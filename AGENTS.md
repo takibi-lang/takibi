@@ -46,37 +46,8 @@ for the exact criterion and `make linuxbuild`/`make linuxcheck` under
 "Build Commands".  Add to it freely when a test satisfies that criterion;
 its whole point is to be cheap to grow.
 
-The `examples/` tree is historical heritage.  It records the language and
-bare-metal milestones that led to the standalone kernel and to `linux_user/`.
-It is not a target for new feature work: do not add features to it, port new
-`kernel/` behavior into it, refactor it, or update it merely to keep parity
-with `kernel/`.  It is, however, checked regularly (`make -f examples/Makefile
-allcheck`, roughly daily): every covered artifact, including the historical
-RPi5 set, is built, and the QEMU and STM32 runtime lanes are kept green. A
-genuine regression found that way (e.g. a compiler bug that breaks existing,
-unchanged example behavior) should be fixed, not left to bit-rot silently.
-Historical RPi5 hardware execution is opt-in
-(`hwcheck-rpi5`/`hwcheck-rpi5-net`) and is not part of this routine guarantee;
-current RPi5 hardware behavior is maintained under `kernel/`. This is distinct
-from an example build/test failure caused by an *intentional* kernel-only or
-`linux_user/`-only change (e.g. deliberately renaming a shared concept that
-only `kernel/` still uses) -- that kind of failure does not justify modifying
-`examples/`; report the historical incompatibility instead. Modify an
-example's own `.tkb`/build files only when the user explicitly asks for that
-exact historical artifact to be changed. A test being extracted (copied or
-moved) into `linux_user/` is exactly such an explicit ask; see the extraction
-note below.
-
-**Copy, don't blindly move, when extracting an example into `linux_user/`.**
-Some examples exist *only* for QEMU/host coverage (`linux_user/linux_hello` is
-one that was moved outright, not copied) and can be moved once ported. Many others
-(anything in `examples/Makefile`'s `EXAMPLES` list) are also independently
-cross-compiled for STM32 (`stm32build`) and exercised on real RPi3/RPi5
-hardware (`hwcheck-rpi3`/`hwcheck-rpi5`, see `scripts/run_hwtest_rpi5.sh`).
-Removing one of those from `examples/` would silently drop real-hardware
-regression coverage that has nothing to do with `linux_user/`'s purpose --
-check each candidate's hardware-test scripts before removing anything, and
-default to copying (leaving the original in place) whenever unsure.
+The `examples/` tree contains historical STM32 and RPi5 code. We occasionally
+test only its STM32 side with `make -f examples/Makefile allcheck`.
 
 Repository-level governance documents such as this file may still be updated
 when needed to describe or enforce the maintenance policy.  Do not expand a
@@ -88,9 +59,7 @@ user direction.
 
 Three tiers exist, and a new test should be justified into the tier that
 positively fits it -- not dropped into whichever tier is left over after
-ruling out the others, which is how `examples/` grew into something slow
-enough that people stopped running it casually (see its own header comment
-in `examples/Makefile`'s history, and HISTORY.md, for that trajectory).
+ruling out the others.
 
 1. **`test/test_takibi.ml`** (Alcotest, `make test`) -- fastest.  In-process:
    does this compile/type-check/get rejected correctly, and (sometimes) does
@@ -111,8 +80,8 @@ in `examples/Makefile`'s history, and HISTORY.md, for that trajectory).
    what (1) structurally cannot: is the runtime BEHAVIOR correct (does this
    algorithm/data structure actually compute the right answer, not just
    typecheck).
-3. **`kernel/` on RPi5 + QEMU** (`make kernelcheck`) / **`examples/`'s
-   QEMU+real-hardware lanes** -- the expensive, fully-faithful tier: real
+3. **`kernel/` on RPi5 + QEMU** (`make kernelcheck`) -- the expensive,
+   fully-faithful tier: real
    MMIO, real interrupts, real cache/memory-ordering behavior, real
    concurrency/timing.
 
@@ -334,9 +303,8 @@ default -- write it fully working WITHOUT refinement types and WITHOUT `--forbid
 commit that as a known-good baseline, and only THEN turn `--forbid-trap` on as one later,
 separate hardening pass -- which had been the rule since the `fatfs` example (GitHub issue
 #61) and its SD card integration (issue #62). Confirmed with the user 2026-07-23 after several
-consecutive hardening passes (issues #135, #140, and most recently #145's RPi3
-USB-Mass-Storage group) each flagged progressively fewer trap sites, with the RPi3 pass
-flagging zero: the project's refinement-type idioms are now established enough that the old
+consecutive hardening passes each flagged progressively fewer trap sites: the project's
+refinement-type idioms are now established enough that the old
 two-phase separation no longer earns its cost for code that follows them. See `HISTORY.md`'s
 dated entries for issues #61, #62, #135, #140, and #145 for the historical evidence this
 decision rests on -- that record stays as-is; it documents what was true when it was written,
@@ -423,11 +391,7 @@ sentinel convention.
   site's own `if`/comparison code, with nothing stopping a caller from checking the wrong
   condition, comparing against the wrong sentinel, or dropping the result on the floor
   entirely. A `variant` return forces a `match` to name every outcome explicitly, so the
-  compiler rejects a call site that only handles one arm. Concrete precedent:
-  `examples/common/fat12.tkb`'s `FatIoResult`/`FatFormatStatus`,
-  `examples/common_rpi3/usb_msc.tkb` and `examples/common_stm32/sdmmc.tkb`'s `DiskIoResult`,
-  and `examples/kvs_server/kvs_server.tkb`'s `KvsPutResult` -- all replaced an existing
-  `i32` 0/1/-1-style sentinel with a named variant plus a `match` at every call site.
+  compiler rejects a call site that only handles one arm.
 - **A plain success/failure result gets `variant Foo { Ok; Err(i32); }`** (see `FatIoResult`);
   a status with more than two meaningfully distinct outcomes gets one case per outcome (see
   `FatFormatStatus`'s `IoError`/`NotFormatted`/`Formatted`, or `KvsPutResult`'s
@@ -481,17 +445,12 @@ description drift between the two files.
 ## Build Commands
 
 The root `Makefile` covers the compiler, `kernel/`, and `linux_user/` --
-the maintained product + fast-test surface. Everything under `examples/`
-(frozen, historical, see "Maintenance Scope: `kernel/` and `linux_user/`"
-above) lives in its own `examples/Makefile` instead, so a plain `make
-<target>` at the repo root can never accidentally run an examples-only
-check against `kernel/` work. Always invoke it explicitly from the repo
-root -- never `cd examples` first:
+the maintained product + fast-test surface:
 
 ```bash
 make build              # build the compiler (takibi) only (= dune build)
 make test               # run unit tests
-make langcheck          # repo-wide ASCII-only check (kernel/ + examples/ + linux_user/ + compiler)
+make langcheck          # repo-wide ASCII-only check
 make kernelbuild-rpi5   # build kernel/build/rpi5/kernel.elf (no hardware needed)
 make kernelbuild-qemu   # build kernel/build/qemu/kernel.elf (no hardware needed)
 make kernelbuild-qemu-debug  # build kernel/build/qemu/kernel-debug.elf with DWARF info (no hardware needed)
@@ -507,7 +466,7 @@ make kernelsh-qemu      # boot QEMU and attach the current terminal to the ash U
 make kernelsh-rpi5      # load RPi5 over SWD and attach the Debug Probe UART to the ash shell
 make linuxbuild         # build linux_user/'s host-native Linux/AMD64 tests (no QEMU/hardware needed)
 make linuxcheck         # build and run linux_user/'s tests, diffing stdout against each .expected
-make allbuild           # langcheck + test + linuxbuild + kernelbuild + every examples/ target, BUILD ONLY -- no execution/hardware step, so it needs no confirmation and nothing to wait on; the cheapest way to check "did this change break anything ANYWHERE in the repo"
+make allbuild           # build every target without execution or hardware
 make allcheck           # langcheck + test + linuxcheck + kernelcheck together (needs real RPi5 hardware for the last one)
 make clean              # remove dune build artifacts, kernel/ link outputs, and linux_user/ build outputs
 ```
@@ -518,14 +477,8 @@ no reason to save it for last. In particular:
 
 - Before believing any change to `lib/*.ml` (a new type-checker rule, a
   codegen change, anything affecting how `.tkb` source compiles) is
-  complete, run it -- `kernel/` alone is not the whole repo.
-  `examples/` and `linux_user/` are separate trees with their own
-  Makefiles and are easy to forget; a change validated only against
-  `kernel/` can still break dozens of files elsewhere (this happened in
-  the issue #316 session: a repo-wide `*io`/`unsafe` policy change was
-  migrated and committed against `kernel/` only, and `examples/`'s ~410
-  more sites were found only after the fact, by a human running `make
-  allcheck` post-push). Run `make allbuild` BEFORE the first commit of
+  complete, run it -- `kernel/` alone is not the whole repo. Run
+  `make allbuild` BEFORE the first commit of
   such a change, not as a final check afterward.
 - Prefer it over hand-rolled `grep`/regex surveys of "which files need
   updating" for a repo-wide change. A regex-based survey only finds the
@@ -535,110 +488,6 @@ no reason to save it for last. In particular:
   initializer's `*io` fields entirely -- a shape no grep pattern in use
   at the time matched -- until `make allbuild` caught it).
 
-Examples-only targets (STM32/RPi3/QEMU milestones) all require
-the `-f examples/Makefile` flag:
-
-```bash
-make -f examples/Makefile qemutest       # run QEMU plus host-side integration tests (build and verify automatically)
-make -f examples/Makefile stm32build     # cross-compile every ported example for STM32F746G-DISCOVERY (no hardware needed)
-make -f examples/Makefile check          # run langcheck + test + stm32build + qemutest together
-make -f examples/Makefile hwcheck-stm32        # like stm32build, but also loads into RAM + UART-diffs against real STM32 hardware
-make -f examples/Makefile hwcheck-stm32-net    # real-Ethernet hardware tests (needs the board's Ethernet port wired to this host)
-make -f examples/Makefile stress-stm32-kvs-server-sdcard-rtos  # opt-in STM32 KVS concurrency stress test (not in allcheck)
-make -f examples/Makefile hwcheck-rpi3   # opt-in Raspberry Pi 3B JTAG hardware integration test (not in allcheck, see examples/common_rpi3/AGENTS.md)
-make -f examples/Makefile hwcheck-rpi3-net     # RPi3 real-Ethernet hardware tests (needs the board's Ethernet port -- behind its USB host stack, see examples/common_rpi3/AGENTS.md -- wired to this host)
-make -f examples/Makefile hwcheck-rpi5   # opt-in RPi5 SWD + RP1-UART suite for the historical RPi5 example milestones (not kernel/ -- see kernelcheck-rpi5 above for that); reformats the attached USB drive, not in allcheck
-make -f examples/Makefile hwcheck-rpi5-net     # RPi5 real-Ethernet tests for the same example milestones, including USB-backed HTTP/KVS persistence; reformats the attached USB drive
-make -f examples/Makefile perfcheck      # real-hardware profiler smoke tests (not in allcheck -- shares phy_init's occasional link-negotiation flakiness with hwcheck-stm32-net, but adds no functional coverage beyond it)
-make -f examples/Makefile allcheck       # build all examples targets (including RPi5), then run QEMU + STM32 lanes
-make -f examples/Makefile clean          # remove examples/ build artifacts
-```
-
-**Parallel by default** (both `Makefile` and `examples/Makefile` set their own
-`MAKEFLAGS += -j$(shell nproc)`): every `.tkb` example is an independent build, so
-`make -f examples/Makefile check`/`stm32build`/etc. fan out across all cores with no flag
-needed, same for `make kernelbuild`/`kernelcheck`. Pass `-j1` explicitly
-(`make -j1 kernelcheck`, `make -f examples/Makefile -j1 check`) to force serial execution
-back, e.g. when a build error's parallel-interleaved output needs to be read one recipe at a
-time.
-`-Otarget` (which buffers each recipe's output into one clean block) was tried and rejected --
-it hides progress until each recipe finishes, worse for watching a long build than the
-occasional interleaved line.
-
-**`TAKIBI` invokes `_build/default/bin/main.exe` directly, not `dune exec takibi --`**: `dune
-exec` re-locks the dune workspace on every call, which serializes what should be independent
-parallel compiles.
-
-**History: order-only `| build`, then the false-pass bug it caused, now fixed for real.**
-Originally every per-example object-file rule depended on the `build` target (`dune build`) as
-an **order-only** prerequisite (`| build`, not a plain one) -- `build` is `.PHONY`, and a plain
-(non-order-only) phony prerequisite makes every dependent target look permanently out-of-date,
-which was silently forcing a full rebuild of all ~50 examples on every invocation before that
-was fixed. Order-only prerequisites are still built when needed, but don't affect whether the
-depending target itself is considered stale, so make's normal `.tkb`-timestamp-based
-skip-if-unchanged logic worked correctly again -- **except** this also meant `make check`
-without `make clean` first could give a FALSE PASS for a compiler change that altered
-accept/reject behavior or codegen for an EXISTING, unchanged `.tkb` file: its `.o`/`.elf` from a
-previous run (built with the OLDER compiler) was never recompiled, since only the `.tkb` file's
-own timestamp was consulted, and `| build`'s order-only nature meant $(TAKIBI)'s own freshness
-was invisible to that comparison. See "The Undetermined-For-Loop-Counter Case Is Now Also a
-Compile Error" below for the concrete incident that surfaced this (a `-k check` run without
-`make clean` reported zero failures; `make clean && make check` immediately found 16 affected
-files it had silently missed).
-
-**Fixed for real**: every per-example rule's prerequisite list now names `$(TAKIBI)` itself (the
-real binary path, `_build/default/bin/main.exe`) as a **normal** (not order-only) prerequisite,
-in place of the old `| build`. `$(TAKIBI)`'s own rule forces `dune build` to run on every `make`
-invocation that reaches it (via a `FORCE`-based always-out-of-date prerequisite, the standard
-make idiom for "always run this recipe"), but **dune's own incremental/content-addressed build
-only touches `main.exe`'s mtime when the compiled output genuinely changes** -- confirmed
-empirically before relying on it: repeated no-op `dune build` runs, a mtime-only `touch` of a
-source file, and even a comment-only source edit all left `main.exe`'s mtime untouched; only a
-change that actually alters compiled output (adding/removing/reverting a real binding) updates
-it. This is exactly the property needed for the fix to be both safe (no perpetual "every example
-always looks stale" regression -- confirmed by running the same target twice in a row with no
-change and observing zero rebuild) and correct (a genuine compiler change now correctly cascades
-into every example that depends on it, with no separate `make clean` step required -- confirmed
-by making a real `bin/main.ml` edit, running `make examples/fibonacci/fibonacci.o` alone with NO
-prior clean, and observing both `main.exe` and `fibonacci.o` get fresh mtimes; reverting the edit
-and re-running triggers a second real rebuild the same way, and a third run with nothing changed
-rebuilds neither). `build:` itself is now just `build: $(TAKIBI)`, an alias -- it no longer calls
-`dune build` directly, so **every path in the Makefile that ever needs the compiler fresh now
-funnels through this one target**.
-
-**Known dune footgun found while wiring up `-j` (this is exactly why the above funnels through
-one target)**: running `dune build` and `dune test` concurrently (e.g. two independent Make
-recipes under `make -j`) can corrupt/race on `_build/.lock` ("Unexpected contents of build
-directory global lock file"), non-deterministically failing or hanging unrelated recipes. Fixed
-by making the `test` target depend on `build` (a normal prerequisite, ensuring `dune build`
-always completes before `dune test` starts) and by making sure nothing else in the build graph
-calls `dune exec`/`dune build`/`dune test` directly (see `scripts/run_qemutest.sh`'s
-`run_compile_error_test`, which had its own independent `dune exec takibi --` call fixed for the
-same reason). `$(TAKIBI)`'s rule in the root `Makefile` is now the ONLY place in the repo that
-invokes `dune build` -- if a future change reintroduces a second, independent `dune
-build`/`dune test` invocation anywhere in a `make -j` graph (rather than depending on
-`$(TAKIBI)`/`build` like everything else does), expect this same class of flake to come back.
-This is also why `examples/Makefile`'s own `build`/`test`/`$(TAKIBI)` targets don't call `dune`
-themselves: they forward to `make -f Makefile build`/`test` in the root Makefile instead, so the
-invariant holds even though the two Makefiles are separate `make` invocations.
-
-**This predicted flake actually recurred (2026-08-13, `allcheck` output-locking attempt)**: a fix
-for `allcheck`'s interleaved/garbled terminal output split its single `$(MAKE) langcheck test
-linuxcheck kernelcheck` call into four separate recursive `$(MAKE) <target>` invocations (one per
-lane), each piped through `scripts/run_line_locked.sh` for output locking. That looked harmless --
-still one `allcheck` target, still parallel -- but each `$(MAKE) <target>` now starts its own
-independent `make` process with its own dependency graph, so `$(TAKIBI)`'s "runs at most once"
-guarantee (which depends on all four lanes sharing ONE graph) no longer held: up to four genuinely
-concurrent `dune build` invocations raced on `_build/.lock`, and instead of the usual fast
-non-deterministic failure, this manifested as a hard hang (`dune build` processes stuck at 0% CPU
-for 15-29+ minutes, twice, both requiring a manual kill). **Fix that keeps the invariant**: don't
-change `allcheck`'s call shape at all; instead make the leaf targets (`langcheck`, `test`,
-`linuxcheck`) route their own recipe's underlying command (not a new `$(MAKE)` call) through the
-shared output lock, e.g. `test: build` / `@bash scripts/run_line_locked.sh "$(LOCK)" dune test` --
-`build` stays a normal prerequisite in the one shared graph, only the leaf command's output gets
-locked. Lesson for output-interleaving fixes generally: locking output and preserving a shared
-`make` dependency graph are two different problems: fix the first by wrapping the *underlying
-command* in a recipe, never by adding a *new recursive `$(MAKE)` call* around it.
 
 ## Kernel Debugging: Use UART DDB First
 
@@ -742,32 +591,9 @@ fails the build if this file names a path that no longer exists.
   `kernel/README.md`, `SYSCALLS.md`, `MEMORY_MAP.md` (build-checked by
   `scripts/check_kernel_memory_map.py`), `RESOURCE_LIMITS.md`, and
   `RUNTIME_STATE.md`. See "Maintenance Scope: `kernel/` and `linux_user/`".
-- `examples/` -- one directory per example, each a single `.tkb` file compiled
-  unmodified for every target; read that file's leading comment for what it
-  demonstrates. The four `common_*` HAL directories mirror each other's
-  function names and signatures exactly, which is what lets a single example
-  file build everywhere, and each has its own `AGENTS.md` carrying that
-  target's bring-up detail:
-  - `examples/common/` -- platform-agnostic logic with no MMIO or assembly dependency.
-  - `examples/common_qemu/` -- QEMU/AArch64 virt (`examples/common_qemu/AGENTS.md`).
-  - `examples/common_stm32/` -- STM32F746G-DISCOVERY, Cortex-M7
-    (`examples/common_stm32/AGENTS.md`).
-  - `examples/common_rpi3/` -- Raspberry Pi 3B, BCM2837, JTAG-only bring-up, including a
-    from-scratch USB host stack (`examples/common_rpi3/AGENTS.md`).
-  - `examples/common_rpi5/` -- Raspberry Pi 5, BCM2712, RP1 PCIe/UART/xHCI, SMP, EL0/EL1
-    (`examples/common_rpi5/AGENTS.md`).
-
-  Where a file inside these exists only to resolve a cross-target name
-  collision or a shared-file dependency (`gic_regs.tkb`, `stm32_stub.tkb`,
-  `uart_irq_stub.tkb`, `eth_sdmmc_regs.tkb`, `semihosting_stub.S`), the reason
-  is in that file's own header comment.
 - `linux_user/` -- x86_64 Linux userspace, built and run through the root
-  Makefile's `linuxbuild`/`linuxcheck`, not `examples/Makefile`. Deliberately
-  self-contained: nothing here `use`s anything under `examples/`, and it keeps
-  its own copies of the shared `examples/common/` sources under
-  `linux_user/common/` rather than sharing them. See
-  "Maintenance Scope" and "Where Should a New Test Go?", including the
-  "copy, don't blindly move" rule for tests that also run on real hardware.
+  Makefile's `linuxbuild`/`linuxcheck`. See "Maintenance Scope" and "Where
+  Should a New Test Go?".
 
 ### Everything else
 
@@ -803,7 +629,7 @@ being a complete list is the whole point of this one;
 | `check_flag_guarded_fields.py` | a read of an optional field `X` that did not consult its paired `has_X` first |
 | `check_lock_discipline.py` | `mutex_init` called on a GLOBAL Mutex (it is already free from zeroed .bss, and the call FORCE-FREES a lock another core may hold), and any use of a raw atomic intrinsic outside a short declared allowlist |
 | `check_execution_model_coverage.py` | a kernel file that declares mutable state and names neither `KERNEL_ACTIVE_CORES` nor `KERNEL_PREEMPTIBLE`, with no stated reason -- `kernel/lib/execution_model.tkb`'s own header called this hole out, and two files fell through it before the check existed |
-| `check_expected_line_endings.py` | a tracked `*.expected` stdout fixture under `kernel/`, `linux_user/`, or `examples/` that mixes LF and CRLF terminators |
+| `check_expected_line_endings.py` | a tracked `*.expected` stdout fixture that mixes LF and CRLF terminators |
 | `check_kernel_memory_map.py` | a build whose layout disagrees with `kernel/MEMORY_MAP.md` (`--update` rewrites the rows instead) |
 | `check_kernel_log_expectations.py` | a host-side test driver waiting for a boot-log line the kernel no longer emits |
 | `check_kernel_interactive_httpd_protocol.py` | an integration runner waiting for the parent shell before its HTTP request, recreating the listener/accept circular wait |
@@ -882,17 +708,17 @@ size.
 - **DMA/device memory-barrier builtins are implemented** -- the STM32 Ethernet DMA bring-up needed a `dsb` instruction between a
   descriptor-ring write and the "poll demand" register kick, because `*io` volatile writes alone don't guarantee the
   CPU's write buffer has retired before a subsequent register write reaches the DMA engine (see the "Hardware
-  bring-up bug worth knowing about" paragraph in examples/common_stm32/AGENTS.md's STM32 Ethernet entry -- found only via live
+  STM32 Ethernet bring-up -- found only via live
   openocd/gdb-multiarch debugging on real hardware, not something the compiler flagged). The original handwritten
   `extern fn eth_dsb()`/`eth_asm.S` workaround has been removed. `dma_publish()`, `dma_consume()`, and
   `device_fence()` now lower per target and are placed inside the STM32 and virtio driver ownership transitions.
   The cache-aware `dma_prepare_tx`/`dma_prepare_rx`/`dma_finish_rx` operations maintain Cortex-M7 cache lines,
-  so application examples do not manually select barriers. The RX/TX API now uses indexed linear owners plus
+  so applications do not manually select barriers. The RX/TX API now uses indexed linear owners plus
   authority-derived region ties to reject use-after-release, double-release, and early release while TX DMA is
   still in flight without changing the source-level barrier semantics.
 - **QEMU (TCG mode, which is all this project uses -- no KVM) does not model caches as physically separate storage
   from RAM, so cache-coherency bugs are invisible there and can ONLY be found on real hardware.** Found again
-  while bringing up `examples/fatfs` on the STM32 board: the hardware test harness injects/extracts the `disk`
+  while bringing up FAT storage on the STM32 board: the hardware test harness injects/extracts the `disk`
   array's live RAM directly over the debug port with OpenOCD (`load_image`/`dump_image`), which -- like a real DMA
   engine -- bypasses the CPU's D-cache entirely; without an explicit `dma_finish_rx`/`dma_prepare_tx` around that
   boundary, the CPU could read stale cached data (or the debugger could dump stale un-flushed RAM) despite the
@@ -1029,59 +855,17 @@ size.
   itself is no longer known to go stale. A same-value-every-boot "coherence check" (e.g. diffing a
   static struct that is written identically on every run) still cannot detect staleness in general and
   must not be used to argue an unverified read is fresh.
-- **STM32 Ethernet driver details** (unified driver API, network config, the DMA-ordering hardware bug, TX interrupt completion) -- see `examples/common_stm32/AGENTS.md`.
 - **RISC-V has no `dma_prepare_tx`/`dma_prepare_rx`/`dma_finish_rx` lowering yet** -- these now raise a compile
   error on RISC-V targets rather than silently falling back to a bare barrier (issue #146). AArch64 previously
   had the same silent-fallback gap (found during Raspberry Pi 3B USB host stack bring-up, issue #140/#144, once
   its D-cache was turned back on for `ldaxr`/`stlxr` reasons and its DWC2 controller/VideoCore mailbox needed real
   cache maintenance around DMA hand-offs) and now gets a real `dc cvac`/`dc civac`/`dc ivac` VA-range-loop
   lowering in `lib/llvm_gen.ml`, matching the real Cortex-M7 `DCCMVAC`/`DCIMVAC` the STM32 backend already had --
-  `examples/common_rpi3/mailbox.tkb`/`usb_dwc2.tkb` call the standard builtins directly now, same as STM32's
-  `eth.tkb`, with no hand-written cache-range assembly stub needed on this target anymore. RISC-V's own real
+  AArch64 code calls the standard builtins directly, same as STM32's `eth.tkb`, with no
+  hand-written cache-range assembly stub needed on this target anymore. RISC-V's own real
   lowering (gated on the Zicbom extension's `cbo.clean`/`cbo.flush`/`cbo.inval`) is deferred until an actual
   RISC-V target exists in this project to verify it against, rather than shipping unverified speculative codegen.
 
-## QEMU Bare-Metal (AArch64)
-
-QEMU/AArch64 bare-metal HAL reference (machine/CPU, PL011 UART and PL031
-RTC register addresses, semihosting exit, GICv2, ARM Generic Timer) now
-lives in **`examples/common_qemu/AGENTS.md`** -- Coding agents that support
-nested guidance should load that file for work under `examples/common_qemu/`.
-
-## STM32F746G-DISCOVERY Bare-Metal (Cortex-M7)
-
-STM32 Cortex-M7 bring-up (devcontainer/USB setup, build model,
-USART1/RTC/NVIC details), the SysTick+PendSV preemptive scheduler, the
-Ethernet MAC/PHY/DMA driver, and the RAM-execution hardware test harness
-now live in **`examples/common_stm32/AGENTS.md`** -- Coding agents that support nested guidance should load that file for work under `examples/common_stm32/`.
-
-## Raspberry Pi 3B Bare-Metal (BCM2837, JTAG-only bring-up, issue #140)
-
-Raspberry Pi 3B bring-up (JTAG/UART devcontainer USB setup, the
-JTAG-injection RAM-load model and why it differs from STM32's `reset
-halt`, the spin-stub image, the `sudo`-makes-JTAG-worse gotcha specific
-to this devcontainer, UART0/GPIO pinmux details) now lives in
-**`examples/common_rpi3/AGENTS.md`** -- Coding agents that support
-nested guidance should load that file for work under
-`examples/common_rpi3/`.
-
-## virtio-net Examples (examples/net_echo, examples/arp_reply, examples/icmp_echo)
-
-QEMU-only stepping stones toward the TCP/IP stack goal (raw frame echo,
-ARP reply, ICMP echo) built on the same virtqueue/DMA/IRQ plumbing.
-Implementation details (legacy virtio-mmio, vring layout, endianness
-handling, test harness) now live in **`examples/common_qemu/AGENTS.md`**.
-
-## TCP/IP Example Progression (examples/inet_checksum, ip_parse, icmp_echo, tcp_parse, tcp_echo, http_server)
-
-The design rationale for how these examples were incrementally built
--- why IPv4/ICMP was split into 3 small steps, why TCP is one
-incrementally-grown example rather than one-per-stage, the TCP
-options/SLIRP/ARP bugs found while wiring up a real browser client
-for `http_server` -- now lives in `HISTORY.md`. See
-`examples/common_qemu/AGENTS.md` for the virtio-net plumbing these
-examples share, and each example's own header comment for a
-one-line description of what it does.
 
 ## Debugging Techniques That Have Paid Off Here
 
@@ -1134,8 +918,8 @@ found nothing; a fresh read of the SAME diagnostic output, with no new
 run, found the bug in one pass. Ask what the data you already collected
 would say if you had not already decided what it meant.
 
-**Bisect a cheap proxy, not the expensive reproduction.** An
-`examples/dwarf_debug` failure needed QEMU plus gdb to observe. What
+**Bisect a cheap proxy, not the expensive reproduction.** A historical
+DWARF failure needed QEMU plus gdb to observe. What
 actually changed was one number -- how many instructions the prologue
 was -- so the bisection was "build the compiler at commit X and print
 which source line the address eight instructions past the breakpoint
@@ -1196,18 +980,14 @@ why the recording belongs at the real caller, not inside the primitive a
 probe drives.
 
 **Grep the whole repo before calling code dead.** A whole-program build
-means callers live in other subtrees, and `examples/` and `linux_user/`
-have their own Makefiles. `make allbuild` finds what a regex survey does
+means callers live in other subtrees with their own Makefiles. `make allbuild` finds what a regex survey does
 not: it compiles everything and reports every shape that broke, including
 the ones nobody thought to look for.
 
 ## Debug Info and Execution Profiling (QEMU)
 
 `-g` emits full DWARF intended to be useful in real `gdb-multiarch`
-sessions, not just to satisfy `llvm-dwarfdump`. The historical live QEMU/GDB
-fixture is `examples/dwarf_debug/dwarf_debug.tkb`, with normalized expected
-output in `examples/dwarf_debug/dwarf_debug.gdb.expected` and the harness in
-`scripts/run_qemutest.sh`. The maintained full-kernel regression is
+sessions, not just to satisfy `llvm-dwarfdump`. The maintained full-kernel regression is
 `make kernelcheck-qemu-debug`: it compiles `kernel-debug.elf` with `-g`, then
 runs the ordinary QEMU view and ash TCP suites with separate ports and
 artifacts from the non-debug lane.
@@ -1239,7 +1019,7 @@ expected to include wait time.
 - **Do not save durable project guidance to tool-specific memory stores.** Consolidate project-specific information in `AGENTS.md` so it can be shared across agent environments.
 - **All text in this repository must be ASCII-only.** Never write Japanese or any other non-ASCII characters in source files, comments, documentation, or any other file. `make langcheck` enforces this and will fail if non-ASCII characters are found.
 - **Follow YAGNI (see "Design Principle: YAGNI" above).** Do not design or implement functionality beyond what the current, concrete task needs. If a request seems to call for more than that, flag the tradeoff and ask before building it.
-- **New `.tkb` code under `kernel/`: write it with refinement types and `--forbid-trap` enabled from the start** (see "Development Process: Write `.tkb` Code Under `--forbid-trap` From the Start" above). Only fall back to the old prove-first-then-harden process for a milestone whose hardware/protocol behavior is not yet understood (a genuinely new peripheral, a first-of-its-kind DMA/cache interaction, a new board's earliest bring-up) -- ask if it is unclear which situation applies. Never "fix" a flagged `--forbid-trap` site by switching it to a raw pointer. The historical `examples/` tree is changed only under the explicit exception in "Maintenance Scope: `kernel/` Only" above.
+- **New `.tkb` code under `kernel/`: write it with refinement types and `--forbid-trap` enabled from the start** (see "Development Process: Write `.tkb` Code Under `--forbid-trap` From the Start" above). Only fall back to the old prove-first-then-harden process for a milestone whose hardware/protocol behavior is not yet understood (a genuinely new peripheral, a first-of-its-kind DMA/cache interaction, a new board's earliest bring-up) -- ask if it is unclear which situation applies. Never "fix" a flagged `--forbid-trap` site by switching it to a raw pointer.
 - **Proactively write English summaries of chat decisions/design rationale to the relevant GitHub issue.** The chat itself is in Japanese, but this repository's issues must stay English-only -- `gh` now has write access (`gh issue comment` / `gh issue create`, see `.claude/settings.json` and `.codex/hooks.json`), and tool-specific hooks (`.claude/hooks/gh-issue-ascii-only.sh` and `.codex/hooks/gh-issue-ascii-only.sh`) guard those two commands against non-ASCII text, so the summary must already be in English before the command is run. This takes over a task the user previously did by hand (translating chat discussion and posting it to issues themselves) -- do it without being asked, once a decision, design tradeoff, or root-cause conclusion has actually been reached in the conversation, not after every message. Infer the target issue from context (a number mentioned in the recent chat, a commit message, `git log`); if none is evident, ask rather than guessing or opening a new issue unprompted.
 
 ## Dependencies
