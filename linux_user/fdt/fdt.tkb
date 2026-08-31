@@ -51,16 +51,17 @@ let fdt_psci_smc_fixture: [u8; 4156] =
 fn println_hex64(value: usize) {
     uart_print_hex((value >> 32) as i32);
     uart_puts(" ");
-    uart_println_hex((value & 0xFFFFFFFF) as i32);
+    uart_print_hex((value & 0xFFFFFFFF) as i32);
+    uart_puts("\n");
 }
 
 fn report_region(result: FdtMemoryRegionResult) {
     match result {
         FdtMemoryRegionResult::Invalid => {
-            uart_puts("region invalid\r\n");
+            uart_puts("region invalid\n");
         }
         FdtMemoryRegionResult::OutOfRange => {
-            uart_puts("region out of range\r\n");
+            uart_puts("region out of range\n");
         }
         FdtMemoryRegionResult::Found(region) => {
             uart_puts("region ");
@@ -70,21 +71,23 @@ fn report_region(result: FdtMemoryRegionResult) {
             uart_puts(" size ");
             uart_print_hex((region.size >> 32) as i32);
             uart_puts(" ");
-            uart_println_hex((region.size & 0xFFFFFFFF) as i32);
+            uart_print_hex((region.size & 0xFFFFFFFF) as i32);
+            uart_puts("\n");
         }
     }
 }
 
 fn report_memory(result: FdtMemoryResult) !{unsafe} {
     match result {
-        FdtMemoryResult::Invalid => { uart_puts("memory invalid\r\n"); }
-        FdtMemoryResult::NotFound => { uart_puts("memory not found\r\n"); }
+        FdtMemoryResult::Invalid => { uart_puts("memory invalid\n"); }
+        FdtMemoryResult::NotFound => { uart_puts("memory not found\n"); }
         FdtMemoryResult::Found(found) => {
             uart_puts("memory regions ");
             uart_print_hex(fdt_memory_region_count(found) as i32);
             uart_puts("\n");
             uart_puts("memory reservations ");
-            uart_println_hex(fdt_memory_reservation_count(found) as i32);
+            uart_print_hex(fdt_memory_reservation_count(found) as i32);
+            uart_puts("\n");
             uart_puts("memory base ");
             println_hex64(fdt_memory_first_base(found));
             uart_puts("memory size ");
@@ -97,17 +100,17 @@ fn report_memory(result: FdtMemoryResult) !{unsafe} {
             }
             uart_puts("memory verifies ");
             if (fdt_memory_map_verify(found)) {
-                uart_puts("yes\r\n");
+                uart_puts("yes\n");
             } else {
-                uart_puts("no\r\n");
+                uart_puts("no\n");
             }
             uart_puts("blob overlap ");
             if (fdt_blob_overlaps(found, fdt_blob_base(found), 1) &&
                 fdt_blob_overlaps(found, fdt_blob_base(found) + 4156, 1) ==
                     false) {
-                uart_puts("yes\r\n");
+                uart_puts("yes\n");
             } else {
-                uart_puts("no\r\n");
+                uart_puts("no\n");
             }
         }
     }

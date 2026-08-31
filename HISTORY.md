@@ -21873,3 +21873,23 @@ RPi5's mapped BCM2712 device L1 block. The test-only command now reads from
 unmapped L1 index 32 (`0x800000000`) on both maintained targets. This keeps
 the command a translation-fault exercise instead of accidentally issuing an
 MMIO read on the physical board.
+
+## 2026-08-31: Reject mixed newline conventions in stdout fixtures (#424)
+
+The repo-wide `langcheck` now scans every tracked `*.expected` file under
+`kernel/`, `linux_user/`, and `examples/` ahead of runtime fixture diffs.
+A fixture may consistently use LF or CRLF, or contain no newline at all, but
+mixing LF and CRLF fails with the exact path and a count of each terminator.
+The checker obtains its default inventory from `git ls-files`, so generated
+artifacts and unrelated untracked files do not make a clean checkout fail.
+
+Host-side controls exercise uniform LF and CRLF files positively. Their mixed
+fixture control independently requires a nonzero checker status and the exact
+`LF=1 CRLF=2` diagnostic, preventing an unrelated invocation failure from
+passing the negative test.
+
+The check immediately caught one regression added after the issue's original
+clean inventory: the host-native FDT fixture emitted its first 51 lines with
+LF, then one memory-map line with LF followed by 15 with CRLF. That new block
+now uses the fixture's established LF convention, and the expected bytes were
+normalized accordingly; no cross-fixture newline convention was imposed.
