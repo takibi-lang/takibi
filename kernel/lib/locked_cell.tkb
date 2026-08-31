@@ -155,18 +155,12 @@ fn locked_cell_is_held(T: type, cell: &mut LockedCell(T) @ id)
 // that is the moment to give it a lock identity of its own
 // rather than the moment to notice.
 //
-// NOT generic, and not by preference. `GuardedField(T)` was written first
-// and does not compile in the one place it is for: SharedObject is the
-// payload of an IntrusivePool, whose slot sizes its storage with
-// `[u8; sizeof(T)]`, so the payload's layout is computed DURING
-// monomorphization -- before the pass that rewrites a plain struct's
-// generic field types -- and the field is still an unresolved
-// `GuardedField(...)` at that moment. GitHub issue #485 has a 14-line
-// reproduction. usize is the only width any caller wants today, so a
-// concrete struct costs nothing; widen it by adding a sibling, or by
-// fixing #485.
-struct GuardedUsize {
-    private value: usize;
+// Generic because the access discipline is independent of the protected
+// value's representation. This remains usable inside a pooled payload:
+// monomorphization resolves the field before sizeof(T) computes the
+// enclosing payload's storage size.
+generic struct GuardedField(T: type) {
+    private value: T;
 }
 
 private linear struct GuardedFieldGuard[lock: addr] {
@@ -186,7 +180,7 @@ fn guarded_field_give(g: sink GuardedFieldGuard[id], m: *Mutex @ id) {
 
 // The only way to the value. Tied to the guard, so it dies with it.
 fn guarded_usize_value(g: borrow GuardedFieldGuard[lock],
-                       f: *GuardedUsize) -> *usize @ lock {
+                       f: *GuardedField(usize)) -> *usize @ lock {
     return &(*f).value;
 }
 

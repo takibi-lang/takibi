@@ -509,7 +509,7 @@ struct SharedObject {
     // Measured before the lock: 4096 retain/release pairs took the count
     // from 2 to 0 and 978 later operations were refused because the
     // handle no longer named anything.
-    refs: GuardedUsize;
+    refs: GuardedField(usize);
 }
 private let mut object_pool: IntrusivePool(SharedObject);
 

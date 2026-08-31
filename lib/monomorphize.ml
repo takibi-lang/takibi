@@ -840,6 +840,13 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
         Hashtbl.replace struct_requests mangled (name, gargs);
       TypeGenericInst (name, args)
     in
+    let apply_resolve name args =
+      let gargs = args_to_generic struct_templates name args in
+      TypeNamed (mangle name gargs)
+    in
+    let resolve_ty t =
+      transform ~subst:no_subst ~vsubst:no_vsubst ~resolve_inst:apply_resolve t
+    in
 
     (* `Var name` / `&name` (unchanged from the original narrow-inference
        design), PLUS `&x.field` (Freelist redesign follow-up): needed for
@@ -1265,9 +1272,39 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
        types, not a half-resolved intermediate. Also keeps the originating
        template name, same reason as raw_fns above. *)
     let raw_fields : (string, string * struct_template * type_expr list) Hashtbl.t = Hashtbl.create 8 in
-    let rec expand_pending () =
+    let rec size_expr_needs_layout = function
+      | ASSizeof _ -> true
+      | ASAdd (a, b) | ASSub (a, b) | ASMul (a, b) | ASDiv (a, b) ->
+          size_expr_needs_layout a || size_expr_needs_layout b
+      | ASLit _ | ASParam _ -> false
+    in
+    let rec type_needs_layout = function
+      | TypeArraySym (t, sz) | TypeSliceSym (t, sz) ->
+          type_needs_layout t || size_expr_needs_layout sz
+      | TypePtr t | TypeIo t | TypeArray (t, _) | TypeSlice (t, _)
+      | TypeBorrow t | TypeBorrowMut t | TypeSink t | TypeRef t | TypeRefMut t
+      | TypeAlignedPtr (_, t) | TypeSingleton (t, _) | TypeRefined (_, _, t) ->
+          type_needs_layout t
+      | TypeFn (ps, r, _) ->
+          List.exists type_needs_layout ps || type_needs_layout r
+      | TypeTuple ts | TypeGenericInst (_, ts) -> List.exists type_needs_layout ts
+      | TypeExists (_, _, t) -> type_needs_layout t
+      | TypeBool | TypeI8 | TypeI16 | TypeI32 | TypeI64
+      | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeU16Be | TypeU32Be
+      | TypeIsize | TypeUsize | TypeVoid | TypeNamed _ | TypeView _
+      | TypeVariant _ | TypeIndexed _ | TypeKind | TypeIntLit _ -> false
+    in
+    let template_needs_layout tpl =
+      List.exists (fun (_, field_ty) -> type_needs_layout field_ty) tpl.st_fields
+    in
+    let rec expand_pending_if should_expand =
       let pending = Hashtbl.fold (fun mangled req acc ->
-        if Hashtbl.mem raw_fields mangled then acc else (mangled, req) :: acc)
+        if Hashtbl.mem raw_fields mangled then acc
+        else
+          let name, _ = req in
+          match Hashtbl.find_opt struct_templates name with
+          | Some tpl when should_expand tpl -> (mangled, req) :: acc
+          | _ -> acc)
         struct_requests [] in
       if pending <> [] then begin
         List.iter (fun (mangled, (name, gargs)) ->
@@ -1300,10 +1337,45 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
                 transform ~subst ~vsubst ~resolve_inst:collect_resolve fty) tpl.st_fields in
               Hashtbl.replace raw_fields mangled (name, tpl, substituted)
         ) pending;
-        expand_pending ()
+        expand_pending_if should_expand
       end
     in
-    expand_pending ();
+
+    (* GitHub issue #485: a layout-dependent template such as
+       `Box(T) { bytes: [u8; sizeof(T)] }` may be instantiated with an
+       ordinary struct whose field is itself a generic instantiation.
+       The ordinary struct was registered by the parser before step 6's
+       final TypeGenericInst rewrite, so asking for its size here used to
+       see the stale generic field and fail. Materialize templates which
+       do not themselves ask layout questions first, register those
+       concrete layouts, then refresh ordinary layout-bearing definitions
+       through the now-total generic-name resolver. The second expansion
+       phase can consequently answer sizeof(Holder) from concrete fields,
+       independent of Hashtbl iteration order. *)
+    expand_pending_if (fun tpl -> not (template_needs_layout tpl));
+    Hashtbl.iter (fun mangled (_, tpl, raw) ->
+      let field_names = List.map fst tpl.st_fields in
+      Type_layout.finish_struct mangled
+        (List.combine field_names (List.map resolve_ty raw))
+        tpl.st_is_packed tpl.st_align_opt
+    ) raw_fields;
+    List.iter (function
+      | StructDef (name, fields, packed, align, _, _) ->
+          Type_layout.finish_struct name
+            (List.map (fun (field, ty) -> (field, resolve_ty ty)) fields)
+            packed align
+      | OwnedStructDef (name, _, _, fields, packed, align, _, _, _) ->
+          Type_layout.finish_struct name
+            (List.map (fun (field, ty) -> (field, resolve_ty ty)) fields)
+            packed align
+      | EnumDef (name, base, _, _) ->
+          Option.iter (Type_layout.register_enum name) (Option.map resolve_ty base)
+      | VariantDef (name, _, cases, _, _) ->
+          Type_layout.register_variant name
+            (List.map (fun (case, payload) ->
+               (case, Option.map resolve_ty payload)) cases)
+      | _ -> ()) prog;
+    expand_pending_if (fun _ -> true);
 
     (* Every request (struct and function) is now known, so TypeGenericInst
        -> TypeNamed resolution is total and stable. Register every
@@ -1342,12 +1414,6 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
        `prog` is always safe as long as it's still before anything that
        embeds IT by value in turn (the same discipline ordinary,
        non-generic struct definitions already require today). *)
-    let apply_resolve name args =
-      let gargs = args_to_generic struct_templates name args in
-      TypeNamed (mangle name gargs)
-    in
-    let resolve_ty t = transform ~subst:no_subst ~vsubst:no_vsubst ~resolve_inst:apply_resolve t in
-
     let struct_by_template_name : (string, toplevel list) Hashtbl.t = Hashtbl.create 8 in
     Hashtbl.iter (fun mangled (name, tpl, raw) ->
       let field_names = List.map fst tpl.st_fields in

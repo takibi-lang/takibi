@@ -843,6 +843,30 @@ let parser_tests = [
           Alcotest.failf "expected both instantiations to resolve, got: %s" msg);
 
   Alcotest.test_case
+    "issue #485: sizeof(T) resolves when T is an ordinary struct with a \
+     generic struct field"
+    `Quick (fun () ->
+      let _ = gen_codegen
+        "generic struct GF485(T: type) { private v: T; }
+         fn gf485_get(T: type, f: *GF485(T)) -> T { return (*f).v; }
+         struct Holder485 { a: usize; b: GF485(usize); }
+         generic struct Box485(T: type) { bytes: [u8; sizeof(T)]; }
+         fn box485_first(T: type, b: *Box485(T)) -> u8 {
+             return (*b).bytes[0];
+         }
+         private let mut hb485: Box485(Holder485);
+         fn issue485_use() -> i32 {
+             return box485_first(&hb485) as i32;
+         }"
+      in
+      match Hashtbl.find_opt Llvm_gen.struct_lltypes "Box485$Holder485" with
+      | Some llty ->
+          let bytes = (Llvm.struct_element_types llty).(0) in
+          Alcotest.(check int) "Holder485 layout is two usize fields" 16
+            (Llvm.array_length bytes)
+      | None -> Alcotest.fail "Box485$Holder485 was not generated");
+
+  Alcotest.test_case
     "sizeof of an unknown type in an array size is still rejected -- the \
      deferral is gated on the name being a generic type parameter" `Quick
     (fun () ->
