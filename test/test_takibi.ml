@@ -2288,6 +2288,27 @@ let async_tx_fixture =
    "
 
 let infer_tests = [
+  Alcotest.test_case "effect matrix contains every checker rule exactly once" `Quick
+    (fun () ->
+      let matrix = Effect_rules.markdown () in
+      let names = List.map (fun rule -> rule.Effect_rules.name) Effect_rules.rules in
+      Alcotest.(check int) "unique rule names" (List.length names)
+        (List.length (List.sort_uniq String.compare names));
+      List.iter (fun name ->
+        Alcotest.(check bool) ("matrix row for " ^ name) true
+          (contains_substring matrix (Printf.sprintf "| `%s` |" name))) names);
+
+  Alcotest.test_case "effect exclusion table is enforced by declarations" `Quick
+    (fun () ->
+      List.iter (fun rule -> List.iter (fun forbidden ->
+        let src = Printf.sprintf "fn f() !{%s, %s} {}"
+          rule.Effect_rules.name forbidden in
+        match infer src with
+        | _ -> Alcotest.failf "expected %s to exclude %s"
+                 rule.Effect_rules.name forbidden
+        | exception Types.TypeError _ | exception Types.MultiTypeError _ -> ()
+      ) rule.Effect_rules.excludes_declared) Effect_rules.rules);
+
   Alcotest.test_case "unused function reachability rejects a dead helper" `Quick
     (fun () ->
       match unused_errors "fn dead() {} fn main() {}" with

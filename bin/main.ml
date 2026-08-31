@@ -56,6 +56,7 @@ let () =
   let emit_struct_layout = ref "" in
   let emit_depfile = ref "" in
   let emit_overflow_audit = ref "" in
+  let emit_effect_matrix = ref false in
   let i = ref 1 in
   while !i < Array.length Sys.argv do
     (match Sys.argv.(!i) with
@@ -89,6 +90,8 @@ let () =
            exit 1
          );
          emit_overflow_audit := Sys.argv.(!i)
+     | "--emit-effect-matrix" ->
+         emit_effect_matrix := true
      | "-o" ->
          incr i;
          if !i >= Array.length Sys.argv then (
@@ -148,9 +151,14 @@ let () =
     exit 0
   );
 
+  if !emit_effect_matrix then (
+    print_string (Effect_rules.markdown ());
+    exit 0
+  );
+
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--forbid-trap] [--forbid-unsafe] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--forbid-trap] [--forbid-unsafe] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--version]\n"
       Sys.argv.(0);
     exit 1
   );

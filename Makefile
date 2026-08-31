@@ -116,7 +116,17 @@ unused-function-control: build
 	*) echo "FAIL unused-function-control: expected diagnostic not found" >&2; echo "$$output" >&2; exit 1;; esac; \
 	echo "PASS unused-function-control: positive build succeeded and negative build failed for stale_helper"
 
-langcheck: unused-function-control
+.PHONY: effect-matrix-control
+effect-matrix-control: build
+	@tmp=`mktemp`; trap 'rm -f "$$tmp"' EXIT; \
+	$(TAKIBI) --emit-effect-matrix > "$$tmp"; \
+	if ! cmp -s EFFECTS.md "$$tmp"; then \
+		echo "FAIL effect-matrix-control: EFFECTS.md is stale; regenerate with $(TAKIBI) --emit-effect-matrix" >&2; \
+		diff -u EFFECTS.md "$$tmp" >&2 || true; exit 1; \
+	fi; \
+	echo "PASS effect-matrix-control: EFFECTS.md matches compiler effect rules"
+
+langcheck: unused-function-control effect-matrix-control
 	@python3 scripts/check_agents_paths.py
 	@python3 scripts/test_check_elf_symbol_alignment.py
 	@python3 scripts/test_check_direct_mmio_literals.py

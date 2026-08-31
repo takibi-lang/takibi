@@ -15,6 +15,17 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-08-31: checker-generated effect relation matrix (#455)
+
+The ten built-in effects and their declaration, function-pointer,
+propagation, exclusion, unknown-indirect-call, and re-entry rules now live in
+one `Effect_rules` table consumed by both type checking and
+`--emit-effect-matrix`. `EFFECTS.md` is the checked-in generated output, and
+`make langcheck` fails on any stale edit or rule change that was not
+regenerated. The table records the current post-#449 rule: `locks` propagates
+and violates a bare `!{}` contract, but an interrupt or exception root may
+reach a lock that does not itself block.
+
 ## 2026-08-31: resolved-call-graph unused-function rejection (#494)
 
 Maintained builds can now request a fatal post-typecheck reachability check

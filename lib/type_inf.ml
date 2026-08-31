@@ -6307,74 +6307,49 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   "static name '%s' is not bound by this function signature or struct"
                   name))))
   in
-  let validate_effects ~allow_interrupt ~allow_noreturn loc kind name effects =
+  let validate_effects ~allow_declaration_only ~allow_noreturn loc kind name effects =
     let seen = ref StringSet.empty in
     List.iter (fun eff ->
-      if eff <> "may_block" && eff <> "allocates" && eff <> "locks"
-         && eff <> "logs" && eff <> "requires_mmu" && eff <> "unsafe" && eff <> "interrupt"
-         && eff <> "exception" && eff <> "mmu_off" && eff <> "noreturn" then
+      let rule = match Effect_rules.find eff with
+        | Some rule -> rule
+        | None ->
         raise (TypeError (loc, Printf.sprintf
-          "unknown effect '%s' on %s '%s'; supported effects are may_block, allocates, locks, logs, requires_mmu, unsafe, interrupt, exception, mmu_off, and noreturn"
-          eff kind name));
-      if (eff = "interrupt" || eff = "exception" || eff = "mmu_off")
-         && not allow_interrupt then
-        raise (TypeError (loc,
-          Printf.sprintf "'%s' is a function declaration role, not a function-pointer call effect" eff));
-      if eff = "noreturn" && not allow_noreturn then
+          "unknown effect '%s' on %s '%s'; supported effects are %s"
+          eff kind name (String.concat ", " Effect_rules.names))) in
+      if rule.declaration = Effect_rules.Trusted_extern && not allow_noreturn then
         raise (TypeError (loc,
           "'noreturn' is currently restricted to trusted extern function declarations"));
+      if not rule.function_pointer && not allow_declaration_only then
+        raise (TypeError (loc,
+          Printf.sprintf "'%s' is a function declaration role, not a function-pointer call effect" eff));
       if StringSet.mem eff !seen then
         raise (TypeError (loc, Printf.sprintf
           "duplicate effect '%s' on %s '%s'" eff kind name));
       seen := StringSet.add eff !seen
     ) effects;
-    List.iter (fun forbidden ->
-      if StringSet.mem forbidden !seen && StringSet.mem "interrupt" !seen then
-        raise (TypeError (loc, Printf.sprintf
-          "%s '%s' cannot be both interrupt and %s" kind name forbidden));
-      if StringSet.mem forbidden !seen && StringSet.mem "exception" !seen then
-        raise (TypeError (loc, Printf.sprintf
-          "%s '%s' cannot be both exception and %s" kind name forbidden))
-    (* GitHub issue #449: `locks` is NOT here, and used to be. Two
-       deliberate decisions in this tree contradicted each other, and
-       annotating the lock primitives is what made that visible.
-
-       Issue #298 added `locks` to this list, with tests, for the
-       diagnostic-trace writer: a recorder must stay safe if an IRQ
-       interrupts ordinary kernel code. Issue #351 had already decided the
-       opposite for the pool, and pinned it -- linux_user/intrusive_pool
-       carries an `!{interrupt}` probe that takes a pool guard, with the
-       comment "the pool is usable from an interrupt handler, and this is
-       here so that stops being a claim in a comment ... marking the lock
-       `!{may_block}` is the alternative this design deliberately did not
-       take."
-
-       Both could stand only because the effect was vacuous: no function
-       declared `locks`, so #298's rule never fired on #351's probe.
-       Annotating the primitives made them collide, and #351 is right. A
-       lock whose acquire MASKS composes with an interrupt handler -- the
-       handler cannot interrupt a holder on the same core -- which is a
-       property of the lock rather than of the call site, and is how Linux
-       allows spin_lock_irqsave there.
-
-       Nothing #298 actually required is lost. A trace writer must not
-       allocate and must not log: `allocates` and `logs` are still here. A
-       lock that genuinely must not be taken in a handler is one whose
-       acquire does not mask, and kernel/lib/task_mutex.tkb declares
-       `may_block` -- also still here -- so it is rejected with a call
-       path. What is removed is the over-generalisation from "the trace
-       writer must not lock" to "no handler may lock". *)
-    ) ["may_block"; "allocates"; "logs"];
-    if StringSet.mem "interrupt" !seen && StringSet.mem "exception" !seen then
-      raise (TypeError (loc, Printf.sprintf
-        "%s '%s' cannot be both interrupt and exception" kind name));
-    if StringSet.mem "mmu_off" !seen &&
-       (StringSet.mem "interrupt" !seen || StringSet.mem "exception" !seen) then
-      raise (TypeError (loc, Printf.sprintf
-        "%s '%s' cannot combine mmu_off with interrupt or exception" kind name));
-    if StringSet.mem "mmu_off" !seen && StringSet.mem "requires_mmu" !seen then
-      raise (TypeError (loc, Printf.sprintf
-        "%s '%s' cannot be both mmu_off and requires_mmu" kind name))
+    List.iter (fun effect_name ->
+      if StringSet.mem effect_name !seen then begin
+        let rule = Option.get (Effect_rules.find effect_name) in
+        List.iter (fun forbidden ->
+          if StringSet.mem forbidden !seen then begin
+            let message = match effect_name, forbidden with
+              | "interrupt", "exception" -> Printf.sprintf
+                  "%s '%s' cannot be both interrupt and exception" kind name
+              | "interrupt", "mmu_off" | "exception", "mmu_off" -> Printf.sprintf
+                  "%s '%s' cannot combine mmu_off with interrupt or exception" kind name
+              | "interrupt", other | "exception", other -> Printf.sprintf
+                  "%s '%s' cannot be both %s and %s" kind name effect_name other
+              | "mmu_off", "requires_mmu" -> Printf.sprintf
+                  "%s '%s' cannot be both mmu_off and requires_mmu" kind name
+              | "mmu_off", ("interrupt" | "exception") -> Printf.sprintf
+                  "%s '%s' cannot combine mmu_off with interrupt or exception" kind name
+              | left, right -> Printf.sprintf
+                  "%s '%s' cannot combine %s with %s" kind name left right in
+            raise (TypeError (loc, message))
+          end
+        ) rule.excludes_declared
+      end
+    ) Effect_rules.names
   in
   let validate_static_application loc kind name formals args =
     if List.length args <> List.length formals then
@@ -6431,7 +6406,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> validate_static_type loc t
     | Ast.TypeFn (args, ret, effects) ->
         Option.iter
-          (validate_effects ~allow_interrupt:false ~allow_noreturn:false loc "function pointer type" "fn")
+          (validate_effects ~allow_declaration_only:false ~allow_noreturn:false loc "function pointer type" "fn")
           effects;
         List.iter (validate_static_type loc) args;
         validate_static_type loc ret
@@ -6968,7 +6943,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   List.iter (function
     | Ast.FuncDef f ->
         Option.iter
-          (validate_effects ~allow_interrupt:true ~allow_noreturn:false f.def_loc "function" f.name)
+          (validate_effects ~allow_declaration_only:true ~allow_noreturn:false f.def_loc "function" f.name)
           f.effects;
         let scope = Hashtbl.create 8 in
         validation_static_scope := Some scope;
@@ -7028,10 +7003,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         List.iter validate_stmt_types f.body
     | Ast.ExternFuncDef (name, params, ret, effects) ->
         Option.iter (fun effects ->
-          validate_effects ~allow_interrupt:true ~allow_noreturn:true Lexing.dummy_pos
+          validate_effects ~allow_declaration_only:true ~allow_noreturn:true Lexing.dummy_pos
             "extern function" name effects;
-          if List.mem "interrupt" effects || List.mem "exception" effects
-             || List.mem "mmu_off" effects then
+          if List.exists (fun effect_name -> match Effect_rules.find effect_name with
+            | Some rule -> rule.declaration_role | None -> false) effects then
             raise (TypeError (Lexing.dummy_pos, Printf.sprintf
               "extern function '%s' cannot be an interrupt or exception root, or an mmu_off root, because it has no body to check"
               name))
@@ -7579,9 +7554,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         let old = Option.value (StringMap.find_opt fdef.name m) ~default:[] in
         let old = List.filter (fun (k, _) -> k <> key) old in
         let call_effects = Option.map (fun effects ->
-          List.filter (fun eff ->
-            eff = "may_block" || eff = "allocates" || eff = "locks"
-            || eff = "logs" || eff = "requires_mmu" || eff = "unsafe") effects)
+          List.filter (fun eff -> match Effect_rules.find eff with
+            | Some rule -> rule.function_pointer | None -> false) effects)
           fdef.effects in
         StringMap.add fdef.name ((key, TFun (pts, rt, call_effects)) :: old) m
     | Ast.ExternFuncDef (name, params, ret_ty, effects_for_extern) ->
@@ -7599,9 +7573,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         let call_effects = match effects_for_extern with
           | None -> Some []
           | Some effects ->
-              Some (List.filter (fun eff ->
-                eff = "may_block" || eff = "allocates" || eff = "locks"
-                || eff = "logs" || eff = "requires_mmu" || eff = "unsafe") effects)
+              Some (List.filter (fun eff -> match Effect_rules.find eff with
+                | Some rule -> rule.function_pointer | None -> false) effects)
         in
         StringMap.add name ((key, TFun (pts, rt, call_effects)) :: old) m
     | Ast.ConstDef _ -> m
@@ -9395,15 +9368,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     in
     loop seed
   in
-  let operational_effects = ["may_block"; "allocates"; "locks"; "logs"] in
-  (* GitHub issue #449: `locks` still PROPAGATES with the rest -- "does
-     this call path take a lock" is the question the effect exists to
-     answer, and an `!{}` effect-free contract still forbids all four. What
-     it is no longer is forbidden inside an interrupt or exception root;
-     validate_effects' own note has why, and why nothing #298 required is
-     lost by it. *)
-  let interrupt_forbidden_effects = ["may_block"; "allocates"; "logs"] in
-  let compositional_effects = operational_effects @ ["requires_mmu"] in
+  let operational_effects = Effect_rules.effect_free_forbidden in
+  let compositional_effects = List.filter (fun name -> name <> "unsafe")
+      Effect_rules.propagating in
   let closed_effects = List.map (fun eff ->
     (eff, close_property (explicit_effect eff)
       (fun direct indirect _ _ ->
@@ -9492,12 +9459,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   StringMap.iter (fun key effects_opt ->
     let effects = Option.value effects_opt ~default:[] in
     (match StringMap.find_opt key effect_summaries with
-     | Some (_, _, _, true, _) when not (List.mem "unsafe" effects) ->
+     | Some (_, _, _, true, _)
+       when (Option.get (Effect_rules.find "unsafe")).declaration =
+            Effect_rules.Local_required && not (List.mem "unsafe" effects) ->
          raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
            "function '%s' contains an unsafe expression but does not declare !{unsafe}"
            (display_effect_key key)))
      | _ -> ());
-    let check_forbidden role = List.iter (fun eff ->
+    let check_forbidden role =
+      let rule = Option.get (Effect_rules.find role) in
+      List.iter (fun eff ->
       if StringSet.mem key (closed_effect eff) then begin
         let path = Option.value (find_effect_path eff StringSet.empty key)
           ~default:[display_effect_key key] in
@@ -9512,10 +9483,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           "%s function '%s' %s via %s" role
           (display_effect_key key) description (String.concat " -> " path)))
       end
-    ) interrupt_forbidden_effects in
+    ) rule.excludes_reachable in
     if List.mem "interrupt" effects then begin
       check_forbidden "interrupt";
-      if StringSet.mem key may_reach_unknown then begin
+      if (Option.get (Effect_rules.find "interrupt")).rejects_unknown_indirect
+         && StringSet.mem key may_reach_unknown then begin
         let path = Option.value (find_unknown_path StringSet.empty key)
           ~default:[display_effect_key key; "<indirect call>"] in
         raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
@@ -9524,29 +9496,32 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       end
     end else if List.mem "exception" effects then begin
       check_forbidden "exception";
-      if StringSet.mem key may_reach_unknown then begin
+      if (Option.get (Effect_rules.find "exception")).rejects_unknown_indirect
+         && StringSet.mem key may_reach_unknown then begin
         let path = Option.value (find_unknown_path StringSet.empty key)
           ~default:[display_effect_key key; "<indirect call>"] in
         raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
           "exception function '%s' reaches a call with unknown effects via %s"
           (display_effect_key key) (String.concat " -> " path)))
       end;
-      (match find_exception_reentry_path key with
-       | Some path ->
-           raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
-             "exception function '%s' may re-enter an exception root via %s"
-             (display_effect_key key) (String.concat " -> " path)))
-       | None -> ())
+      if (Option.get (Effect_rules.find "exception")).forbids_reentry then
+        (match find_exception_reentry_path key with
+         | Some path ->
+             raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
+               "exception function '%s' may re-enter an exception root via %s"
+               (display_effect_key key) (String.concat " -> " path)))
+         | None -> ())
     end else if List.mem "mmu_off" effects then begin
-      if StringSet.mem key (closed_effect "requires_mmu") then begin
+      let mmu_off_rule = Option.get (Effect_rules.find "mmu_off") in
+      List.iter (fun eff -> if StringSet.mem key (closed_effect eff) then begin
         let path = Option.value
-          (find_effect_path "requires_mmu" StringSet.empty key)
+          (find_effect_path eff StringSet.empty key)
           ~default:[display_effect_key key] in
         raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
           "MMU-off function '%s' requires the MMU via %s"
           (display_effect_key key) (String.concat " -> " path)))
-      end;
-      if StringSet.mem key may_reach_unknown then begin
+      end) mmu_off_rule.excludes_reachable;
+      if mmu_off_rule.rejects_unknown_indirect && StringSet.mem key may_reach_unknown then begin
         let path = Option.value (find_unknown_path StringSet.empty key)
           ~default:[display_effect_key key; "<indirect call>"] in
         raise (TypeError (StringMap.find key effect_locs, Printf.sprintf
@@ -9599,10 +9574,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Some (Some effects) -> effects
       | Some None | None -> []
     in
+    let declared_roles = List.filter_map (fun rule ->
+      if rule.Effect_rules.declaration_role && List.mem rule.name declared
+      then Some rule.name else None) Effect_rules.rules in
     let effects =
-      (if List.mem "interrupt" declared then ["interrupt"] else [])
-      @ (if List.mem "exception" declared then ["exception"] else [])
-      @ (if List.mem "mmu_off" declared then ["mmu_off"] else [])
+      declared_roles
       @ List.filter (fun eff -> StringSet.mem key (closed_effect eff))
           compositional_effects
       @ (if StringSet.mem key may_unsafe then ["unsafe"] else [])
