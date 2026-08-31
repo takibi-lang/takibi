@@ -69,10 +69,6 @@ EXEMPT = {
         "the secondary core's own entry point, which carries its own "
         "assertion in kernel_secondary_main",
 
-    # --- Written once before a second core can exist, or read-only after.
-    "printk/number.tkb":
-        "formatter scratch, written and consumed within one call",
-
     # --- Device state, single-core by interrupt routing rather than by a
     # number. Device SPIs are targeted at CPU0 (gicd_itargetsr8 =
     # 0x01010101), so the handler and the state it publishes stay on one

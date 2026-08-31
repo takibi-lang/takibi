@@ -15,6 +15,16 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-08-31: immutable lookup-table assertions (#474)
+
+`static_assert` can now read a literal or earlier `const` index from an
+immutable global array whose initializer is an integer-literal list. Mutable
+arrays remain runtime state and are deliberately excluded. The kernel decimal
+place table is now immutable and checks its descending powers-of-ten
+relationship at compile time. Its per-digit zero guard remains solely as
+runtime-index narrowing for `--forbid-trap`; the execution-model exemption
+that existed only for the former mutable declaration was removed.
+
 ## 2026-08-31: checker-generated effect relation matrix (#455)
 
 The ten built-in effects and their declaration, function-pointer,

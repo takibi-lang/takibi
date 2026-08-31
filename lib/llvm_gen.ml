@@ -232,6 +232,11 @@ let enum_nonexhaustive: (string, bool) Hashtbl.t = Hashtbl.create 8
    order with no forward-reference support, mirroring Const_env's existing
    array-size-constant mechanism. *)
 let global_const_defs : (string, Ast.type_expr * Ast.expr) Hashtbl.t = Hashtbl.create 16
+(* Immutable literal-list array initializers are separately retained for
+   static_assert.  Only a direct StructLit whose elements are integer literals
+   is recorded, so this does not grow into general global evaluation. *)
+let global_literal_array_initializers : (string, Ast.expr list) Hashtbl.t =
+  Hashtbl.create 16
 
 (* -- Trap-site accounting (--forbid-trap) --------------------------------- *)
 (* Every runtime trap check emitted by codegen (array/slice bounds, checked
@@ -6510,6 +6515,20 @@ let rec eval_static_int (e : Ast.expr) : Int64.t =
   let bool_of i = if i then 1L else 0L in
   match e.desc with
   | Unsafe inner -> eval_static_int inner
+  | Index ({ desc = Var name; _ }, index) ->
+      let elements = match Hashtbl.find_opt global_literal_array_initializers name with
+        | Some elements -> elements
+        | None -> raise (Error (Printf.sprintf
+            "global array '%s' does not have a literal-list initializer" name)) in
+      let index = eval_const_int index in
+      if Int64.compare index 0L < 0 ||
+         Int64.compare index (Int64.of_int (List.length elements)) >= 0 then
+        raise (Error (Printf.sprintf
+          "global array '%s' static index %Ld is out of bounds for length %d"
+          name index (List.length elements)));
+      (match (List.nth elements (Int64.to_int index)).desc with
+       | IntLit value -> value
+       | _ -> assert false)
   | BinOp (Sub, { desc = IntLit 0L; _ }, _) ->
       (* Unary minus: eval_const_int recognizes this exact shape already. *)
       eval_const_int e
@@ -6750,6 +6769,12 @@ let gen_global ?prog_types name ty_opt expr_opt align_opt is_mutable decl_loc =
     | Some e -> eval_const ast_ty e
     | None   -> undef llty  (* no initializer -> LLVM undef; startup.S zeroes BSS *)
   in
+  (match is_mutable, ast_ty, expr_opt with
+   | false, TypeArray (_, _), Some { desc = StructLit elements; _ }
+     when List.for_all (fun (element : Ast.expr) ->
+       match element.desc with IntLit _ -> true | _ -> false) elements ->
+       Hashtbl.replace global_literal_array_initializers name elements
+   | _ -> ());
   if (not is_mutable) then
     (match expr_opt with
      | Some e -> Hashtbl.add global_const_defs name (ast_ty, e)
@@ -7158,6 +7183,7 @@ let gen_program ?prog_types prog =
   Hashtbl.reset struct_llvm_field_index;
   Hashtbl.reset struct_is_packed;
   Hashtbl.reset global_const_defs;
+  Hashtbl.reset global_literal_array_initializers;
   Hashtbl.reset enum_underlying;
   Hashtbl.reset enum_variants_tbl;
   Hashtbl.reset enum_nonexhaustive;
@@ -7196,6 +7222,8 @@ let gen_program ?prog_types prog =
   assert_codegen_table_empty "struct_llvm_field_index" struct_llvm_field_index;
   assert_codegen_table_empty "struct_is_packed" struct_is_packed;
   assert_codegen_table_empty "global_const_defs" global_const_defs;
+  assert_codegen_table_empty "global_literal_array_initializers"
+    global_literal_array_initializers;
   assert_codegen_table_empty "enum_underlying" enum_underlying;
   assert_codegen_table_empty "enum_variants_tbl" enum_variants_tbl;
   assert_codegen_table_empty "enum_nonexhaustive" enum_nonexhaustive;

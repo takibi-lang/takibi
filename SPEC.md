@@ -339,6 +339,9 @@ parameter value, or top-level declaration name.
   literals, `sizeof`/`offsetof`, `const` globals and immutable global
   constants, enum variants, `as` casts, and arithmetic, bitwise,
   comparison and `&&`/`||` operators over those; comparisons are signed.
+  A literal or `const` index may also read an element of an immutable global
+  array initialized directly with an integer-literal list. Mutable arrays and
+  general computed array initializers are not compile-time constants.
   It is a **statement**, not a top-level item, so that it can name a
   generic function's own type parameter -- which is the motivating case:
 

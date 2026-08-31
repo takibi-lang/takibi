@@ -13591,6 +13591,39 @@ let codegen_tests = [
           return 0;
         }");
 
+  Alcotest.test_case
+    "issue #474: static_assert reads an immutable literal global array"
+    `Quick
+    (expect_codegen_ok
+       "const ISSUE474_LAST: usize = 2;
+        let issue474_places: [usize; 3] = {100, 10, 1};
+        fn codegen_issue474_global_array() -> usize {
+          static_assert(issue474_places[0] == issue474_places[1] * 10);
+          static_assert(issue474_places[ISSUE474_LAST] == 1);
+          return 0;
+        }");
+
+  Alcotest.test_case
+    "issue #474: a wrong immutable global array element fails static_assert"
+    `Quick
+    (expect_codegen_error "static assertion failed: decimal table is malformed"
+       "let issue474_bad_places: [usize; 3] = {100, 11, 1};
+        fn codegen_issue474_bad_global_array() -> usize {
+          static_assert(issue474_bad_places[0] == issue474_bad_places[1] * 10,
+                        \"decimal table is malformed\");
+          return 0;
+        }");
+
+  Alcotest.test_case
+    "issue #474: static_assert does not treat a mutable array as constant"
+    `Quick
+    (expect_codegen_error "does not have a literal-list initializer"
+       "let mut issue474_mutable_places: [usize; 3] = {100, 10, 1};
+        fn codegen_issue474_mutable_global_array() -> usize {
+          static_assert(issue474_mutable_places[0] == 100);
+          return 0;
+        }");
+
   (* The motivating case: the assertion is about sizeof of a type built
      from the function's own type parameter, so it can only be decided per
      instantiation. The same generic body passes for one T and fails for
