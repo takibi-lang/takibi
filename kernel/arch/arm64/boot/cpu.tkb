@@ -17,15 +17,3 @@ fn enable_irq() {
 fn disable_irq() {
     msr_daifset_irq();
 }
-
-// GitHub issue #226: psci_cpu_on used to be a hand-written register shuffle
-// in entry.S around one `smc #0` -- PSCI_CPU_ON's function ID had to land
-// in x0 while the three real arguments shifted up into x1-x3, all by hand.
-// Now an ordinary .tkb call: smc4's own fixed x0-x3/x0 SMCCC ABI (Stage 0)
-// means the compiler does that argument-to-register mapping itself, the
-// same way it does for any other function call, with no register picked
-// by hand at all.
-fn psci_cpu_on(target_affinity: usize, entry: usize, context: usize)
-        -> usize {
-    return smc4(0xc4000003, target_affinity, entry, context);
-}
