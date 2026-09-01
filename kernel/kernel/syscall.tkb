@@ -1930,6 +1930,7 @@ fn kernel_syscall_block_return(frame_sp: usize) {
             // rewind above already points it back at the syscall, so the
             // process re-enters accept, finds itself alone, and waits in
             // the kernel, which is what being alone means.
+            workload_profile_el0_enter();
             el0_context_resume(frame_sp);
         }
     } else {
@@ -1939,6 +1940,7 @@ fn kernel_syscall_block_return(frame_sp: usize) {
     if (next_sp == 0) {
         kernel_syscall_fail_stop(frame_sp);
     }
+    workload_profile_el0_enter();
     el0_context_resume(next_sp);
 }
 
@@ -1952,6 +1954,7 @@ fn kernel_syscall_resume_return(frame_sp: usize, value: usize) {
     el0_context_set_x0(frame_sp, value);
     kernel_stack_guard_check(frame_sp);  // issue #375
     let resume_sp: usize = kernel_process_syscall_return_schedule(frame_sp);
+    workload_profile_el0_enter();
     el0_context_resume(resume_sp);
 }
 
@@ -2017,6 +2020,7 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) {
     // TLS base until that runtime installs its own TPIDR_EL0.
     el0_context_set_tpidr_el0(frame_sp, 0);
     el0_context_set_x0(frame_sp, 0);
+    workload_profile_el0_enter();
     el0_context_resume(frame_sp);
 }
 
@@ -2034,14 +2038,21 @@ fn kernel_syscall_clone_parent_return(parent_sp: usize) {
     if (parent_sp == 0) {
         kernel_syscall_fail_stop(parent_sp);
     }
+    workload_profile_el0_enter();
     el0_context_resume(parent_sp);
 }
 
 fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                            x2: usize, x3: usize, x4: usize)
         -> (usize, usize) !{unsafe} {
+    workload_profile_note_syscall();
     let (action_code, action_value) = syscall_action_encode(
         kernel_syscall_dispatch_action(esr, number, x0, x1, x2, x3, x4));
+    if (action_code == 6) {
+        workload_profile_syscall_wait();
+    } else {
+        workload_profile_syscall_complete();
+    }
     // GitHub issue #241/#244/#245 postmortem: action 0 (SyscallAction::
     // Unreachable) matches no branch in user_entry.S's dispatch table and
     // silently fail-stops with zero UART evidence. Naming the syscall

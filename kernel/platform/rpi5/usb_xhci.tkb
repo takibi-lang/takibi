@@ -303,7 +303,7 @@ fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 !{unsafe} {
                 dw3 = d3;
                 break;
             }
-            interrupt_wait();
+            workload_profile_interrupt_wait();
         }
         if (seen == false) {
             return 0;

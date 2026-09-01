@@ -79,6 +79,7 @@ fn block_read(device: KernelBlockDevice, block: usize,
     if (block >= device.length / KERNEL_BLOCK_SIZE) {
         return BlockIoResult::Invalid;
     }
+    workload_profile_note_block_read(KERNEL_BLOCK_SIZE);
     if (device.backend == 0) {
             let offset: usize = block * KERNEL_BLOCK_SIZE;
             if (offset < KERNEL_EXT2_IMAGE_LEN - KERNEL_BLOCK_SIZE + 1) {
@@ -120,6 +121,7 @@ fn block_write(device: KernelBlockDevice, block: usize,
     if (block >= device.length / KERNEL_BLOCK_SIZE) {
         return BlockIoResult::Invalid;
     }
+    workload_profile_note_block_write(KERNEL_BLOCK_SIZE);
     if (device.backend == 0) {
             let offset: usize = block * KERNEL_BLOCK_SIZE;
             if (offset < KERNEL_EXT2_IMAGE_LEN - KERNEL_BLOCK_SIZE + 1) {

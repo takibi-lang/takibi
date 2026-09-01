@@ -9,7 +9,7 @@ import re
 import subprocess
 
 
-RECORD_RE = re.compile(r"^profile: (begin|end) (.+)$")
+RECORD_RE = re.compile(r"^profile: (begin|end|cpu) (.+)$")
 
 
 def parse_fields(text):
@@ -35,6 +35,17 @@ def one_record(lines, kind, name):
     if len(records) != 1:
         raise ValueError(f"expected one {kind} record for {name}, found {len(records)}")
     return records[0]
+
+
+def all_records(lines, kind, name):
+    records = []
+    for line in lines:
+        match = RECORD_RE.match(line.rstrip("\r\n"))
+        if match and match.group(1) == kind:
+            fields = parse_fields(match.group(2))
+            if fields.get("name") == name:
+                records.append(fields)
+    return records
 
 
 def integer(fields, key):
@@ -75,12 +86,45 @@ def collect(args):
         raise ValueError("profile interval has a zero duration or frequency")
     if integer(end, "result_count") != 2:
         raise ValueError("busy-pair profile did not produce two results")
+    cpu_count = integer(begin, "cpu_count")
+    cpu_records = all_records(lines, "cpu", args.name)
+    if len(cpu_records) != cpu_count:
+        raise ValueError(
+            f"expected {cpu_count} per-CPU records, found {len(cpu_records)}")
+    per_cpu = []
+    aggregate_running = 0
+    aggregate_idle = 0
+    cpu_fields = (
+        "wall_cycles", "el0_cycles", "el1_cycles", "irq_cycles",
+        "idle_cycles", "context_switches", "blocks", "wakeups",
+        "syscalls", "block_read_bytes", "block_write_bytes",
+        "network_rx_bytes", "network_tx_bytes")
+    for expected_cpu, fields in enumerate(cpu_records):
+        if integer(fields, "cpu") != expected_cpu:
+            raise ValueError("per-CPU profile records are missing or out of order")
+        values = {key: integer(fields, key) for key in cpu_fields}
+        classified = (values["el0_cycles"] + values["el1_cycles"] +
+                      values["irq_cycles"] + values["idle_cycles"])
+        if classified != values["wall_cycles"]:
+            raise ValueError(
+                f"CPU {expected_cpu} classified cycles do not equal wall cycles")
+        running = (values["el0_cycles"] + values["el1_cycles"] +
+                   values["irq_cycles"])
+        aggregate_running += running
+        aggregate_idle += values["idle_cycles"]
+        per_cpu.append({"cpu": expected_cpu, **values})
+    if aggregate_running > aggregate_idle:
+        dominant_state = "running"
+    elif aggregate_idle > aggregate_running:
+        dominant_state = "idle"
+    else:
+        dominant_state = "balanced"
     artifact = {
-        "schema": "takibi.kernel.workload/v1",
+        "schema": "takibi.kernel.workload/v2",
         "workload": args.name,
         "environment": {
             "target": args.target,
-            "cpu_count": integer(begin, "cpu_count"),
+            "cpu_count": cpu_count,
             "commit": args.commit,
         },
         "input": {
@@ -90,12 +134,20 @@ def collect(args):
         "interval": {
             "elapsed_cycles": integer(end, "elapsed_cycles"),
             "counter_frequency_hz": integer(end, "tick_frequency"),
+            "elapsed_seconds": (integer(end, "elapsed_cycles") /
+                                integer(end, "tick_frequency")),
         },
         "results": {
             "completed_iterations": completed,
             "result_count": integer(end, "result_count"),
             "pids": [integer(begin, "pid_a"), integer(begin, "pid_b")],
             "checksums": [integer(end, "checksum_a"), integer(end, "checksum_b")],
+        },
+        "accounting": {
+            "dominant_state": dominant_state,
+            "aggregate_running_cycles": aggregate_running,
+            "aggregate_idle_cycles": aggregate_idle,
+            "per_cpu": per_cpu,
         },
     }
     Path(args.output).write_text(json.dumps(artifact, indent=2) + "\n", encoding="ascii")
@@ -109,7 +161,8 @@ def git_commit():
 
 def load_artifact(path):
     artifact = json.loads(Path(path).read_text(encoding="ascii"))
-    if artifact.get("schema") != "takibi.kernel.workload/v1":
+    if artifact.get("schema") not in (
+            "takibi.kernel.workload/v1", "takibi.kernel.workload/v2"):
         raise ValueError(f"unsupported artifact schema in {path}")
     cycles = artifact["interval"]["elapsed_cycles"]
     frequency = artifact["interval"]["counter_frequency_hz"]

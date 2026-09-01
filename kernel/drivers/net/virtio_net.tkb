@@ -80,6 +80,7 @@ variant NetRxAcquire {
 
 fn net_rx_validated(index: {0..<8 as usize} @ desc, len: i32)
         -> NetRxValidated[desc] {
+    workload_profile_note_network_rx(max(len, 0) as usize);
     let mut frame: NetRxValidated[desc] = { index, len };
     return frame;
 }
@@ -310,7 +311,7 @@ fn net_init() -> NetInitResult {
 // with no host-side peer attached.
 fn net_rx_wait() !{may_block} {
     if (virtio_rx_irq_flag != 0) { return; }
-    interrupt_wait();
+    workload_profile_interrupt_wait();
 }
 
 fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
@@ -369,6 +370,7 @@ fn net_rx_reply_ready(frame: sink NetRxValidated[desc], len: i32)
 // written by the device on RX with no offload fields set, i.e. already
 // effectively zero, and no offload features are negotiated on TX either).
 fn net_transmit(reply: sink NetRxReplyReady[desc]) -> NetTxInFlight[desc] {
+    workload_profile_note_network_tx(max(reply.len, 0) as usize);
     let offset: isize = (reply.index as isize) * (RX_BUF_SIZE_USIZE as isize);
     let buf: *u8 = rx_bufs + offset;
     desc_set(tx_queue_mem as *u8, 0, buf as usize,
@@ -387,7 +389,7 @@ fn net_tx_complete(in_flight: sink NetTxInFlight[desc]) -> NetRxCanAcquire !{may
         virtio_tx_irq_flag = 0;
         if (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {
             while (virtio_tx_irq_flag == 0) {
-                interrupt_wait();
+                workload_profile_interrupt_wait();
             }
         }
     }
@@ -409,6 +411,7 @@ fn net_transmit_ready(ready: sink NetRxCanAcquire,
                       bytes: borrow [u8; 1514..], len: i32)
         -> NetRxCanAcquire !{may_block} {
     let safe_len: i32 = max(min(len, 1514), 0);
+    workload_profile_note_network_tx(safe_len as usize);
     let tx_ready_slice: []u8 = tx_ready_buf as []u8;
     let payload: []u8 = tx_ready_slice[VIRTIO_NET_HDR_LEN..<VIRTIO_NET_HDR_LEN + 1514];
     slice_copy(payload[0..<safe_len as usize], bytes[0..<safe_len as usize]);
@@ -425,7 +428,7 @@ fn net_transmit_ready(ready: sink NetRxCanAcquire,
         virtio_tx_irq_flag = 0;
         if (tx_used_seen == used_idx_get(tx_queue_mem as *u8)) {
             while (virtio_tx_irq_flag == 0) {
-                interrupt_wait();
+                workload_profile_interrupt_wait();
             }
         }
     }

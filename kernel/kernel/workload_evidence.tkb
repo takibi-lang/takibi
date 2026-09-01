@@ -132,7 +132,251 @@ struct WorkloadBusyPair {
 
 private let mut workload_busy_pair: WorkloadBusyPair;
 
+enum WorkloadCpuMode { Idle; El0; El1; Irq; }
+
+struct WorkloadProfileCore {
+    mode: WorkloadCpuMode;
+    irq_resume_mode: WorkloadCpuMode;
+    last_tick: usize;
+    el0_ticks: usize;
+    el1_ticks: usize;
+    irq_ticks: usize;
+    idle_ticks: usize;
+    context_switches: usize;
+    blocks: usize;
+    wakeups: usize;
+    syscalls: usize;
+    syscall_retrying: bool;
+    block_read_bytes: usize;
+    block_write_bytes: usize;
+    network_rx_bytes: usize;
+    network_tx_bytes: usize;
+    selected_pid: usize;
+    has_selected_pid: bool;
+}
+
+private let mut workload_profile_cores: [WorkloadProfileCore; KERNEL_MAX_CORES];
+private let mut workload_profile_active: bool = false;
+
+private fn workload_profile_core_reset(cpu: {0..<KERNEL_MAX_CORES as usize}) {
+    workload_profile_cores[cpu].mode = WorkloadCpuMode::Idle;
+    workload_profile_cores[cpu].irq_resume_mode = WorkloadCpuMode::Idle;
+    workload_profile_cores[cpu].last_tick = 0;
+    workload_profile_cores[cpu].el0_ticks = 0;
+    workload_profile_cores[cpu].el1_ticks = 0;
+    workload_profile_cores[cpu].irq_ticks = 0;
+    workload_profile_cores[cpu].idle_ticks = 0;
+    workload_profile_cores[cpu].context_switches = 0;
+    workload_profile_cores[cpu].blocks = 0;
+    workload_profile_cores[cpu].wakeups = 0;
+    workload_profile_cores[cpu].syscalls = 0;
+    workload_profile_cores[cpu].syscall_retrying = false;
+    workload_profile_cores[cpu].block_read_bytes = 0;
+    workload_profile_cores[cpu].block_write_bytes = 0;
+    workload_profile_cores[cpu].network_rx_bytes = 0;
+    workload_profile_cores[cpu].network_tx_bytes = 0;
+    workload_profile_cores[cpu].selected_pid = 0;
+    workload_profile_cores[cpu].has_selected_pid = false;
+}
+
+private fn workload_profile_charge(cpu: {0..<KERNEL_MAX_CORES as usize},
+                                   now: usize) {
+    if (workload_profile_cores[cpu].last_tick == 0) {
+        workload_profile_cores[cpu].last_tick = now;
+        return;
+    }
+    let spent: usize = now - workload_profile_cores[cpu].last_tick;
+    match workload_profile_cores[cpu].mode {
+        WorkloadCpuMode::Idle => {
+            workload_profile_cores[cpu].idle_ticks =
+                workload_profile_cores[cpu].idle_ticks + spent;
+        }
+        WorkloadCpuMode::El0 => {
+            workload_profile_cores[cpu].el0_ticks =
+                workload_profile_cores[cpu].el0_ticks + spent;
+        }
+        WorkloadCpuMode::El1 => {
+            workload_profile_cores[cpu].el1_ticks =
+                workload_profile_cores[cpu].el1_ticks + spent;
+        }
+        WorkloadCpuMode::Irq => {
+            workload_profile_cores[cpu].irq_ticks =
+                workload_profile_cores[cpu].irq_ticks + spent;
+        }
+    }
+    workload_profile_cores[cpu].last_tick = now;
+}
+
+private fn workload_profile_transition(next: WorkloadCpuMode) {
+    if (workload_profile_active == false) { return; }
+    let cpu: usize = cpu_id();
+    if (cpu >= KERNEL_ACTIVE_CORES || cpu >= KERNEL_MAX_CORES) { return; }
+    let bounded_cpu: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    workload_profile_charge(bounded_cpu, read_cntpct() as usize);
+    workload_profile_cores[bounded_cpu].mode = next;
+}
+
+fn workload_profile_el1_enter() { workload_profile_transition(WorkloadCpuMode::El1); }
+fn workload_profile_el0_enter() { workload_profile_transition(WorkloadCpuMode::El0); }
+fn workload_profile_idle_enter() { workload_profile_transition(WorkloadCpuMode::Idle); }
+
+fn workload_profile_interrupt_wait() !{may_block} {
+    // Unlike exception-path transitions, driver waits arrive with IRQs
+    // enabled. Keep each charge-and-mode update atomic with an IRQ that
+    // would otherwise charge the same last_tick interval a second time.
+    let before_wait_irq_masked: usize = (mrs_daif() >> 7) & 1;
+    disable_irq();
+    workload_profile_idle_enter();
+    if (before_wait_irq_masked == 0) { enable_irq(); }
+    interrupt_wait();
+    let after_wait_irq_masked: usize = (mrs_daif() >> 7) & 1;
+    disable_irq();
+    workload_profile_el1_enter();
+    if (after_wait_irq_masked == 0) { enable_irq(); }
+}
+
+fn workload_profile_irq_enter() {
+    if (workload_profile_active == false) { return; }
+    let cpu: usize = cpu_id();
+    if (cpu >= KERNEL_ACTIVE_CORES || cpu >= KERNEL_MAX_CORES) { return; }
+    let bounded_cpu: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    workload_profile_cores[bounded_cpu].irq_resume_mode =
+        workload_profile_cores[bounded_cpu].mode;
+    workload_profile_transition(WorkloadCpuMode::Irq);
+}
+
+fn workload_profile_irq_exit() {
+    if (workload_profile_active == false) { return; }
+    let cpu: usize = cpu_id();
+    if (cpu >= KERNEL_ACTIVE_CORES || cpu >= KERNEL_MAX_CORES) { return; }
+    let bounded_cpu: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    workload_profile_transition(
+        workload_profile_cores[bounded_cpu].irq_resume_mode);
+}
+
+private fn workload_profile_current_cpu() -> usize {
+    if (workload_profile_active == false) { return KERNEL_MAX_CORES; }
+    let cpu: usize = cpu_id();
+    if (cpu >= KERNEL_ACTIVE_CORES || cpu >= KERNEL_MAX_CORES) {
+        return KERNEL_MAX_CORES;
+    }
+    return cpu;
+}
+
+fn workload_profile_note_syscall() {
+    workload_profile_el1_enter();
+    let cpu: usize = workload_profile_current_cpu();
+    if (cpu < KERNEL_MAX_CORES) {
+        if (workload_profile_cores[cpu].syscall_retrying == false) {
+            workload_profile_cores[cpu].syscalls =
+                workload_profile_cores[cpu].syscalls + 1;
+        }
+    }
+}
+
+fn workload_profile_syscall_wait() {
+    let cpu: usize = workload_profile_current_cpu();
+    if (cpu < KERNEL_MAX_CORES) {
+        workload_profile_cores[cpu].syscall_retrying = true;
+    }
+    workload_profile_idle_enter();
+}
+
+fn workload_profile_syscall_complete() {
+    let cpu: usize = workload_profile_current_cpu();
+    if (cpu < KERNEL_MAX_CORES) {
+        workload_profile_cores[cpu].syscall_retrying = false;
+    }
+}
+
+fn workload_profile_note_block() {
+    let cpu: usize = workload_profile_current_cpu();
+    if (cpu < KERNEL_MAX_CORES) {
+        workload_profile_cores[cpu].blocks = workload_profile_cores[cpu].blocks + 1;
+    }
+}
+
+fn workload_profile_note_wakeup() {
+    let cpu: usize = workload_profile_current_cpu();
+    if (cpu < KERNEL_MAX_CORES) {
+        workload_profile_cores[cpu].wakeups = workload_profile_cores[cpu].wakeups + 1;
+    }
+}
+
+fn workload_profile_note_block_read(bytes: usize) {
+    let cpu: usize = workload_profile_current_cpu();
+    if (cpu < KERNEL_MAX_CORES) {
+        workload_profile_cores[cpu].block_read_bytes =
+            workload_profile_cores[cpu].block_read_bytes + bytes;
+    }
+}
+
+fn workload_profile_note_block_write(bytes: usize) {
+    let cpu: usize = workload_profile_current_cpu();
+    if (cpu < KERNEL_MAX_CORES) {
+        workload_profile_cores[cpu].block_write_bytes =
+            workload_profile_cores[cpu].block_write_bytes + bytes;
+    }
+}
+
+fn workload_profile_note_network_rx(bytes: usize) {
+    let cpu: usize = workload_profile_current_cpu();
+    if (cpu < KERNEL_MAX_CORES) {
+        workload_profile_cores[cpu].network_rx_bytes =
+            workload_profile_cores[cpu].network_rx_bytes + bytes;
+    }
+}
+
+fn workload_profile_note_network_tx(bytes: usize) {
+    let cpu: usize = workload_profile_current_cpu();
+    if (cpu < KERNEL_MAX_CORES) {
+        workload_profile_cores[cpu].network_tx_bytes =
+            workload_profile_cores[cpu].network_tx_bytes + bytes;
+    }
+}
+
+private fn workload_profile_start(now: usize, pid: usize) {
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        workload_profile_core_reset(cpu);
+    }
+    // A core with no transition during the interval is idle for the whole
+    // interval, not absent from the partition. This also gives every active
+    // core the same wall-time boundary for the future multicore re-audit.
+    for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
+        workload_profile_cores[cpu].last_tick = now;
+    }
+    let cpu: usize = cpu_id();
+    if (cpu < KERNEL_ACTIVE_CORES && cpu < KERNEL_MAX_CORES) {
+        workload_profile_cores[cpu].mode = WorkloadCpuMode::El1;
+        workload_profile_cores[cpu].last_tick = now;
+        workload_profile_cores[cpu].selected_pid = pid;
+        workload_profile_cores[cpu].has_selected_pid = true;
+    }
+    workload_profile_active = true;
+}
+
+private fn workload_profile_finish(now: usize) {
+    for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
+        workload_profile_charge(cpu, now);
+    }
+    workload_profile_active = false;
+}
+
+private fn workload_profile_note_selected(pid: usize) {
+    let cpu: usize = workload_profile_current_cpu();
+    if (cpu < KERNEL_MAX_CORES) {
+        if (workload_profile_cores[cpu].has_selected_pid &&
+            workload_profile_cores[cpu].selected_pid != pid) {
+            workload_profile_cores[cpu].context_switches =
+                workload_profile_cores[cpu].context_switches + 1;
+        }
+        workload_profile_cores[cpu].selected_pid = pid;
+        workload_profile_cores[cpu].has_selected_pid = true;
+    }
+}
+
 fn workload_busy_pair_reset() {
+    workload_profile_active = false;
     workload_busy_pair.a_pid = 0;
     workload_busy_pair.b_pid = 0;
     workload_busy_pair.a_restarts = 0;
@@ -174,6 +418,7 @@ fn workload_busy_note_selected(pid: usize) {
     if (workload_busy_pair.a_pid == 0 && workload_busy_pair.b_pid == 0) {
         return;
     }
+    workload_profile_note_selected(pid);
     let now: usize = read_cntpct() as usize;
     if (workload_busy_pair.last_tick != 0) {
         let spent: usize = now - workload_busy_pair.last_tick;
@@ -254,7 +499,10 @@ fn workload_busy_record_progress(tag: usize, checksum: usize,
         workload_busy_pair.both_running = true;
         workload_busy_pair.a_base = workload_busy_pair.a_rounds;
         workload_busy_pair.b_base = workload_busy_pair.b_rounds;
+        disable_irq();
         workload_busy_pair.start_ticks = read_cntpct() as usize;
+        workload_profile_start(workload_busy_pair.start_ticks, pid);
+        enable_irq();
         // The CPU accounting starts here too, so `cpu_a`/`cpu_b` and
         // `elapsed` cover the same interval and their sum is a fraction of
         // it rather than a number that can exceed it -- which is what the
@@ -295,7 +543,10 @@ fn workload_busy_record_progress(tag: usize, checksum: usize,
     if (a_progress < WORKLOAD_BUSY_ROUNDS || b_progress < WORKLOAD_BUSY_ROUNDS) {
         return 0;
     }
+    disable_irq();
     workload_busy_pair.end_ticks = read_cntpct() as usize;
+    workload_profile_finish(workload_busy_pair.end_ticks);
+    enable_irq();
     workload_busy_pair.reported = true;
     workload_busy_pair_report();
     // Not 1: the pair keeps reporting, because the restart demonstration
@@ -430,6 +681,38 @@ private fn workload_busy_pair_report() !{unsafe} {
     kernel_boot_log(" checksum_b=");
     uart_put_udec(workload_busy_pair.b_checksum);
     kernel_boot_log("\n");
+    for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
+        kernel_boot_log("profile: cpu name=busy-pair cpu=");
+        uart_put_udec(cpu);
+        kernel_boot_log(" wall_cycles=");
+        uart_put_udec(workload_busy_pair.end_ticks -
+                      workload_busy_pair.start_ticks);
+        kernel_boot_log(" el0_cycles=");
+        uart_put_udec(workload_profile_cores[cpu].el0_ticks);
+        kernel_boot_log(" el1_cycles=");
+        uart_put_udec(workload_profile_cores[cpu].el1_ticks);
+        kernel_boot_log(" irq_cycles=");
+        uart_put_udec(workload_profile_cores[cpu].irq_ticks);
+        kernel_boot_log(" idle_cycles=");
+        uart_put_udec(workload_profile_cores[cpu].idle_ticks);
+        kernel_boot_log(" context_switches=");
+        uart_put_udec(workload_profile_cores[cpu].context_switches);
+        kernel_boot_log(" blocks=");
+        uart_put_udec(workload_profile_cores[cpu].blocks);
+        kernel_boot_log(" wakeups=");
+        uart_put_udec(workload_profile_cores[cpu].wakeups);
+        kernel_boot_log(" syscalls=");
+        uart_put_udec(workload_profile_cores[cpu].syscalls);
+        kernel_boot_log(" block_read_bytes=");
+        uart_put_udec(workload_profile_cores[cpu].block_read_bytes);
+        kernel_boot_log(" block_write_bytes=");
+        uart_put_udec(workload_profile_cores[cpu].block_write_bytes);
+        kernel_boot_log(" network_rx_bytes=");
+        uart_put_udec(workload_profile_cores[cpu].network_rx_bytes);
+        kernel_boot_log(" network_tx_bytes=");
+        uart_put_udec(workload_profile_cores[cpu].network_tx_bytes);
+        kernel_boot_log("\n");
+    }
     if (workload_busy_pair.refused != 0) {
         kernel_boot_log("workload: busy pair REFUSED reports=");
         uart_put_udec(workload_busy_pair.refused);

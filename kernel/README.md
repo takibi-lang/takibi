@@ -431,10 +431,14 @@ Default logs and projected actual files are written under
 `_build/kernel-hwtest-rpi5/`. Load, reset, UART, ARP, ICMP, TCP, curl, and
 userspace-socket evidence remain separate for diagnosis. The RPi5 and main
 QEMU integration runners also save `busy-pair-profile.json`. It records the
-explicit post-warm-up interval, target, active kernel CPU count, Git commit, input size,
-completed iterations, PIDs, elapsed counter cycles, and xorshift correctness
-checksums. RPi5 is the performance authority; the QEMU artifact only validates
-the same collection path.
+explicit post-warm-up interval, target, active kernel CPU count, Git commit,
+input size, completed iterations, PIDs, elapsed counter cycles, and xorshift
+correctness checksums. Each CPU record partitions wall time into EL0, EL1, IRQ,
+and idle cycles and includes context switches, blocks, wakeups, syscalls, and
+logical block/network byte volumes. The host rejects an artifact unless every
+CPU's four time classes sum exactly to its wall cycles, then reports whether
+running or idle time dominates in aggregate. RPi5 is the performance authority;
+the QEMU artifact only validates the same collection path.
 
 Render a local revision-comparison chart from any saved artifacts without
 rerunning a board:

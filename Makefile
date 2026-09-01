@@ -144,6 +144,7 @@ langcheck: unused-function-control effect-matrix-control
 	@python3 scripts/test_check_direct_mmio_literals.py
 	@python3 scripts/test_check_ddb_command_inventory.py
 	@python3 scripts/test_measure_trusted_base.py
+	@python3 scripts/test_profile_kernel_workload.py
 	@python3 scripts/check_direct_mmio_literals.py kernel
 	@python3 scripts/check_stale_depfiles.py
 	@python3 scripts/check_compiler_sync_rules.py --quiet

@@ -284,6 +284,7 @@ fn irq_uart_rx_unmask() !{unsafe} {
 
 fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
         -> usize !{interrupt, unsafe} {
+    workload_profile_irq_enter();
     let gicc_iar: *io u32 = unsafe { (rpi5_gicc_base + 0x0C) as *io u32 };
     let gicc_eoir: *io u32 = unsafe { (rpi5_gicc_base + 0x10) as *io u32 };
     let id: u32 = *gicc_iar;
@@ -298,6 +299,7 @@ fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
     if (cpu_id() != 0) {
         if (id == rpi5_timer_gic_intid) { secondary_timer_tick(); }
         *gicc_eoir = id;
+        workload_profile_irq_exit();
         return frame_sp;
     }
 
@@ -340,12 +342,14 @@ fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
             kernel_stack_guard_check_interrupt(frame_sp);  // issue #375
             let next_sp: usize = kernel_process_timer_schedule(frame_sp);
             *gicc_eoir = id;
+            workload_profile_irq_exit();
             return next_sp;
         }
         kernel_process_request_reschedule();
     }
 
     *gicc_eoir = id;
+    workload_profile_irq_exit();
     if (debug_break) { kernel_ddb_enter(frame_sp, 1, id as usize); }
     return frame_sp;
 }

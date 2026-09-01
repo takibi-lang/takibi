@@ -275,10 +275,11 @@ what a global provides.
 `kernel/kernel/syscall_test_evidence.tkb` (#304),
 `kernel/kernel/syscall_test_lifecycle.tkb` (#307),
 `kernel/kernel/workload_evidence.tkb` (the CPU-bound pair `/etc/inittab`
-starts, and the fairness and CPU-time numbers taken about it -- the one
-piece of this group the scheduler itself calls into, once per context
-switch, and the one that returns to its caller before reading a counter
-whenever the pair does not exist).
+starts, and the fairness and per-core EL0/EL1/IRQ/idle, scheduler-event,
+syscall, and I/O-volume numbers taken about its post-warm-up interval -- the
+one piece of this group the scheduler, exception paths, syscall dispatch, and
+device boundaries call into, with each hook returning before reading a counter
+when no interval is active).
 
 **Why global:** test fixtures are inherently singleton within one boot
 (there is one QEMU/RPi5 integration run at a time). The point of these
