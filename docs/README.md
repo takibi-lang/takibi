@@ -7,8 +7,9 @@ after the issue or development session which produced it has ended.
   document identifies the exact artifact inspected, distinguishes required
   behavior from optional behavior, and states what change requires a new
   audit.
+- `BUILD_CHECKS.md` is the complete inventory of repository policy checks
+  executed by `make langcheck`.
 
 Issue discussion remains useful for decisions and work status, but it is not
 the canonical location for a current compatibility contract. Historical
 events belong in `HISTORY.md`; current language behavior belongs in `SPEC.md`.
-
