@@ -12,7 +12,7 @@ DEFAULTS = {
     "inventory": ROOT / "kernel/DDB_COMMANDS.json",
     "source": ROOT / "kernel/arch/arm64/kernel/exception_evidence.tkb",
     "readme": ROOT / "kernel/README.md",
-    "agents": ROOT / "AGENTS.md",
+    "debug_skill": ROOT / ".agents/skills/debug-kernel/references/ddb.md",
     "driver": ROOT / "scripts/run_kernel_ddb_driver.py",
 }
 
@@ -154,7 +154,10 @@ def check(paths: dict[str, Path]) -> None:
     if help_lines != [expected_help]:
         fail("help", [expected_help], help_lines)
 
-    for key, label in (("readme", "kernel/README.md"), ("agents", "AGENTS.md")):
+    for key, label in (
+        ("readme", "kernel/README.md"),
+        ("debug_skill", ".agents/skills/debug-kernel/references/ddb.md"),
+    ):
         blocks = documented_inventories(
             paths[key].read_text(encoding="ascii"), label
         )

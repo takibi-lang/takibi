@@ -481,56 +481,18 @@ no reason to save it for last. In particular:
   at the time matched -- until `make allbuild` caught it).
 
 
-## Kernel Debugging: Use UART DDB First
+## Kernel Debugging
 
-The maintained kernel has a resumable, interrupt-safe UART debugger intended
-for both humans and coding agents. When a QEMU or RPi5 failure leaves UART
-alive, use DDB before adding temporary prints to scheduler, exception, or IRQ
-paths. Start `make kernelsh-qemu` or `make kernelsh-rpi5`, then press Ctrl-T
-followed by lowercase `b`. The host sends one finite serial BREAK; this is not
-miniterm's indefinite Ctrl-T/Ctrl-B BREAK toggle. `make kernelcheck-ddb-qemu`
-automates both real UART BREAK and software `brk` entry. The normal
-`make kernelcheck-rpi5` suite verifies physical Debug Probe BREAK, inspection,
-and resume after its ordinary workload.
+For kernel hangs, crashes, boot failures, exceptions, intermittent or timing-sensitive
+failures, QEMU failures, and RPi5 hardware failures, use the `debug-kernel` skill before
+investigating. Its canonical Codex entrypoint is
+`.agents/skills/debug-kernel/SKILL.md`; Claude Code uses
+`.claude/skills/debug-kernel/SKILL.md`, which routes to the same canonical instructions.
 
-The public command inventory is:
-
-<!-- DDB-COMMAND-INVENTORY-START -->
-`oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `proc PID`;
-`trace`; `events`; `xk ADDRESS [COUNT]`; `xp PHYSICAL [COUNT]`;
-`xu PID ADDRESS [COUNT]`; `help`; `continue`.
-<!-- DDB-COMMAND-INVENTORY-END -->
-
-Useful first-pass groupings are:
-
-- `regs`, `intr`, `sched`, and `current` -- saved CPU, interrupt-entry, and
-  scheduler state;
-- `ps` and `proc PID` -- the bounded process snapshot (`not captured` is not a
-  claim that a PID does not exist when the snapshot says it was truncated);
-- `vm` and `fds` -- the captured current process's address-space and bounded
-  descriptor view;
-- `trace` -- the older typed process-lifecycle tail;
-- `events` -- the ftrace-inspired Takibi per-CPU diagnostic rings. Read each
-  CPU independently; there is deliberately no claimed total order between
-  CPUs. Treat `damaged` and `overwritten` as evidence loss, not as valid
-  records. Fixed event ids are 16-bit and build-checked for collisions;
-- `xk ADDRESS [COUNT]`, `xp PHYSICAL [COUNT]`, and
-  `xu PID ADDRESS [COUNT]` -- fault-contained reads of managed ordinary RAM.
-  They reject MMIO and non-RAM storage rather than performing a potentially
-  state-changing "read";
-- `oops` for the retained crash view and `continue` to resume through the
-  compiler-defined saved exception frame.
-
-DDB remains allocation-free, bounded, polling-only, and inside the interrupt
-effect rules. Do not call ordinary logging, allocation, locks, sleeping,
-filesystem, network, or scheduler operations from its call graph, and do not
-add an effect exemption for debugger code. Memory/register mutation, general
-expressions, and an in-kernel GDB remote protocol are intentionally absent
-until a concrete debugging case justifies their separate safety costs.
-Backtracing is also deferred: a plausible but incorrect AArch64 unwind is
-worse evidence for an automated debugger than raw PC/LR plus structured
-snapshots. `kernel/README.md` is the authoritative command and implementation
-reference.
+If UART remains responsive, use DDB before adding temporary prints to scheduler,
+exception, IRQ, VM, or process paths. QEMU cannot validate physical cache coherence,
+real interrupt timing, or hardware concurrency. Keep those two constraints in working
+context even when only one reference from the skill is needed.
 
 ## Directory Layout
 
@@ -680,32 +642,10 @@ size.
   these builtins until an equally race-free wake protocol (not a bare `hlt` or
   `wfi`) is designed with the interrupt controller/runtime.
 - **Language-level known limitations** (function overloading, the flat top-level namespace, `isize`, scoped refinement-type inference, `sizeof`/`offsetof` restrictions, `use` file dependencies) -- see `SPEC.md`'s dedicated sections (Function Pointers/extern fn/Overloading, Refined Integer Types, Types) and its own "Known Limitations (Language-Level)" list for current behavior; see `HISTORY.md` for the design investigations behind each.
-- **EL0 fail-stop is intentional design, not a bug to route around.**
-  `kernel/arch/arm64/kernel/exception_evidence.tkb`'s `el1_exception_evidence` (ordinary `.tkb` since
-  issue #227 item 3; previously hand-written in `kernel/arch/arm64/boot/entry.S`) is the landing site
-  for any EL0 synchronous exception `kernel/arch/arm64/kernel/user_entry.S`'s `el0_sync_entry` doesn't
-  recognize as either a real SVC or its one other handled case, a translation fault from legitimate
-  process-image stack growth (process_image_handle_data_abort, the real growable-stack mechanism
-  that replaced the original single-page-stack limitation) -- a genuine hardware fault (bad
-  instruction fetch, an unhandled data abort, an instruction that is UNDEFINED at the faulting EL)
-  captures a fixed .bss CrashSnapshot and then parks in wfe forever. The UART oops report names
-  ESR/FAR/ELR/SPSR, decoded data-abort access when applicable, live SP_EL0/TPIDR_EL0/TTBR0,
-  process/parent/state/wait/image/root/ASID, the matching saved ExceptionFrame fields when a
-  Lower-EL frame exists, and a bounded local process/scheduler trace. Current-EL vector faults
-  explicitly report that no saved frame exists. valid is written last and sequence changes per
-  capture, so a debugger can distinguish a retained crash from zeroed/stale storage. Capture is
-  allocation-free and recursively faults only into a minimal UART fallback plus park. Use
-  kernelcheck-oops-qemu for the deterministic EL0-BRK regression; GDB injects the instruction
-  and reads the retained object only, while the kernel produces the diagnostic. For an interactive
-  post-mortem, source _build/kernel-crash-snapshot-layout.gdb and then
-  scripts/kernel_crash_snapshot.gdb in gdb-multiarch and run takibi-oops; it reads the
-  compiler-generated snapshot layout rather than duplicating the ExceptionFrame ABI.
-  **Known gap, not yet triggered by any current
-  scenario:** `process_image_clone_vm_begin()` (the fork/clone path, as opposed to
-  `process_image_map_current()`) never initializes root 1's demand-stack metadata
-  (`process_image_stack_growth_active[1]`/`process_image_stack_lowest_l3[1]`), so a forked child
-  that grows its stack past what the parent had already faulted in before the fork would hit this
-  fail-stop path instead of growing (see HISTORY.md's issue #209 entry).
+- **EL0 fail-stop is intentional.** An unhandled EL0 exception captures bounded,
+  allocation-free evidence and parks rather than attempting an unsafe recovery. Use the
+  `debug-kernel` skill for CrashSnapshot, DDB, GDB, and SWD procedures; do not route
+  around the fail-stop while diagnosing it.
 - **Every `eret` that returns to EL0 must mask `DAIF.I` before its last `msr ELR_EL1`/`msr SPSR_EL1`,
   with nothing but more `msr`s in between.** An interrupt taken between those two writes (or after
   them but before the `eret`) makes the hardware overwrite both with the interrupting context's own
@@ -783,31 +723,6 @@ size.
   those macros do byte-range-complete save/restore of every struct field (not just a fixed list), catching
   both a placeholder/empty macro body and a field silently left uncovered by a future struct edit. See
   HISTORY.md's 2026-08-13 entry for the full incident this hardening responds to.
-- **The same D-cache-bypass gap applies to postmortem debugging over SWD, not just DMA/harness I/O --
-  and is closed for CrashSnapshot itself.** `el1_exception_evidence` (now ordinary
-  `.tkb`, `kernel/arch/arm64/kernel/exception_evidence.tkb`, moved off hand-written assembly by
-  issue #226's `mrs_esr_el1`/`mrs_far_el1`/`mrs_elr_el1`/`mrs_spsr_el1` intrinsics) records those four
-  registers, process context, saved-frame summary, bounded trace, and the trapped vector slot into a fixed
-  `CrashSnapshot` global before parking in `wfe`, intended as a postmortem evidence block readable via
-  `openocd` or scripts/kernel_crash_snapshot.gdb. Found during the issue
-  #209 child-exec bring-up (2026-08-05, see HISTORY.md) that these reads could return a stale,
-  earlier-boot value while the CPU's actual writes were still dirty in D-cache -- the block claimed
-  `ESR=0, ELR=0` while the halted core's own `ESR_EL1`/`ELR_EL1` (read via `reg ESR_EL1` etc., from the
-  debug context, not RAM) showed a real, different fault. Issue #227 item 3 closes this specific gap:
-  the `.tkb` version calls `dma_prepare_tx` (a cache CLEAN/write-back, reused here purely for its
-  cache-maintenance side effect, not as a DMA operation) on the block immediately after writing it, so
-  the dirty line is flushed to memory before the `wfe` park. Verified on real RPi5 hardware
-  (2026-08-06): a deliberately injected EL1 Data Abort (write through an unmapped `0xffff...` pointer)
-  produced a `slot`/`esr_el1`/`far_el1`/`elr_el1`/`spsr_el1` block read over SWD with D-cache still
-  enabled that exactly matched the injected fault (`far_el1` == the bad pointer, `elr_el1` == the
-  faulting `str`'s own address from `llvm-objdump`, `esr_el1`'s EC/WnR/DFSC fields all consistent with
-  a same-EL write-translation-fault) -- no staleness observed. **The general guidance still stands as a
-  second, independent cross-check** (reading the parked core's live system registers directly via `reg
-  ESR_EL1`/`ELR_EL1`/`SPSR_EL1` costs nothing and catches a *different* class of bug -- e.g. a future
-  change that reintroduces an unflushed write path elsewhere), but the `CrashSnapshot` block
-  itself is no longer known to go stale. A same-value-every-boot "coherence check" (e.g. diffing a
-  static struct that is written identically on every run) still cannot detect staleness in general and
-  must not be used to argue an unverified read is fresh.
 - **RISC-V has no `dma_prepare_tx`/`dma_prepare_rx`/`dma_finish_rx` lowering yet** -- these now raise a compile
   error on RISC-V targets rather than silently falling back to a bare barrier (issue #146). AArch64 gets a real
   `dc cvac`/`dc civac`/`dc ivac` VA-range-loop lowering in `lib/llvm_gen.ml`. RISC-V's own real
@@ -815,124 +730,6 @@ size.
   RISC-V target exists in this project to verify it against, rather than shipping unverified speculative codegen.
 
 
-## Debugging Techniques That Have Paid Off Here
-
-Collected from real incidents in this tree, each of which cost hours the
-first time. HISTORY.md has the full story behind each; this is the index
-so it is findable while you are stuck rather than only afterwards.
-
-**Before calling an intermittent failure fixed -- or calling it a flake --
-compute your confidence.** The trigger is specific and you will meet it
-often: **a test that has passed before fails, and then passes when you run
-it again.** That is the fork. Both roads from it are wrong without a rate.
-
-On 2026-08-30 one failure appearing in about one QEMU boot in six was
-declared fixed twice, on two different and plausible mechanisms, each on
-the evidence of a clean run of eight. But
-
-    (1 - 1/6)^8 = 0.23
-
-so a clean eight happens about a quarter of the time by luck. It was
-reported as "0 in 8, fixed" and came back both times with a byte-identical
-signature. To be 90% confident a one-in-six event is gone you need about 13
-runs; for 95%, about 17. Compute `(1 - p)^n` with `p` from the failures
-already seen, and if you have not measured `p`, say so instead of saying
-"fixed".
-
-Three things that work better than more samples:
-
-- **Prefer a discriminating experiment.** Disabling the suspect entirely
-  (0/12) and removing the suspected mechanism (still reproduced) each cost
-  one batch and each eliminated a whole theory. Rate measurement alone
-  eliminated neither.
-- **Instrument by recording into globals, not by printing.** Adding two
-  `kernel_boot_log` lines around the suspect suppressed the failure for
-  eight consecutive runs. You cannot narrate through the UART inside a
-  window you are trying to observe.
-- **When one caller of a pattern fails and another does not, the difference
-  is WHERE, not WHAT.** What finally located that bug was noticing that
-  `scheduled_process_table_probe` does the same allocate-and-reap 24 times
-  and had never tripped it -- so the two call sites got compared before any
-  mechanism got theorised about.
-
-And when a fix designed against a wrong cause is worth keeping anyway, say
-plainly in its commit message that it did not fix the symptom. A reader who
-believes it did will not look for the real cause when the symptom returns.
-HISTORY.md's 2026-08-30 entry has the whole sequence.
-
-**Re-read the evidence you already have before running another
-experiment.** Issue #237's virtio work spent hours testing hypotheses and
-found nothing; a fresh read of the SAME diagnostic output, with no new
-run, found the bug in one pass. Ask what the data you already collected
-would say if you had not already decided what it meant.
-
-**Bisect a cheap proxy, not the expensive reproduction.** A historical
-DWARF failure needed QEMU plus gdb to observe. What
-actually changed was one number -- how many instructions the prologue
-was -- so the bisection was "build the compiler at commit X and print
-which source line the address eight instructions past the breakpoint
-belongs to", three lines of Python, seconds per commit, culprit named in
-one pass over seven candidates. An expensive reproduction usually sits
-downstream of a cheap invariant.
-
-**A fix that merely stops a perturbation-sensitive reproducer proves
-nothing.** Issue #373 stopped reproducing when an unrelated compiler
-change landed, and that was reported as a fix. It was not: the bug was
-sensitive to memory layout, so ANY change of similar size silenced it.
-Verify against the mechanism (a measurement, a canary, an invariant),
-never against "the failing test stopped failing".
-
-**A value's accidental properties have readers you never declared -- grep
-the SHAPE, not the name.** Three times in one week's work (issues #392,
-#390, #399), changing what a value IS broke a consumer nobody had written
-down:
-
-| value | its stated meaning | the reader nobody declared |
-|---|---|---|
-| a process slot | index into the process table | `pid = slot + 1`, at about twenty sites |
-| a page's last 128 bytes | the allocator's owner metadata | already the pool's own chunk header, for a one-page chunk |
-| `intrusive_pool`'s `pool_tag` | an identity, compared for equality | an array index AND a bit position, in a `linux_user` checker |
-
-Grepping the NAME finds none of them, because the dependency is
-arithmetic. Grep for the shape instead -- `+ 1`, `- 1`, the value used as
-`[index]`, `1 << value`, bare small literals where the value belongs --
-before changing what a value means. And expect the fix to be "delete the
-second reader's assumption", not "preserve the accidental property": all
-three went that way. In all three it was a test that failed loudly, not a
-careful reading, that found it.
-
-**Instrument the OTHER side.** Issue #392's last stage looked exactly like
-a lost SYN-ACK: the host peer sent 30 SYNs and saw nothing. Three
-kernel-side hypotheses were refuted one probe each (IRQs masked? RX ring
-starved? memory corrupted?) before the peer itself was made to print what
-it received -- and it had received every SYN-ACK, byte-correct, just after
-it had given up. The kernel was ten seconds late to `listen()`. When a
-test has two sides, the side you are not changing is where the cheap
-answer usually is.
-
-**Measure an invariant before enforcing it, and prove the counter can
-fire.** Issues #401 and #406 each replaced a picked constant with a
-computed bound. Both landed first as a counter that ALLOWED the violation,
-run over the whole boot suite; both then ran a deliberately-wrong bound to
-confirm the counter was reached at all. Without that second run, "zero
-violations" and "the code is unreachable" are the same observation. #406's
-first run reported two violations, and both turned out to be the probe
-forging a count to test the constant it was about to lose -- which is also
-why the recording belongs at the real caller, not inside the primitive a
-probe drives.
-
-**Grep the whole repo before calling code dead.** A whole-program build
-means callers live in other subtrees with their own Makefiles. `make allbuild` finds what a regex survey does
-not: it compiles everything and reports every shape that broke, including
-the ones nobody thought to look for.
-
-## Debug Info and Execution Profiling (QEMU)
-
-`-g` emits full DWARF intended to be useful in real `gdb-multiarch`
-sessions, not just to satisfy `llvm-dwarfdump`. The maintained full-kernel regression is
-`make kernelcheck-qemu-debug`: it compiles `kernel-debug.elf` with `-g`, then
-runs the ordinary QEMU view and ash TCP suites with separate ports and
-artifacts from the non-debug lane.
 
 ## Instructions for Coding Agents
 
@@ -940,7 +737,7 @@ artifacts from the non-debug lane.
 - Prefer idiomatic OCaml style. Use `Map.Make(String)` over `Hashtbl`.
 - Do not use the `base` package (it causes friction at the boundary with LLVM bindings).
 - The user is an OCaml beginner, so explain the reason for code changes from the perspective of "why write it this way."
-- **Do not save durable project guidance to tool-specific memory stores.** Consolidate project-specific information in `AGENTS.md` so it can be shared across agent environments.
+- **Do not save durable project guidance to tool-specific memory stores.** Keep always-on rules in `AGENTS.md` and task-specific procedures in tracked cross-agent skills so they can be shared across agent environments.
 - **All text in this repository must be ASCII-only.** Never write Japanese or any other non-ASCII characters in source files, comments, documentation, or any other file. `make langcheck` enforces this and will fail if non-ASCII characters are found.
 - **Follow YAGNI (see "Design Principle: YAGNI" above).** Do not design or implement functionality beyond what the current, concrete task needs. If a request seems to call for more than that, flag the tradeoff and ask before building it.
 - **New `.tkb` code under `kernel/`: write it with refinement types and `--forbid-trap` enabled from the start** (see "Development Process: Write `.tkb` Code Under `--forbid-trap` From the Start" above). Only fall back to the old prove-first-then-harden process for a milestone whose hardware/protocol behavior is not yet understood (a genuinely new peripheral, a first-of-its-kind DMA/cache interaction, a new board's earliest bring-up) -- ask if it is unclear which situation applies. Never "fix" a flagged `--forbid-trap` site by switching it to a raw pointer.
