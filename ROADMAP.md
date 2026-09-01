@@ -445,11 +445,13 @@ scheduled by this milestone, but it is the reason Phase 3 is approachable at
 all. What has landed so far: an interrupt-safe UART DDB and read-only crash
 console, entry from deliberate software breakpoints, interactive breaks driven
 through QMP under QEMU, and the commands `ps`, `regs`, `current`, `intr`,
-`sched`, `vm`, `fds`, `trace`, `oops`, `continue`. Open and relevant: **#443**
-(fault-contained read-only memory inspection), **#444** (controlled mutation,
-deferred), **#429** (in-kernel GDB stub, deferred), **#425**/**#300** (debug
-metadata a debugger needs to decode variants and enums), **#290** (document the
-workflow), **#149**.
+`sched`, `vm`, `fds`, `trace`, `oops`, `continue`, plus fault-contained
+read-only kernel, user and physical RAM inspection. The supported QEMU and
+RPi5 DDB/GDB/crash-inspection workflow is documented in `kernel/README.md`.
+Open and relevant: **#444** (controlled mutation, deferred), **#429**
+(in-kernel GDB stub, deferred), **#425**/**#300** (debug metadata a debugger
+needs to decode variants and enums), **#496** (read-only kernel-aware GDB
+helpers), **#495** (a trustworthy unwind contract before `bt`), and **#149**.
 
 **Do not begin Phase 3 without the observation half of Phase 0.** An SMP race
 with no per-CPU trace is a debugging bottleneck, not a coding one; this project

@@ -469,6 +469,81 @@ RPi5). `scripts/kernel_net_test.py <local-port> <remote-port>` is the host-side
 peer `kernelcheck-qemu` drives automatically; use the automated runner rather
 than an interactive console when exercising its ARP/ICMP/TCP contracts.
 
+### Choose a kernel debugging path
+
+Use the narrowest path that can answer the question. These paths inspect the
+same maintained kernel, but they have different availability and trust
+boundaries.
+
+- Use resumable UART DDB when the UART still responds and the question is
+  about current registers, interrupts, scheduling, processes, VM, file
+  descriptors, retained events, or a bounded RAM read. This is the default
+  first step for a live kernel failure because it does not require the
+  scheduler, filesystem, network stack, or an attached external debugger.
+- Use the terminal crash console after a fail-stop. It reads the retained
+  crash and lifecycle evidence but cannot resume or mutate the failed kernel.
+- Use QEMU's gdbstub for instruction breakpoints, stepping, watchpoints, raw
+  registers or memory, and scripted fault injection. Use
+  `kernel/build/qemu/kernel-debug.elf` when source lines and typed DWARF data
+  are required.
+- Use RPi5 UART DDB for the same structured live inspection available under
+  QEMU. Use OpenOCD/GDB when a hardware halt, watchpoint, or raw machine view
+  is required. A halt is not assumed to stop every active CPU atomically;
+  cross-CPU state is not a coherent snapshot unless the debugger explicitly
+  reports that it stopped those CPUs.
+
+The maintained smoke tests are the quickest way to distinguish a debugger
+regression from the failure being investigated:
+
+```bash
+make kernelcheck-ddb-qemu       # UART BREAK and software BRK, inspect, resume
+make kernelcheck-oops-qemu      # fail-stop console and GDB crash-snapshot read
+make kernelcheck-qemu-debug     # full QEMU suite against the DWARF kernel
+make kernelcheck-rpi5           # includes the maintained physical DDB check
+```
+
+For an interactive DDB session, run `make kernelsh-qemu` or
+`make kernelsh-rpi5`, wait for the shell prompt, and press Ctrl-T followed by
+lowercase `b`. The command inventory and safety rules are documented under
+"Resumable UART DDB" below. Both shell runners preserve the complete UART
+transcript at the path they print; keep a unique transcript by setting
+`KERNEL_SHELL_TRANSCRIPT` before starting the session.
+
+The checked-in GDB commands are deliberately read-only unless their filename
+identifies a focused injection test. Start GDB with the ELF that is running,
+connect to the QEMU gdbstub or OpenOCD server, and then source only the helper
+needed for the stopped subsystem. Current helpers are:
+
+- `scripts/kernel_crash_snapshot.gdb`: `takibi-oops`, after first sourcing
+  `_build/kernel-crash-snapshot-layout.gdb`;
+- `scripts/kernel_boot_dtb.gdb`: `takibi-dtb`, after `_start` has saved `x0`;
+- `scripts/kernel_page_allocator.gdb`: `takibi-pages`, after runtime memory
+  discovery has initialized the allocator.
+
+For example, against a QEMU instance whose gdbstub listens on port 1234:
+
+```gdb
+gdb-multiarch kernel/build/qemu/kernel-debug.elf
+(gdb) target remote :1234
+(gdb) source scripts/kernel_boot_dtb.gdb
+(gdb) takibi-dtb
+```
+
+The focused QEMU runners are the executable reference for launching the full
+kernel device configuration under `-S -gdb`: notably
+`scripts/run_kernel_oops_qemutest.sh`,
+`scripts/run_kernel_ddb_qemutest.sh`, and
+`scripts/run_kernel_qemutest_lifecycle_gap.sh`. On RPi5, use the repository's
+`examples/common_rpi5/bcm2712.cfg` with a CMSIS-DAP probe; the maintained load
+and target-selection sequence is in `scripts/rpi5_jtag_load.sh`. Stock host
+GDB is not an AArch64 substitute in this environment; use `gdb-multiarch`.
+
+There is no supported DDB `bt` command. A trustworthy kernel backtrace needs
+a stable unwind contract across ordinary calls, exception entry, and context
+switches, plus stack-range validation. DDB therefore reports PC/LR, saved
+frames, scheduler state, and bounded event history rather than emitting a
+plausible but unchecked call chain.
+
 ### Terminal fail-stop diagnostic
 
 The kernelcheck-oops-qemu target is a focused QEMU regression for the terminal
