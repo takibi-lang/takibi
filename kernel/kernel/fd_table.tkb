@@ -2376,6 +2376,26 @@ fn fd_refcount_contention_is_armed() -> bool !{unsafe} {
 
 fn fd_refcount_contention_secondary_run() !{unsafe} {
     unsafe { atomic_store_release(fd_refcount_probe_active_address(), 1); }
+    // Complete one cycle before waiting for the primary. Together with the
+    // primary-side wait below, this is a two-way start handshake: neither
+    // core can finish all of its work before the other has begun. Merely
+    // publishing active was insufficient because this core could be
+    // interrupted between that store and its first cycle.
+    if (unsafe {
+            atomic_load_acquire(fd_refcount_probe_armed_address())
+        } == 1) {
+        fd_refcount_probe_cycle();
+        unsafe {
+            atomic_fetch_add_relaxed(
+                fd_refcount_probe_secondary_address(), 1);
+        }
+    }
+    while (unsafe {
+               atomic_load_acquire(fd_refcount_probe_primary_address())
+           } == 0 &&
+           unsafe {
+               atomic_load_acquire(fd_refcount_probe_armed_address())
+           } == 1) { }
     while (unsafe {
                atomic_load_acquire(fd_refcount_probe_secondary_address())
            } < FD_REFCOUNT_CONTENTION_ROUNDS &&
@@ -2506,6 +2526,31 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
             atomic_store_release(fd_refcount_probe_armed_address(), 0);
         }
         fd_refcount_contention_report("secondary-never-entered" as *u8,
+                                      baseline, baseline);
+        return false;
+    }
+
+    // `active` only says that the secondary reached its entry point. Wait
+    // for its first complete retain/release cycle as the other half of the
+    // start handshake. Without this wait an interrupt immediately after the
+    // active store can let the primary finish every round and report a false
+    // overlap=0 failure even though the final reference count is correct.
+    let started_window: i64 = read_cntfrq() >> 2;
+    let started_start: i64 = read_cntpct();
+    let mut started: bool = false;
+    while (started == false &&
+           read_cntpct() - started_start < started_window) {
+        if (unsafe {
+                atomic_load_acquire(fd_refcount_probe_secondary_address())
+            } > 0) {
+            started = true;
+        }
+    }
+    if (started == false) {
+        unsafe {
+            atomic_store_release(fd_refcount_probe_armed_address(), 0);
+        }
+        fd_refcount_contention_report("secondary-never-started" as *u8,
                                       baseline, baseline);
         return false;
     }
