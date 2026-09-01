@@ -12,10 +12,17 @@ shift
 mkdir -p "$(dirname "$lock_file")"
 
 # A locked build may legitimately invoke another protected build target.
-# The inherited marker makes that recursion reuse the outer ownership instead
-# of attempting to take the non-recursive flock a second time.
+# Reuse the outer ownership only when both its marker and its inherited lock
+# descriptor are present. Trusting the environment variable alone would let
+# an unrelated invocation bypass serialization by exporting the same name.
 if [ "${TAKIBI_KERNEL_BUILD_LOCK_HELD:-0}" = 1 ]; then
-    exec "$@"
+    inherited_lock="$(readlink -f /proc/$$/fd/9 2>/dev/null || true)"
+    expected_lock="$(readlink -f "$lock_file" 2>/dev/null || true)"
+    if [ -n "$inherited_lock" ] && [ "$inherited_lock" = "$expected_lock" ]; then
+        exec "$@"
+    fi
+    echo "invalid inherited kernel build lock marker ($lock_file)" >&2
+    exit 2
 fi
 
 exec 9>"$lock_file"

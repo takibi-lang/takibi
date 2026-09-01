@@ -29,8 +29,16 @@ printf '%s\n' first-start first-end second >"$expected"
 cmp "$expected" "$events"
 grep -F "another make owns kernel/build" "$wait_log" >/dev/null
 
-TAKIBI_KERNEL_BUILD_LOCK_HELD=1 \
-    "$runner" "$lock_file" bash -c 'echo nested >>"$1"' _ "$events"
+if TAKIBI_KERNEL_BUILD_LOCK_HELD=1 \
+    "$runner" "$lock_file" true 2>"$tmp_dir/invalid-marker.log"; then
+    echo "FAIL kernel-build-lock: an environment marker bypassed the lock" >&2
+    exit 1
+fi
+grep -F "invalid inherited kernel build lock marker" \
+    "$tmp_dir/invalid-marker.log" >/dev/null
+
+"$runner" "$lock_file" "$runner" "$lock_file" \
+    bash -c 'echo nested >>"$1"' _ "$events"
 tail -n 1 "$events" | grep -Fx nested >/dev/null
 
-echo "PASS kernel-build-lock: independent owners wait and nested builds do not deadlock"
+echo "PASS kernel-build-lock: owners wait, false markers fail, and nested builds reuse ownership"
