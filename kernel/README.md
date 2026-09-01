@@ -518,7 +518,12 @@ needed for the stopped subsystem. Current helpers are:
   `_build/kernel-crash-snapshot-layout.gdb`;
 - `scripts/kernel_boot_dtb.gdb`: `takibi-dtb`, after `_start` has saved `x0`;
 - `scripts/kernel_page_allocator.gdb`: `takibi-pages`, after runtime memory
-  discovery has initialized the allocator.
+  discovery has initialized the allocator;
+- `scripts/kernel_debug_metadata.gdb`: load
+  `_build/kernel-debug-metadata.json` with `takibi-debug-metadata`, then use
+  `takibi-enum`, `takibi-constant`, or `takibi-variant-layout` to decode
+  compiler-owned discriminants and target layout. The sidecar is generated
+  by the compiler and is not linked into the kernel.
 
 For example, against a QEMU instance whose gdbstub listens on port 1234:
 
@@ -527,6 +532,10 @@ gdb-multiarch kernel/build/qemu/kernel-debug.elf
 (gdb) target remote :1234
 (gdb) source scripts/kernel_boot_dtb.gdb
 (gdb) takibi-dtb
+(gdb) source scripts/kernel_debug_metadata.gdb
+(gdb) takibi-debug-metadata _build/kernel-debug-metadata.json
+(gdb) takibi-enum ProcessWaitReason 2
+ProcessWaitReason::ChildExit (2)
 ```
 
 The focused QEMU runners are the executable reference for launching the full

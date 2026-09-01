@@ -8,6 +8,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ELF="$REPO_ROOT/kernel/build/qemu/kernel.elf"
+DEBUG_METADATA="$REPO_ROOT/_build/kernel-debug-metadata.json"
 ARTIFACT_DIR="${KERNEL_QEMU_OOPS_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-oops-qemu}"
 GDB_PORT="${KERNEL_QEMU_OOPS_GDB_PORT:-18697}"
 SERIAL_PORT="${KERNEL_QEMU_OOPS_SERIAL_PORT:-18698}"
@@ -239,10 +240,19 @@ gdb-multiarch -q -batch "$ELF" \
     -ex "interrupt" \
     -ex "source $SNAPSHOT_LAYOUT" \
     -ex "source $REPO_ROOT/scripts/kernel_crash_snapshot.gdb" \
-    -ex "takibi-oops" >"$ARTIFACT_DIR/snapshot-gdb.log" 2>&1 || true
+    -ex "source $REPO_ROOT/scripts/kernel_debug_metadata.gdb" \
+    -ex "takibi-debug-metadata $DEBUG_METADATA" \
+    -ex "takibi-oops" \
+    -ex "takibi-constant ProcessTrace \$snapshot[\$takibi_crashsnapshot_trace / 8 + 2]" \
+    -ex "takibi-enum ProcessSlotState \$snapshot[\$takibi_crashsnapshot_trace / 8 + 7]" \
+    -ex "takibi-enum ProcessWaitReason \$snapshot[\$takibi_crashsnapshot_trace / 8 + 8]" \
+    >"$ARTIFACT_DIR/snapshot-gdb.log" 2>&1 || true
 if ! grep -Eq '^takibi-oops: seq=1 cpu=[0-9]+ slot=8 ' "$ARTIFACT_DIR/snapshot-gdb.log" ||
         ! grep -q '^takibi-oops: saved sp_el0=' "$ARTIFACT_DIR/snapshot-gdb.log" ||
-        ! grep -Eq '^takibi-oops: trace count=([1-9]|1[0-6])$' "$ARTIFACT_DIR/snapshot-gdb.log"; then
+        ! grep -Eq '^takibi-oops: trace count=([1-9]|1[0-6])$' "$ARTIFACT_DIR/snapshot-gdb.log" ||
+        ! grep -Eq '^ProcessTrace[A-Za-z]+ \([0-9]+\)$' "$ARTIFACT_DIR/snapshot-gdb.log" ||
+        ! grep -Eq '^ProcessSlotState::[A-Za-z]+ \([0-9]+\)$' "$ARTIFACT_DIR/snapshot-gdb.log" ||
+        ! grep -Eq '^ProcessWaitReason::[A-Za-z]+ \([0-9]+\)$' "$ARTIFACT_DIR/snapshot-gdb.log"; then
     echo "FAIL kernel/qemu oops: retained CrashSnapshot was not readable" >&2
     sed 's/^/  /' "$ARTIFACT_DIR/snapshot-gdb.log" >&2 || true
     exit 1

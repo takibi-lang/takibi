@@ -54,6 +54,7 @@ let () =
   let show_version = ref false in
   let emit_exception_frame_offsets = ref "" in
   let emit_struct_layout = ref "" in
+  let emit_debug_metadata = ref "" in
   let emit_depfile = ref "" in
   let emit_overflow_audit = ref "" in
   let emit_effect_matrix = ref false in
@@ -76,6 +77,13 @@ let () =
            exit 1
          );
          emit_struct_layout := Sys.argv.(!i)
+     | "--emit-debug-metadata" ->
+         incr i;
+         if !i >= Array.length Sys.argv then (
+           Printf.eprintf "Error: --emit-debug-metadata requires a path\n";
+           exit 1
+         );
+         emit_debug_metadata := Sys.argv.(!i)
      | "--emit-depfile" ->
          incr i;
          if !i >= Array.length Sys.argv then (
@@ -158,7 +166,7 @@ let () =
 
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--forbid-trap] [--forbid-unsafe] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--forbid-trap] [--forbid-unsafe] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--version]\n"
       Sys.argv.(0);
     exit 1
   );
@@ -436,6 +444,13 @@ let () =
         close_out oc
       end else
         print_string (Buffer.contents buf);
+      exit 0
+    end;
+
+    if !emit_debug_metadata <> "" then begin
+      let oc = open_out !emit_debug_metadata in
+      output_string oc (Llvm_gen.debug_type_metadata ());
+      close_out oc;
       exit 0
     end;
 

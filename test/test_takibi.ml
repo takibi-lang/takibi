@@ -14136,6 +14136,43 @@ let codegen_tests = [
          true (contains_substring ir "!DIDerivedType(tag: DW_TAG_member, name: \"len\"")));
 
   Alcotest.test_case
+    "debug metadata sidecar: enum discriminants, variant target layout, and integer constants share one compiler-owned artifact"
+    `Quick
+    (fun () ->
+       ignore (gen_codegen
+         "enum DebugMetaState: u8 { Idle = 0; Busy = 3; }
+          variant DebugMetaResult { Empty; Byte(u8); Wide(u64); }
+          const DebugMetaEventStart: usize = 7;
+          fn debug_meta_use(value: DebugMetaResult) -> usize {
+            match value {
+              DebugMetaResult::Empty => { return DebugMetaEventStart; }
+              DebugMetaResult::Byte(byte) => { return byte as usize; }
+              DebugMetaResult::Wide(wide) => { return wide as usize; }
+            }
+          }");
+       let ir_before = Llvm.string_of_llmodule !Llvm_gen.the_module in
+       let metadata = Llvm_gen.debug_type_metadata () in
+       let ir_after = Llvm.string_of_llmodule !Llvm_gen.the_module in
+       Alcotest.(check string) "sidecar query does not change generated code"
+         ir_before ir_after;
+       Alcotest.(check bool) "format is versioned" true
+         (contains_substring metadata "\"format\":1");
+       Alcotest.(check bool) "enum underlying representation" true
+         (contains_substring metadata
+           "\"name\":\"DebugMetaState\",\"underlying\":\"u8\",\"size\":1");
+       Alcotest.(check bool) "explicit enum discriminant" true
+         (contains_substring metadata "\"name\":\"Busy\",\"value\":3");
+       Alcotest.(check bool) "variant target size and tag layout" true
+         (contains_substring metadata
+           "\"name\":\"DebugMetaResult\",\"size\":16,\"tag_offset\":0,\"tag_size\":4");
+       Alcotest.(check bool) "variant payload uses target offset" true
+         (contains_substring metadata
+           "\"name\":\"Wide\",\"tag\":2,\"payload\":{\"type\":\"u64\",\"offset\":8,\"size\":8}");
+       Alcotest.(check bool) "integer constant is available to a numeric ABI decoder" true
+         (contains_substring metadata
+           "\"name\":\"DebugMetaEventStart\",\"type\":\"usize\",\"value\":7"));
+
+  Alcotest.test_case
     "struct_layout reports LLVM target offsets and tail padding for arbitrary structs" `Quick
     (fun () ->
        ignore (gen_codegen

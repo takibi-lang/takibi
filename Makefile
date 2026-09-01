@@ -438,6 +438,7 @@ KERNEL_RPI5_EXC_CONTEXT := $(KERNEL_DIR)/arch/arm64/kernel/exception_context.inc
 # separate script.
 KERNEL_EXC_CONTEXT_OFFSETS := $(KERNEL_DIR)/arch/arm64/kernel/exception_context_offsets.inc
 KERNEL_CRASH_SNAPSHOT_LAYOUT := _build/kernel-crash-snapshot-layout.gdb
+KERNEL_DEBUG_METADATA := _build/kernel-debug-metadata.json
 KERNEL_RPI5_FPSIMD_S     := $(KERNEL_DIR)/arch/arm64/kernel/fpsimd_probe.S
 KERNEL_RPI5_FPSIMD_O     := $(KERNEL_BUILD_DIR)/fpsimd_probe.o
 KERNEL_RPI5_FPSIMD_EXTERN := $(KERNEL_DIR)/arch/arm64/kernel/fpsimd_probe_extern.tkb
@@ -749,6 +750,14 @@ $(KERNEL_QEMU_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_
 
 kernelbuild-qemu: kernel-lib-check kernel-verify-exception-frame $(KERNEL_QEMU_ELF)
 
+# Compiler-owned names for integer diagnostic ABI fields plus target-aware
+# closed-variant layout. This is a host sidecar only: it is not linked into the
+# kernel and therefore adds no production runtime data or instructions. The
+# main object dependency gives this second compiler invocation the same source
+# staleness boundary without adding another hand-maintained prerequisite list.
+$(KERNEL_DEBUG_METADATA): $(KERNEL_QEMU_MAIN_O) $(TAKIBI)
+	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --emit-debug-metadata $@
+
 # Debug variant: identical inputs to $(KERNEL_QEMU_MAIN_O)/$(KERNEL_QEMU_ELF)
 # above, just with -g added, so GDB would get real DWARF type info --
 # struct fields, enum variant names, bool -- instead of only raw addresses.
@@ -773,7 +782,7 @@ $(KERNEL_QEMU_DEBUG_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(K
 	python3 scripts/check_kernel_asm_invariants.py $@ 1
 	python3 scripts/check_elf_symbol_alignment.py $@ boot_page_pool 16
 
-kernelbuild-qemu-debug: kernel-lib-check kernel-verify-exception-frame $(KERNEL_QEMU_DEBUG_ELF)
+kernelbuild-qemu-debug: kernel-lib-check kernel-verify-exception-frame $(KERNEL_QEMU_DEBUG_ELF) $(KERNEL_DEBUG_METADATA)
 
 # Pure source-text check (issues #207/#242, see HISTORY.md's 2026-08-07
 # entry) -- no build product needed, so it runs independent of and before
@@ -918,7 +927,7 @@ kernelcheck-qemu-debug-ash: kernelbuild-qemu-debug
 ## Focused terminal-path check.  This is deliberately separate from the
 ## ordinary QEMU suite because its expected result is a terminal fail-stop
 ## serving the read-only UART crash console.
-kernelcheck-oops-qemu: kernelbuild-qemu $(KERNEL_CRASH_SNAPSHOT_LAYOUT)
+kernelcheck-oops-qemu: kernelbuild-qemu $(KERNEL_CRASH_SNAPSHOT_LAYOUT) $(KERNEL_DEBUG_METADATA)
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_oops_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=data_abort_write KERNEL_QEMU_OOPS_GDB_PORT=18693 KERNEL_QEMU_OOPS_SERIAL_PORT=18694 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-data-abort" bash scripts/run_kernel_oops_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=child_exec KERNEL_QEMU_OOPS_GDB_PORT=18695 KERNEL_QEMU_OOPS_SERIAL_PORT=18696 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-child-exec" bash scripts/run_kernel_oops_qemutest.sh

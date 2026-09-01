@@ -6949,6 +6949,89 @@ let struct_member_count name =
   | Some llty -> Array.length (struct_element_types llty)
   | None -> raise (Error (Printf.sprintf "struct '%s' not found" name))
 
+(* Machine-readable debugger metadata for source-level discriminants and the
+   target layout of closed variants. DWARF already describes enum-typed
+   variables, but a retained diagnostic record deliberately stores integer
+   ABI fields and therefore needs the same compiler-owned names out of band.
+   JSON keeps that sidecar usable from GDB Python without adding reflection
+   tables or any other bytes to the target image. *)
+let debug_type_metadata () =
+  let dl = match !target_data with
+    | Some dl -> dl
+    | None -> raise (Error "debug_type_metadata: target data layout not initialized")
+  in
+  let quote text =
+    let out = Buffer.create (String.length text + 8) in
+    Buffer.add_char out '"';
+    String.iter (function
+      | '"' -> Buffer.add_string out "\\\""
+      | '\\' -> Buffer.add_string out "\\\\"
+      | '\b' -> Buffer.add_string out "\\b"
+      | '\012' -> Buffer.add_string out "\\f"
+      | '\n' -> Buffer.add_string out "\\n"
+      | '\r' -> Buffer.add_string out "\\r"
+      | '\t' -> Buffer.add_string out "\\t"
+      | c when Char.code c < 0x20 ->
+          Printf.bprintf out "\\u%04x" (Char.code c)
+      | c -> Buffer.add_char out c) text;
+    Buffer.add_char out '"';
+    Buffer.contents out
+  in
+  let comma_list render items = String.concat "," (List.map render items) in
+  let names table =
+    Hashtbl.to_seq_keys table |> List.of_seq |> List.sort String.compare
+  in
+  let enums = names enum_underlying |> List.map (fun name ->
+    let underlying = Hashtbl.find enum_underlying name in
+    let llty = ltype_of_ast underlying in
+    let size = Llvm_target.DataLayout.abi_size llty dl in
+    let cases = Hashtbl.find enum_variants_tbl name in
+    Printf.sprintf
+      "{\"name\":%s,\"underlying\":%s,\"size\":%Ld,\"cases\":[%s]}"
+      (quote name) (quote (ty_str underlying)) size
+      (comma_list (fun (case_name, value) ->
+         Printf.sprintf "{\"name\":%s,\"value\":%d}"
+           (quote case_name) value) cases))
+  in
+  let variants = names variant_lltypes |> List.map (fun name ->
+    let llty = Hashtbl.find variant_lltypes name in
+    let size = Llvm_target.DataLayout.abi_size llty dl in
+    let cases = Hashtbl.find variant_cases_tbl name in
+    Printf.sprintf
+      "{\"name\":%s,\"size\":%Ld,\"tag_offset\":0,\"tag_size\":4,\"cases\":[%s]}"
+      (quote name) size
+      (comma_list (fun (case_name, layout) ->
+         let payload = match layout.variant_payload_field,
+                             layout.variant_payload with
+           | Some field, Some schema ->
+               let runtime_ty = runtime_payload_type schema in
+               let payload_llty = ltype_of_ast runtime_ty in
+               Printf.sprintf
+                 "{\"type\":%s,\"offset\":%Ld,\"size\":%Ld}"
+                 (quote (ty_str runtime_ty))
+                 (Llvm_target.DataLayout.offset_of_element llty field dl)
+                 (Llvm_target.DataLayout.abi_size payload_llty dl)
+           | _ -> "null"
+         in
+         Printf.sprintf "{\"name\":%s,\"tag\":%d,\"payload\":%s}"
+           (quote case_name) layout.variant_tag payload) cases))
+  in
+  let constants =
+    Hashtbl.to_seq global_const_defs |> List.of_seq
+    |> List.filter_map (fun (name, (ty, expr)) ->
+         match eval_static_int expr with
+         | value -> Some (name, ty, value)
+         | exception Error _ -> None)
+    |> List.sort (fun (a, _, _) (b, _, _) -> String.compare a b)
+    |> List.map (fun (name, ty, value) ->
+         Printf.sprintf "{\"name\":%s,\"type\":%s,\"value\":%Ld}"
+           (quote name) (quote (ty_str ty)) value)
+  in
+  Printf.sprintf
+    "{\"format\":1,\"enums\":[%s],\"variants\":[%s],\"constants\":[%s]}\n"
+    (String.concat "," enums) (String.concat "," variants)
+    (String.concat "," constants)
+
 (* Shared by gen_exception_entry and gen_exception_restore: the
    restore-frame/eret half, assuming sp already points at the frame AND
    DAIF.I is already masked (both are the caller's responsibility -- see
