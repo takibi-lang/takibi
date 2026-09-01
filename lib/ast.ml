@@ -510,8 +510,8 @@ and stmt_desc =
          Match at parse time) so `id` stays live in the ENCLOSING scope
          rather than a sub-block's. *)
 and match_arm =
-  | ArmVariant of string * string * (ident * bool) option * stmt list
-      (* Name::Case[(payload_name)] => { stmts }; bool means `mut` binding. *)
+  | ArmVariant of string * string * variant_payload_pattern option * stmt list
+      (* Name::Case[(pattern)] => { stmts }. *)
   | ArmWild    of stmt list                    (* _ => { stmts } *)
   | ArmIntLit  of int list * stmt list
       (* N => { stmts }, or N1 | N2 | ... => { stmts } -- literal-integer
@@ -527,6 +527,10 @@ and match_arm =
          listable the way a closed variant/enum's cases are). *)
   | ArmByteSliceLit of string * stmt list
       (* bs"..." => { stmts } -- exact byte-slice content pattern. *)
+
+and variant_payload_pattern =
+  | PayloadBind of ident * bool       (* bool means `mut` binding *)
+  | PayloadIgnore                    (* explicit `_`; never binds a name *)
 [@@deriving show]
 
 type func = {
@@ -829,7 +833,8 @@ let written_names (stmts : stmt list) : string list =
         go_expr d;
         List.iter (function
           | ArmVariant (_, _, binding, b) ->
-              Option.iter (fun (name, _) -> add name) binding;
+              Option.iter (function PayloadBind (name, _) -> add name
+                                    | PayloadIgnore -> ()) binding;
               List.iter go_stmt b
           | ArmWild b -> List.iter go_stmt b
           | ArmIntLit (_, b) | ArmByteSliceLit (_, b) -> List.iter go_stmt b
@@ -838,7 +843,8 @@ let written_names (stmts : stmt list) : string list =
         add n; go_expr d;
         List.iter (function
           | ArmVariant (_, _, binding, b) ->
-              Option.iter (fun (name, _) -> add name) binding;
+              Option.iter (function PayloadBind (name, _) -> add name
+                                    | PayloadIgnore -> ()) binding;
               List.iter go_stmt b
           | ArmWild b -> List.iter go_stmt b
           | ArmIntLit (_, b) | ArmByteSliceLit (_, b) -> List.iter go_stmt b

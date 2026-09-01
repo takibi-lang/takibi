@@ -777,7 +777,9 @@ match_arm:
   | IDENT COLONCOLON IDENT DARROW LBRACE arm_body RBRACE
     { ArmVariant ($1, $3, None, $6) }
   | IDENT COLONCOLON IDENT LPAREN mutable_ = mut_flag binding = IDENT RPAREN DARROW LBRACE arm_body RBRACE
-    { ArmVariant ($1, $3, Some (binding, mutable_), $10) }
+    { ArmVariant ($1, $3, Some (PayloadBind (binding, mutable_)), $10) }
+  | IDENT COLONCOLON IDENT LPAREN UNDERSCORE RPAREN DARROW LBRACE arm_body RBRACE
+    { ArmVariant ($1, $3, Some PayloadIgnore, $9) }
   | UNDERSCORE DARROW LBRACE arm_body RBRACE
     { ArmWild $4 }
   | ns = match_int_lits DARROW LBRACE body = arm_body RBRACE

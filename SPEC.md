@@ -1060,11 +1060,17 @@ may be used as that one payload, including a linear tuple of indexed owners;
 this is the aggregate-owner-transfer form used by the VM scheduler. Arrays,
 direct nested variants, and structs containing affine/linear fields are still
 rejected. Construct a case with `Name::Case` or
-`Name::Case(expr)`. A payload-bearing arm must bind its
-payload, and a payload-less arm must not. A closed match without `_` must
-cover every case; duplicate cases are rejected. A wildcard is allowed for
-unrestricted or affine variants, but not for a linear variant because it
-could hide a mandatory payload obligation.
+`Name::Case(expr)`. A payload-bearing arm must either bind its payload or
+explicitly ignore it with `Case(_)`; a payload-less arm must do neither. A
+named payload binding remains valid even when its body does not reference the
+name; Takibi does not otherwise diagnose unused local bindings. `Case(_)`
+provides a clearer opt-in spelling without introducing a variant-only unused
+variable rule. `mut _` is rejected because an ignored value cannot be mutated.
+Ignoring a linear payload is also rejected: `_` does not discharge an
+exactly-once obligation. A closed match
+without a whole-arm `_` must cover every case; duplicate cases are rejected.
+A whole-arm wildcard is allowed for unrestricted or affine variants, but not
+for a linear variant because it could hide a mandatory payload obligation.
 
 A function returning a variant must explicitly return one on every
 control-flow path; there is no implicit zero/default package.

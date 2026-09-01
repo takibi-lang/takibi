@@ -571,7 +571,8 @@ let parser_tests = [
            { desc = Ast.VariantCtor ("ParsedMaybe", "Some", _); _ }); _ }]; _ };
          Ast.FuncDef { body = [{ desc = Ast.Match (_,
            [Ast.ArmVariant ("ParsedMaybe", "None", None, []);
-            Ast.ArmVariant ("ParsedMaybe", "Some", Some ("owner", false), [])]); _ }]; _ }] -> ()
+            Ast.ArmVariant ("ParsedMaybe", "Some",
+              Some (Ast.PayloadBind ("owner", false)), [])]); _ }]; _ }] -> ()
       | _ -> Alcotest.fail "expected Slice 3 variant AST nodes");
 
   Alcotest.test_case "must_use variant declaration parses its checker policy" `Quick
@@ -598,8 +599,34 @@ let parser_tests = [
            (Ast.TypeIndexed ("ParsedMutable", [Ast.StaticName "n"]))))]; _ };
          Ast.FuncDef { body = [{ desc = Ast.Match (_,
            [Ast.ArmVariant ("ParsedMutableResult", "Value",
-             Some ("owner", true), [])]); _ }]; _ }] -> ()
+             Some (Ast.PayloadBind ("owner", true)), [])]); _ }]; _ }] -> ()
       | _ -> Alcotest.fail "expected borrow mut and Case(mut payload) AST nodes");
+
+  Alcotest.test_case "variant payload underscore parses as an explicit ignore" `Quick
+    (fun () ->
+      match parse
+        "variant ParsedIgnore { None; Value(i32); }
+         fn parsed_ignore(x: ParsedIgnore) {
+           match x {
+             ParsedIgnore::None => {}
+             ParsedIgnore::Value(_) => {}
+           }
+         }" with
+      | [Ast.VariantDef _;
+         Ast.FuncDef { body = [{ desc = Ast.Match (_,
+           [_; Ast.ArmVariant ("ParsedIgnore", "Value",
+             Some Ast.PayloadIgnore, [])]); _ }]; _ }] -> ()
+      | _ -> Alcotest.fail "expected an explicit ignored payload pattern");
+
+  Alcotest.test_case "mut underscore is not a payload pattern" `Quick
+    (fun () ->
+      match parse
+        "variant ParsedMutIgnore { Value(i32); }
+         fn parsed_mut_ignore(x: ParsedMutIgnore) {
+           match x { ParsedMutIgnore::Value(mut _) => {} }
+         }" with
+      | _ -> Alcotest.fail "expected mut _ to be rejected"
+      | exception Parser.Error -> ());
 
   Alcotest.test_case "Slice 4 checker effects parse on functions and externs" `Quick
     (fun () ->
@@ -7379,14 +7406,34 @@ let infer_tests = [
           }
         }");
 
-  Alcotest.test_case "Slice 3: a linear variant payload must be consumed" `Quick
-    (expect_type_error "linear variant payload 'permit' is never consumed"
+  Alcotest.test_case "Slice 3: a linear variant payload cannot be ignored" `Quick
+    (expect_type_error "linear variant payload 'VariantMaybe2::Held(_)' cannot be ignored"
        "linear view VariantPermit2;
         variant VariantMaybe2 { Empty; Held(VariantPermit2); }
         fn variant_bad2(value: VariantMaybe2) {
           match value {
             VariantMaybe2::Empty => {}
-            VariantMaybe2::Held(permit) => {}
+            VariantMaybe2::Held(_) => {}
+          }
+        }");
+
+  Alcotest.test_case "plain variant payload may be ignored explicitly" `Quick
+    (expect_ok
+       "variant VariantPlainIgnore2 { Empty; Held(i32); }
+        fn variant_ignore2(value: VariantPlainIgnore2) {
+          match value {
+            VariantPlainIgnore2::Empty => {}
+            VariantPlainIgnore2::Held(_) => {}
+          }
+        }");
+
+  Alcotest.test_case "named unused variant payload remains accepted" `Quick
+    (expect_ok
+       "variant VariantNamedIgnore2 { Empty; Held(i32); }
+        fn variant_named_ignore2(value: VariantNamedIgnore2) {
+          match value {
+            VariantNamedIgnore2::Empty => {}
+            VariantNamedIgnore2::Held(item) => {}
           }
         }");
 
@@ -9092,6 +9139,17 @@ let with_embed_fixture contents f =
   Fun.protect ~finally:(fun () -> Sys.remove path) (fun () -> f path)
 
 let codegen_tests = [
+  Alcotest.test_case
+    "ignored plain variant payload codegens without a local binding" `Quick
+    (expect_codegen_ok
+      "variant CgIgnoredPayload { Empty; Value(i32); }
+       fn cg_ignored_payload(v: CgIgnoredPayload) -> i32 {
+         match v {
+           CgIgnoredPayload::Empty => { return 0; }
+           CgIgnoredPayload::Value(_) => { return 1; }
+         }
+       }");
+
   Alcotest.test_case
     "byte-slice match guards loads and evaluates its subject once" `Quick
     (fun () ->

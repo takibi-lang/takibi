@@ -60,10 +60,11 @@ let resolve_func (fdef : Ast.func) : resolution =
       | Ast.ArmVariant (_, _, binding, body) ->
           let arm_env = match binding with
             | None -> env
-            | Some (name, _) ->
+            | Some (Ast.PayloadBind (name, _)) ->
                 let id = fresh () in
                 Hashtbl.add arm_ids (match_loc, index) id;
                 bind env name id
+            | Some Ast.PayloadIgnore -> env
           in
           scoped arm_env body
       | Ast.ArmWild body | Ast.ArmIntLit (_, body)

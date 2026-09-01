@@ -1324,7 +1324,8 @@ let slice_rebind_names (stmts : Ast.stmt list) : string list =
         go_expr d;
         List.iter (function
           | Ast.ArmVariant (_, _, binding, b) ->
-              Option.iter (fun (name, _) -> add name) binding;
+              Option.iter (function Ast.PayloadBind (name, _) -> add name
+                                    | Ast.PayloadIgnore -> ()) binding;
               List.iter go_stmt b
           | ArmWild b -> List.iter go_stmt b
           | ArmIntLit (_, b) | ArmByteSliceLit (_, b) -> List.iter go_stmt b
@@ -1333,7 +1334,8 @@ let slice_rebind_names (stmts : Ast.stmt list) : string list =
         add n; go_expr d;
         List.iter (function
           | Ast.ArmVariant (_, _, binding, b) ->
-              Option.iter (fun (name, _) -> add name) binding;
+              Option.iter (function Ast.PayloadBind (name, _) -> add name
+                                    | Ast.PayloadIgnore -> ()) binding;
               List.iter go_stmt b
           | ArmWild b -> List.iter go_stmt b
           | ArmIntLit (_, b) | ArmByteSliceLit (_, b) -> List.iter go_stmt b
@@ -2403,7 +2405,7 @@ let rec collect_mutable_pattern_binders resolution stmts =
           match arm with
           | ArmVariant (vtype, cname, binding, body) ->
               let here = match binding with
-                | Some (name, true) ->
+                | Some (PayloadBind (name, true)) ->
                     let layout = variant_case vtype cname in
                     let schema = match layout.variant_payload with
                       | Some schema -> schema
@@ -6187,7 +6189,7 @@ let gen_func ?prog_types fdef =
           (match arm with
            | ArmVariant (vtype, cname, binding, body) ->
                (match variant_name, binding with
-                | Some _, Some (name, is_mutable) ->
+                | Some _, Some (Ast.PayloadBind (name, is_mutable)) ->
                     let layout = variant_case vtype cname in
                     let schema = match layout.variant_payload with
                       | Some schema -> schema
@@ -6223,6 +6225,7 @@ let gen_func ?prog_types fdef =
                     (match old_id with
                      | Some prior -> Hashtbl.replace locals.visible name prior
                      | None -> local_remove locals name)
+                | Some _, Some Ast.PayloadIgnore -> run_scoped_stmts body
                 | Some _, None -> run_scoped_stmts body
                 | None, None -> run_scoped_stmts body
                 | None, Some _ -> raise (Error

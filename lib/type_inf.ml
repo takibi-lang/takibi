@@ -1268,6 +1268,18 @@ let is_linear_ptr_ty t = match repr t with
       Hashtbl.find_opt indexed_struct_kinds n = Some Ast.KindLinear
   | _ -> false
 
+let rec is_linear_payload_ty t = match repr t with
+  | TPtr (TStruct n) -> StringSet.mem n !linear_opaque_names
+  | TView (n, _) -> Hashtbl.find_opt view_kinds n = Some Ast.KindLinear
+  | TVariant (n, _) ->
+      Hashtbl.find_opt variant_kinds n = Some Ast.KindLinear
+  | TIndexedStruct (n, _) ->
+      Hashtbl.find_opt indexed_struct_kinds n = Some Ast.KindLinear
+  | TExists (_, _, _, body) | TSingleton (body, _) ->
+      is_linear_payload_ty body
+  | TTuple ts -> List.exists is_linear_payload_ty ts
+  | _ -> false
+
 let rec is_indexed_owner_ty t = match repr t with
   | TIndexedStruct _ -> true
   | TSingleton (base, _) -> is_indexed_owner_ty base
@@ -5404,7 +5416,14 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                       "variant case '%s::%s' has no payload" vtype cname))
                   | Some _, None -> raise (TypeError (s.loc, Printf.sprintf
                       "variant case '%s::%s' must bind its payload" vtype cname))
-                  | Some schema, Some (name, is_mutable) ->
+                  | Some schema, Some Ast.PayloadIgnore ->
+                      let payload_ty = open_payload schema in
+                      if is_linear_payload_ty payload_ty then
+                        raise (TypeError (s.loc, Printf.sprintf
+                          "linear variant payload '%s::%s(_)' cannot be ignored"
+                          vtype cname));
+                      infer_arm_body tyenv rl body
+                  | Some schema, Some (Ast.PayloadBind (name, is_mutable)) ->
                       if Const_env.find name <> None then
                         raise (TypeError (s.loc, Printf.sprintf
                           "'%s' shadows a global constant of the same name" name));
@@ -5617,8 +5636,9 @@ let check_const_shadowing (fdef : Ast.func) =
     | Ast.Match (_, arms) ->
         List.iter (function
           | Ast.ArmVariant (_, _, binding, b) ->
-              Option.iter (fun (name, _) ->
-                if Const_env.find name <> None then reject s.loc name) binding;
+              Option.iter (function Ast.PayloadBind (name, _) ->
+                  if Const_env.find name <> None then reject s.loc name
+                | Ast.PayloadIgnore -> ()) binding;
               List.iter go_stmt b
           | Ast.ArmWild b            -> List.iter go_stmt b
           | Ast.ArmIntLit (_, b) | Ast.ArmByteSliceLit (_, b) -> List.iter go_stmt b
@@ -9066,29 +9086,32 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               | Ast.ArmIntLit (_, b) | Ast.ArmByteSliceLit (_, b) -> (None, None, b)
             in
             let previous_binding_ty = match binding with
-              | Some (name, _) -> StringMap.find_opt name !var_types
-              | None -> None
+              | Some (Ast.PayloadBind (name, _)) ->
+                  StringMap.find_opt name !var_types
+              | None | Some Ast.PayloadIgnore -> None
             in
             let previous_binding_id = match binding with
-              | Some (name, _) -> Hashtbl.find_opt visible_bindings name
-              | None -> None
+              | Some (Ast.PayloadBind (name, _)) ->
+                  Hashtbl.find_opt visible_bindings name
+              | None | Some Ast.PayloadIgnore -> None
             in
-            Option.iter (fun (name, _) ->
-              require_no_authority_rebind s.loc declared taints name)
+            Option.iter (function Ast.PayloadBind (name, _) ->
+                require_no_authority_rebind s.loc declared taints name
+              | Ast.PayloadIgnore -> ())
               binding;
             (match binding with
-             | Some (name, _) ->
+             | Some (Ast.PayloadBind (name, _)) ->
                  (match Local_bindings.id_for_arm binding_resolution s.loc arm_index with
                   | Some id -> Hashtbl.replace visible_bindings name id
                   | None -> ())
-             | None -> ());
+             | None | Some Ast.PayloadIgnore -> ());
             (match binding, binding_ty with
-             | Some (name, _), Some ty ->
+             | Some (Ast.PayloadBind (name, _)), Some ty ->
                  var_types := StringMap.add name ty !var_types
              | _ -> ());
             let (arm_moved, arm_declared, binding_path) = match binding with
-              | None -> (moved, declared, None)
-              | Some (name, _) ->
+              | None | Some Ast.PayloadIgnore -> (moved, declared, None)
+              | Some (Ast.PayloadBind (name, _)) ->
                   let p = pvar name in
                   set_decl_loc p s.loc;
                   (mv_clear p moved, PathSet.add p declared, Some p)
@@ -9096,8 +9119,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             (* A payload binder is a fresh value, never a region slice --
                clear any stale same-named taint for the arm body. *)
             let arm_taints = match binding with
-              | Some (name, _) -> TaintEnv.set name PathSet.empty taints
-              | None -> taints
+              | Some (Ast.PayloadBind (name, _)) ->
+                  TaintEnv.set name PathSet.empty taints
+              | None | Some Ast.PayloadIgnore -> taints
             in
             let (out, _, out_taints) =
               check_stmts arm_moved arm_declared arm_taints body in
@@ -9118,15 +9142,17 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               | None -> out
             in
             (match binding with
-             | Some (name, _) ->
+             | Some (Ast.PayloadBind (name, _)) ->
                  var_types := (match previous_binding_ty with
                    | Some ty -> StringMap.add name ty !var_types
                    | None -> StringMap.remove name !var_types)
-             | None -> ());
+             | None | Some Ast.PayloadIgnore -> ());
             (match binding, previous_binding_id with
-             | Some (name, _), Some id -> Hashtbl.replace visible_bindings name id
-             | Some (name, _), None -> Hashtbl.remove visible_bindings name
-             | None, _ -> ());
+             | Some (Ast.PayloadBind (name, _)), Some id ->
+                 Hashtbl.replace visible_bindings name id
+             | Some (Ast.PayloadBind (name, _)), None ->
+                 Hashtbl.remove visible_bindings name
+             | (None | Some Ast.PayloadIgnore), _ -> ());
             (always_terminates body, out, out_taints)
           ) arms in
           (* Same reasoning as `If` above: a terminating arm never reaches
