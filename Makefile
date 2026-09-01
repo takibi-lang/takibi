@@ -131,6 +131,7 @@ langcheck: unused-function-control effect-matrix-control
 	@python3 scripts/test_check_expected_line_endings.py
 	@python3 scripts/check_expected_line_endings.py
 	@python3 scripts/test_check_elf_symbol_alignment.py
+	@python3 scripts/test_check_kernel_asm_invariants.py
 	@python3 scripts/test_check_direct_mmio_literals.py
 	@python3 scripts/test_check_ddb_command_inventory.py
 	@python3 scripts/test_measure_trusted_base.py

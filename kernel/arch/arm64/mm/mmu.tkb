@@ -178,6 +178,14 @@ fn kernel_mmu_activate(l1_physical: usize, asid: usize) {
     isb();
 
     let sctlr: usize = mrs_sctlr_el1();
+    // The compiler guarantees each scalar access's natural alignment, but
+    // LLVM may combine adjacent accesses into a pair/vector instruction at
+    // an address aligned only for the scalar elements. Normal memory permits
+    // that when SCTLR_EL1.A (bit 1) is clear, so clearing A is the kernel's
+    // explicit post-MMU contract and is checked in the linked disassembly.
+    // Before M becomes active all data is Device memory, whose stricter
+    // alignment applies regardless of A; pre-MMU aggregate storage therefore
+    // keeps exact final-ELF alignment guards such as boot_page_pool's.
     let sctlr_enabled: usize =
         (sctlr | 1 | (1 << 2) | (1 << 12)) & ~(1 << 1);
     msr_sctlr_el1(sctlr_enabled);

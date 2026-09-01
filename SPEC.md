@@ -28,6 +28,16 @@ current implementation prioritizes practical GDB value inspection, so it
 may preserve extra debug-only storage compared with an optimized build
 without `-g`.
 
+For AArch64, the backend preserves each source access's scalar alignment but
+does not promise that a combined pair/vector instruction is aligned to its
+total transfer width. For example, two adjacent 8-byte stores may become one
+16-byte `stp` at an address that is 8 modulo 16. Passing `+strict-align` through
+`--features` does not change that legal instruction selection: each component
+access is still naturally aligned. A kernel using Normal memory must configure
+its architectural alignment policy accordingly. Code that runs before the MMU
+is enabled must separately satisfy Device-memory alignment; this is a target
+boot contract, not a stronger source-level struct-member alignment guarantee.
+
 `--explain-inference` augments a failed generic function type-argument
 inference diagnostic with an argument-by-argument structural trace. It shows
 the declared template type, the locally derived concrete type, wrapper types

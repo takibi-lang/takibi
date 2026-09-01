@@ -48,6 +48,25 @@ pointer live sends the next errno write into an unrelated mapping. Process
 exit returns to the owning EL1 call frame so the complete address space can be
 unmapped and reclaimed.
 
+### AArch64 alignment contract
+
+After stage-1 translation is enabled, kernel Normal memory runs with
+`SCTLR_EL1.A` clear. Takibi guarantees the natural alignment of each scalar
+source access, while LLVM remains free to combine adjacent scalar operations
+into pair or vector instructions at an address aligned only for the scalar
+elements. `kernelbuild-rpi5` and `kernelbuild-qemu` disassemble
+`kernel_mmu_activate` and fail unless the value written to `SCTLR_EL1` clears
+the A bit, keeping the runtime policy consistent with that backend behavior.
+
+Before the MMU is enabled, AArch64 treats data accesses as Device memory.
+Device memory enforces stricter natural alignment independently of
+`SCTLR_EL1.A`; LLVM's `+strict-align` target feature does not prevent it from
+forming a 16-byte pair store from two individually 8-byte-aligned stores.
+Pre-MMU code therefore avoids redundant aggregate initialization and gives
+affected bootstrap objects explicit alignment. Final-ELF checks remain on
+objects such as `boot_page_pool`, because neither the post-MMU A-bit policy nor
+QEMU can validate this hardware-only boot constraint.
+
 ## Implemented system slices
 
 The current RPi5 kernel includes:

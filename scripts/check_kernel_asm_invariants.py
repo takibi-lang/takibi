@@ -274,6 +274,68 @@ def check_spinlock_is_atomic(insns):
     return failures
 
 
+# GitHub issue #480: Takibi's AArch64 backend permits LLVM to combine
+# naturally aligned scalar accesses into pair/vector instructions. That is
+# valid for the kernel's Normal memory only while SCTLR_EL1.A is clear. The
+# pre-MMU Device-memory window is stricter regardless of A and retains exact
+# object-alignment guards; this check pins the other half of the contract so a
+# future boot edit cannot enable alignment checking underneath unchanged
+# generated code.
+SCTLR_WRITE_RE = re.compile(r"^msr\s+SCTLR_EL1,\s*x(\d+)$")
+AND_IMM_RE = re.compile(
+    r"^and\s+[wx](\d+),\s*[wx]\d+,\s*#(0x[0-9a-f]+|\d+)$")
+BIC_IMM_RE = re.compile(
+    r"^bic\s+[wx](\d+),\s*[wx]\d+,\s*#(0x[0-9a-f]+|\d+)$")
+DEST_REG_RE = re.compile(r"^[a-z0-9.]+\s+[wx](\d+)(?:,|$)")
+
+
+def check_sctlr_allows_normal_memory_unaligned_access(insns):
+    failures = []
+    body = [(addr, text) for addr, text, fn in insns
+            if fn == "kernel_mmu_activate"]
+    if not body:
+        return [
+            "issue #480 regression: no kernel_mmu_activate instructions "
+            "found, so the SCTLR_EL1.A alignment policy is unverified"
+        ]
+
+    writes = [(i, addr, text, SCTLR_WRITE_RE.match(text))
+              for i, (addr, text) in enumerate(body)
+              if SCTLR_WRITE_RE.match(text)]
+    if len(writes) != 1:
+        return [
+            "issue #480 regression: expected exactly one SCTLR_EL1 write "
+            "in kernel_mmu_activate, found %d" % len(writes)
+        ]
+
+    write_index, write_addr, _, write_match = writes[0]
+    target_reg = write_match.group(1)
+    producer = None
+    for _, text in reversed(body[:write_index]):
+        dest = DEST_REG_RE.match(text)
+        if dest and dest.group(1) == target_reg:
+            producer = text
+            break
+
+    clears_a = False
+    if producer is not None:
+        match_and = AND_IMM_RE.match(producer)
+        match_bic = BIC_IMM_RE.match(producer)
+        if match_and and match_and.group(1) == target_reg:
+            clears_a = int(match_and.group(2), 0) & (1 << 1) == 0
+        elif match_bic and match_bic.group(1) == target_reg:
+            clears_a = int(match_bic.group(2), 0) & (1 << 1) != 0
+
+    if not clears_a:
+        failures.append(
+            "issue #480 regression: SCTLR_EL1 write at 0x%x is not "
+            "immediately fed by an AND/BIC that clears SCTLR_EL1.A (bit 1); "
+            "the AArch64 backend may emit pair/vector accesses aligned only "
+            "to their scalar elements" % write_addr
+        )
+    return failures
+
+
 
 # GitHub issue #451/#449: mutex_acquire must MASK BEFORE IT TAKES.
 #
@@ -488,6 +550,7 @@ def main():
         check_uxn(insns, expected_uxn_and_pxn_count)
         + check_eret_daif_mask(insns)
         + check_spinlock_is_atomic(insns)
+        + check_sctlr_allows_normal_memory_unaligned_access(insns)
         + check_mutex_masks_before_taking(insns)
         + check_tlb_invalidate_all_is_broadcast(insns)
         + check_exception_stacks_are_per_core(insns)
@@ -497,7 +560,8 @@ def main():
             print("FAIL kernel/asm-invariants: %s" % f, file=sys.stderr)
         return 1
     print("PASS kernel/asm-invariants: UXN identity-block bits, eret DAIF.I "
-          "masking, the spinlock's atomicity, mutex_acquire masking "
+          "masking, SCTLR_EL1.A clear for Normal memory, the spinlock's "
+          "atomicity, mutex_acquire masking "
           "before it takes, the whole-TLB invalidate broadcasting "
           "while MMU activation stays local, and every exception entry "
           "switching to a stack of its own core, all verified statically")
