@@ -32,15 +32,12 @@ RULE 2 -- the raw atomic intrinsics have an allowlist.
     prevention but REVIEW: adding a file here is a claim that this
     particular use needs the raw instruction.
 
-    It also stands in for something the compiler cannot say yet.
-    spin_lock is `!{requires_mmu}` since #479, so locking in the MMU-off
-    window is a build error with a call chain -- but the ATOMICS
-    underneath it are not, because an intrinsic cannot carry an effect
-    today. A raw atomic in an `!{mmu_off}` function still compiles and
-    still faults on real hardware, where QEMU does not enforce the
-    Device-memory restriction at all. Until that is fixed properly, a
-    short allowlist is what keeps the set of files that could hit it small
-    enough to check by hand.
+    The compiler now gives every raw atomic a `requires_mmu` effect, so an
+    atomic reachable from an `!{mmu_off}` function is a build error. The
+    allowlist remains a separate source-level policy: ordinary code should
+    use the reviewed lock or publication abstraction even after the MMU is
+    active, rather than spreading unchecked ordering arguments through the
+    kernel.
 
 Exit code only (0 = pass, 1 = fail).
 """
