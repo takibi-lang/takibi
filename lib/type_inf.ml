@@ -3321,9 +3321,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "%s expects one argument: %s(v)" fname fname)))
 
-  | Call (("atomic_load_acquire" | "atomic_store_release"
-          | "atomic_swap_acquire" | "atomic_fetch_add_relaxed") as fname,
-          args) ->
+  | Call (fname, args) when Atomic_spec.is_intrinsic fname ->
       (* GitHub issue #17: the closed atomic set. Same "closed set of
          instructions" shape as the mrs/msr/tlbi intrinsics above, with the
          MEMORY ORDERING baked into the name rather than passed as an
@@ -3367,19 +3365,19 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
           fname))
       else
         note_type_checker_unsafe_use ();
-      (match fname, args with
-       | "atomic_load_acquire", [addr] -> check_addr addr; TUsize
-       | "atomic_load_acquire", _ ->
-           raise (TypeError (e.loc,
-             "atomic_load_acquire expects one argument: "
-             ^ "atomic_load_acquire(addr)"))
-       | "atomic_store_release", [addr; v] ->
+      let spec = Option.get (Atomic_spec.find fname) in
+      (match spec.operation, args with
+       | Atomic_spec.Load, [addr] -> check_addr addr; TUsize
+       | Atomic_spec.Load, _ ->
+           raise (TypeError (e.loc, Printf.sprintf
+             "%s expects one argument: %s(addr)" fname fname))
+       | Atomic_spec.Store, [addr; v] ->
            check_addr addr; check_value v; TVoid
-       | "atomic_store_release", _ ->
-           raise (TypeError (e.loc,
-             "atomic_store_release expects two arguments: "
-             ^ "atomic_store_release(addr, value)"))
-       | _, [addr; v] -> check_addr addr; check_value v; TUsize
+       | Atomic_spec.Store, _ ->
+           raise (TypeError (e.loc, Printf.sprintf
+             "%s expects two arguments: %s(addr, value)" fname fname))
+       | (Atomic_spec.Exchange | Atomic_spec.Fetch_add), [addr; v] ->
+           check_addr addr; check_value v; TUsize
        | _, _ ->
            raise (TypeError (e.loc, Printf.sprintf
              "%s expects two arguments: %s(addr, value)" fname fname)))
@@ -9291,9 +9289,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             direct_effects := StringSet.add "may_block" !direct_effects;
             direct_effect_origins :=
               StringMap.add "may_block" name !direct_effect_origins
-          end else if List.mem name
-              ["atomic_load_acquire"; "atomic_store_release";
-               "atomic_swap_acquire"; "atomic_fetch_add_relaxed"] then begin
+          end else if Atomic_spec.is_intrinsic name then begin
             (* Raw atomics cannot execute while the AArch64 MMU is off:
                before the page tables establish Normal memory, the target
                address is Device-typed and exclusives fault. Intrinsics have

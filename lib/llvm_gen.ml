@@ -4286,9 +4286,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
       ignore (build_call fty inline [| v |] "" builder);
       (TypeVoid, const_null (i1_type context))
 
-  | Call (("atomic_load_acquire" | "atomic_store_release"
-          | "atomic_swap_acquire" | "atomic_fetch_add_relaxed") as name,
-          args) ->
+  | Call (name, args) when Atomic_spec.is_intrinsic name ->
       (* GitHub issue #17. Two lowerings, and which one a given operation
          gets is decided by what LLVM's OCaml bindings actually expose
          rather than by preference.
@@ -4322,8 +4320,9 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
         raise (Error (Printf.sprintf
           "atomic operations are not implemented for target '%s'" triple));
       let ity = usize_lltype () in
-      (match name, args with
-       | "atomic_load_acquire", [addr_e] ->
+      let spec = Option.get (Atomic_spec.find name) in
+      (match spec.operation, spec.ordering, args with
+       | Atomic_spec.Load, Atomic_spec.Acquire, [addr_e] ->
            let (_, a) = gen_expr ~expected_ty:TypeUsize locals addr_e in
            let fty = function_type ity [| ity |] in
            (* x86-64 is TSO: an ordinary load already has acquire semantics
@@ -4335,7 +4334,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let inline = const_inline_asm fty asm "=r,r,~{memory}" true false in
            let v = build_call fty inline [| a |] "atomic.load" builder in
            (TypeUsize, v)
-       | "atomic_store_release", [addr_e; val_e] ->
+       | Atomic_spec.Store, Atomic_spec.Release, [addr_e; val_e] ->
            let (_, a) = gen_expr ~expected_ty:TypeUsize locals addr_e in
            let (_, v) = gen_expr ~expected_ty:TypeUsize locals val_e in
            let fty = function_type (void_type context) [| ity; ity |] in
@@ -4345,22 +4344,37 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let inline = const_inline_asm fty asm "r,r,~{memory}" true false in
            ignore (build_call fty inline [| a; v |] "" builder);
            (TypeVoid, const_null (i1_type context))
-       | _, [addr_e; val_e] ->
+       | (Atomic_spec.Exchange | Atomic_spec.Fetch_add), ordering,
+         [addr_e; val_e] ->
            let (_, a) = gen_expr ~expected_ty:TypeUsize locals addr_e in
            let p = build_inttoptr a (pointer_type context) "atomic.addr"
              builder in
            let (_, v) = gen_expr ~expected_ty:TypeUsize locals val_e in
-           let (op, ord) = match name with
-             | "atomic_swap_acquire" ->
-                 (AtomicRMWBinOp.Xchg, AtomicOrdering.Acquire)
-             | _ -> (AtomicRMWBinOp.Add, AtomicOrdering.Monotonic)
+           let op = match spec.operation with
+             | Atomic_spec.Exchange -> AtomicRMWBinOp.Xchg
+             | Atomic_spec.Fetch_add -> AtomicRMWBinOp.Add
+             | _ -> assert false
+           in
+           let ord = match ordering with
+             | Atomic_spec.Relaxed -> AtomicOrdering.Monotonic
+             | Atomic_spec.Acquire -> AtomicOrdering.Acquire
+             | Atomic_spec.Release -> AtomicOrdering.Release
            in
            (* singlethread = false. The whole point is the other core. *)
            let r = build_atomicrmw op p v ord false "atomic.rmw" builder in
            (TypeUsize, r)
-       | _, _ ->
-           (* type_inf.ml has already rejected every other arity. *)
-           assert false)
+       | _ ->
+           (* Type inference has already rejected arity errors. Reaching
+              this arm instead means Atomic_spec contains a contract for
+              which this backend has no matching lowering; fail rather than
+              silently emitting an operation with a different ordering. *)
+           raise (Error (Printf.sprintf
+             "atomic contract %s/%s has no lowering for '%s'"
+             (match spec.operation with
+              | Atomic_spec.Load -> "load" | Atomic_spec.Store -> "store"
+              | Atomic_spec.Exchange -> "exchange"
+              | Atomic_spec.Fetch_add -> "fetch_add")
+             (Atomic_spec.ordering_name spec.ordering) name)))
 
   | Call (("publish_begin" | "publish_commit" | "publish_abandon"
           | "publish_copy") as name, args) ->

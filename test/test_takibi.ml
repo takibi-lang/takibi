@@ -12903,6 +12903,27 @@ let codegen_tests = [
      asserting it here would be testing the backend rather than this
      change. SPEC.md records the measured a53/a76 output instead. *)
   Alcotest.test_case
+    "issue #467: atomic contracts have one target-independent ordering table"
+    `Quick
+    (fun () ->
+       let contract spec =
+         let operation = match spec.Atomic_spec.operation with
+           | Atomic_spec.Load -> "load"
+           | Atomic_spec.Store -> "store"
+           | Atomic_spec.Exchange -> "exchange"
+           | Atomic_spec.Fetch_add -> "fetch_add"
+         in
+         Printf.sprintf "%s:%s:%s" spec.name operation
+           (Atomic_spec.ordering_name spec.ordering)
+       in
+       Alcotest.(check (list string)) "atomic contracts"
+         ["atomic_load_acquire:load:acquire";
+          "atomic_store_release:store:release";
+          "atomic_swap_acquire:exchange:acquire";
+          "atomic_fetch_add_relaxed:fetch_add:relaxed"]
+         (List.map contract Atomic_spec.all));
+
+  Alcotest.test_case
     "issue #17: the RMW pair lowers to atomicrmw, the load/store to ldar/stlr"
     `Quick
     (fun () ->
@@ -12947,13 +12968,26 @@ let codegen_tests = [
          expect_codegen_ok
            "fn issue17_x86(addr: usize, v: usize) -> usize !{unsafe} {
               unsafe { atomic_store_release(addr, v); }
-              return unsafe { atomic_swap_acquire(addr, v) };
+              let seen: usize = unsafe { atomic_load_acquire(addr) };
+              let old: usize = unsafe { atomic_swap_acquire(addr, v) };
+              return seen + old
+                     + unsafe { atomic_fetch_add_relaxed(addr, v) };
             }" ();
          let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
-         Alcotest.(check bool) "x86-64 keeps the same atomicrmw"
+         Alcotest.(check bool) "x86-64 acquire load is a TSO load"
+           true (contains_substring ir "movq ($1), $0");
+         Alcotest.(check bool) "x86-64 release store is a TSO store"
+           true (contains_substring ir "movq $1, ($0)");
+         Alcotest.(check bool) "x86-64 exchange is atomicrmw xchg"
            true (contains_substring ir "atomicrmw xchg");
-         Alcotest.(check bool) "x86-64 store is a plain TSO store"
-           true (contains_substring ir "movq $1, ($0)"));
+         Alcotest.(check bool) "x86-64 exchange carries acquire ordering"
+           true (contains_substring ir " acquire");
+         Alcotest.(check bool) "x86-64 fetch-add is atomicrmw add"
+           true (contains_substring ir "atomicrmw add");
+         Alcotest.(check bool) "x86-64 fetch-add carries relaxed ordering"
+           true (contains_substring ir "monotonic");
+         Alcotest.(check bool) "x86-64 atomics are not single-thread scoped"
+           false (contains_substring ir "syncscope(\"singlethread\")"));
        with_codegen_target "thumbv7em-none-eabi" (fun () ->
          expect_codegen_error "atomic operations are not implemented"
            "fn issue17_wrong_target(addr: usize) -> usize !{unsafe} {

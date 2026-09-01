@@ -2367,6 +2367,21 @@ atomic_swap_acquire(addr: usize, value: usize) -> usize
 atomic_fetch_add_relaxed(addr: usize, value: usize) -> usize
 ```
 
+Their target-independent contracts are:
+
+| intrinsic | operation | ordering |
+|---|---|---|
+| `atomic_load_acquire` | load | acquire |
+| `atomic_store_release` | store | release |
+| `atomic_swap_acquire` | exchange | acquire |
+| `atomic_fetch_add_relaxed` | fetch-add | relaxed |
+
+This table is one compiler contract, not a description inferred separately
+from each target's instructions. The type checker, effect inference, builtin
+inventory, and both AArch64 and x86-64 lowering branches consume the same
+operation/ordering metadata. A backend with no implementation of a listed
+combination rejects it instead of substituting a weaker ordering.
+
 **The memory ordering is part of the name, not an argument.** This is the
 same rule that keeps a register selector out of `mrs_*`/`msr_*`: an
 ordering chosen by a runtime value cannot be read off the call site, and

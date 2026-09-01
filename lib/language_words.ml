@@ -40,12 +40,12 @@ let compiler_builtins = [
   "tlbi_vmalle1"; "tlbi_vmalle1is";
   "tlbi_vaae1is"; "tlbi_vae1is"; "tlbi_aside1is";
   "dsb_ish"; "dsb_ishst"; "isb"; "wfi"; "smc4"; "hvc4"; "svc5";
-  (* GitHub issue #17: the closed atomic set. Reserved for the same reason
-     as every builtin above -- infer_expr dispatches on the name before it
-     consults fenv, so a user function of the same name would be silently
-     unreachable. *)
-  "atomic_load_acquire"; "atomic_store_release";
-  "atomic_swap_acquire"; "atomic_fetch_add_relaxed";
+  (* GitHub issue #17/#467: the closed atomic set comes from Atomic_spec,
+     the same source used by typing, effect inference, and code generation.
+     It is reserved for the same reason as every builtin above -- infer_expr
+     dispatches on the name before it consults fenv, so a user function of
+     the same name would be silently unreachable. *)
+] @ Atomic_spec.names @ [
   (* GitHub issue #299: the publication record's four operations. Reserved
      for the same reason -- and additionally because a user function named
      publish_commit that did NOT commit would be the most misleading name
