@@ -287,6 +287,10 @@ AND_IMM_RE = re.compile(
 BIC_IMM_RE = re.compile(
     r"^bic\s+[wx](\d+),\s*[wx]\d+,\s*#(0x[0-9a-f]+|\d+)$")
 DEST_REG_RE = re.compile(r"^[a-z0-9.]+\s+[wx](\d+)(?:,|$)")
+NO_GPR_DEST_RE = re.compile(
+    r"^(?:b(?:\.[a-z]+)?|bl|br|blr|cbnz|cbz|cmp|cmn|ret|str|stp|stlr|"
+    r"stlxr|stur|tbz|tbnz|msr)\b"
+)
 
 
 def check_sctlr_allows_normal_memory_unaligned_access(insns):
@@ -312,6 +316,11 @@ def check_sctlr_allows_normal_memory_unaligned_access(insns):
     target_reg = write_match.group(1)
     producer = None
     for _, text in reversed(body[:write_index]):
+        # Stores name their source register first. They preserve that
+        # register and may appear here in debug builds when LLVM spills the
+        # value for DWARF, so they are not a definition that stops the search.
+        if NO_GPR_DEST_RE.match(text):
+            continue
         dest = DEST_REG_RE.match(text)
         if dest and dest.group(1) == target_reg:
             producer = text
