@@ -2373,8 +2373,15 @@ ordering chosen by a runtime value cannot be read off the call site, and
 the entire value of writing the ordering down is that a reviewer and the
 emitted instruction agree about it.
 
-**They require `unsafe`**, which no other intrinsic in the group above
-does. An atomic's correctness is not a property of the operation; it is a
+**They require `unsafe` and contribute `requires_mmu` to the enclosing
+function's inferred effects**, which no other intrinsic in the group above
+does. A function declared `!{mmu_off}` therefore cannot reach a raw atomic,
+directly or through a helper: before the AArch64 page tables establish Normal
+memory, an exclusive access to the Device-typed address can fault. This is a
+compile-time rule even on targets whose hardware happens to tolerate the
+access, so native tests cannot hide a kernel-only violation.
+
+An atomic's correctness is not a property of the operation; it is a
 property of the ordering argument relating it to every other access, and
 no check in this compiler can see that argument. Ordinary code is meant to
 use the lock built out of these, or the publication record described

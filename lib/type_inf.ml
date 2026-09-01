@@ -9279,6 +9279,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let summarize_effect_body body =
     let callees = ref StringSet.empty in
     let direct_effects = ref StringSet.empty in
+    let direct_effect_origins = ref StringMap.empty in
     let indirect_effects = ref StringSet.empty in
     let contains_unsafe = ref false in
     let has_unknown_indirect_call = ref false in
@@ -9286,8 +9287,23 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       match e.desc with
       | Ast.Call (name, args) ->
           List.iter visit_expr args;
-          if name = "interrupt_wait" then
-            direct_effects := StringSet.add "may_block" !direct_effects
+          if name = "interrupt_wait" then begin
+            direct_effects := StringSet.add "may_block" !direct_effects;
+            direct_effect_origins :=
+              StringMap.add "may_block" name !direct_effect_origins
+          end else if List.mem name
+              ["atomic_load_acquire"; "atomic_store_release";
+               "atomic_swap_acquire"; "atomic_fetch_add_relaxed"] then begin
+            (* Raw atomics cannot execute while the AArch64 MMU is off:
+               before the page tables establish Normal memory, the target
+               address is Device-typed and exclusives fault. Intrinsics have
+               no declaration in [declared_effects], so contribute the same
+               compositional fact directly from the checked AST. *)
+            direct_effects :=
+              StringSet.add "requires_mmu" !direct_effects;
+            direct_effect_origins :=
+              StringMap.add "requires_mmu" name !direct_effect_origins
+          end
           else
             let target = Option.value
               (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)
@@ -9348,7 +9364,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Break | Ast.Continue -> ()
     in
     List.iter visit_stmt body;
-    (!callees, !direct_effects, !indirect_effects,
+    (!callees, !direct_effects, !direct_effect_origins, !indirect_effects,
      !contains_unsafe, !has_unknown_indirect_call)
   in
   let effect_summaries = List.fold_left (fun summaries -> function
@@ -9370,8 +9386,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let close_property seed direct_property =
     let rec loop current =
       let next = StringMap.fold
-        (fun caller (callees, direct_effects, indirect_effects, direct_unsafe,
-                     unknown_indirect) acc ->
+        (fun caller (callees, direct_effects, _, indirect_effects,
+                     direct_unsafe, unknown_indirect) acc ->
         if direct_property direct_effects indirect_effects direct_unsafe
              unknown_indirect
            || StringSet.exists (fun callee -> StringSet.mem callee acc) callees
@@ -9410,12 +9426,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     else
       let visited = StringSet.add key visited in
       match StringMap.find_opt key effect_summaries with
-      | Some (_, direct, _, _, _) when StringSet.mem eff direct ->
-          Some [display_effect_key key; "interrupt_wait"]
-      | Some (_, _, indirect, _, _) when StringSet.mem eff indirect ->
+      | Some (_, direct, origins, _, _, _) when StringSet.mem eff direct ->
+          Some [display_effect_key key;
+            Option.value (StringMap.find_opt eff origins)
+              ~default:("<intrinsic !{" ^ eff ^ "}>")]
+      | Some (_, _, _, indirect, _, _) when StringSet.mem eff indirect ->
           Some [display_effect_key key;
             Printf.sprintf "<indirect call !{%s}>" eff]
-      | Some (callees, _, _, _, _) ->
+      | Some (callees, _, _, _, _, _) ->
           let rec search = function
             | [] -> None
             | callee :: rest ->
@@ -9433,9 +9451,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     else
       let visited = StringSet.add key visited in
       match StringMap.find_opt key effect_summaries with
-      | Some (_, _, _, _, true) ->
+      | Some (_, _, _, _, _, true) ->
           Some [display_effect_key key; "<indirect call>"]
-      | Some (callees, _, _, _, false) ->
+      | Some (callees, _, _, _, _, false) ->
           let rec search = function
             | [] -> None
             | callee :: rest ->
@@ -9455,7 +9473,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         let visited = StringSet.add key visited in
         match StringMap.find_opt key effect_summaries with
         | None -> None
-        | Some (callees, _, _, _, _) ->
+        | Some (callees, _, _, _, _, _) ->
             let rec search_callees = function
               | [] -> None
               | callee :: rest ->
@@ -9473,7 +9491,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   StringMap.iter (fun key effects_opt ->
     let effects = Option.value effects_opt ~default:[] in
     (match StringMap.find_opt key effect_summaries with
-     | Some (_, _, _, true, _)
+     | Some (_, _, _, _, true, _)
        when (Option.get (Effect_rules.find "unsafe")).declaration =
             Effect_rules.Local_required && not (List.mem "unsafe" effects) ->
          raise (TypeError (StringMap.find key effect_locs, Printf.sprintf

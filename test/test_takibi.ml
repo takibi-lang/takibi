@@ -8453,6 +8453,25 @@ let infer_tests = [
         fn boot_leaf395() { boot_page_alloc395(); }
         fn boot_root_ok395() !{mmu_off} { boot_leaf395(); }");
 
+  Alcotest.test_case "MMU-off root rejects a raw atomic through a helper" `Quick
+    (expect_type_error
+       "boot_atomic_root484 -> boot_atomic_helper484 -> atomic_store_release"
+       "fn boot_atomic_helper484(addr: usize) !{unsafe} {
+          unsafe { atomic_store_release(addr, 1); }
+        }
+        fn boot_atomic_root484(addr: usize) !{mmu_off, unsafe} {
+          unsafe { boot_atomic_helper484(addr); }
+        }");
+
+  Alcotest.test_case "raw atomics remain accepted after MMU initialization" `Quick
+    (expect_ok
+       "fn atomic_after_mmu484(addr: usize) -> usize !{unsafe} {
+          unsafe { atomic_store_release(addr, 1); }
+          let loaded: usize = unsafe { atomic_load_acquire(addr) };
+          let swapped: usize = unsafe { atomic_swap_acquire(addr, loaded) };
+          return swapped + unsafe { atomic_fetch_add_relaxed(addr, 1) };
+        }");
+
   Alcotest.test_case "MMU-off is not a function-pointer call effect" `Quick
     (expect_type_error "not a function-pointer call effect"
        "fn boot_bad_callback395(callback: fn !{mmu_off}() -> void) {}");
