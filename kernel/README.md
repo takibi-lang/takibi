@@ -429,7 +429,24 @@ RPI5_KERNEL_HWTEST_ARTIFACT_DIR
 
 Default logs and projected actual files are written under
 `_build/kernel-hwtest-rpi5/`. Load, reset, UART, ARP, ICMP, TCP, curl, and
-userspace-socket evidence remain separate for diagnosis.
+userspace-socket evidence remain separate for diagnosis. The RPi5 and main
+QEMU integration runners also save `busy-pair-profile.json`. It records the
+explicit post-warm-up interval, target, active kernel CPU count, Git commit, input size,
+completed iterations, PIDs, elapsed counter cycles, and xorshift correctness
+checksums. RPi5 is the performance authority; the QEMU artifact only validates
+the same collection path.
+
+Render a local revision-comparison chart from any saved artifacts without
+rerunning a board:
+
+```bash
+make profile-kernel-workload-chart \
+  PROFILE_ARTIFACTS="old/busy-pair-profile.json new/busy-pair-profile.json" \
+  PROFILE_CHART=_build/busy-pair-comparison.svg
+```
+
+This is an explicit profiling command, not a performance threshold in
+`make allcheck`.
 
 ## QEMU/AArch64 integration
 

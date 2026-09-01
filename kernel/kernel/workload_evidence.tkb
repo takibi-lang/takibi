@@ -96,6 +96,8 @@ struct WorkloadBusyPair {
     b_restarts: usize;
     a_rounds: usize;
     b_rounds: usize;
+    a_checksum: usize;
+    b_checksum: usize;
     // Each tag's round count at the moment the second one first reported.
     // Skew is measured from there: whichever entry init forked first is
     // ahead by however long the second took to start, and that is startup
@@ -137,6 +139,8 @@ fn workload_busy_pair_reset() {
     workload_busy_pair.b_restarts = 0;
     workload_busy_pair.a_rounds = 0;
     workload_busy_pair.b_rounds = 0;
+    workload_busy_pair.a_checksum = 0;
+    workload_busy_pair.b_checksum = 0;
     workload_busy_pair.a_base = 0;
     workload_busy_pair.b_base = 0;
     workload_busy_pair.both_running = false;
@@ -208,7 +212,8 @@ private fn workload_busy_absolute_difference(left: usize, right: usize)
 // A CPU-bound process that stopped being CPU-bound would stop being the
 // thing a second core is measured against, which is why 1 is "stop
 // reporting" and not "stop".
-fn workload_busy_record_progress(tag: usize) -> usize !{unsafe} {
+fn workload_busy_record_progress(tag: usize, checksum: usize,
+                                 input_steps: usize) -> usize !{unsafe} {
     if (workload_busy_pair.restart_reported) { return 1; }
     // Started by init, from /etc/inittab. A report from anywhere else is
     // not this workload, and counting it would let an unrelated process
@@ -226,6 +231,7 @@ fn workload_busy_record_progress(tag: usize) -> usize !{unsafe} {
             workload_busy_pair.a_restarts = workload_busy_pair.a_restarts + 1;
         }
         workload_busy_pair.a_rounds = workload_busy_pair.a_rounds + 1;
+        workload_busy_pair.a_checksum = checksum;
     } else if (tag == WORKLOAD_BUSY_TAG_B) {
         if (workload_busy_pair.b_pid == 0) {
             workload_busy_pair.b_pid = pid;
@@ -234,6 +240,7 @@ fn workload_busy_record_progress(tag: usize) -> usize !{unsafe} {
             workload_busy_pair.b_restarts = workload_busy_pair.b_restarts + 1;
         }
         workload_busy_pair.b_rounds = workload_busy_pair.b_rounds + 1;
+        workload_busy_pair.b_checksum = checksum;
     } else {
         workload_busy_pair.refused = workload_busy_pair.refused + 1;
         return 0;
@@ -260,6 +267,17 @@ fn workload_busy_record_progress(tag: usize) -> usize !{unsafe} {
         workload_busy_pair.b_ticks = 0;
         workload_busy_pair.last_pid = 0;
         workload_busy_pair.last_tick = 0;
+        kernel_boot_log("profile: begin name=busy-pair input_steps=");
+        uart_put_udec(input_steps);
+        kernel_boot_log(" cpu_count=");
+        uart_put_udec(KERNEL_ACTIVE_CORES);
+        kernel_boot_log(" iterations_goal=");
+        uart_put_udec(WORKLOAD_BUSY_ROUNDS * 2);
+        kernel_boot_log(" pid_a=");
+        uart_put_udec(workload_busy_pair.a_pid);
+        kernel_boot_log(" pid_b=");
+        uart_put_udec(workload_busy_pair.b_pid);
+        kernel_boot_log("\n");
         return 0;
     }
     if (workload_busy_pair.reported) {
@@ -397,6 +415,20 @@ private fn workload_busy_pair_report() !{unsafe} {
     kernel_boot_log(" restarts=");
     uart_put_udec(workload_busy_pair.a_restarts +
                   workload_busy_pair.b_restarts);
+    kernel_boot_log("\n");
+    kernel_boot_log("profile: end name=busy-pair elapsed_cycles=");
+    uart_put_udec(workload_busy_pair.end_ticks -
+                  workload_busy_pair.start_ticks);
+    kernel_boot_log(" tick_frequency=");
+    uart_put_udec(read_cntfrq() as usize);
+    kernel_boot_log(" iterations_a=");
+    uart_put_udec(workload_busy_pair.a_rounds - workload_busy_pair.a_base);
+    kernel_boot_log(" iterations_b=");
+    uart_put_udec(workload_busy_pair.b_rounds - workload_busy_pair.b_base);
+    kernel_boot_log(" result_count=2 checksum_a=");
+    uart_put_udec(workload_busy_pair.a_checksum);
+    kernel_boot_log(" checksum_b=");
+    uart_put_udec(workload_busy_pair.b_checksum);
     kernel_boot_log("\n");
     if (workload_busy_pair.refused != 0) {
         kernel_boot_log("workload: busy pair REFUSED reports=");

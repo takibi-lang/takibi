@@ -2079,7 +2079,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // and the non-zero answer is that file telling the caller the
     // measurement is over.
     if (number == AARCH64_NR_TAKIBI_WORKLOAD_PROGRESS) {
-        return SyscallAction::Resume(workload_busy_record_progress(x0));
+        return SyscallAction::Resume(workload_busy_record_progress(x0, x1, x2));
     }
 
     if (number == AARCH64_NR_TAKIBI_PARENT_PROGRESS) {

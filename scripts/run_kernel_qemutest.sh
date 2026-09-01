@@ -247,4 +247,8 @@ if [ "$interactive_peer_status" -ne 0 ] ||
     exit 1
 fi
 
+python3 "$REPO_ROOT/scripts/profile_kernel_workload.py" collect \
+    --uart-log "$UART_LOG" --output "$ARTIFACT_DIR/busy-pair-profile.json" \
+    --target qemu
+
 echo "PASS $RUN_LABEL ($view_count views, one boot)"

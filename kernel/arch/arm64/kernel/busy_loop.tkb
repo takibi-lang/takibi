@@ -78,7 +78,8 @@ fn busy_loop_run(tag: usize) {
         }
         if (done == 0) {
             let answer: usize = svc5(
-                WORKLOAD_PROGRESS_SYSCALL, tag, state, 0, 0, 0);
+                WORKLOAD_PROGRESS_SYSCALL, tag, state,
+                BUSY_LOOP_ROUND_STEPS, 0, 0);
             /* 2 is the kernel asking this entry to die, so that init has to
              * bring it back and the fixture can check that it brought back
              * only this one. Nothing else here decides to exit: a workload
