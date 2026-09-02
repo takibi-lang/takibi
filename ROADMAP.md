@@ -368,6 +368,29 @@ probes all want one mechanism, and that `kernel/lib/occupancy.tkb`'s linear
 
 Read `kernel/CONCURRENCY.md` before adding a lock, a probe, or a pooled read.
 
+### Where to start
+
+The threads above are not equally urgent, and one of them is the only DEFECT
+among them.
+
+1. **#488's exit-path reorder, first.** Everything else here is a design step;
+   this is a use-after-free the kernel performs 26 times per boot today. It is
+   also the one item that gets WORSE rather than merely staying broken when a
+   second core runs a process, because the window between the reap and the
+   walk becomes another core's. Fixing a use-after-free before making it
+   concurrent is the obvious order. Two candidate reorderings are on the issue;
+   it needs hardware, and DDB's `bt` can now name the remaining stale readers,
+   which is how the last round had to be done with hand-written instrumentation
+   instead.
+2. **Then the rest of #479 Group B** -- the bootstrap record (really #415),
+   `address_space.tkb`'s ready flag and fallback, and `syscall.tkb`'s
+   re-entrancy -- because that is the milestone, and the method is unchanged:
+   correct for two cores with the flag still at 1, exercised FROM core 1.
+3. **#492's remaining slot-only reads, #493 and #504 after that.** They are
+   design work whose value depends on numbers the first two produce. #493 in
+   particular must not be built before the measurement exists: an effect with
+   no teeth and nothing to evaluate it against is what #449 already was.
+
 **Decision recorded 2026-08-27: raw atomics are reachable only through
 `!{unsafe}`.** Ordinary kernel code goes through the spinlock or the
 publication record; there is no third surface and no plain-atomic escape for a
