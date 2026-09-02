@@ -840,6 +840,8 @@ kernel-lib-check:
 	python3 scripts/check_flag_guarded_fields.py $(KERNEL_DIR)
 	python3 scripts/check_execution_model_coverage.py
 	python3 scripts/check_lock_discipline.py
+	python3 scripts/check_liveness_proof_escapes.py
+	python3 scripts/check_invariant_lines_unviewed.py
 
 # Generate AArch64 exception-frame offset constants from the struct
 # definition (GitHub issue #286). This is a REAL file-based Make rule (not

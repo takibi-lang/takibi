@@ -15,6 +15,8 @@ than warns; do not bypass or weaken one merely to complete a change.
 | `check_direct_mmio_literals.py` | MMIO pointers derive from validated resource bases |
 | `check_flag_guarded_fields.py` | optional fields are read only after their presence flags |
 | `check_lock_discipline.py` | global mutexes are not force-reset and raw atomics stay allowlisted |
+| `check_liveness_proof_escapes.py` | every place that drops a pool's liveness proof is declared with a reason |
+| `check_invariant_lines_unviewed.py` | a known-nonzero invariant report is not asserted as correct by a view |
 | `check_execution_model_coverage.py` | mutable kernel state declares its execution model |
 | `check_expected_line_endings.py` | stdout fixtures use one newline convention |
 | `check_kernel_memory_map.py` | linked normal/debug layout agrees with the memory map and exact boot allocator fixtures |
