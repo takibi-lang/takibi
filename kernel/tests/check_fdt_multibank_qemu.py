@@ -15,20 +15,22 @@ from pathlib import Path
 
 MULTIBANK_EXPECTED = (
     b"memory: source=dtb base_bytes=1073741824 detected_mib=1024 "
-    b"regions=1 reservations=0 allocator_pages=261256")
+    b"regions=1 reservations=0 allocator_pages=261248")
 # The page count is what is left after every statically laid-out kernel
 # region, so it moves whenever the image or the linker script does -- which
 # is the point of asserting it exactly rather than as a range. It went
 # 31904 -> 31888 for GitHub issue #477, exactly the 16 pages (64 KiB) that
 # the second core's own IRQ and overflow stacks cost after the allocator was
-# changed to size its runtime inventory from the boot DTB.
+# changed to size its runtime inventory from the boot DTB. Enabling kernel
+# frame pointers later grew the linked QEMU image by 8 pages (32 KiB), moving
+# this count and the topology variants below down by 8.
 LOW_MEMORY_EXPECTED = (
     b"memory: source=dtb base_bytes=1073741824 detected_mib=128 "
-    b"regions=1 reservations=0 allocator_pages=31880")
+    b"regions=1 reservations=0 allocator_pages=31872")
 MISSING_EXPECTED = b"memory: boot DTB has no usable /memory; halting"
 DISCONTIGUOUS_MEMORY_EXPECTED = (
     b"memory: source=dtb base_bytes=1073741824 detected_mib=768 "
-    b"regions=2 reservations=0 allocator_pages=195720")
+    b"regions=2 reservations=0 allocator_pages=195712")
 DISCONTIGUOUS_PROBE_EXPECTED = (
     b"memory: physical hole excluded and both extent boundaries round-trip")
 
@@ -258,7 +260,7 @@ def main() -> int:
         print("FAIL kernel/qemu FDT allocator sizing: expected memory line absent",
               file=sys.stderr)
         return 1
-    print("PASS kernel/qemu FDT allocator sizing: 128 MiB DTB supplies 31880 pages")
+    print("PASS kernel/qemu FDT allocator sizing: 128 MiB DTB supplies 31872 pages")
 
     with tempfile.TemporaryDirectory(prefix="takibi-fdt-") as directory:
         dtb = Path(directory) / "virt.dtb"

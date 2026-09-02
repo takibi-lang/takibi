@@ -209,11 +209,20 @@ private fn workload_profile_charge(cpu: {0..<KERNEL_MAX_CORES as usize},
 
 private fn workload_profile_transition(next: WorkloadCpuMode) {
     if (workload_profile_active == false) { return; }
+    // Syscall handling runs with IRQs enabled. Without one critical section,
+    // a timer IRQ can charge from the same last_tick before this transition
+    // stores its new boundary, making the classified total exceed wall time.
+    let before_irq_masked: usize = (mrs_daif() >> 7) & 1;
+    disable_irq();
     let cpu: usize = cpu_id();
-    if (cpu >= KERNEL_ACTIVE_CORES || cpu >= KERNEL_MAX_CORES) { return; }
+    if (cpu >= KERNEL_ACTIVE_CORES || cpu >= KERNEL_MAX_CORES) {
+        if (before_irq_masked == 0) { enable_irq(); }
+        return;
+    }
     let bounded_cpu: {0..<KERNEL_MAX_CORES as usize} = cpu;
     workload_profile_charge(bounded_cpu, read_cntpct() as usize);
     workload_profile_cores[bounded_cpu].mode = next;
+    if (before_irq_masked == 0) { enable_irq(); }
 }
 
 fn workload_profile_el1_enter() { workload_profile_transition(WorkloadCpuMode::El1); }
@@ -221,18 +230,9 @@ fn workload_profile_el0_enter() { workload_profile_transition(WorkloadCpuMode::E
 fn workload_profile_idle_enter() { workload_profile_transition(WorkloadCpuMode::Idle); }
 
 fn workload_profile_interrupt_wait() !{may_block} {
-    // Unlike exception-path transitions, driver waits arrive with IRQs
-    // enabled. Keep each charge-and-mode update atomic with an IRQ that
-    // would otherwise charge the same last_tick interval a second time.
-    let before_wait_irq_masked: usize = (mrs_daif() >> 7) & 1;
-    disable_irq();
     workload_profile_idle_enter();
-    if (before_wait_irq_masked == 0) { enable_irq(); }
     interrupt_wait();
-    let after_wait_irq_masked: usize = (mrs_daif() >> 7) & 1;
-    disable_irq();
     workload_profile_el1_enter();
-    if (after_wait_irq_masked == 0) { enable_irq(); }
 }
 
 fn workload_profile_irq_enter() {
