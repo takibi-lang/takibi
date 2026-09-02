@@ -207,7 +207,7 @@ private fn workload_profile_charge(cpu: {0..<KERNEL_MAX_CORES as usize},
     workload_profile_cores[cpu].last_tick = now;
 }
 
-private fn workload_profile_transition(next: WorkloadCpuMode) {
+private fn workload_profile_transition_masked(next: WorkloadCpuMode) {
     if (workload_profile_active == false) { return; }
     // Syscall handling runs with IRQs enabled. Without one critical section,
     // a timer IRQ can charge from the same last_tick before this transition
@@ -223,6 +223,18 @@ private fn workload_profile_transition(next: WorkloadCpuMode) {
     workload_profile_charge(bounded_cpu, read_cntpct() as usize);
     workload_profile_cores[bounded_cpu].mode = next;
     if (before_irq_masked == 0) { enable_irq(); }
+}
+
+private fn workload_profile_transition(next: WorkloadCpuMode) {
+    if (workload_profile_active == false) { return; }
+    // EL1 syscall handling deliberately unmasks IRQs before entering Takibi
+    // code (user_entry.S), so these transitions are not inherently atomic.
+    // Save and restore DAIF.I rather than unconditionally enabling it: the
+    // same helpers are also valid at callers that arrived already masked.
+    let irq_was_masked: usize = (mrs_daif() >> 7) & 1;
+    disable_irq();
+    workload_profile_transition_masked(next);
+    if (irq_was_masked == 0) { enable_irq(); }
 }
 
 fn workload_profile_el1_enter() { workload_profile_transition(WorkloadCpuMode::El1); }
@@ -242,7 +254,7 @@ fn workload_profile_irq_enter() {
     let bounded_cpu: {0..<KERNEL_MAX_CORES as usize} = cpu;
     workload_profile_cores[bounded_cpu].irq_resume_mode =
         workload_profile_cores[bounded_cpu].mode;
-    workload_profile_transition(WorkloadCpuMode::Irq);
+    workload_profile_transition_masked(WorkloadCpuMode::Irq);
 }
 
 fn workload_profile_irq_exit() {
@@ -250,7 +262,7 @@ fn workload_profile_irq_exit() {
     let cpu: usize = cpu_id();
     if (cpu >= KERNEL_ACTIVE_CORES || cpu >= KERNEL_MAX_CORES) { return; }
     let bounded_cpu: {0..<KERNEL_MAX_CORES as usize} = cpu;
-    workload_profile_transition(
+    workload_profile_transition_masked(
         workload_profile_cores[bounded_cpu].irq_resume_mode);
 }
 
