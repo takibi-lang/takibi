@@ -67,7 +67,8 @@ def main() -> int:
     ):
         raise SystemExit("RPi5 DDB did not capture a CPU backtrace root")
     if not re.search(
-        r"^ddb: bt frame=0 pc=0x[0-9a-f]+ boundary=(exception|user)$",
+        r"^ddb: bt frame=0 pc=0x[0-9a-f]+ "
+        r"boundary=(exception|user|assembly|assembly-bridge)$",
         text.replace("\r", ""),
         re.MULTILINE,
     ):

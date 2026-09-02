@@ -22,7 +22,7 @@
     {
       "name": "bttest",
       "classification": "test-only",
-      "reason": "exercises explicit unsupported, corrupt, out-of-range, and truncated unwind stops",
+      "reason": "exercises explicit unsupported, corrupt, out-of-range, truncated, and invalid-saved-context unwind stops",
       "coverage": "qemu"
     },
     {

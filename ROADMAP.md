@@ -503,12 +503,13 @@ all. What has landed so far: an interrupt-safe UART DDB and read-only crash
 console, entry from deliberate software breakpoints, interactive breaks driven
 through QMP under QEMU, and the commands `ps`, `regs`, `current`, `intr`,
 `sched`, `vm`, `fds`, `bt [PID]`, `trace`, `events`, `oops`, `continue`, plus
-fault-contained read-only kernel, user and physical RAM inspection. `bt`
-consumes the checked compiler-owned frame chain from **#495 -- DONE
-2026-09-02, QEMU and RPi5**; cross-CPU stop and root capture after processes
-begin running on core 1 are deliberately tracked by **#505**. The supported
-QEMU and RPi5 DDB/GDB/crash-inspection workflow is documented in
-`kernel/README.md`.
+fault-contained read-only kernel, user and physical RAM inspection. `bt` consumes the checked compiler-owned frame chain from **#495 -- DONE
+2026-09-02**. QEMU verifies a multi-frame compiler chain through the deliberate
+software-break assembly bridge; RPi5 verifies the live CPU root, user boundary,
+guarded fault, and resume path. A focused RPi5 kernel-mode chain walk is not
+currently claimed. Cross-CPU stop and root capture after processes begin
+running on core 1 are deliberately tracked by **#505**. The supported QEMU and
+RPi5 DDB/GDB/crash-inspection workflow is documented in `kernel/README.md`.
 Open and relevant: **#444** (controlled mutation, deferred), **#429**
 (in-kernel GDB stub, deferred), **#425**/**#300** (debug metadata a debugger
 needs to decode variants and enums), **#496** (read-only kernel-aware GDB

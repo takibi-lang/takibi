@@ -9,7 +9,11 @@ SECTIONS {
         KEEP(*(.text.boot))
         . = ALIGN(2048);
         KEEP(*(.text.vectors))
-        *(.text .text.*)
+        *(EXCLUDE_FILE (*/main.o */main.debug.o) .text .text.*)
+        kernel_generated_text_start = .;
+        */main.o(.text .text.*)
+        */main.debug.o(.text .text.*)
+        kernel_generated_text_end = .;
     }
     kernel_text_end = .;
 

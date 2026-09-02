@@ -307,12 +307,18 @@ kernel_syscall_fail_stop:
     /* Takibi-owned deliberate debugger stop. The generated Current-EL sync
      * entry saves/restores ExceptionFrame; this helper only emits BRK. */
     .global kernel_ddb_breakpoint
+    .global kernel_ddb_breakpoint_start
+    .global kernel_ddb_breakpoint_end
+    .type kernel_ddb_breakpoint, %function
+kernel_ddb_breakpoint_start:
 kernel_ddb_breakpoint:
     stp     x29, x30, [sp, #-16]!
     mov     x29, sp
     brk     #0x544b
     ldp     x29, x30, [sp], #16
     ret
+kernel_ddb_breakpoint_end:
+    .size kernel_ddb_breakpoint, .-kernel_ddb_breakpoint
 
     /* One faultable instruction for DDB memory inspection. The caller
      * publishes the exact expected FAR before entering. On a matching

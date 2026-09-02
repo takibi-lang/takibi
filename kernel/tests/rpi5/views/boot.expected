@@ -1,5 +1,5 @@
 takibi kernel: EL1
-memory: source=dtb base_bytes=524288 detected_mib=1019 regions=1 reservations=2 allocator_pages=259720
+memory: source=dtb base_bytes=524288 detected_mib=1019 regions=1 reservations=2 allocator_pages=259712
 system timer: source=dtb base_bytes=70799863808 counter_agrees_with_arch=yes
 psci: source=dtb method=smc applied_to_cpu_on=yes
 rp1 uart: source=dtb base_bytes=133144182784 applied_to_driver=yes

@@ -89,8 +89,8 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         ! grep -Eq '^ddb: ps pid=1 ppid=0 state=[0-9]+ wait=[0-9]+ root=0 sp=0x[0-9a-f]+$' "$UART_LOG" ||
         ! grep -Eq '^ddb: proc pid=1 ppid=0 state=[0-9]+ wait=[0-9]+ root=0 sp=0x[0-9a-f]+$' "$UART_LOG" ||
         [ "$(grep -Ec '^ddb: bt source=(cpu cpu=[0-9]+|saved) pid=[0-9]+ stack=0x[0-9a-f]+\.\.0x[0-9a-f]+$' "$UART_LOG")" -lt 2 ] ||
-        [ "$(grep -Ec '^ddb: bt frame=0 pc=0x[0-9a-f]+ boundary=(exception|user)$' "$UART_LOG")" -lt 2 ] ||
-        ! grep -Eq '^ddb: bt (complete frames=[1-9][0-9]*|stop=(depth-limit|invalid-return-pc|nonmonotonic-frame|out-of-range) fp=0x[0-9a-f]+)$' "$UART_LOG" ||
+        [ "$(grep -Ec '^ddb: bt frame=0 pc=0x[0-9a-f]+ boundary=(exception|user|assembly|assembly-bridge)$' "$UART_LOG")" -lt 2 ] ||
+        ! grep -Eq '^ddb: bt (complete frames=[1-9][0-9]*|stop=(assembly-boundary|depth-limit|invalid-return-pc|nonmonotonic-frame|out-of-range) fp=0x[0-9a-f]+)$' "$UART_LOG" ||
         ! grep -q '^ddb: usage: bt \[PID\]$' "$UART_LOG" ||
         ! grep -q '^ddb: bt pid not captured$' "$UART_LOG" ||
         ! grep -q '^ddb: bt stop=unsupported-pc fp=0x' "$UART_LOG" ||
@@ -98,6 +98,7 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         ! grep -q '^ddb: bt stop=misaligned-frame fp=0x0000000000000003$' "$UART_LOG" ||
         ! grep -q '^ddb: bt stop=out-of-range fp=0x' "$UART_LOG" ||
         ! grep -q '^ddb: bt stop=depth-limit fp=0x' "$UART_LOG" ||
+        ! grep -q '^ddb: bt test invalid saved contexts rejected$' "$UART_LOG" ||
         ! grep -q '^ddb: trace count=' "$UART_LOG" ||
         ! grep -q '^ddb: events cpu=0 count=' "$UART_LOG" ||
         ! grep -Eq "^ddb: xk address=0x0*$KERNEL_READ_ADDRESS count=2$" "$UART_LOG" ||
@@ -134,9 +135,11 @@ if [ "$BREAK_SOURCE" = uart ] &&
 fi
 
 if [ "$BREAK_SOURCE" = software ] &&
-        { ! grep -Eq '^ddb: bt frame=[1-9][0-9]* pc=0x[0-9a-f]+ fp=0x[0-9a-f]+$' "$UART_LOG" ||
-          ! grep -Eq '^ddb: bt complete frames=([2-9]|[1-9][0-9]+)$' "$UART_LOG"; }; then
-    echo "FAIL kernel/qemu ddb: software BRK did not produce a complete compiler frame chain" >&2
+        { ! grep -Eq '^ddb: bt frame=0 pc=0x[0-9a-f]+ boundary=assembly-bridge$' "$UART_LOG" ||
+          ! grep -Eq '^ddb: bt frame=[1-9][0-9]* pc=0x[0-9a-f]+ fp=0x[0-9a-f]+$' "$UART_LOG" ||
+          ! grep -Eq '^ddb: bt frame=[1-9][0-9]* pc=0x[0-9a-f]+ fp=0x[0-9a-f]+ boundary=assembly$' "$UART_LOG" ||
+          ! grep -q '^ddb: bt stop=assembly-boundary fp=0x' "$UART_LOG"; }; then
+    echo "FAIL kernel/qemu ddb: software BRK did not produce a checked compiler chain to its assembly boundary" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1
 fi

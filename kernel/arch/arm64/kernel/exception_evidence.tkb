@@ -624,11 +624,35 @@ struct DdbUnwindRoot {
 
 extern symbol kernel_text_start;
 extern symbol kernel_text_end;
+extern symbol kernel_generated_text_start;
+extern symbol kernel_generated_text_end;
+extern symbol kernel_ddb_breakpoint_start;
+extern symbol kernel_ddb_breakpoint_end;
 
 private fn ddb_bt_stop(reason: *u8, fp: usize) !{unsafe} {
     ddb_puts("ddb: bt stop="); ddb_puts(reason);
     ddb_puts(" fp="); ddb_put_hex(fp);
     ddb_puts("\n");
+}
+
+private fn ddb_pc_is_generated(pc: usize) -> bool {
+    return pc >= kernel_generated_text_start &&
+           pc < kernel_generated_text_end;
+}
+
+private fn ddb_pc_is_breakpoint_bridge(pc: usize) -> bool {
+    return pc >= kernel_ddb_breakpoint_start &&
+           pc < kernel_ddb_breakpoint_end;
+}
+
+private fn ddb_saved_context_valid(saved_sp: usize, stack_bottom: usize,
+                                   stack_top: usize) -> bool {
+    if (saved_sp == 0 || saved_sp % 16 != 0 || stack_bottom == 0 ||
+        stack_top <= stack_bottom || saved_sp < stack_bottom ||
+        saved_sp >= stack_top) {
+        return false;
+    }
+    return stack_top - saved_sp >= EXC_CONTEXT_SIZE;
 }
 
 // The compiler owns the record shape: --frame-pointers makes every Takibi
@@ -655,7 +679,15 @@ private fn ddb_walk_backtrace(root: DdbUnwindRoot, limit: usize) !{unsafe} {
         return;
     }
     ddb_puts("ddb: bt frame=0 pc="); ddb_put_hex(root.pc);
-    ddb_puts(" boundary=exception\n");
+    if (ddb_pc_is_generated(root.pc)) {
+        ddb_puts(" boundary=exception\n");
+    } else if (ddb_pc_is_breakpoint_bridge(root.pc)) {
+        ddb_puts(" boundary=assembly-bridge\n");
+    } else {
+        ddb_puts(" boundary=assembly\n");
+        ddb_bt_stop("assembly-boundary", root.fp);
+        return;
+    }
     let mut frames: usize = 1;
     let mut fp: usize = root.fp;
     while (fp != 0) {
@@ -689,15 +721,21 @@ private fn ddb_walk_backtrace(root: DdbUnwindRoot, limit: usize) !{unsafe} {
             }
             DdbWordReadResult::Read(value) => { return_pc = value; }
         }
-        if (return_pc % 4 != 0 ||
-                return_pc < kernel_text_start || return_pc >= kernel_text_end) {
+        if (return_pc % 4 != 0 || return_pc < kernel_text_start ||
+                return_pc >= kernel_text_end) {
             ddb_bt_stop("invalid-return-pc", fp);
             return;
         }
         ddb_puts("ddb: bt frame="); ddb_put_udec(frames);
         ddb_puts(" pc="); ddb_put_hex(return_pc);
         ddb_puts(" fp="); ddb_put_hex(fp);
-        ddb_puts("\n");
+        if (ddb_pc_is_generated(return_pc)) {
+            ddb_puts("\n");
+        } else {
+            ddb_puts(" boundary=assembly\n");
+            ddb_bt_stop("assembly-boundary", fp);
+            return;
+        }
         frames = frames + 1;
         if (previous == 0) {
             ddb_puts("ddb: bt complete frames="); ddb_put_udec(frames);
@@ -767,9 +805,8 @@ private fn ddb_render_backtrace_process(pid: usize) !{unsafe} {
                 ddb_puts("ddb: bt running on another cpu; capture that cpu\n");
                 return;
             }
-            if (record.saved_sp == 0 || record.stack_bottom == 0 ||
-                    record.saved_sp < record.stack_bottom ||
-                    record.saved_sp > record.stack_top - EXC_CONTEXT_SIZE) {
+            if (ddb_saved_context_valid(record.saved_sp, record.stack_bottom,
+                    record.stack_top) == false) {
                 ddb_puts("ddb: bt pid has no valid saved context\n");
                 return;
             }
@@ -810,7 +847,7 @@ private fn ddb_render_backtrace_process(pid: usize) !{unsafe} {
 
 private fn ddb_render_backtrace_test() !{unsafe} {
     let mut valid: DdbUnwindRoot = ddb_current_unwind_root();
-    let test_pc: usize = kernel_ddb_memory_fault_return;
+    let test_pc: usize = kernel_generated_text_start;
     let mut unsupported: DdbUnwindRoot = {
         valid.source, valid.cpu, valid.pid, 0, valid.fp, valid.stack_floor,
         valid.stack_bottom, valid.stack_top
@@ -836,6 +873,17 @@ private fn ddb_render_backtrace_test() !{unsafe} {
         valid.stack_floor, valid.stack_bottom, valid.stack_top
     };
     ddb_walk_backtrace(truncated, 1);
+    let saved_sp: usize = valid.stack_floor - EXC_CONTEXT_SIZE;
+    if (ddb_saved_context_valid(saved_sp + 8, valid.stack_bottom,
+            valid.stack_top) ||
+        ddb_saved_context_valid(saved_sp, valid.stack_bottom,
+            saved_sp + EXC_CONTEXT_SIZE - 1) ||
+        ddb_saved_context_valid(saved_sp, valid.stack_top,
+            valid.stack_bottom)) {
+        ddb_puts("ddb: bt test invalid saved context accepted\n");
+    } else {
+        ddb_puts("ddb: bt test invalid saved contexts rejected\n");
+    }
 }
 
 private fn ddb_render_trace() !{unsafe} {

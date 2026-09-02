@@ -587,11 +587,14 @@ kernel device configuration under `-S -gdb`: notably
 and target-selection sequence is in `scripts/rpi5_jtag_load.sh`. Stock host
 GDB is not an AArch64 substitute in this environment; use `gdb-multiarch`.
 
-The kernel build enables the compiler's `--frame-pointers` contract. Every
-compiler-generated AArch64 function has the canonical `[previous x29, saved
-x30]` frame record; boot entry clears x29 before entering Takibi so a valid
-chain has an explicit end. Hand-written assembly is a boundary rather than an
-implicitly decoded frame. An asynchronous stop in the short prologue or
+The kernel build enables the compiler's `--frame-pointers` contract. Every compiler-generated AArch64 function has the canonical `[previous x29,
+saved x30]` frame record. Linker-owned generated-text bounds distinguish those
+records from hand-written assembly. Boot entry is an explicit assembly
+boundary and clears x29 before entering Takibi; DDB reports that boundary
+without decoding it as another compiler frame. The deliberate
+`kernel_ddb_breakpoint` helper is the sole explicit assembly bridge: it creates
+one canonical record so the Current-EL exception root can rejoin its compiler
+caller. An asynchronous stop in the short prologue or
 epilogue window may omit that function's record; frame 0 still reports the
 exact interrupted PC, and DDB makes no source-level completeness claim for
 that window.
@@ -651,10 +654,11 @@ it does not exist. The terminal crash console above intentionally has no
 
 `bt` walks the interrupted CPU's compiler-generated frame chain. `bt PID`
 uses the same walker with a non-current process's saved exception frame.
-Every read must remain in the one captured stack range, frame addresses must
-be aligned and move monotonically upward, and return PCs must remain in kernel
-text. The walk is capped at 32 frames. Corruption, an unsupported boundary,
-an invalid saved context, and truncation all stop with an explicit reason;
+Every read must remain in the one captured stack range, saved contexts and
+frame addresses must be 16-byte aligned, frames must move monotonically
+upward, and return PCs must remain in compiler-generated kernel text. The walk
+is capped at 32 frames. Corruption, an assembly or unsupported boundary, an
+invalid saved context, and truncation all stop with an explicit reason;
 DDB never scans the stack or guesses a caller. A saved EL0 context reports
 its user boundary explicitly; it does not reinterpret the user's x29 as a
 kernel frame pointer. A non-current `Running` process is refused because its
