@@ -317,6 +317,57 @@ never makes one, and nothing enforces that -- which is the assumption
 shape this project exists to stop relying on. They need #261's design,
 not four locks bolted on.
 
+### Group B, as of 2026-09-01
+
+Two of the four "these ARE the change" sites are done, and the worklist is
+FIFTEEN sites now rather than ten -- the coverage check added entries that
+had been silent, which is the check working rather than a regression.
+
+`process.tkb`'s scheduler lock is in. The defect it closed is worth stating
+because it was not the expected one: `ProcessSlotState` already distinguished
+Ready from Running, so two cores could never pick the same process off the
+chain -- but `scheduled_process_ready_take` read the state and only THEN minted
+the linear tokens standing for the claim, so two cores in that window both came
+out holding one, with the linear types satisfied on each core separately. An
+ownership discipline sound per-core and blind across cores. Measured at 3163
+double claims per 8192 on QEMU, 3114 on RPi5, and zero with the lock.
+
+The crash trace ring is per-CPU with one global sequence. It is not a lock, and
+`kernel/CONCURRENCY.md` states why reporters never are.
+
+What remains of `process.tkb` is one thing: the bootstrap record and its two
+flags, which is really #415 -- the bootstrap process is distinguished by a
+value, not a type. Then `address_space.tkb`'s ready flag and missing-record
+fallback, and `syscall.tkb`'s re-entrancy.
+
+### The liveness-proof thread, opened 2026-09-01
+
+Not a milestone, but a new session should know it exists before touching the
+process table or any pool.
+
+**#488**: the kernel reaps the record `execution_here()` calls current, 26
+times per boot, on every boot, and then keeps using it -- the trace arguments
+read it and the successor search walks the process chain FROM it. It is
+deterministic, not a flake; the intermittent symptom that led to it was a rare
+failure of CONCEALMENT, because the freed slot is almost always recycled before
+the read. `kernel_syscall_wait4_deliver` reaps the exiting child while it is
+still current, and fixing it means reordering the exit path, which needs
+hardware. A counter reports it every boot.
+
+`IntrusivePool` no longer launders its own liveness proof: payload accessors
+take the view or owner as `borrow` and return a pointer tied to it. 41 sites
+are proof-tied; 18 still launder and are named, `unsafe`, and counted.
+
+**#492** is half done. Every read that HAD a generation now compares it, and
+the count is zero -- so #488's stale reads come through paths that take a bare
+slot and never had one. **#493** (effect-indexed invalidation, a `!{reaps}`
+with teeth) is the static rule aimed at exactly those. **#504** observes that
+#456's stop-the-world, #452's remaining page-allocator lock and the two-core
+probes all want one mechanism, and that `kernel/lib/occupancy.tkb`'s linear
+`Quiesced` is already its shape.
+
+Read `kernel/CONCURRENCY.md` before adding a lock, a probe, or a pooled read.
+
 **Decision recorded 2026-08-27: raw atomics are reachable only through
 `!{unsafe}`.** Ordinary kernel code goes through the spinlock or the
 publication record; there is no third surface and no plain-atomic escape for a
