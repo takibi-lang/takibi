@@ -208,6 +208,11 @@ private fn fd_context_at(process: usize) -> *ProcessFdContext !{unsafe} {
     let address: usize = scheduled_process_fd_context(process);
     let generation: usize = scheduled_process_fd_context_generation(process);
     let owner = intrusive_owner_new(&fd_context_pool, address, generation);
+    // GitHub issue #488: this RETURNS the pointer, so it cannot
+    // hold the proof for the pointer's life. The unproven form
+    // names that and counts it in the trusted base; removing it
+    // means migrating this accessor's callers to hold the view
+    // themselves.
     let payload: *ProcessFdContext = intrusive_pool_ref_unproven(&fd_context_pool, owner);
     intrusive_owner_drop(owner);
     return payload;
@@ -231,6 +236,11 @@ private fn fd_block_matches(address: usize, generation: usize) -> bool !{unsafe}
 
 private fn fd_block_at(address: usize, generation: usize) -> *FdBlock !{unsafe} {
     let owner = intrusive_owner_new(&fd_block_pool, address, generation);
+    // GitHub issue #488: this RETURNS the pointer, so it cannot
+    // hold the proof for the pointer's life. The unproven form
+    // names that and counts it in the trusted base; removing it
+    // means migrating this accessor's callers to hold the view
+    // themselves.
     let payload: *FdBlock = intrusive_pool_ref_unproven(&fd_block_pool, owner);
     intrusive_owner_drop(owner);
     return payload;
@@ -560,6 +570,11 @@ private fn unified_object_matches(handle: UnifiedObjectHandle) -> bool !{unsafe}
 private fn unified_object_at(handle: UnifiedObjectHandle) -> *SharedObject !{unsafe} {
     let owner = intrusive_owner_new(&object_pool, handle.slot,
                                     handle.generation);
+    // GitHub issue #488: this RETURNS the pointer, so it cannot
+    // hold the proof for the pointer's life. The unproven form
+    // names that and counts it in the trusted base; removing it
+    // means migrating this accessor's callers to hold the view
+    // themselves.
     let payload: *SharedObject = intrusive_pool_ref_unproven(&object_pool, owner);
     intrusive_owner_drop(owner);
     return payload;
@@ -869,8 +884,10 @@ fn unified_fd_table_init() !{unsafe} {
         match intrusive_pool_probe_slot(&fd_context_pool, cursor) {
             IntrusiveSlotProbe::NoPayload => {}
             IntrusiveSlotProbe::Live(slot_view) => {
+                // GitHub issue #488: nothing here outlives the loop body,
+                // so the proof is held across the writes and given back.
                 let live: *ProcessFdContext =
-                    intrusive_pool_payload_unproven_of(&fd_context_pool, slot_view);
+                    intrusive_pool_payload_of(&fd_context_pool, slot_view);
                 // GitHub issue #393: giving the descriptor blocks back is
                 // what "empty every entry" means once the entries are
                 // allocated rather than always there. The limits go back
@@ -882,6 +899,7 @@ fn unified_fd_table_init() !{unsafe} {
                 live.heap_limit = 0;
                 live.fd_limit_soft = PROCESS_FD_LIMIT_DEFAULT_SOFT;
                 live.fd_limit_hard = PROCESS_FD_LIMIT_DEFAULT_HARD;
+                intrusive_view_release(slot_view);
             }
         }
         cursor = intrusive_pool_next_slot(&fd_context_pool, cursor);

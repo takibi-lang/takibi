@@ -1,0 +1,30 @@
+// GitHub issue #488 control: the payload pointer must not outlive the proof.
+//
+// kernel/lib/intrusive_pool.tkb's payload accessor used to take the linear
+// IntrusiveSlotView as `sink` and return a bare `*T`, so every payload
+// pointer in the kernel outlived the only evidence that there was a payload.
+// It takes `borrow` and returns `*T @ pool_id` now.
+//
+// Untying it again would REMOVE compile errors, not add them, so the kernel
+// building is not evidence that the tie is still there. This fixture is: it
+// must FAIL to compile, and it must fail for the right reason.
+use "kernel/lib/intrusive_pool.tkb";
+
+let mut control_pool: IntrusivePool(usize);
+
+fn escape_the_proof(address: usize) -> *usize !{unsafe} {
+    match intrusive_pool_probe_slot(&control_pool, address) {
+        IntrusiveSlotProbe::NoPayload => { return 0 as *usize; }
+        IntrusiveSlotProbe::Live(slot_view) => {
+            let payload: *usize =
+                intrusive_pool_payload_of(&control_pool, slot_view);
+            intrusive_view_release(slot_view);
+            return payload;
+        }
+    }
+}
+
+fn app_main() -> i32 !{unsafe} {
+    let escaped: *usize = escape_the_proof(0);
+    return 0;
+}

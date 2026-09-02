@@ -595,7 +595,7 @@ fn tcp_frame_take() -> (FrameLink, usize) !{unsafe} {
 // whatever it managed to take. Called from tcp_connection_alloc, whose Full
 // result is exactly the right thing to report when it fails -- a connection
 // with no frame to transmit from is not one this stack can serve.
-fn tcp_connection_frames_acquire(conn: *TcpConnection) -> bool !{unsafe} {
+fn tcp_connection_frames_acquire(conn: borrow *TcpConnection) -> bool !{unsafe} {
     mutex_init(&conn.frames_mutex);
     let (tx, tx_address) = tcp_frame_take();
     if (tx_address == 0) {
@@ -691,6 +691,11 @@ fn tcp_frame_slice(address: usize) -> [u8; 1514..] !{unsafe} {
             return tcp_frame_absent_fallback as [u8; 1514..];
         }
         IntrusiveSlotProbe::Live(slot_view) => {
+                // GitHub issue #488: this RETURNS the pointer, so it cannot
+                // hold the proof for the pointer's life. The unproven form
+                // names that and counts it in the trusted base; removing it
+                // means migrating this accessor's callers to hold the view
+                // themselves.
             let frame: *NetFrame =
                 intrusive_pool_payload_unproven_of(&tcp_frame_pool, slot_view);
             return frame.bytes as [u8; 1514..];
@@ -734,6 +739,11 @@ fn tcp_connection_payload(address: usize) -> *TcpConnection !{unsafe} {
             return &tcp_connection_absent_fallback;
         }
         IntrusiveSlotProbe::Live(slot_view) => {
+            // GitHub issue #488: this RETURNS the pointer, so it cannot
+            // hold the proof for the pointer's life. The unproven form
+            // names that and counts it in the trusted base; removing it
+            // means migrating this accessor's callers to hold the view
+            // themselves.
             return intrusive_pool_payload_unproven_of(&tcp_connection_pool, slot_view);
         }
     }
@@ -835,9 +845,14 @@ fn tcp_connection_open_at(address: usize) -> bool !{unsafe} {
     match intrusive_pool_probe_slot(&tcp_connection_pool, address) {
         IntrusiveSlotProbe::NoPayload => { return false; }
         IntrusiveSlotProbe::Live(slot_view) => {
+            // GitHub issue #488: the VALUE leaves this function, not the
+            // pointer, so the proof can be held across the read and given
+            // back -- no escape needed.
             let conn: *TcpConnection =
-                intrusive_pool_payload_unproven_of(&tcp_connection_pool, slot_view);
-            return conn.connection_open;
+                intrusive_pool_payload_of(&tcp_connection_pool, slot_view);
+            let open: bool = conn.connection_open;
+            intrusive_view_release(slot_view);
+            return open;
         }
     }
 }
@@ -852,10 +867,13 @@ fn tcp_connection_has_pending_read(address: usize) -> bool !{unsafe} {
     match intrusive_pool_probe_slot(&tcp_connection_pool, address) {
         IntrusiveSlotProbe::NoPayload => { return false; }
         IntrusiveSlotProbe::Live(slot_view) => {
+            // As tcp_connection_open_at: only the answer escapes.
             let conn: *TcpConnection =
-                intrusive_pool_payload_unproven_of(&tcp_connection_pool, slot_view);
-            return conn.connection_open &&
+                intrusive_pool_payload_of(&tcp_connection_pool, slot_view);
+            let pending: bool = conn.connection_open &&
                    conn.socket_buffer_offset < conn.socket_buffer_length;
+            intrusive_view_release(slot_view);
+            return pending;
         }
     }
 }
@@ -868,9 +886,14 @@ fn tcp_any_connection_open() -> bool !{unsafe} {
         match intrusive_pool_probe_slot(&tcp_connection_pool, cursor) {
             IntrusiveSlotProbe::NoPayload => {}
             IntrusiveSlotProbe::Live(slot_view) => {
+                // The proof is released on BOTH paths, which is why the
+                // answer is taken first rather than returned from inside
+                // the match arm (GitHub issue #488).
                 let conn: *TcpConnection =
-                    intrusive_pool_payload_unproven_of(&tcp_connection_pool, slot_view);
-                if (conn.connection_open) { return true; }
+                    intrusive_pool_payload_of(&tcp_connection_pool, slot_view);
+                let open: bool = conn.connection_open;
+                intrusive_view_release(slot_view);
+                if (open) { return true; }
             }
         }
         cursor = intrusive_pool_next_slot(&tcp_connection_pool, cursor);
@@ -904,6 +927,13 @@ fn tcp_connection_alloc() -> TcpConnectionAllocResult !{unsafe} {
         IntrusivePoolInsertResult::Allocated(pool_owner) => {
             let address: usize = intrusive_owner_slot(pool_owner);
             let generation: usize = intrusive_owner_generation(pool_owner);
+            // GitHub issue #488: unproven, and this one is real. `conn` is
+            // used after intrusive_owner_drop(pool_owner) below --
+            // task_mutex_acquire(&conn.lock) -- because the pool's handle
+            // is deliberately discharged and TcpConnectionOwner takes over
+            // the obligation. The proof ends before the last use, so the
+            // tie cannot hold here without reordering an ownership handoff
+            // that issue #462 settled on purpose.
             let conn: *TcpConnection =
                 intrusive_pool_ref_unproven(&tcp_connection_pool, pool_owner);
             conn.self_address = address;
@@ -1158,9 +1188,10 @@ fn kernel_tcp_clear_injection_markers() !{unsafe} {
             IntrusiveSlotProbe::NoPayload => {}
             IntrusiveSlotProbe::Live(slot_view) => {
                 let conn: *TcpConnection =
-                    intrusive_pool_payload_unproven_of(&tcp_connection_pool, slot_view);
+                    intrusive_pool_payload_of(&tcp_connection_pool, slot_view);
                 conn.injected_data_entry = 0;
                 conn.injected_fin_entry = 0;
+                intrusive_view_release(slot_view);
             }
         }
         cursor = intrusive_pool_next_slot(&tcp_connection_pool, cursor);
@@ -1326,7 +1357,7 @@ fn retx_chain_reverse(link_in: RetxLink) -> RetxLink !{unsafe} {
                     let branded =
                         intrusive_owner_new(&tcp_retx_pool, slot, generation);
                     let entry: *RetxEntry =
-                        intrusive_pool_ref_unproven(&tcp_retx_pool, branded);
+                        intrusive_pool_ref(&tcp_retx_pool, branded);
                     let following: RetxLink = retx_entry_take_next(entry);
                     if (retx_entry_put_next(entry, reversed) == false) {
                         kernel_boot_log("tcp retx: chain link was not empty\n");
@@ -1371,7 +1402,7 @@ fn pending_tcp_reset_all(connection_address: usize) !{unsafe} {
                     let branded =
                         intrusive_owner_new(&tcp_retx_pool, slot, generation);
                     let entry: *RetxEntry =
-                        intrusive_pool_ref_unproven(&tcp_retx_pool, branded);
+                        intrusive_pool_ref(&tcp_retx_pool, branded);
                     let following: RetxLink = retx_entry_take_next(entry);
                     let mine: bool = entry.connection == connection_address;
                     if (mine) {

@@ -193,6 +193,11 @@ private fn process_image_record_at(root: usize) -> *ProcessImageRecord !{unsafe}
         return &process_image_record_missing;
     }
     let owner = intrusive_owner_new(&process_image_pool, address, generation);
+        // GitHub issue #488: this RETURNS the pointer, so it cannot
+        // hold the proof for the pointer's life. The unproven form
+        // names that and counts it in the trusted base; removing it
+        // means migrating this accessor's callers to hold the view
+        // themselves.
     let record: *ProcessImageRecord =
         intrusive_pool_ref_unproven(&process_image_pool, owner);
     intrusive_owner_drop(owner);

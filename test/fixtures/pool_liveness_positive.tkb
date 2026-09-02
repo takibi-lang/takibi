@@ -1,0 +1,25 @@
+// The other half of the GitHub issue #488 control: reading the payload while
+// the proof is held, and giving the proof back afterwards, must still
+// compile. Without this the negative fixture could pass because the pool
+// stopped compiling at all rather than because the tie is doing its job.
+use "kernel/lib/intrusive_pool.tkb";
+
+let mut control_pool: IntrusivePool(usize);
+
+fn read_under_the_proof(address: usize) -> usize !{unsafe} {
+    match intrusive_pool_probe_slot(&control_pool, address) {
+        IntrusiveSlotProbe::NoPayload => { return 0; }
+        IntrusiveSlotProbe::Live(slot_view) => {
+            let payload: *usize =
+                intrusive_pool_payload_of(&control_pool, slot_view);
+            let value: usize = *payload;
+            intrusive_view_release(slot_view);
+            return value;
+        }
+    }
+}
+
+fn app_main() -> i32 !{unsafe} {
+    let seen: usize = read_under_the_proof(0);
+    return 0;
+}

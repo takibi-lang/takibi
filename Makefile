@@ -124,6 +124,28 @@ unused-function-control: build
 	*) echo "FAIL unused-function-control: expected diagnostic not found" >&2; echo "$$output" >&2; exit 1;; esac; \
 	echo "PASS unused-function-control: positive build succeeded and negative build failed for stale_helper"
 
+## GitHub issue #488: the pool's payload accessor must keep returning a
+## pointer TIED to the liveness proof. Untying it removes compile errors
+## rather than adding them, so the kernel building is not evidence that the
+## tie survives -- this is.
+.PHONY: pool-liveness-control
+POOL_CONTROL_SRCS = $(LINUX_USER_DIR)/common_linux/uart.tkb \
+	$(LINUX_USER_DIR)/common_linux/print.tkb \
+	$(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb \
+	kernel/lib/spinlock.tkb kernel/lib/mutex.tkb \
+	$(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
+pool-liveness-control: build
+	@$(TAKIBI) $(POOL_CONTROL_SRCS) test/fixtures/pool_liveness_positive.tkb \
+		--target $(LINUX_AMD64_TARGET) --forbid-trap -o /tmp/takibi-pool-positive.o
+	@status=0; output=`$(TAKIBI) $(POOL_CONTROL_SRCS) \
+		test/fixtures/pool_liveness_negative.tkb \
+		--target $(LINUX_AMD64_TARGET) --forbid-trap \
+		-o /tmp/takibi-pool-negative.o 2>&1` || status=$$?; \
+	if [ $$status -eq 0 ]; then echo "FAIL pool-liveness-control: a payload pointer escaped its proof and the build succeeded" >&2; exit 1; fi; \
+	case "$$output" in *"authority-derived pointer 'payload' cannot be returned"*) ;; \
+	*) echo "FAIL pool-liveness-control: expected diagnostic not found" >&2; echo "$$output" >&2; exit 1;; esac; \
+	echo "PASS pool-liveness-control: the payload pointer cannot outlive its liveness proof"
+
 .PHONY: effect-matrix-control
 effect-matrix-control: build
 	@tmp=`mktemp`; trap 'rm -f "$$tmp"' EXIT; \
@@ -134,7 +156,7 @@ effect-matrix-control: build
 	fi; \
 	echo "PASS effect-matrix-control: EFFECTS.md matches compiler effect rules"
 
-langcheck: unused-function-control effect-matrix-control
+langcheck: unused-function-control effect-matrix-control pool-liveness-control
 	@python3 scripts/check_agents_paths.py
 	@python3 scripts/test_check_expected_line_endings.py
 	@python3 scripts/check_expected_line_endings.py
@@ -145,6 +167,8 @@ langcheck: unused-function-control effect-matrix-control
 	@python3 scripts/test_check_ddb_command_inventory.py
 	@python3 scripts/test_measure_trusted_base.py
 	@python3 scripts/test_profile_kernel_workload.py
+	@bash scripts/test_repeat_kernel_lane.sh
+	@bash scripts/test_archive_kernel_failure.sh
 	@python3 scripts/check_direct_mmio_literals.py kernel
 	@python3 scripts/check_stale_depfiles.py
 	@python3 scripts/check_compiler_sync_rules.py --quiet

@@ -355,8 +355,12 @@ still current, and fixing it means reordering the exit path, which needs
 hardware. A counter reports it every boot.
 
 `IntrusivePool` no longer launders its own liveness proof: payload accessors
-take the view or owner as `borrow` and return a pointer tied to it. 41 sites
-are proof-tied; 18 still launder and are named, `unsafe`, and counted.
+take the view or owner as `borrow` and return a pointer tied to it. What still
+launders is named (`intrusive_pool_payload_unproven_of`), `unsafe`, and
+therefore counted -- and every remaining one is an accessor that RETURNS the
+pointer, so removing it means migrating that accessor's callers to hold the
+proof. A count belongs in the trusted-base inventory rather than here, where
+it goes stale the first time somebody converts one.
 
 **#492** is half done. Every read that HAD a generation now compares it, and
 the count is zero -- so #488's stale reads come through paths that take a bare
