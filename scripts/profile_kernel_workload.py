@@ -91,6 +91,10 @@ def collect(args):
     if len(cpu_records) != cpu_count:
         raise ValueError(
             f"expected {cpu_count} per-CPU records, found {len(cpu_records)}")
+    cpu_lines = [index for index, line in enumerate(lines)
+                 if line.startswith(f"profile: cpu name={args.name} ")]
+    if any(index <= end_line for index in cpu_lines):
+        raise ValueError("per-CPU profile record does not follow the end record")
     per_cpu = []
     aggregate_running = 0
     aggregate_idle = 0
@@ -103,6 +107,9 @@ def collect(args):
         if integer(fields, "cpu") != expected_cpu:
             raise ValueError("per-CPU profile records are missing or out of order")
         values = {key: integer(fields, key) for key in cpu_fields}
+        if values["wall_cycles"] != integer(end, "elapsed_cycles"):
+            raise ValueError(
+                f"CPU {expected_cpu} wall cycles do not equal interval cycles")
         classified = (values["el0_cycles"] + values["el1_cycles"] +
                       values["irq_cycles"] + values["idle_cycles"])
         if classified != values["wall_cycles"]:
