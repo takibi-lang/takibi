@@ -437,6 +437,12 @@ first phase where throughput rather than correctness is the question.
 - **#274** -- TCP RX frame disposition under concurrent receivers.
 - **#412** -- the lock-order checker that reported success while tracking
   nothing.
+- **#505** -- revalidate DDB backtraces once #479 lets processes run on two
+  cores. Stop and capture each selected CPU before reading its unwind root,
+  reject stale `Running` process snapshots, and verify cross-CPU unwind and
+  resume on QEMU and RPi5. This belongs here rather than in #495: the
+  single-scheduling-CPU frame contract is complete, while the invalidating
+  condition does not exist until Phase 3.
 
 ### The supporting track: the in-kernel debugger
 
@@ -445,13 +451,17 @@ scheduled by this milestone, but it is the reason Phase 3 is approachable at
 all. What has landed so far: an interrupt-safe UART DDB and read-only crash
 console, entry from deliberate software breakpoints, interactive breaks driven
 through QMP under QEMU, and the commands `ps`, `regs`, `current`, `intr`,
-`sched`, `vm`, `fds`, `trace`, `oops`, `continue`, plus fault-contained
-read-only kernel, user and physical RAM inspection. The supported QEMU and
-RPi5 DDB/GDB/crash-inspection workflow is documented in `kernel/README.md`.
+`sched`, `vm`, `fds`, `bt [PID]`, `trace`, `events`, `oops`, `continue`, plus
+fault-contained read-only kernel, user and physical RAM inspection. `bt`
+consumes the checked compiler-owned frame chain from **#495 -- DONE
+2026-09-02, QEMU and RPi5**; cross-CPU stop and root capture after processes
+begin running on core 1 are deliberately tracked by **#505**. The supported
+QEMU and RPi5 DDB/GDB/crash-inspection workflow is documented in
+`kernel/README.md`.
 Open and relevant: **#444** (controlled mutation, deferred), **#429**
 (in-kernel GDB stub, deferred), **#425**/**#300** (debug metadata a debugger
 needs to decode variants and enums), **#496** (read-only kernel-aware GDB
-helpers), **#495** (a trustworthy unwind contract before `bt`), and **#149**.
+helpers), **#505** (cross-CPU backtrace capture after #479), and **#149**.
 
 **Do not begin Phase 3 without the observation half of Phase 0.** An SMP race
 with no per-CPU trace is a debugging bottleneck, not a coding one; this project
