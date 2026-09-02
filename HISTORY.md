@@ -93,6 +93,73 @@ kernel checks the boot CPU module where the stale fixed-SMC bypass was found.
 Positive and negative build controls independently prove successful execution,
 nonzero rejection, and the exact unused-function diagnostic.
 
+## 2026-09-01: the flake was the shadow of something that happens every boot (#488)
+
+The intermittent `records MISSING` failure of the previous entry was chased
+three times and never caught, because the thing underneath it is not
+intermittent at all.
+
+Asking a narrower question found it in one boot. Instead of "why did this
+boot fail", the question became "does a reap ever take the record that
+`execution_here()` calls current" -- and the answer was **26, every boot,
+twelve boots out of twelve**. All 26 came from one place:
+`kernel_syscall_wait4_deliver` reaps the exiting child, and it is called from
+`kernel_process_child_exit` while that child is still current. The comment
+beside that call had said so for months -- "whoever is current here (the
+exiting child)" -- without anyone reading what it implied.
+
+`kernel_process_child_exit` then keeps using `child`: the trace arguments read
+its record, and the successor search WALKS THE PROCESS CHAIN starting from it.
+Both are reads of a record that has been given back to the pool.
+
+Nothing was visibly wrong because the freed slot is almost always recycled
+before the read, so the read lands on a plausible record. The rare boot where
+the address was not recycled is what appeared as `records MISSING`, and it
+appeared at all only because an unrelated two-core probe had shifted the pool
+layout. A silent corruption had been masquerading as a flaky test.
+
+**The lesson worth carrying: an intermittent symptom is sometimes a rare
+FAILURE OF CONCEALMENT, not a rare event.** If a bug resists rate measurement,
+stop asking why the failing runs fail and start asking what invariant the
+passing runs are relying on. A counter on that invariant costs one boot to
+write and answers immediately.
+
+### Why the type system had not caught it
+
+`scheduled_process_reap` consumes two linear tokens. The `ProcessHandle` that
+names the same slot survives untouched, because a process tree needs many
+non-owning references to one record and ownership cannot express that. The
+reap was also three call layers below the caller, so nothing in
+`kernel_process_child_exit`'s types could mention it.
+
+Four mechanisms were compared before choosing. The one that turned out to be
+right was already in the tree and had been used backwards:
+
+    fn intrusive_pool_payload_of(T, pool, slot_view: SINK IntrusiveSlotView[pool_id])
+            -> *T
+
+`sink` -- it CONSUMED the linear proof that the slot was occupied -- and
+returned a bare pointer unrelated to it. Every payload pointer in the kernel
+outlived the only evidence there was a payload. The same file's neighbours had
+used `borrow` plus a region annotation for exactly this since the week before.
+
+Changing those two words made the compiler produce the worklist, and it walked
+straight to `scheduled_process_record_at`, the function every one of 159
+process-record reads goes through and the one that caused the bug. Eight other
+functions turned out to take a plain `*T` where they only ever read it;
+`borrow` is what they had meant all along.
+
+This is the at-view discipline the project cites ATS2 for, arrived at from the
+other direction: the VALUE stays copyable and storable, the PROOF is linear and
+cannot be stored, and dereferencing requires the proof. Ownership was the wrong
+tool and proof-separation was the right one, which is a distinction worth
+having made concrete rather than argued.
+
+Laundering was not forbidden afterwards. It was named
+(`intrusive_pool_payload_unproven_of`), marked `unsafe`, and counted: 41 sites
+proof-tied, 18 still laundering. A property nobody could state became a number
+that moves.
+
 ## 2026-08-30: two wrong diagnoses of one intermittent failure, and the arithmetic that would have stopped both (#479)
 
 Written for whoever debugs the next intermittent failure in this tree,

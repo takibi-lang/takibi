@@ -21,7 +21,14 @@ timing, or hardware concurrency.
 
 Kernel documentation is authoritative for current behavior:
 `kernel/README.md`, `kernel/SYSCALLS.md`, `kernel/MEMORY_MAP.md`,
-`kernel/RESOURCE_LIMITS.md`, and `kernel/RUNTIME_STATE.md`.
+`kernel/RESOURCE_LIMITS.md`, `kernel/RUNTIME_STATE.md`, and
+`kernel/CONCURRENCY.md`.
+
+Read `kernel/CONCURRENCY.md` before adding a lock, a two-core probe, or any
+mechanism that reads a pooled object through a handle. It states the lock
+classes and order, what must be asked before a lock is the answer, how a lock
+is bound to what it protects, why reporters take none, and what QEMU cannot
+measure.
 
 Every mutable-state kernel file must declare its execution model as required
 by the build checks. Preserve lock, pool-release, MMIO-address derivation,
