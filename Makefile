@@ -939,16 +939,23 @@ profile-kernel-workload-chart:
 ## kernelcheck-repeat: run a lane N times and report the failure RATE
 ## (make kernelcheck-repeat N=20 LANE=kernelcheck-qemu)
 ##
-## GitHub issue #488 and AGENTS.md's confidence entry. An intermittent
-## failure was declared fixed on a clean run of eight -- twice, wrongly --
-## because nobody computed that a clean eight against a one-in-six event
-## happens 23% of the time. This prints the observed rate and how many
-## clean runs the claim would actually need, so the number is in front of
-## whoever is about to say "fixed".
+## An intermittent failure was declared fixed on a clean run of eight --
+## twice, wrongly -- because nobody computed that a clean eight against a
+## one-in-six event happens 23% of the time. This prints the observed rate
+## and how many clean runs the claim would actually need, so the number is
+## in front of whoever is about to say "fixed".
+##
+## Every sample keeps its own artifact directory, and PORT_BASE separates
+## concurrent runs: two agents in different worktrees pick different bases
+## and stop colliding on the fixed lane ports.
+PORT_BASE ?=
+REPEAT_MODE ?= measure
 N ?= 10
 LANE ?= kernelcheck-qemu
 kernelcheck-repeat:
-	@bash scripts/repeat_kernel_lane.sh "$(N)" $(LANE)
+	@bash scripts/repeat_kernel_lane.sh --mode "$(REPEAT_MODE)" \
+	    $(if $(PORT_BASE),--port-base "$(PORT_BASE)",) \
+	    "$(N)" $(MAKE) $(LANE)
 
 kernelcheck-qemu: kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank
 

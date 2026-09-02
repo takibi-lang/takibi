@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
-# Repeat the timing-sensitive DWARF QEMU lane without overwriting an earlier
-# boot's evidence. The ordinary runner is still the single source of verdicts;
-# this wrapper only gives each sample its own label and artifact directory.
+# Repeat the timing-sensitive DWARF QEMU lane as a CHECK: N consecutive clean
+# boots, each with its own artifact directory and its own ports.
+#
+# The repetition, the per-sample directories and the port separation are
+# scripts/repeat_kernel_lane.sh's; this file supplies only what is specific to
+# the debug lane -- which ELF, which expected views, and where its ports start.
+# Merged 2026-09-01: this script and the rate-measuring runner had grown the
+# same machinery from opposite ends, one able to give a verdict and the other
+# able to give a rate.
+#
+# Override the sample count with KERNEL_QEMU_DEBUG_REPEAT.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -14,20 +22,13 @@ case "$RUNS" in
         ;;
 esac
 
-run=1
-while [ "$run" -le "$RUNS" ]; do
-    artifact_dir="$REPO_ROOT/_build/kernel-hwtest-qemu-debug-repeat-$run"
-    echo "[kernel/qemu-debug-repeat] sample $run/$RUNS"
+exec bash "$REPO_ROOT/scripts/repeat_kernel_lane.sh" \
+    --mode "${KERNEL_QEMU_DEBUG_REPEAT_MODE:-check}" \
+    --label qemu-debug-repeat \
+    --port-base 18683 \
+    --artifacts "$REPO_ROOT/_build/kernel-hwtest-qemu-debug-repeat" \
+    "$RUNS" \
     env \
         KERNEL_QEMU_ELF="$REPO_ROOT/kernel/build/qemu/kernel-debug.elf" \
-        KERNEL_QEMU_LABEL="qemu-debug-repeat-$run" \
         KERNEL_QEMU_EXPECTED_VIEW_DIR="$REPO_ROOT/kernel/tests/qemu-debug/views" \
-        KERNEL_QEMU_HWTEST_ARTIFACT_DIR="$artifact_dir" \
-        KERNEL_QEMU_SERIAL_PORT=18683 \
-        KERNEL_QEMU_NETDEV_LOCAL_PORT=18684 \
-        KERNEL_QEMU_NETDEV_REMOTE_PORT=18685 \
         bash "$REPO_ROOT/scripts/run_kernel_qemutest.sh"
-    run=$((run + 1))
-done
-
-echo "PASS kernel/qemu-debug-repeat: $RUNS independent boots"
