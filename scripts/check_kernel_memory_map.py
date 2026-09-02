@@ -297,6 +297,23 @@ def main():
     if problems:
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)
+        # Name the maintenance action in the failure, the way
+        # effect-matrix-control names --emit-effect-matrix and
+        # check_agents_paths.py names the table to edit. This script had the
+        # --update flag documented only in its own docstring, which is the
+        # one place nobody reads while a build is red: four separate
+        # hand-edits of these rows happened in one session before anybody
+        # noticed the flag existed.
+        #
+        # Worded to keep the order the docstring argues for. The check exists
+        # so somebody LOOKS at a layout change; --update is what you run
+        # AFTER deciding the move is intended, not instead of deciding.
+        print("  Decide first whether this layout move is intended -- a "
+              "section that MOVED with its size unchanged is ordinary code "
+              "growth ahead of it, a section that GREW is new state. Then "
+              "refresh the rows with:", file=sys.stderr)
+        print("      python3 scripts/check_kernel_memory_map.py --update",
+              file=sys.stderr)
         fail(f"{len(problems)} row(s) disagree with the build")
     suffix = ", including the debug image" if "--debug" in sys.argv[1:] else ""
     print("PASS kernel/memory-map: checked rows and allocator expectations "
