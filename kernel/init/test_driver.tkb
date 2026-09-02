@@ -381,6 +381,19 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
         uart_put_udec(scheduled_process_reaped_current_count_value());
         kernel_boot_log("\n");
     }
+    // GitHub issue #492: a record read through a handle whose generation no
+    // longer matches the slot's occupant. Counted, not refused, until the
+    // number is known. Printed only when it happens, because zero is the
+    // whole claim.
+    if (scheduled_process_stale_handle_reads_value() != 0) {
+        kernel_boot_log("process invariant: STALE HANDLE READS count=");
+        uart_put_udec(scheduled_process_stale_handle_reads_value());
+        kernel_boot_log(" first_slot=");
+        uart_put_hex(scheduled_process_stale_first_slot_value());
+        kernel_boot_log(" first_generation=");
+        uart_put_udec(scheduled_process_stale_first_generation_value());
+        kernel_boot_log("\n");
+    }
     if (page_allocator_double_free_count() == 0) {
         kernel_boot_log("resources: no double free\n");
     } else {
