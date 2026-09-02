@@ -9638,7 +9638,9 @@ let codegen_tests = [
             (contains_substring ir
               "define i64 @cg_frame_leaf495() #0");
           Alcotest.(check bool) "frame-pointer=all attribute" true
-            (contains_substring ir "\"frame-pointer\"=\"all\"")));
+            (contains_substring ir "\"frame-pointer\"=\"all\"");
+          Alcotest.(check bool) "generated text section" true
+            (contains_substring ir "section \".text.takibi\"")));
 
   Alcotest.test_case
     "Slice 4 ABI: checker effects add no runtime parameters" `Quick

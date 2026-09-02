@@ -7677,7 +7677,8 @@ let gen_program ?prog_types prog =
     iter_functions (fun fn ->
       add_function_attr fn
         (create_string_attr context "frame-pointer" "all")
-        AttrIndex.Function
+        AttrIndex.Function;
+      if not (is_declaration fn) then set_section ".text.takibi" fn
     ) !the_module;
   assert_trap_accounting_consistent ();
   (* Resolve any deferred/forward-referenced DI metadata. Must run after every

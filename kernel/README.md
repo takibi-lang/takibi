@@ -588,8 +588,9 @@ and target-selection sequence is in `scripts/rpi5_jtag_load.sh`. Stock host
 GDB is not an AArch64 substitute in this environment; use `gdb-multiarch`.
 
 The kernel build enables the compiler's `--frame-pointers` contract. Every compiler-generated AArch64 function has the canonical `[previous x29,
-saved x30]` frame record. Linker-owned generated-text bounds distinguish those
-records from hand-written assembly. Boot entry is an explicit assembly
+saved x30]` frame record and is emitted in `.text.takibi`. Linker-owned bounds
+around that section distinguish those records from hand-written assembly
+without relying on object filenames. Boot entry is an explicit assembly
 boundary and clears x29 before entering Takibi; DDB reports that boundary
 without decoding it as another compiler frame. The deliberate
 `kernel_ddb_breakpoint` helper is the sole explicit assembly bridge: it creates

@@ -38,6 +38,15 @@ ELFS = {
     "RPi5": REPO / "kernel" / "build" / "rpi5" / "kernel.elf",
     "QEMU": REPO / "kernel" / "build" / "qemu" / "kernel.elf",
 }
+QEMU_DEBUG_ELF = REPO / "kernel" / "build" / "qemu" / "kernel-debug.elf"
+QEMU_RAM_END = 0x80000000
+QEMU_LOW_RAM_END = 0x48000000
+QEMU_HOLE_FIRST_END = 0x50000000
+QEMU_HOLE_SECOND_START = 0x60000000
+# The maintained board's firmware DTB leaves ordinary RAM below this address.
+# A firmware/DTB change should fail here and require an explicit fixture audit.
+RPI5_MANAGED_RAM_END = 0x3FC00000
+PAGE_SIZE = 4096
 NM_CANDIDATES = ["llvm-nm-19", "llvm-nm", "nm"]
 
 
@@ -183,6 +192,92 @@ def check_consts(text, problems):
                 f"{unbacktick(cells[2])} says {actual}")
 
 
+def expected_boot_pages(path):
+    text = path.read_text()
+    matches = re.findall(r"^memory: .* allocator_pages=(\d+)$",
+                         text, re.MULTILINE)
+    if len(matches) != 1:
+        fail(f"{path.relative_to(REPO)} must contain exactly one memory line "
+             "with allocator_pages")
+    return int(matches[0])
+
+
+def expected_python_pages(path, name):
+    text = path.read_text()
+    match = re.search(
+        rf"^{re.escape(name)}\s*=\s*\((.*?)\)\s*$",
+        text, re.MULTILINE | re.DOTALL)
+    if match is None:
+        fail(f"{path.relative_to(REPO)} has no {name} tuple")
+    pages = re.findall(r"allocator_pages=(\d+)", match.group(1))
+    if len(pages) != 1:
+        fail(f"{name} in {path.relative_to(REPO)} must contain exactly one "
+             "allocator_pages value")
+    return int(pages[0])
+
+
+def page_span(start, end, label):
+    if start % PAGE_SIZE != 0 or end % PAGE_SIZE != 0 or start >= end:
+        fail(f"{label} is not a non-empty page-aligned span")
+    return (end - start) // PAGE_SIZE
+
+
+def check_allocator_expectations(problems, include_debug):
+    symbols = {name: nm_symbols(elf) for name, elf in ELFS.items()}
+    starts = {}
+    for platform in ("RPi5", "QEMU"):
+        start = symbols[platform].get("usable_ram_start")
+        if start is None:
+            fail(f"usable_ram_start is absent from the {platform} build")
+        starts[platform] = start
+
+    expected = {
+        "kernel/tests/qemu/views/boot.expected":
+            page_span(starts["QEMU"], QEMU_RAM_END, "QEMU managed RAM"),
+        "kernel/tests/rpi5/views/boot.expected":
+            page_span(starts["RPi5"], RPI5_MANAGED_RAM_END,
+                      "RPi5 managed RAM"),
+    }
+    for relative, actual in expected.items():
+        documented = expected_boot_pages(REPO / relative)
+        if documented != actual:
+            problems.append(
+                f"`{relative}` says allocator_pages={documented}, "
+                f"linked layout requires {actual}")
+
+    fdt_path = REPO / "kernel/tests/check_fdt_multibank_qemu.py"
+    fdt_expected = {
+        "MULTIBANK_EXPECTED":
+            page_span(starts["QEMU"], QEMU_RAM_END, "QEMU multi-bank RAM"),
+        "LOW_MEMORY_EXPECTED":
+            page_span(starts["QEMU"], QEMU_LOW_RAM_END, "QEMU low RAM"),
+        "DISCONTIGUOUS_MEMORY_EXPECTED":
+            page_span(starts["QEMU"], QEMU_HOLE_FIRST_END,
+                      "QEMU first discontiguous extent") +
+            page_span(QEMU_HOLE_SECOND_START, QEMU_RAM_END,
+                      "QEMU second discontiguous extent"),
+    }
+    for name, actual in fdt_expected.items():
+        documented = expected_python_pages(fdt_path, name)
+        if documented != actual:
+            problems.append(
+                f"`{name}` says allocator_pages={documented}, "
+                f"linked layout requires {actual}")
+
+    if include_debug:
+        debug_start = nm_symbols(QEMU_DEBUG_ELF).get("usable_ram_start")
+        if debug_start is None:
+            fail("usable_ram_start is absent from the QEMU debug build")
+        actual = page_span(debug_start, QEMU_RAM_END,
+                           "QEMU debug managed RAM")
+        relative = "kernel/tests/qemu-debug/views/boot.expected"
+        documented = expected_boot_pages(REPO / relative)
+        if documented != actual:
+            problems.append(
+                f"`{relative}` says allocator_pages={documented}, "
+                f"linked layout requires {actual}")
+
+
 def main():
     if not DOC.exists():
         fail(f"{DOC} does not exist")
@@ -198,12 +293,14 @@ def main():
     problems = []
     check_elf_symbols(text, problems)
     check_consts(text, problems)
+    check_allocator_expectations(problems, "--debug" in sys.argv[1:])
     if problems:
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)
         fail(f"{len(problems)} row(s) disagree with the build")
-    print("PASS kernel/memory-map: every checked row in kernel/MEMORY_MAP.md "
-          "matches the linked kernels and their constants")
+    suffix = ", including the debug image" if "--debug" in sys.argv[1:] else ""
+    print("PASS kernel/memory-map: checked rows and allocator expectations "
+          f"match the linked kernels{suffix}")
 
 
 if __name__ == "__main__":

@@ -161,6 +161,7 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 	@python3 scripts/test_check_expected_line_endings.py
 	@python3 scripts/check_expected_line_endings.py
 	@python3 scripts/test_check_elf_symbol_alignment.py
+	@python3 scripts/test_check_kernel_memory_map.py
 	@python3 scripts/test_check_kernel_asm_invariants.py
 	@bash scripts/test_run_kernel_build_locked.sh
 	@python3 scripts/test_check_direct_mmio_literals.py
@@ -914,10 +915,15 @@ kernelbuild: build
 # while preventing another Make process from interleaving object writes.
 .PHONY: _kernelbuild-check kernelbuild-check
 _kernelbuild-check: _kernelbuild _kernelbuild-qemu-debug \
+	kernel-debug-layout-check \
 	$(KERNEL_CRASH_SNAPSHOT_LAYOUT)
 
 kernelbuild-check: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-check
+
+.PHONY: kernel-debug-layout-check
+kernel-debug-layout-check: _kernelbuild _kernelbuild-qemu-debug
+	python3 scripts/check_kernel_memory_map.py --debug
 
 ## trustedbasecheck: repeatable inventory of the maintained kernel's checked
 ## source coverage and explicit trusted boundaries. Reads build-produced

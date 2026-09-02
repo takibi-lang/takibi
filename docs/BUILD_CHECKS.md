@@ -17,7 +17,7 @@ than warns; do not bypass or weaken one merely to complete a change.
 | `check_lock_discipline.py` | global mutexes are not force-reset and raw atomics stay allowlisted |
 | `check_execution_model_coverage.py` | mutable kernel state declares its execution model |
 | `check_expected_line_endings.py` | stdout fixtures use one newline convention |
-| `check_kernel_memory_map.py` | linked layout agrees with the documented memory map |
+| `check_kernel_memory_map.py` | linked normal/debug layout agrees with the memory map and exact boot allocator fixtures |
 | `check_kernel_log_expectations.py` | test runners wait only for logs the kernel can emit |
 | `check_kernel_interactive_httpd_protocol.py` | interactive HTTP runners avoid listener/request deadlock |
 | `check_platform_file_parity.py` | duplicated platform functions do not drift silently |
