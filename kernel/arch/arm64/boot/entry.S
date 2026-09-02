@@ -58,6 +58,7 @@ _start:
     msr     tpidr_el1, xzr
     bl      el1_fpsimd_enable
     bl      kernel_mmu_init
+    mov     x29, xzr
     bl      main
 
 .Lpark:
@@ -110,6 +111,7 @@ kernel_secondary_entry:
      * kernel/platform/rpi5/init.tkb now, not an ubfx here. The width and
      * position of the field differ per platform and this file had one of
      * the two copies. */
+    mov     x29, xzr
     bl      kernel_secondary_main
 .Lsecondary_park:
     wfe

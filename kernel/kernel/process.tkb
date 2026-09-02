@@ -662,6 +662,8 @@ struct ProcessDdbRecord {
     state: usize;
     wait_reason: usize;
     saved_sp: usize;
+    stack_bottom: usize;
+    stack_top: usize;
     root_slot: usize;
 }
 
@@ -699,6 +701,18 @@ private fn scheduled_process_ddb_copy_one(
         ProcessWaitReason::NetRx => { output[index].wait_reason = 3; }
     }
     output[index].saved_sp = record.saved_sp;
+    output[index].stack_bottom = 0;
+    output[index].stack_top = 0;
+    if (slot == 0) {
+        // PID 1 executes on the linker-owned boot stack even if its record
+        // retained a reusable process-stack run from an earlier fixture.
+        output[index].stack_bottom = boot_stack_bottom;
+        output[index].stack_top = boot_stack_top;
+    } else if (kernel_stack_run_usable(record.stack_run)) {
+        output[index].stack_bottom =
+            record.stack_run + KERNEL_PROCESS_STACK_SIZE;
+        output[index].stack_top = record.stack_run + KERNEL_STACK_RUN_BYTES;
+    }
     output[index].root_slot = slot;
 }
 

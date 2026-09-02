@@ -70,6 +70,10 @@ run_initial_user:
 el0_sync_entry:
     sub     sp, sp, #EXC_CONTEXT_SIZE
     EXC_CONTEXT_SAVE
+    /* The user x29 is saved above and restored on return. Kernel callees
+     * start at an explicit frame-chain boundary rather than inheriting a
+     * user-controlled pointer into stale kernel-stack contents. */
+    mov     x29, xzr
 
     /* Lower-EL synchronous exceptions are either SVC64 syscalls or, for the
      * bounded process-image stack reservation, a translation fault. Handle
@@ -304,7 +308,10 @@ kernel_syscall_fail_stop:
      * entry saves/restores ExceptionFrame; this helper only emits BRK. */
     .global kernel_ddb_breakpoint
 kernel_ddb_breakpoint:
+    stp     x29, x30, [sp, #-16]!
+    mov     x29, sp
     brk     #0x544b
+    ldp     x29, x30, [sp], #16
     ret
 
     /* One faultable instruction for DDB memory inspection. The caller

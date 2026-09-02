@@ -221,7 +221,7 @@ The existing TCP UART/miniterm data path is unchanged. The kernel prints
 `ddb>` and accepts the following commands.
 <!-- DDB-COMMAND-INVENTORY-START -->
 `oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `proc PID`;
-`trace`; `events`; `xk ADDRESS [COUNT]`; `xp PHYSICAL [COUNT]`;
+`bt [PID]`; `trace`; `events`; `xk ADDRESS [COUNT]`; `xp PHYSICAL [COUNT]`;
 `xu PID ADDRESS [COUNT]`; `help`; `continue`.
 <!-- DDB-COMMAND-INVENTORY-END -->
 Use
@@ -587,11 +587,14 @@ kernel device configuration under `-S -gdb`: notably
 and target-selection sequence is in `scripts/rpi5_jtag_load.sh`. Stock host
 GDB is not an AArch64 substitute in this environment; use `gdb-multiarch`.
 
-There is no supported DDB `bt` command. A trustworthy kernel backtrace needs
-a stable unwind contract across ordinary calls, exception entry, and context
-switches, plus stack-range validation. DDB therefore reports PC/LR, saved
-frames, scheduler state, and bounded event history rather than emitting a
-plausible but unchecked call chain.
+The kernel build enables the compiler's `--frame-pointers` contract. Every
+compiler-generated AArch64 function has the canonical `[previous x29, saved
+x30]` frame record; boot entry clears x29 before entering Takibi so a valid
+chain has an explicit end. Hand-written assembly is a boundary rather than an
+implicitly decoded frame. An asynchronous stop in the short prologue or
+epilogue window may omit that function's record; frame 0 still reports the
+exact interrupted PC, and DDB makes no source-level completeness claim for
+that window.
 
 ### Terminal fail-stop diagnostic
 
@@ -621,7 +624,7 @@ scheduler, sleep, filesystem, network, or ordinary logging dependency. Its
 public command inventory follows.
 <!-- DDB-COMMAND-INVENTORY-START -->
 `oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `proc PID`;
-`trace`; `events`; `xk ADDRESS [COUNT]`; `xp PHYSICAL [COUNT]`;
+`bt [PID]`; `trace`; `events`; `xk ADDRESS [COUNT]`; `xp PHYSICAL [COUNT]`;
 `xu PID ADDRESS [COUNT]`; `help`; `continue`.
 <!-- DDB-COMMAND-INVENTORY-END -->
 `help` lists the same inventory.
@@ -645,6 +648,22 @@ The header prints `truncated=1` when either budget prevents a complete view;
 `proc PID` then says that an absent PID was not captured rather than claiming
 it does not exist. The terminal crash console above intentionally has no
 `continue`.
+
+`bt` walks the interrupted CPU's compiler-generated frame chain. `bt PID`
+uses the same walker with a non-current process's saved exception frame.
+Every read must remain in the one captured stack range, frame addresses must
+be aligned and move monotonically upward, and return PCs must remain in kernel
+text. The walk is capped at 32 frames. Corruption, an unsupported boundary,
+an invalid saved context, and truncation all stop with an explicit reason;
+DDB never scans the stack or guesses a caller. A saved EL0 context reports
+its user boundary explicitly; it does not reinterpret the user's x29 as a
+kernel frame pointer. A non-current `Running` process is refused because its
+saved SP may be historical; a future per-CPU capture must supply that CPU's
+live root. The root includes a CPU
+identity independently of the walker, so a future cross-CPU stop protocol can
+provide one `source=cpu` captured exception root per stopped CPU without
+defining another unwind format. A process-only root is reported as
+`source=saved` and is not falsely attributed to the CPU running DDB.
 
 `xk` reads 1 to 64 bytes from a hexadecimal kernel virtual address. It is
 limited to the identity-mapped ordinary-RAM span occupied by the kernel image
@@ -695,7 +714,8 @@ RPi5 implementation uses the same PL011 DR.BE/BEIM
 path. The normal RPi5 integration enables the test-only ring byte over SWD
 after its ordinary workload together with the test-only guarded-fault command,
 then sends an ordinary byte followed by timed CDC BREAK. It runs the guarded
-fault command, verifies the recovered prompt with an `events` inspection,
+fault command, verifies the recovered prompt with `events` and `bt`
+inspections,
 continues, and executes a shell command in the same boot. This verifies the
 process-wake and platform-BREAK records, fault recovery with the debugger
 environment intact, undamaged per-CPU reading, and resumed workload on the

@@ -99,6 +99,7 @@ struct DdbSnapshot {
 private let mut ddb_snapshot: DdbSnapshot;
 let mut kernel_ddb_breakpoint_test_enabled: bool;
 let mut kernel_ddb_memory_fault_test_enabled: bool;
+let mut kernel_ddb_backtrace_test_enabled: bool;
 let mut kernel_ddb_memory_access_active: bool;
 let mut kernel_ddb_memory_access_faulted: bool;
 let mut kernel_ddb_memory_access_address: usize;
@@ -319,6 +320,44 @@ private fn ddb_parse_user_memory(
         return DdbUserMemoryCommand::Invalid;
     }
     return DdbUserMemoryCommand::User((pid, address, count));
+}
+
+must_use variant DdbBacktraceCommand {
+    NotBacktrace;
+    Invalid;
+    Current;
+    Process(usize);
+}
+
+private fn ddb_parse_backtrace(
+        line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize)
+        -> DdbBacktraceCommand {
+    if (ddb_command_is(line, length, bs"bt")) {
+        return DdbBacktraceCommand::Current;
+    }
+    if (ddb_command_starts_with(line, length, bs"bt ") == false) {
+        return DdbBacktraceCommand::NotBacktrace;
+    }
+    let mut pid: usize = 0;
+    let mut digits: usize = 0;
+    for index: usize in 3..<32 {
+        if (index < length) {
+            let byte: u8 = line[index];
+            if (byte < 0x30 || byte > 0x39) {
+                return DdbBacktraceCommand::Invalid;
+            }
+            let digit: usize = (byte - 0x30) as usize;
+            if (pid > (0xFFFFFFFFFFFFFFFF - digit) / 10) {
+                return DdbBacktraceCommand::Invalid;
+            }
+            pid = pid * 10 + digit;
+            digits = digits + 1;
+        }
+    }
+    if (digits == 0 || pid == 0) {
+        return DdbBacktraceCommand::Invalid;
+    }
+    return DdbBacktraceCommand::Process(pid);
 }
 
 must_use variant DdbByteReadResult { Fault; Read(usize); }
@@ -568,6 +607,235 @@ private fn ddb_render_regs() !{unsafe} {
     ddb_puts(" spsr="); ddb_put_hex(frame.spsr_el1);
     ddb_puts(" tpidr_el0="); ddb_put_hex(frame.tpidr_el0);
     ddb_puts("\n");
+}
+
+const DDB_BACKTRACE_FRAMES: usize = 32;
+
+struct DdbUnwindRoot {
+    source: usize;
+    cpu: usize;
+    pid: usize;
+    pc: usize;
+    fp: usize;
+    stack_floor: usize;
+    stack_bottom: usize;
+    stack_top: usize;
+}
+
+extern symbol kernel_text_start;
+extern symbol kernel_text_end;
+
+private fn ddb_bt_stop(reason: *u8, fp: usize) !{unsafe} {
+    ddb_puts("ddb: bt stop="); ddb_puts(reason);
+    ddb_puts(" fp="); ddb_put_hex(fp);
+    ddb_puts("\n");
+}
+
+// The compiler owns the record shape: --frame-pointers makes every Takibi
+// function use AArch64's canonical [previous x29, saved x30] pair. This
+// walker owns only validation and policy. A future stopped-CPU capture can
+// supply another DdbUnwindRoot without changing the frame contract.
+private fn ddb_walk_backtrace(root: DdbUnwindRoot, limit: usize) !{unsafe} {
+    ddb_puts("ddb: bt source=");
+    if (root.source == 1) {
+        ddb_puts("cpu cpu="); ddb_put_udec(root.cpu & 0xFF);
+    } else {
+        ddb_puts("saved");
+    }
+    ddb_puts(" pid="); ddb_put_udec(root.pid);
+    ddb_puts(" stack="); ddb_put_hex(root.stack_bottom);
+    ddb_puts(".."); ddb_put_hex(root.stack_top);
+    ddb_puts("\n");
+    if (root.pc % 4 != 0) {
+        ddb_bt_stop("misaligned-pc", root.fp);
+        return;
+    }
+    if (root.pc < kernel_text_start || root.pc >= kernel_text_end) {
+        ddb_bt_stop("unsupported-pc", root.fp);
+        return;
+    }
+    ddb_puts("ddb: bt frame=0 pc="); ddb_put_hex(root.pc);
+    ddb_puts(" boundary=exception\n");
+    let mut frames: usize = 1;
+    let mut fp: usize = root.fp;
+    while (fp != 0) {
+        if (frames >= limit) {
+            ddb_bt_stop("depth-limit", fp);
+            return;
+        }
+        if (fp % 16 != 0) {
+            ddb_bt_stop("misaligned-frame", fp);
+            return;
+        }
+        if (root.stack_bottom == 0 || root.stack_top <= root.stack_bottom ||
+                fp < root.stack_floor || fp < root.stack_bottom ||
+                fp > root.stack_top - 16) {
+            ddb_bt_stop("out-of-range", fp);
+            return;
+        }
+        let mut previous: usize = 0;
+        match ddb_read_kernel_word(fp) {
+            DdbWordReadResult::Fault => {
+                ddb_bt_stop("memory-fault", fp);
+                return;
+            }
+            DdbWordReadResult::Read(value) => { previous = value; }
+        }
+        let mut return_pc: usize = 0;
+        match ddb_read_kernel_word(fp + 8) {
+            DdbWordReadResult::Fault => {
+                ddb_bt_stop("memory-fault", fp);
+                return;
+            }
+            DdbWordReadResult::Read(value) => { return_pc = value; }
+        }
+        if (return_pc % 4 != 0 ||
+                return_pc < kernel_text_start || return_pc >= kernel_text_end) {
+            ddb_bt_stop("invalid-return-pc", fp);
+            return;
+        }
+        ddb_puts("ddb: bt frame="); ddb_put_udec(frames);
+        ddb_puts(" pc="); ddb_put_hex(return_pc);
+        ddb_puts(" fp="); ddb_put_hex(fp);
+        ddb_puts("\n");
+        frames = frames + 1;
+        if (previous == 0) {
+            ddb_puts("ddb: bt complete frames="); ddb_put_udec(frames);
+            ddb_puts("\n");
+            return;
+        }
+        if (previous <= fp) {
+            ddb_bt_stop("nonmonotonic-frame", previous);
+            return;
+        }
+        fp = previous;
+    }
+    ddb_puts("ddb: bt complete frames="); ddb_put_udec(frames);
+    ddb_puts("\n");
+}
+
+private fn ddb_current_unwind_root() -> DdbUnwindRoot !{unsafe} {
+    let frame: *ExceptionFrame = unsafe {
+        ddb_snapshot.frame_sp as *ExceptionFrame
+    };
+    let run_bottom: usize =
+        (ddb_snapshot.frame_sp / KERNEL_STACK_RUN_BYTES) *
+        KERNEL_STACK_RUN_BYTES;
+    let mut root: DdbUnwindRoot = {
+        1,
+        ddb_snapshot.cpu,
+        ddb_snapshot.process_pid,
+        frame.elr_el1,
+        frame.x29,
+        ddb_snapshot.frame_sp + EXC_CONTEXT_SIZE,
+        run_bottom + KERNEL_PROCESS_STACK_SIZE,
+        run_bottom + KERNEL_STACK_RUN_BYTES
+    };
+    return root;
+}
+
+private fn ddb_render_backtrace_current() !{unsafe} {
+    let frame: *ExceptionFrame = unsafe {
+        ddb_snapshot.frame_sp as *ExceptionFrame
+    };
+    if ((frame.spsr_el1 & 0xF) == 0) {
+        let mut root: DdbUnwindRoot = ddb_current_unwind_root();
+        ddb_puts("ddb: bt source=cpu cpu=");
+        ddb_put_udec(ddb_snapshot.cpu & 0xFF);
+        ddb_puts(" pid="); ddb_put_udec(ddb_snapshot.process_pid);
+        ddb_puts(" stack="); ddb_put_hex(root.stack_bottom);
+        ddb_puts(".."); ddb_put_hex(root.stack_top);
+        ddb_puts("\n");
+        ddb_puts("ddb: bt frame=0 pc="); ddb_put_hex(frame.elr_el1);
+        ddb_puts(" boundary=user\n");
+        ddb_bt_stop("user-boundary", frame.x29);
+        return;
+    }
+    ddb_walk_backtrace(ddb_current_unwind_root(), DDB_BACKTRACE_FRAMES);
+}
+
+private fn ddb_render_backtrace_process(pid: usize) !{unsafe} {
+    if (pid == ddb_snapshot.process_pid) {
+        ddb_render_backtrace_current();
+        return;
+    }
+    for index: usize in 0..<DDB_PROCESS_RECORDS {
+        if (index < ddb_snapshot.process_count &&
+                ddb_snapshot.processes[index].pid == pid) {
+            let mut record: ProcessDdbRecord = ddb_snapshot.processes[index];
+            if (record.state == 2) {
+                ddb_puts("ddb: bt running on another cpu; capture that cpu\n");
+                return;
+            }
+            if (record.saved_sp == 0 || record.stack_bottom == 0 ||
+                    record.saved_sp < record.stack_bottom ||
+                    record.saved_sp > record.stack_top - EXC_CONTEXT_SIZE) {
+                ddb_puts("ddb: bt pid has no valid saved context\n");
+                return;
+            }
+            let frame: *ExceptionFrame = unsafe {
+                record.saved_sp as *ExceptionFrame
+            };
+            if ((frame.spsr_el1 & 0xF) == 0) {
+                ddb_puts("ddb: bt source=saved pid="); ddb_put_udec(pid);
+                ddb_puts(" stack="); ddb_put_hex(record.stack_bottom);
+                ddb_puts(".."); ddb_put_hex(record.stack_top);
+                ddb_puts("\n");
+                ddb_puts("ddb: bt frame=0 pc=");
+                ddb_put_hex(frame.elr_el1);
+                ddb_puts(" boundary=user\n");
+                ddb_bt_stop("user-boundary", frame.x29);
+                return;
+            }
+            let mut root: DdbUnwindRoot = {
+                2,
+                ddb_snapshot.cpu,
+                pid,
+                frame.elr_el1,
+                frame.x29,
+                record.saved_sp + EXC_CONTEXT_SIZE,
+                record.stack_bottom,
+                record.stack_top
+            };
+            ddb_walk_backtrace(root, DDB_BACKTRACE_FRAMES);
+            return;
+        }
+    }
+    ddb_puts("ddb: bt pid not captured");
+    if (ddb_snapshot.process_truncated != 0) {
+        ddb_puts(" (snapshot truncated)");
+    }
+    ddb_puts("\n");
+}
+
+private fn ddb_render_backtrace_test() !{unsafe} {
+    let mut valid: DdbUnwindRoot = ddb_current_unwind_root();
+    let test_pc: usize = kernel_ddb_memory_fault_return;
+    let mut unsupported: DdbUnwindRoot = {
+        valid.source, valid.cpu, valid.pid, 0, valid.fp, valid.stack_floor,
+        valid.stack_bottom, valid.stack_top
+    };
+    ddb_walk_backtrace(unsupported, DDB_BACKTRACE_FRAMES);
+    let mut bad_pc: DdbUnwindRoot = {
+        valid.source, valid.cpu, valid.pid, test_pc + 1, valid.fp,
+        valid.stack_floor, valid.stack_bottom, valid.stack_top
+    };
+    ddb_walk_backtrace(bad_pc, DDB_BACKTRACE_FRAMES);
+    let mut corrupt: DdbUnwindRoot = {
+        valid.source, valid.cpu, valid.pid, test_pc, 3, valid.stack_floor,
+        valid.stack_bottom, valid.stack_top
+    };
+    ddb_walk_backtrace(corrupt, DDB_BACKTRACE_FRAMES);
+    let mut outside: DdbUnwindRoot = {
+        valid.source, valid.cpu, valid.pid, test_pc, valid.stack_top,
+        valid.stack_floor, valid.stack_bottom, valid.stack_top
+    };
+    ddb_walk_backtrace(outside, DDB_BACKTRACE_FRAMES);
+    let mut truncated: DdbUnwindRoot = {
+        valid.source, valid.cpu, valid.pid, test_pc, valid.stack_floor,
+        valid.stack_floor, valid.stack_bottom, valid.stack_top
+    };
+    ddb_walk_backtrace(truncated, 1);
 }
 
 private fn ddb_render_trace() !{unsafe} {
@@ -843,6 +1111,17 @@ fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
         } else if (ddb_command_is(line as []u8, length, bs"events")) {
             ddb_render_events();
         } else {
+            match ddb_parse_backtrace(line as []u8, length) {
+                DdbBacktraceCommand::Current => {
+                    ddb_render_backtrace_current();
+                }
+                DdbBacktraceCommand::Process(pid) => {
+                    ddb_render_backtrace_process(pid);
+                }
+                DdbBacktraceCommand::Invalid => {
+                    ddb_puts("ddb: usage: bt [PID]\n");
+                }
+                DdbBacktraceCommand::NotBacktrace => {
             match ddb_parse_memory(line as []u8, length) {
                 DdbMemoryCommand::Kernel(details) => {
                     let (address, count) = details;
@@ -870,6 +1149,9 @@ fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
                     CrashConsolePidResult::Invalid => {
                     if (ddb_command_is(line as []u8, length, bs"trace")) {
                         ddb_render_trace();
+                    } else if (kernel_ddb_backtrace_test_enabled &&
+                            ddb_command_is(line as []u8, length, bs"bttest")) {
+                        ddb_render_backtrace_test();
                     } else if (kernel_ddb_memory_fault_test_enabled &&
                             ddb_command_is(line as []u8, length, bs"xkfault")) {
                         // Test-only bypass of the ordinary-RAM classifier:
@@ -878,8 +1160,10 @@ fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
                         // index 64 is RPi5 device MMIO despite faulting on QEMU.
                         ddb_render_kernel_memory(0x800000000, 1);
                     } else if (ddb_command_is(line as []u8, length, bs"help")) {
-                        ddb_puts("commands: oops regs intr sched current vm fds ps proc PID trace events xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] help continue\n");
+                        ddb_puts("commands: oops regs intr sched current vm fds ps proc PID bt [PID] trace events xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] help continue\n");
                     } else { ddb_puts("ddb: unknown command; try help\n"); }
+                    }
+                        }
                     }
                      }
                     }

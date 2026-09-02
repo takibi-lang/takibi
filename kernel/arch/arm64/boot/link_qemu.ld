@@ -11,12 +11,14 @@ SECTIONS {
     . = 0x40000000;
     kernel_image_start = .;
 
+    kernel_text_start = .;
     .text : {
         KEEP(*(.text.boot))
         . = ALIGN(2048);
         KEEP(*(.text.vectors))
         *(.text .text.*)
     }
+    kernel_text_end = .;
 
     .rodata : ALIGN(8) {
         *(.rodata .rodata.*)

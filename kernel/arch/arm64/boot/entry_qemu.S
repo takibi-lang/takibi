@@ -82,6 +82,7 @@ _start:
 
     bl      el1_fpsimd_enable
     bl      kernel_mmu_init
+    mov     x29, xzr
     bl      main
 
 .Lpark:
@@ -140,6 +141,7 @@ kernel_secondary_entry:
      * both this file and its RPi5 counterpart. Nothing about which
      * affinity field this machine numbers cores in is stated in assembly
      * any more. */
+    mov     x29, xzr
     bl      kernel_secondary_main
 .Lsecondary_park:
     wfe

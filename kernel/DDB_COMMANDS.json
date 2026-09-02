@@ -9,6 +9,7 @@
     {"name": "fds", "usage": "fds", "coverage": "qemu"},
     {"name": "ps", "usage": "ps", "coverage": "qemu"},
     {"name": "proc", "usage": "proc PID", "coverage": "qemu"},
+    {"name": "bt", "usage": "bt [PID]", "coverage": "qemu"},
     {"name": "trace", "usage": "trace", "coverage": "qemu"},
     {"name": "events", "usage": "events", "coverage": "qemu"},
     {"name": "xk", "usage": "xk ADDRESS [COUNT]", "coverage": "qemu"},
@@ -18,6 +19,12 @@
     {"name": "continue", "usage": "continue", "coverage": "qemu"}
   ],
   "hidden": [
+    {
+      "name": "bttest",
+      "classification": "test-only",
+      "reason": "exercises explicit unsupported, corrupt, out-of-range, and truncated unwind stops",
+      "coverage": "qemu"
+    },
     {
       "name": "xkfault",
       "classification": "test-only",

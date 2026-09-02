@@ -204,6 +204,7 @@ let target_data : Llvm_target.DataLayout.t option ref = ref None
    target is configured, every later gen_program call keeps using it. *)
 let configured_target_triple = ref ""
 let configured_datalayout_str = ref ""
+let frame_pointers_enabled = ref false
 
 (* Test processes compile many independent programs. Return the target-facing
    global state to the same unconfigured defaults a fresh compiler process has;
@@ -213,6 +214,7 @@ let reset_target () =
   target_data := None;
   configured_target_triple := "";
   configured_datalayout_str := "";
+  frame_pointers_enabled := false;
   Target_info.reset ()
 (* Enum underlying type registry: enum name -> underlying Ast type (u8/u16/u32/u64) *)
 let enum_underlying  : (string, Ast.type_expr) Hashtbl.t = Hashtbl.create 8
@@ -256,6 +258,13 @@ let record_trap loc what = trap_sites := (loc, what) :: !trap_sites
 (* -- Function profiling (--profile-functions) --------------------------- *)
 let function_profiling_enabled = ref false
 let set_function_profiling enabled = function_profiling_enabled := enabled
+
+(* -- Stable frame chains (--frame-pointers) ---------------------------- *)
+(* This is an object-level code-generation contract, not a source-language
+   property. The maintained kernel enables it so its debugger can consume
+   AArch64's canonical [previous x29, saved x30] records without decoding
+   LLVM prologues. Other targets keep LLVM's normal frame-pointer policy. *)
+let set_frame_pointers enabled = frame_pointers_enabled := enabled
 
 let prof_entry_ty : lltype option ref = ref None
 let prof_table : llvalue option ref = ref None
@@ -7138,6 +7147,11 @@ let gen_exception_entry name frame dispatch before guard dispatch_stack =
   done;
   List.iter (fun sysreg -> a "\tmrs\tx9, %s\n\tstr\tx9, [sp, #%d]\n" sysreg (off sysreg))
     ["fpsr"; "fpcr"];
+  (* The interrupted x29 is already in the ExceptionFrame. Dispatch starts a
+     new kernel call-chain root instead of inheriting an EL0-controlled frame
+     pointer or accidentally joining the interrupted chain. DDB unwinds the
+     interrupted chain from the saved frame, never through its own handler. *)
+  a "\tmov\tx29, xzr\n";
   (* GitHub issue #378: run the handler on a stack of its own, so one
      kernel stack no longer has to hold the deepest syscall path and the
      deepest interrupt path at once. The FRAME stays where it was saved:
@@ -7659,6 +7673,12 @@ let gen_program ?prog_types prog =
   ) prog;
   if Buffer.length raw_asm_buf > 0 then
     set_module_inline_asm !the_module (Buffer.contents raw_asm_buf);
+  if !frame_pointers_enabled then
+    iter_functions (fun fn ->
+      add_function_attr fn
+        (create_string_attr context "frame-pointer" "all")
+        AttrIndex.Function
+    ) !the_module;
   assert_trap_accounting_consistent ();
   (* Resolve any deferred/forward-referenced DI metadata. Must run after every
      gen_func call above, before the module is optimized or emitted to an object. *)

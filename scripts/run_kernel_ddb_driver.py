@@ -37,6 +37,7 @@ def main() -> int:
         b"oops\n", b"regs\n", b"intr\n", b"sched\n",
         b"current\n", b"vm\n", b"fds\n",
         b"ps\n", b"proc 1\n",
+        b"bt\n", b"bt 1\n", b"bt 0\n", b"bt 999999\n", b"bttest\n",
         b"trace\n", b"events\n",
         f"xk {args.kernel_address} 2\n".encode("ascii"),
         b"xk ffffffffffffffff 2\n", b"xk 0 0\n",

@@ -55,6 +55,7 @@ GDB_COMMANDS=(
     -ex "break kernel_ddb_breakpoint_test_checkpoint"
     -ex "continue"
     -ex "set *(char *)&kernel_ddb_memory_fault_test_enabled = 1"
+    -ex "set *(char *)&kernel_ddb_backtrace_test_enabled = 1"
     -ex "set *(char *)&diagnostic_trace_test_enabled = 1"
     -ex "disable 1"
 )
@@ -87,6 +88,16 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         ! grep -Eq '^ddb: ps count=[1-9][0-9]* truncated=[01]$' "$UART_LOG" ||
         ! grep -Eq '^ddb: ps pid=1 ppid=0 state=[0-9]+ wait=[0-9]+ root=0 sp=0x[0-9a-f]+$' "$UART_LOG" ||
         ! grep -Eq '^ddb: proc pid=1 ppid=0 state=[0-9]+ wait=[0-9]+ root=0 sp=0x[0-9a-f]+$' "$UART_LOG" ||
+        [ "$(grep -Ec '^ddb: bt source=(cpu cpu=[0-9]+|saved) pid=[0-9]+ stack=0x[0-9a-f]+\.\.0x[0-9a-f]+$' "$UART_LOG")" -lt 2 ] ||
+        [ "$(grep -Ec '^ddb: bt frame=0 pc=0x[0-9a-f]+ boundary=(exception|user)$' "$UART_LOG")" -lt 2 ] ||
+        ! grep -Eq '^ddb: bt (complete frames=[1-9][0-9]*|stop=(depth-limit|invalid-return-pc|nonmonotonic-frame|out-of-range) fp=0x[0-9a-f]+)$' "$UART_LOG" ||
+        ! grep -q '^ddb: usage: bt \[PID\]$' "$UART_LOG" ||
+        ! grep -q '^ddb: bt pid not captured$' "$UART_LOG" ||
+        ! grep -q '^ddb: bt stop=unsupported-pc fp=0x' "$UART_LOG" ||
+        ! grep -q '^ddb: bt stop=misaligned-pc fp=0x' "$UART_LOG" ||
+        ! grep -q '^ddb: bt stop=misaligned-frame fp=0x0000000000000003$' "$UART_LOG" ||
+        ! grep -q '^ddb: bt stop=out-of-range fp=0x' "$UART_LOG" ||
+        ! grep -q '^ddb: bt stop=depth-limit fp=0x' "$UART_LOG" ||
         ! grep -q '^ddb: trace count=' "$UART_LOG" ||
         ! grep -q '^ddb: events cpu=0 count=' "$UART_LOG" ||
         ! grep -Eq "^ddb: xk address=0x0*$KERNEL_READ_ADDRESS count=2$" "$UART_LOG" ||
@@ -105,7 +116,7 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         [ "$(grep -c '^ddb: usage: xu PID HEX_ADDRESS \[COUNT_1_TO_64\]$' "$UART_LOG")" -ne 2 ] ||
         ! grep -q '^ddb: xu pid not captured$' "$UART_LOG" ||
         ! grep -q '^ddb: xu unmapped address=0x0000000070000000$' "$UART_LOG" ||
-        ! grep -q '^commands: oops regs intr sched current vm fds ps proc PID trace events xk ADDRESS \[COUNT\] xp PHYSICAL \[COUNT\] xu PID ADDRESS \[COUNT\] help continue$' "$UART_LOG" ||
+        ! grep -q '^commands: oops regs intr sched current vm fds ps proc PID bt \[PID\] trace events xk ADDRESS \[COUNT\] xp PHYSICAL \[COUNT\] xu PID ADDRESS \[COUNT\] help continue$' "$UART_LOG" ||
         ! grep -q '^ddb: continuing$' "$UART_LOG" ||
         ! grep -q '^init: ash bootstrap$' "$UART_LOG"; then
     echo "FAIL kernel/qemu ddb: BREAK inspection did not resume boot" >&2
@@ -114,9 +125,18 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
 fi
 
 if [ "$BREAK_SOURCE" = uart ] &&
-        { ! grep -Eq '^ddb: event seq=1 cpu=0 id=0x0000000000000201 a=0x000000000000000a b=0x0*[1-9a-f][0-9a-f]* c=0x0000000000000000 d=0x0000000000000001$' "$UART_LOG" ||
+        { ! grep -q '^ddb: bt stop=user-boundary fp=0x' "$UART_LOG" ||
+          ! grep -Eq '^ddb: event seq=1 cpu=0 id=0x0000000000000201 a=0x000000000000000a b=0x0*[1-9a-f][0-9a-f]* c=0x0000000000000000 d=0x0000000000000001$' "$UART_LOG" ||
           ! grep -q '^ddb: event seq=2 cpu=0 id=0x0000000000000101 a=0x' "$UART_LOG"; }; then
     echo "FAIL kernel/qemu ddb: interleaved UART wake/BREAK events missing" >&2
+    sed 's/^/  /' "$UART_LOG" >&2 || true
+    exit 1
+fi
+
+if [ "$BREAK_SOURCE" = software ] &&
+        { ! grep -Eq '^ddb: bt frame=[1-9][0-9]* pc=0x[0-9a-f]+ fp=0x[0-9a-f]+$' "$UART_LOG" ||
+          ! grep -Eq '^ddb: bt complete frames=([2-9]|[1-9][0-9]+)$' "$UART_LOG"; }; then
+    echo "FAIL kernel/qemu ddb: software BRK did not produce a complete compiler frame chain" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1
 fi

@@ -9621,6 +9621,26 @@ let codegen_tests = [
         (contains_substring ir "noinline"));
 
   Alcotest.test_case
+    "--frame-pointers gives every generated function a stable frame contract"
+    `Quick
+    (fun () ->
+      Fun.protect
+        ~finally:(fun () -> Llvm_gen.set_frame_pointers false)
+        (fun () ->
+          Llvm_gen.set_frame_pointers true;
+          ignore (gen_codegen
+            "fn cg_frame_leaf495() -> usize { return 1; }
+             fn cg_frame_caller495() -> usize {
+               return cg_frame_leaf495();
+             }");
+          let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+          Alcotest.(check bool) "leaf carries frame-pointer=all" true
+            (contains_substring ir
+              "define i64 @cg_frame_leaf495() #0");
+          Alcotest.(check bool) "frame-pointer=all attribute" true
+            (contains_substring ir "\"frame-pointer\"=\"all\"")));
+
+  Alcotest.test_case
     "Slice 4 ABI: checker effects add no runtime parameters" `Quick
     (fun () ->
       ignore (gen_codegen "fn cgeffect4() !{may_block} {}");
