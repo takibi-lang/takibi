@@ -449,6 +449,15 @@ make profile-kernel-workload-chart \
   PROFILE_CHART=_build/busy-pair-comparison.svg
 ```
 
+Flat PC sample dumps use `scripts/profile_kernel_samples.py`. The input record
+contract preserves sequence, timestamp, PC, CPU, PID, execution level, and
+sample period, followed by explicit stored, lost, and attempted totals. EL1 and
+IRQ addresses are resolved only against `--kernel-elf`; each EL0 PID requires
+its own `--pid-elf PID=PATH` mapping. The JSON artifact records the SHA-256 of
+every ELF it actually used, and leaves unknown PIDs or addresses unresolved
+rather than guessing a symbol. This host-side contract is independently
+testable; QEMU output is not RPi5 performance evidence.
+
 This is an explicit profiling command, not a performance threshold in
 `make allcheck`.
 

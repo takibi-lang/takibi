@@ -168,6 +168,7 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 	@python3 scripts/test_check_ddb_command_inventory.py
 	@python3 scripts/test_measure_trusted_base.py
 	@python3 scripts/test_profile_kernel_workload.py
+	@python3 scripts/test_profile_kernel_samples.py
 	@bash scripts/test_repeat_kernel_lane.sh
 	@bash scripts/test_archive_kernel_failure.sh
 	@python3 scripts/check_direct_mmio_literals.py kernel
