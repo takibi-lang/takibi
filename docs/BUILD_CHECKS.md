@@ -17,6 +17,7 @@ than warns; do not bypass or weaken one merely to complete a change.
 | `check_lock_discipline.py` | global mutexes are not force-reset and raw atomics stay allowlisted |
 | `check_liveness_proof_escapes.py` | every place that drops a pool's liveness proof is declared with a reason |
 | `check_invariant_lines_unviewed.py` | a known-nonzero invariant report is not asserted as correct by a view |
+| `check_dead_slot_peek_not_retained.py` | the dead-slot-tolerant record peek is read on the spot, never bound |
 | `check_execution_model_coverage.py` | mutable kernel state declares its execution model |
 | `check_expected_line_endings.py` | stdout fixtures use one newline convention |
 | `check_kernel_memory_map.py` | linked normal/debug layout agrees with the memory map and exact boot allocator fixtures |
