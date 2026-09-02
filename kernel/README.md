@@ -456,8 +456,10 @@ sample period, followed by explicit stored, lost, and attempted totals. EL1 and
 IRQ addresses are resolved only against `--kernel-elf`; each EL0 PID requires
 its own `--pid-elf PID=PATH` mapping. The JSON artifact records the SHA-256 of
 every ELF it actually used, and leaves unknown PIDs or addresses unresolved
-rather than guessing a symbol. This host-side contract is independently
-testable; QEMU output is not RPi5 performance evidence.
+rather than guessing a symbol. Duplicate PID mappings are rejected, and a
+bounded symbolizer timeout prevents a broken external tool from hanging the
+collection command. This host-side contract is independently testable; QEMU
+output is not RPi5 performance evidence.
 
 This is an explicit profiling command, not a performance threshold in
 `make allcheck`.

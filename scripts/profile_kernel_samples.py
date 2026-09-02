@@ -48,13 +48,16 @@ def elf_identity(path):
     return {"path": str(Path(path).resolve()), "sha256": hashlib.sha256(data).hexdigest()}
 
 
-def symbolize(tool, elf, addresses):
+def symbolize(tool, elf, addresses, timeout):
     if not addresses:
         return []
     command = [tool, "-f", "-C", "-e", elf,
                *[f"0x{pc:x}" for pc in addresses]]
-    result = subprocess.run(command, text=True, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE)
+    try:
+        result = subprocess.run(command, text=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        raise ValueError(f"symbolizer timed out for {elf}") from error
     if result.returncode != 0:
         raise ValueError(f"symbolizer failed for {elf}: {result.stderr.strip()}")
     lines = result.stdout.splitlines()
@@ -141,7 +144,11 @@ def collect(args):
     if integer(summary, "attempted") != stored + lost:
         raise ValueError("sample lost total is inconsistent")
 
-    mappings = dict(args.pid_elf)
+    mappings = {}
+    for pid, elf in args.pid_elf:
+        if pid in mappings:
+            raise ValueError(f"duplicate ELF mapping for PID {pid}")
+        mappings[pid] = elf
     groups = {}
     for index, sample in enumerate(parsed):
         elf = args.kernel_elf if sample["level"] != "el0" else mappings.get(sample["pid"])
@@ -153,7 +160,8 @@ def collect(args):
     identities = {}
     for elf, entries in groups.items():
         identities[elf] = elf_identity(elf)
-        resolved = symbolize(args.symbolizer, elf, [pc for _, pc in entries])
+        resolved = symbolize(args.symbolizer, elf, [pc for _, pc in entries],
+                             args.symbolizer_timeout)
         for (index, _), symbol in zip(entries, resolved):
             parsed[index]["symbol"] = symbol
             parsed[index]["elf"] = identities[elf]["sha256"]
@@ -190,7 +198,11 @@ def main():
     parser.add_argument("--target", required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--symbolizer", default="addr2line")
-    collect(parser.parse_args())
+    parser.add_argument("--symbolizer-timeout", type=float, default=10.0)
+    args = parser.parse_args()
+    if args.symbolizer_timeout <= 0:
+        parser.error("--symbolizer-timeout must be positive")
+    collect(args)
 
 
 if __name__ == "__main__":

@@ -83,7 +83,20 @@ def main():
         if result.returncode == 0 or "execution level is invalid" not in result.stderr:
             raise RuntimeError("malformed execution level was accepted")
 
-    print("PASS profile-kernel-samples: identities, loss, rejection, unknown symbols")
+        uart.write_text(good, encoding="ascii")
+        result = run(root, uart, "--pid-elf", f"7={root / 'image'}")
+        if result.returncode == 0 or "duplicate ELF mapping" not in result.stderr:
+            raise RuntimeError("duplicate PID ELF mapping was accepted")
+
+        blocker = root / "blocking-symbolizer"
+        blocker.write_text("#!/bin/sh\nsleep 5\n", encoding="ascii")
+        blocker.chmod(0o755)
+        result = run(root, uart, "--symbolizer", str(blocker),
+                     "--symbolizer-timeout", "0.1")
+        if result.returncode == 0 or "symbolizer timed out" not in result.stderr:
+            raise RuntimeError("blocked symbolizer was not bounded by its timeout")
+
+    print("PASS profile-kernel-samples: identities, loss, rejection, timeout")
 
 
 if __name__ == "__main__":
