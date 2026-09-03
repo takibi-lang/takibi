@@ -76,6 +76,8 @@ fi
 # An orphan of THIS lane -- a qemu-system whose own command line carries
 # this port, left behind by an interrupted run -- is reaped; anything else
 # is reported and left alone.
+. "$REPO_ROOT/scripts/qemu_session_ports.sh"
+qemu_session_shift_ports SERIAL_PORT NETDEV_LOCAL_PORT NETDEV_REMOTE_PORT
 python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "$RUN_LABEL" \
     "tcp:$SERIAL_PORT" "udp:$NETDEV_LOCAL_PORT" "udp:$NETDEV_REMOTE_PORT" || exit 1
 if [ ! -f "$ELF" ]; then

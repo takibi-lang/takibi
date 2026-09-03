@@ -25,7 +25,7 @@ than warns; do not bypass or weaken one merely to complete a change.
 | `check_kernel_interactive_httpd_protocol.py` | interactive HTTP runners avoid listener/request deadlock |
 | `check_platform_file_parity.py` | duplicated platform functions do not drift silently |
 | `check_pool_release_paths.py` | every kernel pool has a release path or explicit exemption |
-| `check_qemu_lane_ports.py` | QEMU lanes do not claim conflicting protocol ports |
+| `check_qemu_lane_ports.py` | QEMU lanes do not claim conflicting protocol ports, and every lane fits the per-session port block |
 | `check_raw_pos_fname.py` | source identity uses the canonical path helpers |
 | `check_stale_depfiles.py` | generated kernel depfiles name live prerequisites |
 | `check_suite_output.py` | batched UART cases appear in manifest order and match their fixtures |

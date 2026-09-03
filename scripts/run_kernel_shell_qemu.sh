@@ -61,6 +61,8 @@ SKIP_NETWORK="${KERNEL_QEMU_SHELL_SKIP_NETWORK:-0}"
 # sets this flag because its contract is the terminal/miniterm/DDB path; the
 # ordinary integration boot already exercises virtio-net and HTTP in the same
 # aggregate target.
+. "$REPO_ROOT/scripts/qemu_session_ports.sh"
+qemu_session_shift_ports QEMU_SERIAL_PORT HTTP_PORT
 guard_ports=("tcp:$QEMU_SERIAL_PORT")
 if [ "$SKIP_NETWORK" != 1 ]; then
     guard_ports+=("tcp:$HTTP_PORT")

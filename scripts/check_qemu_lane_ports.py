@@ -49,6 +49,59 @@ VAR_DEFAULT = re.compile(
 )
 ENV_OVERRIDE = re.compile(r"(?P<env>[A-Z0-9_]+)=(?P<port>\d+)")
 
+SESSION_PORTS = REPO_ROOT / "scripts" / "qemu_session_ports.sh"
+
+
+def session_port_constants():
+    """The block geometry, read from the one file that defines it."""
+    text = SESSION_PORTS.read_text(encoding="utf-8")
+    wanted = (
+        "QEMU_SESSION_PORT_STRIDE",
+        "QEMU_SESSION_PORT_BLOCKS",
+        "QEMU_SESSION_EPHEMERAL_FLOOR",
+    )
+    found = {}
+    for name in wanted:
+        match = re.search(rf"^{name}=(\d+)$", text, re.MULTILINE)
+        if match is None:
+            print(f"ERROR\t{SESSION_PORTS.name}: no {name}=N line to read")
+            return None
+        found[name] = int(match.group(1))
+    return found
+
+
+def check_block_geometry(ports):
+    """A session's whole port set must fit in one block, and the highest block
+    must stay below the ephemeral range. Both hold today by a wide margin; a
+    lane added outside the window is what this is here to catch."""
+    constants = session_port_constants()
+    if constants is None:
+        return False
+    stride = constants["QEMU_SESSION_PORT_STRIDE"]
+    blocks = constants["QEMU_SESSION_PORT_BLOCKS"]
+    floor = constants["QEMU_SESSION_EPHEMERAL_FLOOR"]
+
+    low, high = min(ports), max(ports)
+    span = high - low
+    ok = True
+    if span >= stride:
+        print(
+            f"ERROR\tlane ports span {span + 1} ({low}..{high}) but one session "
+            f"block is {stride} wide, so two sessions would overlap. Move the "
+            f"outlying lane or raise QEMU_SESSION_PORT_STRIDE in "
+            f"{SESSION_PORTS.name} (and lower the block count to match)."
+        )
+        ok = False
+    top = high + stride * (blocks - 1)
+    if top >= floor:
+        print(
+            f"ERROR\tthe highest session block reaches {top}, at or above the "
+            f"ephemeral floor {floor}. Lower QEMU_SESSION_PORT_BLOCKS in "
+            f"{SESSION_PORTS.name} or move the lanes down."
+        )
+        ok = False
+    return ok
+
 
 def lane_claims(script: pathlib.Path):
     """[(proto, env_name, default_port)] this script declares to the guard."""
@@ -122,9 +175,20 @@ def main() -> int:
             "concurrently claim the same port"
         )
         return 1
+    if not claimed:
+        print("FAIL qemu-lane-ports: no lane declared a port")
+        return 1
+    if not check_block_geometry([port for _proto, port in claimed]):
+        print(
+            "FAIL qemu-lane-ports: the lane ports do not fit the per-session "
+            "block geometry"
+        )
+        return 1
+    constants = session_port_constants()
     print(
         f"PASS qemu-lane-ports: {lanes} lane instances, "
-        f"{len(claimed)} protocol:port claims, no duplicates"
+        f"{len(claimed)} protocol:port claims, no duplicates, "
+        f"{constants['QEMU_SESSION_PORT_BLOCKS']} session blocks fit"
     )
     return 0
 

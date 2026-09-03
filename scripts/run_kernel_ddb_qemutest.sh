@@ -21,6 +21,8 @@ fi
 
 mkdir -p "$ARTIFACT_DIR"
 cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
+. "$REPO_ROOT/scripts/qemu_session_ports.sh"
+qemu_session_shift_ports SERIAL_PORT QMP_PORT GDB_PORT
 python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "kernel/qemu ddb" \
     "tcp:$SERIAL_PORT" "tcp:$QMP_PORT" "tcp:$GDB_PORT" || exit 1
 

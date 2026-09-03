@@ -173,6 +173,14 @@ Run `make allbuild` before the first commit of a compiler-affecting change. It
 is the build-level proof that callers in different trees still compile; do not
 replace it with a regex survey.
 
+QEMU lane ports move as a block when `TAKIBI_SESSION` names this checkout, so
+several clones can run lanes at once in one host network namespace. The block
+is claimed under that name in the registry the containers share, the defaults
+in the runners and the Makefile remain the single-session numbers, and a tree
+with no `TAKIBI_SESSION` uses them unchanged. `TAKIBI_QEMU_PORT_OFFSET` pins an
+offset explicitly. The interactive shell lane prints the forwarded URL it ended
+up with; `scripts/qemu_session_ports.sh` documents the mechanism.
+
 A build-level negative control must prove independently that the command exited
 nonzero and that output contains the expected diagnostic. Prefer an in-process
 compiler rejection test when the build system is not itself under test.

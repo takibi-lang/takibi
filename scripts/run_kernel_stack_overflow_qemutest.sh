@@ -28,6 +28,8 @@ mkdir -p "$ARTIFACT_DIR"
 # GitHub issue #407: see scripts/qemu_port_guard.py. Refuse to start if
 # somebody already owns this lane's ports, and say that rather than
 # reporting a kernel that was never asked anything.
+. "$REPO_ROOT/scripts/qemu_session_ports.sh"
+qemu_session_shift_ports GDB_PORT
 python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "kernel/qemu stack-overflow" \
     "tcp:$GDB_PORT" || exit 1
 if ! command -v gdb-multiarch >/dev/null 2>&1; then
