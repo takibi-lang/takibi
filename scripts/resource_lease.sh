@@ -34,21 +34,26 @@
 # reason -- finished, failed, interrupted, or killed. Nothing has to be given
 # back, and a stopped agent releases its board immediately.
 #
-# A child that inherits the descriptor holds the lease too, and that is
-# deliberate: if a runner is killed while its openocd or its serial reader
-# survives, something is still driving the board, and handing it to another
-# session then would be worse than making that session wait. Interrupting a
+# A child that inherits the descriptor holds the lease too. For a board that
+# is deliberate: if a runner is killed while its openocd or its serial reader
+# survives, something is still driving it, and handing it to another session
+# then would be worse than making that session wait. For `suite` the same
+# behaviour only costs -- a leftover dune keeps the aggregate reserved while
+# protecting nothing -- and it has already happened once, so read a stuck
+# `suite` as a leftover process rather than a running suite. Interrupting a
 # runner from a terminal signals the whole process group, so the ordinary case
 # releases everything at once. An orphan that outlives its runner shows up in
-# resource_lease_status as a board still held while its recorded holder is
+# resource_lease_status as a resource still held while its recorded holder is
 # gone, which is the signal to look for the leftover process.
 #
-# The grain is one runner, deliberately, rather than an aggregate target. A
-# lane resets the board and loads its own image before it tests anything, so
-# another session's lane in between changes nothing for the next one. Short
-# holds are what keeps a long measurement from monopolising the board: twenty
-# samples of one lane become twenty short holds other sessions can interleave
-# with, rather than one hour nobody else can use.
+# For the boards the grain is one runner, deliberately, rather than an
+# aggregate target; `suite` is the exception, and is on the aggregate because
+# that is what saturates the machine. A lane resets the board and loads its
+# own image before it tests anything, so another session's lane in between
+# changes nothing for the next one. Short holds are what keeps a long
+# measurement from monopolising the board: twenty samples of one lane become
+# twenty short holds other sessions can interleave with, rather than one hour
+# nobody else can use.
 #
 # There is no priority and no queue: everyone waits their turn, including the
 # person. Inside a container a person and an agent share one TAKIBI_SESSION,
