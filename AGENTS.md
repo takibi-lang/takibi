@@ -59,13 +59,23 @@ requirement and explicit user direction.
   guidance; historical rationale belongs in `HISTORY.md`.
 - Do not store durable project guidance in tool-specific memory.
 
-## Shared physical hardware
+## Shared resources
 
-One STM32 and one Raspberry Pi 5 are shared by every clone of this repository.
-Each hardware runner takes that board's lease before touching it, so running a
-hardware lane needs no permission: start it and it waits its turn. `make
-hw-status` reports which session holds each board and since when. Stopping a
-session releases whatever it holds, which is how a person takes a board back.
+Several clones of this repository are worked on at once, and three things they
+share are taken under a lease rather than by agreement: the STM32 board, the
+Raspberry Pi 5, and one run of the kernel test suite. Each runner takes the
+lease it needs before it starts, so nothing here needs permission: start it and
+it waits its turn. `make lease-status` reports which session holds each and
+since when. Stopping a session releases whatever it holds, which is how a
+person takes a board or the suite back.
+
+`make kernelcheck` and `make allcheck` take the suite lease, so one clone runs
+the aggregate at a time. Individual lanes do not, and run in parallel freely.
+The aggregate is the unit because that is what saturates the machine: measured
+on a 24-core host, twelve concurrent QEMU lanes all passed, while three
+concurrent aggregates -- each adding a compiler build and the unit suite --
+made the kernel stall mid-boot in lanes that had nothing to do with the change
+under test.
 
 The boards are physically disconnected when they are not available, so a
 runner that finds no device refuses with a message naming it rather than

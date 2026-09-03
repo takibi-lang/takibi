@@ -155,8 +155,15 @@ else:
     print(f"repeat: observed rate {f}/{n} = {p:.3f}")
     print(f"repeat: a clean run of {n} at this rate would have probability "
           f"{(1-p)**n:.1%} -- that is what such a run would have proven.")
-    for target, label in ((0.10, "90%"), (0.05, "95%")):
-        need = math.ceil(math.log(target) / math.log(1 - p))
-        print(f"repeat: {need} consecutive clean runs needed for {label} "
-              "confidence it is gone")
+    if f == n:
+        # log(1 - p) is log(0) here. There is also nothing to ask: a failure
+        # that happened every time is not intermittent under these conditions,
+        # so one clean run already says something changed.
+        print("repeat: every run failed, so this is not intermittent at this "
+              "load. One clean run would already be evidence of a change.")
+    else:
+        for target, label in ((0.10, "90%"), (0.05, "95%")):
+            need = math.ceil(math.log(target) / math.log(1 - p))
+            print(f"repeat: {need} consecutive clean runs needed for {label} "
+                  "confidence it is gone")
 PY

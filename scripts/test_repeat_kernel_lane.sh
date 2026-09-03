@@ -52,4 +52,18 @@ grep -q "no failures observed" "$tmp_dir/clean.log" || fail "clean run reported 
 grep -q "if the real rate were 1 in" "$tmp_dir/clean.log" ||
     fail "clean run did not say what a clean run of that length fails to prove"
 
-echo "PASS repeat-runner-control: check stops at the first failure, measure reports the rate"
+# --- a measurement where everything failed still reports ------------------
+# The confidence arithmetic divides by log(1 - rate), which is log(0) when
+# every sample failed. That is also the case where the question is wrong: a
+# failure that happened every time is not intermittent, so there is no clean
+# run count to quote.
+bash "$runner" --mode measure --label ctl-all --artifacts "$tmp_dir/all" \
+    3 false >"$tmp_dir/all.log" 2>&1
+grep -q "3 runs -> 0 pass, 3 fail" "$tmp_dir/all.log" ||
+    fail "an all-failing measurement did not report its counts"
+grep -q "not intermittent at this load" "$tmp_dir/all.log" ||
+    fail "an all-failing measurement did not say the question does not apply"
+grep -qi "Traceback\|math domain error" "$tmp_dir/all.log" &&
+    fail "an all-failing measurement raised instead of reporting"
+
+echo "PASS repeat-runner-control: check stops at the first failure, measure reports the rate, and an all-failing run reports rather than raises"

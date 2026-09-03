@@ -40,8 +40,8 @@ if ! flock -n 9; then
 fi
 # The lock above covers this clone's artifact directory. The board is shared by
 # every clone, so take its lease before touching the device.
-. "$REPO_ROOT/scripts/hardware_lease.sh"
-hardware_lease_acquire rpi5 "kernelcheck-rpi5" || exit 1
+. "$REPO_ROOT/scripts/resource_lease.sh"
+resource_lease_acquire rpi5 "kernelcheck-rpi5" || exit 1
 if [ ! -e "$SERIAL_DEV" ]; then
     echo "error: RPi5 UART device not found: $SERIAL_DEV" >&2
     exit 1
@@ -98,7 +98,7 @@ stty -F "$SERIAL_DEV" 115200 raw -echo
 echo "[kernel/rpi5] resetting board"
 if ! "$REPO_ROOT/scripts/rpi5_jtag_reset.sh" --resident-image-unchanged >"$RESET_LOG" 2>&1; then
     echo "FAIL kernel/rpi5: reset failed (see $RESET_LOG)" >&2
-    hardware_lease_board_failed
+    resource_lease_board_failed
     exit 1
 fi
 
@@ -144,13 +144,13 @@ load_started=$SECONDS
 echo "[kernel/rpi5] loading kernel over SWD"
 if ! "$REPO_ROOT/scripts/rpi5_jtag_load.sh" "$ELF" >"$LOADER_LOG" 2>&1; then
     echo "FAIL kernel/rpi5: load failed (see $LOADER_LOG)" >&2
-    hardware_lease_board_failed
+    resource_lease_board_failed
     exit 1
 fi
 # Reset and load both answered over SWD, so the board itself is responding.
 # Whether the tests below pass is a different question from whether the next
 # session will find a board that needs a power cycle.
-hardware_lease_board_ok
+resource_lease_board_ok
 echo "[kernel/rpi5] kernel loaded in $((SECONDS - load_started))s; waiting for integration completion"
 
 # GitHub issue #387: ONE readiness gate, before the FIRST wire test, rather

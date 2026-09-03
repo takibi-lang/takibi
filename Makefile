@@ -39,7 +39,7 @@ LLVM_OBJCOPY := llvm-objcopy-19
 # `kernelcheck`), which made it easy to run the wrong one by accident.
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-qemu kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-qemu-ash kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-qemu-debug-main kernelcheck-qemu-debug-repeat kernelcheck-qemu-debug-ash kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-alloc-rollback-qemu kernelcheck-repeat kernelsh-qemu kernelsh-rpi5 hw-status profile-kernel-workload-chart langcheck linuxbuild linuxcheck clean FORCE
+.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-qemu kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-qemu-ash kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-qemu-debug-main kernelcheck-qemu-debug-repeat kernelcheck-qemu-debug-ash kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-alloc-rollback-qemu kernelcheck-repeat kernelsh-qemu kernelsh-rpi5 lease-status profile-kernel-workload-chart langcheck linuxbuild linuxcheck clean FORCE
 
 .DEFAULT_GOAL := build
 
@@ -165,7 +165,7 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 	@python3 scripts/test_check_kernel_asm_invariants.py
 	@bash scripts/test_run_kernel_build_locked.sh
 	@bash scripts/test_qemu_session_ports.sh
-	@bash scripts/test_hardware_lease.sh
+	@bash scripts/test_resource_lease.sh
 	@python3 scripts/test_run_kernel_shell_console.py
 	@python3 scripts/test_check_direct_mmio_literals.py
 	@python3 scripts/test_check_ddb_command_inventory.py
@@ -1088,16 +1088,21 @@ kernelsh-qemu: kernelbuild-qemu
 kernelsh-rpi5: kernelbuild-rpi5
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" bash scripts/run_kernel_shell_rpi5.sh
 
-## hw-status: report which session holds each physical board, and for how long
-hw-status:
-	@bash -c '. scripts/hardware_lease.sh; hardware_lease_status'
+## lease-status: report which session holds each shared resource, and since when
+lease-status:
+	@bash -c '. scripts/resource_lease.sh; resource_lease_status'
 
 KERNELCHECK_LANES := kernelcheck-qemu kernelcheck-qemu-debug \
 	kernelcheck-oops-qemu kernelcheck-ddb-qemu \
 	kernelcheck-stack-overflow-qemu kernelcheck-lifecycle-gap-qemu \
 	kernelcheck-alloc-rollback-qemu kernelcheck-rpi5
 
-kernelcheck: $(KERNELCHECK_LANES)
+## kernelcheck: run every maintained kernel lane, one suite at a time across
+## clones -- see scripts/resource_lease.sh for why the aggregate is the unit.
+kernelcheck:
+	@. scripts/resource_lease.sh; \
+	resource_lease_acquire suite kernelcheck || exit 1; \
+	$(MAKE) $(KERNELCHECK_LANES)
 
 ## allcheck: run every check this Makefile knows about -- langcheck, test,
 ## linuxcheck, kernelcheck -- so a single command surfaces a failure
@@ -1127,7 +1132,9 @@ kernelcheck: $(KERNELCHECK_LANES)
 ## call.
 .PHONY: allcheck
 allcheck:
-	@status=0; $(MAKE) langcheck test linuxcheck kernelcheck || status=$$?; \
+	@status=0; . scripts/resource_lease.sh; \
+	resource_lease_acquire suite allcheck || exit 1; \
+	$(MAKE) langcheck test linuxcheck kernelcheck || status=$$?; \
 	if [ $$status -eq 0 ]; then \
 		echo "PASS allcheck: langcheck test linuxcheck $(KERNELCHECK_LANES)"; \
 	else \
