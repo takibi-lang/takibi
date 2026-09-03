@@ -48,6 +48,74 @@ Retrofitting an existing sentinel API is case-specific, but when a concrete
 cleanup is already underway, convert all genuinely convertible cases in scope
 unless a real boundary requires coordinated redesign.
 
+## Proving a range instead of relating two ends
+
+`buf[from..<to]` where `from` and `to` come from separate scans does not
+compile: bounds are proved against the slice's compile-time minimum length,
+and no relation between two independently computed ends is available. Early
+return guards narrow an immutable `let` against a constant; they do not
+establish `from <= to`.
+
+Walk the backing array's own static size and treat the parsed range as a
+filter over that walk:
+
+```takibi
+for position: usize in 0..<STAGING_MAX {
+    if (position >= from && position < to) {
+        let value: u8 = staging[position];
+    }
+}
+```
+
+Every index is then bounded by the array itself. The relation that cannot be
+proved is the one to stop needing. Guard a single dynamic index with an
+immediate `if (i < view.len) { ... } else { ... }`, and bind a slice length to
+an immutable `let` before comparing, because narrowing is immutable-only.
+
+Use `static_assert` to delete a runtime failure path whose condition is
+knowable at compile time, rather than carrying an outcome through a
+`must_use variant` that no caller can ever observe. It is checked once per
+monomorphized instantiation, so a generic body is checked for each concrete
+type that is actually instantiated.
+
+## Accessors over an affine result
+
+A `must_use variant` is affine: consuming it to ask whether an operation
+succeeded leaves nothing to ask why it failed. Two single-answer accessors
+therefore force every reporting caller to choose one question, which
+reintroduces the defect the variant existed to remove. Return every answer one
+caller might need from a single call, and keep single-answer accessors only
+for sites that genuinely need one. Sites that branch per outcome match the
+variant directly.
+
+## Scope an `unsafe` block to the unproven statements
+
+Wrap only a run of statements that are entirely unproven operations
+back-to-back, such as constructing one or two checked views and immediately
+consuming them. Do not wrap a whole function or loop body because it contains
+several unproven sites scattered among safe code; that pulls unrelated,
+already-proven operations into the audited region and makes the audit density
+disproportionate to the real trust decisions. When a binding must outlive the
+block, hoist the independent computation earlier rather than widening the
+span.
+
+## Before deleting a clear, and before adding a field
+
+A zeroing step can be redundant for correctness and load-bearing for
+disclosure. Ask separately whether any consumer depends on the value, and
+whether the storage can be observed by a different owner afterwards. Any
+resource that is returned and handed out again -- pages, slots, buffers,
+descriptors -- raises the second question. When it applies, move the scrub to
+the release path rather than deleting it: that pays only when the resource
+actually leaves, and puts the cost on the component that knows the data was
+sensitive.
+
+When allocator bookkeeping seems to need a new field, first compute which axis
+it scales on -- per object, per page, or per pool -- and look for space already
+reserved and unused. A per-object word multiplies; a per-pool word usually does
+not; a header with reserved slack may cost nothing at all. Check also whether
+one word can do two jobs.
+
 ## Diagnostics and verification
 
 Treat compiler-detected invalid or dangerously ambiguous code as an error, not

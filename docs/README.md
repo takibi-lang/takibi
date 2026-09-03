@@ -6,7 +6,8 @@ after the issue or development session which produced it has ended.
 - `compatibility/` records contracts with pinned external software. Each
   document identifies the exact artifact inspected, distinguishes required
   behavior from optional behavior, and states what change requires a new
-  audit.
+  audit. `compatibility/METHOD.md` records how to establish such a contract,
+  and the evidence ordering that applies to hardware bring-up as well.
 - `BUILD_CHECKS.md` is the complete inventory of repository policy checks
   executed by `make langcheck`.
 

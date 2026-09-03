@@ -37,6 +37,16 @@ requirement and explicit user direction.
 - Detect errors at compile time. A compiler-detected invalid, dangerously
   ambiguous, or invariant-breaking construct is an error by default, not a
   warning used for gradual migration.
+- Do not record a class of defect as permanently beyond compile-time checking.
+  Re-examine each new instance on its own merits, even when a superficially
+  similar one was previously judged out of reach.
+- Not every prevention has to become a compile-time error. Ask what a
+  build-time check under `scripts/` would catch and what it would miss; ship
+  that when it catches the instance that actually occurred, and pursue the
+  language-level version once its misses are themselves observed.
+- When readability suffers from a language limitation rather than a one-off,
+  propose extending the syntax before extracting a shared helper. Helpers
+  accumulate divergent variants and stop being shared.
 - Embedded production code must not retain traps or panics. Never use raw
   pointers or `unsafe` merely to bypass a checked access.
 - Follow YAGNI. Implement present requirements, not plausible future
@@ -48,6 +58,30 @@ requirement and explicit user direction.
 - Durable current behavior belongs in maintained documentation or scoped
   guidance; historical rationale belongs in `HISTORY.md`.
 - Do not store durable project guidance in tool-specific memory.
+
+## Shared physical hardware
+
+The STM32 and Raspberry Pi 5 boards are shared laboratory equipment that the
+maintainer also uses outside any agent session. Notify the maintainer and get
+agreement before running anything that drives them, every time. A past
+statement that a board was available is not standing permission for a later
+command. The Raspberry Pi 3B is free to use without asking.
+
+Treat any target whose name contains `allcheck`, `hwcheck`, or `kernelcheck`
+as hardware-touching, because those aggregates reach the hardware lanes even
+when the change under test is unrelated. `make allbuild` and the
+`*build`/`langcheck`/`linuxcheck`/`*-qemu` targets execute no hardware and are
+always safe. Knowing this rule is not the same as remembering it while typing
+a convenient aggregate target: prefer the specific lane.
+
+## Concurrent agents and the working tree
+
+More than one agent, plus the maintainer, may work in this repository at the
+same time. Interleaved commits by another author, and rebases that change the
+hashes of commits already made locally, are expected rather than incidents.
+Re-check `git status` and `git log` before relying on an earlier build or test
+result, and do not treat recent local commits as exclusively yours when
+considering a destructive git operation.
 
 ## Required routing
 
@@ -169,6 +203,12 @@ the inventory names every `scripts/check_*.py` file.
 - Do not add the `base` package; it causes friction with LLVM bindings.
 - Explain Takibi and OCaml changes in terms useful to an OCaml beginner.
 - Write a leading comment for a new source file; keep directory maps coarse.
+- Never let a generator's only source for hand-written content be the file it
+  is about to overwrite. Once that file is gitignored or removed by `make
+  clean`, the fallback path becomes the sole source and can emit a placeholder
+  silently. Split such a file into a tracked hand-written part that includes a
+  generated part holding only the derivable content, and add a build-time check
+  that the generated output is not degenerate.
 - When a settled design decision or root-cause conclusion belongs to an
   existing GitHub issue, record an English ASCII summary using
   `github-workflow`. Do not guess or open an unrelated issue.

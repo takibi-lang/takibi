@@ -1624,6 +1624,29 @@ cast, and are invariant behind writable pointers so an alias cannot replace a
 non-blocking callback with a blocking one. Effects still erase completely:
 they add no LLVM parameter, field, instruction, or metadata.
 
+## Cross-File Name Resolution
+
+Function names resolve globally and without regard to the order of files on
+the command line. A file may call a function defined in a file that is parsed
+later, and no `use` declaration is required for the call to resolve. An
+apparent dependency cycle between two files is therefore not a blocker when
+what is needed is an accessor.
+
+Compile-time integer constants do not share that property. The constant
+environment is populated as the parser walks the file list from left to right,
+so a `const` named in a refined bound or an array size must be declared in a
+file parsed earlier:
+
+```
+File "a.tkb", line 3: refined type bound 'B_LIMIT' is not a known
+compile-time integer constant (declare it earlier as `const B_LIMIT: T = N;`)
+```
+
+Sharing one ceiling constant across several files therefore requires a file
+that precedes all of them. `private` globals remain file-scoped either way;
+cross-file access goes through an accessor function, which the first rule
+makes free.
+
 ## File-Granular Privacy (`private`)
 
 The file is takibi's module and trust boundary (GitHub issue #108,

@@ -27,6 +27,14 @@ checksums, and runtime confirmation of a type-system prototype.
 Run `make linuxbuild` to compile and `make linuxcheck` to execute and compare
 stdout with the test's `.expected` fixture.
 
+Adding `linux_user/<name>/` needs three Makefile edits, not one: append
+`<name>` to `LINUX_USER_EXAMPLES`; declare the rebuild prerequisite on the
+`.tkb` sources it compiles; and set `LINUX_USER_EXTRA_SRCS` for that object.
+The prerequisite and the source list are separate mechanisms, and supplying
+only the prerequisite fails at compile time with an undefined function.
+`.expected` files use CRLF, because output goes through the kernel's own
+formatter; an LF-only fixture fails with a diff that prints as identical.
+
 ## Tier 3: maintained kernel
 
 Use `kernel/` with QEMU and RPi5 when the verdict depends on MMIO, real
@@ -47,5 +55,34 @@ both facts independently:
 
 Capture status before inspecting output. A missing message alone can mean the
 compiler never ran; a present unrelated failure is not the expected rejection.
+
+Capture the exit status of the command itself. A grep is never the last stage
+of a verification pipeline: a build failure prints no `FAIL` line, so a
+pattern search over the log matches nothing and the pipeline reports the
+grep's success. Redirect to a file, print the status, then search the file.
+Note also that the root `make allcheck` does not cover `examples/`, which has
+its own aggregate; a compiler change can break that tree alone.
+
+## A shape fixture must perform the consumer's operations
+
+A prototype fixture earns its cost by making a hole cost an afternoon instead
+of a bisect, and it only does that when the operations it performs are the
+operations the real consumer will perform. Writing single elements where the
+consumer slices proves nothing that matters, and every claim such a fixture
+makes can be true while none of them is the claim at issue.
+
+List the API calls the real consumer makes against the data and make the
+fixture make each of them at least once. If one is awkward to express, that
+awkwardness is the finding; stop and look at it rather than substituting an
+easier operation.
+
+## Validate a new check against the real tree
+
+After the unit tests for a new lint, warning, stricter proof, or `--forbid-*`
+flag pass, run it against the maintained `kernel/` tree for both targets and
+read every line of new diagnostic output rather than only confirming a zero
+exit. Real code has narrowing chains, guard shapes, and interacting proofs
+that synthetic probes do not reproduce, and the real tree is the population
+the check will actually run against.
 
 Do not add new feature tests to the historical `examples/` tree.
