@@ -70,18 +70,30 @@ hardware_lease_write() {
     mv "$tmp" "$file"
 }
 
+# A recorded pid means something only to the session that recorded it: each
+# container has its own pid namespace, so another container's pid either names
+# nothing here or names an unrelated local process. Ask about liveness only
+# for a holder from this session, and otherwise report what was recorded
+# without claiming anything about it. Whether the board is actually held is a
+# question for the lock, which is namespace-independent.
 hardware_lease_holder_line() {
     local file="$1" session target pid started
     session="$(hardware_lease_field "$file" session)"
     target="$(hardware_lease_field "$file" target)"
     pid="$(hardware_lease_field "$file" pid)"
     started="$(hardware_lease_field "$file" started)"
-    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
-        printf 'no live holder\n'
+    if [ -z "$session" ]; then
+        printf 'no holder recorded\n'
+        return 0
+    fi
+    if [ "$session" = "${TAKIBI_SESSION:-}" ] && [ -n "$pid" ] \
+            && ! kill -0 "$pid" 2>/dev/null; then
+        printf '%s running %s since %s (pid %s, no longer running)\n' \
+            "$session" "${target:-unknown}" "${started:-unknown}" "$pid"
         return 0
     fi
     printf '%s running %s since %s (pid %s)\n' \
-        "${session:-unknown}" "${target:-unknown}" "${started:-unknown}" "$pid"
+        "$session" "${target:-unknown}" "${started:-unknown}" "$pid"
 }
 
 hardware_lease_acquire() {
@@ -194,11 +206,13 @@ hardware_lease_status() {
         board="$(basename "$holder" .holder)"
         lock="$dir/$board.lock"
         recorded="$(hardware_lease_holder_line "$holder")"
-        # Ask the lock itself rather than trusting the recorded pid: the two
-        # disagree exactly when a child outlived the runner that started it.
+        # The lock is the authority on whether the board is taken, because it
+        # is the one fact that crosses containers. The record only says who
+        # took it last.
         if (exec 6>"$lock" && flock -n 6) 2>/dev/null; then
             state="free"
-        elif [ "$recorded" = "no live holder" ]; then
+        elif [ "$(hardware_lease_field "$holder" session)" = "${TAKIBI_SESSION:-}" ] \
+                && ! kill -0 "$(hardware_lease_field "$holder" pid)" 2>/dev/null; then
             state="HELD by a process outliving its runner -- look for a leftover"
         else
             state="held"

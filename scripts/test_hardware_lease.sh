@@ -120,7 +120,10 @@ if timeout 2 env TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_SESSION=agent-d \
     kill -KILL "$orphan" 2>/dev/null || true
     fail "a board still held by a leftover process was handed on"
 fi
-orphan_status="$(env TAKIBI_SESSION_REGISTRY="$registry" bash -c \
+# Asked from the session whose runner died: a recorded pid means nothing to any
+# other container, so only its own session can recognise a leftover.
+orphan_status="$(env -u TAKIBI_HARDWARE_LEASE_HELD \
+    TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_SESSION=agent-a bash -c \
     ". '$helper'; hardware_lease_status")"
 kill -KILL "$orphan" 2>/dev/null || true
 case "$orphan_status" in
@@ -128,8 +131,20 @@ case "$orphan_status" in
     *) fail "status did not report the leftover holder: $orphan_status" ;;
 esac
 
+# A holder recorded by another container is reported without any claim about
+# its pid, which names nothing in this pid namespace.
+foreign="$(env -u TAKIBI_HARDWARE_LEASE_HELD \
+    TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_SESSION=someone-else bash -c \
+    ". '$helper'; hardware_lease_holder_line '$holder'")"
+case "$foreign" in
+    *"no longer running"*) fail "another container's pid was judged for liveness" ;;
+    *agent-a*) ;;
+    *) fail "a foreign holder was not reported: $foreign" ;;
+esac
+
 # Status is readable by a person deciding whether to wait.
-status="$(env TAKIBI_SESSION_REGISTRY="$registry" bash -c \
+status="$(env -u TAKIBI_HARDWARE_LEASE_HELD \
+    TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_SESSION=agent-a bash -c \
     ". '$helper'; hardware_lease_status")"
 case "$status" in
     *testboard*) ;;
