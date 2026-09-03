@@ -73,7 +73,11 @@ echo "[kernel/qemu] interactive UART session (Ctrl-] exits miniterm)"
 if [ "$SKIP_NETWORK" = 1 ]; then
     echo "[kernel/qemu] network device omitted for terminal-path smoke"
 else
-    echo "[kernel/qemu] httpd forwarding: http://127.0.0.1:$HTTP_PORT/ -> 192.168.20.2:8080"
+    echo "[kernel/qemu] httpd forwarding: http://127.0.0.1:$HTTP_PORT/ -> 192.168.20.2:8080${TAKIBI_SESSION:+ (session $TAKIBI_SESSION)}"
+    # The console repeats this when a shell prompt appears and when the guest
+    # announces a listener: this line is printed before a boot log long enough
+    # to scroll it away, and the port differs per clone.
+    export KERNEL_SHELL_HTTP_URL="http://127.0.0.1:$HTTP_PORT/"
 fi
 QEMU_LAUNCH_NS="$(date +%s%N)"
 # Keep the user-network subnet aligned with the kernel's fixed test address.

@@ -162,8 +162,50 @@ BOOT_PHASE_MARKERS = (
 )
 
 
-def ash_ready(output: bytes) -> bool:
-    return any(marker in output for marker in READY_MARKERS)
+# The forwarded URL is announced before the boot log, which is long enough to
+# scroll it out of reach, and its port now differs per clone. Repeat it at the
+# two moments it is wanted: when a prompt appears, and when the guest says a
+# server is listening.
+HTTP_URL = os.environ.get("KERNEL_SHELL_HTTP_URL", "")
+LISTENER_MARKERS = (b"listener ready port=",)
+LISTENER_CARRY = max(len(marker) for marker in LISTENER_MARKERS) - 1
+READY_CARRY = READY_MARKER_WINDOW - 1
+
+
+def marker_seen(carry: bytes, data: bytes, markers, carry_length: int):
+    """(fired, next carry) for one read of the UART stream.
+
+    The whole of each read is searched and only the overlap a split could hide
+    is carried forward. Retaining a window of exactly the marker length instead
+    drops any marker that arrives with something after it in the same read,
+    which is the ordinary case for a marker that does not end a line.
+    """
+    buffered = carry + data
+    if any(marker in buffered for marker in markers):
+        return True, b""
+    return False, buffered[-carry_length:] if carry_length else b""
+
+
+def listener_seen(carry: bytes, data: bytes):
+    return marker_seen(carry, data, LISTENER_MARKERS, LISTENER_CARRY)
+
+
+def ready_seen(carry: bytes, data: bytes):
+    return marker_seen(carry, data, READY_MARKERS, READY_CARRY)
+
+
+SESSION = os.environ.get("TAKIBI_SESSION", "")
+
+
+def announce_url() -> None:
+    if not HTTP_URL:
+        return
+    where = f" (session {SESSION})" if SESSION else ""
+    print(
+        f"{LABEL} open in a host browser: {HTTP_URL}{where}",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 class TimingMiniterm(miniterm.Miniterm):
@@ -172,6 +214,7 @@ class TimingMiniterm(miniterm.Miniterm):
         self.launch_ns = launch_ns
         self.transcript = transcript
         self.pending = b""
+        self.listener_pending = b""
         self.reported = False
 
     def handle_menu_key(self, key):
@@ -201,8 +244,8 @@ class TimingMiniterm(miniterm.Miniterm):
                 self.transcript.write(data)
                 self.transcript.flush()
                 if not self.reported:
-                    self.pending = (self.pending + data)[-READY_MARKER_WINDOW:]
-                    if ash_ready(self.pending):
+                    ready, self.pending = ready_seen(self.pending, data)
+                    if ready:
                         elapsed_ms = (time.time_ns() - self.launch_ns) / 1_000_000
                         print(
                             f"{LABEL} ash readiness: {elapsed_ms:.1f} ms "
@@ -210,7 +253,13 @@ class TimingMiniterm(miniterm.Miniterm):
                             file=sys.stderr,
                             flush=True,
                         )
+                        announce_url()
                         self.reported = True
+                fired, self.listener_pending = listener_seen(
+                    self.listener_pending, data
+                )
+                if fired:
+                    announce_url()
                 if self.raw:
                     self.console.write_bytes(data)
                 else:
@@ -267,8 +316,8 @@ def main() -> int:
                                 flush=True,
                             )
                             reported_phases.add(phase)
-                pending = (pending + data)[-READY_MARKER_WINDOW:]
-                if ash_ready(pending):
+                ready, pending = ready_seen(pending, data)
+                if ready:
                     elapsed_ms = (time.time_ns() - launch_ns) / 1_000_000
                     if "ash readiness" not in reported_phases:
                         print(
@@ -277,6 +326,7 @@ def main() -> int:
                             file=sys.stderr,
                             flush=True,
                         )
+                    announce_url()
                     transcript.flush()
                     transcript.close()
                     print(
