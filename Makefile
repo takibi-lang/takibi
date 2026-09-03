@@ -1098,12 +1098,7 @@ KERNELCHECK_LANES := kernelcheck-qemu kernelcheck-qemu-debug \
 	kernelcheck-stack-overflow-qemu kernelcheck-lifecycle-gap-qemu \
 	kernelcheck-alloc-rollback-qemu kernelcheck-rpi5
 
-## kernelcheck: run every maintained kernel lane, one suite at a time across
-## clones -- see scripts/resource_lease.sh for why the aggregate is the unit.
-kernelcheck:
-	@. scripts/resource_lease.sh; \
-	resource_lease_acquire suite kernelcheck || exit 1; \
-	$(MAKE) $(KERNELCHECK_LANES)
+kernelcheck: $(KERNELCHECK_LANES)
 
 ## allcheck: run every check this Makefile knows about -- langcheck, test,
 ## linuxcheck, kernelcheck -- so a single command surfaces a failure

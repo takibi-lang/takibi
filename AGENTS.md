@@ -69,8 +69,9 @@ it waits its turn. `make lease-status` reports which session holds each and
 since when. Stopping a session releases whatever it holds, which is how a
 person takes a board or the suite back.
 
-`make kernelcheck` and `make allcheck` take the suite lease, so one clone runs
-the aggregate at a time. Individual lanes do not, and run in parallel freely.
+`make allcheck` takes the suite lease, so one clone runs the aggregate at a
+time. Individual lanes and `make kernelcheck` do not, and run in parallel
+freely.
 The aggregate is the unit because that is what saturates the machine: measured
 on a 24-core host, twelve concurrent QEMU lanes all passed, while three
 concurrent aggregates -- each adding a compiler build and the unit suite --

@@ -14,9 +14,19 @@
 # concurrent aggregates -- each adding a compiler build and the unit suite on
 # top of eight lanes -- starved the host enough that the guest stopped making
 # progress mid-boot, always at the same line. So the lane is not the unit that
-# needs limiting and the aggregate is: `make kernelcheck` and `make allcheck`
-# take this lease, individual lanes take nothing, and parallel work on separate
-# lanes keeps running at full speed.
+# needs limiting and the aggregate is: `make allcheck` takes this lease,
+# individual lanes take nothing, and parallel work on separate lanes keeps
+# running at full speed.
+#
+# Only allcheck, because holding a lease across a set of targets needs a
+# process that outlives them, and allcheck already had one: its recipe is a
+# shell that then runs a sub-make. Giving `kernelcheck` the same treatment
+# meant adding a sub-make of its own, which made a SECOND independent make
+# invocation run `dune build` -- the race the top of the Makefile says must
+# never be reintroduced. It deadlocked on the first real run. `make
+# kernelcheck` alone is therefore unleased, which the measurement supports:
+# what saturates is the aggregate, with its compiler build and unit suite on
+# top of the lanes.
 #
 # The lease is one flock in the registry every container mounts at the same
 # path, so it excludes across containers. It is held by the runner's own open
