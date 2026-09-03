@@ -59,6 +59,32 @@ def diagnose_lifecycle(output: bytes, httpd_sent: bool,
             f"next expected '{next_expected}'")
 
 
+# Below this, a capture that timed out was merely slow rather than stopped.
+SILENCE_SECONDS = 2.0
+
+
+def silence_note(quiet_for: float, timeout: float, output: bytes) -> str:
+    """Why a capture that hit its deadline stopped, in the failure's own words.
+
+    Two different failures wear the same timeout, and the distinction is the
+    whole diagnosis: a guest still talking when the budget ran out is slow,
+    and one that went quiet stopped. Reporting only what a downstream check
+    was waiting for reads as a protocol fault -- see GitHub issue #509, where
+    it cost a day.
+    """
+    last_line = next(
+        (line for line in reversed(
+            output.decode("utf-8", errors="replace")
+            .replace("\r", "").splitlines()) if line.strip()),
+        "(nothing at all)")
+    if quiet_for >= SILENCE_SECONDS:
+        return (f"; the guest then sent nothing for {quiet_for:.1f}s of its "
+                f"{timeout:.0f}s budget -- it stopped rather than ran late -- "
+                f"and its last line was {last_line!r}")
+    return (f"; the guest was still sending when its {timeout:.0f}s budget "
+            f"ran out, last line {last_line!r}")
+
+
 def write_uart_line(connection, line: bytes) -> None:
     # The kernel UART ISR currently drains one byte per interrupt. Pace the
     # synthetic console like typed input so a command longer than a 16-byte
@@ -152,6 +178,7 @@ def main() -> int:
     httpd_ready = False
     httpd_done_seen_at = None
     capture_started = time.monotonic()
+    last_chunk_at = capture_started
     timing_pending = bytearray()
     timing_capture = (open(args.timing_log, "w", encoding="ascii")
                       if args.timing_log else None)
@@ -160,6 +187,7 @@ def main() -> int:
             while time.monotonic() < deadline:
                 chunk = connection.read(4096)
                 if chunk:
+                    last_chunk_at = time.monotonic()
                     output.extend(chunk)
                     capture.write(chunk)
                     capture.flush()
@@ -246,6 +274,18 @@ def main() -> int:
                 timing_capture.write(f"{elapsed:9.3f}\t{text_line}\n")
             timing_capture.close()
 
+    # Every path out of the loop above breaks on a marker, so reaching the
+    # deadline means the guest stopped sending. Say so wherever a downstream
+    # check reports what it was still waiting for: a lifecycle diagnosis reads
+    # as a protocol fault, and under a saturated host the real answer is that
+    # the guest went quiet -- see GitHub issue #509, where that cost a day.
+    # Appended rather than substituted, because the lifecycle-gap lane asserts
+    # the diagnosis it induces.
+    silence = ""
+    if time.monotonic() >= deadline:
+        silence = silence_note(
+            time.monotonic() - last_chunk_at, args.timeout, bytes(output))
+
     text = output.decode("utf-8", errors="replace").replace("\r", "")
     if args.validate_ash:
         lines = text.splitlines()
@@ -254,7 +294,8 @@ def main() -> int:
             end = next(index for index in range(start, len(lines))
                        if "busybox interactive shell exit: 0" in lines[index])
         except (ValueError, StopIteration) as error:
-            raise RuntimeError("ash transcript boundaries were not observed") from error
+            raise RuntimeError(
+                "ash transcript boundaries were not observed" + silence) from error
         actual = [line.removeprefix("/ # ") for line in lines[start:end + 1]]
         if actual != expected:
             diff = "".join(difflib.unified_diff(
@@ -269,11 +310,13 @@ def main() -> int:
             if not check(output, httpd_sent, httpd_ready):
                 raise RuntimeError(
                     "interactive HTTPd lifecycle stalled: "
-                    + diagnose_lifecycle(output, httpd_sent, httpd_ready))
+                    + diagnose_lifecycle(output, httpd_sent, httpd_ready)
+                    + silence)
         if not httpd_done_file.exists():
             raise RuntimeError(
                 "host HTTP checks did not complete; "
-                + diagnose_lifecycle(output, httpd_sent, httpd_ready))
+                + diagnose_lifecycle(output, httpd_sent, httpd_ready)
+                + silence)
         for forbidden in ("can't open '/dev/null'", "sh: can't fork",
                           "exception: fail-stop"):
             if forbidden in text:
