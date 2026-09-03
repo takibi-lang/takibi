@@ -20,9 +20,16 @@ stride="$QEMU_SESSION_PORT_STRIDE"
 blocks="$QEMU_SESSION_PORT_BLOCKS"
 
 # Ask the helper for one session's offset, with the registry under $1.
+#
+# The container this runs in exports TAKIBI_SESSION, so both variables are
+# removed before each case adds back only what it means to set. Letting the
+# ambient session through made the no-name case claim a block under the
+# container's own name, which then failed the next case in every clone whose
+# name was not the one the assertion expected.
 offset_for() {
     local registry="$1" session="${2-}" extra="${3-}"
-    env TAKIBI_SESSION_REGISTRY="$registry" \
+    env -u TAKIBI_SESSION -u TAKIBI_QEMU_PORT_OFFSET \
+        TAKIBI_SESSION_REGISTRY="$registry" \
         ${session:+TAKIBI_SESSION="$session"} \
         ${extra:+TAKIBI_QEMU_PORT_OFFSET="$extra"} \
         bash -c ". '$helper'; qemu_session_port_offset"
@@ -93,7 +100,8 @@ grep -F "$broken/blocks" "$tmp_dir/broken.log" >/dev/null \
     || fail "the malformed-registry message does not name the file"
 
 # The shift applies to every named port and to nothing else.
-shifted="$(env TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_SESSION=takibi-codex \
+shifted="$(env -u TAKIBI_QEMU_PORT_OFFSET \
+    TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_SESSION=takibi-codex \
     bash -c ". '$helper'
              SERIAL_PORT=18673
              HTTP_PORT=18080

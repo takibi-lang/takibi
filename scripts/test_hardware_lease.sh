@@ -20,9 +20,14 @@ fail() {
 
 lease() {
     # lease SESSION SCRIPT -- run SCRIPT with the helper sourced.
+    #
+    # Every variable the lease reads is removed first, so a case sets only what
+    # it means to. This runs inside a container that exports TAKIBI_SESSION,
+    # and could run inside a runner that already holds a lease.
     local session="$1"
     shift
-    env TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_SESSION="$session" \
+    env -u TAKIBI_HARDWARE_LEASE_HELD -u TAKIBI_HARDWARE_LEASE_TIMEOUT \
+        TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_SESSION="$session" \
         bash -c ". '$helper'; $*"
 }
 
@@ -101,11 +106,13 @@ lease agent-a 'hardware_lease_acquire testboard run >/dev/null
 # be driving the board. The board then reads as held while its recorded holder
 # is gone, which is how a leftover process is noticed rather than silently
 # handing the board to the next session.
-lease agent-a 'hardware_lease_acquire testboard orphaned >/dev/null
+lease agent-a "hardware_lease_acquire testboard orphaned >/dev/null
     sleep 30 &
-    exit 0' 2>/dev/null
-orphan="$(pgrep -n -f 'sleep 30' || true)"
-[ -n "$orphan" ] || fail "the orphan control did not leave a process behind"
+    echo \$! >'$tmp_dir/orphan.pid'
+    exit 0" 2>/dev/null
+orphan="$(cat "$tmp_dir/orphan.pid" 2>/dev/null || true)"
+[ -n "$orphan" ] && kill -0 "$orphan" 2>/dev/null \
+    || fail "the orphan control did not leave a process behind"
 if timeout 2 env TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_SESSION=agent-d \
         TAKIBI_HARDWARE_LEASE_TIMEOUT=1 \
         bash -c ". '$helper'; hardware_lease_acquire testboard next" \
