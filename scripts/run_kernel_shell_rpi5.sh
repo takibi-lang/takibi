@@ -27,6 +27,10 @@ if ! python3 -c 'import serial' >/dev/null 2>&1; then
     echo "error: pyserial is required; install it with: sudo apt-get install python3-serial" >&2
     exit 1
 fi
+# The board is shared by every clone of this repository; take its lease before
+# touching the device. An interactive session holds it until the console exits.
+. "$REPO_ROOT/scripts/hardware_lease.sh"
+hardware_lease_acquire rpi5 "kernelsh-rpi5" || exit 1
 if [ -z "$SERIAL_DEV" ] || [ ! -e "$SERIAL_DEV" ]; then
     echo "error: RPi5 UART device not found: '$SERIAL_DEV'" >&2
     exit 1

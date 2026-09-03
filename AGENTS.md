@@ -61,18 +61,30 @@ requirement and explicit user direction.
 
 ## Shared physical hardware
 
-The STM32 and Raspberry Pi 5 boards are shared laboratory equipment that the
-maintainer also uses outside any agent session. Notify the maintainer and get
-agreement before running anything that drives them, every time. A past
-statement that a board was available is not standing permission for a later
-command. The Raspberry Pi 3B is free to use without asking.
+One STM32 and one Raspberry Pi 5 are shared by every clone of this repository.
+Each hardware runner takes that board's lease before touching it, so running a
+hardware lane needs no permission: start it and it waits its turn. `make
+hw-status` reports which session holds each board and since when. Stopping a
+session releases whatever it holds, which is how a person takes a board back.
+
+The boards are physically disconnected when they are not available, so a
+runner that finds no device refuses with a message naming it rather than
+waiting. Do not add a declared availability flag beside that.
+
+Run hardware lanes at a natural boundary of the work -- a finished
+implementation step, a milestone, or evidence that genuinely requires real
+timing, caches, or concurrency -- not on every commit. One board serves every
+session, so a hardware lane per commit makes it the queue everyone waits in.
+QEMU lanes carry no such cost; run them freely.
 
 Treat any target whose name contains `allcheck`, `hwcheck`, or `kernelcheck`
 as hardware-touching, because those aggregates reach the hardware lanes even
 when the change under test is unrelated. `make allbuild` and the
-`*build`/`langcheck`/`linuxcheck`/`*-qemu` targets execute no hardware and are
-always safe. Knowing this rule is not the same as remembering it while typing
-a convenient aggregate target: prefer the specific lane.
+`*build`/`langcheck`/`linuxcheck`/`*-qemu` targets execute no hardware.
+
+A board that stops answering SWD needs a power cycle, which nothing here can
+perform. The lease counts consecutive reset or load failures and says so;
+report that to the maintainer rather than retrying.
 
 ## Concurrent agents and the working tree
 

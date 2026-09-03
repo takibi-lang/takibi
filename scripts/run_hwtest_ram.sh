@@ -86,6 +86,12 @@ if [ ! -e "$SERIAL_DEV" ]; then
     exit 1
 fi
 
+# The claim below excludes runners inside this container; its lock lives under
+# /tmp, which every container has its own copy of. The board is shared by every
+# clone, so take its cross-container lease first.
+# shellcheck source=scripts/hardware_lease.sh
+source "$REPO_ROOT/scripts/hardware_lease.sh"
+hardware_lease_acquire stm32 "hwcheck-stm32" || exit 1
 # shellcheck source=scripts/stm32_hw_claim.sh
 source "$(dirname "$0")/stm32_hw_claim.sh"
 claim_stm32_hardware "$SERIAL_DEV"
