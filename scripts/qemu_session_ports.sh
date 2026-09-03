@@ -30,9 +30,19 @@
 # below the ephemeral range. scripts/check_qemu_lane_ports.py enforces both
 # against the real lane claims, so a lane added outside this window turns a
 # build red rather than colliding at runtime.
-QEMU_SESSION_PORT_STRIDE=1000
-QEMU_SESSION_PORT_BLOCKS=14
+QEMU_SESSION_PORT_STRIDE=1400
+QEMU_SESSION_PORT_BLOCKS=11
 QEMU_SESSION_EPHEMERAL_FLOOR=32768
+
+# scripts/repeat_kernel_lane.sh gives each sample of a repeated lane ports of
+# its own, so one sample cannot inherit the previous one's lingering sockets.
+# Those ports live above the declared lane ports and inside the same block, so
+# a session's whole port footprint still moves as one offset. A base chosen
+# outside the block would land in the next session's, which is why the base is
+# defined here rather than typed on a command line.
+QEMU_SESSION_REPEAT_BASE=18720
+QEMU_SESSION_REPEAT_STEP=8
+QEMU_SESSION_REPEAT_MAX_SAMPLES=56
 
 qemu_session_registry_dir() {
     printf '%s\n' "${TAKIBI_SESSION_REGISTRY:-$HOME/.takibi-sessions}"

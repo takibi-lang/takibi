@@ -19,10 +19,16 @@
 # timing-sensitive failure the useful comparison is a passing boot against a
 # failing one, and the lane's own directory is overwritten by the next run.
 #
-# PORTS. With --port-base each sample gets its own serial and netdev ports, so
-# repeated runs cannot collide with each other, and two agents working in
-# separate worktrees cannot collide either by choosing different bases. The
-# QEMU lane already reads all three from the environment.
+# PORTS. Each sample gets its own serial and netdev ports, so one sample cannot
+# inherit the previous one's lingering sockets. The QEMU lane already reads all
+# three from the environment.
+#
+# The base comes from scripts/qemu_session_ports.sh rather than a command line,
+# and the count is checked against the window it defines. Separating two agents
+# is no longer this flag's job: the lane runner shifts every port by the
+# session's own block, so a base picked by hand to dodge another worktree now
+# lands INSIDE that worktree's block instead. The window is above the declared
+# lane ports and inside one block, so a session's whole footprint moves as one.
 #
 # Usage:
 #   repeat_kernel_lane.sh [options] <count> <command...>
@@ -30,7 +36,8 @@
 # Options:
 #   --mode check|measure   default measure
 #   --label NAME           artifact/label prefix; default derived from command
-#   --port-base N          first port; sample i uses N + i*8
+#   --port-base N          first port; sample i uses N + i*8. Defaults to the
+#                          session repeat window and must stay inside it.
 #   --artifacts DIR        parent of the per-sample directories
 #
 # Examples:
@@ -64,6 +71,29 @@ case "$count" in ''|*[!0-9]*|0) echo "count must be a positive integer" >&2; exi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+# The window these ports must stay inside belongs to the session, not to this
+# runner. Reaching past it does not merely collide with another lane of this
+# clone: the lane runner adds this session's block offset afterwards, so the
+# ports land in a DIFFERENT clone's block, where they can take a lane port a
+# session that is not running yet will claim later.
+. "$repo_root/scripts/qemu_session_ports.sh"
+window_top=$((QEMU_SESSION_REPEAT_BASE \
+    + QEMU_SESSION_REPEAT_STEP * QEMU_SESSION_REPEAT_MAX_SAMPLES - 1))
+[ -n "$port_base" ] || port_base="$QEMU_SESSION_REPEAT_BASE"
+case "$port_base" in
+    ''|*[!0-9]*) echo "--port-base must be a port number" >&2; exit 2;;
+esac
+sample_top=$((port_base + QEMU_SESSION_REPEAT_STEP * (count - 1) + 2))
+if [ "$port_base" -lt "$QEMU_SESSION_REPEAT_BASE" ] ||
+        [ "$sample_top" -gt "$window_top" ]; then
+    echo "FAIL repeat: $count samples from base $port_base need ports" \
+         "$port_base..$sample_top, outside this session's repeat window" \
+         "$QEMU_SESSION_REPEAT_BASE..$window_top" >&2
+    echo "  At most $QEMU_SESSION_REPEAT_MAX_SAMPLES samples fit from the" \
+         "default base. Ports past the window land in another clone's block." >&2
+    exit 2
+fi
+
 [ -n "$label" ] || label="$(echo "$*" | tr -c 'A-Za-z0-9' '-' | sed 's/-\+/-/g;s/^-//;s/-$//' | cut -c1-40)"
 [ -n "$artifacts" ] || artifacts="$repo_root/_build/repeat-$label"
 mkdir -p "$artifacts"
@@ -79,13 +109,12 @@ for i in $(seq 1 "$count"); do
         "KERNEL_QEMU_HWTEST_ARTIFACT_DIR=$sample_dir"
         "KERNEL_QEMU_LABEL=$label-$i"
     )
-    if [ -n "$port_base" ]; then
-        env_args+=(
-            "KERNEL_QEMU_SERIAL_PORT=$((port_base + (i - 1) * 8))"
-            "KERNEL_QEMU_NETDEV_LOCAL_PORT=$((port_base + (i - 1) * 8 + 1))"
-            "KERNEL_QEMU_NETDEV_REMOTE_PORT=$((port_base + (i - 1) * 8 + 2))"
-        )
-    fi
+    sample_port=$((port_base + (i - 1) * QEMU_SESSION_REPEAT_STEP))
+    env_args+=(
+        "KERNEL_QEMU_SERIAL_PORT=$sample_port"
+        "KERNEL_QEMU_NETDEV_LOCAL_PORT=$((sample_port + 1))"
+        "KERNEL_QEMU_NETDEV_REMOTE_PORT=$((sample_port + 2))"
+    )
     if env "${env_args[@]}" "$@" >"$sample_dir/run.log" 2>&1; then
         pass=$((pass + 1)); printf '.'
     else

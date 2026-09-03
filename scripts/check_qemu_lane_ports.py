@@ -59,6 +59,9 @@ def session_port_constants():
         "QEMU_SESSION_PORT_STRIDE",
         "QEMU_SESSION_PORT_BLOCKS",
         "QEMU_SESSION_EPHEMERAL_FLOOR",
+        "QEMU_SESSION_REPEAT_BASE",
+        "QEMU_SESSION_REPEAT_STEP",
+        "QEMU_SESSION_REPEAT_MAX_SAMPLES",
     )
     found = {}
     for name in wanted:
@@ -98,6 +101,32 @@ def check_block_geometry(ports):
             f"ERROR\tthe highest session block reaches {top}, at or above the "
             f"ephemeral floor {floor}. Lower QEMU_SESSION_PORT_BLOCKS in "
             f"{SESSION_PORTS.name} or move the lanes down."
+        )
+        ok = False
+
+    # The repeated-lane window shares the block, so it has to start above every
+    # declared lane and end before the next session's block begins.
+    repeat_base = constants["QEMU_SESSION_REPEAT_BASE"]
+    repeat_top = (
+        repeat_base
+        + constants["QEMU_SESSION_REPEAT_STEP"]
+        * constants["QEMU_SESSION_REPEAT_MAX_SAMPLES"]
+        - 1
+    )
+    block_top = low + stride - 1
+    if repeat_base <= high:
+        print(
+            f"ERROR\tthe repeat window starts at {repeat_base}, at or below the "
+            f"highest lane port {high}, so a repeated sample can take a lane's "
+            f"own port. Raise QEMU_SESSION_REPEAT_BASE in {SESSION_PORTS.name}."
+        )
+        ok = False
+    if repeat_top > block_top:
+        print(
+            f"ERROR\tthe repeat window ends at {repeat_top}, past this block's "
+            f"last port {block_top}, so a long repeat run reaches into the next "
+            f"session's block. Lower QEMU_SESSION_REPEAT_MAX_SAMPLES or raise "
+            f"QEMU_SESSION_PORT_STRIDE in {SESSION_PORTS.name}."
         )
         ok = False
     return ok
