@@ -17,7 +17,10 @@ existing bounded diagnostics.
    postmortem work, read [references/crash-evidence.md](references/crash-evidence.md).
 3. For intermittent failures, perturbation-sensitive failures, bisection, or a
    test that fails once and passes on rerun, read
-   [references/investigation.md](references/investigation.md).
+   [references/investigation.md](references/investigation.md). Read its
+   "Failures that are not the change under test" section FIRST when a QEMU
+   lane fails: two known failures there look like defects in whatever is being
+   worked on and are not.
 4. For DWARF, QEMU gdbstub, or source-line investigation, read
    [references/dwarf.md](references/dwarf.md). For PC-sampling performance work,
    use the separate `profile-qemu` skill.

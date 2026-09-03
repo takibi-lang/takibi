@@ -36,6 +36,32 @@ the mechanism or invariant directly.
   sentinel answers its own question truthfully and a different question
   silently.
 
+## Failures that are not the change under test
+
+Before diagnosing a QEMU lane failure, check it against these. Each was paid
+for once; re-deriving one costs a day.
+
+**The guest stops emitting mid-boot on a loaded host.** A lane fails with a
+harness diagnosis naming whatever it was still waiting for -- an interactive
+HTTPd lifecycle stall, an unobserved ash boundary -- while the UART capture
+simply ends part way through the boot, at the same line every time, well
+before the driver's deadline. The driver now says which of the two happened:
+"the guest then sent nothing for N seconds of its budget -- it stopped rather
+than ran late". When it says that, the change under test is not implicated.
+
+What causes it is host CPU saturation, and concurrent runs of the whole suite
+are what saturate: measured on 24 cores, twelve concurrent lanes all passed
+while three concurrent aggregates failed every lane. `make kernelcheck` and
+`make allcheck` take the `suite` lease for that reason, so this should not
+arise from ordinary parallel work. If it does, that itself is new evidence.
+Add what you observe to the open investigation on GitHub issue #509 rather
+than starting again; it carries the reproduction, the measured rates, and the
+exact line the guest stops on.
+
+**`records MISSING uses=16 reason=2` on a boot that runs to completion.** A
+different failure, tracked separately, and not caused by load: it appears at
+roughly one boot in six on an idle host too.
+
 ## Suspect the instrument
 
 A truncating or otherwise broken diagnostic reads exactly like a real
