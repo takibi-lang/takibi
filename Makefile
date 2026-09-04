@@ -177,6 +177,7 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 	@bash scripts/test_archive_kernel_failure.sh
 	@python3 scripts/check_direct_mmio_literals.py kernel
 	@python3 scripts/check_stale_depfiles.py
+	@python3 scripts/check_single_dune_invocation.py
 	@python3 scripts/check_compiler_sync_rules.py --quiet
 	@python3 scripts/check_raw_pos_fname.py
 	@python3 scripts/check_qemu_lane_ports.py
@@ -184,9 +185,15 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 	@python3 scripts/check_pool_release_paths.py
 	@python3 scripts/check_platform_file_parity.py
 	@python3 scripts/check_kernel_log_expectations.py
+# -I skips binary files. Without it a build directory left in the worktree
+# under any name but `_build` -- a copy taken for diagnosis, say -- makes grep
+# match dune's preprocessed .pp.ml files, which carry NUL. That reports
+# "binary file matches" on stderr, which this recipe discards, so the run ends
+# with "found (see above)" and nothing above it. The check is about source
+# text, and a file grep calls binary is not source text.
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash -c ' \
 		echo "Checking for non-ASCII characters in source files..."; \
-		if LC_ALL=C grep -rnP "[^\x00-\x7F]" --exclude-dir=_build \
+		if LC_ALL=C grep -rnPI "[^\x00-\x7F]" --exclude-dir=_build \
 		       --include="*.ml" --include="*.mll" --include="*.mly" \
 		       --include="*.tkb" --include="*.S" --include="*.md" \
 		       --include="*.sh" --include="*.ld" --include="*.py" \

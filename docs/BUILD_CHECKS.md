@@ -27,6 +27,7 @@ than warns; do not bypass or weaken one merely to complete a change.
 | `check_pool_release_paths.py` | every kernel pool has a release path or explicit exemption |
 | `check_qemu_lane_ports.py` | QEMU lanes do not claim conflicting protocol ports, and every lane fits the per-session port block |
 | `check_raw_pos_fname.py` | source identity uses the canonical path helpers |
+| `check_single_dune_invocation.py` | exactly one rule runs `dune build`, so no second make invocation races its lock |
 | `check_stale_depfiles.py` | generated kernel depfiles name live prerequisites |
 | `check_suite_output.py` | batched UART cases appear in manifest order and match their fixtures |
 | `check_user_payload_no_rw_globals.py` | flat EL0 payloads contain no writable globals |
