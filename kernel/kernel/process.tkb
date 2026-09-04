@@ -2611,6 +2611,21 @@ private let mut kernel_process_trace_boot_enabled: bool;
 // stop immediately after a real child exec commit, proving one lifecycle tail
 // contains fork, exec prepare, and exec commit. Normal boot leaves it false.
 private let mut kernel_process_trace_fail_after_exec: bool;
+// The syscall path records its named committed-exec failure before it enters
+// the common fail-stop entry.  The exception renderer owns presentation.
+private let mut kernel_process_exec_failure_reason: usize;
+
+must_use variant KernelChildExecPrepareResult {
+    Prepared;
+    NotChildOrPending;
+    CloneVmMissing;
+    DynamicResolveInvalid;
+    DynamicPairInvalid;
+    ImageAlreadyInstalled;
+    NoImageResolved;
+    StaticImageInvalid;
+    StaticMapOutOfMemory;
+}
 private let mut kernel_process_trace_enabled: bool;
 
 // Layout: sequence, cpu, kind, subject pid/generation, peer
@@ -2716,6 +2731,43 @@ fn kernel_process_trace_disable() { kernel_process_trace_enabled = false; }
 
 fn kernel_process_trace_fail_after_exec_requested() -> bool {
     return kernel_process_trace_fail_after_exec;
+}
+
+fn kernel_process_exec_failure_clear() { kernel_process_exec_failure_reason = 0; }
+
+fn kernel_process_exec_failure_set(result: KernelChildExecPrepareResult) {
+    match result {
+        KernelChildExecPrepareResult::Prepared => { kernel_process_exec_failure_reason = 0; }
+        KernelChildExecPrepareResult::NotChildOrPending => { kernel_process_exec_failure_reason = 1; }
+        KernelChildExecPrepareResult::CloneVmMissing => { kernel_process_exec_failure_reason = 2; }
+        KernelChildExecPrepareResult::DynamicResolveInvalid => { kernel_process_exec_failure_reason = 3; }
+        KernelChildExecPrepareResult::DynamicPairInvalid => { kernel_process_exec_failure_reason = 4; }
+        KernelChildExecPrepareResult::ImageAlreadyInstalled => { kernel_process_exec_failure_reason = 5; }
+        KernelChildExecPrepareResult::NoImageResolved => { kernel_process_exec_failure_reason = 6; }
+        KernelChildExecPrepareResult::StaticImageInvalid => { kernel_process_exec_failure_reason = 7; }
+        KernelChildExecPrepareResult::StaticMapOutOfMemory => { kernel_process_exec_failure_reason = 8; }
+    }
+}
+
+fn kernel_process_exec_failure_debugger_after_commit() {
+    kernel_process_exec_failure_reason = 9;
+}
+
+fn kernel_process_exec_failure_render() {
+    if (kernel_process_exec_failure_reason == 0) { return; }
+    kernel_boot_log("oops: exec prepare=");
+    match kernel_process_exec_failure_reason {
+        1 => { kernel_boot_log("not-child-or-pending\n"); }
+        2 => { kernel_boot_log("clone-vm-missing\n"); }
+        3 => { kernel_boot_log("dynamic-resolve-invalid\n"); }
+        4 => { kernel_boot_log("dynamic-pair-invalid\n"); }
+        5 => { kernel_boot_log("image-already-installed\n"); }
+        6 => { kernel_boot_log("no-image-resolved\n"); }
+        7 => { kernel_boot_log("static-image-invalid\n"); }
+        8 => { kernel_boot_log("static-map-out-of-memory\n"); }
+        9 => { kernel_boot_log("debugger-after-commit\n"); }
+        _ => { kernel_boot_log("unknown\n"); }
+    }
 }
 
 fn kernel_process_trace_current(event: usize, peer: ProcessHandle,

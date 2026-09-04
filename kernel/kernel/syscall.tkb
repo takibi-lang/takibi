@@ -1993,12 +1993,47 @@ fn kernel_syscall_clone_child_return(parent_frame_sp: usize, child_pid: usize)
 // class of bug structurally impossible now: there is no second code path
 // left that could reload and silently discard these two field writes.
 fn kernel_syscall_child_exec_return(frame_sp: usize) {
-    if (kernel_process_child_exec_prepare() == 0) {
-        kernel_syscall_fail_stop(frame_sp);
+    kernel_process_exec_failure_clear();
+    let result: KernelChildExecPrepareResult = kernel_process_child_exec_prepare();
+    match result {
+        KernelChildExecPrepareResult::Prepared => {}
+        KernelChildExecPrepareResult::NotChildOrPending => {
+            kernel_process_exec_failure_set(KernelChildExecPrepareResult::NotChildOrPending);
+            kernel_syscall_fail_stop(frame_sp);
+        }
+        KernelChildExecPrepareResult::CloneVmMissing => {
+            kernel_process_exec_failure_set(KernelChildExecPrepareResult::CloneVmMissing);
+            kernel_syscall_fail_stop(frame_sp);
+        }
+        KernelChildExecPrepareResult::DynamicResolveInvalid => {
+            kernel_process_exec_failure_set(KernelChildExecPrepareResult::DynamicResolveInvalid);
+            kernel_syscall_fail_stop(frame_sp);
+        }
+        KernelChildExecPrepareResult::DynamicPairInvalid => {
+            kernel_process_exec_failure_set(KernelChildExecPrepareResult::DynamicPairInvalid);
+            kernel_syscall_fail_stop(frame_sp);
+        }
+        KernelChildExecPrepareResult::ImageAlreadyInstalled => {
+            kernel_process_exec_failure_set(KernelChildExecPrepareResult::ImageAlreadyInstalled);
+            kernel_syscall_fail_stop(frame_sp);
+        }
+        KernelChildExecPrepareResult::NoImageResolved => {
+            kernel_process_exec_failure_set(KernelChildExecPrepareResult::NoImageResolved);
+            kernel_syscall_fail_stop(frame_sp);
+        }
+        KernelChildExecPrepareResult::StaticImageInvalid => {
+            kernel_process_exec_failure_set(KernelChildExecPrepareResult::StaticImageInvalid);
+            kernel_syscall_fail_stop(frame_sp);
+        }
+        KernelChildExecPrepareResult::StaticMapOutOfMemory => {
+            kernel_process_exec_failure_set(KernelChildExecPrepareResult::StaticMapOutOfMemory);
+            kernel_syscall_fail_stop(frame_sp);
+        }
     }
     // Default-false debugger test switch: stop after the real prepare+commit
     // path without affecting ordinary exec or adding a userspace interface.
     if (kernel_process_trace_fail_after_exec_requested()) {
+        kernel_process_exec_failure_debugger_after_commit();
         kernel_syscall_fail_stop(frame_sp);
     }
     let entry: usize = kernel_process_child_exec_entry();

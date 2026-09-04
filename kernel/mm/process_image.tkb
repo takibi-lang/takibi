@@ -960,21 +960,23 @@ fn process_image_exec_image_installed(root: usize) -> bool !{unsafe} {
     return process_image_record_at(root).exec_image_installed;
 }
 
+must_use variant ProcessImageExecInstallResult { Installed; AlreadyInstalled; }
+
 fn process_image_exec_install(
-        pages: sink ProcessImagePages[image]) -> bool {
+        pages: sink ProcessImagePages[image]) -> ProcessImageExecInstallResult {
     let root: usize =
         process_image_root_index();
     if (process_image_record_at(root).exec_image_installed) {
         // Unchanged: the INCOMING image is the one unmapped, and the
         // already-installed one is left alone.
         process_image_unmap(pages);
-        return false;
+        return ProcessImageExecInstallResult::AlreadyInstalled;
     }
     process_image_record_at(root).exec_image_page_count =
         process_image_page_count(pages);
     process_image_record_at(root).exec_image_installed = true;
     process_image_pages_discard(pages);
-    return true;
+    return ProcessImageExecInstallResult::Installed;
 }
 
 // GitHub issue #209: an applet used to be launched by the kernel itself,

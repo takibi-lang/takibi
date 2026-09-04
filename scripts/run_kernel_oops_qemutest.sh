@@ -185,7 +185,8 @@ fi
 if [ "$MODE" = child_exec ] &&
         { ! grep -Eq '^oops: trace seq=[1-9][0-9]* cpu=0 event=1 pid=[1-9][0-9]* ' "$UART_LOG" ||
           ! grep -Eq '^oops: trace seq=[1-9][0-9]* cpu=0 event=2 pid=[1-9][0-9]* ' "$UART_LOG" ||
-          ! grep -Eq '^oops: trace seq=[1-9][0-9]* cpu=0 event=3 pid=[1-9][0-9]* ' "$UART_LOG"; }; then
+          ! grep -Eq '^oops: trace seq=[1-9][0-9]* cpu=0 event=3 pid=[1-9][0-9]* ' "$UART_LOG" ||
+          ! grep -q '^oops: exec prepare=debugger-after-commit$' "$UART_LOG"; }; then
     echo "FAIL kernel/qemu oops: child exec lifecycle trace was incomplete" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1

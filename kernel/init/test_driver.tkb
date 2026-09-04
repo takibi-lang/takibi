@@ -228,20 +228,24 @@ fn kernel_exec_resolve_argv0(mount: Ext2Mount) -> ExecResolveResult !{unsafe} {
 }
 
 fn kernel_process_child_exec_map_result(
-        pages_result: ProcessImageMapResult, child_root: usize) -> usize {
+        pages_result: ProcessImageMapResult, child_root: usize)
+        -> KernelChildExecPrepareResult {
     match pages_result {
         ProcessImageMapResult::InvalidImage => {
-            return 0;
+            return KernelChildExecPrepareResult::StaticImageInvalid;
         }
         ProcessImageMapResult::OutOfMemory => {
-            return 0;
+            return KernelChildExecPrepareResult::StaticMapOutOfMemory;
         }
         ProcessImageMapResult::Mapped(pages) => {
             kernel_child_exec_entry = process_image_entry(pages);
             kernel_child_exec_stack = process_image_stack_pointer(pages);
             let (heap_start, heap_limit) = process_image_heap_range(pages);
-            if (process_image_exec_install(pages) == false) {
-                return 0;
+            match process_image_exec_install(pages) {
+                ProcessImageExecInstallResult::AlreadyInstalled => {
+                    return KernelChildExecPrepareResult::ImageAlreadyInstalled;
+                }
+                ProcessImageExecInstallResult::Installed => {}
             }
             kernel_syscall_process_configure_current(heap_start, heap_limit);
             process_image_activate_root(child_root);
@@ -257,7 +261,7 @@ fn kernel_process_child_exec_map_result(
                     kernel_process_current_pid());
             }
             kernel_syscall_exec_clear();
-            return 1;
+            return KernelChildExecPrepareResult::Prepared;
         }
     }
 }
@@ -472,10 +476,10 @@ fn kernel_initial_process_map(rootfs_ready: bool,
     return process_image_map(fallback_plan, argv, argc);
 }
 
-fn kernel_process_child_exec_prepare() -> usize {
+fn kernel_process_child_exec_prepare() -> KernelChildExecPrepareResult {
     if (kernel_process_is_child() == false ||
         kernel_syscall_exec_pending() == false) {
-        return 0;
+        return KernelChildExecPrepareResult::NotChildOrPending;
     }
     kernel_process_trace_exec_prepare();
     if (kernel_syscall_persistent_shell_active()) {
@@ -521,7 +525,7 @@ fn kernel_process_child_exec_prepare() -> usize {
     } else {
         match process_image_clone_vm_reap(child_root) {
             ProcessCloneVmReapResult::Missing => {
-                return 0;
+                return KernelChildExecPrepareResult::CloneVmMissing;
             }
             ProcessCloneVmReapResult::Reaped => {}
         }
@@ -529,7 +533,9 @@ fn kernel_process_child_exec_prepare() -> usize {
     if (ext2_mount_ready) {
         match kernel_exec_resolve_dynamic_ext2(saved_ext2_mount) {
             DynamicExecResolveResult::NotRequested => {}
-            DynamicExecResolveResult::Invalid => { return 0; }
+            DynamicExecResolveResult::Invalid => {
+                return KernelChildExecPrepareResult::DynamicResolveInvalid;
+            }
             DynamicExecResolveResult::Resolved(images) => {
                 match process_image_pair_map_ext2_in_root(
                         images.primary.plan,
@@ -544,15 +550,20 @@ fn kernel_process_child_exec_prepare() -> usize {
                         kernel_syscall_exec_argv(),
                         kernel_syscall_exec_argc(),
                         child_root) {
-                    ProcessImagePairProbeResult::Invalid => { return 0; }
+                    ProcessImagePairProbeResult::Invalid => {
+                        return KernelChildExecPrepareResult::DynamicPairInvalid;
+                    }
                     ProcessImagePairProbeResult::Ready(pages) => {
                         kernel_child_exec_entry = process_image_entry(pages);
                         kernel_child_exec_stack =
                             process_image_stack_pointer(pages);
                         let (heap_start, heap_limit) =
                             process_image_heap_range(pages);
-                        if (process_image_exec_install(pages) == false) {
-                            return 0;
+                        match process_image_exec_install(pages) {
+                            ProcessImageExecInstallResult::AlreadyInstalled => {
+                                return KernelChildExecPrepareResult::ImageAlreadyInstalled;
+                            }
+                            ProcessImageExecInstallResult::Installed => {}
                         }
                         kernel_syscall_process_configure_current(
                             heap_start, heap_limit);
@@ -587,14 +598,14 @@ fn kernel_process_child_exec_prepare() -> usize {
                         process_image_activate_root(child_root);
                         kernel_process_child_exec_mark();
                         kernel_syscall_exec_clear();
-                        return 1;
+                        return KernelChildExecPrepareResult::Prepared;
                     }
                 }
             }
         }
     }
     if (target_ext2_ready == false) {
-        return 0;
+        return KernelChildExecPrepareResult::NoImageResolved;
     }
     if (target_ext2_ready) {
         return kernel_process_child_exec_map_result(

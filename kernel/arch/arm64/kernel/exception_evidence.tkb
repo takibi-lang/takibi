@@ -1330,6 +1330,7 @@ fn crash_snapshot_render() !{unsafe} {
     kernel_boot_log(" image=");
     if (crash_snapshot.image_kind == 1) { kernel_boot_log("exec\n"); }
     else { kernel_boot_log("bootstrap\n"); }
+    kernel_process_exec_failure_render();
     for fd: usize in 0..<CRASH_FD_SNAPSHOT_SLOTS {
         if (crash_snapshot.fd_kind[fd] != 0) {
             kernel_boot_log("oops: fd="); uart_put_udec(fd);
