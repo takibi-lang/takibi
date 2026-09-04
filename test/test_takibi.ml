@@ -3749,7 +3749,7 @@ let infer_tests = [
     (expect_type_error "cannot unify"
        "fn f(x: i32) { if (x) { } }");
 
-  (* -- check_literal_fits_refined's TBool arm: the same unbound-type
+  (* -- check_expected_type_value's TBool arm: the same unbound-type
      -variable hole, but for any literal-flows-into-a-known-type site, not
      just if/while conditions (Let, Return, Call arguments, ...). *)
 
@@ -15886,9 +15886,10 @@ let codegen_tests = [
      #100, "Refinement type on struct field": struct field reads/writes
      already worked correctly, but this literal-value gap affected EVERY
      refined-type target, not just struct fields). Fixed by
-     check_literal_fits_refined, called alongside unify_at at every site
-     where a literal-or-Const_env-constant expression flows into an
-     already-declared target type. One test per call site below. *)
+     check_expected_type_value, reached structurally through check_expr for
+     every expression flowing into an already-declared target type (with an
+     explicit refined cast checked in infer_expr because its target syntax is
+     part of that expression). One test per destination shape below. *)
   Alcotest.test_case
     "issue #100: an out-of-range literal `let` initializer against a \
      refined target is now a compile error, not a silently-accepted false \
@@ -16016,7 +16017,7 @@ let codegen_tests = [
   Alcotest.test_case
     "issue #100 negative control: an UNPROVEN runtime (non-constant) \
      value assigned to a refined struct field is still rejected by the \
-     PRE-EXISTING anti-subtyping guard -- check_literal_fits_refined only \
+     PRE-EXISTING anti-subtyping guard -- check_expected_type_value only \
      ever adds a NEW rejection for compile-time-known values, it must not \
      weaken this existing, unrelated check" `Quick
     (expect_type_error "cannot pass unproven"

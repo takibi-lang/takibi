@@ -693,7 +693,7 @@ let min_max_sentinel base =
    context"), a literal's inferred type is a genuinely UNCONSTRAINED type
    variable, which happily unifies STRUCTURALLY with TBool even though a
    literal is never actually a legitimate bool value -- the same class of
-   soundness gap check_literal_fits_refined exists to close for refined
+   soundness gap check_expected_type_value exists to close for refined
    targets (see that function's own comment), just for a boolean target
    instead of a numeric range. Left unchecked, `while (1)` would silently
    "type-check" (the unresolved TVar binds to TBool) and then crash at
@@ -1017,7 +1017,7 @@ let rec value_facts_of_expr ty (expr : Ast.expr) =
    Exact literals, folded constants, and immutable initializer facts all use
    this path; an unknown expression remains the unifier's responsibility and
    cannot gain a proof here. *)
-let check_literal_fits_refined loc (e : Ast.expr) (target : ty) =
+let check_expected_type_value loc (e : Ast.expr) (target : ty) =
   check_integer_literal_target_shape loc e target;
   match strip_singleton target with
   | TRefinedInt (lo, hi, base_ty) ->
@@ -2734,7 +2734,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                    Let/Assign/etc: `tgt` was already computed from the
                    written syntax with no check against a literal source's
                    actual value. *)
-                check_literal_fits_refined e.loc e tgt;
+                check_expected_type_value e.loc e tgt;
                 tgt))))
 
   | FieldGet (base_expr, fname) ->
@@ -3040,11 +3040,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
         | ty -> of_ast_in_decl_scope scope ty
       in
       let expected = instantiate_exists schema in
-      let actual = infer_expr senv eenv tyenv fenv payload in
-      let actual = adapt_actual_to_expected tyenv payload actual expected in
-      unify_at payload.loc actual expected;
-      check_literal_fits_refined payload.loc payload expected;
-      check_io_ptr_literal_needs_unsafe payload.loc payload expected;
+      let _actual = check_expr senv eenv tyenv fenv payload expected in
       (* variant_args were bound into `scope` BEFORE the payload schema
          was resolved through it, so unifying the payload above has
          already resolved them to whatever the argument's own type
@@ -3847,7 +3843,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               covers everything this hand-written loop used to do itself
               (the AddrOf-vs-TRef/TRefMut dispatch, existential-argument
               opening, adapt_actual_to_expected, unify_at,
-              check_literal_fits_refined, check_io_ptr_literal_needs_unsafe
+              check_expected_type_value, check_io_ptr_literal_needs_unsafe
               -- see check_expr's own cases and its header comment).
 
               One case is deliberately bypassed: a bare `{ ... }`
@@ -3900,11 +3896,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
              | TExists _ -> pack_exists_ty target_ty
              | _ -> target_ty
            in
-           let ety = infer_expr senv eenv tyenv fenv rhs in
-           let ety = adapt_actual_to_expected tyenv rhs ety unify_target in
-           unify_at rhs.loc ety unify_target;
-           check_literal_fits_refined rhs.loc rhs unify_target;
-           check_io_ptr_literal_needs_unsafe rhs.loc rhs unify_target;
+           let _ety = check_expr senv eenv tyenv fenv rhs unify_target in
            TVoid
        | Deref ptr_expr ->
            let pt = infer_expr senv eenv tyenv fenv ptr_expr in
@@ -3931,8 +3923,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            if contains_stable_owner_value_ty inner then
              raise (TypeError (e.loc,
                "stable owner container storage cannot be overwritten or copied through a pointer"));
-           let vt = infer_expr senv eenv tyenv fenv rhs in
-           let vt = adapt_actual_to_expected tyenv rhs vt inner in
+           let vt = check_expr senv eenv tyenv fenv rhs inner in
            if contains_view_ty vt then
              raise (TypeError (rhs.loc,
                "cannot store an erased view through a pointer"));
@@ -3949,16 +3940,12 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            if is_indexed_owner_ty vt then
              raise (TypeError (rhs.loc,
                "cannot store an indexed owner through a pointer: it would escape obligation tracking"));
-           unify_at rhs.loc vt inner;
-           check_literal_fits_refined rhs.loc rhs inner;
-           check_io_ptr_literal_needs_unsafe rhs.loc rhs inner;
            TVoid
        | Index (base, idx) ->
            check_no_write_through_shared_ref senv eenv tyenv fenv base;
            let vt = place_undecayed_type senv eenv tyenv fenv base in
            let it = infer_expr senv eenv tyenv fenv idx in
            Hashtbl.replace index_resolved_ty idx.loc (to_ast it);  (* GitHub issue #311 *)
-           let rt = infer_expr senv eenv tyenv fenv rhs in
            let elem_ty = match repr vt with
              | TArray (elem, n) ->
                  require_usize_index idx.loc it;
@@ -3988,7 +3975,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            if contains_stable_owner_value_ty elem_ty then
              raise (TypeError (e.loc,
                "stable owner container storage cannot be overwritten or copied through an index"));
-           let rt = adapt_actual_to_expected tyenv rhs rt elem_ty in
+           let rt = check_expr senv eenv tyenv fenv rhs elem_ty in
            if contains_view_ty rt then
              raise (TypeError (rhs.loc,
                "cannot store an erased view into an array/slice element"));
@@ -4005,9 +3992,6 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            if is_indexed_owner_ty rt then
              raise (TypeError (rhs.loc,
                "cannot store an indexed owner into an array/slice element: it would escape obligation tracking"));
-           unify_at rhs.loc rt elem_ty;
-           check_literal_fits_refined rhs.loc rhs elem_ty;
-           check_io_ptr_literal_needs_unsafe rhs.loc rhs elem_ty;
            TVoid
        | FieldGet (base_expr, fname) ->
            let bt = infer_expr senv eenv tyenv fenv base_expr in
@@ -4100,8 +4084,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  raise (TypeError (e.loc,
                    Printf.sprintf "no field '%s' in struct '%s'" fname sname))
            in
-           let vt = infer_expr senv eenv tyenv fenv rhs in
-           let vt = adapt_actual_to_expected tyenv rhs vt (strip_io field_ty) in
+           let vt = check_expr senv eenv tyenv fenv rhs (strip_io field_ty) in
            if contains_view_ty vt then
              raise (TypeError (rhs.loc,
                "cannot store an erased view into a struct field"));
@@ -4118,9 +4101,6 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            if is_indexed_owner_ty vt then
              raise (TypeError (rhs.loc,
                "cannot store an indexed owner into a struct field: it would escape obligation tracking"));
-           unify_at rhs.loc vt (strip_io field_ty);
-           check_literal_fits_refined rhs.loc rhs (strip_io field_ty);
-           check_io_ptr_literal_needs_unsafe rhs.loc rhs (strip_io field_ty);
            TVoid
        | _ ->
            raise (TypeError (lhs.loc, "not an assignable expression")))
@@ -4328,7 +4308,15 @@ and place_undecayed_type senv eenv tyenv fenv (e : Ast.expr) : ty =
    Handles nested StructLit for both struct and array fields.
    Falls back to infer_expr + unify for all other expressions. *)
 
-(* GitHub issue #323: returns the actual/resolved type (mirroring
+(* The structural expected-type boundary. Every expression flowing into a
+   declared destination -- parameters, locals, returns, assignments,
+   aggregate fields, variant payloads, and globals -- enters here. This is
+   what prevents a new destination form from having to remember a separate
+   literal/refinement check (GitHub issue #103). An explicit `as T` cast is
+   the sole exception because its written target is part of infer_expr itself;
+   that branch calls check_expected_type_value directly.
+
+   GitHub issue #323: returns the actual/resolved type (mirroring
    infer_expr's own return), not just unit -- needed so callers that
    route through this function (Let's initializer handling, in
    particular) can still see the resolved type for their own follow-up
@@ -4384,21 +4372,15 @@ and check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : ty =
          entirely (falls to the generic branch below, unchanged from
          before this type existed) -- so every existing `&x` call site
          keeps compiling with zero changes.
-         GitHub issue #323: check_literal_fits_refined added here to match
-         what the Call-argument and Let-initializer call sites already did
-         in their own, now-removed, duplicate AddrOf/TRef cases -- a
-         behavior difference from before #323 for this exact branch's
-         OTHER two callers (StructLit field checking), which never
-         exercised it since &expr cannot appear inside a `{ ... }`
-         literal's own value list. *)
+         These specialized reference arms still converge on the same
+         expected-type unification; integer-value validation is irrelevant
+         because AddrOf cannot produce an integer literal. *)
       let actual = infer_addrof_wrapped senv eenv tyenv fenv e inner `Ref in
       unify_at e.loc actual expected;
-      check_literal_fits_refined e.loc e expected;
       actual
   | AddrOf inner, TRefMut _ ->
       let actual = infer_addrof_wrapped senv eenv tyenv fenv e inner `RefMut in
       unify_at e.loc actual expected;
-      check_literal_fits_refined e.loc e expected;
       actual
   (* GitHub issue #347: `&mut T @ place` -- the same mint as the two cases
      above (which type of reference to produce still comes from the
@@ -4415,7 +4397,6 @@ and check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : ty =
       let actual = infer_addrof_wrapped senv eenv tyenv fenv e inner mode in
       let actual = adapt_actual_to_expected tyenv e actual expected in
       unify_at e.loc actual expected;
-      check_literal_fits_refined e.loc e expected;
       actual
   | _ ->
       let te = infer_expr senv eenv tyenv fenv e in
@@ -4454,7 +4435,7 @@ and check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : ty =
          (match hint with
           | Some h -> raise (TypeError (eloc, msg ^ " (" ^ h ^ ")"))
           | None -> raise (TypeError (eloc, msg))));
-      check_literal_fits_refined e.loc e (strip_io expected);
+      check_expected_type_value e.loc e (strip_io expected);
       check_io_ptr_literal_needs_unsafe e.loc e (strip_io expected);
       te
 
@@ -4787,11 +4768,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
            "bare `return;` requires a void return type; this function returns a value -- use `return e;`")));
       (tyenv, raw_locals)
   | Return (Some e) ->
-      let t = infer_expr senv eenv tyenv fenv e in
-      let t = adapt_actual_to_expected tyenv e t ret_ty in
-      unify_at e.loc t ret_ty;
-      check_literal_fits_refined e.loc e ret_ty;
-      check_io_ptr_literal_needs_unsafe e.loc e ret_ty;
+      let _t = check_expr senv eenv tyenv fenv e ret_ty in
       (tyenv, raw_locals)
   | Expr e ->
       ignore (infer_expr senv eenv tyenv fenv e);
@@ -4841,14 +4818,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                &T/&mut T) still falls through to check_expr's fallback,
                which calls infer_expr's own AddrOf case exactly as this
                file's previous "Some e -> infer_expr ..." general branch
-               did for every non-TRef/TRefMut annotation. Two observed
-               behavior differences from before this change, both strict
-               capability gains: an AddrOf initializer against a &T/&mut T
-               annotation now also runs check_literal_fits_refined (the
-               dedicated Let-side AddrOf branch never called it, unlike
-               the Call-argument loop's own copy); and an existentially-
-               typed initializer is now opened before unification the same
-               way an existentially-typed call argument already was (see
+               did for every non-TRef/TRefMut annotation. An existentially-
+               typed initializer is also opened before unification the same
+               way an existentially-typed call argument was (see
                check_expr's own fallback comment) -- previously unique to
                Call, now shared, though no existing test or kernel/ site
                is known to exercise a Let initializer that would have hit
@@ -7732,10 +7704,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let genv = List.fold_left (fun genv item -> match item with
     | Ast.ConstDef (name, _, expr, _) ->
         let (ty, _) = StringMap.find name genv in
-        let et = infer_expr senv eenv genv fenv expr in
-        (try unify et (strip_io ty)
-         with Unify_error m -> raise (TypeError (expr.loc, m)));
-        check_literal_fits_refined expr.loc expr (strip_io ty);
+        let _et = check_expr senv eenv genv fenv expr (strip_io ty) in
         genv
     | Ast.LetDef (name, _, expr_opt, _, is_mutable, _, _) ->
         let (ty, _) = StringMap.find name genv in
@@ -7813,7 +7782,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               | None ->
                   raise (TypeError (loc, Printf.sprintf "Unbound variable: %s" vname)))
          | Some e ->
-             let et = infer_expr senv eenv genv fenv e in
+             let et = check_expr senv eenv genv fenv e (strip_io ty) in
              if contains_view_ty et then
                raise (TypeError (e.loc, Printf.sprintf
                  "global '%s' cannot hold an erased view" name));
@@ -7838,10 +7807,6 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                 which every TRefinedInt-into-base-type subtyping rule
                 already allows once the arguments are the right way
                 round). *)
-             (try unify et (strip_io ty)
-              with Unify_error m -> raise (TypeError (e.loc, m)));
-             check_literal_fits_refined e.loc e (strip_io ty);
-             check_io_ptr_literal_needs_unsafe e.loc e (strip_io ty);
              (* Mirrors local lets' bind_ty exactly (see that comment) --
                 this is the piece that actually matters for issue #77: not
                 just "does this type-check" but "does the global keep the
