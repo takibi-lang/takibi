@@ -231,10 +231,26 @@ wrong:
 Treat any QEMU concurrency result as a lower bound. Measured differences on the
 same binary:
 
-- freelist double hand-out: 1349 on RPi5, 3 on QEMU.
 - spinlock fairness: RPi5 gave one core 4096 rounds to the other's 1; QEMU gave
   4096 to 4110, because its round-robin vCPU scheduling supplies a fairness the
   hardware does not.
-- probe overlap: a lock's second core reached 18 rounds of 2048 on RPi5 where
-  QEMU reported the full 2048.
+- probe overlap, measured on one binary across both targets: `asid` 11 on RPi5
+  against 2035 on QEMU, `fd refcount` 14 against 2038, `page` 31 against 2048,
+  `pool` 161 against 4082. Two orders of magnitude, and it is the same code.
+  This is the live form of the older note that a lock's second core reached 18
+  rounds of 2048 on the board where QEMU reported the full 2048.
+- the probes that DO agree across targets are the ones that stopped leaving it
+  to chance: `freelist` and `pid` rendezvous inside the production read/write
+  pair, `schedule` runs 4095/4096 either way, and
+  `pool_walk_contention_evidence` reports an identical 64 of 64 on both. A
+  synchronised probe measuring the same number everywhere is evidence that the
+  synchronisation works, NOT that the two machines are alike -- the bullets
+  above are what they are actually like. Read a matching pair of numbers as a
+  statement about the probe, and a diverging pair as a statement about the
+  machine.
+
+The freelist double hand-out used to be quoted here as 1349 on RPi5 against 3
+on QEMU. That measurement is gone rather than merely old: `df06fc8` made that
+probe force the collision at a rendezvous, so it now reports 4096 on both and
+no longer measures the gap at all.
 - MMU-off exclusives are not enforced by QEMU at all.

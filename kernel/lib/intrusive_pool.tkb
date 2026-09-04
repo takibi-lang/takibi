@@ -499,9 +499,12 @@ generic struct IntrusiveSlot(T: type) {
 generic struct IntrusivePool(T: type) {
     pool_tag: usize;
     // GitHub issue #445: the lock the pool takes. Per POOL, which is the
-    // cheapest axis there is -- six pools in this kernel, so 48 bytes in
-    // total, against a per-object or per-chunk field that would scale with
-    // what the pool holds. pool_tag cannot double as it: a tag is a mixed
+    // cheapest axis there is -- eleven persistent pools in this kernel, so
+    // 88 bytes in total, against a per-object or per-chunk field that would
+    // scale with what the pool holds. (The count said six for a while after
+    // the pools outgrew it; it is checked against
+    // `let mut <name>: IntrusivePool(` in kernel/ when it is edited, and
+    // excludes intrusive_pool_boot_probe's own stack-local instance.) pool_tag cannot double as it: a tag is a mixed
     // counter identifying the pool (issue #399), not a location.
     //
     // Issue #451 gave it a type. It was a bare `usize` and there was no

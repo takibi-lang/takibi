@@ -459,13 +459,21 @@ private fn pool_walk_await(sequence_address: usize, target: usize)
 
 // One round: make the extra chunk, wait for the walker to be holding an
 // address in it, release it, and wait for the walker to have asked.
-private fn pool_walk_round(round: usize) -> bool !{allocates, unsafe} {
+// The four ways a round can fail are four different things, and the stage
+// this returns is what the caller prints. Collapsing them into one word is
+// the defect GitHub issue #510 was filed over -- "the lock leaked", "the
+// race did not reproduce" and "one core never ran" all reading `failed` --
+// and this file had it too until the end-of-session audit that also
+// produced the numbers in its header.
+private fn pool_walk_round(round: usize) -> *u8 !{allocates, unsafe} {
     unsafe { atomic_store_release(pool_walk_seq_address(), round); }
     let guard = intrusive_pool_lock(&pool_walk_pool);
     let taken = intrusive_pool_insert_zeroed(&pool_walk_pool, guard);
     intrusive_pool_unlock(&pool_walk_pool, guard);
     match taken {
-        IntrusivePoolInsertResult::OutOfMemory => { return false; }
+        IntrusivePoolInsertResult::OutOfMemory => {
+            return "allocator-empty" as *u8;
+        }
         IntrusivePoolInsertResult::Allocated(owner) => {
             intrusive_pool_ref(&pool_walk_pool, owner).stamp =
                 POOL_WALK_SENTINEL;
@@ -478,15 +486,22 @@ private fn pool_walk_round(round: usize) -> bool !{allocates, unsafe} {
             let removed: bool = intrusive_remove_succeeded(
                 intrusive_pool_remove(&pool_walk_pool, release, owner));
             intrusive_pool_unlock(&pool_walk_pool, release);
-            if (removed == false) { return false; }
-            if (held == false) { return false; }
+            // Checked before `held`: a chunk this probe could not give back
+            // is a leak, and saying "the walk never arrived" about it would
+            // send the reader to the wrong core.
+            if (removed == false) { return "extra-chunk-not-removed" as *u8; }
+            if (held == false) { return "walk-never-held-it" as *u8; }
             unsafe {
                 atomic_store_release(pool_walk_released_seq_address(), round);
             }
             // Do not start the next round -- whose allocation could be
             // handed the very page just released -- until the walker has
             // asked about the address it is holding.
-            return pool_walk_await(pool_walk_probed_seq_address(), round);
+            if (pool_walk_await(pool_walk_probed_seq_address(), round)
+                    == false) {
+                return "walk-never-probed-it" as *u8;
+            }
+            return 0 as *u8;
         }
     }
 }
@@ -517,9 +532,14 @@ fn pool_walk_contention_probe() -> bool !{allocates, unsafe} {
     }
 
     let mut rounds_ok: bool = true;
+    let mut round_stage: *u8 = 0 as *u8;
     for round: usize in 0..<POOL_WALK_ROUNDS {
         if (rounds_ok) {
-            if (pool_walk_round(round + 1) == false) { rounds_ok = false; }
+            let stage: *u8 = pool_walk_round(round + 1);
+            if (stage != (0 as *u8)) {
+                rounds_ok = false;
+                round_stage = stage;
+            }
         }
     }
     unsafe { atomic_store_release(pool_walk_armed_address(), 0); }
@@ -539,7 +559,7 @@ fn pool_walk_contention_probe() -> bool !{allocates, unsafe} {
     }
 
     if (rounds_ok == false) {
-        pool_walk_report("rendezvous-not-met" as *u8);
+        pool_walk_report(round_stage);
         return false;
     }
     if (settled == false) {
