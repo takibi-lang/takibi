@@ -3,7 +3,9 @@
 # replace the first ordinary EL0 instruction with BRK #0, then verify both
 # the UART oops record and retained structured CrashSnapshot while the kernel
 # itself has parked the CPU. `child_exec` instead stops immediately after a
-# real exec commit through a debugger-owned, default-false test switch.
+# real exec commit through a debugger-owned, default-false test switch, while
+# `child_exec_prepare_failure` forces one named prepare result at its real
+# call boundary through compiler-emitted variant-return metadata.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -44,6 +46,11 @@ case "$MODE" in
         expected_detail='^oops: data-abort dfsc=0x000000000000000[0-9a-f] access=write$'
         ;;
     child_exec)
+        fault_instruction=''
+        expected_ec=15
+        expected_detail=''
+        ;;
+    child_exec_prepare_failure)
         fault_instruction=''
         expected_ec=15
         expected_detail=''
@@ -95,6 +102,20 @@ for _ in $(seq 1 50); do
             -ex "set *(char *)&kernel_process_trace_boot_enabled = 1"
             -ex "set *(char *)&kernel_process_trace_fail_after_exec = 1"
             -ex "disable 1"
+            -ex "detach"
+        )
+    elif [ "$MODE" = child_exec_prepare_failure ]; then
+        gdb_commands=(
+            -ex "target remote :$GDB_PORT"
+            -ex "break kernel_process_execution_reset"
+            -ex "continue"
+            -ex "set *(char *)&kernel_process_trace_boot_enabled = 1"
+            -ex "disable 1"
+            -ex "source $REPO_ROOT/scripts/kernel_debug_metadata.gdb"
+            -ex "takibi-debug-metadata $DEBUG_METADATA"
+            -ex "break kernel_process_child_exec_prepare"
+            -ex "continue"
+            -ex "takibi-force-variant-return KernelChildExecPrepareResult CloneVmMissing"
             -ex "detach"
         )
     else
@@ -163,21 +184,22 @@ fi
 # the allocator recycles numbers by rolling the generation over, so root 0
 # holds whatever number its last activation gave it. What still has to be
 # true is that a running root has one at all, which a nonzero value says.
-if [ "$MODE" != child_exec ] &&
+if [ "$MODE" != child_exec ] && [ "$MODE" != child_exec_prepare_failure ] &&
         { ! grep -Eq '^oops: trace seq=[1-9][0-9]* cpu=0 event=7 pid=1 gen=[1-9][0-9]* ' "$UART_LOG" ||
           ! grep -Eq '^oops: process pid=1 parent=0 state=2 wait=0 wait4_status_ptr=0x0+ root=0 asid=[1-9][0-9]* .* image=bootstrap$' "$UART_LOG"; }; then
     echo "FAIL kernel/qemu oops: expected bootstrap process trace" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1
 fi
-if [ "$MODE" != child_exec ] &&
+if [ "$MODE" != child_exec ] && [ "$MODE" != child_exec_prepare_failure ] &&
         { ! grep -Eq '^process trace: count=([1-9]|1[0-6])$' "$UART_LOG" ||
           ! grep -Eq '^process trace: seq=[1-9][0-9]* cpu=0 event=7 pid=1 gen=[1-9][0-9]* ' "$UART_LOG"; }; then
     echo "FAIL kernel/qemu oops: on-demand process trace report was not callable before the crash" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1
 fi
-if [ "$MODE" != child_exec ] && ! grep -q ' tpidr_el0=0xfeedfacefeedface ' "$UART_LOG"; then
+if [ "$MODE" != child_exec ] && [ "$MODE" != child_exec_prepare_failure ] &&
+        ! grep -q ' tpidr_el0=0xfeedfacefeedface ' "$UART_LOG"; then
     echo "FAIL kernel/qemu oops: saved TPIDR_EL0 was not retained" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1
@@ -189,6 +211,15 @@ if [ "$MODE" = child_exec ] &&
           ! grep -q '^oops: exec prepare=debugger-after-commit$' "$UART_LOG"; }; then
     echo "FAIL kernel/qemu oops: child exec lifecycle trace was incomplete" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
+    exit 1
+fi
+if [ "$MODE" = child_exec_prepare_failure ] &&
+        { ! grep -Eq '^oops: trace seq=[1-9][0-9]* cpu=0 event=1 pid=[1-9][0-9]* ' "$UART_LOG" ||
+          ! grep -q '^oops: exec prepare=clone-vm-missing$' "$UART_LOG" ||
+          ! grep -q 'takibi-force-variant-return: KernelChildExecPrepareResult::CloneVmMissing via registers' "$ARTIFACT_DIR/arm-gdb.log"; }; then
+    echo "FAIL kernel/qemu oops: forced child exec prepare failure was not named" >&2
+    sed 's/^/  /' "$UART_LOG" >&2 || true
+    sed 's/^/  /' "$ARTIFACT_DIR/arm-gdb.log" >&2 || true
     exit 1
 fi
 # GitHub issue #384: the report says WHO owns the pages it names, which is
@@ -210,7 +241,7 @@ fi
 # translation, which is where that coverage belongs; both owner lines are
 # still required in every mode by the loop below.
 case "$MODE" in
-    child_exec) resolved= ;;
+    child_exec|child_exec_prepare_failure) resolved= ;;
     *)          resolved=elr ;;
 esac
 if [ -n "$resolved" ] &&
