@@ -258,18 +258,34 @@ private fn address_space_backing_at(slot: usize)
     }
     let generation: usize =
         scheduled_process_address_space_backing_generation(slot);
-    let owner = intrusive_owner_new(
-        &address_space_backing_pool, address, generation);
-    // GitHub issue #488: this RETURNS the pointer, so it cannot hold the
-    // owner for as long as the pointer lives. The unproven form says that
-    // in its name and in the trusted-base count, instead of the pool
-    // silently allowing it for every caller. Removing it means migrating
-    // address_space_backing_at's 36 call sites to hold the owner
-    // themselves -- filed, not done here.
-    let backing: *AddressSpaceBacking =
-        intrusive_pool_ref_unproven(&address_space_backing_pool, owner);
-    intrusive_owner_drop(owner);
-    return backing;
+    // GitHub issue #492: the generation is COMPARED, which it was not.
+    // This read a slot address and a generation out of the process record
+    // and handed both to intrusive_owner_new, which stores two words and
+    // validates nothing, then dereferenced through the unproven ref, which
+    // by its own contract does not re-validate either. So a backing whose
+    // slot had been freed and handed out again was read as though it were
+    // still this process's -- and the sibling three lines down,
+    // address_space_backing_existing_at, already checked. Two accessors
+    // over the same pair disagreeing about whether to check is the state
+    // this replaces.
+    match intrusive_pool_probe_handle(&address_space_backing_pool, address,
+                                      generation) {
+        IntrusiveSlotProbe::NoPayload => {
+            address_space_backing_missing_count =
+                address_space_backing_missing_count + 1;
+            return &address_space_backing_missing;
+        }
+        IntrusiveSlotProbe::Live(slot_view) => {
+            // GitHub issue #488: this RETURNS the pointer, so it cannot
+            // hold the proof for the pointer's life. The unproven form says
+            // that in its name and in the trusted-base count, instead of
+            // the pool silently allowing it for every caller. Removing it
+            // means migrating address_space_backing_at's 36 call sites to
+            // hold the view themselves -- filed, not done here.
+            return intrusive_pool_payload_unproven_of(
+                &address_space_backing_pool, slot_view);
+        }
+    }
 }
 
 // Lookup-only counterpart for IRQ-reachable context-switch paths. A missing
@@ -287,24 +303,25 @@ private fn address_space_backing_existing_at(slot: usize)
     }
     let generation: usize =
         scheduled_process_address_space_backing_generation(slot);
-    if (intrusive_pool_matches(
-            &address_space_backing_pool, address, generation) == false) {
-        address_space_backing_missing_count =
-            address_space_backing_missing_count + 1;
-        return &address_space_backing_missing;
+    // GitHub issue #492: one lookup, not two. This checked with
+    // intrusive_pool_matches and then re-derived the payload from the same
+    // pair, which is the check-then-use split probe_handle exists to fuse:
+    // the comparison and the read are now the same call and cannot drift
+    // apart.
+    match intrusive_pool_probe_handle(&address_space_backing_pool, address,
+                                      generation) {
+        IntrusiveSlotProbe::NoPayload => {
+            address_space_backing_missing_count =
+                address_space_backing_missing_count + 1;
+            return &address_space_backing_missing;
+        }
+        IntrusiveSlotProbe::Live(slot_view) => {
+            // GitHub issue #488: this RETURNS the pointer, so it cannot
+            // hold the proof for the pointer's life. See the sibling above.
+            return intrusive_pool_payload_unproven_of(
+                &address_space_backing_pool, slot_view);
+        }
     }
-    let owner = intrusive_owner_new(
-        &address_space_backing_pool, address, generation);
-    // GitHub issue #488: this RETURNS the pointer, so it cannot hold the
-    // owner for as long as the pointer lives. The unproven form says that
-    // in its name and in the trusted-base count, instead of the pool
-    // silently allowing it for every caller. Removing it means migrating
-    // address_space_backing_at's 36 call sites to hold the owner
-    // themselves -- filed, not done here.
-    let backing: *AddressSpaceBacking =
-        intrusive_pool_ref_unproven(&address_space_backing_pool, owner);
-    intrusive_owner_drop(owner);
-    return backing;
 }
 
 fn address_space_is_live(slot: usize) -> bool {

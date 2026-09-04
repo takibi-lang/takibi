@@ -1735,7 +1735,23 @@ fn intrusive_pool_matches_untrusted(
 // expectation: a WALK found the slot by scanning and the occupant it finds
 // is the answer, not a mismatch.
 fn intrusive_pool_probe_handle(T: type, pool: &mut IntrusivePool(T) @ pool_id,
-                               slot_address: usize, generation: usize)
+                               slot_address: IntrusiveSlotAddress,
+                               generation: usize)
+        -> IntrusiveSlotProbe[pool_id] !{unsafe} {
+    return intrusive_pool_probe_handle_untrusted(
+        pool, slot_address.raw, generation);
+}
+
+// The raw-address form, paired with the typed one above for the same reason
+// intrusive_pool_matches_untrusted is paired with intrusive_pool_matches:
+// some consumers store the slot as a plain numeric identity rather than as
+// an IntrusiveSlotAddress -- an fd block, a UnifiedObjectHandle, a TCP
+// connection's owner -- and cannot hand over a minted address. Validating
+// the integer is what earns it a view, so the split costs no safety; the
+// name is what says which callers still owe issue #396 a conversion.
+fn intrusive_pool_probe_handle_untrusted(
+        T: type, pool: &mut IntrusivePool(T) @ pool_id,
+        slot_address: usize, generation: usize)
         -> IntrusiveSlotProbe[pool_id] !{unsafe} {
     if (intrusive_pool_matches_untrusted(
             pool, slot_address, generation) == false) {
@@ -2364,14 +2380,14 @@ fn intrusive_pool_boot_probe() -> bool !{unsafe} {
         }
     }
     let mut handle_probe_refused: bool = false;
-    match intrusive_pool_probe_handle(&pool, slot0_raw, generation0) {
+    match intrusive_pool_probe_handle(&pool, slot0, generation0) {
         IntrusiveSlotProbe::NoPayload => { handle_probe_refused = true; }
         IntrusiveSlotProbe::Live(wrong) => { intrusive_view_drop(wrong); }
     }
     // ...and refuses the stale NAME rather than the slot: the occupant that
     // is really there is still reachable through its own generation.
     let mut handle_probe_current: bool = false;
-    match intrusive_pool_probe_handle(&pool, slot0_raw,
+    match intrusive_pool_probe_handle(&pool, slot0,
                                       intrusive_owner_generation(a1)) {
         IntrusiveSlotProbe::NoPayload => {}
         IntrusiveSlotProbe::Live(now) => {

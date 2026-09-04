@@ -192,16 +192,30 @@ private fn process_image_record_at(root: usize) -> *ProcessImageRecord !{unsafe}
             process_image_record_missing_count + 1;
         return &process_image_record_missing;
     }
-    let owner = intrusive_owner_new(&process_image_pool, address, generation);
-        // GitHub issue #488: this RETURNS the pointer, so it cannot
-        // hold the proof for the pointer's life. The unproven form
-        // names that and counts it in the trusted base; removing it
-        // means migrating this accessor's callers to hold the view
-        // themselves.
-    let record: *ProcessImageRecord =
-        intrusive_pool_ref_unproven(&process_image_pool, owner);
-    intrusive_owner_drop(owner);
-    return record;
+    // GitHub issue #492: the generation is COMPARED, which it was not.
+    // The address and the generation both come out of the process record,
+    // and both were handed to intrusive_owner_new -- which stores two words
+    // and validates nothing -- and then dereferenced through the unproven
+    // ref, which by its own contract does not re-validate. An image record
+    // whose slot had been freed and handed out again was read as though it
+    // were still this root's.
+    match intrusive_pool_probe_handle(&process_image_pool, address,
+                                      generation) {
+        IntrusiveSlotProbe::NoPayload => {
+            process_image_record_missing_count =
+                process_image_record_missing_count + 1;
+            return &process_image_record_missing;
+        }
+        IntrusiveSlotProbe::Live(slot_view) => {
+            // GitHub issue #488: this RETURNS the pointer, so it cannot
+            // hold the proof for the pointer's life. The unproven form
+            // names that and counts it in the trusted base; removing it
+            // means migrating this accessor's callers to hold the view
+            // themselves.
+            return intrusive_pool_payload_unproven_of(&process_image_pool,
+                                                      slot_view);
+        }
+    }
 }
 
 // The state a root's record starts in, written down rather than left as

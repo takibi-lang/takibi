@@ -332,6 +332,16 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
         uart_put_udec(address_space_backing_missing_uses());
         kernel_boot_log("\n");
     }
+    // GitHub issue #492: the same report for the descriptor side, whose
+    // three accessors began comparing the generation they were already
+    // carrying. One count for the three pools, because the question a
+    // reader has is "did any descriptor lookup land on a record that was
+    // not the one it named", not which of the three.
+    if (unified_fd_record_missing_uses() != 0) {
+        kernel_boot_log("fd table: records MISSING uses=");
+        uart_put_udec(unified_fd_record_missing_uses());
+        kernel_boot_log("\n");
+    }
     // The same for the process record itself, whose
     // fallback is what an access to a REAPED process's
     // slot lands in. An array of never-freed slots could

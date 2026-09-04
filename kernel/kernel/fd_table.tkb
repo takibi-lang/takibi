@@ -136,6 +136,29 @@ struct FdBlock {
 private let mut fd_block_pool: IntrusivePool(FdBlock);
 private let mut fd_block_pool_ready: bool = false;
 
+// GitHub issue #492: where a lookup lands when the (slot, generation) pair
+// it was given does not name a live occupant. Three accessors in this file
+// took such a pair, minted an owner from it without validating anything,
+// and dereferenced -- so a recycled slot was read as though it were still
+// the caller's. They compare now, and a refusal has to go somewhere: one
+// fallback record per pool, and one COUNT, on the pattern
+// kernel/mm/address_space.tkb's backing fallback established.
+//
+// Reachable only by a caller that skipped its own check. Every caller in
+// this file tests first today -- unified_object_at's own comment says so --
+// which is exactly why the count is the interesting part: it says whether
+// that stays true, instead of the file saying it does.
+private let mut fd_block_missing: FdBlock;
+private let mut fd_context_missing: ProcessFdContext;
+private let mut unified_object_missing: SharedObject;
+private let mut unified_fd_record_missing_count: usize = 0;
+
+// Printed by the boot summary when nonzero, like its two siblings in
+// kernel/mm/. Zero is the whole claim.
+fn unified_fd_record_missing_uses() -> usize {
+    return unified_fd_record_missing_count;
+}
+
 // How many descriptor slots exist across every process, maintained as
 // blocks are allocated and freed. This is what unified_object_ref_bound
 // used to compute as `live contexts x PROCESS_FD_MAX` -- the same
@@ -208,15 +231,26 @@ private fn fd_context_address(process: usize) -> usize !{unsafe} {
 private fn fd_context_at(process: usize) -> *ProcessFdContext !{unsafe} {
     let mut address: IntrusiveSlotAddress = scheduled_process_fd_context(process);
     let generation: usize = scheduled_process_fd_context_generation(process);
-    let owner = intrusive_owner_new(&fd_context_pool, address, generation);
-    // GitHub issue #488: this RETURNS the pointer, so it cannot
-    // hold the proof for the pointer's life. The unproven form
-    // names that and counts it in the trusted base; removing it
-    // means migrating this accessor's callers to hold the view
-    // themselves.
-    let payload: *ProcessFdContext = intrusive_pool_ref_unproven(&fd_context_pool, owner);
-    intrusive_owner_drop(owner);
-    return payload;
+    // GitHub issue #492: the pair comes out of the process record and both
+    // halves were carried here and only one used. A context whose slot had
+    // been freed and handed out again was read as though it were still this
+    // process's.
+    match intrusive_pool_probe_handle(&fd_context_pool, address, generation) {
+        IntrusiveSlotProbe::NoPayload => {
+            unified_fd_record_missing_count =
+                unified_fd_record_missing_count + 1;
+            return &fd_context_missing;
+        }
+        IntrusiveSlotProbe::Live(slot_view) => {
+            // GitHub issue #488: this RETURNS the pointer, so it cannot
+            // hold the proof for the pointer's life. The unproven form
+            // names that and counts it in the trusted base; removing it
+            // means migrating this accessor's callers to hold the view
+            // themselves.
+            return intrusive_pool_payload_unproven_of(&fd_context_pool,
+                                                      slot_view);
+        }
+    }
 }
 
 // -- Descriptor blocks -------------------------------------------------
@@ -237,17 +271,26 @@ private fn fd_block_matches(address: usize, generation: usize) -> bool !{unsafe}
 }
 
 private fn fd_block_at(address: usize, generation: usize) -> *FdBlock !{unsafe} {
-    let mut checked: IntrusiveSlotAddress = intrusive_pool_validated_address(
-        &fd_block_pool, address, generation);
-    let owner = intrusive_owner_new(&fd_block_pool, checked, generation);
-    // GitHub issue #488: this RETURNS the pointer, so it cannot
-    // hold the proof for the pointer's life. The unproven form
-    // names that and counts it in the trusted base; removing it
-    // means migrating this accessor's callers to hold the view
-    // themselves.
-    let payload: *FdBlock = intrusive_pool_ref_unproven(&fd_block_pool, owner);
-    intrusive_owner_drop(owner);
-    return payload;
+    // GitHub issue #492: the generation is COMPARED. fd_block_matches
+    // above is the same comparison, and callers ran it separately; the two
+    // are one call now, so a caller cannot get the payload without it.
+    match intrusive_pool_probe_handle_untrusted(&fd_block_pool, address,
+                                                generation) {
+        IntrusiveSlotProbe::NoPayload => {
+            unified_fd_record_missing_count =
+                unified_fd_record_missing_count + 1;
+            return &fd_block_missing;
+        }
+        IntrusiveSlotProbe::Live(slot_view) => {
+            // GitHub issue #488: this RETURNS the pointer, so it cannot
+            // hold the proof for the pointer's life. The unproven form
+            // names that and counts it in the trusted base; removing it
+            // means migrating this accessor's callers to hold the view
+            // themselves.
+            return intrusive_pool_payload_unproven_of(&fd_block_pool,
+                                                      slot_view);
+        }
+    }
 }
 
 // `a % N` is always below N for a positive N, but the refinement wants
@@ -580,17 +623,29 @@ private fn unified_object_matches(handle: UnifiedObjectHandle) -> bool !{unsafe}
 // the payload of an address that failed that test is exactly the
 // use-after-free the generation check exists to refuse.
 private fn unified_object_at(handle: UnifiedObjectHandle) -> *SharedObject !{unsafe} {
-    let mut checked: IntrusiveSlotAddress = intrusive_pool_validated_address(
-        &object_pool, handle.slot, handle.generation);
-    let owner = intrusive_owner_new(&object_pool, checked, handle.generation);
-    // GitHub issue #488: this RETURNS the pointer, so it cannot
-    // hold the proof for the pointer's life. The unproven form
-    // names that and counts it in the trusted base; removing it
-    // means migrating this accessor's callers to hold the view
-    // themselves.
-    let payload: *SharedObject = intrusive_pool_ref_unproven(&object_pool, owner);
-    intrusive_owner_drop(owner);
-    return payload;
+    // GitHub issue #492: the handle's generation is COMPARED here, so the
+    // rule stated above -- "every caller in this file tests
+    // unified_object_matches first" -- stops being a rule a reader has to
+    // hold and starts being what this function does. The callers keep their
+    // own test, because it decides their OUTCOME (Invalid, Missing) and this
+    // one only decides which record is read.
+    match intrusive_pool_probe_handle_untrusted(&object_pool, handle.slot,
+                                                handle.generation) {
+        IntrusiveSlotProbe::NoPayload => {
+            unified_fd_record_missing_count =
+                unified_fd_record_missing_count + 1;
+            return &unified_object_missing;
+        }
+        IntrusiveSlotProbe::Live(slot_view) => {
+            // GitHub issue #488: this RETURNS the pointer, so it cannot
+            // hold the proof for the pointer's life. The unproven form
+            // names that and counts it in the trusted base; removing it
+            // means migrating this accessor's callers to hold the view
+            // themselves.
+            return intrusive_pool_payload_unproven_of(&object_pool,
+                                                      slot_view);
+        }
+    }
 }
 
 // Gives the allocation back. Replaces refcount_pool_abandon (an object
