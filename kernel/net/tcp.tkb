@@ -2550,9 +2550,9 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection],
 // question -- is there another process that could run instead of me? The
 // wait below is at EL1 and this kernel does not preempt kernel mode, so
 // while it runs, nothing else on the machine does. When the answer is no,
-// waiting here costs nothing and is what every fixture in this tree was
-// written against. When it is yes, this takes ONE look and hands the
-// decision back to its caller, which returns to userspace and comes back.
+// waiting here costs nothing. The answer can change while the loop runs,
+// so every iteration asks again and hands Pending back as soon as another
+// process becomes runnable.
 //
 // The same shape as the UART read path's own answer to the same question,
 // and for the same reason: "may I wait here" is a question about the rest
@@ -2567,6 +2567,9 @@ fn kernel_tcp_accept_progress(owner: borrow TcpConnectionOwner[connection],
     }
     let conn: *TcpConnection = tcp_connection_of(owner);
     while ((read_cntpct() - conn.accept_start_at) < conn.accept_deadline_ticks) {
+        if (kernel_process_other_ready()) {
+            return KernelTcpAcceptStep::Pending(ready);
+        }
         net_rx_wait();
         match kernel_tcp_accept_step(owner, ready) {
             KernelTcpAcceptStep::Accepted(next) => {
