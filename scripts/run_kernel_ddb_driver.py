@@ -3,27 +3,9 @@
 
 import argparse
 import json
-import math
 from pathlib import Path
 import socket
 import time
-
-
-BREAK_MARKER = b"interactive shell: uart blocked\n"
-
-
-def break_triggered(received: bytes, break_on_silence: float | None,
-                    last_activity: float, now: float) -> bool:
-    if break_on_silence is None:
-        return BREAK_MARKER in received
-    return now - last_activity >= break_on_silence
-
-
-def receive_wait(break_on_silence: float | None, last_activity: float,
-                 now: float) -> float:
-    if break_on_silence is None:
-        return 0.25
-    return max(0.0, min(0.25, break_on_silence - (now - last_activity)))
 
 
 def connect(port: int, deadline: float) -> socket.socket:
@@ -44,34 +26,18 @@ def main() -> int:
     parser.add_argument("--log", required=True)
     parser.add_argument("--snapshot-ready-file")
     parser.add_argument("--snapshot-release-file")
-    parser.add_argument("--break-on-silence", type=float)
-    parser.add_argument("--silence-arm-file")
     parser.add_argument("--timeout", type=float, default=30.0)
     args = parser.parse_args()
-    if (args.break_on_silence is not None
-            and (not math.isfinite(args.break_on_silence)
-                 or args.break_on_silence < 1.0)):
-        parser.error("--break-on-silence must be at least one second")
-    if args.break_on_silence is not None and args.break_source != "uart":
-        parser.error("--break-on-silence requires --break-source uart")
-    if args.silence_arm_file is not None and args.break_on_silence is None:
-        parser.error("--silence-arm-file requires --break-on-silence")
     if ((args.snapshot_ready_file is None)
             != (args.snapshot_release_file is None)):
         raise SystemExit(
             "snapshot ready and release files must be supplied together")
-    timeout = args.timeout
-    if args.break_on_silence is not None:
-        timeout = max(timeout, args.break_on_silence + 30.0)
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + args.timeout
     ready_file = (
         Path(args.snapshot_ready_file) if args.snapshot_ready_file else None
     )
     release_file = (
         Path(args.snapshot_release_file) if args.snapshot_release_file else None
-    )
-    silence_arm_file = (
-        Path(args.silence_arm_file) if args.silence_arm_file else None
     )
     if ready_file is not None:
         ready_file.unlink(missing_ok=True)
@@ -82,8 +48,6 @@ def main() -> int:
     received = bytearray()
     break_sent = args.break_source == "software"
     wake_byte_sent = args.break_source == "software"
-    last_activity = time.monotonic()
-    silence_armed = silence_arm_file is None
     prompt_count = 0
     commands = [
         b"oops\n", b"regs\n", b"intr\n", b"sched\n",
@@ -102,33 +66,19 @@ def main() -> int:
         b"help\n",
         b"continue\n",
     ]
-    if args.break_on_silence is not None:
-        commands = [b"bt\n", b"sched\n", b"ps\n"]
 
     with serial, open(args.log, "wb") as log:
         while time.monotonic() < deadline:
-            if (not silence_armed and silence_arm_file is not None
-                    and silence_arm_file.exists()):
-                silence_armed = True
-                last_activity = time.monotonic()
-            wait = receive_wait(
-                args.break_on_silence if silence_armed else None,
-                last_activity, time.monotonic())
-            if wait == 0.0:
+            try:
+                chunk = serial.recv(4096)
+            except socket.timeout:
                 chunk = None
-            else:
-                serial.settimeout(wait)
-                try:
-                    chunk = serial.recv(4096)
-                except socket.timeout:
-                    chunk = None
             if chunk == b"":
                 break
             if chunk is not None:
                 received.extend(chunk)
                 log.write(chunk)
                 log.flush()
-                last_activity = time.monotonic()
 
             # Drive the two producers in an evidence-backed order rather than
             # guessing how much host sleep lets the guest run. The marker says
@@ -137,15 +87,11 @@ def main() -> int:
             # event-ring assertions below prove that the guest actually
             # recorded wake before BREAK.
             if (not wake_byte_sent and
-                    args.break_on_silence is None and
-                    BREAK_MARKER in received):
+                    b"interactive shell: uart blocked\n" in received):
                 serial.sendall(b"\n")
                 wake_byte_sent = True
 
-            if (not break_sent and
-                    (wake_byte_sent or (silence_armed and break_triggered(
-                        received, args.break_on_silence,
-                        last_activity, time.monotonic())))):
+            if wake_byte_sent and not break_sent:
                 with connect(args.qmp_port, deadline) as qmp:
                     qmp_file = qmp.makefile("rwb", buffering=0)
                     # Say what arrived instead of naming only what did
@@ -191,10 +137,6 @@ def main() -> int:
                 if prompt_count < len(commands):
                     serial.sendall(commands[prompt_count])
                 prompt_count += 1
-
-            if (args.break_on_silence is not None and
-                    prompt_count > len(commands)):
-                return 0
 
             if (prompt_count >= len(commands) and
                     b"ddb: continuing\n" in received and

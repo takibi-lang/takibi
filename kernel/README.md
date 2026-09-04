@@ -186,7 +186,6 @@ make kernelcheck-qemu-debug  # run the complete QEMU integration test against th
 make kernelcheck-qemu-debug-repeat  # repeat it 5 times, preserving each boot's artifacts
 make kernelcheck-oops-qemu  # verify parked QEMU oops records and the retained lifecycle trace
 make kernelcheck-ddb-qemu  # enter DDB through a real UART BREAK, inspect, and resume
-make kernelcheck-ddb-silence-qemu  # capture bt+sched+ps after 5 quiet UART seconds
 make kernelcheck-lifecycle-gap-qemu  # verify the interactive-HTTPd checkpoint diagnosis names a real gap
 make kernelbuild       # build every maintained kernel target
 make kernelcheck       # build and test every maintained kernel target
@@ -581,7 +580,6 @@ regression from the failure being investigated:
 
 ```bash
 make kernelcheck-ddb-qemu       # UART BREAK and software BRK, inspect, resume
-make kernelcheck-ddb-silence-qemu # BREAK after UART silence, capture bt+sched+ps
 make kernelcheck-ddb-rpi5-software # physical software BRK compiler-frame walk
 make kernelcheck-oops-qemu      # fail-stop console and GDB crash-snapshot read
 make kernelcheck-qemu-debug     # full QEMU suite against the DWARF kernel
@@ -790,15 +788,6 @@ continues afterward. A second lane executes Takibi's reserved deliberate
 `brk #0x544b`, enters through a compiler-generated Current-EL synchronous
 `ExceptionFrame`, advances ELR past that instruction, and proves the same
 resume behavior. Other Current-EL synchronous exceptions remain fatal. The
-separate `kernelcheck-ddb-silence-qemu` diagnostic lane does not wait for the
-interactive-shell marker: after five seconds without a UART byte it sends the
-same QMP BREAK and preserves `bt`, `sched`, and `ps` in
-`_build/kernel-ddb-qemu-silence/uart.log`. Set
-`KERNEL_QEMU_DDB_SILENCE_SECONDS` when a shorter or longer stall threshold is
-needed; the minimum supported interval is one second. It is not part of
-`kernelcheck`; an ordinary boot should not be interrupted merely because one
-phase is quiet.
-
 RPi5 implementation uses the same PL011 DR.BE/BEIM
 path. The normal RPi5 integration enables the test-only ring byte over SWD
 after its ordinary workload together with the test-only guarded-fault command,
