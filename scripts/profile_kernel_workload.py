@@ -10,6 +10,19 @@ import subprocess
 
 
 RECORD_RE = re.compile(r"^profile: (begin|end|cpu) (.+)$")
+TIMELINE_RE = re.compile(
+    r"^profile: (timeline|timeline-cpu|event) (.+)$")
+TIMELINE_KINDS = {
+    "schedule-out": "scheduler",
+    "schedule-in": "scheduler",
+    "block": "scheduler",
+    "wakeup": "scheduler",
+    "syscall-enter": "syscall",
+    "syscall-exit": "syscall",
+    "syscall-wait": "syscall",
+    "irq-enter": "irq",
+    "irq-exit": "irq",
+}
 
 
 def parse_fields(text):
@@ -160,6 +173,187 @@ def collect(args):
     Path(args.output).write_text(json.dumps(artifact, indent=2) + "\n", encoding="ascii")
 
 
+def timeline_records(lines, kind, name):
+    records = []
+    for index, line in enumerate(lines):
+        match = TIMELINE_RE.match(line.rstrip("\r\n"))
+        if match and match.group(1) == kind:
+            values = parse_fields(match.group(2))
+            if values.get("name") == name:
+                records.append((index, values))
+    return records
+
+
+def timeline(args):
+    if not args.target or not args.commit:
+        raise ValueError("target and commit are required")
+    lines = Path(args.uart_log).read_text(
+        encoding="ascii", errors="strict").splitlines()
+    begin = one_record(lines, "begin", args.name)
+    end = one_record(lines, "end", args.name)
+    headers = timeline_records(lines, "timeline", args.name)
+    if len(headers) != 1:
+        raise ValueError(
+            f"expected one timeline record for {args.name}, "
+            f"found {len(headers)}")
+    header_line, header = headers[0]
+    start = integer(header, "start_cycles")
+    finish = integer(header, "end_cycles")
+    frequency = integer(header, "frequency")
+    cpu_count = integer(header, "cpu_count")
+    capacity = integer(header, "capacity")
+    if start >= finish or frequency == 0 or cpu_count == 0 or capacity == 0:
+        raise ValueError("invalid timeline interval or bounds")
+    if finish - start != integer(end, "elapsed_cycles"):
+        raise ValueError("timeline interval does not equal profile interval")
+    if frequency != integer(end, "tick_frequency"):
+        raise ValueError("timeline frequency does not equal profile frequency")
+    if cpu_count != integer(begin, "cpu_count"):
+        raise ValueError("timeline CPU count does not equal profile CPU count")
+    workload_pids = {integer(begin, "pid_a"), integer(begin, "pid_b")}
+
+    cpu_records = timeline_records(lines, "timeline-cpu", args.name)
+    if len(cpu_records) != cpu_count:
+        raise ValueError(
+            f"expected {cpu_count} timeline CPU records, "
+            f"found {len(cpu_records)}")
+    events = timeline_records(lines, "event", args.name)
+    per_cpu_events = [[] for _ in range(cpu_count)]
+    for line_index, values in events:
+        if line_index <= header_line:
+            raise ValueError("timeline event does not follow its header")
+        cpu = integer(values, "cpu")
+        if cpu >= cpu_count:
+            raise ValueError("timeline event CPU is outside the active set")
+        sequence = integer(values, "sequence")
+        timestamp = integer(values, "timestamp")
+        pid = integer(values, "pid")
+        peer = integer(values, "peer")
+        arg = integer(values, "arg")
+        kind = values.get("kind")
+        if kind not in TIMELINE_KINDS:
+            raise ValueError(f"unknown timeline event kind: {kind!r}")
+        if kind in ("schedule-out", "schedule-in"):
+            if pid not in workload_pids and peer not in workload_pids:
+                raise ValueError(
+                    "scheduler timeline event does not involve the workload")
+        elif pid not in workload_pids:
+            raise ValueError(
+                "timeline event PID does not belong to the workload")
+        if timestamp < start or timestamp > finish:
+            raise ValueError("timeline event timestamp is outside the interval")
+        per_cpu_events[cpu].append({
+            "sequence": sequence,
+            "timestamp": timestamp,
+            "cpu": cpu,
+            "kind": kind,
+            "pid": pid,
+            "peer": peer,
+            "arg": arg,
+        })
+
+    per_cpu = []
+    for expected_cpu, (_, values) in enumerate(cpu_records):
+        cpu = integer(values, "cpu")
+        stored = integer(values, "stored")
+        lost = integer(values, "lost")
+        attempted = integer(values, "attempted")
+        if cpu != expected_cpu:
+            raise ValueError(
+                "timeline CPU records are missing or out of order")
+        if (stored > capacity or attempted != stored + lost or
+                (lost > 0 and stored != capacity)):
+            raise ValueError("invalid timeline stored/lost accounting")
+        records = per_cpu_events[cpu]
+        if len(records) != stored:
+            raise ValueError(
+                f"timeline CPU {cpu} record count does not match stored")
+        previous_timestamp = None
+        for expected_sequence, event in enumerate(records, 1):
+            if event["sequence"] != expected_sequence:
+                raise ValueError(
+                    f"timeline CPU {cpu} sequence is missing or out of order")
+            if (previous_timestamp is not None and
+                    event["timestamp"] < previous_timestamp):
+                raise ValueError(
+                    f"timeline CPU {cpu} timestamp moved backwards")
+            previous_timestamp = event["timestamp"]
+        per_cpu.append({
+            "cpu": cpu,
+            "stored": stored,
+            "lost": lost,
+            "attempted": attempted,
+        })
+
+    observed_kinds = {
+        event["kind"] for records in per_cpu_events for event in records
+    }
+    missing = sorted(set(args.require_kind) - observed_kinds)
+    if missing:
+        raise ValueError(
+            "timeline missing required event kinds: " + ", ".join(missing))
+
+    trace_events = [{
+        "name": "process_name",
+        "ph": "M",
+        "pid": 1,
+        "tid": 0,
+        "args": {"name": "Takibi kernel"},
+    }]
+    for cpu in range(cpu_count):
+        trace_events.append({
+            "name": "thread_name",
+            "ph": "M",
+            "pid": 1,
+            "tid": cpu,
+            "args": {"name": f"CPU {cpu}"},
+        })
+    merged = sorted(
+        (event for records in per_cpu_events for event in records),
+        key=lambda event: (
+            event["timestamp"], event["cpu"], event["sequence"]))
+    for event in merged:
+        trace_events.append({
+            "name": event["kind"],
+            "cat": TIMELINE_KINDS[event["kind"]],
+            "ph": "i",
+            "s": "t",
+            "ts": ((event["timestamp"] - start) * 1_000_000 /
+                   frequency),
+            "pid": 1,
+            "tid": event["cpu"],
+            "args": {
+                "process_pid": event["pid"],
+                "peer_pid": event["peer"],
+                "syscall_number": event["arg"],
+                "counter_cycles": event["timestamp"],
+                "cpu_sequence": event["sequence"],
+            },
+        })
+    artifact = {
+        "traceEvents": trace_events,
+        "displayTimeUnit": "ns",
+        "metadata": {
+            "schema": "takibi.kernel.timeline/v1",
+            "workload": args.name,
+            "environment": {
+                "target": args.target,
+                "cpu_count": cpu_count,
+                "commit": args.commit,
+            },
+            "interval": {
+                "start_cycles": start,
+                "end_cycles": finish,
+                "counter_frequency_hz": frequency,
+            },
+            "pids": sorted(workload_pids),
+            "per_cpu": per_cpu,
+        },
+    }
+    Path(args.output).write_text(
+        json.dumps(artifact, indent=2) + "\n", encoding="ascii")
+
+
 def git_commit():
     return subprocess.run(
         ["git", "rev-parse", "HEAD"], check=True, text=True,
@@ -209,6 +403,16 @@ def main():
     collect_parser.add_argument("--target", required=True)
     collect_parser.add_argument("--commit", default=None)
     collect_parser.set_defaults(run=collect)
+    timeline_parser = subparsers.add_parser("timeline")
+    timeline_parser.add_argument("--uart-log", required=True)
+    timeline_parser.add_argument("--output", required=True)
+    timeline_parser.add_argument("--name", default="busy-pair")
+    timeline_parser.add_argument("--target", required=True)
+    timeline_parser.add_argument("--commit", default=None)
+    timeline_parser.add_argument(
+        "--require-kind", action="append", default=[],
+        choices=sorted(TIMELINE_KINDS))
+    timeline_parser.set_defaults(run=timeline)
     chart_parser = subparsers.add_parser("chart")
     chart_parser.add_argument("--output", required=True)
     chart_parser.add_argument("artifacts", nargs="+")

@@ -273,6 +273,16 @@ python3 "$REPO_ROOT/scripts/profile_kernel_workload.py" collect \
     --uart-log "$UART_LOG" --output "$ARTIFACT_DIR/busy-pair-profile.json" \
     --target qemu
 
+# GitHub issue #501: validate the bounded off-CPU records and export standard
+# Perfetto trace-event JSON. These six kinds are the part of the general
+# timeline vocabulary the named CPU-bound workload must actually exercise.
+python3 "$REPO_ROOT/scripts/profile_kernel_workload.py" timeline \
+    --uart-log "$UART_LOG" \
+    --output "$ARTIFACT_DIR/busy-pair-perfetto.json" --target qemu \
+    --require-kind schedule-out --require-kind schedule-in \
+    --require-kind syscall-enter --require-kind syscall-exit \
+    --require-kind irq-enter --require-kind irq-exit
+
 # GitHub issue #500: the flat PC samples the same interval collected. The
 # collector is the assertion, not a convenience: it refuses a missing,
 # duplicated, or out-of-order record, a lost total that does not add up, and

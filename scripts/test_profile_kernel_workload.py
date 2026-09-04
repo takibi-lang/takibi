@@ -22,6 +22,7 @@ def main():
         root = Path(directory)
         uart = root / "uart.log"
         artifact = root / "profile.json"
+        timeline = root / "timeline.json"
         chart = root / "chart.svg"
         good_text = (
             "profile: begin name=busy-pair input_steps=10 cpu_count=2 "
@@ -38,7 +39,27 @@ def main():
             "el0_cycles=1 el1_cycles=0 irq_cycles=0 idle_cycles=9 "
             "context_switches=0 blocks=0 wakeups=0 syscalls=0 "
             "block_read_bytes=0 block_write_bytes=0 "
-            "network_rx_bytes=0 network_tx_bytes=0\n")
+            "network_rx_bytes=0 network_tx_bytes=0\n"
+            "profile: timeline name=busy-pair start_cycles=100 "
+            "end_cycles=110 frequency=5 cpu_count=2 capacity=6\n"
+            "profile: timeline-cpu name=busy-pair cpu=0 stored=6 "
+            "lost=1 attempted=7\n"
+            "profile: event name=busy-pair sequence=1 timestamp=100 cpu=0 "
+            "kind=schedule-out pid=2 peer=3 arg=0\n"
+            "profile: event name=busy-pair sequence=2 timestamp=101 cpu=0 "
+            "kind=schedule-in pid=3 peer=2 arg=0\n"
+            "profile: event name=busy-pair sequence=3 timestamp=102 cpu=0 "
+            "kind=syscall-enter pid=3 peer=0 arg=453\n"
+            "profile: event name=busy-pair sequence=4 timestamp=103 cpu=0 "
+            "kind=syscall-exit pid=3 peer=0 arg=453\n"
+            "profile: event name=busy-pair sequence=5 timestamp=104 cpu=0 "
+            "kind=irq-enter pid=3 peer=0 arg=0\n"
+            "profile: event name=busy-pair sequence=6 timestamp=105 cpu=0 "
+            "kind=irq-exit pid=3 peer=0 arg=0\n"
+            "profile: timeline-cpu name=busy-pair cpu=1 stored=1 "
+            "lost=0 attempted=1\n"
+            "profile: event name=busy-pair sequence=1 timestamp=106 cpu=1 "
+            "kind=wakeup pid=2 peer=0 arg=0\n")
         uart.write_text(good_text, encoding="ascii")
         result = run(
             "collect", "--uart-log", str(uart), "--output", str(artifact),
@@ -50,6 +71,66 @@ def main():
                 len(parsed["accounting"]["per_cpu"]) != 2 or
                 parsed["accounting"]["dominant_state"] != "balanced"):
             raise RuntimeError("positive per-CPU artifact was not preserved")
+
+        timeline_args = [
+            "timeline", "--uart-log", str(uart), "--output", str(timeline),
+            "--target", "qemu", "--commit", "test",
+        ]
+        for kind in (
+                "schedule-out", "schedule-in", "syscall-enter",
+                "syscall-exit", "irq-enter", "irq-exit"):
+            timeline_args.extend(("--require-kind", kind))
+        result = run(*timeline_args)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr)
+        parsed_timeline = json.loads(timeline.read_text(encoding="ascii"))
+        names = {
+            event["name"] for event in parsed_timeline["traceEvents"]
+            if event.get("ph") == "i"
+        }
+        if (parsed_timeline["metadata"]["schema"] !=
+                "takibi.kernel.timeline/v1" or
+                parsed_timeline["metadata"]["per_cpu"][0]["lost"] != 1 or
+                "schedule-out" not in names or "wakeup" not in names):
+            raise RuntimeError("positive Perfetto timeline was not preserved")
+
+        uart.write_text(good_text.replace(
+            "cpu_count=2 capacity=6", "cpu_count=2 capacity=8", 1),
+            encoding="ascii")
+        result = run(*timeline_args)
+        if result.returncode == 0 or \
+                "invalid timeline stored/lost accounting" not in result.stderr:
+            raise RuntimeError("timeline loss negative control did not reject")
+
+        uart.write_text(good_text.replace(
+            "kind=syscall-enter pid=3",
+            "kind=syscall-enter pid=9", 1), encoding="ascii")
+        result = run(*timeline_args)
+        if result.returncode == 0 or \
+                "PID does not belong to the workload" not in result.stderr:
+            raise RuntimeError("timeline PID negative control did not reject")
+
+        uart.write_text(good_text.replace(
+            "sequence=1 timestamp=100 cpu=0",
+            "sequence=2 timestamp=100 cpu=0", 1), encoding="ascii")
+        result = run(*timeline_args)
+        if (result.returncode == 0 or
+                "sequence is missing or out of order" not in result.stderr):
+            raise RuntimeError("timeline sequence negative control did not reject")
+
+        uart.write_text(good_text.replace(
+            "timestamp=100 cpu=0", "timestamp=99 cpu=0", 1),
+            encoding="ascii")
+        result = run(*timeline_args)
+        if (result.returncode == 0 or
+                "timestamp is outside the interval" not in result.stderr):
+            raise RuntimeError("timeline timestamp negative control did not reject")
+
+        uart.write_text(good_text.replace(
+            "kind=wakeup", "kind=unknown", 1), encoding="ascii")
+        result = run(*timeline_args)
+        if result.returncode == 0 or "unknown timeline event kind" not in result.stderr:
+            raise RuntimeError("timeline kind negative control did not reject")
 
         bad_text = uart.read_text(encoding="ascii").replace(
             "el0_cycles=6", "el0_cycles=5", 1)
@@ -92,7 +173,9 @@ def main():
         if result.returncode != 0 or "<svg" not in chart.read_text(encoding="ascii"):
             raise RuntimeError("v1 chart compatibility control failed")
 
-    print("PASS profile-kernel-workload: per-CPU artifact, rejection, v1 chart")
+    print(
+        "PASS profile-kernel-workload: per-CPU summary, Perfetto timeline, "
+        "rejection, v1 chart")
 
 
 if __name__ == "__main__":

@@ -44,6 +44,7 @@
 use "kernel/arch/arm64/kernel/timer.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/kernel/profile_samples.tkb";
+use "kernel/kernel/profile_timeline.tkb";
 
 // The two inittab entries, told apart by the tag they pass rather than by
 // their pid -- a respawned entry gets a new pid and is still the same
@@ -253,6 +254,8 @@ fn workload_profile_irq_enter() {
     let cpu: usize = cpu_id();
     if (cpu >= KERNEL_ACTIVE_CORES || cpu >= KERNEL_MAX_CORES) { return; }
     let bounded_cpu: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    profile_timeline_irq_enter(
+        workload_profile_selected_pid(bounded_cpu));
     workload_profile_cores[bounded_cpu].irq_resume_mode =
         workload_profile_cores[bounded_cpu].mode;
     workload_profile_transition_masked(WorkloadCpuMode::Irq);
@@ -263,6 +266,8 @@ fn workload_profile_irq_exit() {
     let cpu: usize = cpu_id();
     if (cpu >= KERNEL_ACTIVE_CORES || cpu >= KERNEL_MAX_CORES) { return; }
     let bounded_cpu: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    profile_timeline_irq_exit(
+        workload_profile_selected_pid(bounded_cpu));
     workload_profile_transition_masked(
         workload_profile_cores[bounded_cpu].irq_resume_mode);
 }
@@ -276,10 +281,20 @@ private fn workload_profile_current_cpu() -> usize {
     return cpu;
 }
 
-fn workload_profile_note_syscall() {
+private fn workload_profile_selected_pid(
+        cpu: {0..<KERNEL_MAX_CORES as usize}) -> usize {
+    if (workload_profile_cores[cpu].has_selected_pid) {
+        return workload_profile_cores[cpu].selected_pid;
+    }
+    return 0;
+}
+
+fn workload_profile_note_syscall(number: usize) {
     workload_profile_el1_enter();
     let cpu: usize = workload_profile_current_cpu();
     if (cpu < KERNEL_MAX_CORES) {
+        profile_timeline_syscall_enter(
+            workload_profile_selected_pid(cpu), number);
         if (workload_profile_cores[cpu].syscall_retrying == false) {
             workload_profile_cores[cpu].syscalls =
                 workload_profile_cores[cpu].syscalls + 1;
@@ -287,31 +302,37 @@ fn workload_profile_note_syscall() {
     }
 }
 
-fn workload_profile_syscall_wait() {
+fn workload_profile_syscall_wait(number: usize) {
     let cpu: usize = workload_profile_current_cpu();
     if (cpu < KERNEL_MAX_CORES) {
+        profile_timeline_syscall_wait(
+            workload_profile_selected_pid(cpu), number);
         workload_profile_cores[cpu].syscall_retrying = true;
     }
     workload_profile_idle_enter();
 }
 
-fn workload_profile_syscall_complete() {
+fn workload_profile_syscall_complete(number: usize) {
     let cpu: usize = workload_profile_current_cpu();
     if (cpu < KERNEL_MAX_CORES) {
+        profile_timeline_syscall_exit(
+            workload_profile_selected_pid(cpu), number);
         workload_profile_cores[cpu].syscall_retrying = false;
     }
 }
 
-fn workload_profile_note_block() {
+fn workload_profile_note_block(pid: usize) {
     let cpu: usize = workload_profile_current_cpu();
     if (cpu < KERNEL_MAX_CORES) {
+        profile_timeline_block(pid);
         workload_profile_cores[cpu].blocks = workload_profile_cores[cpu].blocks + 1;
     }
 }
 
-fn workload_profile_note_wakeup() {
+fn workload_profile_note_wakeup(pid: usize) {
     let cpu: usize = workload_profile_current_cpu();
     if (cpu < KERNEL_MAX_CORES) {
+        profile_timeline_wakeup(pid);
         workload_profile_cores[cpu].wakeups = workload_profile_cores[cpu].wakeups + 1;
     }
 }
@@ -366,6 +387,8 @@ private fn workload_profile_start(now: usize, pid: usize) {
         workload_profile_cores[cpu].has_selected_pid = true;
     }
     workload_profile_active = true;
+    profile_timeline_start(
+        workload_busy_pair.a_pid, workload_busy_pair.b_pid);
     // The flat PC profile shares this interval exactly: same IRQ-masked
     // boundary, same start timestamp, so a sample outside the interval the
     // artifact reports cannot exist.
@@ -376,6 +399,7 @@ private fn workload_profile_finish(now: usize) {
     for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
         workload_profile_charge(cpu, now);
     }
+    profile_timeline_finish();
     workload_profile_active = false;
     profile_sample_finish();
 }
@@ -731,6 +755,8 @@ private fn workload_busy_pair_report() !{unsafe} {
         uart_put_udec(workload_profile_cores[cpu].network_tx_bytes);
         kernel_boot_log("\n");
     }
+    profile_timeline_report(
+        workload_busy_pair.start_ticks, workload_busy_pair.end_ticks);
     if (workload_busy_pair.refused != 0) {
         kernel_boot_log("workload: busy pair REFUSED reports=");
         uart_put_udec(workload_busy_pair.refused);

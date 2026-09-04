@@ -1,0 +1,247 @@
+// Bounded off-CPU timeline for the named busy-pair profiling interval.
+//
+// The timeline records scheduler, blocking, syscall and IRQ boundaries as
+// scalar events while the existing workload profile is active. It never logs,
+// allocates or takes a lock from a hook. Reporting happens only after the
+// interval is closed, and scripts/profile_kernel_workload.py converts the
+// named records to Perfetto trace-event JSON.
+//
+// Current limitations (2026-09-04):
+// - The only profiled interval is busy-pair. It does not perform block-device
+//   or network I/O and does not contend on a kernel lock, so this first trace
+//   has no speculative hooks for those event classes.
+// - Storage is per core but activation/reporting is single-writer while
+//   KERNEL_ACTIVE_CORES is 1. Raising it requires the #497 multicore re-audit,
+//   including timestamp merge and cross-core wakeup ordering.
+// - Each core keeps the first 512 events and counts the rest as lost. This is
+//   a prefix timeline, not a ring and not a claim that missing suffix events
+//   did not occur.
+
+use "kernel/arch/arm64/kernel/timer.tkb";
+use "kernel/lib/execution_model.tkb";
+
+const PROFILE_TIMELINE_EVENTS: usize = 512;
+
+enum ProfileTimelineKind {
+    ScheduleOut;
+    ScheduleIn;
+    Block;
+    Wakeup;
+    SyscallEnter;
+    SyscallExit;
+    SyscallWait;
+    IrqEnter;
+    IrqExit;
+}
+
+struct ProfileTimelineEvent {
+    sequence: usize;
+    timestamp: usize;
+    kind: ProfileTimelineKind;
+    pid: usize;
+    peer: usize;
+    arg: usize;
+}
+
+struct ProfileTimelineCore {
+    stored: usize;
+    lost: usize;
+    next_sequence: usize;
+    events: [ProfileTimelineEvent; PROFILE_TIMELINE_EVENTS];
+}
+
+private let mut profile_timeline_cores:
+    [ProfileTimelineCore; KERNEL_MAX_CORES];
+private let mut profile_timeline_active: bool = false;
+private let mut profile_timeline_pid_a: usize;
+private let mut profile_timeline_pid_b: usize;
+
+private fn profile_timeline_pid_relevant(pid: usize) -> bool {
+    return pid != 0 &&
+           (pid == profile_timeline_pid_a || pid == profile_timeline_pid_b);
+}
+
+private fn profile_timeline_core_reset(
+        cpu: {0..<KERNEL_MAX_CORES as usize}) {
+    profile_timeline_cores[cpu].stored = 0;
+    profile_timeline_cores[cpu].lost = 0;
+    profile_timeline_cores[cpu].next_sequence = 0;
+}
+
+private fn profile_timeline_note(kind: ProfileTimelineKind, pid: usize,
+                                 peer: usize, arg: usize) {
+    if (profile_timeline_active == false) { return; }
+    // Ordinary syscall and scheduler paths can be interrupted by the IRQ
+    // hooks below. Reserve and publish one local slot with IRQs masked so an
+    // interrupt cannot overwrite a half-filled event.
+    let irq_was_masked: usize = (mrs_daif() >> 7) & 1;
+    disable_irq();
+    let raw_cpu: usize = cpu_id();
+    if (raw_cpu >= KERNEL_ACTIVE_CORES || raw_cpu >= KERNEL_MAX_CORES) {
+        if (irq_was_masked == 0) { enable_irq(); }
+        return;
+    }
+    let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
+    let sequence: usize =
+        profile_timeline_cores[cpu].next_sequence + 1;
+    profile_timeline_cores[cpu].next_sequence = sequence;
+    let stored: usize = profile_timeline_cores[cpu].stored;
+    if (stored >= PROFILE_TIMELINE_EVENTS) {
+        profile_timeline_cores[cpu].lost =
+            profile_timeline_cores[cpu].lost + 1;
+        if (irq_was_masked == 0) { enable_irq(); }
+        return;
+    }
+    let slot: {0..<PROFILE_TIMELINE_EVENTS as usize} = stored;
+    profile_timeline_cores[cpu].events[slot].sequence = sequence;
+    profile_timeline_cores[cpu].events[slot].timestamp =
+        read_cntpct() as usize;
+    profile_timeline_cores[cpu].events[slot].kind = kind;
+    profile_timeline_cores[cpu].events[slot].pid = pid;
+    profile_timeline_cores[cpu].events[slot].peer = peer;
+    profile_timeline_cores[cpu].events[slot].arg = arg;
+    profile_timeline_cores[cpu].stored = stored + 1;
+    if (irq_was_masked == 0) { enable_irq(); }
+}
+
+fn profile_timeline_start(pid_a: usize, pid_b: usize) {
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        profile_timeline_core_reset(cpu);
+    }
+    profile_timeline_pid_a = pid_a;
+    profile_timeline_pid_b = pid_b;
+    profile_timeline_active = true;
+}
+
+fn profile_timeline_finish() { profile_timeline_active = false; }
+
+fn profile_timeline_schedule(from_pid: usize, to_pid: usize) {
+    if (profile_timeline_pid_relevant(from_pid) == false &&
+        profile_timeline_pid_relevant(to_pid) == false) {
+        return;
+    }
+    profile_timeline_note(
+        ProfileTimelineKind::ScheduleOut, from_pid, to_pid, 0);
+    profile_timeline_note(
+        ProfileTimelineKind::ScheduleIn, to_pid, from_pid, 0);
+}
+
+fn profile_timeline_block(pid: usize) {
+    if (profile_timeline_pid_relevant(pid) == false) { return; }
+    profile_timeline_note(ProfileTimelineKind::Block, pid, 0, 0);
+}
+
+fn profile_timeline_wakeup(pid: usize) {
+    if (profile_timeline_pid_relevant(pid) == false) { return; }
+    profile_timeline_note(ProfileTimelineKind::Wakeup, pid, 0, 0);
+}
+
+fn profile_timeline_syscall_enter(pid: usize, number: usize) {
+    if (profile_timeline_pid_relevant(pid) == false) { return; }
+    profile_timeline_note(
+        ProfileTimelineKind::SyscallEnter, pid, 0, number);
+}
+
+fn profile_timeline_syscall_exit(pid: usize, number: usize) {
+    if (profile_timeline_pid_relevant(pid) == false) { return; }
+    profile_timeline_note(
+        ProfileTimelineKind::SyscallExit, pid, 0, number);
+}
+
+fn profile_timeline_syscall_wait(pid: usize, number: usize) {
+    if (profile_timeline_pid_relevant(pid) == false) { return; }
+    profile_timeline_note(
+        ProfileTimelineKind::SyscallWait, pid, 0, number);
+}
+
+fn profile_timeline_irq_enter(pid: usize) {
+    if (profile_timeline_pid_relevant(pid) == false) { return; }
+    profile_timeline_note(ProfileTimelineKind::IrqEnter, pid, 0, 0);
+}
+
+fn profile_timeline_irq_exit(pid: usize) {
+    if (profile_timeline_pid_relevant(pid) == false) { return; }
+    profile_timeline_note(ProfileTimelineKind::IrqExit, pid, 0, 0);
+}
+
+private fn profile_timeline_put_kind(kind: ProfileTimelineKind) {
+    match kind {
+        ProfileTimelineKind::ScheduleOut => {
+            kernel_boot_log("schedule-out");
+        }
+        ProfileTimelineKind::ScheduleIn => {
+            kernel_boot_log("schedule-in");
+        }
+        ProfileTimelineKind::Block => { kernel_boot_log("block"); }
+        ProfileTimelineKind::Wakeup => { kernel_boot_log("wakeup"); }
+        ProfileTimelineKind::SyscallEnter => {
+            kernel_boot_log("syscall-enter");
+        }
+        ProfileTimelineKind::SyscallExit => {
+            kernel_boot_log("syscall-exit");
+        }
+        ProfileTimelineKind::SyscallWait => {
+            kernel_boot_log("syscall-wait");
+        }
+        ProfileTimelineKind::IrqEnter => {
+            kernel_boot_log("irq-enter");
+        }
+        ProfileTimelineKind::IrqExit => {
+            kernel_boot_log("irq-exit");
+        }
+    }
+}
+
+fn profile_timeline_report(start: usize, finish: usize) {
+    kernel_boot_log(
+        "profile: timeline name=busy-pair start_cycles=");
+    uart_put_udec(start);
+    kernel_boot_log(" end_cycles=");
+    uart_put_udec(finish);
+    kernel_boot_log(" frequency=");
+    uart_put_udec(read_cntfrq() as usize);
+    kernel_boot_log(" cpu_count=");
+    uart_put_udec(KERNEL_ACTIVE_CORES);
+    kernel_boot_log(" capacity=");
+    uart_put_udec(PROFILE_TIMELINE_EVENTS);
+    kernel_boot_log("\n");
+    for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
+        let stored: usize = profile_timeline_cores[cpu].stored;
+        kernel_boot_log("profile: timeline-cpu name=busy-pair cpu=");
+        uart_put_udec(cpu);
+        kernel_boot_log(" stored=");
+        uart_put_udec(stored);
+        kernel_boot_log(" lost=");
+        uart_put_udec(profile_timeline_cores[cpu].lost);
+        kernel_boot_log(" attempted=");
+        uart_put_udec(stored + profile_timeline_cores[cpu].lost);
+        kernel_boot_log("\n");
+        for slot: usize in 0..<PROFILE_TIMELINE_EVENTS {
+            if (slot < stored) {
+                kernel_boot_log("profile: event name=busy-pair sequence=");
+                uart_put_udec(
+                    profile_timeline_cores[cpu].events[slot].sequence);
+                kernel_boot_log(" timestamp=");
+                uart_put_udec(
+                    profile_timeline_cores[cpu].events[slot].timestamp);
+                kernel_boot_log(" cpu=");
+                uart_put_udec(cpu);
+                kernel_boot_log(" kind=");
+                profile_timeline_put_kind(
+                    profile_timeline_cores[cpu].events[slot].kind);
+                kernel_boot_log(" pid=");
+                uart_put_udec(profile_timeline_cores[cpu].events[slot].pid);
+                kernel_boot_log(" peer=");
+                uart_put_udec(profile_timeline_cores[cpu].events[slot].peer);
+                kernel_boot_log(" arg=");
+                uart_put_udec(profile_timeline_cores[cpu].events[slot].arg);
+                kernel_boot_log("\n");
+            }
+        }
+    }
+}
+
+fn profile_timeline_execution_model_assumption() {
+    static_assert(KERNEL_ACTIVE_CORES == 1,
+                  "timeline activation and reporting are single-writer; re-audit timestamp merge and cross-core wakeup ordering before scheduling on a second core");
+}

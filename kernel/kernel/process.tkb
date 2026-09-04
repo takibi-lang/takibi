@@ -2032,7 +2032,8 @@ fn scheduled_process_block(
     scheduled_process_state_drop(state);
     scheduled_process_record_at(owner.pool_index).state =
         ProcessSlotState::Blocked;
-    workload_profile_note_block();
+    workload_profile_note_block(
+        scheduled_process_pid_of_slot(owner.pool_index));
     let mut blocked: ScheduledProcessState[process, ProcessState::Blocked] =
         { owner.pool_index };
     return blocked;
@@ -2045,7 +2046,8 @@ fn scheduled_process_wake(
     scheduled_process_state_drop(state);
     scheduled_process_record_at(owner.pool_index).state =
         ProcessSlotState::Ready;
-    workload_profile_note_wakeup();
+    workload_profile_note_wakeup(
+        scheduled_process_pid_of_slot(owner.pool_index));
     let mut ready: ScheduledProcessState[process, ProcessState::Ready] =
         { owner.pool_index };
     return ready;
@@ -2950,6 +2952,9 @@ private fn kernel_process_switch_to(guard: borrow ProcessRunGuard[lock],
         return current_sp;
     }
     execution_here().current_handle = to;
+    profile_timeline_schedule(
+        scheduled_process_pid_of_handle(from),
+        scheduled_process_pid_of_handle(to));
     // GitHub issue #448: the incoming process starts a WHOLE quantum here,
     // rather than inheriting whatever is left of the outgoing one's.
     //

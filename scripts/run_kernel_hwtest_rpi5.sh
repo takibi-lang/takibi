@@ -516,6 +516,15 @@ python3 "$REPO_ROOT/scripts/profile_kernel_workload.py" collect \
     --uart-log "$UART_LOG" --output "$ARTIFACT_DIR/busy-pair-profile.json" \
     --target rpi5
 
+# GitHub issue #501: the same bounded event contract and Perfetto export as
+# QEMU, with real interrupt timing checked on the Cortex-A76 board.
+python3 "$REPO_ROOT/scripts/profile_kernel_workload.py" timeline \
+    --uart-log "$UART_LOG" \
+    --output "$ARTIFACT_DIR/busy-pair-perfetto.json" --target rpi5 \
+    --require-kind schedule-out --require-kind schedule-in \
+    --require-kind syscall-enter --require-kind syscall-exit \
+    --require-kind irq-enter --require-kind irq-exit
+
 # GitHub issue #500: the flat PC samples the same interval collected, and
 # the only run of them that is performance evidence -- QEMU's cycle counter
 # is virtual time, this one is a real Cortex-A76 PMU. See the QEMU runner

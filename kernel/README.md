@@ -460,6 +460,24 @@ profile rather than faulting. RPi5 is again the performance authority: QEMU's
 cycle counter is derived from virtual time, so its capture validates
 collection, extraction, and symbolization only.
 
+Each runner additionally saves `busy-pair-perfetto.json`, a standard Perfetto
+trace-event JSON timeline over that same start/end counter interval. The kernel
+keeps the first 512 relevant events per core and reports stored, lost, and
+attempted counts. For the named workload, relevant means schedule transitions
+with either busy process, those processes' block/wakeup and syscall
+boundaries, and IRQ boundaries while either process is selected. Filtering
+out PID 1's unrelated polling is what lets the bounded artifact describe the
+whole workload rather than an immediately saturated prefix. The host validates
+per-core sequence and timestamp order, interval and CPU bounds, event names,
+and loss arithmetic before merging cores by timestamp for a Perfetto viewer.
+
+The first timeline deliberately does not add unused lock, block-device, or
+network completion hooks: busy-pair is CPU-bound and exercises none of those
+paths. Event records are timestamped instants rather than assumed begin/end
+pairs, because a timer IRQ may switch away from a selected busy process before
+the IRQ exit. Storage is per-core, but activation and cross-core ordering must
+be re-audited when ordinary processes can run on more than one core.
+
 The host-side contract for those dumps is implemented by
 `scripts/profile_kernel_samples.py`. Its input record contract preserves
 sequence, timestamp, PC, CPU, PID, execution level, and
