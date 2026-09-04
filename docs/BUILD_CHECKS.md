@@ -18,6 +18,7 @@ than warns; do not bypass or weaken one merely to complete a change.
 | `check_liveness_proof_escapes.py` | every place that drops a pool's liveness proof is declared with a reason |
 | `check_invariant_lines_unviewed.py` | invariant reports are either diagnostic-only or enforced by absence, never asserted as correct |
 | `check_dead_slot_peek_not_retained.py` | the dead-slot-tolerant record peek is read on the spot, never bound |
+| `check_probe_entry_gates.py` | a two-core probe's arrival gate waits on a count that only grows, never on a level the other core clears |
 | `check_execution_model_coverage.py` | mutable kernel state declares its execution model |
 | `check_expected_line_endings.py` | stdout fixtures use one newline convention |
 | `check_kernel_memory_map.py` | linked normal/debug layout agrees with the memory map and exact boot allocator fixtures |

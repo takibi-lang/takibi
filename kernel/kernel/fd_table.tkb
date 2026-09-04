@@ -2440,6 +2440,22 @@ private fn fd_refcount_probe_active_address() -> usize {
     return (&fd_refcount_probe_active) as usize;
 }
 
+// GitHub issue #510: entries into the secondary's run function, counted and
+// never cleared.
+//
+// This file INVENTED the two-way start handshake, and kept the one half of it
+// that a level cannot express. `active` is raised on entry and cleared on the
+// way out, and this secondary leaves while still armed the moment it reaches
+// FD_REFCOUNT_CONTENTION_ROUNDS -- so a core 0 that was slow to look sees 0
+// and reports `secondary-never-entered` about a core that finished every
+// round. The `started` gate below is already monotonic and would have caught
+// it, but the `entered` gate runs first and fails first.
+private let mut fd_refcount_probe_entries: usize;
+
+private fn fd_refcount_probe_entries_address() -> usize {
+    return (&fd_refcount_probe_entries) as usize;
+}
+
 private fn fd_refcount_probe_overlap_address() -> usize {
     return (&fd_refcount_probe_overlap) as usize;
 }
@@ -2483,7 +2499,10 @@ fn fd_refcount_contention_is_armed() -> bool !{unsafe} {
 }
 
 fn fd_refcount_contention_secondary_run() !{unsafe} {
-    unsafe { atomic_store_release(fd_refcount_probe_active_address(), 1); }
+    unsafe {
+        atomic_fetch_add_relaxed(fd_refcount_probe_entries_address(), 1);
+        atomic_store_release(fd_refcount_probe_active_address(), 1);
+    }
     // Complete one cycle before waiting for the primary. Together with the
     // primary-side wait below, this is a two-way start handshake: neither
     // core can finish all of its work before the other has begun. Merely
@@ -2617,6 +2636,9 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
     }
     let baseline: usize = unified_object_refs_of(fd_refcount_probe_handle);
     let doubles_before: usize = unified_object_double_release_count();
+    let entries_before: usize = unsafe {
+        atomic_load_acquire(fd_refcount_probe_entries_address())
+    };
     unsafe { atomic_store_release(fd_refcount_probe_armed_address(), 1); }
 
     let entry_window: i64 = read_cntfrq() >> 2;
@@ -2624,8 +2646,8 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
     let mut entered: bool = false;
     while (entered == false && read_cntpct() - entry_start < entry_window) {
         if (unsafe {
-                atomic_load_acquire(fd_refcount_probe_active_address())
-            } == 1) {
+                atomic_load_acquire(fd_refcount_probe_entries_address())
+            } > entries_before) {
             entered = true;
         }
     }

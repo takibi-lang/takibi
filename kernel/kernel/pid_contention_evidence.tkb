@@ -66,6 +66,28 @@ private fn pid_probe_active_address() -> usize {
     return (&pid_probe_active) as usize;
 }
 
+// GitHub issue #510: entries into the secondary's run function, counted and
+// never cleared. This is what core 0's entry gate waits on.
+//
+// `active` cannot be that gate. It is a LEVEL the secondary clears on its
+// way out, and this probe's secondary CAN leave while still armed: the
+// rendezvous below sets `armed = 0` when it times out, and the round loop
+// then falls through to clear `active`. A core 0 that was descheduled past
+// the rendezvous deadline -- measured to happen under host saturation --
+// comes back, polls `active`, sees 0, and reports `secondary-never-entered`
+// about a core that entered and waited for it. The verdict is right and the
+// reason is wrong, which is the whole of what #510 was filed about.
+//
+// A COUNT, not a flag, and incremented at the top of the function BEFORE any
+// rendezvous. Gating on the per-round cycle count instead would deadlock:
+// that count only advances after a rendezvous with core 0, and core 0 is the
+// one waiting.
+private let mut pid_probe_entries: usize;
+
+private fn pid_probe_entries_address() -> usize {
+    return (&pid_probe_entries) as usize;
+}
+
 private fn pid_probe_overlap_address() -> usize {
     return (&pid_probe_overlap) as usize;
 }
@@ -168,7 +190,10 @@ fn pid_contention_is_armed() -> bool !{unsafe} {
 }
 
 fn pid_contention_secondary_run() !{unsafe} {
-    unsafe { atomic_store_release(pid_probe_active_address(), 1); }
+    unsafe {
+        atomic_fetch_add_relaxed(pid_probe_entries_address(), 1);
+        atomic_store_release(pid_probe_active_address(), 1);
+    }
     while (unsafe {
                atomic_load_acquire(pid_probe_secondary_address())
            } < PID_CONTENTION_ROUNDS &&
@@ -228,6 +253,9 @@ private fn pid_probe_disarm_and_quiesce() -> bool !{unsafe} {
 
 private fn pid_contention_phase(locked: bool) -> bool !{unsafe} {
     let next_before: usize = scheduled_process_pid_counter();
+    let entries_before: usize = unsafe {
+        atomic_load_acquire(pid_probe_entries_address())
+    };
     unsafe {
         atomic_store_release(pid_probe_primary_address(), 0);
         atomic_store_release(pid_probe_secondary_address(), 0);
@@ -250,8 +278,8 @@ private fn pid_contention_phase(locked: bool) -> bool !{unsafe} {
     let mut entered: bool = false;
     while (entered == false && read_cntpct() - entry_start < entry_window) {
         if (unsafe {
-                atomic_load_acquire(pid_probe_active_address())
-            } == 1) {
+                atomic_load_acquire(pid_probe_entries_address())
+            } > entries_before) {
             entered = true;
         }
     }
