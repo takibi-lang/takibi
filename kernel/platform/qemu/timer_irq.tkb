@@ -4,16 +4,8 @@
 // banked per-CPU by the GIC itself, so this needs no GICD_ITARGETSR write,
 // same as RPi5's version.
 
-use "kernel/arch/arm64/kernel/timer.tkb";
-
 const QEMU_TIMER_GIC_INTID: u32 = 30;
 let mut qemu_timer_gic_intid: u32 = QEMU_TIMER_GIC_INTID;
-
-// read_cntfrq() >> 6 matches kernel/platform/rpi5/timer_irq.tkb and
-// examples/common_qemu/timer.tkb's own scheduler-tick divisor exactly.
-fn timer_tick_rearm() {
-    set_cntp_tval((read_cntfrq() >> 6) as i32);
-}
 
 fn gic_timer_ppi_enable() !{unsafe} {
     let gicd_isenabler0: *io u32 = unsafe {
@@ -21,19 +13,4 @@ fn gic_timer_ppi_enable() !{unsafe} {
     };
     *gicd_isenabler0 = *gicd_isenabler0 |
         (1 << qemu_timer_gic_intid);
-}
-
-fn timer_irq_setup() {
-    gic_timer_ppi_enable();
-    timer_tick_rearm();
-    enable_cntp();
-}
-
-fn timer_irq_handler() !{interrupt} {
-    timer_tick_rearm();
-    // GitHub issue #469: every tick, regardless of which EL it interrupted.
-    // See kernel_process_net_wake_all for why this is not behind the
-    // EL0-only scheduling half of the tick.
-    kernel_process_net_wake_all();
-    interrupt_notify();
 }

@@ -37,3 +37,23 @@ fn enable_cntp() {
 fn disable_cntp() {
     msr_cntp_ctl_el0(0);
 }
+
+// The scheduler tick is architectural rather than a GIC implementation
+// detail. Each platform supplies only gic_timer_ppi_enable().
+fn timer_tick_rearm() {
+    set_cntp_tval((read_cntfrq() >> 6) as i32);
+}
+
+fn timer_irq_setup() {
+    gic_timer_ppi_enable();
+    timer_tick_rearm();
+    enable_cntp();
+}
+
+fn timer_irq_handler() !{interrupt} {
+    timer_tick_rearm();
+    // Every tick wakes network waiters, regardless of which EL it
+    // interrupted. This is separate from the EL0-only scheduling half.
+    kernel_process_net_wake_all();
+    interrupt_notify();
+}

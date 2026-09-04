@@ -62,10 +62,10 @@
 // now implemented in examples/common_rpi5/pcie.tkb.
 
 use "kernel/platform/rpi5/intc.tkb";
+use "kernel/arch/arm64/kernel/platform_uart_common.tkb";
 
 const RPI5_RP1_UART0_BASE: usize = 0x1F00030000;
 
-let mut uart_rx_handler: fn !{unsafe}(u8) -> void;
 let mut rpi5_uart_base: usize = RPI5_RP1_UART0_BASE;
 let mut rpi5_uart_dtb_status: usize;
 
@@ -88,14 +88,6 @@ fn uart_isr_getc() -> u8 !{unsafe} {
     return *dr;
 }
 
-// Terminal fail-stop diagnostics run with IRQ delivery masked, so they must
-// consume the same PL011 FIFO by polling rather than through uart_rx_handler.
-// This deliberately has no timeout: the kernel is already terminally stopped.
-fn uart_debug_getc() -> u8 !{unsafe} {
-    while (uart_rx_ready() == false) { }
-    return uart_isr_getc();
-}
-
 // DDB's emergency TX path is deliberately distinct from uart_putc: it does
 // not carry the ordinary `logs` effect and touches no driver-owned state.
 // The interrupt checker therefore sees the real MMIO-only operation rather
@@ -110,10 +102,6 @@ fn uart_debug_putc(c: u8) !{unsafe} {
 fn uart_rx_ready() -> bool !{unsafe} {
     let fr: *io u32 = unsafe { (rpi5_uart_base + 0x18) as *io u32 };
     return (*fr & (1 << 4)) == 0; // RXFE clear = data available
-}
-
-fn uart_set_rx_handler(handler: fn !{unsafe}(u8) -> void) !{} {
-    uart_rx_handler = handler;
 }
 
 fn uart_tx_isr() {

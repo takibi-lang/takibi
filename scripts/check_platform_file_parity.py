@@ -47,17 +47,6 @@ ALLOWED = {
         "empty HAL slot -- a platform whose RX needs draining fills it",
     "uart_tx_isr":
         "empty HAL slot -- a platform with a TX interrupt fills it",
-    "timer_tick_rearm":
-        "GitHub issue #475 -- belongs in arch/arm64/kernel/timer.tkb",
-    "timer_irq_setup":
-        "GitHub issue #475 -- belongs in arch/arm64/kernel/timer.tkb",
-    "timer_irq_handler":
-        "GitHub issue #475 -- belongs in arch/arm64/kernel/timer.tkb",
-    "uart_debug_getc":
-        "GitHub issue #475 -- composes two per-platform primitives, no "
-        "device knowledge of its own",
-    "uart_set_rx_handler":
-        "GitHub issue #475 -- moves together with the uart_rx_handler global",
     "platform_memory_detect":
         "GitHub issue #472 is actively rewriting both copies from the DTB",
 }

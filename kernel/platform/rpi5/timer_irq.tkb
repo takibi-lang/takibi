@@ -25,8 +25,6 @@
 // syscall-return boundary, while Lower-EL ticks may select another runnable
 // context immediately.
 
-use "kernel/arch/arm64/kernel/timer.tkb";
-
 const RPI5_GICD_BASE: usize = 0x107FFF9000;
 const RPI5_GICC_BASE: usize = 0x107FFFA000;
 let mut rpi5_gicd_base: usize = RPI5_GICD_BASE;
@@ -36,33 +34,10 @@ let mut rpi5_gic_dtb_status: usize;
 const RPI5_TIMER_GIC_INTID: u32 = 30;
 let mut rpi5_timer_gic_intid: u32 = RPI5_TIMER_GIC_INTID;
 
-// read_cntfrq() >> 6 matches examples/common_qemu/timer.tkb and
-// examples/common_rpi3/timer.tkb's own scheduler-tick divisor exactly
-// (roughly a 1/64 second period for any board's real CNTFRQ_EL0) --
-// reused here as an already-proven-safe tick rate, not re-derived.
-fn timer_tick_rearm() {
-    set_cntp_tval((read_cntfrq() >> 6) as i32);
-}
-
 fn gic_timer_ppi_enable() !{unsafe} {
     let gicd_isenabler0: *io u32 = unsafe {
         (rpi5_gicd_base + 0x100) as *io u32
     };
     *gicd_isenabler0 = *gicd_isenabler0 |
         (1 << rpi5_timer_gic_intid);
-}
-
-fn timer_irq_setup() {
-    gic_timer_ppi_enable();
-    timer_tick_rearm();
-    enable_cntp();
-}
-
-fn timer_irq_handler() !{interrupt} {
-    timer_tick_rearm();
-    // GitHub issue #469: every tick, regardless of which EL it interrupted.
-    // See kernel_process_net_wake_all for why this is not behind the
-    // EL0-only scheduling half of the tick.
-    kernel_process_net_wake_all();
-    interrupt_notify();
 }
