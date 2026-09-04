@@ -5094,11 +5094,11 @@ fn kernel_process_child_exit(status: usize) -> usize {
     let mut draining: usize = scheduled_process_pool_live_count() + 1;
     while (draining != 0) {
         draining = draining - 1;
-        match kernel_process_first_zombie_of(child.pool_index) {
+        match kernel_process_first_zombie_of(child) {
             ProcessNextReadyResult::Missing => { draining = 0; }
             ProcessNextReadyResult::Next(grandchild) => {
                 let orphan_status: usize =
-                    kernel_process_reap_zombie(child.pool_index, grandchild);
+                    kernel_process_reap_zombie(child, grandchild);
             }
         }
     }
@@ -5270,13 +5270,13 @@ private fn kernel_process_exit_start_successor(child: ProcessHandle)
 // and not yet been reaped. Walks the sibling list, so a parent with
 // several children finds whichever one is waitable rather than the one a
 // single field happened to remember.
-private fn kernel_process_first_zombie_of(slot: usize)
+private fn kernel_process_first_zombie_of(parent: ProcessHandle)
         -> ProcessNextReadyResult {
-    if (scheduled_process_record_at(slot).has_first_child == false) {
+    if (scheduled_process_record_of(parent).has_first_child == false) {
         return ProcessNextReadyResult::Missing;
     }
     let mut cursor: ProcessHandle =
-        scheduled_process_record_at(slot).first_child;
+        scheduled_process_record_of(parent).first_child;
     let mut remaining: usize = scheduled_process_pool_live_count() + 1;
     while (remaining != 0) {
         remaining = remaining - 1;
@@ -5303,7 +5303,15 @@ private fn kernel_process_first_zombie_of(slot: usize)
 // whose state is Exited -- so this cannot reap a running process for want
 // of a token, and cannot reap the same one twice because the take will not
 // mint a second pair.
-private fn kernel_process_reap_zombie(parent: usize, child: ProcessHandle)
+// The parent as a HANDLE. GitHub issue #492: every read of the parent's
+// record below -- the unlink walk over its child list, and the pid it
+// remembers afterwards -- went through a bare slot, so a parent whose slot
+// had been recycled would have had a DIFFERENT process's sibling chain
+// rewritten. The callers that have no expectation say so by minting a
+// handle from the slot with scheduled_process_handle_of_slot, which names
+// whoever is there now and is the honest encoding of not knowing.
+private fn kernel_process_reap_zombie(parent: ProcessHandle,
+                                      child: ProcessHandle)
         -> usize !{unsafe} {
     // GitHub issue #437: scheduled_process_reap ends in
     // process_image_exec_teardown, which used to leave the image target at
@@ -5345,15 +5353,15 @@ private fn kernel_process_reap_zombie(parent: usize, child: ProcessHandle)
     // has no children, so without this guard the walk below would read
     // record_at() at an index no one chose. Nothing to unlink is a
     // perfectly good outcome: the reap below is what actually matters.
-    if (scheduled_process_record_at(parent).has_first_child == false) {
+    if (scheduled_process_record_of(parent).has_first_child == false) {
         kernel_process_reap_unlinked_count =
             kernel_process_reap_unlinked_count + 1;
     } else {
     let mut head: ProcessHandle =
-        scheduled_process_record_at(parent).first_child;
+        scheduled_process_record_of(parent).first_child;
     if (scheduled_process_same_slot(head, child)) {
-        scheduled_process_record_at(parent).first_child = following;
-        scheduled_process_record_at(parent).has_first_child = has_following;
+        scheduled_process_record_of(parent).first_child = following;
+        scheduled_process_record_of(parent).has_first_child = has_following;
     } else {
         let mut prev: ProcessHandle = head;
         let mut remaining: usize = scheduled_process_pool_live_count() + 1;
@@ -5385,7 +5393,7 @@ private fn kernel_process_reap_zombie(parent: usize, child: ProcessHandle)
             scheduled_process_reap(exited_owner, exited_state);
         }
     }
-    scheduled_process_record_at(parent).last_child_pid = pid;
+    scheduled_process_record_of(parent).last_child_pid = pid;
     process_image_activate_root(resume_root);
     return status;
 }
@@ -5444,13 +5452,13 @@ fn kernel_process_current_has_child_pid(pid: usize) -> bool {
 // The zombie carrying this pid, if this slot has one. wait4(pid) reaps
 // through here so that a specific child can be collected while its
 // siblings keep running.
-private fn kernel_process_zombie_of_pid(slot: usize, pid: usize)
+private fn kernel_process_zombie_of_pid(parent: ProcessHandle, pid: usize)
         -> ProcessNextReadyResult {
-    if (scheduled_process_record_at(slot).has_first_child == false) {
+    if (scheduled_process_record_of(parent).has_first_child == false) {
         return ProcessNextReadyResult::Missing;
     }
     let mut cursor: ProcessHandle =
-        scheduled_process_record_at(slot).first_child;
+        scheduled_process_record_of(parent).first_child;
     let mut remaining: usize = scheduled_process_pool_live_count() + 1;
     while (remaining != 0) {
         remaining = remaining - 1;
@@ -5476,7 +5484,7 @@ private fn kernel_process_zombie_of_pid(slot: usize, pid: usize)
 fn kernel_process_child_wait_status_peek_pid(pid: usize) -> usize {
     if (execution_here().current_live == false) { return 0; }
     match kernel_process_zombie_of_pid(
-            execution_here().current_handle.pool_index, pid) {
+            execution_here().current_handle, pid) {
         ProcessNextReadyResult::Missing => { return 0; }
         ProcessNextReadyResult::Next(zombie) => {
             return scheduled_process_record_of(zombie).exit_status;
@@ -5488,7 +5496,7 @@ fn kernel_process_child_wait_status_peek_pid(pid: usize) -> usize {
 fn kernel_process_child_waitable_pid(pid: usize) -> bool {
     if (execution_here().current_live == false) { return false; }
     match kernel_process_zombie_of_pid(
-            execution_here().current_handle.pool_index, pid) {
+            execution_here().current_handle, pid) {
         ProcessNextReadyResult::Missing => { return false; }
         ProcessNextReadyResult::Next(zombie) => { return true; }
     }
@@ -5498,11 +5506,11 @@ fn kernel_process_child_waitable_pid(pid: usize) -> bool {
 // afterwards through kernel_process_last_child_pid, same as wait4(-1).
 fn kernel_process_child_wait_status_pid(pid: usize) -> usize !{unsafe} {
     if (execution_here().current_live == false) { return 0; }
-    let slot: usize = execution_here().current_handle.pool_index;
-    match kernel_process_zombie_of_pid(slot, pid) {
+    let mut parent: ProcessHandle = execution_here().current_handle;
+    match kernel_process_zombie_of_pid(parent, pid) {
         ProcessNextReadyResult::Missing => { return 0; }
         ProcessNextReadyResult::Next(zombie) => {
-            return kernel_process_reap_zombie(slot, zombie);
+            return kernel_process_reap_zombie(parent, zombie);
         }
     }
 }
@@ -5510,7 +5518,7 @@ fn kernel_process_child_wait_status_pid(pid: usize) -> usize !{unsafe} {
 fn kernel_process_child_waitable() -> bool {
     if (execution_here().current_live == false) { return false; }
     match kernel_process_first_zombie_of(
-            execution_here().current_handle.pool_index) {
+            execution_here().current_handle) {
         ProcessNextReadyResult::Missing => { return false; }
         ProcessNextReadyResult::Next(zombie) => { return true; }
     }
@@ -5532,7 +5540,14 @@ fn kernel_process_child_wait_status() -> usize !{unsafe} {
 // file's kernel_process_child_exit): the one caller that needs a SPECIFIC
 // parent slot rather than "whichever slot is current."
 fn kernel_process_child_wait_status_peek_for(slot: usize) -> usize {
-    match kernel_process_first_zombie_of(slot) {
+    // GitHub issue #492: a slot with NO expectation attached, which is what
+    // this pair exists for -- kernel_syscall_wait4_deliver names a specific
+    // parent slot and has no generation to check it against.
+    // scheduled_process_handle_of_slot says exactly that: whoever is there
+    // now. Encoding it makes the absence of an expectation visible instead
+    // of hiding it in a bare usize.
+    match kernel_process_first_zombie_of(
+            scheduled_process_handle_of_slot(slot)) {
         ProcessNextReadyResult::Missing => { return 0; }
         ProcessNextReadyResult::Next(zombie) => {
             return scheduled_process_record_of(zombie).exit_status;
@@ -5544,10 +5559,12 @@ fn kernel_process_child_wait_status_peek_for(slot: usize) -> usize {
 // current-slot wrapper above needs no second lookup.
 fn kernel_process_child_wait_status_consume_for(slot: usize) -> usize
         !{unsafe} {
-    match kernel_process_first_zombie_of(slot) {
+    // The same no-expectation slot as its peek sibling above.
+    let mut parent: ProcessHandle = scheduled_process_handle_of_slot(slot);
+    match kernel_process_first_zombie_of(parent) {
         ProcessNextReadyResult::Missing => { return 0; }
         ProcessNextReadyResult::Next(zombie) => {
-            return kernel_process_reap_zombie(slot, zombie);
+            return kernel_process_reap_zombie(parent, zombie);
         }
     }
 }
@@ -5741,7 +5758,9 @@ fn kernel_process_reap_own_zombies() !{unsafe} {
                         let mut victim: ProcessHandle =
                             scheduled_process_handle_of_slot(slot);
                         let collected: usize =
-                            kernel_process_reap_zombie(owner_slot, victim);
+                            kernel_process_reap_zombie(
+                                scheduled_process_handle_of_slot(owner_slot),
+                                victim);
                     }
                     cursor = scheduled_process_next_slot(slot);
                 }
