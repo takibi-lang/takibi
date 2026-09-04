@@ -461,29 +461,13 @@ let unify_at loc t1 t2 =
   try unify t1 t2
   with Unify_error msg -> raise (TypeError (loc, msg))
 
-(* GitHub issue #100 follow-up: a bare integer literal's inferred type is a
-   polymorphic, unbound type variable (see IntLit's own case below,
-   `fresh ()`), so `unify_at` alone lets it bind STRUCTURALLY against any
-   refined target -- e.g. `let v: {0..<8 as usize} = 20;` -- without ever
-   checking whether the literal's actual VALUE fits {lo..<hi}. That is a
-   genuine soundness hole, not just a missing diagnostic: downstream code
-   (an array index, a narrowed subslice, ...) trusts `v`'s declared
-   {0..<8} range to elide its own bounds check, so an out-of-range literal
-   silently "proving" a range it doesn't satisfy lets --forbid-trap accept
-   code with a real, unchecked out-of-bounds access at runtime. Checked
-   here at every site where a literal-or-Const_env-constant expression
-   flows into an already-known target type (Let, Assign, AssignDeref,
-   AssignIndex, AssignField, Return, Call arguments, StructLit fields) --
-   reuses Const_env.bound_value, the same "is this expression a
-   compile-time-known integer" resolver already used throughout this file
-   (e.g. collect_bounds's range_of), so bare literals and named constants
-   are both covered identically. A non-constant expression (a variable, a
-   computed value) is left alone: unify's existing anti-subtyping guard
-   (`t1, TRefinedInt (lo, hi, base) when t1 = repr base -> ...`) already
-   correctly rejects an unproven plain-base value flowing into a refined
-   target, so there is nothing extra to check there.
+(* An integer literal starts as a polymorphic unbound type variable, so the
+   ordinary unifier needs a separate value check when an expression flows
+   into an already-known target. The Value_facts-based implementation lives
+   below value_facts_of_expr; keeping the non-refinement checks here avoids a
+   forward dependency while preserving their existing diagnostics.
 
-   TBool branch added while fixing check_cond's own instance of this same
+   The TBool branch was added while fixing check_cond's instance of the same
    root cause (`while (1)` silently "type-checking" then crashing at
    codegen, see check_cond's comment): the exact same unbound-type-variable
    hole means `let x: bool = 1;`, `return 1;` from a `-> bool` function,
@@ -500,15 +484,8 @@ let unify_at loc t1 t2 =
    is a compile-time integer (not, say, an already-bool-typed expression
    that happens to reach this function with a TBool target, which
    Const_env.bound_value correctly returns None for). *)
-let check_literal_fits_refined loc (e : Ast.expr) (target : ty) =
+let check_integer_literal_target_shape loc (e : Ast.expr) (target : ty) =
   match strip_singleton target with
-  | TRefinedInt (lo, hi, _) ->
-      (match Const_env.bound_value e with
-       | Some k when k < lo || k >= hi ->
-           raise (TypeError (loc, Printf.sprintf
-             "constant value %d does not fit the refined type {%d..<%d}"
-             k lo hi))
-       | _ -> ())
   | TBool ->
       (match Const_env.bound_value e with
        | Some k ->
@@ -1028,6 +1005,33 @@ let rec value_facts_of_expr ty (expr : Ast.expr) =
                (try Some (exact base mathematical)
                 with Invalid_argument _ -> Some (unknown base))
            | None -> Some (unknown base))
+
+(* GitHub issue #103: validate refined destinations through the same
+   mathematical Value_facts domain used by the compiler's proof consumers.
+   In particular, do not use Const_env's host-int-sized folded value here:
+   direct i64/u64 literals must be checked without narrowing to OCaml int.
+
+   Pass the refined type's BASE to value_facts_of_expr. Passing the refined
+   wrapper itself would describe the destination interval rather than the
+   source expression and would therefore assume the fact being checked.
+   Exact literals, folded constants, and immutable initializer facts all use
+   this path; an unknown expression remains the unifier's responsibility and
+   cannot gain a proof here. *)
+let check_literal_fits_refined loc (e : Ast.expr) (target : ty) =
+  check_integer_literal_target_shape loc e target;
+  match strip_singleton target with
+  | TRefinedInt (lo, hi, base_ty) ->
+      (match value_facts_of_expr base_ty e with
+       | Some { Value_facts.exact = Some exact; _ } ->
+           let lower = Value_facts.of_signed_int64 (Int64.of_int lo) in
+           let upper = Value_facts.of_signed_int64 (Int64.of_int hi) in
+           if Value_facts.compare_integer exact lower < 0
+              || Value_facts.compare_integer exact upper >= 0 then
+             raise (TypeError (loc, Printf.sprintf
+               "constant value %s does not fit the refined type {%d..<%d}"
+               (Value_facts.to_string exact) lo hi))
+       | Some _ | None -> ())
+  | _ -> ()
 
 let record_divisor_nonzero_proof ty (expr : Ast.expr) =
   match value_facts_of_expr ty expr with

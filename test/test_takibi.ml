@@ -15899,6 +15899,14 @@ let codegen_tests = [
         }");
 
   Alcotest.test_case
+    "issue #103: a full-width literal that cannot narrow through OCaml int \
+     is rejected by mathematical Value_facts at a refined destination" `Quick
+    (expect_type_error "18446744073709551615 does not fit the refined type"
+       "fn refnum103_full_width() {
+          let v: {0..<8 as u64} = 0xFFFFFFFFFFFFFFFF;
+        }");
+
+  Alcotest.test_case
     "issue #100: an out-of-range literal `Assign` (not just the \
      initializer) to an already-refined mutable local is now a compile \
      error" `Quick

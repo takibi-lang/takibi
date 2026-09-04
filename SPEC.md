@@ -180,7 +180,10 @@ parameter value, or top-level declaration name.
   An integer literal used directly in a context with a known expected
   type (a `let` annotation, a `return`, a function argument, an
   assignment, a struct/array literal field) is generated directly at that
-  type's width; otherwise it defaults to `i32` if it fits in
+  type's width. When that expected type is refined, the literal's full
+  mathematical signed or unsigned value is checked against the interval;
+  this check does not narrow the 64-bit bit pattern through a host-sized
+  integer. Otherwise the literal defaults to `i32` if it fits in
   `0..0x7FFFFFFF`, `i64` otherwise.
 - Character literals: `'a'`, `'\n'`, `'\r'`, `'\t'`, `'\0'`, `'\\'` --
   desugared to an integer literal (`Char.code c`).
