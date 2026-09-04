@@ -306,6 +306,10 @@ fn process_image_record_release(root: usize) !{unsafe} {
 // were global, and making two cores agree on it would be agreeing on the
 // wrong thing.
 private let mut process_image_target_root: [usize; KERNEL_MAX_CORES];
+// Root 0 is a real target, so zero-initialization cannot also mean that no
+// image operation has selected a target. Keep that state separately and
+// make teardown open the result before it can touch any mappings.
+private let mut process_image_target_root_set: [bool; KERNEL_MAX_CORES];
 
 private fn process_image_target_root_here() -> usize {
     let base: *usize = process_image_target_root;
@@ -316,9 +320,35 @@ private fn process_image_target_root_here() -> usize {
 
 private fn process_image_set_target_root_here(root: usize) {
     let base: *usize = process_image_target_root;
+    let set_base: *bool = process_image_target_root_set;
     let core: usize = cpu_id();
-    if (core >= KERNEL_MAX_CORES) { *base = root; return; }
+    if (core >= KERNEL_MAX_CORES) {
+        *base = root;
+        *set_base = true;
+        return;
+    }
     *(base + (core as isize)) = root;
+    *(set_base + (core as isize)) = true;
+}
+
+private fn process_image_clear_target_root_here() {
+    let base: *usize = process_image_target_root;
+    let set_base: *bool = process_image_target_root_set;
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) {
+        *base = 0;
+        *set_base = false;
+        return;
+    }
+    *(base + (core as isize)) = 0;
+    *(set_base + (core as isize)) = false;
+}
+
+private fn process_image_target_root_is_set_here() -> bool {
+    let base: *bool = process_image_target_root_set;
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) { return *base; }
+    return *(base + (core as isize));
 }
 
 // GitHub issue #392: a root is a process slot, and a process slot is a
@@ -329,23 +359,36 @@ private fn process_image_set_target_root_here(root: usize) {
 // valid.
 private let mut process_image_root_fallback_count: usize = 0;
 
-// A target root that no longer names a live process. It answers root 0
-// instead, which is what the old range check did for an out-of-range
-// index -- counted, because "the root this operation was aimed at is
-// gone" is worth knowing rather than silently redirecting.
+// A target that was never set, or a target root that no longer names a live
+// process. Readers retain the old root-0 fallback because their many call
+// sites cannot act on a miss; teardown opens ProcessImageTargetRootResult
+// and does nothing. Both paths count the miss rather than hiding it.
 fn process_image_root_fallback_uses() -> usize {
     return process_image_root_fallback_count;
 }
 
+must_use variant ProcessImageTargetRootResult {
+    Missing;
+    Ready(usize);
+}
+
+private fn process_image_target_root_result()
+        -> ProcessImageTargetRootResult !{unsafe} {
+    if (process_image_target_root_is_set_here() &&
+        scheduled_process_slot_valid(process_image_target_root_here())) {
+        return ProcessImageTargetRootResult::Ready(
+            process_image_target_root_here());
+    }
+    process_image_root_fallback_count =
+        process_image_root_fallback_count + 1;
+    return ProcessImageTargetRootResult::Missing;
+}
+
 fn process_image_root_index() -> usize !{unsafe} {
-    if (scheduled_process_slot_valid(process_image_target_root_here())) {
-        return process_image_target_root_here();
+    match process_image_target_root_result() {
+        ProcessImageTargetRootResult::Missing => { return 0; }
+        ProcessImageTargetRootResult::Ready(root) => { return root; }
     }
-    if (process_image_target_root_here() != 0) {
-        process_image_root_fallback_count =
-            process_image_root_fallback_count + 1;
-    }
-    return 0;
 }
 
 fn process_image_pte_read(index: usize) -> usize {
@@ -751,6 +794,24 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     process_image_record_at(0).heap_page_count = PROCESS_HEAP_PAGES_DEFAULT;
 
     let mut ok: bool = true;
+    // GitHub issue #438: unset is distinct from selecting the real root 0.
+    // Exercise the actual teardown helper while root 0 has both a mapping
+    // and live demand-stack metadata. A miss must be counted and must not
+    // turn into cleanup of the bootstrap address space. Restore the count
+    // afterwards so this deliberate negative control does not masquerade
+    // as a fault in the healthy-boot evidence.
+    let fallback_before: usize = process_image_root_fallback_count;
+    process_image_clear_target_root_here();
+    process_image_unmap_pages(1);
+    if (process_image_root_fallback_count != fallback_before + 1 ||
+        address_space_pte_read(0, process_stack_top_page()) == 0 ||
+        process_image_record_at(0).stack_growth_active == false ||
+        process_image_record_at(0).active_page_count != 1 ||
+        process_image_record_at(0).stack_lowest_l3 != process_stack_top_page()) {
+        ok = false;
+    }
+    process_image_root_fallback_count = fallback_before;
+    process_image_set_target_root_here(0);
     let mut cow_parent_physical: usize = 0;
     match process_image_clone_vm_begin(child_root) {
         ProcessCloneVmResult::OutOfMemory => { ok = false; }
@@ -948,48 +1009,53 @@ fn process_image_exec_reap_evidence() -> (usize, usize, usize) {
 // and before process_image_record_release, which is what makes it the last
 // moment the installed flag and page count still exist.
 //
-// It resets the target root on EVERY path, installed or not. Leaving it
+// It clears the target on EVERY path, installed or not. Leaving it
 // pointing at the dead child's root is not a tidiness question: the next
 // EL0 COW permission fault resolves against process_image_root_index(),
 // and against the wrong root it cannot resolve at all. That was one
 // fail-stop in the busybox fixture, found the first time this release was
 // wired in.
 fn process_image_exec_teardown(root_index: usize) {
-    if (scheduled_process_slot_valid(root_index)) {
-        let root: usize = root_index;
-        process_image_set_target_root_here(root);
-        // Take before acting, so an image is reaped once even though what
-        // says it exists is now a bool rather than a linear value.
-        let installed: bool =
-            process_image_record_at(root).exec_image_installed;
-        let count: usize =
-            process_image_record_at(root).exec_image_page_count;
-        process_image_record_at(root).exec_image_installed = false;
-        process_image_record_at(root).exec_image_page_count = 0;
-        if (installed) {
-            let reaped_root: usize =
-                process_image_root_index();
-            if (process_image_stack_grew_pages(count)) {
-                process_image_exec_reap_stack_growth_count =
-                    process_image_exec_reap_stack_growth_count + 1;
-            }
-            process_image_unmap_pages(count);
-            process_image_exec_reap_count =
-                process_image_exec_reap_count + 1;
-            if (process_image_root_window_is_clear(reaped_root)) {
-                process_image_exec_reap_clean_count =
-                    process_image_exec_reap_clean_count + 1;
+    process_image_set_target_root_here(root_index);
+    match process_image_target_root_result() {
+        ProcessImageTargetRootResult::Missing => {
+            process_image_clear_target_root_here();
+            return;
+        }
+        ProcessImageTargetRootResult::Ready(root) => {
+            // Take before acting, so an image is reaped once even though what
+            // says it exists is now a bool rather than a linear value.
+            let installed: bool =
+                process_image_record_at(root).exec_image_installed;
+            let count: usize =
+                process_image_record_at(root).exec_image_page_count;
+            process_image_record_at(root).exec_image_installed = false;
+            process_image_record_at(root).exec_image_page_count = 0;
+            if (installed) {
+                let reaped_root: usize =
+                    process_image_root_index();
+                if (process_image_stack_grew_pages(count)) {
+                    process_image_exec_reap_stack_growth_count =
+                        process_image_exec_reap_stack_growth_count + 1;
+                }
+                process_image_unmap_pages(count);
+                process_image_exec_reap_count =
+                    process_image_exec_reap_count + 1;
+                if (process_image_root_window_is_clear(reaped_root)) {
+                    process_image_exec_reap_clean_count =
+                        process_image_exec_reap_clean_count + 1;
+                }
             }
         }
-        process_image_set_target_root_here(0);
     }
+    process_image_clear_target_root_here();
 }
 
 // The RESUME half stays where it was, at the parent's return, because that
 // is the only moment "current" means the parent.
 //
-// process_image_unmap only retargets later page-table writes at root 0; it
-// leaves TTBR0 on the root it just emptied. The parent is resumed straight
+// process_image_unmap clears the later page-table target; it leaves TTBR0
+// on the root it just emptied. The parent is resumed straight
 // after this, so activate its root here exactly as process_image_clone_vm_
 // reap does for the plain fork/exit path -- otherwise the parent returns to
 // EL0 against the unmapped child root and faults on its own first
@@ -1377,12 +1443,20 @@ fn process_image_load_page_ext2(page: borrow PageOwner[page],
 // Address-space cleanup walks the actual L2/L3 tree, releasing every
 // transferred user page and every dynamic L3 table page. It needs no
 // per-image page-index list and scales with populated branches.
-fn process_image_cleanup() {
-    let root: usize = process_image_root_index();
+private fn process_image_cleanup_root(root: usize) {
     address_space_release_user_mappings(root);
     process_image_record_at(root).active_page_count = 0;
     process_image_record_at(root).stack_growth_active = false;
     process_image_record_at(root).stack_lowest_l3 = process_stack_top_page();
+}
+
+fn process_image_cleanup() {
+    match process_image_target_root_result() {
+        ProcessImageTargetRootResult::Missing => { return; }
+        ProcessImageTargetRootResult::Ready(root) => {
+            process_image_cleanup_root(root);
+        }
+    }
 }
 
 // Called directly from el0_sync_entry for a lower-EL data-abort translation
@@ -1455,15 +1529,23 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
 // is what process_image_exec_reap calls, now that what it reaps is a
 // record field rather than a parked linear value.
 fn process_image_unmap_pages(count: usize) {
-    let root: usize = process_image_root_index();
-    if (process_image_record_at(root).stack_growth_active ||
-        process_image_record_at(root).active_page_count > count) {
-        process_image_record_at(root).stack_growth_active = false;
-        process_image_record_at(root).active_page_count = 0;
-        process_image_record_at(root).stack_lowest_l3 = process_stack_top_page();
+    match process_image_target_root_result() {
+        ProcessImageTargetRootResult::Missing => {
+            process_image_clear_target_root_here();
+            return;
+        }
+        ProcessImageTargetRootResult::Ready(root) => {
+            if (process_image_record_at(root).stack_growth_active ||
+                process_image_record_at(root).active_page_count > count) {
+                process_image_record_at(root).stack_growth_active = false;
+                process_image_record_at(root).active_page_count = 0;
+                process_image_record_at(root).stack_lowest_l3 =
+                    process_stack_top_page();
+            }
+            process_image_cleanup_root(root);
+        }
     }
-    process_image_cleanup();
-    process_image_set_target_root_here(0);
+    process_image_clear_target_root_here();
 }
 
 fn process_image_unmap(pages: sink ProcessImagePages[image]) {
@@ -1971,7 +2053,8 @@ fn process_image_gap_is_unmapped() -> bool {
 
 // GitHub issue #479. Twenty globals, and they fall into three kinds.
 //
-// ONE WAS THE WRONG SHAPE and is fixed. process_image_target_root names
+// ONE WAS THE WRONG SHAPE and is fixed. process_image_target_root plus its
+// explicit set flag name
 // the root an image operation is aimed at, set by one call and read by
 // another -- per-OPERATION state living in a global, which on two cores
 // means one answer held for two concurrent operations. It is an array

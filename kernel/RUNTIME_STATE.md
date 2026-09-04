@@ -121,7 +121,7 @@ section's entries stopped being plain unsynchronized globals:
 | `page.tkb`'s `boot_page_pool` | one acquire of `page_allocator_lock` covers each allocator entry point; `page_alloc_boot`/`page_free_boot` are the MMU-off window's lock-free path, because AArch64 has no exclusives on Device memory |
 | `asid.tkb`'s `asid_next`/`asid_generation` | minted under `asid_lock`; the file's execution-model assertion was deleted, since nothing there is left to assert |
 | `address_space.tkb`'s `address_space_active_slot` | now `[usize; KERNEL_MAX_CORES]` indexed by `cpu_id()` -- it was never shared state, it was PER-CORE state stored as one global |
-| `process_image.tkb`'s `process_image_target_root` | same, and the same shape: per-operation state, which on two cores means per-core |
+| `process_image.tkb`'s `process_image_target_root` and explicit set flag | same, and the same shape: per-operation state, which on two cores means per-core; the flag distinguishes selecting bootstrap root 0 from having no teardown target |
 
 The last two are the distinction this section should keep: five subsystems
 this week were missing exclusion, and three were not shared at all. A lock

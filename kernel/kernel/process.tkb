@@ -5198,15 +5198,17 @@ private fn kernel_process_first_zombie_of(slot: usize)
 private fn kernel_process_reap_zombie(parent: usize, child: ProcessHandle)
         -> usize !{unsafe} {
     // GitHub issue #437: scheduled_process_reap ends in
-    // process_image_exec_teardown, which leaves process_image_target_root
-    // at 0. While the reap ran inside kernel_process_child_exit that was
+    // process_image_exec_teardown, which used to leave the image target at
+    // root 0 and now leaves it unset. While the reap ran inside
+    // kernel_process_child_exit that was
     // repaired before anyone returned to EL0, because that function's tail
     // re-activates the parent. It runs in the REAPER's syscall context
     // now, and on the fast path (the child already a zombie when wait4 is
     // called) nothing after it re-activates -- so the reaper resumed at
     // EL0 with the COW handler aimed at root 0, PID 1's live image, and
     // its next write to a COW page fail-stopped. Root 0 being a VALID slot
-    // is what made this invisible to the fallback counter. QEMU never saw
+    // made this invisible to the old fallback counter; an unset target is
+    // counted now, but still cannot service the reaper's next fault. QEMU never saw
     // it because its parents always block before the child exits; RPi5's
     // children finish first, deterministically.
     //
