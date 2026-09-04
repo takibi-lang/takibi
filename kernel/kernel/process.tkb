@@ -501,6 +501,43 @@ fn scheduled_process_mint_pid_for_probe() -> usize {
     return scheduled_process_mint_pid();
 }
 
+// The contention probe's negative control pauses after reading the counter
+// and before writing it. Ordinary callers cannot obtain this pending value;
+// they continue to use scheduled_process_mint_pid(), whose LockedCell guard
+// spans both operations.
+linear struct ScheduledPidProbePending[pending: usize] {
+    private pid: usize @ pending;
+}
+
+must_use variant ScheduledPidProbeBeginResult {
+    Pending(exists pending: usize. ScheduledPidProbePending[pending]);
+}
+
+private fn scheduled_pid_probe_pending_new(pid: usize @ pending)
+        -> ScheduledPidProbePending[pending] {
+    let mut value: ScheduledPidProbePending[pending] = { pid };
+    return value;
+}
+
+fn scheduled_process_mint_pid_probe_begin()
+        -> ScheduledPidProbeBeginResult !{unsafe} {
+    let minted: *usize =
+        locked_cell_value_boot(&scheduled_process_pid_cell);
+    return ScheduledPidProbeBeginResult::Pending(
+        scheduled_pid_probe_pending_new(*minted + 1));
+}
+
+fn scheduled_process_mint_pid_probe_commit(
+        pending: sink ScheduledPidProbePending[pending]) -> usize !{unsafe} {
+    let minted: *usize =
+        locked_cell_value_boot(&scheduled_process_pid_cell);
+    *minted = pending.pid;
+    return pending.pid;
+}
+
+fn scheduled_process_mint_pid_probe_cancel(
+        pending: sink ScheduledPidProbePending[pending]) {}
+
 // Both take the lock, which the bare globals they replace did not -- and
 // with the count inside a LockedCell an unlocked read is not expressible.
 // The probe reads this WHILE the other core is minting, which is exactly

@@ -3,7 +3,8 @@ schedule contention stage: locked
 schedule contention: two cores claiming one Ready process, the race shown without the lock and gone with it ok
 tag contention stage: complete
 tag contention: two cores minting a pool tag, every one advanced the counter once ok
-pid contention stage: complete
+pid contention stage: unlocked
+pid contention stage: locked
 pid contention: two cores minting, every pid advanced the counter once ok
 fd refcount contention stage: complete
 fd refcount contention: two cores retaining and releasing one object, count back to baseline ok

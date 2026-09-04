@@ -44,6 +44,11 @@ const FREELIST_CONTENTION_ROUNDS: usize = 4096;
 // rather than the structure.
 const FREELIST_CONTENTION_OUTSIDE_WORK: usize = 64;
 
+must_use variant FreelistProbeRendezvousResult {
+    Met;
+    TimedOut;
+}
+
 private let mut freelist_probe: FreelistCore(FREELIST_CONTENTION_SLOTS);
 private let mut freelist_probe_ready: bool = false;
 
@@ -67,6 +72,10 @@ private let mut freelist_probe_duplicates: usize;
 private let mut freelist_probe_empty: usize;
 private let mut freelist_probe_active: usize;
 private let mut freelist_probe_overlap: usize;
+private let mut freelist_probe_primary_arrived: usize;
+private let mut freelist_probe_secondary_arrived: usize;
+private let mut freelist_probe_primary_marked: usize;
+private let mut freelist_probe_secondary_marked: usize;
 
 private fn freelist_probe_armed_address() -> usize {
     return (&freelist_probe_armed) as usize;
@@ -96,6 +105,22 @@ private fn freelist_probe_overlap_address() -> usize {
     return (&freelist_probe_overlap) as usize;
 }
 
+private fn freelist_probe_primary_arrived_address() -> usize {
+    return (&freelist_probe_primary_arrived) as usize;
+}
+
+private fn freelist_probe_secondary_arrived_address() -> usize {
+    return (&freelist_probe_secondary_arrived) as usize;
+}
+
+private fn freelist_probe_primary_marked_address() -> usize {
+    return (&freelist_probe_primary_marked) as usize;
+}
+
+private fn freelist_probe_secondary_marked_address() -> usize {
+    return (&freelist_probe_secondary_marked) as usize;
+}
+
 private fn freelist_probe_locked_phase_address() -> usize {
     return (&freelist_probe_locked_phase) as usize;
 }
@@ -119,27 +144,51 @@ private fn freelist_probe_init() {
 // The marking is a real atomic exchange, so the DETECTOR is sound even
 // while the thing under test is not: a probe whose own bookkeeping raced
 // would report duplicates that were its own fault.
-private fn freelist_probe_cycle() -> bool !{unsafe} {
-    let locked: bool = unsafe {
-        atomic_load_acquire(freelist_probe_locked_phase_address())
-    } == 1;
-    let mut flags: usize = 0;
-    if (locked) {
-        flags = pool_lock_acquire(0, &freelist_probe_lock);
+private fn freelist_probe_rendezvous(primary: bool, sequence: usize,
+                                     primary_address: usize,
+                                     secondary_address: usize)
+        -> FreelistProbeRendezvousResult !{unsafe} {
+    let mut own_address: usize = secondary_address;
+    let mut peer_address: usize = primary_address;
+    if (primary) {
+        own_address = primary_address;
+        peer_address = secondary_address;
     }
-    let taken: bool = freelist_probe_cycle_body();
-    if (locked) {
-        pool_lock_release(0, &freelist_probe_lock, flags);
+    unsafe { atomic_store_release(own_address, sequence); }
+    let deadline: i64 = read_cntpct() + read_cntfrq() * 2;
+    while (read_cntpct() < deadline &&
+           unsafe { atomic_load_acquire(peer_address) } < sequence &&
+           unsafe {
+               atomic_load_acquire(freelist_probe_armed_address())
+           } == 1) {
     }
-    // Outside the lock in phase 2, and in the same place in phase 1 so the
-    // two phases differ by exactly one thing.
-    for spin: usize in 0..<FREELIST_CONTENTION_OUTSIDE_WORK { }
-    return taken;
+    if (unsafe { atomic_load_acquire(peer_address) } >= sequence &&
+        unsafe {
+            atomic_load_acquire(freelist_probe_armed_address())
+        } == 1) {
+        return FreelistProbeRendezvousResult::Met;
+    }
+    unsafe { atomic_store_release(freelist_probe_armed_address(), 0); }
+    return FreelistProbeRendezvousResult::TimedOut;
 }
 
-private fn freelist_probe_cycle_body() -> bool !{unsafe} {
-    match freelist_core_insert(&freelist_probe) {
+private fn freelist_probe_record_pop(result: FreelistPopResult,
+                                     primary: bool, sequence: usize)
+        -> bool !{unsafe} {
+    match result {
         FreelistPopResult::Empty => {
+            if (unsafe {
+                    atomic_load_acquire(
+                        freelist_probe_locked_phase_address())
+                } == 0) {
+                match freelist_probe_rendezvous(
+                        primary, sequence,
+                        freelist_probe_primary_marked_address(),
+                        freelist_probe_secondary_marked_address()) {
+                    FreelistProbeRendezvousResult::TimedOut => {}
+                    FreelistProbeRendezvousResult::Met => {}
+                }
+            }
             unsafe {
                 atomic_fetch_add_relaxed(freelist_probe_empty_address(), 1);
             }
@@ -157,6 +206,18 @@ private fn freelist_probe_cycle_body() -> bool !{unsafe} {
                             freelist_probe_duplicates_address(), 1);
                     }
                 }
+                if (unsafe {
+                        atomic_load_acquire(
+                            freelist_probe_locked_phase_address())
+                    } == 0) {
+                    match freelist_probe_rendezvous(
+                            primary, sequence,
+                            freelist_probe_primary_marked_address(),
+                            freelist_probe_secondary_marked_address()) {
+                        FreelistProbeRendezvousResult::TimedOut => {}
+                        FreelistProbeRendezvousResult::Met => {}
+                    }
+                }
                 unsafe {
                     atomic_store_release(
                         freelist_probe_held_address(index), 0);
@@ -168,6 +229,64 @@ private fn freelist_probe_cycle_body() -> bool !{unsafe} {
     }
 }
 
+private fn freelist_probe_cycle(primary: bool, sequence: usize)
+        -> bool !{unsafe} {
+    let locked: bool = unsafe {
+        atomic_load_acquire(freelist_probe_locked_phase_address())
+    } == 1;
+    let mut taken: bool = false;
+    if (locked) {
+        match freelist_probe_rendezvous(
+                primary, sequence,
+                freelist_probe_primary_arrived_address(),
+                freelist_probe_secondary_arrived_address()) {
+            FreelistProbeRendezvousResult::TimedOut => {}
+            FreelistProbeRendezvousResult::Met => {
+                let flags: usize =
+                    pool_lock_acquire(0, &freelist_probe_lock);
+                taken = freelist_probe_record_pop(
+                    freelist_core_insert(&freelist_probe),
+                    primary, sequence);
+                pool_lock_release(0, &freelist_probe_lock, flags);
+            }
+        }
+    } else {
+        match freelist_core_insert_probe_begin(&freelist_probe) {
+            FreelistPopProbeBeginResult::Empty => {
+                match freelist_probe_rendezvous(
+                        primary, sequence,
+                        freelist_probe_primary_arrived_address(),
+                        freelist_probe_secondary_arrived_address()) {
+                    FreelistProbeRendezvousResult::TimedOut => {}
+                    FreelistProbeRendezvousResult::Met => {}
+                }
+                taken = freelist_probe_record_pop(
+                    FreelistPopResult::Empty, primary, sequence);
+            }
+            FreelistPopProbeBeginResult::Pending(pending) => {
+                match freelist_probe_rendezvous(
+                        primary, sequence,
+                        freelist_probe_primary_arrived_address(),
+                        freelist_probe_secondary_arrived_address()) {
+                    FreelistProbeRendezvousResult::TimedOut => {
+                        freelist_core_insert_probe_cancel(pending);
+                    }
+                    FreelistProbeRendezvousResult::Met => {
+                        taken = freelist_probe_record_pop(
+                            freelist_core_insert_probe_commit(
+                                &freelist_probe, pending),
+                            primary, sequence);
+                    }
+                }
+            }
+        }
+    }
+    // Outside the lock in phase 2, and in the same place in phase 1 so the
+    // two phases differ by exactly one thing.
+    for spin: usize in 0..<FREELIST_CONTENTION_OUTSIDE_WORK { }
+    return taken;
+}
+
 fn freelist_contention_is_armed() -> bool !{unsafe} {
     return unsafe {
         atomic_load_acquire(freelist_probe_armed_address())
@@ -176,14 +295,15 @@ fn freelist_contention_is_armed() -> bool !{unsafe} {
 
 fn freelist_contention_secondary_run() !{unsafe} {
     unsafe { atomic_store_release(freelist_probe_active_address(), 1); }
-    while (unsafe {
-               atomic_load_acquire(freelist_probe_secondary_address())
-           } < FREELIST_CONTENTION_ROUNDS &&
-           unsafe { atomic_load_acquire(freelist_probe_armed_address()) } == 1) {
-        if (freelist_probe_cycle()) {
-            unsafe {
-                atomic_fetch_add_relaxed(
-                    freelist_probe_secondary_address(), 1);
+    for round: usize in 0..<FREELIST_CONTENTION_ROUNDS {
+        if (unsafe {
+                atomic_load_acquire(freelist_probe_armed_address())
+            } == 1) {
+            if (freelist_probe_cycle(false, round + 1)) {
+                unsafe {
+                    atomic_fetch_add_relaxed(
+                        freelist_probe_secondary_address(), 1);
+                }
             }
         }
     }
@@ -227,7 +347,13 @@ private fn freelist_contention_phase(locked: bool) -> bool !{unsafe} {
         atomic_store_release(freelist_probe_duplicates_address(), 0);
         atomic_store_release(freelist_probe_empty_address(), 0);
         atomic_store_release(freelist_probe_overlap_address(), 0);
+        atomic_store_release(freelist_probe_primary_arrived_address(), 0);
+        atomic_store_release(freelist_probe_secondary_arrived_address(), 0);
+        atomic_store_release(freelist_probe_primary_marked_address(), 0);
+        atomic_store_release(freelist_probe_secondary_marked_address(), 0);
+        atomic_store_release(freelist_probe_active_address(), 0);
     }
+    freelist_core_init(&freelist_probe);
     if (locked) {
         unsafe {
             atomic_store_release(freelist_probe_locked_phase_address(), 1);
@@ -239,23 +365,10 @@ private fn freelist_contention_phase(locked: bool) -> bool !{unsafe} {
     }
     unsafe { atomic_store_release(freelist_probe_armed_address(), 1); }
 
-    // DELIBERATELY the `active` gate, not the completed-round gate that
-    // page/tag/asid/schedule take.
-    //
-    // GitHub issue #479: waiting for the secondary to finish a round makes
-    // the two cores start OFFSET rather than together. That is what those
-    // probes want -- their verdicts need overlap, and issue #478 otherwise
-    // starves the second core out of the measurement. This one is
-    // different: its phase 1 has to SHOW the race, and its detection
-    // window is a few instructions wide (freelist_core_insert reads
-    // free_head and writes it back), not a whole claim like
-    // schedule_contention's. Measured: with the completed-round gate,
-    // phase 1 came back duplicates=0 on QEMU -- the race stopped
-    // reproducing and the two-sided test correctly failed.
-    //
-    // So the rule is not "always gate on a completed round". It is: gate on
-    // a completed round when the verdict needs OVERLAP, and gate on
-    // presence when phase 1 needs the cores to COLLIDE.
+    // Core 1 remains inside its first per-round rendezvous until core 0
+    // arrives, so `active` can no longer be a pulse that a long QEMU vCPU
+    // timeslice misses. In the unlocked phase each core has already read
+    // the same freelist head before that rendezvous completes.
     let entry_window: i64 = read_cntfrq() >> 2;
     let entry_start: i64 = read_cntpct();
     let mut entered: bool = false;
@@ -274,13 +387,22 @@ private fn freelist_contention_phase(locked: bool) -> bool !{unsafe} {
 
 
     for round: usize in 0..<FREELIST_CONTENTION_ROUNDS {
-        if (freelist_probe_cycle()) {
+        if (freelist_probe_cycle(true, round + 1)) {
             unsafe {
                 atomic_fetch_add_relaxed(freelist_probe_primary_address(), 1);
             }
         }
     }
 
+    if (unsafe {
+            atomic_load_acquire(freelist_probe_armed_address())
+        } == 0) {
+        freelist_contention_report("rendezvous-timeout" as *u8);
+        return false;
+    }
+
+    // With per-round rendezvous this is the secondary completion count at
+    // the instant the primary finishes, not a scheduler-granularity metric.
     unsafe {
         atomic_store_release(freelist_probe_overlap_address(),
             atomic_load_acquire(freelist_probe_secondary_address()));
@@ -301,6 +423,20 @@ private fn freelist_contention_phase(locked: bool) -> bool !{unsafe} {
         freelist_contention_report("secondary-never-finished" as *u8);
         return false;
     }
+    let primary: usize = unsafe {
+        atomic_load_acquire(freelist_probe_primary_address())
+    };
+    let secondary: usize = unsafe {
+        atomic_load_acquire(freelist_probe_secondary_address())
+    };
+    let empty: usize = unsafe {
+        atomic_load_acquire(freelist_probe_empty_address())
+    };
+    if (primary != FREELIST_CONTENTION_ROUNDS ||
+        secondary != FREELIST_CONTENTION_ROUNDS || empty != 0) {
+        freelist_contention_report("incomplete" as *u8);
+        return false;
+    }
     return true;
 }
 
@@ -310,34 +446,35 @@ fn freelist_contention_duplicates() -> usize !{unsafe} {
     };
 }
 
-fn freelist_contention_overlap() -> usize !{unsafe} {
-    return unsafe {
-        atomic_load_acquire(freelist_probe_overlap_address())
-    };
-}
-
 // TWO phases, and the verdict needs BOTH to come out right.
 //
-// Phase 1 runs unlocked and must SHOW the race. Phase 2 runs the identical
-// cycle with the caller holding a lock and must not. A test that only
-// checked phase 2 would go quietly green the day the race stopped being
-// reproducible -- because the window closed, because the timing shifted,
-// because someone made the loop slower -- and would then be asserting
-// nothing while looking like it asserted something. Requiring phase 1 to
-// fail is how this one notices it has gone stale.
+// Phase 1 runs unlocked and must SHOW the race. Its two cores rendezvous
+// after the real primitive's shared begin step has read free_head, then
+// commit through the same private implementation as ordinary insertion.
+// Phase 2 rendezvouses before the complete insertion and has the caller
+// lock around it. A test that only checked phase 2 would assert nothing
+// about whether its contention control still exercised the vulnerable
+// read/update window.
 fn freelist_contention_probe() -> bool !{unsafe} {
     freelist_probe_init();
 
     if (freelist_contention_phase(false) == false) { return false; }
     let unlocked_duplicates: usize = freelist_contention_duplicates();
-    let unlocked_overlap: usize = freelist_contention_overlap();
     freelist_contention_report("unlocked" as *u8);
 
     if (freelist_contention_phase(true) == false) { return false; }
     let locked_duplicates: usize = freelist_contention_duplicates();
-    let locked_overlap: usize = freelist_contention_overlap();
     freelist_contention_report("locked" as *u8);
 
-    return unlocked_duplicates > 0 && unlocked_overlap > 0 &&
-           locked_duplicates == 0 && locked_overlap > 0;
+    if (unlocked_duplicates == 0) {
+        kernel_boot_log(
+            "freelist contention verdict: unlocked-race-not-reproduced\n");
+        return false;
+    }
+    if (locked_duplicates != 0) {
+        kernel_boot_log(
+            "freelist contention verdict: locked-duplicate-handout\n");
+        return false;
+    }
+    return true;
 }

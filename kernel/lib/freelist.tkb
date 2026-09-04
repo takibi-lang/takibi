@@ -65,12 +65,38 @@
 //   freelist_core_init's own comment) -- a pool's backing memory being
 //   zero-initialized .bss is NOT equivalent to an initialized empty pool,
 //   unlike the linear-scan allocators this replaced.
+// - The explicit probe begin/commit pair is `unsafe` and exists only so the
+//   two-core contention fixture can pause after reading free_head. A pending
+//   read must be committed against the same FreelistCore that produced it or
+//   cancelled; ordinary callers use freelist_core_insert, which performs the
+//   same private begin/commit immediately.
 
 use "kernel/lib/execution_model.tkb";
 
 must_use variant FreelistPopResult {
     Empty;
     Popped(exists allocation: usize. FreelistOwner[allocation]);
+}
+
+// A head read that has not yet been committed. Normal callers never see
+// this split: freelist_core_insert begins and commits immediately. The
+// contention probe uses the explicit unsafe pair to rendezvous two cores
+// after both have read the head, making the primitive's read/update race
+// reproducible under host scheduling that otherwise runs one vCPU through
+// the whole operation.
+linear struct FreelistPopPending[pending: usize] {
+    private head: usize @ pending;
+}
+
+must_use variant FreelistPopProbeBeginResult {
+    Empty;
+    Pending(exists pending: usize. FreelistPopPending[pending]);
+}
+
+private fn freelist_pop_pending_new(head: usize @ pending)
+        -> FreelistPopPending[pending] {
+    let mut value: FreelistPopPending[pending] = { head };
+    return value;
 }
 
 private linear struct FreelistOwner[allocation: usize] {
@@ -149,13 +175,26 @@ fn freelist_core_add_index(core: &mut FreelistCore(N),
     }
 }
 
-fn freelist_core_insert(core: &mut FreelistCore(N)) -> FreelistPopResult
-        !{allocates} {
+private fn freelist_core_insert_begin(core: &mut FreelistCore(N))
+        -> FreelistPopProbeBeginResult {
     let head: usize = core.free_head;
     if (head >= 0 && head < N) {
-        // GitHub issue #217: head is narrowed to {0..<N} on this branch,
-        // so this checked index is also statically proven -- see
-        // freelist_core_init's own comment.
+        return FreelistPopProbeBeginResult::Pending(
+            freelist_pop_pending_new(head));
+    }
+    return FreelistPopProbeBeginResult::Empty;
+}
+
+private fn freelist_core_insert_commit(
+        core: &mut FreelistCore(N),
+        pending: sink FreelistPopPending[pending_head])
+        -> FreelistPopResult !{allocates} {
+    let head: usize = pending.head;
+    if (head < N) {
+        // GitHub issue #217: the begin step only produces Pending after
+        // narrowing head to the array bound. Recheck at this function
+        // boundary so the proof remains local and --forbid-trap needs no
+        // exception.
         core.free_head = core.next_free[head];
         let generation: usize = core.next_generation;
         core.next_generation = generation + 1;
@@ -163,6 +202,38 @@ fn freelist_core_insert(core: &mut FreelistCore(N)) -> FreelistPopResult
     }
     return FreelistPopResult::Empty;
 }
+
+fn freelist_core_insert(core: &mut FreelistCore(N)) -> FreelistPopResult
+        !{allocates} {
+    match freelist_core_insert_begin(core) {
+        FreelistPopProbeBeginResult::Empty => {
+            return FreelistPopResult::Empty;
+        }
+        FreelistPopProbeBeginResult::Pending(pending) => {
+            return freelist_core_insert_commit(core, pending);
+        }
+    }
+}
+
+// Unsafe because holding a pending head read across another core's mutation
+// is deliberately the operation whose race the kernel contention probe
+// demonstrates. The linear pending value still makes commit or cancel
+// mandatory on every path. The type does not carry the originating core;
+// committing it against any other core is invalid.
+fn freelist_core_insert_probe_begin(core: &mut FreelistCore(N))
+        -> FreelistPopProbeBeginResult !{unsafe} {
+    return freelist_core_insert_begin(core);
+}
+
+fn freelist_core_insert_probe_commit(
+        core: &mut FreelistCore(N),
+        pending: sink FreelistPopPending[pending_head])
+        -> FreelistPopResult !{allocates, unsafe} {
+    return freelist_core_insert_commit(core, pending);
+}
+
+fn freelist_core_insert_probe_cancel(
+        pending: sink FreelistPopPending[pending_head]) !{unsafe} {}
 
 // GitHub issue #380: take every free entry in [first, first + count) OFF
 // the list, in ONE pass over it.
@@ -291,4 +362,3 @@ fn freelist_ref(T: type, target: &mut Freelist(T, N),
 // looking for a defect that is not there. What holds the requirement up
 // instead is the probe above, which demonstrates both halves every boot:
 // unlocked hands one index to two cores, locked does not.
-
