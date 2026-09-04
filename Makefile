@@ -487,6 +487,7 @@ KERNEL_RPI5_EXC_CONTEXT := $(KERNEL_DIR)/arch/arm64/kernel/exception_context.inc
 KERNEL_EXC_CONTEXT_OFFSETS := $(KERNEL_DIR)/arch/arm64/kernel/exception_context_offsets.inc
 KERNEL_CRASH_SNAPSHOT_LAYOUT := _build/kernel-crash-snapshot-layout.gdb
 KERNEL_DEBUG_METADATA := _build/kernel-debug-metadata.json
+KERNEL_RPI5_DEBUG_METADATA := _build/kernel-debug-metadata-rpi5.json
 KERNEL_RPI5_FPSIMD_S     := $(KERNEL_DIR)/arch/arm64/kernel/fpsimd_probe.S
 KERNEL_RPI5_FPSIMD_O     := $(KERNEL_BUILD_DIR)/fpsimd_probe.o
 KERNEL_RPI5_FPSIMD_EXTERN := $(KERNEL_DIR)/arch/arm64/kernel/fpsimd_probe_extern.tkb
@@ -554,9 +555,11 @@ KERNEL_BUSY_LOOP_A_ELF   := $(KERNEL_BUILD_DIR)/busy_a.elf
 KERNEL_BUSY_LOOP_B_ELF   := $(KERNEL_BUILD_DIR)/busy_b.elf
 KERNEL_BUSY_LOOP_SPIN_ELF := $(KERNEL_BUILD_DIR)/busy_spin.elf
 KERNEL_RPI5_MAIN_O      := $(KERNEL_BUILD_DIR)/main.o
+KERNEL_RPI5_MAIN_DEBUG_O := $(KERNEL_BUILD_DIR)/main.debug.o
 
 $(KERNEL_RPI5_MAIN_O): $(KERNEL_FD_TABLE_TKB)
 KERNEL_RPI5_ELF         := $(KERNEL_BUILD_DIR)/kernel.elf
+KERNEL_RPI5_DEBUG_ELF   := $(KERNEL_BUILD_DIR)/kernel-debug.elf
 
 $(KERNEL_BUILD_DIR):
 	mkdir -p $@
@@ -725,6 +728,23 @@ $(KERNEL_RPI5_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_
 	$(LLD) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_MAIN_O) -o $@
 	python3 scripts/check_kernel_asm_invariants.py $@ 2
 	python3 scripts/check_elf_symbol_alignment.py $@ boot_page_pool 16
+
+# External RPi5 inspection uses the same code and load addresses as the
+# ordinary image, with DWARF added only to the host ELF. Depending on main.o
+# gives this second compile its complete depfile-backed source boundary.
+$(KERNEL_RPI5_MAIN_DEBUG_O): $(KERNEL_RPI5_MAIN_O)
+	$(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $(KERNEL_RPI5_MAIN_TKB) --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --frame-pointers --forbid-trap $(KERNEL_UNUSED_CHECK) -g --emit-depfile $@.d -o $@
+
+-include $(KERNEL_RPI5_MAIN_DEBUG_O).d
+
+$(KERNEL_RPI5_DEBUG_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_MAIN_DEBUG_O) $(KERNEL_RPI5_LINK_LD)
+	$(LLD) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_MAIN_DEBUG_O) -o $@
+	python3 scripts/check_kernel_asm_invariants.py $@ 2
+	python3 scripts/check_elf_symbol_alignment.py $@ boot_page_pool 16
+
+$(KERNEL_RPI5_DEBUG_METADATA): $(KERNEL_RPI5_MAIN_O) $(TAKIBI)
+	@mkdir -p $(dir $@)
+	$(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $(KERNEL_RPI5_MAIN_TKB) --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --emit-debug-metadata $@
 
 # -- QEMU/AArch64 (GitHub issue #237) -----------------------------------------
 # Reuses the same aarch64-none-elf triple as RPi5 (no --cpu passed to
@@ -922,6 +942,13 @@ _kernelbuild-rpi5: kernel-lib-check kernel-verify-exception-frame $(KERNEL_RPI5_
 kernelbuild-rpi5: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-rpi5
 
+.PHONY: _kernelbuild-rpi5-debug kernelbuild-rpi5-debug
+_kernelbuild-rpi5-debug: kernel-lib-check kernel-verify-exception-frame \
+	$(KERNEL_RPI5_DEBUG_ELF) $(KERNEL_RPI5_DEBUG_METADATA)
+
+kernelbuild-rpi5-debug: build
+	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-rpi5-debug
+
 ## kernel/MEMORY_MAP.md's checkable rows against both linked kernels.  Here
 ## rather than in a check lane because it needs both ELFs and nothing else,
 ## and because a memory map that is only verified when someone runs the
@@ -941,7 +968,7 @@ kernelbuild: build
 # before the long QEMU/RPi5 runs. This preserves the ordinary lane fan-out
 # while preventing another Make process from interleaving object writes.
 .PHONY: _kernelbuild-check kernelbuild-check
-_kernelbuild-check: _kernelbuild _kernelbuild-qemu-debug \
+_kernelbuild-check: _kernelbuild _kernelbuild-qemu-debug _kernelbuild-rpi5-debug \
 	kernel-debug-layout-check \
 	$(KERNEL_CRASH_SNAPSHOT_LAYOUT)
 
@@ -1071,8 +1098,8 @@ kernelcheck-oops-qemu: kernelbuild-check
 ## check inspects state and guarded kernel memory, then proves `continue`
 ## resumes ordinary boot.
 kernelcheck-ddb-qemu: kernelbuild-check
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_ddb_qemutest.sh
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_DDB_BREAK_SOURCE=software KERNEL_QEMU_DDB_SERIAL_PORT=18704 KERNEL_QEMU_DDB_QMP_PORT=18705 KERNEL_QEMU_DDB_GDB_PORT=18706 KERNEL_QEMU_DDB_ARTIFACT_DIR="$(CURDIR)/_build/kernel-ddb-qemu-software" bash scripts/run_kernel_ddb_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_DDB_ELF="$(KERNEL_QEMU_DEBUG_ELF)" bash scripts/run_kernel_ddb_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_DDB_ELF="$(KERNEL_QEMU_DEBUG_ELF)" KERNEL_QEMU_DDB_BREAK_SOURCE=software KERNEL_QEMU_DDB_SERIAL_PORT=18704 KERNEL_QEMU_DDB_QMP_PORT=18705 KERNEL_QEMU_DDB_GDB_PORT=18706 KERNEL_QEMU_DDB_ARTIFACT_DIR="$(CURDIR)/_build/kernel-ddb-qemu-software" bash scripts/run_kernel_ddb_qemutest.sh
 
 ## Issue #377 regression: the exception-entry stack guard.  Deliberately
 ## separate from the ordinary QEMU suite for the same reason as

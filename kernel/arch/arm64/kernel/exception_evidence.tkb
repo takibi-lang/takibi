@@ -97,6 +97,12 @@ struct DdbSnapshot {
 }
 
 private let mut ddb_snapshot: DdbSnapshot;
+// External debuggers cannot assume that halting the CPU happened after the
+// last field above was captured. Zero means unpublished/in progress; the
+// completed sequence is stored with release ordering only after every bounded
+// sub-snapshot is present. A reader accepts the object only when this equals
+// ddb_snapshot.sequence before and after its read.
+private let mut ddb_snapshot_published_sequence: usize;
 let mut kernel_ddb_breakpoint_test_enabled: bool;
 let mut kernel_ddb_memory_fault_test_enabled: bool;
 let mut kernel_ddb_backtrace_test_enabled: bool;
@@ -106,6 +112,10 @@ let mut kernel_ddb_memory_access_address: usize;
 
 fn kernel_ddb_breakpoint_test_checkpoint() {
     if (kernel_ddb_breakpoint_test_enabled) { kernel_ddb_breakpoint(); }
+}
+
+private fn ddb_snapshot_published_sequence_address() -> usize {
+    return (&ddb_snapshot_published_sequence) as usize;
 }
 
 private fn ddb_puts(text: *u8) !{unsafe} {
@@ -892,17 +902,28 @@ private fn ddb_render_trace() !{unsafe} {
     for item: usize in 0..<16 {
         if (item < ddb_snapshot.trace_count) {
             let base: usize = item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
-            ddb_puts("ddb: trace seq="); ddb_put_udec(ddb_snapshot.trace[base]);
-            ddb_puts(" cpu="); ddb_put_udec(ddb_snapshot.trace[base + 1]);
-            ddb_puts(" event="); ddb_put_udec(ddb_snapshot.trace[base + 2]);
-            ddb_puts(" pid="); ddb_put_udec(ddb_snapshot.trace[base + 3]);
-            ddb_puts(" gen="); ddb_put_udec(ddb_snapshot.trace[base + 4]);
-            ddb_puts(" peer="); ddb_put_udec(ddb_snapshot.trace[base + 5]);
-            ddb_puts(" state="); ddb_put_udec(ddb_snapshot.trace[base + 7]);
-            ddb_puts(" wait="); ddb_put_udec(ddb_snapshot.trace[base + 8]);
-            ddb_puts(" root="); ddb_put_udec(ddb_snapshot.trace[base + 9]);
-            ddb_puts(" sp="); ddb_put_hex(ddb_snapshot.trace[base + 10]);
-            ddb_puts(" aux="); ddb_put_hex(ddb_snapshot.trace[base + 11]);
+            ddb_puts("ddb: trace seq="); ddb_put_udec(ddb_snapshot.trace[
+                base + KERNEL_PROCESS_TRACE_SEQUENCE_WORD]);
+            ddb_puts(" cpu="); ddb_put_udec(ddb_snapshot.trace[
+                base + KERNEL_PROCESS_TRACE_CPU_WORD]);
+            ddb_puts(" event="); ddb_put_udec(ddb_snapshot.trace[
+                base + KERNEL_PROCESS_TRACE_EVENT_WORD]);
+            ddb_puts(" pid="); ddb_put_udec(ddb_snapshot.trace[
+                base + KERNEL_PROCESS_TRACE_PID_WORD]);
+            ddb_puts(" gen="); ddb_put_udec(ddb_snapshot.trace[
+                base + KERNEL_PROCESS_TRACE_GENERATION_WORD]);
+            ddb_puts(" peer="); ddb_put_udec(ddb_snapshot.trace[
+                base + KERNEL_PROCESS_TRACE_PEER_PID_WORD]);
+            ddb_puts(" state="); ddb_put_udec(ddb_snapshot.trace[
+                base + KERNEL_PROCESS_TRACE_STATE_WORD]);
+            ddb_puts(" wait="); ddb_put_udec(ddb_snapshot.trace[
+                base + KERNEL_PROCESS_TRACE_WAIT_REASON_WORD]);
+            ddb_puts(" root="); ddb_put_udec(ddb_snapshot.trace[
+                base + KERNEL_PROCESS_TRACE_ROOT_WORD]);
+            ddb_puts(" sp="); ddb_put_hex(ddb_snapshot.trace[
+                base + KERNEL_PROCESS_TRACE_SAVED_SP_WORD]);
+            ddb_puts(" aux="); ddb_put_hex(ddb_snapshot.trace[
+                base + KERNEL_PROCESS_TRACE_AUX_WORD]);
             ddb_puts("\n");
         }
     }
@@ -1065,6 +1086,9 @@ private fn ddb_render_proc(pid: usize) !{unsafe} {
 // interrupt function: no semantic exception is made for debugger code.
 fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
         !{interrupt, unsafe} {
+    unsafe {
+        atomic_store_release(ddb_snapshot_published_sequence_address(), 0);
+    }
     ddb_snapshot.sequence = ddb_snapshot.sequence + 1;
     ddb_snapshot.cpu = crash_snapshot_read_mpidr_el1();
     ddb_snapshot.entry_kind = entry_kind;
@@ -1118,6 +1142,11 @@ fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
     }
     ddb_snapshot.trace_count = kernel_process_crash_trace_copy(
         ddb_snapshot.trace as *usize);
+    unsafe {
+        atomic_store_release(
+            ddb_snapshot_published_sequence_address(),
+            ddb_snapshot.sequence);
+    }
     ddb_puts("\nddb: interrupt-safe UART debugger\n");
     ddb_render_oops();
     let mut line: [u8; CRASH_CONSOLE_LINE_BYTES];

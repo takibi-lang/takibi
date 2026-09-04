@@ -6,11 +6,17 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERIAL_DEV="${RPI5_SERIAL_DEV:-$($REPO_ROOT/scripts/rpi5_uart_dev.sh)}"
-ELF="$REPO_ROOT/kernel/build/rpi5/kernel.elf"
+ELF="$REPO_ROOT/kernel/build/rpi5/kernel-debug.elf"
+DEBUG_METADATA="$REPO_ROOT/_build/kernel-debug-metadata-rpi5.json"
 ARTIFACT_DIR="${RPI5_DDB_SOFTWARE_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-ddb-rpi5-software}"
 UART_LOG="$ARTIFACT_DIR/uart.log"
+GDB_VIEW_LOG="$ARTIFACT_DIR/kernel-state-gdb.log"
+OPENOCD_GDB_LOG="$ARTIFACT_DIR/gdb-openocd.log"
+SNAPSHOT_READY="$ARTIFACT_DIR/snapshot.ready"
+SNAPSHOT_RELEASE="$ARTIFACT_DIR/snapshot.release"
 RESET_LOG="$ARTIFACT_DIR/reset.log"
 LOADER_LOG="$ARTIFACT_DIR/loader.log"
+GDB_PORT="${RPI5_DDB_GDB_PORT:-3333}"
 
 mkdir -p "$ARTIFACT_DIR"
 exec 9>"$ARTIFACT_DIR/runner.lock"
@@ -27,6 +33,10 @@ if [ ! -e "$SERIAL_DEV" ]; then
 fi
 if [ ! -f "$ELF" ]; then
     echo "error: kernel ELF not found: $ELF" >&2
+    exit 1
+fi
+if [ ! -f "$DEBUG_METADATA" ]; then
+    echo "error: RPi5 debug metadata not found: $DEBUG_METADATA" >&2
     exit 1
 fi
 if ! python3 -c 'import serial' >/dev/null 2>&1; then
@@ -55,10 +65,19 @@ timeout 1 cat "$SERIAL_DEV" >/dev/null 2>&1 || true
 
 python3 "$REPO_ROOT/scripts/run_kernel_ddb_rpi5_software_driver.py" \
     --port "$SERIAL_DEV" --log "$UART_LOG" \
-    --generated-start "$generated_start" --generated-end "$generated_end" &
+    --generated-start "$generated_start" --generated-end "$generated_end" \
+    --snapshot-ready-file "$SNAPSHOT_READY" \
+    --snapshot-release-file "$SNAPSHOT_RELEASE" &
 driver_pid=$!
+openocd_pid=""
 cleanup() {
     status=$?
+    if [ -n "$openocd_pid" ] && kill -0 "$openocd_pid" 2>/dev/null; then
+        kill "$openocd_pid" 2>/dev/null || true
+    fi
+    if [ -n "$openocd_pid" ]; then
+        wait "$openocd_pid" 2>/dev/null || true
+    fi
     if kill -0 "$driver_pid" 2>/dev/null; then
         kill "$driver_pid" 2>/dev/null || true
     fi
@@ -82,5 +101,65 @@ if ! RPI5_ARM_KERNEL_DDB_BREAKPOINT=1 \
 fi
 resource_lease_board_ok
 
+for _wait in $(seq 1 300); do
+    [ -e "$SNAPSHOT_READY" ] && break
+    kill -0 "$driver_pid" 2>/dev/null || break
+    sleep 0.1
+done
+if [ ! -e "$SNAPSHOT_READY" ]; then
+    echo "FAIL kernel/rpi5 ddb: snapshot was not ready for GDB" >&2
+    exit 1
+fi
+
+openocd_args=(
+    -f interface/cmsis-dap.cfg
+    -c 'set USE_SMP 1'
+    -f "$REPO_ROOT/examples/common_rpi5/bcm2712.cfg"
+    -c "gdb_port $GDB_PORT"
+    -c 'tcl_port disabled'
+    -c 'telnet_port disabled'
+)
+if [ -n "${RPI5_SWD_SPEED:-}" ]; then
+    openocd_args+=(-c "adapter speed $RPI5_SWD_SPEED")
+fi
+openocd "${openocd_args[@]}" \
+    -c init \
+    -c 'targets bcm2712.cpu0' -c halt \
+    -c 'targets bcm2712.cpu1' -c halt \
+    -c 'targets bcm2712.cpu0' \
+    >"$OPENOCD_GDB_LOG" 2>&1 &
+openocd_pid=$!
+if ! python3 - "$GDB_PORT" <<'PY'
+import socket
+import sys
+import time
+
+port = int(sys.argv[1])
+for _ in range(200):
+    try:
+        with socket.create_connection(("127.0.0.1", port), 0.1):
+            raise SystemExit(0)
+    except OSError:
+        time.sleep(0.1)
+raise SystemExit(1)
+PY
+then
+    echo "FAIL kernel/rpi5 ddb: OpenOCD GDB port did not open" >&2
+    exit 1
+fi
+gdb-multiarch -q -batch "$ELF" \
+    -ex "target remote 127.0.0.1:$GDB_PORT" \
+    -ex "source $REPO_ROOT/scripts/kernel_debug_metadata.gdb" \
+    -ex "takibi-debug-metadata $DEBUG_METADATA" \
+    -ex "source $REPO_ROOT/scripts/kernel_state.gdb" \
+    -ex "takibi-kernel 1" \
+    -ex "monitor resume" \
+    -ex disconnect >"$GDB_VIEW_LOG" 2>&1
+kill "$openocd_pid"
+wait "$openocd_pid" 2>/dev/null || true
+openocd_pid=""
+touch "$SNAPSHOT_RELEASE"
 wait "$driver_pid"
+python3 "$REPO_ROOT/scripts/validate_kernel_gdb_state.py" \
+    --uart-log "$UART_LOG" --gdb-log "$GDB_VIEW_LOG"
 trap - EXIT INT TERM HUP

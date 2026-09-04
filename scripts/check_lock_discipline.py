@@ -63,6 +63,12 @@ ATOMIC_ALLOWED = {
     "arch/arm64/kernel/secondary.tkb":
         "the secondary core's tick counter, genuinely written by one core "
         "and read by another with no lock between them",
+    "arch/arm64/kernel/exception_evidence.tkb":
+        "GitHub issue #496: DdbSnapshot's one valid-last word. The snapshot "
+        "is captured with interrupts masked and has no competing writer; "
+        "release ordering prevents an external debugger from accepting its "
+        "fields before the completed sequence is published. A lock cannot "
+        "help a halted out-of-band reader",
     "kernel/fd_table.tkb":
         "the shared-object contention probe lives in this file, because the "
         "retain/release it exercises are private to it",

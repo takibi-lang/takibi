@@ -7,7 +7,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ELF="$REPO_ROOT/kernel/build/qemu/kernel.elf"
+ELF="${KERNEL_QEMU_OOPS_ELF:-$REPO_ROOT/kernel/build/qemu/kernel-debug.elf}"
 DEBUG_METADATA="$REPO_ROOT/_build/kernel-debug-metadata.json"
 ARTIFACT_DIR="${KERNEL_QEMU_OOPS_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-oops-qemu}"
 GDB_PORT="${KERNEL_QEMU_OOPS_GDB_PORT:-18697}"
@@ -244,7 +244,9 @@ gdb-multiarch -q -batch "$ELF" \
     -ex "source $REPO_ROOT/scripts/kernel_crash_snapshot.gdb" \
     -ex "source $REPO_ROOT/scripts/kernel_debug_metadata.gdb" \
     -ex "takibi-debug-metadata $DEBUG_METADATA" \
+    -ex "source $REPO_ROOT/scripts/kernel_state.gdb" \
     -ex "takibi-oops" \
+    -ex "takibi-kernel" \
     -ex "takibi-constant ProcessTrace \$snapshot[\$takibi_crashsnapshot_trace / 8 + 2]" \
     -ex "takibi-enum ProcessSlotState \$snapshot[\$takibi_crashsnapshot_trace / 8 + 7]" \
     -ex "takibi-enum ProcessWaitReason \$snapshot[\$takibi_crashsnapshot_trace / 8 + 8]" \
@@ -256,6 +258,18 @@ if ! grep -Eq '^takibi-oops: seq=1 cpu=[0-9]+ slot=8 ' "$ARTIFACT_DIR/snapshot-g
         ! grep -Eq '^ProcessSlotState::[A-Za-z]+ \([0-9]+\)$' "$ARTIFACT_DIR/snapshot-gdb.log" ||
         ! grep -Eq '^ProcessWaitReason::[A-Za-z]+ \([0-9]+\)$' "$ARTIFACT_DIR/snapshot-gdb.log"; then
     echo "FAIL kernel/qemu oops: retained CrashSnapshot was not readable" >&2
+    sed 's/^/  /' "$ARTIFACT_DIR/snapshot-gdb.log" >&2 || true
+    exit 1
+fi
+if ! grep -q '^takibi-kernel: ddb status=unpublished$' \
+        "$ARTIFACT_DIR/snapshot-gdb.log" ||
+        ! grep -Eq '^takibi-kernel: crash status=valid seq=1 cpu=[0-9]+ slot=8 ' \
+        "$ARTIFACT_DIR/snapshot-gdb.log" ||
+        ! grep -Eq '^takibi-kernel: crash process pid=[0-9]+ .* trace_count=([1-9]|1[0-6])$' \
+        "$ARTIFACT_DIR/snapshot-gdb.log" ||
+        ! grep -Eq '^takibi-kernel: crash-trace seq=[1-9][0-9]* cpu=[0-9]+ event=ProcessTrace[A-Za-z]+\([0-9]+\) ' \
+        "$ARTIFACT_DIR/snapshot-gdb.log"; then
+    echo "FAIL kernel/qemu oops: kernel-aware crash view was incomplete" >&2
     sed 's/^/  /' "$ARTIFACT_DIR/snapshot-gdb.log" >&2 || true
     exit 1
 fi

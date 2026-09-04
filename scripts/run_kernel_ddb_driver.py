@@ -3,6 +3,7 @@
 
 import argparse
 import json
+from pathlib import Path
 import socket
 import time
 
@@ -23,9 +24,24 @@ def main() -> int:
     parser.add_argument("--break-source", choices=("uart", "software"), default="uart")
     parser.add_argument("--kernel-address", required=True)
     parser.add_argument("--log", required=True)
+    parser.add_argument("--snapshot-ready-file")
+    parser.add_argument("--snapshot-release-file")
     parser.add_argument("--timeout", type=float, default=30.0)
     args = parser.parse_args()
+    if ((args.snapshot_ready_file is None)
+            != (args.snapshot_release_file is None)):
+        raise SystemExit(
+            "snapshot ready and release files must be supplied together")
     deadline = time.monotonic() + args.timeout
+    ready_file = (
+        Path(args.snapshot_ready_file) if args.snapshot_ready_file else None
+    )
+    release_file = (
+        Path(args.snapshot_release_file) if args.snapshot_release_file else None
+    )
+    if ready_file is not None:
+        ready_file.unlink(missing_ok=True)
+        release_file.unlink(missing_ok=True)
 
     serial = connect(args.serial_port, deadline)
     serial.settimeout(0.25)
@@ -56,12 +72,13 @@ def main() -> int:
             try:
                 chunk = serial.recv(4096)
             except socket.timeout:
-                continue
-            if not chunk:
+                chunk = None
+            if chunk == b"":
                 break
-            received.extend(chunk)
-            log.write(chunk)
-            log.flush()
+            if chunk is not None:
+                received.extend(chunk)
+                log.write(chunk)
+                log.flush()
 
             # Drive the two producers in an evidence-backed order rather than
             # guessing how much host sleep lets the guest run. The marker says
@@ -112,6 +129,10 @@ def main() -> int:
                 break_sent = True
 
             found = received.count(b"ddb> ")
+            if found > prompt_count and ready_file is not None:
+                ready_file.touch()
+                if not release_file.exists():
+                    continue
             while prompt_count < found:
                 if prompt_count < len(commands):
                     serial.sendall(commands[prompt_count])

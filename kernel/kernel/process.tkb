@@ -2422,6 +2422,21 @@ private let mut kernel_process_trace_probe_child_frame:
 // however they are spread across cores.
 const KERNEL_CRASH_TRACE_EVENTS: usize = 16;
 const KERNEL_PROCESS_TRACE_WORDS_PER_EVENT: usize = 12;
+// Compiler-owned field positions for the flat snapshot ABI. External readers
+// consume these through --emit-debug-metadata rather than repeating the
+// numeric layout. Keep the kernel's writer and renderers on the same names.
+const KERNEL_PROCESS_TRACE_SEQUENCE_WORD: usize = 0;
+const KERNEL_PROCESS_TRACE_CPU_WORD: usize = 1;
+const KERNEL_PROCESS_TRACE_EVENT_WORD: usize = 2;
+const KERNEL_PROCESS_TRACE_PID_WORD: usize = 3;
+const KERNEL_PROCESS_TRACE_GENERATION_WORD: usize = 4;
+const KERNEL_PROCESS_TRACE_PEER_PID_WORD: usize = 5;
+const KERNEL_PROCESS_TRACE_PEER_GENERATION_WORD: usize = 6;
+const KERNEL_PROCESS_TRACE_STATE_WORD: usize = 7;
+const KERNEL_PROCESS_TRACE_WAIT_REASON_WORD: usize = 8;
+const KERNEL_PROCESS_TRACE_ROOT_WORD: usize = 9;
+const KERNEL_PROCESS_TRACE_SAVED_SP_WORD: usize = 10;
+const KERNEL_PROCESS_TRACE_AUX_WORD: usize = 11;
 // The SNAPSHOT's size, and an ABI: kernel/arch/arm64/kernel/
 // exception_evidence.tkb's CrashSnapshot and DdbSnapshot both declare
 // `trace: [usize; KERNEL_CRASH_TRACE_WORDS]`, and the oops lane and the
@@ -2559,7 +2574,9 @@ private fn kernel_process_crash_trace_reset() !{unsafe} {
         atomic_store_release(kernel_crash_trace_sequence_address(), 0);
     }
     for slot: usize in 0..<KERNEL_CRASH_TRACE_SLOTS {
-        kernel_crash_trace[slot * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT] = 0;
+        kernel_crash_trace[
+            slot * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT +
+            KERNEL_PROCESS_TRACE_SEQUENCE_WORD] = 0;
     }
 }
 
@@ -2586,19 +2603,22 @@ fn kernel_process_trace_record(event: usize, pid: usize, generation: usize,
     let slot: {0..<KERNEL_CRASH_TRACE_SLOTS as usize} =
         kernel_crash_trace_slot(cpu, local);
     let base: usize = slot * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
-    kernel_crash_trace[base] = 0;
-    kernel_crash_trace[base + 1] = cpu;
-    kernel_crash_trace[base + 2] = event;
-    kernel_crash_trace[base + 3] = pid;
-    kernel_crash_trace[base + 4] = generation;
-    kernel_crash_trace[base + 5] = peer_pid;
-    kernel_crash_trace[base + 6] = peer_generation;
-    kernel_crash_trace[base + 7] = state;
-    kernel_crash_trace[base + 8] = wait_reason;
-    kernel_crash_trace[base + 9] = root;
-    kernel_crash_trace[base + 10] = saved_sp;
-    kernel_crash_trace[base + 11] = aux;
-    kernel_crash_trace[base] = sequence;
+    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_SEQUENCE_WORD] = 0;
+    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_CPU_WORD] = cpu;
+    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_EVENT_WORD] = event;
+    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_PID_WORD] = pid;
+    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_GENERATION_WORD] =
+        generation;
+    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_PEER_PID_WORD] = peer_pid;
+    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_PEER_GENERATION_WORD] =
+        peer_generation;
+    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_STATE_WORD] = state;
+    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_WAIT_REASON_WORD] =
+        wait_reason;
+    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_ROOT_WORD] = root;
+    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_SAVED_SP_WORD] = saved_sp;
+    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_AUX_WORD] = aux;
+    kernel_crash_trace[base + KERNEL_PROCESS_TRACE_SEQUENCE_WORD] = sequence;
 }
 
 fn kernel_process_trace_enable() { kernel_process_trace_enabled = true; }
@@ -2682,7 +2702,8 @@ fn kernel_process_crash_trace_copy(output: *usize) -> usize {
     // stopping.
     let mut latest: usize = 0;
     for slot: usize in 0..<KERNEL_CRASH_TRACE_SLOTS {
-        let slot_base: usize = slot * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
+        let slot_base: usize = slot * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT +
+            KERNEL_PROCESS_TRACE_SEQUENCE_WORD;
         let committed: usize = kernel_crash_trace[slot_base];
         if (committed > latest) { latest = committed; }
     }
@@ -2697,7 +2718,9 @@ fn kernel_process_crash_trace_copy(output: *usize) -> usize {
             for slot: usize in 0..<KERNEL_CRASH_TRACE_SLOTS {
                 let source_base: usize =
                     slot * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
-                if (kernel_crash_trace[source_base] == sequence &&
+                if (kernel_crash_trace[
+                        source_base + KERNEL_PROCESS_TRACE_SEQUENCE_WORD] ==
+                        sequence &&
                     copied < KERNEL_CRASH_TRACE_EVENTS) {
                     let output_base: usize =
                         copied * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
@@ -2737,31 +2760,36 @@ fn kernel_process_trace_render(
             let base: usize = item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
             kernel_boot_log(prefix);
             kernel_boot_log(" seq=");
-            uart_put_udec(trace[base]);
+            uart_put_udec(trace[
+                base + KERNEL_PROCESS_TRACE_SEQUENCE_WORD]);
             kernel_boot_log(" cpu=");
-            uart_put_udec(trace[base + 1]);
+            uart_put_udec(trace[base + KERNEL_PROCESS_TRACE_CPU_WORD]);
             kernel_boot_log(" event=");
-            uart_put_udec(trace[base + 2]);
+            uart_put_udec(trace[base + KERNEL_PROCESS_TRACE_EVENT_WORD]);
             kernel_boot_log(" pid=");
-            uart_put_udec(trace[base + 3]);
+            uart_put_udec(trace[base + KERNEL_PROCESS_TRACE_PID_WORD]);
             kernel_boot_log(" gen=");
-            uart_put_udec(trace[base + 4]);
+            uart_put_udec(trace[
+                base + KERNEL_PROCESS_TRACE_GENERATION_WORD]);
             kernel_boot_log(" peer=");
-            uart_put_udec(trace[base + 5]);
+            uart_put_udec(trace[
+                base + KERNEL_PROCESS_TRACE_PEER_PID_WORD]);
             kernel_boot_log(" peer-gen=");
-            uart_put_udec(trace[base + 6]);
+            uart_put_udec(trace[
+                base + KERNEL_PROCESS_TRACE_PEER_GENERATION_WORD]);
             kernel_boot_log(" state=");
-            uart_put_udec(trace[base + 7]);
+            uart_put_udec(trace[base + KERNEL_PROCESS_TRACE_STATE_WORD]);
             kernel_boot_log(" wait=");
-            uart_put_udec(trace[base + 8]);
+            uart_put_udec(trace[
+                base + KERNEL_PROCESS_TRACE_WAIT_REASON_WORD]);
             kernel_boot_log(" root=");
-            uart_put_udec(trace[base + 9]);
+            uart_put_udec(trace[base + KERNEL_PROCESS_TRACE_ROOT_WORD]);
             kernel_boot_log(" sp=");
             uart_put_hex(
-                trace[base + 10]);
+                trace[base + KERNEL_PROCESS_TRACE_SAVED_SP_WORD]);
             kernel_boot_log(" aux=");
             uart_put_hex(
-                trace[base + 11]);
+                trace[base + KERNEL_PROCESS_TRACE_AUX_WORD]);
             kernel_boot_log("\n");
         }
     }
@@ -4233,15 +4261,20 @@ fn kernel_process_trace_block_wake_probe() -> bool !{unsafe} {
     for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
         if (item < trace_count) {
             let base: usize = item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
-            let kind: usize = trace[base + 2];
-            if (kind == ProcessTraceBlock && trace[base + 3] == 2 &&
-                trace[base + 5] == 1 && trace[base + 7] == 3 &&
-                trace[base + 8] == 1) {
+            let kind: usize =
+                trace[base + KERNEL_PROCESS_TRACE_EVENT_WORD];
+            if (kind == ProcessTraceBlock &&
+                trace[base + KERNEL_PROCESS_TRACE_PID_WORD] == 2 &&
+                trace[base + KERNEL_PROCESS_TRACE_PEER_PID_WORD] == 1 &&
+                trace[base + KERNEL_PROCESS_TRACE_STATE_WORD] == 3 &&
+                trace[base + KERNEL_PROCESS_TRACE_WAIT_REASON_WORD] == 1) {
                 saw_block = true;
             }
-            if (kind == ProcessTraceWake && trace[base + 3] == 2 &&
-                trace[base + 5] == 1 && trace[base + 7] == 1 &&
-                trace[base + 8] == 0) {
+            if (kind == ProcessTraceWake &&
+                trace[base + KERNEL_PROCESS_TRACE_PID_WORD] == 2 &&
+                trace[base + KERNEL_PROCESS_TRACE_PEER_PID_WORD] == 1 &&
+                trace[base + KERNEL_PROCESS_TRACE_STATE_WORD] == 1 &&
+                trace[base + KERNEL_PROCESS_TRACE_WAIT_REASON_WORD] == 0) {
                 saw_wake = true;
             }
         }
@@ -4380,8 +4413,9 @@ fn kernel_process_scheduler_probe() -> bool {
     let mut saw_fork: bool = false;
     for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
         if (item < fork_trace_count &&
-            fork_trace[item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT + 2] ==
-                ProcessTraceFork) {
+            fork_trace[
+                item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT +
+                KERNEL_PROCESS_TRACE_EVENT_WORD] == ProcessTraceFork) {
             saw_fork = true;
         }
     }
@@ -4398,7 +4432,9 @@ fn kernel_process_scheduler_probe() -> bool {
     let mut saw_activate: bool = false;
     for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
         if (item < trace_count) {
-            let kind: usize = trace[item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT + 2];
+            let kind: usize = trace[
+                item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT +
+                KERNEL_PROCESS_TRACE_EVENT_WORD];
             if (kind == ProcessTraceSchedule) { saw_schedule = true; }
             if (kind == ProcessTraceResume) { saw_resume = true; }
             if (kind == ProcessTraceAddressSpaceActivate) { saw_activate = true; }

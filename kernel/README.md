@@ -585,6 +585,10 @@ needed for the stopped subsystem. Current helpers are:
 - `scripts/kernel_boot_dtb.gdb`: `takibi-dtb`, after `_start` has saved `x0`;
 - `scripts/kernel_page_allocator.gdb`: `takibi-pages`, after runtime memory
   discovery has initialized the allocator;
+- `scripts/kernel_state.gdb`: `takibi-kernel [PID]`, after loading the
+  target-specific compiler metadata described below. It validates and prints
+  the published DDB snapshot, one selected process, per-CPU diagnostic events,
+  and any retained crash snapshot;
 - `scripts/kernel_debug_metadata.gdb`: load
   `_build/kernel-debug-metadata.json` with `takibi-debug-metadata`, then use
   `takibi-enum`, `takibi-constant`, or `takibi-variant-layout` to decode
@@ -602,7 +606,32 @@ gdb-multiarch kernel/build/qemu/kernel-debug.elf
 (gdb) takibi-debug-metadata _build/kernel-debug-metadata.json
 (gdb) takibi-enum ProcessWaitReason 2
 ProcessWaitReason::ChildExit (2)
+(gdb) source scripts/kernel_state.gdb
+(gdb) takibi-kernel 1
 ```
+
+The command above uses QEMU's `_build/kernel-debug-metadata.json`. For RPi5,
+run `make kernelbuild-rpi5-debug`, load
+`kernel/build/rpi5/kernel-debug.elf` itself, and load
+`_build/kernel-debug-metadata-rpi5.json`; the ordinary and DWARF ELFs do not
+have interchangeable addresses. The maintained physical software-BRK lane
+does exactly this and has checked current process, scheduler, VM, descriptor,
+process, lifecycle-trace, and diagnostic-event views against UART DDB from the
+same stop.
+
+`takibi-kernel` accepts a DDB snapshot only when its valid-last publication
+sequence matches before and after the read. It likewise checks bounded counts,
+boolean and truncation fields, per-record diagnostic sequences, and crash
+validity. It prints `unpublished`, `in-progress`, `replaced`, `invalid`, or
+`not-captured snapshot-truncated` rather than interpreting incomplete state.
+Descriptor output always names the bounded captured width and says that the
+remainder was not captured. The CPU line maps stopped GDB threads to CPU IDs
+through the debugger's MPIDR, thread name, or bounded remote CPU ID; on OpenOCD
+it also reads the target-state table because an SMP group may expose only its
+selected core as a GDB thread. It derives the online set from the
+compiler-owned secondary boot publication and reports coherence only when
+every online CPU is stopped. Diagnostic events remain individually coherent
+per CPU rather than a cross-CPU instant.
 
 The focused QEMU runners are the executable reference for launching the full
 kernel device configuration under `-S -gdb`: notably
@@ -755,12 +784,15 @@ physical board.
 The RPi5 integration then performs a separate boot with an SWD hardware
 breakpoint at the deliberate software-BRK checkpoint. After boot-time BSS
 initialization, OpenOCD halts at the checkpoint, arms its test byte before the
-condition is evaluated, and resumes. DDB must report the explicit assembly
-bridge, one or more return PCs within the linker-owned compiler-generated text
-range, and the terminal boot-assembly boundary. `continue` must reach a shell
-marker in the same boot. This focused path prevents the ordinary asynchronous
-UART BREAK's root-only or user-boundary walk from being mistaken for hardware
-coverage of compiler frame chaining.
+condition is evaluated, and resumes into DDB. OpenOCD then halts the DDB stop,
+and `takibi-kernel` reads the compiler-owned DWARF and RPi5 metadata before the
+CPU is explicitly resumed. DDB must report the explicit assembly bridge, one
+or more return PCs within the linker-owned compiler-generated text range, and
+the terminal boot-assembly boundary. Its structured state must agree with the
+GDB view, and `continue` must reach a shell marker in the same boot. This
+focused path prevents the ordinary asynchronous UART BREAK's root-only or
+user-boundary walk from being mistaken for hardware coverage of compiler frame
+chaining or external state inspection.
 
 When enabled for a boot test, the process layer records a fixed 16-entry,
 allocation-free lifecycle ring: fork, exec prepare/commit, schedule, block,

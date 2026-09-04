@@ -2,6 +2,7 @@
 """Drive and validate the deliberate DDB software breakpoint on RPi5."""
 
 import argparse
+from pathlib import Path
 import re
 import time
 
@@ -23,13 +24,22 @@ def main() -> int:
                         required=True)
     parser.add_argument("--generated-end", type=lambda value: int(value, 0),
                         required=True)
+    parser.add_argument("--snapshot-ready-file", required=True)
+    parser.add_argument("--snapshot-release-file", required=True)
     parser.add_argument("--timeout", type=float, default=180.0)
     args = parser.parse_args()
 
     deadline = time.monotonic() + args.timeout
+    ready_file = Path(args.snapshot_ready_file)
+    release_file = Path(args.snapshot_release_file)
+    ready_file.unlink(missing_ok=True)
+    release_file.unlink(missing_ok=True)
     received = bytearray()
     prompt_count = 0
-    commands = (b"intr", b"bt", b"continue")
+    commands = (
+        b"intr", b"current", b"sched", b"vm", b"fds", b"ps", b"proc 1",
+        b"trace", b"events", b"bt", b"continue",
+    )
     shell_probe_sent = False
 
     with serial.Serial(args.port, 115200, timeout=0.25) as uart, open(
@@ -43,6 +53,11 @@ def main() -> int:
                 log.flush()
 
             found = received.count(b"ddb> ")
+            if found > prompt_count:
+                ready_file.touch()
+                if not release_file.exists():
+                    deadline = time.monotonic() + args.timeout
+                    continue
             while prompt_count < found:
                 if prompt_count < len(commands):
                     write_line(uart, commands[prompt_count])
