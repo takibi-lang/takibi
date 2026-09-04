@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regression controls for the cross-container physical board lease.
+# Regression controls for cross-container board and aggregate-suite leases.
 #
 # Every case uses a fictitious board and a command that touches nothing, so
 # this runs anywhere and never drives real hardware.
@@ -142,6 +142,33 @@ case "$foreign" in
     *) fail "a foreign holder was not reported: $foreign" ;;
 esac
 
+# Unlike a board child, an aggregate child must not retain the suite lease
+# after its runner dies. It may keep doing harmless build work, but another
+# clone must not wait for an aggregate that no longer exists.
+env -u TAKIBI_RESOURCE_LEASE_HELD \
+    TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_SESSION=agent-suite \
+    bash -c ". '$helper'; resource_lease_run_suite allcheck \
+        bash -c 'echo \$\$ >\"$tmp_dir/suite-child.pid\"; exec sleep 30'" &
+suite_runner=$!
+for _attempt in 1 2 3 4 5; do
+    [ -s "$tmp_dir/suite-child.pid" ] && break
+    sleep 0.1
+done
+suite_child="$(cat "$tmp_dir/suite-child.pid" 2>/dev/null || true)"
+[ -n "$suite_child" ] && kill -0 "$suite_child" 2>/dev/null \
+    || fail "the suite child did not start"
+kill -KILL "$suite_runner" 2>/dev/null || true
+wait "$suite_runner" 2>/dev/null || true
+kill -0 "$suite_child" 2>/dev/null \
+    || fail "the suite child did not outlive its runner"
+timeout 2 env TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_SESSION=agent-next \
+    bash -c ". '$helper'; resource_lease_acquire suite next" >/dev/null \
+    || {
+        kill -KILL "$suite_child" 2>/dev/null || true
+        fail "an orphaned suite child retained the lease"
+    }
+kill -KILL "$suite_child" 2>/dev/null || true
+
 # Status is readable by a person deciding whether to wait.
 status="$(env -u TAKIBI_RESOURCE_LEASE_HELD \
     TAKIBI_SESSION_REGISTRY="$registry" TAKIBI_SESSION=agent-a bash -c \
@@ -152,5 +179,5 @@ case "$status" in
 esac
 
 echo "PASS resource-lease: boards are exclusive across clones, released by a" \
-     "dying holder, kept by one that outlives its runner, reused when nested," \
-     "and reported when a board stops answering"
+     "dying holder, kept by one that outlives its runner, reused when nested;" \
+     "suite children do not inherit; board failures remain reported"

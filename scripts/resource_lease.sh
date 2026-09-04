@@ -29,22 +29,18 @@
 # top of the lanes.
 #
 # The lease is one flock in the registry every container mounts at the same
-# path, so it excludes across containers. It is held by the runner's own open
-# file description, so the kernel releases it when the runner exits for any
-# reason -- finished, failed, interrupted, or killed. Nothing has to be given
-# back, and a stopped agent releases its board immediately.
+# path, so it excludes across containers. Board runners deliberately pass the
+# open file description to children. The suite wrapper closes it in the child
+# command instead, so only the recipe shell holds that lease and killing the
+# recipe releases it even if a build child survives.
 #
 # A child that inherits the descriptor holds the lease too. For a board that
 # is deliberate: if a runner is killed while its openocd or its serial reader
 # survives, something is still driving it, and handing it to another session
-# then would be worse than making that session wait. For `suite` the same
-# behaviour only costs -- a leftover dune keeps the aggregate reserved while
-# protecting nothing -- and it has already happened once, so read a stuck
-# `suite` as a leftover process rather than a running suite. Interrupting a
-# runner from a terminal signals the whole process group, so the ordinary case
-# releases everything at once. An orphan that outlives its runner shows up in
-# resource_lease_status as a resource still held while its recorded holder is
-# gone, which is the signal to look for the leftover process.
+# then would be worse than making that session wait. `resource_lease_run_suite`
+# is deliberately different: its child closes descriptor 7 before exec, while
+# this shell waits and retains the lease. A leftover build therefore cannot
+# reserve a suite that is no longer running.
 #
 # For the boards the grain is one runner, deliberately, rather than an
 # aggregate target; `suite` is the exception, and is on the aggregate because
@@ -180,6 +176,18 @@ resource_lease_acquire() {
         "board_failures=$failures"
 
     export TAKIBI_RESOURCE_LEASE_HELD="$resource"
+}
+
+# Run one aggregate while this shell alone retains the suite lease. Bash has
+# no redirect form that opens a descriptor close-on-exec, so close the known
+# lease descriptor in the child and remove the inherited marker explicitly.
+# Board runners must keep using resource_lease_acquire directly: their
+# descendants are part of the physical-device ownership boundary.
+resource_lease_run_suite() {
+    local target="$1"
+    shift
+    resource_lease_acquire suite "$target" || return 1
+    env -u TAKIBI_RESOURCE_LEASE_HELD "$@" 7>&-
 }
 
 # Record whether the BOARD answered, as distinct from whether the tests passed.

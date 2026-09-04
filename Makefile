@@ -1183,8 +1183,8 @@ kernelcheck: $(KERNELCHECK_LANES)
 .PHONY: allcheck
 allcheck:
 	@status=0; . scripts/resource_lease.sh; \
-	resource_lease_acquire suite allcheck || exit 1; \
-	$(MAKE) langcheck test linuxcheck kernelcheck || status=$$?; \
+	resource_lease_run_suite allcheck \
+		$(MAKE) langcheck test linuxcheck kernelcheck || status=$$?; \
 	if [ $$status -eq 0 ]; then \
 		echo "PASS allcheck: langcheck test linuxcheck $(KERNELCHECK_LANES)"; \
 	else \
