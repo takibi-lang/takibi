@@ -5,3 +5,4 @@
 ^crash trace:
 ^resources:
 ^process invariant: REAPED THE CURRENT PROCESS
+^process invariant: RECYCLED HANDLE READS
