@@ -6828,6 +6828,37 @@ let infer_tests = [
              (contains_substring msg
                 "cannot unify usize with SlotAddress"));
 
+  (* GitHub issue #415: the ordinary allocator and the bootstrap allocator
+     return different nominal wrappers. Both can be explicitly lowered to the
+     scheduler's common ProcessHandle inside their declaring module, but a
+     probe result cannot satisfy a bootstrap-only parameter. *)
+  Alcotest.test_case
+    "issue #415: a pooled process cannot satisfy a bootstrap-only API"
+    `Quick
+    (fun () ->
+       match infer_files [
+         "process.tkb",
+         "struct ProcessHandle { private slot: usize; }
+          struct PooledProcessHandle { private handle: ProcessHandle; }
+          struct BootstrapProcessHandle { private handle: ProcessHandle; }
+          fn probe_acquire() -> PooledProcessHandle {
+            let mut h: ProcessHandle = { 7 };
+            let mut pooled: PooledProcessHandle = { h };
+            return pooled;
+          }
+          fn bootstrap_only(bootstrap: BootstrapProcessHandle) {}";
+         "probe.tkb",
+         "fn wrong_probe() {
+            let mut pooled: PooledProcessHandle = probe_acquire();
+            bootstrap_only(pooled);
+          }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "rejects pooled as bootstrap" true
+             (contains_substring msg "PooledProcessHandle" &&
+              contains_substring msg "BootstrapProcessHandle"));
+
   Alcotest.test_case "private field: a NON-private field of the same struct \
                       stays freely accessible cross-file" `Quick
     (fun () ->

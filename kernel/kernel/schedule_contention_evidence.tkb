@@ -341,11 +341,13 @@ fn schedule_contention_probe() -> bool !{unsafe} {
         // was where rather than what.
         scheduled_process_table_init();
         match scheduled_process_alloc() {
-            ScheduledProcessAllocResult::Full => {
+            ScheduledPooledProcessAllocResult::Full => {
                 schedule_contention_report("no-process-to-race-for" as *u8);
                 return false;
             }
-            ScheduledProcessAllocResult::Allocated(handle) => {
+            ScheduledPooledProcessAllocResult::Allocated(pooled) => {
+                let mut handle: ProcessHandle =
+                    scheduled_pooled_process_handle(pooled);
                 schedule_probe_handle = handle;
                 schedule_probe_ready = true;
             }

@@ -1312,9 +1312,51 @@ private fn kernel_stack_quarantine_span(bottom: usize)
     return unsafe { (bottom - KERNEL_PROCESS_STACK_SIZE) as *KernelStackHalf };
 }
 
+// The shared rollback implementation produces a plain handle internally.
+// Its two public entry points wrap that value in distinct nominal types, so
+// code acquiring an ordinary pooled process cannot pass it to a bootstrap-only
+// operation. GitHub issue #415.
+//
+// The distinction ends explicitly at scheduled_*_process_handle. A full
+// split through ProcessHandle would duplicate the scheduler API rather than
+// strengthen it: the pre-split call graph had 103 ProcessHandle type uses and
+// 123 pool_index field uses, and both kinds must enter the same ready/running/
+// blocked lifecycle after allocation. The bootstrap-only storage and release
+// rules therefore remain at their existing process/address-space/image
+// boundaries; moving all of them onto separate APIs would require parallel
+// scheduler and VM surfaces. The type pays for the boundary where the
+// historical bug occurred, not for those parallel implementations.
 must_use variant ScheduledProcessAllocResult {
     Full;
     Allocated(ProcessHandle);
+}
+
+struct PooledProcessHandle {
+    private handle: ProcessHandle;
+}
+
+struct BootstrapProcessHandle {
+    private handle: ProcessHandle;
+}
+
+must_use variant ScheduledPooledProcessAllocResult {
+    Full;
+    Allocated(PooledProcessHandle);
+}
+
+must_use variant ScheduledBootstrapProcessAllocResult {
+    Full;
+    Allocated(BootstrapProcessHandle);
+}
+
+fn scheduled_pooled_process_handle(pooled: PooledProcessHandle)
+        -> ProcessHandle {
+    return pooled.handle;
+}
+
+fn scheduled_bootstrap_process_handle(bootstrap: BootstrapProcessHandle)
+        -> ProcessHandle {
+    return bootstrap.handle;
 }
 
 must_use variant ScheduledProcessReadyTakeResult {
@@ -1679,7 +1721,7 @@ fn scheduled_process_table_clear() !{unsafe} {
 // "Full" no longer means "the sixteenth slot was taken" -- it means the
 // page allocator is empty. The rollback chain is unchanged in shape: every
 // resource acquired below is given back on every later failure.
-fn scheduled_process_alloc() -> ScheduledProcessAllocResult !{unsafe} {
+fn scheduled_process_alloc() -> ScheduledPooledProcessAllocResult !{unsafe} {
     scheduled_process_pool_init();
     let mut slot: usize = 0;
     let mut generation: usize = 0;
@@ -1692,7 +1734,7 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult !{unsafe} {
             kernel_boot_log_resource_exhausted(
                 "physical page allocator" as *u8,
                 page_allocator_total_count());
-            return ScheduledProcessAllocResult::Full;
+            return ScheduledPooledProcessAllocResult::Full;
         }
         IntrusivePoolInsertResult::Allocated(pool_owner) => {
             slot = intrusive_slot_address_identity(
@@ -1701,7 +1743,15 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult !{unsafe} {
             intrusive_owner_drop(pool_owner);
         }
     }
-    return scheduled_process_alloc_finish(slot, generation);
+    match scheduled_process_alloc_finish(slot, generation) {
+        ScheduledProcessAllocResult::Full => {
+            return ScheduledPooledProcessAllocResult::Full;
+        }
+        ScheduledProcessAllocResult::Allocated(handle) => {
+            let mut pooled: PooledProcessHandle = { handle };
+            return ScheduledPooledProcessAllocResult::Allocated(pooled);
+        }
+    }
 }
 
 // The bootstrap process: the static record at slot 0, asked for by name.
@@ -1712,16 +1762,24 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult !{unsafe} {
 // used it, and gave it back WITH slot 0's fd context and image record
 // attached, breaking a later probe that had set those up. One caller
 // wants the bootstrap; it says so.
-fn scheduled_process_alloc_bootstrap() -> ScheduledProcessAllocResult
+fn scheduled_process_alloc_bootstrap() -> ScheduledBootstrapProcessAllocResult
         !{unsafe} {
     scheduled_process_pool_init();
     if (scheduled_process_boot_live) {
-        return ScheduledProcessAllocResult::Full;
+        return ScheduledBootstrapProcessAllocResult::Full;
     }
     scheduled_process_boot_generation = scheduled_process_boot_generation + 1;
     scheduled_process_boot_live = true;
-    return scheduled_process_alloc_finish(
-        0, scheduled_process_boot_generation);
+    match scheduled_process_alloc_finish(
+            0, scheduled_process_boot_generation) {
+        ScheduledProcessAllocResult::Full => {
+            return ScheduledBootstrapProcessAllocResult::Full;
+        }
+        ScheduledProcessAllocResult::Allocated(handle) => {
+            let mut bootstrap: BootstrapProcessHandle = { handle };
+            return ScheduledBootstrapProcessAllocResult::Allocated(bootstrap);
+        }
+    }
 }
 
 // Everything a new process needs once it has a record: the same rollback
@@ -2151,8 +2209,10 @@ fn scheduled_process_reap(
 fn scheduled_process_probe_slot_acquire() -> usize !{unsafe} {
     let mut slot: usize = 0;
     match scheduled_process_alloc() {
-        ScheduledProcessAllocResult::Full => { return 0; }
-        ScheduledProcessAllocResult::Allocated(handle) => {
+        ScheduledPooledProcessAllocResult::Full => { return 0; }
+        ScheduledPooledProcessAllocResult::Allocated(pooled) => {
+            let mut handle: ProcessHandle =
+                scheduled_pooled_process_handle(pooled);
             slot = handle.pool_index;
         }
     }
@@ -2246,8 +2306,10 @@ fn scheduled_process_table_probe() -> bool !{unsafe} {
     let mut handles: [ProcessHandle; PROCESS_TABLE_PROBE_COUNT];
     for i: usize in 0..<PROCESS_TABLE_PROBE_COUNT {
         match scheduled_process_alloc() {
-            ScheduledProcessAllocResult::Full => { return false; }
-            ScheduledProcessAllocResult::Allocated(handle) => {
+            ScheduledPooledProcessAllocResult::Full => { return false; }
+            ScheduledPooledProcessAllocResult::Allocated(pooled) => {
+                let mut handle: ProcessHandle =
+                    scheduled_pooled_process_handle(pooled);
                 handles[i] = handle;
             }
         }
@@ -2295,8 +2357,10 @@ fn scheduled_process_table_probe() -> bool !{unsafe} {
     if (scheduled_process_probe_cycle(first) == false) { return false; }
     if (scheduled_process_stack_top(first) != 0) { return false; }
     match scheduled_process_alloc() {
-        ScheduledProcessAllocResult::Full => { return false; }
-        ScheduledProcessAllocResult::Allocated(reused) => {
+        ScheduledPooledProcessAllocResult::Full => { return false; }
+        ScheduledPooledProcessAllocResult::Allocated(pooled) => {
+            let mut reused: ProcessHandle =
+                scheduled_pooled_process_handle(pooled);
             if (scheduled_process_same_slot(first, reused) &&
                 scheduled_process_same_generation(first, reused)) {
                 return false;
@@ -2880,8 +2944,10 @@ fn kernel_process_execution_reset() {
     // destroyed every pooled record and reset the bootstrap's static one,
     // which is strictly more than this loop did (issue #392).
     match scheduled_process_alloc_bootstrap() {
-        ScheduledProcessAllocResult::Full => {}
-        ScheduledProcessAllocResult::Allocated(root) => {
+        ScheduledBootstrapProcessAllocResult::Full => {}
+        ScheduledBootstrapProcessAllocResult::Allocated(bootstrap) => {
+            let mut root: ProcessHandle =
+                scheduled_bootstrap_process_handle(bootstrap);
             execution_here().current_handle = root;
             let start_guard = process_run_lock();
             execution_here().current_live =
@@ -4563,10 +4629,12 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
     }
     let mut parent: ProcessHandle = execution_here().current_handle;
     match scheduled_process_alloc() {
-        ScheduledProcessAllocResult::Full => {
+        ScheduledPooledProcessAllocResult::Full => {
             return ProcessCloneResult::Invalid;
         }
-        ScheduledProcessAllocResult::Allocated(child) => {
+        ScheduledPooledProcessAllocResult::Allocated(pooled) => {
+            let mut child: ProcessHandle =
+                scheduled_pooled_process_handle(pooled);
             scheduled_process_copy_command_line(parent.pool_index,
                                                 child.pool_index);
             // GitHub issue #437: push at the HEAD of the sibling list.
