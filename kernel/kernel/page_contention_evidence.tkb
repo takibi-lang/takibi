@@ -89,6 +89,30 @@ fn page_contention_is_armed() -> bool !{unsafe} {
 
 fn page_contention_secondary_run() !{allocates, unsafe} {
     unsafe { atomic_store_release(page_probe_active_address(), 1); }
+    // Complete one cycle, then WAIT for the primary to have started.
+    // GitHub issue #510: this is the second half of the start handshake
+    // kernel/kernel/fd_table.tkb's probe already had. Without it this core
+    // -- driven from the idle loop in
+    // kernel/arch/arm64/kernel/secondary.tkb, which re-enters an armed
+    // probe after every `wfi` wake -- can run every round and leave before
+    // core 0 gets a slice, and the overlap core 0 then asserts is a number
+    // from a phase the two cores never shared. A cycle that comes back
+    // false took no page and is not one, so this retries rather than
+    // publishing a round it did not complete.
+    while (unsafe {
+               atomic_load_acquire(page_probe_secondary_address())
+           } == 0 &&
+           unsafe { atomic_load_acquire(page_probe_armed_address()) } == 1) {
+        if (page_probe_cycle()) {
+            unsafe {
+                atomic_fetch_add_relaxed(page_probe_secondary_address(), 1);
+            }
+        }
+    }
+    while (unsafe {
+               atomic_load_acquire(page_probe_primary_address())
+           } == 0 &&
+           unsafe { atomic_load_acquire(page_probe_armed_address()) } == 1) { }
     while (unsafe {
                atomic_load_acquire(page_probe_secondary_address())
            } < PAGE_CONTENTION_ROUNDS &&
@@ -159,10 +183,12 @@ fn page_contention_probe() -> bool !{allocates, unsafe} {
     let entry_start: i64 = read_cntpct();
     let mut entered: bool = false;
     while (entered == false && read_cntpct() - entry_start < entry_window) {
+        // The completed round is the whole gate. GitHub issue #510: the
+        // `active` conjunct that stood beside it turned a monotonic count
+        // into a level the secondary clears on its way out, so a core that
+        // ran every round before this one got a slice was reported as
+        // never having entered.
         if (unsafe {
-                atomic_load_acquire(page_probe_active_address())
-            } == 1 &&
-            unsafe {
                 atomic_load_acquire(page_probe_secondary_address())
             } >= 1) {
             entered = true;

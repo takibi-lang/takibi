@@ -199,11 +199,63 @@ fn schedule_contention_is_armed() -> bool !{unsafe} {
     } == 1;
 }
 
+// How many times phase 1 may be re-run before its failure to reproduce the
+// race becomes this probe's verdict. A busy host runs each vCPU in longer
+// stretches than the window this race needs, so phase 1 comes back
+// `duplicates=0` on a kernel that is doing nothing wrong -- observed here as
+// `duplicates=0 missing=976 overlap=3403`, the cores overlapped for most of
+// the phase and the collision still did not land.
+//
+// A RETRY, and the weaker of the two answers this tree now has.
+// kernel/kernel/freelist_contention_evidence.tkb and its pid sibling stopped
+// hoping: they split the production read from its write-back and rendezvous
+// both cores between the two, so the unlocked phase loses exactly one update
+// per round by construction. That is strictly better and it costs a
+// test-only escape in the primitive being measured -- freelist.tkb grew a
+// begin/commit/cancel trio for it. The claim here is
+// scheduled_process_ready_take, a whole state transition under the run lock
+// rather than one word, and splitting it is a larger change to a hotter path
+// than this probe's flakiness has earned. Retrying is what closes the gap
+// until it has.
+//
+// Bounded by attempts and by a wall-clock budget, because the boot this
+// runs in has a 90-second deadline.
+const SCHEDULE_CONTENTION_ATTEMPTS: usize = 8;
+const SCHEDULE_CONTENTION_ATTEMPT_SECONDS: i64 = 5;
+
+// Phase 1 attempts spent by the run being reported. Printed, never
+// asserted: how hard the machine made this is evidence about the machine.
+private let mut schedule_probe_attempts: usize;
+
 fn schedule_contention_secondary_run() !{unsafe} {
     // Linear, so leaving is checked on every path out of this function --
     // which is the half of the protocol a bare flag was worst at, and the
     // half that cost a 1-in-8 flake when it was a bare flag.
     let visit = occupancy_enter(&schedule_probe_occupancy);
+    // One round, then WAIT for the primary to have run one of its own.
+    // GitHub issue #510: core 0 already gates on a completed round here,
+    // and that is only half a handshake -- nothing held this core back
+    // afterwards, so it could finish every round before core 0 got a slice
+    // and hand core 0 an `overlap` from a phase the two never shared.
+    // kernel/kernel/fd_table.tkb's probe has had both halves since it was
+    // written; this is the same pair.
+    while (unsafe {
+               atomic_load_acquire(schedule_probe_secondary_address())
+           } == 0 &&
+           unsafe {
+               atomic_load_acquire(schedule_probe_armed_address())
+           } == 1) {
+        schedule_probe_cycle();
+        unsafe {
+            atomic_fetch_add_relaxed(schedule_probe_secondary_address(), 1);
+        }
+    }
+    while (unsafe {
+               atomic_load_acquire(schedule_probe_primary_address())
+           } == 0 &&
+           unsafe {
+               atomic_load_acquire(schedule_probe_armed_address())
+           } == 1) { }
     while (unsafe {
                atomic_load_acquire(schedule_probe_secondary_address())
            } < SCHEDULE_CONTENTION_ROUNDS &&
@@ -240,12 +292,17 @@ private fn schedule_contention_report(stage: *u8) !{unsafe} {
     uart_put_udec(unsafe {
         atomic_load_acquire(schedule_probe_overlap_address())
     });
+    kernel_boot_log(" attempts=");
+    uart_put_udec(schedule_probe_attempts);
     kernel_boot_log("\n");
 }
 
 // Run one phase to completion on both cores. Returns the duplicate count,
 // or refuses by reporting when the secondary never joined.
-private fn schedule_contention_run_phase(locked: usize, stage: *u8)
+// Reports only its GIVE-UPS. The caller reports the stage it finished,
+// because phase 1 may be re-run and one `unlocked` line per attempt would
+// put a variable number of lines into a view that compares exactly.
+private fn schedule_contention_run_phase(locked: usize)
         -> bool !{unsafe} {
     unsafe {
         atomic_store_release(schedule_probe_phase_address(), locked);
@@ -311,7 +368,6 @@ private fn schedule_contention_run_phase(locked: usize, stage: *u8)
         schedule_contention_report("secondary-never-finished" as *u8);
         return false;
     }
-    schedule_contention_report(stage);
     return true;
 }
 
@@ -357,15 +413,41 @@ fn schedule_contention_probe() -> bool !{unsafe} {
     // Phase 1: no lock. The race is the expected result, and a run with no
     // duplicates at all means the window closed rather than that the
     // kernel is safe -- so it FAILS, loudly, instead of passing.
-    if (schedule_contention_run_phase(0, "unlocked" as *u8) == false) {
+    //
+    // GitHub issue #510: retried until the window opens or the budget runs
+    // out, because whether it opens is a property of the machine this boot
+    // landed on and not of the kernel under test. Only the attempt that is
+    // reported prints a stage line; `attempts=` in the counts line carries
+    // the rest.
+    let attempt_budget: i64 =
+        read_cntfrq() * SCHEDULE_CONTENTION_ATTEMPT_SECONDS;
+    let attempt_start: i64 = read_cntpct();
+    let mut attempts: usize = 0;
+    let mut unlocked_ran: bool = true;
+    let mut raced: usize = 0;
+    while (unlocked_ran && raced == 0 &&
+           attempts < SCHEDULE_CONTENTION_ATTEMPTS &&
+           read_cntpct() - attempt_start < attempt_budget) {
+        attempts = attempts + 1;
+        schedule_probe_attempts = attempts;
+        unlocked_ran = schedule_contention_run_phase(0);
+        if (unlocked_ran) {
+            raced = schedule_contention_duplicate_count();
+        }
+    }
+    // A phase that could not set itself up has already reported which way,
+    // and retrying a secondary that never arrived would only spend the
+    // budget saying so eight times.
+    if (unlocked_ran == false) {
         return false;
     }
-    let raced: usize = schedule_contention_duplicate_count();
+    schedule_contention_report("unlocked" as *u8);
 
     // Phase 2: the real lock. Nothing may claim twice.
-    if (schedule_contention_run_phase(1, "locked" as *u8) == false) {
+    if (schedule_contention_run_phase(1) == false) {
         return false;
     }
+    schedule_contention_report("locked" as *u8);
     let excluded: usize = schedule_contention_duplicate_count();
     // How much of the locked phase the second core was actually present
     // for. Asserted, because "no duplicates" from a phase the second core
@@ -403,7 +485,29 @@ fn schedule_contention_probe() -> bool !{unsafe} {
             quiesced_release(proof);
             schedule_probe_ready = false;
             scheduled_process_pid_counter_restore(pid_before);
-            return raced > 0 && excluded == 0 && shared > 0 && cleaned;
+            // WHICH term went false, in the same `schedule contention:`
+            // line shape the verdict uses, so it lands in the
+            // pool_contention view beside it and a failing lane's diff
+            // names the cause. GitHub issue #510: one word, `failed`,
+            // covered a broken lock, a race that did not reproduce and a
+            // core that never ran, and only the first is about the kernel.
+            if (raced == 0) {
+                kernel_boot_log("schedule contention: no lock and still no double claim, so the race this probe exists to show did not reproduce -- see attempts= and overlap= above\n");
+                return false;
+            }
+            if (excluded != 0) {
+                kernel_boot_log("schedule contention: the run lock was held and one Ready process still reached both cores, which is the defect\n");
+                return false;
+            }
+            if (shared == 0) {
+                kernel_boot_log("schedule contention: the second core completed no round inside the locked phase, so its clean result excluded nothing\n");
+                return false;
+            }
+            if (cleaned == false) {
+                kernel_boot_log("schedule contention: the record this probe raced for was not given back\n");
+                return false;
+            }
+            return true;
         }
     }
 }

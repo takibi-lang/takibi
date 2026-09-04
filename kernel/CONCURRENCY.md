@@ -164,13 +164,45 @@ wrong:
 - **Two-sided where the race can be produced**: phase 1 unlocked must SHOW the
   defect, phase 2 locked must not. A probe with only the locked phase goes
   quietly green the day the window stops reproducing.
-- **Wait for the secondary to have COMPLETED A ROUND**, not merely to have
-  announced itself, before the primary starts -- except where phase 1 needs the
-  cores to collide inside a few instructions, in which case gate on presence.
-  The rule is: gate on a completed round when the verdict needs overlap, gate
-  on presence when phase 1 needs a collision.
-- **Print the counts on every exit path**, including the give-ups. A run that
-  could not set itself up otherwise looks identical to one whose counter raced.
+- **The start is a TWO-WAY handshake, and one half alone is worse than none.**
+  The secondary completes one round, publishes it, and then waits for the
+  primary to have run one of its own; the primary waits for that completed
+  round before starting. Neither core can finish its work before the other has
+  begun, which is what makes the reported overlap an arrangement rather than a
+  hope. Each half was tried alone and each failed differently: waiting for a
+  completed round without holding the secondary back hands it a head start and
+  closes the window phase 1 needs, and letting it announce itself without
+  holding it back lets it run every round and leave -- and an `active` flag is
+  a LEVEL the secondary clears on its way out, so a primary polling that level
+  reports a core that did all of its work as a core that never arrived.
+- **Every wait is bounded by the counter, never by a spin count.** A spin
+  bound is a duration only if this core's speed is fixed, and on a busy host
+  4096 empty iterations expire before the other core has been scheduled at
+  all. `read_cntfrq()`-derived windows are the same duration on both boards
+  and on an emulator.
+- **Make phase 1 reproduce the race, rather than hoping it does.** Whether the
+  window opens is otherwise a property of the machine the boot landed on, and
+  a probe that reports `failed` because a host was busy sends its reader to
+  the wrong subsystem. Two answers, in order of preference:
+  1. **Split the production read from its write-back and rendezvous both
+     cores between them**, so the unlocked phase loses exactly one update per
+     round by construction. `kernel/kernel/freelist_contention_evidence.tkb`
+     and its pid sibling do this; it costs a test-only begin/commit/cancel
+     escape in the primitive being measured, which is linear so every path
+     commits or cancels, and it is worth that where the racing window is one
+     word.
+  2. **Retry phase 1**, bounded by attempts and by a wall-clock budget, where
+     splitting the primitive is a larger change than the flakiness has
+     earned -- `schedule_contention` claims a whole state transition under
+     the run lock. Report only the attempt that is reported, so a view
+     comparing exactly still sees one stage line, and print the attempt count
+     so the cost is visible.
+- **Print the counts on every exit path**, including the give-ups, and say
+  WHICH term of the verdict went false. A run that could not set itself up
+  otherwise looks identical to one whose counter raced, and one word covering
+  "the lock leaked", "the race did not reproduce" and "one core never ran"
+  sends the reader to the wrong subsystem -- only the first is about the
+  kernel.
 - **A probe that destroys what it raced for must wait for the other core to
   have LEFT**, which `kernel/lib/occupancy.tkb` makes a linear value rather
   than a flag.

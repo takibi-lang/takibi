@@ -74,6 +74,27 @@ fn tag_contention_is_armed() -> bool !{unsafe} {
 
 fn tag_contention_secondary_run() !{unsafe} {
     unsafe { atomic_store_release(tag_probe_active_address(), 1); }
+    // One cycle, published, and then WAIT for the primary to have started.
+    // GitHub issue #510: this is the second half of the start handshake
+    // kernel/kernel/fd_table.tkb's probe already had and this one did not.
+    // Without it, this core -- driven from the idle loop in
+    // kernel/arch/arm64/kernel/secondary.tkb, which re-enters an armed
+    // probe after every `wfi` wake -- can run every round and leave before
+    // core 0 gets a slice, and the overlap core 0 then asserts is a number
+    // from a phase the two cores never shared.
+    while (unsafe {
+               atomic_load_acquire(tag_probe_secondary_address())
+           } == 0 &&
+           unsafe { atomic_load_acquire(tag_probe_armed_address()) } == 1) {
+        tag_probe_cycle();
+        unsafe {
+            atomic_fetch_add_relaxed(tag_probe_secondary_address(), 1);
+        }
+    }
+    while (unsafe {
+               atomic_load_acquire(tag_probe_primary_address())
+           } == 0 &&
+           unsafe { atomic_load_acquire(tag_probe_armed_address()) } == 1) { }
     while (unsafe {
                atomic_load_acquire(tag_probe_secondary_address())
            } < TAG_CONTENTION_ROUNDS &&
@@ -164,6 +185,24 @@ fn tag_contention_probe() -> bool !{unsafe} {
     }
     unsafe { atomic_store_release(tag_probe_armed_address(), 0); }
 
+    // `advanced` and `calls` are read one after the other, and disarming
+    // stops the other core at its next condition check rather than mid
+    // cycle. A mint that lands between the two reads advances the kernel's
+    // counter without advancing this probe's, and `advanced == calls` then
+    // fails on a kernel that did nothing wrong. GitHub issue #510: wait for
+    // the secondary to be provably OUT first, the way the pool probe waits
+    // before reading its live count.
+    let settle_window: i64 = read_cntfrq() >> 2;
+    let settle_start: i64 = read_cntpct();
+    let mut settled: bool = false;
+    while (settled == false && read_cntpct() - settle_start < settle_window) {
+        if (unsafe {
+                atomic_load_acquire(tag_probe_active_address())
+            } == 0) {
+            settled = true;
+        }
+    }
+
     let advanced: usize = intrusive_pool_tag_counter() - next_before;
     let calls: usize =
         unsafe { atomic_load_acquire(tag_probe_primary_address()) } +
@@ -171,6 +210,11 @@ fn tag_contention_probe() -> bool !{unsafe} {
     if (finished == false) {
         tag_contention_report("secondary-never-finished" as *u8, advanced,
                                calls);
+        return false;
+    }
+    if (settled == false) {
+        tag_contention_report("secondary-never-left" as *u8, advanced,
+                                 calls);
         return false;
     }
     // Back where it started, before the verdict, so a failed probe does
