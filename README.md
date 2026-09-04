@@ -217,6 +217,7 @@ the fastest checks:
 ```bash
 make build       # build the OCaml compiler
 make test        # compiler acceptance/rejection and IR tests
+make coverage    # compiler test coverage summary and HTML report
 make linuxcheck  # build and execute host-native Takibi tests
 ```
 
@@ -312,7 +313,7 @@ and debugging tools all have hardware-independent paths.
 ## Primary dependencies
 
 ```text
-OCaml 5.4.0, dune, menhir, ppx_deriving.show
+OCaml 5.4.0, dune, menhir, ppx_deriving.show, bisect_ppx_ng
 LLVM 19 libraries and command-line tools
 QEMU system emulation for AArch64
 Python 3 and pyserial

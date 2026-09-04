@@ -39,7 +39,7 @@ LLVM_OBJCOPY := llvm-objcopy-19
 # `kernelcheck`), which made it easy to run the wrong one by accident.
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-ddb-rpi5-software kernelcheck-qemu kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-qemu-ash kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-qemu-debug-main kernelcheck-qemu-debug-repeat kernelcheck-qemu-debug-ash kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-alloc-rollback-qemu kernelcheck-repeat kernelsh-qemu kernelsh-rpi5 lease-status profile-kernel-workload-chart langcheck linuxbuild linuxcheck clean FORCE
+.PHONY: build test coverage kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-ddb-rpi5-software kernelcheck-qemu kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-qemu-ash kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-qemu-debug-main kernelcheck-qemu-debug-repeat kernelcheck-qemu-debug-ash kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-alloc-rollback-qemu kernelcheck-repeat kernelsh-qemu kernelsh-rpi5 lease-status profile-kernel-workload-chart langcheck linuxbuild linuxcheck clean FORCE
 
 .DEFAULT_GOAL := build
 
@@ -107,6 +107,20 @@ endif
 test: build
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env ALCOTEST_COMPACT=1 bash scripts/list_dune_test_failures.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env ALCOTEST_COMPACT=1 SHUFFLE_TESTS=877156326 bash scripts/list_dune_test_failures.sh
+
+## coverage: instrument the OCaml compiler library, run its Alcotest suite,
+## and produce both a terminal summary and browsable HTML. bisect_ppx_ng is
+## the OCaml-5.4-compatible fork; the original bisect_ppx 2.8.3 package is
+## constrained to ppxlib < 0.36 and cannot resolve in this toolchain.
+coverage:
+	@mkdir -p _build/coverage
+	@find _build/coverage -type f -name '*.coverage' -delete
+	@BISECT_FILE="$(CURDIR)/_build/coverage/bisect" ALCOTEST_COMPACT=1 \
+		dune runtest --force --instrument-with bisect_ppx_ng
+	@bisect-ppx-report summary --coverage-path _build/coverage --per-file --expect lib/
+	@bisect-ppx-report html --coverage-path _build/coverage --expect lib/ \
+		--tree --title 'Takibi compiler coverage' -o _build/coverage/html
+	@echo "HTML report: $(CURDIR)/_build/coverage/html/index.html"
 
 ## langcheck: verify that all source files contain only ASCII characters.
 ## Repo-wide (kernel/, examples/, the compiler itself), so this is the one

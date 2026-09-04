@@ -20,7 +20,7 @@
  (version 0.1.0)
  (synopsis "Takibi Language")
  (description "Takibi Language")
- (depends ocaml llvm)
+ (depends ocaml llvm bisect_ppx_ng)
  (tags
   ("language" "compiler")))
 
