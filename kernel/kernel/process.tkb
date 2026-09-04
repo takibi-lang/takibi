@@ -890,9 +890,35 @@ fn scheduled_process_record_state(slot: usize) -> ProcessSlotState
     return scheduled_process_record_at(slot).state;
 }
 
+// The same two questions asked through a HANDLE, which carries the
+// generation the slot-taking pair above cannot check.
+//
+// GitHub issue #492's third acceptance line is "no call site that holds a
+// handle passes only its slot", and these two accessors were where most of
+// them were: seventeen of the twenty state reads and six of the seven
+// wait-reason reads had a ProcessHandle in scope and passed `X.pool_index`.
+// Writing `.pool_index` at a call site is what discarding a generation looks
+// like, and it looks like nothing.
+//
+// Both go through scheduled_process_record_of, so a stale handle is COUNTED
+// on the existing `process invariant: STALE HANDLE READS` line rather than
+// refused -- the same ship-the-counter-first rule that accessor was added
+// under. The slot-taking forms stay for the callers that genuinely never had
+// a handle: a slot from scheduled_process_slot_for_pid, the teardown sweep's
+// scan, and the crash paths.
+fn scheduled_process_state_of(handle: ProcessHandle) -> ProcessSlotState
+        !{unsafe} {
+    return scheduled_process_record_of(handle).state;
+}
+
 fn scheduled_process_record_wait_reason(slot: usize) -> ProcessWaitReason
         !{unsafe} {
     return scheduled_process_record_at(slot).wait_reason;
+}
+
+fn scheduled_process_wait_reason_of(handle: ProcessHandle) -> ProcessWaitReason
+        !{unsafe} {
+    return scheduled_process_record_of(handle).wait_reason;
 }
 
 // GitHub issue #392: kernel/kernel/syscall.tkb's two per-process values,
@@ -1170,9 +1196,15 @@ fn scheduled_process_set_command_line(slot: usize, value: []u8,
     record.command_line_length = length;
 }
 
-private fn scheduled_process_copy_command_line(parent: usize, child: usize)
-        !{unsafe} {
-    let source: *ProcessRecord = scheduled_process_record_at(parent);
+// The parent as a HANDLE and the child as a slot, which looks asymmetric
+// and is not. GitHub issue #492: the one caller holds a ProcessHandle for
+// the parent, so the generation is there to be spent; the child arrives as
+// a ScheduledProcessOwner from the allocation that just produced it, and an
+// owner is a linear proof of THAT allocation -- strictly stronger than a
+// generation compare, so record_at is the right read for it.
+private fn scheduled_process_copy_command_line(parent: ProcessHandle,
+                                               child: usize) !{unsafe} {
+    let source: *ProcessRecord = scheduled_process_record_of(parent);
     let destination: *ProcessRecord = scheduled_process_record_at(child);
     destination.command_line_length = source.command_line_length;
     for index: usize in 0..<512 {
@@ -2031,7 +2063,7 @@ fn process_run_guard_discard_unlocked(
 fn scheduled_process_ready_take(guard: borrow ProcessRunGuard[lock],
                                 handle: ProcessHandle)
         -> ScheduledProcessReadyTakeResult {
-    if (scheduled_process_record_state(handle.pool_index) !=
+    if (scheduled_process_state_of(handle) !=
             ProcessSlotState::Ready) {
         return ScheduledProcessReadyTakeResult::Missing;
     }
@@ -2046,7 +2078,7 @@ fn scheduled_process_ready_take(guard: borrow ProcessRunGuard[lock],
 
 fn scheduled_process_exited_take(handle: ProcessHandle)
         -> ScheduledProcessExitedTakeResult {
-    if (scheduled_process_record_state(handle.pool_index) !=
+    if (scheduled_process_state_of(handle) !=
             ProcessSlotState::Exited) {
         return ScheduledProcessExitedTakeResult::Missing;
     }
@@ -2062,7 +2094,7 @@ fn scheduled_process_exited_take(handle: ProcessHandle)
 fn scheduled_process_running_take(guard: borrow ProcessRunGuard[lock],
                                   handle: ProcessHandle)
         -> ScheduledProcessRunningTakeResult {
-    if (scheduled_process_record_state(handle.pool_index) !=
+    if (scheduled_process_state_of(handle) !=
             ProcessSlotState::Running) {
         return ScheduledProcessRunningTakeResult::Missing;
     }
@@ -2077,7 +2109,7 @@ fn scheduled_process_running_take(guard: borrow ProcessRunGuard[lock],
 
 fn scheduled_process_blocked_take(handle: ProcessHandle)
         -> ScheduledProcessBlockedTakeResult {
-    if (scheduled_process_record_state(handle.pool_index) !=
+    if (scheduled_process_state_of(handle) !=
             ProcessSlotState::Blocked) {
         return ScheduledProcessBlockedTakeResult::Missing;
     }
@@ -3250,7 +3282,7 @@ private fn kernel_process_next_ready(from: ProcessHandle)
         remaining = remaining - 1;
         cursor = kernel_process_next_successor(cursor, root);
         if (scheduled_process_same_slot(cursor, from) == false &&
-            scheduled_process_record_state(cursor.pool_index) ==
+            scheduled_process_state_of(cursor) ==
                 ProcessSlotState::Ready) {
             return ProcessNextReadyResult::Next(cursor);
         }
@@ -3344,13 +3376,13 @@ fn kernel_process_exit_would_strand() -> bool {
     if (scheduled_process_handle_matches(parent) == false) { return false; }
     // A parent already waiting for this exit is woken BY it, so it counts
     // as somewhere to go even though it is blocked right now.
-    if (scheduled_process_record_state(parent.pool_index) ==
+    if (scheduled_process_state_of(parent) ==
             ProcessSlotState::Ready) {
         return false;
     }
-    if (scheduled_process_record_state(parent.pool_index) ==
+    if (scheduled_process_state_of(parent) ==
             ProcessSlotState::Blocked &&
-        scheduled_process_record_wait_reason(parent.pool_index) ==
+        scheduled_process_wait_reason_of(parent) ==
             ProcessWaitReason::ChildExit) {
         return false;
     }
@@ -4121,9 +4153,9 @@ fn kernel_process_net_wake_all() !{interrupt, unsafe} {
     let mut steps: usize = scheduled_process_pool_live_count() + 1;
     while (steps != 0) {
         steps = steps - 1;
-        if (scheduled_process_record_state(cursor.pool_index) ==
+        if (scheduled_process_state_of(cursor) ==
                 ProcessSlotState::Blocked &&
-            scheduled_process_record_wait_reason(cursor.pool_index) ==
+            scheduled_process_wait_reason_of(cursor) ==
                 ProcessWaitReason::NetRx) {
             match scheduled_process_blocked_take(cursor) {
                 ScheduledProcessBlockedTakeResult::Missing => {}
@@ -4223,9 +4255,9 @@ fn kernel_process_uart_wake(value: usize)
             if (scheduled_process_handle_matches(candidate) == false) {
                 scanning = 0;
             } else {
-                if (scheduled_process_record_state(candidate.pool_index) ==
+                if (scheduled_process_state_of(candidate) ==
                         ProcessSlotState::Blocked &&
-                    scheduled_process_record_wait_reason(candidate.pool_index) ==
+                    scheduled_process_wait_reason_of(candidate) ==
                         ProcessWaitReason::UartRx) {
                     waiter = candidate;
                     found = true;
@@ -4268,10 +4300,10 @@ fn kernel_process_uart_wake(value: usize)
             if (scheduled_process_handle_matches(candidate) == false) {
                 climbing = false;
             } else {
-                if (scheduled_process_record_state(candidate.pool_index) ==
+                if (scheduled_process_state_of(candidate) ==
                         ProcessSlotState::Blocked &&
-                    scheduled_process_record_wait_reason(
-                        candidate.pool_index) == ProcessWaitReason::UartRx) {
+                    scheduled_process_wait_reason_of(candidate) ==
+                        ProcessWaitReason::UartRx) {
                     waiter = candidate;
                     found = true;
                 }
@@ -4300,9 +4332,9 @@ fn kernel_process_uart_wake(value: usize)
         let mut steps: usize = scheduled_process_pool_live_count() + 1;
         while (steps != 0 && found == false) {
             steps = steps - 1;
-            if (scheduled_process_record_state(cursor.pool_index) ==
+            if (scheduled_process_state_of(cursor) ==
                     ProcessSlotState::Blocked &&
-                scheduled_process_record_wait_reason(cursor.pool_index) ==
+                scheduled_process_wait_reason_of(cursor) ==
                     ProcessWaitReason::UartRx) {
                 waiter = cursor;
                 found = true;
@@ -4373,11 +4405,11 @@ fn kernel_process_uart_record_parent_progress()
     let mut parent: ProcessHandle = execution_here().current_handle;
     let mut child: ProcessHandle =
         scheduled_process_record_of(parent).first_child;
-    if (scheduled_process_record_state(parent.pool_index) !=
+    if (scheduled_process_state_of(parent) !=
             ProcessSlotState::Running ||
-        scheduled_process_record_state(child.pool_index) !=
+        scheduled_process_state_of(child) !=
             ProcessSlotState::Blocked ||
-        scheduled_process_record_wait_reason(child.pool_index) !=
+        scheduled_process_wait_reason_of(child) !=
             ProcessWaitReason::UartRx) {
         return ProcessUartProgressResult::Invalid;
     }
@@ -4712,8 +4744,7 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
         ScheduledPooledProcessAllocResult::Allocated(pooled) => {
             let mut child: ProcessHandle =
                 scheduled_pooled_process_handle(pooled);
-            scheduled_process_copy_command_line(parent.pool_index,
-                                                child.pool_index);
+            scheduled_process_copy_command_line(parent, child.pool_index);
             // GitHub issue #437: push at the HEAD of the sibling list.
             // O(1), and with one child it leaves first_child naming that
             // child and no sibling -- the shape every existing view was
@@ -5112,9 +5143,9 @@ fn kernel_process_child_exit(status: usize) -> usize {
     // child. Thus every child-based trace and successor decision happens
     // while the child is live, and another core cannot run the parent and
     // observe the same zombie between delivery and reap.
-    if (scheduled_process_record_state(parent.pool_index) ==
+    if (scheduled_process_state_of(parent) ==
             ProcessSlotState::Blocked &&
-        scheduled_process_record_wait_reason(parent.pool_index) ==
+        scheduled_process_wait_reason_of(parent) ==
             ProcessWaitReason::ChildExit) {
         let parent_guard = process_run_lock();
         match scheduled_process_blocked_take(parent) {
@@ -5252,7 +5283,7 @@ private fn kernel_process_first_zombie_of(slot: usize)
         if (scheduled_process_handle_matches(cursor) == false) {
             return ProcessNextReadyResult::Missing;
         }
-        if (scheduled_process_record_state(cursor.pool_index) ==
+        if (scheduled_process_state_of(cursor) ==
                 ProcessSlotState::Exited) {
             return ProcessNextReadyResult::Next(cursor);
         }
@@ -5372,7 +5403,7 @@ private fn kernel_process_has_live_child_of(slot: usize) -> bool {
     while (remaining != 0) {
         remaining = remaining - 1;
         if (scheduled_process_handle_matches(cursor) == false) { return false; }
-        if (scheduled_process_record_state(cursor.pool_index) !=
+        if (scheduled_process_state_of(cursor) !=
                 ProcessSlotState::Exited) {
             return true;
         }
@@ -5427,7 +5458,7 @@ private fn kernel_process_zombie_of_pid(slot: usize, pid: usize)
             return ProcessNextReadyResult::Missing;
         }
         if (scheduled_process_pid_of_handle(cursor) == pid &&
-            scheduled_process_record_state(cursor.pool_index) ==
+            scheduled_process_state_of(cursor) ==
                 ProcessSlotState::Exited) {
             return ProcessNextReadyResult::Next(cursor);
         }
@@ -5609,8 +5640,7 @@ fn kernel_process_clone_evidence() -> bool {
            scheduled_process_record_of(execution_here().current_handle)
                .has_first_child ==
                false &&
-           scheduled_process_record_state(
-               execution_here().current_handle.pool_index) ==
+           scheduled_process_state_of(execution_here().current_handle) ==
                ProcessSlotState::Running &&
            scheduled_process_record_of(execution_here().current_handle)
                .saved_sp !=
