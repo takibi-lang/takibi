@@ -79,6 +79,10 @@ ATOMIC_ALLOWED = {
     "kernel/pid_contention_evidence.tkb": "two-core contention probe",
     "kernel/tag_contention_evidence.tkb": "two-core contention probe",
     "kernel/schedule_contention_evidence.tkb": "two-core contention probe",
+    "kernel/occupancy_drain_evidence.tkb":
+        "GitHub issue #508's two-core probe for occupancy_drain's give-up "
+        "path; the words it holds are the handshake with the core that "
+        "occupies the region",
     "lib/occupancy.tkb":
         "GitHub issue #479: \"no other core is inside this region\" as a "
         "linear value. Each core writes ONLY its own word, so there is no "

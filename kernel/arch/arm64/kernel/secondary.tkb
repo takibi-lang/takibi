@@ -174,6 +174,13 @@ fn kernel_secondary_main(context: usize) {
             if (schedule_contention_is_armed()) {
                 schedule_contention_secondary_run();
             }
+            // GitHub issue #508: the one probe here that is not about a
+            // subsystem. It holds kernel/lib/occupancy.tkb's region open so
+            // core 0's drain has to give up, which is the branch of that
+            // primitive no boot had ever executed.
+            if (occupancy_drain_is_armed()) {
+                occupancy_drain_secondary_run();
+            }
             wfi();
         }
     }

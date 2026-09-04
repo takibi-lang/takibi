@@ -1,0 +1,236 @@
+// GitHub issue #508: does kernel/lib/occupancy.tkb's give-up path work?
+//
+// `occupancy_drain` has two outcomes. `Empty(proof)` runs on every boot,
+// because every probe that tears down what it raced for ends with one.
+// `Busy` had never executed, on QEMU or on RPi5 -- so the branch that
+// exists precisely for the situation where something has gone wrong was
+// the branch with no evidence behind it. That is the wrong way round: a
+// give-up path is worth having only if it works when the thing it guards
+// against actually happens, and by then nobody is in a position to debug
+// it.
+//
+// It becomes load-bearing with issue #504, which proposes this token as
+// the mechanism DDB and the page allocator both accept in place of a
+// lock. `Busy` then means "a core did not stop", and a debugger has to do
+// something correct with it.
+//
+// WHAT THIS PROBE MAKES HAPPEN
+//
+// The secondary enters the region and STAYS, holding it until this core
+// says otherwise. So the first drain cannot succeed, whatever its spin
+// bound is -- which is the point, and the reason this probe is not
+// timing-sensitive on either target. A test that made the drain expire by
+// racing it would be a different spin count on RPi5 than on QEMU and would
+// be exactly the kind of load-dependent verdict issue #510 was about.
+//
+// Then this core releases the secondary, waits for it to have provably
+// left, and drains again with the SAME bound. Same call, same number,
+// opposite answer, and only the second one produces a proof -- which is
+// what "the caller refuses to tear down on Busy" means when the refusal is
+// a type rather than a branch.
+//
+// WHAT IT ASSERTS, AND WHAT THE COMPILER ASSERTS INSTEAD
+//
+// The teardown below takes `borrow Quiesced[region]`, so the Busy arm
+// CANNOT call it: there is no proof in scope to pass. That is a compile-
+// time property and a boot cannot observe it, so the runtime stand-in is a
+// count -- teardowns must be exactly one across two drains. A change that
+// made Busy proceed anyway would have to mint a proof from somewhere, and
+// this counter says whether it did.
+//
+// Current limitations:
+// - IT PROVES THE BOUND EXPIRES, not that the bound is well chosen. The
+//   secondary holds the region for as long as it takes, so this says
+//   nothing about whether SCHEDULE_CONTENTION_DRAIN_SPINS is large enough
+//   for a core that is merely slow. That is a different question and needs
+//   a different probe.
+// - IT DOES NOT COVER A CORE THAT NEVER LEAVES. This one always leaves,
+//   because the boot continues afterwards. A wedged core is the case the
+//   `Busy` report is FOR, and the honest position is that this probe
+//   exercises the mechanism, not the emergency.
+// - ONE REGION, private to this file, so a failure names the primitive
+//   rather than whatever else shares a live instance -- the same reason
+//   every sibling probe owns its own instance.
+
+use "kernel/lib/occupancy.tkb";
+use "kernel/lib/execution_model.tkb";
+
+// Any finite number works, because the secondary holds the region until
+// released. Small on purpose: the first drain is EXPECTED to expire, and
+// spending a million iterations to learn that costs boot time on the
+// board for nothing.
+const OCCUPANCY_PROBE_DRAIN_SPINS: usize = 4096;
+
+private let mut occupancy_probe_region: Occupancy;
+private let mut occupancy_probe_armed: usize;
+// A LATCH, set by the secondary when it is inside and never cleared by it.
+// GitHub issue #510: a level flag that the other core clears on its way
+// out cannot answer "was it ever there", which is the question a report
+// that has to tell a harness fault from a kernel one is asking.
+private let mut occupancy_probe_entered: usize;
+private let mut occupancy_probe_release: usize;
+private let mut occupancy_probe_left: usize;
+private let mut occupancy_probe_teardowns: usize;
+
+private fn occupancy_probe_armed_address() -> usize {
+    return (&occupancy_probe_armed) as usize;
+}
+
+private fn occupancy_probe_entered_address() -> usize {
+    return (&occupancy_probe_entered) as usize;
+}
+
+private fn occupancy_probe_release_address() -> usize {
+    return (&occupancy_probe_release) as usize;
+}
+
+private fn occupancy_probe_left_address() -> usize {
+    return (&occupancy_probe_left) as usize;
+}
+
+fn occupancy_drain_is_armed() -> bool !{unsafe} {
+    return unsafe {
+        atomic_load_acquire(occupancy_probe_armed_address())
+    } == 1;
+}
+
+// Enter, announce, and HOLD. Linear, so the leave is checked on every path
+// out of this function including the disarmed one -- which is the half of
+// the protocol a bare flag is worst at, and the half this file exists to
+// exercise.
+fn occupancy_drain_secondary_run() !{unsafe} {
+    let visit = occupancy_enter(&occupancy_probe_region);
+    unsafe { atomic_store_release(occupancy_probe_entered_address(), 1); }
+    // Held until core 0 says otherwise, or until it gives up on this probe
+    // entirely -- a secondary that spun here after an abandoned probe would
+    // hold the region for the rest of the boot.
+    while (unsafe {
+               atomic_load_acquire(occupancy_probe_release_address())
+           } == 0 &&
+           unsafe {
+               atomic_load_acquire(occupancy_probe_armed_address())
+           } == 1) { }
+    occupancy_leave(visit, &occupancy_probe_region);
+    unsafe { atomic_store_release(occupancy_probe_left_address(), 1); }
+}
+
+private fn occupancy_drain_report(stage: *u8, busy: usize, empty: usize)
+        !{unsafe} {
+    kernel_boot_log("occupancy drain stage: ");
+    kernel_boot_log(stage);
+    kernel_boot_log("\n");
+    kernel_boot_log("occupancy drain counts: entered=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(occupancy_probe_entered_address())
+    });
+    kernel_boot_log(" left=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(occupancy_probe_left_address())
+    });
+    kernel_boot_log(" busy=");
+    uart_put_udec(busy);
+    kernel_boot_log(" empty=");
+    uart_put_udec(empty);
+    kernel_boot_log(" teardowns=");
+    uart_put_udec(occupancy_probe_teardowns);
+    kernel_boot_log(" spins=");
+    uart_put_udec(OCCUPANCY_PROBE_DRAIN_SPINS);
+    kernel_boot_log("\n");
+}
+
+// The teardown, and the reason this file has one: it CANNOT be called
+// without a proof that no other core is inside the region. The Busy arm
+// has no proof to pass, so its refusal is the absence of a call rather
+// than a check somebody has to remember.
+private fn occupancy_probe_teardown(proof: borrow Quiesced[region]) {
+    occupancy_probe_teardowns = occupancy_probe_teardowns + 1;
+}
+
+fn occupancy_drain_probe() -> bool !{unsafe} {
+    unsafe {
+        atomic_store_release(occupancy_probe_entered_address(), 0);
+        atomic_store_release(occupancy_probe_release_address(), 0);
+        atomic_store_release(occupancy_probe_left_address(), 0);
+    }
+    occupancy_probe_teardowns = 0;
+    unsafe { atomic_store_release(occupancy_probe_armed_address(), 1); }
+
+    // Bounded in TIME here, unlike the drain itself: this file has a clock
+    // and occupancy.tkb deliberately does not.
+    let entry_window: i64 = read_cntfrq() >> 2;
+    let entry_start: i64 = read_cntpct();
+    let mut entered: bool = false;
+    while (entered == false && read_cntpct() - entry_start < entry_window) {
+        if (unsafe {
+                atomic_load_acquire(occupancy_probe_entered_address())
+            } == 1) {
+            entered = true;
+        }
+    }
+    if (entered == false) {
+        unsafe { atomic_store_release(occupancy_probe_armed_address(), 0); }
+        // The distinction issue #508 asked for. A drain that comes back
+        // Empty because nothing was ever inside is a HARNESS fault and
+        // reads identically to a working give-up unless the probe says so
+        // -- this is the arm that says so, before any drain has run.
+        occupancy_drain_report("secondary-never-entered" as *u8, 0, 0);
+        return false;
+    }
+
+    // Drain one: the region is occupied and stays occupied, so the bound
+    // must expire.
+    let mut busy_seen: usize = 0;
+    let mut empty_seen: usize = 0;
+    match occupancy_drain(&occupancy_probe_region,
+                          OCCUPANCY_PROBE_DRAIN_SPINS) {
+        OccupancyDrainResult::Busy => { busy_seen = busy_seen + 1; }
+        OccupancyDrainResult::Empty(proof) => {
+            // The secondary left without being asked, which no path in this
+            // file does. Reported rather than ignored, and the proof is
+            // still spent on the teardown so the count below tells the two
+            // apart: an early drain that tore down is a different failure
+            // from one that did not.
+            empty_seen = empty_seen + 1;
+            occupancy_probe_teardown(proof);
+            quiesced_release(proof);
+        }
+    }
+
+    // Let it go, and wait until it has provably left -- not for a duration,
+    // because "long enough" is the assumption this whole file is about.
+    unsafe { atomic_store_release(occupancy_probe_release_address(), 1); }
+    let leave_window: i64 = read_cntfrq() >> 2;
+    let leave_start: i64 = read_cntpct();
+    let mut left: bool = false;
+    while (left == false && read_cntpct() - leave_start < leave_window) {
+        if (unsafe {
+                atomic_load_acquire(occupancy_probe_left_address())
+            } == 1) {
+            left = true;
+        }
+    }
+    if (left == false) {
+        unsafe { atomic_store_release(occupancy_probe_armed_address(), 0); }
+        occupancy_drain_report("secondary-never-left" as *u8, busy_seen,
+                               empty_seen);
+        return false;
+    }
+
+    // Drain two: same call, same bound, and now it must succeed.
+    match occupancy_drain(&occupancy_probe_region,
+                          OCCUPANCY_PROBE_DRAIN_SPINS) {
+        OccupancyDrainResult::Busy => { busy_seen = busy_seen + 1; }
+        OccupancyDrainResult::Empty(proof) => {
+            empty_seen = empty_seen + 1;
+            occupancy_probe_teardown(proof);
+            quiesced_release(proof);
+        }
+    }
+    unsafe { atomic_store_release(occupancy_probe_armed_address(), 0); }
+
+    occupancy_drain_report("complete" as *u8, busy_seen, empty_seen);
+    // One of each, in that order, and exactly one teardown -- the Busy arm
+    // had no proof to spend, which is the property the token exists for.
+    return busy_seen == 1 && empty_seen == 1 &&
+           occupancy_probe_teardowns == 1;
+}

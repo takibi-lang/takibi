@@ -76,7 +76,7 @@ build; the boundaries are what matter.
 |---|---|---|---|---|
 | `_start` | `0x00200000` | `0x40000000` | linker script `.` assignment | CHECKED (ELF) |
 | `__bss_start` | `0x004ec000` | `0x402ea000` | linker script `.bss` | CHECKED (ELF) |
-| `__bss_end` | `0x0055cc80` | `0x40362c30` | linker script `.bss` | CHECKED (ELF) |
+| `__bss_end` | `0x0055ccb0` | `0x40362c60` | linker script `.bss` | CHECKED (ELF) |
 | `boot_stack_run_bottom` | `0x00560000` | `0x40368000` | linker script `.stack` | CHECKED (ELF) |
 | `boot_stack_bottom` | `0x00564000` | `0x4036c000` | linker script `.stack` | CHECKED (ELF) |
 | `boot_stack_top` | `0x00568000` | `0x40370000` | linker script `.stack` | CHECKED (ELF) |

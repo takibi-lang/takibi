@@ -17,3 +17,5 @@ freelist contention stage: locked
 freelist contention: unlocked hands one index to both cores, a caller's lock stops it ok
 pool contention stage: complete
 pool contention: two cores cycling one pool, every allocation given back, no handle refused ok
+occupancy drain stage: complete
+occupancy drain: the second core held the region and the bounded drain gave up, then left and the same drain handed over a proof ok

@@ -19,6 +19,7 @@ use "kernel/kernel/asid_contention_evidence.tkb";
 use "kernel/kernel/pid_contention_evidence.tkb";
 use "kernel/kernel/tag_contention_evidence.tkb";
 use "kernel/kernel/schedule_contention_evidence.tkb";
+use "kernel/kernel/occupancy_drain_evidence.tkb";
 
 must_use variant SecondaryBootResult {
     Started;
@@ -900,6 +901,14 @@ fn main() !{unsafe} {
                 kernel_boot_log("pool contention: two cores cycling one pool, every allocation given back, no handle refused ok\n");
             } else {
                 kernel_boot_log("pool contention: failed\n");
+            }
+            // GitHub issue #508: the give-up path of the token every probe
+            // above ends with, exercised on purpose rather than only in the
+            // emergency it exists for.
+            if (occupancy_drain_probe()) {
+                kernel_boot_log("occupancy drain: the second core held the region and the bounded drain gave up, then left and the same drain handed over a proof ok\n");
+            } else {
+                kernel_boot_log("occupancy drain: failed\n");
             }
         }
         SecondaryBootResult::UnexpectedStatus(status) => {

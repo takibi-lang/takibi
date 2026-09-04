@@ -175,6 +175,11 @@ wrong:
   holding it back lets it run every round and leave -- and an `active` flag is
   a LEVEL the secondary clears on its way out, so a primary polling that level
   reports a core that did all of its work as a core that never arrived.
+  A probe whose verdict is about a primitive's GIVE-UP path rather than about
+  overlap needs neither half: `kernel/kernel/occupancy_drain_evidence.tkb`
+  has the second core hold the region open and keep holding it, so the drain
+  it is testing cannot succeed whatever its bound is, and the counts come out
+  the same on QEMU and on the board.
 - **Every wait is bounded by the counter, never by a spin count.** A spin
   bound is a duration only if this core's speed is fixed, and on a busy host
   4096 empty iterations expire before the other core has been scheduled at
