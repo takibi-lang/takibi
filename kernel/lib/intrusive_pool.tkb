@@ -112,6 +112,16 @@ use "kernel/lib/locked_cell.tkb";
 //   a mutation is the caller's problem, exactly as it is for
 //   intrusive_pool_ref's; what changed is that getting the pointer at all
 //   now requires having looked.
+// - intrusive_pool_probe_slot ANSWERS FOR WHOEVER IS THERE. It takes an
+//   address, so it cannot ask which occupant the caller meant: a slot that
+//   was freed and reallocated is Live, and the payload it returns belongs
+//   to the new one. That is right for a walk, which found the slot by
+//   scanning and wants whatever is in it. A caller holding a
+//   (slot, generation) pair must use intrusive_pool_probe_handle, which is
+//   told the expectation and refuses on mismatch (issue #492). The
+//   mismatches are COUNTED per pool -- intrusive_pool_recycled_handle_count
+//   -- and not yet refused anywhere but at that entry point, because the
+//   number is still being learned.
 // - T must be at least pointer-sized and must not need stronger than
 //   8-byte alignment, both because the free-chain link shares its
 //   storage and because `[u8; N]` contributes no alignment of its own
@@ -509,6 +519,15 @@ generic struct IntrusivePool(T: type) {
     double_remove_count: usize;
     foreign_handle_count: usize;
     released_chunk_count: usize;
+    // GitHub issue #492: how many times a caller named this pool's slot
+    // with a generation that is not the one living there NOW, while
+    // something else is. The dangerous refusal, kept apart from the free
+    // and foreign ones: a slot whose occupant has been recycled answers
+    // every address-shaped question correctly and is a different object.
+    //
+    // Per POOL, the cheap axis this file's header argues for and the same
+    // one double_remove_count and foreign_handle_count already take.
+    recycled_handle_count: usize;
 }
 
 // GitHub issue #345: `pool_id` is the erased ADDRESS of the pool that
@@ -914,6 +933,7 @@ fn intrusive_pool_init_retaining(T: type, pool: &mut IntrusivePool(T) @ pool_id,
     pool.double_remove_count = 0;
     pool.foreign_handle_count = 0;
     pool.released_chunk_count = 0;
+    pool.recycled_handle_count = 0;
 }
 
 // Both derived from sizeof after monomorphization, never supplied by a
@@ -1668,11 +1688,13 @@ fn intrusive_pool_matches(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                           slot_address: IntrusiveSlotAddress,
                           generation: usize)
         -> bool !{unsafe} {
-    if (generation == 0) { return false; }
-    if (intrusive_pool_slot_is_valid(pool, slot_address.raw) == false) { return false; }
-    return intrusive_slot_at(pool, slot_address.raw).generation == generation;
+    return intrusive_pool_matches_untrusted(
+        pool, slot_address.raw, generation);
 }
 
+// The same question asked about an address this pool has not vouched for.
+// Both entry points land here, so GitHub issue #492's recycled count below
+// is kept in one place rather than once per caller-facing signature.
 fn intrusive_pool_matches_untrusted(
         T: type, pool: &mut IntrusivePool(T) @ pool_id,
         slot_address: usize, generation: usize) -> bool !{unsafe} {
@@ -1680,7 +1702,48 @@ fn intrusive_pool_matches_untrusted(
     if (intrusive_pool_slot_is_valid(pool, slot_address) == false) {
         return false;
     }
-    return intrusive_slot_at(pool, slot_address).generation == generation;
+    let living: usize = intrusive_slot_at(pool, slot_address).generation;
+    if (living == generation) { return true; }
+    // GitHub issue #492: the RECYCLED case, counted apart from the others.
+    // A false here has three causes and they are not the same size. A zero
+    // generation is a slot nobody occupies, so the caller's handle names
+    // something that is simply gone; an invalid address is not this pool's
+    // at all. But a live generation that differs means the slot has been
+    // freed and handed out again, the caller is holding a name for the
+    // PREVIOUS occupant, and every address-shaped question about it still
+    // answers correctly. That is the one that reads the wrong object
+    // rather than nothing, and nobody has ever had the number.
+    if (living != 0) {
+        pool.recycled_handle_count = pool.recycled_handle_count + 1;
+    }
+    return false;
+}
+
+// The generation-checked probe. Same shape as intrusive_pool_probe_slot,
+// and the difference is the whole of GitHub issue #492: this one is told
+// which occupant the caller meant.
+//
+// probe_slot takes a bare address, reads whatever generation is stored
+// there, and mints a view if it is nonzero -- so a slot that was freed and
+// immediately reallocated answers Live and the caller receives the NEW
+// occupant's payload, silently. Every consumer that carries a
+// (slot, generation) pair -- ProcessHandle, UnifiedObjectHandle, a TCP
+// connection's transport pair, a process image, an fd block -- has the
+// generation in its hand and had no way to spend it on the lookup.
+//
+// probe_slot stays, and is right for the callers that legitimately have no
+// expectation: a WALK found the slot by scanning and the occupant it finds
+// is the answer, not a mismatch.
+fn intrusive_pool_probe_handle(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                               slot_address: usize, generation: usize)
+        -> IntrusiveSlotProbe[pool_id] !{unsafe} {
+    if (intrusive_pool_matches_untrusted(
+            pool, slot_address, generation) == false) {
+        return IntrusiveSlotProbe::NoPayload;
+    }
+    let mut address: IntrusiveSlotAddress = { slot_address };
+    let mut minted: IntrusiveSlotView[pool_id] = { address, generation };
+    return IntrusiveSlotProbe::Live(minted);
 }
 
 // The only raw-to-slot conversion: it succeeds only for the exact live
@@ -1930,6 +1993,15 @@ fn intrusive_pool_double_remove_count(T: type, pool: &mut IntrusivePool(T) @ poo
 
 fn intrusive_pool_foreign_handle_count(T: type, pool: &mut IntrusivePool(T) @ pool_id) -> usize {
     return pool.foreign_handle_count;
+}
+
+// GitHub issue #492: how many lookups named a slot whose occupant had been
+// recycled. Reported rather than asserted while the number is being
+// learned, on this tree's ship-the-counter-first rule.
+fn intrusive_pool_recycled_handle_count(T: type,
+                                        pool: &mut IntrusivePool(T) @ pool_id)
+        -> usize {
+    return pool.recycled_handle_count;
 }
 
 // GitHub issue #352: how many times a popped free-chain entry failed the
@@ -2270,8 +2342,47 @@ fn intrusive_pool_boot_probe() -> bool !{unsafe} {
     };
     let recycled: bool =
         intrusive_slot_address_equal(intrusive_owner_slot(a1), slot0);
+    let recycled_before: usize = intrusive_pool_recycled_handle_count(&pool);
     let stale_refused: bool =
         intrusive_pool_matches(&pool, slot0, generation0) == false;
+
+    // GitHub issue #492: the two probes disagree about this slot, and the
+    // disagreement is the whole issue. probe_slot has only an address, finds
+    // a live generation there, and hands back the payload -- of the NEW
+    // occupant, silently. probe_handle is told which occupant was meant and
+    // refuses. Both halves are asserted: the first line says the unchecked
+    // path really does answer for a slot whose occupant changed, so if it is
+    // ever tightened this probe says so rather than passing while asserting
+    // nothing.
+    let slot0_raw: usize = intrusive_slot_address_identity(slot0);
+    let mut slot_probe_answered_live: bool = false;
+    match intrusive_pool_probe_slot(&pool, slot0_raw) {
+        IntrusiveSlotProbe::NoPayload => {}
+        IntrusiveSlotProbe::Live(seen) => {
+            slot_probe_answered_live = true;
+            intrusive_view_drop(seen);
+        }
+    }
+    let mut handle_probe_refused: bool = false;
+    match intrusive_pool_probe_handle(&pool, slot0_raw, generation0) {
+        IntrusiveSlotProbe::NoPayload => { handle_probe_refused = true; }
+        IntrusiveSlotProbe::Live(wrong) => { intrusive_view_drop(wrong); }
+    }
+    // ...and refuses the stale NAME rather than the slot: the occupant that
+    // is really there is still reachable through its own generation.
+    let mut handle_probe_current: bool = false;
+    match intrusive_pool_probe_handle(&pool, slot0_raw,
+                                      intrusive_owner_generation(a1)) {
+        IntrusiveSlotProbe::NoPayload => {}
+        IntrusiveSlotProbe::Live(now) => {
+            handle_probe_current = true;
+            intrusive_view_drop(now);
+        }
+    }
+    // Two refusals, and only the two: the matches() above and the handle
+    // probe. The probe of the current occupant must not have counted one.
+    let recycled_counted: bool =
+        intrusive_pool_recycled_handle_count(&pool) == recycled_before + 2;
     let removes_before: usize = intrusive_pool_double_remove_count(&pool);
     let stale = intrusive_owner_new(&pool, slot0, generation0);
     let g3 = intrusive_pool_lock(&pool);
@@ -2307,7 +2418,9 @@ fn intrusive_pool_boot_probe() -> bool !{unsafe} {
         released == 1 && page_allocator_live_count() == live_before;
 
     return stored_ok && removed_ok && removed_a1_ok && recycled &&
-           stale_refused && stale_counted && invariants_ok && pages_returned;
+           stale_refused && stale_counted && invariants_ok && pages_returned &&
+           slot_probe_answered_live && handle_probe_refused &&
+           handle_probe_current && recycled_counted;
 }
 
 // GitHub issue #479. The tag counter used to be this assertion's whole

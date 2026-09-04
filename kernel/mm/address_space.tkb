@@ -131,6 +131,13 @@ fn address_space_backing_missing_uses() -> usize {
     return address_space_backing_missing_count;
 }
 
+// GitHub issue #492: lookups that named a backing slot with the previous
+// occupant's generation.
+fn address_space_backing_recycled_handle_count() -> usize !{unsafe} {
+    if (address_space_backing_ready == false) { return 0; }
+    return intrusive_pool_recycled_handle_count(&address_space_backing_pool);
+}
+
 private fn address_space_backing_pool_init() {
     if (address_space_backing_ready) { return; }
     address_space_backing_ready = true;

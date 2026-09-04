@@ -755,8 +755,36 @@ fn tcp_connection_payload(address: usize) -> *TcpConnection !{unsafe} {
     }
 }
 
+// The connection an OWNER names, and the owner carries a generation, so
+// this asks the question the address-only accessor above cannot.
+//
+// GitHub issue #492: `tcp_connection_payload(owner.slot)` is what stood
+// here, and it threw away the half of the owner that makes the lookup safe.
+// A slot that was freed and reallocated answers Live to an address, so an
+// owner outliving its connection -- which is what the linear type exists to
+// prevent, and what a bug in that discipline would look like -- would have
+// been handed the NEW connection's payload and gone on writing into it.
+// The generation is right there in the owner; spending it costs one
+// comparison.
+//
+// The address-only form above stays and is right for its callers: the fd
+// table's stored address, the pool walk's cursor, and the two lock
+// operations that name a slot rather than an occupant. Those genuinely have
+// no expectation to check against.
 fn tcp_connection_of(owner: borrow TcpConnectionOwner[connection])
         -> *TcpConnection !{unsafe} {
+    // The check here and the payload lookup below validate the address
+    // twice, and that is the deliberate trade. Fusing them means calling
+    // intrusive_pool_probe_handle and laundering the view HERE, which adds
+    // a second declared liveness escape to this file for a pointer that
+    // already escapes once, one call down. One extra generation compare on
+    // a read path is cheaper than a second entry in the trusted-base
+    // inventory (scripts/check_liveness_proof_escapes.py).
+    if (intrusive_pool_matches_untrusted(&tcp_connection_pool, owner.slot,
+                                        owner.generation) == false) {
+        kernel_boot_log("tcp: connection owner names no live slot\n");
+        return &tcp_connection_absent_fallback;
+    }
     return tcp_connection_payload(owner.slot);
 }
 
@@ -886,6 +914,23 @@ fn tcp_connection_has_pending_read(address: usize) -> bool !{unsafe} {
 
 // "Is any connection still open" -- kernel/kernel/syscall.tkb's daemon
 // teardown check, which was a loop over TCP_CONNECTION_MAX array slots.
+// GitHub issue #492: lookups that named one of this file's pool slots with
+// the previous occupant's generation, across all three.
+fn tcp_recycled_handle_count() -> usize !{unsafe} {
+    let mut total: usize = 0;
+    if (tcp_connection_pool_ready) {
+        total = total +
+            intrusive_pool_recycled_handle_count(&tcp_connection_pool);
+    }
+    if (tcp_retx_pool_ready) {
+        total = total + intrusive_pool_recycled_handle_count(&tcp_retx_pool);
+    }
+    if (tcp_frame_pool_ready) {
+        total = total + intrusive_pool_recycled_handle_count(&tcp_frame_pool);
+    }
+    return total;
+}
+
 fn tcp_any_connection_open() -> bool !{unsafe} {
     let mut cursor: usize = intrusive_pool_first_slot(&tcp_connection_pool);
     while (cursor != 0) {

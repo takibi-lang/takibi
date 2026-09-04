@@ -383,6 +383,38 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
     // longer matches the slot's occupant. Counted, not refused, until the
     // number is known. Printed only when it happens, because zero is the
     // whole claim.
+    // GitHub issue #492: a lookup that named a slot with the PREVIOUS
+    // occupant's generation, summed over every pool that hands out a
+    // (slot, generation) pair. The dangerous half of a stale handle:
+    // "the occupant is gone" refuses on its own, while "the occupant was
+    // replaced" answers every address-shaped question correctly and is a
+    // different object.
+    //
+    // Printed only when it happens, because zero is the whole claim, and
+    // counted rather than refused while the number is being learned --
+    // kernel/lib/intrusive_pool.tkb's boot probe is what proves the counter
+    // is not vacuous.
+    let recycled_handle_total: usize =
+        scheduled_process_recycled_handle_count() +
+        unified_fd_recycled_handle_count() +
+        tcp_recycled_handle_count() +
+        address_space_backing_recycled_handle_count() +
+        process_image_recycled_handle_count();
+    if (recycled_handle_total != 0) {
+        kernel_boot_log("process invariant: RECYCLED HANDLE READS count=");
+        uart_put_udec(recycled_handle_total);
+        kernel_boot_log(" process=");
+        uart_put_udec(scheduled_process_recycled_handle_count());
+        kernel_boot_log(" fd=");
+        uart_put_udec(unified_fd_recycled_handle_count());
+        kernel_boot_log(" tcp=");
+        uart_put_udec(tcp_recycled_handle_count());
+        kernel_boot_log(" backing=");
+        uart_put_udec(address_space_backing_recycled_handle_count());
+        kernel_boot_log(" image=");
+        uart_put_udec(process_image_recycled_handle_count());
+        kernel_boot_log("\n");
+    }
     if (scheduled_process_stale_handle_reads_value() != 0) {
         kernel_boot_log("process invariant: STALE HANDLE READS count=");
         uart_put_udec(scheduled_process_stale_handle_reads_value());

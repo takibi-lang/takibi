@@ -720,6 +720,25 @@ private fn unified_object_refs_of(handle: UnifiedObjectHandle) -> usize
     return held;
 }
 
+// GitHub issue #492: lookups that named one of this file's pool slots with
+// the previous occupant's generation. Three pools here, added up, because a
+// caller of the summary wants "did any descriptor-side lookup name a
+// recycled slot", not which of the three.
+fn unified_fd_recycled_handle_count() -> usize !{unsafe} {
+    let mut total: usize = 0;
+    if (object_pool_ready) {
+        total = total + intrusive_pool_recycled_handle_count(&object_pool);
+    }
+    if (fd_block_pool_ready) {
+        total = total + intrusive_pool_recycled_handle_count(&fd_block_pool);
+    }
+    if (fd_context_pool_ready) {
+        total = total +
+            intrusive_pool_recycled_handle_count(&fd_context_pool);
+    }
+    return total;
+}
+
 fn unified_object_double_release_count() -> usize {
     return object_double_release_count;
 }

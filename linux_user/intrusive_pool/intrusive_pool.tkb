@@ -316,8 +316,15 @@ fn app_main() {
     // 88 -> 96 in issue #445: the pool now carries the word its spinlock
     // swaps. Per POOL, which is the axis this comparison is about -- the
     // number is 5440 on the other side because that one scales with the
-    // OBJECT COUNT, and 96 does not scale with anything. Six pools in the
+    // OBJECT COUNT, and it does not scale with anything. Six pools in the
     // kernel means 48 bytes bought a lock that excludes a second core.
+    //
+    // 96 -> 104 in issue #492: the count of lookups that named a slot with
+    // the PREVIOUS occupant's generation. Per pool rather than one global,
+    // because "which pool hands out stale names" is the whole question and
+    // a single number cannot answer it; ten pools in the kernel means 80
+    // bytes. This line is why the cost is a decision rather than a
+    // side effect.
     uart_puts("static bytes of bookkeeping for a 336-object pool -- growable: ");
     uart_print(sizeof(GrowablePool(usize, 168, 2, 336)));
     uart_puts(", intrusive: ");

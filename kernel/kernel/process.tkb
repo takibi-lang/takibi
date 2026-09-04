@@ -636,6 +636,14 @@ fn scheduled_process_record_missing_uses() -> usize {
     return scheduled_process_record_missing_count;
 }
 
+// GitHub issue #492: lookups that named this pool's slot with the previous
+// occupant's generation. The pool counts it; this only publishes it, so the
+// boot summary can add the pools up.
+fn scheduled_process_recycled_handle_count() -> usize !{unsafe} {
+    if (scheduled_process_pool_ready == false) { return 0; }
+    return intrusive_pool_recycled_handle_count(&scheduled_process_pool);
+}
+
 // Validated on every call, which is strictly more than the old
 // `{0..<KERNEL_PROCESS_MAX as usize}` refinement proved: a refinement said
 // the index named a real array element, never that a live process was in

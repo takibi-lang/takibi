@@ -367,6 +367,13 @@ fn process_image_root_fallback_uses() -> usize {
     return process_image_root_fallback_count;
 }
 
+// GitHub issue #492: lookups that named an image slot with the previous
+// occupant's generation.
+fn process_image_recycled_handle_count() -> usize !{unsafe} {
+    if (process_image_pool_ready == false) { return 0; }
+    return intrusive_pool_recycled_handle_count(&process_image_pool);
+}
+
 must_use variant ProcessImageTargetRootResult {
     Missing;
     Ready(usize);
