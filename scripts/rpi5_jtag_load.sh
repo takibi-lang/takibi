@@ -92,6 +92,22 @@ if [ "$SMP_CORES" = "2" ]; then
         exit 1
     fi
 fi
+ddb_breakpoint_test_address=""
+ddb_breakpoint_checkpoint_address=""
+if [ "${RPI5_ARM_KERNEL_DDB_BREAKPOINT:-0}" = "1" ]; then
+    ddb_breakpoint_test_address="0x$(llvm-nm-19 "$ELF" |
+        awk '$3=="kernel_ddb_breakpoint_test_enabled"{print $1; exit}')"
+    ddb_breakpoint_checkpoint_address="0x$(llvm-nm-19 "$ELF" |
+        awk '$3=="kernel_ddb_breakpoint_test_checkpoint"{print $1; exit}')"
+    if [ -z "${ddb_breakpoint_test_address#0x}" ] ||
+            [ -z "${ddb_breakpoint_checkpoint_address#0x}" ]; then
+        echo "error: DDB breakpoint test symbols absent from $ELF" >&2
+        exit 1
+    fi
+elif [ "${RPI5_ARM_KERNEL_DDB_BREAKPOINT:-0}" != "0" ]; then
+    echo "error: RPI5_ARM_KERNEL_DDB_BREAKPOINT must be 0 or 1" >&2
+    exit 1
+fi
 
 if [ -z "${entry_pc#0x}" ] || [ -z "${stack_top#0x}" ]; then
     echo "error: could not read entry point / stack_top from $ELF" >&2
@@ -193,6 +209,8 @@ LOAD_COMMANDS=(
     -c 'targets bcm2712.cpu3'
     -c 'halt'
     -c "load_image $ELF 0 elf"
+)
+LOAD_COMMANDS+=(
     -c 'targets bcm2712.cpu0'
     -c "reg sp $stack_top"
     -c 'reg x0 0x00100000'
@@ -200,6 +218,22 @@ LOAD_COMMANDS=(
     -c 'reg x2 0'
     -c 'reg x3 0'
     -c "reg pc $entry_pc"
+)
+if [ -n "$ddb_breakpoint_test_address" ]; then
+    # BSS zeroing happens after cpu0 starts, so a byte written immediately
+    # after load_image would be erased. Stop at the checkpoint first, then
+    # write through the already-halted cpu3 before releasing cpu0 again.
+    LOAD_COMMANDS+=(
+        -c "bp $ddb_breakpoint_checkpoint_address 4 hw"
+        -c 'resume'
+        -c 'wait_halt 30000'
+        -c 'targets bcm2712.cpu3'
+        -c "mwb $ddb_breakpoint_test_address 1"
+        -c 'targets bcm2712.cpu0'
+        -c "rbp $ddb_breakpoint_checkpoint_address"
+    )
+fi
+LOAD_COMMANDS+=(
     -c 'resume'
 )
 if [ "$SMP_CORES" = "2" ]; then

@@ -562,6 +562,7 @@ regression from the failure being investigated:
 
 ```bash
 make kernelcheck-ddb-qemu       # UART BREAK and software BRK, inspect, resume
+make kernelcheck-ddb-rpi5-software # physical software BRK compiler-frame walk
 make kernelcheck-oops-qemu      # fail-stop console and GDB crash-snapshot read
 make kernelcheck-qemu-debug     # full QEMU suite against the DWARF kernel
 make kernelcheck-rpi5           # includes the maintained physical DDB check
@@ -750,6 +751,16 @@ continues, and executes a shell command in the same boot. This verifies the
 process-wake and platform-BREAK records, fault recovery with the debugger
 environment intact, undamaged per-CPU reading, and resumed workload on the
 physical board.
+
+The RPi5 integration then performs a separate boot with an SWD hardware
+breakpoint at the deliberate software-BRK checkpoint. After boot-time BSS
+initialization, OpenOCD halts at the checkpoint, arms its test byte before the
+condition is evaluated, and resumes. DDB must report the explicit assembly
+bridge, one or more return PCs within the linker-owned compiler-generated text
+range, and the terminal boot-assembly boundary. `continue` must reach a shell
+marker in the same boot. This focused path prevents the ordinary asynchronous
+UART BREAK's root-only or user-boundary walk from being mistaken for hardware
+coverage of compiler frame chaining.
 
 When enabled for a boot test, the process layer records a fixed 16-entry,
 allocation-free lifecycle ring: fork, exec prepare/commit, schedule, block,
