@@ -14328,6 +14328,8 @@ let codegen_tests = [
        ignore (gen_codegen
          "enum DebugMetaState: u8 { Idle = 0; Busy = 3; }
           variant DebugMetaResult { Empty; Byte(u8); Wide(u64); }
+          struct DebugMetaWords { first: u64; second: u64; third: u64; }
+          variant DebugMetaLarge { Empty; Words(DebugMetaWords); }
           const DebugMetaEventStart: usize = 7;
           fn debug_meta_use(value: DebugMetaResult) -> usize {
             match value {
@@ -14342,7 +14344,9 @@ let codegen_tests = [
        Alcotest.(check string) "sidecar query does not change generated code"
          ir_before ir_after;
        Alcotest.(check bool) "format is versioned" true
-         (contains_substring metadata "\"format\":1");
+         (contains_substring metadata "\"format\":2");
+       Alcotest.(check bool) "target is explicit" true
+         (contains_substring metadata "\"target\":\"aarch64-none-elf\"");
        Alcotest.(check bool) "enum underlying representation" true
          (contains_substring metadata
            "\"name\":\"DebugMetaState\",\"underlying\":\"u8\",\"size\":1");
@@ -14351,6 +14355,12 @@ let codegen_tests = [
        Alcotest.(check bool) "variant target size and tag layout" true
          (contains_substring metadata
            "\"name\":\"DebugMetaResult\",\"size\":16,\"tag_offset\":0,\"tag_size\":4");
+       Alcotest.(check bool) "small variant return registers are compiler-owned" true
+         (contains_substring metadata
+           "\"return_abi\":{\"kind\":\"registers\",\"return_address_register\":\"x30\",\"parts\":[{\"register\":\"x0\",\"offset\":0,\"size\":4},{\"register\":\"x1\",\"offset\":4,\"size\":1},{\"register\":\"x2\",\"offset\":8,\"size\":8}]");
+       Alcotest.(check bool) "large variant scalar return registers are compiler-owned" true
+         (contains_substring metadata
+           "\"name\":\"DebugMetaLarge\",\"size\":32,\"tag_offset\":0,\"tag_size\":4,\"return_abi\":{\"kind\":\"registers\",\"return_address_register\":\"x30\",\"parts\":[{\"register\":\"x0\",\"offset\":0,\"size\":4},{\"register\":\"x1\",\"offset\":8,\"size\":8},{\"register\":\"x2\",\"offset\":16,\"size\":8},{\"register\":\"x3\",\"offset\":24,\"size\":8}]");
        Alcotest.(check bool) "variant payload uses target offset" true
          (contains_substring metadata
            "\"name\":\"Wide\",\"tag\":2,\"payload\":{\"type\":\"u64\",\"offset\":8,\"size\":8}");

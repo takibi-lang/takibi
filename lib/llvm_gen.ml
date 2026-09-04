@@ -7023,13 +7023,48 @@ let debug_type_metadata () =
          Printf.sprintf "{\"name\":%s,\"value\":%d}"
            (quote case_name) value) cases))
   in
+  let variant_return_abi llty =
+    if starts_with !configured_target_triple "aarch64" then
+      (* Takibi currently declares a direct LLVM aggregate return, without an
+         sret parameter. LLVM's AArch64 lowering assigns one result register
+         to each scalar leaf (PageRunAllocResult is 40 bytes and returns in
+         x0..x4), so describe that LLVM type tree instead of reimplementing
+         the C ABI's size-based indirect-result rule. *)
+      let rec scalar_parts base ty =
+        match classify_type ty with
+        | TypeKind.Struct ->
+            struct_element_types ty |> Array.to_list |> List.mapi (fun i member ->
+              let offset = Llvm_target.DataLayout.offset_of_element ty i dl in
+              scalar_parts (Int64.add base offset) member)
+            |> List.flatten
+        | TypeKind.Array ->
+            let element = element_type ty in
+            let stride = Llvm_target.DataLayout.abi_size element dl in
+            List.init (array_length ty) (fun i ->
+              scalar_parts
+                (Int64.add base (Int64.mul (Int64.of_int i) stride)) element)
+            |> List.flatten
+        | _ ->
+            [(base, Llvm_target.DataLayout.abi_size ty dl)]
+      in
+      let parts = scalar_parts 0L llty |> List.mapi (fun index (offset, size) ->
+        Printf.sprintf
+          "{\"register\":\"x%d\",\"offset\":%Ld,\"size\":%Ld}"
+          index offset size)
+      in
+      Printf.sprintf
+        "{\"kind\":\"registers\",\"return_address_register\":\"x30\",\"parts\":[%s]}"
+        (String.concat "," parts)
+    else
+      "null"
+  in
   let variants = names variant_lltypes |> List.map (fun name ->
     let llty = Hashtbl.find variant_lltypes name in
     let size = Llvm_target.DataLayout.abi_size llty dl in
     let cases = Hashtbl.find variant_cases_tbl name in
     Printf.sprintf
-      "{\"name\":%s,\"size\":%Ld,\"tag_offset\":0,\"tag_size\":4,\"cases\":[%s]}"
-      (quote name) size
+      "{\"name\":%s,\"size\":%Ld,\"tag_offset\":0,\"tag_size\":4,\"return_abi\":%s,\"cases\":[%s]}"
+      (quote name) size (variant_return_abi llty)
       (comma_list (fun (case_name, layout) ->
          let payload = match layout.variant_payload_field,
                              layout.variant_payload with
@@ -7058,8 +7093,8 @@ let debug_type_metadata () =
            (quote name) (quote (ty_str ty)) value)
   in
   Printf.sprintf
-    "{\"format\":1,\"enums\":[%s],\"variants\":[%s],\"constants\":[%s]}\n"
-    (String.concat "," enums) (String.concat "," variants)
+    "{\"format\":2,\"target\":%s,\"enums\":[%s],\"variants\":[%s],\"constants\":[%s]}\n"
+    (quote !configured_target_triple) (String.concat "," enums) (String.concat "," variants)
     (String.concat "," constants)
 
 (* Shared by gen_exception_entry and gen_exception_restore: the

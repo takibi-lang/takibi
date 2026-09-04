@@ -7,12 +7,12 @@
 # chain is a failure mode the pooling introduced and nothing exercised.
 #
 # Reaching it honestly needs the discovered page allocator genuinely empty,
-# which no probe does. This lane makes it empty for the duration of ONE
-# acquisition, from the debugger side, the way
+# which no probe does. This lane forces ONE acquisition to return its
+# payload-free OutOfMemory variant from the debugger side, the way
 # scripts/run_kernel_qemutest_lifecycle_gap.sh and
 # scripts/run_kernel_oops_qemutest.sh already poke kernel state without a
-# kernel-side test switch. See scripts/kernel_alloc_rollback.gdb for what is
-# poked, where it arms, and why the restore point is the exhaustion log call.
+# kernel-side test switch. See scripts/kernel_alloc_rollback.gdb for where it
+# arms and how compiler-emitted return ABI metadata makes the return safe.
 #
 # The verdict is the kernel's own end-of-run accounting, not the injection:
 #
@@ -37,6 +37,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ELF="$REPO_ROOT/kernel/build/qemu/kernel-debug.elf"
+DEBUG_METADATA="$REPO_ROOT/_build/kernel-debug-metadata.json"
 COMMON_VIEW_DIR="$REPO_ROOT/kernel/tests/common/views"
 ASH_DIR="$REPO_ROOT/kernel/tests/common/ash"
 ARTIFACT_DIR="${KERNEL_QEMU_ALLOC_ROLLBACK_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-alloc-rollback-qemu}"
@@ -83,6 +84,10 @@ python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "kernel/qemu alloc-rollback" \
     "udp:$NETDEV_LOCAL_PORT" "udp:$NETDEV_REMOTE_PORT" || exit 1
 if [ ! -f "$ELF" ]; then
     echo "error: kernel ELF not found: $ELF (run 'make kernelbuild-qemu-debug' first)" >&2
+    exit 1
+fi
+if [ ! -f "$DEBUG_METADATA" ]; then
+    echo "error: kernel debug metadata not found: $DEBUG_METADATA (run 'make kernelbuild-qemu-debug' first)" >&2
     exit 1
 fi
 if ! command -v gdb-multiarch >/dev/null 2>&1; then
@@ -136,7 +141,8 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     >"$UART_DRIVER_LOG" 2>&1 &
 uart_driver_pid=$!
 
-# Arm the injection: three stops (arm after the baseline, inject, restore),
+# Arm the injection: three stops (arm after the baseline, select the process
+# allocation path, then force-return from its stack-run acquisition),
 # after which GDB's batch command list ends and it detaches -- which resumes
 # the guest, the same automatic behaviour the lifecycle-gap lane relies on.
 # The whole sequence is over before the boot suite's first fixture, so
@@ -145,21 +151,23 @@ uart_driver_pid=$!
 # `target remote` is retried the same way and for the same reason as the
 # other lanes: QEMU's gdbstub not listening yet is a genuine, short-lived
 # race against its own startup. A connected session that did not reach both
-# of its markers is a real failure of this lane, not a race, so it is not
-# retried.
+# the helper and lane markers is a real failure of this lane, not a race, so
+# it is not retried.
 gdb_log="$ARTIFACT_DIR/arm-gdb.log"
 armed=false
 for _ in $(seq 1 50); do
     timeout "$TIMEOUT_SECS" gdb-multiarch -q -batch "$ELF" \
         -ex "target remote :$GDB_PORT" \
+        -ex "source $REPO_ROOT/scripts/kernel_debug_metadata.gdb" \
+        -ex "takibi-debug-metadata $DEBUG_METADATA" \
         -x "$REPO_ROOT/scripts/kernel_alloc_rollback.gdb" \
         >"$gdb_log" 2>&1 || true
     if grep -q 'could not connect\|Connection refused' "$gdb_log"; then
         sleep 0.1
         continue
     fi
-    if grep -q 'alloc-rollback: injected' "$gdb_log" &&
-       grep -q 'alloc-rollback: restored' "$gdb_log"; then
+    if grep -q 'takibi-force-variant-return: PageRunAllocResult::OutOfMemory via registers' "$gdb_log" &&
+       grep -q 'alloc-rollback: forced PageRunAllocResult::OutOfMemory' "$gdb_log"; then
         armed=true
     fi
     break

@@ -851,10 +851,11 @@ kernelbuild-qemu: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-qemu
 
 # Compiler-owned names for integer diagnostic ABI fields plus target-aware
-# closed-variant layout. This is a host sidecar only: it is not linked into the
-# kernel and therefore adds no production runtime data or instructions. The
-# main object dependency gives this second compiler invocation the same source
-# staleness boundary without adding another hand-maintained prerequisite list.
+# closed-variant layout and return ABI. This is a host sidecar only: it is not
+# linked into the kernel and therefore adds no production runtime data or
+# instructions. The main object dependency gives this second compiler
+# invocation the same source staleness boundary without adding another
+# hand-maintained prerequisite list.
 $(KERNEL_DEBUG_METADATA): $(KERNEL_QEMU_MAIN_O) $(TAKIBI)
 	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --emit-debug-metadata $@
 

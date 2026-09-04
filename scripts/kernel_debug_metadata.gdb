@@ -34,7 +34,7 @@ class TakibiDebugMetadata(gdb.Command):
             raise gdb.GdbError("usage: takibi-debug-metadata PATH")
         with open(args[0], "r", encoding="ascii") as stream:
             metadata = json.load(stream)
-        if metadata.get("format") != 1:
+        if metadata.get("format") not in (1, 2):
             raise gdb.GdbError("unsupported Takibi debug metadata format")
         _takibi_debug_metadata = metadata
         gdb.write(
@@ -124,8 +124,66 @@ class TakibiVariantLayout(gdb.Command):
                 f"tag={case['tag']} {detail}\n")
 
 
+class TakibiForceVariantReturn(gdb.Command):
+    """Return immediately from the current function with a payload-free variant case."""
+
+    def __init__(self):
+        super().__init__("takibi-force-variant-return", gdb.COMMAND_RUNNING)
+
+    def invoke(self, argument, from_tty):
+        if _takibi_debug_metadata is None:
+            raise gdb.GdbError("load metadata with takibi-debug-metadata first")
+        args = gdb.string_to_argv(argument)
+        if len(args) != 2:
+            raise gdb.GdbError(
+                "usage: takibi-force-variant-return TYPE CASE")
+        variant = _takibi_named(
+            _takibi_debug_metadata["variants"], args[0], "variant")
+        case = _takibi_named(variant["cases"], args[1], "variant case")
+        if case["payload"] is not None:
+            raise gdb.GdbError(
+                "takibi-force-variant-return only supports payload-free cases")
+        abi = variant.get("return_abi")
+        if abi is None:
+            raise gdb.GdbError(
+                "metadata has no supported return ABI for this target")
+
+        tag_bytes = int(case["tag"]).to_bytes(
+            variant["tag_size"], byteorder="little", signed=False)
+        value_bytes = bytearray(variant["size"])
+        tag_offset = variant["tag_offset"]
+        value_bytes[tag_offset:tag_offset + len(tag_bytes)] = tag_bytes
+
+        register_values = []
+        if abi["kind"] == "registers":
+            for part in abi["parts"]:
+                start = part["offset"]
+                end = start + part["size"]
+                register_values.append((
+                    part["register"],
+                    int.from_bytes(value_bytes[start:end], "little")))
+        elif abi["kind"] == "indirect":
+            address = int(gdb.parse_and_eval(f"${abi['pointer_register']}"))
+            gdb.selected_inferior().write_memory(address, value_bytes)
+        else:
+            raise gdb.GdbError(
+                f"unsupported Takibi return ABI kind '{abi['kind']}'")
+
+        # A source-line breakpoint normally lands after the machine prologue,
+        # so changing PC to x30 would leave SP and callee-saved registers in
+        # the callee's frame. Let GDB unwind the selected frame, then install
+        # direct-result registers in the restored caller context.
+        gdb.execute("return")
+        for register, value in register_values:
+            gdb.execute(f"set ${register} = {value}")
+        gdb.write(
+            "takibi-force-variant-return: "
+            f"{variant['name']}::{case['name']} via {abi['kind']}\n")
+
+
 TakibiDebugMetadata()
 TakibiEnum()
 TakibiConstant()
 TakibiVariantLayout()
+TakibiForceVariantReturn()
 end
