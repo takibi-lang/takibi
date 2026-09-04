@@ -55,7 +55,25 @@ def fail(message):
     sys.exit(1)
 
 
-def table_after(text, marker):
+def reject_conflict_markers(text):
+    """An unresolved merge is not a document, and must not read as one.
+
+    The parser below ends a table at the first line that is not a table
+    row, which a conflict marker is.  A conflicted MEMORY_MAP.md therefore
+    used to parse as a table of everything ABOVE the `<<<<<<<` -- one row,
+    in the case that occurred -- and pass, while every row the conflict
+    covered went unread.  The check that exists to keep this document
+    honest reported it correct at the one moment it certainly was not.
+    """
+    for number, line in enumerate(text.splitlines(), start=1):
+        if line.startswith(("<<<<<<<", ">>>>>>>", "|||||||")):
+            fail(f"{DOC.name} line {number} is a merge conflict marker: "
+                 f"{line.strip()!r}. Resolve the conflict first -- the rows "
+                 f"a conflict covers are not checked, so a pass here would "
+                 f"mean nothing")
+
+
+def table_after(text, marker, state_tag):
     """The contiguous markdown table following `marker`, as a list of cell lists."""
     start = text.find(marker)
     if start < 0:
@@ -74,7 +92,20 @@ def table_after(text, marker):
         rows.append(cells)
     if len(rows) < 2:
         fail(f"the table after `{marker}` has no data rows")
-    return rows[1:]
+    data = rows[1:]
+    # The loop above stops at the first line that is not a table row, so
+    # anything that interrupts the table hides every row below it. Silently,
+    # because a shorter table is still a table. A row carrying this table's
+    # state tag that the parser did not reach is a row claiming to be
+    # verified while nothing reads it, which is the failure this whole file
+    # argues against -- so count them and refuse to differ.
+    claimed = sum(1 for line in text.splitlines()
+                  if line.lstrip().startswith("|") and state_tag in line)
+    if claimed != len(data):
+        fail(f"{DOC.name} has {claimed} `{state_tag}` row(s) but the table "
+             f"after `{marker}` holds {len(data)} of them; the rest sit "
+             f"outside it, where nothing checks them")
+    return data
 
 
 def unbacktick(cell):
@@ -138,7 +169,7 @@ def update_elf_symbols(text):
 def check_elf_symbols(text, problems):
     marker = "<!-- checked: elf-symbols -->"
     symbols = {name: nm_symbols(elf) for name, elf in ELFS.items()}
-    for cells in table_after(text, marker):
+    for cells in table_after(text, marker, "CHECKED (ELF)"):
         if len(cells) < 3:
             fail(f"malformed row in the `{marker}` table: {cells}")
         symbol = unbacktick(cells[0])
@@ -160,7 +191,7 @@ def check_elf_symbols(text, problems):
 def check_consts(text, problems):
     marker = "<!-- checked: consts -->"
     sources = {}
-    for cells in table_after(text, marker):
+    for cells in table_after(text, marker, "CHECKED (const)"):
         if len(cells) < 3:
             fail(f"malformed row in the `{marker}` table: {cells}")
         name = unbacktick(cells[0])
@@ -282,6 +313,9 @@ def main():
     if not DOC.exists():
         fail(f"{DOC} does not exist")
     text = DOC.read_text()
+    # Before --update, too: refreshing rows around a conflict marker would
+    # rewrite one side of the conflict and leave the document unresolved.
+    reject_conflict_markers(text)
     if "--update" in sys.argv[1:]:
         updated = update_elf_symbols(text)
         DOC.write_text(updated)
