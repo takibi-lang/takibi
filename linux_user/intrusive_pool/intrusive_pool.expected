@@ -40,7 +40,8 @@ a wrecked chunk header cannot widen what validates (real slot yes, off-by-one no
 the invariant probe reports the wrecked chunk and survives walking it: true
 1960-byte objects placed before the PROVIDER ran out (objects, chunks, pages left): 112 14 2
 every phase left its pool's own bookkeeping coherent (all passed, phases checked): true 7
-every lock above was balanced, singly held and consistently ordered (reentrant, order violations, unbalanced, still held, untracked): 0 0 0 0 0
+every lock above was balanced, singly held and consistently ordered (reentrant, order violations, unbalanced, still held): 0 0 0 0
+lock checker: every acquire tracked, so the counts above are about the whole program
 taking one pool's guard twice on a path is caught: true
 the same two pools in a consistent order are not reported, the reversed pair is (consistent quiet, reversal caught): true true
 done

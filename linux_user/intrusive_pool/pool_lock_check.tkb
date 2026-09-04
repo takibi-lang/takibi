@@ -97,7 +97,18 @@ private let mut pool_lock_held: [usize; POOL_LOCK_MAX_TAGS];
 private let mut pool_lock_held_depth: usize = 0;
 private let mut pool_lock_reentrant: usize = 0;
 private let mut pool_lock_order_violations: usize = 0;
-private let mut pool_lock_untracked: usize = 0;
+// GitHub issue #412: THREE counters, not one, because the three ways this
+// checker can fail to track an acquire need three different fixes.
+//
+// A tag of 0 means a pool whose init never ran, or a caller passing a
+// literal -- a bug in the exerciser or in the pool. The table being full
+// means POOL_LOCK_MAX_TAGS is too small for the program under test and the
+// constant moves. Nesting deeper than the held array means the same about
+// the depth. One number cannot say which, and "untracked: 385" was
+// exactly that: the summary read as a pass and the cause took a bisect.
+private let mut pool_lock_untracked_tag_zero: usize = 0;
+private let mut pool_lock_untracked_table_full: usize = 0;
+private let mut pool_lock_untracked_too_deep: usize = 0;
 private let mut pool_lock_unbalanced: usize = 0;
 
 fn pool_lock_check_reset() {
@@ -108,7 +119,9 @@ fn pool_lock_check_reset() {
     pool_lock_held_depth = 0;
     pool_lock_reentrant = 0;
     pool_lock_order_violations = 0;
-    pool_lock_untracked = 0;
+    pool_lock_untracked_tag_zero = 0;
+    pool_lock_untracked_table_full = 0;
+    pool_lock_untracked_too_deep = 0;
     pool_lock_unbalanced = 0;
     pool_lock_tag_count = 0;
 }
@@ -125,8 +138,12 @@ fn pool_lock_check_reset() {
 // is a stand-in that stops catching signature drift.
 fn pool_lock_acquire(tag: usize, lock: *Mutex @ id) -> usize !{locks} {
     let slot_value: usize = pool_lock_slot_of(tag);
-    if (tag == 0 || slot_value >= POOL_LOCK_MAX_TAGS) {
-        pool_lock_untracked = pool_lock_untracked + 1;
+    if (tag == 0) {
+        pool_lock_untracked_tag_zero = pool_lock_untracked_tag_zero + 1;
+        return 0;
+    }
+    if (slot_value >= POOL_LOCK_MAX_TAGS) {
+        pool_lock_untracked_table_full = pool_lock_untracked_table_full + 1;
         return 0;
     }
     let slot: {0..<POOL_LOCK_MAX_TAGS as usize} = slot_value;
@@ -158,7 +175,7 @@ fn pool_lock_acquire(tag: usize, lock: *Mutex @ id) -> usize !{locks} {
         pool_lock_held[top_slot] = slot_value;
         pool_lock_held_depth = top + 1;
     } else {
-        pool_lock_untracked = pool_lock_untracked + 1;
+        pool_lock_untracked_too_deep = pool_lock_untracked_too_deep + 1;
     }
     return 0;
 }
@@ -194,10 +211,54 @@ fn pool_lock_release(tag: usize, lock: *Mutex @ id, flags: usize) !{locks} {
 fn pool_lock_reentrant_count() -> usize { return pool_lock_reentrant; }
 fn pool_lock_order_violation_count() -> usize { return pool_lock_order_violations; }
 fn pool_lock_held_depth_now() -> usize { return pool_lock_held_depth; }
-// Acquires the checker could not track -- a tag of 0, more distinct pools
-// than POOL_LOCK_MAX_TAGS, or nesting deeper than it can hold. Nonzero means
-// the two counts above are answering about less than the whole program.
-fn pool_lock_untracked_count() -> usize { return pool_lock_untracked; }
+// Acquires the checker could not track. Nonzero means the two counts above
+// are answering about less than the whole program, so an exerciser must
+// treat it as a FAILURE of the check rather than as a number in a line --
+// GitHub issue #412, and pool_lock_check_verdict below is what to print.
+fn pool_lock_untracked_count() -> usize {
+    return pool_lock_untracked_tag_zero + pool_lock_untracked_table_full +
+           pool_lock_untracked_too_deep;
+}
+
+fn pool_lock_untracked_tag_zero_count() -> usize {
+    return pool_lock_untracked_tag_zero;
+}
+
+fn pool_lock_untracked_table_full_count() -> usize {
+    return pool_lock_untracked_table_full;
+}
+
+fn pool_lock_untracked_too_deep_count() -> usize {
+    return pool_lock_untracked_too_deep;
+}
+
+// The one line every exerciser that links this checker should print, so
+// that "the checker could not check" is a sentence rather than a digit
+// somebody has to notice inside a line whose words say everything passed.
+//
+// GitHub issue #412: when the pool tag stopped being a small consecutive
+// integer, all 385 acquires fell into the untracked counter and the
+// summary line still read as a pass on the checker's own terms. The
+// expected-output diff caught it, by luck of the number being on that line.
+// This makes the checker say it, and say WHICH of the three causes, because
+// they need different fixes.
+fn pool_lock_check_verdict() {
+    if (pool_lock_untracked_count() == 0) {
+        uart_puts("lock checker: every acquire tracked, so the counts above ");
+        uart_puts("are about the whole program\n");
+        return;
+    }
+    uart_puts("lock checker: COULD NOT TRACK ");
+    uart_print(pool_lock_untracked_count());
+    uart_puts(" acquire(s), so the counts above are about less than the ");
+    uart_puts("whole program (tag-zero, table-full, too-deep): ");
+    uart_print(pool_lock_untracked_tag_zero_count());
+    uart_puts(" ");
+    uart_print(pool_lock_untracked_table_full_count());
+    uart_puts(" ");
+    uart_print(pool_lock_untracked_too_deep_count());
+    uart_puts("\n");
+}
 fn pool_lock_unbalanced_count() -> usize { return pool_lock_unbalanced; }
 
 // GitHub issue #451: the other half of the substitution. kernel/lib/

@@ -11,4 +11,5 @@ pages still held after teardown, and retained chunks (pages, conns, frames, retx
 the alien address is a real slot of the other pool: true
 a cross-pool handle the erased brand cannot catch is refused at runtime, as foreign: true
 a stale (slot, generation) pair against a recycled slot is refused, and the new occupant survives (recycled, refused): true true
+lock checker: every acquire tracked, so the counts above are about the whole program
 done

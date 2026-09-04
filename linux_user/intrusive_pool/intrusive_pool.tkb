@@ -1198,8 +1198,8 @@ fn app_main() {
     // start from whatever the rest of this file did -- which is the first
     // thing worth asserting.
     uart_puts("every lock above was balanced, singly held and consistently ");
-    uart_puts("ordered (reentrant, order violations, unbalanced, still held, ");
-    uart_puts("untracked): ");
+    uart_puts("ordered (reentrant, order violations, unbalanced, still ");
+    uart_puts("held): ");
     uart_print(pool_lock_reentrant_count());
     uart_puts(" ");
     uart_print(pool_lock_order_violation_count());
@@ -1207,9 +1207,11 @@ fn app_main() {
     uart_print(pool_lock_unbalanced_count());
     uart_puts(" ");
     uart_print(pool_lock_held_depth_now());
-    uart_puts(" ");
-    uart_print(pool_lock_untracked_count());
     uart_puts("\n");
+    // GitHub issue #412: on its OWN line and as a sentence, because the
+    // four numbers above mean nothing while this one is nonzero -- and
+    // when it was, the line they share still read as a pass.
+    pool_lock_check_verdict();
 
     // Re-entrancy: the same pool's guard twice on one path. A compile
     // error cannot see this -- both acquires are individually correct --

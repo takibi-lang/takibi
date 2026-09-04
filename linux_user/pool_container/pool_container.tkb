@@ -115,5 +115,10 @@ fn app_main() !{unsafe} {
     uart_print(head_held);
     uart_puts("\n");
 
+    // GitHub issue #412: this file links the lock checker, so every pool
+    // acquire above went through it -- and nothing here ever asked what it
+    // found. A checker whose answer nobody reads is the same defect as one
+    // that reports "could not check" as a digit, one step further along.
+    pool_lock_check_verdict();
     uart_puts("done\n");
 }
