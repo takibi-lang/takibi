@@ -79,6 +79,9 @@ ATOMIC_ALLOWED = {
     "kernel/pid_contention_evidence.tkb": "two-core contention probe",
     "kernel/tag_contention_evidence.tkb": "two-core contention probe",
     "kernel/schedule_contention_evidence.tkb": "two-core contention probe",
+    "kernel/pool_walk_contention_evidence.tkb":
+        "GitHub issue #482's two-core probe: the walk side of a pool takes "
+        "no guard by design, and this measures what that costs",
     "kernel/occupancy_drain_evidence.tkb":
         "GitHub issue #508's two-core probe for occupancy_drain's give-up "
         "path; the words it holds are the handshake with the core that "

@@ -1,0 +1,586 @@
+// GitHub issue #482: what does an IntrusivePool WALK actually tolerate?
+//
+// Mutating a pool requires the lock as a matter of typing -- insert,
+// remove and reclaim all take `borrow IntrusivePoolGuard[pool_id]`, and
+// another pool's guard is a compile error. Walking one requires nothing:
+// intrusive_pool_first_slot, intrusive_pool_next_slot and
+// intrusive_pool_probe_slot take no guard at all. The issue asks whether
+// that asymmetry is a hole, and asks for the measurement BEFORE the
+// design, on the pattern issue #479 Group A established.
+//
+// WHAT THE RACE IS, PRECISELY
+//
+// Reading the file rather than assuming: an insert never rewrites the
+// chunk chain a walk follows, and a remove usually does not either. The
+// one operation that does is a chunk RELEASE, and there are two of them --
+// intrusive_pool_reclaim, and intrusive_pool_remove itself when the chunk
+// it emptied is past this pool's retained reserve. A release unlinks the
+// chunk, scrubs every byte of it, and hands its pages back to the page
+// allocator. So the hazard is exactly the issue's own words: "a walk
+// following a pointer that has been rewritten" -- a walker that has
+// already read `next_chunk` and holds an address into a chunk that is
+// then released.
+//
+// HOW THIS PRODUCES IT: A RENDEZVOUS, NOT A RACE
+//
+// The first version of this file chased that window statistically --
+// thousands of churn rounds, hoping the walker was inside one when a
+// release landed. That was the wrong instrument twice over, and both
+// failures are worth recording because they are the reason this file
+// looks the way it does:
+//
+// - It was EXPENSIVE. Every round released a whole multi-page chunk,
+//   which scrubs every byte of it, so one 2048-round pass cost 12.4
+//   SECONDS of real boot time (measured: 772445438 ticks at 62.5 MHz).
+//   At four times that it delayed the boot far enough to break this same
+//   boot's unrelated network self-test -- `virtio net: icmp timeout`
+//   where a healthy boot says `icmp echo reply ok`, and a 51-second
+//   interactive-HTTPd stall behind it. A probe that breaks an unrelated
+//   fixture to make its own point is not a probe this tree can keep.
+// - It was UNRELIABLE where it mattered most. QEMU's round-robin vCPU
+//   scheduling crossed the window readily; the RPi5 board did not cross
+//   it in either of two boots, so the hazard went untested on the only
+//   target whose concurrency is real.
+//
+// kernel/CONCURRENCY.md already states the rule this file should have
+// followed from the start, and `df06fc8` had already applied it to the
+// freelist and pid probes: rendezvous FIRST, retry only as the fallback.
+// Split the two cores at the exact instruction boundary that matters and
+// hold them there, rather than running both flat out and hoping.
+//
+// So the walker publishes the address the moment `next_slot` hands it one
+// that belongs to the extra chunk, and WAITS. Core 0 keeps that chunk
+// alive until the walker says it is holding it, releases it, and only
+// then lets the walker proceed to probe. Every round reproduces the
+// hazard by construction:
+//
+//     core 1: cursor = next_slot(...)   -- a legitimately obtained address
+//             publish it, wait for the release
+//             probe_slot(cursor)        -- MUST answer NoPayload
+//
+//     core 0: insert           -- the extra chunk exists
+//             wait for the walker to be holding it
+//             remove           -- unlink, scrub, pages back to the allocator
+//             publish released, wait for the probe
+//
+// Three problems fall to that one change. The rounds drop from 2048 to
+// POOL_WALK_ROUNDS because nothing is left to chance, taking the cost
+// with them; the verdict stops depending on which machine the boot landed
+// on; and the confound that made the statistical version ambiguous is
+// gone too, since core 0 cannot reach the next round's allocation -- which
+// could hand the same page straight back -- until the walker has already
+// probed.
+//
+// WHAT IT ASSERTS
+//
+// - `refused`: probes of a released chunk's address that answered
+//   NoPayload. Must equal the rounds that rendezvoused: this is the
+//   property #482 asks about, and it holds because
+//   intrusive_pool_slot_is_valid asks the PAGE ALLOCATOR who owns the
+//   page (issue #384's page_owner_tag_at) before touching it.
+// - `admitted`: probes that answered Live for a released chunk. Must be
+//   ZERO. Nonzero is the defect this file exists to catch -- a walk
+//   dereferencing a page the pool no longer owns.
+// - `floor_bad`: a floor slot whose payload was not the sentinel. The
+//   floor is written once at setup and never touched again, so this is a
+//   deterministic control: it says the walk reads live slots correctly,
+//   and it would catch the walk straying out of the chunk it is in.
+//
+// Current limitations:
+// - IT DOES NOT COVER THE PAYLOAD POINTER'S LIFETIME. probe_slot's answer
+//   is a snapshot; a caller holding the `*T` that payload_of hands back
+//   across a concurrent remove is issue #488's shape, not this one, and
+//   the eighteen declared `_unproven_` escapes are where that still lives.
+// - IT TESTS RELEASE, NOT INSERT. Measured while building this and worth
+//   recording, because the pool's own contract says it and nothing had
+//   observed it from the outside: a lockless walker CAN see a slot's first
+//   word holding the free-chain LINK that used to occupy it, in the window
+//   after intrusive_pool_insert_unchecked sets `slot.generation` nonzero
+//   and before the caller -- or insert_zeroed's own zero-loop -- writes the
+//   payload. `intrusive_pool_insert`'s comment states the contract exactly
+//   ("nothing zeroes the storage here... a freshly allocated payload is
+//   uninitialized, write it before reading it"), and the observed values
+//   were slot addresses inside the same chunk, which is what a free-chain
+//   link is. That is a second, narrower hazard than this file's subject,
+//   it belongs to insert rather than to walking, and it is recorded here
+//   rather than re-measured every boot.
+// - The verdict is a LOWER BOUND on a real machine, like every QEMU
+//   concurrency result -- see kernel/CONCURRENCY.md.
+
+use "kernel/lib/intrusive_pool.tkb";
+use "kernel/lib/execution_model.tkb";
+
+// Deterministic now, so this is "enough to show it repeatedly", not
+// "enough for luck to strike". Each round releases a whole chunk, which
+// scrubs every byte of it, so rounds are not free -- see the cost this
+// file's header records for what 2048 of them bought.
+const POOL_WALK_ROUNDS: usize = 64;
+const POOL_WALK_SENTINEL: usize = 0x5AFE5107;
+
+// A walk's own termination bound: enough slot-hops that a healthy chain
+// (a floor chunk plus at most one extra) is covered several times over,
+// so this never doubles as a source of truncation. A chain being rewritten
+// underneath is the case this exists for, and a walk that trusted the
+// chain to terminate would hang instead of reporting.
+const POOL_WALK_STEP_BUDGET: usize = 64;
+
+// A payload wide enough that a chunk holds only a FEW slots, so the floor
+// below can FILL one chunk while carrying a bounded number of addresses to
+// rebuild owners with at teardown. A `usize` payload gives ~255 slots per
+// chunk and would need 255 of each.
+struct PoolWalkItem {
+    stamp: usize;
+    filler: [usize; 250];
+}
+
+// The floor is one full chunk. Sized generously against a chunk geometry
+// this file does not want to hard-code; the setup refuses rather than
+// half-fills if the real number is bigger.
+const POOL_WALK_FLOOR: usize = 16;
+
+// Both cores wait for each other at the rendezvous. Bounded in TIME, not
+// in iterations, because the two targets disagree about what an iteration
+// costs -- kernel/CONCURRENCY.md's rule, and the one this file's first
+// version broke by tuning a spin count that meant different things on
+// QEMU and on the board.
+const POOL_WALK_RENDEZVOUS_SHIFT: i64 = 2;
+
+private let mut pool_walk_pool: IntrusivePool(PoolWalkItem);
+private let mut pool_walk_ready: bool = false;
+// The floor's (address, generation) pairs, kept so the owners can be
+// rebuilt and removed at teardown -- the same arrangement
+// kernel/kernel/pool_contention_evidence.tkb's own floor uses, and for the
+// same reason: a linear owner cannot be parked in an array.
+private let mut pool_walk_floor_address: [IntrusiveSlotAddress; POOL_WALK_FLOOR];
+private let mut pool_walk_floor_generation: [usize; POOL_WALK_FLOOR];
+private let mut pool_walk_floor_held: usize = 0;
+// Where the floor chunk's slots start and stop. An address outside this
+// range is the extra chunk's, which is how the walker knows it has
+// crossed without needing this file to know the pool's private geometry.
+private let mut pool_walk_floor_base: usize = 0;
+private let mut pool_walk_floor_end: usize = 0;
+
+private let mut pool_walk_armed: usize;
+private let mut pool_walk_active: usize;
+// The rendezvous, as a round number rather than a pair of flags: core 0
+// publishes `seq`, the walker answers `held_seq` when it is holding that
+// round's address, core 0 answers `released_seq` once the chunk is gone,
+// and the walker answers `probed_seq` once it has asked. A sequence
+// cannot be missed the way a flag can when the other core is late -- the
+// lesson issue #510 left on every probe in this directory.
+private let mut pool_walk_seq: usize;
+private let mut pool_walk_held_seq: usize;
+private let mut pool_walk_released_seq: usize;
+private let mut pool_walk_probed_seq: usize;
+private let mut pool_walk_stale: usize;
+
+private let mut pool_walk_rounds_met: usize;
+private let mut pool_walk_refused: usize;
+private let mut pool_walk_admitted: usize;
+private let mut pool_walk_floor_bad: usize;
+private let mut pool_walk_steps: usize;
+
+private fn pool_walk_armed_address() -> usize {
+    return (&pool_walk_armed) as usize;
+}
+
+private fn pool_walk_active_address() -> usize {
+    return (&pool_walk_active) as usize;
+}
+
+private fn pool_walk_seq_address() -> usize {
+    return (&pool_walk_seq) as usize;
+}
+
+private fn pool_walk_held_seq_address() -> usize {
+    return (&pool_walk_held_seq) as usize;
+}
+
+private fn pool_walk_released_seq_address() -> usize {
+    return (&pool_walk_released_seq) as usize;
+}
+
+private fn pool_walk_probed_seq_address() -> usize {
+    return (&pool_walk_probed_seq) as usize;
+}
+
+private fn pool_walk_stale_address() -> usize {
+    return (&pool_walk_stale) as usize;
+}
+
+private fn pool_walk_refused_address() -> usize {
+    return (&pool_walk_refused) as usize;
+}
+
+private fn pool_walk_admitted_address() -> usize {
+    return (&pool_walk_admitted) as usize;
+}
+
+private fn pool_walk_floor_bad_address() -> usize {
+    return (&pool_walk_floor_bad) as usize;
+}
+
+private fn pool_walk_steps_address() -> usize {
+    return (&pool_walk_steps) as usize;
+}
+
+private fn pool_walk_rounds_met_address() -> usize {
+    return (&pool_walk_rounds_met) as usize;
+}
+
+private fn pool_walk_init() {
+    if (pool_walk_ready) { return; }
+    pool_walk_ready = true;
+    // ZERO retained chunks, which is the whole setup: the chunk core 0
+    // adds is released the moment it empties, rather than being held back
+    // as a reserve.
+    intrusive_pool_init_retaining(&pool_walk_pool, 0);
+}
+
+// Is this address one of the floor chunk's slots? The floor never moves
+// and is never released, so anything outside it is the extra chunk core 0
+// is creating and destroying.
+private fn pool_walk_in_floor(address: usize) -> bool {
+    return address >= pool_walk_floor_base && address < pool_walk_floor_end;
+}
+
+// -- The walking core --------------------------------------------------
+
+fn pool_walk_contention_is_armed() -> bool !{unsafe} {
+    return unsafe {
+        atomic_load_acquire(pool_walk_armed_address())
+    } == 1;
+}
+
+// One enumeration. Floor slots are read and checked; the first address
+// that is NOT the floor's is the extra chunk, and that is where this core
+// stops and hands the round to core 0.
+private fn pool_walk_once() !{unsafe} {
+    let mut cursor: usize = intrusive_pool_first_slot(&pool_walk_pool);
+    let mut budget: usize = POOL_WALK_STEP_BUDGET;
+    let mut crossed: bool = false;
+    while (cursor != 0 && budget != 0 && crossed == false) {
+        budget = budget - 1;
+        unsafe { atomic_fetch_add_relaxed(pool_walk_steps_address(), 1); }
+        if (pool_walk_in_floor(cursor)) {
+            match intrusive_pool_probe_slot(&pool_walk_pool, cursor) {
+                IntrusiveSlotProbe::NoPayload => {}
+                IntrusiveSlotProbe::Live(slot_view) => {
+                    let payload: *PoolWalkItem =
+                        intrusive_pool_payload_of(&pool_walk_pool, slot_view);
+                    // The floor is written once at setup and never touched
+                    // again, so this is a control rather than a race: a
+                    // deviation means the walk read something that is not
+                    // the slot it named.
+                    if (payload.stamp != POOL_WALK_SENTINEL) {
+                        unsafe {
+                            atomic_fetch_add_relaxed(
+                                pool_walk_floor_bad_address(), 1);
+                        }
+                    }
+                    intrusive_view_release(slot_view);
+                }
+            }
+            cursor = intrusive_pool_next_slot(&pool_walk_pool, cursor);
+        } else {
+            // THE RENDEZVOUS. This address came out of next_slot following
+            // the floor chunk's `next_chunk`, which is exactly the pointer
+            // issue #482 says a release rewrites underneath a walk. Publish
+            // it and stop; core 0 will release the chunk it names and then
+            // let this core ask about it.
+            crossed = true;
+            let round: usize = unsafe {
+                atomic_load_acquire(pool_walk_seq_address())
+            };
+            unsafe {
+                atomic_store_release(pool_walk_stale_address(), cursor);
+                atomic_store_release(pool_walk_held_seq_address(), round);
+            }
+            let window: i64 = read_cntfrq() >> POOL_WALK_RENDEZVOUS_SHIFT;
+            let start: i64 = read_cntpct();
+            let mut released: bool = false;
+            while (released == false && read_cntpct() - start < window &&
+                   unsafe {
+                       atomic_load_acquire(pool_walk_armed_address())
+                   } == 1) {
+                if (unsafe {
+                        atomic_load_acquire(pool_walk_released_seq_address())
+                    } >= round) {
+                    released = true;
+                }
+            }
+            if (released) {
+                // The whole point, in one call: the chunk this address
+                // names has been unlinked, scrubbed and handed back, and
+                // the walk is asking about it anyway.
+                match intrusive_pool_probe_slot(&pool_walk_pool, cursor) {
+                    IntrusiveSlotProbe::NoPayload => {
+                        unsafe {
+                            atomic_fetch_add_relaxed(
+                                pool_walk_refused_address(), 1);
+                        }
+                    }
+                    IntrusiveSlotProbe::Live(slot_view) => {
+                        unsafe {
+                            atomic_fetch_add_relaxed(
+                                pool_walk_admitted_address(), 1);
+                        }
+                        intrusive_view_release(slot_view);
+                    }
+                }
+                unsafe {
+                    atomic_fetch_add_relaxed(
+                        pool_walk_rounds_met_address(), 1);
+                }
+            }
+            unsafe {
+                atomic_store_release(pool_walk_probed_seq_address(), round);
+            }
+        }
+    }
+}
+
+fn pool_walk_contention_secondary_run() !{unsafe} {
+    unsafe { atomic_store_release(pool_walk_active_address(), 1); }
+    while (unsafe {
+               atomic_load_acquire(pool_walk_armed_address())
+           } == 1) {
+        pool_walk_once();
+    }
+    unsafe { atomic_store_release(pool_walk_active_address(), 0); }
+}
+
+// -- The churning core -------------------------------------------------
+
+private fn pool_walk_report(stage: *u8) !{unsafe} {
+    kernel_boot_log("pool walk stage: ");
+    kernel_boot_log(stage);
+    kernel_boot_log("\n");
+    kernel_boot_log("pool walk counts: rounds=");
+    uart_put_udec(POOL_WALK_ROUNDS);
+    kernel_boot_log(" met=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(pool_walk_rounds_met_address())
+    });
+    kernel_boot_log(" refused=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(pool_walk_refused_address())
+    });
+    kernel_boot_log(" admitted=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(pool_walk_admitted_address())
+    });
+    kernel_boot_log(" floor_bad=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(pool_walk_floor_bad_address())
+    });
+    kernel_boot_log(" steps=");
+    uart_put_udec(unsafe {
+        atomic_load_acquire(pool_walk_steps_address())
+    });
+    kernel_boot_log(" per_chunk=");
+    uart_put_udec(intrusive_pool_slots_per_chunk(&pool_walk_pool));
+    kernel_boot_log("\n");
+}
+
+// Fill one chunk and keep it, so a walk always has something to enumerate
+// and the chunk it starts in is never the one being released. The owners
+// are discharged and the pairs kept, because a linear owner cannot live in
+// an array; teardown rebuilds them.
+private fn pool_walk_floor_take() -> bool !{allocates, unsafe} {
+    let per_chunk: usize = intrusive_pool_slots_per_chunk(&pool_walk_pool);
+    if (per_chunk > POOL_WALK_FLOOR) { return false; }
+    for i: usize in 0..<POOL_WALK_FLOOR {
+        if (i < per_chunk) {
+            let guard = intrusive_pool_lock(&pool_walk_pool);
+            let taken = intrusive_pool_insert_zeroed(&pool_walk_pool, guard);
+            intrusive_pool_unlock(&pool_walk_pool, guard);
+            match taken {
+                IntrusivePoolInsertResult::OutOfMemory => { return false; }
+                IntrusivePoolInsertResult::Allocated(owner) => {
+                    intrusive_pool_ref(&pool_walk_pool, owner).stamp =
+                        POOL_WALK_SENTINEL;
+                    pool_walk_floor_address[i] = intrusive_owner_slot(owner);
+                    pool_walk_floor_generation[i] =
+                        intrusive_owner_generation(owner);
+                    pool_walk_floor_held = pool_walk_floor_held + 1;
+                    intrusive_owner_drop(owner);
+                }
+            }
+        }
+    }
+    // Only the floor exists at this moment, so the chain's first slot is
+    // its base, and its slots run one stride apart from there.
+    pool_walk_floor_base = intrusive_pool_first_slot(&pool_walk_pool);
+    pool_walk_floor_end = pool_walk_floor_base +
+        per_chunk * intrusive_pool_slot_stride(&pool_walk_pool);
+    return pool_walk_floor_base != 0;
+}
+
+private fn pool_walk_floor_give_back() -> bool !{unsafe} {
+    let mut ok: bool = true;
+    for i: usize in 0..<POOL_WALK_FLOOR {
+        if (i < pool_walk_floor_held) {
+            let owner = intrusive_owner_new(&pool_walk_pool,
+                                            pool_walk_floor_address[i],
+                                            pool_walk_floor_generation[i]);
+            let guard = intrusive_pool_lock(&pool_walk_pool);
+            if (intrusive_remove_succeeded(
+                    intrusive_pool_remove(&pool_walk_pool, guard, owner))
+                    == false) {
+                ok = false;
+            }
+            intrusive_pool_unlock(&pool_walk_pool, guard);
+        }
+    }
+    pool_walk_floor_held = 0;
+    let reclaim_guard = intrusive_pool_lock(&pool_walk_pool);
+    let released: usize =
+        intrusive_pool_reclaim(&pool_walk_pool, reclaim_guard);
+    intrusive_pool_unlock(&pool_walk_pool, reclaim_guard);
+    return ok;
+}
+
+// Wait, bounded in time, for the other core to reach `target` on one of
+// the rendezvous sequences. False means it did not, which is a give-up
+// this file reports rather than a hang.
+private fn pool_walk_await(sequence_address: usize, target: usize)
+        -> bool !{unsafe} {
+    let window: i64 = read_cntfrq() >> POOL_WALK_RENDEZVOUS_SHIFT;
+    let start: i64 = read_cntpct();
+    let mut met: bool = false;
+    while (met == false && read_cntpct() - start < window) {
+        if (unsafe { atomic_load_acquire(sequence_address) } >= target) {
+            met = true;
+        }
+    }
+    return met;
+}
+
+// One round: make the extra chunk, wait for the walker to be holding an
+// address in it, release it, and wait for the walker to have asked.
+private fn pool_walk_round(round: usize) -> bool !{allocates, unsafe} {
+    unsafe { atomic_store_release(pool_walk_seq_address(), round); }
+    let guard = intrusive_pool_lock(&pool_walk_pool);
+    let taken = intrusive_pool_insert_zeroed(&pool_walk_pool, guard);
+    intrusive_pool_unlock(&pool_walk_pool, guard);
+    match taken {
+        IntrusivePoolInsertResult::OutOfMemory => { return false; }
+        IntrusivePoolInsertResult::Allocated(owner) => {
+            intrusive_pool_ref(&pool_walk_pool, owner).stamp =
+                POOL_WALK_SENTINEL;
+            // The walker has to have the address BEFORE the chunk goes,
+            // or the round proves nothing. This wait is what replaces the
+            // luck the first version of this file depended on.
+            let held: bool =
+                pool_walk_await(pool_walk_held_seq_address(), round);
+            let release = intrusive_pool_lock(&pool_walk_pool);
+            let removed: bool = intrusive_remove_succeeded(
+                intrusive_pool_remove(&pool_walk_pool, release, owner));
+            intrusive_pool_unlock(&pool_walk_pool, release);
+            if (removed == false) { return false; }
+            if (held == false) { return false; }
+            unsafe {
+                atomic_store_release(pool_walk_released_seq_address(), round);
+            }
+            // Do not start the next round -- whose allocation could be
+            // handed the very page just released -- until the walker has
+            // asked about the address it is holding.
+            return pool_walk_await(pool_walk_probed_seq_address(), round);
+        }
+    }
+}
+
+fn pool_walk_contention_probe() -> bool !{allocates, unsafe} {
+    pool_walk_init();
+    let live_before: usize = page_allocator_live_count();
+    if (pool_walk_floor_take() == false) {
+        pool_walk_report("floor-not-taken" as *u8);
+        return false;
+    }
+    unsafe { atomic_store_release(pool_walk_armed_address(), 1); }
+
+    let entry_window: i64 = read_cntfrq() >> 2;
+    let entry_start: i64 = read_cntpct();
+    let mut entered: bool = false;
+    while (entered == false && read_cntpct() - entry_start < entry_window) {
+        if (unsafe {
+                atomic_load_acquire(pool_walk_active_address())
+            } == 1) {
+            entered = true;
+        }
+    }
+    if (entered == false) {
+        unsafe { atomic_store_release(pool_walk_armed_address(), 0); }
+        pool_walk_report("secondary-never-entered" as *u8);
+        return false;
+    }
+
+    let mut rounds_ok: bool = true;
+    for round: usize in 0..<POOL_WALK_ROUNDS {
+        if (rounds_ok) {
+            if (pool_walk_round(round + 1) == false) { rounds_ok = false; }
+        }
+    }
+    unsafe { atomic_store_release(pool_walk_armed_address(), 0); }
+
+    // Provably out before the accounting is read, for the reason the pool
+    // probe next door states: a core still inside would make a leak of a
+    // page it is holding.
+    let settle_window: i64 = read_cntfrq() >> 2;
+    let settle_start: i64 = read_cntpct();
+    let mut settled: bool = false;
+    while (settled == false && read_cntpct() - settle_start < settle_window) {
+        if (unsafe {
+                atomic_load_acquire(pool_walk_active_address())
+            } == 0) {
+            settled = true;
+        }
+    }
+
+    if (rounds_ok == false) {
+        pool_walk_report("rendezvous-not-met" as *u8);
+        return false;
+    }
+    if (settled == false) {
+        pool_walk_report("secondary-never-left" as *u8);
+        return false;
+    }
+    pool_walk_report("complete" as *u8);
+    if (pool_walk_floor_give_back() == false) {
+        kernel_boot_log("pool walk: the floor this probe held was not given back\n");
+        return false;
+    }
+
+    let met: usize = unsafe {
+        atomic_load_acquire(pool_walk_rounds_met_address())
+    };
+    let refused: usize = unsafe {
+        atomic_load_acquire(pool_walk_refused_address())
+    };
+    let admitted: usize = unsafe {
+        atomic_load_acquire(pool_walk_admitted_address())
+    };
+    let floor_bad: usize = unsafe {
+        atomic_load_acquire(pool_walk_floor_bad_address())
+    };
+    if (met != POOL_WALK_ROUNDS) {
+        kernel_boot_log("pool walk: a round ended without the walk holding an address in the chunk that was released, so it proved nothing\n");
+        return false;
+    }
+    if (admitted != 0) {
+        kernel_boot_log("pool walk: a walk was handed a live payload for a chunk that had been unlinked, scrubbed and given back, which is the defect\n");
+        return false;
+    }
+    if (refused != POOL_WALK_ROUNDS) {
+        kernel_boot_log("pool walk: a released chunk's address was neither refused nor admitted, so the probe did not answer\n");
+        return false;
+    }
+    if (floor_bad != 0) {
+        kernel_boot_log("pool walk: a floor slot read back something other than the value written to it at setup\n");
+        return false;
+    }
+    // Every page back: each round allocated and freed one chunk, and a
+    // walk holding a stale address must not have kept one alive.
+    return page_allocator_live_count() == live_before;
+}

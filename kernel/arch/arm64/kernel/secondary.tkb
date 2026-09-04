@@ -181,6 +181,11 @@ fn kernel_secondary_main(context: usize) {
             if (occupancy_drain_is_armed()) {
                 occupancy_drain_secondary_run();
             }
+            // GitHub issue #482: the walk side of the pool, which takes no
+            // lock at all, against a core that is releasing chunks.
+            if (pool_walk_contention_is_armed()) {
+                pool_walk_contention_secondary_run();
+            }
             wfi();
         }
     }

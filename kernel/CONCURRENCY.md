@@ -180,6 +180,16 @@ wrong:
   has the second core hold the region open and keep holding it, so the drain
   it is testing cannot succeed whatever its bound is, and the counts come out
   the same on QEMU and on the board.
+- **A window narrower than a scheduling slice wants a RENDEZVOUS, not more
+  rounds.** `kernel/kernel/pool_walk_contention_evidence.tkb` needs a walk to
+  be holding an address into a chunk at the instant that chunk is released.
+  Chased statistically it cost 12.4 seconds of boot time per 2048 rounds --
+  enough to break an unrelated network self-test in the same boot -- and still
+  never landed once on RPi5 across two boots. Stopping the walker at the
+  boundary and holding it there until the other core has released the chunk
+  produces the same hazard every round on both targets, in 64 rounds. The rule
+  generalises: when a probe finds itself tuning round counts against a
+  deadline, the window is telling it to synchronise instead of to spend more.
 - **Every wait is bounded by the counter, never by a spin count.** A spin
   bound is a duration only if this core's speed is fixed, and on a busy host
   4096 empty iterations expire before the other core has been scheduled at
