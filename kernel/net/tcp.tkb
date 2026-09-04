@@ -83,6 +83,11 @@ use "kernel/lib/intrusive_pool.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/mutex.tkb";
 use "kernel/lib/task_mutex.tkb";
+// GitHub issue #509: the accept loop asks the scheduler whether it is still
+// entitled to hold the machine. This is the one place kernel/net/ depends on
+// kernel/kernel/process.tkb, and it is the same shape as Linux asking
+// need_resched() from inside a long loop in its own networking code.
+use "kernel/kernel/process.tkb";
 
 let mut our_mac: [u8; 6];
 
@@ -2586,6 +2591,23 @@ fn kernel_tcp_accept_progress(owner: borrow TcpConnectionOwner[connection],
     }
     let conn: *TcpConnection = tcp_connection_of(owner);
     while ((read_cntpct() - conn.accept_start_at) < conn.accept_deadline_ticks) {
+        // What "again" buys, since the loop already existed: the answer
+        // can only change in one direction here, and it is the direction
+        // that starves somebody. A process that becomes Ready after entry
+        // could not run until this loop ended, because kernel mode does not
+        // preempt -- captured under host CPU starvation as a DDB backtrace
+        // inside this loop with `pending=1 ready=1`, a reschedule requested
+        // and a runnable child that never ran.
+        //
+        // Pending is already the answer the caller wants and already
+        // handled at kernel/kernel/syscall.tkb: it gives the receive
+        // capability back, parks the handshake on the listener, and blocks
+        // this process on ProcessWaitReason::NetRx to run the syscall again
+        // when it is woken. Nothing new is built; what is new is asking.
+        // The wake cannot be lost either -- kernel_process_net_wake_all runs
+        // from the timer HANDLER and makes every NetRx waiter runnable once
+        // per tick, and the deadline above lives on the connection, so it
+        // still bounds the whole accept across the block.
         if (kernel_process_other_ready()) {
             return KernelTcpAcceptStep::Pending(ready);
         }
@@ -2623,8 +2645,11 @@ fn kernel_tcp_accept_once(owner: borrow TcpConnectionOwner[connection],
         KernelTcpAcceptStep::GaveUp(next) => {
             return KernelTcpAcceptResult::TimedOut(next);
         }
-        // Unreachable with may_hold_machine true: that path only leaves
-        // the loop by accepting or by running out of budget.
+        // GitHub issue #509: reachable now, and only in the one case this
+        // fixture's header says cannot happen -- another process became
+        // Ready while it waited. TimedOut is the honest answer for a caller
+        // that has no process context to block: it did not get a
+        // connection, and the machine is no longer its to hold.
         KernelTcpAcceptStep::Pending(next) => {
             return KernelTcpAcceptResult::TimedOut(next);
         }
