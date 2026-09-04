@@ -261,17 +261,17 @@ struct ProcessRecord {
     // address and the occupant generation that says the slot is still
     // ours. 0 means none yet.
     //
-    // Two plain usizes rather than the record type, deliberately:
+    // A nominal slot address plus the generation rather than the record type:
     // kernel/kernel/fd_table.tkb is parsed AFTER this file, so its struct
     // is not nameable here -- but a function is (functions resolve
     // globally regardless of file order), which is how this file can
     // ensure and release a context it cannot describe.
-    fd_context: usize;
+    fd_context: IntrusiveSlotAddress;
     fd_context_generation: usize;
     // GitHub issue #392: and this process's image record, by the same
     // rule and for the same reason -- kernel/mm/process_image.tkb is
     // parsed after this file, so its struct is not nameable here.
-    image_record: usize;
+    image_record: IntrusiveSlotAddress;
     image_record_generation: usize;
     // GitHub issue #392: and this process's address-space backing. Unlike
     // the two above, kernel/mm/address_space.tkb is parsed BEFORE this
@@ -279,7 +279,7 @@ struct ProcessRecord {
     // handle rather than an embedded field, because taking the address of
     // a field of an array element is not expressible (issue #385) and
     // that file needs a pointer to work through.
-    address_space_backing: usize;
+    address_space_backing: IntrusiveSlotAddress;
     address_space_backing_generation: usize;
 }
 
@@ -1176,7 +1176,7 @@ private fn scheduled_process_copy_command_line(parent: usize, child: usize)
 // process's context handle. It cannot hold it itself without a table
 // keyed by process slot, which is the ceiling this is on the way to
 // removing -- so the process record holds it, and fd_table asks.
-fn scheduled_process_fd_context(slot: usize) -> usize {
+fn scheduled_process_fd_context(slot: usize) -> IntrusiveSlotAddress {
     return scheduled_process_record_at(slot).fd_context;
 }
 
@@ -1184,13 +1184,13 @@ fn scheduled_process_fd_context_generation(slot: usize) -> usize {
     return scheduled_process_record_at(slot).fd_context_generation;
 }
 
-fn scheduled_process_set_fd_context(slot: usize, address: usize,
+fn scheduled_process_set_fd_context(slot: usize, address: IntrusiveSlotAddress,
                                     generation: usize) {
     scheduled_process_record_at(slot).fd_context = address;
     scheduled_process_record_at(slot).fd_context_generation = generation;
 }
 
-fn scheduled_process_image_record(slot: usize) -> usize {
+fn scheduled_process_image_record(slot: usize) -> IntrusiveSlotAddress {
     return scheduled_process_record_at(slot).image_record;
 }
 
@@ -1198,7 +1198,7 @@ fn scheduled_process_image_record_generation(slot: usize) -> usize {
     return scheduled_process_record_at(slot).image_record_generation;
 }
 
-fn scheduled_process_set_image_record(slot: usize, address: usize,
+fn scheduled_process_set_image_record(slot: usize, address: IntrusiveSlotAddress,
                                       generation: usize) {
     scheduled_process_record_at(slot).image_record = address;
     scheduled_process_record_at(slot).image_record_generation = generation;
@@ -1223,7 +1223,7 @@ fn scheduled_process_slot_valid(slot: usize) -> bool !{unsafe} {
     }
 }
 
-fn scheduled_process_address_space_backing(slot: usize) -> usize {
+fn scheduled_process_address_space_backing(slot: usize) -> IntrusiveSlotAddress {
     return scheduled_process_record_at(slot).address_space_backing;
 }
 
@@ -1231,7 +1231,8 @@ fn scheduled_process_address_space_backing_generation(slot: usize) -> usize {
     return scheduled_process_record_at(slot).address_space_backing_generation;
 }
 
-fn scheduled_process_set_address_space_backing(slot: usize, address: usize,
+fn scheduled_process_set_address_space_backing(
+        slot: usize, address: IntrusiveSlotAddress,
                                                generation: usize) {
     scheduled_process_record_at(slot).address_space_backing = address;
     scheduled_process_record_at(slot).address_space_backing_generation =
@@ -1398,8 +1399,8 @@ fn scheduled_process_handle_matches(handle: ProcessHandle) -> bool {
                handle.generation == scheduled_process_boot_generation;
     }
     if (scheduled_process_pool_ready == false) { return false; }
-    return intrusive_pool_matches(&scheduled_process_pool, handle.pool_index,
-                                  handle.generation);
+    return intrusive_pool_matches_untrusted(
+        &scheduled_process_pool, handle.pool_index, handle.generation);
 }
 
 // A put is a drop: there is nowhere to put an owner back to.
@@ -1517,16 +1518,18 @@ private fn scheduled_process_slot_remove(slot: usize) !{unsafe} {
         return;
     }
     let mut generation: usize = 0;
+    let mut address: IntrusiveSlotAddress = intrusive_slot_address_none();
     match intrusive_pool_probe_slot(&scheduled_process_pool, slot) {
         IntrusiveSlotProbe::NoPayload => { return; }
         IntrusiveSlotProbe::Live(slot_view) => {
+            address = intrusive_view_slot(slot_view);
             generation = intrusive_view_generation(slot_view);
             intrusive_view_drop(slot_view);
         }
     }
     scheduled_process_park_stack_run(
         scheduled_process_record_at(slot).stack_run);
-    let owner = intrusive_owner_new(&scheduled_process_pool, slot,
+    let owner = intrusive_owner_new(&scheduled_process_pool, address,
                                     generation);
     let guard = intrusive_pool_lock(&scheduled_process_pool);
     let (ok, reason) = intrusive_remove_outcome(
@@ -1692,7 +1695,8 @@ fn scheduled_process_alloc() -> ScheduledProcessAllocResult !{unsafe} {
             return ScheduledProcessAllocResult::Full;
         }
         IntrusivePoolInsertResult::Allocated(pool_owner) => {
-            slot = intrusive_owner_slot(pool_owner);
+            slot = intrusive_slot_address_identity(
+                intrusive_owner_slot(pool_owner));
             generation = intrusive_owner_generation(pool_owner);
             intrusive_owner_drop(pool_owner);
         }

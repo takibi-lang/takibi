@@ -515,8 +515,21 @@ generic struct IntrusivePool(T: type) {
 // minted this handle. It costs nothing at runtime and makes "handle from
 // pool A, freed through pool B" a compile error rather than something to
 // notice afterwards -- see this file's header.
+// GitHub issue #396: a slot address is not an arbitrary machine integer.
+// Its field is private so only this allocator can mint one from raw pointer
+// arithmetic; consumers can store, compare, and return it, but cannot cast a
+// payload address (or any other usize) into a slot by accident.
+struct IntrusiveSlotAddress {
+    private raw: usize;
+}
+
+struct IntrusiveOwnerParts {
+    address: IntrusiveSlotAddress;
+    generation: usize;
+}
+
 private linear struct IntrusiveOwner[pool_id: addr, allocation: usize] {
-    private slot: usize;
+    private slot: IntrusiveSlotAddress;
     private generation: usize @ allocation;
 }
 
@@ -675,13 +688,15 @@ private fn intrusive_pool_mix_tag(value: usize) -> usize {
 }
 
 fn intrusive_owner_new(T: type, pool: &mut IntrusivePool(T) @ pool_id,
-                       slot: usize, generation: usize @ allocation)
+                       slot: IntrusiveSlotAddress,
+                       generation: usize @ allocation)
         -> IntrusiveOwner[pool_id, allocation] {
     let mut owner: IntrusiveOwner[pool_id, allocation] = { slot, generation };
     return owner;
 }
 
-fn intrusive_owner_slot(owner: borrow IntrusiveOwner[pool_id, allocation]) -> usize {
+fn intrusive_owner_slot(owner: borrow IntrusiveOwner[pool_id, allocation])
+        -> IntrusiveSlotAddress {
     return owner.slot;
 }
 
@@ -696,8 +711,62 @@ fn intrusive_owner_generation(owner: borrow IntrusiveOwner[pool_id, allocation])
 // produce a handle this pool did not mint, which is why remove validates.
 fn intrusive_owner_into_parts(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                               owner: sink IntrusiveOwner[pool_id, allocation])
-        -> (usize, usize @ allocation) {
-    return (owner.slot, owner.generation);
+        -> IntrusiveOwnerParts {
+    let mut parts: IntrusiveOwnerParts = { owner.slot, owner.generation };
+    return parts;
+}
+
+fn intrusive_slot_address_none() -> IntrusiveSlotAddress {
+    let mut address: IntrusiveSlotAddress = { 0 };
+    return address;
+}
+
+fn intrusive_slot_address_is_none(address: IntrusiveSlotAddress) -> bool {
+    return address.raw == 0;
+}
+
+fn intrusive_slot_address_equal(a: IntrusiveSlotAddress,
+                                b: IntrusiveSlotAddress) -> bool {
+    return a.raw == b.raw;
+}
+
+fn intrusive_slot_address_chunk_base(
+        T: type, pool: &mut IntrusivePool(T) @ pool_id,
+        address: IntrusiveSlotAddress) -> usize {
+    return intrusive_chunk_base_of(pool, address.raw);
+}
+
+fn intrusive_slot_address_offset(
+        T: type, pool: &mut IntrusivePool(T) @ pool_id,
+        address: IntrusiveSlotAddress) -> usize {
+    return address.raw - intrusive_chunk_base_of(pool, address.raw);
+}
+
+fn intrusive_slot_address_is_valid(
+        T: type, pool: &mut IntrusivePool(T) @ pool_id,
+        address: IntrusiveSlotAddress) -> bool !{unsafe} {
+    return intrusive_pool_slot_is_valid(pool, address.raw);
+}
+
+fn intrusive_slot_address_offset_is_valid(
+        T: type, pool: &mut IntrusivePool(T) @ pool_id,
+        address: IntrusiveSlotAddress, offset: usize) -> bool !{unsafe} {
+    return intrusive_pool_slot_is_valid(pool, address.raw + offset);
+}
+
+// Comparison with an untrusted integer does not mint an address. This is
+// used by corruption probes to prove that a poisoned link was not returned.
+fn intrusive_slot_address_matches_untrusted(
+        address: IntrusiveSlotAddress, untrusted: usize) -> bool {
+    return address.raw == untrusted;
+}
+
+// One-way projection for namespaces that use the address as an opaque numeric
+// identity (notably the scheduler and diagnostics). There is deliberately no
+// inverse: a usize must be validated by probe_slot before it can become an
+// owner address again.
+fn intrusive_slot_address_identity(address: IntrusiveSlotAddress) -> usize {
+    return address.raw;
 }
 
 // Discharges the linear obligation without returning the slot -- for a
@@ -1345,7 +1414,7 @@ fn intrusive_pool_insert_zeroed(T: type, pool: &mut IntrusivePool(T) @ pool_id,
         }
         IntrusivePoolInsertResult::Allocated(owner) => {
             let bytes: *u8 = unsafe {
-                (intrusive_owner_slot(owner)
+                (intrusive_owner_slot(owner).raw
                  + offsetof(IntrusiveSlot(T), storage)) as *u8
             };
             let span: isize = sizeof(T) as isize;
@@ -1468,8 +1537,9 @@ private fn intrusive_pool_insert_unchecked(T: type, pool: &mut IntrusivePool(T) 
     // Full now: it has nothing left to hand out, so it leaves the partial
     // list and rejoins on its next free.
     if (header.free_head == 0) { intrusive_pool_unlink_partial(pool, base); }
+    let mut address: IntrusiveSlotAddress = { slot_address };
     return IntrusivePoolInsertResult::Allocated(
-        intrusive_owner_new(pool, slot_address, generation));
+        intrusive_owner_new(pool, address, generation));
 }
 
 // Rejects, rather than acts on, two distinguishable classes of bad handle:
@@ -1539,7 +1609,7 @@ fn intrusive_pool_remove(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                          guard: borrow IntrusivePoolGuard[pool_id],
                          owner: sink IntrusiveOwner[pool_id, allocation])
         -> IntrusivePoolRemoveResult !{unsafe} {
-    let slot_address: usize = intrusive_owner_slot(owner);
+    let slot_address: usize = intrusive_owner_slot(owner).raw;
     let generation: usize = intrusive_owner_generation(owner);
     if (intrusive_pool_slot_is_valid(pool, slot_address) == false) {
         pool.foreign_handle_count = pool.foreign_handle_count + 1;
@@ -1595,11 +1665,37 @@ fn intrusive_pool_remove(T: type, pool: &mut IntrusivePool(T) @ pool_id,
 // this exact occupant? No ownership proof required, and safe to call on an
 // address of unknown provenance.
 fn intrusive_pool_matches(T: type, pool: &mut IntrusivePool(T) @ pool_id,
-                          slot_address: usize, generation: usize)
+                          slot_address: IntrusiveSlotAddress,
+                          generation: usize)
         -> bool !{unsafe} {
     if (generation == 0) { return false; }
-    if (intrusive_pool_slot_is_valid(pool, slot_address) == false) { return false; }
+    if (intrusive_pool_slot_is_valid(pool, slot_address.raw) == false) { return false; }
+    return intrusive_slot_at(pool, slot_address.raw).generation == generation;
+}
+
+fn intrusive_pool_matches_untrusted(
+        T: type, pool: &mut IntrusivePool(T) @ pool_id,
+        slot_address: usize, generation: usize) -> bool !{unsafe} {
+    if (generation == 0) { return false; }
+    if (intrusive_pool_slot_is_valid(pool, slot_address) == false) {
+        return false;
+    }
     return intrusive_slot_at(pool, slot_address).generation == generation;
+}
+
+// The only raw-to-slot conversion: it succeeds only for the exact live
+// occupant named by (address, generation). Legacy numeric identity stores can
+// therefore cross the API boundary without regaining an unchecked cast.
+fn intrusive_pool_validated_address(
+        T: type, pool: &mut IntrusivePool(T) @ pool_id,
+        slot_address: usize, generation: usize)
+        -> IntrusiveSlotAddress !{unsafe} {
+    if (intrusive_pool_matches_untrusted(
+            pool, slot_address, generation) == false) {
+        return intrusive_slot_address_none();
+    }
+    let mut address: IntrusiveSlotAddress = { slot_address };
+    return address;
 }
 
 // Fast path, no re-validation: see this file's "Current limitations".
@@ -1612,7 +1708,7 @@ fn intrusive_pool_matches(T: type, pool: &mut IntrusivePool(T) @ pool_id,
 fn intrusive_pool_ref(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                       owner: borrow IntrusiveOwner[pool_id, allocation])
         -> *T @ allocation !{unsafe} {
-    return intrusive_pool_payload_at(pool, intrusive_owner_slot(owner));
+    return intrusive_pool_payload_at(pool, intrusive_owner_slot(owner).raw);
 }
 
 // PRIVATE since GitHub issue #348's second half. This is the raw form --
@@ -1658,7 +1754,7 @@ private fn intrusive_pool_payload_at(T: type, pool: &mut IntrusivePool(T) @ pool
 // sidesteps the comparison entirely. The cost is 16 stack bytes per probe
 // in flight, never anything per slot.
 private linear struct IntrusiveSlotView[pool_id: addr] {
-    private slot: usize;
+    private slot: IntrusiveSlotAddress;
     private generation: usize;
 }
 
@@ -1680,7 +1776,8 @@ must_use variant IntrusiveSlotProbe[pool_id: addr] {
 // filter already performed, with the result in a form that cannot be
 // skipped.
 fn intrusive_pool_probe_slot(T: type, pool: &mut IntrusivePool(T) @ pool_id,
-                             slot_address: usize) -> IntrusiveSlotProbe[pool_id] !{unsafe} {
+                             slot_address: usize)
+        -> IntrusiveSlotProbe[pool_id] !{unsafe} {
     if (intrusive_pool_slot_is_valid(pool, slot_address) == false) {
         return IntrusiveSlotProbe::NoPayload;
     }
@@ -1688,11 +1785,13 @@ fn intrusive_pool_probe_slot(T: type, pool: &mut IntrusivePool(T) @ pool_id,
     if (generation == 0) {
         return IntrusiveSlotProbe::NoPayload;
     }
-    let mut minted: IntrusiveSlotView[pool_id] = { slot_address, generation };
+    let mut address: IntrusiveSlotAddress = { slot_address };
+    let mut minted: IntrusiveSlotView[pool_id] = { address, generation };
     return IntrusiveSlotProbe::Live(minted);
 }
 
-fn intrusive_view_slot(slot_view: borrow IntrusiveSlotView[pool_id]) -> usize {
+fn intrusive_view_slot(slot_view: borrow IntrusiveSlotView[pool_id])
+        -> IntrusiveSlotAddress {
     return slot_view.slot;
 }
 
@@ -1738,7 +1837,7 @@ fn intrusive_view_drop(slot_view: sink IntrusiveSlotView[pool_id]) {}
 fn intrusive_pool_payload_of(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                              slot_view: borrow IntrusiveSlotView[pool_id])
         -> *T @ pool_id !{unsafe} {
-    return intrusive_pool_payload_at(pool, intrusive_view_slot(slot_view));
+    return intrusive_pool_payload_at(pool, intrusive_view_slot(slot_view).raw);
 }
 
 // Give a view back. Linear, so a probe whose Live case is taken cannot
@@ -1762,14 +1861,14 @@ fn intrusive_view_release(slot_view: sink IntrusiveSlotView[pool_id]) {}
 fn intrusive_pool_payload_unproven_of(
         T: type, pool: &mut IntrusivePool(T) @ pool_id,
         slot_view: sink IntrusiveSlotView[pool_id]) -> *T !{unsafe} {
-    return intrusive_pool_payload_at(pool, intrusive_view_slot(slot_view));
+    return intrusive_pool_payload_at(pool, intrusive_view_slot(slot_view).raw);
 }
 
 // The owner-shaped escape, same reasoning.
 fn intrusive_pool_ref_unproven(
         T: type, pool: &mut IntrusivePool(T) @ pool_id,
         owner: borrow IntrusiveOwner[pool_id, allocation]) -> *T !{unsafe} {
-    return intrusive_pool_payload_at(pool, intrusive_owner_slot(owner));
+    return intrusive_pool_payload_at(pool, intrusive_owner_slot(owner).raw);
 }
 
 // -- Iteration ---------------------------------------------------------
@@ -1782,7 +1881,8 @@ fn intrusive_pool_ref_unproven(
 // payload only through the view its Live case carries. That match IS the
 // filter this section used to describe as a convention.
 
-fn intrusive_pool_first_slot(T: type, pool: &mut IntrusivePool(T) @ pool_id) -> usize !{unsafe} {
+fn intrusive_pool_first_slot(T: type, pool: &mut IntrusivePool(T) @ pool_id)
+        -> usize !{unsafe} {
     if (pool.chunk_head == 0) { return 0; }
     return pool.chunk_head;
 }
@@ -2149,7 +2249,7 @@ fn intrusive_pool_boot_probe() -> bool !{unsafe} {
     // thing that fails loudly if it is not.
     let p0: *usize = intrusive_pool_ref(&pool, a0);
     *p0 = 0xFEEDFACE;
-    let slot0: usize = intrusive_owner_slot(a0);
+    let mut slot0: IntrusiveSlotAddress = intrusive_owner_slot(a0);
     let generation0: usize = intrusive_owner_generation(a0);
     let p0_again: *usize = intrusive_pool_ref(&pool, a0);
     let stored_ok: bool = *p0_again == 0xFEEDFACE;
@@ -2168,7 +2268,8 @@ fn intrusive_pool_boot_probe() -> bool !{unsafe} {
         IntrusivePoolInsertResult::OutOfMemory => { return false; }
         IntrusivePoolInsertResult::Allocated(o) => { o }
     };
-    let recycled: bool = intrusive_owner_slot(a1) == slot0;
+    let recycled: bool =
+        intrusive_slot_address_equal(intrusive_owner_slot(a1), slot0);
     let stale_refused: bool =
         intrusive_pool_matches(&pool, slot0, generation0) == false;
     let removes_before: usize = intrusive_pool_double_remove_count(&pool);

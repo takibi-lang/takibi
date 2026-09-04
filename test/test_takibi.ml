@@ -6802,6 +6802,32 @@ let infer_tests = [
            Alcotest.(check bool) "mentions private fields" true
              (contains_substring msg "it has private fields"));
 
+  (* GitHub issue #396: the intrusive-pool constructor used to take usize,
+     so `(payload as usize)` was indistinguishable from the slot address and
+     silently rebuilt an owner eight bytes into the allocation. The nominal
+     address has a private field, and the constructor accepts only that type.
+     This cross-file case pins down the consumer boundary: pointer-to-integer
+     casts remain available for legitimate low-level work, but cannot satisfy
+     the slot parameter. *)
+  Alcotest.test_case
+    "issue #396: a payload address cannot be passed as a pool slot address"
+    `Quick
+    (fun () ->
+       match infer_files [
+         "pool.tkb",
+         "struct SlotAddress { private raw: usize; }
+          fn owner_new(slot: SlotAddress) {}";
+         "consumer.tkb",
+         "fn wrong(payload: *u8) {
+            owner_new(payload as usize);
+          }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "rejects usize as slot address" true
+             (contains_substring msg
+                "cannot unify usize with SlotAddress"));
+
   Alcotest.test_case "private field: a NON-private field of the same struct \
                       stays freely accessible cross-file" `Quick
     (fun () ->

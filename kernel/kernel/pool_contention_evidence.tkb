@@ -138,7 +138,7 @@ private fn contention_cycle() -> bool !{unsafe} {
             return false;
         }
         IntrusivePoolInsertResult::Allocated(owner) => {
-            let address: usize = intrusive_owner_slot(owner);
+            let mut address: IntrusiveSlotAddress = intrusive_owner_slot(owner);
             let generation: usize = intrusive_owner_generation(owner);
             intrusive_owner_drop(owner);
             let handle = intrusive_owner_new(&contention_pool, address,
@@ -246,7 +246,8 @@ fn pool_contention_probe() -> bool !{unsafe} {
                 // carries the proven range and `held` does not, which
                 // --forbid-trap says out loud. They are equal on every
                 // path that reaches the check below.
-                floor_address[i] = intrusive_owner_slot(owner);
+                floor_address[i] = intrusive_slot_address_identity(
+                    intrusive_owner_slot(owner));
                 floor_generation[i] = intrusive_owner_generation(owner);
                 intrusive_owner_drop(owner);
                 held = held + 1;
@@ -347,8 +348,10 @@ fn pool_contention_probe() -> bool !{unsafe} {
     if (settled == false) { return false; }
 
     for i: usize in 0..<CONTENTION_FLOOR {
-        let handle = intrusive_owner_new(&contention_pool, floor_address[i],
-                                         floor_generation[i]);
+        let mut address: IntrusiveSlotAddress = intrusive_pool_validated_address(
+            &contention_pool, floor_address[i], floor_generation[i]);
+        let handle = intrusive_owner_new(
+            &contention_pool, address, floor_generation[i]);
         let guard = intrusive_pool_lock(&contention_pool);
         let (ok, reason) = intrusive_remove_outcome(
             intrusive_pool_remove(&contention_pool, guard, handle));

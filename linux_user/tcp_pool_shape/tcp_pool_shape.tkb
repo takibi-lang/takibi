@@ -127,7 +127,7 @@ fn free_frame(link: FrameLink) -> usize !{unsafe} {
     match link {
         FrameLink::None => { return 0; }
         FrameLink::Some(parked) => {
-            let slot: usize = intrusive_owner_slot(parked);
+            let mut slot: IntrusiveSlotAddress = intrusive_owner_slot(parked);
             let generation: usize = intrusive_owner_generation(parked);
             intrusive_owner_drop(parked);
             let branded = intrusive_owner_new(&frames, slot, generation);
@@ -176,7 +176,7 @@ fn free_retx_chain(head: RetxLink) -> (usize, usize) !{unsafe} {
         match link {
             RetxLink::End => { walking = false; link = RetxLink::End; }
             RetxLink::More(parked) => {
-                let slot: usize = intrusive_owner_slot(parked);
+                let mut slot: IntrusiveSlotAddress = intrusive_owner_slot(parked);
                 let generation: usize = intrusive_owner_generation(parked);
                 intrusive_owner_drop(parked);
                 let branded = intrusive_owner_new(&retxs, slot, generation);
@@ -347,7 +347,8 @@ fn app_main() !{unsafe} {
                                 let tx: *NetFrame = intrusive_pool_ref(&frames, tx_owner);
                                 tx.len = 54;                 // a SYN-ACK
                                 tx.bytes[0] = 0x45;
-                                let tx_slot: usize = intrusive_owner_slot(tx_owner);
+                                let mut tx_slot: IntrusiveSlotAddress =
+                                    intrusive_owner_slot(tx_owner);
 
                                 let rg = intrusive_pool_lock(&retxs);
                                 let rr = intrusive_pool_insert_zeroed(&retxs, rg);
@@ -385,7 +386,8 @@ fn app_main() !{unsafe} {
                                         match held {
                                             FrameLink::None => {}
                                             FrameLink::Some(back) => {
-                                                if (intrusive_owner_slot(back) == tx_slot) {
+                                                if (intrusive_slot_address_equal(
+                                                        intrusive_owner_slot(back), tx_slot)) {
                                                     moved_frames = moved_frames + 1;
                                                 }
                                                 let g4 = slot_lock(&e2.mutex);
@@ -513,8 +515,10 @@ fn app_main() !{unsafe} {
                 // that stop being true, and holding it across the remove
                 // is exactly the shape the tie exists to stop. Nothing
                 // reads `conn` past this line.
+                let mut address: IntrusiveSlotAddress =
+                    intrusive_view_slot(slot_view);
                 intrusive_view_release(slot_view);
-                let owner = intrusive_owner_new(&conns, cursor, generation);
+                let owner = intrusive_owner_new(&conns, address, generation);
                 let g4 = intrusive_pool_lock(&conns);
                 let removed2: bool =
                     intrusive_remove_succeeded(intrusive_pool_remove(&conns, g4, owner));
@@ -567,8 +571,16 @@ fn app_main() !{unsafe} {
     // because a future retention default of zero would make the whole
     // check pass vacuously via the same counter.
     let alien_slot: usize = intrusive_pool_first_slot(&retxs);
+    let mut alien_address: IntrusiveSlotAddress = intrusive_slot_address_none();
+    match intrusive_pool_probe_slot(&retxs, alien_slot) {
+        IntrusiveSlotProbe::NoPayload => {}
+        IntrusiveSlotProbe::Live(alien_view) => {
+            alien_address = intrusive_view_slot(alien_view);
+            intrusive_view_drop(alien_view);
+        }
+    }
     let before: usize = intrusive_pool_foreign_handle_count(&frames);
-    let alien = intrusive_owner_new(&frames, alien_slot, 1);
+    let alien = intrusive_owner_new(&frames, alien_address, 1);
     let g5 = intrusive_pool_lock(&frames);
     let alien_result = intrusive_pool_remove(&frames, g5, alien);
     intrusive_pool_unlock(&frames, g5);
@@ -609,7 +621,7 @@ fn app_main() !{unsafe} {
     let seed_g = intrusive_pool_lock(&conns);
     let seed = intrusive_pool_insert_zeroed(&conns, seed_g);
     intrusive_pool_unlock(&conns, seed_g);
-    let mut stale_slot: usize = 0;
+    let mut stale_slot: IntrusiveSlotAddress = intrusive_slot_address_none();
     let mut stale_generation: usize = 0;
     match seed {
         IntrusivePoolInsertResult::OutOfMemory => {}
@@ -631,7 +643,8 @@ fn app_main() !{unsafe} {
             uart_puts("a stale (slot, generation) pair is refused: no refill\n");
         }
         IntrusivePoolInsertResult::Allocated(fresh) => {
-            let recycled: bool = intrusive_owner_slot(fresh) == stale_slot;
+            let recycled: bool = intrusive_slot_address_equal(
+                intrusive_owner_slot(fresh), stale_slot);
             let matched: bool =
                 intrusive_pool_matches(&conns, stale_slot, stale_generation);
             let before_stale: usize = intrusive_pool_double_remove_count(&conns);

@@ -527,7 +527,7 @@ fn tcp_frame_release_link(link: FrameLink) !{unsafe} {
     match link {
         FrameLink::None => {}
         FrameLink::Some(parked) => {
-            let slot: usize = intrusive_owner_slot(parked);
+            let mut slot: IntrusiveSlotAddress = intrusive_owner_slot(parked);
             let generation: usize = intrusive_owner_generation(parked);
             intrusive_owner_drop(parked);
             let branded = intrusive_owner_new(&tcp_frame_pool, slot, generation);
@@ -585,7 +585,8 @@ fn tcp_frame_take() -> (FrameLink, usize) !{unsafe} {
             // The address comes back beside the link because a link is
             // linear: reading it out of the parked handle later would mean
             // consuming the handle to look at it.
-            let address: usize = intrusive_owner_slot(owner);
+            let address: usize = intrusive_slot_address_identity(
+                intrusive_owner_slot(owner));
             return (FrameLink::Some(owner), address);
         }
     }
@@ -925,7 +926,8 @@ fn tcp_connection_alloc() -> TcpConnectionAllocResult !{unsafe} {
             return TcpConnectionAllocResult::Full;
         }
         IntrusivePoolInsertResult::Allocated(pool_owner) => {
-            let address: usize = intrusive_owner_slot(pool_owner);
+            let address: usize = intrusive_slot_address_identity(
+                intrusive_owner_slot(pool_owner));
             let generation: usize = intrusive_owner_generation(pool_owner);
             // GitHub issue #488: unproven, and this one is real. `conn` is
             // used after intrusive_owner_drop(pool_owner) below --
@@ -977,7 +979,8 @@ fn tcp_connection_identity(owner: borrow TcpConnectionOwner[connection])
 fn tcp_connection_matches(owner: borrow TcpConnectionOwner[connection],
                           slot: usize, generation: usize) -> bool !{unsafe} {
     return owner.slot == slot && owner.generation == generation &&
-           intrusive_pool_matches(&tcp_connection_pool, owner.slot, generation);
+           intrusive_pool_matches_untrusted(
+               &tcp_connection_pool, owner.slot, generation);
 }
 
 // What used to store the owner in a stable slot and describe the
@@ -1000,7 +1003,8 @@ fn tcp_connection_put(owner: sink TcpConnectionOwner[connection])
 // slotmap_matches call inside tcp_connection_matches was.
 fn tcp_connection_take(slot_value: usize, generation: usize)
         -> TcpConnectionTakeResult !{unsafe} {
-    if (intrusive_pool_matches(&tcp_connection_pool, slot_value, generation)) {
+    if (intrusive_pool_matches_untrusted(
+            &tcp_connection_pool, slot_value, generation)) {
         // GitHub issue #462: the owner IS the exclusion now. This is the
         // acquire, and the reason it can live here -- rather than needing
         // a lock outside the payload -- is that the caller has no
@@ -1046,7 +1050,10 @@ fn tcp_connection_free(owner: sink TcpConnectionOwner[connection]) !{unsafe} {
     conn.state = ConnState::Listen;
     conn.connection_open = false;
     tcp_connection_frames_release(conn);
-    let branded = intrusive_owner_new(&tcp_connection_pool, address, generation);
+    let mut checked: IntrusiveSlotAddress = intrusive_pool_validated_address(
+        &tcp_connection_pool, address, generation);
+    let branded = intrusive_owner_new(
+        &tcp_connection_pool, checked, generation);
     let guard = intrusive_pool_lock(&tcp_connection_pool);
     tcp_pool_remove_expected(
         intrusive_pool_remove(&tcp_connection_pool, guard, branded),
@@ -1327,7 +1334,9 @@ fn retx_entry_put_next(entry: borrow *RetxEntry, link: RetxLink) -> bool {
 // is exactly the one way to produce a handle the pool did not mint, and
 // exactly why remove validates before it trusts one.
 fn retx_entry_free(slot: usize, generation: usize) !{unsafe} {
-    let branded = intrusive_owner_new(&tcp_retx_pool, slot, generation);
+    let mut checked: IntrusiveSlotAddress = intrusive_pool_validated_address(
+        &tcp_retx_pool, slot, generation);
+    let branded = intrusive_owner_new(&tcp_retx_pool, checked, generation);
     let guard = intrusive_pool_lock(&tcp_retx_pool);
     tcp_pool_remove_expected(
         intrusive_pool_remove(&tcp_retx_pool, guard, branded),
@@ -1350,7 +1359,7 @@ fn retx_chain_reverse(link_in: RetxLink) -> RetxLink !{unsafe} {
         match link {
             RetxLink::End => { walking = false; link = RetxLink::End; }
             RetxLink::More(parked) => {
-                let slot: usize = intrusive_owner_slot(parked);
+                let mut slot: IntrusiveSlotAddress = intrusive_owner_slot(parked);
                 let generation: usize = intrusive_owner_generation(parked);
                 intrusive_owner_drop(parked);
                 if (intrusive_pool_matches(&tcp_retx_pool, slot, generation)) {
@@ -1395,7 +1404,7 @@ fn pending_tcp_reset_all(connection_address: usize) !{unsafe} {
         match link {
             RetxLink::End => { walking = false; link = RetxLink::End; }
             RetxLink::More(parked) => {
-                let slot: usize = intrusive_owner_slot(parked);
+                let mut slot: IntrusiveSlotAddress = intrusive_owner_slot(parked);
                 let generation: usize = intrusive_owner_generation(parked);
                 intrusive_owner_drop(parked);
                 if (intrusive_pool_matches(&tcp_retx_pool, slot, generation)) {
@@ -1407,7 +1416,8 @@ fn pending_tcp_reset_all(connection_address: usize) !{unsafe} {
                     let mine: bool = entry.connection == connection_address;
                     if (mine) {
                         intrusive_owner_drop(branded);
-                        retx_entry_free(slot, generation);
+                        retx_entry_free(
+                            intrusive_slot_address_identity(slot), generation);
                     } else {
                         if (retx_entry_put_next(entry, kept) == false) {
                             kernel_boot_log("tcp retx: chain link was not empty\n");
@@ -1471,7 +1481,8 @@ fn pending_tcp_record(conn: *TcpConnection,
             return 0;
         }
         IntrusivePoolInsertResult::Allocated(owner) => {
-            let entry_address: usize = intrusive_owner_slot(owner);
+            let entry_address: usize = intrusive_slot_address_identity(
+                intrusive_owner_slot(owner));
             let entry: *RetxEntry = intrusive_pool_ref(&tcp_retx_pool, owner);
             // GitHub issue #460: this was `entry.mutex = 0` and it
             // compiled after the field became a Mutex -- assigning an
@@ -1600,7 +1611,7 @@ fn pending_tcp_chain_probe_body(conn: *TcpConnection, other: *TcpConnection)
         match link {
             RetxLink::End => { walking = false; link = RetxLink::End; }
             RetxLink::More(parked) => {
-                let slot: usize = intrusive_owner_slot(parked);
+                let mut slot: IntrusiveSlotAddress = intrusive_owner_slot(parked);
                 let generation: usize = intrusive_owner_generation(parked);
                 intrusive_owner_drop(parked);
                 if (intrusive_pool_matches(&tcp_retx_pool, slot, generation)) {
@@ -1736,7 +1747,8 @@ fn pending_tcp_service_once(conn: *TcpConnection,
                 match link {
                     RetxLink::End => { walking = false; link = RetxLink::End; }
                     RetxLink::More(parked) => {
-                        let slot: usize = intrusive_owner_slot(parked);
+                        let mut slot: IntrusiveSlotAddress =
+                            intrusive_owner_slot(parked);
                         let generation: usize =
                             intrusive_owner_generation(parked);
                         intrusive_owner_drop(parked);
@@ -1759,11 +1771,13 @@ fn pending_tcp_service_once(conn: *TcpConnection,
                                 // same rigor
                                 // kernel_tcp_injected_syn_ack_recovered()
                                 // already had.
-                                if (slot == conn.injected_data_entry &&
+                                if (intrusive_slot_address_matches_untrusted(
+                                        slot, conn.injected_data_entry) &&
                                     tcp_injected_data_retransmitted) {
                                     tcp_injected_data_recovery_observed = true;
                                 }
-                                if (slot == conn.injected_fin_entry &&
+                                if (intrusive_slot_address_matches_untrusted(
+                                        slot, conn.injected_fin_entry) &&
                                     tcp_injected_fin_retransmitted) {
                                     tcp_injected_fin_recovery_observed = true;
                                 }
@@ -1771,7 +1785,9 @@ fn pending_tcp_service_once(conn: *TcpConnection,
                             }
                             if (acked) {
                                 intrusive_owner_drop(branded);
-                                retx_entry_free(slot, generation);
+                                retx_entry_free(
+                                    intrusive_slot_address_identity(slot),
+                                    generation);
                                 conn.retx_count =
                                     retx_count_after_release(conn);
                             } else {
@@ -1807,7 +1823,7 @@ fn pending_tcp_service_once(conn: *TcpConnection,
         match link {
             RetxLink::End => { walking = false; link = RetxLink::End; }
             RetxLink::More(parked) => {
-                let slot: usize = intrusive_owner_slot(parked);
+                let mut slot: IntrusiveSlotAddress = intrusive_owner_slot(parked);
                 let generation: usize = intrusive_owner_generation(parked);
                 intrusive_owner_drop(parked);
                 if (intrusive_pool_matches(&tcp_retx_pool, slot, generation)) {
@@ -1853,16 +1869,19 @@ fn pending_tcp_service_once(conn: *TcpConnection,
                         let frame_bytes = entry.frame as []u8;
                         ready = net_transmit_ready(
                             ready, frame_bytes[0..<1514], length as i32);
-                        if (slot == conn.injected_data_entry) {
+                        if (intrusive_slot_address_matches_untrusted(
+                                slot, conn.injected_data_entry)) {
                             tcp_injected_data_retransmitted = true;
                         }
-                        if (slot == conn.injected_fin_entry) {
+                        if (intrusive_slot_address_matches_untrusted(
+                                slot, conn.injected_fin_entry)) {
                             tcp_injected_fin_retransmitted = true;
                         }
                     }
                     if (expired) {
                         intrusive_owner_drop(branded);
-                        retx_entry_free(slot, generation);
+                        retx_entry_free(
+                            intrusive_slot_address_identity(slot), generation);
                         conn.retx_count =
                             retx_count_after_release(conn);
                     } else {

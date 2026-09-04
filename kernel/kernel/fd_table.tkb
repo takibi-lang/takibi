@@ -186,16 +186,17 @@ private let mut fd_context_pool: IntrusivePool(ProcessFdContext);
 // really "is this index in range", it was "does this process have an fd
 // table", and only one of those survives the array going away.
 private fn fd_context_address(process: usize) -> usize !{unsafe} {
-    let address: usize = scheduled_process_fd_context(process);
-    if (address == 0) { return 0; }
+    let mut address: IntrusiveSlotAddress = scheduled_process_fd_context(process);
+    if (intrusive_slot_address_is_none(address)) { return 0; }
     let generation: usize = scheduled_process_fd_context_generation(process);
     // The handle is (address, generation) and both halves are checked: a
     // stale pair naming a recycled slot is exactly the use-after-free
     // intrusive_pool_matches exists to refuse.
-    if (intrusive_pool_matches(&fd_context_pool, address, generation) == false) {
+    if (intrusive_pool_matches(
+            &fd_context_pool, address, generation) == false) {
         return 0;
     }
-    return address;
+    return intrusive_slot_address_identity(address);
 }
 
 // The PAYLOAD, not the slot. A slot address is the address of
@@ -205,7 +206,7 @@ private fn fd_context_address(process: usize) -> usize !{unsafe} {
 // that sounds. The pool's own accessor knows the offset; nothing here
 // should.
 private fn fd_context_at(process: usize) -> *ProcessFdContext !{unsafe} {
-    let address: usize = scheduled_process_fd_context(process);
+    let mut address: IntrusiveSlotAddress = scheduled_process_fd_context(process);
     let generation: usize = scheduled_process_fd_context_generation(process);
     let owner = intrusive_owner_new(&fd_context_pool, address, generation);
     // GitHub issue #488: this RETURNS the pointer, so it cannot
@@ -231,11 +232,14 @@ fn unified_fd_block_pool_init() {
 
 private fn fd_block_matches(address: usize, generation: usize) -> bool !{unsafe} {
     if (address == 0) { return false; }
-    return intrusive_pool_matches(&fd_block_pool, address, generation);
+    return intrusive_pool_matches_untrusted(
+        &fd_block_pool, address, generation);
 }
 
 private fn fd_block_at(address: usize, generation: usize) -> *FdBlock !{unsafe} {
-    let owner = intrusive_owner_new(&fd_block_pool, address, generation);
+    let mut checked: IntrusiveSlotAddress = intrusive_pool_validated_address(
+        &fd_block_pool, address, generation);
+    let owner = intrusive_owner_new(&fd_block_pool, checked, generation);
     // GitHub issue #488: this RETURNS the pointer, so it cannot
     // hold the proof for the pointer's life. The unproven form
     // names that and counts it in the trusted base; removing it
@@ -270,7 +274,8 @@ private fn fd_block_alloc() -> FdBlockAllocResult !{unsafe} {
             return FdBlockAllocResult::OutOfMemory;
         }
         IntrusivePoolInsertResult::Allocated(owner) => {
-            let address: usize = intrusive_owner_slot(owner);
+            let address: usize = intrusive_slot_address_identity(
+                intrusive_owner_slot(owner));
             let generation: usize = intrusive_owner_generation(owner);
             intrusive_owner_drop(owner);
             // insert_zeroed IS the empty run: UnifiedFdKind::Empty is
@@ -283,7 +288,9 @@ private fn fd_block_alloc() -> FdBlockAllocResult !{unsafe} {
 }
 
 private fn fd_block_free(address: usize, generation: usize) !{unsafe} {
-    let owner = intrusive_owner_new(&fd_block_pool, address, generation);
+    let mut checked: IntrusiveSlotAddress = intrusive_pool_validated_address(
+        &fd_block_pool, address, generation);
+    let owner = intrusive_owner_new(&fd_block_pool, checked, generation);
     let guard = intrusive_pool_lock(&fd_block_pool);
     let (ok, reason) = intrusive_remove_outcome(
         intrusive_pool_remove(&fd_block_pool, guard, owner));
@@ -387,7 +394,7 @@ fn unified_fd_context_ensure(process: usize) -> bool !{unsafe} {
     match result {
         IntrusivePoolInsertResult::OutOfMemory => { return false; }
         IntrusivePoolInsertResult::Allocated(owner) => {
-            let address: usize = intrusive_owner_slot(owner);
+            let mut address: IntrusiveSlotAddress = intrusive_owner_slot(owner);
             let generation: usize = intrusive_owner_generation(owner);
             let ctx: *ProcessFdContext =
                 intrusive_pool_ref(&fd_context_pool, owner);
@@ -409,16 +416,21 @@ fn unified_fd_context_ensure(process: usize) -> bool !{unsafe} {
 // context back is what makes this a pool rather than a differently-spelled
 // array.
 fn unified_fd_context_release(process: usize) !{unsafe} {
-    let address: usize = fd_context_address(process);
-    if (address == 0) { return; }
+    if (fd_context_address(process) == 0) { return; }
     // The descriptor blocks go first: they are a separate pool, and the
     // context is the only thing that names them.
     fd_blocks_release(fd_context_at(process));
+    // Read both typed handle parts AFTER the descriptor walk and BEFORE
+    // clearing the record. Keeping an aggregate-valued address live across
+    // that walk needlessly extends its ABI-visible lifetime; the process
+    // record remains the authority until this point.
+    let mut address: IntrusiveSlotAddress = scheduled_process_fd_context(process);
     // Read the generation BEFORE clearing the record, or the handle
     // rebuilt below names the right slot with the wrong occupant and the
     // pool correctly refuses it.
     let generation: usize = scheduled_process_fd_context_generation(process);
-    scheduled_process_set_fd_context(process, 0, 0);
+    scheduled_process_set_fd_context(
+        process, intrusive_slot_address_none(), 0);
     let owner = intrusive_owner_new(&fd_context_pool, address, generation);
     let guard = intrusive_pool_lock(&fd_context_pool);
     let (ok, reason) = intrusive_remove_outcome(
@@ -558,8 +570,8 @@ fn unified_object_max_files() -> usize {
 }
 
 private fn unified_object_matches(handle: UnifiedObjectHandle) -> bool !{unsafe} {
-    return intrusive_pool_matches(&object_pool, handle.slot,
-                                  handle.generation);
+    return intrusive_pool_matches_untrusted(
+        &object_pool, handle.slot, handle.generation);
 }
 
 // The PAYLOAD of a slot the caller has already matched -- the same split,
@@ -568,8 +580,9 @@ private fn unified_object_matches(handle: UnifiedObjectHandle) -> bool !{unsafe}
 // the payload of an address that failed that test is exactly the
 // use-after-free the generation check exists to refuse.
 private fn unified_object_at(handle: UnifiedObjectHandle) -> *SharedObject !{unsafe} {
-    let owner = intrusive_owner_new(&object_pool, handle.slot,
-                                    handle.generation);
+    let mut checked: IntrusiveSlotAddress = intrusive_pool_validated_address(
+        &object_pool, handle.slot, handle.generation);
+    let owner = intrusive_owner_new(&object_pool, checked, handle.generation);
     // GitHub issue #488: this RETURNS the pointer, so it cannot
     // hold the proof for the pointer's life. The unproven form
     // names that and counts it in the trusted base; removing it
@@ -587,7 +600,9 @@ private fn unified_object_at(handle: UnifiedObjectHandle) -> *SharedObject !{uns
 // `object_records[slot].kind = Empty` to write afterwards -- the record
 // stops existing instead.
 private fn unified_object_free(slot: usize, generation: usize) !{unsafe} {
-    let owner = intrusive_owner_new(&object_pool, slot, generation);
+    let mut checked: IntrusiveSlotAddress = intrusive_pool_validated_address(
+        &object_pool, slot, generation);
+    let owner = intrusive_owner_new(&object_pool, checked, generation);
     let guard = intrusive_pool_lock(&object_pool);
     let (ok, reason) = intrusive_remove_outcome(
         intrusive_pool_remove(&object_pool, guard, owner));
@@ -1202,7 +1217,8 @@ fn unified_object_alloc_first(kind: UnifiedFdKind) -> UnifiedObjectResult !{unsa
             return UnifiedObjectResult::Full;
         }
         IntrusivePoolInsertResult::Allocated(owner) => {
-            let slot: usize = intrusive_owner_slot(owner);
+            let slot: usize = intrusive_slot_address_identity(
+                intrusive_owner_slot(owner));
             let generation: usize = intrusive_owner_generation(owner);
             let object: *SharedObject = intrusive_pool_ref(&object_pool, owner);
             object.kind = kind;

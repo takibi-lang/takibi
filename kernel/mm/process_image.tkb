@@ -185,9 +185,9 @@ private fn process_image_record_at(root: usize) -> *ProcessImageRecord !{unsafe}
             process_image_record_missing_count + 1;
         return &process_image_record_missing;
     }
-    let address: usize = scheduled_process_image_record(root);
+    let mut address: IntrusiveSlotAddress = scheduled_process_image_record(root);
     let generation: usize = scheduled_process_image_record_generation(root);
-    if (address == 0) {
+    if (intrusive_slot_address_is_none(address)) {
         process_image_record_missing_count =
             process_image_record_missing_count + 1;
         return &process_image_record_missing;
@@ -240,10 +240,10 @@ private fn process_image_record_reset(record: borrow *ProcessImageRecord) {
 // of live records was the process table's size.
 fn process_image_record_ensure(root: usize) -> bool !{unsafe} {
     process_image_pool_init();
-    let address: usize = scheduled_process_image_record(root);
+    let mut address: IntrusiveSlotAddress = scheduled_process_image_record(root);
     let generation: usize = scheduled_process_image_record_generation(root);
-    if (address != 0 &&
-        intrusive_pool_matches(&process_image_pool, address, generation)) {
+    if (intrusive_slot_address_is_none(address) == false && intrusive_pool_matches(
+            &process_image_pool, address, generation)) {
         return true;
     }
     let guard = intrusive_pool_lock(&process_image_pool);
@@ -252,7 +252,7 @@ fn process_image_record_ensure(root: usize) -> bool !{unsafe} {
     match result {
         IntrusivePoolInsertResult::OutOfMemory => { return false; }
         IntrusivePoolInsertResult::Allocated(owner) => {
-            let slot: usize = intrusive_owner_slot(owner);
+            let mut slot: IntrusiveSlotAddress = intrusive_owner_slot(owner);
             let stamp: usize = intrusive_owner_generation(owner);
             let record: *ProcessImageRecord =
                 intrusive_pool_ref(&process_image_pool, owner);
@@ -269,13 +269,13 @@ fn process_image_record_ensure(root: usize) -> bool !{unsafe} {
 // for why that is the bootstrap root's exemption and not a leak.
 fn process_image_record_release(root: usize) !{unsafe} {
     if (root == 0) { return; }
-    let address: usize = scheduled_process_image_record(root);
-    if (address == 0) { return; }
+    let mut address: IntrusiveSlotAddress = scheduled_process_image_record(root);
+    if (intrusive_slot_address_is_none(address)) { return; }
     // Read the generation BEFORE clearing the handle, or the owner
     // rebuilt below names the right slot with the wrong occupant and the
     // pool correctly refuses it.
     let generation: usize = scheduled_process_image_record_generation(root);
-    scheduled_process_set_image_record(root, 0, 0);
+    scheduled_process_set_image_record(root, intrusive_slot_address_none(), 0);
     let owner = intrusive_owner_new(&process_image_pool, address, generation);
     let guard = intrusive_pool_lock(&process_image_pool);
     let (ok, reason) = intrusive_remove_outcome(

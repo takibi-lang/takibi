@@ -157,15 +157,17 @@ private fn address_space_backing_pool_init() {
 // the MMU-off reason stated above.
 fn address_space_backing_release(slot: usize) !{unsafe} {
     if (slot == 0) { return; }
-    let address: usize = scheduled_process_address_space_backing(slot);
-    if (address == 0) { return; }
+    let mut address: IntrusiveSlotAddress =
+        scheduled_process_address_space_backing(slot);
+    if (intrusive_slot_address_is_none(address)) { return; }
     // Read the generation BEFORE clearing the handle, the same ordering
     // process_image_record_release states: an owner rebuilt afterwards
     // would name the right slot with the wrong occupant, and the pool
     // would correctly refuse it.
     let generation: usize =
         scheduled_process_address_space_backing_generation(slot);
-    scheduled_process_set_address_space_backing(slot, 0, 0);
+    scheduled_process_set_address_space_backing(
+        slot, intrusive_slot_address_none(), 0);
     let owner =
         intrusive_owner_new(&address_space_backing_pool, address, generation);
     let guard = intrusive_pool_lock(&address_space_backing_pool);
@@ -187,11 +189,12 @@ fn address_space_backing_ensure(slot: usize) -> bool !{unsafe} {
     // must not attempt one, because it is created with the MMU off.
     if (slot == 0) { return true; }
     address_space_backing_pool_init();
-    let address: usize = scheduled_process_address_space_backing(slot);
+    let mut address: IntrusiveSlotAddress =
+        scheduled_process_address_space_backing(slot);
     let generation: usize =
         scheduled_process_address_space_backing_generation(slot);
-    if (address != 0 &&
-        intrusive_pool_matches(&address_space_backing_pool, address, generation)) {
+    if (intrusive_slot_address_is_none(address) == false && intrusive_pool_matches(
+            &address_space_backing_pool, address, generation)) {
         return true;
     }
     let guard = intrusive_pool_lock(&address_space_backing_pool);
@@ -200,7 +203,8 @@ fn address_space_backing_ensure(slot: usize) -> bool !{unsafe} {
     match result {
         IntrusivePoolInsertResult::OutOfMemory => { return false; }
         IntrusivePoolInsertResult::Allocated(owner) => {
-            let address_new: usize = intrusive_owner_slot(owner);
+            let mut address_new: IntrusiveSlotAddress =
+                intrusive_owner_slot(owner);
             let stamp: usize = intrusive_owner_generation(owner);
             intrusive_owner_drop(owner);
             scheduled_process_set_address_space_backing(slot, address_new, stamp);
@@ -238,16 +242,17 @@ private fn address_space_backing_at(slot: usize)
             address_space_backing_missing_count + 1;
         return &address_space_backing_missing;
     }
-    let address: usize = scheduled_process_address_space_backing(slot);
-    if (address == 0) {
+    let mut address: IntrusiveSlotAddress =
+        scheduled_process_address_space_backing(slot);
+    if (intrusive_slot_address_is_none(address)) {
         address_space_backing_missing_count =
             address_space_backing_missing_count + 1;
         return &address_space_backing_missing;
     }
     let generation: usize =
         scheduled_process_address_space_backing_generation(slot);
-    let owner =
-        intrusive_owner_new(&address_space_backing_pool, address, generation);
+    let owner = intrusive_owner_new(
+        &address_space_backing_pool, address, generation);
     // GitHub issue #488: this RETURNS the pointer, so it cannot hold the
     // owner for as long as the pointer lives. The unproven form says that
     // in its name and in the trusted-base count, instead of the pool
@@ -266,8 +271,9 @@ private fn address_space_backing_at(slot: usize)
 private fn address_space_backing_existing_at(slot: usize)
         -> *AddressSpaceBacking !{unsafe} {
     if (slot == 0) { return &address_space_backing_root0; }
-    let address: usize = scheduled_process_address_space_backing(slot);
-    if (address == 0) {
+    let mut address: IntrusiveSlotAddress =
+        scheduled_process_address_space_backing(slot);
+    if (intrusive_slot_address_is_none(address)) {
         address_space_backing_missing_count =
             address_space_backing_missing_count + 1;
         return &address_space_backing_missing;
@@ -280,8 +286,8 @@ private fn address_space_backing_existing_at(slot: usize)
             address_space_backing_missing_count + 1;
         return &address_space_backing_missing;
     }
-    let owner =
-        intrusive_owner_new(&address_space_backing_pool, address, generation);
+    let owner = intrusive_owner_new(
+        &address_space_backing_pool, address, generation);
     // GitHub issue #488: this RETURNS the pointer, so it cannot hold the
     // owner for as long as the pointer lives. The unproven form says that
     // in its name and in the trusted-base count, instead of the pool

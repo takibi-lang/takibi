@@ -223,17 +223,17 @@ fn app_main() {
         match hr {
             IntrusivePoolInsertResult::OutOfMemory => { huge_going = false; }
             IntrusivePoolInsertResult::Allocated(h) => {
-                let address: usize = intrusive_owner_slot(h);
-                if (huge_base == 0) { huge_base = intrusive_chunk_base_of(&pool_huge, address); }
+                let mut address: IntrusiveSlotAddress = intrusive_owner_slot(h);
+                if (huge_base == 0) { huge_base = intrusive_slot_address_chunk_base(&pool_huge, address); }
                 // Every slot must answer with the SAME chunk base, whichever
                 // page of the chunk it starts in.
-                if (intrusive_chunk_base_of(&pool_huge, address) != huge_base) {
+                if (intrusive_slot_address_chunk_base(&pool_huge, address) != huge_base) {
                     huge_base_ok = false;
                 }
-                if (intrusive_pool_slot_is_valid(&pool_huge, address) == false) {
+                if (intrusive_slot_address_is_valid(&pool_huge, address) == false) {
                     huge_base_ok = false;
                 }
-                if (address - huge_base >= PAGE_SIZE) {
+                if (intrusive_slot_address_offset(&pool_huge, address) >= PAGE_SIZE) {
                     huge_beyond_first_page = huge_beyond_first_page + 1;
                 }
                 let payload: *HugePayload = intrusive_pool_ref(&pool_huge, h);
@@ -280,10 +280,12 @@ fn app_main() {
                     huge_cursor = intrusive_pool_next_slot(&pool_huge, huge_cursor);
                 }
                 IntrusiveSlotProbe::Live(huge_view) => {
+                    let mut address: IntrusiveSlotAddress =
+                        intrusive_view_slot(huge_view);
                     let occupant: usize = intrusive_view_generation(huge_view);
                     intrusive_view_drop(huge_view);
                     let victim =
-                        intrusive_owner_new(&pool_huge, huge_cursor, occupant);
+                        intrusive_owner_new(&pool_huge, address, occupant);
                     let hgf = intrusive_pool_lock(&pool_huge);
                     let gone: bool = intrusive_remove_succeeded(
                         intrusive_pool_remove(&pool_huge, hgf, victim));
@@ -368,7 +370,7 @@ fn app_main() {
     uart_print(page_allocator_live_count());
     uart_puts("\n");
 
-    let a1_slot: usize = intrusive_owner_slot(a1);
+    let mut a1_slot: IntrusiveSlotAddress = intrusive_owner_slot(a1);
     let a1_generation: usize = intrusive_owner_generation(a1);
     uart_puts("live handle matches before free: ");
     uart_print(intrusive_pool_matches(&pool_a, a1_slot, a1_generation));
@@ -398,7 +400,7 @@ fn app_main() {
         }
     };
     uart_puts("reinsert reused that exact slot address: ");
-    uart_print(intrusive_owner_slot(a1b) == a1_slot);
+    uart_print(intrusive_slot_address_equal(intrusive_owner_slot(a1b), a1_slot));
     uart_puts("\n");
     uart_puts("stale handle still rejected after the reuse: ");
     uart_print(
@@ -408,16 +410,17 @@ fn app_main() {
     // A genuine double free, through the one legal way to fabricate a
     // handle (the into_parts/new round trip kernel/net/tcp.tkb's own owner
     // type needs).
-    let (a1b_slot, a1b_generation) = intrusive_owner_into_parts(&pool_a, a1b);
+    let mut a1b_parts: IntrusiveOwnerParts =
+        intrusive_owner_into_parts(&pool_a, a1b);
     let first =
-        intrusive_owner_new(&pool_a, a1b_slot, a1b_generation);
+        intrusive_owner_new(&pool_a, a1b_parts.address, a1b_parts.generation);
     let g5 = intrusive_pool_lock(&pool_a);
     let removed2: bool =
         intrusive_remove_succeeded(intrusive_pool_remove(&pool_a, g5, first));
     if (removed2 == false) { uart_puts("remove refused\n"); }
     intrusive_pool_unlock(&pool_a, g5);
     let again =
-        intrusive_owner_new(&pool_a, a1b_slot, a1b_generation);
+        intrusive_owner_new(&pool_a, a1b_parts.address, a1b_parts.generation);
     let doubles_before: usize = intrusive_pool_double_remove_count(&pool_a);
     let g6 = intrusive_pool_lock(&pool_a);
     let again_result = intrusive_pool_remove(&pool_a, g6, again);
@@ -453,7 +456,7 @@ fn app_main() {
             return;
         }
     };
-    let a0_slot: usize = intrusive_owner_slot(a0);
+    let mut a0_slot: IntrusiveSlotAddress = intrusive_owner_slot(a0);
     let a0_generation: usize = intrusive_owner_generation(a0);
     let forged = intrusive_owner_new(&pool_b, a0_slot, a0_generation);
     let g8 = intrusive_pool_lock(&pool_b);
@@ -637,9 +640,11 @@ fn app_main() {
                     cursor = intrusive_pool_next_slot(&pool_r, cursor);
                 }
                 IntrusiveSlotProbe::Live(slot_view) => {
+                    let mut address: IntrusiveSlotAddress =
+                        intrusive_view_slot(slot_view);
                     let occupant: usize = intrusive_view_generation(slot_view);
                     intrusive_view_drop(slot_view);
-                    let victim = intrusive_owner_new(&pool_r, cursor, occupant);
+                    let victim = intrusive_owner_new(&pool_r, address, occupant);
                     let g13 = intrusive_pool_lock(&pool_r);
                     let removed7: bool =
                         intrusive_remove_succeeded(intrusive_pool_remove(&pool_r, g13, victim));
@@ -715,11 +720,13 @@ fn app_main() {
                     cursor = intrusive_pool_next_slot(&pool_r, cursor);
                 }
                 IntrusiveSlotProbe::Live(slot_view) => {
+                    let mut address: IntrusiveSlotAddress =
+                        intrusive_view_slot(slot_view);
                     let g: usize = intrusive_view_generation(slot_view);
                     intrusive_view_drop(slot_view);
                     let g15 = intrusive_pool_lock(&pool_r);
                     let removed8: bool =
-                        intrusive_remove_succeeded(intrusive_pool_remove(&pool_r, g15, intrusive_owner_new(&pool_r, cursor, g)));
+                        intrusive_remove_succeeded(intrusive_pool_remove(&pool_r, g15, intrusive_owner_new(&pool_r, address, g)));
                     if (removed8 == false) { uart_puts("remove refused\n"); }
                     intrusive_pool_unlock(&pool_r, g15);
                     freed = true;
@@ -828,7 +835,8 @@ fn app_main() {
         }
     };
     uart_puts("the poisoned slot is itself still handed out normally: ");
-    uart_print(intrusive_owner_slot(c1) == c_slot1);
+    uart_print(intrusive_slot_address_matches_untrusted(
+        intrusive_owner_slot(c1), c_slot1));
     uart_puts("\n");
     intrusive_owner_drop(c1);
 
@@ -840,7 +848,8 @@ fn app_main() {
     intrusive_pool_unlock(&pool_c, g21);
     match r21 {
         IntrusivePoolInsertResult::Allocated(o) => {
-            if (intrusive_owner_slot(o) == poison) { returned_poison = true; }
+            if (intrusive_slot_address_matches_untrusted(
+                    intrusive_owner_slot(o), poison)) { returned_poison = true; }
             intrusive_owner_drop(o);
         }
         IntrusivePoolInsertResult::OutOfMemory => { rejected = true; }
@@ -863,11 +872,11 @@ fn app_main() {
     intrusive_pool_unlock(&pool_c, g22);
     match r22 {
         IntrusivePoolInsertResult::Allocated(o) => {
-            let fresh: usize = intrusive_owner_slot(o);
+            let mut fresh: IntrusiveSlotAddress = intrusive_owner_slot(o);
             intrusive_owner_drop(o);
             uart_puts("the pool keeps working from a fresh chunk instead: ");
             uart_print(page_allocator_live_count() == pages_before_recovery + 1 &&
-                            intrusive_chunk_base_of(&pool_c, fresh) != poisoned_base);
+                            intrusive_slot_address_chunk_base(&pool_c, fresh) != poisoned_base);
             uart_puts("\n");
         }
         IntrusivePoolInsertResult::OutOfMemory => {
@@ -884,11 +893,13 @@ fn app_main() {
     match intrusive_pool_probe_slot(&pool_c, c_slot0) {
         IntrusiveSlotProbe::NoPayload => {}
         IntrusiveSlotProbe::Live(slot_view) => {
+            let mut address: IntrusiveSlotAddress =
+                intrusive_view_slot(slot_view);
             let occupant: usize = intrusive_view_generation(slot_view);
             intrusive_view_drop(slot_view);
             let g23 = intrusive_pool_lock(&pool_c);
             let removed10: bool =
-                intrusive_remove_succeeded(intrusive_pool_remove(&pool_c, g23, intrusive_owner_new(&pool_c, c_slot0, occupant)));
+                intrusive_remove_succeeded(intrusive_pool_remove(&pool_c, g23, intrusive_owner_new(&pool_c, address, occupant)));
             if (removed10 == false) { uart_puts("remove refused\n"); }
             intrusive_pool_unlock(&pool_c, g23);
         }
@@ -896,11 +907,13 @@ fn app_main() {
     match intrusive_pool_probe_slot(&pool_c, c_slot1) {
         IntrusiveSlotProbe::NoPayload => {}
         IntrusiveSlotProbe::Live(slot_view) => {
+            let mut address: IntrusiveSlotAddress =
+                intrusive_view_slot(slot_view);
             let occupant: usize = intrusive_view_generation(slot_view);
             intrusive_view_drop(slot_view);
             let g24 = intrusive_pool_lock(&pool_c);
             let removed11: bool =
-                intrusive_remove_succeeded(intrusive_pool_remove(&pool_c, g24, intrusive_owner_new(&pool_c, c_slot1, occupant)));
+                intrusive_remove_succeeded(intrusive_pool_remove(&pool_c, g24, intrusive_owner_new(&pool_c, address, occupant)));
             if (removed11 == false) { uart_puts("remove refused\n"); }
             intrusive_pool_unlock(&pool_c, g24);
         }
@@ -910,11 +923,11 @@ fn app_main() {
     intrusive_pool_unlock(&pool_c, g25);
     match r25 {
         IntrusivePoolInsertResult::Allocated(o) => {
-            let after: usize = intrusive_owner_slot(o);
+            let mut after: IntrusiveSlotAddress = intrusive_owner_slot(o);
             intrusive_owner_drop(o);
             uart_puts("emptying it neither re-admits it nor returns its page ");
             uart_puts("(allocated elsewhere, chunks, released): ");
-            uart_print(intrusive_chunk_base_of(&pool_c, after) != poisoned_base);
+            uart_print(intrusive_slot_address_chunk_base(&pool_c, after) != poisoned_base);
             uart_puts(" ");
             uart_print(intrusive_pool_chunk_count(&pool_c));
             uart_puts(" ");
@@ -941,9 +954,11 @@ fn app_main() {
     let live_next: usize = intrusive_pool_next_slot(&pool_c, live_slot);
     let free_head: usize = intrusive_pool_next_slot(&pool_c, live_next);
     let mut live_generation: usize = 0;
+    let mut live_address: IntrusiveSlotAddress = intrusive_slot_address_none();
     match intrusive_pool_probe_slot(&pool_c, live_slot) {
         IntrusiveSlotProbe::NoPayload => {}
         IntrusiveSlotProbe::Live(slot_view) => {
+            live_address = intrusive_view_slot(slot_view);
             live_generation = intrusive_view_generation(slot_view);
             intrusive_view_drop(slot_view);
         }
@@ -972,7 +987,8 @@ fn app_main() {
     intrusive_pool_unlock(&pool_c, g27);
     match r27 {
         IntrusivePoolInsertResult::Allocated(o) => {
-            if (intrusive_owner_slot(o) == live_slot) { aliased = true; }
+            if (intrusive_slot_address_matches_untrusted(
+                    intrusive_owner_slot(o), live_slot)) { aliased = true; }
             intrusive_owner_drop(o);
         }
         IntrusivePoolInsertResult::OutOfMemory => { alias_rejected = true; }
@@ -985,7 +1001,7 @@ fn app_main() {
     uart_puts(" ");
     uart_print(intrusive_pool_corrupt_free_chain_count(&pool_c) - alias_before);
     uart_puts(" ");
-    uart_print(intrusive_pool_matches(&pool_c, live_slot, live_generation));
+    uart_print(intrusive_pool_matches(&pool_c, live_address, live_generation));
     uart_puts("\n");
 
     if (intrusive_pool_probe(&pool_c) == false) { probes_ok = false; }
@@ -1055,7 +1071,7 @@ fn app_main() {
     uart_print(first_a == u_slot1 && first_a != 0);
     uart_puts("\n");
 
-    let u0_slot: usize = intrusive_owner_slot(u0);
+    let mut u0_slot: IntrusiveSlotAddress = intrusive_owner_slot(u0);
     intrusive_pool_ref(&pool_u, u0).a = 1;
     intrusive_pool_ref(&pool_u, u0).b = 2;
     intrusive_pool_ref(&pool_u, u0).c = 3;
@@ -1076,7 +1092,7 @@ fn app_main() {
     };
     uart_puts("reuse of that same slot: previous occupant survives past the ");
     uart_puts("link word (same slot, b == 2, c == 3): ");
-    uart_print(intrusive_owner_slot(u1) == u0_slot);
+    uart_print(intrusive_slot_address_equal(intrusive_owner_slot(u1), u0_slot));
     uart_puts(" ");
     uart_print(intrusive_pool_ref(&pool_u, u1).b == 2);
     uart_puts(" ");
@@ -1099,7 +1115,7 @@ fn app_main() {
     // (which is the ownership question, not the bounds question) must
     // therefore change no answer. pool_u is finished with by this point,
     // so its chunk is free to wreck.
-    let u_base: usize = intrusive_chunk_base_of(&pool_u, u0_slot);
+    let u_base: usize = intrusive_slot_address_chunk_base(&pool_u, u0_slot);
     let u_header: *IntrusiveChunkHeader = intrusive_chunk_header_at(&pool_u, u_base);
     u_header.next_chunk = 1;
     u_header.prev_chunk = 1;
@@ -1110,9 +1126,9 @@ fn app_main() {
     u_header.live_count = 0xFFFF;
     uart_puts("a wrecked chunk header cannot widen what validates ");
     uart_puts("(real slot yes, off-by-one no, past the chunk no): ");
-    uart_print(intrusive_pool_slot_is_valid(&pool_u, u0_slot));
+    uart_print(intrusive_slot_address_is_valid(&pool_u, u0_slot));
     uart_puts(" ");
-    uart_print(intrusive_pool_slot_is_valid(&pool_u, u0_slot + 1) == false);
+    uart_print(intrusive_slot_address_offset_is_valid(&pool_u, u0_slot, 1) == false);
     uart_puts(" ");
     uart_print(
         intrusive_pool_slot_is_valid(&pool_u, u_base + PAGE_SIZE) == false);
