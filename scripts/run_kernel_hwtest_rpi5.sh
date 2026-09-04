@@ -516,6 +516,17 @@ python3 "$REPO_ROOT/scripts/profile_kernel_workload.py" collect \
     --uart-log "$UART_LOG" --output "$ARTIFACT_DIR/busy-pair-profile.json" \
     --target rpi5
 
+# GitHub issue #500: the flat PC samples the same interval collected, and
+# the only run of them that is performance evidence -- QEMU's cycle counter
+# is virtual time, this one is a real Cortex-A76 PMU. See the QEMU runner
+# for why the collector is the assertion and why llvm-addr2line-19.
+python3 "$REPO_ROOT/scripts/profile_kernel_samples.py" \
+    --uart-log "$UART_LOG" \
+    --output "$ARTIFACT_DIR/busy-pair-flat-pc.json" \
+    --kernel-elf "$ELF" --target rpi5 --min-samples 1 \
+    --symbolizer llvm-addr2line-19 \
+    --commit "$(git -C "$REPO_ROOT" rev-parse HEAD)"
+
 cleanup
 trap - EXIT INT TERM HUP
 

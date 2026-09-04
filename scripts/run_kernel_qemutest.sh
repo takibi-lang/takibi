@@ -273,4 +273,18 @@ python3 "$REPO_ROOT/scripts/profile_kernel_workload.py" collect \
     --uart-log "$UART_LOG" --output "$ARTIFACT_DIR/busy-pair-profile.json" \
     --target qemu
 
+# GitHub issue #500: the flat PC samples the same interval collected. The
+# collector is the assertion, not a convenience: it refuses a missing,
+# duplicated, or out-of-order record, a lost total that does not add up, and
+# -- with --min-samples -- a boot where the PMU source never fired at all.
+# llvm-addr2line-19 rather than the host addr2line: this ELF is AArch64 and
+# the stock binutils build here is x86-64 only, the same reason
+# gdb-multiarch is required elsewhere.
+python3 "$REPO_ROOT/scripts/profile_kernel_samples.py" \
+    --uart-log "$UART_LOG" \
+    --output "$ARTIFACT_DIR/busy-pair-flat-pc.json" \
+    --kernel-elf "$ELF" --target qemu --min-samples 1 \
+    --symbolizer llvm-addr2line-19 \
+    --commit "$(git -C "$REPO_ROOT" rev-parse HEAD)"
+
 echo "PASS $RUN_LABEL ($view_count views, one boot)"

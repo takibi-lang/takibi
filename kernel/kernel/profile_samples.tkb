@@ -1,0 +1,277 @@
+// Bounded per-core flat PC sampling, driven by PMUv3 cycle-counter
+// overflow (GitHub issue #500, stage 3 of the #497 profiling roadmap).
+//
+// What this file is for. The workload evidence beside it
+// (kernel/kernel/workload_evidence.tkb) already says how a named interval
+// divided its time between EL0, EL1, IRQ and idle. That answers "where did
+// the time go" at the granularity of four buckets, which is enough to say
+// whether a workload is CPU-bound and not enough to say WHICH CODE was
+// running. This file adds the missing half: every `period` cycles the PMU
+// interrupts whatever is executing, and the interrupted PC is recorded with
+// enough identity (timestamp, CPU, pid, execution level, period) that
+// scripts/profile_kernel_samples.py can symbolize it against the exact
+// ELF/DWARF artifact the board actually ran and produce a flat
+// function/instruction distribution.
+//
+// The line format below is a contract with that script's parser. It rejects
+// a missing, duplicated, or out-of-order sequence number, an out-of-order
+// timestamp, a CPU outside the reported active count, a zero period, and a
+// lost-sample total that does not add up -- so a truncated or interleaved
+// UART capture becomes a refusal rather than a quietly wrong profile. Change
+// one without the other and the lane fails, which is the intent.
+//
+// Current limitations (2026-09-04). Keep this list current; a stale one
+// invites relying on a guarantee that quietly stopped holding.
+// - ONE SAMPLING CORE. PMU state is per-core and only the core that runs
+//   profile_sample_start arms its own counter, so exactly one core produces
+//   samples today. STORAGE is already per-core, because the interrupt
+//   writes on whichever core took it and sharing one buffer would need a
+//   lock the interrupt path must not take. The DUMP is a plain per-core
+//   walk, which is timestamp-ordered only while one core samples. A second
+//   sampling core must merge the buffers by timestamp here, or the parser
+//   will (correctly) refuse the capture.
+// - DROP-TAIL, NOT A RING. When a core's buffer is full the sample is
+//   counted in `lost` and discarded, so the profile covers the START of the
+//   interval rather than a uniform draw from it. This matches what perf
+//   does when nothing drains its buffer, and it keeps `lost` honest, but a
+//   capture with a large lost count describes only its own prefix.
+// - INTERRUPT WORK IS INVISIBLE. IRQs are masked while a handler runs, so a
+//   PMU overflow inside one is not taken until the handler has returned and
+//   is then attributed to the code it returned to. The `irq` level the
+//   parser accepts is therefore never emitted here, and interrupt cost is
+//   what workload_evidence.tkb's irq_cycles measures instead.
+// - QEMU IS NOT PERFORMANCE EVIDENCE. Its cycle counter is derived from
+//   virtual time, not from a modelled pipeline. A QEMU capture validates
+//   collection, extraction, and symbolization; the profile itself is only
+//   authoritative on real hardware.
+
+use "kernel/arch/arm64/kernel/pmu_extern.tkb";
+use "kernel/arch/arm64/kernel/timer.tkb";
+use "kernel/lib/execution_model.tkb";
+
+// How many samples one core keeps. 256 * 32 bytes per core is the whole
+// cost, and the dump is ~27 KB of UART text -- about two seconds at
+// 115200 baud, paid once per boot at the end of the measured interval.
+const PROFILE_SAMPLE_MAX: usize = 256;
+
+// The sample period, in CPU cycles. On the RPi5's 2.4 GHz Cortex-A76 this
+// is roughly 120 Hz, so a full buffer covers about two seconds of the busy
+// pair -- long enough to outlast the interval rather than describe its
+// first moment. Under QEMU the same number is about 50 Hz against its
+// 1 GHz virtual cycle counter, which is fewer samples for the same wall
+// time and is fine: QEMU is here to prove the path, not the profile.
+const PROFILE_SAMPLE_PERIOD_CYCLES: usize = 20000000;
+
+// Which exception level the sampled PC belongs to. This is what tells the
+// host which ELF to symbolize against: EL0 needs the workload's own binary
+// selected by pid, EL1 needs the kernel's.
+enum ProfileSampleLevel { El0; El1; }
+
+struct ProfileSample {
+    timestamp: usize;
+    pc: usize;
+    pid: usize;
+    level: ProfileSampleLevel;
+}
+
+struct ProfileSampleCore {
+    stored: usize;
+    lost: usize;
+    samples: [ProfileSample; PROFILE_SAMPLE_MAX];
+}
+
+private let mut profile_sample_cores: [ProfileSampleCore; KERNEL_MAX_CORES];
+private let mut profile_sample_active: bool = false;
+// Set once, at the first profile_sample_start, from ID_AA64DFR0_EL1. A CPU
+// with no PMUv3 reports an empty profile instead of executing an msr that
+// would fault.
+private let mut profile_sample_available: bool = false;
+private let mut profile_sample_checked: bool = false;
+// Captured at the interval's end, printed only when the interval collected
+// nothing. A counter still holding its own reload value never counted; a
+// counter past it with the overflow status set counted and overflowed into
+// an interrupt that was never delivered, which is a routing question and
+// not a PMU one.
+private let mut profile_sample_end_counter: usize = 0;
+private let mut profile_sample_end_pending: usize = 0;
+private let mut profile_sample_end_state: usize = 0;
+private let mut profile_sample_end_gic: usize = 0;
+
+private fn profile_sample_core_reset(cpu: {0..<KERNEL_MAX_CORES as usize}) {
+    profile_sample_cores[cpu].stored = 0;
+    profile_sample_cores[cpu].lost = 0;
+}
+
+// Store one sample, or count it lost. The buffer's own size is the bound:
+// `stored` is proved below PROFILE_SAMPLE_MAX by the early return, which is
+// what lets the slot be indexed without a runtime bounds check.
+private fn profile_sample_store(cpu: {0..<KERNEL_MAX_CORES as usize},
+                                timestamp: usize, pc: usize, pid: usize,
+                                level: ProfileSampleLevel) {
+    let stored: usize = profile_sample_cores[cpu].stored;
+    if (stored >= PROFILE_SAMPLE_MAX) {
+        profile_sample_cores[cpu].lost = profile_sample_cores[cpu].lost + 1;
+        return;
+    }
+    let slot: {0..<PROFILE_SAMPLE_MAX as usize} = stored;
+    profile_sample_cores[cpu].samples[slot].timestamp = timestamp;
+    profile_sample_cores[cpu].samples[slot].pc = pc;
+    profile_sample_cores[cpu].samples[slot].pid = pid;
+    profile_sample_cores[cpu].samples[slot].level = level;
+    profile_sample_cores[cpu].stored = stored + 1;
+}
+
+// Begin sampling on the calling core. Called from the same IRQ-masked
+// critical section that opens the measured interval, so the first sample
+// and the interval's own start timestamp cannot straddle a tick.
+fn profile_sample_start() {
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        profile_sample_core_reset(cpu);
+    }
+    if (profile_sample_checked == false) {
+        profile_sample_checked = true;
+        profile_sample_available = pmu_sample_supported() == 1;
+    }
+    if (profile_sample_available == false) { return; }
+    profile_sample_active = true;
+    pmu_sample_start(PROFILE_SAMPLE_PERIOD_CYCLES);
+}
+
+// End sampling. Runs on the interval's own end boundary, before anything is
+// reported, so no sample can land after the summary that counts it.
+fn profile_sample_finish() {
+    if (profile_sample_active == false) { return; }
+    profile_sample_active = false;
+    profile_sample_end_counter = pmu_sample_counter();
+    profile_sample_end_pending = pmu_sample_pending();
+    profile_sample_end_state = pmu_sample_state();
+    profile_sample_end_gic = platform_pmu_irq_debug();
+    pmu_sample_stop();
+}
+
+// The PMU overflow interrupt, dispatched by each platform's intc.tkb from
+// the same IRQ entry every other source uses. `frame_sp` is the already-
+// saved exception frame, so the interrupted PC and its execution level are
+// read from architectural state rather than guessed.
+fn profile_sample_irq(frame_sp: usize) !{interrupt, unsafe} {
+    if (pmu_sample_pending() != 1) { return; }
+    if (profile_sample_active == false) {
+        // An overflow armed before the interval ended, delivered after.
+        // Silence it rather than rearming it.
+        pmu_sample_stop();
+        return;
+    }
+    let cpu: usize = cpu_id();
+    if (cpu >= KERNEL_ACTIVE_CORES || cpu >= KERNEL_MAX_CORES) {
+        pmu_sample_stop();
+        return;
+    }
+    let bounded_cpu: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    let frame: *ExceptionFrame = unsafe { frame_sp as *ExceptionFrame };
+    // SPSR_EL1.M[3:0] is the mode the exception was taken FROM: 0b0000 is
+    // EL0t, anything else here is this kernel's own EL1.
+    let mut level: ProfileSampleLevel = ProfileSampleLevel::El1;
+    if ((frame.spsr_el1 & 0xF) == 0) { level = ProfileSampleLevel::El0; }
+    profile_sample_store(bounded_cpu, read_cntpct() as usize, frame.elr_el1,
+                         kernel_process_current_pid(), level);
+    pmu_sample_rearm(PROFILE_SAMPLE_PERIOD_CYCLES);
+}
+
+private fn profile_sample_put_level(level: ProfileSampleLevel) {
+    match level {
+        ProfileSampleLevel::El0 => { kernel_boot_log("el0"); }
+        ProfileSampleLevel::El1 => { kernel_boot_log("el1"); }
+    }
+}
+
+// The raw artifact, in scripts/profile_kernel_samples.py's record grammar.
+// `busy-pair` is written here rather than passed in because this kernel has
+// exactly one named workload interval, and it is the same one
+// workload_evidence.tkb names on its own `profile: begin`/`profile: end`
+// lines -- a second interval would make the name a parameter of both.
+fn profile_sample_report() {
+    // The stable half of this dump, and the one a view asserts: whether the
+    // hardware source this file needs was actually there and armed. The
+    // counts below are load-dependent and belong to the artifact, not to a
+    // fixture's expected output.
+    kernel_boot_log("profile: sample-source name=busy-pair source=");
+    if (profile_sample_available) {
+        kernel_boot_log("pmuv3-cycles");
+    } else {
+        kernel_boot_log("none");
+    }
+    kernel_boot_log(" period=");
+    uart_put_udec(PROFILE_SAMPLE_PERIOD_CYCLES);
+    kernel_boot_log("\n");
+    let mut sequence: usize = 0;
+    for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
+        let stored: usize = profile_sample_cores[cpu].stored;
+        for slot: usize in 0..<PROFILE_SAMPLE_MAX {
+            if (slot < stored) {
+                kernel_boot_log("profile: sample name=busy-pair sequence=");
+                uart_put_udec(sequence);
+                kernel_boot_log(" timestamp=");
+                uart_put_udec(profile_sample_cores[cpu].samples[slot].timestamp);
+                kernel_boot_log(" cpu=");
+                uart_put_udec(cpu);
+                kernel_boot_log(" pid=");
+                uart_put_udec(profile_sample_cores[cpu].samples[slot].pid);
+                kernel_boot_log(" pc=0x");
+                uart_put_hex_digits(profile_sample_cores[cpu].samples[slot].pc);
+                kernel_boot_log(" period=");
+                uart_put_udec(PROFILE_SAMPLE_PERIOD_CYCLES);
+                kernel_boot_log(" level=");
+                profile_sample_put_level(
+                    profile_sample_cores[cpu].samples[slot].level);
+                kernel_boot_log("\n");
+                sequence = sequence + 1;
+            }
+        }
+    }
+    let mut lost: usize = 0;
+    for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
+        lost = lost + profile_sample_cores[cpu].lost;
+    }
+    kernel_boot_log("profile: sample-summary name=busy-pair stored=");
+    uart_put_udec(sequence);
+    kernel_boot_log(" lost=");
+    uart_put_udec(lost);
+    kernel_boot_log(" attempted=");
+    uart_put_udec(sequence + lost);
+    kernel_boot_log("\n");
+    if (sequence + lost == 0) {
+        // Absent on a healthy boot, so no view has to match it, and the
+        // one boot that needs it does not need a second one to get it.
+        kernel_boot_log("profile: sample-idle name=busy-pair counter=0x");
+        uart_put_hex_digits(profile_sample_end_counter);
+        kernel_boot_log(" pending=");
+        uart_put_udec(profile_sample_end_pending);
+        kernel_boot_log(" reload=");
+        uart_put_udec(PROFILE_SAMPLE_PERIOD_CYCLES);
+        kernel_boot_log(" pmu=0x");
+        uart_put_hex_digits(profile_sample_end_state);
+        kernel_boot_log(" gic=0x");
+        uart_put_hex_digits(profile_sample_end_gic);
+        kernel_boot_log("\n");
+    }
+}
+
+// GitHub issue #479's coverage rule (scripts/check_execution_model_
+// coverage.py): every file with a mutable global says what makes it safe.
+//
+// The per-core sample buffers are PARTITIONED by construction -- an entry
+// is written only by the interrupt that took it, on the core whose index it
+// is written under, and nothing else writes them until the interval has
+// ended. That much would survive a second core.
+//
+// `profile_sample_active` and the two availability flags would not. They
+// are written by the core that opens and closes the interval and read by
+// every core's interrupt, so on two cores a sample can be recorded into a
+// buffer the reporting core is already walking. The fix is not a lock in
+// the interrupt path; it is that the second core's sampling has to be
+// started and stopped by the same interval boundary, which is the multicore
+// milestone's own work and not something to guess at now.
+fn profile_sample_execution_model_assumption() {
+    static_assert(KERNEL_ACTIVE_CORES == 1,
+                  "the sample buffers are per-core; the active flag and the interval boundary are shared");
+}

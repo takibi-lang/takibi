@@ -279,11 +279,14 @@ starts, and the fairness and per-core EL0/EL1/IRQ/idle, scheduler-event,
 syscall, and I/O-volume numbers taken about its post-warm-up interval -- the
 one piece of this group the scheduler, exception paths, syscall dispatch, and
 device boundaries call into, with each hook returning before reading a counter
-when no interval is active).
+when no interval is active),
+`kernel/kernel/profile_samples.tkb` (the bounded per-core PC samples the PMU
+overflow interrupt records over that same interval, plus the flags saying
+whether the interval is open and whether this CPU has a PMUv3 at all).
 
 **Why global:** test fixtures are inherently singleton within one boot
 (there is one QEMU/RPi5 integration run at a time). The point of these
-five files is that test-only state is now physically separated from
+six files is that test-only state is now physically separated from
 production state at the file level, satisfying #294's "test-only
 lifecycle state is clearly separated from ordinary kernel state"
 acceptance criterion -- not that it stopped being global.

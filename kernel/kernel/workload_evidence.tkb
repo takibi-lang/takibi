@@ -43,6 +43,7 @@
 
 use "kernel/arch/arm64/kernel/timer.tkb";
 use "kernel/lib/execution_model.tkb";
+use "kernel/kernel/profile_samples.tkb";
 
 // The two inittab entries, told apart by the tag they pass rather than by
 // their pid -- a respawned entry gets a new pid and is still the same
@@ -365,6 +366,10 @@ private fn workload_profile_start(now: usize, pid: usize) {
         workload_profile_cores[cpu].has_selected_pid = true;
     }
     workload_profile_active = true;
+    // The flat PC profile shares this interval exactly: same IRQ-masked
+    // boundary, same start timestamp, so a sample outside the interval the
+    // artifact reports cannot exist.
+    profile_sample_start();
 }
 
 private fn workload_profile_finish(now: usize) {
@@ -372,6 +377,7 @@ private fn workload_profile_finish(now: usize) {
         workload_profile_charge(cpu, now);
     }
     workload_profile_active = false;
+    profile_sample_finish();
 }
 
 private fn workload_profile_note_selected(pid: usize) {
@@ -730,6 +736,10 @@ private fn workload_busy_pair_report() !{unsafe} {
         uart_put_udec(workload_busy_pair.refused);
         kernel_boot_log("\n");
     }
+    // Last, because scripts/profile_kernel_samples.py requires every
+    // `profile: sample` record to fall between this interval's `profile:
+    // end` and its `profile: sample-summary`.
+    profile_sample_report();
 }
 
 // GitHub issue #479: this file had no execution-model assertion and holds

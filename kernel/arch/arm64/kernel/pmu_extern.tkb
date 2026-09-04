@@ -1,0 +1,38 @@
+// extern fn declarations for kernel/arch/arm64/kernel/pmu.S's PMUv3
+// cycle-counter sampling shim (GitHub issue #500). Split into its own file
+// for the same reason fpsimd_probe_extern.tkb is: takibi rejects a second
+// `extern fn` declaration of the same name even with an identical
+// signature, so a future second consumer would otherwise be a hard
+// conflict.
+//
+// The period is in CPU CYCLES, not timer ticks. It is the caller's choice
+// and is reported with every sample, because a flat distribution whose
+// sample weight is unknown cannot be compared with another run's.
+
+// 1 when this CPU implements PMUv3 (ID_AA64DFR0_EL1.PMUVer), 0 otherwise.
+// Ask before calling anything else here.
+extern fn pmu_sample_supported() -> usize;
+
+// Arm the 64-bit cycle counter to overflow after `period` cycles, counting
+// at EL0 and EL1 alike, and enable its overflow interrupt.
+extern fn pmu_sample_start(period: usize);
+
+// 1 when the cycle counter's overflow status bit is set.
+extern fn pmu_sample_pending() -> usize;
+
+// The raw PMCCNTR_EL0, for telling "never counted" apart from "counted,
+// overflowed, and the interrupt was never delivered".
+extern fn pmu_sample_counter() -> usize;
+
+// Packed PMU arming state, for telling "the interrupt line never
+// asserted" apart from "it asserted and was not forwarded". See pmu.S for
+// the bit layout.
+extern fn pmu_sample_state() -> usize;
+
+// Acknowledge the overflow and reload for another `period` cycles. Must
+// run before the interrupt controller's EOI: clearing the PMU overflow
+// status is what deasserts the interrupt line.
+extern fn pmu_sample_rearm(period: usize);
+
+// Disable the counter and its interrupt, and clear any latched overflow.
+extern fn pmu_sample_stop();

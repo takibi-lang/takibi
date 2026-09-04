@@ -449,7 +449,18 @@ make profile-kernel-workload-chart \
   PROFILE_CHART=_build/busy-pair-comparison.svg
 ```
 
-The host-side contract for forthcoming flat PC sample dumps is implemented by
+Both runners also save `busy-pair-flat-pc.json`: the flat PC profile taken
+over the same interval. Every `PROFILE_SAMPLE_PERIOD_CYCLES` CPU cycles the
+PMUv3 cycle counter overflows, and the interrupt records the interrupted PC
+with its timestamp, CPU, PID, and execution level into a bounded per-core
+buffer (`kernel/kernel/profile_samples.tkb`); the buffer is dumped after the
+interval's own `profile: end` line, with a lost count for every sample a full
+buffer dropped. A CPU without PMUv3 reports `source=none` and an empty
+profile rather than faulting. RPi5 is again the performance authority: QEMU's
+cycle counter is derived from virtual time, so its capture validates
+collection, extraction, and symbolization only.
+
+The host-side contract for those dumps is implemented by
 `scripts/profile_kernel_samples.py`. Its input record contract preserves
 sequence, timestamp, PC, CPU, PID, execution level, and
 sample period, followed by explicit stored, lost, and attempted totals. EL1 and
@@ -458,7 +469,9 @@ its own `--pid-elf PID=PATH` mapping. The JSON artifact records the SHA-256 of
 every ELF it actually used, and leaves unknown PIDs or addresses unresolved
 rather than guessing a symbol. Duplicate PID mappings are rejected, and a
 bounded symbolizer timeout prevents a broken external tool from hanging the
-collection command. This host-side contract is independently testable; QEMU
+collection command. `--min-samples` turns a boot that collected nothing into a
+failure where it happened, because a lane that ran the interval and saw no
+sample has a broken hardware source rather than an empty profile. This host-side contract is independently testable; QEMU
 output is not RPi5 performance evidence.
 
 This is an explicit profiling command, not a performance threshold in

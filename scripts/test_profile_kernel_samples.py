@@ -88,6 +88,18 @@ def main():
         if result.returncode == 0 or "duplicate ELF mapping" not in result.stderr:
             raise RuntimeError("duplicate PID ELF mapping was accepted")
 
+        # A lane that ran a workload interval and collected nothing has a
+        # broken hardware source, not an empty profile. --min-samples is
+        # where that becomes a failure, so both sides of the threshold are
+        # controlled here.
+        uart.write_text(good, encoding="ascii")
+        result = run(root, uart, "--min-samples", "3")
+        if result.returncode == 0 or "expected at least 3 samples" not in result.stderr:
+            raise RuntimeError("a capture below --min-samples was accepted")
+        result = run(root, uart, "--min-samples", "2")
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr)
+
         blocker = root / "blocking-symbolizer"
         blocker.write_text("#!/bin/sh\nsleep 5\n", encoding="ascii")
         blocker.chmod(0o755)
@@ -96,7 +108,7 @@ def main():
         if result.returncode == 0 or "symbolizer timed out" not in result.stderr:
             raise RuntimeError("blocked symbolizer was not bounded by its timeout")
 
-    print("PASS profile-kernel-samples: identities, loss, rejection, timeout")
+    print("PASS profile-kernel-samples: identities, loss, rejection, minimum, timeout")
 
 
 if __name__ == "__main__":

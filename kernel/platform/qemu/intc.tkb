@@ -25,6 +25,12 @@ use "kernel/arch/arm64/kernel/secondary.tkb";
 use "kernel/arch/arm64/boot/cpu.tkb";
 
 let mut qemu_uart_gic_intid: u32 = 33; // bootstrap route until DTB comparison
+// The PMU overflow PPI. QEMU's `virt` machine wires each CPU's
+// "pmu-interrupt" output to PPI 7 (hw/arm/virt.c's VIRTUAL_PMU_IRQ), which
+// is architectural INTID 16 + 7. Like the timer PPI above it is banked
+// per-CPU by the GIC, so it needs no GICD_ITARGETSR write.
+const QEMU_PMU_GIC_INTID: u32 = 23;
+let mut qemu_pmu_gic_intid: u32 = QEMU_PMU_GIC_INTID;
 let mut qemu_gicd_base: usize = 0;
 let mut qemu_gicc_base: usize = 0;
 
@@ -68,8 +74,40 @@ fn platform_irq_cpu_interface_init() !{unsafe} {
 fn platform_irq_init() {
     gic_uart_spi_setup();
     platform_irq_cpu_interface_init();
+    gic_pmu_ppi_enable();
     timer_irq_setup();
     enable_irq();
+}
+
+// GitHub issue #500: routing only. The PMU counter itself stays disarmed
+// until a measured workload interval starts, so an armed route with no
+// counter behind it delivers nothing.
+
+// GitHub issue #500: diagnosis only. The whole of the distributor's
+// banked-interrupt enable and group words, printed only by an interval
+// that collected no samples:
+//
+//   bits 31:0   GICD_ISENABLER0 -- which of INTIDs 0..31 are enabled
+//   bits 63:32  GICD_ISENABLER1 -- which of INTIDs 32..63 are enabled
+//
+// Whole words rather than the PMU interrupt's own bit, because the timer
+// PPI and the RP1 vectors in the same words are known-working controls: a
+// GIC-400 ignores an enable write to an INTID it does not implement, so a
+// bit that reads back clear beside neighbors that read back set says the
+// interrupt number itself is wrong.
+fn platform_pmu_irq_debug() -> usize !{unsafe} {
+    let gicd_isenabler0: *io u32 = unsafe { (qemu_gicd_base + 0x100) as *io u32 };
+    let gicd_isenabler1: *io u32 = unsafe { (qemu_gicd_base + 0x104) as *io u32 };
+    let banked: usize = (*gicd_isenabler0) as usize;
+    let shared: usize = (*gicd_isenabler1) as usize;
+    return banked | (shared << 32);
+}
+
+fn gic_pmu_ppi_enable() !{unsafe} {
+    let gicd_isenabler0: *io u32 = unsafe {
+        (qemu_gicd_base + 0x100) as *io u32
+    };
+    *gicd_isenabler0 = *gicd_isenabler0 | (1 << qemu_pmu_gic_intid);
 }
 
 fn irq_uart_rx_unmask() !{unsafe} {
@@ -109,6 +147,12 @@ fn platform_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
         // device found / net_init() not called yet), so the >= 0 guard
         // keeps that sentinel from ever matching a real GICC_IAR value.
         virtio_net_irq_handler();
+    } else if (id == qemu_pmu_gic_intid) {
+        // GitHub issue #500: the flat PC sample. Takes the interrupted PC
+        // out of the frame this entry already saved, and acknowledges the
+        // PMU overflow before the EOI below -- the overflow status is what
+        // holds the interrupt line asserted.
+        profile_sample_irq(frame_sp);
     } else if (id == qemu_timer_gic_intid) {
         timer_irq_handler();
         // GitHub issue #453: this branch is why most of kernel/ can share

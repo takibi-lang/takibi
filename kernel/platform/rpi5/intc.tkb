@@ -53,6 +53,25 @@ const RP1_USB0_VECTOR: u32 = 31;
 const RPI5_USB0_GIC_INTID: u32 = 191; // 32 + (MIP0 SPI base 128 + vector 31)
 const RP1_GEM_VECTOR: u32 = 6;
 const RPI5_GEM_GIC_INTID: u32 = 166; // 32 + (MIP0 SPI base 128 + vector 6)
+// GitHub issue #500: the Cortex-A76 PMU overflow output. This is NOT the
+// architectural PPI 7 that QEMU's `virt` uses. BCM2712's `arm-pmu` node
+// (raspberrypi/linux, arch/arm64/boot/dts/broadcom/bcm2712.dtsi,
+// compatible "arm,cortex-a76-pmu") declares four SPIs instead --
+// GIC_SPI 16..19, IRQ_TYPE_LEVEL_HIGH, with interrupt-affinity cpu0..cpu3
+// -- so each core's overflow line arrives as its own shared interrupt
+// rather than as one per-CPU banked one. Core 0's is SPI 16, INTID
+// 32 + 16 = 48.
+//
+// Getting this wrong is silent rather than loud: a GIC-400 ignores writes
+// to the enable bit of an INTID it does not implement, so PPI 7 left
+// GICD_ISENABLER0 reading 0x4000ffff -- the SGIs and the timer PPI, and
+// nothing at bit 23 -- while the counter overflowed 60-odd times with
+// PMOVSSET_EL0 set and no interrupt behind it.
+//
+// Being an SPI and not a PPI, this one needs the same GICD_ITARGETSR and
+// GICD_ICFGR programming as UART0's and USB0's vectors, which the PPI it
+// replaced did not.
+const RPI5_PMU_GIC_INTID: u32 = 48;
 // These are not DT device resources. The table base is the BAR0 assignment
 // made by pcie2_rp1_endpoint_setup(); MSIX_CFG_SET is an RP1 internal
 // register protocol offset within the fixed endpoint peripheral aperture.
@@ -274,7 +293,60 @@ fn platform_irq_init() {
 
     timer_irq_setup();
 
+    gic_pmu_spi_enable();
+
     enable_irq();
+}
+
+// GitHub issue #500: routing only. The PMU counter itself stays disarmed
+// until a measured workload interval starts, so an armed route with no
+// counter behind it delivers nothing.
+
+// GitHub issue #500: diagnosis only. The whole of the distributor's
+// banked-interrupt enable and group words, printed only by an interval
+// that collected no samples:
+//
+//   bits 31:0   GICD_ISENABLER0 -- which of INTIDs 0..31 are enabled
+//   bits 63:32  GICD_ISENABLER1 -- which of INTIDs 32..63 are enabled
+//
+// Whole words rather than the PMU interrupt's own bit, because the timer
+// PPI and the RP1 vectors in the same words are known-working controls: a
+// GIC-400 ignores an enable write to an INTID it does not implement, so a
+// bit that reads back clear beside neighbors that read back set says the
+// interrupt number itself is wrong.
+fn platform_pmu_irq_debug() -> usize !{unsafe} {
+    let gicd_isenabler0: *io u32 = unsafe { (rpi5_gicd_base + 0x100) as *io u32 };
+    let gicd_isenabler1: *io u32 = unsafe { (rpi5_gicd_base + 0x104) as *io u32 };
+    let banked: usize = (*gicd_isenabler0) as usize;
+    let shared: usize = (*gicd_isenabler1) as usize;
+    return banked | (shared << 32);
+}
+
+fn gic_pmu_spi_enable() !{unsafe} {
+    let gicd_isenabler1: *io u32 = unsafe {
+        (rpi5_gicd_base + 0x104) as *io u32 // INTIDs 32..63
+    };
+    let gicd_icpendr1: *io u32 = unsafe {
+        (rpi5_gicd_base + 0x284) as *io u32
+    };
+    let gicd_itargetsr12: *io u32 = unsafe {
+        (rpi5_gicd_base + 0x830) as *io u32 // INTIDs 48..51
+    };
+    let gicd_icfgr3: *io u32 = unsafe {
+        (rpi5_gicd_base + 0xC0C) as *io u32 // INTIDs 48..63
+    };
+
+    // INTID 48 occupies byte 0 of ITARGETSR12; route it to CPU interface 0
+    // without disturbing SPIs 49..51.
+    let targets: u32 = *gicd_itargetsr12;
+    *gicd_itargetsr12 = (targets & ~0xFF) | 1;
+
+    // INTID 48 is the first pair in ICFGR3, and the PMU line is
+    // level-high, so its upper bit must be CLEAR -- the opposite of the
+    // edge-triggered MSI vectors above.
+    *gicd_icfgr3 = *gicd_icfgr3 & ~(0x3 << 0);
+    *gicd_icpendr1 = 1 << 16;
+    *gicd_isenabler1 = 1 << 16;
 }
 
 fn irq_uart_rx_unmask() !{unsafe} {
@@ -328,6 +400,12 @@ fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
                 as *io u32
         };
         *rp1_msix_cfg6_set = 1 << 2; // MSIX_CFG_IACK
+    } else if (id == RPI5_PMU_GIC_INTID) {
+        // GitHub issue #500: the flat PC sample. Takes the interrupted PC
+        // out of the frame this entry already saved, and acknowledges the
+        // PMU overflow before the EOI below -- the overflow status is what
+        // holds the interrupt line asserted.
+        profile_sample_irq(frame_sp);
     } else if (id == rpi5_timer_gic_intid) {
         timer_irq_handler();
         // GitHub issue #453: this branch is why most of kernel/ can share

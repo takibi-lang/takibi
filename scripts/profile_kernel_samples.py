@@ -143,6 +143,14 @@ def collect(args):
                        "cpu": cpu, "pid": pid, "level": level, "period": period})
     if integer(summary, "attempted") != stored + lost:
         raise ValueError("sample lost total is inconsistent")
+    # A capture that collected nothing parses perfectly and describes
+    # nothing. On a lane that ran a real workload interval, zero samples
+    # means the hardware source never fired -- an unrouted PMU interrupt, a
+    # CPU with no PMUv3 -- and that has to fail where it happened rather
+    # than become an empty artifact somebody later reads as a flat profile.
+    if stored < args.min_samples:
+        raise ValueError(
+            f"expected at least {args.min_samples} samples, found {stored}")
 
     mappings = {}
     for pid, elf in args.pid_elf:
@@ -199,9 +207,12 @@ def main():
     parser.add_argument("--commit", required=True)
     parser.add_argument("--symbolizer", default="addr2line")
     parser.add_argument("--symbolizer-timeout", type=float, default=10.0)
+    parser.add_argument("--min-samples", type=int, default=0)
     args = parser.parse_args()
     if args.symbolizer_timeout <= 0:
         parser.error("--symbolizer-timeout must be positive")
+    if args.min_samples < 0:
+        parser.error("--min-samples must not be negative")
     collect(args)
 
 
