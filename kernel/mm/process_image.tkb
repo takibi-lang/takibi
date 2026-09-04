@@ -982,8 +982,8 @@ fn process_image_exec_install(
 // GitHub issue #209: an applet used to be launched by the kernel itself,
 // which then unmapped the image and checked process_image_window_is_clear()
 // on the spot. Applets are children of the init script now, so their images
-// are torn down here instead -- and process_image_unmap() retargets this
-// module at root 0 on its way out, so a caller can no longer inspect the
+// are torn down here instead -- and process_image_unmap() clears this
+// module's target on its way out, so a caller can no longer inspect the
 // root that was just emptied. Counting both reaps and clean reaps here
 // keeps that VM-hygiene assertion, and does it for every applet at once
 // rather than one hand-written check per kernel-side launch.

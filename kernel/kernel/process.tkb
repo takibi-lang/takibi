@@ -2612,8 +2612,21 @@ private let mut kernel_process_trace_boot_enabled: bool;
 // contains fork, exec prepare, and exec commit. Normal boot leaves it false.
 private let mut kernel_process_trace_fail_after_exec: bool;
 // The syscall path records its named committed-exec failure before it enters
-// the common fail-stop entry.  The exception renderer owns presentation.
-private let mut kernel_process_exec_failure_reason: usize;
+// the common fail-stop entry. The exhaustive enum makes adding a reason
+// without teaching the exception renderer about it a compile error.
+enum KernelExecFailureReason: u8 {
+    None;
+    NotChildOrPending;
+    CloneVmMissing;
+    DynamicResolveInvalid;
+    DynamicPairInvalid;
+    ImageAlreadyInstalled;
+    NoImageResolved;
+    StaticImageInvalid;
+    StaticMapOutOfMemory;
+    DebuggerAfterCommit;
+}
+private let mut kernel_process_exec_failure_reason: KernelExecFailureReason;
 
 must_use variant KernelChildExecPrepareResult {
     Prepared;
@@ -2733,40 +2746,44 @@ fn kernel_process_trace_fail_after_exec_requested() -> bool {
     return kernel_process_trace_fail_after_exec;
 }
 
-fn kernel_process_exec_failure_clear() { kernel_process_exec_failure_reason = 0; }
+fn kernel_process_exec_failure_clear() {
+    kernel_process_exec_failure_reason = KernelExecFailureReason::None;
+}
 
 fn kernel_process_exec_failure_set(result: KernelChildExecPrepareResult) {
     match result {
-        KernelChildExecPrepareResult::Prepared => { kernel_process_exec_failure_reason = 0; }
-        KernelChildExecPrepareResult::NotChildOrPending => { kernel_process_exec_failure_reason = 1; }
-        KernelChildExecPrepareResult::CloneVmMissing => { kernel_process_exec_failure_reason = 2; }
-        KernelChildExecPrepareResult::DynamicResolveInvalid => { kernel_process_exec_failure_reason = 3; }
-        KernelChildExecPrepareResult::DynamicPairInvalid => { kernel_process_exec_failure_reason = 4; }
-        KernelChildExecPrepareResult::ImageAlreadyInstalled => { kernel_process_exec_failure_reason = 5; }
-        KernelChildExecPrepareResult::NoImageResolved => { kernel_process_exec_failure_reason = 6; }
-        KernelChildExecPrepareResult::StaticImageInvalid => { kernel_process_exec_failure_reason = 7; }
-        KernelChildExecPrepareResult::StaticMapOutOfMemory => { kernel_process_exec_failure_reason = 8; }
+        KernelChildExecPrepareResult::Prepared => { kernel_process_exec_failure_reason = KernelExecFailureReason::None; }
+        KernelChildExecPrepareResult::NotChildOrPending => { kernel_process_exec_failure_reason = KernelExecFailureReason::NotChildOrPending; }
+        KernelChildExecPrepareResult::CloneVmMissing => { kernel_process_exec_failure_reason = KernelExecFailureReason::CloneVmMissing; }
+        KernelChildExecPrepareResult::DynamicResolveInvalid => { kernel_process_exec_failure_reason = KernelExecFailureReason::DynamicResolveInvalid; }
+        KernelChildExecPrepareResult::DynamicPairInvalid => { kernel_process_exec_failure_reason = KernelExecFailureReason::DynamicPairInvalid; }
+        KernelChildExecPrepareResult::ImageAlreadyInstalled => { kernel_process_exec_failure_reason = KernelExecFailureReason::ImageAlreadyInstalled; }
+        KernelChildExecPrepareResult::NoImageResolved => { kernel_process_exec_failure_reason = KernelExecFailureReason::NoImageResolved; }
+        KernelChildExecPrepareResult::StaticImageInvalid => { kernel_process_exec_failure_reason = KernelExecFailureReason::StaticImageInvalid; }
+        KernelChildExecPrepareResult::StaticMapOutOfMemory => { kernel_process_exec_failure_reason = KernelExecFailureReason::StaticMapOutOfMemory; }
     }
 }
 
 fn kernel_process_exec_failure_debugger_after_commit() {
-    kernel_process_exec_failure_reason = 9;
+    kernel_process_exec_failure_reason = KernelExecFailureReason::DebuggerAfterCommit;
 }
 
 fn kernel_process_exec_failure_render() {
-    if (kernel_process_exec_failure_reason == 0) { return; }
+    if (kernel_process_exec_failure_reason == KernelExecFailureReason::None) {
+        return;
+    }
     kernel_boot_log("oops: exec prepare=");
     match kernel_process_exec_failure_reason {
-        1 => { kernel_boot_log("not-child-or-pending\n"); }
-        2 => { kernel_boot_log("clone-vm-missing\n"); }
-        3 => { kernel_boot_log("dynamic-resolve-invalid\n"); }
-        4 => { kernel_boot_log("dynamic-pair-invalid\n"); }
-        5 => { kernel_boot_log("image-already-installed\n"); }
-        6 => { kernel_boot_log("no-image-resolved\n"); }
-        7 => { kernel_boot_log("static-image-invalid\n"); }
-        8 => { kernel_boot_log("static-map-out-of-memory\n"); }
-        9 => { kernel_boot_log("debugger-after-commit\n"); }
-        _ => { kernel_boot_log("unknown\n"); }
+        KernelExecFailureReason::None => { kernel_boot_log("none\n"); }
+        KernelExecFailureReason::NotChildOrPending => { kernel_boot_log("not-child-or-pending\n"); }
+        KernelExecFailureReason::CloneVmMissing => { kernel_boot_log("clone-vm-missing\n"); }
+        KernelExecFailureReason::DynamicResolveInvalid => { kernel_boot_log("dynamic-resolve-invalid\n"); }
+        KernelExecFailureReason::DynamicPairInvalid => { kernel_boot_log("dynamic-pair-invalid\n"); }
+        KernelExecFailureReason::ImageAlreadyInstalled => { kernel_boot_log("image-already-installed\n"); }
+        KernelExecFailureReason::NoImageResolved => { kernel_boot_log("no-image-resolved\n"); }
+        KernelExecFailureReason::StaticImageInvalid => { kernel_boot_log("static-image-invalid\n"); }
+        KernelExecFailureReason::StaticMapOutOfMemory => { kernel_boot_log("static-map-out-of-memory\n"); }
+        KernelExecFailureReason::DebuggerAfterCommit => { kernel_boot_log("debugger-after-commit\n"); }
     }
 }
 
