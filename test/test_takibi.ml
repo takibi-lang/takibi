@@ -4507,6 +4507,59 @@ let infer_tests = [
   Alcotest.test_case "slice-to-its-own-element-type (usize) codegens without needing a real target machine" `Quick
     (expect_codegen_ok "fn f(s: [usize; 3..]) -> *usize { return s as *usize; }");
 
+  (* GitHub issue #385: Index already has a bounds-checked addressable
+     lowering for assignment and nested field access. AddrOf must consume
+     that place rather than the loaded value. *)
+  Alcotest.test_case
+    "issue #385: &arr[i] mints an &mut element reference and codegens through the shared index place" `Quick
+    (expect_codegen_ok
+       "struct Refnum385Cell { value: u8; }
+        fn refnum385_array() -> u8 {
+          let mut arr: [Refnum385Cell; 4] = {{0}, {0}, {0}, {0}};
+          let p: &mut Refnum385Cell = &arr[2];
+          p.value = 7;
+          return p.value;
+        }");
+
+  Alcotest.test_case
+    "issue #385: &arr[i] retains the legacy raw-pointer result when context expects *T" `Quick
+    (expect_codegen_ok
+       "struct Refnum385RawResultCell { value: u8; }
+        fn refnum385_raw_result() -> u8 {
+          let mut arr: [Refnum385RawResultCell; 2] = {{3}, {5}};
+          let p: *Refnum385RawResultCell = &arr[1];
+          return p.value;
+        }");
+
+  Alcotest.test_case
+    "issue #385: &slice[i] uses the same addressable element place" `Quick
+    (expect_codegen_ok
+       "struct Refnum385SliceCell { value: u8; }
+        fn refnum385_slice() -> u8 {
+          let mut arr: [Refnum385SliceCell; 4] = {{0}, {0}, {0}, {0}};
+          let s: []Refnum385SliceCell = arr as []Refnum385SliceCell;
+          let p: &mut Refnum385SliceCell = &s[2];
+          p.value = 9;
+          return p.value;
+        }");
+
+  Alcotest.test_case
+    "issue #385: an out-of-bounds indexed address is rejected at compile time" `Quick
+    (expect_type_error "index 4 is out of bounds for array of size 4"
+       "struct Refnum385OobCell { value: u8; }
+        fn refnum385_oob() {
+          let mut arr: [Refnum385OobCell; 4] = {{0}, {0}, {0}, {0}};
+          let p: &Refnum385OobCell = &arr[4];
+        }");
+
+  Alcotest.test_case
+    "issue #385: indexing a raw pointer cannot mint a safe reference" `Quick
+    (expect_type_error "cannot take the address of an indexed raw pointer"
+       "struct Refnum385RawCell { value: u8; }
+        fn refnum385_raw(raw: *Refnum385RawCell) {
+          let p: &Refnum385RawCell = &raw[0];
+        }");
+
   (* -- GitHub issue #239: reject pointer-to-pointer types such as **T --- *)
 
   Alcotest.test_case "a direct **T let annotation is rejected" `Quick

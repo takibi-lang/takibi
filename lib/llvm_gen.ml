@@ -3075,8 +3075,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
             | FieldValue _ ->
                 raise (Error (Printf.sprintf
                   "BUG: field '.%s' has no addressable place" fname)))
+       | Index (base, idx) ->
+           let (elem_ty, place, _) = gen_index_place locals base idx inner.loc in
+           (TypePtr elem_ty, place_ptr place)
        | _ ->
-           raise (Error "& requires a variable or struct field"))
+           raise (Error
+             "& requires a variable, struct field, or array/slice element"))
 
   | BinOp (op, e1, e2) ->
       (* GitHub issue #232: IntLit's own codegen (see its case above) already

@@ -441,12 +441,11 @@ parameter value, or top-level declaration name.
 - Function call, `*expr` (dereference), `&ident` (address-of; taking the
   address of an immutable *local* variable is a compile error, but
   `&global_var` is always allowed since globals are always mutable
-  storage). `&` only accepts a bare variable or a struct field (`&s`,
-  `&s.field`) -- `&arr[i]` (address of an array/slice *element*) is a
-  compile error ("& requires a variable or struct field"); index into a
-  pointer already obtained from the array/variable instead (e.g. `let p:
-  *T = arr; ... p[i] ...`, since an array decays to `*T` when used as an
-  ordinary expression).
+  storage). `&` accepts a bare variable, a struct field, or an array/slice
+  element (`&s`, `&s.field`, `&arr[i]`). Element addressing carries the same
+  compile-time or runtime bounds obligation as reading `arr[i]`. Indexing a
+  raw pointer is excluded: `&raw[i]` cannot mint a safe reference from an
+  unproven address; use the raw pointer directly.
 - `min(a, b)` / `max(a, b)` -- compiler builtins (reserved names; defining
   a user `fn`/`extern fn` with either name is a compile error). Clamp a
   value's provable range: `min(x, LITERAL)` proves an upper bound of
@@ -2251,8 +2250,8 @@ fn f() {
 
 - **Minting is unchanged `&expr`.** There is no separate mint syntax:
   `&expr` (`AddrOf`) keeps its existing grammar and restrictions exactly
-  (only a bare variable or struct field -- `&s`, `&s.field`, never
-  `&arr[i]`; a local must be mutable to be addressed, globals are always
+  (a bare variable, struct field, or array/slice element -- `&s`,
+  `&s.field`, `&arr[i]`; a local must be mutable to be addressed, globals are always
   addressable; linear/indexed-owner/erased-view/variant/singleton targets
   are rejected). Only the *type* `&expr` produces changes, resolved from
   context: a function argument or `let` annotation of type `&T`/`&mut T`

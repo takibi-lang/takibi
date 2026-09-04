@@ -4212,8 +4212,25 @@ and infer_addrof_wrapped senv eenv tyenv fenv (e : Ast.expr) (inner : Ast.expr)
              | `RefMut -> TRefMut ft_ty)
         | None -> raise (TypeError (e.loc,
             Printf.sprintf "no field '%s' in struct '%s'" fname sname)))
+   | Index (base, _) ->
+       (* GitHub issue #385: an array/slice element is an addressable place,
+          not the loaded value returned by Index codegen. Type inference can
+          reuse Index's ordinary checking (including the exact same bounds
+          proof) after first ruling out raw-pointer indexing: a raw address
+          cannot mint a safe reference merely by being indexed. *)
+       let storage_ty = place_undecayed_type senv eenv tyenv fenv base in
+       (match repr storage_ty with
+        | TArray _ | TSlice _ -> ()
+        | _ -> raise (TypeError (e.loc,
+            "cannot take the address of an indexed raw pointer; use the raw pointer directly")));
+       let elem_ty = infer_expr senv eenv tyenv fenv inner in
+       (match wrap with
+        | `Ptr -> check_no_nested_ptr_mint e.loc elem_ty; TPtr elem_ty
+        | `Ref -> TRef elem_ty
+        | `RefMut -> TRefMut elem_ty)
    | _ ->
-       raise (TypeError (e.loc, "& requires a variable or struct field")))
+       raise (TypeError (e.loc,
+         "& requires a variable, struct field, or array/slice element")))
 
 (* GitHub issue #217: shared struct-field-access logic for both an ordinary
    field READ (FieldGet -- decays an array-typed field to a bare element
