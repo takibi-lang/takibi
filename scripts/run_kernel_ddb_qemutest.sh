@@ -11,12 +11,14 @@ SERIAL_PORT="${KERNEL_QEMU_DDB_SERIAL_PORT:-18701}"
 QMP_PORT="${KERNEL_QEMU_DDB_QMP_PORT:-18702}"
 GDB_PORT="${KERNEL_QEMU_DDB_GDB_PORT:-18703}"
 BREAK_SOURCE="${KERNEL_QEMU_DDB_BREAK_SOURCE:-uart}"
+BREAK_ON_SILENCE="${KERNEL_QEMU_DDB_BREAK_ON_SILENCE:-}"
 UART_LOG="$ARTIFACT_DIR/uart.log"
 GDB_VIEW_LOG="$ARTIFACT_DIR/kernel-state-gdb.log"
 GDB_INVALID_LOG="$ARTIFACT_DIR/kernel-state-invalid-gdb.log"
 GDB_REPLACED_TEST="$ARTIFACT_DIR/kernel-state-replaced-test.gdb"
 SNAPSHOT_READY="$ARTIFACT_DIR/snapshot.ready"
 SNAPSHOT_RELEASE="$ARTIFACT_DIR/snapshot.release"
+SILENCE_ARM="$ARTIFACT_DIR/silence.arm"
 QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
 KERNEL_READ_ADDRESS="$(llvm-nm-19 "$ELF" | awk '$3 == "kernel_ddb_breakpoint_test_enabled" { print $1; exit }')"
 if [ -z "$KERNEL_READ_ADDRESS" ]; then
@@ -25,7 +27,7 @@ if [ -z "$KERNEL_READ_ADDRESS" ]; then
 fi
 
 mkdir -p "$ARTIFACT_DIR"
-rm -f "$SNAPSHOT_READY" "$SNAPSHOT_RELEASE"
+rm -f "$SNAPSHOT_READY" "$SNAPSHOT_RELEASE" "$SILENCE_ARM"
 cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
 . "$REPO_ROOT/scripts/qemu_session_ports.sh"
 qemu_session_shift_ports SERIAL_PORT QMP_PORT GDB_PORT
@@ -51,14 +53,23 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM HUP
 
+DRIVER_ARGS=(
+    --serial-port "$SERIAL_PORT" --qmp-port "$QMP_PORT"
+    --break-source "$BREAK_SOURCE"
+    --kernel-address "$KERNEL_READ_ADDRESS"
+    --log "$UART_LOG"
+    --snapshot-ready-file "$SNAPSHOT_READY"
+    --snapshot-release-file "$SNAPSHOT_RELEASE"
+    --timeout 90
+)
+if [ -n "$BREAK_ON_SILENCE" ]; then
+    DRIVER_ARGS+=(
+        --break-on-silence "$BREAK_ON_SILENCE"
+        --silence-arm-file "$SILENCE_ARM"
+    )
+fi
 python3 "$REPO_ROOT/scripts/run_kernel_ddb_driver.py" \
-    --serial-port "$SERIAL_PORT" --qmp-port "$QMP_PORT" \
-    --break-source "$BREAK_SOURCE" \
-    --kernel-address "$KERNEL_READ_ADDRESS" \
-    --log "$UART_LOG" \
-    --snapshot-ready-file "$SNAPSHOT_READY" \
-    --snapshot-release-file "$SNAPSHOT_RELEASE" \
-    --timeout 90 &
+    "${DRIVER_ARGS[@]}" &
 driver_pid=$!
 
 GDB_COMMANDS=(
@@ -77,15 +88,29 @@ if [ "$BREAK_SOURCE" = software ]; then
 fi
 gdb-multiarch -q -batch "$ELF" "${GDB_COMMANDS[@]}" \
     -ex "detach" >/dev/null
+if [ -n "$BREAK_ON_SILENCE" ]; then
+    touch "$SILENCE_ARM"
+fi
 
-for _wait in $(seq 1 300); do
-    [ -e "$SNAPSHOT_READY" ] && break
-    kill -0 "$driver_pid" 2>/dev/null || break
+while [ ! -e "$SNAPSHOT_READY" ] && kill -0 "$driver_pid" 2>/dev/null; do
     sleep 0.1
 done
 if [ ! -e "$SNAPSHOT_READY" ]; then
     echo "FAIL kernel/qemu ddb: DDB snapshot was not ready for GDB" >&2
     exit 1
+fi
+if [ -n "$BREAK_ON_SILENCE" ]; then
+    touch "$SNAPSHOT_RELEASE"
+    wait "$driver_pid"
+    driver_pid=""
+    if ! grep -Eq '^ddb: bt source=' "$UART_LOG" ||
+            ! grep -Eq '^ddb: sched enabled=' "$UART_LOG" ||
+            ! grep -Eq '^ddb: ps count=' "$UART_LOG"; then
+        echo "FAIL kernel/qemu ddb: silence capture lacks bt/sched/ps" >&2
+        exit 1
+    fi
+    echo "PASS kernel/qemu ddb: silence triggered bt+sched+ps capture"
+    exit 0
 fi
 cat >"$GDB_REPLACED_TEST" <<'GDB'
 python
