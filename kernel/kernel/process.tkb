@@ -349,27 +349,10 @@ private let mut scheduled_process_record_missing_count: usize = 0;
 // only because an unrelated probe had shifted the pool layout enough to
 // stop the address being recycled.
 //
-// MEASURED 2026-08-30 AND IT IS NOT ZERO: 26 per QEMU boot, every boot,
-// and all 26 come from one place. kernel/kernel/syscall.tkb's
-// kernel_syscall_wait4_deliver reaps the exiting child through
-// kernel_process_child_wait_status_consume_for, and it is called FROM
-// kernel_process_child_exit while that child is still what
-// execution_here() calls current -- the comment beside that call already
-// says so ("whoever is current here (the exiting child)").
-//
-// kernel_process_child_exit then keeps using `child` afterwards: the trace
-// arguments read its record, and kernel_process_exit_start_successor walks
-// the process chain starting FROM it. On one core the slot is almost
-// always recycled immediately, so those reads land on some record and the
-// damage is invisible; the rare boot where it is not recycled is what
-// surfaced as `records MISSING`. On two cores another core can allocate
-// that slot between the reap and the walk.
-//
-// A counter and a printed line rather than a fail-stop, deliberately: this
-// tree's convention is to ship the counter first and prove it fires before
-// enforcing it, and it has now fired. GitHub issue #488 carries the fix,
-// which has to reorder the exit path rather than add a guard, and needs
-// hardware.
+// The fault was measured at 26 reaps per boot before issue #488 moved the
+// blocked-parent handoff ahead of wait4 delivery. Keep the counter: its
+// conditional report is captured by the process-lifecycle view, whose
+// expected output asserts that no reap takes the current record.
 private let mut scheduled_process_reaped_current_count: usize = 0;
 // GitHub issue #492: reads through a handle whose generation no longer
 // matches the slot's occupant. Must be zero; see
@@ -4620,6 +4603,10 @@ fn kernel_process_clone_rollback() {
     // and exactly the kind of use-after-reap an array of never-freed slots
     // cannot show you.
     scheduled_process_record_of(child).has_parent = false;
+    // The rollback still runs on the child's unfinished clone frame, but the
+    // logical current process must be the surviving parent before the child
+    // record is returned to the pool.
+    execution_here().current_handle = parent;
     let guard = process_run_lock();
     match scheduled_process_ready_take(guard, child) {
         ScheduledProcessReadyTakeResult::Missing => {}
@@ -4639,7 +4626,6 @@ fn kernel_process_clone_rollback() {
     }
     process_run_unlock(guard);
     scheduled_process_record_of(parent).has_first_child = false;
-    execution_here().current_handle = parent;
     workload_busy_note_selected(
         scheduled_process_pid_of_handle(parent));
     process_image_activate_root(parent.pool_index);
@@ -4930,21 +4916,21 @@ fn kernel_process_child_exit(status: usize) -> usize {
     process_run_unlock(exit_guard);
     // GitHub issue #244: the parent may be genuinely Blocked here (wait4
     // called kernel_process_block_wait4() before this child had exited),
-    // not just Ready from an ordinary scheduler preemption -- wake it
-    // first if so, since kernel_process_start_handle() below only accepts
-    // a Ready handle. Bug fix found on real RPi5 hardware: waking alone
-    // is not enough, unlike kernel_process_uart_wake()'s single scalar --
-    // wait4()'s own return value (the reaped pid) and optional status-
-    // buffer write must also be delivered into the blocked frame here,
-    // via kernel_syscall_wait4_deliver() (kernel/kernel/syscall.tkb,
-    // needs user_range_check/user_write_u32 this file does not have),
-    // or the woken parent resumes with a stale/garbage x0 and no status
-    // ever written -- the original bug: it just silently never made
-    // observable progress after being woken.
+    // not just Ready from an ordinary scheduler preemption. Waking alone
+    // is not enough: wait4's return value and optional status-buffer write
+    // must be delivered into the blocked frame.
+    //
+    // GitHub issue #488: keep the parent owner through Blocked -> Ready ->
+    // Running instead of publishing Ready and taking it again. The handoff
+    // makes the parent current before kernel_syscall_wait4_deliver reaps the
+    // child. Thus every child-based trace and successor decision happens
+    // while the child is live, and another core cannot run the parent and
+    // observe the same zombie between delivery and reap.
     if (scheduled_process_record_state(parent.pool_index) ==
             ProcessSlotState::Blocked &&
         scheduled_process_record_wait_reason(parent.pool_index) ==
             ProcessWaitReason::ChildExit) {
+        let parent_guard = process_run_lock();
         match scheduled_process_blocked_take(parent) {
             ScheduledProcessBlockedTakeResult::Missing => {}
             ScheduledProcessBlockedTakeResult::Blocked(resources) => {
@@ -4952,15 +4938,28 @@ fn kernel_process_child_exit(status: usize) -> usize {
                 let ready = scheduled_process_wake(owner, blocked);
                 scheduled_process_record_at(owner.pool_index).wait_reason =
                     ProcessWaitReason::None;
-                kernel_syscall_wait4_deliver(
-                    scheduled_process_record_at(owner.pool_index).saved_sp,
-                    scheduled_process_record_at(owner.pool_index).last_child_pid,
-                    owner.pool_index);
-                scheduled_process_release(owner, ready);
                 kernel_process_trace_handle(ProcessTraceWake, parent, child,
                                             status);
+                let running = scheduled_process_start(owner, ready);
+                let parent_sp: usize =
+                    scheduled_process_record_at(owner.pool_index).saved_sp;
+                let reaped_pid: usize =
+                    scheduled_process_record_at(owner.pool_index)
+                        .last_child_pid;
+                execution_here().current_handle = parent;
+                scheduled_process_release(owner, running);
+                process_run_unlock(parent_guard);
+                workload_busy_note_selected(
+                    scheduled_process_pid_of_handle(parent));
+                process_image_activate_root(parent.pool_index);
+                kernel_process_trace_handle(
+                    ProcessTraceResume, parent, child, 0);
+                kernel_syscall_wait4_deliver(
+                    parent_sp, reaped_pid, parent.pool_index);
+                return parent_sp;
             }
         }
+        process_run_unlock(parent_guard);
     }
     let parent_guard = process_run_lock();
     let parent_started: bool =
@@ -5048,10 +5047,8 @@ private fn kernel_process_exit_start_successor(child: ProcessHandle)
 // init/test_driver.tkb's kernel_process_child_exec_reap(), which already relies
 // on execution_here().current_handle being the parent by the time it runs), so
 // none of their call sites need to change. The one place that DOES need a
-// specific, non-current slot (kernel_process_child_exit's own
-// wake-a-blocked-parent step above, where execution_here().current_handle is
-// still the exiting CHILD, not yet switched to the parent) uses the
-// explicit _for(slot) pair further below instead.
+// specific slot (kernel_process_child_exit's wake-a-blocked-parent step
+// above) uses the explicit _for(slot) pair further below instead.
 // GitHub issue #437: which of this slot's children, if any, has exited
 // and not yet been reaped. Walks the sibling list, so a parent with
 // several children finds whichever one is waitable rather than the one a

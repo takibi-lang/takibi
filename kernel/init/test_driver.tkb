@@ -369,14 +369,8 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
     // called current. Printed only when it happens, because zero is the
     // whole claim.
     if (scheduled_process_reaped_current_count_value() != 0) {
-        // "process invariant:", NOT "process table:", and the prefix is the
-        // decision. kernel/tests/common/views/process_lifecycle.filter
-        // captures `^process table:`, so that spelling would put this line
-        // in an expected file -- and baking a known-nonzero invariant
-        // violation into a view as CORRECT is the opposite of measuring it.
-        // It goes into a view when the fix has driven it to zero, because
-        // absence is what should be asserted and absence is stable across
-        // both targets. GitHub issue #488.
+        // The process-lifecycle view captures this prefix but expects no
+        // matching line, enforcing the zero count on both targets.
         kernel_boot_log("process invariant: REAPED THE CURRENT PROCESS count=");
         uart_put_udec(scheduled_process_reaped_current_count_value());
         kernel_boot_log("\n");

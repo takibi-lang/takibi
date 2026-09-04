@@ -4,3 +4,4 @@
 ^process fanout:
 ^crash trace:
 ^resources:
+^process invariant: REAPED THE CURRENT PROCESS

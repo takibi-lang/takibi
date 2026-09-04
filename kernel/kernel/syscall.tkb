@@ -1759,14 +1759,13 @@ fn kernel_syscall_exit_current_process(status: usize) -> SyscallAction {
 // saved context, not "the currently running one").
 //
 // GitHub issue #248: takes parent_slot explicitly (the blocked parent's
-// own pool_index) rather than reading kernel/kernel/process.tkb's
-// implicit "current" slot -- this runs from INSIDE
-// kernel_process_child_exit(), at the moment execution_current_handle is
-// still the EXITING CHILD, not yet switched to the parent being woken
-// here. Needed so a multi-level concurrent wait4() chain delivers each
-// parent's OWN child's status/pid, not whichever slot happened to be
-// "current" (irrelevant here). GitHub issue #302: the status pointer read
-// below used to be exactly the shared-global bug #248 fixed for
+// own pool_index) rather than depending on an implicit current slot.
+// GitHub issue #488 moved the current-process handoff before this call so
+// the exiting child is not reaped while still current, but keeping the
+// explicit slot preserves the original multi-level wait4 guarantee: each
+// delivery names the parent whose saved frame is being completed.
+// GitHub issue #302: the status pointer read below used to be exactly the
+// shared-global bug #248 fixed for
 // reaped_pid/parent_slot -- a second parent blocking in wait4() before the
 // first one woke would silently overwrite the first parent's still-pending
 // status pointer with its own. scheduled_process_record_wait4_status_ptr
@@ -1776,19 +1775,10 @@ fn kernel_syscall_wait4_deliver(frame_sp: usize, reaped_pid: usize,
     let wait4_status_ptr: usize =
         scheduled_process_record_wait4_status_ptr(parent_slot);
     if (wait4_status_ptr != 0) {
-        // The status buffer belongs to the PARENT being woken, but this runs
-        // while the exiting CHILD is still current (see this function's
-        // header comment and kernel_process_child_exit). user_write_u32
-        // dereferences the user VA directly, so TTBR0_EL1 has to already
-        // name the parent's root -- and user_range_check has to validate
-        // against that same root -- before the status is written. Otherwise
-        // the write lands in the exiting child's address space, which after
-        // that child has execve'd is a completely different set of physical
-        // pages, and the woken parent goes on to read whatever uninitialised
-        // value its own status variable happened to hold. Only the BLOCKING
-        // wait4() path reaches here, which is why the synchronous
-        // already-exited path (correct address space, current is the parent)
-        // never showed this.
+        // The status buffer belongs to the parent being resumed.
+        // user_write_u32 dereferences the user VA directly, so TTBR0_EL1 has
+        // to name that parent's root -- and user_range_check has to validate
+        // against the same root -- before the status is written.
         process_image_activate_root(parent_slot);
         match user_range_check_write(address_space_root_for_slot(parent_slot), wait4_status_ptr, 4) {
             UserWriteRangeResult::Fault => {
@@ -1807,8 +1797,7 @@ fn kernel_syscall_wait4_deliver(frame_sp: usize, reaped_pid: usize,
         }
     }
     kernel_process_child_wait_status_consume_for(parent_slot);
-    // GitHub issue #270: the blocking path credits the reap to the parent
-    // being woken, not to whoever is current here (the exiting child).
+    // GitHub issue #270: credit the reap to the explicitly named parent.
     kernel_init_boot_fixture_reaped(
         scheduled_process_pid_of_slot(parent_slot));
     el0_context_set_x0(frame_sp, reaped_pid);

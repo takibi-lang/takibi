@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""A `process invariant:` boot-log line must not be captured by any view.
+"""Known invariant violations must not be asserted as correct by a view.
 
-These lines report an invariant this kernel is KNOWN to be violating, with a
-count, so the number is visible while it is being driven to zero:
+These lines report measured invariant counts:
 
     process invariant: REAPED THE CURRENT PROCESS count=26
     process invariant: STALE HANDLE READS count=0
@@ -14,9 +13,9 @@ statement that the output is CORRECT. Baking a known-nonzero violation in as
 correct is the opposite of measuring it, and it would then have to be edited
 every time the number moved, which is exactly when somebody stops reading it.
 
-The rule is therefore: report the invariant under a prefix no filter matches,
-and move the line into a view only once the count is zero -- because absence
-is what should be asserted, and absence is stable across both targets.
+The rule is therefore: report a known violation under a prefix no filter
+matches. Once fixed, a filter may capture the line only when its expected file
+does not contain the prefix: that asserts absence across both targets.
 
 That rule was applied by hand twice and written in two comments. This makes
 it a build failure instead, which matters because the failure mode is silent:
@@ -61,6 +60,7 @@ def main():
         return 1
 
     failures = []
+    enforced = set()
     for filter_path in filters:
         for number, pattern in enumerate(
                 filter_path.read_text().splitlines(), 1):
@@ -73,22 +73,38 @@ def main():
                 continue
             for source, line_number, text in emitted:
                 if compiled.search(text):
-                    failures.append(
-                        "%s:%d pattern %r captures %r, emitted at %s:%d. "
-                        "An expected file would then assert a known "
-                        "violation as correct; keep the line out of every "
-                        "view until its count is zero"
-                        % (filter_path, number, pattern, text,
-                           source, line_number))
+                    expected_paths = sorted(
+                        KERNEL.glob(
+                            "tests/*/views/%s.expected" % filter_path.stem))
+                    if not expected_paths:
+                        failures.append(
+                            "%s:%d pattern %r captures %r, emitted at %s:%d, "
+                            "but no expected file asserts its absence"
+                            % (filter_path, number, pattern, text, source,
+                               line_number))
+                        continue
+                    asserted_by = [
+                        path for path in expected_paths
+                        if text in path.read_text()
+                    ]
+                    if asserted_by:
+                        failures.append(
+                            "%s:%d pattern %r captures %r, emitted at "
+                            "%s:%d, and %s asserts it as correct"
+                            % (filter_path, number, pattern, text, source,
+                               line_number,
+                               ", ".join(str(path) for path in asserted_by)))
+                    else:
+                        enforced.add((source, line_number, text))
 
     if failures:
         for line in failures:
             print("FAIL invariant-lines-unviewed: " + line, file=sys.stderr)
         return 1
 
-    print("PASS invariant-lines-unviewed: %d 'process invariant:' line(s), "
-          "none captured by any of %d view filters"
-          % (len(emitted), len(filters)))
+    print("PASS invariant-lines-unviewed: %d report(s), %d enforced by "
+          "absence and none asserted as correct across %d view filters"
+          % (len(emitted), len(enforced), len(filters)))
     return 0
 
 
