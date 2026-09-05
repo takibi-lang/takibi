@@ -1,14 +1,6 @@
 use "kernel/init/test_driver.tkb";
 use "kernel/arch/arm64/kernel/secondary.tkb";
-use "kernel/kernel/pool_contention_evidence.tkb";
-use "kernel/kernel/freelist_contention_evidence.tkb";
-use "kernel/kernel/page_contention_evidence.tkb";
-use "kernel/kernel/asid_contention_evidence.tkb";
-use "kernel/kernel/pid_contention_evidence.tkb";
-use "kernel/kernel/tag_contention_evidence.tkb";
-use "kernel/kernel/schedule_contention_evidence.tkb";
-use "kernel/kernel/occupancy_drain_evidence.tkb";
-use "kernel/kernel/pool_walk_contention_evidence.tkb";
+use "kernel/init/contention_probes.tkb";
 
 must_use variant SecondaryBootResult {
     Started;
@@ -509,76 +501,7 @@ fn main() !{unsafe} {
             } else {
                 kernel_boot_log("smp bringup: core1 idle but no ticks\n");
             }
-            // GitHub issue #445: the first evidence that this kernel's
-            // spinlock EXCLUDES. Everything before it was single-threaded
-            // exercise and an instruction-level check.
-            // GitHub issue #479 Group A. This one currently reports a
-            // DEFECT, not a test failure, and says so: freelist.tkb's free
-            // chain has no lock and two cores are handed the same index.
-            // The line is in the boot every time on purpose -- an open
-            // race that only shows up when someone remembers to look is
-            // the state this was written to leave behind.
-            // GitHub issue #479: the page allocator's own lock. Added
-            // after removing that lock changed nothing any lane could
-            // see -- an audit is not evidence.
-            if (schedule_contention_probe()) {
-                kernel_boot_log("schedule contention: two cores claiming one Ready process, the race shown without the lock and gone with it ok\n");
-            } else {
-                kernel_boot_log("schedule contention: failed\n");
-            }
-            if (tag_contention_probe()) {
-                kernel_boot_log("tag contention: two cores minting a pool tag, every one advanced the counter once ok\n");
-            } else {
-                kernel_boot_log("tag contention: failed\n");
-            }
-            if (pid_contention_probe()) {
-                kernel_boot_log("pid contention: two cores minting, every pid advanced the counter once ok\n");
-            } else {
-                kernel_boot_log("pid contention: failed\n");
-            }
-            if (fd_refcount_contention_probe()) {
-                kernel_boot_log("fd refcount contention: two cores retaining and releasing one object, count back to baseline ok\n");
-            } else {
-                kernel_boot_log("fd refcount contention: failed\n");
-            }
-            if (asid_contention_probe()) {
-                kernel_boot_log("asid contention: two cores assigning, every number advanced the counter once ok\n");
-            } else {
-                kernel_boot_log("asid contention: failed\n");
-            }
-            if (page_contention_probe()) {
-                kernel_boot_log("page contention: two cores allocating and freeing, every page back, none freed twice ok\n");
-            } else {
-                kernel_boot_log("page contention: failed\n");
-            }
-            if (freelist_contention_probe()) {
-                kernel_boot_log("freelist contention: unlocked hands one index to both cores, a caller's lock stops it ok\n");
-            } else {
-                kernel_boot_log("freelist contention: failed\n");
-            }
-            if (pool_contention_probe()) {
-                kernel_boot_log("pool contention: two cores cycling one pool, every allocation given back, no handle refused ok\n");
-            } else {
-                kernel_boot_log("pool contention: failed\n");
-            }
-            // GitHub issue #508: the give-up path of the token every probe
-            // above ends with, exercised on purpose rather than only in the
-            // emergency it exists for.
-            if (occupancy_drain_probe()) {
-                kernel_boot_log("occupancy drain: the second core held the region and the bounded drain gave up, then left and the same drain handed over a proof ok\n");
-            } else {
-                kernel_boot_log("occupancy drain: failed\n");
-            }
-            // GitHub issue #482: a pool WALK takes no guard. The two
-            // cores rendezvous at the exact instruction boundary that
-            // matters -- the walk holding an address the release is about
-            // to invalidate -- so this is produced every round rather
-            // than waited for.
-            if (pool_walk_contention_probe()) {
-                kernel_boot_log("pool walk: a walk holding an address into a chunk that is then unlinked, scrubbed and given back is refused rather than let into it ok\n");
-            } else {
-                kernel_boot_log("pool walk: failed\n");
-            }
+            contention_probes();
         }
         SecondaryBootResult::UnexpectedStatus(status) => {
             kernel_boot_log("smp bringup: core1 unexpected psci status\n");

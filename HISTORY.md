@@ -15,6 +15,41 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-05: one place to add a contention probe
+
+The two-core contention probes were driven by 57 lines that were
+byte-identical in kernel/platform/qemu/init.tkb and
+kernel/platform/rpi5/init.tkb, plus a nine-line `use` block that was also
+identical. Adding a probe meant editing four places and two boot
+expectation fixtures; measured over the last 200 commits the two init files
+were touched 32 and 25 times, putting them among the highest-churn files in
+the tree, and both agents working in parallel append at exactly the same two
+anchors.
+
+scripts/check_platform_file_parity.py could not see the duplication: it
+compares FUNCTIONS defined in both platform trees, and this sequence was
+inline in main(). Twenty-four functions are checked; this was not one.
+
+The sequence is now kernel/init/contention_probes.tkb, called in one line
+from each platform. Append points for a new probe drop from six to four,
+and the two that remain -- the per-platform boot.expected fixtures -- now
+mirror a single source, so their order cannot diverge.
+
+The name deliberately carries no core count. KERNEL_ACTIVE_CORES and
+KERNEL_MAX_CORES in kernel/lib/execution_model.tkb are where the degree
+lives, and every per-core array in this kernel is already written
+[T; KERNEL_MAX_CORES]; a file named two_core_* would have been the only
+place in the tree spelling the number out, and would need renaming at four
+cores and again at N. Contention is the property being asserted and it does
+not change with the count. The caller is still shaped for a single
+secondary, and raising the constant still changes that call site -- in one
+file now rather than two.
+
+Verified as a pure refactor: both boot.expected fixtures are unchanged and
+the QEMU lane's 42 views pass, which is the whole criterion, since any
+reordering or dropped probe would move the boot log. allbuild, test,
+langcheck, linuxcheck, kernelcheck-qemu, kernelcheck-ddb-qemu green.
+
 ## 2026-09-05: a lane says whether it passed
 
 `make allcheck` ends with a receipt -- one line that says PASS or FAIL for

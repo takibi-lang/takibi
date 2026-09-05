@@ -1,0 +1,103 @@
+// The evidence that runs while another core is active: every probe here
+// asserts something about cores contending for one piece of kernel state.
+//
+// Deliberately NOT named for a core count. kernel/lib/execution_model.tkb's
+// KERNEL_ACTIVE_CORES and KERNEL_MAX_CORES are where the degree lives, and
+// every per-core array in this kernel is already written [T; KERNEL_MAX_CORES];
+// a file called two_core_* would be the only place the number is spelled out,
+// and would need renaming at four cores and again at N. Contention is the
+// property, and it does not change with the count.
+//
+// It exists as one file because the sequence below was byte-identical in
+// kernel/platform/qemu/init.tkb and kernel/platform/rpi5/init.tkb -- 57 lines
+// duplicated where scripts/check_platform_file_parity.py could not see it,
+// since that check compares FUNCTIONS defined in both trees and this was
+// inline in main(). Adding a probe meant editing two files and two boot
+// expectation fixtures; it is now one file and two fixtures.
+//
+// The caller is still shaped for a single secondary (one SecondaryBootResult).
+// Raising KERNEL_ACTIVE_CORES changes that call site, and the point of this
+// file is that it changes in one place.
+
+use "kernel/kernel/pool_contention_evidence.tkb";
+use "kernel/kernel/freelist_contention_evidence.tkb";
+use "kernel/kernel/page_contention_evidence.tkb";
+use "kernel/kernel/asid_contention_evidence.tkb";
+use "kernel/kernel/pid_contention_evidence.tkb";
+use "kernel/kernel/tag_contention_evidence.tkb";
+use "kernel/kernel/schedule_contention_evidence.tkb";
+use "kernel/kernel/occupancy_drain_evidence.tkb";
+use "kernel/kernel/pool_walk_contention_evidence.tkb";
+
+fn contention_probes() !{allocates, unsafe} {
+    // GitHub issue #445: the first evidence that this kernel's
+    // spinlock EXCLUDES. Everything before it was single-threaded
+    // exercise and an instruction-level check.
+    // GitHub issue #479 Group A. This one currently reports a
+    // DEFECT, not a test failure, and says so: freelist.tkb's free
+    // chain has no lock and two cores are handed the same index.
+    // The line is in the boot every time on purpose -- an open
+    // race that only shows up when someone remembers to look is
+    // the state this was written to leave behind.
+    // GitHub issue #479: the page allocator's own lock. Added
+    // after removing that lock changed nothing any lane could
+    // see -- an audit is not evidence.
+    if (schedule_contention_probe()) {
+        kernel_boot_log("schedule contention: two cores claiming one Ready process, the race shown without the lock and gone with it ok\n");
+    } else {
+        kernel_boot_log("schedule contention: failed\n");
+    }
+    if (tag_contention_probe()) {
+        kernel_boot_log("tag contention: two cores minting a pool tag, every one advanced the counter once ok\n");
+    } else {
+        kernel_boot_log("tag contention: failed\n");
+    }
+    if (pid_contention_probe()) {
+        kernel_boot_log("pid contention: two cores minting, every pid advanced the counter once ok\n");
+    } else {
+        kernel_boot_log("pid contention: failed\n");
+    }
+    if (fd_refcount_contention_probe()) {
+        kernel_boot_log("fd refcount contention: two cores retaining and releasing one object, count back to baseline ok\n");
+    } else {
+        kernel_boot_log("fd refcount contention: failed\n");
+    }
+    if (asid_contention_probe()) {
+        kernel_boot_log("asid contention: two cores assigning, every number advanced the counter once ok\n");
+    } else {
+        kernel_boot_log("asid contention: failed\n");
+    }
+    if (page_contention_probe()) {
+        kernel_boot_log("page contention: two cores allocating and freeing, every page back, none freed twice ok\n");
+    } else {
+        kernel_boot_log("page contention: failed\n");
+    }
+    if (freelist_contention_probe()) {
+        kernel_boot_log("freelist contention: unlocked hands one index to both cores, a caller's lock stops it ok\n");
+    } else {
+        kernel_boot_log("freelist contention: failed\n");
+    }
+    if (pool_contention_probe()) {
+        kernel_boot_log("pool contention: two cores cycling one pool, every allocation given back, no handle refused ok\n");
+    } else {
+        kernel_boot_log("pool contention: failed\n");
+    }
+    // GitHub issue #508: the give-up path of the token every probe
+    // above ends with, exercised on purpose rather than only in the
+    // emergency it exists for.
+    if (occupancy_drain_probe()) {
+        kernel_boot_log("occupancy drain: the second core held the region and the bounded drain gave up, then left and the same drain handed over a proof ok\n");
+    } else {
+        kernel_boot_log("occupancy drain: failed\n");
+    }
+    // GitHub issue #482: a pool WALK takes no guard. The two
+    // cores rendezvous at the exact instruction boundary that
+    // matters -- the walk holding an address the release is about
+    // to invalidate -- so this is produced every round rather
+    // than waited for.
+    if (pool_walk_contention_probe()) {
+        kernel_boot_log("pool walk: a walk holding an address into a chunk that is then unlinked, scrubbed and given back is refused rather than let into it ok\n");
+    } else {
+        kernel_boot_log("pool walk: failed\n");
+    }
+}
