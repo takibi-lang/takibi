@@ -103,10 +103,10 @@ entry leaves the next one unable to be verified.
 9. **#261** PTE mutation against the hardware page-table walker.
 10. **#9** processor affinity, with four cores.
 
-Then, in this territory and unordered: #468, #464, #516, #308, #414, #514,
-#202, #476, #386, #274, #493, #422, #252, #216, #297, #131, #132, #343, #342,
-#370, #374, #203, #200, #201, #212, #282, #417, #400, #109, #129, #155, #267,
-#28, #58, #13, #95, #8.
+Then, in this territory and unordered: #518, #468, #464, #516, #308, #414,
+#514, #202, #476, #386, #274, #493, #422, #252, #216, #297, #131, #132, #343,
+#342, #370, #374, #203, #200, #201, #212, #282, #417, #400, #109, #129, #155,
+#267, #28, #58, #13, #95, #8.
 
 ### Territory B queue -- debug environment and recurrence prevention
 
@@ -134,8 +134,8 @@ above does not pay the same debugging cost twice.
 
 Waiting on Territory A: #456 and #486 on #504, #505 on #479, #465 on #222.
 
-Then, in this territory and unordered: #339, #338, #275, #281, #208, #182,
-#268, #283, #389, #430.
+Then, in this territory and unordered: #517, #339, #338, #275, #281, #208,
+#182, #268, #283, #389, #430.
 
 ### Not started by either
 
