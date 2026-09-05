@@ -1,0 +1,11 @@
+# HISTORY.md is an append-at-the-top log: every entry is a contiguous block
+# inserted directly under the `---`, so two agents recording a decision on the
+# same day conflict at that anchor every single time, and the resolution is
+# always "keep both blocks". A union merge performs exactly that resolution
+# and stops interrupting a rebase to ask for it.
+#
+# What union merge cannot do is notice that two sides edited the SAME existing
+# entry -- it keeps both versions of the changed lines, silently. That is rare
+# here (entries are written once and not revisited) and is the price of the
+# rule; a conflicting edit to an OLD entry is worth reading the file after.
+HISTORY.md merge=union

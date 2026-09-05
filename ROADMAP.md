@@ -71,6 +71,81 @@ the deepest dependency: it needs a language primitive this compiler does not
 have, and every week of single-core code written before that primitive exists
 is a week of code whose synchronization argument has to be reconstructed later.
 
+## Work split between two agents, 2026-09-05
+
+Two agents run in parallel, one per territory, with the territories and the
+shared-file conventions defined in `AGENTS.md`. This section is the part that
+moves: when a new issue outranks what is queued below, edit it here.
+
+**Codex holds Territory A. Claude Code holds Territory B.** The one measured
+asymmetry is compiler experience -- of the last 40 commits by each, Codex
+touched `lib/` 19 times and Claude Code did not -- and Territory A's
+highest-priority items (#452, #450) are compiler work.
+
+### Territory A queue -- the multicore critical path
+
+The order is forced by M0's phase dependencies below, not chosen. Skipping an
+entry leaves the next one unable to be verified.
+
+1. **#448** a workload occupying two cores -- in progress. Must pass on ONE
+   core first, so that a later failure is provably a concurrency defect.
+2. **#431** SIGCHLD/kill and **#432** nanosleep -- what #448's `respawn`
+   needs. The 2026-08-27 decision stands: dependencies get implemented.
+3. **#222** per-core scheduler state, while the cores are still parked.
+4. **#479** raise `KERNEL_ACTIVE_CORES` and work the ten sites it names. The
+   widest change in the milestone.
+5. **#483** the network stack's unsynchronized non-pool state -- the same
+   files as #479, so the same hands.
+6. **#478** the spinlock excludes but does not arbitrate.
+7. **#504** one world-stopped token. Territory B's #456 and #486 wait on it.
+8. **#452** make a lock say what it protects to the compiler, then **#466**
+   lock order and **#450** compare-and-swap.
+9. **#261** PTE mutation against the hardware page-table walker.
+10. **#9** processor affinity, with four cores.
+
+Then, in this territory and unordered: #468, #464, #516, #308, #414, #514,
+#202, #476, #386, #274, #493, #422, #252, #216, #297, #131, #132, #343, #342,
+#370, #374, #203, #200, #201, #212, #282, #417, #400, #109, #129, #155, #267,
+#28, #58, #13, #95, #8.
+
+### Territory B queue -- debug environment and recurrence prevention
+
+This order is a recommendation, not a dependency chain. Nothing here blocks
+Territory A, which is the point: the backlog exists so that the milestone
+above does not pay the same debugging cost twice.
+
+1. **#513** a check that reports PASS while checking nothing. Four instances
+   in one session when it was filed, and two more on 2026-09-05.
+2. **#515** an intermittent DDB-continue failure discarding a whole boot's
+   views -- expensive, because the board is a shared lease.
+3. **#471** per-lane timing, **#411** boot duration in the log, **#280**
+   bounded allcheck time. The "is it slow or is it hung" cluster.
+4. **#387** one shared board-reachability step instead of one per script.
+5. **#336** flag workaround comments citing closed issues.
+6. **#56** CI. Worth most with two agents; QEMU lanes need no board lease.
+7. **#502** call chains, **#503** PMU counters, **#497** post-boot profiling,
+   so measurement exists before Territory A needs it.
+8. **#410** how a fallback is reported: three counted, two logged, none
+   asserted.
+9. **#388** the hand-written exception vectors carry no stack-overflow test.
+10. **#429** in-kernel GDB stub, **#149** GDB without JTAG, **#444**
+    controlled DDB memory mutation.
+11. **#454** `uart_putc` busy-waits, at 87us per logged byte.
+
+Waiting on Territory A: #456 and #486 on #504, #505 on #479, #465 on #222.
+
+Then, in this territory and unordered: #339, #338, #275, #281, #208, #182,
+#268, #283, #389, #430.
+
+### Not started by either
+
+**M3's userspace capabilities** -- #433, #434, #435, #436, #204, #220 --
+concentrate in `kernel/kernel/syscall.tkb`, Territory A's second-largest file,
+and sit at priority 4. Parallelising them would congest the milestone for
+work that is not blocking it. The same applies to the other-architecture and
+long-horizon items (#50, #51, #85, #95), the DWARF trio waiting on external
+triggers (#122, #123, #124), and #250, which records that it blocks nothing.
+
 ## The development and research loop
 
 The project does not have independent "kernel feature" and "language research"

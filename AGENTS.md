@@ -106,6 +106,48 @@ Re-check `git status` and `git log` before relying on an earlier build or test
 result, and do not treat recent local commits as exclusively yours when
 considering a destructive git operation.
 
+### File territories
+
+Two agents work at a time and each owns a set of directories. **The territory
+is the exclusion: do not edit a file outside yours.** Splitting the work by
+theme instead does not prevent conflicts -- measured over 200 commits, the
+most-touched files were cross-cutting infrastructure, not subsystem code, and
+every expensive conflict in the 2026-09-05 rebase came from two streams
+editing the same API in one file.
+
+- **Territory A**, the multicore critical path: `kernel/kernel/`,
+  `kernel/net/`, `kernel/mm/`, `kernel/lib/`, `lib/`, and
+  `kernel/arch/arm64/kernel/` except `exception_evidence.tkb`.
+- **Territory B**, debug environment and recurrence prevention: `scripts/`,
+  `test/`, `linux_user/`, `kernel/arch/arm64/kernel/exception_evidence.tkb`
+  (DDB), `kernel/printk/`, `kernel/drivers/`, `kernel/fs/`,
+  `kernel/platform/`, and `docs/`.
+
+An issue that needs both territories is not parallel work. Sequence it: the
+owning territory lands its half first, and the other waits.
+
+`ROADMAP.md` carries the current queues and which agent holds which territory.
+It is a dated snapshot and is the file to edit when priorities move.
+
+### Files both territories touch
+
+These belong to neither territory, and each has a convention instead:
+
+- `kernel/init/contention_probes.tkb` is the single place a two-core
+  contention probe is added; the per-platform `init.tkb` files call it once
+  and must not regain an inline probe sequence.
+- `kernel/tests/*/views/*.expected` mirror that one source, so their order
+  cannot diverge; append in the order the probe body runs.
+- `HISTORY.md` is `merge=union` in `.gitattributes`, so two entries added at
+  the top merge without stopping a rebase. Check the seam after a merge that
+  touched an existing entry.
+- `Makefile`, `kernel/README.md`, `SPEC.md`, `ROADMAP.md` have no structural
+  fix; frequent rebasing is the only mitigation.
+
+Rebase onto the upstream `main` before starting an issue and after each
+commit. One
+commit's worth of conflict can be understood on the spot; twelve cannot.
+
 ## Required routing
 
 Read the applicable nested guidance before editing these trees:
