@@ -11,6 +11,11 @@ Agents stage and commit completed work locally. Never run `git push`, merge a
 remote branch, or otherwise publish commits; the human maintainer owns that
 gate. A skill does not expand tool permissions or user authorization.
 
+Integrating is not publishing: `git fetch` and `git rebase` onto the upstream
+`main` are the agent's own to run, and AGENTS.md asks for them before an issue
+is started and after each commit. Rebasing local commits that were never
+pushed rewrites nothing anyone else holds.
+
 Use `gh` for every GitHub operation. Do not use GitHub connectors, MCP tools,
 or browser automation. If `gh` is unavailable or unauthenticated, complete the
 local work and report the external step that remains.

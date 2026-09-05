@@ -145,8 +145,9 @@ These belong to neither territory, and each has a convention instead:
   fix; frequent rebasing is the only mitigation.
 
 Rebase onto the upstream `main` before starting an issue and after each
-commit. One
-commit's worth of conflict can be understood on the spot; twelve cannot.
+commit. `git fetch` and `git rebase` are yours to run and need no permission;
+only pushing is the maintainer's. One commit's worth of conflict can be
+understood on the spot; twelve cannot.
 
 ## Required routing
 
