@@ -5,6 +5,8 @@ import re
 import sys
 from pathlib import Path
 
+from pass_line import report_pass
+
 
 SOURCE = Path("kernel/lib/diagnostic_ring.tkb")
 PATTERN = re.compile(
@@ -39,8 +41,10 @@ def main() -> int:
         values[value] = name
     if failed:
         return 1
-    print(
-        f"PASS diagnostic-event-ids: {len(declarations)} fixed ids are unique and 16-bit"
+    report_pass(
+        "diagnostic-event-ids",
+        f"{len(declarations)} fixed ids are unique and 16-bit",
+        declarations=len(declarations),
     )
     return 0
 

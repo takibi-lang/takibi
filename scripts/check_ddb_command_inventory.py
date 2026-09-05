@@ -6,6 +6,8 @@ import json
 import re
 from pathlib import Path
 
+from pass_line import report_pass
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULTS = {
@@ -138,7 +140,8 @@ def driver_commands(text: str) -> list[str]:
     return list(dict.fromkeys(names))
 
 
-def check(paths: dict[str, Path]) -> None:
+def check(paths: dict[str, Path]) -> int:
+    """Verify every surface agrees, and return the number of commands."""
     public, hidden = load_inventory(paths["inventory"])
     public_names = [entry["name"] for entry in public]
     all_names = public_names + [entry["name"] for entry in hidden]
@@ -168,6 +171,7 @@ def check(paths: dict[str, Path]) -> None:
     covered = driver_commands(paths["driver"].read_text(encoding="ascii"))
     if set(covered) != set(all_names):
         fail("QEMU integration driver", all_names, covered)
+    return len(all_names)
 
 
 def main() -> int:
@@ -176,11 +180,14 @@ def main() -> int:
         parser.add_argument(f"--{name}", type=Path, default=default)
     args = parser.parse_args()
     try:
-        check({name: getattr(args, name) for name in DEFAULTS})
+        commands = check({name: getattr(args, name) for name in DEFAULTS})
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(f"FAIL ddb-command-inventory: {error}")
         return 1
-    print("PASS ddb-command-inventory: dispatcher, help, docs, and coverage agree")
+    report_pass("ddb-command-inventory",
+                f"dispatcher, help, docs, and coverage agree on "
+                f"{commands} commands",
+                commands=commands)
     return 0
 
 

@@ -22,6 +22,8 @@ import pathlib
 import re
 import sys
 
+from pass_line import report_pass
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 AGENTS = ROOT / "AGENTS.md"
 BUILD_CHECKS = ROOT / "docs/BUILD_CHECKS.md"
@@ -57,7 +59,8 @@ def exists(token: str) -> bool:
 def main() -> int:
     text = AGENTS.read_text(encoding="utf-8")
 
-    missing = sorted({t for t in BACKTICKED.findall(text) if is_repo_path(t) and not exists(t)})
+    repo_paths = sorted({t for t in BACKTICKED.findall(text) if is_repo_path(t)})
+    missing = [token for token in repo_paths if not exists(token)]
     checks_text = BUILD_CHECKS.read_text(encoding="utf-8")
     checked = sorted(p.name for p in (ROOT / "scripts").glob("check_*.py"))
     unnamed = [name for name in checked if name not in checks_text]
@@ -74,9 +77,12 @@ def main() -> int:
     if missing or unnamed:
         return 1
 
-    print(
-        f"PASS agents-paths: {len(checked)} check scripts inventoried, "
-        "every path in root AGENTS.md resolves"
+    report_pass(
+        "agents-paths",
+        f"{len(checked)} check scripts inventoried, all "
+        f"{len(repo_paths)} paths in root AGENTS.md resolve",
+        checks=len(checked),
+        agents_md_paths=len(repo_paths),
     )
     return 0
 

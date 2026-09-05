@@ -218,6 +218,19 @@ wrong:
   "the lock leaked", "the race did not reproduce" and "one core never ran"
   sends the reader to the wrong subsystem -- only the first is about the
   kernel.
+- **The verdict needs a term that is FALSE when the probe did no work, and
+  that term has to be asserted rather than printed.** Printing it is what
+  keeps failing: `pool_walk_contention`'s first draft reported a clean run
+  over `steps=0` -- 2048 walks and not one slot visited -- and the number was
+  on the screen the whole time. It became a real verdict only when the probe
+  compared it, as `met != POOL_WALK_ROUNDS` returning false. The same term
+  under other names: `overlap > 0` in `asid_contention_evidence.tkb`,
+  `primary == CONTENTION_ROUNDS && secondary == CONTENTION_ROUNDS` in the
+  pool probe. Pick the count that goes to zero when the probe never ran, not
+  the count of what it found: a probe that legitimately finds no duplicate
+  still walked, and it is the walking that has to be proved. A verdict that
+  cannot tell "the property holds" from "I never looked" is worth less than
+  no verdict, because it is read as the first.
 - **A probe that destroys what it raced for must wait for the other core to
   have LEFT**, which `kernel/lib/occupancy.tkb` makes a linear value rather
   than a flag.
@@ -225,6 +238,26 @@ wrong:
   `scheduled_process_table_init()`, not `scheduled_process_pool_init_for_probe()`**:
   the pool-only call leaves three other slot-keyed tables holding a previous
   life's state.
+
+The verdict rule above -- assert a term that is false when the probe did no
+work -- is not a build check, and that is a judgement rather than an omission. The scripts side of the same defect is mechanised -- every
+`scripts/check_*.py` reports through `scripts/pass_line.py`, which refuses to
+print PASS when a count the verdict rests on is zero, and
+`scripts/check_pass_line_counts.py` enforces that no check goes around it.
+The probe side does not reduce the same way. It would have to decide two
+things a pattern cannot: which of a probe's several `return false` paths is
+the verdict rather than a give-up, and which statics the SECOND core
+increments, which means following `kernel/arch/arm64/kernel/secondary.tkb`
+into each probe's entry point and tracking the atomics it writes across
+files. The shapes in the tree are genuinely different -- a trailing
+`return advanced == calls && overlap > 0`, a chain of guards ending in
+`return true`, a two-phase verdict split across a helper called twice -- so
+the obvious cheap approximations produce false positives on correct probes
+today, which is the failure mode that gets a check disabled.
+`scripts/check_probe_entry_gates.py` is mechanised instead because its rule
+is a forbidden token in one recognisable loop, not a relation between a
+variable and another core's writes. Revisit this if the probes converge on
+one verdict shape.
 
 ## What QEMU cannot tell you
 

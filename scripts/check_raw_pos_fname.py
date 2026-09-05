@@ -4,6 +4,8 @@
 from pathlib import Path
 import sys
 
+from pass_line import report_pass
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # Exact source lines are intentional: broad file/function exemptions would let
@@ -21,9 +23,12 @@ ALLOWED = {
 }
 
 
-def violations() -> list[str]:
+def violations() -> tuple[list[str], int]:
+    """Return the undeclared reads and the number of files scanned."""
     found = []
+    scanned = 0
     for path in sorted((ROOT / "lib").glob("*.ml")):
+        scanned += 1
         relative = str(path.relative_to(ROOT))
         for number, line in enumerate(path.read_text().splitlines(), 1):
             stripped = line.strip()
@@ -31,18 +36,21 @@ def violations() -> list[str]:
                 continue
             if (relative, stripped) not in ALLOWED:
                 found.append(f"{relative}:{number}: {stripped}")
-    return found
+    return found, scanned
 
 
 def main() -> None:
-    found = violations()
+    found, scanned = violations()
     if found:
         print("ERROR: raw Lexing.pos_fname access bypasses Ast.source_file_of_loc:")
         for item in found:
             print(f"  {item}")
         return_code = 1
     else:
-        print("PASS raw-pos-fname: all direct accesses are identity-key helpers")
+        report_pass("raw-pos-fname",
+                    f"all direct accesses across {scanned} lib/*.ml files "
+                    "are identity-key helpers",
+                    files=scanned)
         return_code = 0
     sys.exit(return_code)
 

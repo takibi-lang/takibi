@@ -25,6 +25,8 @@ import re
 import subprocess
 import sys
 
+from pass_line import report_pass
+
 LLVM_OBJDUMP = "llvm-objdump-19"
 
 # GitHub issue #231: kernel/arch/arm64/mm/mmu.tkb's init_root() (originally
@@ -568,12 +570,13 @@ def main():
         for f in failures:
             print("FAIL kernel/asm-invariants: %s" % f, file=sys.stderr)
         return 1
-    print("PASS kernel/asm-invariants: UXN identity-block bits, eret DAIF.I "
+    report_pass("kernel/asm-invariants", "UXN identity-block bits, eret DAIF.I "
           "masking, SCTLR_EL1.A clear for Normal memory, the spinlock's "
           "atomicity, mutex_acquire masking "
           "before it takes, the whole-TLB invalidate broadcasting "
           "while MMU activation stays local, and every exception entry "
-          "switching to a stack of its own core, all verified statically")
+          "switching to a stack of its own core, all verified statically",
+                insns=len(insns))
     return 0
 
 

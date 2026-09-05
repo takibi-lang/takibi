@@ -36,6 +36,8 @@ import pathlib
 import re
 import sys
 
+from pass_line import report_pass
+
 PLATFORM_ROOT = pathlib.Path("kernel/platform")
 
 # name -> why this identical pair is not a finding.  Adding a name here is a
@@ -90,7 +92,9 @@ def collect(platform):
 def main():
     platforms = sorted(p.name for p in PLATFORM_ROOT.iterdir() if p.is_dir())
     if len(platforms) < 2:
-        print(f"PASS platform-parity: {len(platforms)} platform, nothing to compare")
+        report_pass("platform-parity",
+                    f"{len(platforms)} platform, nothing to compare",
+                    platforms=len(platforms))
         return 0
 
     trees = {name: collect(name) for name in platforms}
@@ -130,9 +134,11 @@ def main():
         print("  scripts/check_platform_file_parity.py with the reason.")
         return 1
 
-    print(f"PASS platform-parity: {compared} functions defined in all of "
-          f"{'/'.join(platforms)}, {allowed_hits} identical by declared "
-          f"intent, 0 undeclared")
+    report_pass("platform-parity",
+                f"{compared} functions defined in all of "
+                f"{'/'.join(platforms)}, {allowed_hits} identical by "
+                "declared intent, 0 undeclared",
+                compared_functions=compared)
     return 0
 
 

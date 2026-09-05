@@ -37,6 +37,8 @@ import pathlib
 import re
 import sys
 
+from pass_line import report_pass
+
 KERNEL = pathlib.Path("kernel")
 CONSTANTS = ("KERNEL_ACTIVE_CORES", "KERNEL_PREEMPTIBLE")
 GLOBAL_RE = re.compile(r"^(?:private )?let mut ", re.M)
@@ -170,10 +172,12 @@ def main():
 
     not_audited = sum(1 for name in exempt
                       if EXEMPT[name].startswith("NOT AUDITED"))
-    print("PASS execution-model-coverage: %d files hold mutable state; %d "
-          "assert an execution-model constant, %d are exempt with a stated "
-          "reason (%d of those recorded as NOT AUDITED)"
-          % (len(stateful), len(asserting), len(exempt), not_audited))
+    report_pass("execution-model-coverage",
+                "%d files hold mutable state; %d assert an execution-model "
+                "constant, %d are exempt with a stated reason (%d of those "
+                "recorded as NOT AUDITED)"
+                % (len(stateful), len(asserting), len(exempt), not_audited),
+                stateful_files=len(stateful))
     return 0
 
 

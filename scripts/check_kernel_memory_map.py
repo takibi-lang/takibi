@@ -54,6 +54,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from pass_line import report_pass
+
 REPO = Path(__file__).resolve().parent.parent
 DOC = REPO / "kernel" / "MEMORY_MAP.md"
 ELFS = {
@@ -416,7 +418,8 @@ def page_span(start, end, label):
     return (end - start) // PAGE_SIZE
 
 
-def check_allocator_expectations(problems, include_debug):
+def check_allocator_expectations(problems, include_debug) -> int:
+    """Compare the documented page counts, and return how many were read."""
     symbols = {name: nm_symbols(elf) for name, elf in ELFS.items()}
     starts = {}
     for platform in ("RPi5", "QEMU"):
@@ -432,7 +435,9 @@ def check_allocator_expectations(problems, include_debug):
             page_span(starts["RPi5"], RPI5_MANAGED_RAM_END,
                       "RPi5 managed RAM"),
     }
+    compared = 0
     for relative, actual in expected.items():
+        compared += 1
         documented = expected_boot_pages(REPO / relative)
         if documented != actual:
             problems.append(
@@ -452,6 +457,7 @@ def check_allocator_expectations(problems, include_debug):
                       "QEMU second discontiguous extent"),
     }
     for name, actual in fdt_expected.items():
+        compared += 1
         documented = expected_python_pages(fdt_path, name)
         if documented != actual:
             problems.append(
@@ -470,6 +476,8 @@ def check_allocator_expectations(problems, include_debug):
             problems.append(
                 f"`{relative}` says allocator_pages={documented}, "
                 f"linked layout requires {actual}")
+        compared += 1
+    return compared
 
 
 def main():
@@ -493,7 +501,8 @@ def main():
     check_image_ceiling(text, problems)
     check_layout_invariants(problems)
     check_consts(text, problems)
-    check_allocator_expectations(problems, "--debug" in sys.argv[1:])
+    expectations = check_allocator_expectations(
+        problems, "--debug" in sys.argv[1:])
     if problems:
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)
@@ -520,8 +529,16 @@ def main():
               file=sys.stderr)
         fail(f"{len(problems)} row(s) disagree with the build")
     suffix = ", including the debug image" if "--debug" in sys.argv[1:] else ""
-    print("PASS kernel/memory-map: checked rows and allocator expectations "
-          f"match the linked kernels{suffix}")
+    # The asserted term is the allocator expectations rather than the rows
+    # of the document's tables. `table_after` already compares the rows it
+    # parsed against a count of the same state tag taken across the whole
+    # document, which is a completeness check and strictly stronger than
+    # "not zero" -- that is what a conflict marker defeated in 8ed13ef. The
+    # expectations have no such comparison of their own, so they need this.
+    report_pass("kernel/memory-map",
+                f"checked rows and {expectations} allocator expectations "
+                f"match the linked kernels{suffix}",
+                allocator_expectations=expectations)
 
 
 if __name__ == "__main__":

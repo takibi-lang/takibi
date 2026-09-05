@@ -9,6 +9,7 @@ than warns; do not bypass or weaken one merely to complete a change.
 | `check_compiler_sync_rules.py` | declared compiler counterpart changes stay synchronized |
 | `check_elf_symbol_alignment.py` | linked symbols meet hardware alignment requirements |
 | `check_no_conflict_markers.py` | no tracked file is left mid-merge, where a pattern-scanning check would answer about the half above the marker |
+| `check_pass_line_counts.py` | every check reports PASS through `scripts/pass_line.py`, asserting a count that is zero when it examined nothing |
 | `check_kernel_asm_invariants.py` | linked AArch64 assembly preserves EL0 entry/return and SCTLR alignment invariants |
 | `check_kernel_lib_limitations_header.py` | core kernel files state their current limitations |
 | `check_diagnostic_event_ids.py` | fixed diagnostic event IDs are unique 16-bit values |
@@ -33,6 +34,15 @@ than warns; do not bypass or weaken one merely to complete a change.
 | `check_stale_depfiles.py` | generated kernel depfiles name live prerequisites |
 | `check_suite_output.py` | batched UART cases appear in manifest order and match their fixtures |
 | `check_user_payload_no_rw_globals.py` | flat EL0 payloads contain no writable globals |
+
+Every check above prints its verdict through `scripts/pass_line.py`, which
+refuses to print PASS when a count the verdict rests on is zero. A new check
+reports the same way: pick the number that is zero when the check did no work
+-- usually the size of the set it scanned, not the number of findings it made
+-- and pass it to `report_pass`. A nonzero count proves the check looked at
+something; it does not prove the set was complete, and where completeness is
+the property at risk the count is compared against a separately discovered
+total instead.
 
 The scripts and their tests are authoritative for exact mechanics. Update this
 table when adding or removing a `scripts/check_*.py` check.

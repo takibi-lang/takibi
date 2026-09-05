@@ -42,6 +42,8 @@ import re
 import sys
 import pathlib
 
+from pass_line import report_pass
+
 READ_THEN_CHECK_LINES = 3
 
 
@@ -124,8 +126,10 @@ def main(argv):
         print("FAIL kernel/flag-guarded-fields: %d read(s) of a field whose "
               "paired flag was not consulted first" % len(findings))
         return 1
-    print("PASS kernel/flag-guarded-fields: every optional field read under "
-          "its has_ flag (%d files)" % files)
+    report_pass("kernel/flag-guarded-fields",
+                "every optional field read under its has_ flag (%d files)"
+                % files,
+                files=files)
     return 0
 
 

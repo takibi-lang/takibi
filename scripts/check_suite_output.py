@@ -5,6 +5,8 @@ import pathlib
 import re
 import sys
 
+from pass_line import report_pass
+
 
 MARKER = re.compile(rb"@@TAKIBI_TEST:([A-Za-z0-9_]+)@@\n")
 
@@ -61,7 +63,16 @@ def main() -> int:
             failed = True
             print(f"FAIL\t{name}\t{escaped(expected)}\t{escaped(actual)}")
 
-    return 1 if failed else 0
+    if failed:
+        return 1
+    # stdout here is the tab-delimited report scripts/run_qemutest.sh reads
+    # row by row, and a sentence in it is a row that reader drops.
+    report_pass("suite-output",
+                f"{len(requested)} batched case(s) match their fixtures in "
+                "manifest order",
+                stream=sys.stderr,
+                cases=len(requested))
+    return 0
 
 
 if __name__ == "__main__":

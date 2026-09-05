@@ -30,6 +30,8 @@ import pathlib
 import re
 import sys
 
+from pass_line import report_pass
+
 ROOTS = (pathlib.Path("kernel"), pathlib.Path("linux_user"))
 DEFINING_FILE = pathlib.Path("kernel/lib/intrusive_pool.tkb")
 
@@ -74,13 +76,16 @@ ALLOWED = {
 
 
 def escapes():
+    """Return the proof-dropping call sites and the files scanned."""
     found = []
+    scanned = 0
     for root in ROOTS:
         if not root.is_dir():
             continue
         for path in sorted(root.rglob("*.tkb")):
             if path == DEFINING_FILE:
                 continue
+            scanned += 1
             enclosing = "<file scope>"
             for number, line in enumerate(path.read_text().splitlines(), 1):
                 match = FN_RE.match(line)
@@ -88,11 +93,11 @@ def escapes():
                     enclosing = match.group(1)
                 if ESCAPE_RE.search(line):
                     found.append((str(path), enclosing, number))
-    return found
+    return found, scanned
 
 
 def main():
-    found = escapes()
+    found, scanned = escapes()
     failures = []
     for path, function, number in found:
         if (path, function) not in ALLOWED:
@@ -114,8 +119,10 @@ def main():
             print("FAIL liveness-proof-escapes: " + line, file=sys.stderr)
         return 1
 
-    print("PASS liveness-proof-escapes: %d declared escape(s), each with a "
-          "stated reason" % len(found))
+    report_pass("liveness-proof-escapes",
+                "%d declared escape(s) across %d files, each with a stated "
+                "reason" % (len(found), scanned),
+                files=scanned)
     return 0
 
 

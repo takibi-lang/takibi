@@ -46,6 +46,8 @@ import pathlib
 import re
 import sys
 
+from pass_line import report_pass
+
 KERNEL = pathlib.Path("kernel")
 
 GLOBAL_RE = re.compile(r"^(?:private )?let mut ([A-Za-z_0-9]+)\s*:", re.M)
@@ -159,9 +161,11 @@ def main():
             print("FAIL lock-discipline: %s" % f, file=sys.stderr)
         return 1
 
-    print("PASS lock-discipline: %d files checked; no global Mutex is "
-          "initialised, and %d files use a raw atomic, all of them declared"
-          % (checked_files, len(atomic_users)))
+    report_pass("lock-discipline",
+                "%d files checked; no global Mutex is initialised, and %d "
+                "files use a raw atomic, all of them declared"
+                % (checked_files, len(atomic_users)),
+                files=checked_files)
     return 0
 
 

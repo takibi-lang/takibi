@@ -44,6 +44,8 @@
 import sys
 from pathlib import Path
 
+from pass_line import report_pass
+
 MARKER = "Current limitations"
 # How far into the file (in leading comment lines) the marker must
 # appear -- generous enough for a real design-rationale header
@@ -96,10 +98,12 @@ def main():
                 file=sys.stderr,
             )
         return 1
-    print(
-        "PASS kernel-limitations-header: every *.tkb file in %s "
-        "documents its current limitations (%d files)"
-        % (", ".join(str(d) for d in directories), checked_count)
+    report_pass(
+        "kernel-limitations-header",
+        "every *.tkb file in %s documents its current limitations "
+        "(%d files)"
+        % (", ".join(str(d) for d in directories), checked_count),
+        files=checked_count,
     )
     return 0
 

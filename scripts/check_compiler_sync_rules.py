@@ -14,6 +14,8 @@ import pathlib
 import re
 import sys
 
+from pass_line import report_pass
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FILES = (ROOT / "lib/type_inf.ml", ROOT / "lib/llvm_gen.ml")
@@ -59,7 +61,9 @@ def main() -> int:
     if not sites:
         print("ERROR: no compiler sync rules found", file=sys.stderr)
         return 1
-    print(f"PASS compiler-sync-rules: {len(sites)} counterpart references indexed")
+    report_pass("compiler-sync-rules",
+                f"{len(sites)} counterpart references indexed",
+                sites=len(sites))
     return 0
 
 

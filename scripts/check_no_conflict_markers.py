@@ -25,6 +25,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from pass_line import report_pass
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # Assembled rather than written, so this file and its control do not match
@@ -78,8 +80,9 @@ def main():
               f"marker(s) in tracked files", file=sys.stderr)
         return 1
 
-    print(f"PASS no-conflict-markers: {scanned} tracked files hold no "
-          f"unresolved merge")
+    report_pass("no-conflict-markers",
+                f"{scanned} tracked files hold no unresolved merge",
+                tracked_files=scanned)
     return 0
 
 

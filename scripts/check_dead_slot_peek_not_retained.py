@@ -35,6 +35,8 @@ import pathlib
 import re
 import sys
 
+from pass_line import report_pass
+
 KERNEL = pathlib.Path("kernel")
 PEEK = "scheduled_process_record_peek"
 DEFINITION_RE = re.compile(r"^(?:private )?fn " + PEEK + r"\b")
@@ -77,8 +79,10 @@ def main():
               "no longer looking at anything" % PEEK, file=sys.stderr)
         return 1
 
-    print("PASS dead-slot-peek: %d call(s) to %s, each read as a field on "
-          "the spot" % (calls, PEEK))
+    report_pass("dead-slot-peek",
+                "%d call(s) to %s, each read as a field on the spot"
+                % (calls, PEEK),
+                calls=calls)
     return 0
 
 

@@ -28,6 +28,8 @@ import pathlib
 import re
 import sys
 
+from pass_line import report_pass
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 KERNEL = REPO_ROOT / "kernel"
 
@@ -79,9 +81,11 @@ def main() -> int:
     if failed:
         print("FAIL pool-release-paths: a pool hands out records it can never take back")
         return 1
-    print(
-        f"PASS pool-release-paths: {len(pools)} pools, "
-        f"{len(pools) - exempt} with a release path, {exempt} declared never-released"
+    report_pass(
+        "pool-release-paths",
+        f"{len(pools)} pools, {len(pools) - exempt} with a release path, "
+        f"{exempt} declared never-released",
+        pools=len(pools),
     )
     return 0
 

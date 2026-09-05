@@ -139,6 +139,10 @@ import pathlib
 import sys
 
 root = pathlib.Path(sys.argv[1])
+# A check script imports its siblings by bare name, which works when python
+# runs it as a script because sys.path[0] is then scripts/. Loading it from
+# a heredoc has to say so.
+sys.path.insert(0, str(root / "scripts"))
 spec = importlib.util.spec_from_file_location(
     "check_qemu_lane_ports", root / "scripts" / "check_qemu_lane_ports.py"
 )

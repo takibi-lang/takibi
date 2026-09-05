@@ -29,28 +29,35 @@ import pathlib
 import re
 import sys
 
+from pass_line import report_pass
+
 KERNEL = pathlib.Path("kernel")
 PREFIX = "process invariant: "
 EMIT_RE = re.compile(r'kernel_boot_log\("(' + re.escape(PREFIX) + r'[^"]*)"')
 
 
 def emitted_lines():
+    """Return the emitted invariant lines and the files scanned for them."""
     lines = []
+    scanned = 0
     for path in sorted(KERNEL.rglob("*.tkb")):
+        scanned += 1
         for number, line in enumerate(path.read_text().splitlines(), 1):
             for match in EMIT_RE.finditer(line):
                 lines.append((str(path), number, match.group(1)))
-    return lines
+    return lines, scanned
 
 
 def main():
-    emitted = emitted_lines()
+    emitted, scanned = emitted_lines()
     if not emitted:
         # Not a failure: the invariants may all have reached zero and had
         # their lines removed. Say so rather than passing silently, because
         # "no such line" and "the check stopped looking" read the same.
-        print("PASS invariant-lines-unviewed: no 'process invariant:' line is "
-              "emitted; nothing to keep out of a view")
+        report_pass("invariant-lines-unviewed",
+                    f"no 'process invariant:' line is emitted by any of "
+                    f"{scanned} kernel files; nothing to keep out of a view",
+                    files=scanned)
         return 0
 
     filters = sorted(KERNEL.rglob("views/*.filter"))
@@ -102,9 +109,11 @@ def main():
             print("FAIL invariant-lines-unviewed: " + line, file=sys.stderr)
         return 1
 
-    print("PASS invariant-lines-unviewed: %d report(s), %d enforced by "
-          "absence and none asserted as correct across %d view filters"
-          % (len(emitted), len(enforced), len(filters)))
+    report_pass("invariant-lines-unviewed",
+                "%d report(s), %d enforced by absence and none asserted as "
+                "correct across %d view filters"
+                % (len(emitted), len(enforced), len(filters)),
+                files=scanned, view_filters=len(filters))
     return 0
 
 

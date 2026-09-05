@@ -13,6 +13,8 @@ from pathlib import Path
 import re
 import sys
 
+from pass_line import report_pass
+
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNNERS = (
@@ -86,9 +88,10 @@ def main() -> int:
     if failed:
         print("FAIL kernel-interactive-httpd-protocol")
         return 1
-    print(
-        f"PASS kernel-interactive-httpd-protocol: {len(RUNNERS)} runners use "
-        "LISTENER -> request -> READY -> DONE"
+    report_pass(
+        "kernel-interactive-httpd-protocol",
+        f"{len(RUNNERS)} runners use LISTENER -> request -> READY -> DONE",
+        runners=len(RUNNERS),
     )
     return 0
 

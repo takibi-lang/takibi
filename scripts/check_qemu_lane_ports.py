@@ -36,6 +36,8 @@ import pathlib
 import re
 import sys
 
+from pass_line import report_pass
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCRIPT_GLOB = "run_kernel_*.sh"
 
@@ -214,10 +216,13 @@ def main() -> int:
         )
         return 1
     constants = session_port_constants()
-    print(
-        f"PASS qemu-lane-ports: {lanes} lane instances, "
-        f"{len(claimed)} protocol:port claims, no duplicates, "
-        f"{constants['QEMU_SESSION_PORT_BLOCKS']} session blocks fit"
+    report_pass(
+        "qemu-lane-ports",
+        f"{lanes} lane instances, {len(claimed)} protocol:port claims, no "
+        f"duplicates, {constants['QEMU_SESSION_PORT_BLOCKS']} session "
+        "blocks fit",
+        lanes=lanes,
+        port_claims=len(claimed),
     )
     return 0
 

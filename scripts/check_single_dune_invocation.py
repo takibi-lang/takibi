@@ -26,6 +26,8 @@ import pathlib
 import re
 import sys
 
+from pass_line import report_pass
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 MAKEFILE = REPO_ROOT / "Makefile"
 EXPECTED_RULE = "$(TAKIBI)"
@@ -78,8 +80,10 @@ def main() -> int:
         )
         return 1
     rule, number, _ = found[0]
-    print(f"PASS single-dune-invocation: `dune build` runs from `{rule}` "
-          f"(Makefile:{number}) and nowhere else")
+    report_pass("single-dune-invocation",
+                f"`dune build` runs from `{rule}` (Makefile:{number}) and "
+                "nowhere else",
+                invocations=len(found))
     return 0
 
 

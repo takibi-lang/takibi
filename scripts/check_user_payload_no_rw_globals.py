@@ -34,6 +34,8 @@ import re
 import subprocess
 import sys
 
+from pass_line import report_pass
+
 LLVM_READELF = "llvm-readelf-19"
 
 # Matches e.g. "  [ 3] .bss              NOBITS          ... 000004 00  WA  0   0  8"
@@ -60,8 +62,10 @@ def section_sizes(elf_path):
 
 
 def check_no_rw_globals(elf_path):
+    """Return the failures and the number of ELF sections examined."""
+    sections = section_sizes(elf_path)
     failures = []
-    for name, size in section_sizes(elf_path):
+    for name, size in sections:
         if name.startswith(FLAGGED_PREFIXES) and size > 0:
             failures.append(
                 "%s has a nonzero-size '%s' section (%d bytes) -- this "
@@ -71,7 +75,7 @@ def check_no_rw_globals(elf_path):
                 "this used to matter structurally, not just stylistically."
                 % (elf_path, name, size)
             )
-    return failures
+    return failures, len(sections)
 
 
 def main():
@@ -79,13 +83,15 @@ def main():
         print("usage: check_user_payload_no_rw_globals.py <user_payload.elf>",
               file=sys.stderr)
         return 1
-    failures = check_no_rw_globals(sys.argv[1])
+    failures, sections = check_no_rw_globals(sys.argv[1])
     if failures:
         for f in failures:
             print("FAIL user_payload/no-rw-globals: %s" % f, file=sys.stderr)
         return 1
-    print("PASS user_payload/no-rw-globals: no writable globals in the "
-          "user_payload ELF")
+    report_pass("user_payload/no-rw-globals",
+                "no writable globals in the user_payload ELF (%d sections)"
+                % sections,
+                sections=sections)
     return 0
 
 

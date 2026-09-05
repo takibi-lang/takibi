@@ -7,6 +7,8 @@ import pathlib
 import subprocess
 import sys
 
+from pass_line import report_pass
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FIXTURE_ROOTS = ("kernel", "linux_user", "examples")
@@ -51,9 +53,10 @@ def main() -> int:
     if mixed:
         return 1
 
-    print(
-        f"PASS expected-line-endings: {len(fixtures)} stdout fixtures use "
-        "one newline convention each"
+    report_pass(
+        "expected-line-endings",
+        f"{len(fixtures)} stdout fixtures use one newline convention each",
+        fixtures=len(fixtures),
     )
     return 0
 

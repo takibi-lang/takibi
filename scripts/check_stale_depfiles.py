@@ -5,6 +5,8 @@ import shlex
 import sys
 from pathlib import Path
 
+from pass_line import report_pass
+
 ROOT = Path(__file__).resolve().parent.parent
 # Roots scanned RECURSIVELY: everything under them that ends in .d is a
 # `takibi --emit-depfile` output.
@@ -66,7 +68,10 @@ def main() -> None:
         print("Run `make clean` to remove generated dependency state, then rebuild.")
         sys.exit(1)
 
-    print(f"PASS stale-depfiles: {len(depfiles)} generated depfiles have live prerequisites")
+    report_pass("stale-depfiles",
+                f"{len(depfiles)} generated depfiles have live "
+                "prerequisites",
+                depfiles=len(depfiles))
 
 
 if __name__ == "__main__":

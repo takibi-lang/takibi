@@ -31,6 +31,8 @@ import pathlib
 import re
 import sys
 
+from pass_line import report_pass
+
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
 # HTTP protocol text a driver sends or matches on the wire. Not kernel output.
@@ -102,8 +104,10 @@ def main():
         print(f"FAIL kernel/log-expectations: {len(problems)} of {checked} "
               f"host-side expectations name a line nothing emits", file=sys.stderr)
         return 1
-    print(f"PASS kernel/log-expectations: all {checked} host-side boot-log "
-          f"expectations match a line the kernel can emit")
+    report_pass("kernel/log-expectations",
+                f"all {checked} host-side boot-log expectations match a "
+                "line the kernel can emit",
+                expectations=checked)
     return 0
 
 

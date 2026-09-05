@@ -33,6 +33,8 @@ import pathlib
 import re
 import sys
 
+from pass_line import report_pass
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 KERNEL = ROOT / "kernel"
 
@@ -94,8 +96,10 @@ def main() -> int:
         for problem in problems:
             print(f"  {problem}")
         return 1
-    print(f"PASS probe-entry-gates: {checked} arrival gate(s) across "
-          f"{len(targets)} probe file(s) wait on a monotonic value")
+    report_pass("probe-entry-gates",
+                f"{checked} arrival gate(s) across {len(targets)} probe "
+                "file(s) wait on a monotonic value",
+                gates=checked, probe_files=len(targets))
     return 0
 
 

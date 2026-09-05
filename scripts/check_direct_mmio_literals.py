@@ -7,6 +7,8 @@ import re
 import sys
 from pathlib import Path
 
+from pass_line import report_pass
+
 
 NUMBER = r"(?:0x[0-9A-Fa-f_]+|[0-9][0-9_]*)"
 NUMERIC_ADDRESS = rf"{NUMBER}(?:\s*[+-]\s*{NUMBER})*"
@@ -56,8 +58,9 @@ def source_files(arguments: list[str]) -> list[Path]:
 
 
 def main() -> int:
+    files = source_files(sys.argv[1:])
     failures: list[str] = []
-    for path in source_files(sys.argv[1:]):
+    for path in files:
         code = code_without_comments_or_strings(path.read_text())
         for match in DIRECT_MMIO.finditer(code):
             line = code.count("\n", 0, match.start()) + 1
@@ -69,8 +72,10 @@ def main() -> int:
         print("Resolve the device base from the boot DTB or derive the address "
               "from an already-validated resource base.")
         return 1
-    print("PASS direct-mmio-literals: no numeric physical address is cast "
-          "directly to *io")
+    report_pass("direct-mmio-literals",
+                f"no numeric physical address is cast directly to *io in "
+                f"{len(files)} files",
+                files=len(files))
     return 0
 
 
