@@ -55,5 +55,6 @@ fn timer_irq_handler() !{interrupt} {
     // Every tick wakes network waiters, regardless of which EL it
     // interrupted. This is separate from the EL0-only scheduling half.
     kernel_process_net_wake_all();
+    kernel_process_deadline_wake_all();
     interrupt_notify();
 }

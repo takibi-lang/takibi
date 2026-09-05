@@ -75,7 +75,7 @@ enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; }
 // which stops every other process for the duration -- kernel mode does not
 // preempt. Added at the end so the numbers the oops path prints for the
 // first three are unchanged.
-enum ProcessWaitReason: u8 { None; UartRx; ChildExit; NetRx; }
+enum ProcessWaitReason: u8 { None; UartRx; ChildExit; NetRx; Deadline; }
 
 // GitHub issue #392: declared here, with the rest of a process's
 // lifecycle state, rather than in kernel/kernel/syscall.tkb where the
@@ -205,6 +205,9 @@ struct ProcessRecord {
     saved_sp: usize;
     state: ProcessSlotState;
     wait_reason: ProcessWaitReason;
+    // Absolute generic-counter deadline for nanosleep/clock_nanosleep and
+    // finite ppoll. Meaningful only while wait_reason is Deadline.
+    deadline_ticks: usize;
     // GitHub issue #302: wait4()'s status pointer, owned per-slot so a
     // multi-level concurrent wait4() chain delivers each blocked parent's
     // OWN status pointer instead of a value shared across every blocked
@@ -780,6 +783,7 @@ private fn scheduled_process_ddb_copy_one(
         ProcessWaitReason::UartRx => { output[index].wait_reason = 1; }
         ProcessWaitReason::ChildExit => { output[index].wait_reason = 2; }
         ProcessWaitReason::NetRx => { output[index].wait_reason = 3; }
+        ProcessWaitReason::Deadline => { output[index].wait_reason = 4; }
     }
     output[index].saved_sp = record.saved_sp;
     output[index].stack_bottom = 0;
@@ -1176,6 +1180,7 @@ fn kernel_process_monitor_proc(pid: usize) !{unsafe} {
         ProcessWaitReason::UartRx => { uart_put_udec(1); }
         ProcessWaitReason::ChildExit => { uart_put_udec(2); }
         ProcessWaitReason::NetRx => { uart_put_udec(3); }
+        ProcessWaitReason::Deadline => { uart_put_udec(4); }
     }
     kernel_boot_log(" saved_sp=");
     uart_put_hex(scheduled_process_peek_saved_sp(slot));
@@ -1541,6 +1546,7 @@ private fn scheduled_process_record_reset(slot: usize) !{unsafe} {
     record.saved_sp = 0;
     record.state = ProcessSlotState::Free;
     record.wait_reason = ProcessWaitReason::None;
+    record.deadline_ticks = 0;
     record.wait4_status_ptr = 0;
     record.has_parent = false;
     record.has_first_child = false;
@@ -4130,6 +4136,76 @@ fn kernel_process_block_net(current_sp: usize) -> usize {
         current_sp, ProcessWaitReason::NetRx, 3);
 }
 
+fn kernel_process_current_arm_deadline(deadline_ticks: usize) {
+    if (execution_here().current_live) {
+        scheduled_process_record_of(execution_here().current_handle)
+            .deadline_ticks = deadline_ticks;
+        kernel_process_current_set_pending_block(
+            ProcessWaitReason::Deadline, 0);
+    }
+}
+
+fn kernel_process_current_deadline_ticks() -> usize {
+    if (execution_here().current_live) {
+        return scheduled_process_record_of(execution_here().current_handle)
+            .deadline_ticks;
+    }
+    return 0;
+}
+
+fn kernel_process_current_clear_deadline() {
+    if (execution_here().current_live) {
+        scheduled_process_record_of(execution_here().current_handle)
+            .deadline_ticks = 0;
+        scheduled_process_record_of(execution_here().current_handle)
+            .wait_reason = ProcessWaitReason::None;
+    }
+}
+
+fn kernel_process_block_deadline(current_sp: usize) -> usize {
+    return kernel_process_block_current(
+        current_sp, ProcessWaitReason::Deadline, 4);
+}
+
+// Complete timed syscalls directly from their saved frame when the generic
+// counter reaches the per-process deadline.
+fn kernel_process_deadline_wake_all() !{interrupt, unsafe} {
+    let now: usize = read_cntpct() as usize;
+    let mut cursor = scheduled_process_first_slot();
+    let mut walking: bool = true;
+    while (walking) {
+        match cursor {
+            ProcessSlotCursor::Done => { walking = false; }
+            ProcessSlotCursor::At(slot) => {
+                let next = scheduled_process_next_slot(slot);
+                if (scheduled_process_record_state(slot) ==
+                        ProcessSlotState::Blocked &&
+                    scheduled_process_record_wait_reason(slot) ==
+                        ProcessWaitReason::Deadline &&
+                    now >= scheduled_process_record_at(slot).deadline_ticks) {
+                    match scheduled_process_blocked_take(
+                            scheduled_process_handle_of_slot(slot)) {
+                        ScheduledProcessBlockedTakeResult::Missing => {}
+                        ScheduledProcessBlockedTakeResult::Blocked(resources) => {
+                            let (owner, blocked) = resources;
+                            el0_context_set_x0(
+                                scheduled_process_record_at(owner.pool_index)
+                                    .saved_sp, 0);
+                            let ready = scheduled_process_wake(owner, blocked);
+                            scheduled_process_record_at(owner.pool_index)
+                                .wait_reason = ProcessWaitReason::None;
+                            scheduled_process_record_at(owner.pool_index)
+                                .deadline_ticks = 0;
+                            scheduled_process_release(owner, ready);
+                        }
+                    }
+                }
+                cursor = next;
+            }
+        }
+    }
+}
+
 // Every process waiting for a frame becomes runnable again.
 //
 // Called from the timer HANDLER, so a waiter is retried once per tick
@@ -4970,6 +5046,7 @@ fn kernel_process_crash_wait_reason() -> usize !{unsafe} {
         ProcessWaitReason::UartRx => { return 1; }
         ProcessWaitReason::ChildExit => { return 2; }
         ProcessWaitReason::NetRx => { return 3; }
+        ProcessWaitReason::Deadline => { return 4; }
     }
 }
 

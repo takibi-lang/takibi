@@ -45,6 +45,8 @@ const AARCH64_NR_WRITE: usize = 64;
 const AARCH64_NR_READV: usize = 65;
 const AARCH64_NR_WRITEV: usize = 66;
 const AARCH64_NR_PPOLL: usize = 73;
+const AARCH64_NR_NANOSLEEP: usize = 101;
+const AARCH64_NR_CLOCK_NANOSLEEP: usize = 115;
 const AARCH64_NR_SYSLOG: usize = 116;
 const AARCH64_NR_UNAME: usize = 160;
 // GitHub issue #393: the only rlimit syscall this architecture has.
@@ -1546,10 +1548,95 @@ fn syscall_poll_fd_ready(fd: usize) -> (bool, usize) {
     return (false, POLLNVAL);
 }
 
+must_use variant SyscallDeadlineResult {
+    Fault;
+    Invalid;
+    Ready;
+    Block;
+    WaitInterrupt;
+}
+
+// Parse one Linux arm64 timespec and either finish a zero/already-expired
+// wait or arm the current process against the architectural generic counter.
+fn syscall_deadline_wait(timespec_address: usize) -> SyscallDeadlineResult {
+    if (timespec_address == 0) { return SyscallDeadlineResult::Invalid; }
+    let mut seconds: usize = 0;
+    let mut nanoseconds: usize = 0;
+    match user_range_check_read(kernel_process_current_root(),
+                                timespec_address, 16) {
+        UserReadRangeResult::Fault => {
+            return SyscallDeadlineResult::Fault;
+        }
+        UserReadRangeResult::Ok(range) => {
+            let (seconds_ok, seconds_raw) = user_read_u64(range, 0);
+            let (nanoseconds_ok, nanoseconds_raw) = user_read_u64(range, 8);
+            if (seconds_ok == false || nanoseconds_ok == false) {
+                return SyscallDeadlineResult::Invalid;
+            }
+            seconds = seconds_raw as usize;
+            nanoseconds = nanoseconds_raw as usize;
+        }
+    }
+    if (nanoseconds >= 1000000000) {
+        return SyscallDeadlineResult::Invalid;
+    }
+    let now: usize = read_cntpct() as usize;
+    if (kernel_process_current_pending_block_reason() ==
+            ProcessWaitReason::Deadline) {
+        if (now >= kernel_process_current_deadline_ticks()) {
+            kernel_process_current_clear_deadline();
+            return SyscallDeadlineResult::Ready;
+        }
+        return SyscallDeadlineResult::WaitInterrupt;
+    }
+    let frequency: usize = read_cntfrq() as usize;
+    let whole_ticks: usize = match checked_mul_usize(seconds, frequency) {
+        CheckedUsize::Overflow => { return SyscallDeadlineResult::Invalid; }
+        CheckedUsize::Value(value) => { value }
+    };
+    let subsecond_product: usize =
+        match checked_mul_usize(nanoseconds, frequency) {
+            CheckedUsize::Overflow => { return SyscallDeadlineResult::Invalid; }
+            CheckedUsize::Value(value) => { value }
+        };
+    let duration: usize = match checked_add_usize(
+            whole_ticks, subsecond_product / 1000000000) {
+        CheckedUsize::Overflow => { return SyscallDeadlineResult::Invalid; }
+        CheckedUsize::Value(value) => { value }
+    };
+    if (duration == 0) { return SyscallDeadlineResult::Ready; }
+    let deadline: usize = match checked_add_usize(now, duration) {
+        CheckedUsize::Overflow => { return SyscallDeadlineResult::Invalid; }
+        CheckedUsize::Value(value) => { value }
+    };
+    kernel_process_current_arm_deadline(deadline);
+    if (kernel_process_other_ready()) {
+        return SyscallDeadlineResult::Block;
+    }
+    return SyscallDeadlineResult::WaitInterrupt;
+}
+
 fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
                           timeout_address: usize, sigmask_address: usize)
         -> SyscallAction !{unsafe} {
-    if (raw_nfds == 0) { return SyscallAction::Resume(0); }
+    if (raw_nfds == 0) {
+        if (timeout_address == 0) { return SyscallAction::WaitInterrupt; }
+        match syscall_deadline_wait(timeout_address) {
+            SyscallDeadlineResult::Fault => {
+                return SyscallAction::Resume(LINUX_EFAULT);
+            }
+            SyscallDeadlineResult::Invalid => {
+                return SyscallAction::Resume(LINUX_EINVAL);
+            }
+            SyscallDeadlineResult::Ready => {
+                return SyscallAction::Resume(0);
+            }
+            SyscallDeadlineResult::Block => { return SyscallAction::Block; }
+            SyscallDeadlineResult::WaitInterrupt => {
+                return SyscallAction::WaitInterrupt;
+            }
+        }
+    }
     if (raw_nfds >= 0 && raw_nfds < POLL_MAX) {
       let nfds: {0..<POLL_MAX as usize} = raw_nfds;
       let array_bytes: usize = match checked_mul_usize(nfds, sizeof(Pollfd)) {
@@ -1593,6 +1680,25 @@ fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
                     kernel_boot_log("shell ppoll: uart blocked\n");
                 }
                 return SyscallAction::WaitInterrupt;
+            }
+            if (ready_count == 0 && timeout_address != 0) {
+                match syscall_deadline_wait(timeout_address) {
+                    SyscallDeadlineResult::Fault => {
+                        return SyscallAction::Resume(LINUX_EFAULT);
+                    }
+                    SyscallDeadlineResult::Invalid => {
+                        return SyscallAction::Resume(LINUX_EINVAL);
+                    }
+                    SyscallDeadlineResult::Ready => {
+                        return SyscallAction::Resume(0);
+                    }
+                    SyscallDeadlineResult::Block => {
+                        return SyscallAction::Block;
+                    }
+                    SyscallDeadlineResult::WaitInterrupt => {
+                        return SyscallAction::WaitInterrupt;
+                    }
+                }
             }
             return SyscallAction::Resume(ready_count);
         }
@@ -1922,6 +2028,9 @@ fn kernel_syscall_block_return(frame_sp: usize) {
             workload_profile_el0_enter();
             el0_context_resume(frame_sp);
         }
+    } else if (kernel_process_current_pending_block_reason() ==
+                   ProcessWaitReason::Deadline) {
+        next_sp = kernel_process_block_deadline(frame_sp);
     } else {
         kernel_syscall_uart_block_prepare(frame_sp);
         next_sp = kernel_process_block_uart(frame_sp);
@@ -3908,9 +4017,25 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         match user_range_check_write(kernel_process_current_root(), x1, 16) {
             UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserWriteRangeResult::Ok(range) => {
-                let wrote_seconds: bool =
-                    user_write_u64(range, 0, 1700000000 as u64);
-                let wrote_nanoseconds: bool = user_write_u64(range, 8, 0);
+                if (x0 == 1) {
+                    let frequency: usize = read_cntfrq() as usize;
+                    if (frequency == 0) {
+                        return SyscallAction::Resume(LINUX_EINVAL);
+                    }
+                    let ticks: usize = read_cntpct() as usize;
+                    let wrote_seconds: bool = user_write_u64(
+                        range, 0, (ticks / frequency) as u64);
+                    let remainder: usize = ticks % frequency;
+                    let nanos: usize = (remainder * 1000000000) / frequency;
+                    let wrote_nanoseconds: bool =
+                        user_write_u64(range, 8, nanos as u64);
+                } else if (x0 == 0) {
+                    let wrote_seconds: bool =
+                        user_write_u64(range, 0, 1700000000 as u64);
+                    let wrote_nanoseconds: bool = user_write_u64(range, 8, 0);
+                } else {
+                    return SyscallAction::Resume(LINUX_EINVAL);
+                }
             }
         }
         return SyscallAction::Resume(0);
@@ -4200,6 +4325,46 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
     if (number == AARCH64_NR_PPOLL) {
         return syscall_ppoll_dispatch(x0, x1, x2, x3);
+    }
+    if (number == AARCH64_NR_NANOSLEEP) {
+        match syscall_deadline_wait(x0) {
+            SyscallDeadlineResult::Fault => {
+                return SyscallAction::Resume(LINUX_EFAULT);
+            }
+            SyscallDeadlineResult::Invalid => {
+                return SyscallAction::Resume(LINUX_EINVAL);
+            }
+            SyscallDeadlineResult::Ready => {
+                return SyscallAction::Resume(0);
+            }
+            SyscallDeadlineResult::Block => { return SyscallAction::Block; }
+            SyscallDeadlineResult::WaitInterrupt => {
+                return SyscallAction::WaitInterrupt;
+            }
+        }
+    }
+    if (number == AARCH64_NR_CLOCK_NANOSLEEP) {
+        // The maintained userspace asks for CLOCK_MONOTONIC relative time.
+        // Absolute deadlines and other clocks remain rejected rather than
+        // silently receiving relative-time semantics.
+        if (x0 != 1 || x1 != 0) {
+            return SyscallAction::Resume(LINUX_EINVAL);
+        }
+        match syscall_deadline_wait(x2) {
+            SyscallDeadlineResult::Fault => {
+                return SyscallAction::Resume(LINUX_EFAULT);
+            }
+            SyscallDeadlineResult::Invalid => {
+                return SyscallAction::Resume(LINUX_EINVAL);
+            }
+            SyscallDeadlineResult::Ready => {
+                return SyscallAction::Resume(0);
+            }
+            SyscallDeadlineResult::Block => { return SyscallAction::Block; }
+            SyscallDeadlineResult::WaitInterrupt => {
+                return SyscallAction::WaitInterrupt;
+            }
+        }
     }
     if (number == AARCH64_NR_PRLIMIT64) {
         // pid 0 is "me". A real pid is accepted only when it is this

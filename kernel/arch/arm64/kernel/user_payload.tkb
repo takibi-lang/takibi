@@ -114,6 +114,29 @@ fn initial_user_payload() {
     fail_if(payload_read_u64(rlimit_base, 0) != 1024);
     fail_if(payload_read_u64(rlimit_base, 8) != 4096);
 
+    /* Timed blocking uses the real CLOCK_MONOTONIC counter. One eighth of
+     * a second is several 1/64-second scheduler ticks: returning immediately
+     * or selecting this process while it is still asleep both fail here. */
+    let mut time_buf: [u8; 16];
+    let time_base: *u8 = time_buf as *u8;
+    payload_write_u64(time_base, 0, 0);
+    payload_write_u64(time_base, 8, 125000000);
+    let mut before_buf: [u8; 16];
+    let before_base: *u8 = before_buf as *u8;
+    fail_if(svc5(113, 1, ptr_of(before_base, 0), 0, 0, 0) != 0);
+    fail_if(svc5(101, ptr_of(time_base, 0), 0, 0, 0, 0) != 0);
+    fail_if(svc5(113, 1, ptr_of(time_base, 0), 0, 0, 0) != 0);
+    let before_ns: usize = payload_read_u64(before_base, 0) * 1000000000 +
+                           payload_read_u64(before_base, 8);
+    let after_ns: usize = payload_read_u64(time_base, 0) * 1000000000 +
+                          payload_read_u64(time_base, 8);
+    fail_if(after_ns - before_ns < 125000000);
+
+    /* nfds=0 isolates ppoll's timeout result from fd readiness. */
+    payload_write_u64(time_base, 0, 0);
+    payload_write_u64(time_base, 8, 62500000);
+    fail_if(svc5(73, 0, 0, ptr_of(time_base, 0), 0, 0) != 0);
+
     /* socket/bind/listen/close one IPv4 stream endpoint. */
     let mut socket_address: [u8; 16] = {
         0x02, 0x00, 0x1f, 0x90,
