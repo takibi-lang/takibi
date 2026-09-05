@@ -182,6 +182,7 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 	@bash scripts/test_resource_lease.sh
 	@python3 scripts/test_run_kernel_shell_console.py
 	@python3 scripts/test_run_kernel_uart_driver.py
+	@python3 scripts/test_run_kernel_ddb_rpi5_driver.py
 	@python3 scripts/test_check_direct_mmio_literals.py
 	@python3 scripts/test_check_ddb_command_inventory.py
 	@python3 scripts/test_measure_trusted_base.py

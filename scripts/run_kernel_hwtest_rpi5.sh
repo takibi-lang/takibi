@@ -121,17 +121,22 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --validate-ash &
 uart_driver_pid=$!
 archive_reason=""
+# Split out of cleanup so the tail of the run can keep archiving after the
+# UART driver has been stopped and the full cleanup trap removed.
+archive_failure() {
+    local status="$1"
+    [ "$status" -ne 0 ] || return 0
+    bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" "$ARTIFACT_DIR" \
+        "$REPO_ROOT/_build/kernel-hwtest-rpi5-failures" \
+        "${archive_reason:-exit status $status}" || true
+}
 cleanup() {
     status=$?
     if [ -n "${uart_driver_pid:-}" ]; then
         kill "$uart_driver_pid" 2>/dev/null || true
         wait "$uart_driver_pid" 2>/dev/null || true
     fi
-    if [ "$status" -ne 0 ]; then
-        bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" "$ARTIFACT_DIR" \
-            "$REPO_ROOT/_build/kernel-hwtest-rpi5-failures" \
-            "${archive_reason:-exit status $status}" || true
-    fi
+    archive_failure "$status"
     if [ -n "${pinned_neigh:-}" ]; then
         sudo ip neigh del "${ETH_TEST_SUBNET}.2" dev "$ETH_TEST_IFACE" \
             2>/dev/null || true
@@ -538,21 +543,12 @@ python3 "$REPO_ROOT/scripts/profile_kernel_samples.py" \
 
 cleanup
 trap - EXIT INT TERM HUP
-
-# The ordinary integration has completed and released the UART. Enable the
-# debugger-only ring and guarded-fault command on this already-loaded kernel,
-# then prove real Debug Probe CDC BREAK entry, fault recovery, inspection, and
-# resume into the same shell workload.
-DDB_LOG="$ARTIFACT_DIR/ddb-uart.log"
-: >"$DDB_LOG"
-RPI5_SWD_SPEED="${RPI5_SWD_SPEED:-}" \
-    "$REPO_ROOT/scripts/rpi5_set_kernel_byte.sh" "$ELF" \
-    diagnostic_trace_test_enabled 1 >"$ARTIFACT_DIR/ddb-openocd.log" 2>&1
-RPI5_SWD_SPEED="${RPI5_SWD_SPEED:-}" \
-    "$REPO_ROOT/scripts/rpi5_set_kernel_byte.sh" "$ELF" \
-    kernel_ddb_memory_fault_test_enabled 1 >>"$ARTIFACT_DIR/ddb-openocd.log" 2>&1
-python3 "$REPO_ROOT/scripts/run_kernel_ddb_rpi5_driver.py" \
-    --port "$SERIAL_DEV" --log "$DDB_LOG"
+# cleanup stopped the UART driver and released the port; its archive did not
+# fire, because reaching here means the integration succeeded. What follows
+# can still fail, so re-arm the archive alone. Without this the
+# `archive_reason` a failing view sets below named an archive nobody wrote:
+# removing the trap here removed the only thing that read it.
+trap 'archive_failure $?' EXIT INT TERM HUP
 
 # The real UART echoes a shell command immediately after the prompt, so a
 # command's short output can arrive as `/ # repl-ok` rather than as a separate
@@ -617,24 +613,70 @@ while IFS= read -r name; do
     view_count=$((view_count + 1))
 done <<<"$view_names"
 
+# Report the views BEFORE the DDB exercise, and let the DDB step fail the run
+# without taking them with it. Both orderings were available; this one is the
+# stronger, because the view lines are already on the terminal even if the
+# step below hangs or takes the board down. The DDB exercise depends on
+# nothing the comparison produces -- it drives the still-running kernel over
+# the UART, while the comparison is file work over a capture that was
+# complete before it started -- so nothing is lost by running it second.
+#
+# The cost of the old order was measured, not imagined: two of four
+# `make kernelcheck-rpi5` runs on 2026-09-04 failed at the DDB continue, and
+# each discarded every `PASS kernel/rpi5 view:` line and the one-boot summary
+# from a boot whose network, userspace-I/O and httpd integration had all
+# passed. An unrelated intermittent hid the entire board's verdict, and the
+# capture left behind was briefly misread as stale because no view lines
+# accompanied it.
+views_failed=0
 if [ -n "$failed_views" ]; then
     echo "FAIL kernel/rpi5 views:$failed_views" >&2
     echo "artifacts: $ARTIFACT_DIR" >&2
-    # The archive is taken by the EXIT trap now (issue #233's reasoning,
-    # widened): it used to happen only here, so every failure that stops
-    # EARLIER than the view comparison -- ARP, TCP, the reset, a load --
-    # left nothing behind. That is what made issue #387's ARP diagnosis
-    # wait for a failure to land on the last run of a batch.
-    #
-    # Recorded here so the archive names the views rather than only the
-    # exit status.
-    archive_reason="failing views:$failed_views"
-    exit 1
-fi
-
-if [ "$view_count" -eq 0 ]; then
+    views_failed=1
+elif [ "$view_count" -eq 0 ]; then
+    # No view compared is not a pass. This is the whole `PASS about nothing`
+    # shape: the loop above finds its filters by glob, and a glob that stops
+    # matching reports success having read no contract at all.
     echo "error: no kernel integration views found under $COMMON_VIEW_DIR or $VIEW_DIR" >&2
+    archive_reason="no views found"
     exit 1
+else
+    echo "PASS kernel/rpi5 ($view_count views, one boot)"
 fi
 
-echo "PASS kernel/rpi5 ($view_count views, one boot)"
+# The ordinary integration has completed and released the UART. Enable the
+# debugger-only ring and guarded-fault command on this already-loaded kernel,
+# then prove real Debug Probe CDC BREAK entry, fault recovery, inspection, and
+# resume into the same shell workload.
+DDB_LOG="$ARTIFACT_DIR/ddb-uart.log"
+: >"$DDB_LOG"
+RPI5_SWD_SPEED="${RPI5_SWD_SPEED:-}" \
+    "$REPO_ROOT/scripts/rpi5_set_kernel_byte.sh" "$ELF" \
+    diagnostic_trace_test_enabled 1 >"$ARTIFACT_DIR/ddb-openocd.log" 2>&1
+RPI5_SWD_SPEED="${RPI5_SWD_SPEED:-}" \
+    "$REPO_ROOT/scripts/rpi5_set_kernel_byte.sh" "$ELF" \
+    kernel_ddb_memory_fault_test_enabled 1 >>"$ARTIFACT_DIR/ddb-openocd.log" 2>&1
+ddb_status=0
+python3 "$REPO_ROOT/scripts/run_kernel_ddb_rpi5_driver.py" \
+    --port "$SERIAL_DEV" --log "$DDB_LOG" || ddb_status=$?
+
+# One verdict over both halves, so neither hides the other. The reason the
+# archive records names whichever failed, the way the view branch used to do
+# alone (issue #233's reasoning, widened: the archive used to be taken only
+# at a failing view, so every failure that stopped earlier -- ARP, TCP, the
+# reset, a load -- left nothing behind, which is what made issue #387's ARP
+# diagnosis wait for a failure to land on the last run of a batch).
+verdict=0
+archive_parts=""
+if [ "$views_failed" -ne 0 ]; then
+    archive_parts="failing views:$failed_views"
+    verdict=1
+fi
+if [ "$ddb_status" -ne 0 ]; then
+    archive_parts="${archive_parts:+$archive_parts, }ddb exit $ddb_status"
+    verdict=1
+fi
+if [ "$verdict" -ne 0 ]; then
+    archive_reason="$archive_parts"
+fi
+exit "$verdict"
