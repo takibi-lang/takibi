@@ -105,8 +105,10 @@ endif
 # original group/name in its shuffled display name. The ordered pass remains
 # first so its stable native Alcotest paths remain available for diagnosis.
 test: build
+	@bash scripts/lane_timing.sh begin test
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env ALCOTEST_COMPACT=1 bash scripts/list_dune_test_failures.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env ALCOTEST_COMPACT=1 SHUFFLE_TESTS=877156326 bash scripts/list_dune_test_failures.sh
+	@bash scripts/lane_timing.sh end test 0
 
 ## coverage: instrument the OCaml compiler library, run its Alcotest suite,
 ## and produce both a terminal summary and browsable HTML. bisect_ppx_ng is
@@ -171,6 +173,7 @@ effect-matrix-control: build
 	echo "PASS effect-matrix-control: EFFECTS.md matches compiler effect rules"
 
 langcheck: unused-function-control effect-matrix-control pool-liveness-control
+	@bash scripts/lane_timing.sh begin langcheck
 	@python3 scripts/check_agents_paths.py
 	@python3 scripts/test_check_expected_line_endings.py
 	@python3 scripts/check_expected_line_endings.py
@@ -189,6 +192,7 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 	@python3 scripts/test_profile_kernel_workload.py
 	@python3 scripts/test_profile_kernel_samples.py
 	@bash scripts/test_repeat_kernel_lane.sh
+	@bash scripts/test_run_lane.sh
 	@bash scripts/test_archive_kernel_failure.sh
 	@python3 scripts/check_direct_mmio_literals.py kernel
 	@python3 scripts/check_no_conflict_markers.py
@@ -221,6 +225,7 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 		fi; \
 		echo "OK: all files are ASCII-clean" \
 	'
+	@bash scripts/lane_timing.sh end langcheck 0
 
 # -- linux_user/ (host-native Linux/AMD64 environment-independent tests) -----
 # See AGENTS.md's "Where Should a New Test Go?": this directory holds
@@ -465,6 +470,7 @@ linuxbuild: $(LINUX_USER_BINS)
 
 ## linuxcheck: run linux_user/'s tests natively and diff stdout against each .expected
 linuxcheck: linuxbuild
+	@bash scripts/lane_timing.sh begin linuxcheck
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash -c ' \
 		fail=0; \
 		for e in $(LINUX_USER_EXAMPLES); do \
@@ -481,6 +487,7 @@ linuxcheck: linuxbuild
 		done; \
 		exit $$fail \
 	'
+	@bash scripts/lane_timing.sh end linuxcheck 0
 
 # -- Raspberry Pi 5 (BCM2712) -------------------------------------------------
 RPI5_TARGET := aarch64-none-elf
@@ -1256,11 +1263,22 @@ kernelcheck: $(KERNELCHECK_LANES)
 ## the original interleaved/garbled-output report without spawning any
 ## new recursive make process or touching this target's single `$(MAKE)`
 ## call.
+# One run's lane receipts. Emptied at the start of each allcheck so the
+# summary describes ONE run: the records are append-only, so keeping the
+# previous run's would average two runs into a critical path that neither
+# had. Copy the directory to compare two runs (GitHub issue #471).
+LANE_TIMING_DIR := $(CURDIR)/_build/lane-timing
+
 .PHONY: allcheck
 allcheck:
 	@status=0; . scripts/resource_lease.sh; \
+	rm -rf "$(LANE_TIMING_DIR)"; mkdir -p "$(LANE_TIMING_DIR)"; \
+	export TAKIBI_LANE_TIMING_DIR="$(LANE_TIMING_DIR)"; \
 	resource_lease_run_suite allcheck \
 		$(MAKE) langcheck test linuxcheck kernelcheck || status=$$?; \
+	echo; \
+	python3 scripts/summarize_lane_timing.py "$(LANE_TIMING_DIR)" || true; \
+	echo "lane timing artifact: $(LANE_TIMING_DIR:$(CURDIR)/%=%)"; \
 	if [ $$status -eq 0 ]; then \
 		echo "PASS allcheck: langcheck test linuxcheck $(KERNELCHECK_LANES)"; \
 	else \
