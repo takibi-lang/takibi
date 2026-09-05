@@ -8,6 +8,7 @@ than warns; do not bypass or weaken one merely to complete a change.
 | `check_agents_paths.py` | paths named by root guidance resolve and this table names every check |
 | `check_compiler_sync_rules.py` | declared compiler counterpart changes stay synchronized |
 | `check_elf_symbol_alignment.py` | linked symbols meet hardware alignment requirements |
+| `check_no_conflict_markers.py` | no tracked file is left mid-merge, where a pattern-scanning check would answer about the half above the marker |
 | `check_kernel_asm_invariants.py` | linked AArch64 assembly preserves EL0 entry/return and SCTLR alignment invariants |
 | `check_kernel_lib_limitations_header.py` | core kernel files state their current limitations |
 | `check_diagnostic_event_ids.py` | fixed diagnostic event IDs are unique 16-bit values |

@@ -190,6 +190,8 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 	@bash scripts/test_repeat_kernel_lane.sh
 	@bash scripts/test_archive_kernel_failure.sh
 	@python3 scripts/check_direct_mmio_literals.py kernel
+	@python3 scripts/check_no_conflict_markers.py
+	@python3 scripts/test_check_no_conflict_markers.py
 	@python3 scripts/check_stale_depfiles.py
 	@python3 scripts/check_single_dune_invocation.py
 	@python3 scripts/check_compiler_sync_rules.py --quiet
