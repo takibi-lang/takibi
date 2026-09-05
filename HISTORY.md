@@ -15,6 +15,38 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-05: a lane says whether it passed
+
+`make allcheck` ends with a receipt -- one line that says PASS or FAIL for
+the whole run -- and its own comment explains why: a failing lane inside a
+parallel fan-out otherwise scrolls away, leaving the run's verdict to be
+inferred from where the output stopped. The individual lanes, which are what
+a person runs directly, had no such line. `make kernelcheck-ddb-rpi5-software`
+ends on `PASS kernel-gdb-state: ...` whether or not that was the last step it
+was supposed to reach, and the only way to tell was the exit status nobody
+sees or a scroll back through a page of PASS lines.
+
+scripts/run_lane.sh is that receipt, and the fourteen `kernelcheck-*` lanes
+with recipes now go through it, in the `$(MAKE) _inner` shape this Makefile
+already uses for `kernelbuild-check`. A lane prints
+`PASS <lane>: every step passed` or `FAIL <lane>: a step above failed
+(exit N)` and propagates the status.
+
+The receipt is only honest because reaching the end of a lane really does
+mean every step passed, and that was checked rather than assumed: every
+`FAIL` in `scripts/run_kernel_*.sh` exits non-zero. Three of them do not exit
+at the point they print -- the per-view mismatches in
+`run_kernel_hwtest_rpi5.sh` and `run_kernel_qemutest.sh`, which deliberately
+report the whole failing list instead of stopping at the first -- and each is
+followed by an aggregate block that exits 1 once the loop ends.
+
+Verified: all eight QEMU lane receipts observed green; the failure path
+exercised by injecting `exit 7` into one lane's inner target, which produced
+`FAIL kernelcheck-qemu-fdt-multibank: a step above failed (exit 2)` and a
+non-zero aggregate, with the sibling lane's PASS receipt still printed beside
+it. The two RPi5 lanes were not run -- the wrapper around them is the same
+shape verified twelve times on QEMU, and `make -n` confirms the command line.
+
 ## 2026-09-05: the RPi5 software-BRK lane leaves the aggregate
 
 f4e673a (#506) added a second RPi5 recipe line to kernelcheck-rpi5: the

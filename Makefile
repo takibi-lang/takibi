@@ -39,7 +39,7 @@ LLVM_OBJCOPY := llvm-objcopy-19
 # `kernelcheck`), which made it easy to run the wrong one by accident.
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: build test coverage kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-ddb-rpi5-software kernelcheck-qemu kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-qemu-ash kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-qemu-debug-main kernelcheck-qemu-debug-repeat kernelcheck-qemu-debug-ash kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-alloc-rollback-qemu kernelcheck-repeat kernelsh-qemu kernelsh-rpi5 lease-status profile-kernel-workload-chart langcheck linuxbuild linuxcheck clean FORCE
+.PHONY: _kernelcheck-qemu-main _kernelcheck-qemu-fdt-multibank _kernelcheck-qemu-ash _kernelcheck-shell-qemu _kernelcheck-qemu-debug-main _kernelcheck-qemu-debug-repeat _kernelcheck-qemu-debug-ash _kernelcheck-oops-qemu _kernelcheck-ddb-qemu _kernelcheck-stack-overflow-qemu _kernelcheck-lifecycle-gap-qemu _kernelcheck-alloc-rollback-qemu _kernelcheck-rpi5 _kernelcheck-ddb-rpi5-software build test coverage kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-ddb-rpi5-software kernelcheck-qemu kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-qemu-ash kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-qemu-debug-main kernelcheck-qemu-debug-repeat kernelcheck-qemu-debug-ash kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-alloc-rollback-qemu kernelcheck-repeat kernelsh-qemu kernelsh-rpi5 lease-status profile-kernel-workload-chart langcheck linuxbuild linuxcheck clean FORCE
 
 .DEFAULT_GOAL := build
 
@@ -1016,6 +1016,9 @@ RPI5_SWD_SPEED ?= 30000
 # A compile is not an integration pass. This deliberately fails until the
 # first observable RPi5 EL1 milestone connects its real-hardware harness.
 kernelcheck-rpi5: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-rpi5
+
+_kernelcheck-rpi5:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" bash scripts/run_kernel_hwtest_rpi5.sh
 
 ## Focused physical-board check for the deliberate software BRK. Unlike the
@@ -1031,6 +1034,9 @@ kernelcheck-rpi5: kernelbuild-check
 ## costs a second reset and reload of the one board every session shares, so
 ## it runs at a milestone rather than inside every aggregate.
 kernelcheck-ddb-rpi5-software: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-ddb-rpi5-software
+
+_kernelcheck-ddb-rpi5-software:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" bash scripts/run_kernel_ddb_rpi5_softwaretest.sh
 
 ## PROFILE_ARTIFACTS: space-separated saved busy-pair JSON artifacts.
@@ -1075,13 +1081,22 @@ kernelcheck-repeat:
 kernelcheck-qemu: kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank
 
 kernelcheck-qemu-main: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-qemu-main
+
+_kernelcheck-qemu-main:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" python3 scripts/run_kernel_shell_qemu_smoketest.py
 
 kernelcheck-qemu-fdt-multibank: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-qemu-fdt-multibank
+
+_kernelcheck-qemu-fdt-multibank:
 	@python3 kernel/tests/check_fdt_multibank_qemu.py
 
 kernelcheck-qemu-ash: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-qemu-ash
+
+_kernelcheck-qemu-ash:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_ash_qemutest.sh
 
 ## Exercise make -> /dev/tty -> miniterm -> ash in a pseudo-terminal.  This
@@ -1091,11 +1106,17 @@ kernelcheck-qemu-ash: kernelbuild-check
 ## while user-mode networking otherwise makes this terminal-only check spend
 ## about 15 seconds in the kernel's network retry fixture.
 kernelcheck-shell-qemu: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-shell-qemu
+
+_kernelcheck-shell-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" python3 scripts/run_kernel_shell_qemu_smoketest.py
 
 kernelcheck-qemu-debug: kernelcheck-qemu-debug-main
 
 kernelcheck-qemu-debug-main: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-qemu-debug-main
+
+_kernelcheck-qemu-debug-main:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_ELF="$(KERNEL_QEMU_DEBUG_ELF)" KERNEL_QEMU_LABEL=qemu-debug KERNEL_QEMU_EXPECTED_VIEW_DIR="$(CURDIR)/kernel/tests/qemu-debug/views" KERNEL_QEMU_HWTEST_ARTIFACT_DIR="$(CURDIR)/_build/kernel-hwtest-qemu-debug" KERNEL_QEMU_SERIAL_PORT=18683 KERNEL_QEMU_NETDEV_LOCAL_PORT=18684 KERNEL_QEMU_NETDEV_REMOTE_PORT=18685 bash scripts/run_kernel_qemutest.sh
 
 ## Preserve every boot separately when chasing a probabilistic failure.
@@ -1104,15 +1125,24 @@ kernelcheck-qemu-debug-main: kernelbuild-check
 ## KERNEL_QEMU_DEBUG_REPEAT=<count>.
 KERNEL_QEMU_DEBUG_REPEAT ?= 5
 kernelcheck-qemu-debug-repeat: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-qemu-debug-repeat
+
+_kernelcheck-qemu-debug-repeat:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_DEBUG_REPEAT="$(KERNEL_QEMU_DEBUG_REPEAT)" bash scripts/repeat_kernel_qemu_debug_check.sh
 
 kernelcheck-qemu-debug-ash: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-qemu-debug-ash
+
+_kernelcheck-qemu-debug-ash:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_ASH_ELF="$(KERNEL_QEMU_DEBUG_ELF)" KERNEL_QEMU_ASH_LABEL=qemu-debug KERNEL_QEMU_ASH_ARTIFACT_DIR="$(CURDIR)/_build/kernel-hwtest-qemu-debug-ash" KERNEL_QEMU_ASH_SERIAL_PORT=18686 KERNEL_QEMU_ASH_NETDEV_LOCAL_PORT=18687 KERNEL_QEMU_ASH_NETDEV_REMOTE_PORT=18688 bash scripts/run_kernel_ash_qemutest.sh
 
 ## Focused terminal-path check.  This is deliberately separate from the
 ## ordinary QEMU suite because its expected result is a terminal fail-stop
 ## serving the read-only UART crash console.
 kernelcheck-oops-qemu: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-oops-qemu
+
+_kernelcheck-oops-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_oops_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=data_abort_write KERNEL_QEMU_OOPS_GDB_PORT=18693 KERNEL_QEMU_OOPS_SERIAL_PORT=18694 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-data-abort" bash scripts/run_kernel_oops_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=child_exec KERNEL_QEMU_OOPS_GDB_PORT=18695 KERNEL_QEMU_OOPS_SERIAL_PORT=18696 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-child-exec" bash scripts/run_kernel_oops_qemutest.sh
@@ -1122,6 +1152,9 @@ kernelcheck-oops-qemu: kernelbuild-check
 ## check inspects state and guarded kernel memory, then proves `continue`
 ## resumes ordinary boot.
 kernelcheck-ddb-qemu: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-ddb-qemu
+
+_kernelcheck-ddb-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_DDB_ELF="$(KERNEL_QEMU_DEBUG_ELF)" bash scripts/run_kernel_ddb_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_DDB_ELF="$(KERNEL_QEMU_DEBUG_ELF)" KERNEL_QEMU_DDB_BREAK_SOURCE=software KERNEL_QEMU_DDB_SERIAL_PORT=18704 KERNEL_QEMU_DDB_QMP_PORT=18705 KERNEL_QEMU_DDB_GDB_PORT=18706 KERNEL_QEMU_DDB_ARTIFACT_DIR="$(CURDIR)/_build/kernel-ddb-qemu-software" bash scripts/run_kernel_ddb_qemutest.sh
 
@@ -1132,6 +1165,9 @@ kernelcheck-ddb-qemu: kernelbuild-check
 ## sends PC back to the entry symbol; the generated single-bit test then
 ## fires on the ordinary path, with nothing about the kernel modified.
 kernelcheck-stack-overflow-qemu: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-stack-overflow-qemu
+
+_kernelcheck-stack-overflow-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_stack_overflow_qemutest.sh
 
 ## Issue #289 negative-path regression: GDB pokes the exec-commit lifecycle
@@ -1141,6 +1177,9 @@ kernelcheck-stack-overflow-qemu: kernelbuild-check
 ## scripts/run_kernel_qemutest_lifecycle_gap.sh for the full rationale. It
 ## uses the DWARF-enabled ELF so GDB has Takibi source and type information.
 kernelcheck-lifecycle-gap-qemu: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-lifecycle-gap-qemu
+
+_kernelcheck-lifecycle-gap-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_qemutest_lifecycle_gap.sh
 
 ## Issue #414: the rollback chain inside scheduled_process_alloc has never
@@ -1153,6 +1192,9 @@ kernelcheck-lifecycle-gap-qemu: kernelbuild-check
 ## kernel's own end-of-run accounting: the refusal was reported, and every
 ## pooled record and page came back. Uses the DWARF-enabled ELF.
 kernelcheck-alloc-rollback-qemu: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-alloc-rollback-qemu
+
+_kernelcheck-alloc-rollback-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_alloc_rollback_qemutest.sh
 
 ## kernelsh-qemu: boot the standalone kernel, attach the current terminal to
