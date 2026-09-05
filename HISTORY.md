@@ -15,6 +15,50 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-05: the RPi5 software-BRK lane leaves the aggregate
+
+f4e673a (#506) added a second RPi5 recipe line to kernelcheck-rpi5: the
+software-BRK DDB pass, after the view suite. It made allcheck reset and
+reload the board a second time, with kernel-debug.elf (3,909,992 bytes
+against kernel.elf's 3,276,704), and it did so silently -- `PASS
+kernel/rpi5 (41 views, one boot)` stopped being the last line of a run and
+became the halfway point, with minutes of no output after it. A maintainer
+read that as a hang.
+
+Comparing the two lanes' assertions, kernelcheck-ddb-qemu already ran the
+software break source (Makefile's second recipe line for it sets
+KERNEL_QEMU_DDB_BREAK_SOURCE=software) and already checked the
+assembly-bridge root, that a compiler frame exists, the terminal
+boundary=assembly frame, stop=assembly-boundary, entry through the reserved
+BRK source 21579, and resume. Two questions were the board lane's alone:
+that every compiler frame lies inside the linker-owned
+[kernel_generated_text_start, kernel_generated_text_end) range, and that the
+walk does not end at a user boundary.
+
+Neither is hardware-dependent. Both are about the shape of a frame-pointer
+chain in the same kernel. They now live in
+scripts/ddb_software_brk_checks.py, which both lanes call, so the QEMU lane
+gained them and the two implementations that had drifted apart became one.
+Checked against the real QEMU transcript before the move: all three compiler
+PCs fall inside the range, and stop=user-boundary appears in the uart run
+but not the software one, so both assertions were already true and are now
+enforced.
+
+kernelcheck-rpi5 therefore drops the second line, and allcheck is one board
+load again. `make kernelcheck-ddb-rpi5-software` keeps the physical pass,
+self-contained: it builds what it needs through kernelbuild-check and takes
+the rpi5 lease under its own target name, so it queues behind other sessions
+exactly as it did inside the aggregate. What it still proves is what only
+silicon can -- the BRK debug exception on a real Cortex-A76, the Debug Probe
+UART path, and an SWD-loaded checkpoint -- run at a milestone rather than on
+every aggregate, which is what AGENTS.md's "one board serves every session"
+rule asks for.
+
+Verified: kernelcheck-ddb-qemu green; the moved range check confirmed
+faithful by narrowing the bound in the lane and watching it fail with the
+three real frame addresses named; allbuild, test, langcheck, linuxcheck,
+kernelcheck-qemu green.
+
 ## 2026-09-04: kernel/MEMORY_MAP.md records a shape, not twenty addresses
 
 The ELF-symbol table carried all twenty of the kernel image's boundary

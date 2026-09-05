@@ -218,14 +218,29 @@ if [ "$BREAK_SOURCE" = uart ] &&
     exit 1
 fi
 
-if [ "$BREAK_SOURCE" = software ] &&
-        { ! grep -Eq '^ddb: bt frame=0 pc=0x[0-9a-f]+ boundary=assembly-bridge$' "$UART_LOG" ||
-          ! grep -Eq '^ddb: bt frame=[1-9][0-9]* pc=0x[0-9a-f]+ fp=0x[0-9a-f]+$' "$UART_LOG" ||
-          ! grep -Eq '^ddb: bt frame=[1-9][0-9]* pc=0x[0-9a-f]+ fp=0x[0-9a-f]+ boundary=assembly$' "$UART_LOG" ||
-          ! grep -q '^ddb: bt stop=assembly-boundary fp=0x' "$UART_LOG"; }; then
-    echo "FAIL kernel/qemu ddb: software BRK did not produce a checked compiler chain to its assembly boundary" >&2
-    sed 's/^/  /' "$UART_LOG" >&2 || true
-    exit 1
+# The software-BRK walk's claims live in one file, because they say nothing
+# about which machine ran them: scripts/ddb_software_brk_checks.py is what
+# the RPi5 board lane asks too. It adds two questions this lane used to skip
+# -- that every compiler frame is inside the linker-owned generated-text
+# range, and that the walk does not end at a user boundary -- and those two
+# are why the board lane no longer runs inside kernelcheck-rpi5.
+if [ "$BREAK_SOURCE" = software ]; then
+    generated_start="0x$(llvm-nm-19 "$ELF" |
+        awk '$3=="kernel_generated_text_start"{print $1; exit}')"
+    generated_end="0x$(llvm-nm-19 "$ELF" |
+        awk '$3=="kernel_generated_text_end"{print $1; exit}')"
+    if [ -z "${generated_start#0x}" ] || [ -z "${generated_end#0x}" ]; then
+        echo "FAIL kernel/qemu ddb: compiler-generated text bounds absent from $ELF" >&2
+        exit 1
+    fi
+    if ! python3 "$REPO_ROOT/scripts/ddb_software_brk_checks.py" \
+            --log "$UART_LOG" \
+            --generated-start "$generated_start" \
+            --generated-end "$generated_end" \
+            --label "kernel/qemu ddb"; then
+        sed 's/^/  /' "$UART_LOG" >&2 || true
+        exit 1
+    fi
 fi
 
 echo "PASS kernel/qemu ddb: $BREAK_SOURCE BREAK inspected and resumed"

@@ -1017,12 +1017,19 @@ RPI5_SWD_SPEED ?= 30000
 # first observable RPi5 EL1 milestone connects its real-hardware harness.
 kernelcheck-rpi5: kernelbuild-check
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" bash scripts/run_kernel_hwtest_rpi5.sh
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" bash scripts/run_kernel_ddb_rpi5_softwaretest.sh
 
 ## Focused physical-board check for the deliberate software BRK. Unlike the
 ## ordinary RPi5 lane's external UART BREAK, this stops at a deterministic EL1
 ## checkpoint and must walk compiler-generated frames to the boot-assembly
 ## boundary before resuming the same shell.
+##
+## Deliberately NOT part of kernelcheck-rpi5, and so not part of allcheck. The
+## walk's shape is target-independent and kernelcheck-ddb-qemu now asks every
+## question about it (scripts/ddb_software_brk_checks.py is the same file both
+## lanes call). What is left here needs silicon -- the BRK debug exception on
+## a real Cortex-A76, the Debug Probe UART, an SWD-loaded checkpoint -- and
+## costs a second reset and reload of the one board every session shares, so
+## it runs at a milestone rather than inside every aggregate.
 kernelcheck-ddb-rpi5-software: kernelbuild-check
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" bash scripts/run_kernel_ddb_rpi5_softwaretest.sh
 
@@ -1214,7 +1221,7 @@ allcheck:
 # produces a final, unmistakable allcheck failure receipt after Make has
 # waited for the other scheduled jobs.
 ifneq (,$(filter allcheck,$(MAKECMDGOALS)))
-$(info [allcheck] includes: langcheck, compiler unit tests, linux_user, QEMU integration, QEMU debug integration, QEMU oops, QEMU DDB (UART BREAK and software BRK), QEMU stack overflow, QEMU lifecycle gap, QEMU allocation rollback, and RPi5 integration -- which is TWO board loads, the view suite and then the software-BRK DDB pass, so the board is held past the "41 views, one boot" line)
+$(info [allcheck] includes: langcheck, compiler unit tests, linux_user, QEMU integration, QEMU debug integration, QEMU oops, QEMU DDB (UART BREAK and software BRK), QEMU stack overflow, QEMU lifecycle gap, QEMU allocation rollback, and RPi5 integration -- one board load, ending at the view line; the silicon-only software-BRK pass is make kernelcheck-ddb-rpi5-software)
 endif
 
 ## allbuild: a fast, no-execution/no-hardware smoke gate across all three

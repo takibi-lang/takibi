@@ -4,6 +4,8 @@
 import argparse
 from pathlib import Path
 import re
+
+from ddb_software_brk_checks import backtrace_problems
 import time
 
 import serial
@@ -79,55 +81,26 @@ def main() -> int:
         r"^ddb: intr cpu=[0-9]+ entry=brk source=21579 ", text, re.MULTILINE
     ):
         raise SystemExit("RPi5 DDB did not enter through reserved software BRK")
-    if not re.search(
-        r"^ddb: bt frame=0 pc=0x[0-9a-f]+ boundary=assembly-bridge$",
-        text, re.MULTILINE
-    ):
-        raise SystemExit("RPi5 DDB backtrace root was not the assembly bridge")
-
-    compiler_pcs = [
-        int(match.group(1), 16)
-        for match in re.finditer(
-            r"^ddb: bt frame=[1-9][0-9]* pc=0x([0-9a-f]+) "
-            r"fp=0x[0-9a-f]+$",
-            text,
-            re.MULTILINE,
-        )
-    ]
-    if not compiler_pcs:
+    # The shape of the walk itself is the same question on either target, so
+    # it is asked by one file that the QEMU lane calls too. What is left here
+    # is what only this lane can see: entry through the real BRK exception
+    # above, and the board's own shell resuming below.
+    problems = backtrace_problems(
+        text, args.generated_start, args.generated_end)
+    if problems:
         raise SystemExit(
-            "RPi5 DDB backtrace was root-only; no compiler frame was reported"
-        )
-    outside = [
-        pc for pc in compiler_pcs
-        if not args.generated_start <= pc < args.generated_end
-    ]
-    if outside:
-        raise SystemExit(
-            "RPi5 DDB compiler frame outside .text.takibi: "
-            + ", ".join(f"0x{pc:x}" for pc in outside)
-        )
-    if not re.search(
-        r"^ddb: bt frame=[1-9][0-9]* pc=0x[0-9a-f]+ "
-        r"fp=0x[0-9a-f]+ boundary=assembly$",
-        text, re.MULTILINE
-    ):
-        raise SystemExit("RPi5 DDB did not report the terminal assembly frame")
-    if not re.search(
-        r"^ddb: bt stop=assembly-boundary fp=0x[0-9a-f]+$",
-        text, re.MULTILINE
-    ):
-        raise SystemExit("RPi5 DDB did not stop at the assembly boundary")
-    if "ddb: bt stop=user-boundary" in text:
-        raise SystemExit("RPi5 software-BRK lane accepted a user-boundary walk")
+            "RPi5 DDB software BRK walk -- " + "; ".join(problems))
     if "ddb: continuing\n" not in text:
         raise SystemExit("RPi5 DDB did not continue after the compiler walk")
     if "\nddb-software-resume-ok\n/ # " not in text:
         raise SystemExit("RPi5 shell did not resume in the same boot")
 
+    frames = len(re.findall(
+        r"^ddb: bt frame=[1-9][0-9]* pc=0x[0-9a-f]+ fp=0x[0-9a-f]+$",
+        text, re.MULTILINE))
     print(
         "PASS kernel/rpi5 ddb: software BRK walked "
-        f"{len(compiler_pcs)} compiler frame(s) and resumed"
+        f"{frames} compiler frame(s) and resumed"
     )
     return 0
 
