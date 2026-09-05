@@ -599,12 +599,10 @@ fn workload_busy_record_progress(tag: usize, checksum: usize,
 // The second half of the fixture: init brings back the entry that died, and
 // only that entry.
 //
-// Making one of the pair die is this file's job rather than a `kill` from
-// outside, for a plain reason -- no signal is ever delivered in this kernel,
-// so there is nothing to kill it WITH. What matters for the claim is that
-// the process ended and that init noticed, and an exit gives both. When
-// `kill` exists this should become one, since a killed process and a process
-// that chose to exit are different events for init to notice.
+// Making one of the pair die is this file's job rather than an external test
+// driver's: answer 3 asks that EL0 process to send SIGTERM to itself. This
+// exercises kill(2), child-exit SIGCHLD delivery, and init's respawn path in
+// one deterministic fixture.
 //
 // A is chosen arbitrarily. B is the control: its pid must be the one it
 // already had (init did not restart it too) and its counter must have moved
@@ -617,10 +615,10 @@ private fn workload_busy_restart_step(tag: usize) -> usize !{unsafe} {
         workload_busy_pair.restart_b_pid_before = workload_busy_pair.b_pid;
         workload_busy_pair.restart_b_rounds_before =
             workload_busy_pair.b_rounds;
-        return 2;
+        return 3;
     }
     // A's replacement has spoken once the restart counter moved -- that is
-    // a report under tag A from a pid that is not the one told to exit.
+    // a report under tag A from a pid that is not the one told to terminate.
     if (workload_busy_pair.a_restarts == 0) { return 0; }
     // Then wait for B to finish another round before judging. Asking at A's
     // replacement instead made "B kept going" a race against how fast the

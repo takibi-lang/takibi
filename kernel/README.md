@@ -1091,14 +1091,17 @@ run, not a specification.
   scheduler picks otherwise -- which is what a background job needs, since
   its parent is off at its own prompt. An exit that would leave nothing at
   all runnable waits for an interrupt and asks again instead of proceeding.
-- **Signals.** Signal state is recorded honestly, but no signal is ever
-  delivered, so an installed handler is never invoked. Two consequences are
-  worth naming because they decide what a shell script can do here.
-  BusyBox `init`'s `respawn` works anyway: `rt_sigtimedwait` returns
-  `-ENOSYS`, so its main loop falls through to a `waitpid(-1, WNOHANG)`
-  reap and restarts the entry that died. Ash's `wait` builtin does not:
-  it polls with `WNOHANG` and then calls `sigsuspend` to wait for
-  `SIGCHLD`, so `wait` never returns. A script here must not use it.
+- **Signals.** Signal masks and pending SIGCHLD state are per-process.
+  A child exit queues SIGCHLD for a parent that blocked it, wakes a parent in
+  `rt_sigtimedwait`, and lets BusyBox `init` reap and respawn the child without
+  spinning. `rt_sigtimedwait` supports a null/infinite timeout, a zero poll,
+  and a finite timeout at scheduler-tick resolution; its `siginfo` output is
+  not implemented. `kill(pid, 0)` performs an existence check,
+  `kill(pid, SIGCHLD)` queues the signal the kernel generates, and SIGTERM
+  applies its default process-termination action. Other externally sent
+  signals and asynchronous handler entry are not implemented,
+  so ash's `wait` builtin still cannot use `sigsuspend`; a script here must not
+  use it.
 - **Memory.** `mmap` is anonymous-only through a heap-break cursor rather
   than a real independent mapping. `mprotect` performs exactly one
   permission transition (`RW+XN` <-> `R+XN` on data, heap, and stack) and

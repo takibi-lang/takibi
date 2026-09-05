@@ -25,6 +25,10 @@
 const WORKLOAD_PROGRESS_SYSCALL: usize = 453;
 const WORKLOAD_EXIT_SYSCALL: usize = 93;
 const WORKLOAD_ANSWER_EXIT: usize = 2;
+const WORKLOAD_ANSWER_SIGTERM: usize = 3;
+const GETPID_SYSCALL: usize = 172;
+const KILL_SYSCALL: usize = 129;
+const LINUX_SIGTERM: usize = 15;
 const BUSY_LOOP_TAG_A: usize = 1;
 const BUSY_LOOP_TAG_B: usize = 2;
 
@@ -86,6 +90,10 @@ fn busy_loop_run(tag: usize) {
              * that stopped on its own would prove nothing about init. */
             if (answer == WORKLOAD_ANSWER_EXIT) {
                 svc5(WORKLOAD_EXIT_SYSCALL, 0, 0, 0, 0, 0);
+            }
+            if (answer == WORKLOAD_ANSWER_SIGTERM) {
+                let pid: usize = svc5(GETPID_SYSCALL, 0, 0, 0, 0, 0);
+                svc5(KILL_SYSCALL, pid, LINUX_SIGTERM, 0, 0, 0);
             }
             done = answer;
         }

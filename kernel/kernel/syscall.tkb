@@ -47,6 +47,8 @@ const AARCH64_NR_WRITEV: usize = 66;
 const AARCH64_NR_PPOLL: usize = 73;
 const AARCH64_NR_NANOSLEEP: usize = 101;
 const AARCH64_NR_CLOCK_NANOSLEEP: usize = 115;
+const AARCH64_NR_KILL: usize = 129;
+const AARCH64_NR_RT_SIGTIMEDWAIT: usize = 137;
 const AARCH64_NR_SYSLOG: usize = 116;
 const AARCH64_NR_UNAME: usize = 160;
 // GitHub issue #393: the only rlimit syscall this architecture has.
@@ -76,6 +78,8 @@ const LINUX_EINVAL: usize = 0xFFFFFFFFFFFFFFEA;
 const LINUX_EAGAIN: usize = 0xFFFFFFFFFFFFFFF5;
 const LINUX_EACCES: usize = 0xFFFFFFFFFFFFFFF3;
 const LINUX_ECHILD: usize = 0xFFFFFFFFFFFFFFF6;
+const LINUX_SIGTERM: usize = 15;
+const LINUX_SIGCHLD: usize = 17;
 // GitHub issue #295: distinct errno for fixed-pool exhaustion, previously
 // collapsed into LINUX_EBADF (which real Linux reserves for an actually bad
 // descriptor argument) at every fd-allocating syscall handler below.
@@ -250,6 +254,7 @@ must_use variant KernelInetdAcceptResult { TimedOut; Accepted; }
 // scheduled_process_clone_file_state()/_uart_block_delivery() and their
 // setters. Every decision made with them is still made here.
 private let mut syscall_exec_pending: bool;
+private let mut syscall_init_signal_wait_logged: bool;
 private let mut syscall_exec_argc: usize;
 private let mut syscall_exec_argv: [u8; 512];
 private let mut syscall_exec_path: [u8; 256];
@@ -887,6 +892,7 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize)
     syscall_test_evidence_reset_file_counters();
     syscall_test_evidence_reset_read_uart_waits();
     syscall_exec_pending = false;
+    syscall_init_signal_wait_logged = false;
     syscall_exec_argc = 0;
     syscall_test_lifecycle_persistent_shell_clear();
     scheduled_process_reset_syscall_state_everywhere();
@@ -1609,11 +1615,95 @@ fn syscall_deadline_wait(timespec_address: usize) -> SyscallDeadlineResult {
         CheckedUsize::Overflow => { return SyscallDeadlineResult::Invalid; }
         CheckedUsize::Value(value) => { value }
     };
-    kernel_process_current_arm_deadline(deadline);
+    kernel_process_current_arm_deadline(deadline, 0);
     if (kernel_process_other_ready()) {
         return SyscallDeadlineResult::Block;
     }
     return SyscallDeadlineResult::WaitInterrupt;
+}
+
+fn syscall_signal_wait(wait_set: usize, timeout_address: usize)
+        -> SyscallAction {
+    match kernel_process_current_signal_take(wait_set) {
+        ProcessSignalPendingResult::Pending(signum) => {
+            kernel_process_current_clear_deadline();
+            return SyscallAction::Resume(signum);
+        }
+        ProcessSignalPendingResult::Missing => {}
+    }
+    let now: usize = read_cntpct() as usize;
+    if (kernel_process_current_pending_block_reason() ==
+            ProcessWaitReason::Signal) {
+        let armed: usize = kernel_process_current_deadline_ticks();
+        if (armed != 0 && now >= armed) {
+            kernel_process_current_clear_deadline();
+            return SyscallAction::Resume(LINUX_EAGAIN);
+        }
+        return SyscallAction::WaitInterrupt;
+    }
+    if (timeout_address != 0) {
+        let mut seconds: usize = 0;
+        let mut nanoseconds: usize = 0;
+        match user_range_check_read(kernel_process_current_root(),
+                                    timeout_address, 16) {
+            UserReadRangeResult::Fault => {
+                return SyscallAction::Resume(LINUX_EFAULT);
+            }
+            UserReadRangeResult::Ok(range) => {
+                let (seconds_ok, seconds_raw) = user_read_u64(range, 0);
+                let (nanoseconds_ok, nanoseconds_raw) =
+                    user_read_u64(range, 8);
+                if (seconds_ok == false || nanoseconds_ok == false) {
+                    return SyscallAction::Resume(LINUX_EINVAL);
+                }
+                seconds = seconds_raw as usize;
+                nanoseconds = nanoseconds_raw as usize;
+            }
+        }
+        if (nanoseconds >= 1000000000) {
+            return SyscallAction::Resume(LINUX_EINVAL);
+        }
+        let frequency: usize = read_cntfrq() as usize;
+        let whole_ticks: usize = match checked_mul_usize(seconds, frequency) {
+            CheckedUsize::Overflow => {
+                return SyscallAction::Resume(LINUX_EINVAL);
+            }
+            CheckedUsize::Value(value) => { value }
+        };
+        let subsecond_product: usize =
+            match checked_mul_usize(nanoseconds, frequency) {
+                CheckedUsize::Overflow => {
+                    return SyscallAction::Resume(LINUX_EINVAL);
+                }
+                CheckedUsize::Value(value) => { value }
+            };
+        let duration: usize = match checked_add_usize(
+                whole_ticks, subsecond_product / 1000000000) {
+            CheckedUsize::Overflow => {
+                return SyscallAction::Resume(LINUX_EINVAL);
+            }
+            CheckedUsize::Value(value) => { value }
+        };
+        if (duration == 0) {
+            return SyscallAction::Resume(LINUX_EAGAIN);
+        }
+        let deadline: usize = match checked_add_usize(now, duration) {
+            CheckedUsize::Overflow => {
+                return SyscallAction::Resume(LINUX_EINVAL);
+            }
+            CheckedUsize::Value(value) => { value }
+        };
+        kernel_process_current_arm_deadline(deadline, LINUX_EAGAIN);
+    }
+    kernel_process_current_prepare_signal_wait(wait_set);
+    if (kernel_process_current_pid() == 1 &&
+        syscall_init_signal_wait_logged == false) {
+        syscall_init_signal_wait_logged = true;
+        kernel_boot_log(
+            "signal: BusyBox init blocked in rt_sigtimedwait for SIGCHLD\n");
+    }
+    if (kernel_process_other_ready()) { return SyscallAction::Block; }
+    return SyscallAction::WaitInterrupt;
 }
 
 fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
@@ -2031,6 +2121,9 @@ fn kernel_syscall_block_return(frame_sp: usize) {
     } else if (kernel_process_current_pending_block_reason() ==
                    ProcessWaitReason::Deadline) {
         next_sp = kernel_process_block_deadline(frame_sp);
+    } else if (kernel_process_current_pending_block_reason() ==
+                   ProcessWaitReason::Signal) {
+        next_sp = kernel_process_block_signal(frame_sp);
     } else {
         kernel_syscall_uart_block_prepare(frame_sp);
         next_sp = kernel_process_block_uart(frame_sp);
@@ -2205,6 +2298,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     if (exception_class != 0x15) { return SyscallAction::Unreachable; }
     kernel_init_boot_fixture_poll();
     kernel_syscall_persistent_shell_checkpoint_selected();
+    match kernel_process_current_termination_signal_take() {
+        ProcessSignalPendingResult::Missing => {}
+        ProcessSignalPendingResult::Pending(signum) => {
+            return kernel_syscall_exit_current_process(128 + signum);
+        }
+    }
     if (number == AARCH64_NR_TAKIBI_UART_RX_WAIT) {
         disable_irq();
         if (kernel_uart_rx_pending()) {
@@ -4081,15 +4180,80 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         return SyscallAction::Resume(0);
     }
     if (number == 135) {
+        if (x3 != 8) { return SyscallAction::Resume(LINUX_EINVAL); }
+        let old_mask: usize = kernel_process_current_signal_mask();
+        let mut new_mask: usize = old_mask;
+        if (x1 != 0) {
+            match user_range_check_read(kernel_process_current_root(), x1, 8) {
+                UserReadRangeResult::Fault => {
+                    return SyscallAction::Resume(LINUX_EFAULT);
+                }
+                UserReadRangeResult::Ok(range) => {
+                    let (read_ok, requested_mask) = user_read_u64(range, 0);
+                    if (read_ok == false) {
+                        return SyscallAction::Resume(LINUX_EFAULT);
+                    }
+                    if (x0 == 0) {
+                        new_mask = old_mask | (requested_mask as usize);
+                    } else if (x0 == 1) {
+                        new_mask = old_mask & ~(requested_mask as usize);
+                    } else if (x0 == 2) {
+                        new_mask = requested_mask as usize;
+                    } else {
+                        return SyscallAction::Resume(LINUX_EINVAL);
+                    }
+                }
+            }
+        }
         if (x2 != 0) {
             match user_range_check_write(kernel_process_current_root(), x2, 8) {
                 UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserWriteRangeResult::Ok(range) => {
-                    let wrote_mask: bool = user_write_u64(range, 0, 0);
+                    let wrote_mask: bool =
+                        user_write_u64(range, 0, old_mask as u64);
                 }
             }
         }
+        if (x1 != 0) { kernel_process_current_set_signal_mask(new_mask); }
         return SyscallAction::Resume(0);
+    }
+    if (number == AARCH64_NR_RT_SIGTIMEDWAIT) {
+        if (x3 != 8) { return SyscallAction::Resume(LINUX_EINVAL); }
+        // The maintained BusyBox path passes NULL siginfo. Refuse a shape
+        // whose output this kernel cannot yet fill instead of returning a
+        // signal number beside untouched userspace memory.
+        if (x1 != 0) { return SyscallAction::Resume(LINUX_EINVAL); }
+        match user_range_check_read(kernel_process_current_root(), x0, 8) {
+            UserReadRangeResult::Fault => {
+                return SyscallAction::Resume(LINUX_EFAULT);
+            }
+            UserReadRangeResult::Ok(range) => {
+                let (read_ok, wait_set) = user_read_u64(range, 0);
+                if (read_ok == false) {
+                    return SyscallAction::Resume(LINUX_EFAULT);
+                }
+                return syscall_signal_wait(wait_set as usize, x2);
+            }
+        }
+    }
+    if (number == AARCH64_NR_KILL) {
+        if (x0 == 0 || x1 > 64) {
+            return SyscallAction::Resume(LINUX_EINVAL);
+        }
+        if (x1 != 0 && x1 != LINUX_SIGTERM && x1 != LINUX_SIGCHLD) {
+            return SyscallAction::Resume(LINUX_EINVAL);
+        }
+        if (x0 == kernel_process_current_pid() && x1 == LINUX_SIGTERM) {
+            return kernel_syscall_exit_current_process(128 + LINUX_SIGTERM);
+        }
+        match kernel_process_signal_send(x0, x1) {
+            ProcessSignalSendResult::Missing => {
+                return SyscallAction::Resume(LINUX_ESRCH);
+            }
+            ProcessSignalSendResult::Delivered => {
+                return SyscallAction::Resume(0);
+            }
+        }
     }
     if (number == 205) {
         if (x0 != 0) { return SyscallAction::Resume(LINUX_EFAULT); }

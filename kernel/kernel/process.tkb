@@ -75,7 +75,9 @@ enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; }
 // which stops every other process for the duration -- kernel mode does not
 // preempt. Added at the end so the numbers the oops path prints for the
 // first three are unchanged.
-enum ProcessWaitReason: u8 { None; UartRx; ChildExit; NetRx; Deadline; }
+enum ProcessWaitReason: u8 {
+    None; UartRx; ChildExit; NetRx; Deadline; Signal;
+}
 
 // GitHub issue #392: declared here, with the rest of a process's
 // lifecycle state, rather than in kernel/kernel/syscall.tkb where the
@@ -208,6 +210,13 @@ struct ProcessRecord {
     // Absolute generic-counter deadline for nanosleep/clock_nanosleep and
     // finite ppoll. Meaningful only while wait_reason is Deadline.
     deadline_ticks: usize;
+    // Linux signal sets use bit (signum - 1). Pending state and the set a
+    // blocked rt_sigtimedwait accepts belong to the process whose frame is
+    // parked, not to the syscall dispatcher globally.
+    signal_mask: usize;
+    pending_signals: usize;
+    sigwait_set: usize;
+    deadline_result: usize;
     // GitHub issue #302: wait4()'s status pointer, owned per-slot so a
     // multi-level concurrent wait4() chain delivers each blocked parent's
     // OWN status pointer instead of a value shared across every blocked
@@ -784,6 +793,7 @@ private fn scheduled_process_ddb_copy_one(
         ProcessWaitReason::ChildExit => { output[index].wait_reason = 2; }
         ProcessWaitReason::NetRx => { output[index].wait_reason = 3; }
         ProcessWaitReason::Deadline => { output[index].wait_reason = 4; }
+        ProcessWaitReason::Signal => { output[index].wait_reason = 5; }
     }
     output[index].saved_sp = record.saved_sp;
     output[index].stack_bottom = 0;
@@ -1181,6 +1191,7 @@ fn kernel_process_monitor_proc(pid: usize) !{unsafe} {
         ProcessWaitReason::ChildExit => { uart_put_udec(2); }
         ProcessWaitReason::NetRx => { uart_put_udec(3); }
         ProcessWaitReason::Deadline => { uart_put_udec(4); }
+        ProcessWaitReason::Signal => { uart_put_udec(5); }
     }
     kernel_boot_log(" saved_sp=");
     uart_put_hex(scheduled_process_peek_saved_sp(slot));
@@ -1215,6 +1226,12 @@ private fn scheduled_process_copy_command_line(parent: ProcessHandle,
     for index: usize in 0..<512 {
         destination.command_line[index] = source.command_line[index];
     }
+}
+
+private fn scheduled_process_copy_signal_mask(parent: ProcessHandle,
+                                              child: usize) !{unsafe} {
+    scheduled_process_record_at(child).signal_mask =
+        scheduled_process_record_of(parent).signal_mask;
 }
 
 // GitHub issue #392: where kernel/kernel/fd_table.tkb keeps this
@@ -1547,6 +1564,10 @@ private fn scheduled_process_record_reset(slot: usize) !{unsafe} {
     record.state = ProcessSlotState::Free;
     record.wait_reason = ProcessWaitReason::None;
     record.deadline_ticks = 0;
+    record.signal_mask = 0;
+    record.pending_signals = 0;
+    record.sigwait_set = 0;
+    record.deadline_result = 0;
     record.wait4_status_ptr = 0;
     record.has_parent = false;
     record.has_first_child = false;
@@ -4136,10 +4157,13 @@ fn kernel_process_block_net(current_sp: usize) -> usize {
         current_sp, ProcessWaitReason::NetRx, 3);
 }
 
-fn kernel_process_current_arm_deadline(deadline_ticks: usize) {
+fn kernel_process_current_arm_deadline(deadline_ticks: usize,
+                                       result: usize) {
     if (execution_here().current_live) {
         scheduled_process_record_of(execution_here().current_handle)
             .deadline_ticks = deadline_ticks;
+        scheduled_process_record_of(execution_here().current_handle)
+            .deadline_result = result;
         kernel_process_current_set_pending_block(
             ProcessWaitReason::Deadline, 0);
     }
@@ -4158,8 +4182,148 @@ fn kernel_process_current_clear_deadline() {
         scheduled_process_record_of(execution_here().current_handle)
             .deadline_ticks = 0;
         scheduled_process_record_of(execution_here().current_handle)
+            .deadline_result = 0;
+        scheduled_process_record_of(execution_here().current_handle)
             .wait_reason = ProcessWaitReason::None;
     }
+}
+
+fn kernel_process_current_signal_mask() -> usize {
+    if (execution_here().current_live) {
+        return scheduled_process_record_of(execution_here().current_handle)
+            .signal_mask;
+    }
+    return 0;
+}
+
+fn kernel_process_current_set_signal_mask(mask: usize) {
+    if (execution_here().current_live) {
+        // SIGKILL (9) and SIGSTOP (19) cannot be blocked.
+        let unmaskable: usize = (1 << 8) | (1 << 18);
+        scheduled_process_record_of(execution_here().current_handle)
+            .signal_mask = mask & ~unmaskable;
+    }
+}
+
+must_use variant ProcessSignalPendingResult {
+    Missing;
+    Pending(usize);
+}
+
+fn kernel_process_current_signal_take(wait_set: usize)
+        -> ProcessSignalPendingResult {
+    if (execution_here().current_live == false) {
+        return ProcessSignalPendingResult::Missing;
+    }
+    let record: *ProcessRecord =
+        scheduled_process_record_of(execution_here().current_handle);
+    let available: usize = record.pending_signals & wait_set;
+    for bit: usize in 0..<64 {
+        let bit_mask: usize = 1 << bit;
+        if ((available & bit_mask) != 0) {
+            record.pending_signals = record.pending_signals & ~bit_mask;
+            return ProcessSignalPendingResult::Pending(bit + 1);
+        }
+    }
+    return ProcessSignalPendingResult::Missing;
+}
+
+// Return one pending, unblocked signal whose maintained default action is
+// process termination. Signal handlers do not exist yet, so SIGTERM is the
+// only such signal accepted by kill(2).
+fn kernel_process_current_termination_signal_take()
+        -> ProcessSignalPendingResult {
+    if (execution_here().current_live == false) {
+        return ProcessSignalPendingResult::Missing;
+    }
+    let record: *ProcessRecord =
+        scheduled_process_record_of(execution_here().current_handle);
+    let sigterm_bit: usize = 1 << 14;
+    if ((record.pending_signals & sigterm_bit) == 0 ||
+        (record.signal_mask & sigterm_bit) != 0) {
+        return ProcessSignalPendingResult::Missing;
+    }
+    record.pending_signals = record.pending_signals & ~sigterm_bit;
+    return ProcessSignalPendingResult::Pending(15);
+}
+
+fn kernel_process_current_prepare_signal_wait(wait_set: usize) {
+    if (execution_here().current_live) {
+        scheduled_process_record_of(execution_here().current_handle)
+            .sigwait_set = wait_set;
+        kernel_process_current_set_pending_block(
+            ProcessWaitReason::Signal, 0);
+    }
+}
+
+fn kernel_process_block_signal(current_sp: usize) -> usize {
+    return kernel_process_block_current(
+        current_sp, ProcessWaitReason::Signal, 5);
+}
+
+must_use variant ProcessSignalSendResult {
+    Missing;
+    Delivered;
+}
+
+private fn kernel_process_signal_deliver_to(target: ProcessHandle,
+                                            signum: usize)
+        -> ProcessSignalSendResult !{unsafe} {
+    if (signum == 0 || signum > 64 ||
+        scheduled_process_handle_matches(target) == false ||
+        scheduled_process_state_of(target) == ProcessSlotState::Exited) {
+        return ProcessSignalSendResult::Missing;
+    }
+    let bit: usize = 1 << (signum - 1);
+    let record: *ProcessRecord = scheduled_process_record_of(target);
+    // There is no asynchronous handler entry yet. An unblocked SIGCHLD has
+    // its Linux default (ignored); a blocked one remains pending for
+    // rt_sigtimedwait, which is the BusyBox init path implemented here.
+    if ((record.signal_mask & bit) == 0 && signum != 15) {
+        return ProcessSignalSendResult::Delivered;
+    }
+    record.pending_signals = record.pending_signals | bit;
+    if (scheduled_process_state_of(target) == ProcessSlotState::Blocked &&
+        scheduled_process_wait_reason_of(target) ==
+            ProcessWaitReason::Signal &&
+        (record.sigwait_set & bit) != 0) {
+        match scheduled_process_blocked_take(target) {
+            ScheduledProcessBlockedTakeResult::Missing => {}
+            ScheduledProcessBlockedTakeResult::Blocked(resources) => {
+                let (owner, blocked) = resources;
+                el0_context_set_x0(record.saved_sp, signum);
+                record.pending_signals = record.pending_signals & ~bit;
+                record.sigwait_set = 0;
+                record.deadline_ticks = 0;
+                record.deadline_result = 0;
+                let ready = scheduled_process_wake(owner, blocked);
+                record.wait_reason = ProcessWaitReason::None;
+                scheduled_process_release(owner, ready);
+            }
+        }
+    }
+    return ProcessSignalSendResult::Delivered;
+}
+
+fn kernel_process_signal_child_exit(parent: ProcessHandle) {
+    let result = kernel_process_signal_deliver_to(parent, 17);
+    match result {
+        ProcessSignalSendResult::Missing => {}
+        ProcessSignalSendResult::Delivered => {}
+    }
+}
+
+fn kernel_process_signal_send(pid: usize, signum: usize)
+        -> ProcessSignalSendResult {
+    let slot: usize = match scheduled_process_slot_for_pid(pid) {
+        ProcessSlotForPidResult::Missing => {
+            return ProcessSignalSendResult::Missing;
+        }
+        ProcessSlotForPidResult::Found(found) => { found }
+    };
+    if (signum == 0) { return ProcessSignalSendResult::Delivered; }
+    return kernel_process_signal_deliver_to(
+        scheduled_process_handle_of_slot(slot), signum);
 }
 
 fn kernel_process_block_deadline(current_sp: usize) -> usize {
@@ -4178,10 +4342,13 @@ fn kernel_process_deadline_wake_all() !{interrupt, unsafe} {
             ProcessSlotCursor::Done => { walking = false; }
             ProcessSlotCursor::At(slot) => {
                 let next = scheduled_process_next_slot(slot);
+                let reason: ProcessWaitReason =
+                    scheduled_process_record_wait_reason(slot);
                 if (scheduled_process_record_state(slot) ==
                         ProcessSlotState::Blocked &&
-                    scheduled_process_record_wait_reason(slot) ==
-                        ProcessWaitReason::Deadline &&
+                    (reason == ProcessWaitReason::Deadline ||
+                     reason == ProcessWaitReason::Signal) &&
+                    scheduled_process_record_at(slot).deadline_ticks != 0 &&
                     now >= scheduled_process_record_at(slot).deadline_ticks) {
                     match scheduled_process_blocked_take(
                             scheduled_process_handle_of_slot(slot)) {
@@ -4190,12 +4357,18 @@ fn kernel_process_deadline_wake_all() !{interrupt, unsafe} {
                             let (owner, blocked) = resources;
                             el0_context_set_x0(
                                 scheduled_process_record_at(owner.pool_index)
-                                    .saved_sp, 0);
+                                    .saved_sp,
+                                scheduled_process_record_at(owner.pool_index)
+                                    .deadline_result);
                             let ready = scheduled_process_wake(owner, blocked);
                             scheduled_process_record_at(owner.pool_index)
                                 .wait_reason = ProcessWaitReason::None;
                             scheduled_process_record_at(owner.pool_index)
                                 .deadline_ticks = 0;
+                            scheduled_process_record_at(owner.pool_index)
+                                .deadline_result = 0;
+                            scheduled_process_record_at(owner.pool_index)
+                                .sigwait_set = 0;
                             scheduled_process_release(owner, ready);
                         }
                     }
@@ -4821,6 +4994,7 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
             let mut child: ProcessHandle =
                 scheduled_pooled_process_handle(pooled);
             scheduled_process_copy_command_line(parent, child.pool_index);
+            scheduled_process_copy_signal_mask(parent, child.pool_index);
             // GitHub issue #437: push at the HEAD of the sibling list.
             // O(1), and with one child it leaves first_child naming that
             // child and no sibling -- the shape every existing view was
@@ -5047,6 +5221,7 @@ fn kernel_process_crash_wait_reason() -> usize !{unsafe} {
         ProcessWaitReason::ChildExit => { return 2; }
         ProcessWaitReason::NetRx => { return 3; }
         ProcessWaitReason::Deadline => { return 4; }
+        ProcessWaitReason::Signal => { return 5; }
     }
 }
 
@@ -5129,6 +5304,7 @@ fn kernel_process_child_exit(status: usize) -> usize {
     let mut child: ProcessHandle = execution_here().current_handle;
     let mut parent: ProcessHandle =
         scheduled_process_record_of(child).parent;
+    kernel_process_signal_child_exit(parent);
     kernel_process_trace_record(
         ProcessTraceExit, scheduled_process_pid_of_handle(child),
         child.generation,
