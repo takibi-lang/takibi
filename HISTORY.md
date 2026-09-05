@@ -15,6 +15,65 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-04: kernel/MEMORY_MAP.md records a shape, not twenty addresses
+
+The ELF-symbol table carried all twenty of the kernel image's boundary
+addresses exactly, per platform. Measured over the last 76 commits that
+touched the file, 73 of them moved a row: `__bss_end` in 71, `__bss_start`
+in 49, and the whole stack block in about 20 whenever the image crossed a
+32 KiB boundary. Two agents working at once therefore conflicted in this
+document nearly every time, over numbers neither of them had chosen, and
+resolving that conflict is not a judgement anybody can make by reading --
+the answer only exists in a fresh link of both kernels.
+
+Seventeen of the twenty rows were not really moving. Measured against both
+linked kernels, every symbol from `boot_stack_run_bottom` to
+`usable_ram_start` sits at an identical offset from that anchor on RPi5 and
+on QEMU -- `+0x4000`, `+0x8000`, ... `+0x30000` -- because the two linker
+scripts emit the block identically. They were a fixed shape written down as
+an absolute address riding on a moving base.
+
+So the table became three:
+
+- `<!-- checked: elf-symbols -->` keeps `_start` alone, which is a linker
+  script constant and moved once in 76 commits.
+- `<!-- checked: elf-offsets -->` states the stack block once, as offsets
+  from `boot_stack_run_bottom`, in one column for both platforms. Issue
+  #477's per-core stride became two subtractions a reader can do in the
+  table rather than a sentence of prose, and the check does them against
+  the build. A platform that diverges fails rather than silently widening
+  the column back to two.
+- `<!-- checked: elf-ceiling -->` holds one bound: the image must stay under
+  4 MiB (it was 3.56 and 3.59 MiB when the ceiling was set).
+
+`__bss_start`, `__bss_end` and the stack block's base have no row at all.
+What those rows used to pin incidentally is now pinned on purpose, read out
+of the build: the boundaries' ordering, page alignment of `__bss_start` and
+`usable_ram_start`, and the 32768-byte alignment of the stack block that
+`stack_guard_shift`'s one-bit test depends on.
+
+The trade is deliberate and is stated in the document. Nobody now watches a
+4 KiB growth in `.bss` go past; the ceiling is what still asks a person to
+look, at a size where looking earns the interruption, and `--update`
+refuses to move that one row for exactly that reason.
+
+Verified by growing `.bss` 32 KiB (`KERNEL_LOG_SNAPSHOT_CAPACITY` 65536 ->
+98304) and relinking: `MEMORY_MAP.md` came back byte-for-byte identical,
+where before the change it would have needed four rewritten rows.
+
+Two findings came out of the same work. `check_kernel_memory_map.py` used
+to PASS on a document that still contained `<<<<<<< HEAD`: its table parser
+ends a table at the first line that is not a table row, so a conflicted map
+parsed as the one row above the marker and cleared the "has data rows"
+guard. Fixed separately, with a second guard that counts a table's state tag
+across the whole document so any truncation is loud, not only a marker's.
+
+And the same layout churn lives outside this document: `allocator_pages` in
+`kernel/tests/*/views/boot.expected` and `kernel/tests/check_fdt_multibank_qemu.py`
+tracks `usable_ram_start` exactly. It moves roughly eight times less often,
+because `usable_ram_start` only steps at 32 KiB, but it is the same class
+and those are test expectations rather than prose. Not changed here.
+
 ## 2026-08-31: lexical trusted-base unsafe-block discovery (#404)
 
 The trusted-base inventory now finds `unsafe` openings and their matching

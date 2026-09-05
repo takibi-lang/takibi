@@ -15,7 +15,7 @@ Both were lookups. This is the table.
 
 ## How to trust a number here
 
-Rows are in one of three states, and which one is always stated:
+Rows are in one of five states, and which one is always stated:
 
 - **CHECKED (ELF)** -- read out of the linked `kernel.elf` by
   `scripts/check_kernel_memory_map.py`, which fails the build if this
@@ -25,6 +25,13 @@ Rows are in one of three states, and which one is always stated:
   command on purpose, because the point of the check is that somebody
   looks at a layout change, and a document that heals itself is one nobody
   reads.
+- **CHECKED (ELF offset)** -- the same, except that what is compared is the
+  symbol's distance from an anchor symbol rather than its address. Used for
+  the rows whose absolute address moves with every build while their shape
+  does not; see "The stack block, as one shape".
+- **CHECKED (ELF ceiling)** -- a bound, not a value: the build must stay
+  under it. `--update` refreshes every other checked row and deliberately
+  leaves this one, because it is the row whose job is to be read by a person.
 - **CHECKED (const)** -- the named `const` is read out of the named `.tkb`
   file by the same script and compared.
 - **HAND** -- written by a person, checked by nobody. Treat as suspect
@@ -67,48 +74,112 @@ must construct those tables before it can enable the MMU.
 
 ## Physical layout of the kernel image
 
-Ascending, in the order the linker script emits them. Sizes vary with the
-build; the boundaries are what matter.
+Ascending, in the order the linker script emits them.
+
+Three boundaries here move with every build: `.bss` begins wherever the code
+and data ahead of it end, `__bss_end` follows it, and the stack block starts
+at the next 32 KiB boundary above that. Their absolute addresses are
+deliberately not recorded, and that is a trade worth stating rather than
+discovering.
+
+This section used to carry all twenty addresses exactly, and it cost more
+than it returned: 73 of the last 76 commits that touched this file moved a
+row, so two people working at once conflicted here, over numbers neither of
+them had chosen. Seventeen of those rows were not really moving -- they are a
+fixed shape riding on a moving base, and written as offsets from that base
+they say the same thing and stop churning. What is genuinely given up is the
+third state: nobody now watches a 4 KiB growth in `.bss` go past. The image
+ceiling below is what still makes somebody look, at the size where looking
+earns the interruption.
+
+An exact address for any of the three is one command away and is never stale:
+
+```
+llvm-nm-19 kernel/build/rpi5/kernel.elf | grep __bss_end
+```
+
+### Load address
 
 <!-- checked: elf-symbols -->
 
 | Symbol | RPi5 | QEMU `virt` | Defined by | State |
 |---|---|---|---|---|
 | `_start` | `0x00200000` | `0x40000000` | linker script `.` assignment | CHECKED (ELF) |
-| `__bss_start` | `0x004ef000` | `0x402ed000` | linker script `.bss` | CHECKED (ELF) |
-| `__bss_end` | `0x0055feb0` | `0x40366100` | linker script `.bss` | CHECKED (ELF) |
-| `boot_stack_run_bottom` | `0x00560000` | `0x40368000` | linker script `.stack` | CHECKED (ELF) |
-| `boot_stack_bottom` | `0x00564000` | `0x4036c000` | linker script `.stack` | CHECKED (ELF) |
-| `boot_stack_top` | `0x00568000` | `0x40370000` | linker script `.stack` | CHECKED (ELF) |
-| `secondary_stack_run_bottom` | `0x00568000` | `0x40370000` | linker script `.stack` | CHECKED (ELF) |
-| `secondary_stack_bottom` | `0x0056c000` | `0x40374000` | linker script `.stack` | CHECKED (ELF) |
-| `secondary_stack_top` | `0x00570000` | `0x40378000` | linker script `.stack` | CHECKED (ELF) |
-| `percpu_stack_base` | `0x00570000` | `0x40378000` | linker script `.stack` | CHECKED (ELF) |
-| `overflow_stack_run_bottom` | `0x00570000` | `0x40378000` | linker script `.stack` | CHECKED (ELF) |
-| `overflow_stack_bottom` | `0x00574000` | `0x4037c000` | linker script `.stack` | CHECKED (ELF) |
-| `overflow_stack_top` | `0x00578000` | `0x40380000` | linker script `.stack` | CHECKED (ELF) |
-| `irq_stack_run_bottom` | `0x00578000` | `0x40380000` | linker script `.stack` | CHECKED (ELF) |
-| `irq_stack_bottom` | `0x0057c000` | `0x40384000` | linker script `.stack` | CHECKED (ELF) |
-| `irq_stack_top` | `0x00580000` | `0x40388000` | linker script `.stack` | CHECKED (ELF) |
-| `percpu_stack_group_end` | `0x00580000` | `0x40388000` | linker script `.stack` | CHECKED (ELF) |
-| `secondary_percpu_stack_base` | `0x00580000` | `0x40388000` | linker script `.stack` | CHECKED (ELF) |
-| `percpu_stack_end` | `0x00590000` | `0x40398000` | linker script `.stack` | CHECKED (ELF) |
-| `usable_ram_start` | `0x00590000` | `0x40398000` | linker script, `ALIGN(4096)` | CHECKED (ELF) |
+
+### The stack block, as one shape
+
+Each row is an offset from `boot_stack_run_bottom`, and both platforms have
+the same one: the two linker scripts emit this block identically, so a single
+column is the whole truth rather than a summary of two. A platform that
+diverges fails this table instead of quietly widening it back to two columns.
+
+Writing them as offsets is also what made the shape's own invariants
+checkable rather than asserted. GitHub issue #477's per-core stride -- that
+`secondary_percpu_stack_base - percpu_stack_base` must equal
+`percpu_stack_group_end - percpu_stack_base` -- is now two subtractions a
+reader can do in this table, and the build check does them against the linked
+kernels.
+
+<!-- checked: elf-offsets -->
+
+| Symbol | Offset from `boot_stack_run_bottom` | Defined by | State |
+|---|---|---|---|
+| `boot_stack_run_bottom` | `+0x00000` | linker script `.stack` | CHECKED (ELF offset) |
+| `boot_stack_bottom` | `+0x04000` | linker script `.stack` | CHECKED (ELF offset) |
+| `boot_stack_top` | `+0x08000` | linker script `.stack` | CHECKED (ELF offset) |
+| `secondary_stack_run_bottom` | `+0x08000` | linker script `.stack` | CHECKED (ELF offset) |
+| `secondary_stack_bottom` | `+0x0c000` | linker script `.stack` | CHECKED (ELF offset) |
+| `secondary_stack_top` | `+0x10000` | linker script `.stack` | CHECKED (ELF offset) |
+| `percpu_stack_base` | `+0x10000` | linker script `.stack` | CHECKED (ELF offset) |
+| `overflow_stack_run_bottom` | `+0x10000` | linker script `.stack` | CHECKED (ELF offset) |
+| `overflow_stack_bottom` | `+0x14000` | linker script `.stack` | CHECKED (ELF offset) |
+| `overflow_stack_top` | `+0x18000` | linker script `.stack` | CHECKED (ELF offset) |
+| `irq_stack_run_bottom` | `+0x18000` | linker script `.stack` | CHECKED (ELF offset) |
+| `irq_stack_bottom` | `+0x1c000` | linker script `.stack` | CHECKED (ELF offset) |
+| `irq_stack_top` | `+0x20000` | linker script `.stack` | CHECKED (ELF offset) |
+| `percpu_stack_group_end` | `+0x20000` | linker script `.stack` | CHECKED (ELF offset) |
+| `secondary_percpu_stack_base` | `+0x20000` | linker script `.stack` | CHECKED (ELF offset) |
+| `percpu_stack_end` | `+0x30000` | linker script `.stack` | CHECKED (ELF offset) |
+| `usable_ram_start` | `+0x30000` | linker script, `ALIGN(4096)` | CHECKED (ELF offset) |
+
+### The image ceiling
+
+`_start` to `usable_ram_start` is the whole kernel image. Ordinary growth
+moves it a few kilobytes at a time and no longer changes this document, so
+this row is the one a person is asked to look at -- and it is deliberately
+the one row `--update` refuses to move for you.
+
+<!-- checked: elf-ceiling -->
+
+| Span | Ceiling | State |
+|---|---|---|
+| `usable_ram_start` - `_start` | `0x00400000` | CHECKED (ELF ceiling) |
+
+Measured when this ceiling was set: RPi5 `0x390000`
+(3.56 MiB), QEMU `0x398000`
+(3.59 MiB).
+
+### What still holds the boundaries that have no row
+
+`scripts/check_kernel_memory_map.py` reads these out of both linked kernels
+on every `make kernelbuild`:
+
+- `_start` < `__bss_start` <= `__bss_end` <= `boot_stack_run_bottom` <
+  `usable_ram_start`, so the image is in the order this section claims it is.
+- `__bss_start` and `usable_ram_start` are page-aligned.
+- `boot_stack_run_bottom` is 32768-aligned. That is what makes bit 14 of an
+  address say which half of a stack region it is in, which the generated
+  exception entries depend on -- see "Kernel stacks" below.
 
 `stack_top` is an alias of `boot_stack_top`, kept because `entry.S` names
 it. `percpu_stack_end` and `usable_ram_start` are the same address:
 `.stack` ends where the page pool begins, and it is already page-aligned.
 
-GitHub issue #477: the rows from `percpu_stack_base` to
-`percpu_stack_group_end` are core 0's PER-CORE stack group, and
-`secondary_percpu_stack_base` is core 1's copy of the same shape one
-stride later. The named symbols are core 0's; each core's entry path puts
-its own byte offset into TPIDR_EL1, and the generated exception entries add
-it. The rows are what makes the stride checkable rather than assumed --
-`secondary_percpu_stack_base - percpu_stack_base` must equal
-`percpu_stack_group_end - percpu_stack_base`, and every run inside a group
-must stay 0x8000-aligned with its live half on top, which is what
-`stack_guard_shift`'s one-bit test depends on.
+The rows from `percpu_stack_base` to `percpu_stack_group_end` are core 0's
+PER-CORE stack group, and `secondary_percpu_stack_base` is core 1's copy of
+the same shape one stride later. The named symbols are core 0's; each core's
+entry path puts its own byte offset into TPIDR_EL1, and the generated
+exception entries add it.
 
 ### An address between `_start` and `usable_ram_start` is kernel image
 

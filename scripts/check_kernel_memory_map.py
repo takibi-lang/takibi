@@ -14,13 +14,35 @@ it can check are checked; the rows it cannot are required to say so, which
 is the other half of the same guarantee -- silence about which is which is
 the failure mode.
 
-Two tables are machine-checked, each introduced by an HTML comment marker:
+Four tables are machine-checked, each introduced by an HTML comment marker:
 
   <!-- checked: elf-symbols -->   symbol | RPi5 | QEMU | ... | State
       compared against `llvm-nm` output for both linked kernels.
 
+  <!-- checked: elf-offsets -->   symbol | offset | ... | State
+      the same comparison, against the symbol's distance from
+      OFFSET_ANCHOR rather than its address, in one column for both
+      platforms.  This is where most of the map lives, and why: an
+      absolute address for a symbol that sits above `.bss` moves on
+      almost every kernel commit, so recording twenty of them made this
+      document conflict between any two people working at once -- 73 of
+      the 76 commits that touched it moved a row.  Seventeen of those
+      rows were a fixed shape riding on a moving base; as offsets they
+      say the same thing and hold still.
+
+  <!-- checked: elf-ceiling -->   span | ceiling | State
+      the image must stay UNDER the recorded bound.  Not refreshed by
+      --update, deliberately: with the floating boundaries no longer
+      recorded, this is the row whose job is to make somebody look, and
+      it should only move when a person decides the growth is ordinary.
+
   <!-- checked: consts -->        constant | value | file | State
       compared against `const NAME: <ty> = <literal>;` in the named file.
+
+The boundaries that move every build -- __bss_start, __bss_end and the
+stack block's base -- have no row at all.  check_layout_invariants reads
+their ordering and alignment out of the build instead, so what those rows
+used to pin incidentally is still pinned, on purpose.
 
 Rows in those tables must be marked `CHECKED`.  A row that is not is a row
 claiming to be verified while nothing verifies it, which is worse than an
@@ -47,6 +69,19 @@ QEMU_HOLE_SECOND_START = 0x60000000
 # A firmware/DTB change should fail here and require an explicit fixture audit.
 RPI5_MANAGED_RAM_END = 0x3FC00000
 PAGE_SIZE = 4096
+# Every stack in this kernel is the upper half of a 32768-byte region aligned
+# to 32768, which is what lets bit 14 of an address say which half it is in
+# without loading a base. The block's own start has to hold that alignment or
+# the generated exception entries report an overflow on every exception taken
+# while standing on a stack.
+STACK_REGION_BYTES = 0x8000
+STACK_GUARD_SHIFT = 14
+# Every offset row is measured from here, and the row for it must say +0.
+OFFSET_ANCHOR = "boot_stack_run_bottom"
+# The floating boundaries carry no row of their own; these are what still
+# holds them, read from the build rather than from the document.
+ORDERED_BOUNDARIES = ("_start", "__bss_start", "__bss_end", OFFSET_ANCHOR,
+                      "usable_ram_start")
 NM_CANDIDATES = ["llvm-nm-19", "llvm-nm", "nm"]
 
 
@@ -156,12 +191,29 @@ def update_elf_symbols(text):
                 set(c) <= set("-: ") for c in stripped.strip("|").split("|")):
             cells = [c.strip() for c in stripped.strip("|").split("|")]
             name = unbacktick(cells[0])
+            known = all(name in symbols[p] for p in ELFS)
+            rewritten = None
             if (len(cells) >= 3 and any("CHECKED (ELF)" in c for c in cells)
-                    and name in symbols["RPi5"] and name in symbols["QEMU"]):
+                    and known):
                 cells[1] = f"`0x{symbols['RPi5'][name]:08x}`"
                 cells[2] = f"`0x{symbols['QEMU'][name]:08x}`"
+                rewritten = cells
+            elif (len(cells) >= 2
+                    and any("CHECKED (ELF offset)" in c for c in cells)
+                    and known):
+                offsets = {symbols[p][name] - symbols[p][OFFSET_ANCHOR]
+                           for p in ELFS}
+                # Two platforms that no longer share the offset cannot be
+                # stated in one column at all, so there is nothing to write.
+                # Leaving the row is what makes the check say so.
+                if len(offsets) == 1:
+                    cells[1] = f"`+0x{offsets.pop():05x}`"
+                    rewritten = cells
+            # A CHECKED (ELF ceiling) row is never rewritten: it is the one
+            # row that exists to be decided rather than derived.
+            if rewritten is not None:
                 indent = line[:len(line) - len(line.lstrip())]
-                line = indent + "| " + " | ".join(cells) + " |\n"
+                line = indent + "| " + " | ".join(rewritten) + " |\n"
         out.append(line)
     return "".join(out)
 
@@ -186,6 +238,117 @@ def check_elf_symbols(text, problems):
                 problems.append(
                     f"`{symbol}` on {platform}: document says 0x{documented:08x}, "
                     f"build says 0x{actual:08x}")
+
+
+def check_elf_offsets(text, problems):
+    """The stack block, stated once as a shape instead of twice as addresses."""
+    marker = "<!-- checked: elf-offsets -->"
+    symbols = {name: nm_symbols(elf) for name, elf in ELFS.items()}
+    for platform in ELFS:
+        if OFFSET_ANCHOR not in symbols[platform]:
+            fail(f"{OFFSET_ANCHOR}, which every offset row is measured from, "
+                 f"is absent from the {platform} build")
+    rows = table_after(text, marker, "CHECKED (ELF offset)")
+    anchor_row = unbacktick(rows[0][0])
+    if anchor_row != OFFSET_ANCHOR:
+        fail(f"the `{marker}` table must open with `{OFFSET_ANCHOR}`, the "
+             f"anchor its offsets are measured from; it opens with "
+             f"`{anchor_row}`")
+    for cells in rows:
+        if len(cells) < 2:
+            fail(f"malformed row in the `{marker}` table: {cells}")
+        symbol = unbacktick(cells[0])
+        check_state(cells, marker, symbol)
+        documented = parse_int(cells[1])
+        if documented is None:
+            fail(f"`{symbol}`'s offset cell is not a number: {cells[1]!r}")
+        actual = {}
+        for platform in ELFS:
+            if symbol not in symbols[platform]:
+                problems.append(f"`{symbol}` is documented but absent from "
+                                f"the {platform} build")
+                continue
+            actual[platform] = (symbols[platform][symbol]
+                                - symbols[platform][OFFSET_ANCHOR])
+        if len(set(actual.values())) > 1:
+            # The single column is a claim about both platforms. When it
+            # stops being true the answer is not a wider table by default:
+            # the linker scripts diverging here is a fact somebody has to
+            # decide about.
+            shown = ", ".join(f"{p} +0x{o:x}" for p, o in sorted(actual.items()))
+            problems.append(
+                f"`{symbol}` is at a different offset on each platform "
+                f"({shown}), so the shared-shape column can no longer state "
+                f"it -- decide whether the linker scripts should diverge here")
+            continue
+        for platform, offset in actual.items():
+            if offset != documented:
+                problems.append(
+                    f"`{symbol}` on {platform}: document says "
+                    f"{OFFSET_ANCHOR}+0x{documented:x}, build says "
+                    f"{OFFSET_ANCHOR}+0x{offset:x}")
+
+
+def check_image_ceiling(text, problems):
+    """A bound the image must stay under, and the row --update will not move."""
+    marker = "<!-- checked: elf-ceiling -->"
+    symbols = {name: nm_symbols(elf) for name, elf in ELFS.items()}
+    rows = table_after(text, marker, "CHECKED (ELF ceiling)")
+    if len(rows) != 1:
+        fail(f"the `{marker}` table must hold exactly one row, the image "
+             f"ceiling; it holds {len(rows)}")
+    cells = rows[0]
+    if len(cells) < 2:
+        fail(f"malformed row in the `{marker}` table: {cells}")
+    check_state(cells, marker, "the image ceiling")
+    ceiling = parse_int(cells[1])
+    if ceiling is None:
+        fail(f"the image ceiling is not a number: {cells[1]!r}")
+    for platform in ELFS:
+        for symbol in ("_start", "usable_ram_start"):
+            if symbol not in symbols[platform]:
+                fail(f"{symbol} is absent from the {platform} build")
+        size = (symbols[platform]["usable_ram_start"]
+                - symbols[platform]["_start"])
+        if size >= ceiling:
+            problems.append(
+                f"{platform}: the kernel image is 0x{size:x} bytes "
+                f"({size / 1048576:.2f} MiB) and reached the recorded ceiling "
+                f"of 0x{ceiling:x} ({ceiling / 1048576:.2f} MiB). This is the "
+                f"row --update will not raise for you: ordinary growth is "
+                f"expected to arrive here eventually, so decide that it is "
+                f"ordinary, then raise it by hand")
+
+
+def check_layout_invariants(problems):
+    """What holds the boundaries whose absolute address is not recorded.
+
+    Dropping their rows is what stopped this document conflicting on every
+    kernel commit (see its own "Physical layout" section). It is only a
+    trade rather than a loss because the properties those rows used to pin
+    incidentally are pinned here on purpose.
+    """
+    symbols = {name: nm_symbols(elf) for name, elf in ELFS.items()}
+    for platform in ELFS:
+        found = symbols[platform]
+        missing = [s for s in ORDERED_BOUNDARIES if s not in found]
+        if missing:
+            fail(f"the {platform} build is missing {', '.join(missing)}")
+        values = [found[s] for s in ORDERED_BOUNDARIES]
+        if not (values[0] < values[1] <= values[2] <= values[3] < values[4]):
+            shown = ", ".join(f"{s} 0x{found[s]:x}" for s in ORDERED_BOUNDARIES)
+            problems.append(f"{platform}: the image is out of order -- {shown}")
+        for symbol in ("__bss_start", "usable_ram_start"):
+            if found[symbol] % PAGE_SIZE != 0:
+                problems.append(
+                    f"{platform}: {symbol} 0x{found[symbol]:x} is not "
+                    f"page-aligned")
+        if found[OFFSET_ANCHOR] % STACK_REGION_BYTES != 0:
+            problems.append(
+                f"{platform}: {OFFSET_ANCHOR} 0x{found[OFFSET_ANCHOR]:x} is "
+                f"not 0x{STACK_REGION_BYTES:x}-aligned, so bit "
+                f"{STACK_GUARD_SHIFT} no longer says which half of a stack "
+                f"region an address is in")
 
 
 def check_consts(text, problems):
@@ -326,6 +489,9 @@ def main():
         text = updated
     problems = []
     check_elf_symbols(text, problems)
+    check_elf_offsets(text, problems)
+    check_image_ceiling(text, problems)
+    check_layout_invariants(problems)
     check_consts(text, problems)
     check_allocator_expectations(problems, "--debug" in sys.argv[1:])
     if problems:
@@ -347,6 +513,10 @@ def main():
               "growth ahead of it, a section that GREW is new state. Then "
               "refresh the rows with:", file=sys.stderr)
         print("      python3 scripts/check_kernel_memory_map.py --update",
+              file=sys.stderr)
+        print("  That refreshes every checked row except the image ceiling, "
+              "which is left for you on purpose: reaching it is the one "
+              "layout event this document still asks a person to look at.",
               file=sys.stderr)
         fail(f"{len(problems)} row(s) disagree with the build")
     suffix = ", including the debug image" if "--debug" in sys.argv[1:] else ""
