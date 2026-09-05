@@ -1214,7 +1214,7 @@ allcheck:
 # produces a final, unmistakable allcheck failure receipt after Make has
 # waited for the other scheduled jobs.
 ifneq (,$(filter allcheck,$(MAKECMDGOALS)))
-$(info [allcheck] includes: langcheck, compiler unit tests, linux_user, QEMU integration, QEMU debug integration, QEMU oops, QEMU DDB, QEMU stack overflow, QEMU lifecycle gap, QEMU allocation rollback, and RPi5 integration)
+$(info [allcheck] includes: langcheck, compiler unit tests, linux_user, QEMU integration, QEMU debug integration, QEMU oops, QEMU DDB (UART BREAK and software BRK), QEMU stack overflow, QEMU lifecycle gap, QEMU allocation rollback, and RPi5 integration -- which is TWO board loads, the view suite and then the software-BRK DDB pass, so the board is held past the "41 views, one boot" line)
 endif
 
 ## allbuild: a fast, no-execution/no-hardware smoke gate across all three
