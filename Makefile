@@ -1127,8 +1127,13 @@ KERNEL_QEMU_DEBUG_REPEAT ?= 5
 kernelcheck-qemu-debug-repeat: kernelbuild-check
 	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-qemu-debug-repeat
 
+## Pinned to check mode. scripts/run_lane.sh reads this target's exit
+## status as a verdict, and repeat_kernel_lane.sh's measure mode
+## reports a failure RATE and still exits 0 -- which would make the
+## lane's PASS receipt say every step passed when some did not.
+## Measurement is run by calling that script directly.
 _kernelcheck-qemu-debug-repeat:
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_DEBUG_REPEAT="$(KERNEL_QEMU_DEBUG_REPEAT)" bash scripts/repeat_kernel_qemu_debug_check.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_DEBUG_REPEAT="$(KERNEL_QEMU_DEBUG_REPEAT)" KERNEL_QEMU_DEBUG_REPEAT_MODE=check bash scripts/repeat_kernel_qemu_debug_check.sh
 
 kernelcheck-qemu-debug-ash: kernelbuild-check
 	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-qemu-debug-ash

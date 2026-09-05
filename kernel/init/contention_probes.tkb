@@ -29,7 +29,7 @@ use "kernel/kernel/schedule_contention_evidence.tkb";
 use "kernel/kernel/occupancy_drain_evidence.tkb";
 use "kernel/kernel/pool_walk_contention_evidence.tkb";
 
-fn contention_probes() !{allocates, unsafe} {
+fn contention_probes() !{unsafe} {
     // GitHub issue #445: the first evidence that this kernel's
     // spinlock EXCLUDES. Everything before it was single-threaded
     // exercise and an instruction-level check.

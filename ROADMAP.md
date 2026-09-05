@@ -452,7 +452,11 @@ Read `kernel/CONCURRENCY.md` before adding a lock, a probe, or a pooled read.
 The threads above are not equally urgent, and one of them is the only DEFECT
 among them.
 
-1. **#488's exit-path reorder, first.** Everything else here is a design step;
+1. **#488 -- DONE 2026-09-04, closed.** Its exit-path reorder was the
+   first item here and is no longer pending; the queue in "Work split
+   between two agents" above starts from what remains. The reasoning
+   is kept because the rest of this section refers to it:
+   Everything else here is a design step;
    this is a use-after-free the kernel performs 26 times per boot today. It is
    also the one item that gets WORSE rather than merely staying broken when a
    second core runs a process, because the window between the reap and the
