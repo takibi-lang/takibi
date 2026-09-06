@@ -20,9 +20,12 @@ use "kernel/lib/execution_model.tkb";
 // munmap scope, signal delivery, scatter/gather I/O coverage, ppoll
 // shape, and more); this note only covers what is specific to THIS
 // file's own dispatch mechanics, not every syscall it implements.
-// - NOT SYNCHRONIZED, single-core dispatch only -- every syscall handler
-//   here assumes it runs to completion on core 0 with no concurrent
-//   dispatch from another core.
+// - EPHEMERAL SCRATCH IS PER CORE, so independent handlers on two cores do
+//   not overwrite each other's file/path/sockaddr/uname/rlimit staging.
+//   Persistent exec handoff, init logging and inetd mode are still globals
+//   even though they describe one process; they must move into ProcessRecord
+//   before dispatch can be concurrent. Non-preemptible syscall execution is
+//   what keeps two processes on one core from interleaving through them now.
 // - Every fixed-capacity pool a syscall handler here allocates from
 //   (process slots, fd table, shared objects, TCP connections, address
 //   spaces) is documented once, authoritatively, in
@@ -196,12 +199,35 @@ const POLL_MAX: usize = 1024;
 
 private let mut syscall_ext2_mount: Ext2Mount;
 private let mut syscall_ext2_ready: bool;
-// A bounded one-block staging area, not a whole-file cache. ext2 reads fill
-// it one block at a time and read(2)/readv(2)/sendfile(2) stream each chunk
-// onward, so its size does not limit the file size userspace can consume.
-private let mut syscall_file_buffer: [u8; KERNEL_BLOCK_SIZE];
-private let mut syscall_path_buffer: [u8; 256];
-private let mut syscall_sockaddr_buffer: [u8; 28];
+// Scratch that lives only for one non-preemptible syscall invocation. Per
+// core rather than global: two cores may dispatch concurrently, but one core
+// cannot enter a second handler until the current one returns while
+// KERNEL_PREEMPTIBLE is zero. The file buffer is a bounded one-block staging
+// area, not a whole-file cache; read/readv/sendfile stream each chunk onward,
+// so its size does not limit the file size userspace can consume.
+struct SyscallScratch {
+    file_buffer: [u8; KERNEL_BLOCK_SIZE];
+    path_buffer: [u8; 256];
+    sockaddr_buffer: [u8; 28];
+    // Headroom over sizeof(Utsname) (390 bytes), since array declarations
+    // cannot use sizeof directly.
+    uname_buffer: [u8; 512];
+    // Two struct rlimit64 values. User memory is never accessed in place.
+    rlimit_buffer: [u8; 16];
+}
+
+private let mut syscall_scratch: [SyscallScratch; KERNEL_MAX_CORES];
+
+private fn syscall_scratch_here() -> *SyscallScratch {
+    // Takibi cannot take &array[index] yet (issue #385), so use the same
+    // bounded array-decay pattern as process.tkb's execution_here(). A
+    // hardware affinity outside KERNEL_MAX_CORES falls back to slot zero;
+    // such a core is not active and must never reach syscall dispatch.
+    let base: *SyscallScratch = syscall_scratch;
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) { return base; }
+    return base + (core as isize);
+}
 // GitHub issue #257: connection_open, socket_buffer_length/_offset and
 // inetd_response_length used to be four more [T; TCP_CONNECTION_MAX]
 // arrays here (step 2), and syscall_socket_buffer/syscall_inetd_response
@@ -216,15 +242,6 @@ private let mut syscall_sockaddr_buffer: [u8; 28];
 // anything here. Those go when step 5 makes a connection's identity an
 // address.
 private let mut syscall_inetd_mode: bool;
-
-// Issue #196: scratch buffer for uname(2)'s struct utsname reply, sized
-// with headroom over sizeof(Utsname) (390 bytes) since array declarations
-// can't use sizeof(...) directly (SPEC.md).
-private let mut syscall_uname_buffer: [u8; 512];
-// GitHub issue #393: scratch for prlimit64(2)'s two struct rlimit64
-// values, the same shape as the uname and sockaddr buffers above -- user
-// memory is never read or written in place.
-private let mut syscall_rlimit_buffer: [u8; 16];
 
 // struct rlimit64 is two little-endian u64s. Written a byte at a time
 // rather than through a pointer cast onto the buffer: the cast would be
@@ -1360,7 +1377,7 @@ fn kernel_syscall_partial_write_evidence() -> bool {
 // single root component is supported by this first generic lookup slice;
 // directory traversal and symlink resolution remain separate work.
 fn kernel_syscall_path_name(address: usize) -> SyscallPathResult {
-    let path_view: []u8 = syscall_path_buffer as []u8;
+    let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
     let mut length: usize = 0;
     let mut terminated: bool = false;
     for offset: usize in 0..<255 {
@@ -1456,7 +1473,7 @@ fn syscall_readv_segment(fd: usize, address: usize, length: usize)
         if (chunk_limit > KERNEL_BLOCK_SIZE) {
             chunk_limit = KERNEL_BLOCK_SIZE;
         }
-        let staging_buffer = syscall_file_buffer as []u8;
+        let staging_buffer = syscall_scratch_here().file_buffer as []u8;
         if (chunk_limit > staging_buffer.len) {
             return ReadSegmentResult::Errno(LINUX_EINVAL);
         }
@@ -1486,7 +1503,7 @@ fn syscall_readv_segment(fd: usize, address: usize, length: usize)
                     }
                     UserWriteRangeResult::Ok(range) => {
                         let copied_chunk: bool = copy_to_user_raw(
-                            range, syscall_file_buffer as *u8, chunk);
+                            range, syscall_scratch_here().file_buffer as *u8, chunk);
                     }
                 }
                 if (kernel_syscall_file_set_offset(
@@ -2026,7 +2043,7 @@ private fn syscall_syslog(action: usize, address: usize, requested: usize)
     while (copied < amount) {
         let mut chunk: usize = amount - copied;
         if (chunk > KERNEL_BLOCK_SIZE) { chunk = KERNEL_BLOCK_SIZE; }
-        let staging_buffer = syscall_file_buffer as []u8;
+        let staging_buffer = syscall_scratch_here().file_buffer as []u8;
         if (chunk > staging_buffer.len) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
@@ -2046,7 +2063,7 @@ private fn syscall_syslog(action: usize, address: usize, requested: usize)
             }
             UserWriteRangeResult::Ok(range) => {
                 let sent: bool = copy_to_user_raw(
-                    range, syscall_file_buffer as *u8, chunk);
+                    range, syscall_scratch_here().file_buffer as *u8, chunk);
                 if (sent == false) {
                     return SyscallAction::Resume(LINUX_EFAULT);
                 }
@@ -2469,7 +2486,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 length > KERNEL_BLOCK_SIZE) {
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
-            let destination_base: *u8 = syscall_file_buffer as *u8;
+            let destination_base: *u8 = syscall_scratch_here().file_buffer as *u8;
             match user_range_check_read(kernel_process_current_root(), address, length) {
                 UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserReadRangeResult::Ok(range) => {
@@ -2477,7 +2494,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         copy_from_user_raw(range, destination_base, length);
                 }
             }
-            let content_buffer = syscall_file_buffer as []u8;
+            let content_buffer = syscall_scratch_here().file_buffer as []u8;
             if (length > content_buffer.len) {
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
@@ -2541,7 +2558,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 return kernel_syscall_procfs_open(node, fd);
             }
         }
-        let path_view: []u8 = syscall_path_buffer as []u8;
+        let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
         let mut lookup_inode: usize = 2;
         if (path_view[0] != 0x2F && x0 != LINUX_AT_FDCWD) {
             if (kernel_syscall_directory_is_open(x0) == false) {
@@ -2677,7 +2694,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     match ext2_read_directory_chunk(
                             syscall_ext2_mount, inode_number,
                             directory_offset,
-                            syscall_file_buffer as []u8) {
+                            syscall_scratch_here().file_buffer as []u8) {
                         Ext2ReadResult::Invalid => {
                             if (written != 0) {
                                 return SyscallAction::Resume(written);
@@ -2701,7 +2718,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                     return SyscallAction::Resume(LINUX_EINVAL);
                                 }
                                 let entry: *u8 =
-                                    (syscall_file_buffer as *u8) +
+                                    (syscall_scratch_here().file_buffer as *u8) +
                                     (cursor as isize);
                                 let entry_inode: usize =
                                     ext2_u32(entry, 0) as usize;
@@ -2786,7 +2803,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
             SyscallPathResult::Name(path) => { path }
         };
-        let path_view: []u8 = syscall_path_buffer as []u8;
+        let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
         let mut lookup_inode: usize = 2;
         if (path_view[0] != 0x2F && x0 != LINUX_AT_FDCWD) {
             if (kernel_syscall_directory_is_open(x0) == false) {
@@ -2836,7 +2853,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 }
             }
         }
-        let path_view: []u8 = syscall_path_buffer as []u8;
+        let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
         let mut lookup_inode: usize = 2;
         if (path_view[0] != 0x2F && x0 != LINUX_AT_FDCWD) {
             if (kernel_syscall_directory_is_open(x0) == false) {
@@ -3026,7 +3043,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         let opened_inode: usize = kernel_syscall_file_inode(fd);
         if (procfs_inode_is_ours(opened_inode)) {
             let staging_buffer: []u8 =
-                syscall_file_buffer as []u8;
+                syscall_scratch_here().file_buffer as []u8;
             let total: usize = procfs_render_file(opened_inode,
                                                   staging_buffer);
             let offset: usize = kernel_syscall_file_offset(fd);
@@ -3041,7 +3058,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     return SyscallAction::Resume(LINUX_EFAULT);
                 }
                 UserWriteRangeResult::Ok(range) => {
-                    let source: *u8 = (syscall_file_buffer as *u8) +
+                    let source: *u8 = (syscall_scratch_here().file_buffer as *u8) +
                         (offset as isize);
                     copy_to_user_raw(range, source, amount);
                 }
@@ -3061,7 +3078,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             if (chunk_limit > KERNEL_BLOCK_SIZE) {
                 chunk_limit = KERNEL_BLOCK_SIZE;
             }
-            let staging_buffer = syscall_file_buffer as []u8;
+            let staging_buffer = syscall_scratch_here().file_buffer as []u8;
             if (chunk_limit > staging_buffer.len) {
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
@@ -3096,7 +3113,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         }
                         UserWriteRangeResult::Ok(range) => {
                             let copied_chunk: bool = copy_to_user_raw(
-                                range, syscall_file_buffer as *u8, chunk);
+                                range, syscall_scratch_here().file_buffer as *u8, chunk);
                         }
                     }
                     if (kernel_syscall_file_set_offset(
@@ -3300,10 +3317,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserReadRangeResult::Ok(range) => {
                 let copied: bool = copy_from_user_raw(
-                    range, syscall_sockaddr_buffer as *u8, sockaddr_len);
+                    range, syscall_scratch_here().sockaddr_buffer as *u8, sockaddr_len);
             }
         }
-        let address: []u8 = syscall_sockaddr_buffer as []u8;
+        let address: []u8 = syscall_scratch_here().sockaddr_buffer as []u8;
         if (address[0] == 2 && address[1] == 0) {
             if (address[4] != 0 || address[5] != 0 ||
                 address[6] != 0 || address[7] != 0) {
@@ -3569,7 +3586,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             if (chunk_limit > KERNEL_BLOCK_SIZE) {
                 chunk_limit = KERNEL_BLOCK_SIZE;
             }
-            let staging_buffer = syscall_file_buffer as []u8;
+            let staging_buffer = syscall_scratch_here().file_buffer as []u8;
             if (chunk_limit > staging_buffer.len) {
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
@@ -3584,7 +3601,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 }
                 Ext2ReadResult::Read(chunk) => {
                     if (chunk == 0) { return SyscallAction::Resume(copied); }
-                    let source: *u8 = syscall_file_buffer as *u8;
+                    let source: *u8 = syscall_scratch_here().file_buffer as *u8;
                     let mut copy_index: usize = 0;
                     while (copy_index < chunk) {
                         uart_putc(source[copy_index as isize]);
@@ -3715,7 +3732,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             SyscallPathResult::Name(path) => { path }
         };
         let mut path_length: usize = exec_lookup_name.len;
-        let path_view: []u8 = syscall_path_buffer as []u8;
+        let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
         if (path_view[0] == 0x2F) { path_length = path_length + 1; }
         if (path_length == 0 || argv_address == 0) { return SyscallAction::Resume(LINUX_EINVAL); }
         let exec_path_absolute: bool = path_view[0] == 0x2F;
@@ -4093,7 +4110,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         match user_range_check_read(kernel_process_current_root(), x0, 2) {
             UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserReadRangeResult::Ok(range) => {
-                let path_view: []u8 = syscall_path_buffer as []u8;
+                let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
                 if (copy_from_user(range, path_view[0..<2]) &&
                         (path_view[0] == 0x2F || path_view[0] == 0x2E) &&
                         path_view[1] == 0) {
@@ -4572,7 +4589,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     return SyscallAction::Resume(LINUX_EFAULT);
                 }
                 UserWriteRangeResult::Ok(range) => {
-                    let old_bytes = syscall_rlimit_buffer as []u8;
+                    let old_bytes = syscall_scratch_here().rlimit_buffer as []u8;
                     syscall_rlimit_store(old_bytes[0..<8], soft);
                     syscall_rlimit_store(old_bytes[8..<16], hard);
                     let reported: []u8 = old_bytes[0..<16];
@@ -4588,10 +4605,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
             UserReadRangeResult::Ok(range) => {
                 let copied: bool = copy_from_user_raw(
-                    range, syscall_rlimit_buffer as *u8, sizeof(usize) * 2);
+                    range, syscall_scratch_here().rlimit_buffer as *u8, sizeof(usize) * 2);
             }
         }
-        let new_bytes = syscall_rlimit_buffer as []u8;
+        let new_bytes = syscall_scratch_here().rlimit_buffer as []u8;
         let new_soft: usize = syscall_rlimit_load(new_bytes[0..<8]);
         let new_hard: usize = syscall_rlimit_load(new_bytes[8..<16]);
         if (new_soft > new_hard) { return SyscallAction::Resume(LINUX_EINVAL); }
@@ -4613,9 +4630,9 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         match user_range_check_write(kernel_process_current_root(), x0, sizeof(Utsname)) {
             UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserWriteRangeResult::Ok(range) => {
-                let uname_bytes = syscall_uname_buffer as []u8;
+                let uname_bytes = syscall_scratch_here().uname_buffer as []u8;
                 for zero_index: usize in 0..<sizeof(Utsname) {
-                    syscall_uname_buffer[zero_index] = 0;
+                    syscall_scratch_here().uname_buffer[zero_index] = 0;
                 }
                 uname_write_field(uname_bytes[
                                       offsetof(Utsname, sysname)..<
@@ -4736,18 +4753,18 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
     }
 }
 
-// GitHub issue #453. This file's own header says it: "every syscall
-// handler here assumes it runs to completion on core 0 with no concurrent
-// dispatch from another core." Both halves of that are numbers now.
+// GitHub issue #453. The large ephemeral buffers are per-core now; they no
+// longer justify serialising every handler in the machine. What remains is
+// persistent state with the wrong ownership axis: exec_pending/path/argv,
+// init_signal_wait_logged and inetd_mode describe the current PROCESS but
+// are stored once for the whole kernel.
 //
-// The core count is the obvious one. The preemption number is the one
-// that is easy to lose: a timer interrupt DOES arrive inside a syscall
-// today -- interrupts are unmasked on EL0 entry -- and what keeps two
-// processes from interleaving inside a handler is that the switch is
-// deferred to kernel_process_syscall_return_schedule. Enable kernel
-// preemption and every handler in this file becomes re-entrant with
-// respect to a second process, on one core, with no other change.
+// Both execution-model numbers expose that mistake. A second active core can
+// execute another process concurrently. On one core a timer interrupt already
+// arrives inside a syscall -- interrupts are unmasked on EL0 entry -- but the
+// switch is deferred to kernel_process_syscall_return_schedule. Enabling
+// kernel preemption would interleave a second process through the same globals.
 fn syscall_execution_model_assumption() {
     static_assert(KERNEL_ACTIVE_CORES == 1 && KERNEL_PREEMPTIBLE == 0,
-                  "every syscall handler here assumes it runs to completion with no second dispatch; enabling either number makes them re-entrant");
+                  "exec handoff, init logging and inetd mode are process state stored in syscall globals");
 }
