@@ -84,7 +84,7 @@ enum ProcessWaitReason: u8 {
 
 // GitHub issue #392: declared here, with the rest of a process's
 // lifecycle state, rather than in kernel/kernel/syscall.tkb where the
-// logic that uses them lives. Both were `[T; KERNEL_PROCESS_MAX]` arrays
+// logic that uses them lives. They were `[T; KERNEL_PROCESS_MAX]` arrays
 // keyed by process slot -- the last two of those outside this file -- and
 // a field of ProcessRecord cannot name a type declared in a file parsed
 // after this one. The concepts already belonged next to
@@ -98,7 +98,6 @@ enum UartBlockDelivery: u8 { Scalar; Read; }
 // handler reaps that child before switching execution to its parent.
 struct CloneFileState {
     file_state_live: bool;
-    parent_inetd_mode: bool;
 }
 
 // GitHub issue #392: KERNEL_PROCESS_MAX is GONE. It was 16 -- "a generous
@@ -260,6 +259,12 @@ struct ProcessRecord {
     // still owns every decision made with it.
     uart_block_delivery: UartBlockDelivery;
     clone_file_state: CloneFileState;
+    // Syscall policy belonging to this process. These used to be machine
+    // globals in syscall.tkb, with clone saving the parent's inetd flag and
+    // child exit restoring it. Keeping the value on each record makes that
+    // save/restore unnecessary and preserves it across future core migration.
+    inetd_mode: bool;
+    init_signal_wait_logged: bool;
     // GitHub issue #392 stage 1: the run backing this slot's kernel
     // stack, as its base physical address (0 = never backed). It was a
     // parallel [usize; KERNEL_PROCESS_MAX] beside this array, indexed in
@@ -938,9 +943,9 @@ fn scheduled_process_wait_reason_of(handle: ProcessHandle) -> ProcessWaitReason
     return scheduled_process_record_of(handle).wait_reason;
 }
 
-// GitHub issue #392: kernel/kernel/syscall.tkb's two per-process values,
-// asked for by slot. Out of range answers with the same default a fresh
-// record has, so a caller that cannot name a process is never handed
+// GitHub issue #392 and the multicore follow-up: syscall.tkb's per-process
+// values, asked for by slot. Out of range answers with the same default a
+// fresh record has, so a caller that cannot name a process is never handed
 // another process's state.
 fn scheduled_process_uart_block_delivery(slot: usize) -> UartBlockDelivery {
     return scheduled_process_record_at(slot).uart_block_delivery;
@@ -961,6 +966,22 @@ fn scheduled_process_set_clone_file_state(slot: usize,
     scheduled_process_record_at(slot).clone_file_state = state;
 }
 
+fn scheduled_process_inetd_mode(slot: usize) -> bool {
+    return scheduled_process_record_at(slot).inetd_mode;
+}
+
+fn scheduled_process_set_inetd_mode(slot: usize, enabled: bool) {
+    scheduled_process_record_at(slot).inetd_mode = enabled;
+}
+
+fn scheduled_process_init_signal_wait_logged(slot: usize) -> bool {
+    return scheduled_process_record_at(slot).init_signal_wait_logged;
+}
+
+fn scheduled_process_set_init_signal_wait_logged(slot: usize, logged: bool) {
+    scheduled_process_record_at(slot).init_signal_wait_logged = logged;
+}
+
 // The same reset applied to every live process, for
 // kernel_syscall_process_configure -- a whole-world reset that can run
 // while processes already exist. It walks rather than sweeping an index
@@ -979,14 +1000,16 @@ fn scheduled_process_reset_syscall_state_everywhere() !{unsafe} {
     }
 }
 
-// The fresh value of both, in one place, so a slot handed out again does
-// not inherit the previous occupant's blocking or clone bookkeeping.
+// Fresh syscall-owned process state in one place, so a slot handed out again
+// does not inherit the previous occupant's blocking, clone, or policy state.
 private fn scheduled_process_record_reset_syscall_state(slot: usize)
         !{unsafe} {
     scheduled_process_set_uart_block_delivery(slot,
                                               UartBlockDelivery::Scalar);
-    let mut fresh: CloneFileState = { false, false };
+    let mut fresh: CloneFileState = { false };
     scheduled_process_set_clone_file_state(slot, fresh);
+    scheduled_process_set_inetd_mode(slot, false);
+    scheduled_process_set_init_signal_wait_logged(slot, false);
 }
 
 // GitHub issue #392: both directions between a pid and a slot, asked

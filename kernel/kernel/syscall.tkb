@@ -22,10 +22,11 @@ use "kernel/lib/execution_model.tkb";
 // file's own dispatch mechanics, not every syscall it implements.
 // - EPHEMERAL SCRATCH IS PER CORE, so independent handlers on two cores do
 //   not overwrite each other's file/path/sockaddr/uname/rlimit staging.
-//   Persistent exec handoff, init logging and inetd mode are still globals
-//   even though they describe one process; they must move into ProcessRecord
-//   before dispatch can be concurrent. Non-preemptible syscall execution is
-//   what keeps two processes on one core from interleaving through them now.
+//   Persistent inetd mode and the init logging latch live in ProcessRecord.
+//   Exec handoff is still global even though it describes one process; it
+//   must move to process-owned storage before dispatch can be concurrent.
+//   Non-preemptible syscall execution is what keeps two processes on one core
+//   from interleaving through it now.
 // - Every fixed-capacity pool a syscall handler here allocates from
 //   (process slots, fd table, shared objects, TCP connections, address
 //   spaces) is documented once, authoritatively, in
@@ -241,7 +242,6 @@ private fn syscall_scratch_here() -> *SyscallScratch {
 // reset every connection -- proofs about an index, not the size of
 // anything here. Those go when step 5 makes a connection's identity an
 // address.
-private let mut syscall_inetd_mode: bool;
 
 // struct rlimit64 is two little-endian u64s. Written a byte at a time
 // rather than through a pointer cast onto the buffer: the cast would be
@@ -265,13 +265,12 @@ must_use variant KernelInetdAcceptResult { TimedOut; Accepted; }
 
 // GitHub issue #392: CloneFileState and UartBlockDelivery, and the two
 // `[T; KERNEL_PROCESS_MAX]` arrays that held them, are gone from this
-// file. Both were keyed by process slot, which is a key that stops
+// file. The original two were keyed by process slot, which is a key that stops
 // existing when the process table becomes a pool; the values are fields
 // of ProcessRecord now, reached through
 // scheduled_process_clone_file_state()/_uart_block_delivery() and their
 // setters. Every decision made with them is still made here.
 private let mut syscall_exec_pending: bool;
-private let mut syscall_init_signal_wait_logged: bool;
 private let mut syscall_exec_argc: usize;
 private let mut syscall_exec_argv: [u8; 512];
 private let mut syscall_exec_path: [u8; 256];
@@ -303,7 +302,7 @@ fn kernel_syscall_daemon_start() {
     // -- there is no fixed set of slots left to put back into a clean
     // state.
     tcp_connection_pool_init();
-    syscall_inetd_mode = false;
+    kernel_syscall_set_inetd_mode(false);
     syscall_test_lifecycle_daemon_reset();
 }
 
@@ -311,6 +310,14 @@ fn kernel_syscall_exec_pending() -> bool { return syscall_exec_pending; }
 fn kernel_syscall_exec_argc() -> usize { return syscall_exec_argc; }
 fn kernel_syscall_exec_argv() -> []u8 { return syscall_exec_argv as []u8; }
 fn kernel_syscall_exec_clear() { syscall_exec_pending = false; }
+
+private fn kernel_syscall_inetd_mode() -> bool {
+    return scheduled_process_inetd_mode(kernel_syscall_process_slot());
+}
+
+private fn kernel_syscall_set_inetd_mode(enabled: bool) {
+    scheduled_process_set_inetd_mode(kernel_syscall_process_slot(), enabled);
+}
 
 // execve's pathname is distinct from argv[0]. Preserve it for generic image
 // source selection; userspace remains free to choose a different argv[0].
@@ -909,17 +916,16 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize)
     syscall_test_evidence_reset_file_counters();
     syscall_test_evidence_reset_read_uart_waits();
     syscall_exec_pending = false;
-    syscall_init_signal_wait_logged = false;
     syscall_exec_argc = 0;
     syscall_test_lifecycle_persistent_shell_clear();
     scheduled_process_reset_syscall_state_everywhere();
     for path_index: usize in 0..<256 { syscall_exec_path[path_index] = 0; }
     tcp_connection_pool_init();
     syscall_test_evidence_reset_socket_counters();
-    syscall_inetd_mode = false;
-    // Both of this file's per-process values are cleared above, in one
-    // walk over the live processes -- configure is a whole-world reset and
-    // can run while processes already exist, so it does not rely on
+    kernel_syscall_set_inetd_mode(false);
+    // This file's process-owned values are cleared above, in one walk over
+    // the live processes -- configure is a whole-world reset and can run
+    // while processes already exist, so it does not rely on
     // scheduled_process_alloc's own per-process reset.
 }
 
@@ -933,13 +939,13 @@ fn kernel_syscall_clone_files_begin(parent_slot: usize, child_slot: usize)
     if (scheduled_process_slot_valid(child_slot)) {
         match unified_fd_clone(parent_slot, child_slot) {
             UnifiedFdResult::Invalid => {
-                let mut failed: CloneFileState = { false, syscall_inetd_mode };
+                let mut failed: CloneFileState = { false };
                 scheduled_process_set_clone_file_state(child_slot, failed);
                 return UnifiedFdResult::Invalid;
             }
             UnifiedFdResult::Ok => {}
         }
-        let mut cloned: CloneFileState = { true, syscall_inetd_mode };
+        let mut cloned: CloneFileState = { true };
         scheduled_process_set_clone_file_state(child_slot, cloned);
         return UnifiedFdResult::Ok;
     }
@@ -1214,8 +1220,7 @@ fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
             UnifiedFdResult::Invalid => { return KernelFdReapResult::Failed; }
             UnifiedFdResult::Ok => {}
         }
-        syscall_inetd_mode = state.parent_inetd_mode;
-        let mut reaped: CloneFileState = { false, state.parent_inetd_mode };
+        let mut reaped: CloneFileState = { false };
         scheduled_process_set_clone_file_state(child_slot, reaped);
         return KernelFdReapResult::Reaped;
     }
@@ -1285,7 +1290,7 @@ fn kernel_syscall_inetd_accept(port: u16)
                                     // validates the address that replaced
                                     // it is the pool, on every use.
                                     tcp_connection_put(owner);
-                                        syscall_inetd_mode = true;
+                                        kernel_syscall_set_inetd_mode(true);
                                         tcp_connection_payload(slot).connection_open = true;
                                         match unified_connection_create(
                                                 kernel_syscall_process_slot(),
@@ -1720,9 +1725,10 @@ fn syscall_signal_wait(wait_set: usize, timeout_address: usize)
         kernel_process_current_arm_deadline(deadline, LINUX_EAGAIN);
     }
     kernel_process_current_prepare_signal_wait(wait_set);
+    let process_slot: usize = kernel_syscall_process_slot();
     if (kernel_process_current_pid() == 1 &&
-        syscall_init_signal_wait_logged == false) {
-        syscall_init_signal_wait_logged = true;
+        scheduled_process_init_signal_wait_logged(process_slot) == false) {
+        scheduled_process_set_init_signal_wait_logged(process_slot, true);
         kernel_boot_log(
             "signal: BusyBox init blocked in rt_sigtimedwait for SIGCHLD\n");
     }
@@ -2367,7 +2373,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         let address: usize = x1;
         let length: usize = x2;
         if (kernel_connected_fd_is_open(fd) &&
-            (fd != 1 || syscall_inetd_mode == false)) {
+            (fd != 1 || kernel_syscall_inetd_mode() == false)) {
             syscall_test_evidence_record_connected_write();
             if (kernel_connected_fd_is_open(fd) == false) {
                 return SyscallAction::Resume(LINUX_EBADF);
@@ -2450,7 +2456,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 }
             }
         }
-        if (fd == 1 && syscall_inetd_mode) {
+        if (fd == 1 && kernel_syscall_inetd_mode()) {
             let inetd_write_slot: usize =
                 match kernel_connection_fd_lookup(fd) {
                     KernelConnectionLookupResult::Missing => {
@@ -3627,7 +3633,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     if (number == 210) {
         // shutdown(1, SHUT_WR) is a connected stream's end-of-response
         // boundary. Its writes are transmitted independently of RX ownership.
-        if (x0 == 1 && syscall_inetd_mode == false &&
+        if (x0 == 1 && kernel_syscall_inetd_mode() == false &&
             kernel_connected_fd_is_open(1) && x1 == 1) {
             let direct_shutdown_slot: usize =
                 match kernel_connection_fd_lookup(1) {
@@ -3656,7 +3662,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 KernelConnectionLookupResult::Found(found) => { found }
             };
         let inetd_shutdown_generation: usize = kernel_connection_fd_identity(1);
-        if (x0 != 1 || syscall_inetd_mode == false ||
+        if (x0 != 1 || kernel_syscall_inetd_mode() == false ||
             tcp_connection_open_at(inetd_shutdown_slot) == false ||
             tcp_connection_payload(inetd_shutdown_slot).inetd_response_length == 0) {
             return SyscallAction::Resume(LINUX_EINVAL);
@@ -4755,9 +4761,10 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
 
 // GitHub issue #453. The large ephemeral buffers are per-core now; they no
 // longer justify serialising every handler in the machine. What remains is
-// persistent state with the wrong ownership axis: exec_pending/path/argv,
-// init_signal_wait_logged and inetd_mode describe the current PROCESS but
-// are stored once for the whole kernel.
+// persistent state with the wrong ownership axis: exec_pending/path/argv and
+// script staging describe the current PROCESS but are stored once for the
+// whole kernel. inetd mode and init's log latch have moved to ProcessRecord;
+// clone no longer saves a parent global for child exit to restore.
 //
 // Both execution-model numbers expose that mistake. A second active core can
 // execute another process concurrently. On one core a timer interrupt already
@@ -4766,5 +4773,5 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
 // kernel preemption would interleave a second process through the same globals.
 fn syscall_execution_model_assumption() {
     static_assert(KERNEL_ACTIVE_CORES == 1 && KERNEL_PREEMPTIBLE == 0,
-                  "exec handoff, init logging and inetd mode are process state stored in syscall globals");
+                  "exec handoff and script staging are process state stored in syscall globals");
 }
