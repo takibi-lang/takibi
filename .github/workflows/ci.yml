@@ -117,7 +117,12 @@ jobs:
         run: |
           eval $(opam env)
           echo "running with TAKIBI_JOBS=1 on $(nproc) cores"
-          TAKIBI_JOBS=1 make cicheck
+          # A four-core runner boots the guest slowly enough that the default
+          # 90s budget is a real constraint rather than a wide margin, and a
+          # guest cut off mid-boot reports as a lifecycle stall, which names
+          # the wrong thing. Widened here rather than everywhere: on a
+          # development host 90s is already several times what a boot takes.
+          TAKIBI_JOBS=1 KERNEL_QEMU_TIMEOUT=240 make cicheck
 
       # Printed, never gated. The unsafe-block and assembly counts are
       # supposed to be moving right now -- multicore work adds atomics -- so a

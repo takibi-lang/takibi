@@ -125,6 +125,7 @@ def main() -> int:
     parser.add_argument("--ash-only", action="store_true")
     parser.add_argument("--validate-ash", action="store_true")
     parser.add_argument("--interactive-httpd-listener-file")
+    parser.add_argument("--foreground-httpd-listener-file")
     parser.add_argument("--interactive-httpd-ready-file")
     parser.add_argument("--interactive-httpd-done-file")
     args = parser.parse_args()
@@ -144,6 +145,12 @@ def main() -> int:
         httpd_ready_file.unlink(missing_ok=True)
     if httpd_listener_file is not None:
         httpd_listener_file.unlink(missing_ok=True)
+    foreground_listener_file = (
+        Path(args.foreground_httpd_listener_file)
+        if args.foreground_httpd_listener_file else None)
+    foreground_listener_published = False
+    if foreground_listener_file is not None:
+        foreground_listener_file.unlink(missing_ok=True)
 
     commands = [line.rstrip("\n") for line in open(args.stdin, encoding="ascii")
                 if line.strip() and not line.startswith("#")]
@@ -217,6 +224,19 @@ def main() -> int:
                         args.payload_marker.encode("ascii") in output):
                     connection.write((args.payload + "\n").encode("ascii"))
                     payload_sent = True
+
+                # Publish the boot-time HTTP listener the moment the guest
+                # announces it. The host-side network peer talks to that
+                # server and used to race the boot to it, with no way to tell
+                # "not up yet" from "broken" (GitHub issue #56's first CI
+                # runs, where the peer failed at 24s on a four-core runner
+                # while the guest was still short of this line).
+                if (foreground_listener_file is not None
+                        and not foreground_listener_published
+                        and b"foreground server: listener ready port=8080\n"
+                        in output):
+                    foreground_listener_file.touch()
+                    foreground_listener_published = True
 
                 workload_seen = (
                     args.workload_marker is None or

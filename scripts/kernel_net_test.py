@@ -35,16 +35,30 @@ QEMU_HOST = "127.0.0.1"
 MODE_FLAGS = {"--fast"}
 RAW_ARGS = sys.argv[1:]
 FAST_MODE = "--fast" in RAW_ARGS
-INTERACTIVE_READY_FILE = None
-if "--interactive-ready-file" in RAW_ARGS:
-    ready_index = RAW_ARGS.index("--interactive-ready-file")
-    if ready_index + 1 >= len(RAW_ARGS):
-        raise SystemExit("--interactive-ready-file requires a path")
-    INTERACTIVE_READY_FILE = Path(RAW_ARGS[ready_index + 1])
+FILE_FLAGS = ("--interactive-ready-file", "--daemon-ready-file")
+
+
+def path_argument(flag):
+    if flag not in RAW_ARGS:
+        return None
+    index = RAW_ARGS.index(flag)
+    if index + 1 >= len(RAW_ARGS):
+        raise SystemExit(f"{flag} requires a path")
+    return Path(RAW_ARGS[index + 1])
+
+
+INTERACTIVE_READY_FILE = path_argument("--interactive-ready-file")
+# The UART driver touches this when the guest announces the HTTP listener the
+# first request phase below talks to. Without it that phase raced the boot: it
+# printed "waiting for HTTP daemon listener", drained stale frames until 0.25s
+# of quiet, and then made exactly one attempt per client port. On a fast
+# machine the guest was already serving; on a slower one it was not, and the
+# peer failed with no line saying why.
+DAEMON_READY_FILE = path_argument("--daemon-ready-file")
 POSITIONAL_ARGS = [
     arg for index, arg in enumerate(RAW_ARGS)
-    if arg not in MODE_FLAGS and arg != "--interactive-ready-file" and
-    not (index > 0 and RAW_ARGS[index - 1] == "--interactive-ready-file")
+    if arg not in MODE_FLAGS and arg not in FILE_FLAGS and
+    not (index > 0 and RAW_ARGS[index - 1] in FILE_FLAGS)
 ]
 QEMU_PORT = int(POSITIONAL_ARGS[0]) if len(POSITIONAL_ARGS) > 0 else 17771
 LOCAL_PORT = int(POSITIONAL_ARGS[1]) if len(POSITIONAL_ARGS) > 1 else 17772
@@ -648,6 +662,27 @@ def main() -> int:
                 del frame
             except socket.timeout:
                 break
+        # Then wait for the guest to say the listener exists, rather than
+        # assuming the drain above outlasted the boot. Waiting rather than
+        # retrying the request is deliberate: a completed connection makes
+        # the server fork, and `httpd server: foreground children=2` is an
+        # asserted view, so an extra attempt would change the verdict it
+        # reports.
+        if DAEMON_READY_FILE is not None:
+            # Shorter than any outer budget this runs under. The lane wraps
+            # this script in `timeout $KERNEL_QEMU_TIMEOUT`, which defaults to
+            # 90s, and a wait that outlasts it is killed with status 124 and
+            # says nothing -- the diagnostic below would never print, which is
+            # the whole point of having it.
+            deadline = time.monotonic() + 60.0
+            while (not DAEMON_READY_FILE.exists()
+                   and time.monotonic() < deadline):
+                time.sleep(0.1)
+            if not DAEMON_READY_FILE.exists():
+                print("  the guest never announced its HTTP listener, so "
+                      "there was nothing to request from")
+                sock.close()
+                return 1
         root_body = HTTP_ASSETS[0][1].read_bytes()
         http_ok = init_ok and all(
             http_request(sock, port, isn, "/", root_body, "text/html")

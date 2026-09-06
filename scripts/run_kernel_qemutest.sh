@@ -45,6 +45,9 @@ UART_LOG="$ARTIFACT_DIR/uart.log"
 UART_TIMING_LOG="$ARTIFACT_DIR/uart-timing.log"
 PEER_LOG="$ARTIFACT_DIR/net-peer.log"
 INTERACTIVE_HTTPD_LISTENER="$ARTIFACT_DIR/interactive-httpd.listener"
+# The boot-time HTTP listener, published by the UART driver when the guest
+# announces it, so the network peer waits for it instead of racing the boot.
+FOREGROUND_HTTPD_LISTENER="$ARTIFACT_DIR/foreground-httpd.listener"
 INTERACTIVE_HTTPD_READY="$ARTIFACT_DIR/interactive-httpd.ready"
 INTERACTIVE_HTTPD_DONE="$ARTIFACT_DIR/interactive-httpd.done"
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
@@ -134,6 +137,7 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --stdin "$ASH_DIR/ash.stdin" --expected "$ASH_DIR/ash.expected" \
     --timeout "$TIMEOUT_SECS" --stop-marker 'resources: pages=0' \
     --interactive-httpd-listener-file "$INTERACTIVE_HTTPD_LISTENER" \
+    --foreground-httpd-listener-file "$FOREGROUND_HTTPD_LISTENER" \
     --interactive-httpd-ready-file "$INTERACTIVE_HTTPD_READY" \
     --interactive-httpd-done-file "$INTERACTIVE_HTTPD_DONE" \
     --workload-marker 'workload: busy pair done' \
@@ -152,6 +156,7 @@ peer_status=0
 timeout "$TIMEOUT_SECS" python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" \
     "$NETDEV_LOCAL_PORT" "$NETDEV_REMOTE_PORT" \
     --interactive-ready-file "$INTERACTIVE_HTTPD_LISTENER" \
+    --daemon-ready-file "$FOREGROUND_HTTPD_LISTENER" \
     >"$PEER_LOG" 2>&1 || peer_status=$?
 sed 's/^/  /' "$PEER_LOG"
 if [ "$peer_status" -ne 0 ]; then
