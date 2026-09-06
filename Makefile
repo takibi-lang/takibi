@@ -205,6 +205,7 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 	@python3 scripts/test_check_pass_line_counts.py
 	@python3 scripts/check_stale_depfiles.py
 	@python3 scripts/check_single_dune_invocation.py
+	@python3 scripts/check_ci_opam_deps.py
 	@python3 scripts/check_compiler_sync_rules.py --quiet
 	@python3 scripts/check_raw_pos_fname.py
 	@python3 scripts/check_qemu_lane_ports.py

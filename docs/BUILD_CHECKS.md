@@ -6,6 +6,7 @@ than warns; do not bypass or weaken one merely to complete a change.
 | Check | Enforced invariant |
 | --- | --- |
 | `check_agents_paths.py` | paths named by root guidance resolve and this table names every check |
+| `check_ci_opam_deps.py` | every library the dune files name is installed by the CI workflow or provided by the compiler |
 | `check_compiler_sync_rules.py` | declared compiler counterpart changes stay synchronized |
 | `check_elf_symbol_alignment.py` | linked symbols meet hardware alignment requirements |
 | `check_no_conflict_markers.py` | no tracked file is left mid-merge, where a pattern-scanning check would answer about the half above the marker |

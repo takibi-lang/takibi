@@ -76,7 +76,8 @@ jobs:
             # the rest float, because pinning a version that later leaves the
             # opam repository breaks a build for a reason unrelated to the
             # change under test.
-            opam install -y dune menhir ppx_deriving alcotest bisect_ppx_ng
+            opam install -y dune dune-build-info menhir ppx_deriving \
+                            alcotest bisect_ppx_ng
             opam install -y llvm.19-static
           '
 
