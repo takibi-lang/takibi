@@ -6,8 +6,21 @@
 # their long-lived output is otherwise captured until the recipe exits.
 # `-Otarget` remains unsuitable here: it hides all progress until a long
 # recipe finishes.
+## TAKIBI_JOBS: how many things run at once. Defaults to every core, which is
+## right on a development host; override it where the cores are fewer than the
+## work wants.
+##
+## What makes this a knob rather than a constant: every QEMU lane runs
+## `-smp 2`, so N concurrent lanes ask for 2N guest vCPUs. GitHub issue #509
+## measured that concurrency alone is not the trigger -- twelve concurrent
+## lanes on a 24-core host all passed -- but CPU STARVATION is, and a starved
+## guest stops mid-boot, always at `linux socket: listener ready port=8080`,
+## and is then reported as an interactive-HTTPd lifecycle stall. Keeping
+## 2 * jobs at or under the core count avoids that condition rather than
+## discovering it.
+TAKIBI_JOBS ?= $(shell nproc)
 ifeq ($(MAKELEVEL),0)
-MAKEFLAGS += -j$(shell nproc)
+MAKEFLAGS += -j$(TAKIBI_JOBS)
 endif
 MAKEFLAGS += -Oline --no-print-directory
 
