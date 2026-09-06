@@ -535,9 +535,13 @@ run_hw_test_rpi3_stdin "el0_elf_load (rpi3)" "$REPO_ROOT/examples/el0_elf_load/k
 # same filesystem at boot -- input redirection into a real ash builtin,
 # not `cat CAT.TXT` itself: confirmed empirically that this busybox
 # build's `cat` is a separate applet requiring a real $PATH search +
-# execve (GitHub issue #158, not yet implemented), the same
+# execve, which this frozen example does not perform -- the same
 # no-standalone-shell-applet-dispatch finding issue #156 already made
-# for `uname`, so `cat` alone just reports "not found" here.
+# for `uname`, so `cat` alone just reports "not found" here. GitHub
+# issue #158 delivered that capability in the MAINTAINED kernel, which
+# runs BusyBox applets through a real child exec; examples/ is
+# historical and did not follow it, so the shape here is permanent
+# rather than pending.
 run_hw_test_rpi3_stdin "el0_shell (rpi3)" "$REPO_ROOT/examples/el0_shell/kernel_rpi3.elf" \
     "$REPO_ROOT/examples/el0_shell/el0_shell.expected" "$REPO_ROOT/examples/el0_shell/el0_shell.stdin" 25 140
 run_hw_test_rpi3 "rtc (rpi3)"            "$REPO_ROOT/examples/rtc/kernel_rpi3.elf"            "$REPO_ROOT/examples/rtc/rtc.expected"       5 30

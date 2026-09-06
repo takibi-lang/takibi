@@ -200,6 +200,15 @@ in tracked files. `HISTORY.md` may record stable past events and `ROADMAP.md`
 may enumerate its dated plan; current documentation must be correct without
 GitHub access.
 
+A source comment may name a settled issue when it explains an enduring design
+rationale, and that is the common and correct case. The exception is a comment
+saying something is not done YET: that sentence stops being true when the
+issue closes, and nothing announces the moment.
+`scripts/find_stale_issue_workarounds.py` lists those, on demand. Run it
+occasionally, not in a build -- it needs the network, its matching is prose
+matching, and a hit is a question rather than a defect, since an issue closing
+does not prove that this particular workaround became unnecessary.
+
 ## Takibi implementation summary
 
 New maintained `.tkb` work starts with refinement types and `--forbid-trap`.
