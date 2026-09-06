@@ -77,7 +77,13 @@ fn process_image_pair_ext2_source_clear() {
 // the running page count of "the clone in flight" -- moved into the
 // destination's own ProcessImageRecord, because there is no longer one
 // clone in flight. See ProcessCloneVm* below for what that ceiling cost.
-private let mut clone_last_reaped_count: usize;
+private let mut clone_last_reaped_count: [usize; KERNEL_MAX_CORES];
+
+private fn process_image_counter_here(counters: *usize) -> *usize {
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) { return counters; }
+    return counters + (core as isize);
+}
 // GitHub issues #258 and #264: one persistent record per address-space
 // root, replacing the prior ProcessLayout table plus the separate flattened
 // growth-page array. Its scalar fields are ProcessLayout's former fields,
@@ -409,14 +415,20 @@ private fn process_image_target_root_is_set_here() -> bool {
 // scheduled_process_slot_valid, which answers about a LIVE process rather
 // than about an index being in bounds. Root 0 is the bootstrap and always
 // valid.
-private let mut process_image_root_fallback_count: usize = 0;
+private let mut process_image_root_fallback_count:
+    [usize; KERNEL_MAX_CORES];
 
 // A target that was never set, or a target root that no longer names a live
 // process. Readers retain the old root-0 fallback because their many call
 // sites cannot act on a miss; teardown opens ProcessImageTargetRootResult
 // and does nothing. Both paths count the miss rather than hiding it.
 fn process_image_root_fallback_uses() -> usize {
-    return process_image_root_fallback_count;
+    let counts: *usize = process_image_root_fallback_count;
+    let mut total: usize = 0;
+    for core: usize in 0..<KERNEL_MAX_CORES {
+        total = total + *(counts + (core as isize));
+    }
+    return total;
 }
 
 // GitHub issue #492: lookups that named an image slot with the previous
@@ -438,8 +450,9 @@ private fn process_image_target_root_result()
         return ProcessImageTargetRootResult::Ready(
             process_image_target_root_here());
     }
-    process_image_root_fallback_count =
-        process_image_root_fallback_count + 1;
+    let fallback_count: *usize =
+        process_image_counter_here(process_image_root_fallback_count);
+    *fallback_count = *fallback_count + 1;
     return ProcessImageTargetRootResult::Missing;
 }
 
@@ -776,12 +789,12 @@ fn process_image_clone_vm_reap(dest_root: usize) -> ProcessCloneVmReapResult {
     let source: usize = process_image_record_at(dest).clone_vm_source_root;
     process_clone_vm_rollback(dest_root);
     process_image_activate_root(source);
-    clone_last_reaped_count = count;
+    *process_image_counter_here(clone_last_reaped_count) = count;
     return ProcessCloneVmReapResult::Reaped;
 }
 
 fn process_image_clone_vm_reaped_pages() -> usize {
-    return clone_last_reaped_count;
+    return *process_image_counter_here(clone_last_reaped_count);
 }
 
 // GitHub issue #219 verification: process_image_clone_vm_begin() must
@@ -859,17 +872,19 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     // turn into cleanup of the bootstrap address space. Restore the count
     // afterwards so this deliberate negative control does not masquerade
     // as a fault in the healthy-boot evidence.
-    let fallback_before: usize = process_image_root_fallback_count;
+    let fallback_count: *usize =
+        process_image_counter_here(process_image_root_fallback_count);
+    let fallback_before: usize = *fallback_count;
     process_image_clear_target_root_here();
     process_image_unmap_pages(1);
-    if (process_image_root_fallback_count != fallback_before + 1 ||
+    if (*fallback_count != fallback_before + 1 ||
         address_space_pte_read(0, process_stack_top_page()) == 0 ||
         process_image_record_at(0).stack_growth_active == false ||
         process_image_record_at(0).active_page_count != 1 ||
         process_image_record_at(0).stack_lowest_l3 != process_stack_top_page()) {
         ok = false;
     }
-    process_image_root_fallback_count = fallback_before;
+    *fallback_count = fallback_before;
     process_image_set_target_root_here(0);
     let mut cow_parent_physical: usize = 0;
     match process_image_clone_vm_begin(child_root) {
@@ -2136,11 +2151,14 @@ fn process_image_gap_is_unmapped() -> bool {
 // The missing-record fallback and its count are per-core, so one core cannot
 // overwrite another core's failure record.
 //
-// What remains shared is the pool's lazy initializer and diagnostic/event
-// state: the target-root fallback count and the last clone-reap page count.
-// They need an activation barrier plus per-CPU reporting or atomic publication
-// before a second core can update them.
+// The target-root fallback count and last clone-reap page count are per-core
+// too. The former is summed for the boot diagnostic; the latter describes the
+// current core's most recent clone-reap event.
+//
+// What remains shared is only the pool's lazy initializer. It needs an
+// activation barrier or a two-core-tested one-time initialization mechanism
+// before a second core can enter this file.
 fn process_image_execution_model_assumption() {
     static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "the process-image pool initializer and two diagnostic counters remain shared; target-root, ext2 staging, and missing fallback are per-core since GitHub issue #479");
+                  "the process-image pool initializer is lazy shared state; every per-operation and diagnostic scalar is per-core since GitHub issue #479");
 }
