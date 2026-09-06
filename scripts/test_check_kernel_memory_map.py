@@ -8,6 +8,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from pass_line import report_pass
+
 
 ROOT = Path(__file__).resolve().parent.parent
 CHECKER = ROOT / "scripts" / "check_kernel_memory_map.py"
@@ -149,6 +151,19 @@ def layout_controls(checker):
                   lambda p: checker.check_image_ceiling(
                       layout_doc(ceiling=0x00100000), p),
                   True, "reached the recorded ceiling"))
+
+    # The ceiling is the one row a person raises by hand, so its message has
+    # to carry what raising it costs. Without the number the cheap reading is
+    # "ordinary growth, raise it", and the SWD transfer that growth buys is
+    # invisible from where the decision is made.
+    cases.append(("the ceiling says what raising it costs",
+                  lambda p: checker.check_image_ceiling(
+                      layout_doc(ceiling=0x00100000), p),
+                  True, "5.5 s on every RPi5 lane run"))
+    cases.append(("the ceiling names the cheaper alternative",
+                  lambda p: checker.check_image_ceiling(
+                      layout_doc(ceiling=0x00100000), p),
+                  True, "stop embedding it"))
 
     cases.append(("a conflict marker is refused", lambda p: (
         checker.reject_conflict_markers(

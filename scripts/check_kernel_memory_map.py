@@ -319,7 +319,25 @@ def check_image_ceiling(text, problems):
                 f"of 0x{ceiling:x} ({ceiling / 1048576:.2f} MiB). This is the "
                 f"row --update will not raise for you: ordinary growth is "
                 f"expected to arrive here eventually, so decide that it is "
-                f"ordinary, then raise it by hand")
+                f"ordinary, then raise it by hand. "
+                # What the decision costs, in the currency it is paid in. A
+                # person raising this row is choosing to pay it on every
+                # future RPi5 run, and the number is not obvious from here.
+                # Measured 2026-09-06 on the connected probe: 30 MHz SWD
+                # sustains 187.4 KiB/s and is the ceiling of this probe and
+                # cable -- 40 MHz and above are accepted as a clock setting
+                # and then fail to transfer -- while a 30x clock over 1 MHz
+                # bought only 4x throughput, so the link is overhead-bound
+                # and there is nothing left to tune.
+                f"Raising it is not free: the whole image is pushed to the "
+                f"board over SWD at about 187 KiB/s, so each added MiB costs "
+                f"roughly 5.5 s on every RPi5 lane run, inside the stretch "
+                f"where make allcheck is waiting on that lane alone. Most of "
+                f"the image is the embedded ext2 rootfs, so if what grew is "
+                f"rootfs CONTENT rather than kernel code, the cheaper answer "
+                f"may be to stop embedding it: the board already writes that "
+                f"same filesystem to USB mass storage at about 29 MB/s "
+                f"during the boot this check guards.")
 
 
 def check_layout_invariants(problems):
