@@ -98,24 +98,26 @@ jobs:
           eval $(opam env)
           bash scripts/run_lane.sh ci-allbuild make allbuild
 
-      # Every QEMU lane runs `-smp 2`, so N lanes at once ask for 2N guest
-      # vCPUs. A hosted runner has four cores, and the default of one job per
-      # core would put fourteen vCPUs on them. GitHub issue #509 measured what
-      # that does: the guest stops mid-boot, always at `linux socket: listener
-      # ready port=8080`, and the harness reports an interactive-HTTPd
-      # lifecycle stall, which names the wrong thing. Half the cores keeps
-      # 2 * jobs at the core count.
+      # One lane at a time. Every QEMU lane runs `-smp 2`, so N lanes ask for
+      # 2N guest vCPUs, and GitHub issue #509 measured what starving them
+      # does: the guest stops mid-boot, always at `linux socket: listener
+      # ready port=8080`, reported as an interactive-HTTPd lifecycle stall,
+      # which names the wrong thing.
       #
-      # It costs wall time and buys a verdict about the change rather than
-      # about the runner. The seven QEMU lanes are 25-31 s each, so this is
-      # minutes rather than the 41 s a 24-core host takes.
+      # Half the cores was tried first and was not enough. Four vCPUs on four
+      # cores leaves nothing for QEMU's own I/O threads, the Python drivers,
+      # or the runner agent, and the debug lane -- the biggest kernel, built
+      # with -g -- still stopped at that line. `taskset -c 0-3` reproduces the
+      # core count locally but not the per-core speed of a hosted runner, so
+      # the measurement that passed here did not transfer.
+      #
+      # Serial lanes cost minutes rather than the 41 s a 24-core host takes,
+      # and buy a verdict about the change rather than about the runner.
       - name: Hardware-free checks
         run: |
           eval $(opam env)
-          jobs=$(( $(nproc) / 2 ))
-          [ "$jobs" -ge 1 ] || jobs=1
-          echo "running with TAKIBI_JOBS=$jobs on $(nproc) cores"
-          TAKIBI_JOBS="$jobs" make cicheck
+          echo "running with TAKIBI_JOBS=1 on $(nproc) cores"
+          TAKIBI_JOBS=1 make cicheck
 
       # Printed, never gated. The unsafe-block and assembly counts are
       # supposed to be moving right now -- multicore work adds atomics -- so a

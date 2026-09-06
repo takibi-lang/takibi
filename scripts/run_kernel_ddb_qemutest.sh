@@ -3,6 +3,13 @@
 # inspects its compiler-generated IRQ frame, and `continue` resumes boot.
 set -euo pipefail
 
+# `set -e` aborts with no context, and everything before the first echo below
+# is setup that prints nothing on success. A CI run failed here with exit 74
+# and not one line of output, so which command produced 74 could not be
+# determined from the log at all -- the lane was an absence, which is the one
+# thing a reader cannot act on.
+trap 'status=$?; echo "[kernel/qemu ddb] aborted at line $LINENO with exit $status: $BASH_COMMAND" >&2' ERR
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ELF="${KERNEL_QEMU_DDB_ELF:-$REPO_ROOT/kernel/build/qemu/kernel-debug.elf}"
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
