@@ -47,13 +47,19 @@ use "kernel/lib/locked_cell.tkb";
 //   checking rather than exclusion. The port supplies disable_irq on one
 //   core or a real acquire for SMP; nothing in this file changes when it
 //   does.
-// - READS are not guarded. A caller that reads while another context
-//   mutates -- a cursor walk racing an insert, a counter racing a
-//   reclaim -- must hold the guard across both, and this file cannot
-//   make it. Guarding the observers too was tried and rejected: it costs
-//   every caller a release on every early-return path, for a race the
-//   mutation guard already makes impossible to reach WITHOUT a
-//   deliberate concurrent reader. Revisit when there is one.
+// - READS are not guarded. A cursor retained across removal is safe to
+//   probe: intrusive_pool_slot_is_valid asks the page allocator whether
+//   the chunk is still pool-owned before dereferencing it, and issue #482's
+//   two-core rendezvous exercises that refusal on QEMU and RPi5. This is
+//   not general read-side exclusion. A caller must still prevent removal
+//   between a Live probe and its payload access, and a lockless walk can
+//   observe a newly inserted slot before its payload is initialized. Current
+//   callers provide that lifetime through their subsystem lock/execution
+//   model, or are stop-the-world diagnostics. Guarding every observer here
+//   was rejected because it would impose a lock across arbitrary caller work
+//   and every early-return path rather than express the lifetime actually
+//   needed. Today KERNEL_ACTIVE_CORES keeps ordinary consumers single-core;
+//   stop-the-world diagnostics have their own execution-model blocker.
 // - The guard is not re-entrant, and taking one twice on a path would
 //   deadlock under a real lock. It is not a compile error -- both
 //   acquires are individually correct, so nothing in the type ties the
@@ -2442,25 +2448,17 @@ fn intrusive_pool_boot_probe() -> bool !{unsafe} {
            handle_probe_current && recycled_counted;
 }
 
-// GitHub issue #479. The tag counter used to be this assertion's whole
-// subject: a monotonic global read and incremented with nothing excluding a
-// second core, measured racing (advanced=3936 of 4096 calls) and then
-// locked. It is a LockedCell now (issue #452), so no path can even name it
-// without the guard, and it is no longer what this assertion is about.
-//
-// What IS still about it: issue #482. Every MUTATION of a pool takes
-// `borrow IntrusivePoolGuard[pool_id]` and so cannot happen without the
-// pool's lock, but the WALKS do not -- intrusive_pool_ref and the chunk
-// traversals read slot state with no guard held. One core walking while
-// another frees is a read of a slot being torn down, and unlike the tag
-// counter it is not fixed by adding an acquire in one place: a walk is a
-// sequence, so the lock has to be the CALLER's, and every caller's critical
-// section changes shape.
-//
-// A busy loop reaches this. Page allocation and process creation both walk
-// pools, so this is not one of the sites #479 Group B can argue a workload
-// avoids.
+// GitHub issues #479 and #482. The tag counter is a LockedCell, mutation
+// requires an indexed pool guard, and a cursor into a released chunk is
+// rejected before dereference by the page-ownership check. That last fact is
+// what #482's contention probe proves; it does NOT close the window after a
+// probe returns Live. IntrusiveSlotView proves occupancy at probe time but
+// does not exclude another core from removing the slot before or during the
+// payload access, and a concurrent insertion may expose uninitialized payload.
+// Process diagnostic walks as well as fd and TCP walks reach this API, so the
+// container needs read-side lifetime protection before ordinary consumers can
+// be active on two cores.
 fn intrusive_pool_execution_model_assumption() {
     static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "issue #482: pool WALKS take no guard, so one core can read a slot while another frees it -- the mutations are guarded, the traversals are not");
+                  "a Live slot proof does not exclude another core from removing or initializing its payload");
 }
