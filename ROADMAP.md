@@ -114,23 +114,28 @@ This order is a recommendation, not a dependency chain. Nothing here blocks
 Territory A, which is the point: the backlog exists so that the milestone
 above does not pay the same debugging cost twice.
 
-1. **#513** a check that reports PASS while checking nothing. Four instances
-   in one session when it was filed, and two more on 2026-09-05.
-2. **#515** an intermittent DDB-continue failure discarding a whole boot's
-   views -- expensive, because the board is a shared lease.
-3. **#471** per-lane timing, **#411** boot duration in the log, **#280**
-   bounded allcheck time. The "is it slow or is it hung" cluster.
-4. **#387** one shared board-reachability step instead of one per script.
-5. **#336** flag workaround comments citing closed issues.
-6. **#56** CI. Worth most with two agents; QEMU lanes need no board lease.
-7. **#502** call chains, **#503** PMU counters, **#497** post-boot profiling,
+The first five entries of the 2026-09-05 order closed on 2026-09-05 and
+2026-09-06: #513, #515, #471, #387 and #411. What that work left behind is
+carried below rather than in a list of what is done -- #280 keeps the half of
+its cluster that was an investigation rather than a measurement, and #519 is
+new.
+
+1. **#280** bounded allcheck time. Now has its number rather than an
+   estimate: the RPi5 lane runs alone for 28.8s after every other lane has
+   finished, which is 41% of a 70.6s span. `make allcheck` prints that on
+   every run.
+2. **#519** DDB asserts a process UART-wake event the harness never
+   establishes. Same family as #387 and #515, found while measuring #411.
+3. **#336** flag workaround comments citing closed issues.
+4. **#56** CI. Worth most with two agents; QEMU lanes need no board lease.
+5. **#502** call chains, **#503** PMU counters, **#497** post-boot profiling,
    so measurement exists before Territory A needs it.
-8. **#410** how a fallback is reported: three counted, two logged, none
+6. **#410** how a fallback is reported: three counted, two logged, none
    asserted.
-9. **#388** the hand-written exception vectors carry no stack-overflow test.
-10. **#429** in-kernel GDB stub, **#149** GDB without JTAG, **#444**
-    controlled DDB memory mutation.
-11. **#454** `uart_putc` busy-waits, at 87us per logged byte.
+7. **#388** the hand-written exception vectors carry no stack-overflow test.
+8. **#429** in-kernel GDB stub, **#149** GDB without JTAG, **#444**
+   controlled DDB memory mutation.
+9. **#454** `uart_putc` busy-waits, at 87us per logged byte.
 
 Waiting on Territory A: #456 and #486 on #504, #505 on #479, #465 on #222.
 
