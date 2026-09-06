@@ -115,9 +115,15 @@ Territory A, which is the point: the backlog exists so that the milestone
 above does not pay the same debugging cost twice.
 
 The first five entries of the 2026-09-05 order closed on 2026-09-05 and
-2026-09-06: #513, #515, #471, #387, #411 and #336, plus #519, which was filed
-and closed the same day. #280, the sixth of the original order, was measured
-and then deliberately parked; see below.
+2026-09-06: #513, #515, #471, #387, #411, #336 and #56, plus #519, which was
+filed and closed the same day. #280, the sixth of the original order, was
+measured and then deliberately parked; see below.
+
+`make cicheck` -- allcheck minus the RPi5 lane -- now runs on every push
+through `.github/workflows/ci.yml`, and reports where its own minutes went so
+the first iteration's costs can be read rather than guessed. Hardware stays
+out of CI: there is no always-on host, so a scheduled run would take the board
+at the moment the workstation came back, which is when a person wants it.
 
 #336 left one item behind that this territory cannot decide:
 `scripts/find_stale_issue_workarounds.py` reports `linux_user/field_lease`
@@ -125,16 +131,15 @@ and its `examples/` twin as saying they do not yet solve issue #89's
 escaping-index shape, and #89 has closed. Whether the closure covers that
 shape needs the compiler's affine analysis read, which is Territory A.
 
-1. **#56** CI. Worth most with two agents; QEMU lanes need no board lease.
-2. **#497** post-boot profiling, whose first named workload is now bulk TCP
+1. **#497** post-boot profiling, whose first named workload is now bulk TCP
    throughput on RPi5 because #280 waits on that number, then **#502** call
    chains and **#503** PMU counters. Measurement before Territory A needs it.
-3. **#410** how a fallback is reported: three counted, two logged, none
+2. **#410** how a fallback is reported: three counted, two logged, none
    asserted.
-4. **#388** the hand-written exception vectors carry no stack-overflow test.
-5. **#429** in-kernel GDB stub, **#149** GDB without JTAG, **#444**
+3. **#388** the hand-written exception vectors carry no stack-overflow test.
+4. **#429** in-kernel GDB stub, **#149** GDB without JTAG, **#444**
    controlled DDB memory mutation.
-6. **#454** `uart_putc` busy-waits, at 87us per logged byte.
+5. **#454** `uart_putc` busy-waits, at 87us per logged byte.
 
 **#280 is parked, not queued.** It was measured on 2026-09-06: SWD is at its
 30 MHz ceiling at 187 KiB/s, the rootfs is 85% of what is transferred, and the
