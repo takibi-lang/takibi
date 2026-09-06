@@ -1564,7 +1564,8 @@ must_use variant SyscallDeadlineResult {
 
 // Parse one Linux arm64 timespec and either finish a zero/already-expired
 // wait or arm the current process against the architectural generic counter.
-fn syscall_deadline_wait(timespec_address: usize) -> SyscallDeadlineResult {
+fn syscall_deadline_wait(timespec_address: usize, absolute: bool)
+        -> SyscallDeadlineResult {
     if (timespec_address == 0) { return SyscallDeadlineResult::Invalid; }
     let mut seconds: usize = 0;
     let mut nanoseconds: usize = 0;
@@ -1605,16 +1606,22 @@ fn syscall_deadline_wait(timespec_address: usize) -> SyscallDeadlineResult {
             CheckedUsize::Overflow => { return SyscallDeadlineResult::Invalid; }
             CheckedUsize::Value(value) => { value }
         };
-    let duration: usize = match checked_add_usize(
+    let requested_ticks: usize = match checked_add_usize(
             whole_ticks, subsecond_product / 1000000000) {
         CheckedUsize::Overflow => { return SyscallDeadlineResult::Invalid; }
         CheckedUsize::Value(value) => { value }
     };
-    if (duration == 0) { return SyscallDeadlineResult::Ready; }
-    let deadline: usize = match checked_add_usize(now, duration) {
-        CheckedUsize::Overflow => { return SyscallDeadlineResult::Invalid; }
-        CheckedUsize::Value(value) => { value }
-    };
+    let mut deadline: usize = requested_ticks;
+    if (absolute == false) {
+        if (requested_ticks == 0) { return SyscallDeadlineResult::Ready; }
+        match checked_add_usize(now, requested_ticks) {
+            CheckedUsize::Overflow => {
+                return SyscallDeadlineResult::Invalid;
+            }
+            CheckedUsize::Value(value) => { deadline = value; }
+        }
+    }
+    if (deadline <= now) { return SyscallDeadlineResult::Ready; }
     kernel_process_current_arm_deadline(deadline, 0);
     if (kernel_process_other_ready()) {
         return SyscallDeadlineResult::Block;
@@ -1711,7 +1718,7 @@ fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
         -> SyscallAction !{unsafe} {
     if (raw_nfds == 0) {
         if (timeout_address == 0) { return SyscallAction::WaitInterrupt; }
-        match syscall_deadline_wait(timeout_address) {
+        match syscall_deadline_wait(timeout_address, false) {
             SyscallDeadlineResult::Fault => {
                 return SyscallAction::Resume(LINUX_EFAULT);
             }
@@ -1772,7 +1779,7 @@ fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
                 return SyscallAction::WaitInterrupt;
             }
             if (ready_count == 0 && timeout_address != 0) {
-                match syscall_deadline_wait(timeout_address) {
+                match syscall_deadline_wait(timeout_address, false) {
                     SyscallDeadlineResult::Fault => {
                         return SyscallAction::Resume(LINUX_EFAULT);
                     }
@@ -4491,7 +4498,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         return syscall_ppoll_dispatch(x0, x1, x2, x3);
     }
     if (number == AARCH64_NR_NANOSLEEP) {
-        match syscall_deadline_wait(x0) {
+        match syscall_deadline_wait(x0, false) {
             SyscallDeadlineResult::Fault => {
                 return SyscallAction::Resume(LINUX_EFAULT);
             }
@@ -4508,13 +4515,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
     }
     if (number == AARCH64_NR_CLOCK_NANOSLEEP) {
-        // The maintained userspace asks for CLOCK_MONOTONIC relative time.
-        // Absolute deadlines and other clocks remain rejected rather than
-        // silently receiving relative-time semantics.
-        if (x0 != 1 || x1 != 0) {
+        if (x0 != 1 || x1 > 1) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
-        match syscall_deadline_wait(x2) {
+        match syscall_deadline_wait(x2, x1 == 1) {
             SyscallDeadlineResult::Fault => {
                 return SyscallAction::Resume(LINUX_EFAULT);
             }

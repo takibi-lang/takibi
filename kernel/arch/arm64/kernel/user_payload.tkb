@@ -134,6 +134,28 @@ fn initial_user_payload() {
                           payload_read_u64(time_base, 8);
     fail_if(after_ns - before_ns < 125000000);
 
+    /* TIMER_ABSTIME uses the CLOCK_MONOTONIC timestamp itself as the
+     * deadline. Build one 125 ms ahead, including nanosecond carry, and
+     * reject an implementation that treats it as another relative delay. */
+    fail_if(svc5(113, 1, ptr_of(before_base, 0), 0, 0, 0) != 0);
+    let mut absolute_seconds: usize = payload_read_u64(before_base, 0);
+    let mut absolute_nanos: usize =
+        payload_read_u64(before_base, 8) + 125000000;
+    if (absolute_nanos >= 1000000000) {
+        absolute_seconds = absolute_seconds + 1;
+        absolute_nanos = absolute_nanos - 1000000000;
+    }
+    payload_write_u64(time_base, 0, absolute_seconds);
+    payload_write_u64(time_base, 8, absolute_nanos);
+    fail_if(svc5(115, 1, 1, ptr_of(time_base, 0), 0, 0) != 0);
+    fail_if(svc5(113, 1, ptr_of(time_base, 0), 0, 0, 0) != 0);
+    let absolute_after_ns: usize =
+        payload_read_u64(time_base, 0) * 1000000000 +
+        payload_read_u64(time_base, 8);
+    let absolute_target_ns: usize =
+        absolute_seconds * 1000000000 + absolute_nanos;
+    fail_if(absolute_after_ns < absolute_target_ns);
+
     /* nfds=0 isolates ppoll's timeout result from fd readiness. */
     payload_write_u64(time_base, 0, 0);
     payload_write_u64(time_base, 8, 62500000);
