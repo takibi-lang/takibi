@@ -7,7 +7,8 @@ use "kernel/lib/locked_cell.tkb";
 // current as call sites change; a limitation that goes stale here is
 // worse than none, since it invites relying on a guarantee that quietly
 // stopped holding.
-// - PARTLY SYNCHRONIZED. SharedObject.refs is protected, by construction
+// - PARTLY SYNCHRONIZED. SharedObject.refs and the descriptor-slot total
+//   that bounds it are protected by the same lock, by construction
 //   as of GitHub issue #452: the field is private and the only pointer at
 //   it comes from guarded_usize_value, which needs the refcount guard, so
 //   an unguarded read or write does not compile. Everything ELSE in this
@@ -160,10 +161,12 @@ fn unified_fd_record_missing_uses() -> usize {
 }
 
 // How many descriptor slots exist across every process, maintained as
-// blocks are allocated and freed. This is what unified_object_ref_bound
+// blocks are allocated and freed. The same guard protects this value and
+// SharedObject.refs, so a retain cannot use a bound from before a concurrent
+// block release. This is what unified_object_ref_bound
 // used to compute as `live contexts x PROCESS_FD_MAX` -- the same
 // quantity, still exact, now that neither factor is a constant.
-private let mut fd_slot_total: usize = 0;
+private let mut fd_slot_total: GuardedField(usize);
 
 // GitHub issue #264 third stage: descriptor state and the process heap break
 // share one record, so a process slot has one local FD context rather than
@@ -309,11 +312,13 @@ must_use variant FdBlockAllocResult {
 
 private fn fd_block_alloc() -> FdBlockAllocResult !{unsafe} {
     unified_fd_block_pool_init();
+    let count_guard = guarded_field_take(&object_refcount_lock);
     let guard = intrusive_pool_lock(&fd_block_pool);
     let inserted = intrusive_pool_insert_zeroed(&fd_block_pool, guard);
     intrusive_pool_unlock(&fd_block_pool, guard);
     match inserted {
         IntrusivePoolInsertResult::OutOfMemory => {
+            guarded_field_give(count_guard, &object_refcount_lock);
             return FdBlockAllocResult::OutOfMemory;
         }
         IntrusivePoolInsertResult::Allocated(owner) => {
@@ -324,7 +329,9 @@ private fn fd_block_alloc() -> FdBlockAllocResult !{unsafe} {
             // insert_zeroed IS the empty run: UnifiedFdKind::Empty is
             // declaration-order tag zero and every other field of an
             // unused FdEntry is 0/false.
-            fd_slot_total = fd_slot_total + FD_BLOCK_SLOTS;
+            let total = guarded_usize_value(count_guard, &fd_slot_total);
+            *total = *total + FD_BLOCK_SLOTS;
+            guarded_field_give(count_guard, &object_refcount_lock);
             return FdBlockAllocResult::Allocated((address, generation));
         }
     }
@@ -334,17 +341,28 @@ private fn fd_block_free(address: usize, generation: usize) !{unsafe} {
     let mut checked: IntrusiveSlotAddress = intrusive_pool_validated_address(
         &fd_block_pool, address, generation);
     let owner = intrusive_owner_new(&fd_block_pool, checked, generation);
+    let count_guard = guarded_field_take(&object_refcount_lock);
     let guard = intrusive_pool_lock(&fd_block_pool);
     let (ok, reason) = intrusive_remove_outcome(
         intrusive_pool_remove(&fd_block_pool, guard, owner));
     intrusive_pool_unlock(&fd_block_pool, guard);
     if (ok == false) {
+        guarded_field_give(count_guard, &object_refcount_lock);
         kernel_boot_log("fd table: releasing a descriptor block -- ");
         kernel_boot_log(reason);
         kernel_boot_log("\n");
         return;
     }
-    fd_slot_total = fd_slot_total - FD_BLOCK_SLOTS;
+    let total = guarded_usize_value(count_guard, &fd_slot_total);
+    let current: usize = *total;
+    let count_valid: bool = current >= FD_BLOCK_SLOTS;
+    if (current >= FD_BLOCK_SLOTS) {
+        *total = current - FD_BLOCK_SLOTS;
+    }
+    guarded_field_give(count_guard, &object_refcount_lock);
+    if (count_valid == false) {
+        kernel_boot_log("fd table: descriptor slot count underflow\n");
+    }
 }
 
 // The block holding `fd` and the generation naming its occupant, or (0, 0)
@@ -683,7 +701,20 @@ must_use variant UnifiedObjectReleaseResult { Invalid; StillHeld; Freed; }
 // retain/release pairs took the count from 2 to 0 -- the object was freed
 // while both cores still held it -- and 978 later operations were refused
 // because the handle no longer named anything.
-private fn unified_object_retain(handle: UnifiedObjectHandle, limit: usize)
+private fn unified_object_retain(handle: UnifiedObjectHandle)
+        -> UnifiedObjectRetainResult !{unsafe} {
+    let guard = guarded_field_take(&object_refcount_lock);
+    let bound = guarded_usize_value(guard, &fd_slot_total);
+    let result: UnifiedObjectRetainResult =
+        unified_object_retain_locked(guard, handle, *bound);
+    guarded_field_give(guard, &object_refcount_lock);
+    return result;
+}
+
+// Boundary probes deliberately ask whether a chosen historical limit is
+// enforced. Production retains use the current guarded descriptor count above.
+private fn unified_object_retain_at_limit(
+        handle: UnifiedObjectHandle, limit: usize)
         -> UnifiedObjectRetainResult !{unsafe} {
     let guard = guarded_field_take(&object_refcount_lock);
     let result: UnifiedObjectRetainResult =
@@ -1767,8 +1798,9 @@ fn unified_file_is_writable(handle: UnifiedObjectHandle) -> bool {
 // `live fd contexts x PROCESS_FD_MAX`, exact only because both factors
 // were constants over a table that always existed; a process's table
 // grows now, so the quantity is maintained where it changes -- in
-// fd_block_alloc and fd_block_free -- instead of being recomputed from
-// numbers that no longer exist.
+// fd_block_alloc and fd_block_free, under the same fd -> pool lock order as
+// object removal -- instead of being recomputed from numbers that no longer
+// exist.
 //
 // It replaces SHARED_OBJECT_MAX_REFS, which was KERNEL_PROCESS_MAX *
 // PROCESS_FD_MAX until issue #392 removed the process ceiling and left the
@@ -1783,7 +1815,11 @@ fn unified_file_is_writable(handle: UnifiedObjectHandle) -> bool {
 // instrumentation with the bound deliberately set to one slot per process
 // reported 71, which is what says the counter was reached at all.
 fn unified_object_ref_bound() -> usize {
-    return fd_slot_total;
+    let guard = guarded_field_take(&object_refcount_lock);
+    let total = guarded_usize_value(guard, &fd_slot_total);
+    let bound: usize = *total;
+    guarded_field_give(guard, &object_refcount_lock);
+    return bound;
 }
 
 // Exceeding a DERIVED bound is not a resource limit: it says a reference
@@ -1840,7 +1876,7 @@ fn unified_fd_install(process: usize, fd: usize, object_value: usize,
         object.kind == UnifiedFdKind::Empty) {
         return UnifiedFdInstallResult::Invalid;
     }
-    match unified_object_retain(handle, unified_object_ref_bound()) {
+    match unified_object_retain(handle) {
         UnifiedObjectRetainResult::Invalid => {
             return UnifiedFdInstallResult::Invalid;
         }
@@ -2192,14 +2228,14 @@ fn unified_object_ref_ceiling_probe() -> bool !{unsafe} {
             // fd 0 already holds one of them.
             let mut retained: usize = 1;
             while (retained < bound) {
-                match unified_object_retain(handle, bound) {
+                match unified_object_retain_at_limit(handle, bound) {
                     UnifiedObjectRetainResult::Ok => {}
                     UnifiedObjectRetainResult::Invalid => { return false; }
                     UnifiedObjectRetainResult::Overflow => { return false; }
                 }
                 retained = retained + 1;
             }
-            match unified_object_retain(handle, bound) {
+            match unified_object_retain_at_limit(handle, bound) {
                 UnifiedObjectRetainResult::Overflow => {}
                 UnifiedObjectRetainResult::Invalid => { ok = false; }
                 UnifiedObjectRetainResult::Ok => {
@@ -2235,7 +2271,7 @@ fn unified_object_ref_ceiling_probe() -> bool !{unsafe} {
             let grown: usize = unified_object_ref_bound();
             if (grown != bound + FD_BLOCK_SLOTS) { ok = false; }
             if (ok) {
-                match unified_object_retain(handle, grown) {
+                match unified_object_retain_at_limit(handle, grown) {
                     UnifiedObjectRetainResult::Ok => { retained = retained + 1; }
                     UnifiedObjectRetainResult::Invalid => { ok = false; }
                     UnifiedObjectRetainResult::Overflow => { ok = false; }
@@ -2462,8 +2498,7 @@ private fn fd_refcount_probe_overlap_address() -> usize {
 
 // One retain/release pair. Both cores run this, on the same object.
 private fn fd_refcount_probe_cycle() !{unsafe} {
-    match unified_object_retain(fd_refcount_probe_handle,
-                                unified_object_ref_bound()) {
+    match unified_object_retain(fd_refcount_probe_handle) {
         UnifiedObjectRetainResult::Invalid => {
             unsafe {
                 atomic_fetch_add_relaxed(
@@ -2621,8 +2656,7 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
         // retain cannot take the count to zero and free the object out
         // from under the other core -- which would be a different failure
         // reported as this one.
-        match unified_object_retain(fd_refcount_probe_handle,
-                                    unified_object_ref_bound()) {
+        match unified_object_retain(fd_refcount_probe_handle) {
             UnifiedObjectRetainResult::Ok => {}
             UnifiedObjectRetainResult::Invalid => {
                 fd_refcount_contention_report("baseline-invalid" as *u8, 0, 0);
@@ -2884,11 +2918,11 @@ fn kernel_fd_table_crash_object(process: usize, fd: usize) -> usize !{unsafe} {
     return entries.slot[index].object;
 }
 
-// GitHub issue #453. unified_object_retain/_release are a bare counter
-// increment and decrement, as this file's header already says. Two cores
-// racing on that loses a reference and frees a live object; there is no
-// atomic and no lock on that path.
+// GitHub issue #479. SharedObject.refs and fd_slot_total are guarded now.
+// What remains is the per-process descriptor block chain: lookup, growth,
+// entry mutation and release span several accesses without exclusion from a
+// second core operating on the same process.
 fn fd_table_execution_model_assumption() {
     static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "fd_slot_total and the per-process block chain are unlocked: the refcount they bound is not, since GitHub issue #479");
+                  "one process's descriptor block chain can be walked or changed concurrently from two cores");
 }
