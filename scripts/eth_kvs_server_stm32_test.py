@@ -50,6 +50,12 @@ import subprocess
 import sys
 import time
 
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from net_link_wait import wait_until_reachable
+
 IFACE = os.environ.get("ETH_TEST_IFACE", "enp4s0")
 SERVER_IP = os.environ.get("ETH_TEST_SUBNET", "192.168.10") + ".2"  # must match netconfig.tkb's OUR_IP
 SERVER_PORT = 80
@@ -113,16 +119,27 @@ def request(method: str, path: str, body: bytes = None) -> tuple:
 
 
 def request_with_retry(method: str, path: str, body: bytes = None) -> tuple:
-    deadline = time.monotonic() + RETRY_TOTAL_SECS
-    last_err = None
-    while time.monotonic() < deadline:
+    """The request, waiting out a link the board has not finished bringing up.
+
+    This used to retry on ANY OSError, and it carries PUT and DELETE. A
+    timeout can mean the request ARRIVED and its answer was lost, so
+    retrying through one asked this key-value store to apply the same write
+    twice -- against a fixture whose later cases turn on how full the table
+    is and on tombstone reuse. It has not produced a wrong verdict, but it
+    is the shape that does.
+
+    Only the errnos the host raises before anything reaches the wire are
+    waited out now, and that argument lives in scripts/net_link_wait.py
+    rather than being re-derived here (GitHub issue #387). The ARP flush
+    stays inside the attempt so every try still forces a cold resolution.
+    """
+    def attempt():
         flush_arp_entry()
-        try:
-            return request(method, path, body)
-        except OSError as e:
-            last_err = e
-            time.sleep(RETRY_INTERVAL_SECS)
-    raise last_err
+        return request(method, path, body)
+
+    return wait_until_reachable(attempt, seconds=RETRY_TOTAL_SECS,
+                                poll=RETRY_INTERVAL_SECS,
+                                label=f"{method} {path}")
 
 
 def expect(desc: str, method: str, path: str, body: bytes,

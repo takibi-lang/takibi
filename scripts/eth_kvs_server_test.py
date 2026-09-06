@@ -6,6 +6,12 @@ import socket
 import subprocess
 import sys
 
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from net_link_wait import wait_until_reachable
+
 IFACE = os.environ.get("ETH_TEST_IFACE", "enp4s0")
 SERVER_IP = os.environ.get("ETH_TEST_SUBNET", "192.168.10") + ".2"
 SERVER_PORT = 80
@@ -18,6 +24,21 @@ def flush_arp_entry():
 
 
 def request(method: str, path: str, body: bytes = None, content_length=None):
+    """One request, waiting out a link the board has not brought up yet.
+
+    The runner starts the board and runs this immediately, and this goes
+    through the host kernel's own stack rather than raw frames, so the first
+    request races the board's boot the same way the http_server tests did.
+    Only the errnos the host raises before anything reaches the wire are
+    waited out, which is why wrapping EVERY request -- including PUT and
+    DELETE -- is sound: a retried one provably never arrived. That argument
+    lives in scripts/net_link_wait.py (GitHub issue #387).
+    """
+    return wait_until_reachable(
+        lambda: _request(method, path, body, content_length))
+
+
+def _request(method: str, path: str, body: bytes = None, content_length=None):
     lines = [f"{method} {path} HTTP/1.1", f"Host: {SERVER_IP}"]
     if body is not None and content_length != "omit":
         length = len(body) if content_length is None else content_length

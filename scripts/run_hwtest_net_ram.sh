@@ -83,6 +83,11 @@ stop_uart_capture() {
 }
 trap stop_uart_capture EXIT
 trap 'stop_uart_capture; exit 130' INT TERM HUP
+# 0.1s ticks. phy_init retries reset+auto-negotiation, so this has to
+# cover several attempts; 30s is generous against a link that is coming
+# and far under the cost of the misattributed failure it replaces.
+. "$REPO_ROOT/scripts/board_link_gate.sh"
+LINK_READY_TICKS=300
 PASS=0
 FAIL=0
 FAILED_TESTS=()
@@ -138,14 +143,34 @@ ram_load_and_run() {
     fi
 }
 
+# GitHub issue #387: ONE readiness gate, before the first wire test, rather
+# than one answer per test script. The rules -- which markers, and why a
+# failed bring-up is answered differently from a slow one -- live in
+# scripts/board_link_gate.sh, which the maintained RPi5 kernel lane uses too.
+#
+# The marker is the example's own name, which is the first word of the test
+# label: `net_echo (stm32/ram)` watches for `net_echo: ready`.
+wait_for_board_link() {
+    local artifact_dir="$1" name="$2" log="${3:-uart.log}"
+    local marker="${name%% *}" reason
+    if reason="$(board_link_gate "$artifact_dir/$log" \
+            "$marker: ready" "$marker: device/link not found" \
+            "$LINK_READY_TICKS")"; then
+        printf '       %s\n' "$reason"
+        return 0
+    fi
+    printf '       %s\n' "$reason"
+    return 1
+}
+
 # run_net_hw_test NAME ELF TEST_SCRIPT
 #
-# Loads ELF into AXI SRAM1 and starts it, then runs TEST_SCRIPT (a
-# raw-socket Python test against the physical link, e.g.
-# scripts/eth_net_echo_test.py) via sudo. No fixed post-load sleep: these
-# test scripts already resend on every retry (same pattern as
-# scripts/virtio_net_test.py), which already covers PHY-autonegotiation
-# latency without a hardcoded wait.
+# Loads ELF into AXI SRAM1 and starts it, waits for the firmware to announce
+# its link, then runs TEST_SCRIPT (a raw-socket Python test against the
+# physical link, e.g. scripts/eth_net_echo_test.py) via sudo. The test
+# scripts still resend on every retry, which is what covers ordinary frame
+# loss; the gate above is what makes a board that never came up say so,
+# instead of each script discovering it differently or not at all.
 run_net_hw_test() {
     local name="$1" elf="$2" test_script="$3"
     local artifact_dir
@@ -162,6 +187,13 @@ run_net_hw_test() {
     fi
 
     echo "-- $name --"
+    if ! wait_for_board_link "$artifact_dir" "$name"; then
+        stop_uart_capture
+        printf "${RED}FAIL${RST}  %s  (the board never reported a link)\n" "$name"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+        return
+    fi
     if sudo python3 "$test_script" > >(tee "$artifact_dir/host.log") 2>&1; then
         stop_uart_capture
         printf "${GRN}PASS${RST}  %s\n" "$name"
@@ -208,6 +240,13 @@ run_net_hw_test_flash() {
     fi
 
     echo "-- $name --"
+    if ! wait_for_board_link "$artifact_dir" "$name"; then
+        stop_uart_capture
+        printf "${RED}FAIL${RST}  %s  (the board never reported a link)\n" "$name"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$name")
+        return
+    fi
     if sudo python3 "$test_script" > >(tee "$artifact_dir/host.log") 2>&1; then
         stop_uart_capture
         printf "${GRN}PASS${RST}  %s\n" "$name"
@@ -271,7 +310,12 @@ else
         # ordinary environment variables that aren't in env_keep, confirmed
         # empirically before writing this.
         echo "-- $sdcard_name --"
-        if sudo SDCARD_CONTENT_DIR="$sdcard_content_dir" \
+        if ! wait_for_board_link "$sdcard_artifact_dir" "$sdcard_name"; then
+            stop_uart_capture
+            printf "${RED}FAIL${RST}  %s  (the board never reported a link)\n" "$sdcard_name"
+            FAIL=$((FAIL + 1))
+            FAILED_TESTS+=("$sdcard_name")
+        elif sudo SDCARD_CONTENT_DIR="$sdcard_content_dir" \
                 python3 scripts/eth_http_server_sdcard_test.py \
                 > >(tee "$sdcard_artifact_dir/host.log") 2>&1; then
             stop_uart_capture
@@ -297,7 +341,12 @@ if ! ram_load_and_run examples/http_server_sdcard_rtos/kernel_stm32_ram.elf "$sd
     FAILED_TESTS+=("$sdcard_rtos_name")
 else
     echo "-- $sdcard_rtos_name --"
-    if sudo SDCARD_CONTENT_DIR="$sdcard_content_dir" \
+    if ! wait_for_board_link "$sdcard_rtos_artifact_dir" "$sdcard_rtos_name"; then
+        stop_uart_capture
+        printf "${RED}FAIL${RST}  %s  (the board never reported a link)\n" "$sdcard_rtos_name"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$sdcard_rtos_name")
+    elif sudo SDCARD_CONTENT_DIR="$sdcard_content_dir" \
             python3 scripts/eth_http_server_sdcard_test.py \
             > >(tee "$sdcard_rtos_artifact_dir/host.log") 2>&1; then
         stop_uart_capture
@@ -340,7 +389,12 @@ else
         FAILED_TESTS+=("$sdcard_flash_name")
     else
         echo "-- $sdcard_flash_name --"
-        if sudo SDCARD_CONTENT_DIR="$sdcard_content_dir" \
+        if ! wait_for_board_link "$sdcard_flash_artifact_dir" "$sdcard_flash_name"; then
+            stop_uart_capture
+            printf "${RED}FAIL${RST}  %s  (the board never reported a link)\n" "$sdcard_flash_name"
+            FAIL=$((FAIL + 1))
+            FAILED_TESTS+=("$sdcard_flash_name")
+        elif sudo SDCARD_CONTENT_DIR="$sdcard_content_dir" \
                 python3 scripts/eth_http_server_sdcard_test.py \
                 > >(tee "$sdcard_flash_artifact_dir/host.log") 2>&1; then
             stop_uart_capture
@@ -386,7 +440,12 @@ if ! ram_load_and_run examples/kvs_server_sdcard_rtos/kernel_stm32_ram.elf "$kvs
     FAILED_TESTS+=("$kvs_rtos_name")
 else
     echo "-- $kvs_rtos_name --"
-    if ! sudo python3 scripts/eth_kvs_server_stm32_test.py \
+    if ! wait_for_board_link "$kvs_rtos_artifact_dir" "$kvs_rtos_name" uart-boot1.log; then
+        stop_uart_capture
+        printf "${RED}FAIL${RST}  %s  (the board never reported a link, boot 1)\n" "$kvs_rtos_name"
+        FAIL=$((FAIL + 1))
+        FAILED_TESTS+=("$kvs_rtos_name")
+    elif ! sudo python3 scripts/eth_kvs_server_stm32_test.py \
             > >(tee "$kvs_rtos_artifact_dir/host-boot1.log") 2>&1; then
         stop_uart_capture
         printf "${RED}FAIL${RST}  %s  (protocol test failed, boot 1)\n" "$kvs_rtos_name"
@@ -402,7 +461,12 @@ else
             FAILED_TESTS+=("$kvs_rtos_name")
         else
             echo "-- $kvs_rtos_name (persistence-survives-reset check) --"
-            if sudo KVS_TEST_PHASE=verify_persistence python3 scripts/eth_kvs_server_stm32_test.py \
+            if ! wait_for_board_link "$kvs_rtos_artifact_dir" "$kvs_rtos_name" uart-boot2.log; then
+                stop_uart_capture
+                printf "${RED}FAIL${RST}  %s  (the board never reported a link, boot 2)\n" "$kvs_rtos_name"
+                FAIL=$((FAIL + 1))
+                FAILED_TESTS+=("$kvs_rtos_name")
+            elif sudo KVS_TEST_PHASE=verify_persistence python3 scripts/eth_kvs_server_stm32_test.py \
                     > >(tee "$kvs_rtos_artifact_dir/host-boot2.log") 2>&1; then
                 stop_uart_capture
                 printf "${GRN}PASS${RST}  %s\n" "$kvs_rtos_name"

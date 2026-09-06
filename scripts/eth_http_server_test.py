@@ -31,13 +31,17 @@
 #
 # Exit code only (0 = pass, 1 = fail).
 
-import errno
 import http.client
 import os
 import re
 import subprocess
 import sys
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from net_link_wait import wait_until_reachable
 
 IFACE = os.environ.get("ETH_TEST_IFACE", "enp4s0")
 SERVER_IP = os.environ.get("ETH_TEST_SUBNET", "192.168.10") + ".2"
@@ -78,45 +82,27 @@ def fetch() -> tuple:
 def fetch_once_link_is_up() -> tuple:
     """The first fetch, waiting out the board's PHY link negotiation.
 
-    This runner starts the board and runs this script immediately, with no
-    readiness step in between (scripts/run_hwtest_net_ram.sh's
-    run_net_hw_test), so the first request races the board's boot and
-    `phy_init`'s Ethernet auto-negotiation -- which takes long enough that
-    AGENTS.md records this lane's "occasional link-negotiation flakiness"
-    as a known property. The other four STM32 Ethernet tests never saw it
-    because they are raw AF_PACKET scripts that retry every frame
-    (eth_tcp_echo_test.py's send_and_wait); this one goes through the host
-    kernel's own stack and had exactly one attempt.
+    The runner starts the board and runs this script immediately, so the
+    first request races the board's boot and `phy_init`'s Ethernet
+    auto-negotiation -- long enough that AGENTS.md records this lane's
+    "occasional link-negotiation flakiness" as a known property. The other
+    STM32 Ethernet tests never saw it because they are raw AF_PACKET scripts
+    that retry every frame; this one goes through the host kernel's own
+    stack and had exactly one attempt.
 
-    Retrying is only sound because of WHICH errors are retried.
-    EHOSTUNREACH and ENETUNREACH are generated locally, by the neighbour
-    subsystem, when nothing can be sent to the address -- so the board
-    cannot have seen a request, and its counter cannot have moved. That
-    keeps the #1/#2 counter check below meaning what it means. A timeout or
-    a refused connection is NOT retried: those can mean the request
-    arrived and its response was lost, which would silently break exactly
-    that check.
+    Which errors that wait may retry is the correctness argument, and it
+    lives in scripts/net_link_wait.py rather than here -- three other
+    host-stack tests need the same answer, and one of them had a different
+    one (GitHub issue #387). What matters locally is that the argument keeps
+    the #1/#2 counter check below honest: a retried request that had already
+    arrived would move the counter.
 
     The ARP flush and the cold resolution it forces are untouched: this
     waits for the LINK, and the first request that gets through still does
     a genuine from-scratch ARP resolution.
     """
-    deadline = time.monotonic() + LINK_WAIT_SECS
-    waited = False
-    while True:
-        try:
-            result = fetch()
-            if waited:
-                print("  (waited %.1fs for the board's link)"
-                      % (LINK_WAIT_SECS - (deadline - time.monotonic())))
-            return result
-        except OSError as e:
-            if e.errno not in (errno.EHOSTUNREACH, errno.ENETUNREACH):
-                raise
-            if time.monotonic() >= deadline:
-                raise
-            waited = True
-            time.sleep(LINK_POLL_SECS)
+    return wait_until_reachable(fetch, seconds=LINK_WAIT_SECS,
+                                poll=LINK_POLL_SECS)
 
 
 def extract_count(body: str) -> int:

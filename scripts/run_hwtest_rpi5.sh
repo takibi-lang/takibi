@@ -18,6 +18,17 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERIAL_DEV="${RPI5_SERIAL_DEV:-$("$REPO_ROOT/scripts/rpi5_uart_dev.sh")}"
+
+# Every clone shares one physical board, and AGENTS.md's promise is that each
+# runner takes the lease it needs before it starts, so nothing needs
+# permission. This runner did not, while scripts/run_kernel_hwtest_rpi5.sh
+# next to it did -- so the maintained kernel lane waited its turn and these
+# examples lanes walked straight past it into the same board. Measured on
+# 2026-09-06: this lane and another clone's `make kernelcheck-rpi5` ran
+# concurrently, and three of six tests here came back with empty or truncated
+# UART captures while the other run recorded a board failure.
+. "$REPO_ROOT/scripts/resource_lease.sh"
+resource_lease_acquire rpi5 "hwcheck-rpi5" || exit 1
 BAUD=115200
 
 POLL_INTERVAL=0.05

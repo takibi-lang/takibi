@@ -3,6 +3,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$REPO_ROOT/scripts/board_link_gate.sh"
 SERIAL_DEV="${RPI5_SERIAL_DEV:-$($REPO_ROOT/scripts/rpi5_uart_dev.sh)}"
 ELF="$REPO_ROOT/kernel/build/rpi5/kernel.elf"
 VIEW_DIR="$REPO_ROOT/kernel/tests/rpi5/views"
@@ -159,7 +160,9 @@ resource_lease_board_ok
 echo "[kernel/rpi5] kernel loaded in $((SECONDS - load_started))s; waiting for integration completion"
 
 # GitHub issue #387: ONE readiness gate, before the FIRST wire test, rather
-# than one answer per script.
+# than one answer per script. The rules -- which markers, and why a failed
+# bring-up is answered differently from a slow one -- live in
+# scripts/board_link_gate.sh, which the STM32 net lane uses too.
 #
 # What this replaces: the three wire tests below used to start the moment
 # rpi5_jtag_load.sh returned -- which is when SWD finished injecting, not
@@ -176,32 +179,14 @@ echo "[kernel/rpi5] kernel loaded in $((SECONDS - load_started))s; waiting for i
 # one -- the same fix the TCP flake took on 2026-08-02, which was the test
 # harness firing before the kernel was listening rather than anything in
 # kernel/net/tcp.tkb.
-#
-# The elapsed time is printed because it is GitHub issue #411's number and
-# this wait measures it directly: a ten-second retry budget against a boot
-# nobody had timed is exactly the pairing that issue was opened about.
 echo "[kernel/rpi5] waiting for the RP1 GEM link"
-link_started=$SECONDS
-link_ready=0
-for _wait in $(seq 1 600); do
-    if LC_ALL=C grep -aFq 'rp1 gem: link ready' "$UART_LOG"; then
-        link_ready=1
-        break
-    fi
-    # A failed bring-up is a different answer from a slow one, and the
-    # kernel distinguishes them. Say so immediately instead of spending the
-    # whole window discovering it.
-    if LC_ALL=C grep -aFq 'rp1 gem: link failed' "$UART_LOG"; then
-        echo "FAIL kernel/rpi5: the kernel reported 'rp1 gem: link failed' (see $UART_LOG)" >&2
-        exit 1
-    fi
-    sleep 0.1
-done
-if [ "$link_ready" -ne 1 ]; then
-    echo "FAIL kernel/rpi5: the kernel never announced 'rp1 gem: link ready' (see $UART_LOG) -- the board did not reach a usable link, which is NOT a protocol defect in the tests below" >&2
+if link_reason="$(board_link_gate "$UART_LOG" \
+        'rp1 gem: link ready' 'rp1 gem: link failed' 600)"; then
+    echo "[kernel/rpi5] $link_reason"
+else
+    echo "FAIL kernel/rpi5: $link_reason (see $UART_LOG)" >&2
     exit 1
 fi
-echo "[kernel/rpi5] RP1 GEM link ready $((SECONDS - link_started))s after load"
 
 # GitHub issue #387: stop the HOST from asking, because the board can only
 # answer once.

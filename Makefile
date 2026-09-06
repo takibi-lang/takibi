@@ -193,6 +193,8 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 	@python3 scripts/test_profile_kernel_samples.py
 	@bash scripts/test_repeat_kernel_lane.sh
 	@bash scripts/test_run_lane.sh
+	@bash scripts/test_board_link_gate.sh
+	@python3 scripts/test_net_link_wait.py
 	@bash scripts/test_archive_kernel_failure.sh
 	@python3 scripts/check_direct_mmio_literals.py kernel
 	@python3 scripts/check_no_conflict_markers.py
