@@ -115,22 +115,21 @@ Territory A, which is the point: the backlog exists so that the milestone
 above does not pay the same debugging cost twice.
 
 The first five entries of the 2026-09-05 order closed on 2026-09-05 and
-2026-09-06: #513, #515, #471, #387 and #411. #280, the sixth, was measured and
-then deliberately parked; see below. #519 is new.
+2026-09-06: #513, #515, #471, #387 and #411, and #519, which was filed and
+closed the same day. #280, the sixth of the original order, was measured and
+then deliberately parked; see below.
 
-1. **#519** DDB asserts a process UART-wake event the harness never
-   establishes. Same family as #387 and #515, found while measuring #411.
-2. **#336** flag workaround comments citing closed issues.
-3. **#56** CI. Worth most with two agents; QEMU lanes need no board lease.
-4. **#497** post-boot profiling, whose first named workload is now bulk TCP
+1. **#336** flag workaround comments citing closed issues.
+2. **#56** CI. Worth most with two agents; QEMU lanes need no board lease.
+3. **#497** post-boot profiling, whose first named workload is now bulk TCP
    throughput on RPi5 because #280 waits on that number, then **#502** call
    chains and **#503** PMU counters. Measurement before Territory A needs it.
-5. **#410** how a fallback is reported: three counted, two logged, none
+4. **#410** how a fallback is reported: three counted, two logged, none
    asserted.
-6. **#388** the hand-written exception vectors carry no stack-overflow test.
-7. **#429** in-kernel GDB stub, **#149** GDB without JTAG, **#444**
+5. **#388** the hand-written exception vectors carry no stack-overflow test.
+6. **#429** in-kernel GDB stub, **#149** GDB without JTAG, **#444**
    controlled DDB memory mutation.
-8. **#454** `uart_putc` busy-waits, at 87us per logged byte.
+7. **#454** `uart_putc` busy-waits, at 87us per logged byte.
 
 **#280 is parked, not queued.** It was measured on 2026-09-06: SWD is at its
 30 MHz ceiling at 187 KiB/s, the rootfs is 85% of what is transferred, and the
