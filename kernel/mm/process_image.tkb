@@ -15,45 +15,61 @@ private let mut process_image_zero_page: [u8; PAGE_SIZE];
 // Streaming ELF source selected only for the ext2-backed map entry point.
 // The metadata window still contains the ELF header/program table; file
 // bytes for PT_LOAD pages are fetched one filesystem block at a time.
-private let mut process_image_ext2_active: bool;
-private let mut process_image_ext2_mount: Ext2Mount;
-private let mut process_image_ext2_inode: usize;
-private let mut process_image_ext2_length: usize;
-private let mut process_image_ext2_block: [u8; KERNEL_BLOCK_SIZE];
 // A dynamic ELF pair changes backing files between the application's and
 // interpreter's PT_LOAD passes. These fields carry that second source only
 // for the synchronous pair mapper below.
-private let mut process_image_pair_ext2_active: bool;
-private let mut process_image_pair_ext2_mount: Ext2Mount;
-private let mut process_image_pair_ext2_inode: usize;
-private let mut process_image_pair_ext2_length: usize;
+struct ProcessImageExt2State {
+    active: bool;
+    mount: Ext2Mount;
+    inode: usize;
+    length: usize;
+    block: [u8; KERNEL_BLOCK_SIZE];
+    pair_active: bool;
+    pair_mount: Ext2Mount;
+    pair_inode: usize;
+    pair_length: usize;
+}
+
+private let mut process_image_ext2_state:
+    [ProcessImageExt2State; KERNEL_MAX_CORES];
+
+private fn process_image_ext2_here() -> *ProcessImageExt2State {
+    let base: *ProcessImageExt2State = process_image_ext2_state;
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) { return base; }
+    return base + (core as isize);
+}
 
 fn process_image_ext2_source(mount: Ext2Mount, inode: usize,
                              length: usize) {
-    process_image_ext2_mount = mount;
-    process_image_ext2_inode = inode;
-    process_image_ext2_length = length;
-    process_image_ext2_active = true;
+    let state: *ProcessImageExt2State = process_image_ext2_here();
+    state.mount = mount;
+    state.inode = inode;
+    state.length = length;
+    state.active = true;
 }
 
 fn process_image_ext2_source_clear() {
-    process_image_ext2_active = false;
-    process_image_ext2_inode = 0;
-    process_image_ext2_length = 0;
+    let state: *ProcessImageExt2State = process_image_ext2_here();
+    state.active = false;
+    state.inode = 0;
+    state.length = 0;
 }
 
 fn process_image_pair_ext2_source(mount: Ext2Mount, inode: usize,
                                   length: usize) {
-    process_image_pair_ext2_mount = mount;
-    process_image_pair_ext2_inode = inode;
-    process_image_pair_ext2_length = length;
-    process_image_pair_ext2_active = true;
+    let state: *ProcessImageExt2State = process_image_ext2_here();
+    state.pair_mount = mount;
+    state.pair_inode = inode;
+    state.pair_length = length;
+    state.pair_active = true;
 }
 
 fn process_image_pair_ext2_source_clear() {
-    process_image_pair_ext2_active = false;
-    process_image_pair_ext2_inode = 0;
-    process_image_pair_ext2_length = 0;
+    let state: *ProcessImageExt2State = process_image_ext2_here();
+    state.pair_active = false;
+    state.pair_inode = 0;
+    state.pair_length = 0;
 }
 // GitHub issue #448: how many pages the LAST reap gave back, which is a
 // report about an event rather than about a process, so it stays here.
@@ -1307,7 +1323,7 @@ fn process_image_load_page(page: borrow PageOwner[page],
                            load_bias: usize,
                            l3_index: usize)
         -> ProcessImagePageLoadResult !{unsafe} {
-    if (process_image_ext2_active) {
+    if (process_image_ext2_here().active) {
         return process_image_load_page_ext2(
             page, plan, header, load_bias, l3_index);
     }
@@ -1387,6 +1403,7 @@ fn process_image_load_page_ext2(page: borrow PageOwner[page],
                                 load_bias: usize,
                                 l3_index: usize)
         -> ProcessImagePageLoadResult !{unsafe} {
+    let source_state: *ProcessImageExt2State = process_image_ext2_here();
     let bytes = page_bytes(page);
     for i: usize in 0..<4096 { bytes[i] = 0; }
     let page_start: usize = l3_index * PAGE_SIZE;
@@ -1410,12 +1427,12 @@ fn process_image_load_page_ext2(page: borrow PageOwner[page],
                                        (copy_start - segment_start);
         let mut remaining: usize = copy_end - copy_start;
         while (remaining != 0) {
-            if (source_offset >= process_image_ext2_length) {
+            if (source_offset >= source_state.length) {
                 return ProcessImagePageLoadResult::Invalid;
             }
             match ext2_read_file_chunk(
-                    process_image_ext2_mount, process_image_ext2_inode,
-                    source_offset, process_image_ext2_block as []u8) {
+                    source_state.mount, source_state.inode,
+                    source_offset, source_state.block as []u8) {
                 Ext2ReadResult::Invalid => {
                     return ProcessImagePageLoadResult::Invalid;
                 }
@@ -1425,7 +1442,7 @@ fn process_image_load_page_ext2(page: borrow PageOwner[page],
                     }
                     let mut take: usize = read_length;
                     if (take > remaining) { take = remaining; }
-                    let block_bytes = process_image_ext2_block as []u8;
+                    let block_bytes = source_state.block as []u8;
                     let destination_start: usize = destination_offset;
                     if (take > block_bytes.len ||
                         destination_start > bytes.len) {
@@ -1691,11 +1708,13 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
             return ProcessImagePairProbeResult::Invalid;
         }
         ProcessImageSegmentsResult::Mapped(primary_count) => {
-            if (process_image_pair_ext2_active) {
+            let source_state: *ProcessImageExt2State =
+                process_image_ext2_here();
+            if (source_state.pair_active) {
                 process_image_ext2_source(
-                    process_image_pair_ext2_mount,
-                    process_image_pair_ext2_inode,
-                    process_image_pair_ext2_length);
+                    source_state.pair_mount,
+                    source_state.pair_inode,
+                    source_state.pair_length);
             }
             match process_image_map_segments(
                     interpreter, interpreter_bias, primary_count) {
@@ -2089,15 +2108,12 @@ fn process_image_gap_is_unmapped() -> bool {
 // aiming the COW handler at PID 1's live image, and that took a hardware
 // bisect to find.
 //
-// SIX ARE SHARED STAGING for an exec's ext2 source
-// (process_image_ext2_active/_mount/_inode/_length/_block and the _pair_
-// set beside them). Two cores exec'ing at once would each stage over the
-// other, and the result is a process started from another process's file --
-// which does not fault, it runs.
+// The ext2 exec staging is per-core too. Two concurrent execs therefore
+// carry independent source metadata and block buffers.
 //
 // The rest are the pool (mutation guard-required by typing), its ready
 // flag, the missing-record fallback, and counters.
 fn process_image_execution_model_assumption() {
     static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "the ext2 exec staging is shared: two cores exec'ing at once each stage over the other");
+                  "the process-image pool initializer, missing-record fallback, and counters are shared; target-root and ext2 staging are per-core since GitHub issue #479");
 }
