@@ -224,6 +224,7 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 		       --include="*.ml" --include="*.mll" --include="*.mly" \
 		       --include="*.tkb" --include="*.S" --include="*.md" \
 		       --include="*.sh" --include="*.ld" --include="*.py" \
+		       --include="*.yml" --include="*.yaml" \
 		       . Makefile examples/Makefile 2>/dev/null; then \
 		    echo "ERROR: non-ASCII characters found (see above)"; exit 1; \
 		fi; \
@@ -1234,10 +1235,17 @@ kernelsh-rpi5: kernelbuild-rpi5
 lease-status:
 	@bash -c '. scripts/resource_lease.sh; resource_lease_status'
 
-KERNELCHECK_LANES := kernelcheck-qemu kernelcheck-qemu-debug \
+## The QEMU lanes, named apart from the RPi5 one so `cicheck` below can be
+## exactly allcheck minus the hardware without repeating the list. Adding a
+## lane to KERNELCHECK_QEMU_LANES puts it in both aggregates, which is the
+## behaviour wanted: a lane that allcheck runs and CI does not is a lane
+## whose failures only a person sitting at this machine ever sees.
+KERNELCHECK_QEMU_LANES := kernelcheck-qemu kernelcheck-qemu-debug \
 	kernelcheck-oops-qemu kernelcheck-ddb-qemu \
 	kernelcheck-stack-overflow-qemu kernelcheck-lifecycle-gap-qemu \
-	kernelcheck-alloc-rollback-qemu kernelcheck-rpi5
+	kernelcheck-alloc-rollback-qemu
+
+KERNELCHECK_LANES := $(KERNELCHECK_QEMU_LANES) kernelcheck-rpi5
 
 kernelcheck: $(KERNELCHECK_LANES)
 
@@ -1287,6 +1295,45 @@ allcheck:
 		echo "PASS allcheck: langcheck test linuxcheck $(KERNELCHECK_LANES)"; \
 	else \
 		echo "FAIL allcheck: one or more checks failed (see the lane output above)" >&2; \
+		exit $$status; \
+	fi
+
+## cicheck: everything allcheck runs that does not touch a board.
+##
+## Named without `allcheck`, `hwcheck` or `kernelcheck` in it on purpose:
+## AGENTS.md tells a reader to treat any target carrying one of those as
+## hardware-touching, and this one deliberately is not. It is exactly
+## allcheck minus `kernelcheck-rpi5`, derived from the same variable rather
+## than a second list, so the two cannot drift.
+##
+## This is what a hosted CI runner can do. The hardware half is not a
+## question of wiring: a GitHub-hosted runner has no board, and a self-hosted
+## one here would queue behind a machine that is switched off overnight and
+## would take the board at whatever moment it came back -- which is when a
+## person is about to use it. See the RPi5 lane's own cost, measured
+## 2026-09-06: it runs alone for 28.8 s of allcheck's 70.6 s span, and its
+## intermittents have been measured at rates that make a single automated
+## run a poor verdict.
+##
+## Takes the suite lease for the same reason allcheck does -- it is an
+## aggregate with a compiler build and the unit suite, which is what
+## saturates this machine. On a CI runner nothing else holds it, so the
+## acquire returns immediately.
+.PHONY: cicheck
+cicheck:
+	@status=0; . scripts/resource_lease.sh; \
+	rm -rf "$(LANE_TIMING_DIR)"; mkdir -p "$(LANE_TIMING_DIR)"; \
+	export TAKIBI_LANE_TIMING_DIR="$(LANE_TIMING_DIR)"; \
+	resource_lease_run_suite cicheck \
+		$(MAKE) langcheck test linuxcheck $(KERNELCHECK_QEMU_LANES) \
+		|| status=$$?; \
+	echo; \
+	python3 scripts/summarize_lane_timing.py "$(LANE_TIMING_DIR)" || true; \
+	echo "lane timing artifact: $(LANE_TIMING_DIR:$(CURDIR)/%=%)"; \
+	if [ $$status -eq 0 ]; then \
+		echo "PASS cicheck: langcheck test linuxcheck $(KERNELCHECK_QEMU_LANES)"; \
+	else \
+		echo "FAIL cicheck: one or more checks failed (see the lane output above)" >&2; \
 		exit $$status; \
 	fi
 

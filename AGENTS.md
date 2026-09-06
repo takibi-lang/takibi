@@ -239,10 +239,22 @@ make kernelbuild        # build QEMU and RPi5 kernels
 make kernelcheck-qemu   # run maintained QEMU integration tests
 make kernelcheck-rpi5   # run maintained RPi5 hardware tests
 make kernelcheck        # run all maintained kernel tests
+make cicheck            # every allcheck lane that touches no board
 make allbuild           # build every target without hardware execution
 make allcheck           # run maintained checks, including RPi5 hardware
 make clean
 ```
+
+`cicheck` is allcheck minus `kernelcheck-rpi5`, derived from the same variable
+so the two cannot drift, and named without `allcheck`/`hwcheck`/`kernelcheck`
+in it because unlike those it touches no board. It is what
+`.github/workflows/ci.yml` runs on every push and pull request, alongside
+`make allbuild` for the cross-tree compile proof.
+
+Hardware is deliberately not in CI. A hosted runner has no board, and a
+self-hosted one here would take the board whenever the workstation came back
+from being switched off -- which is when a person is about to use it. Run the
+hardware lanes yourself, at a natural boundary of the work, as above.
 
 Run `make allbuild` before the first commit of a compiler-affecting change. It
 is the build-level proof that callers in different trees still compile; do not

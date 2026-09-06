@@ -1,0 +1,133 @@
+name: CI
+
+# The hardware-free half of `make allcheck`, which is what a hosted runner can
+# run: langcheck, the compiler unit tests, linux_user, and the seven QEMU
+# lanes. `make cicheck` is that set, derived from the same variable allcheck
+# uses so the two cannot drift apart.
+#
+# The RPi5 and STM32 lanes are absent deliberately, not by oversight. A
+# GitHub-hosted runner has no board. A self-hosted runner on the machine that
+# does have them would queue behind a workstation that is switched off
+# overnight and would then take the board at whatever moment it came back --
+# which is when a person is about to use it. Measured 2026-09-06: the RPi5
+# lane runs alone for 28.8 s of allcheck's 70.6 s span, and its intermittents
+# have been measured at rates (2 in 4, 1 in 5 before their fixes) that make a
+# single automated run a poor verdict anyway. Hardware stays a thing a person
+# runs at a natural boundary of the work.
+#
+# Every phase is timed. This workflow is a first iteration whose costs are not
+# yet known, so it reports where its own minutes went rather than asking
+# someone to guess: the make phases go through scripts/run_lane.sh, the same
+# receipt the local aggregates use, and the step durations GitHub records are
+# summarised beside them.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+  actions: read
+
+# A batch of pushes should not queue a run per commit; the newest is the one
+# whose answer anybody wants.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hardware-free:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      OPAMYES: "true"
+      # The workflow's own phases. `make cicheck` empties and fills
+      # _build/lane-timing for its lanes, so the two summaries stay separate:
+      # this one is setup versus build versus test, that one is which lane.
+      TAKIBI_LANE_TIMING_DIR: ${{ github.workspace }}/_build/ci-timing
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain packages
+        run: |
+          bash scripts/run_lane.sh ci-apt bash -euo pipefail -c '
+            wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+            chmod +x /tmp/llvm.sh
+            sudo /tmp/llvm.sh 19
+            sudo apt-get install -y --no-install-recommends \
+              llvm-19 llvm-19-dev lld-19 libzstd-dev cmake \
+              qemu-system-arm gdb-multiarch \
+              mtools cpio e2fsprogs e2tools python3-serial
+          '
+
+      # Caches the opam switch itself, which is the expensive part: the OCaml
+      # LLVM bindings are compiled, not downloaded. Deliberately an action
+      # with a dependency-keyed cache rather than a prebuilt image -- an image
+      # drifts from this file silently, a cache key does not.
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.4.0"
+
+      - name: OCaml dependencies
+        run: |
+          bash scripts/run_lane.sh ci-opam bash -euo pipefail -c '
+            # llvm is pinned because it must match the LLVM installed above;
+            # the rest float, because pinning a version that later leaves the
+            # opam repository breaks a build for a reason unrelated to the
+            # change under test.
+            opam install -y dune menhir ppx_deriving alcotest bisect_ppx_ng
+            opam install -y llvm.19-static
+          '
+
+      # Runs langcheck and the unit tests a second time, since cicheck below
+      # runs them too. The duplication is known and costs about 27 s locally.
+      # It is kept because the alternative -- naming allbuild's pieces here by
+      # hand -- silently stops covering whatever allbuild gains later, and
+      # silent coverage loss is a worse failure than a wasted half minute.
+      # What it buys is the cross-tree compile proof: every examples/ target,
+      # which nothing else in this job builds.
+      - name: Build every tree
+        run: |
+          eval $(opam env)
+          bash scripts/run_lane.sh ci-allbuild make allbuild
+
+      - name: Hardware-free checks
+        run: |
+          eval $(opam env)
+          make cicheck
+
+      # Printed, never gated. The unsafe-block and assembly counts are
+      # supposed to be moving right now -- multicore work adds atomics -- so a
+      # threshold or a recorded baseline would measure churn rather than risk,
+      # and would conflict constantly between two agents working in parallel.
+      # CI logs are retained, so running it here is what "recording changes
+      # over time" costs nothing to mean today.
+      - name: Trusted-base inventory
+        run: |
+          eval $(opam env)
+          make trustedbasecheck
+
+      - name: Where the time went
+        if: always()
+        run: |
+          {
+            echo "## Phase timing"
+            echo '```'
+            python3 scripts/summarize_lane_timing.py "$TAKIBI_LANE_TIMING_DIR" \
+              2>&1 || true
+            echo '```'
+            echo "## Lane timing inside cicheck"
+            echo '```'
+            python3 scripts/summarize_lane_timing.py _build/lane-timing \
+              2>&1 || true
+            echo '```'
+            echo "## Step durations recorded by GitHub"
+            echo '```'
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" \
+              --jq '.jobs[] | select(.name == "hardware-free") | .steps[]
+                    | "\(.conclusion // "running")\t\(.name)"' 2>&1 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          GH_TOKEN: ${{ github.token }}
