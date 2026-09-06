@@ -54,7 +54,10 @@ REPLIES = {
             b"ddb: bt frame=0 pc=0x00000000400103a0 boundary=user\n"
             b"ddb: bt stop=user-boundary fp=0x000000007ffffa40\n"),
 }
-RESUME_ECHO = b"/ # ddb-resume-ok\r\n/ # "
+# What the board actually produces: the command's output on its own line,
+# then the next prompt. The `ddb: continuing` line supplies the newline in
+# front of it.
+RESUME_ECHO = b"ddb-resume-ok\r\n/ # "
 
 
 def retry_seconds() -> float:
@@ -66,28 +69,49 @@ def retry_seconds() -> float:
     return float(match.group(1))
 
 
-def scripted_board(master: int, proc, answer_on_attempt: int, budget: float):
-    """Play the kernel side; return how many resume commands were seen."""
+def scripted_board(master: int, proc, answer_on_attempt: int, budget: float,
+                   answer_wake: bool = True):
+    """Play the kernel side; return how many resume commands were seen.
+
+    The driver's opening move is a newline whose only job is to make the
+    kernel record a process UART-wake, and it now waits to be answered before
+    breaking in. `answer_wake=False` plays a board that never answers it,
+    which is the case the driver has to attribute correctly rather than
+    reporting as a ring-retention defect.
+
+    The BREAK itself is not observable from the master end of a pty, so the
+    debugger banner follows the acknowledgement by a short delay instead --
+    the same ordering a real board produces.
+    """
     pending = b""
     resume_seen = 0
     continued = False
-    # Wait for the driver to announce itself before answering. It opens the
-    # port, writes a newline and sends a BREAK, and opening a serial port
-    # flushes what is already queued -- a banner written before that is
-    # discarded, and the driver then sees a board that never prompted.
+    acked = False
+    announce_at = None
     announced = False
     deadline = time.monotonic() + budget
     while proc.poll() is None and time.monotonic() < deadline:
-        readable, _, _ = select.select([master], [], [], 0.1)
+        readable, _, _ = select.select([master], [], [], 0.05)
+        if announce_at is not None and not announced \
+                and time.monotonic() >= announce_at:
+            os.write(master, BANNER + PROMPT)
+            announced = True
         if not readable:
             continue
         try:
             pending += os.read(master, 4096)
         except OSError:
             break
-        if not announced:
-            os.write(master, BANNER + PROMPT)
-            announced = True
+        if not acked:
+            acked = True
+            if not answer_wake:
+                pending = b""
+                continue
+            # What a shell answers an empty command line with.
+            os.write(master, b"\r\n")
+            announce_at = time.monotonic() + 0.2
+            pending = b""
+            continue
         while b"\n" in pending:
             line, _, pending = pending.partition(b"\n")
             command = line.strip()
@@ -104,7 +128,8 @@ def scripted_board(master: int, proc, answer_on_attempt: int, budget: float):
     return resume_seen
 
 
-def run_case(label, answer_on_attempt, timeout, expect_ok, needles):
+def run_case(label, answer_on_attempt, timeout, expect_ok, needles,
+             answer_wake=True):
     master, slave = pty.openpty()
     try:
         port = os.ttyname(slave)
@@ -114,7 +139,7 @@ def run_case(label, answer_on_attempt, timeout, expect_ok, needles):
                  "--log", log.name, "--timeout", str(timeout)],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             attempts = scripted_board(master, proc, answer_on_attempt,
-                                      timeout + 10)
+                                      timeout + 10, answer_wake)
             stdout, stderr = proc.communicate(timeout=30)
     finally:
         os.close(master)
@@ -177,9 +202,20 @@ def main() -> int:
               f"command(s) went out in {silent_budget:.1f}s")
         return 1
 
-    print("PASS ddb-rpi5-driver controls: an immediate answer takes one "
-          "command, a dropped first command is retried during silence, and a "
-          "workload that never answers fails with the attempt count")
+    # A board that never answers the byte the wake event depends on. The
+    # driver must say that, and must NOT go on to report a ring-retention
+    # defect about a ring nothing was given to retain (GitHub issue #519).
+    if run_case("a board that never answers the wake byte", 1, 6.0, False,
+                ["did not answer the byte", "wake-acked=never",
+                 "NOT a diagnostic-ring retention defect"],
+                answer_wake=False) is None:
+        return 1
+
+    print("PASS ddb-rpi5-driver controls: the wake byte is acknowledged "
+          "before the BREAK and a board that never answers it says so, an "
+          "immediate resume takes one command, a dropped first command is "
+          "retried during silence, and a workload that never answers fails "
+          "with the attempt count")
     return 0
 
 

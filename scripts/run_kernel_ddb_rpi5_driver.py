@@ -46,8 +46,14 @@ import time
 import serial
 
 # The milestones, in the order the session reaches them.
-MILESTONES = ("break-sent", "first-prompt", "continuing", "resume-sent",
-              "resume-echoed")
+MILESTONES = ("wake-sent", "wake-acked", "break-sent", "first-prompt",
+              "continuing", "resume-sent", "resume-echoed")
+
+# How long the board may take to answer the byte that produces the process
+# UART-wake event. Measured healthy runs answer it before the BREAK is even
+# sent; this is generous by orders of magnitude and only exists so a board
+# that is not listening says so instead of being broken into.
+WAKE_ACK_SECONDS = 3.0
 
 # How long a resume command may draw no echo before it is sent again. A
 # healthy round trip is 0.2s, so this is generous by an order of magnitude and
@@ -84,6 +90,28 @@ class Timeline:
         return SystemExit(f"{message}\n{self.render()}")
 
 
+def resumed(normalized: bytes) -> bool:
+    """Has the shell run a command since DDB said it was continuing?
+
+    The proof is the command's OUTPUT on a line of its own, after the
+    continuing line. It used to be `/ # ddb-resume-ok`, a prompt immediately
+    followed by the output -- which held only while the newline that wakes
+    the shell was still unconsumed when the BREAK landed. Now that the wake
+    is acknowledged first (GitHub issue #519), the shell has already answered
+    that newline, so the first command after the resume produces its output
+    with no prompt in front of it. The command was running fine; the marker
+    was describing a side effect of the race it now avoids.
+
+    Anchored after `ddb: continuing` so nothing earlier in the capture can
+    satisfy it. The shell does not echo what is typed at it, so the only
+    source of this line is the command having run.
+    """
+    continuing = normalized.find(b"ddb: continuing\n")
+    if continuing < 0:
+        return False
+    return normalized.find(b"\nddb-resume-ok\n", continuing) >= 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", required=True)
@@ -101,8 +129,46 @@ def main() -> int:
     with serial.Serial(args.port, 115200, timeout=0.25) as uart, open(
         args.log, "ab"
     ) as log:
+        # Establish the process UART-wake, do not assume it.
+        #
+        # The verdict below requires a DiagnosticEventProcessUartWake record
+        # in the ring. The kernel writes one on EVERY path through
+        # kernel_process_uart_wake -- delivered, retried, or no process
+        # blocked at all -- so the only way to be missing one is for no UART
+        # byte to have reached the kernel between the ring being enabled and
+        # the BREAK. That is what this newline is for, and it used to be
+        # written and immediately buried under a BREAK: `flush()` returns
+        # when the byte reaches the USB stack, not when it has been clocked
+        # out and consumed, so the BREAK could land first and the ring then
+        # held only the platform BREAK event. Observed once in five
+        # consecutive runs (GitHub issue #519), as `events cpu=0 count=1`
+        # holding id=0x0101 alone.
+        #
+        # So the byte is acknowledged before the BREAK goes out. Anything the
+        # target sends back is proof it processed input: a healthy board
+        # answers an empty command line with a newline of its own, which the
+        # captures show arriving before the debugger banner. The input queue
+        # is dropped first so a byte that predates the question cannot answer
+        # it.
+        uart.reset_input_buffer()
         uart.write(b"\n")
         uart.flush()
+        timeline.mark("wake-sent")
+        ack_deadline = min(time.monotonic() + WAKE_ACK_SECONDS, deadline)
+        while time.monotonic() < ack_deadline:
+            chunk = uart.read(4096)
+            if chunk:
+                received.extend(chunk)
+                log.write(chunk)
+                log.flush()
+                timeline.mark("wake-acked")
+                break
+        if "wake-acked" not in timeline.at:
+            raise timeline.bail(
+                "RPi5 did not answer the byte that produces the process "
+                "UART-wake event, so breaking in would have inspected a ring "
+                "that never saw one. This is the board not listening, NOT a "
+                "diagnostic-ring retention defect")
         uart.send_break(0.25)
         timeline.mark("break-sent")
         while time.monotonic() < deadline:
@@ -116,17 +182,23 @@ def main() -> int:
                 received.extend(chunk)
                 log.write(chunk)
                 log.flush()
-                found = received.count(b"ddb> ")
-                if found:
-                    timeline.mark("first-prompt")
-                while prompt_count < found:
-                    if prompt_count < len(commands):
-                        uart.write(commands[prompt_count])
-                        uart.flush()
-                    prompt_count += 1
+
+            # Evaluated every iteration, not only when a chunk just arrived.
+            # The acknowledgement read above can pull the debugger banner in
+            # alongside the byte it was waiting for, and gating this on a
+            # NEW chunk then leaves a prompt sitting unanswered in a buffer
+            # while the session waits for output that has already been sent.
+            found = received.count(b"ddb> ")
+            if found:
+                timeline.mark("first-prompt")
+            while prompt_count < found:
+                if prompt_count < len(commands):
+                    uart.write(commands[prompt_count])
+                    uart.flush()
+                prompt_count += 1
 
             normalized = bytes(received).replace(b"\r", b"")
-            if b"\n/ # ddb-resume-ok\n/ # " in normalized:
+            if resumed(normalized):
                 timeline.mark("resume-echoed")
                 break
             if b"ddb: continuing\n" in received:
@@ -186,8 +258,7 @@ def main() -> int:
     if "ddb: continuing\n" not in text:
         raise timeline.bail(
             "RPi5 DDB did not continue after post-fault inspection")
-    if (b"\n/ # ddb-resume-ok\n/ # " not in
-            bytes(received).replace(b"\r", b"")):
+    if not resumed(bytes(received).replace(b"\r", b"")):
         raise timeline.bail(
             f"RPi5 workload did not resume after DDB continue: "
             f"{timeline.resume_attempts} resume command(s) went out and no "
