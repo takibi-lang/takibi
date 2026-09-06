@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import subprocess
 import sys
 
 from pass_line import report_pass
@@ -55,11 +56,42 @@ PACKAGE_OF = {
 PROVIDED = {"unix", "str", "threads", "bytes", "takibi"}
 
 
+def shown(path: pathlib.Path) -> str:
+    """A path to put in a message, without a formatter that can raise.
+
+    `relative_to` throws when the path is outside the tree, which a control
+    pointing this at a scratch file does. A diagnostic that crashes instead
+    of printing is worse than no diagnostic.
+    """
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def tracked_dune_files() -> list[pathlib.Path]:
+    """Every dune file git knows about, which is the set that matters.
+
+    Not `rglob("dune")`. That matched `_opam/bin/dune` on a CI runner --
+    `ocaml/setup-ocaml` puts a local switch in the workspace -- and this check
+    crashed decoding an ELF binary as UTF-8. Asking git is exact, needs no
+    exclusion list to keep current, and cannot be surprised by the next
+    directory something decides to create here.
+    """
+    listing = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "-z", "dune", "*/dune"],
+        capture_output=True, check=True)
+    return [ROOT / name for name in
+            listing.stdout.decode("utf-8").split("\0") if name]
+
+
 def declared_libraries() -> set[str]:
-    """Root findlib names every dune file in the tree asks for."""
+    """Root findlib names every tracked dune file asks for."""
     names: set[str] = set()
-    for path in sorted(ROOT.rglob("dune")):
-        if "_build" in path.parts or not path.is_file():
+    for path in tracked_dune_files():
+        if not path.is_file():
+            # In the index but not on disk is git's business, not this
+            # check's.
             continue
         text = path.read_text(encoding="utf-8")
         for match in LIBRARIES.findall(text) + PPS.findall(text):
@@ -82,9 +114,8 @@ def installed_packages() -> set[str]:
 
 def main() -> int:
     if not WORKFLOW.is_file():
-        print(f"FAIL ci-opam-deps: {WORKFLOW.relative_to(ROOT)} does not "
-              "exist, so nothing installs what the build needs",
-              file=sys.stderr)
+        print(f"FAIL ci-opam-deps: {shown(WORKFLOW)} does not exist, so "
+              "nothing installs what the build needs", file=sys.stderr)
         return 1
 
     declared = declared_libraries()
@@ -115,11 +146,10 @@ def main() -> int:
               "which opam package provides it, or that the compiler does.",
               file=sys.stderr)
     for name, package in missing:
-        print(f"FAIL ci-opam-deps: a dune file asks for `{name}`, provided by "
-              f"opam package `{package}`, which "
-              f"{WORKFLOW.relative_to(ROOT)} does not install. CI would fail "
-              "at 'Library not found' for whoever pushes next.",
-              file=sys.stderr)
+        print(f"FAIL ci-opam-deps: a dune file asks for `{name}`, provided "
+              f"by opam package `{package}`, which {shown(WORKFLOW)} does not "
+              "install. CI would fail at 'Library not found' for whoever "
+              "pushes next.", file=sys.stderr)
 
     if missing or unmapped:
         return 1

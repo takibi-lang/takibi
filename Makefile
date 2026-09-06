@@ -206,6 +206,7 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 	@python3 scripts/check_stale_depfiles.py
 	@python3 scripts/check_single_dune_invocation.py
 	@python3 scripts/check_ci_opam_deps.py
+	@python3 scripts/test_check_ci_opam_deps.py
 	@python3 scripts/check_compiler_sync_rules.py --quiet
 	@python3 scripts/check_raw_pos_fname.py
 	@python3 scripts/check_qemu_lane_ports.py
@@ -221,7 +222,8 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 # text, and a file grep calls binary is not source text.
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash -c ' \
 		echo "Checking for non-ASCII characters in source files..."; \
-		if LC_ALL=C grep -rnPI "[^\x00-\x7F]" --exclude-dir=_build \
+		if LC_ALL=C grep -rnPI "[^\x00-\x7F]" \
+		       --exclude-dir=_build --exclude-dir=_opam \
 		       --include="*.ml" --include="*.mll" --include="*.mly" \
 		       --include="*.tkb" --include="*.S" --include="*.md" \
 		       --include="*.sh" --include="*.ld" --include="*.py" \
