@@ -160,11 +160,36 @@ private let mut process_image_pool_ready: bool = false;
 // accesses, so it lands here and is COUNTED, and the count is printed at
 // the end of the boot suite. That is the difference between a fallback
 // and a silent one.
-private let mut process_image_record_missing: ProcessImageRecord;
-private let mut process_image_record_missing_count: usize = 0;
+private let mut process_image_record_missing:
+    [ProcessImageRecord; KERNEL_MAX_CORES];
+private let mut process_image_record_missing_count:
+    [usize; KERNEL_MAX_CORES];
+
+private fn process_image_record_missing_here() -> *ProcessImageRecord {
+    let base: *ProcessImageRecord = process_image_record_missing;
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) { return base; }
+    return base + (core as isize);
+}
+
+private fn process_image_record_missing_note() {
+    let base: *usize = process_image_record_missing_count;
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) {
+        *base = *base + 1;
+        return;
+    }
+    let count: *usize = base + (core as isize);
+    *count = *count + 1;
+}
 
 fn process_image_record_missing_uses() -> usize {
-    return process_image_record_missing_count;
+    let counts: *usize = process_image_record_missing_count;
+    let mut total: usize = 0;
+    for core: usize in 0..<KERNEL_MAX_CORES {
+        total = total + *(counts + (core as isize));
+    }
+    return total;
 }
 
 // GitHub issue #392: how many root records the pool is holding. A
@@ -197,16 +222,14 @@ private fn process_image_pool_init() {
 // middle of mapping an image.
 private fn process_image_record_at(root: usize) -> *ProcessImageRecord !{unsafe} {
     if (process_image_record_ensure(root) == false) {
-        process_image_record_missing_count =
-            process_image_record_missing_count + 1;
-        return &process_image_record_missing;
+        process_image_record_missing_note();
+        return process_image_record_missing_here();
     }
     let mut address: IntrusiveSlotAddress = scheduled_process_image_record(root);
     let generation: usize = scheduled_process_image_record_generation(root);
     if (intrusive_slot_address_is_none(address)) {
-        process_image_record_missing_count =
-            process_image_record_missing_count + 1;
-        return &process_image_record_missing;
+        process_image_record_missing_note();
+        return process_image_record_missing_here();
     }
     // GitHub issue #492: the generation is COMPARED, which it was not.
     // The address and the generation both come out of the process record,
@@ -218,9 +241,8 @@ private fn process_image_record_at(root: usize) -> *ProcessImageRecord !{unsafe}
     match intrusive_pool_probe_handle(&process_image_pool, address,
                                       generation) {
         IntrusiveSlotProbe::NoPayload => {
-            process_image_record_missing_count =
-                process_image_record_missing_count + 1;
-            return &process_image_record_missing;
+            process_image_record_missing_note();
+            return process_image_record_missing_here();
         }
         IntrusiveSlotProbe::Live(slot_view) => {
             // GitHub issue #488: this RETURNS the pointer, so it cannot
@@ -2111,9 +2133,14 @@ fn process_image_gap_is_unmapped() -> bool {
 // The ext2 exec staging is per-core too. Two concurrent execs therefore
 // carry independent source metadata and block buffers.
 //
-// The rest are the pool (mutation guard-required by typing), its ready
-// flag, the missing-record fallback, and counters.
+// The missing-record fallback and its count are per-core, so one core cannot
+// overwrite another core's failure record.
+//
+// What remains shared is the pool's lazy initializer and diagnostic/event
+// state: the target-root fallback count and the last clone-reap page count.
+// They need an activation barrier plus per-CPU reporting or atomic publication
+// before a second core can update them.
 fn process_image_execution_model_assumption() {
     static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "the process-image pool initializer, missing-record fallback, and counters are shared; target-root and ext2 staging are per-core since GitHub issue #479");
+                  "the process-image pool initializer and two diagnostic counters remain shared; target-root, ext2 staging, and missing fallback are per-core since GitHub issue #479");
 }
