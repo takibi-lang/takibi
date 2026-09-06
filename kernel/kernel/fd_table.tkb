@@ -11,11 +11,12 @@ use "kernel/lib/locked_cell.tkb";
 //   that bounds it are protected by the same lock, by construction
 //   as of GitHub issue #452: the field is private and the only pointer at
 //   it comes from guarded_usize_value, which needs the refcount guard, so
-//   an unguarded read or write does not compile. Everything ELSE in this
-//   file -- the fd context tables, the descriptor blocks, the listener
-//   state -- is still reachable only from single-core boot/syscall-
-//   dispatch context, same as every kernel/lib/-backed pool this file
-//   builds on (IntrusivePool, whose walks are issue #482).
+//   an unguarded read or write does not compile. Descriptor block pool
+//   mutation uses the pool guard. One process's block chain has no separate
+//   lock: the current process alone reaches it through syscall dispatch;
+//   clone builds a not-yet-runnable child's chain, and reap releases an
+//   Exited process's chain. A future shared fd table between threads would
+//   need synchronization before it could reuse this ownership argument.
 // - unified_object_retain()/_release() are still a counter increment and
 //   decrement, not linear-tracked: the guard proves nothing reaches the
 //   count without the lock, and proves nothing at all about whether a
@@ -2918,11 +2919,13 @@ fn kernel_fd_table_crash_object(process: usize, fd: usize) -> usize !{unsafe} {
     return entries.slot[index].object;
 }
 
-// GitHub issue #479. SharedObject.refs and fd_slot_total are guarded now.
-// What remains is the per-process descriptor block chain: lookup, growth,
-// entry mutation and release span several accesses without exclusion from a
-// second core operating on the same process.
+// GitHub issue #479. SharedObject.refs and fd_slot_total are guarded by one
+// fd-class lock. The descriptor block pool guards mutation, while each chain
+// belongs to one process lifecycle: only its current syscall path operates on
+// a runnable chain; clone's destination is not runnable until copying ends;
+// reap releases only an Exited process. Two cores may therefore operate on
+// different chains without sharing their links or entries. Crash diagnostics
+// remain lockless under the separate world-stop execution-model blocker.
+// This file consequently has no KERNEL_ACTIVE_CORES dependency today.
 fn fd_table_execution_model_assumption() {
-    static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "one process's descriptor block chain can be walked or changed concurrently from two cores");
 }
