@@ -157,7 +157,19 @@ fi
 # Whether the tests below pass is a different question from whether the next
 # session will find a board that needs a power cycle.
 resource_lease_board_ok
-echo "[kernel/rpi5] kernel loaded in $((SECONDS - load_started))s; waiting for integration completion"
+# Say how many bytes went over SWD and how fast, not just how long it took.
+# GitHub issue #280 is about this number growing: 85% of what is transferred
+# is the embedded ext2 rootfs, the link is at its 30 MHz ceiling (40 MHz and
+# above fail outright), and every added MiB costs 5.5 s on every run, inside
+# the part of `make allcheck` that is waiting on this lane alone.
+#
+# Printed, not bounded. A bound here would fire on intended rootfs growth and
+# would be raised rather than investigated, which is the failure mode
+# kernel/tests' boot-duration bound is written to avoid. What a printed number
+# gives instead is a growth that shows up in a diff of two runs.
+load_summary="$(grep -ao 'downloaded [0-9]* bytes in [0-9.]*s ([0-9.]* KiB/s)' \
+    "$LOADER_LOG" | tail -1)"
+echo "[kernel/rpi5] kernel loaded in $((SECONDS - load_started))s${load_summary:+ -- $load_summary}; waiting for integration completion"
 
 # GitHub issue #387: ONE readiness gate, before the FIRST wire test, rather
 # than one answer per script. The rules -- which markers, and why a failed
