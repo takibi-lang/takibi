@@ -65,11 +65,12 @@ private fn secondary_tick_address() -> usize {
 }
 
 fn kernel_secondary_boot_state_clear() {
-    // GitHub issue #479: establish the process-image pool before PSCI can
-    // expose a second kernel execution context. Its ordinary callers retain
-    // lazy initialization for pre-secondary core-0 use; after this barrier
-    // the shared ready flag is immutable and cannot race.
+    // GitHub issue #479: establish the lazily initialized VM record pools
+    // before PSCI can expose a second kernel execution context. Their ordinary
+    // callers retain lazy initialization for pre-secondary core-0 use; after
+    // this barrier the shared ready flags are immutable and cannot race.
     process_image_pool_init_before_secondary();
+    address_space_backing_pool_init_before_secondary();
     kernel_secondary_boot_state = 0;
 }
 

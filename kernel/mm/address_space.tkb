@@ -54,8 +54,10 @@ private let mut address_space_backing_ready: bool = false;
 // Genuine allocation failure has nowhere to be reported from thirty-odd
 // field accesses, so it lands here and is COUNTED. Printed at the end of
 // the boot suite; 0 on a healthy kernel.
-private let mut address_space_backing_missing: AddressSpaceBacking;
-private let mut address_space_backing_missing_count: usize = 0;
+private let mut address_space_backing_missing:
+    [AddressSpaceBacking; KERNEL_MAX_CORES];
+private let mut address_space_backing_missing_count:
+    [usize; KERNEL_MAX_CORES];
 // GitHub issue #479: WHICH ADDRESS SPACE IS ACTIVE is a property of a
 // core, not of the kernel. Each core has its own TTBR0_EL1 and can be
 // running a different process, so two cores have two answers -- and one
@@ -96,7 +98,7 @@ private fn address_space_set_active_slot_here(slot: usize) {
 // page can be mapped into an address space at most once, so it cannot be
 // mapped into more address spaces than exist.
 fn address_space_live_count() -> usize !{unsafe} {
-    address_space_backing_pool_init();
+    address_space_backing_pool_init_before_secondary();
     return intrusive_pool_live_count(&address_space_backing_pool) + 1;
 }
 
@@ -128,7 +130,30 @@ fn address_space_probe_root_release(slot: usize) !{unsafe} {
 }
 
 fn address_space_backing_missing_uses() -> usize {
-    return address_space_backing_missing_count;
+    let mut total: usize = 0;
+    for core: usize in 0..<KERNEL_MAX_CORES {
+        total = total + address_space_backing_missing_count[core];
+    }
+    return total;
+}
+
+private fn address_space_backing_missing_here() -> *AddressSpaceBacking {
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) {
+        return &address_space_backing_missing[0];
+    }
+    return &address_space_backing_missing[core];
+}
+
+private fn address_space_backing_missing_note() {
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) {
+        address_space_backing_missing_count[0] =
+            address_space_backing_missing_count[0] + 1;
+        return;
+    }
+    address_space_backing_missing_count[core] =
+        address_space_backing_missing_count[core] + 1;
 }
 
 // GitHub issue #492: lookups that named a backing slot with the previous
@@ -138,7 +163,10 @@ fn address_space_backing_recycled_handle_count() -> usize !{unsafe} {
     return intrusive_pool_recycled_handle_count(&address_space_backing_pool);
 }
 
-private fn address_space_backing_pool_init() {
+// Core 0 may reach this lazily before secondary startup. The common PSCI
+// preparation path also calls it before core 1 becomes visible, after which
+// the ready flag is immutable and cannot race.
+fn address_space_backing_pool_init_before_secondary() {
     if (address_space_backing_ready) { return; }
     address_space_backing_ready = true;
     intrusive_pool_init(&address_space_backing_pool);
@@ -195,7 +223,7 @@ fn address_space_backing_ensure(slot: usize) -> bool !{unsafe} {
     // See address_space_backing_root0: slot 0 needs no allocation, and
     // must not attempt one, because it is created with the MMU off.
     if (slot == 0) { return true; }
-    address_space_backing_pool_init();
+    address_space_backing_pool_init_before_secondary();
     let mut address: IntrusiveSlotAddress =
         scheduled_process_address_space_backing(slot);
     let generation: usize =
@@ -245,16 +273,14 @@ private fn address_space_backing_at(slot: usize)
         -> *AddressSpaceBacking !{unsafe} {
     if (slot == 0) { return &address_space_backing_root0; }
     if (address_space_backing_ensure(slot) == false) {
-        address_space_backing_missing_count =
-            address_space_backing_missing_count + 1;
-        return &address_space_backing_missing;
+        address_space_backing_missing_note();
+        return address_space_backing_missing_here();
     }
     let mut address: IntrusiveSlotAddress =
         scheduled_process_address_space_backing(slot);
     if (intrusive_slot_address_is_none(address)) {
-        address_space_backing_missing_count =
-            address_space_backing_missing_count + 1;
-        return &address_space_backing_missing;
+        address_space_backing_missing_note();
+        return address_space_backing_missing_here();
     }
     let generation: usize =
         scheduled_process_address_space_backing_generation(slot);
@@ -271,9 +297,8 @@ private fn address_space_backing_at(slot: usize)
     match intrusive_pool_probe_handle(&address_space_backing_pool, address,
                                       generation) {
         IntrusiveSlotProbe::NoPayload => {
-            address_space_backing_missing_count =
-                address_space_backing_missing_count + 1;
-            return &address_space_backing_missing;
+            address_space_backing_missing_note();
+            return address_space_backing_missing_here();
         }
         IntrusiveSlotProbe::Live(slot_view) => {
             // GitHub issue #488: this RETURNS the pointer, so it cannot
@@ -297,9 +322,8 @@ private fn address_space_backing_existing_at(slot: usize)
     let mut address: IntrusiveSlotAddress =
         scheduled_process_address_space_backing(slot);
     if (intrusive_slot_address_is_none(address)) {
-        address_space_backing_missing_count =
-            address_space_backing_missing_count + 1;
-        return &address_space_backing_missing;
+        address_space_backing_missing_note();
+        return address_space_backing_missing_here();
     }
     let generation: usize =
         scheduled_process_address_space_backing_generation(slot);
@@ -311,9 +335,8 @@ private fn address_space_backing_existing_at(slot: usize)
     match intrusive_pool_probe_handle(&address_space_backing_pool, address,
                                       generation) {
         IntrusiveSlotProbe::NoPayload => {
-            address_space_backing_missing_count =
-                address_space_backing_missing_count + 1;
-            return &address_space_backing_missing;
+            address_space_backing_missing_note();
+            return address_space_backing_missing_here();
         }
         IntrusiveSlotProbe::Live(slot_view) => {
             // GitHub issue #488: this RETURNS the pointer, so it cannot
@@ -1197,9 +1220,7 @@ fn address_space_asid_rollover_probe() -> bool {
     return ok;
 }
 
-// GitHub issue #479. Five of this file's six globals are the ordinary
-// unsynchronized kind; the sixth is a different problem and is the reason
-// this assertion is worth reading.
+// GitHub issue #479. Re-derived as each shared scalar moved to its real axis.
 //
 // address_space_active_slot USED to be the interesting one: it records
 // which address space is active, which is a property of a core rather than
@@ -1208,10 +1229,16 @@ fn address_space_asid_rollover_probe() -> bool {
 // because the problem was never contention, it was that the state had the
 // wrong shape, and a lock would not have helped.
 //
-// What is left is the ordinary kind: the backing pool (mutation
-// guard-required by typing), its ready flag, the missing-record fallback
-// and its counter, and root 0's static backing.
+// The backing pool's mutation is guard-required by typing, and its ready flag
+// is settled on core 0 before PSCI publishes core 1. Missing-record fallback
+// storage and counts are per-core, so an invariant failure on one CPU cannot
+// overwrite another CPU's evidence.
+//
+// What remains shared is root 0's static backing. Its page-table addresses are
+// permanent after MMU-off boot, but ASID rollover refreshes its asid and
+// generation fields. Two cores may activate the fallback root, so that update
+// still needs one cross-core answer before KERNEL_ACTIVE_CORES can move.
 fn address_space_execution_model_assumption() {
     static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "the ext2/exec staging and the missing-record fallback are shared; active_slot is per-core since GitHub issue #479");
+                  "root 0 has one mutable ASID/generation pair shared by every core that can activate the fallback address space");
 }
