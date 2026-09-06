@@ -16,17 +16,20 @@ use "kernel/lib/locked_cell.tkb";
 // Current limitations (2026-08-13, issue #295). Keep this list current as
 // call sites change; a limitation that goes stale here is worse than
 // none.
-// - SINGLE-CORE SCHEDULER: only core 0 runs the scheduler or dispatches
-//   syscalls. Core 1 no longer parks -- since GitHub issue #447 it takes
-//   its own timer interrupt and idles in wfi -- but its dispatch returns
-//   before every path that reaches kernel state, so it never enters here.
-//   That, not parking, is why KERNEL_ACTIVE_CORES is still 1.
+// - Core 1 does not schedule yet. Since GitHub issue #447 it takes its own
+//   timer interrupt and idles in wfi, but its dispatch returns before every
+//   path that reaches process state. The scheduler state and crash trace are
+//   already per-core, and the run lock serializes shared tree walks and state
+//   transitions in preparation for enabling it.
 // - PARTLY SYNCHRONIZED as of GitHub issue #479. The pid counter is minted
 //   inside a LockedCell whose guard is the only way to reach the count
 //   (issue #452), and execution_state is per-core,
-//   indexed by cpu_id(). What is still unsynchronized is named by this
-//   file's process_execution_model_assumption: the bootstrap record and
-//   its two flags, the parent/sibling links, and the trace ring index.
+//   indexed by cpu_id(). Parent/sibling walks and all Ready/Running/Blocked
+//   transitions take the run lock, including the static bootstrap record;
+//   the crash trace uses per-core storage and an atomic global sequence.
+//   What remains unsynchronized is named by this file's
+//   process_execution_model_assumption: one core cannot preempt a lifecycle
+//   operation with another process's operation on that same core.
 // - scheduled_process_spare_lock takes a real lock as of issue #451. It
 //   returns a linear STRUCT carrying the interrupt state its release
 //   restores, where it used to return an erased `linear view` that emitted
@@ -5917,38 +5920,23 @@ fn kernel_process_clone_evidence() -> bool {
                0;
 }
 
-// GitHub issue #453. execution_here().current_handle, execution_here().scheduler_enabled
-// and execution_here().reschedule_pending are one scheduler's state, and
-// scheduled_process_spare_lock returns an erased view that emits no
-// instruction -- a compile-time proof that no second holder exists, which
-// stops being a proof when a second core can reap (#451).
-// GitHub issue #479: re-derived, because the old message had gone stale in
-// both halves. The spare-run guard has emitted real instructions since
-// issue #451 -- it is a Mutex, not an erased view -- and execution_state is
-// per-core and indexed by cpu_id() as of Group B.
+// GitHub issues #453/#479, re-derived against the current access paths.
+// execution_state and the crash-trace writer are per-core. The run lock spans
+// each shared process-tree walk and Ready/Running/Blocked transition, including
+// slot 0: two cores may inspect the bootstrap record, but only the core whose
+// guarded Ready -> Running transition succeeds can install it as current.
+// Bootstrap allocation itself has one caller, kernel_process_execution_reset,
+// while scheduling is disabled. Issue #415's narrower allocation type keeps a
+// pooled caller from acquiring slot 0; duplicating the whole lifecycle by
+// bootstrap/pooled type would not add a cross-core guarantee.
 //
-// Re-derived AGAIN, because Group B removed two of the three things this
-// message used to name. That is the point of keeping the message specific:
-// a message that stayed general would still read as true and would stop
-// saying anything.
-//
-// Gone: the parent and sibling LINKS, because the walk that reads them is
-// inside kernel_process_schedule's and kernel_process_block_current's
-// critical section now, and every state transition takes the scheduler
-// guard. Gone: the crash trace ring's next-index counter, which is per-CPU
-// with a global atomic sequence -- not a lock, because a reporter that can
-// block cannot report the deadlock it is in (issues #465, #486).
-//
-// What is left is ONE thing: the BOOTSTRAP record and its two flags
-// (scheduled_process_boot_record/_live/_generation). It is a static record
-// outside the pool, and two cores could both decide it is current --
-// which is not a locking problem so much as GitHub issue #415's, that the
-// bootstrap process is distinguished by a value (slot 0) rather than by a
-// type. The pool holding every OTHER record is not on the list: mutating
-// an IntrusivePool requires its guard as a matter of typing.
+// What remains is preemption on ONE core. Several lifecycle operations compose
+// short guarded transitions with caller-local work outside the run lock. They
+// rely on a syscall or lifecycle path running to completion before another
+// process on the same core enters one of those spans.
 fn process_execution_model_assumption() {
-    static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "the bootstrap record and its two flags are one static record two cores could both decide is current (issue #415)");
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+                  "process lifecycle operations contain caller-local spans outside the run lock; kernel preemption could interleave two processes on one core");
 }
 
 
