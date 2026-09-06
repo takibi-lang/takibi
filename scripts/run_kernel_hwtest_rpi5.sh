@@ -497,11 +497,16 @@ done
 # two runs, and a baseline whose variance becomes known by accumulating rather
 # than by being guessed.
 echo "[kernel/rpi5] measuring TCP throughput over the interactive HTTPd"
+#
+# ONE modest file, not a size sweep. The rate was measured flat across two
+# orders of magnitude on 2026-09-06 -- 15-18 KiB/s from 133 KB to 1.09 MB --
+# so a bigger transfer buys no accuracy and costs the lane real minutes: the
+# four-size sweep this replaces added about 125 s to every run, which made
+# `make allcheck` look like it had hung. 133 KB at the measured rate is
+# roughly 8 s, and the standalone script still takes the sweep on demand.
 python3 "$REPO_ROOT/scripts/measure_kernel_tcp_throughput.py" \
     --host "${ETH_TEST_SUBNET}.2" --interface "$ETH_TEST_IFACE" \
-    --path /read_indirect.txt --path /bin/busybox-extras \
-    --path /lib/ld-musl-aarch64.so.1 --path /bin/busybox.static \
-    --repeat 1 --timeout 180 \
+    --path /bin/busybox-extras --repeat 1 --timeout 60 \
     --json "$ARTIFACT_DIR/tcp-throughput.json" \
     --commit "$(git -C "$REPO_ROOT" rev-parse HEAD)" || true
 
