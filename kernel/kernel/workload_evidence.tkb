@@ -31,10 +31,11 @@
 //   only A back -- B keeping both its pid and a counter that never went
 //   backwards is the other half of that claim. After that everything is
 //   latched and the pair reports nothing more.
-// - SINGLE-WRITER, like the rest of this kernel's evidence state. Every
-//   entry point below runs in syscall-dispatch context on the one core
-//   that runs kernel code; there is no locking here and none is correct
-//   once that stops being true.
+// - THE VERDICT IS SERIALIZED with the process run lock. Scheduler picks
+//   that already hold the lock thread its guard into this file; syscall and
+//   lifecycle paths that do not hold it acquire once at their boundary.
+//   The profiling interval still has a separate multicore restriction at
+//   the end of this file: starting it resets every core's accounting array.
 // - THE PROGRESS COUNT IS THE CALLER'S CLAIM. A process that reported
 //   without doing the work between reports would be believed. What the
 //   syscall checks is identity (which process is speaking) and ordering,
@@ -453,7 +454,8 @@ fn workload_busy_pair_reset() {
 // than of the workload: two processes doing identical work should be
 // selected about equally often, and a round count that says otherwise
 // cannot say whether the cause was the pick or the work.
-fn workload_busy_note_selected(pid: usize) {
+fn workload_busy_note_selected_locked(
+        guard: borrow ProcessRunGuard[lock], pid: usize) {
     // Free until the pair exists: every boot before this workload starts,
     // and every switch after the verdict, leaves here without reading the
     // counter. The scheduler calls this on every context switch.
@@ -481,6 +483,12 @@ fn workload_busy_note_selected(pid: usize) {
     }
 }
 
+fn workload_busy_note_selected(pid: usize) {
+    let guard = process_run_lock();
+    workload_busy_note_selected_locked(guard, pid);
+    process_run_unlock(guard);
+}
+
 private fn workload_busy_absolute_difference(left: usize, right: usize)
         -> usize {
     if (left > right) { return left - right; }
@@ -499,8 +507,9 @@ private fn workload_busy_absolute_difference(left: usize, right: usize)
 // A CPU-bound process that stopped being CPU-bound would stop being the
 // thing a second core is measured against, which is why 1 is "stop
 // reporting" and not "stop".
-fn workload_busy_record_progress(tag: usize, checksum: usize,
-                                 input_steps: usize) -> usize !{unsafe} {
+private fn workload_busy_record_progress_locked(
+        guard: borrow ProcessRunGuard[lock], tag: usize, checksum: usize,
+        input_steps: usize) -> usize !{unsafe} {
     if (workload_busy_pair.restart_reported) { return 1; }
     // Started by init, from /etc/inittab. A report from anywhere else is
     // not this workload, and counting it would let an unrelated process
@@ -571,7 +580,7 @@ fn workload_busy_record_progress(tag: usize, checksum: usize,
         return 0;
     }
     if (workload_busy_pair.reported) {
-        return workload_busy_restart_step(tag);
+        return workload_busy_restart_step(guard, tag);
     }
     let a_progress: usize =
         workload_busy_pair.a_rounds - workload_busy_pair.a_base;
@@ -596,6 +605,15 @@ fn workload_busy_record_progress(tag: usize, checksum: usize,
     return 0;
 }
 
+fn workload_busy_record_progress(tag: usize, checksum: usize,
+                                 input_steps: usize) -> usize !{unsafe} {
+    let guard = process_run_lock();
+    let result: usize = workload_busy_record_progress_locked(
+        guard, tag, checksum, input_steps);
+    process_run_unlock(guard);
+    return result;
+}
+
 // The second half of the fixture: init brings back the entry that died, and
 // only that entry.
 //
@@ -607,7 +625,8 @@ fn workload_busy_record_progress(tag: usize, checksum: usize,
 // A is chosen arbitrarily. B is the control: its pid must be the one it
 // already had (init did not restart it too) and its counter must have moved
 // while A was away (it kept running rather than waiting on its sibling).
-private fn workload_busy_restart_step(tag: usize) -> usize !{unsafe} {
+private fn workload_busy_restart_step(
+        guard: borrow ProcessRunGuard[lock], tag: usize) -> usize !{unsafe} {
     if (workload_busy_pair.restart_requested == false) {
         if (tag != WORKLOAD_BUSY_TAG_A) { return 0; }
         workload_busy_pair.restart_requested = true;
@@ -775,25 +794,21 @@ private fn workload_busy_pair_report() !{unsafe} {
 //
 // What is and is not shared here, because the answer is not uniform:
 //
-// - The per-tag counters are naturally PARTITIONED. Tag A's fields are
-//   written only by the process running tag A and tag B's only by B's, and
-//   one process cannot be both. Two cores each reporting their own tag
-//   touch disjoint memory.
-// - `both_running`, `refused` and `restart_reported` are NOT. Two cores
-//   can both observe both_running false and both run the "start of the
-//   measured interval" step, which is what the fairness verdict is
-//   computed against.
-// - Any read that compares a_rounds against b_rounds reads two words the
-//   other core may be between.
+// The busy-pair verdict is now under ProcessRunGuard. That includes the
+// apparently partitioned per-tag fields because the verdict compares them:
+// a reader taking a lock is not synchronized with an unlocked writer.
+// Scheduler paths already in a process-run section thread their guard into
+// workload_busy_note_selected_locked; all other scheduler and syscall paths
+// acquire through the public wrappers, so nested acquisition is explicit and
+// rejected by the linear guard API rather than becoming a runtime deadlock.
 //
-// So what this needs is not a lock around the counter increments; it is one
-// around the shared transitions and the comparison. It is NOT taken here
-// yet, deliberately: the contention that would exercise it is the busy pair
-// running on two cores, which is #479 Group B's own milestone. A lock added
-// now would be one nothing exercises -- the mistake page.tkb's lock made,
-// and the reason its probe had to be written afterwards. This assertion is
-// what makes the flip stop here and take it.
+// The remaining restriction is the profiling INTERVAL boundary. Start resets
+// every WorkloadProfileCore before publishing workload_profile_active, while
+// finish charges and reads every active core. Per-core event updates disable
+// only their local IRQ and do not rendezvous with that cross-core reset/read.
+// Enabling a second core therefore needs a start/finish protocol that first
+// makes every core quiescent; the busy-pair lock alone cannot prove that.
 fn workload_execution_model_assumption() {
     static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "both_running, refused and the a/b comparison are shared; the per-tag counters are not");
+                  "workload profile start/finish must rendezvous with every core before resetting or reading its counters");
 }

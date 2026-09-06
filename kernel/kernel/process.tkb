@@ -3198,7 +3198,8 @@ private fn kernel_process_switch_to(guard: borrow ProcessRunGuard[lock],
     // number of selections (21 versus 18). Re-arming here made the same
     // measurement 21562176 versus 21563097.
     timer_tick_rearm();
-    workload_busy_note_selected(scheduled_process_pid_of_handle(to));
+    workload_busy_note_selected_locked(
+        guard, scheduled_process_pid_of_handle(to));
     kernel_process_trace_handle(ProcessTraceSchedule, to, from, 0);
     process_image_activate_root(to.pool_index);
     kernel_process_trace_handle(ProcessTraceResume, to, from, 0);
@@ -4144,8 +4145,8 @@ private fn kernel_process_block_current_locked(
     // switches to the child -- and while only the timer path was counted,
     // the per-process CPU numbers went missing exactly when the machine
     // was busiest, which is the one time they are worth reading.
-    workload_busy_note_selected(
-        scheduled_process_pid_of_handle(to));
+    workload_busy_note_selected_locked(
+        guard, scheduled_process_pid_of_handle(to));
     process_image_activate_root(to.pool_index);
     kernel_process_trace_handle(ProcessTraceResume, to, from, 0);
     return scheduled_process_record_of(to).saved_sp;
