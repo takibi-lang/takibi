@@ -32,17 +32,53 @@ def main() -> None:
 
     by_text = {text: timestamp for timestamp, text in records}
     first = b"takibi kernel: EL1"
+    # The whole bounded suite has run by the time the foreground server is
+    # listening: it is the LAST timestamped record on both platforms, so its
+    # timestamp is the boot duration (GitHub issue #411).
+    boot_done = b"foreground server: listener ready port=8080"
+    #
+    # The bounds below were measured rather than guessed, on 2026-09-06:
+    #
+    #   QEMU  12 runs, 16.8 - 18.2 s. Eight sequential on a quiet host and
+    #         four while the rest of the QEMU fan-out ran beside them; the
+    #         concurrent ones were not slower, so host contention is not
+    #         what moves this number.
+    #   RPi5  4 runs, 19.3 - 20.0 s. Real hardware, no host contention.
+    #
+    # Both distributions are within +-4% of their mean, which is why the
+    # bounds can be this close: 25 s is 37% above the worst QEMU run ever
+    # seen here and 28 s is 40% above the worst RPi5 one.
+    #
+    # The issue that asked for this suggested a 2x margin. 2x does not work:
+    # the regression it was opened about was +10.7 s (13.0 -> 23.7 s), and
+    # 2x of today's 17.4 s baseline is 34.8 s, which such a regression would
+    # pass straight through. The bound is set to catch that class -- anything
+    # over about +7 s -- and the headroom comes from the measured spread
+    # being tiny, not from a multiplier.
+    #
+    # WHEN THIS FIRES, INVESTIGATE; DO NOT RAISE IT. What it guards against
+    # is complexity added to a path that runs per page or per record: the
+    # kernel still boots and still passes every view, it is just slower, and
+    # nothing else in the suite says so. Raising the bound converts the one
+    # signal back into silence. If a genuinely slower boot is intended, say
+    # so here with the measurement that justifies it.
+    #
+    # The number is printed on every run, passing or not, because the bound
+    # only catches the large regressions: a +3 s one stays green and is
+    # visible only as a difference between two runs' output.
     assembled_prefix = b"memory: source=dtb base_bytes="
     if args.platform == "qemu":
         listener = b"virtio net: link ready mac=02:00:20:00:00:02"
         resumed = b"virtio net: tcp handshake echo close reconnect ok"
         minimum_delay = 3_500_000
         maximum_delay = 5_500_000
+        maximum_boot = 25_000_000
     else:
         listener = b"rp1 gem: link ready mac=02:00:20:00:00:02"
         resumed = b"rp1 gem: tcp handshake echo close reconnect ok"
         minimum_delay = 5_000_000
         maximum_delay = 9_000_000
+        maximum_boot = 28_000_000
     if first not in by_text:
         fail("first kernel marker is absent")
     assembled = [item for item in records if item[1].startswith(assembled_prefix)]
@@ -50,6 +86,20 @@ def main() -> None:
         fail("fragment-assembled memory line is not one complete record")
     if listener not in by_text or resumed not in by_text:
         fail("bounded network retransmission markers are absent")
+    if boot_done not in by_text:
+        fail("the boot-duration milestone is absent, so this check would "
+             "have passed having bounded nothing. The same line is held by "
+             "kernel/tests/common/views/boot_milestone.expected so its "
+             "disappearance fails a view too; the reasoning is in this file.")
+    boot_us = by_text[boot_done]
+    if boot_us > maximum_boot:
+        fail(
+            f"{args.platform} reached its last boot milestone in "
+            f"{boot_us / 1_000_000:.1f} s, over the {maximum_boot / 1_000_000:.0f} s "
+            "bound. INVESTIGATE, do not raise the bound: the number this "
+            "guards against is complexity added to a path that runs per page "
+            "or per record, which does not announce itself any other way."
+        )
     elapsed = by_text[resumed] - by_text[listener]
     if elapsed < minimum_delay or elapsed > maximum_delay:
         fail(
@@ -57,8 +107,8 @@ def main() -> None:
             f"{minimum_delay / 1_000_000:.1f}-{maximum_delay / 1_000_000:.1f} s"
         )
     print(
-        f"PASS kernel/{args.platform} dmesg: monotonic records, "
-        f"assembled lines, delay={elapsed} us"
+        f"PASS kernel/{args.platform} dmesg: {len(records)} monotonic records, "
+        f"assembled lines, delay={elapsed} us, boot={boot_us / 1_000_000:.1f} s"
     )
 
 
