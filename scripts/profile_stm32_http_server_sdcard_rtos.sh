@@ -124,22 +124,22 @@ bash scripts/provision_http_server_sdcard.sh "$INSTALLER_ELF" "$CONTENT_DIR" > "
 echo "Loading profiled HTTP+SD+RTOS firmware..."
 ram_load_and_run "$ELF"
 
-table_addr=$(llvm-nm-19 "$ELF" | awk '$3 == "__takibi_prof_table" { print "0x" $1; exit }')
+table_addr=$(llvm-nm-19 "$ELF" | awk '$3 == "__takibi_prof_table" && !seen { print "0x" $1; seen = 1 }')
 if [ -z "$table_addr" ]; then
     echo "could not find __takibi_prof_table in $ELF" >&2
     exit 1
 fi
-path_addr=$(llvm-nm-19 "$ELF" | awk '$3 == "__takibi_prof_path_table" { print "0x" $1; exit }')
+path_addr=$(llvm-nm-19 "$ELF" | awk '$3 == "__takibi_prof_path_table" && !seen { print "0x" $1; seen = 1 }')
 if [ -z "$path_addr" ]; then
     echo "could not find __takibi_prof_path_table in $ELF" >&2
     exit 1
 fi
-overflow_addr=$(llvm-nm-19 "$ELF" | awk '$3 == "__takibi_prof_path_overflow" { print "0x" $1; exit }')
+overflow_addr=$(llvm-nm-19 "$ELF" | awk '$3 == "__takibi_prof_path_overflow" && !seen { print "0x" $1; seen = 1 }')
 if [ -z "$overflow_addr" ]; then
     echo "could not find __takibi_prof_path_overflow in $ELF" >&2
     exit 1
 fi
-stack_overflow_addr=$(llvm-nm-19 "$ELF" | awk '$3 == "__takibi_prof_overflow" { print "0x" $1; exit }')
+stack_overflow_addr=$(llvm-nm-19 "$ELF" | awk '$3 == "__takibi_prof_overflow" && !seen { print "0x" $1; seen = 1 }')
 if [ -z "$stack_overflow_addr" ]; then
     echo "could not find __takibi_prof_overflow in $ELF" >&2
     exit 1

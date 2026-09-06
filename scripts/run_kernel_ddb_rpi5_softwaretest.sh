@@ -45,9 +45,9 @@ if ! python3 -c 'import serial' >/dev/null 2>&1; then
 fi
 
 generated_start="0x$(llvm-nm-19 "$ELF" |
-    awk '$3=="kernel_generated_text_start"{print $1; exit}')"
+    awk '$3=="kernel_generated_text_start" && !seen{print $1; seen = 1 }')"
 generated_end="0x$(llvm-nm-19 "$ELF" |
-    awk '$3=="kernel_generated_text_end"{print $1; exit}')"
+    awk '$3=="kernel_generated_text_end" && !seen{print $1; seen = 1 }')"
 if [ -z "${generated_start#0x}" ] || [ -z "${generated_end#0x}" ]; then
     echo "error: compiler-generated text bounds absent from $ELF" >&2
     exit 1

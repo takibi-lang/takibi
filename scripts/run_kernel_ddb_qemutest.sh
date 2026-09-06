@@ -25,7 +25,7 @@ GDB_REPLACED_TEST="$ARTIFACT_DIR/kernel-state-replaced-test.gdb"
 SNAPSHOT_READY="$ARTIFACT_DIR/snapshot.ready"
 SNAPSHOT_RELEASE="$ARTIFACT_DIR/snapshot.release"
 QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
-KERNEL_READ_ADDRESS="$(llvm-nm-19 "$ELF" | awk '$3 == "kernel_ddb_breakpoint_test_enabled" { print $1; exit }')"
+KERNEL_READ_ADDRESS="$(llvm-nm-19 "$ELF" | awk '$3 == "kernel_ddb_breakpoint_test_enabled" && !seen { print $1; seen = 1 }')"
 if [ -z "$KERNEL_READ_ADDRESS" ]; then
     echo "kernel DDB read-test symbol not found" >&2
     exit 1
@@ -233,9 +233,9 @@ fi
 # are why the board lane no longer runs inside kernelcheck-rpi5.
 if [ "$BREAK_SOURCE" = software ]; then
     generated_start="0x$(llvm-nm-19 "$ELF" |
-        awk '$3=="kernel_generated_text_start"{print $1; exit}')"
+        awk '$3=="kernel_generated_text_start" && !seen{print $1; seen = 1 }')"
     generated_end="0x$(llvm-nm-19 "$ELF" |
-        awk '$3=="kernel_generated_text_end"{print $1; exit}')"
+        awk '$3=="kernel_generated_text_end" && !seen{print $1; seen = 1 }')"
     if [ -z "${generated_start#0x}" ] || [ -z "${generated_end#0x}" ]; then
         echo "FAIL kernel/qemu ddb: compiler-generated text bounds absent from $ELF" >&2
         exit 1

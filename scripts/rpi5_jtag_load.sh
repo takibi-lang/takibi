@@ -96,9 +96,9 @@ ddb_breakpoint_test_address=""
 ddb_breakpoint_checkpoint_address=""
 if [ "${RPI5_ARM_KERNEL_DDB_BREAKPOINT:-0}" = "1" ]; then
     ddb_breakpoint_test_address="0x$(llvm-nm-19 "$ELF" |
-        awk '$3=="kernel_ddb_breakpoint_test_enabled"{print $1; exit}')"
+        awk '$3=="kernel_ddb_breakpoint_test_enabled" && !seen{print $1; seen = 1 }')"
     ddb_breakpoint_checkpoint_address="0x$(llvm-nm-19 "$ELF" |
-        awk '$3=="kernel_ddb_breakpoint_test_checkpoint"{print $1; exit}')"
+        awk '$3=="kernel_ddb_breakpoint_test_checkpoint" && !seen{print $1; seen = 1 }')"
     if [ -z "${ddb_breakpoint_test_address#0x}" ] ||
             [ -z "${ddb_breakpoint_checkpoint_address#0x}" ]; then
         echo "error: DDB breakpoint test symbols absent from $ELF" >&2
