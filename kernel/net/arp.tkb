@@ -2,12 +2,15 @@
 // own header comment for why this no longer `use`s kernel/drivers/net/
 // rp1_gem.tkb directly.
 use "kernel/net/wire.tkb";
-use "kernel/lib/execution_model.tkb";
 
-// Current limitations (2026-08-13, issue #295): NOT SYNCHRONIZED,
-// single-core only. No ARP cache/table -- every reply is generated
-// synchronously against the single request just parsed, not stored for
-// later reuse. Only the kernel's own fixed OUR_MAC/OUR_IP
+// Current limitations (2026-08-13, issue #295): No ARP cache/table -- every
+// reply is generated synchronously against the single request just parsed,
+// not stored for later reuse. Reply construction is safe across cores without
+// an ARP-local lock: NetRxValidated exclusively owns the acquired descriptor
+// whose frame is rewritten in place, and the one linear NetRxCanAcquire keeps
+// a second request from being acquired concurrently. Its initial mint remains
+// checked by the network driver's execution-model assertion. Only the
+// kernel's own fixed OUR_MAC/OUR_IP
 // (kernel/net/netconfig.tkb) is ever a valid target address; there is no
 // support for a second local address or VLAN/subinterface.
 //
@@ -94,12 +97,4 @@ fn kernel_arp_reply_once(ready_in: sink NetRxCanAcquire)
         }
     }
     return KernelArpResult::TimedOut(ready);
-}
-
-// GitHub issue #453. Every reply is generated synchronously against the
-// single request just parsed, into shared frame storage; nothing
-// serialises two requests being handled at once.
-fn arp_execution_model_assumption() {
-    static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "replies are built in shared frame storage with nothing serialising two requests");
 }

@@ -3,12 +3,15 @@
 // rp1_gem.tkb directly.
 use "kernel/net/checksum.tkb";
 use "kernel/net/wire.tkb";
-use "kernel/lib/execution_model.tkb";
 
-// Current limitations (2026-08-13, issue #295): NOT SYNCHRONIZED,
-// single-core only. Only Echo Request/Reply is handled; no fragmentation
-// reassembly, no other ICMP type (Destination Unreachable, Time
-// Exceeded, etc.) is generated or interpreted.
+// Current limitations (2026-08-13, issue #295): Only Echo Request/Reply is
+// handled; no fragmentation reassembly, no other ICMP type (Destination
+// Unreachable, Time Exceeded, etc.) is generated or interpreted. Reply
+// construction is safe across cores without an ICMP-local lock:
+// NetRxValidated exclusively owns the acquired descriptor whose frame is
+// rewritten in place, and the one linear NetRxCanAcquire keeps a second
+// request from being acquired concurrently. Its initial mint remains checked
+// by the network driver's execution-model assertion.
 //
 // Ipv4Hdr/EthHdr are kernel/net/wire.tkb's shared structs (tcp.tkb needs
 // the identical IPv4 wire layout, so it lives there rather than being
@@ -162,11 +165,4 @@ fn kernel_icmp_reply_once(ready_in: sink NetRxCanAcquire)
         }
     }
     return KernelIcmpResult::TimedOut(ready);
-}
-
-// GitHub issue #453. Echo replies are built in shared frame storage with
-// no serialisation, the same shape as kernel/net/arp.tkb.
-fn icmp_execution_model_assumption() {
-    static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "replies are built in shared frame storage with nothing serialising two requests");
 }
