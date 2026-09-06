@@ -487,6 +487,24 @@ for asset_spec in "${interactive_assets[@]}"; do
     fi
 done
 
+# GitHub issue #280 is parked on one number -- what this kernel's own TCP path
+# sustains -- and the board is serving its whole rootfs over HTTP right here,
+# so taking it costs about a second rather than a separate boot.
+#
+# Printed, never gated, and no threshold. The rate depends on a network stack
+# that has had no optimization pass, so a bound would be a bound on work
+# nobody has done yet; what a printed number buys is the difference between
+# two runs, and a baseline whose variance becomes known by accumulating rather
+# than by being guessed.
+echo "[kernel/rpi5] measuring TCP throughput over the interactive HTTPd"
+python3 "$REPO_ROOT/scripts/measure_kernel_tcp_throughput.py" \
+    --host "${ETH_TEST_SUBNET}.2" --interface "$ETH_TEST_IFACE" \
+    --path /read_indirect.txt --path /bin/busybox-extras \
+    --path /lib/ld-musl-aarch64.so.1 --path /bin/busybox.static \
+    --repeat 1 --timeout 180 \
+    --json "$ARTIFACT_DIR/tcp-throughput.json" \
+    --commit "$(git -C "$REPO_ROOT" rev-parse HEAD)" || true
+
 interactive_ready=0
 for _wait in $(seq 1 600); do
     if [ -f "$INTERACTIVE_HTTPD_READY" ]; then
