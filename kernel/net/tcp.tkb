@@ -13,12 +13,16 @@
 // Current limitations (2026-08-20, issues #295 and #257). Keep this list
 // current as call sites change; a limitation that goes stale here is
 // worse than none.
-// - NOT SYNCHRONIZED, single-core only, same as every kernel/lib/-backed
-//   pool this file uses (SlotMap for tcp_connection_pool,
-//   IntrusivePool for the retransmit queue). The retransmit pool's own
-//   mutation is at least IRQ-safe now (kernel/lib/pool_lock.tkb masks
-//   DAIF.I), which the nine arrays it replaced were not; excluding a
-//   second CPU is still nobody's job here -- see issue #261.
+// - CONNECTION STATE IS SERIALIZED across cores. Every
+//   TcpConnectionOwner represents its payload's held TaskMutex: allocation
+//   and take acquire it, while put releases it and free destroys the locked
+//   slot. The linear owner makes a forgotten release a compile error. This
+//   does not make an unowned IntrusivePool observation safe against a
+//   concurrent free; the open/pending queries and diagnostic walks retain
+//   kernel/lib/intrusive_pool.tkb's read-side limitation (issue #482).
+//   Nor may the current scheduler preempt one holder and run a waiter for
+//   the same TaskMutex on that core; the assertion at the end keeps that
+//   distinct execution-model requirement checked.
 // - THERE IS NO CEILING LEFT. TCP_CONNECTION_MAX and PENDING_TCP_MAX are
 //   both gone (issue #257): a connection is a slot in
 //   IntrusivePool(TcpConnection), its frames are slots in a NetFrame pool,
@@ -3039,15 +3043,22 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection],
 // that against a reader. Issue #462 made TcpConnectionOwner itself the
 // exclusion -- take acquires, put releases.
 //
-// What still rests on both numbers is the PROTOCOL STATE MACHINE around
-// them. tcp_service_once and the RX path read and advance a connection's
-// sequence numbers across several statements, and nothing makes that span
-// atomic: what makes it safe is that a syscall handler runs to completion
-// (KERNEL_PREEMPTIBLE == 0) and that no other core is in this file at all
-// (KERNEL_ACTIVE_CORES == 1). Holding the owner excludes another taker; it
-// does not make a multi-statement read-modify-write of the state it
-// protects indivisible against a preemption inside it.
+// The old replacement below was itself stale: a held TaskMutex DOES make a
+// multi-statement transition indivisible against another core. Every public
+// protocol-state entry takes a borrowed TcpConnectionOwner, and the only
+// three owner mint sites acquire the connection lock before publishing the
+// token. A competing core cannot mint its owner until the first is put or
+// freed. The connection is therefore already safe when the active-core count
+// rises; issue #482 separately covers observers that intentionally do not
+// take an owner.
+//
+// What still rests on the execution model is PREEMPTION on one core. A
+// TaskMutex deliberately does not mask interrupts. If the scheduler could
+// preempt its holder and run another task that waits for that same connection
+// on the same core, the waiter would spin forever because the holder cannot
+// resume. Keep that narrower condition compile-time checked until the
+// scheduler learns not to run a blocked waiter there.
 fn tcp_execution_model_assumption() {
-    static_assert(KERNEL_ACTIVE_CORES == 1 && KERNEL_PREEMPTIBLE == 0,
-                  "a connection's sequence numbers are advanced across several statements with nothing making that span atomic");
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+                  "a preempted TaskMutex holder and its same-core waiter cannot both make progress");
 }
