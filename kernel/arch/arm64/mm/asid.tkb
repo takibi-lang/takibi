@@ -17,7 +17,8 @@
 // **A number is reclaimed by rolling over, not by being freed.** That is
 // what makes exhaustion stop being a refusal: assignment is a counter, and
 // when the counter passes the last number it advances a GENERATION,
-// invalidates every TLB entry, and starts again at 1. An address space
+// invalidates every TLB entry, and starts again at 2. ASID 1 remains reserved
+// for the bootstrap/fallback root for the kernel's lifetime. An address space
 // whose recorded generation is not the current one no longer owns its
 // number -- it is given a fresh one the next time it is activated
 // (kernel/mm/address_space.tkb's address_space_activate), which is the one
@@ -51,16 +52,16 @@
 // - asid_bits and asid_last are still plain globals, deliberately: written
 //   once by asid_init and never again, which is what keeps
 //   asid_width_bits() and asid_highest_value() lock-free.
-// - The ROLLOVER's reach is no longer part of that. GitHub issue #446
-//   made mmu_tlb_invalidate_all() `tlbi vmalle1is`, so a rollover
-//   invalidates every core in the shareability domain rather than only the
-//   one that noticed the counter wrapped. A second core executing user
-//   code with an ASID about to be reassigned therefore does NOT keep stale
-//   entries -- the remaining single-core assumption is about the counter,
-//   not about the TLB.
+// - The ROLLOVER still requires one active core. GitHub issue #446 made
+//   mmu_tlb_invalidate_all() `tlbi vmalle1is`, so the invalidation reaches
+//   every core. That does not quiesce them: another core can refill an entry
+//   under its old-generation ASID immediately after the broadcast, while
+//   this core is already handing that number to a different address space.
+//   The assertion at the end keeps that silent alias from compiling until
+//   rollover has a cross-core quiescence protocol.
 // - A number is not reused until the next rollover even if the address
 //   space holding it dies immediately. Linux keeps a bitmap and reuses
-//   freed numbers within a generation; here 65535 process creations
+//   freed numbers within a generation; here 65534 dynamic assignments
 //   between two whole-TLB invalidations is cheap enough that the bitmap is
 //   not worth its own state. What this costs is measured by
 //   asid_rollover_count(), which the boot suite prints.
@@ -100,9 +101,10 @@ private let mut asid_ready: bool = false;
 // count as one step, and four separate cells would be four locks with an
 // order to get right (issue #466). One cell, one critical section.
 struct AsidState {
-    // The next number to hand out. 1 after every rollover; ASID 0 is
-    // never assigned, because it is what TTBR0_EL1 holds before any
-    // address space exists.
+    // The next number to hand out. Bootstrap takes 1 once; every rollover
+    // resumes at 2 because root 0 keeps ASID 1 permanently. ASID 0 is never
+    // assigned, because it is what TTBR0_EL1 holds before any address space
+    // exists.
     next: usize;
     // Which round of the counter this is. An address space whose recorded
     // stamp is not this value has lost its number.
@@ -200,7 +202,11 @@ fn asid_generation_is_current(generation: usize) -> bool {
 // handed out again, so every entry tagged with one has to go.
 private fn asid_rollover(state: borrow *AsidState) {
     state.generation = state.generation + 1;
-    state.next = 1;
+    // Root 0 is shared by every core and never released. Keeping its ASID
+    // permanently reserved makes its backing immutable after MMU-off boot;
+    // handing out 1 here would force competing cores to refresh that shared
+    // backing and could leave one core executing under the overwritten ASID.
+    state.next = 2;
     state.rollover_count = state.rollover_count + 1;
     mmu_tlb_invalidate_all();
 }
@@ -210,10 +216,10 @@ private fn asid_rollover(state: borrow *AsidState) {
 // issue #402.
 //
 // **Call this only when switching to the address space that will hold the
-// result.** A rollover hands the numbers of every live address space to
-// somebody else, which is safe exactly because none of them is executing:
-// the one that was is the one being switched away from, and the one that
-// will be is the one taking the number this returns. Assigning at
+// result.** With one active core, a rollover hands the numbers of every live
+// address space to somebody else while none of them is executing: the one
+// that was is the one being switched away from, and the one that will be is
+// the one taking the number this returns. Assigning at
 // CREATION time instead would roll over underneath a running address
 // space and alias its TLB entries with the new one's -- which is why a
 // new root is created with no ASID at all and gets one at its first
@@ -260,22 +266,12 @@ private fn asid_assign_locked(state: borrow *AsidState) -> (usize, usize) {
     return (value, state.generation);
 }
 
-// GitHub issue #479: this file HAD an execution-model assertion and no
-// longer needs one, which is worth saying rather than silently deleting.
-//
-// It named two reasons in turn, and both are now fixed. The first was
-// GitHub issue #446's -- the rollover invalidated the LOCAL TLB, so a
-// second core kept entries tagged with numbers about to be reassigned.
-// The second, after that landed, was that asid_next and asid_generation
-// were unlocked globals and two cores in asid_assign could alias two
-// address spaces onto one number. That was measured (4096 assignments
-// advanced the counter 3974 times) and then locked.
-//
-// Everything asid_assign_locked touches -- the whole AsidState, plus
-// asid_last, plus the rollover -- is inside that lock, and since GitHub
-// issue #452 it is inside it structurally: the state is a private field
-// of a LockedCell, so an unguarded read does not compile. The remaining
-// globals (asid_bits, asid_last, asid_ready) are written once by asid_init
-// before any second core exists. So there is nothing left for an assertion
-// to be true ABOUT, and one that fires without a reason is worse than
-// none: it sends the next reader looking for a defect that was fixed.
+// GitHub issue #479. Assignment itself is locked, and #446 made rollover's
+// invalidation broadcast. The broadcast is not a rendezvous, however: a
+// second core can resume and refill under an old-generation number before
+// this core reassigns it. The allocator needs a stop-the-world rollover or
+// an equivalent scheme before two cores may execute address spaces.
+fn asid_execution_model_assumption() {
+    static_assert(KERNEL_ACTIVE_CORES == 1,
+                  "ASID rollover can reassign a number while another core refills entries under its old generation");
+}

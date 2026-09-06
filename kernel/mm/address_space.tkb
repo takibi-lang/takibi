@@ -569,13 +569,19 @@ fn address_space_ensure_root(slot: usize) -> AddressSpaceEnsureResult {
     }
 }
 
-// GitHub issue #402: the one moment a root may take an ASID. It is the
-// moment it is about to run, and the moment the root that was running
+// GitHub issue #402: the one moment a non-bootstrap root may take an ASID.
+// It is the moment it is about to run, and the moment the root that was running
 // stops -- which is what makes handing out a recycled number safe. A root
 // whose stamp is still the current generation keeps the number it has;
 // one that never had a number, or whose generation was left behind by a
 // rollover, is given a fresh one here.
-private fn address_space_refresh_asid(backing: *AddressSpaceBacking) {
+// GitHub issue #479: root 0 keeps the ASID it took before the MMU came on.
+// ASID 1 is permanently reserved by asid.tkb, so rollover never makes that
+// number available to another root and these shared fields never need a
+// cross-core write. Every other backing remains protected by its pool guard.
+private fn address_space_refresh_asid(
+        slot: usize, backing: *AddressSpaceBacking) {
+    if (slot == 0) { return; }
     if (asid_generation_is_current(backing.asid_generation)) { return; }
     let (value, generation) = asid_assign();
     backing.asid = value;
@@ -588,7 +594,7 @@ fn address_space_activate_root(slot: usize) {
         let backing: *AddressSpaceBacking =
             address_space_backing_existing_at(checked);
         if (backing.live) {
-            address_space_refresh_asid(backing);
+            address_space_refresh_asid(checked, backing);
             mmu_activate_root(backing.l1_physical, backing.asid);
             address_space_set_active_slot_here(checked);
             return;
@@ -599,7 +605,6 @@ fn address_space_activate_root(slot: usize) {
     let fallback: usize = 0;
     let fallback_backing: *AddressSpaceBacking =
         address_space_backing_existing_at(fallback);
-    address_space_refresh_asid(fallback_backing);
     mmu_activate_root(fallback_backing.l1_physical, fallback_backing.asid);
     address_space_set_active_slot_here(0);
 }
@@ -1164,17 +1169,18 @@ fn process_address_space_probe() -> bool !{unsafe} {
 // at. It drives the REAL allocator past its last number -- 65535 of them
 // on both targets, which is why this is a counter loop rather than a
 // fixture that would have to create that many address spaces -- and checks
-// that the generation advances exactly once, numbering restarts at 1,
+// that the generation advances exactly once, dynamic numbering restarts at
+// 2 because ASID 1 remains reserved for root 0,
 // every stamp from before the rollover goes stale, and no assignment ever
 // fails.
 //
 // It lives here rather than in kernel/arch/arm64/mm/asid.tkb because of
-// its last step, which is not tidiness: the rollover left the RUNNING
-// root's stamp behind, and its number is assignable to somebody else now.
-// Every production rollover happens inside a switch and therefore ends
-// with the incoming root taking a current number by construction; a probe
-// that rolls over from outside a switch has to put the running root back
-// on the CPU itself. Activation is this file's to do.
+// its last step, which is not tidiness: if a non-bootstrap root is running,
+// rollover leaves its stamp behind and makes its number assignable. Every
+// production rollover happens inside a switch and therefore ends with the
+// incoming root taking a current number by construction; a probe that rolls
+// over from outside a switch has to put the running root back on the CPU
+// itself. Root 0 instead keeps reserved ASID 1. Activation is this file's to do.
 fn address_space_asid_rollover_probe() -> bool {
     let bits: usize = asid_width_bits();
     if (bits != 8 && bits != 16) { return false; }
@@ -1198,7 +1204,7 @@ fn address_space_asid_rollover_probe() -> bool {
             if (value <= previous) { ok = false; }
         } else {
             if (generation != generation_before + 1) { ok = false; }
-            if (value != 1) { ok = false; }
+            if (value != 2) { ok = false; }
             rolled = true;
         }
         previous = value;
@@ -1213,10 +1219,13 @@ fn address_space_asid_rollover_probe() -> bool {
     address_space_reactivate_current_root();
     let active: usize = address_space_active_slot_here();
     let running: *AddressSpaceBacking = address_space_backing_existing_at(active);
-    if (asid_generation_is_current(running.asid_generation) == false) {
+    if (active != 0 &&
+        asid_generation_is_current(running.asid_generation) == false) {
         ok = false;
     }
     if (running.asid == 0 || running.asid > last) { ok = false; }
+    let bootstrap: *AddressSpaceBacking = address_space_backing_existing_at(0);
+    if (bootstrap.asid != 1 || bootstrap.asid_generation != 1) { ok = false; }
     return ok;
 }
 
@@ -1234,11 +1243,10 @@ fn address_space_asid_rollover_probe() -> bool {
 // storage and counts are per-core, so an invariant failure on one CPU cannot
 // overwrite another CPU's evidence.
 //
-// What remains shared is root 0's static backing. Its page-table addresses are
-// permanent after MMU-off boot, but ASID rollover refreshes its asid and
-// generation fields. Two cores may activate the fallback root, so that update
-// still needs one cross-core answer before KERNEL_ACTIVE_CORES can move.
+// Root 0's static backing is also immutable after MMU-off boot. ASID 1 is
+// permanently reserved for it, and rollover invalidates every core before
+// reusing dynamic ASIDs from 2 onward. Concurrent fallback activation therefore
+// reads one permanent page-table/ASID tuple and writes only per-core state.
+// Consequently this file no longer requires a KERNEL_ACTIVE_CORES assertion.
 fn address_space_execution_model_assumption() {
-    static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "root 0 has one mutable ASID/generation pair shared by every core that can activate the fallback address space");
 }
