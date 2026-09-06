@@ -203,11 +203,15 @@ fn process_image_record_missing_uses() -> usize {
 // scheduled_process_table_probe asserts exactly that -- the detector for
 // this release path, built in with it rather than after the first leak.
 fn process_image_record_live_count() -> usize !{unsafe} {
-    process_image_pool_init();
+    process_image_pool_init_before_secondary();
     return intrusive_pool_live_count(&process_image_pool);
 }
 
-private fn process_image_pool_init() {
+// Called lazily by core 0's early users and explicitly by
+// kernel_secondary_boot_state_clear() before PSCI can publish core 1. The
+// ready flag is therefore never observed concurrently: once another core can
+// enter kernel state, this pool has already been initialized.
+fn process_image_pool_init_before_secondary() {
     if (process_image_pool_ready) { return; }
     process_image_pool_ready = true;
     intrusive_pool_init(&process_image_pool);
@@ -297,7 +301,7 @@ private fn process_image_record_reset(record: borrow *ProcessImageRecord) {
 // going missing. It has to release now, because what bounded the number
 // of live records was the process table's size.
 fn process_image_record_ensure(root: usize) -> bool !{unsafe} {
-    process_image_pool_init();
+    process_image_pool_init_before_secondary();
     let mut address: IntrusiveSlotAddress = scheduled_process_image_record(root);
     let generation: usize = scheduled_process_image_record_generation(root);
     if (intrusive_slot_address_is_none(address) == false && intrusive_pool_matches(
@@ -2155,10 +2159,12 @@ fn process_image_gap_is_unmapped() -> bool {
 // too. The former is summed for the boot diagnostic; the latter describes the
 // current core's most recent clone-reap event.
 //
-// What remains shared is only the pool's lazy initializer. It needs an
-// activation barrier or a two-core-tested one-time initialization mechanism
-// before a second core can enter this file.
+// The pool initializer is shared but not concurrent: secondary-core startup
+// calls process_image_pool_init_before_secondary() before PSCI can make core 1
+// visible. Every per-operation and diagnostic scalar above is per-core.
+// Within one core those operation records still assume a kernel path runs to
+// completion before another process can overwrite the same slot.
 fn process_image_execution_model_assumption() {
-    static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "the process-image pool initializer is lazy shared state; every per-operation and diagnostic scalar is per-core since GitHub issue #479");
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+                  "process-image operation state is per-core, not per-process; kernel preemption would let two operations share one core's slot");
 }

@@ -65,6 +65,11 @@ private fn secondary_tick_address() -> usize {
 }
 
 fn kernel_secondary_boot_state_clear() {
+    // GitHub issue #479: establish the process-image pool before PSCI can
+    // expose a second kernel execution context. Its ordinary callers retain
+    // lazy initialization for pre-secondary core-0 use; after this barrier
+    // the shared ready flag is immutable and cannot race.
+    process_image_pool_init_before_secondary();
     kernel_secondary_boot_state = 0;
 }
 
