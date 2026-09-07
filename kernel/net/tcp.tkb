@@ -2685,7 +2685,9 @@ fn kernel_tcp_accept_progress(owner: borrow TcpConnectionOwner[connection],
         // could not run until this loop ended, because kernel mode does not
         // preempt -- captured under host CPU starvation as a DDB backtrace
         // inside this loop with `pending=1 ready=1`, a reschedule requested
-        // and a runnable child that never ran.
+        // and a runnable child that never ran. Issue #524 adds the other
+        // direction: the current child may itself be the event a blocked
+        // parent needs, even when nobody else is Ready yet.
         //
         // Pending is already the answer the caller wants and already
         // handled at kernel/kernel/syscall.tkb: it gives the receive
@@ -2696,7 +2698,8 @@ fn kernel_tcp_accept_progress(owner: borrow TcpConnectionOwner[connection],
         // from the timer HANDLER and makes every NetRx waiter runnable once
         // per tick, and the deadline above lives on the connection, so it
         // still bounds the whole accept across the block.
-        if (kernel_process_other_ready()) {
+        if (kernel_process_other_ready() ||
+            kernel_process_current_exit_has_waiter()) {
             return KernelTcpAcceptStep::Pending(ready);
         }
         net_rx_wait();

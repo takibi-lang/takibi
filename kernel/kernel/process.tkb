@@ -3472,6 +3472,28 @@ fn kernel_process_other_ready() -> bool {
     }
 }
 
+// Is the current process itself the event that can make a blocked parent
+// runnable?
+//
+// GitHub issue #524: "no other process is Ready" is not sufficient
+// permission to wait inside non-preemptible EL1. A parent blocked in wait4()
+// is not Ready precisely because it is waiting for this process to exit; if
+// this process instead waits for an unrelated device while holding the
+// machine, neither side can produce the other's progress condition.
+//
+// Child exit wakes its direct parent, so this asks about that exact edge
+// rather than treating every blocked process as a reason to yield.
+fn kernel_process_current_exit_has_waiter() -> bool {
+    if (execution_here().current_live == false) { return false; }
+    let slot: usize = execution_here().current_handle.pool_index;
+    if (scheduled_process_record_at(slot).has_parent == false) { return false; }
+    let mut parent: ProcessHandle = scheduled_process_record_at(slot).parent;
+    return scheduled_process_handle_matches(parent) &&
+           scheduled_process_state_of(parent) == ProcessSlotState::Blocked &&
+           scheduled_process_wait_reason_of(parent) ==
+               ProcessWaitReason::ChildExit;
+}
+
 // Would this process's exit leave the machine with nothing to run?
 //
 // GitHub issue #448: an exit hands the CPU somewhere, and until a shell
@@ -4933,10 +4955,52 @@ fn kernel_process_fanout_probe() -> bool !{unsafe} {
     return true;
 }
 
+// Deterministic regression for issue #524's process topology. The current
+// process is the child created by scheduler_probe; put its parent in the
+// exact Blocked/ChildExit state observed by DDB, assert that the dependency
+// is visible, then restore the parent before the scheduler exercise continues.
+private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
+    let guard = process_run_lock();
+    let mut arranged: bool = false;
+    match scheduled_process_ready_take(guard, parent) {
+        ScheduledProcessReadyTakeResult::Missing => {}
+        ScheduledProcessReadyTakeResult::Ready(resources) => {
+            let (owner, ready) = resources;
+            let running = scheduled_process_start(owner, ready);
+            let blocked = scheduled_process_block(owner, running);
+            scheduled_process_record_at(owner.pool_index).wait_reason =
+                ProcessWaitReason::ChildExit;
+            scheduled_process_release(owner, blocked);
+            arranged = true;
+        }
+    }
+    process_run_unlock(guard);
+    if (arranged == false ||
+        kernel_process_current_exit_has_waiter() == false) {
+        return false;
+    }
+    let restore_guard = process_run_lock();
+    let mut restored: bool = false;
+    match scheduled_process_blocked_take(parent) {
+        ScheduledProcessBlockedTakeResult::Missing => {}
+        ScheduledProcessBlockedTakeResult::Blocked(resources) => {
+            let (owner, blocked) = resources;
+            let ready = scheduled_process_wake(owner, blocked);
+            scheduled_process_record_at(owner.pool_index).wait_reason =
+                ProcessWaitReason::None;
+            scheduled_process_release(owner, ready);
+            restored = true;
+        }
+    }
+    process_run_unlock(restore_guard);
+    return restored && kernel_process_current_exit_has_waiter() == false;
+}
+
 fn kernel_process_scheduler_probe() -> bool {
     kernel_process_execution_reset();
     kernel_process_trace_enable();
     let root_pid: usize = kernel_process_current_pid();
+    let mut root_handle: ProcessHandle = execution_here().current_handle;
     match kernel_process_clone_begin(0x11, 0) {
         ProcessCloneResult::Invalid => { return false; }
         ProcessCloneResult::ChildReady(child_pid) => {
@@ -4946,6 +5010,9 @@ fn kernel_process_scheduler_probe() -> bool {
                 return false;
             }
         }
+    }
+    if (kernel_process_exit_waiter_probe(root_handle) == false) {
+        return false;
     }
     // Fork is deliberately checked before the later scheduler tail wraps it
     // out. The ring's job is to retain the most recent causal history, not

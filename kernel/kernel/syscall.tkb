@@ -3454,9 +3454,15 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
         // Whether this call may wait inside the kernel at all. The wait is
         // at EL1 and kernel mode does not preempt, so it stops every other
-        // process for its duration -- which is fine when there is no other
-        // process to stop, and is the whole of issue #469 when there is.
-        let accept_may_wait: bool = kernel_process_other_ready() == false;
+        // process for its duration. GitHub issue #524: a blocked parent is
+        // not Ready, but it may be waiting for THIS process to exit. Holding
+        // the child in accept then prevents the event that would wake the
+        // parent, so that dependency forbids the EL1 wait too.
+        let accept_exit_waiter: bool =
+            kernel_process_current_exit_has_waiter();
+        let accept_may_wait: bool =
+            kernel_process_other_ready() == false &&
+            accept_exit_waiter == false;
         match kernel_tcp_accept_resume_or_begin(
                 pending_slot, pending_generation,
                 kernel_listener_port(accept_listener_fd)) {
@@ -3478,6 +3484,14 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 tcp_connection_put(owner);
                 if (accept_may_wait) {
                     return SyscallAction::Resume(LINUX_EAGAIN);
+                }
+                // There is no Ready successor to take a Block action, but
+                // the parent cannot become Ready until this process exits.
+                // Sleep interruptibly in this syscall instead: an RX or
+                // timer interrupt reruns it with the parked handshake and
+                // its original deadline intact.
+                if (accept_exit_waiter) {
+                    return SyscallAction::WaitInterrupt;
                 }
                 kernel_process_current_set_pending_block(
                     ProcessWaitReason::NetRx, 0);
@@ -3512,6 +3526,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                 // promises. So this process waits, off the
                                 // run queue, holding nothing, and runs the
                                 // syscall again when it is woken.
+                                // Re-read after progress: another core may
+                                // have moved the parent into wait4() while
+                                // accept_progress was examining the socket.
+                                if (kernel_process_current_exit_has_waiter()) {
+                                    return SyscallAction::WaitInterrupt;
+                                }
                                 kernel_process_current_set_pending_block(
                                     ProcessWaitReason::NetRx, 0);
                                 return SyscallAction::Block;
