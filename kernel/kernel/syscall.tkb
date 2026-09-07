@@ -3489,8 +3489,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 // the parent cannot become Ready until this process exits.
                 // Sleep interruptibly in this syscall instead: an RX or
                 // timer interrupt reruns it with the parked handshake and
-                // its original deadline intact.
-                if (accept_exit_waiter) {
+                // its original deadline intact. Re-read other_ready first:
+                // a UART interrupt may just have woken the shell that must
+                // run before this child can exit.
+                if (accept_exit_waiter &&
+                    kernel_process_other_ready() == false) {
                     return SyscallAction::WaitInterrupt;
                 }
                 kernel_process_current_set_pending_block(
@@ -3529,7 +3532,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                 // Re-read after progress: another core may
                                 // have moved the parent into wait4() while
                                 // accept_progress was examining the socket.
-                                if (kernel_process_current_exit_has_waiter()) {
+                                // A simultaneous UART wake takes priority:
+                                // blocking this process is what lets that
+                                // newly Ready shell consume its byte.
+                                if (kernel_process_current_exit_has_waiter() &&
+                                    kernel_process_other_ready() == false) {
                                     return SyscallAction::WaitInterrupt;
                                 }
                                 kernel_process_current_set_pending_block(
