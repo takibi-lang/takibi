@@ -2,6 +2,14 @@ use "kernel/kernel/process.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/kernel/fd_table.tkb";
 use "kernel/arch/arm64/kernel/user_entry_extern.tkb";
+use "kernel/lib/occupancy.tkb";
+
+// Both maintained platforms start core 1 before any DDB entry is enabled.
+// KERNEL_ACTIVE_CORES remains the scheduler count and is deliberately not
+// used here: the idle secondary still executes timer and SGI handlers and
+// therefore must acknowledge inspection quiescence.
+const DDB_ONLINE_CORES: usize = 2;
+const DDB_WORLD_STOP_SPINS: usize = 10000000;
 
 // How many of a process's descriptors an oops report prints. GitHub issue
 // #393: this is the width of the REPORT, not of the table -- see
@@ -404,7 +412,8 @@ private fn ddb_read_kernel_word(address: usize)
     return DdbWordReadResult::Read(value);
 }
 
-private fn ddb_translate_user(l2: usize, virtual: usize)
+private fn ddb_translate_user(stopped: borrow WorldStopped[id],
+                              l2: usize, virtual: usize)
         -> DdbUserTranslateResult !{unsafe} {
     if (virtual < USER_TEXT_VA) { return DdbUserTranslateResult::Unmapped; }
     let offset: usize = virtual - USER_TEXT_VA;
@@ -412,7 +421,7 @@ private fn ddb_translate_user(l2: usize, virtual: usize)
     if (index >= USER_SPACE_PAGE_COUNT) {
         return DdbUserTranslateResult::Unmapped;
     }
-    if (page_ddb_kernel_address_readable(l2, PAGE_SIZE) == false) {
+    if (page_ddb_kernel_address_readable(stopped, l2, PAGE_SIZE) == false) {
         return DdbUserTranslateResult::Fault;
     }
     let branch: usize = index / USER_L3_PAGE_COUNT;
@@ -423,7 +432,8 @@ private fn ddb_translate_user(l2: usize, virtual: usize)
                 return DdbUserTranslateResult::Unmapped;
             }
             let l3: usize = l2_entry & 0x0000FFFFFFFFF000;
-            if (page_ddb_kernel_address_readable(l3, PAGE_SIZE) == false) {
+            if (page_ddb_kernel_address_readable(
+                    stopped, l3, PAGE_SIZE) == false) {
                 return DdbUserTranslateResult::Fault;
             }
             let entry: usize = index % USER_L3_PAGE_COUNT;
@@ -468,8 +478,9 @@ private fn ddb_render_kernel_memory(address: usize, count: usize) !{unsafe} {
     }
 }
 
-private fn ddb_command_kernel_memory(address: usize, count: usize) !{unsafe} {
-    if (page_ddb_kernel_address_readable(address, count) == false) {
+private fn ddb_command_kernel_memory(stopped: borrow WorldStopped[id],
+                                     address: usize, count: usize) !{unsafe} {
+    if (page_ddb_kernel_address_readable(stopped, address, count) == false) {
         ddb_puts("ddb: xk denied (not ordinary kernel RAM) address=");
         ddb_put_hex(address);
         ddb_puts(" count="); ddb_put_udec(count);
@@ -479,8 +490,9 @@ private fn ddb_command_kernel_memory(address: usize, count: usize) !{unsafe} {
     ddb_render_kernel_memory(address, count);
 }
 
-private fn ddb_command_physical_memory(address: usize, count: usize) !{unsafe} {
-    if (page_ddb_physical_address_readable(address, count) == false) {
+private fn ddb_command_physical_memory(stopped: borrow WorldStopped[id],
+                                       address: usize, count: usize) !{unsafe} {
+    if (page_ddb_physical_address_readable(stopped, address, count) == false) {
         ddb_puts("ddb: xp denied (not ordinary physical RAM) address=");
         ddb_put_hex(address);
         ddb_puts(" count="); ddb_put_udec(count);
@@ -509,7 +521,8 @@ private fn ddb_command_physical_memory(address: usize, count: usize) !{unsafe} {
     }
 }
 
-private fn ddb_render_user_memory(pid: usize, address: usize, count: usize)
+private fn ddb_render_user_memory(stopped: borrow WorldStopped[id],
+                                  pid: usize, address: usize, count: usize)
         !{unsafe} {
     let mut root: usize = 0;
     let mut l2: usize = 0;
@@ -539,7 +552,7 @@ private fn ddb_render_user_memory(pid: usize, address: usize, count: usize)
     while (offset < count && offset < 64) {
         let virtual: usize = address + offset;
         let mut physical: usize = 0;
-        match ddb_translate_user(l2, virtual) {
+        match ddb_translate_user(stopped, l2, virtual) {
             DdbUserTranslateResult::Unmapped => {
                 ddb_puts("ddb: xu unmapped address="); ddb_put_hex(virtual);
                 ddb_puts("\n");
@@ -553,7 +566,7 @@ private fn ddb_render_user_memory(pid: usize, address: usize, count: usize)
             }
             DdbUserTranslateResult::Mapped(mapped) => { physical = mapped; }
         }
-        if (page_ddb_kernel_address_readable(physical, 1) == false) {
+        if (page_ddb_kernel_address_readable(stopped, physical, 1) == false) {
             ddb_puts("ddb: xu invalid physical="); ddb_put_hex(physical);
             ddb_puts("\n");
             return;
@@ -1084,7 +1097,9 @@ private fn ddb_render_proc(pid: usize) !{unsafe} {
 // The one resumable DDB root. It receives an already-saved IRQ frame after
 // the UART source and interrupt controller were acknowledged, but remains an
 // interrupt function: no semantic exception is made for debugger code.
-fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
+private fn kernel_ddb_enter_stopped(
+        stopped_world: borrow WorldStopped[id],
+        frame_sp: usize, entry_kind: usize, entry_source: usize)
         !{interrupt, unsafe} {
     unsafe {
         atomic_store_release(ddb_snapshot_published_sequence_address(), 0);
@@ -1148,6 +1163,9 @@ fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
             ddb_snapshot.sequence);
     }
     ddb_puts("\nddb: interrupt-safe UART debugger\n");
+    ddb_puts("ddb: world-stop complete mask=");
+    ddb_put_hex(world_stopped_mask(stopped_world));
+    ddb_puts("\n");
     ddb_render_oops();
     let mut line: [u8; CRASH_CONSOLE_LINE_BYTES];
     let mut length: usize = 0;
@@ -1202,11 +1220,12 @@ fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
             match ddb_parse_memory(line as []u8, length) {
                 DdbMemoryCommand::Kernel(details) => {
                     let (address, count) = details;
-                    ddb_command_kernel_memory(address, count);
+                    ddb_command_kernel_memory(stopped_world, address, count);
                 }
                 DdbMemoryCommand::Physical(details) => {
                     let (address, count) = details;
-                    ddb_command_physical_memory(address, count);
+                    ddb_command_physical_memory(
+                        stopped_world, address, count);
                 }
                 DdbMemoryCommand::Invalid => {
                     ddb_puts("ddb: usage: xk|xp HEX_ADDRESS [COUNT_1_TO_64]\n");
@@ -1215,7 +1234,8 @@ fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
                   match ddb_parse_user_memory(line as []u8, length) {
                     DdbUserMemoryCommand::User(details) => {
                         let (pid, address, count) = details;
-                        ddb_render_user_memory(pid, address, count);
+                        ddb_render_user_memory(
+                            stopped_world, pid, address, count);
                     }
                     DdbUserMemoryCommand::Invalid => {
                         ddb_puts("ddb: usage: xu PID HEX_ADDRESS [COUNT_1_TO_64]\n");
@@ -1249,6 +1269,31 @@ fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
             }
         }
         length = 0;
+    }
+}
+
+// Stop every online peer before touching the machine-global snapshot or the
+// page allocator's lock-free diagnostic view. A partial token is deliberately
+// not passed to kernel_ddb_enter_stopped: report the stopped set, resume it,
+// and return without inspecting shared state.
+fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
+        !{interrupt, unsafe} {
+    match world_stop_begin(
+            &kernel_world_stop, DDB_ONLINE_CORES, DDB_WORLD_STOP_SPINS) {
+        WorldStopResult::Busy => {
+            ddb_puts("\nddb: world-stop busy; inspection refused\n");
+        }
+        WorldStopResult::Partial(partial) => {
+            ddb_puts("\nddb: world-stop partial mask=");
+            ddb_put_hex(world_stop_partial_mask(partial));
+            ddb_puts("; inspection refused\n");
+            world_stop_partial_release(partial, &kernel_world_stop);
+        }
+        WorldStopResult::Complete(stopped_world) => {
+            kernel_ddb_enter_stopped(
+                stopped_world, frame_sp, entry_kind, entry_source);
+            world_stop_release(stopped_world, &kernel_world_stop);
+        }
     }
 }
 
@@ -1559,19 +1604,18 @@ fn el1_exception_evidence_from_frame(slot: usize, frame_sp: usize) !{unsafe} {
 // GitHub issue #479: the crash and debugger state, which is singular in a
 // way the rest of this kernel's state is not.
 //
-// THERE IS ONE crash_snapshot AND ONE ddb_snapshot. Two cores faulting
-// produce one report, and which one survives is whichever wrote last -- so
+// THERE IS ONE crash_snapshot. Two cores faulting produce one report, and
+// which one survives is whichever wrote last -- so
 // the first fault, which is usually the interesting one, is the one lost.
 // crash_snapshot_capturing is the flag meant to stop a fault inside the
 // capture from recursing, and on two cores it also stops the SECOND CORE's
 // unrelated fault from being recorded at all.
 //
-// kernel_ddb_memory_access_active/_faulted/_address are what make DDB's
-// memory reads safe: the handler consults them to tell a read it expected
-// from a real fault. They are a single set, so two cores in DDB would each
-// answer the other's question -- and this is the path that runs when
-// something has already gone wrong, where a wrong answer is least
-// affordable.
+// The DDB snapshot and guarded-read recovery words are also machine-global,
+// but #504 now serializes entry through kernel_world_stop and holds every
+// peer until `continue`. Busy or partial entry returns before touching them,
+// and the page allocator classifiers require the resulting WorldStopped
+// token, so those globals no longer contribute to this assertion.
 //
 // The shape of the answer is probably not a lock. Locking a crash reporter
 // is what kernel/printk/log.tkb's own note argues against: a reporter that
@@ -1579,5 +1623,5 @@ fn el1_exception_evidence_from_frame(slot: usize, frame_sp: usize) !{unsafe} {
 // arrangement kernel/lib/diagnostic_ring.tkb already uses, for this reason.
 fn exception_evidence_execution_model_assumption() {
     static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "one crash snapshot and one DDB fault-catch state for the machine: two cores faulting lose one report");
+                  "one crash snapshot for the machine: two cores faulting lose one report");
 }

@@ -51,6 +51,7 @@
 use "kernel/lib/freelist.tkb";
 use "kernel/lib/pool_lock.tkb";
 use "kernel/lib/execution_model.tkb";
+use "kernel/lib/occupancy.tkb";
 
 const PAGE_SIZE: usize = 4096;
 must_use variant CheckedUsize {
@@ -68,7 +69,9 @@ extern symbol kernel_image_start;
 // mapped ordinary-memory span owned by this image and its page allocator.
 // Device blocks may also be mapped in TTBR0, but reading them can acknowledge
 // or clear hardware state and is not an inspection-only operation.
-fn page_ddb_kernel_address_readable(address: usize, count: usize) -> bool {
+fn page_ddb_kernel_address_readable(
+        stopped: borrow WorldStopped[id], address: usize, count: usize)
+        -> bool {
     if (count == 0 || address < kernel_image_start ||
             address > 0xFFFFFFFFFFFFFFFF - count) {
         return false;
@@ -106,8 +109,10 @@ fn page_ddb_kernel_address_readable(address: usize, count: usize) -> bool {
 // maps this span identically, but keeping the physical predicate separate
 // prevents the debugger interface from treating that mapping choice as the
 // meaning of an `xp` address.
-fn page_ddb_physical_address_readable(address: usize, count: usize) -> bool {
-    return page_ddb_kernel_address_readable(address, count);
+fn page_ddb_physical_address_readable(
+        stopped: borrow WorldStopped[id], address: usize, count: usize)
+        -> bool {
+    return page_ddb_kernel_address_readable(stopped, address, count);
 }
 
 // GitHub issue #353: per-page storage whose MEANING belongs to whoever

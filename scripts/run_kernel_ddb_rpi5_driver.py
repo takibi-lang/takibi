@@ -228,6 +228,9 @@ def main() -> int:
             "RPi5 DDB did not return to a prompt after guarded fault")
     if "ddb: xk fault address=0x0000000800000000" not in text:
         raise timeline.bail("RPi5 DDB guarded fault was not reported")
+    if "ddb: world-stop complete mask=0x0000000000000002" not in text:
+        raise timeline.bail(
+            "RPi5 DDB did not stop and acknowledge the online peer")
     if "ddb: events cpu=0 count=" not in text:
         raise timeline.bail(
             "RPi5 DDB post-fault inspection command did not complete")

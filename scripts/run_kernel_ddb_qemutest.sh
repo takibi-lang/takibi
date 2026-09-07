@@ -167,6 +167,7 @@ if [ "$BREAK_SOURCE" = software ]; then
 fi
 
 if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
+        ! grep -q '^ddb: world-stop complete mask=0x0000000000000002$' "$UART_LOG" ||
         ! grep -Eq '^ddb: break seq=[1-9][0-9]* cpu=[0-9]+ elr=0x[0-9a-f]+ sp_el0=0x[0-9a-f]+$' "$UART_LOG" ||
         ! grep -q '^ddb: x0=0x' "$UART_LOG" ||
         ! grep -q '^ddb: sp_el0=0x' "$UART_LOG" ||

@@ -288,6 +288,19 @@ fn world_stop_partial_mask(partial: borrow WorldStopPartial[id]) -> usize {
     return partial.stopped_mask;
 }
 
+// The complete token does not need to store a second copy of its mask: every
+// non-owner core in [0, cores) acknowledged, which is exactly the set the SGI
+// targeted and the set release resumes.
+fn world_stopped_mask(stopped: borrow WorldStopped[id]) -> usize {
+    let mut mask: usize = 0;
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if (cpu < stopped.cores && cpu != stopped.owner) {
+            mask = mask | (1 << cpu);
+        }
+    }
+    return mask;
+}
+
 private fn occupancy_cpu() -> {0..<KERNEL_MAX_CORES as usize} {
     let raw: usize = cpu_id();
     if (raw >= KERNEL_MAX_CORES) { return 0; }
