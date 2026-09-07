@@ -125,6 +125,16 @@ the first iteration's costs can be read rather than guessed. Hardware stays
 out of CI: there is no always-on host, so a scheduled run would take the board
 at the moment the workstation came back, which is when a person wants it.
 
+Getting that first workflow green took five rounds, and four of the five
+failures were latent defects rather than workflow mistakes -- a hosted runner
+is a second machine, and this repository had only ever had one. What it found:
+a dependency the build declared and nothing installed, a check that read every
+file named `dune` including a switch's binary, QEMU lanes asking for more
+guest vCPUs than the runner has cores, a host-side network peer that raced the
+guest's boot with a single un-retried request, and `awk` leaving `llvm-nm`
+holding a closed pipe. The last of those is #521, whose remaining half is a
+decision rather than a defect.
+
 #280's own number is now measured and it closed the option it was expected to
 open: the wire sustains 15.6 KiB/s against SWD's 187.4, so a network-delivered
 rootfs is blocked on #520 rather than merely unproven. What that leaves
@@ -153,15 +163,18 @@ stale.
    already and run on every lane; what is left of its first milestone is that
    second named interval, then **#502** call chains and **#503** PMU
    counters.
-3. **#410** how a fallback is reported: three counted, two logged, none
+3. **#521** early-exit pipe consumers under `pipefail`. The fifteen sites
+   that demonstrably bit are fixed; 27 remain that have not, and the open
+   part is how narrow a build check should be rather than what to repair.
+4. **#410** how a fallback is reported: three counted, two logged, none
    asserted.
-4. **#511** capture useful DDB state automatically when an ordinary QEMU lane
+5. **#511** capture useful DDB state automatically when an ordinary QEMU lane
    stops at a debugger prompt, without reviving the reverted unreliable
    silence trigger unchanged.
-5. **#388** the hand-written exception vectors carry no stack-overflow test.
-6. **#429** in-kernel GDB stub, **#149** GDB without JTAG, **#444**
+6. **#388** the hand-written exception vectors carry no stack-overflow test.
+7. **#429** in-kernel GDB stub, **#149** GDB without JTAG, **#444**
    controlled DDB memory mutation.
-7. **#454** `uart_putc` busy-waits, at 87us per logged byte.
+8. **#454** `uart_putc` busy-waits, at 87us per logged byte.
 
 **#280 is parked, not queued.** It was measured on 2026-09-06: SWD is at its
 30 MHz ceiling at 187 KiB/s, the rootfs is 85% of what is transferred, and the
