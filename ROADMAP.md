@@ -108,6 +108,22 @@ Then, in this territory and unordered: #518, #468, #464, #516, #308, #414,
 #342, #370, #374, #203, #200, #201, #212, #282, #417, #400, #109, #129, #155,
 #267, #28, #58, #13, #95, #8.
 
+#### Handed over from Territory B, 2026-09-07
+
+**#524 is the one that should be read first, and it is not a decision -- it is
+an attributed defect with a reproduction.** The QEMU lane's oldest
+intermittent, #509's stop point at `linux socket: listener ready port=8080`,
+has a cause: the connected-fixture child calls accept, which may hold
+non-preemptible EL1 while `kernel_process_other_ready()` is false -- and it is
+false because the only other two processes are that child's own parent and
+grandparent, both blocked on ChildExit waiting for it. The condition that
+authorises holding the machine is produced by the thing the machine is being
+held for. It does not resolve after the 30s accept deadline either: EL0 retries
+and `kernel_tcp_accept_begin` resets the window, which is why the measured
+silence is 175s and CI's was 218s rather than 30s. Two DDB captures are on the
+issue, one with the process in the kernel and one in its userspace retry loop.
+This failed CI on 2026-09-07 and is the reason that run needed re-running.
+
 #### Handed over from Territory B, 2026-09-06
 
 Four things this territory owns that Territory B found and could not decide.
