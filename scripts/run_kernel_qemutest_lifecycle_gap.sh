@@ -103,6 +103,18 @@ QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
 # these defaults must not collide with any of them.
 SERIAL_PORT="${KERNEL_QEMU_LIFECYCLE_GAP_SERIAL_PORT:-18679}"
 GDB_PORT="${KERNEL_QEMU_LIFECYCLE_GAP_GDB_PORT:-18680}"
+# The monitor the UART driver asks for a serial BREAK through when this lane's
+# guest stops without reaching the debugger (GitHub issues #509/#511). This is
+# the lane that stalls: it boots the largest kernel, under GDB, and is the one
+# CI has lost rounds to. A stall here now leaves a backtrace in the failure
+# artifacts instead of a capture that ends mid-boot with nothing after it.
+#
+# Safe alongside -gdb: the break is asked for only inside the last stretch of
+# the capture budget, and this lane's GDB session detaches during early boot
+# once its one breakpoint is hit -- an ordering the 2026-09-07 CI failure's
+# artifacts confirm, with "[Inferior 1 (process 1) detached]" logged while the
+# guest went on booting for another twenty seconds.
+QMP_PORT="${KERNEL_QEMU_LIFECYCLE_GAP_QMP_PORT:-18699}"
 TIMEOUT_SECS="${KERNEL_QEMU_LIFECYCLE_GAP_TIMEOUT:-${KERNEL_QEMU_TIMEOUT:-90}}"
 export KERNEL_QEMU_TIMEOUT="$TIMEOUT_SECS"
 NETDEV_LOCAL_PORT="${KERNEL_QEMU_LIFECYCLE_GAP_NETDEV_LOCAL_PORT:-18681}"
@@ -120,9 +132,10 @@ fi
 # somebody already owns this lane's ports, and say that rather than
 # reporting a kernel that was never asked anything.
 . "$REPO_ROOT/scripts/qemu_session_ports.sh"
-qemu_session_shift_ports SERIAL_PORT GDB_PORT NETDEV_LOCAL_PORT NETDEV_REMOTE_PORT
+qemu_session_shift_ports SERIAL_PORT GDB_PORT QMP_PORT NETDEV_LOCAL_PORT \
+    NETDEV_REMOTE_PORT
 python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "kernel/qemu lifecycle-gap" \
-    "tcp:$SERIAL_PORT" "tcp:$GDB_PORT" \
+    "tcp:$SERIAL_PORT" "tcp:$GDB_PORT" "tcp:$QMP_PORT" \
     "udp:$NETDEV_LOCAL_PORT" "udp:$NETDEV_REMOTE_PORT" || exit 1
 if [ ! -f "$ELF" ]; then
     echo "error: kernel ELF not found: $ELF (run 'make kernelbuild-qemu-debug' first)" >&2
@@ -136,7 +149,9 @@ fi
 echo "[kernel/qemu lifecycle-gap] booting kernel-debug.elf under QEMU+GDB"
 qemu-system-aarch64 \
     -machine virt -cpu cortex-a53 -smp 2 -m 1024 -display none -monitor none \
-    -serial "tcp:127.0.0.1:$SERIAL_PORT,server=on,wait=on" \
+    -qmp "tcp:127.0.0.1:$QMP_PORT,server=on,wait=off" \
+    -chardev "socket,id=debug_uart,host=127.0.0.1,port=$SERIAL_PORT,server=on,wait=on" \
+    -serial chardev:debug_uart \
     -global virtio-mmio.force-legacy=on \
     -drive "file=$QEMU_EXT2_IMAGE,if=none,format=raw,id=vd0" \
     -device virtio-blk-device,drive=vd0 \
@@ -173,6 +188,7 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --network-ready-file "$NETWORK_READY" \
     --interactive-httpd-ready-file "$INTERACTIVE_HTTPD_READY" \
     --interactive-httpd-done-file "$INTERACTIVE_HTTPD_DONE" \
+    --qmp-port "$QMP_PORT" \
     --validate-ash >"$UART_DRIVER_LOG" 2>&1 &
 uart_driver_pid=$!
 
