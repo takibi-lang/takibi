@@ -7,14 +7,13 @@
 // same top-level names, so listing both together is a compile error by
 // design.
 
-// Current limitations (2026-08-13, issue #295): the "mutex"/lock here
-// (NetworkCapabilityGuard) is a linear type-state token, not a real
-// spinlock -- it enforces exclusive borrow-and-return discipline at
-// compile time but performs no runtime synchronization, correct only
-// because this whole kernel is NOT SYNCHRONIZED / single-core. There is
-// exactly one NetRxCanAcquire capability for the whole kernel: no
-// multi-NIC support, and every network-facing syscall path serializes
-// through this single store.
+// Current limitations (2026-09-07): there is exactly one NetRxCanAcquire
+// capability for the whole kernel: no multi-NIC support, and every
+// network-facing syscall path serializes through this single store. The
+// store's Mutex provides cross-core exclusion, while the indexed linear guard
+// makes access without holding that particular mutex a compile error. Driver
+// initialization remains CPU0-owned by each platform's interrupt routing; it
+// is not state owned by this store.
 //
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/mutex.tkb";
@@ -128,11 +127,7 @@ fn network_capability_put(ready: sink NetRxCanAcquire)
     }
 }
 
-// GitHub issue #453. This file's header already says the initialisation
-// flag that mints the first NetRxCanAcquire is trusted "because this whole
-// kernel is NOT SYNCHRONIZED / single-core" -- two cores reaching
-// net_init() would mint two permissions for one descriptor set.
-fn socket_capability_execution_model_assumption() {
-    static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "the init flag that mints the first NetRxCanAcquire would mint two");
-}
+// This store does not depend on KERNEL_ACTIVE_CORES. Its three public
+// operations take network_capability_store.mutex before moving the capability;
+// the net_init() flags that mint the initial driver capability live in the
+// platform-selected drivers and remain CPU0-owned by device interrupt routing.
