@@ -309,6 +309,42 @@ private let mut tcp_connection_pool_ready: bool = false;
 // harmless instead of undefined, exactly as tcp_frame_absent_fallback is
 // for frames. Private because it holds stable owner storage.
 private let mut tcp_connection_absent_fallback: TcpConnection;
+
+// GitHub issue #410: the two absent-slot fallbacks in this file logged every
+// occurrence and counted none, which is the one shape of report that is bad
+// in both directions -- noisy if it happens often, and invisible in a summary
+// if it happens once. The four elsewhere (image record, target root, address
+// space backing, fd record, process record) were counted and summarised, and
+// this pair predates that convention.
+//
+// One counter for all three return sites, on the precedent
+// `unified_fd_record_missing_uses` set for its own three pools: the question
+// a reader has at the end of a boot is whether any lookup here landed on a
+// slot that was not the one it named, not which accessor it was. The
+// per-occurrence lines above already say which, and they stay -- they are
+// useful the first time, and they are no longer the only signal.
+//
+// Indexed by cpu_id() and sized by KERNEL_MAX_CORES, the same shape as every
+// other counter in this family, so two cores cannot lose each other's
+// increments to a read-modify-write on one word.
+private let mut tcp_absent_fallback_count: [usize; KERNEL_MAX_CORES];
+
+fn tcp_absent_fallback_uses() -> usize {
+    let mut total: usize = 0;
+    for core: usize in 0..<KERNEL_MAX_CORES {
+        total = total + tcp_absent_fallback_count[core];
+    }
+    return total;
+}
+
+private fn tcp_absent_fallback_note() {
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) {
+        tcp_absent_fallback_count[0] = tcp_absent_fallback_count[0] + 1;
+        return;
+    }
+    tcp_absent_fallback_count[core] = tcp_absent_fallback_count[core] + 1;
+}
 let mut tcp_completed_handshakes: usize = 0;
 let mut tcp_completed_echoes: usize = 0;
 let mut tcp_completed_closes: usize = 0;
@@ -698,6 +734,7 @@ fn tcp_frame_slice(address: usize) -> [u8; 1514..] !{unsafe} {
     match intrusive_pool_probe_slot(&tcp_frame_pool, address) {
         IntrusiveSlotProbe::NoPayload => {
             kernel_boot_log("tcp frames: frame missing\n");
+            tcp_absent_fallback_note();
             return tcp_frame_absent_fallback as [u8; 1514..];
         }
         IntrusiveSlotProbe::Live(slot_view) => {
@@ -746,6 +783,7 @@ fn tcp_connection_payload(address: usize) -> *TcpConnection !{unsafe} {
     match intrusive_pool_probe_slot(&tcp_connection_pool, address) {
         IntrusiveSlotProbe::NoPayload => {
             kernel_boot_log("tcp: connection address names no live slot\n");
+            tcp_absent_fallback_note();
             return &tcp_connection_absent_fallback;
         }
         IntrusiveSlotProbe::Live(slot_view) => {
@@ -787,6 +825,7 @@ fn tcp_connection_of(owner: borrow TcpConnectionOwner[connection])
     if (intrusive_pool_matches_untrusted(&tcp_connection_pool, owner.slot,
                                         owner.generation) == false) {
         kernel_boot_log("tcp: connection owner names no live slot\n");
+        tcp_absent_fallback_note();
         return &tcp_connection_absent_fallback;
     }
     return tcp_connection_payload(owner.slot);

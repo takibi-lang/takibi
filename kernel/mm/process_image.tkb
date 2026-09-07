@@ -419,20 +419,42 @@ private fn process_image_target_root_is_set_here() -> bool {
 // scheduled_process_slot_valid, which answers about a LIVE process rather
 // than about an index being in bounds. Root 0 is the bootstrap and always
 // valid.
-private let mut process_image_root_fallback_count:
+// GitHub issue #410: two events, and they were one counter.
+//
+// "No target has been chosen yet" is an ordinary state of an early boot and
+// of the teardown negative control below; it happens twice in a healthy QEMU
+// boot. "A target was chosen and its root no longer names a live process" is
+// the #270 hazard -- a teardown resolving through root 0, which is BusyBox
+// init's live image, so it unmaps PID 1.
+//
+// Sharing one counter meant the second could never be gated on zero, because
+// the first is legitimately nonzero. That is why this fallback stayed
+// advisory while it was the ONLY one with a counter and no reader: nothing
+// could have asserted the number without asserting the benign half too.
+private let mut process_image_root_unset_count:
+    [usize; KERNEL_MAX_CORES];
+private let mut process_image_root_stale_count:
     [usize; KERNEL_MAX_CORES];
 
-// A target that was never set, or a target root that no longer names a live
-// process. Readers retain the old root-0 fallback because their many call
-// sites cannot act on a miss; teardown opens ProcessImageTargetRootResult
-// and does nothing. Both paths count the miss rather than hiding it.
-fn process_image_root_fallback_uses() -> usize {
-    let counts: *usize = process_image_root_fallback_count;
+private fn process_image_root_counter_total(counts: *usize) -> usize {
     let mut total: usize = 0;
     for core: usize in 0..<KERNEL_MAX_CORES {
         total = total + *(counts + (core as isize));
     }
     return total;
+}
+
+// No target chosen. Readers retain the old root-0 fallback because their many
+// call sites cannot act on a miss; teardown opens ProcessImageTargetRootResult
+// and does nothing. Reported, not gated: a healthy boot reaches it.
+fn process_image_root_unset_uses() -> usize {
+    return process_image_root_counter_total(process_image_root_unset_count);
+}
+
+// A target that was chosen and whose root has since stopped naming a live
+// process. This one is gated on zero, and it is the one issue #270 hit.
+fn process_image_root_stale_fallback_uses() -> usize {
+    return process_image_root_counter_total(process_image_root_stale_count);
 }
 
 // GitHub issue #492: lookups that named an image slot with the previous
@@ -449,15 +471,21 @@ must_use variant ProcessImageTargetRootResult {
 
 private fn process_image_target_root_result()
         -> ProcessImageTargetRootResult !{unsafe} {
-    if (process_image_target_root_is_set_here() &&
-        scheduled_process_slot_valid(process_image_target_root_here())) {
-        return ProcessImageTargetRootResult::Ready(
-            process_image_target_root_here());
+    if (process_image_target_root_is_set_here() == false) {
+        let unset_count: *usize =
+            process_image_counter_here(process_image_root_unset_count);
+        *unset_count = *unset_count + 1;
+        return ProcessImageTargetRootResult::Missing;
     }
-    let fallback_count: *usize =
-        process_image_counter_here(process_image_root_fallback_count);
-    *fallback_count = *fallback_count + 1;
-    return ProcessImageTargetRootResult::Missing;
+    if (scheduled_process_slot_valid(
+            process_image_target_root_here()) == false) {
+        let stale_count: *usize =
+            process_image_counter_here(process_image_root_stale_count);
+        *stale_count = *stale_count + 1;
+        return ProcessImageTargetRootResult::Missing;
+    }
+    return ProcessImageTargetRootResult::Ready(
+        process_image_target_root_here());
 }
 
 fn process_image_root_index() -> usize !{unsafe} {
@@ -877,7 +905,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     // afterwards so this deliberate negative control does not masquerade
     // as a fault in the healthy-boot evidence.
     let fallback_count: *usize =
-        process_image_counter_here(process_image_root_fallback_count);
+        process_image_counter_here(process_image_root_unset_count);
     let fallback_before: usize = *fallback_count;
     process_image_clear_target_root_here();
     process_image_unmap_pages(1);

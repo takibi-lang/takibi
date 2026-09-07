@@ -286,6 +286,25 @@ fn kernel_process_child_exec_map_result(
 // counts are exactly what the report measures. Latch there, report at PID
 // 1's next syscall, by which time the child is fully gone and init is
 // running again.
+// GitHub issue #410: every dead-slot fallback counter in the kernel, summed
+// into the one number the positive report below is gated on.
+//
+// The summing is what makes the report checkable. A counter left out of this
+// function is a fallback that can fire without failing anything, which is the
+// defect this issue is about -- and it is exactly what happened to
+// `process_image_root_stale_fallback_uses`, which had a counter and no reader until
+// issue #270 hit it from a probe and nothing in the boot said so.
+// `scripts/check_fallback_counters.py` refuses a build in which any accessor
+// of this family is not named here, so the next one cannot be forgotten.
+private fn dead_slot_fallback_uses() -> usize {
+    return process_image_record_missing_uses()
+        + process_image_root_stale_fallback_uses()
+        + address_space_backing_missing_uses()
+        + unified_fd_record_missing_uses()
+        + scheduled_process_record_missing_uses()
+        + tcp_absent_fallback_uses();
+}
+
 fn kernel_init_boot_fixture_reaped(reaper_pid: usize) {
     if (init_boot_fixture_reported) { return; }
     if (reaper_pid != 1) { return; }
@@ -310,6 +329,26 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
     // not act on; printing its use count is what keeps it
     // from being a silent one. Zero on a healthy kernel,
     // and a line that should never appear.
+    // GitHub issue #410: one positive line for the whole dead-slot fallback
+    // family, printed on the GOOD path and listed in
+    // kernel/tests/common/views/process_lifecycle.expected -- so a boot in
+    // which any of them fired LOSES an expected line and the view goes red.
+    //
+    // The reports below stay and are what a reader wants once it has: they
+    // name which accessor and how many times. What they could not do is
+    // fail. Each prints only when its count is NONZERO, so a boot where one
+    // fired GAINED a line -- and a line no filter captures is a line no
+    // expected file misses. Measured 2026-09-07: of the six counters, only
+    // `process table:` and `fd table:` were caught at all, and only because
+    // their prefixes collide with two lines this view already wanted. The
+    // `process image:`, `address space:` and `tcp` prefixes are matched by no
+    // filter in the tree, so four of the six were advisory.
+    //
+    // This is the shape #401 and #406 already use for their invariant breaks,
+    // two lines further down, and it is the only one that catches anything.
+    if (dead_slot_fallback_uses() == 0) {
+        kernel_boot_log("resources: every pooled record resolved to the slot its handle named\n");
+    }
     if (process_image_record_missing_uses() != 0) {
         kernel_boot_log("process image: records MISSING uses=");
         uart_put_udec(process_image_record_missing_uses());
@@ -322,11 +361,20 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
     // live image, because every teardown that resolves through it unmaps
     // PID 1. Issue #270 hit exactly that from a probe, and nothing in the
     // boot would have said so.
-    if (process_image_root_fallback_uses() != 0) {
+    if (process_image_root_stale_fallback_uses() != 0) {
         kernel_boot_log("process image: target root FELL BACK TO 0 uses=");
-        uart_put_udec(process_image_root_fallback_uses());
+        uart_put_udec(process_image_root_stale_fallback_uses());
         kernel_boot_log("\n");
     }
+    // The benign half of what used to share that counter, and the reason the
+    // hazardous half could never be gated on zero while they were one number.
+    // Printed unconditionally, with its count, so the view asserts the value
+    // rather than merely the absence of a complaint: a boot that stops
+    // reaching it, or reaches it more often, is a change in the teardown
+    // order and this is where it shows.
+    kernel_boot_log("resources: image target root unset uses=");
+    uart_put_udec(process_image_root_unset_uses());
+    kernel_boot_log("\n");
     if (address_space_backing_missing_uses() != 0) {
         kernel_boot_log("address space: backings MISSING uses=");
         uart_put_udec(address_space_backing_missing_uses());

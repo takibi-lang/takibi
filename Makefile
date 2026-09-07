@@ -202,6 +202,7 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 	@python3 scripts/test_run_kernel_ddb_rpi5_driver.py
 	@python3 scripts/test_check_direct_mmio_literals.py
 	@python3 scripts/test_check_ddb_command_inventory.py
+	@python3 scripts/test_check_fallback_counters.py
 	@python3 scripts/test_measure_trusted_base.py
 	@python3 scripts/test_profile_kernel_workload.py
 	@python3 scripts/test_profile_kernel_samples.py
@@ -939,6 +940,7 @@ kernel-lib-check:
 	python3 scripts/check_lock_discipline.py
 	python3 scripts/check_liveness_proof_escapes.py
 	python3 scripts/check_invariant_lines_unviewed.py
+	python3 scripts/check_fallback_counters.py
 	python3 scripts/check_dead_slot_peek_not_retained.py
 	python3 scripts/check_probe_entry_gates.py
 
