@@ -263,12 +263,30 @@ next occurrence answers it in the lane's own artifacts.
    already and run on every lane; what is left of its first milestone is that
    second named interval, then **#502** call chains and **#503** PMU
    counters.
-3. **#410** how a fallback is reported: three counted, two logged, none
-   asserted.
-4. **#388** the hand-written exception vectors carry no stack-overflow test.
-5. **#429** in-kernel GDB stub, **#149** GDB without JTAG, **#444**
+3. **#388** the hand-written exception vectors carry no stack-overflow test.
+4. **#429** in-kernel GDB stub, **#149** GDB without JTAG, **#444**
    controlled DDB memory mutation.
-6. **#454** `uart_putc` busy-waits, at 87us per logged byte.
+5. **#454** `uart_putc` busy-waits, at 87us per logged byte.
+
+**#410 closed 2026-09-07**, and what it found is worth carrying: the tree held
+six of these counters rather than three, four were matched by no filter at
+all, and the two that would have failed a lane did so only because their
+prefixes collide with lines the process-lifecycle view already wanted. All six
+now feed one positively reported line a view expects, and
+`check_fallback_counters.py` refuses a counter the gate does not sum. Its
+first run found a fallback firing twice on every healthy boot, on both
+platforms, whose counter had conflated "no target chosen yet" with issue
+#270's hazard -- which is why that one had a counter and no reader for months
+rather than by oversight.
+
+**Territory note.** Three of the first four entries of the 2026-09-07 order
+were not workable in this territory alone: #520 and #497 both reduce to one
+missing profiling interval that lands in `kernel/net/tcp.tkb`, the file
+Territory A is changing for #479/#483/#478, and #388's vectors are Territory
+A's as well. #410 was taken with the maintainer's go-ahead to cross where
+separation is not possible, and it crossed cheaply -- the edits in A's files
+are a counter and a print. The boundary that matters is structural change to
+a file the other territory is restructuring, not any edit at all.
 
 **#280 closed on 2026-09-06, and the numbers it produced outlive it.** SWD is
 at its 30 MHz ceiling at 187 KiB/s with 40 MHz and above failing outright; the
