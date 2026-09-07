@@ -198,7 +198,11 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 	@bash scripts/test_resource_lease.sh
 	@python3 scripts/test_run_kernel_shell_console.py
 	@python3 scripts/test_run_kernel_uart_driver.py
-	@python3 scripts/test_kernel_ddb_postmortem.py
+	@# allbuild defers this socket/timing control until its compiler-heavy
+	@# parallel section has ended. Every direct langcheck still runs it here.
+	@if [ "$(ALLBUILD_DEFER_DDB_POSTMORTEM)" != 1 ]; then \
+		python3 scripts/test_kernel_ddb_postmortem.py; \
+	fi
 	@python3 scripts/test_run_kernel_ddb_rpi5_driver.py
 	@python3 scripts/test_check_direct_mmio_literals.py
 	@python3 scripts/test_check_ddb_command_inventory.py
@@ -1416,8 +1420,12 @@ endif
 ## considering it done.
 .PHONY: allbuild
 allbuild:
-	@status=0; $(MAKE) langcheck test linuxbuild kernelbuild || status=$$?; \
+	@# Keep the build lanes parallel, but defer the host-timed DDB control: a
+	@# four-core cold build can starve its fake UART server past the lane budget.
+	@status=0; $(MAKE) ALLBUILD_DEFER_DDB_POSTMORTEM=1 \
+		langcheck test linuxbuild kernelbuild || status=$$?; \
 	$(MAKE) -f examples/Makefile allcheck-build || status=$$?; \
+	python3 scripts/test_kernel_ddb_postmortem.py || status=$$?; \
 	if [ $$status -eq 0 ]; then \
 		echo "PASS allbuild: langcheck + compiler unit + linux_user + kernel (RPi5+QEMU) + every examples/ target, all build-only"; \
 	else \
