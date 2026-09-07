@@ -54,6 +54,11 @@
 # sdcard` (see that script's own header comment), not duplicated here.
 set -euo pipefail
 
+# `set -e` aborts with no context, and a lane's setup prints nothing on
+# success -- a CI failure once reported exit 74 and not one line saying
+# which command produced it. Name the line, the command and the status.
+trap 'takibi_status=$?; echo "[$(basename "$0")] aborted at line $LINENO with exit $takibi_status: $BASH_COMMAND" >&2' ERR
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${STM32_SERIAL_DEV:?STM32_SERIAL_DEV is required; run 'make hwcheck-stm32-net' or set it explicitly}"
 SERIAL_DEV="$STM32_SERIAL_DEV"

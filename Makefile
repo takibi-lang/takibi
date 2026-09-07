@@ -219,8 +219,10 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 	@python3 scripts/check_stale_depfiles.py
 	@python3 scripts/check_single_dune_invocation.py
 	@python3 scripts/check_ci_opam_deps.py
+	@python3 scripts/check_pipefail_early_exit.py
 	@python3 scripts/test_check_ci_opam_deps.py
 	@python3 scripts/test_measure_kernel_tcp_throughput.py
+	@python3 scripts/test_check_pipefail_early_exit.py
 	@python3 scripts/check_compiler_sync_rules.py --quiet
 	@python3 scripts/check_raw_pos_fname.py
 	@python3 scripts/check_qemu_lane_ports.py
@@ -1353,6 +1355,32 @@ cicheck:
 		echo "FAIL cicheck: one or more checks failed (see the lane output above)" >&2; \
 		exit $$status; \
 	fi
+
+## cicheck-as-ci: the same checks under a hosted runner's constraints, so a
+## failure that only happens there can be reproduced here instead of by
+## pushing again. Standing this workflow up took five rounds, and four of them
+## were spent learning what the runner constrains that this host does not.
+##
+## What it reproduces: four cores, one lane at a time, and the widened guest
+## budget CI uses. `nproc` respects CPU affinity, so `taskset` is enough to
+## make the default job count follow.
+##
+## What it does NOT reproduce, measured 2026-09-06: per-core SPEED. Two jobs
+## on four cores passed here and still starved the guest on a runner, so a
+## green run of this is weaker evidence than a green run of CI. Add load to
+## the same cores when that distinction matters.
+##
+## MAKEFLAGS and MAKELEVEL are cleared so the inner make is a genuine top
+## level: without that it inherits this one's `-j`, and TAKIBI_JOBS would be
+## set while the job count stayed put.
+CI_CORES ?= 0-3
+.PHONY: cicheck-as-ci
+cicheck-as-ci:
+	@command -v taskset >/dev/null || { \
+		echo "cicheck-as-ci needs taskset (util-linux)" >&2; exit 1; }
+	@echo "[cicheck-as-ci] cores $(CI_CORES), one lane at a time, 240s guest budget"
+	@env -u MAKEFLAGS -u MAKELEVEL taskset -c $(CI_CORES) \
+		env TAKIBI_JOBS=1 KERNEL_QEMU_TIMEOUT=240 $(MAKE) cicheck
 
 # allcheck's recursive Make invocation intentionally fans out the independent
 # lanes in parallel. It is wrapped in one shell recipe so a failing lane still

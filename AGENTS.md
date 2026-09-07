@@ -242,6 +242,7 @@ make kernelcheck-qemu   # run maintained QEMU integration tests
 make kernelcheck-rpi5   # run maintained RPi5 hardware tests
 make kernelcheck        # run all maintained kernel tests
 make cicheck            # every allcheck lane that touches no board
+make cicheck-as-ci      # the same, under CI's core count and budget
 make allbuild           # build every target without hardware execution
 make allcheck           # run maintained checks, including RPi5 hardware
 make clean
@@ -252,6 +253,12 @@ so the two cannot drift, and named without `allcheck`/`hwcheck`/`kernelcheck`
 in it because unlike those it touches no board. It is what
 `.github/workflows/ci.yml` runs on every push and pull request, alongside
 `make allbuild` for the cross-tree compile proof.
+
+`cicheck-as-ci` runs the same target pinned to four cores with one lane at a
+time and CI's wider guest timeout, so a failure that only appears on a runner
+can be reproduced here rather than by pushing again. It does not reproduce the
+runner's per-core speed, so a green run of it is weaker evidence than a green
+run of CI.
 
 Hardware is deliberately not in CI. A hosted runner has no board, and a
 self-hosted one here would take the board whenever the workstation came back

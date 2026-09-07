@@ -2,6 +2,11 @@
 # Serialize independent Make invocations that write kernel/build.
 set -euo pipefail
 
+# `set -e` aborts with no context, and a lane's setup prints nothing on
+# success -- a CI failure once reported exit 74 and not one line saying
+# which command produced it. Name the line, the command and the status.
+trap 'takibi_status=$?; echo "[$(basename "$0")] aborted at line $LINENO with exit $takibi_status: $BASH_COMMAND" >&2' ERR
+
 if [ "$#" -lt 2 ]; then
     echo "usage: $0 LOCK_FILE COMMAND [ARG ...]" >&2
     exit 2

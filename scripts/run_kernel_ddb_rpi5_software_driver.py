@@ -66,6 +66,16 @@ def main() -> int:
                 prompt_count += 1
 
             normalized = bytes(received).replace(b"\r", b"")
+            # This still proves the resume with a prompt-then-output
+            # marker, and its uart sibling no longer does. The two are
+            # deliberately asymmetric: that driver acknowledges the byte that
+            # wakes the shell before it breaks in, so by the time it resumes
+            # the shell has already answered and its first command produces
+            # output with no prompt in front (GitHub issue #519). This one
+            # sends no such byte and waits for a prompt to exist before
+            # typing, so the prompt is still there to match. If this driver
+            # ever gains the same acknowledgement, this marker has to move
+            # with it.
             if (not shell_probe_sent and b"ddb: continuing\n" in normalized
                     and b"/ # " in normalized):
                 write_line(uart, b"echo ddb-software-resume-ok")

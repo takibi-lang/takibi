@@ -16,6 +16,11 @@
 # USB mass-storage device. Use only the project's sacrificial test drive.
 set -euo pipefail
 
+# `set -e` aborts with no context, and a lane's setup prints nothing on
+# success -- a CI failure once reported exit 74 and not one line saying
+# which command produced it. Name the line, the command and the status.
+trap 'takibi_status=$?; echo "[$(basename "$0")] aborted at line $LINENO with exit $takibi_status: $BASH_COMMAND" >&2' ERR
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERIAL_DEV="${RPI5_SERIAL_DEV:-$("$REPO_ROOT/scripts/rpi5_uart_dev.sh")}"
 

@@ -4,6 +4,11 @@
 # once. Tests sharing the STM32 board remain serial inside its lane.
 set -euo pipefail
 
+# `set -e` aborts with no context, and a lane's setup prints nothing on
+# success -- a CI failure once reported exit 74 and not one line saying
+# which command produced it. Name the line, the command and the status.
+trap 'takibi_status=$?; echo "[$(basename "$0")] aborted at line $LINENO with exit $takibi_status: $BASH_COMMAND" >&2' ERR
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # examples/Makefile owns `check` (see its own header comment for why examples/
 # and kernel/ targets live in separate Makefiles); an array (not a plain
