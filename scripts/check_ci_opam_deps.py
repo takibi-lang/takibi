@@ -78,9 +78,19 @@ def tracked_dune_files() -> list[pathlib.Path]:
     exclusion list to keep current, and cannot be surprised by the next
     directory something decides to create here.
     """
-    listing = subprocess.run(
-        ["git", "-C", str(ROOT), "ls-files", "-z", "dune", "*/dune"],
-        capture_output=True, check=True)
+    try:
+        listing = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "-z", "dune", "*/dune"],
+            capture_output=True, check=True, timeout=60)
+    except (OSError, subprocess.CalledProcessError,
+            subprocess.TimeoutExpired) as error:
+        # A diagnostic, not a traceback. This check already learned once that
+        # a message which raises instead of printing is worse than no message.
+        detail = getattr(error, "stderr", b"") or b""
+        raise SystemExit(
+            "FAIL ci-opam-deps: could not ask git which dune files are "
+            f"tracked, so nothing can be compared: {error} "
+            f"{detail.decode('utf-8', 'replace').strip()[:200]}") from None
     return [ROOT / name for name in
             listing.stdout.decode("utf-8").split("\0") if name]
 

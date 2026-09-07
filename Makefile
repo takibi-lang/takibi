@@ -220,6 +220,7 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 	@python3 scripts/check_single_dune_invocation.py
 	@python3 scripts/check_ci_opam_deps.py
 	@python3 scripts/test_check_ci_opam_deps.py
+	@python3 scripts/test_measure_kernel_tcp_throughput.py
 	@python3 scripts/check_compiler_sync_rules.py --quiet
 	@python3 scripts/check_raw_pos_fname.py
 	@python3 scripts/check_qemu_lane_ports.py
