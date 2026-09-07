@@ -176,16 +176,19 @@ stale.
    controlled DDB memory mutation.
 8. **#454** `uart_putc` busy-waits, at 87us per logged byte.
 
-**#280 is parked, not queued.** It was measured on 2026-09-06: SWD is at its
-30 MHz ceiling at 187 KiB/s, the rootfs is 85% of what is transferred, and the
-board already ingests the same filesystem over USB at about 29 MB/s. What is
-owed is one number -- what the kernel's own TCP path sustains on RPi5 -- and
-taking it before the network stack has had an optimization pass would measure
-a lower bound and could wrongly eliminate network delivery. It is not queued
-because nothing needs deciding until either that number exists or the rootfs
-grows, and the second of those announces itself: the RPi5 image is 3.59 MiB
-against `kernel/MEMORY_MAP.md`'s 4.00 MiB ceiling, so the next meaningful
-addition fails `langcheck` with the per-run cost in the message.
+**#280 closed on 2026-09-06, and the numbers it produced outlive it.** SWD is
+at its 30 MHz ceiling at 187 KiB/s with 40 MHz and above failing outright; the
+rootfs is 85% of what each run transfers; the board already ingests the same
+filesystem over USB at about 29 MB/s; and the wire it was expected to move to
+sustains 15.6 KiB/s, which is why that half became #520 rather than a plan.
+
+Two of those keep working after the close. `make kernelcheck-rpi5` prints the
+SWD bytes and rate and the wire's throughput on every run, so growth shows in
+a diff rather than in a memory. And `kernel/MEMORY_MAP.md`'s 4.00 MiB image
+ceiling sits 0.41 MiB above the current image, so the next meaningful rootfs
+addition fails `langcheck` with the per-MiB cost of raising it in the
+message -- which is the conversation this issue existed to force, now had by
+whoever causes it rather than by whoever remembers.
 
 Waiting on Territory A: #456 and #486 on #504, #505 on #479, #465 on #222.
 
