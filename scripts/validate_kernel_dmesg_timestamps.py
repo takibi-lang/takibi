@@ -21,7 +21,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("uart_log", type=Path)
     parser.add_argument("--platform", choices=("qemu", "rpi5"), default="qemu")
+    parser.add_argument("--timing-profile", choices=("local", "hosted"),
+                        default="local")
     args = parser.parse_args()
+    if args.platform != "qemu" and args.timing_profile != "local":
+        parser.error("the hosted timing profile is only valid for QEMU")
     data = args.uart_log.read_bytes().replace(b"\r", b"")
     records: list[tuple[int, bytes]] = []
     for line in data.splitlines():
@@ -45,8 +49,8 @@ def main() -> None:
     #
     #   QEMU  12 runs, 16.8 - 18.2 s. Eight sequential on a quiet host and
     #         four while the rest of the QEMU fan-out ran beside them; the
-    #         concurrent ones were not slower, so host contention is not
-    #         what moves this number.
+    #         concurrent ones were not slower on that development host.
+    #         This does not calibrate a different host's per-core speed.
     #   RPi5  4 runs, 19.3 - 20.0 s. Real hardware, no host contention.
     #
     # Both distributions are within +-4% of their mean, which is why the
@@ -77,6 +81,17 @@ def main() -> None:
         minimum_delay = 3_500_000
         maximum_delay = 5_500_000
         maximum_boot = 25_000_000
+        if args.timing_profile == "hosted":
+            # CI run 34160800357, same 8924f4a6 kernel as the local 17.5s
+            # boot: main 22.621s, debug 25.869s, both completed every network
+            # exchange. Link-to-echo was 4.12s in both, versus 4.11s locally;
+            # the extra time was outside that protocol wait. The local 25s
+            # calibration is not portable to the hosted runner. Keep it for
+            # local checks; 35s gives this runner 9.1s over its observed debug
+            # boot and still rejects a +10.7s recurrence of issue #411.
+            # This is an initial hosted calibration, not a measured tail
+            # distribution. Every run reports its profile and duration.
+            maximum_boot = 35_000_000
     else:
         listener = b"rp1 gem: link ready mac=02:00:20:00:00:02"
         resumed = b"rp1 gem: tcp handshake echo close reconnect ok"
@@ -98,7 +113,7 @@ def main() -> None:
     boot_us = by_text[boot_done]
     if boot_us > maximum_boot:
         fail(
-            f"{args.platform} reached its last boot milestone in "
+            f"{args.platform} ({args.timing_profile}) reached its last boot milestone in "
             f"{boot_us / 1_000_000:.1f} s, over the {maximum_boot / 1_000_000:.0f} s "
             "bound. INVESTIGATE, do not raise the bound: the number this "
             "guards against is complexity added to a path that runs per page "
@@ -127,7 +142,8 @@ def main() -> None:
     print(
         f"PASS kernel/{args.platform} dmesg: {len(records)} monotonic records, "
         f"assembled lines, delay={elapsed} us, boot={boot_us / 1_000_000:.1f} s"
-        f"{spin}"
+        f"{spin}, timing-profile={args.timing_profile}, "
+        f"boot-bound={maximum_boot / 1_000_000:.0f} s"
     )
 
 

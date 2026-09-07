@@ -47,12 +47,13 @@ def transcript(records) -> bytes:
     return b"\r\n".join(out) + b"\r\n"
 
 
-def run(records, platform="qemu", extra=b""):
+def run(records, platform="qemu", extra=b"", profile="local"):
     with tempfile.NamedTemporaryFile(suffix=".log") as log:
         log.write(transcript(records) + extra)
         log.flush()
         result = subprocess.run(
-            [sys.executable, str(VALIDATOR), log.name, "--platform", platform],
+            [sys.executable, str(VALIDATOR), log.name, "--platform", platform,
+             "--timing-profile", profile],
             capture_output=True, text=True)
     return result.returncode, result.stdout + result.stderr
 
@@ -117,6 +118,20 @@ def main() -> int:
     for label, records, ok, needle in cases:
         if not expect(label, records, ok, needle):
             return 1
+
+    for duration, ok in ((25.869018, True), (34.9, True), (36.569018, False)):
+        status, output = run(replace(
+            HEALTHY, "foreground server: listener ready port=8080", duration),
+            profile="hosted")
+        needle = "boot-bound=35 s" if ok else "INVESTIGATE, do not raise"
+        if (status == 0) != ok or needle not in output:
+            print(f"FAIL dmesg-timestamps control: hosted {duration}s "
+                  f"verdict is incorrect\n{output}")
+            return 1
+    status, output = run([], "rpi5", profile="hosted")
+    if status == 0 or "only valid for QEMU" not in output:
+        print("FAIL dmesg-timestamps control: hosted profile accepted for RPi5")
+        return 1
 
     # The RPi5 bound is a different number, so it needs its own direction.
     # Its network window is 5-9 s rather than QEMU's 3.5-5.5, so the resumed

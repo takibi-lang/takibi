@@ -1392,9 +1392,9 @@ CI_CORES ?= 0-3
 cicheck-as-ci:
 	@command -v taskset >/dev/null || { \
 		echo "cicheck-as-ci needs taskset (util-linux)" >&2; exit 1; }
-	@echo "[cicheck-as-ci] cores $(CI_CORES), one lane at a time, 240s guest budget"
+	@echo "[cicheck-as-ci] cores $(CI_CORES), one lane at a time, 240s guest budget, hosted timing profile"
 	@env -u MAKEFLAGS -u MAKELEVEL taskset -c $(CI_CORES) \
-		env TAKIBI_JOBS=1 KERNEL_QEMU_TIMEOUT=240 $(MAKE) cicheck
+		env TAKIBI_JOBS=1 KERNEL_QEMU_TIMEOUT=240 KERNEL_QEMU_TIMING_PROFILE=hosted $(MAKE) cicheck
 
 # allcheck's recursive Make invocation intentionally fans out the independent
 # lanes in parallel. It is wrapped in one shell recipe so a failing lane still

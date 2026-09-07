@@ -122,7 +122,9 @@ jobs:
           # guest cut off mid-boot reports as a lifecycle stall, which names
           # the wrong thing. Widened here rather than everywhere: on a
           # development host 90s is already several times what a boot takes.
-          TAKIBI_JOBS=1 KERNEL_QEMU_TIMEOUT=240 make cicheck
+          # Boot performance is calibrated separately from the capture budget:
+          # hosted 35s, local 25s. The validator documents the measurements.
+          TAKIBI_JOBS=1 KERNEL_QEMU_TIMEOUT=240 KERNEL_QEMU_TIMING_PROFILE=hosted make cicheck
 
       # Printed, never gated. The unsafe-block and assembly counts are
       # supposed to be moving right now -- multicore work adds atomics -- so a
