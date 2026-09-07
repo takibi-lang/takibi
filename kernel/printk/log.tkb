@@ -69,6 +69,40 @@ fn kernel_log_begin_fragment() {
     kernel_log_capture_enabled = true;
 }
 
+// GitHub issue #454: what the console costs its callers, in the units the
+// caller pays. `uart_putc` spins on PL011 TXFF, so once the 16-entry FIFO is
+// full a byte costs its whole transmission time -- 86.8us at RPi5's 115207
+// baud -- in the calling process's own time, and a 180-character line is a
+// whole 15.625ms scheduler tick.
+//
+// That much is arithmetic. What the issue could not say is the SHARE: "some
+// unknown fraction of boot time is this loop". So the loop times itself. Two
+// counter reads per byte against a wait that is three orders of magnitude
+// longer is not a measurement that changes what it measures.
+//
+// Counted here rather than in the two platform drivers so both report one
+// number through one path, and so this file's own execution-model assertion
+// below -- KERNEL_ACTIVE_CORES == 1, because two cores logging split one line
+// across two -- already covers it. These add no concurrency question the
+// console does not already have.
+private let mut kernel_log_tx_spin_ticks: usize = 0;
+private let mut kernel_log_tx_bytes: usize = 0;
+
+fn kernel_log_note_tx_spin(ticks: i64) {
+    kernel_log_tx_bytes = kernel_log_tx_bytes + 1;
+    if (ticks > 0) {
+        kernel_log_tx_spin_ticks = kernel_log_tx_spin_ticks + (ticks as usize);
+    }
+}
+
+fn kernel_log_tx_spin_ticks_total() -> usize {
+    return kernel_log_tx_spin_ticks;
+}
+
+fn kernel_log_tx_byte_total() -> usize {
+    return kernel_log_tx_bytes;
+}
+
 fn kernel_log_capture_uart_byte(value: u8) {
     if (kernel_log_capture_enabled == false) { return; }
     if (kernel_log_active == false) {

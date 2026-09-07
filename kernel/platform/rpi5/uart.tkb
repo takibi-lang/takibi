@@ -72,7 +72,12 @@ let mut rpi5_uart_dtb_status: usize;
 fn uart_putc(c: u8) !{logs, unsafe} {
     kernel_log_capture_uart_byte(c);
     let fr: *io u32 = unsafe { (rpi5_uart_base + 0x18) as *io u32 };
+    // GitHub issue #454: time the wait, not the write. Everything
+    // after the loop is a single store; what a caller pays for is
+    // the FIFO being full, and this is the only place that knows.
+    let spin_from: i64 = read_cntpct();
     while ((*fr & (1 << 5)) != 0) { } // wait while TXFF (TX FIFO full)
+    kernel_log_note_tx_spin(read_cntpct() - spin_from);
     let dr: *io u8 = unsafe { rpi5_uart_base as *io u8 };
     *dr = c;
 }

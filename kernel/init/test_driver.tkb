@@ -372,6 +372,18 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
     // rather than merely the absence of a complaint: a boot that stops
     // reaching it, or reaches it more often, is a change in the teardown
     // order and this is where it shows.
+    // GitHub issue #454: the share of the boot spent inside uart_putc's TXFF
+    // wait. Reported with the tick frequency beside it so a reader needs
+    // nothing else to turn it into seconds, the same convention the workload
+    // evidence uses, and echoed by both lane runners so growth shows in a
+    // diff rather than in somebody's memory.
+    kernel_boot_log("console: tx spin ticks=");
+    uart_put_udec(kernel_log_tx_spin_ticks_total());
+    kernel_boot_log(" bytes=");
+    uart_put_udec(kernel_log_tx_byte_total());
+    kernel_boot_log(" tickfreq=");
+    uart_put_udec(read_cntfrq() as usize);
+    kernel_boot_log("\n");
     kernel_boot_log("resources: image target root unset uses=");
     uart_put_udec(process_image_root_unset_uses());
     kernel_boot_log("\n");

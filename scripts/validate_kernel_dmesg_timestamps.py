@@ -7,6 +7,10 @@ from pathlib import Path
 
 
 LINE = re.compile(rb"^\[(\d{6})\.(\d{6})\] (.*)$")
+# The console's own account of what it spent waiting on the wire, emitted once
+# at the end of the boot suite (GitHub issue #454).
+CONSOLE_SPIN = re.compile(
+    rb"console: tx spin ticks=(\d+) bytes=(\d+) tickfreq=(\d+)")
 
 
 def fail(message: str) -> None:
@@ -106,9 +110,24 @@ def main() -> None:
             f"{args.platform} network interval is {elapsed} us, expected "
             f"{minimum_delay / 1_000_000:.1f}-{maximum_delay / 1_000_000:.1f} s"
         )
+    # GitHub issue #454: what the console costs its callers, printed beside
+    # the boot duration it is a share of. Reported rather than bounded: this
+    # is the number the issue was missing, and a bound on it would be a bound
+    # on how much the kernel logs, which is not the thing under control.
+    # Printed on every run for the reason the SWD and TCP figures are --
+    # growth then shows in a diff between two runs rather than in a memory.
+    console = CONSOLE_SPIN.search(data)
+    spin = ""
+    if console:
+        ticks, sent, frequency = (int(console.group(index)) for index in (1, 2, 3))
+        if frequency > 0 and sent > 0:
+            seconds = ticks / frequency
+            spin = (f", console tx spin={seconds * 1000:.0f} ms over {sent} "
+                    f"bytes ({seconds / sent * 1e6:.1f} us/byte)")
     print(
         f"PASS kernel/{args.platform} dmesg: {len(records)} monotonic records, "
         f"assembled lines, delay={elapsed} us, boot={boot_us / 1_000_000:.1f} s"
+        f"{spin}"
     )
 
 
