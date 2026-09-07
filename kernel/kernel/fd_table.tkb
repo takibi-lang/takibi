@@ -691,9 +691,9 @@ private fn unified_object_free(slot: usize, generation: usize) !{unsafe} {
 must_use variant UnifiedObjectRetainResult { Invalid; Overflow; Ok; }
 must_use variant UnifiedObjectReleaseResult { Invalid; StillHeld; Freed; }
 
-// RefcountSlotMap's retain/release, over the object's own field. The
-// limit parameter is unchanged in meaning and still passed per call
-// (issue #401): it is the caller's world's bound, not the container's.
+// RefcountSlotMap's retain/release, over the object's own field. Production
+// retain reads the current descriptor-slot bound under the same guard as the
+// refcount; the boundary probe alone supplies a chosen historical limit.
 // GitHub issue #479: the lock covers the MATCH as well as the add, and
 // that is the whole point rather than caution. Checking that the handle
 // still names a live occupant and then incrementing its counter is two

@@ -1011,7 +1011,8 @@ fn scheduled_process_exec_argc(slot: usize) -> usize {
             PROCESS_EXEC_ARGC_MASK) >> PROCESS_EXEC_ARGC_SHIFT;
 }
 
-fn scheduled_process_set_exec_argc(slot: usize, argc: usize) {
+fn scheduled_process_set_exec_argc(
+        slot: usize, argc: {0..<16 as usize}) {
     let record: *ProcessRecord = scheduled_process_record_at(slot);
     record.command_line_length = record.command_line_length &
                                  ~PROCESS_EXEC_ARGC_MASK;

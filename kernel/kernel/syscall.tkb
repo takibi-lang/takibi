@@ -3894,11 +3894,14 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // Keep the path validation explicit even though this first image
         // registry currently contains one static BusyBox ELF.
         if (exec_path_absolute == false) { return SyscallAction::Resume(LINUX_ENOENT); }
+        if (argc >= 16) { return SyscallAction::Resume(LINUX_EINVAL); }
+        let packed_argc: {0..<16 as usize} = argc;
         let diagnostic_argv: []u8 = syscall_exec_argv_here();
         scheduled_process_set_command_line(
             kernel_syscall_process_slot(),
             diagnostic_argv, output_offset);
-        scheduled_process_set_exec_argc(kernel_syscall_process_slot(), argc);
+        scheduled_process_set_exec_argc(
+            kernel_syscall_process_slot(), packed_argc);
         scheduled_process_set_exec_path_is_dynamic_httpd(
             kernel_syscall_process_slot(),
             syscall_exec_path_is_dynamic_httpd());
