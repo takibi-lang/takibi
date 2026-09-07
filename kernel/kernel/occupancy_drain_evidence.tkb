@@ -60,6 +60,7 @@ use "kernel/lib/execution_model.tkb";
 // spending a million iterations to learn that costs boot time on the
 // board for nothing.
 const OCCUPANCY_PROBE_DRAIN_SPINS: usize = 4096;
+const WORLD_STOP_PROBE_SPINS: usize = 10000000;
 
 private let mut occupancy_probe_region: Occupancy;
 private let mut occupancy_probe_armed: usize;
@@ -71,6 +72,7 @@ private let mut occupancy_probe_entered: usize;
 private let mut occupancy_probe_release: usize;
 private let mut occupancy_probe_left: usize;
 private let mut occupancy_probe_teardowns: usize;
+private let mut world_stop_probe_inspections: usize;
 
 private fn occupancy_probe_armed_address() -> usize {
     return (&occupancy_probe_armed) as usize;
@@ -233,4 +235,76 @@ fn occupancy_drain_probe() -> bool !{unsafe} {
     // had no proof to spend, which is the property the token exists for.
     return busy_seen == 1 && empty_seen == 1 &&
            occupancy_probe_teardowns == 1;
+}
+
+// The guarded operation cannot accept WorldStopPartial: its parameter is the
+// complete token itself, so a partial stop has no source for this call.
+private fn world_stop_probe_inspect(stopped: borrow WorldStopped[id]) {
+    world_stop_probe_inspections = world_stop_probe_inspections + 1;
+}
+
+// Exercise both runtime outcomes. The full path sends a real SGI to core 1;
+// the negative-control entry suppresses that notification so the same online
+// peer deliberately does not acknowledge and must produce Partial.
+fn world_stop_probe() -> bool !{unsafe} {
+    world_stop_probe_inspections = 0;
+    let ticks_before: usize = secondary_tick_value();
+    let mut full: bool = false;
+    match world_stop_begin(
+            &kernel_world_stop, 2, WORLD_STOP_PROBE_SPINS) {
+        WorldStopResult::Busy => { }
+        WorldStopResult::Partial(partial) => {
+            world_stop_partial_release(partial, &kernel_world_stop);
+        }
+        WorldStopResult::Complete(stopped) => {
+            let held_before: usize = secondary_tick_value();
+            let hold_start: i64 = read_cntpct();
+            let hold_window: i64 = read_cntfrq() >> 4;
+            while (read_cntpct() - hold_start < hold_window) { }
+            let held_after: usize = secondary_tick_value();
+            world_stop_probe_inspect(stopped);
+            full = held_before == held_after;
+            world_stop_release(stopped, &kernel_world_stop);
+        }
+    }
+
+    let resume_start: i64 = read_cntpct();
+    let resume_window: i64 = read_cntfrq() >> 2;
+    let mut resumed: bool = false;
+    while (resumed == false &&
+           read_cntpct() - resume_start < resume_window) {
+        resumed = secondary_tick_value() > ticks_before;
+    }
+
+    let mut partial_ok: bool = false;
+    match world_stop_begin_nonack_probe(
+            &kernel_world_stop, 2, WORLD_STOP_PROBE_SPINS) {
+        WorldStopResult::Busy => { }
+        WorldStopResult::Complete(stopped) => {
+            world_stop_release(stopped, &kernel_world_stop);
+        }
+        WorldStopResult::Partial(partial) => {
+            let mask: usize = world_stop_partial_mask(partial);
+            partial_ok = mask == 0;
+            world_stop_partial_release(partial, &kernel_world_stop);
+        }
+    }
+
+    let mut full_count: usize = 0;
+    let mut partial_count: usize = 0;
+    let mut resumed_count: usize = 0;
+    if (full) { full_count = 1; }
+    if (partial_ok) { partial_count = 1; }
+    if (resumed) { resumed_count = 1; }
+    kernel_boot_log("world stop counts: full=");
+    uart_put_udec(full_count);
+    kernel_boot_log(" partial=");
+    uart_put_udec(partial_count);
+    kernel_boot_log(" resumed=");
+    uart_put_udec(resumed_count);
+    kernel_boot_log(" inspections=");
+    uart_put_udec(world_stop_probe_inspections);
+    kernel_boot_log("\n");
+    return full && partial_ok && resumed &&
+           world_stop_probe_inspections == 1;
 }

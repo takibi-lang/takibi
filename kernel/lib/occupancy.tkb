@@ -77,6 +77,11 @@
 //   leaving once clears it, so a drain could succeed with that core still
 //   inside. The linear `Occupying` makes the SECOND enter visible (two
 //   live tokens), but nothing rejects it. Every caller today enters once.
+// - WORLD STOP HAS ONE INITIATOR. The stop controller below is deliberately
+//   one-deep: DDB and the interval-boundary users serialize their own entry.
+//   Without compare-and-swap (issue #450), two simultaneous initiators can be
+//   refused but cannot be fairly arbitrated. Refusal is an explicit Busy
+//   result and never permission to inspect shared state.
 use "kernel/lib/execution_model.tkb";
 
 // Presence, per core. Private, so no other file can read or write it
@@ -107,6 +112,180 @@ linear struct Quiesced[region: addr] {
 must_use variant OccupancyDrainResult[region: addr] {
     Busy;
     Empty(Quiesced[region]);
+}
+
+// A complete stop is the only proof accepted by readers which replace a lock
+// with machine quiescence. A partial stop carries only the obligation to
+// resume cores that did acknowledge; its different type prevents it from
+// being passed to such a reader.
+struct WorldStop {
+    private owner: usize;
+    private requested: usize;
+    private ack: [usize; KERNEL_MAX_CORES];
+}
+
+linear struct WorldStopped[stop: addr] {
+    private cores: usize;
+    private owner: usize;
+}
+
+linear struct WorldStopPartial[stop: addr] {
+    private cores: usize;
+    private owner: usize;
+    private stopped_mask: usize;
+}
+
+must_use variant WorldStopResult[stop: addr] {
+    Busy;
+    Partial(WorldStopPartial[stop]);
+    Complete(WorldStopped[stop]);
+}
+
+// One machine-wide controller. Its address is the type index carried by every
+// token, so a proof cannot be spent against another stop domain. Production
+// callers pass KERNEL_ACTIVE_CORES; probes may include an offline slot to
+// exercise the partial result.
+let mut kernel_world_stop: WorldStop;
+
+private fn world_stop_owner_address(stop: *WorldStop @ id) -> usize {
+    return (&(*stop).owner) as usize;
+}
+
+private fn world_stop_requested_address(stop: *WorldStop @ id) -> usize {
+    return (&(*stop).requested) as usize;
+}
+
+private fn world_stop_ack_address(
+        stop: *WorldStop @ id,
+        cpu: {0..<KERNEL_MAX_CORES as usize}) -> usize {
+    let words: *usize = (*stop).ack;
+    return (words + (cpu as isize)) as usize;
+}
+
+// Called after the platform interrupt dispatcher has acknowledged the SGI
+// but before it touches ordinary kernel state. The interrupt remains active
+// until release. The holding pen spins rather than using interrupt_wait:
+// interrupt handlers cannot carry may_block, and this is a bounded diagnostic
+// or rollover interval rather than an idle state.
+fn world_stop_interrupt_hold() !{interrupt, unsafe} {
+    if (unsafe {
+            atomic_load_acquire(
+                world_stop_requested_address(&kernel_world_stop))
+        } == 0) {
+        return;
+    }
+    let raw_cpu: usize = cpu_id();
+    if (raw_cpu >= KERNEL_MAX_CORES) { return; }
+    let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
+    let owner: usize = unsafe {
+        atomic_load_acquire(world_stop_owner_address(&kernel_world_stop))
+    };
+    if (owner == raw_cpu + 1) { return; }
+    unsafe {
+        atomic_store_release(
+            world_stop_ack_address(&kernel_world_stop, cpu), 1);
+    }
+    while (unsafe {
+               atomic_load_acquire(
+                   world_stop_requested_address(&kernel_world_stop))
+           } != 0) {
+    }
+    unsafe {
+        atomic_store_release(
+            world_stop_ack_address(&kernel_world_stop, cpu), 0);
+    }
+}
+
+// Stop every other core in [0, cores). The platform sends one SGI to the
+// computed target set. A bounded wait returns Partial rather than claiming a
+// proof when any target did not acknowledge.
+private fn world_stop_begin_config(stop: *WorldStop @ id, cores: usize,
+                                   spins: usize, notify: bool)
+        -> WorldStopResult[id] !{unsafe} {
+    let raw_owner: usize = cpu_id();
+    if (cores == 0 || cores > KERNEL_MAX_CORES ||
+            raw_owner >= cores || raw_owner >= KERNEL_MAX_CORES) {
+        return WorldStopResult::Busy;
+    }
+    let claimed: usize = unsafe {
+        atomic_swap_acquire(world_stop_owner_address(stop), raw_owner + 1)
+    };
+    if (claimed != 0) {
+        unsafe {
+            atomic_store_release(world_stop_owner_address(stop), claimed);
+        }
+        return WorldStopResult::Busy;
+    }
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        unsafe { atomic_store_release(world_stop_ack_address(stop, cpu), 0); }
+    }
+    unsafe {
+        atomic_store_release(world_stop_requested_address(stop), 1);
+    }
+    if (notify) { platform_world_stop_notify(cores, raw_owner); }
+
+    let mut remaining: usize = spins;
+    let mut stopped_mask: usize = 0;
+    let mut complete: bool = false;
+    while (complete == false && remaining != 0) {
+        remaining = remaining - 1;
+        complete = true;
+        stopped_mask = 0;
+        for cpu: usize in 0..<KERNEL_MAX_CORES {
+            if (cpu < cores && cpu != raw_owner) {
+                if (unsafe {
+                        atomic_load_acquire(world_stop_ack_address(stop, cpu))
+                    } == 0) {
+                    complete = false;
+                } else {
+                    stopped_mask = stopped_mask | (1 << cpu);
+                }
+            }
+        }
+    }
+    if (complete) {
+        let mut proof: WorldStopped[id] = { cores, raw_owner };
+        return WorldStopResult::Complete(proof);
+    }
+    let mut partial: WorldStopPartial[id] = {
+        cores, raw_owner, stopped_mask
+    };
+    return WorldStopResult::Partial(partial);
+}
+
+fn world_stop_begin(stop: *WorldStop @ id, cores: usize, spins: usize)
+        -> WorldStopResult[id] !{unsafe} {
+    return world_stop_begin_config(stop, cores, spins, true);
+}
+
+// Test-only negative control: production callers cannot suppress the SGI.
+// With a real peer online this deterministically yields Partial, proving that
+// absence of an acknowledgement is not silently promoted to a full token.
+fn world_stop_begin_nonack_probe(
+        stop: *WorldStop @ id, cores: usize, spins: usize)
+        -> WorldStopResult[id] !{unsafe} {
+    return world_stop_begin_config(stop, cores, spins, false);
+}
+
+private fn world_stop_resume(stop: *WorldStop @ id) !{unsafe} {
+    unsafe {
+        atomic_store_release(world_stop_requested_address(stop), 0);
+    }
+    unsafe { atomic_store_release(world_stop_owner_address(stop), 0); }
+}
+
+fn world_stop_release(stopped: sink WorldStopped[id],
+                      stop: *WorldStop @ id) !{unsafe} {
+    world_stop_resume(stop);
+}
+
+fn world_stop_partial_release(partial: sink WorldStopPartial[id],
+                              stop: *WorldStop @ id) !{unsafe} {
+    world_stop_resume(stop);
+}
+
+fn world_stop_partial_mask(partial: borrow WorldStopPartial[id]) -> usize {
+    return partial.stopped_mask;
 }
 
 private fn occupancy_cpu() -> {0..<KERNEL_MAX_CORES as usize} {

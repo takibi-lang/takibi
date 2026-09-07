@@ -72,11 +72,29 @@ const RPI5_GEM_GIC_INTID: u32 = 166; // 32 + (MIP0 SPI base 128 + vector 6)
 // GICD_ICFGR programming as UART0's and USB0's vectors, which the PPI it
 // replaced did not.
 const RPI5_PMU_GIC_INTID: u32 = 48;
+const RPI5_WORLD_STOP_SGI: u32 = 1;
 // These are not DT device resources. The table base is the BAR0 assignment
 // made by pcie2_rp1_endpoint_setup(); MSIX_CFG_SET is an RP1 internal
 // register protocol offset within the fixed endpoint peripheral aperture.
 const RP1_MSIX_TABLE_BASE: usize = 0x1F00410000;
 const RP1_MSIX_CFG_SET_BASE: usize = 0x1F00108808;
+
+// Send the world-stop SGI to every active CPU except the initiator. GICv2's
+// target-list field uses the same CPU-interface bits as ITARGETSR.
+fn platform_world_stop_notify(cores: usize, owner: usize) !{unsafe} {
+    let mut targets: u32 = 0;
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if (cpu < cores && cpu != owner) {
+            targets = targets | ((1 << cpu) as u32);
+        }
+    }
+    if (targets == 0) { return; }
+    dsb_ishst();
+    let gicd_sgir: *io u32 = unsafe {
+        (rpi5_gicd_base + 0xF00) as *io u32
+    };
+    *gicd_sgir = (targets << 16) | RPI5_WORLD_STOP_SGI;
+}
 
 fn gic_uart0_msi_setup() !{unsafe} {
     let gicd_ctlr: *io u32 = unsafe { rpi5_gicd_base as *io u32 };
@@ -356,10 +374,18 @@ fn irq_uart_rx_unmask() !{unsafe} {
 
 fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
         -> usize !{interrupt, unsafe} {
-    workload_profile_irq_enter();
     let gicc_iar: *io u32 = unsafe { (rpi5_gicc_base + 0x0C) as *io u32 };
     let gicc_eoir: *io u32 = unsafe { (rpi5_gicc_base + 0x10) as *io u32 };
     let id: u32 = *gicc_iar;
+
+    // Stop before touching profiling, scheduler, driver, or reporter state:
+    // those are consumers of the proof the initiator is waiting to receive.
+    if (id == RPI5_WORLD_STOP_SGI) {
+        world_stop_interrupt_hold();
+        *gicc_eoir = id;
+        return frame_sp;
+    }
+    workload_profile_irq_enter();
 
     // GitHub issue #447: the secondary core takes its own timer tick and
     // goes back to sleep. It must not fall into anything below -- every

@@ -148,6 +148,28 @@ unlike the diagnostic ring's per-CPU sequences, because on two cores the
 interesting version of "what was the kernel doing when it died" is the
 interleaving.
 
+## Stopping the other cores
+
+`kernel/lib/occupancy.tkb` also owns the machine-wide `WorldStop` controller.
+An initiator publishes a stop request, and each platform sends GIC SGI 1 to
+every other active CPU. The SGI handler acknowledges in its own per-CPU word
+before entering a holding spin; release clears the request and every held CPU
+returns through its interrupted frame.
+
+A successful request returns a linear `WorldStopped[controller]`. Readers that
+substitute machine quiescence for a lock accept that type, so a request which
+did not stop every target cannot call them. A bounded incomplete request
+returns the distinct linear `WorldStopPartial[controller]`; it records which
+CPUs acknowledged only so release can remain mandatory, not as inspection
+permission. Concurrent initiators are refused rather than arbitrated until
+compare-and-swap exists.
+
+The maintained contention lane proves the distinction on QEMU and RPi5. Its
+positive phase stops the live secondary through the real SGI, observes that
+its timer count stays fixed, and resumes it. Its negative phase suppresses the
+test notification to make that same live CPU deliberately fail to acknowledge;
+only a partial token is produced and the guarded inspection count stays one.
+
 ## Two-core probes
 
 A probe lives in `kernel/kernel/*_contention_evidence.tkb`, is armed by the

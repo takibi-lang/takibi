@@ -90,6 +90,14 @@ fn contention_probes() !{unsafe} {
     } else {
         kernel_boot_log("occupancy drain: failed\n");
     }
+    // GitHub issue #504: stop and resume the booted secondary through a
+    // real SGI, then suppress that notification in a negative control to
+    // prove that incomplete acknowledgement returns a partial token.
+    if (world_stop_probe()) {
+        kernel_boot_log("world stop: full token stopped and resumed the online peer, partial token refused a non-acknowledging peer ok\n");
+    } else {
+        kernel_boot_log("world stop: failed\n");
+    }
     // GitHub issue #482: a pool WALK takes no guard. The two
     // cores rendezvous at the exact instruction boundary that
     // matters -- the walk holding an address the release is about
