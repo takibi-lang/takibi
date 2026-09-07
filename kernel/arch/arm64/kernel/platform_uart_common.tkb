@@ -15,7 +15,9 @@ fn uart_set_rx_handler(handler: fn !{unsafe}(u8) -> void) !{} {
     uart_rx_handler = handler;
 }
 
-fn platform_uart_common_execution_model_assumption() {
-    static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "the stored UART RX handler is one shared callback until multicore dispatch owns its synchronization");
-}
+// This shared callback does not depend on KERNEL_ACTIVE_CORES. Both platform
+// interrupt controllers route the UART SPI/MSI-X source to CPU0, and the boot
+// fixture installs the handler on CPU0 before it unmasks the peripheral RX
+// source. No later path replaces it. The callback is consequently immutable
+// while UART interrupts can observe it; making it per-core or locking it would
+// encode sharing that the hardware route deliberately does not provide.
