@@ -189,9 +189,10 @@ def check_walk(driver) -> list[str]:
         report = finished.stdout + finished.stderr
         if "stopped at a DDB prompt" not in report:
             failures.append(f"the verdict did not name the stall: {report!r}")
-        if "listener ready port=8080" not in report:
-            failures.append("the verdict did not name the last line the guest "
-                            "managed before the prompt")
+        uart_log = workdir / "uart.log"
+        if not uart_log.exists() or BOOT_LAST not in uart_log.read_bytes():
+            failures.append("the raw UART capture lost the last boot line "
+                            "before the prompt")
         if elapsed >= budget:
             failures.append(
                 f"the lane spent its whole {budget:.0f}s budget ({elapsed:.1f}s) "
@@ -253,6 +254,9 @@ def check_partial_walk(driver) -> list[str]:
         failures.append("a complete walk was reported as incomplete")
     if "walk.log" not in whole:
         failures.append("a complete walk did not name its transcript")
+    if "listener ready port=8080" not in whole:
+        failures.append("a complete verdict did not name the last line before "
+                        "the prompt")
 
     partial = driver.postmortem_note(BOOT_FIRST + BOOT_LAST, 2, "walk.log")
     if "unanswered" not in partial:
