@@ -179,8 +179,14 @@ then incrementing its counter is two steps, and a core that frees the
 object in between leaves the other adding to a recycled slot. Measured
 before the lock: two cores took a refcount from a baseline of 2 to 0, so
 the object was freed while both still held it, and 978 later operations
-found a handle naming nothing. `fd_slot_total` and the per-process block
-chain are still unlocked, which is what the file's assertion now says.
+found a handle naming nothing. `fd_slot_total` is guarded by the same
+lock: it is a `GuardedField(usize)`, and `fd_block_alloc`/`fd_block_free`
+take `object_refcount_lock` around the block-pool insert or remove that
+changes it, so the count and the slots it counts move together. The
+per-process block chain carries no lock and does not need one -- each chain
+belongs to one process lifecycle, so two cores operating on different
+chains share no link or entry -- which is what the file's assertion now
+says.
 
 `fd_context_pool`/`fd_context_pool_ready` (issue #392 -- the per-process
 `ProcessFdContext` array of #264 is now pooled, keyed by a handle in
