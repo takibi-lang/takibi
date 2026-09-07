@@ -161,8 +161,9 @@ above does not pay the same debugging cost twice.
 
 The first five entries of the 2026-09-05 order closed on 2026-09-05 and
 2026-09-06: #513, #515, #471, #387, #411, #336 and #56, plus #519, which was
-filed and closed the same day. #280, the sixth of the original order, was
-measured and then deliberately parked; see below.
+filed and closed the same day, and #521, filed 2026-09-06 and closed
+2026-09-07. #280, the sixth of the original order, was measured and then
+deliberately parked; see below.
 
 `make cicheck` -- allcheck minus the RPi5 lane -- now runs on every push
 through `.github/workflows/ci.yml`, and reports where its own minutes went so
@@ -177,8 +178,27 @@ a dependency the build declared and nothing installed, a check that read every
 file named `dune` including a switch's binary, QEMU lanes asking for more
 guest vCPUs than the runner has cores, a host-side network peer that raced the
 guest's boot with a single un-retried request, and `awk` leaving `llvm-nm`
-holding a closed pipe. The last of those is #521, whose remaining half is a
-decision rather than a defect.
+holding a closed pipe.
+
+The last of those, #521, is now closed both halves. `check_pipefail_early_exit`
+refuses the pipeline shape at `langcheck` time -- narrow deliberately: the wide
+rule matches 27 sites in this repository, almost none of which can fill a pipe,
+and a check that fires 27 times on arrival is one people learn to silence. The
+27 stay ungated and the evidence for that choice is reproducible rather than
+remembered, since widening the rule makes the tree fail.
+
+Three things came out of those five rounds that outlive them. Nineteen lane
+runners now carry an ERR trap naming the script, line, command and status, so
+an abort in a log nobody ran says what it was -- the round spent on `exit 74`
+had no such line. `make cicheck-as-ci` reproduces the runner's constraints
+here (four cores, one lane, CI's guest budget), and says in its own comment
+what it does NOT reproduce: per-core speed, which is what actually starved the
+guest, and which a CPU quota cannot supply from inside this devcontainer. And
+asking whether other waits obeyed the constraint the repaired one documented
+found the host peer's interactive readiness wait outlasting its own outer
+`timeout`, so its give-up could never have printed; both waits now share one
+budget derived from `KERNEL_QEMU_TIMEOUT`, with the first offline control this
+file has ever had.
 
 #280's own number is now measured and it closed the option it was expected to
 open: the wire sustains 15.6 KiB/s against SWD's 187.4, so a network-delivered
@@ -208,18 +228,15 @@ stale.
    already and run on every lane; what is left of its first milestone is that
    second named interval, then **#502** call chains and **#503** PMU
    counters.
-3. **#521** early-exit pipe consumers under `pipefail`. The fifteen sites
-   that demonstrably bit are fixed; 27 remain that have not, and the open
-   part is how narrow a build check should be rather than what to repair.
-4. **#410** how a fallback is reported: three counted, two logged, none
+3. **#410** how a fallback is reported: three counted, two logged, none
    asserted.
-5. **#511** capture useful DDB state automatically when an ordinary QEMU lane
+4. **#511** capture useful DDB state automatically when an ordinary QEMU lane
    stops at a debugger prompt, without reviving the reverted unreliable
    silence trigger unchanged.
-6. **#388** the hand-written exception vectors carry no stack-overflow test.
-7. **#429** in-kernel GDB stub, **#149** GDB without JTAG, **#444**
+5. **#388** the hand-written exception vectors carry no stack-overflow test.
+6. **#429** in-kernel GDB stub, **#149** GDB without JTAG, **#444**
    controlled DDB memory mutation.
-8. **#454** `uart_putc` busy-waits, at 87us per logged byte.
+7. **#454** `uart_putc` busy-waits, at 87us per logged byte.
 
 **#280 closed on 2026-09-06, and the numbers it produced outlive it.** SWD is
 at its 30 MHz ceiling at 187 KiB/s with 40 MHz and above failing outright; the
@@ -238,7 +255,11 @@ whoever causes it rather than by whoever remembers.
 Waiting on Territory A: #456 and #486 on #504, #505 on #479, #465 on #222.
 
 Then, in this territory and unordered: #517, #339, #338, #275, #281, #208,
-#182, #268, #283, #389, #430.
+#182, #268, #283, #389, #430, plus two the CI work left behind: **#522**,
+counts written into prose that nothing derives -- four commits have existed
+only to repair one of them -- and **#523**, the build's dependencies written
+down three times, of which `check_ci_opam_deps.py` compares two and the third
+is already wrong.
 
 ### Not started by either
 

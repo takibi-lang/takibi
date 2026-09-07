@@ -1371,6 +1371,12 @@ cicheck:
 ## green run of this is weaker evidence than a green run of CI. Add load to
 ## the same cores when that distinction matters.
 ##
+## The obvious way to fix that -- a CPU quota -- was tried and does not work
+## from inside this devcontainer, checked 2026-09-07: `systemd-run --user
+## --scope -p CPUQuota=` cannot reach a bus, and /sys/fs/cgroup is not
+## delegated. It would have to run on the host outside the container, so
+## nothing here attempts it.
+##
 ## MAKEFLAGS and MAKELEVEL are cleared so the inner make is a genuine top
 ## level: without that it inherits this one's `-j`, and TAKIBI_JOBS would be
 ## set while the job count stayed put.
