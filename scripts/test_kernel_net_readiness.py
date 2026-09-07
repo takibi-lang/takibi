@@ -94,6 +94,22 @@ def timed_wait(exists_after):
 
 
 def main() -> int:
+    # Every shell consumer must wire both ends of the readiness protocol.
+    # Exercising only the peer missed the lifecycle and rollback runners.
+    for runner in (ROOT / "scripts").glob("*.sh"):
+        source = runner.read_text(encoding="ascii")
+        if '"$REPO_ROOT/scripts/kernel_net_test.py"' not in source:
+            continue
+        commands = source.replace("\\\n", " ").splitlines()
+        for program, flags in (
+                ("kernel_net_test.py", ("--init-ready-file", "--network-ready-file")),
+                ("run_kernel_uart_driver.py", ("--init-listener-file", "--network-ready-file"))):
+            calls = [line for line in commands
+                     if f'"$REPO_ROOT/scripts/{program}"' in line]
+            if not calls or any(flag not in line for line in calls for flag in flags):
+                print(f"FAIL net-readiness control: {runner.name} does not "
+                      f"wire readiness into {program}")
+                return 1
     # 0. Protocol retries must start only after the kernel link is ready, and
     # the init socket exchange must wait for its own later listener. Otherwise
     # a slow guest spends a bounded retry budget on boot rather than traffic.

@@ -90,6 +90,8 @@ INTERACTIVE_HTTPD_LISTENER="$ARTIFACT_DIR/interactive-httpd.listener"
 # The boot-time HTTP listener, so the network peer waits for the server
 # it is about to request from instead of racing the boot to it.
 FOREGROUND_HTTPD_LISTENER="$ARTIFACT_DIR/foreground-httpd.listener"
+INIT_LISTENER="$ARTIFACT_DIR/init.listener"
+NETWORK_READY="$ARTIFACT_DIR/network.ready"
 INTERACTIVE_HTTPD_READY="$ARTIFACT_DIR/interactive-httpd.ready"
 INTERACTIVE_HTTPD_DONE="$ARTIFACT_DIR/interactive-httpd.done"
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
@@ -101,12 +103,13 @@ QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
 # these defaults must not collide with any of them.
 SERIAL_PORT="${KERNEL_QEMU_LIFECYCLE_GAP_SERIAL_PORT:-18679}"
 GDB_PORT="${KERNEL_QEMU_LIFECYCLE_GAP_GDB_PORT:-18680}"
-TIMEOUT_SECS="${KERNEL_QEMU_LIFECYCLE_GAP_TIMEOUT:-90}"
+TIMEOUT_SECS="${KERNEL_QEMU_LIFECYCLE_GAP_TIMEOUT:-${KERNEL_QEMU_TIMEOUT:-90}}"
+export KERNEL_QEMU_TIMEOUT="$TIMEOUT_SECS"
 NETDEV_LOCAL_PORT="${KERNEL_QEMU_LIFECYCLE_GAP_NETDEV_LOCAL_PORT:-18681}"
 NETDEV_REMOTE_PORT="${KERNEL_QEMU_LIFECYCLE_GAP_NETDEV_REMOTE_PORT:-18682}"
 mkdir -p "$ARTIFACT_DIR"
 rm -f "$INTERACTIVE_HTTPD_LISTENER" "$INTERACTIVE_HTTPD_READY" \
-    "$INTERACTIVE_HTTPD_DONE"
+    "$INTERACTIVE_HTTPD_DONE" "$INIT_LISTENER" "$NETWORK_READY" "$FOREGROUND_HTTPD_LISTENER"
 cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
 exec 9>"$ARTIFACT_DIR/runner.lock"
 if ! flock -n 9; then
@@ -166,6 +169,8 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --timeout "$TIMEOUT_SECS" --stop-marker 'resources: pages=0' \
     --interactive-httpd-listener-file "$INTERACTIVE_HTTPD_LISTENER" \
     --foreground-httpd-listener-file "$FOREGROUND_HTTPD_LISTENER" \
+    --init-listener-file "$INIT_LISTENER" \
+    --network-ready-file "$NETWORK_READY" \
     --interactive-httpd-ready-file "$INTERACTIVE_HTTPD_READY" \
     --interactive-httpd-done-file "$INTERACTIVE_HTTPD_DONE" \
     --validate-ash >"$UART_DRIVER_LOG" 2>&1 &
@@ -252,6 +257,8 @@ timeout "$TIMEOUT_SECS" python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" \
     "$NETDEV_LOCAL_PORT" "$NETDEV_REMOTE_PORT" \
     --interactive-ready-file "$INTERACTIVE_HTTPD_LISTENER" \
     --daemon-ready-file "$FOREGROUND_HTTPD_LISTENER" \
+    --init-ready-file "$INIT_LISTENER" \
+    --network-ready-file "$NETWORK_READY" \
     >"$PEER_LOG" 2>&1 || peer_status=$?
 sed 's/^/  /' "$PEER_LOG"
 

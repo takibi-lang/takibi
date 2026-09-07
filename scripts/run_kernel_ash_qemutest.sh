@@ -17,7 +17,10 @@ QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
 SERIAL_PORT="${KERNEL_QEMU_ASH_SERIAL_PORT:-17774}"
 NETDEV_LOCAL_PORT="${KERNEL_QEMU_ASH_NETDEV_LOCAL_PORT:-17775}"
 NETDEV_REMOTE_PORT="${KERNEL_QEMU_ASH_NETDEV_REMOTE_PORT:-17776}"
-TIMEOUT_SECS="${KERNEL_QEMU_ASH_TIMEOUT:-90}"
+TIMEOUT_SECS="${KERNEL_QEMU_ASH_TIMEOUT:-${KERNEL_QEMU_TIMEOUT:-90}}"
+export KERNEL_QEMU_TIMEOUT="$TIMEOUT_SECS"
+INIT_LISTENER="$ARTIFACT_DIR/init.listener"
+NETWORK_READY="$ARTIFACT_DIR/network.ready"
 
 if [ ! -f "$ELF" ] || [ ! -f "$EXT2_IMAGE" ]; then
     echo "error: kernel build products are missing" >&2
@@ -25,6 +28,7 @@ if [ ! -f "$ELF" ] || [ ! -f "$EXT2_IMAGE" ]; then
 fi
 
 mkdir -p "$ARTIFACT_DIR"
+rm -f "$INIT_LISTENER" "$NETWORK_READY"
 cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
 
 # GitHub issue #407: refuse to start if somebody already owns the ports
@@ -56,7 +60,7 @@ trap cleanup EXIT INT TERM HUP
 echo "[$RUN_LABEL] starting automated ash UART test"
 qemu-system-aarch64 \
     -machine virt -cpu cortex-a53 -smp 2 -m 1024 -display none -monitor none \
-    -serial "tcp:127.0.0.1:$SERIAL_PORT,server=on,wait=off" \
+    -serial "tcp:127.0.0.1:$SERIAL_PORT,server=on,wait=on" \
     -global virtio-mmio.force-legacy=on \
     -drive "file=$QEMU_EXT2_IMAGE,if=none,format=raw,id=vd0" \
     -device virtio-blk-device,drive=vd0 \
@@ -67,6 +71,8 @@ qemu-system-aarch64 \
 QEMU_PID=$!
 
 python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" "$NETDEV_LOCAL_PORT" "$NETDEV_REMOTE_PORT" --fast \
+    --init-ready-file "$INIT_LISTENER" \
+    --network-ready-file "$NETWORK_READY" \
     >"${KERNEL_QEMU_ASH_NETWORK_LOG:-/tmp/takibi-kernel-qemu-ash-network.log}" 2>&1 &
 PEER_PID=$!
 
@@ -74,6 +80,8 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --port "socket://127.0.0.1:$SERIAL_PORT" \
     --log "${KERNEL_QEMU_ASH_UART_LOG:-$ARTIFACT_DIR/uart.log}" \
     --postmortem-log "$ARTIFACT_DIR/ddb-postmortem.log" \
+    --init-listener-file "$INIT_LISTENER" \
+    --network-ready-file "$NETWORK_READY" \
     --stdin "$ASH_DIR/ash.stdin" --expected "$ASH_DIR/ash.expected" \
     --timeout "$TIMEOUT_SECS" --ash-only --validate-ash
 echo "PASS $RUN_LABEL ash TCP integration"
