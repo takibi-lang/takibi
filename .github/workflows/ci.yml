@@ -135,6 +135,22 @@ jobs:
           eval $(opam env)
           make trustedbasecheck
 
+      # Keep the UART and DDB evidence together with the exact ELFs whose
+      # addresses it contains. Runner-local failure archives otherwise vanish.
+      - name: Preserve failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-failure-evidence
+          retention-days: 14
+          path: |
+            _build/kernel-*/**/*.log
+            _build/kernel-*/**/*.actual
+            _build/lane-timing/
+            _build/ci-timing/
+            kernel/build/qemu/*.elf
+            kernel/build/rpi5/user_payload.elf
+
       - name: Where the time went
         if: always()
         run: |

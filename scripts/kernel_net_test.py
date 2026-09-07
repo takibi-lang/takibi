@@ -36,7 +36,8 @@ QEMU_HOST = "127.0.0.1"
 MODE_FLAGS = {"--fast"}
 RAW_ARGS = sys.argv[1:]
 FAST_MODE = "--fast" in RAW_ARGS
-FILE_FLAGS = ("--interactive-ready-file", "--daemon-ready-file")
+FILE_FLAGS = ("--interactive-ready-file", "--daemon-ready-file",
+              "--init-ready-file", "--network-ready-file")
 
 
 def path_argument(flag):
@@ -56,6 +57,8 @@ INTERACTIVE_READY_FILE = path_argument("--interactive-ready-file")
 # machine the guest was already serving; on a slower one it was not, and the
 # peer failed with no line saying why.
 DAEMON_READY_FILE = path_argument("--daemon-ready-file")
+INIT_READY_FILE = path_argument("--init-ready-file")
+NETWORK_READY_FILE = path_argument("--network-ready-file")
 # Every readiness wait below has to expire while this process is still alive
 # to say so. Each lane runs this script as `timeout "$TIMEOUT_SECS" python3
 # ...`, and a wait that outlasts that budget is killed with status 124 and
@@ -647,6 +650,13 @@ def main() -> int:
     sock.bind((QEMU_HOST, LOCAL_PORT))
     sock.settimeout(RETRY_TIMEOUT_SECS)
 
+    if (NETWORK_READY_FILE is not None and
+            not wait_for_marker(NETWORK_READY_FILE, "kernel network link")):
+        print("  the kernel never announced its network link, so there was "
+              "nothing to probe")
+        sock.close()
+        return 1
+
     arp_ok = send_until_reply(sock, build_arp_request(SERVER_IP), check_arp_reply)
     print("  who-has 192.168.20.2 (ours):        %s" % ("PASS" if arp_ok else "FAIL"))
 
@@ -689,6 +699,17 @@ def main() -> int:
 
     http_ok = False
     if ok_reconnect:
+        # The echo fixture and /bin/user_payload use different listeners.
+        # On a slow runner the latter can start more than the handshake's
+        # bounded retry window after echo finishes, so wait for its UART
+        # announcement before spending those retries.
+        if (INIT_READY_FILE is not None and
+                not wait_for_marker(INIT_READY_FILE,
+                                    "init.sh socket listener")):
+            print("  init.sh never announced its socket listener, so there "
+                  "was nothing to connect to")
+            sock.close()
+            return 1
         init_ok = init_script_fixture(sock)
         print("  waiting for HTTP daemon listener")
         for _attempt in range(60):

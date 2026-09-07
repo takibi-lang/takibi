@@ -285,6 +285,8 @@ def main() -> int:
     parser.add_argument("--qmp-port", type=int)
     parser.add_argument("--interactive-httpd-listener-file")
     parser.add_argument("--foreground-httpd-listener-file")
+    parser.add_argument("--init-listener-file")
+    parser.add_argument("--network-ready-file")
     parser.add_argument("--interactive-httpd-ready-file")
     parser.add_argument("--interactive-httpd-done-file")
     args = parser.parse_args()
@@ -310,6 +312,16 @@ def main() -> int:
     foreground_listener_published = False
     if foreground_listener_file is not None:
         foreground_listener_file.unlink(missing_ok=True)
+    init_listener_file = (Path(args.init_listener_file)
+                          if args.init_listener_file else None)
+    init_listener_published = False
+    if init_listener_file is not None:
+        init_listener_file.unlink(missing_ok=True)
+    network_ready_file = (Path(args.network_ready_file)
+                          if args.network_ready_file else None)
+    network_ready_published = False
+    if network_ready_file is not None:
+        network_ready_file.unlink(missing_ok=True)
     # A transcript left by the PREVIOUS run reads exactly like this one's and
     # is not, the same trap the view runner's stale `.actual` files set (see
     # scripts/run_kernel_qemutest.sh). Its absence has to mean "this lane did
@@ -454,6 +466,19 @@ def main() -> int:
                         in output):
                     foreground_listener_file.touch()
                     foreground_listener_published = True
+
+                if (init_listener_file is not None
+                        and not init_listener_published
+                        and b"linux socket: listener ready port=8080\n"
+                        in output):
+                    init_listener_file.touch()
+                    init_listener_published = True
+
+                if (network_ready_file is not None
+                        and not network_ready_published
+                        and b"virtio net: link ready " in output):
+                    network_ready_file.touch()
+                    network_ready_published = True
 
                 workload_seen = (
                     args.workload_marker is None or

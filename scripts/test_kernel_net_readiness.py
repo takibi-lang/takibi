@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Controls for the host peer's readiness waits, with no QEMU in the room.
 
-`scripts/kernel_net_test.py` waits for two markers the UART driver touches:
-the HTTP daemon's listener and the interactive HTTPd. Each wait exists so the
+`scripts/kernel_net_test.py` waits for four markers the UART driver touches:
+the kernel network link, the init socket listener, the HTTP daemon's listener,
+and the interactive HTTPd. Each wait exists so the
 request phase after it establishes readiness instead of assuming it (GitHub
 issues #387, #515, #519). Each also has a give-up branch that prints what was
 missing -- and that branch is the one part a passing run never reaches, so
@@ -22,12 +23,16 @@ UP IN TIME TO SPEAK, for every outer budget the lanes actually use.
 """
 
 import json
+import contextlib
+import io
 import os
+import runpy
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parent.parent
 PEER = ROOT / "scripts" / "kernel_net_test.py"
@@ -89,6 +94,45 @@ def timed_wait(exists_after):
 
 
 def main() -> int:
+    # 0. Protocol retries must start only after the kernel link is ready, and
+    # the init socket exchange must wait for its own later listener. Otherwise
+    # a slow guest spends a bounded retry budget on boot rather than traffic.
+    with patch.object(sys, "argv", [str(PEER), "--network-ready-file",
+                                    "network.ready", "--init-ready-file",
+                                    "init.ready"]):
+        peer = runpy.run_path(str(PEER), run_name="not_main")
+    namespace = peer["main"].__globals__
+    for missing in ("network.ready", "init.ready"):
+        seen = set()
+
+        def wait(marker, label):
+            seen.add(str(marker))
+            return str(marker) != missing
+
+        def probe(*args):
+            assert "network.ready" in seen
+            assert missing != "network.ready"
+            return True
+
+        exchange = Mock(side_effect=AssertionError(
+            "init exchange started without its listener"))
+        replacements = {name: probe for name in (
+            "send_until_reply", "test_syn_wrong_port_silent",
+            "test_syn_bad_checksum_silent", "do_handshake",
+            "test_data_echo", "test_close")}
+        replacements.update(wait_for_marker=wait, init_script_fixture=exchange)
+        with patch.dict(namespace, replacements), \
+                patch.object(namespace["socket"], "socket", return_value=Mock()), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            result = peer["main"]()
+        if result != 1 or missing not in seen or exchange.called:
+            print("FAIL net-readiness control: missing readiness did not "
+                  "stop its exchange")
+            return 1
+        if "never announced" not in output.getvalue():
+            print("FAIL net-readiness control: missing readiness was silent")
+            return 1
+
     # 1. The budget leaves room to speak, for every outer budget in use.
     for outer in OUTER_BUDGETS:
         info = load(outer)
@@ -161,7 +205,9 @@ def main() -> int:
 
     from pass_line import report_pass
     report_pass("net-readiness controls",
-                "the marker wait gives up inside every outer budget the lanes "
+                "network probes and the init exchange wait for their own "
+                "readiness markers, marker waits "
+                "give up inside every outer budget the lanes "
                 "use, agrees with the shell's own default, returns at once "
                 "for a marker that is there, and names the one that never "
                 "arrives",

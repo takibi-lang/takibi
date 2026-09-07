@@ -53,6 +53,8 @@ INTERACTIVE_HTTPD_LISTENER="$ARTIFACT_DIR/interactive-httpd.listener"
 # The boot-time HTTP listener, published by the UART driver when the guest
 # announces it, so the network peer waits for it instead of racing the boot.
 FOREGROUND_HTTPD_LISTENER="$ARTIFACT_DIR/foreground-httpd.listener"
+INIT_LISTENER="$ARTIFACT_DIR/init.listener"
+NETWORK_READY="$ARTIFACT_DIR/network.ready"
 INTERACTIVE_HTTPD_READY="$ARTIFACT_DIR/interactive-httpd.ready"
 INTERACTIVE_HTTPD_DONE="$ARTIFACT_DIR/interactive-httpd.done"
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
@@ -75,7 +77,8 @@ NETDEV_LOCAL_PORT="${KERNEL_QEMU_NETDEV_LOCAL_PORT:-18671}"
 NETDEV_REMOTE_PORT="${KERNEL_QEMU_NETDEV_REMOTE_PORT:-18672}"
 mkdir -p "$ARTIFACT_DIR"
 rm -f "$INTERACTIVE_HTTPD_LISTENER" "$INTERACTIVE_HTTPD_READY" \
-    "$INTERACTIVE_HTTPD_DONE"
+    "$INTERACTIVE_HTTPD_DONE" "$FOREGROUND_HTTPD_LISTENER" "$INIT_LISTENER" \
+    "$NETWORK_READY"
 cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
 exec 9>"$ARTIFACT_DIR/runner.lock"
 if ! flock -n 9; then
@@ -154,6 +157,8 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --timeout "$TIMEOUT_SECS" --stop-marker 'resources: pages=0' \
     --interactive-httpd-listener-file "$INTERACTIVE_HTTPD_LISTENER" \
     --foreground-httpd-listener-file "$FOREGROUND_HTTPD_LISTENER" \
+    --init-listener-file "$INIT_LISTENER" \
+    --network-ready-file "$NETWORK_READY" \
     --interactive-httpd-ready-file "$INTERACTIVE_HTTPD_READY" \
     --interactive-httpd-done-file "$INTERACTIVE_HTTPD_DONE" \
     --workload-marker 'workload: busy pair done' \
@@ -162,8 +167,8 @@ uart_driver_pid=$!
 
 # Host-side peer: drives ARP, ICMP, and the full TCP handshake/echo/close/
 # reconnect sequence kernel_tcp_echo_check() counts before returning
-# Verified. Its own retry loops absorb the guest's ~1s boot time, so no
-# sleep is needed here. A peer failure is reported but not fatal on its
+# Verified. UART markers gate the link and init listener before the peer
+# spends its protocol retry budgets. A peer failure is reported but not fatal on its
 # own -- the view diff below is the real verdict, and letting it run gives
 # a much more useful failure (which exact boot-log line is missing) than
 # aborting here would.
@@ -173,6 +178,8 @@ timeout "$TIMEOUT_SECS" python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" \
     "$NETDEV_LOCAL_PORT" "$NETDEV_REMOTE_PORT" \
     --interactive-ready-file "$INTERACTIVE_HTTPD_LISTENER" \
     --daemon-ready-file "$FOREGROUND_HTTPD_LISTENER" \
+    --init-ready-file "$INIT_LISTENER" \
+    --network-ready-file "$NETWORK_READY" \
     >"$PEER_LOG" 2>&1 || peer_status=$?
 sed 's/^/  /' "$PEER_LOG"
 if [ "$peer_status" -ne 0 ]; then
