@@ -58,6 +58,11 @@ INTERACTIVE_HTTPD_DONE="$ARTIFACT_DIR/interactive-httpd.done"
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
 QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
 SERIAL_PORT="${KERNEL_QEMU_SERIAL_PORT:-18673}"
+# The monitor the UART driver asks for a serial BREAK through when this lane's
+# guest stops without reaching the debugger (GitHub issues #509/#511). It is
+# opened for every run of this lane, not only a failing one, because the moment
+# it is needed is the moment nobody was watching.
+QMP_PORT="${KERNEL_QEMU_QMP_PORT:-18674}"
 # The UART driver and network peer below each enforce this bound. QEMU itself
 # is deliberately started directly so QEMU_PID names the process that owns
 # the lane's sockets; cleanup must wait for that process before a following
@@ -85,9 +90,11 @@ fi
 # this port, left behind by an interrupted run -- is reaped; anything else
 # is reported and left alone.
 . "$REPO_ROOT/scripts/qemu_session_ports.sh"
-qemu_session_shift_ports SERIAL_PORT NETDEV_LOCAL_PORT NETDEV_REMOTE_PORT
+qemu_session_shift_ports SERIAL_PORT QMP_PORT NETDEV_LOCAL_PORT \
+    NETDEV_REMOTE_PORT
 python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "$RUN_LABEL" \
-    "tcp:$SERIAL_PORT" "udp:$NETDEV_LOCAL_PORT" "udp:$NETDEV_REMOTE_PORT" || exit 1
+    "tcp:$SERIAL_PORT" "tcp:$QMP_PORT" "udp:$NETDEV_LOCAL_PORT" \
+    "udp:$NETDEV_REMOTE_PORT" || exit 1
 if [ ! -f "$ELF" ]; then
     echo "error: kernel ELF not found: $ELF" >&2
     exit 1
@@ -103,7 +110,9 @@ echo "[$RUN_LABEL] booting $(basename "$ELF") under QEMU"
 # self-test evidence before run_kernel_uart_driver.py connects.
 qemu-system-aarch64 \
     -machine virt -cpu cortex-a53 -smp 2 -m 1024 -display none -monitor none \
-    -serial "tcp:127.0.0.1:$SERIAL_PORT,server=on,wait=on" \
+    -qmp "tcp:127.0.0.1:$QMP_PORT,server=on,wait=off" \
+    -chardev "socket,id=debug_uart,host=127.0.0.1,port=$SERIAL_PORT,server=on,wait=on" \
+    -serial chardev:debug_uart \
     -global virtio-mmio.force-legacy=on \
     -drive "file=$QEMU_EXT2_IMAGE,if=none,format=raw,id=vd0" \
     -device virtio-blk-device,drive=vd0 \
@@ -140,6 +149,7 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --port "socket://127.0.0.1:$SERIAL_PORT" --log "$UART_LOG" \
     --timing-log "$UART_TIMING_LOG" \
     --postmortem-log "$ARTIFACT_DIR/ddb-postmortem.log" \
+    --qmp-port "$QMP_PORT" \
     --stdin "$ASH_DIR/ash.stdin" --expected "$ASH_DIR/ash.expected" \
     --timeout "$TIMEOUT_SECS" --stop-marker 'resources: pages=0' \
     --interactive-httpd-listener-file "$INTERACTIVE_HTTPD_LISTENER" \

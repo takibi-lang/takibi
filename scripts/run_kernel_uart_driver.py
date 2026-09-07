@@ -4,6 +4,7 @@
 import argparse
 import difflib
 from pathlib import Path
+import socket
 import time
 
 import serial
@@ -127,7 +128,88 @@ POSTMORTEM_COMMANDS = (b"oops", b"intr", b"bt", b"sched", b"current", b"ps")
 # instead of burning the other 87. Bounded, so a debugger that stops
 # answering mid-walk cannot make the lane hang -- the deadline ends the loop
 # and whatever did arrive is still reported.
-POSTMORTEM_SECONDS = 20.0
+#
+# Derived from the capture budget rather than fixed, for the reason
+# scripts/test_kernel_net_readiness.py exists: a flat sub-wait outlives the
+# outer budget of every lane shorter than itself, and the branch that was
+# supposed to speak then never runs. The ceiling is what a six-command walk
+# over a 115200-baud UART needs several times over; the fraction is what keeps
+# it inside a short budget.
+POSTMORTEM_FRACTION = 0.25
+POSTMORTEM_CEILING = 20.0
+
+
+def postmortem_budget(timeout: float) -> float:
+    return min(POSTMORTEM_CEILING, timeout * POSTMORTEM_FRACTION)
+
+
+# GitHub issues #509 and #511. The walk above needs a prompt, and a guest that
+# stops without reaching the debugger never prints one. #509's twenty-three
+# captures all stopped at the same line with nothing after it, and its closing
+# comment says plainly what was still missing: the two halves it could not tell
+# apart -- a kernel stopped in a loop, and a kernel not running at all -- are
+# distinguished by asking the debugger, and nothing asked.
+#
+# So the lane asks, and WHEN it asks is the whole design. A BREAK sent early is
+# the trigger that was reverted in 3f86b75e: a quiet stretch of ordinary boot
+# fires it, the debugger's receive path may not be up yet, and a lane that
+# would have passed is stopped by its own diagnosis. This one fires only once
+# the lane is already lost -- inside the last of the capture budget the walk
+# itself would need, with the guest quiet for a quarter of that budget -- so
+# there is no passing run left to spoil, and the debugger has had the whole
+# boot to come up. Whatever it costs, it costs a run that was about to be
+# reported as a timeout with nothing in it.
+#
+# The BREAK's job is only to PRODUCE a prompt. Everything after it is the walk
+# above, unchanged, and a BREAK that produces no prompt is not a wasted attempt
+# either: on a guest that was merely stopped in kernel code the debugger
+# answers at once, so silence after a delivered BREAK says the guest was not
+# running -- which is the half #509 could not name.
+#
+# Not a command-line option: this has to equal the `-chardev id=` the lane
+# gives QEMU, and a flag would let the two drift apart while every run still
+# looked fine -- the break would fail only at a stall, which is the one moment
+# nobody is watching. scripts/test_kernel_ddb_postmortem.py checks the lanes
+# against this name instead.
+QMP_CHARDEV = "debug_uart"
+
+# Measured 2026-09-07: the longest gap between two UART lines in a healthy
+# boot is 4.0s, the same to two decimal places across six consecutive samples,
+# and it is a wait on the host peer rather than on guest CPU. A quarter of the
+# capture budget is 22.5s at the lanes' default 90s and 60s at the 240s CI
+# uses, so it clears that measurement several times over at every budget in
+# use, while staying far below the 218s of silence this exists for.
+STOPPED_FRACTION = 0.25
+
+
+def send_serial_break(port: int, chardev: str, budget: float) -> str:
+    """Ask QEMU for a real serial BREAK; return what went wrong, or "".
+
+    Every failure is returned rather than raised. This runs inside a lane that
+    has already failed, and a diagnosis that replaces the real failure with its
+    own is worse than no diagnosis: the capture, the silence note and the
+    lifecycle report all still have to come out.
+    """
+    deadline = time.monotonic() + budget
+    try:
+        with socket.create_connection(("127.0.0.1", port), budget) as qmp:
+            qmp.settimeout(max(0.5, deadline - time.monotonic()))
+            stream = qmp.makefile("rwb", buffering=0)
+            greeting = stream.readline()
+            if b"QMP" not in greeting:
+                return ("QMP produced no greeting, so QEMU is still starting "
+                        f"or has already exited (first line {greeting[:80]!r})")
+            stream.write(b'{"execute":"qmp_capabilities"}\n')
+            if b"return" not in stream.readline():
+                return "QMP capability negotiation failed"
+            stream.write(b'{"execute":"chardev-send-break","arguments":'
+                         b'{"id":"' + chardev.encode("ascii") + b'"}}\n')
+            reply = stream.readline()
+            if b"return" not in reply:
+                return f"QMP refused the serial BREAK: {reply[:160]!r}"
+    except OSError as error:
+        return f"QMP on port {port} was unreachable: {error}"
+    return ""
 
 
 def postmortem_note(before: bytes, answered: int, log_path) -> str:
@@ -196,6 +278,11 @@ def main() -> int:
     # a lane that never sees a prompt -- and this only decides whether its
     # transcript also gets a file of its own beside the capture.
     parser.add_argument("--postmortem-log")
+    # Without this the driver can still answer a prompt the guest reached on
+    # its own; with it, it can also ask for one. Only the QEMU lanes have a
+    # QMP monitor to ask through, which is why it is optional rather than
+    # required.
+    parser.add_argument("--qmp-port", type=int)
     parser.add_argument("--interactive-httpd-listener-file")
     parser.add_argument("--foreground-httpd-listener-file")
     parser.add_argument("--interactive-httpd-ready-file")
@@ -257,6 +344,8 @@ def main() -> int:
     output = bytearray()
     postmortem_at = None
     postmortem_sent = 0
+    break_asked = False
+    break_failure = ""
     shell_step = 0
     payload_sent = False
     httpd_shell_probe_sent = False
@@ -289,6 +378,26 @@ def main() -> int:
                             timing_capture.write(f"{elapsed:9.3f}\t{text_line}\n")
                             timing_capture.flush()
 
+                # The lane is inside the last of its budget and the guest
+                # has stopped talking: it will be reported as a timeout in a
+                # few seconds whatever happens now, so this is the moment to
+                # spend on asking the debugger rather than on waiting.
+                if (args.qmp_port and not break_asked and
+                        postmortem_at is None and
+                        time.monotonic()
+                        >= deadline - postmortem_budget(args.timeout) and
+                        (time.monotonic() - last_chunk_at)
+                        >= args.timeout * STOPPED_FRACTION):
+                    break_asked = True
+                    print("[kernel/uart] guest silent for "
+                          f"{time.monotonic() - last_chunk_at:.0f}s with its "
+                          "budget nearly gone; asking QEMU for a serial BREAK",
+                          flush=True)
+                    break_failure = send_serial_break(
+                        args.qmp_port, QMP_CHARDEV, 5.0)
+                    deadline = (time.monotonic()
+                                + postmortem_budget(args.timeout))
+
                 # Before any of the scenario logic below, because from here
                 # on the far end is the debugger and not the shell: a lane
                 # that kept typing `ls /bin` at a `ddb>` prompt would bury
@@ -298,7 +407,9 @@ def main() -> int:
                     if postmortem_at is None:
                         postmortem_at = output.index(DDB_PROMPT)
                         deadline = max(
-                            deadline, time.monotonic() + POSTMORTEM_SECONDS)
+                            deadline,
+                            time.monotonic()
+                            + postmortem_budget(args.timeout))
                         print("[kernel/uart] guest stopped at a DDB prompt; "
                               "walking "
                               + " ".join(name.decode("ascii")
@@ -424,6 +535,20 @@ def main() -> int:
     if time.monotonic() >= deadline:
         silence = silence_note(
             time.monotonic() - last_chunk_at, args.timeout, bytes(output))
+    # A BREAK that produced no prompt is a finding, not a failed attempt --
+    # see this file's QMP_CHARDEV comment. Say which of the two it was, since
+    # they call for opposite next steps: a kernel stopped in a loop is read
+    # with the debugger, and a kernel not running is read on the host.
+    if break_asked and postmortem_at is None:
+        if break_failure:
+            silence += ("; the debugger could not be asked what it was doing: "
+                        + break_failure)
+        else:
+            silence += (
+                "; a serial BREAK was delivered and no debugger prompt "
+                "followed within "
+                f"{postmortem_budget(args.timeout):.0f}s, so the guest was "
+                "not merely stopped inside kernel code -- it was not running")
 
     text = output.decode("utf-8", errors="replace").replace("\r", "")
     if args.validate_ash:
