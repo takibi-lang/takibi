@@ -161,6 +161,7 @@ trap 'stop_qemu; exit 130' INT TERM HUP
 # while the vCPU is still halted, then sit idle until GDB unhalts it.
 python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --port "socket://127.0.0.1:$SERIAL_PORT" --log "$UART_LOG" \
+    --postmortem-log "$ARTIFACT_DIR/ddb-postmortem.log" \
     --stdin "$ASH_DIR/ash.stdin" --expected "$ASH_DIR/ash.expected" \
     --timeout "$TIMEOUT_SECS" --stop-marker 'resources: pages=0' \
     --interactive-httpd-listener-file "$INTERACTIVE_HTTPD_LISTENER" \

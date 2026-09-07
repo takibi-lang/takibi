@@ -118,6 +118,7 @@ timeout 1 cat "$SERIAL_DEV" >/dev/null 2>&1 || true
 # driver alive through the entire load; it owns both capture and ash input.
 python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --port "$SERIAL_DEV" --log "$UART_LOG" --timing-log "$UART_TIMING_LOG" --timeout 180 \
+    --postmortem-log "$ARTIFACT_DIR/ddb-postmortem.log" \
     --stdin "$ASH_DIR/ash.stdin" --expected "$ASH_DIR/ash.expected" \
     --stop-marker 'resources: pages=0' \
     --interactive-httpd-listener-file "$INTERACTIVE_HTTPD_LISTENER" \

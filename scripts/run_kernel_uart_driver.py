@@ -85,6 +85,73 @@ def silence_note(quiet_for: float, timeout: float, output: bytes) -> str:
             f"ran out, last line {last_line!r}")
 
 
+# GitHub issue #511. An ordinary lane's guest is never supposed to reach the
+# debugger, so a `ddb> ` in its capture is a stall that has already answered
+# most of the questions somebody is about to ask -- the snapshot is taken and
+# the prompt is reading the same UART this driver already owns. Until now the
+# lane read that prompt as ordinary output and sat there until its budget ran
+# out, and on 2026-09-07 a multicore exec assertion produced exactly that: a
+# capture whose last line was `ddb>` and a timeout in place of a diagnosis.
+#
+# This is the prompt trigger, not the silence trigger that was reverted. The
+# difference is what makes it reliable: a prompt PROVES the debugger is live
+# and its UART receive path is usable, so there is nothing to arm early, no
+# BREAK to deliver, and no quiet stretch of ordinary boot to mistake for a
+# stall.
+DDB_PROMPT = b"ddb> "
+
+# The walk, and it deliberately differs from the DDB lane's own list -- that
+# one exercises every command, and this one answers a stall.
+#
+#   oops     the break's sequence, cpu, elr and sp_el0.
+#   intr     esr/far and whether the entry was an irq or a brk. An assertion
+#            arrives as brk, which is the 2026-09-07 case.
+#   bt       where it stopped. `bt` and `sched` are what ended #509.
+#   sched    enabled/pending/current and the ready/running/blocked counts.
+#   current  the process the snapshot belongs to.
+#   ps       what else existed, so `current` can be placed among them.
+#
+# Left out on purpose: `vm` and `fds`, which were asked during #509 and
+# answered nothing; `regs`, thirty lines whose two interesting registers
+# `oops` already prints; `trace` and `events`, bounded rings worth reading by
+# hand rather than spending a stalled lane's budget on; `proc`, which needs a
+# pid that `ps` and `current` have not been read yet to supply; and `help`.
+# `xk`/`xp`/`xu`/`xkfault`/`bttest` are excluded as not read-only in intent,
+# and `continue` because resuming a guest that stopped for a reason destroys
+# the state the next question would have asked about.
+POSTMORTEM_COMMANDS = (b"oops", b"intr", b"bt", b"sched", b"current", b"ps")
+
+# What the walk may spend, granted on top of whatever remains of the capture
+# budget rather than taken out of it: a stall found at second 89 of 90 still
+# gets its answer, and a stall found at second 3 ends the lane in seconds
+# instead of burning the other 87. Bounded, so a debugger that stops
+# answering mid-walk cannot make the lane hang -- the deadline ends the loop
+# and whatever did arrive is still reported.
+POSTMORTEM_SECONDS = 20.0
+
+
+def postmortem_note(before: bytes, answered: int, log_path) -> str:
+    """What a lane that stopped at a debugger prompt should say instead of a timeout."""
+    last_line = next(
+        (line for line in reversed(
+            before.decode("utf-8", errors="replace")
+            .replace("\r", "").splitlines()) if line.strip()),
+        "(nothing at all)")
+    walked = ", ".join(name.decode("ascii")
+                       for name in POSTMORTEM_COMMANDS[:answered])
+    if answered == 0:
+        walked = ("no command was answered -- the prompt appeared and the "
+                  "debugger then went quiet")
+    elif answered < len(POSTMORTEM_COMMANDS):
+        walked = (f"{walked} (the walk stopped there; "
+                  f"{len(POSTMORTEM_COMMANDS) - answered} command(s) went "
+                  "unanswered)")
+    where = f"; transcript in {log_path}" if log_path else ""
+    return (f"the guest stopped at a DDB prompt after {last_line!r} -- this "
+            f"lane never expects one, so it is a stall, not a session. "
+            f"Walked: {walked}{where}")
+
+
 def write_uart_line(connection, line: bytes) -> None:
     # The kernel UART ISR currently drains one byte per interrupt. Pace the
     # synthetic console like typed input so a command longer than a 16-byte
@@ -124,6 +191,11 @@ def main() -> int:
     parser.add_argument("--payload", default="irqtest")
     parser.add_argument("--ash-only", action="store_true")
     parser.add_argument("--validate-ash", action="store_true")
+    # Where the DDB walk above goes when an ordinary lane's guest stops at a
+    # debugger prompt. The walk itself is unconditional -- it costs nothing on
+    # a lane that never sees a prompt -- and this only decides whether its
+    # transcript also gets a file of its own beside the capture.
+    parser.add_argument("--postmortem-log")
     parser.add_argument("--interactive-httpd-listener-file")
     parser.add_argument("--foreground-httpd-listener-file")
     parser.add_argument("--interactive-httpd-ready-file")
@@ -151,6 +223,12 @@ def main() -> int:
     foreground_listener_published = False
     if foreground_listener_file is not None:
         foreground_listener_file.unlink(missing_ok=True)
+    # A transcript left by the PREVIOUS run reads exactly like this one's and
+    # is not, the same trap the view runner's stale `.actual` files set (see
+    # scripts/run_kernel_qemutest.sh). Its absence has to mean "this lane did
+    # not stall".
+    if args.postmortem_log:
+        Path(args.postmortem_log).unlink(missing_ok=True)
 
     commands = [line.rstrip("\n") for line in open(args.stdin, encoding="ascii")
                 if line.strip() and not line.startswith("#")]
@@ -177,6 +255,8 @@ def main() -> int:
         raise RuntimeError(f"could not open UART {args.port}: {last_error}")
 
     output = bytearray()
+    postmortem_at = None
+    postmortem_sent = 0
     shell_step = 0
     payload_sent = False
     httpd_shell_probe_sent = False
@@ -208,6 +288,32 @@ def main() -> int:
                                 "ascii", errors="replace").replace("\r", "")
                             timing_capture.write(f"{elapsed:9.3f}\t{text_line}\n")
                             timing_capture.flush()
+
+                # Before any of the scenario logic below, because from here
+                # on the far end is the debugger and not the shell: a lane
+                # that kept typing `ls /bin` at a `ddb>` prompt would bury
+                # the one transcript worth keeping.
+                prompts = output.count(DDB_PROMPT)
+                if prompts:
+                    if postmortem_at is None:
+                        postmortem_at = output.index(DDB_PROMPT)
+                        deadline = max(
+                            deadline, time.monotonic() + POSTMORTEM_SECONDS)
+                        print("[kernel/uart] guest stopped at a DDB prompt; "
+                              "walking "
+                              + " ".join(name.decode("ascii")
+                                         for name in POSTMORTEM_COMMANDS),
+                              flush=True)
+                    while (postmortem_sent < prompts and
+                           postmortem_sent < len(POSTMORTEM_COMMANDS)):
+                        write_uart_line(
+                            connection, POSTMORTEM_COMMANDS[postmortem_sent])
+                        postmortem_sent += 1
+                    # One prompt per command plus the one that opened the
+                    # walk: the last command has been answered.
+                    if prompts > len(POSTMORTEM_COMMANDS):
+                        break
+                    continue
 
                 prompt_count = output.count(b"/ # ")
                 if (shell_step == 0 and
@@ -293,6 +399,19 @@ def main() -> int:
                     "ascii", errors="replace").replace("\r", "")
                 timing_capture.write(f"{elapsed:9.3f}\t{text_line}\n")
             timing_capture.close()
+
+    # A stall answers every question below it -- the ash transcript never
+    # completed, the lifecycle never finished -- and answers them wrongly,
+    # naming a protocol boundary for a guest that stopped talking to the
+    # shell entirely. Report the debugger's own account of it first.
+    if postmortem_at is not None:
+        walk = bytes(output[postmortem_at:])
+        if args.postmortem_log:
+            Path(args.postmortem_log).write_bytes(walk)
+        answered = max(0, walk.count(DDB_PROMPT) - 1)
+        raise RuntimeError(postmortem_note(
+            bytes(output[:postmortem_at]), min(answered, postmortem_sent),
+            args.postmortem_log))
 
     # Every path out of the loop above breaks on a marker, so reaching the
     # deadline means the guest stopped sending. Say so wherever a downstream

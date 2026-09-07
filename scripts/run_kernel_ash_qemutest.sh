@@ -73,6 +73,7 @@ PEER_PID=$!
 python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --port "socket://127.0.0.1:$SERIAL_PORT" \
     --log "${KERNEL_QEMU_ASH_UART_LOG:-$ARTIFACT_DIR/uart.log}" \
+    --postmortem-log "$ARTIFACT_DIR/ddb-postmortem.log" \
     --stdin "$ASH_DIR/ash.stdin" --expected "$ASH_DIR/ash.expected" \
     --timeout "$TIMEOUT_SECS" --ash-only --validate-ash
 echo "PASS $RUN_LABEL ash TCP integration"
