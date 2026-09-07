@@ -212,13 +212,32 @@ and its `examples/` twin as saying they do not yet solve issue #89's
 escaping-index shape, and #89 has closed. Whether the closure covers that
 shape needs the compiler's affine analysis read, which is Territory A.
 
-The 2026-09-07 Territory A audit left two Territory B handoffs. **#511** is
-open again: an unexpected DDB prompt in an ordinary QEMU lane should leave a
-read-only postmortem walk instead of only timing out at `ddb>`. Also update
-`kernel/RUNTIME_STATE.md`'s FD section: `fd_slot_total` is now a
-`GuardedField` under `object_refcount_lock`, while the per-process block chain
-is process-lifecycle-owned, so its current "still unlocked" sentence is
-stale.
+**Both of the 2026-09-07 Territory A audit's handoffs are done.**
+`kernel/RUNTIME_STATE.md`'s FD section no longer says both `fd_slot_total` and
+the per-process block chain are unlocked; only the second is, and for a reason
+rather than for want of a lock. **#511 is closed**, by the prompt trigger
+rather than by the silence trigger that was reverted: an ordinary lane now
+walks `oops`, `intr`, `bt`, `sched`, `current`, `ps` on sight of a `ddb> ` it
+never expected, and ends there instead of at its budget.
+
+The main QEMU lane also asks for a prompt when the guest stops without
+reaching one, over a QMP monitor it now opens on every run. That fires only
+inside the last stretch of the budget the walk itself needs, with the guest
+quiet for a quarter of the budget, so it cannot stop a run that would have
+passed -- the measured longest silence in a healthy boot is 4.0s against a
+22.5s threshold at 90s and 60s at CI's 240s. Run against #509's own
+reproduction it produced a ten-frame backtrace and
+`sched ... ready=0 running=1 blocked=2`, which names that stall as #509's
+second sample -- accept holding the machine from nobody -- rather than
+leaving it inferred.
+
+**CI failed once on 2026-09-07 with #509's exact signature** and the failing
+commit changed only documentation, so it is not a regression. Six consecutive
+runs of the lane pinned to four cores with CI's budget all passed, which is
+the gap the workflow already documents: `taskset` reproduces a hosted runner's
+core count and not its per-core speed. What was missing was any account of
+what the guest was doing, and that is what the paragraph above supplies. The
+next occurrence answers it in the lane's own artifacts.
 
 1. **#520** the kernel's TCP path sustains 15 KiB/s, 12x slower than SWD and
    flat across transfer size. Measured 2026-09-06 and printed by
@@ -230,13 +249,10 @@ stale.
    counters.
 3. **#410** how a fallback is reported: three counted, two logged, none
    asserted.
-4. **#511** capture useful DDB state automatically when an ordinary QEMU lane
-   stops at a debugger prompt, without reviving the reverted unreliable
-   silence trigger unchanged.
-5. **#388** the hand-written exception vectors carry no stack-overflow test.
-6. **#429** in-kernel GDB stub, **#149** GDB without JTAG, **#444**
+4. **#388** the hand-written exception vectors carry no stack-overflow test.
+5. **#429** in-kernel GDB stub, **#149** GDB without JTAG, **#444**
    controlled DDB memory mutation.
-7. **#454** `uart_putc` busy-waits, at 87us per logged byte.
+6. **#454** `uart_putc` busy-waits, at 87us per logged byte.
 
 **#280 closed on 2026-09-06, and the numbers it produced outlive it.** SWD is
 at its 30 MHz ceiling at 187 KiB/s with 40 MHz and above failing outright; the
