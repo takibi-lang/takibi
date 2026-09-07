@@ -25,6 +25,7 @@
 #
 # Exit code only (0 = pass, 1 = fail).
 
+import os
 import socket
 import struct
 import sys
@@ -55,6 +56,42 @@ INTERACTIVE_READY_FILE = path_argument("--interactive-ready-file")
 # machine the guest was already serving; on a slower one it was not, and the
 # peer failed with no line saying why.
 DAEMON_READY_FILE = path_argument("--daemon-ready-file")
+# Every readiness wait below has to expire while this process is still alive
+# to say so. Each lane runs this script as `timeout "$TIMEOUT_SECS" python3
+# ...`, and a wait that outlasts that budget is killed with status 124 and
+# prints nothing -- the diagnostic that names which marker never arrived is
+# exactly what a person needs, and exactly what would be lost. So the deadline
+# is measured from this process's own start (the `timeout` starts with it) and
+# left short of the kill by MARKER_SAFETY_SECONDS.
+#
+# The 90 here must stay equal to the shells' own `${KERNEL_QEMU_TIMEOUT:-90}`:
+# when the variable is unset, the shell uses its default and this uses this
+# one, and a disagreement would put the deadline back on the wrong side of the
+# kill. `make cicheck` sets 240, so both sides move together there.
+STARTED_AT = time.monotonic()
+OUTER_BUDGET_SECONDS = float(os.environ.get("KERNEL_QEMU_TIMEOUT", "90"))
+MARKER_SAFETY_SECONDS = 10.0
+MARKER_BUDGET_SECONDS = max(5.0, OUTER_BUDGET_SECONDS - MARKER_SAFETY_SECONDS)
+
+
+def wait_for_marker(marker, label):
+    """Wait for the driver to touch `marker`; report rather than be killed.
+
+    Returns True if it appeared. On False the caller must print what the
+    absence means and fail, which is the only reason this budget is bounded
+    the way it is.
+    """
+    deadline = STARTED_AT + MARKER_BUDGET_SECONDS
+    while not marker.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    if marker.exists():
+        return True
+    print("  waited %.1fs of a %.1fs budget for the %s marker and it never "
+          "arrived" % (time.monotonic() - STARTED_AT, MARKER_BUDGET_SECONDS,
+                       label))
+    return False
+
+
 POSITIONAL_ARGS = [
     arg for index, arg in enumerate(RAW_ARGS)
     if arg not in MODE_FLAGS and arg not in FILE_FLAGS and
@@ -669,16 +706,7 @@ def main() -> int:
         # asserted view, so an extra attempt would change the verdict it
         # reports.
         if DAEMON_READY_FILE is not None:
-            # Shorter than any outer budget this runs under. The lane wraps
-            # this script in `timeout $KERNEL_QEMU_TIMEOUT`, which defaults to
-            # 90s, and a wait that outlasts it is killed with status 124 and
-            # says nothing -- the diagnostic below would never print, which is
-            # the whole point of having it.
-            deadline = time.monotonic() + 60.0
-            while (not DAEMON_READY_FILE.exists()
-                   and time.monotonic() < deadline):
-                time.sleep(0.1)
-            if not DAEMON_READY_FILE.exists():
+            if not wait_for_marker(DAEMON_READY_FILE, "HTTP daemon listener"):
                 print("  the guest never announced its HTTP listener, so "
                       "there was nothing to request from")
                 sock.close()
@@ -691,10 +719,7 @@ def main() -> int:
 
     normal_ok = ok_reconnect and http_ok
     if (normal_ok and INTERACTIVE_READY_FILE is not None):
-        deadline = time.monotonic() + 90.0
-        while not INTERACTIVE_READY_FILE.exists() and time.monotonic() < deadline:
-            time.sleep(0.1)
-        if not INTERACTIVE_READY_FILE.exists():
+        if not wait_for_marker(INTERACTIVE_READY_FILE, "interactive HTTPd"):
             print("  interactive HTTPd never became ready")
             sock.close()
             return 1
