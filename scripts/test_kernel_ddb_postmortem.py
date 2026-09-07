@@ -90,22 +90,44 @@ class FakeGuest:
         self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.listener.bind(("127.0.0.1", 0))
         self.listener.listen(1)
-        self.listener.settimeout(20.0)
+        self.listener.settimeout(0.25)
         self.port = self.listener.getsockname()[1]
-        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.stop = threading.Event()
+        self.ready = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
 
     def __enter__(self):
         self.thread.start()
+        # Do not start the wall-clock driver budget until the fake endpoint's
+        # thread has actually been scheduled and reached its accept loop.
+        self.ready.wait()
         return self
 
     def __exit__(self, *_):
+        self.stop.set()
         self.listener.close()
         self.thread.join(timeout=5.0)
 
+    def _run(self):
+        """Publish readiness before dispatching to a subclass's server."""
+        self.ready.set()
+        self._serve()
+
+    def _accept(self):
+        """Wait for the driver until this fixture's context is leaving."""
+        while not self.stop.is_set():
+            try:
+                connection, _ = self.listener.accept()
+                return connection
+            except socket.timeout:
+                continue
+            except OSError:
+                return None
+        return None
+
     def _serve(self):
-        try:
-            connection, _ = self.listener.accept()
-        except OSError:
+        connection = self._accept()
+        if connection is None:
             return
         with connection:
             connection.sendall(self.transcript)
@@ -115,7 +137,7 @@ class FakeGuest:
                 time.sleep(5.0)
                 return
             connection.sendall(self.prompt)
-            connection.settimeout(20.0)
+            connection.settimeout(0.25)
             self._answer(connection)
 
     def _answer(self, connection):
@@ -124,7 +146,11 @@ class FakeGuest:
         while True:
             try:
                 chunk = connection.recv(256)
-            except (socket.timeout, OSError):
+            except socket.timeout:
+                if self.stop.is_set():
+                    return
+                continue
+            except OSError:
                 return
             if not chunk:
                 return
@@ -334,16 +360,15 @@ class SilentGuest(FakeGuest):
         self.broken_in = threading.Event()
 
     def _serve(self):
-        try:
-            connection, _ = self.listener.accept()
-        except OSError:
+        connection = self._accept()
+        if connection is None:
             return
         with connection:
             connection.sendall(self.transcript)
             if not self.broken_in.wait(timeout=60.0):
                 return
             connection.sendall(self.prompt)
-            connection.settimeout(20.0)
+            connection.settimeout(0.25)
             self._answer(connection)
 
 
@@ -351,9 +376,8 @@ class ChattyGuest(FakeGuest):
     """A guest that is merely slow: it keeps producing output to the end."""
 
     def _serve(self):
-        try:
-            connection, _ = self.listener.accept()
-        except OSError:
+        connection = self._accept()
+        if connection is None:
             return
         with connection:
             try:
