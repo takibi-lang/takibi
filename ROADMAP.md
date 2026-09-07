@@ -92,8 +92,8 @@ entry leaves the next one unable to be verified.
 2. **#431** SIGCHLD/kill and **#432** nanosleep -- what #448's `respawn`
    needs. The 2026-08-27 decision stands: dependencies get implemented.
 3. **#222** per-core scheduler state, while the cores are still parked.
-4. **#479** raise `KERNEL_ACTIVE_CORES` and work the ten sites it names. The
-   widest change in the milestone.
+4. **#479** raise `KERNEL_ACTIVE_CORES` and clear its compiler-derived
+   worklist. The widest change in the milestone.
 5. **#483** the network stack's unsynchronized non-pool state -- the same
    files as #479, so the same hands.
 6. **#478** the spinlock excludes but does not arbitrate.
@@ -137,6 +137,14 @@ and its `examples/` twin as saying they do not yet solve issue #89's
 escaping-index shape, and #89 has closed. Whether the closure covers that
 shape needs the compiler's affine analysis read, which is Territory A.
 
+The 2026-09-07 Territory A audit left two Territory B handoffs. **#511** is
+open again: an unexpected DDB prompt in an ordinary QEMU lane should leave a
+read-only postmortem walk instead of only timing out at `ddb>`. Also update
+`kernel/RUNTIME_STATE.md`'s FD section: `fd_slot_total` is now a
+`GuardedField` under `object_refcount_lock`, while the per-process block chain
+is process-lifecycle-owned, so its current "still unlocked" sentence is
+stale.
+
 1. **#520** the kernel's TCP path sustains 15 KiB/s, 12x slower than SWD and
    flat across transfer size. Measured 2026-09-06 and printed by
    `make kernelcheck-rpi5` on every run. Attributing it needs a named
@@ -147,10 +155,13 @@ shape needs the compiler's affine analysis read, which is Territory A.
    counters.
 3. **#410** how a fallback is reported: three counted, two logged, none
    asserted.
-4. **#388** the hand-written exception vectors carry no stack-overflow test.
-5. **#429** in-kernel GDB stub, **#149** GDB without JTAG, **#444**
+4. **#511** capture useful DDB state automatically when an ordinary QEMU lane
+   stops at a debugger prompt, without reviving the reverted unreliable
+   silence trigger unchanged.
+5. **#388** the hand-written exception vectors carry no stack-overflow test.
+6. **#429** in-kernel GDB stub, **#149** GDB without JTAG, **#444**
    controlled DDB memory mutation.
-6. **#454** `uart_putc` busy-waits, at 87us per logged byte.
+7. **#454** `uart_putc` busy-waits, at 87us per logged byte.
 
 **#280 is parked, not queued.** It was measured on 2026-09-06: SWD is at its
 30 MHz ceiling at 187 KiB/s, the rootfs is 85% of what is transferred, and the
