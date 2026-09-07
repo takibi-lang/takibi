@@ -398,7 +398,7 @@ probe/board setup. A successful run includes:
 [kernel/rpi5] BusyBox httpd curl passed
 [kernel/rpi5] second BusyBox httpd curl passed
 [kernel/rpi5] userspace connected I/O passed
-PASS kernel/rpi5 (38 views, one boot)
+PASS kernel/rpi5 (43 views, one boot)
 ```
 
 It tests negative and positive ARP/ICMP behavior, TCP lifecycle, USB ext2
@@ -869,11 +869,11 @@ each exactly against its `.expected` file -- the identical "one boot, many
 independent contracts" pattern `kernelcheck-rpi5` uses (see "Expected-file
 integration views" below), just without the SWD reset/load dance: QEMU's
 TCP-backed serial chardev is read by the shared pyserial driver.
-Thirty-eight views currently pass. The target then runs a separate ash smoke
-lane using the same pyserial driver and the shared
+Forty-three views currently pass; the lane prints the live count on every
+run, which is the number to trust when this one has drifted. The target then
+runs a separate ash smoke lane using the same pyserial driver and the shared
 `kernel/tests/common/ash/ash.stdin` and `ash.expected` fixtures; the RPi5
-runner drives those fixtures during its one boot as well. The 38 views
-cover:
+runner drives those fixtures during its one boot as well. They cover:
 
 - the full hardware-independent self-test bundle (FP/SIMD-across-IRQ, a
   real second-core PSCI bring-up, VM layout, user memory + root isolation,

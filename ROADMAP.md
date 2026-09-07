@@ -108,6 +108,51 @@ Then, in this territory and unordered: #518, #468, #464, #516, #308, #414,
 #342, #370, #374, #203, #200, #201, #212, #282, #417, #400, #109, #129, #155,
 #267, #28, #58, #13, #95, #8.
 
+#### Handed over from Territory B, 2026-09-06
+
+Four things this territory owns that Territory B found and could not decide.
+None is queued above; they are recorded so they are not rediscovered.
+
+1. **#520 needs an attribution, and only Territory A can make it.** The
+   kernel's TCP path was measured at 15.6 KiB/s, flat across two orders of
+   magnitude of transfer length, which is 12x slower than SWD and about
+   0.013% of the RP1 GEM link. What the measurement cannot say is where the
+   time goes: it spans host stack, wire, kernel and BusyBox with nothing
+   separating them. The instrument already exists -- `profile: cpu` reports
+   wall, EL0, EL1, IRQ and idle cycles for a named interval -- but is emitted
+   for the `busy-pair` workload only. A second named interval around a bulk
+   transfer is the missing piece, and it is also what #497's first milestone
+   still needs.
+
+2. **A `freelist contention` probe failure, seen once and not chased.** On
+   2026-09-06 `kernel/qemu-debug view: pool_contention` failed with
+   `freelist contention stage: incomplete` / `freelist contention: failed`
+   where the expected view has `unlocked` then `locked`. Three consecutive
+   re-runs passed. Recorded rather than filed because one sample is a rate of
+   nothing; if it recurs, that is two, and the probe reported its own
+   incompleteness rather than passing about nothing, which is the behaviour
+   `kernel/CONCURRENCY.md` asks for.
+
+3. **Whether #89's closure covers the escaping-index shape.**
+   `scripts/find_stale_issue_workarounds.py` reports
+   `linux_user/field_lease/field_lease.tkb` and its `examples/` twin as
+   saying they "do not yet solve issue #89's actual fd-table shape (an
+   escaping index into a table living past the acquiring function)", and #89
+   has closed. Deciding it means reading the compiler's affine analysis. If
+   the shape is now handled the comments should go; if not, they should stop
+   naming a closed issue as the reason.
+
+4. **The probe-verdict rule is documented but not mechanised, and the reason
+   is a property of the probes.** `kernel/CONCURRENCY.md` now requires a
+   probe's verdict to carry a term that is false when the probe did no work,
+   asserted rather than printed. A build check was judged not writable
+   because the probes disagree on shape: a trailing
+   `return advanced == calls && overlap > 0`, a chain of guards ending in
+   `return true`, and a two-phase verdict split across a helper called twice
+   all appear today, and the cheap approximations fire on correct probes. If
+   this territory converges the probes on one verdict shape, the check
+   becomes possible and is worth revisiting.
+
 ### Territory B queue -- debug environment and recurrence prevention
 
 This order is a recommendation, not a dependency chain. Nothing here blocks

@@ -69,8 +69,8 @@ it waits its turn. `make lease-status` reports which session holds each and
 since when. Stopping a session releases whatever it holds, which is how a
 person takes a board or the suite back.
 
-`make allcheck` takes the suite lease, so one clone runs the aggregate at a
-time. Individual lanes and `make kernelcheck` do not, and run in parallel
+`make allcheck` and `make cicheck` take the suite lease, so one clone runs an
+aggregate at a time. Individual lanes and `make kernelcheck` do not, and run in parallel
 freely.
 The aggregate is the unit because that is what saturates the machine: measured
 on a 24-core host, twelve concurrent QEMU lanes all passed, while three
@@ -90,8 +90,10 @@ QEMU lanes carry no such cost; run them freely.
 
 Treat any target whose name contains `allcheck`, `hwcheck`, or `kernelcheck`
 as hardware-touching, because those aggregates reach the hardware lanes even
-when the change under test is unrelated. `make allbuild` and the
-`*build`/`langcheck`/`linuxcheck`/`*-qemu` targets execute no hardware.
+when the change under test is unrelated. `make cicheck`, `make allbuild` and
+the `*build`/`langcheck`/`linuxcheck`/`*-qemu` targets execute no hardware --
+`cicheck` is named without any of those three substrings precisely so this
+rule reads correctly about it.
 
 A board that stops answering SWD needs a power cycle, which nothing here can
 perform. The lease counts consecutive reset or load failures and says so;
