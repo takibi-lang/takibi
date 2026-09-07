@@ -200,12 +200,15 @@ const POLL_MAX: usize = 1024;
 
 private let mut syscall_ext2_mount: Ext2Mount;
 private let mut syscall_ext2_ready: bool;
+const SYSCALL_SCRIPT_LINE_MAX: usize = 256;
 // Scratch that lives only for one non-preemptible syscall invocation. Per
 // core rather than global: two cores may dispatch concurrently, but one core
 // cannot enter a second handler until the current one returns while
 // KERNEL_PREEMPTIBLE is zero. The file buffer is a bounded one-block staging
 // area, not a whole-file cache; read/readv/sendfile stream each chunk onward,
-// so its size does not limit the file size userspace can consume.
+// so its size does not limit the file size userspace can consume. execve uses
+// three disjoint regions of that same invocation-local buffer for argv, path,
+// and script-header staging; it never overlaps a file-data syscall.
 struct SyscallScratch {
     file_buffer: [u8; KERNEL_BLOCK_SIZE];
     path_buffer: [u8; 256];
@@ -270,10 +273,6 @@ must_use variant KernelInetdAcceptResult { TimedOut; Accepted; }
 // of ProcessRecord now, reached through
 // scheduled_process_clone_file_state()/_uart_block_delivery() and their
 // setters. Every decision made with them is still made here.
-private let mut syscall_exec_pending: bool;
-private let mut syscall_exec_argc: usize;
-private let mut syscall_exec_argv: [u8; 512];
-private let mut syscall_exec_path: [u8; 256];
 // The first line of an execve(2) target, read before any image is chosen.
 // Bounded on purpose: this is the whole window in which a `#!` interpreter
 // directive is allowed to live, and the kernel must decide the executable
@@ -285,8 +284,6 @@ private let mut syscall_exec_path: [u8; 256];
 // zero-filled before the read for the same reason Linux zero-pads its
 // buffer -- a file with no trailing newline then ends at a NUL, which the
 // scan below treats as the end of the directive.
-const SYSCALL_SCRIPT_LINE_MAX: usize = 256;
-private let mut syscall_script_line: [u8; SYSCALL_SCRIPT_LINE_MAX];
 
 must_use variant SyscallPathResult { Fault; Invalid; Name([]u8); }
 
@@ -306,10 +303,36 @@ fn kernel_syscall_daemon_start() {
     syscall_test_lifecycle_daemon_reset();
 }
 
-fn kernel_syscall_exec_pending() -> bool { return syscall_exec_pending; }
-fn kernel_syscall_exec_argc() -> usize { return syscall_exec_argc; }
-fn kernel_syscall_exec_argv() -> []u8 { return syscall_exec_argv as []u8; }
-fn kernel_syscall_exec_clear() { syscall_exec_pending = false; }
+fn kernel_syscall_exec_pending() -> bool {
+    return scheduled_process_exec_pending(kernel_syscall_process_slot());
+}
+fn kernel_syscall_exec_argc() -> usize {
+    return scheduled_process_exec_argc(kernel_syscall_process_slot());
+}
+fn kernel_syscall_exec_argv() -> []u8 {
+    return scheduled_process_command_line(kernel_syscall_process_slot());
+}
+fn kernel_syscall_exec_clear() {
+    scheduled_process_set_exec_pending(kernel_syscall_process_slot(), false);
+}
+
+private fn syscall_exec_argv_here() -> [u8; 512..] {
+    let scratch: [u8; KERNEL_BLOCK_SIZE..] =
+        syscall_scratch_here().file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+    return scratch[0..<512];
+}
+
+private fn syscall_exec_path_here() -> [u8; 256..] {
+    let scratch: [u8; KERNEL_BLOCK_SIZE..] =
+        syscall_scratch_here().file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+    return scratch[512..<768];
+}
+
+private fn syscall_script_line_here() -> [u8; 256..] {
+    let scratch: [u8; KERNEL_BLOCK_SIZE..] =
+        syscall_scratch_here().file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+    return scratch[768..<1024];
+}
 
 private fn kernel_syscall_inetd_mode() -> bool {
     return scheduled_process_inetd_mode(kernel_syscall_process_slot());
@@ -319,23 +342,26 @@ private fn kernel_syscall_set_inetd_mode(enabled: bool) {
     scheduled_process_set_inetd_mode(kernel_syscall_process_slot(), enabled);
 }
 
-// execve's pathname is distinct from argv[0]. Preserve it for generic image
-// source selection; userspace remains free to choose a different argv[0].
+// execve's pathname is distinct from argv[0]. The only current image choice
+// that needs that distinction is the dynamic /bin/httpd fixture, so retain
+// that exact process-owned fact instead of 256 bytes on every process record.
 fn kernel_syscall_exec_path_matches(name: []u8) -> bool !{unsafe} {
-    let path: []u8 = syscall_exec_path as []u8;
-    if (name.len > path.len) { return false; }
-    let mut index: usize = 0;
-    for byte in name {
-        if (byte == 0) { return true; }
-        if (index < 256) {
-            let bounded: {0..<256 as usize} = index;
-            if (path[bounded] != byte) { return false; }
-        } else {
-            return false;
-        }
-        index = index + 1;
+    if (name.len != 10) { return false; }
+    let expected: [u8; 10..] = bs"/bin/httpd" as [u8; 10..];
+    for index: usize in 0..<10 {
+        if (name[index] != expected[index]) { return false; }
     }
-    return true;
+    return scheduled_process_exec_path_is_dynamic_httpd(
+        kernel_syscall_process_slot());
+}
+
+private fn syscall_exec_path_is_dynamic_httpd() -> bool {
+    let path: [u8; 256..] = syscall_exec_path_here();
+    let expected: [u8; 10..] = bs"/bin/httpd" as [u8; 10..];
+    for index: usize in 0..<10 {
+        if (path[index] != expected[index]) { return false; }
+    }
+    return path[10] == 0;
 }
 
 // A `#!` script is executed by naming an interpreter, so the image execve(2)
@@ -410,7 +436,7 @@ must_use variant SyscallArgvAppendResult { Full; Appended(usize); }
 // return the offset the next entry starts at.
 private fn syscall_exec_argv_append(offset: usize, source: []u8)
         -> SyscallArgvAppendResult {
-    let argv_view: []u8 = syscall_exec_argv as []u8;
+    let argv_view: []u8 = syscall_exec_argv_here();
     if (offset > argv_view.len) { return SyscallArgvAppendResult::Full; }
     let tail = argv_view[offset..<argv_view.len];
     let length: usize = source.len;
@@ -435,11 +461,12 @@ private fn syscall_exec_argv_append(offset: usize, source: []u8)
 private fn syscall_exec_argv_append_line(offset: usize, from: usize,
                                          to: usize)
         -> SyscallArgvAppendResult {
-    let argv_view: []u8 = syscall_exec_argv as []u8;
+    let argv_view: []u8 = syscall_exec_argv_here();
+    let line: []u8 = syscall_script_line_here();
     let mut cursor: usize = offset;
     for position: usize in 0..<SYSCALL_SCRIPT_LINE_MAX {
         if (position >= from && position < to) {
-            let value: u8 = syscall_script_line[position];
+            let value: u8 = line[position];
             if (cursor < argv_view.len) {
                 argv_view[cursor] = value;
             } else {
@@ -456,17 +483,17 @@ private fn syscall_exec_argv_append_line(offset: usize, from: usize,
     return SyscallArgvAppendResult::Appended(cursor + 1);
 }
 
-// Parse the `#!` directive already staged in syscall_script_line and build
+// Parse the `#!` directive already staged in the current core's scratch and build
 // the replacement argv: the interpreter becomes argv[0], its single optional
 // argument follows, and the pathname execve(2) was called with takes the
 // place of the caller's own argv[0]. That is the argv shape Linux's script
 // binfmt produces, and the reason the pathname is used rather than argv[0] is
 // that the interpreter has to be able to open the script it was given.
-// syscall_exec_path is rewritten to the interpreter for the same reason the
+// The process's exec path is rewritten to the interpreter for the same reason the
 // argv is: it names the image that will actually be loaded.
 private fn syscall_exec_script_prefix(line_length: usize, path_length: usize)
         -> SyscallExecFormatResult {
-    let line: []u8 = syscall_script_line as []u8;
+    let line: []u8 = syscall_script_line_here();
     let mut end: usize = 0;
     let mut line_terminated: bool = false;
     // The whole window is scanned, not only the bytes the file supplied: it
@@ -573,7 +600,7 @@ private fn syscall_exec_script_prefix(line_length: usize, path_length: usize)
         }
         argc = argc + 1;
     }
-    let stored_path: []u8 = syscall_exec_path as []u8;
+    let stored_path: []u8 = syscall_exec_path_here();
     if (path_length > stored_path.len) {
         return SyscallExecFormatResult::Invalid;
     }
@@ -588,14 +615,14 @@ private fn syscall_exec_script_prefix(line_length: usize, path_length: usize)
     // The pathname execve(2) was called with is in the replacement argv now,
     // so the stored path can become what it has to name from here on: the
     // image that will actually be loaded.
-    for path_index: usize in 0..<256 { syscall_exec_path[path_index] = 0; }
+    for path_index: usize in 0..<256 { stored_path[path_index] = 0; }
     let mut path_cursor: usize = 0;
     for position: usize in 0..<SYSCALL_SCRIPT_LINE_MAX {
         if (position >= interpreter_from && position < interpreter_to) {
-            let value: u8 = syscall_script_line[position];
+            let value: u8 = line[position];
             if (path_cursor < 256) {
                 let bounded: {0..<256 as usize} = path_cursor;
-                syscall_exec_path[bounded] = value;
+                stored_path[bounded] = value;
             } else {
                 return SyscallExecFormatResult::Invalid;
             }
@@ -607,7 +634,7 @@ private fn syscall_exec_script_prefix(line_length: usize, path_length: usize)
     // directory is EACCES -- neither is a complaint about the script. The
     // stored path is the interpreter now, so the same question asked of the
     // original target above is asked of it here.
-    let interpreter_path: []u8 = syscall_exec_path as []u8;
+    let interpreter_path: []u8 = stored_path;
     let interpreter_length: usize = path_cursor;
     if (interpreter_length > interpreter_path.len) {
         return SyscallExecFormatResult::Invalid;
@@ -647,10 +674,10 @@ private fn syscall_exec_format(name: []u8, path_length: usize)
             return SyscallExecFormatResult::NotPermitted;
         }
         SyscallExecTargetResult::Inode(inode) => {
+            let line: []u8 = syscall_script_line_here();
             for index: usize in 0..<SYSCALL_SCRIPT_LINE_MAX {
-                syscall_script_line[index] = 0;
+                line[index] = 0;
             }
-            let line: []u8 = syscall_script_line as []u8;
             match ext2_read_file_chunk(syscall_ext2_mount, inode, 0, line) {
                 Ext2ReadResult::Invalid => {
                     // The kind and the permission were already settled above,
@@ -915,11 +942,8 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize)
     }
     syscall_test_evidence_reset_file_counters();
     syscall_test_evidence_reset_read_uart_waits();
-    syscall_exec_pending = false;
-    syscall_exec_argc = 0;
     syscall_test_lifecycle_persistent_shell_clear();
     scheduled_process_reset_syscall_state_everywhere();
-    for path_index: usize in 0..<256 { syscall_exec_path[path_index] = 0; }
     tcp_connection_pool_init();
     syscall_test_evidence_reset_socket_counters();
     kernel_syscall_set_inetd_mode(false);
@@ -3723,7 +3747,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // First handoff slice: only the current parent image may request an
         // exec. The child path still needs a process-owned image token and is
         // deliberately rejected until the general child lifecycle lands.
-        if (syscall_exec_pending) {
+        if (kernel_syscall_exec_pending()) {
             return SyscallAction::Resume(LINUX_EAGAIN);
         }
         let mut path_address: usize = x0;
@@ -3743,7 +3767,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (path_length == 0 || argv_address == 0) { return SyscallAction::Resume(LINUX_EINVAL); }
         let exec_path_absolute: bool = path_view[0] == 0x2F;
         if (path_length > 256) { return SyscallAction::Resume(LINUX_EINVAL); }
-        let exec_path: []u8 = syscall_exec_path as []u8;
+        let exec_path: []u8 = syscall_exec_path_here();
+        for path_index: usize in 0..<256 { exec_path[path_index] = 0; }
         let saved_path: usize = slice_copy(
             exec_path[0..<path_length],
             path_view[0..<path_length]);
@@ -3832,7 +3857,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                 let copy_length: usize = string_length + 1;
                                 let destination_start: usize = output_offset;
                                 let exec_argv_view: []u8 =
-                                    syscall_exec_argv as []u8;
+                                    syscall_exec_argv_here();
                                 if (destination_start > exec_argv_view.len) {
                                     return SyscallAction::Resume(LINUX_EINVAL);
                                 }
@@ -3869,12 +3894,15 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // Keep the path validation explicit even though this first image
         // registry currently contains one static BusyBox ELF.
         if (exec_path_absolute == false) { return SyscallAction::Resume(LINUX_ENOENT); }
-        syscall_exec_argc = argc;
-        let diagnostic_argv: []u8 = syscall_exec_argv as []u8;
+        let diagnostic_argv: []u8 = syscall_exec_argv_here();
         scheduled_process_set_command_line(
             kernel_syscall_process_slot(),
             diagnostic_argv, output_offset);
-        syscall_exec_pending = true;
+        scheduled_process_set_exec_argc(kernel_syscall_process_slot(), argc);
+        scheduled_process_set_exec_path_is_dynamic_httpd(
+            kernel_syscall_process_slot(),
+            syscall_exec_path_is_dynamic_httpd());
+        scheduled_process_set_exec_pending(kernel_syscall_process_slot(), true);
         if (kernel_process_is_child()) { return SyscallAction::ChildExec; }
         return SyscallAction::Exec;
     }
@@ -4759,19 +4787,13 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
     }
 }
 
-// GitHub issue #453. The large ephemeral buffers are per-core now; they no
-// longer justify serialising every handler in the machine. What remains is
-// persistent state with the wrong ownership axis: exec_pending/path/argv and
-// script staging describe the current PROCESS but are stored once for the
-// whole kernel. inetd mode and init's log latch have moved to ProcessRecord;
-// clone no longer saves a parent global for child exit to restore.
-//
-// Both execution-model numbers expose that mistake. A second active core can
-// execute another process concurrently. On one core a timer interrupt already
+// GitHub issue #453. Persistent syscall state belongs to ProcessRecord and
+// transient buffers belong to the executing core, so distinct active cores do
+// not share mutable handler state. On one core a timer interrupt already
 // arrives inside a syscall -- interrupts are unmasked on EL0 entry -- but the
 // switch is deferred to kernel_process_syscall_return_schedule. Enabling
-// kernel preemption would interleave a second process through the same globals.
+// kernel preemption would let another handler overwrite that core's scratch.
 fn syscall_execution_model_assumption() {
-    static_assert(KERNEL_ACTIVE_CORES == 1 && KERNEL_PREEMPTIBLE == 0,
-                  "exec handoff and script staging are process state stored in syscall globals");
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+                  "per-core syscall scratch cannot survive preemption by another handler");
 }

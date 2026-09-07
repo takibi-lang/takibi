@@ -982,6 +982,59 @@ fn scheduled_process_set_init_signal_wait_logged(slot: usize, logged: bool) {
     scheduled_process_record_at(slot).init_signal_wait_logged = logged;
 }
 
+// command_line_length needs ten bits for 0..512. Its remaining bits carry the
+// short-lived exec handoff metadata, avoiding a ProcessRecord size increase
+// that would push every intrusive-pool record across a page boundary.
+const PROCESS_COMMAND_LENGTH_MASK: usize = 0x3FF;
+const PROCESS_EXEC_ARGC_SHIFT: usize = 10;
+const PROCESS_EXEC_ARGC_MASK: usize = 0x3C00;
+const PROCESS_EXEC_PENDING: usize = 0x4000;
+const PROCESS_EXEC_DYNAMIC_HTTPD: usize = 0x8000;
+
+fn scheduled_process_exec_pending(slot: usize) -> bool {
+    return (scheduled_process_record_at(slot).command_line_length &
+            PROCESS_EXEC_PENDING) != 0;
+}
+
+fn scheduled_process_set_exec_pending(slot: usize, pending: bool) {
+    let record: *ProcessRecord = scheduled_process_record_at(slot);
+    record.command_line_length = record.command_line_length &
+                                 ~PROCESS_EXEC_PENDING;
+    if (pending) {
+        record.command_line_length = record.command_line_length |
+                                     PROCESS_EXEC_PENDING;
+    }
+}
+
+fn scheduled_process_exec_argc(slot: usize) -> usize {
+    return (scheduled_process_record_at(slot).command_line_length &
+            PROCESS_EXEC_ARGC_MASK) >> PROCESS_EXEC_ARGC_SHIFT;
+}
+
+fn scheduled_process_set_exec_argc(slot: usize, argc: usize) {
+    let record: *ProcessRecord = scheduled_process_record_at(slot);
+    record.command_line_length = record.command_line_length &
+                                 ~PROCESS_EXEC_ARGC_MASK;
+    record.command_line_length = record.command_line_length |
+        ((argc << PROCESS_EXEC_ARGC_SHIFT) & PROCESS_EXEC_ARGC_MASK);
+}
+
+fn scheduled_process_exec_path_is_dynamic_httpd(slot: usize) -> bool {
+    return (scheduled_process_record_at(slot).command_line_length &
+            PROCESS_EXEC_DYNAMIC_HTTPD) != 0;
+}
+
+fn scheduled_process_set_exec_path_is_dynamic_httpd(slot: usize,
+                                                     matches: bool) {
+    let record: *ProcessRecord = scheduled_process_record_at(slot);
+    record.command_line_length = record.command_line_length &
+                                 ~PROCESS_EXEC_DYNAMIC_HTTPD;
+    if (matches) {
+        record.command_line_length = record.command_line_length |
+                                     PROCESS_EXEC_DYNAMIC_HTTPD;
+    }
+}
+
 // The same reset applied to every live process, for
 // kernel_syscall_process_configure -- a whole-world reset that can run
 // while processes already exist. It walks rather than sweeping an index
@@ -1010,6 +1063,9 @@ private fn scheduled_process_record_reset_syscall_state(slot: usize)
     scheduled_process_set_clone_file_state(slot, fresh);
     scheduled_process_set_inetd_mode(slot, false);
     scheduled_process_set_init_signal_wait_logged(slot, false);
+    scheduled_process_set_exec_pending(slot, false);
+    scheduled_process_set_exec_argc(slot, 0);
+    scheduled_process_set_exec_path_is_dynamic_httpd(slot, false);
 }
 
 // GitHub issue #392: both directions between a pid and a slot, asked
@@ -1124,7 +1180,8 @@ fn scheduled_process_diagnostic_snapshot(pid: usize)
     }
     snapshot.resident_pages = process_image_active_page_count(slot);
     snapshot.start_time_ticks = record.start_time_ticks;
-    snapshot.command_line_length = record.command_line_length;
+    snapshot.command_line_length = record.command_line_length &
+                                   PROCESS_COMMAND_LENGTH_MASK;
     for index: usize in 0..<512 {
         snapshot.command_line[index] = record.command_line[index];
     }
@@ -1238,6 +1295,10 @@ fn scheduled_process_set_command_line(slot: usize, value: []u8,
     record.command_line_length = length;
 }
 
+fn scheduled_process_command_line(slot: usize) -> [u8; 512..] {
+    return scheduled_process_record_at(slot).command_line as [u8; 512..];
+}
+
 // The parent as a HANDLE and the child as a slot, which looks asymmetric
 // and is not. GitHub issue #492: the one caller holds a ProcessHandle for
 // the parent, so the generation is there to be spent; the child arrives as
@@ -1248,7 +1309,8 @@ private fn scheduled_process_copy_command_line(parent: ProcessHandle,
                                                child: usize) !{unsafe} {
     let source: *ProcessRecord = scheduled_process_record_of(parent);
     let destination: *ProcessRecord = scheduled_process_record_at(child);
-    destination.command_line_length = source.command_line_length;
+    destination.command_line_length = source.command_line_length &
+                                      PROCESS_COMMAND_LENGTH_MASK;
     for index: usize in 0..<512 {
         destination.command_line[index] = source.command_line[index];
     }
