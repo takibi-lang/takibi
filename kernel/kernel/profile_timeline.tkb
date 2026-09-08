@@ -70,12 +70,18 @@ private fn profile_timeline_core_reset(
 
 private fn profile_timeline_note(kind: ProfileTimelineKind, pid: usize,
                                  peer: usize, arg: usize) {
-    if (profile_timeline_active == false) { return; }
     // Ordinary syscall and scheduler paths can be interrupted by the IRQ
     // hooks below. Reserve and publish one local slot with IRQs masked so an
     // interrupt cannot overwrite a half-filled event.
     let irq_was_masked: usize = (mrs_daif() >> 7) & 1;
     disable_irq();
+    // Test activation inside the same masked region as publication. A stop
+    // SGI between an earlier test and this mask could close the interval,
+    // then resume this writer into an already reported buffer.
+    if (profile_timeline_active == false) {
+        if (irq_was_masked == 0) { enable_irq(); }
+        return;
+    }
     let raw_cpu: usize = cpu_id();
     if (raw_cpu >= KERNEL_ACTIVE_CORES || raw_cpu >= KERNEL_MAX_CORES) {
         if (irq_was_masked == 0) { enable_irq(); }

@@ -211,12 +211,15 @@ private fn workload_profile_charge(cpu: {0..<KERNEL_MAX_CORES as usize},
 }
 
 private fn workload_profile_transition_masked(next: WorkloadCpuMode) {
-    if (workload_profile_active == false) { return; }
     // Syscall handling runs with IRQs enabled. Without one critical section,
     // a timer IRQ can charge from the same last_tick before this transition
     // stores its new boundary, making the classified total exceed wall time.
     let before_irq_masked: usize = (mrs_daif() >> 7) & 1;
     disable_irq();
+    if (workload_profile_active == false) {
+        if (before_irq_masked == 0) { enable_irq(); }
+        return;
+    }
     let cpu: usize = cpu_id();
     if (cpu >= KERNEL_ACTIVE_CORES || cpu >= KERNEL_MAX_CORES) {
         if (before_irq_masked == 0) { enable_irq(); }
@@ -274,6 +277,9 @@ fn workload_profile_irq_exit() {
 }
 
 private fn workload_profile_current_cpu() -> usize {
+    // Callers hold their local IRQ mask from this activation check through
+    // the last counter write. A future world-stop close can therefore wait
+    // for a complete update, rather than resume a half-finished one later.
     if (workload_profile_active == false) { return KERNEL_MAX_CORES; }
     let cpu: usize = cpu_id();
     if (cpu >= KERNEL_ACTIVE_CORES || cpu >= KERNEL_MAX_CORES) {
@@ -291,6 +297,8 @@ private fn workload_profile_selected_pid(
 }
 
 fn workload_profile_note_syscall(number: usize) {
+    let irq_was_masked: usize = (mrs_daif() >> 7) & 1;
+    disable_irq();
     workload_profile_el1_enter();
     let cpu: usize = workload_profile_current_cpu();
     if (cpu < KERNEL_MAX_CORES) {
@@ -301,9 +309,12 @@ fn workload_profile_note_syscall(number: usize) {
                 workload_profile_cores[cpu].syscalls + 1;
         }
     }
+    if (irq_was_masked == 0) { enable_irq(); }
 }
 
 fn workload_profile_syscall_wait(number: usize) {
+    let irq_was_masked: usize = (mrs_daif() >> 7) & 1;
+    disable_irq();
     let cpu: usize = workload_profile_current_cpu();
     if (cpu < KERNEL_MAX_CORES) {
         profile_timeline_syscall_wait(
@@ -311,63 +322,85 @@ fn workload_profile_syscall_wait(number: usize) {
         workload_profile_cores[cpu].syscall_retrying = true;
     }
     workload_profile_idle_enter();
+    if (irq_was_masked == 0) { enable_irq(); }
 }
 
 fn workload_profile_syscall_complete(number: usize) {
+    let irq_was_masked: usize = (mrs_daif() >> 7) & 1;
+    disable_irq();
     let cpu: usize = workload_profile_current_cpu();
     if (cpu < KERNEL_MAX_CORES) {
         profile_timeline_syscall_exit(
             workload_profile_selected_pid(cpu), number);
         workload_profile_cores[cpu].syscall_retrying = false;
     }
+    if (irq_was_masked == 0) { enable_irq(); }
 }
 
 fn workload_profile_note_block(pid: usize) {
+    let irq_was_masked: usize = (mrs_daif() >> 7) & 1;
+    disable_irq();
     let cpu: usize = workload_profile_current_cpu();
     if (cpu < KERNEL_MAX_CORES) {
         profile_timeline_block(pid);
         workload_profile_cores[cpu].blocks = workload_profile_cores[cpu].blocks + 1;
     }
+    if (irq_was_masked == 0) { enable_irq(); }
 }
 
 fn workload_profile_note_wakeup(pid: usize) {
+    let irq_was_masked: usize = (mrs_daif() >> 7) & 1;
+    disable_irq();
     let cpu: usize = workload_profile_current_cpu();
     if (cpu < KERNEL_MAX_CORES) {
         profile_timeline_wakeup(pid);
         workload_profile_cores[cpu].wakeups = workload_profile_cores[cpu].wakeups + 1;
     }
+    if (irq_was_masked == 0) { enable_irq(); }
 }
 
 fn workload_profile_note_block_read(bytes: usize) {
+    let irq_was_masked: usize = (mrs_daif() >> 7) & 1;
+    disable_irq();
     let cpu: usize = workload_profile_current_cpu();
     if (cpu < KERNEL_MAX_CORES) {
         workload_profile_cores[cpu].block_read_bytes =
             workload_profile_cores[cpu].block_read_bytes + bytes;
     }
+    if (irq_was_masked == 0) { enable_irq(); }
 }
 
 fn workload_profile_note_block_write(bytes: usize) {
+    let irq_was_masked: usize = (mrs_daif() >> 7) & 1;
+    disable_irq();
     let cpu: usize = workload_profile_current_cpu();
     if (cpu < KERNEL_MAX_CORES) {
         workload_profile_cores[cpu].block_write_bytes =
             workload_profile_cores[cpu].block_write_bytes + bytes;
     }
+    if (irq_was_masked == 0) { enable_irq(); }
 }
 
 fn workload_profile_note_network_rx(bytes: usize) {
+    let irq_was_masked: usize = (mrs_daif() >> 7) & 1;
+    disable_irq();
     let cpu: usize = workload_profile_current_cpu();
     if (cpu < KERNEL_MAX_CORES) {
         workload_profile_cores[cpu].network_rx_bytes =
             workload_profile_cores[cpu].network_rx_bytes + bytes;
     }
+    if (irq_was_masked == 0) { enable_irq(); }
 }
 
 fn workload_profile_note_network_tx(bytes: usize) {
+    let irq_was_masked: usize = (mrs_daif() >> 7) & 1;
+    disable_irq();
     let cpu: usize = workload_profile_current_cpu();
     if (cpu < KERNEL_MAX_CORES) {
         workload_profile_cores[cpu].network_tx_bytes =
             workload_profile_cores[cpu].network_tx_bytes + bytes;
     }
+    if (irq_was_masked == 0) { enable_irq(); }
 }
 
 private fn workload_profile_start(now: usize, pid: usize) {
@@ -406,6 +439,8 @@ private fn workload_profile_finish(now: usize) {
 }
 
 private fn workload_profile_note_selected(pid: usize) {
+    // Reached only through workload_busy_note_selected_locked, under the
+    // IRQ-masking ProcessRunGuard. Keep that mask across the update.
     let cpu: usize = workload_profile_current_cpu();
     if (cpu < KERNEL_MAX_CORES) {
         if (workload_profile_cores[cpu].has_selected_pid &&

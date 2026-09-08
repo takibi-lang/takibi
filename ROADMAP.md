@@ -118,10 +118,11 @@ workload.
 
 The next profiling increment needs more than passing a `WorldStopped` token
 into the current start/finish functions. They run under `ProcessRunGuard`:
-first preserve its IRQ mask until unlock, then move the stop rendezvous
-outside the run-lock section so a peer waiting for that lock can acknowledge.
-Also audit local PMU start/stop when interval ownership moves between cores,
-and event producers suspended before their local IRQ mask. Keep the existing
+The run-lock IRQ mask is now preserved until unlock, and profiling producers
+keep activation checks and writes within one local IRQ-masked section.
+Next move the stop rendezvous outside the run-lock section so a peer waiting
+for that lock can acknowledge. Also audit local PMU start/stop when interval
+ownership moves between cores. Keep the existing
 multicore assertions until those boundaries are exercised from the peer.
 
 #### Handed over from Territory B, 2026-09-07
