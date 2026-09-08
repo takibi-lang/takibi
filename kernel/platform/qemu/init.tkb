@@ -1,13 +1,8 @@
 use "kernel/init/test_driver.tkb";
 use "kernel/arch/arm64/kernel/secondary.tkb";
 use "kernel/init/boot_memory.tkb";
+use "kernel/init/secondary_boot.tkb";
 use "kernel/init/contention_probes.tkb";
-
-must_use variant SecondaryBootResult {
-    Started;
-    UnexpectedStatus(usize);
-    NotStarted(usize);
-}
 
 // GitHub issue #237: QEMU `virt`'s own guest-visible PSCI conduit is HVC,
 // not RPi5's real-firmware SMC -- confirmed by dumping this machine's
@@ -46,20 +41,9 @@ fn cpu_id() -> usize {
 fn kernel_secondary_boot_probe() -> SecondaryBootResult {
     kernel_secondary_boot_state_clear();
     signal_fence();
-    let status: usize = qemu_psci_cpu_on(
-        0x1, kernel_secondary_entry, 0x191);
-    let start: i64 = read_cntpct();
-    let deadline_ticks: i64 = read_cntfrq();
-    while ((read_cntpct() - start) < deadline_ticks) {
-        signal_fence();
-        if (kernel_secondary_boot_state_value() == 0x101) {
-            if (status == 0) {
-                return SecondaryBootResult::Started;
-            }
-            return SecondaryBootResult::UnexpectedStatus(status);
-        }
-    }
-    return SecondaryBootResult::NotStarted(status);
+    return kernel_secondary_boot_await(
+        qemu_psci_cpu_on(
+            0x1, kernel_secondary_entry, 0x191));
 }
 
 // QEMU-only ext2 mutation helpers for the virtio-blk fixture.
@@ -464,27 +448,7 @@ fn main() !{unsafe} {
         kernel_boot_log("fp/simd irq: failed\n");
     }
 
-    match kernel_secondary_boot_probe() {
-        SecondaryBootResult::Started => {
-            // GitHub issue #447: "and then it parked" is what this
-            // line used to mean. The core runs an idle loop with its own
-            // GIC CPU interface and its own timer now, so the assertion
-            // that replaces it is the one that could not be made before.
-            if (secondary_ticks_independent()) {
-                kernel_boot_log(
-                    "smp bringup: core1 psci+el1+takibi+own-timer ok\n");
-            } else {
-                kernel_boot_log("smp bringup: core1 idle but no ticks\n");
-            }
-            contention_probes();
-        }
-        SecondaryBootResult::UnexpectedStatus(status) => {
-            kernel_boot_log("smp bringup: core1 unexpected psci status\n");
-        }
-        SecondaryBootResult::NotStarted(status) => {
-            kernel_boot_log("smp bringup: core1 failed\n");
-        }
-    }
+    kernel_secondary_boot_report();
 
     kernel_test_rpi5_extended = false;
     kernel_test_httpd_daemon = true;

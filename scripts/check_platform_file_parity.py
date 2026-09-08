@@ -91,10 +91,6 @@ MIN_SIGNIFICANT_RUN = 8
 # with. Unlike ALLOWED, every entry here is also a piece of work -- these are
 # extractable, and the reason says so.
 ALLOWED_RUNS = {
-    ("init.tkb", "let start: i64 = read_cntpct();"):
-        "the secondary-core start poll: read the deadline, spin on the boot "
-        "state word, report Started/UnexpectedStatus/NotStarted. Extractable; "
-        "GitHub issue #517 tracks it",
     ("init.tkb", "kernel_syscall_ext2_configure(mount);"):
         "the ext2 fixture sequence, the largest of the three. It is one region "
         "with a platform-specific hole in the middle, which is why it did not "
@@ -103,8 +99,6 @@ ALLOWED_RUNS = {
         "the symlink half of the same ext2 fixture region",
     ("init.tkb", 'match ext2_lookup_root(mount, bs"large.txt") {'):
         "the multi-block half of the same ext2 fixture region",
-    ("init.tkb", "match kernel_secondary_boot_probe() {"):
-        "reporting what the secondary core did, on top of the poll above",
     ("intc.tkb", "fn platform_world_stop_notify(cores: usize, owner: usize) "
                  "!{unsafe} {"):
         "a function whose bodies genuinely diverge -- each GIC writes its own "

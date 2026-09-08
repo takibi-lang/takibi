@@ -13,13 +13,8 @@ use "kernel/platform/rpi5/gic_dtb.tkb";
 use "kernel/platform/rpi5/psci_dtb.tkb";
 use "kernel/arch/arm64/kernel/secondary.tkb";
 use "kernel/init/boot_memory.tkb";
+use "kernel/init/secondary_boot.tkb";
 use "kernel/init/contention_probes.tkb";
-
-must_use variant SecondaryBootResult {
-    Started;
-    UnexpectedStatus(usize);
-    NotStarted(usize);
-}
 
 // GitHub issue #445: which core is asking, as a callable function.
 //
@@ -50,20 +45,9 @@ fn rpi5_psci_cpu_on(target_affinity: usize, entry: usize, context: usize)
 fn kernel_secondary_boot_probe() -> SecondaryBootResult {
     kernel_secondary_boot_state_clear();
     signal_fence();
-    let status: usize = rpi5_psci_cpu_on(
-        0x100, kernel_secondary_entry, 0x191);
-    let start: i64 = read_cntpct();
-    let deadline_ticks: i64 = read_cntfrq();
-    while ((read_cntpct() - start) < deadline_ticks) {
-        signal_fence();
-        if (kernel_secondary_boot_state_value() == 0x101) {
-            if (status == 0) {
-                return SecondaryBootResult::Started;
-            }
-            return SecondaryBootResult::UnexpectedStatus(status);
-        }
-    }
-    return SecondaryBootResult::NotStarted(status);
+    return kernel_secondary_boot_await(
+        rpi5_psci_cpu_on(
+            0x100, kernel_secondary_entry, 0x191));
 }
 
 must_use variant UsbExt2WriteCheckResult { Invalid; Verified; }
@@ -806,27 +790,7 @@ fn main() !{unsafe} {
     // would free root 0's three already-in-use pages back into the pool
     // while they are still this kernel's own active page tables).
 
-    match kernel_secondary_boot_probe() {
-        SecondaryBootResult::Started => {
-            // GitHub issue #447: "and then it parked" is what this
-            // line used to mean. The core runs an idle loop with its own
-            // GIC CPU interface and its own timer now, so the assertion
-            // that replaces it is the one that could not be made before.
-            if (secondary_ticks_independent()) {
-                kernel_boot_log(
-                    "smp bringup: core1 psci+el1+takibi+own-timer ok\n");
-            } else {
-                kernel_boot_log("smp bringup: core1 idle but no ticks\n");
-            }
-            contention_probes();
-        }
-        SecondaryBootResult::UnexpectedStatus(status) => {
-            kernel_boot_log("smp bringup: core1 unexpected psci status\n");
-        }
-        SecondaryBootResult::NotStarted(status) => {
-            kernel_boot_log("smp bringup: core1 failed\n");
-        }
-    }
+    kernel_secondary_boot_report();
 
     kernel_test_rpi5_extended = true;
     kernel_test_httpd_daemon = true;

@@ -1,0 +1,69 @@
+// Bringing up the secondary core, and reporting what it did, once.
+//
+// It exists as one file for the reason kernel/init/contention_probes.tkb and
+// kernel/init/boot_memory.tkb do: three pieces of this were written twice,
+// byte-identical, in kernel/platform/qemu/init.tkb and
+// kernel/platform/rpi5/init.tkb. The two platform trees are never compiled
+// together, so a case added to one copy and not the other is invisible until
+// a board boots -- GitHub issue #470's failure, and #517's finding that the
+// parity check could not see it because a block inside main() is not a
+// function.
+//
+// What genuinely differs is one call. QEMU uses Aff0 target numbering and HVC
+// for PSCI; RPi5 uses Aff1 and SMC. So each platform keeps its own
+// kernel_secondary_boot_probe(), which makes that call and hands the status
+// here; the wait, the three outcomes and the reporting are shared.
+//
+// The deadline is one second of the architected counter, and it is what
+// separates NotStarted from a core that simply has not answered yet.
+use "kernel/printk/log.tkb";
+use "kernel/init/contention_probes.tkb";
+
+must_use variant SecondaryBootResult {
+    Started;
+    UnexpectedStatus(usize);
+    NotStarted(usize);
+}
+
+// Wait for the secondary to publish its boot state, then say what happened.
+// `status` is what the platform's own PSCI CPU_ON returned: a core that comes
+// up anyway after a nonzero status is a different finding from one that never
+// comes up, and both are different from success.
+fn kernel_secondary_boot_await(status: usize) -> SecondaryBootResult {
+    let start: i64 = read_cntpct();
+    let deadline_ticks: i64 = read_cntfrq();
+    while ((read_cntpct() - start) < deadline_ticks) {
+        signal_fence();
+        if (kernel_secondary_boot_state_value() == 0x101) {
+            if (status == 0) {
+                return SecondaryBootResult::Started;
+            }
+            return SecondaryBootResult::UnexpectedStatus(status);
+        }
+    }
+    return SecondaryBootResult::NotStarted(status);
+}
+
+fn kernel_secondary_boot_report() !{logs, unsafe} {
+    match kernel_secondary_boot_probe() {
+        SecondaryBootResult::Started => {
+            // GitHub issue #447: "and then it parked" is what this
+            // line used to mean. The core runs an idle loop with its own
+            // GIC CPU interface and its own timer now, so the assertion
+            // that replaces it is the one that could not be made before.
+            if (secondary_ticks_independent()) {
+                kernel_boot_log(
+                    "smp bringup: core1 psci+el1+takibi+own-timer ok\n");
+            } else {
+                kernel_boot_log("smp bringup: core1 idle but no ticks\n");
+            }
+            contention_probes();
+        }
+        SecondaryBootResult::UnexpectedStatus(status) => {
+            kernel_boot_log("smp bringup: core1 unexpected psci status\n");
+        }
+        SecondaryBootResult::NotStarted(status) => {
+            kernel_boot_log("smp bringup: core1 failed\n");
+        }
+    }
+}
