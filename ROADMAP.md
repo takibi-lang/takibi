@@ -108,6 +108,22 @@ Then, in this territory and unordered: #518, #468, #464, #516, #308, #414,
 #342, #370, #374, #203, #200, #201, #212, #282, #417, #400, #109, #129, #155,
 #267, #28, #58, #13, #95, #8.
 
+#### Territory A resumption, 2026-09-08
+
+CI is green at `db9ecb89`; resume #479's remaining two-core worklist.
+#222 and #504 are closed. #448's one-core workload is in the maintained
+lanes; its two-core criterion still depends on #479. #432's remaining-time
+writeback awaits an observable signal-handler interruption, not the busy-pair
+workload.
+
+The next profiling increment needs more than passing a `WorldStopped` token
+into the current start/finish functions. They run under `ProcessRunGuard`:
+first preserve its IRQ mask until unlock, then move the stop rendezvous
+outside the run-lock section so a peer waiting for that lock can acknowledge.
+Also audit local PMU start/stop when interval ownership moves between cores,
+and event producers suspended before their local IRQ mask. Keep the existing
+multicore assertions until those boundaries are exercised from the peer.
+
 #### Handed over from Territory B, 2026-09-07
 
 **#524 is the one that should be read first, and it is not a decision -- it is

@@ -550,10 +550,11 @@ private fn workload_busy_record_progress_locked(
         workload_busy_pair.both_running = true;
         workload_busy_pair.a_base = workload_busy_pair.a_rounds;
         workload_busy_pair.b_base = workload_busy_pair.b_rounds;
-        disable_irq();
+        // ProcessRunGuard already masks IRQs. Only its release may restore
+        // them: enabling here would expose the held run lock to an IRQ
+        // that enters the scheduler on this same core.
         workload_busy_pair.start_ticks = read_cntpct() as usize;
         workload_profile_start(workload_busy_pair.start_ticks, pid);
-        enable_irq();
         // The CPU accounting starts here too, so `cpu_a`/`cpu_b` and
         // `elapsed` cover the same interval and their sum is a fraction of
         // it rather than a number that can exceed it -- which is what the
@@ -594,10 +595,10 @@ private fn workload_busy_record_progress_locked(
     if (a_progress < WORKLOAD_BUSY_ROUNDS || b_progress < WORKLOAD_BUSY_ROUNDS) {
         return 0;
     }
-    disable_irq();
+    // Keep the caller's ProcessRunGuard mask through interval close and
+    // reporting; process_run_unlock restores the original IRQ state.
     workload_busy_pair.end_ticks = read_cntpct() as usize;
     workload_profile_finish(workload_busy_pair.end_ticks);
-    enable_irq();
     workload_busy_pair.reported = true;
     workload_busy_pair_report();
     // Not 1: the pair keeps reporting, because the restart demonstration
