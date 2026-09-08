@@ -108,10 +108,6 @@ ALLOWED_RUNS = {
     ("intc.tkb", "timer_irq_handler();"):
         "the dispatch tail: timer, then the EL0/EL1 preemption branch that "
         "nine files assert against",
-    ("uart.tkb", "if ((received & (1 << 10)) != 0 || (*uart_mis & (1 << 9)) "
-                 "!= 0) {"):
-        "PL011 BREAK detection inside uart_irq_handler, whose surrounding "
-        "bodies differ by RP1's per-vector IACK",
 }
 
 

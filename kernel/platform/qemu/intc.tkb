@@ -165,7 +165,7 @@ fn platform_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
     let mut debug_break: bool = false;
 
     if (id == qemu_uart_gic_intid) {
-        debug_break = uart_irq_handler();
+        debug_break = uart_irq_service();
     } else if (id == (virtio_net_gic_intid as u32) && virtio_net_gic_intid >= 0) {
         // GitHub issue #237 M4: virtio_net_gic_intid (kernel/drivers/net/
         // virtio_net.tkb) is discovered at runtime, not a compile-time

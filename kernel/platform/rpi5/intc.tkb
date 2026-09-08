@@ -404,7 +404,7 @@ fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
     let mut debug_break: bool = false;
 
     if (id == RPI5_UART0_GIC_INTID) {
-        debug_break = uart_irq_handler();
+        debug_break = uart_irq_service();
 
         // RP1's level-triggered MSI-X wrapper needs an IACK after the
         // device source has been serviced, matching rp1_chained_handle_irq.

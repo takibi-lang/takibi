@@ -1,0 +1,46 @@
+// The PL011 interrupt logic both platforms run, written once.
+//
+// QEMU's `virt` machine and RPi5's RP1 both present a standard PL011, at
+// different base addresses and behind different interrupt controllers. The
+// SEQUENCE the handler follows is neither platform's business: service the
+// queued transmitter, then decide whether what arrived is a serial BREAK --
+// which is how DDB is entered -- and otherwise hand the byte to the receive
+// handler, clearing the separately latched receive-timeout on the way out.
+//
+// It was written twice, identically apart from the base address, until GitHub
+// issue #517's inline-run comparison found it. The two platform trees are
+// never compiled together, so a drift here would have meant DDB entering on
+// one platform and not the other, discovered on a board.
+//
+// What stays per-platform is one register access each: which address, and
+// nothing else. A typo in an offset is a different and far smaller risk than
+// the else-if structure below drifting, which is the risk this file removes.
+use "kernel/lib/diagnostic_ring.tkb";
+use "kernel/printk/log.tkb";
+
+// True when the arrival was a BREAK and the caller should enter the debugger.
+//
+// QEMU represents CHR_EVENT_BREAK as a FIFO word carrying DR.BE; a real PL011
+// also exposes BE through MIS when BEIM is enabled. Both are checked, on both
+// platforms, because the kernel that runs under QEMU is the one that runs on
+// the board.
+fn uart_irq_service() -> bool !{interrupt, unsafe} {
+    if (uart_tx_irq_flagged()) { uart_tx_isr(); }
+    if (uart_rx_ready()) {
+        let received: u32 = uart_rx_word();
+        if ((received & (1 << 10)) != 0 || uart_break_flagged()) {
+            diagnostic_trace_record_uart_break(received as usize);
+            uart_break_clear();
+            return true;
+        }
+        uart_rx_handler(received as u8);
+    } else if (uart_break_flagged()) {
+        diagnostic_trace_record_uart_break(1 << 10);
+        uart_break_clear();
+        return true;
+    }
+    // Receive-timeout is latched separately from the FIFO level and must be
+    // cleared explicitly after servicing a short (e.g. one-byte) burst.
+    uart_rx_timeout_clear();
+    return false;
+}

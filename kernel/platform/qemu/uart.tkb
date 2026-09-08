@@ -15,6 +15,7 @@
 
 use "kernel/platform/qemu/intc.tkb";
 use "kernel/arch/arm64/kernel/platform_uart_common.tkb";
+use "kernel/drivers/serial/pl011.tkb";
 let mut uart_base: usize = 0x09000000;
 
 // The FIFO, reached without the logging path's bookkeeping: the drain below
@@ -69,36 +70,31 @@ fn uart_tx_isr() !{unsafe} {
     if (kernel_log_tx_pending() == false) { uart_tx_irq_disable(); }
 }
 
-// Called by platform_irq_dispatch (kernel/platform/qemu/intc.tkb) after
-// GICC_IAR identifies the UART SPI. No RP1-style per-vector IACK write
-// here -- QEMU's GICv2 needs only the ordinary GICC_EOIR this file's
-// caller already issues.
-fn uart_irq_handler() -> bool !{interrupt, unsafe} {
-    let uart_mis: *io u32 = unsafe { (uart_base + 0x40) as *io u32 };
-    let uart_icr: *io u32 = unsafe { (uart_base + 0x44) as *io u32 };
-    // GitHub issue #454: the queued transmitter's own source. Serviced before
-    // the receive path so a full FIFO is relieved as early in the handler as
-    // possible; the drain disarms TXIM itself once the queue empties, so an
-    // idle console raises no interrupt at all.
-    if ((*uart_mis & (1 << 5)) != 0) { uart_tx_isr(); }
-    if (uart_rx_ready()) {
-        let dr: *io u32 = unsafe { uart_base as *io u32 };
-        let received: u32 = *dr;
-        // QEMU represents CHR_EVENT_BREAK as a FIFO word carrying DR.BE.
-        // Real PL011 also exposes BE through MIS when BEIM is enabled.
-        if ((received & (1 << 10)) != 0 || (*uart_mis & (1 << 9)) != 0) {
-            diagnostic_trace_record_uart_break(received as usize);
-            *uart_icr = 1 << 9; // BEIC
-            return true;
-        }
-        uart_rx_handler(received as u8);
-    } else if ((*uart_mis & (1 << 9)) != 0) {
-        diagnostic_trace_record_uart_break(1 << 10);
-        *uart_icr = 1 << 9; // BEIC
-        return true;
-    }
-    *uart_icr = 1 << 6; // RTIC (receive-timeout, latched separately from FIFO level)
-    return false;
+// GitHub issue #517: one register access each, and nothing else. The
+// sequence they serve lives in kernel/drivers/serial/pl011.tkb.
+fn uart_tx_irq_flagged() -> bool !{interrupt, unsafe} {
+    let mis: *io u32 = unsafe { (uart_base + 0x40) as *io u32 };
+    return (*mis & (1 << 5)) != 0; // TXMIS
+}
+
+fn uart_break_flagged() -> bool !{interrupt, unsafe} {
+    let mis: *io u32 = unsafe { (uart_base + 0x40) as *io u32 };
+    return (*mis & (1 << 9)) != 0; // BEMIS
+}
+
+fn uart_break_clear() !{interrupt, unsafe} {
+    let icr: *io u32 = unsafe { (uart_base + 0x44) as *io u32 };
+    *icr = 1 << 9; // BEIC
+}
+
+fn uart_rx_timeout_clear() !{interrupt, unsafe} {
+    let icr: *io u32 = unsafe { (uart_base + 0x44) as *io u32 };
+    *icr = 1 << 6; // RTIC
+}
+
+fn uart_rx_word() -> u32 !{interrupt, unsafe} {
+    let dr: *io u32 = unsafe { uart_base as *io u32 };
+    return *dr;
 }
 
 fn uart_init() !{unsafe} {
