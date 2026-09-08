@@ -375,18 +375,31 @@ core count and not its per-core speed. What was missing was any account of
 what the guest was doing, and that is what the paragraph above supplies. The
 next occurrence answers it in the lane's own artifacts.
 
-1. **#520** the kernel's TCP path sustains 15 KiB/s, 12x slower than SWD and
+1. **#526** `langcheck` grew from one non-ASCII grep into a hand-listed
+   48-line gate, and a wall-clock control inside it cost CI nine consecutive
+   runs on 2026-09-07 -- six of the nine failed on that one script, and for
+   several of those rounds it gated `allbuild`, so no kernel lane ran at all
+   and the real defects behind it stayed invisible. Placed first because it is
+   the only entry here that pays back on every future round rather than once.
+   Agreed design: two prefixes, `check_` and `slowcheck_`, dispatched by glob
+   with no hand-listed enumeration, and the fast gate running each member under
+   a timeout so a name that lies is refused by the mechanism rather than by a
+   document. Renaming `langcheck` and `allbuild` themselves comes after, not
+   with it: a name should be changed once it points at a fact. Wait for a few
+   consecutive green runs first, and land it as one commit -- 31 files move,
+   and a half-migrated tree has both conventions live at once.
+2. **#520** the kernel's TCP path sustains 15 KiB/s, 12x slower than SWD and
    flat across transfer size. Measured 2026-09-06 and printed by
    `make kernelcheck-rpi5` on every run. Attributing it needs a named
    profiling interval around a network transfer, which is Territory A.
-2. **#497** post-boot profiling. Stages 1-4 turn out to be implemented
+3. **#497** post-boot profiling. Stages 1-4 turn out to be implemented
    already and run on every lane; what is left of its first milestone is that
    second named interval, then **#502** call chains and **#503** PMU
    counters.
-3. **#388** the hand-written exception vectors carry no stack-overflow test.
-4. **#429** in-kernel GDB stub, **#149** GDB without JTAG, **#444**
+4. **#388** the hand-written exception vectors carry no stack-overflow test.
+5. **#429** in-kernel GDB stub, **#149** GDB without JTAG, **#444**
    controlled DDB memory mutation.
-5. **#454** `uart_putc` busy-waits, at 87us per logged byte.
+6. **#454** `uart_putc` busy-waits, at 87us per logged byte.
 
 **#410 closed 2026-09-07**, and what it found is worth carrying: the tree held
 six of these counters rather than three, four were matched by no filter at
