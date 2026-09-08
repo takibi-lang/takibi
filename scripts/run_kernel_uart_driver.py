@@ -60,6 +60,11 @@ def diagnose_lifecycle(output: bytes, httpd_sent: bool,
             f"next expected '{next_expected}'")
 
 
+def workload_ready(output: bytes, marker: str | None) -> bool:
+    """Whether a caller-requested workload boundary has been observed."""
+    return marker is None or marker.encode("ascii") in output
+
+
 # Below this, a capture that timed out was merely slow rather than stopped.
 SILENCE_SECONDS = 2.0
 
@@ -480,10 +485,9 @@ def main() -> int:
                     network_ready_file.touch()
                     network_ready_published = True
 
-                workload_seen = (
-                    args.workload_marker is None or
-                    args.workload_marker.encode("ascii") in output)
-                if (interactive_httpd and not httpd_shell_probe_sent and
+                workload_seen = workload_ready(output, args.workload_marker)
+                if (interactive_httpd and workload_seen and
+                        not httpd_shell_probe_sent and
                         b"persistent shell: uart blocked\n" in output):
                     write_uart_line(connection, b"echo httpd-shell-ready")
                     httpd_shell_probe_sent = True

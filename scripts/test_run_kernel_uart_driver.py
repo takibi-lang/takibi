@@ -62,6 +62,22 @@ def main() -> int:
     if "(nothing at all)" not in driver.silence_note(90.0, 90.0, b""):
         failures.append("a capture with no output at all named no last line")
 
+    # The main QEMU and RPi5 lanes keep two CPU-bound processes alive after
+    # their measurement. Their final profile report can hold the IRQ-masking
+    # process lock while emitting much more than the UART RX FIFO can retain.
+    # Sending the interactive command before that boundary loses its newline,
+    # leaving ash blocked on the remainder forever.
+    workload_marker = "workload: busy pair done"
+    before_workload = b"persistent shell: uart blocked\n"
+    after_workload = (before_workload +
+                      b"workload: busy pair done\n")
+    if driver.workload_ready(before_workload, workload_marker):
+        failures.append("the interactive workload gate opened before its marker")
+    if not driver.workload_ready(after_workload, workload_marker):
+        failures.append("the interactive workload gate stayed closed after its marker")
+    if not driver.workload_ready(before_workload, None):
+        failures.append("an ungated lane was made to wait for a workload marker")
+
     for failure in failures:
         print(f"ERROR\tuart-driver-silence: {failure}")
     if failures:
@@ -69,7 +85,8 @@ def main() -> int:
               "itself")
         return 1
     print("PASS uart-driver-silence: a timed-out capture says whether the guest "
-          "stopped or merely ran late, and names its last line")
+          "stopped or merely ran late and names its last line; an interactive "
+          "command waits for its requested workload boundary")
     return 0
 
 
