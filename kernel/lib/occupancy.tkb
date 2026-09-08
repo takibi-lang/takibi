@@ -77,11 +77,11 @@
 //   leaving once clears it, so a drain could succeed with that core still
 //   inside. The linear `Occupying` makes the SECOND enter visible (two
 //   live tokens), but nothing rejects it. Every caller today enters once.
-// - WORLD STOP HAS ONE INITIATOR. The stop controller below is deliberately
-//   one-deep: DDB and the interval-boundary users serialize their own entry.
-//   Without compare-and-swap (issue #450), two simultaneous initiators can be
-//   refused but cannot be fairly arbitrated. Refusal is an explicit Busy
-//   result and never permission to inspect shared state.
+// - WORLD STOP IS ONE-DEEP. A nonblocking test-and-set gate refuses competing
+//   initiators with Busy; it never waits for a CPU it may need to stop.
+//   Request generations are never reused, including on integer exhaustion:
+//   exhaustion refuses further requests rather than accepting an old ack.
+//   These guarantees were revised on 2026-09-08 for repeated interval stops.
 use "kernel/lib/execution_model.tkb";
 
 // Presence, per core. Private, so no other file can read or write it
@@ -119,7 +119,9 @@ must_use variant OccupancyDrainResult[region: addr] {
 // resume cores that did acknowledge; its different type prevents it from
 // being passed to such a reader.
 struct WorldStop {
+    private claimed: usize;
     private owner: usize;
+    private generation: usize;
     private requested: usize;
     private ack: [usize; KERNEL_MAX_CORES];
 }
@@ -147,6 +149,10 @@ must_use variant WorldStopResult[stop: addr] {
 // exercise the partial result.
 let mut kernel_world_stop: WorldStop;
 
+private fn world_stop_claimed_address(stop: *WorldStop @ id) -> usize {
+    return (&(*stop).claimed) as usize;
+}
+
 private fn world_stop_owner_address(stop: *WorldStop @ id) -> usize {
     return (&(*stop).owner) as usize;
 }
@@ -168,12 +174,10 @@ private fn world_stop_ack_address(
 // interrupt handlers cannot carry may_block, and this is a bounded diagnostic
 // or rollover interval rather than an idle state.
 fn world_stop_interrupt_hold() !{interrupt, unsafe} {
-    if (unsafe {
-            atomic_load_acquire(
-                world_stop_requested_address(&kernel_world_stop))
-        } == 0) {
-        return;
-    }
+    let generation: usize = unsafe {
+        atomic_load_acquire(world_stop_requested_address(&kernel_world_stop))
+    };
+    if (generation == 0) { return; }
     let raw_cpu: usize = cpu_id();
     if (raw_cpu >= KERNEL_MAX_CORES) { return; }
     let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
@@ -183,12 +187,12 @@ fn world_stop_interrupt_hold() !{interrupt, unsafe} {
     if (owner == raw_cpu + 1) { return; }
     unsafe {
         atomic_store_release(
-            world_stop_ack_address(&kernel_world_stop, cpu), 1);
+            world_stop_ack_address(&kernel_world_stop, cpu), generation);
     }
     while (unsafe {
                atomic_load_acquire(
                    world_stop_requested_address(&kernel_world_stop))
-           } != 0) {
+           } == generation) {
     }
     unsafe {
         atomic_store_release(
@@ -200,27 +204,45 @@ fn world_stop_interrupt_hold() !{interrupt, unsafe} {
 // computed target set. A bounded wait returns Partial rather than claiming a
 // proof when any target did not acknowledge.
 private fn world_stop_begin_config(stop: *WorldStop @ id, cores: usize,
-                                   spins: usize, notify: bool)
+                                   spins: usize, notify: bool,
+                                   stale_ack_probe: bool)
         -> WorldStopResult[id] !{unsafe} {
     let raw_owner: usize = cpu_id();
     if (cores == 0 || cores > KERNEL_MAX_CORES ||
             raw_owner >= cores || raw_owner >= KERNEL_MAX_CORES) {
         return WorldStopResult::Busy;
     }
+    // Every contender writes the SAME held value. A failed attempt must not
+    // restore an earlier owner: that owner may have released in the meantime.
     let claimed: usize = unsafe {
-        atomic_swap_acquire(world_stop_owner_address(stop), raw_owner + 1)
+        atomic_swap_acquire(world_stop_claimed_address(stop), 1)
     };
-    if (claimed != 0) {
-        unsafe {
-            atomic_store_release(world_stop_owner_address(stop), claimed);
-        }
+    if (claimed != 0) { return WorldStopResult::Busy; }
+    let previous: usize = (*stop).generation;
+    if (previous == ~(0 as usize)) {
+        unsafe { atomic_store_release(world_stop_claimed_address(stop), 0); }
         return WorldStopResult::Busy;
     }
-    for cpu: usize in 0..<KERNEL_MAX_CORES {
-        unsafe { atomic_store_release(world_stop_ack_address(stop, cpu), 0); }
-    }
+    let generation: usize = previous + 1;
+    (*stop).generation = generation;
+    // Do not clear peer-owned ack words here. An old handler may still be
+    // leaving; only an acknowledgement of THIS generation proves it stopped
+    // for this request. Its old holding loop also exits if a newer request
+    // overtakes the zero written by release.
     unsafe {
-        atomic_store_release(world_stop_requested_address(stop), 1);
+        atomic_store_release(world_stop_owner_address(stop), raw_owner + 1);
+        atomic_store_release(world_stop_requested_address(stop), generation);
+    }
+    // Negative control: model a delayed acknowledgement from the previous
+    // request AFTER this request was published. Never used with notification.
+    if (stale_ack_probe) {
+        for cpu: usize in 0..<KERNEL_MAX_CORES {
+            if (cpu < cores && cpu != raw_owner) {
+                unsafe {
+                    atomic_store_release(world_stop_ack_address(stop, cpu), previous);
+                }
+            }
+        }
     }
     if (notify) { platform_world_stop_notify(cores, raw_owner); }
 
@@ -235,7 +257,7 @@ private fn world_stop_begin_config(stop: *WorldStop @ id, cores: usize,
             if (cpu < cores && cpu != raw_owner) {
                 if (unsafe {
                         atomic_load_acquire(world_stop_ack_address(stop, cpu))
-                    } == 0) {
+                    } != generation) {
                     complete = false;
                 } else {
                     stopped_mask = stopped_mask | (1 << cpu);
@@ -255,7 +277,7 @@ private fn world_stop_begin_config(stop: *WorldStop @ id, cores: usize,
 
 fn world_stop_begin(stop: *WorldStop @ id, cores: usize, spins: usize)
         -> WorldStopResult[id] !{unsafe} {
-    return world_stop_begin_config(stop, cores, spins, true);
+    return world_stop_begin_config(stop, cores, spins, true, false);
 }
 
 // Test-only negative control: production callers cannot suppress the SGI.
@@ -264,14 +286,24 @@ fn world_stop_begin(stop: *WorldStop @ id, cores: usize, spins: usize)
 fn world_stop_begin_nonack_probe(
         stop: *WorldStop @ id, cores: usize, spins: usize)
         -> WorldStopResult[id] !{unsafe} {
-    return world_stop_begin_config(stop, cores, spins, false);
+    return world_stop_begin_config(stop, cores, spins, false, false);
+}
+
+// A private controller with no live handler is required: this negative control
+// deliberately impersonates a late peer write rather than sending an SGI.
+fn world_stop_begin_stale_ack_probe(
+        stop: *WorldStop @ id, cores: usize, spins: usize)
+        -> WorldStopResult[id] !{unsafe} {
+    return world_stop_begin_config(stop, cores, spins, false, true);
 }
 
 private fn world_stop_resume(stop: *WorldStop @ id) !{unsafe} {
     unsafe {
         atomic_store_release(world_stop_requested_address(stop), 0);
     }
-    unsafe { atomic_store_release(world_stop_owner_address(stop), 0); }
+    // owner remains stable until the next successful claimant publishes it.
+    // Releasing the gate last prevents a new publication being cleared here.
+    unsafe { atomic_store_release(world_stop_claimed_address(stop), 0); }
 }
 
 fn world_stop_release(stopped: sink WorldStopped[id],

@@ -161,14 +161,20 @@ substitute machine quiescence for a lock accept that type, so a request which
 did not stop every target cannot call them. A bounded incomplete request
 returns the distinct linear `WorldStopPartial[controller]`; it records which
 CPUs acknowledged only so release can remain mandatory, not as inspection
-permission. Concurrent initiators are refused rather than arbitrated until
-compare-and-swap exists.
+permission. A nonblocking test-and-set gate refuses concurrent initiators
+without changing the owner's identity. Each request has a fresh nonzero
+generation, and an acknowledgement must match it. A handler leaving an older
+request cannot acknowledge a new stop or remain held by it. Generations never
+wrap: exhaustion refuses subsequent requests.
 
 The maintained contention lane proves the distinction on QEMU and RPi5. Its
 positive phase stops the live secondary through the real SGI, observes that
 its timer count stays fixed, and resumes it. Its negative phase suppresses the
 test notification to make that same live CPU deliberately fail to acknowledge;
 only a partial token is produced and the guarded inspection count stays one.
+It also repeats sixteen immediate stop/release pairs with the online peer,
+checks nested requests are refused, and injects a stale nonzero acknowledgement
+into a private controller to prove it cannot mint a complete token.
 
 ## Two-core probes
 

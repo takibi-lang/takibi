@@ -73,6 +73,7 @@ private let mut occupancy_probe_release: usize;
 private let mut occupancy_probe_left: usize;
 private let mut occupancy_probe_teardowns: usize;
 private let mut world_stop_probe_inspections: usize;
+private let mut world_stop_stale_probe_controller: WorldStop;
 
 private fn occupancy_probe_armed_address() -> usize {
     return (&occupancy_probe_armed) as usize;
@@ -290,6 +291,58 @@ fn world_stop_probe() -> bool !{unsafe} {
         }
     }
 
+    // The same live peer must acknowledge fresh requests without a timer
+    // delay between release and the next begin. Also exercise Busy while a
+    // complete token is live, without releasing that token on the refusal.
+    let mut repeated: usize = 0;
+    let mut busy: usize = 0;
+    for round: usize in 0..<16 {
+        match world_stop_begin(&kernel_world_stop, 2, WORLD_STOP_PROBE_SPINS) {
+            WorldStopResult::Busy => { }
+            WorldStopResult::Partial(partial) => {
+                world_stop_partial_release(partial, &kernel_world_stop);
+            }
+            WorldStopResult::Complete(stopped) => {
+                repeated = repeated + 1;
+                match world_stop_begin(&kernel_world_stop, 2, 1) {
+                    WorldStopResult::Busy => { busy = busy + 1; }
+                    WorldStopResult::Partial(partial) => {
+                        world_stop_partial_release(partial, &kernel_world_stop);
+                    }
+                    WorldStopResult::Complete(unexpected) => {
+                        world_stop_release(unexpected, &kernel_world_stop);
+                    }
+                }
+                world_stop_release(stopped, &kernel_world_stop);
+            }
+        }
+    }
+
+    // No SGI uses this private controller. The first request advances its
+    // generation; the second injects that now-stale, NONZERO acknowledgement
+    // after publication. Only Partial, with no acknowledged CPUs, is valid.
+    let mut stale: bool = false;
+    match world_stop_begin_nonack_probe(&world_stop_stale_probe_controller, 2, 1) {
+        WorldStopResult::Busy => { }
+        WorldStopResult::Complete(unexpected) => {
+            world_stop_release(unexpected, &world_stop_stale_probe_controller);
+        }
+        WorldStopResult::Partial(first) => {
+            world_stop_partial_release(first, &world_stop_stale_probe_controller);
+            match world_stop_begin_stale_ack_probe(
+                    &world_stop_stale_probe_controller, 2, 1) {
+                WorldStopResult::Busy => { }
+                WorldStopResult::Complete(unexpected) => {
+                    world_stop_release(unexpected, &world_stop_stale_probe_controller);
+                }
+                WorldStopResult::Partial(second) => {
+                    stale = world_stop_partial_mask(second) == 0;
+                    world_stop_partial_release(second, &world_stop_stale_probe_controller);
+                }
+            }
+        }
+    }
+
     let mut full_count: usize = 0;
     let mut partial_count: usize = 0;
     let mut resumed_count: usize = 0;
@@ -304,7 +357,13 @@ fn world_stop_probe() -> bool !{unsafe} {
     uart_put_udec(resumed_count);
     kernel_boot_log(" inspections=");
     uart_put_udec(world_stop_probe_inspections);
+    kernel_boot_log(" repeated=");
+    uart_put_udec(repeated);
+    kernel_boot_log(" busy=");
+    uart_put_udec(busy);
+    kernel_boot_log(" stale-refused=");
+    if (stale) { uart_put_udec(1); } else { uart_put_udec(0); }
     kernel_boot_log("\n");
     return full && partial_ok && resumed &&
-           world_stop_probe_inspections == 1;
+           world_stop_probe_inspections == 1 && repeated == 16 && busy == 16 && stale;
 }
