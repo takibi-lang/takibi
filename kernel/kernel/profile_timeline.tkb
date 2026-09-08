@@ -10,9 +10,11 @@
 // - The only profiled interval is busy-pair. It does not perform block-device
 //   or network I/O and does not contend on a kernel lock, so this first trace
 //   has no speculative hooks for those event classes.
-// - Storage is per core but activation/reporting is single-writer while
-//   KERNEL_ACTIVE_CORES is 1. Raising it requires the #497 multicore re-audit,
-//   including timestamp merge and cross-core wakeup ordering.
+// - Storage is per core. Start and finish run with every active CPU stopped;
+//   each producer tests activation and publishes its whole event with local
+//   IRQs masked. PID filters are immutable while active. Reporting therefore
+//   walks stable buffers, and the host parser merges them by timestamp, CPU,
+//   and per-CPU sequence before emitting the trace.
 // - Each core keeps the first 512 events and counts the rest as lost. This is
 //   a prefix timeline, not a ring and not a claim that missing suffix events
 //   did not occur.
@@ -245,9 +247,4 @@ fn profile_timeline_report(start: usize, finish: usize) {
             }
         }
     }
-}
-
-fn profile_timeline_execution_model_assumption() {
-    static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "timeline activation and reporting are single-writer; re-audit timestamp merge and cross-core wakeup ordering before scheduling on a second core");
 }

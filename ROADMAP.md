@@ -127,6 +127,13 @@ reservation for a later progress syscall to retry. Next implement local PMU
 start/stop on every process-running core. Keep the existing multicore
 assertions until that boundary is exercised from the peer.
 
+The timeline assertion is removed after that boundary audit. Its buffers are
+per-core, activation and closure occur under complete world-stop, and each
+event is published with local IRQs masked. The host workload profiler already
+merges the stable per-core streams by timestamp, CPU, and local sequence. A
+fresh two-core negative build now reports eight unique blockers and no
+timeline diagnostic; profile samples and workload PMU ownership remain.
+
 Before adding repeated interval stops, the world-stop controller now separates
 its nonblocking claim gate from the owner identity and uses non-reused request
 generations. Old acknowledgements cannot satisfy a fresh stop, and a failed
