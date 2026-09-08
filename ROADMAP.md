@@ -407,7 +407,25 @@ next occurrence answers it in the lane's own artifacts.
 4. **#388** the hand-written exception vectors carry no stack-overflow test.
 5. **#429** in-kernel GDB stub, **#149** GDB without JTAG, **#444**
    controlled DDB memory mutation.
-6. **#454** `uart_putc` busy-waits, at 87us per logged byte.
+**#454 closed 2026-09-08**, and its numbers outlive it. Measured on the board
+before and after: `console tx spin=2519 ms over 31919 bytes (78.9 us/byte)`
+became `81 ms over 31999 bytes (1077 spun, 75.4 us each)`. `kernel_boot_log`
+queues and returns; the TX interrupt drains and disarms itself; early boot,
+DDB and the crash console keep the old spinning path, and the terminal ones
+stand the queue down at entry so their output is byte-identical through
+exactly the path it used before. `make kernelcheck-rpi5` prints the figure on
+every run, so a regression shows in a diff rather than in a memory -- and it
+prints QEMU's 0.5 us/byte too, which is the standing reminder that only the
+board can judge this one.
+
+Two things the work found that reasoning had not. `disable_irq`/`enable_irq`
+are absolute, so a console that enabled them unconditionally unmasked
+interrupts underneath any caller holding them masked, including DDB; the fix
+is `mutex_irq_save`/`mutex_irq_restore`, which `kernel/lib/pool_lock.tkb`
+already carried. And `check_platform_file_parity.py` refused the first
+version, correctly: queue-or-spin, when to drain and when to flush are console
+decisions, not platform ones, so they live in `kernel/printk/log.tkb` and the
+platform keeps only the four MMIO primitives that differ by base address.
 
 **#410 closed 2026-09-07**, and what it found is worth carrying: the tree held
 six of these counters rather than three, four were matched by no filter at

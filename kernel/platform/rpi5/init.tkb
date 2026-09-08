@@ -863,6 +863,11 @@ fn main() !{unsafe} {
     kernel_test_init_script = true;
     kernel_test_driver_run();
 
+    // GitHub issue #454: the last flush point the issue names. Nothing after
+    // this line runs, so a byte still in the transmit queue would never leave
+    // -- the park is exactly the case where "must be on the wire before it
+    // proceeds" means "before it stops proceeding at all".
+    uart_tx_flush();
     platform_shutdown();
     while (true) { }
 }
