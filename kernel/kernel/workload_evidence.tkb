@@ -34,8 +34,10 @@
 // - THE VERDICT IS SERIALIZED with the process run lock. Scheduler picks
 //   that already hold the lock thread its guard into this file; syscall and
 //   lifecycle paths that do not hold it acquire once at their boundary.
-//   The profiling interval still has a separate multicore restriction at
-//   the end of this file: starting it resets every core's accounting array.
+//   Profiling interval boundaries additionally stop every active core before
+//   resetting or reading the per-core arrays. The stop rendezvous happens
+//   outside the run lock; a peer holding that IRQ-masking lock could not
+//   otherwise acknowledge its stop SGI.
 // - THE PROGRESS COUNT IS THE CALLER'S CLAIM. A process that reported
 //   without doing the work between reports would be believed. What the
 //   syscall checks is identity (which process is speaking) and ordering,
@@ -44,6 +46,7 @@
 
 use "kernel/arch/arm64/kernel/timer.tkb";
 use "kernel/lib/execution_model.tkb";
+use "kernel/lib/occupancy.tkb";
 use "kernel/kernel/profile_samples.tkb";
 use "kernel/kernel/profile_timeline.tkb";
 
@@ -89,6 +92,13 @@ const WORKLOAD_BUSY_ROUNDS: usize = 8;
 // #448's "report what the second core bought" criterion needs. They stay
 // diagnostic here only because no bound has been chosen for them yet.
 const WORKLOAD_BUSY_SKEW_BOUND: usize = 4;
+const WORKLOAD_PROFILE_WORLD_STOP_SPINS: usize = 10000000;
+
+must_use variant WorkloadBusyProgressResult {
+    Value(usize);
+    StartRequested;
+    FinishRequested;
+}
 
 struct WorkloadBusyPair {
     // The pid currently reporting under each tag, and how many times that
@@ -108,6 +118,7 @@ struct WorkloadBusyPair {
     a_base: usize;
     b_base: usize;
     both_running: bool;
+    start_requested: bool;
     max_skew: usize;
     a_slices: usize;
     b_slices: usize;
@@ -118,6 +129,7 @@ struct WorkloadBusyPair {
     start_ticks: usize;
     end_ticks: usize;
     reported: bool;
+    finish_requested: bool;
     // The restart demonstration, which runs once after the fairness
     // verdict. `restart_requested` is this file having told tag A to exit;
     // the three `*_before` fields are what was true of the pair at that
@@ -403,7 +415,9 @@ fn workload_profile_note_network_tx(bytes: usize) {
     if (irq_was_masked == 0) { enable_irq(); }
 }
 
-private fn workload_profile_start(now: usize, pid: usize) {
+private fn workload_profile_start(
+        stopped: borrow WorldStopped[stop],
+        guard: borrow ProcessRunGuard[lock], now: usize, pid: usize) {
     for cpu: usize in 0..<KERNEL_MAX_CORES {
         workload_profile_core_reset(cpu);
     }
@@ -429,7 +443,9 @@ private fn workload_profile_start(now: usize, pid: usize) {
     profile_sample_start();
 }
 
-private fn workload_profile_finish(now: usize) {
+private fn workload_profile_finish(
+        stopped: borrow WorldStopped[stop],
+        guard: borrow ProcessRunGuard[lock], now: usize) {
     for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
         workload_profile_charge(cpu, now);
     }
@@ -466,6 +482,7 @@ fn workload_busy_pair_reset() {
     workload_busy_pair.a_base = 0;
     workload_busy_pair.b_base = 0;
     workload_busy_pair.both_running = false;
+    workload_busy_pair.start_requested = false;
     workload_busy_pair.max_skew = 0;
     workload_busy_pair.a_slices = 0;
     workload_busy_pair.b_slices = 0;
@@ -476,6 +493,7 @@ fn workload_busy_pair_reset() {
     workload_busy_pair.start_ticks = 0;
     workload_busy_pair.end_ticks = 0;
     workload_busy_pair.reported = false;
+    workload_busy_pair.finish_requested = false;
     workload_busy_pair.restart_requested = false;
     workload_busy_pair.restart_a_pid_before = 0;
     workload_busy_pair.restart_b_pid_before = 0;
@@ -544,14 +562,16 @@ private fn workload_busy_absolute_difference(left: usize, right: usize)
 // reporting" and not "stop".
 private fn workload_busy_record_progress_locked(
         guard: borrow ProcessRunGuard[lock], tag: usize, checksum: usize,
-        input_steps: usize) -> usize !{unsafe} {
-    if (workload_busy_pair.restart_reported) { return 1; }
+        input_steps: usize) -> WorkloadBusyProgressResult !{unsafe} {
+    if (workload_busy_pair.restart_reported) {
+        return WorkloadBusyProgressResult::Value(1);
+    }
     // Started by init, from /etc/inittab. A report from anywhere else is
     // not this workload, and counting it would let an unrelated process
     // satisfy the fairness assertion on the real one's behalf.
     if (kernel_process_parent_is_root() == false) {
         workload_busy_pair.refused = workload_busy_pair.refused + 1;
-        return 0;
+        return WorkloadBusyProgressResult::Value(0);
     }
     let pid: usize = kernel_process_current_pid();
     if (tag == WORKLOAD_BUSY_TAG_A) {
@@ -574,49 +594,24 @@ private fn workload_busy_record_progress_locked(
         workload_busy_pair.b_checksum = checksum;
     } else {
         workload_busy_pair.refused = workload_busy_pair.refused + 1;
-        return 0;
+        return WorkloadBusyProgressResult::Value(0);
     }
     if (workload_busy_pair.both_running == false) {
         if (workload_busy_pair.a_pid == 0 || workload_busy_pair.b_pid == 0) {
-            return 0;
+            return WorkloadBusyProgressResult::Value(0);
         }
-        // Both have now spoken, so both exist and both are runnable. This
-        // is the start of the measured interval.
-        workload_busy_pair.both_running = true;
-        workload_busy_pair.a_base = workload_busy_pair.a_rounds;
-        workload_busy_pair.b_base = workload_busy_pair.b_rounds;
-        // ProcessRunGuard already masks IRQs. Only its release may restore
-        // them: enabling here would expose the held run lock to an IRQ
-        // that enters the scheduler on this same core.
-        workload_busy_pair.start_ticks = read_cntpct() as usize;
-        workload_profile_start(workload_busy_pair.start_ticks, pid);
-        // The CPU accounting starts here too, so `cpu_a`/`cpu_b` and
-        // `elapsed` cover the same interval and their sum is a fraction of
-        // it rather than a number that can exceed it -- which is what the
-        // first hardware run reported, and it made the two unreadable
-        // together. `last_tick` has to go with them: leaving it set would
-        // credit the next switch with the whole stretch before this point,
-        // which is exactly how the first attempt at this reset still
-        // reported a sum larger than the interval.
-        workload_busy_pair.a_ticks = 0;
-        workload_busy_pair.b_ticks = 0;
-        workload_busy_pair.last_pid = 0;
-        workload_busy_pair.last_tick = 0;
-        kernel_boot_log("profile: begin name=busy-pair input_steps=");
-        uart_put_udec(input_steps);
-        kernel_boot_log(" cpu_count=");
-        uart_put_udec(KERNEL_ACTIVE_CORES);
-        kernel_boot_log(" iterations_goal=");
-        uart_put_udec(WORKLOAD_BUSY_ROUNDS * 2);
-        kernel_boot_log(" pid_a=");
-        uart_put_udec(workload_busy_pair.a_pid);
-        kernel_boot_log(" pid_b=");
-        uart_put_udec(workload_busy_pair.b_pid);
-        kernel_boot_log("\n");
-        return 0;
+        if (workload_busy_pair.start_requested) {
+            return WorkloadBusyProgressResult::Value(0);
+        }
+        workload_busy_pair.start_requested = true;
+        return WorkloadBusyProgressResult::StartRequested;
     }
     if (workload_busy_pair.reported) {
-        return workload_busy_restart_step(guard, tag);
+        return WorkloadBusyProgressResult::Value(
+            workload_busy_restart_step(guard, tag));
+    }
+    if (workload_busy_pair.finish_requested) {
+        return WorkloadBusyProgressResult::Value(0);
     }
     let a_progress: usize =
         workload_busy_pair.a_rounds - workload_busy_pair.a_base;
@@ -628,26 +623,120 @@ private fn workload_busy_record_progress_locked(
         workload_busy_pair.max_skew = skew;
     }
     if (a_progress < WORKLOAD_BUSY_ROUNDS || b_progress < WORKLOAD_BUSY_ROUNDS) {
-        return 0;
+        return WorkloadBusyProgressResult::Value(0);
     }
-    // Keep the caller's ProcessRunGuard mask through interval close and
-    // reporting; process_run_unlock restores the original IRQ state.
-    workload_busy_pair.end_ticks = read_cntpct() as usize;
-    workload_profile_finish(workload_busy_pair.end_ticks);
-    workload_busy_pair.reported = true;
-    workload_busy_pair_report();
-    // Not 1: the pair keeps reporting, because the restart demonstration
-    // below is driven entirely by which of them speaks next.
-    return 0;
+    // Reserve the close while serialized, then leave the run lock before
+    // asking peers to stop. A peer spinning for this IRQ-masking lock cannot
+    // acknowledge the stop SGI until this guard is released.
+    workload_busy_pair.finish_requested = true;
+    return WorkloadBusyProgressResult::FinishRequested;
+}
+
+private fn workload_busy_start_profile(pid: usize, input_steps: usize)
+        !{unsafe} {
+    match world_stop_begin(&kernel_world_stop, KERNEL_ACTIVE_CORES,
+                           WORKLOAD_PROFILE_WORLD_STOP_SPINS) {
+        WorldStopResult::Busy => {
+            let retry_guard = process_run_lock();
+            workload_busy_pair.start_requested = false;
+            process_run_unlock(retry_guard);
+        }
+        WorldStopResult::Partial(partial) => {
+            world_stop_partial_release(partial, &kernel_world_stop);
+            let retry_guard = process_run_lock();
+            workload_busy_pair.start_requested = false;
+            process_run_unlock(retry_guard);
+        }
+        WorldStopResult::Complete(stopped) => {
+            let start_guard = process_run_lock();
+            if (workload_busy_pair.start_requested &&
+                    workload_busy_pair.both_running == false &&
+                    workload_busy_pair.a_pid != 0 &&
+                    workload_busy_pair.b_pid != 0) {
+                // Both have spoken and remain serialized. Reset every CPU at
+                // the actual stopped boundary, not at the earlier request.
+                workload_busy_pair.both_running = true;
+                workload_busy_pair.start_requested = false;
+                workload_busy_pair.a_base = workload_busy_pair.a_rounds;
+                workload_busy_pair.b_base = workload_busy_pair.b_rounds;
+                workload_busy_pair.start_ticks = read_cntpct() as usize;
+                workload_profile_start(
+                    stopped, start_guard, workload_busy_pair.start_ticks, pid);
+                workload_busy_pair.a_ticks = 0;
+                workload_busy_pair.b_ticks = 0;
+                workload_busy_pair.last_pid = 0;
+                workload_busy_pair.last_tick = 0;
+                kernel_boot_log("profile: begin name=busy-pair input_steps=");
+                uart_put_udec(input_steps);
+                kernel_boot_log(" cpu_count=");
+                uart_put_udec(KERNEL_ACTIVE_CORES);
+                kernel_boot_log(" iterations_goal=");
+                uart_put_udec(WORKLOAD_BUSY_ROUNDS * 2);
+                kernel_boot_log(" pid_a=");
+                uart_put_udec(workload_busy_pair.a_pid);
+                kernel_boot_log(" pid_b=");
+                uart_put_udec(workload_busy_pair.b_pid);
+                kernel_boot_log("\n");
+            }
+            process_run_unlock(start_guard);
+            world_stop_release(stopped, &kernel_world_stop);
+        }
+    }
 }
 
 fn workload_busy_record_progress(tag: usize, checksum: usize,
                                  input_steps: usize) -> usize !{unsafe} {
     let guard = process_run_lock();
-    let result: usize = workload_busy_record_progress_locked(
-        guard, tag, checksum, input_steps);
-    process_run_unlock(guard);
-    return result;
+    match workload_busy_record_progress_locked(
+            guard, tag, checksum, input_steps) {
+        WorkloadBusyProgressResult::Value(value) => {
+            process_run_unlock(guard);
+            return value;
+        }
+        WorkloadBusyProgressResult::StartRequested => {
+            process_run_unlock(guard);
+            workload_busy_start_profile(
+                kernel_process_current_pid(), input_steps);
+            return 0;
+        }
+        WorkloadBusyProgressResult::FinishRequested => {
+            process_run_unlock(guard);
+        }
+    }
+    match world_stop_begin(&kernel_world_stop, KERNEL_ACTIVE_CORES,
+                           WORKLOAD_PROFILE_WORLD_STOP_SPINS) {
+        WorldStopResult::Busy => {
+            let retry_guard = process_run_lock();
+            workload_busy_pair.finish_requested = false;
+            process_run_unlock(retry_guard);
+        }
+        WorldStopResult::Partial(partial) => {
+            world_stop_partial_release(partial, &kernel_world_stop);
+            let retry_guard = process_run_lock();
+            workload_busy_pair.finish_requested = false;
+            process_run_unlock(retry_guard);
+        }
+        WorldStopResult::Complete(stopped) => {
+            let finish_guard = process_run_lock();
+            // The reservation is still serialized by ProcessRunGuard. With
+            // peers stopped, no producer can resume between the final charge
+            // and publication of inactive state.
+            if (workload_busy_pair.finish_requested &&
+                    workload_busy_pair.reported == false) {
+                workload_busy_pair.end_ticks = read_cntpct() as usize;
+                workload_profile_finish(
+                    stopped, finish_guard, workload_busy_pair.end_ticks);
+                workload_busy_pair.reported = true;
+                workload_busy_pair.finish_requested = false;
+                workload_busy_pair_report();
+            }
+            process_run_unlock(finish_guard);
+            world_stop_release(stopped, &kernel_world_stop);
+        }
+    }
+    // Not 1: the pair keeps reporting, because the restart demonstration is
+    // driven entirely by which of them speaks next.
+    return 0;
 }
 
 // The second half of the fixture: init brings back the entry that died, and
@@ -838,13 +927,13 @@ private fn workload_busy_pair_report() !{unsafe} {
 // acquire through the public wrappers, so nested acquisition is explicit and
 // rejected by the linear guard API rather than becoming a runtime deadlock.
 //
-// The remaining restriction is the profiling INTERVAL boundary. Start resets
-// every WorkloadProfileCore before publishing workload_profile_active, while
-// finish charges and reads every active core. Per-core event updates disable
-// only their local IRQ and do not rendezvous with that cross-core reset/read.
-// Enabling a second core therefore needs a start/finish protocol that first
-// makes every core quiescent; the busy-pair lock alone cannot prove that.
+// Profile start/finish now require both machine quiescence and ProcessRunGuard:
+// the first prevents per-core producers from changing the arrays, while the
+// second serializes the busy-pair state that decides which boundary is valid.
+// The remaining restriction is local PMU ownership. Only the initiating core
+// arms and stops its PMU, so a second process-running core needs an explicit
+// per-core start/stop protocol before this assertion can be removed.
 fn workload_execution_model_assumption() {
     static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "workload profile start/finish must rendezvous with every core before resetting or reading its counters");
+                  "workload profile PMU start/stop must run on every process-running core");
 }
