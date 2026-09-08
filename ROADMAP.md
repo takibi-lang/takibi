@@ -385,9 +385,17 @@ next occurrence answers it in the lane's own artifacts.
    with no hand-listed enumeration, and the fast gate running each member under
    a timeout so a name that lies is refused by the mechanism rather than by a
    document. Renaming `langcheck` and `allbuild` themselves comes after, not
-   with it: a name should be changed once it points at a fact. Wait for a few
-   consecutive green runs first, and land it as one commit -- 31 files move,
-   and a half-migrated tree has both conventions live at once.
+   with it: a name should be changed once it points at a fact. The timeout is
+   a membership rule and not an estimate -- a check that cannot finish inside
+   it has changed category, so it is investigated rather than raised, the same
+   discipline the boot-duration bound already carries.
+   **DO NOT START THIS WITHOUT THE MAINTAINER SAYING SO.** Its position here is
+   its value per future round, not its urgency, and starting it because it sits
+   first is the mistake it is about. It also needs a quiet window: 31 files
+   move, the Makefile is shared, and a `test_*` script added by either
+   territory mid-migration silently restores the old convention. Land it as one
+   commit after a few consecutive green runs -- a half-migrated tree has both
+   conventions live at once.
 2. **#520** the kernel's TCP path sustains 15 KiB/s, 12x slower than SWD and
    flat across transfer size. Measured 2026-09-06 and printed by
    `make kernelcheck-rpi5` on every run. Attributing it needs a named
