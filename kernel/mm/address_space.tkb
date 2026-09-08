@@ -663,6 +663,9 @@ fn address_space_commit_activation(
     return AddressSpaceActivationCommitResult::Activated(checked);
 }
 
+fn address_space_cancel_activation(
+        prepared: sink AddressSpaceActivationPrepared[root]) {}
+
 fn address_space_activate_root(slot: usize) {
     if (scheduled_process_slot_valid(slot)) {
         let checked: usize = slot;

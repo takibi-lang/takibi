@@ -170,6 +170,15 @@ neither TTBR0 nor the per-CPU target-root record; the probe now reactivates its
 stale running root through this boundary. The process-image wrapper publishes
 its target-root and trace only after address-space commit succeeds.
 
+The ordinary timer/deferred scheduler path now uses that split. It takes the
+target's existing linear owner and changes its state from Ready to Running as
+the reservation, drops `ProcessRunGuard`, prepares the ASID, then reacquires
+the guard and revalidates both handles and states before committing TTBR0 and
+the logical current process. A failed preparation, world stop, or revalidation
+returns the reserved target to Ready through the same linear state token. The
+block, clone, and exit handoffs still use direct activation and remain in the
+two-core worklist.
+
 #### Handed over from Territory B, 2026-09-07
 
 **#524 is the one that should be read first, and it is not a decision -- it is

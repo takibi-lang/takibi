@@ -820,6 +820,11 @@ fn process_image_commit_activation(
     }
 }
 
+fn process_image_cancel_activation(
+        prepared: sink AddressSpaceActivationPrepared[root]) {
+    address_space_cancel_activation(prepared);
+}
+
 // Give the parent's copy-on-write pages back and put the parent's root
 // into TTBR0 again. `dest_root` is the root the clone was made INTO -- the
 // caller's own, at every one of the three call sites, since a clone is

@@ -154,6 +154,11 @@ const KERNEL_STACK_RUN_BYTES: usize = KERNEL_STACK_RUN_PAGES * PAGE_SIZE;
 // the log of.
 const KERNEL_STACK_SHIFT: usize = 14;
 
+// A failed stop only cancels this scheduling attempt; the next tick retries.
+// The bound is deliberately the same as the maintained stop probes, while
+// remaining owned by the scheduler rather than by profiling evidence.
+const SCHEDULER_WORLD_STOP_SPINS: usize = 10000000;
+
 // Issue #188 Stage 2: the stable store holds one generation-indexed process
 // identity. A separate linear state token carries Ready/Running/Exited, so
 // adding a later Blocked state does not require another copy of the stable
@@ -2110,7 +2115,9 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize)
 // a pool lock (scheduled_process_record_at reaches the pool through
 // intrusive_pool_probe_slot, a WALK, which takes no guard -- issue #482);
 // clone takes run and then the pool's, which is run -> pool; and
-// switch_to reaches asid through process_image_activate_root.
+// Scheduler activation drops this lock before ASID preparation. Once a
+// prepared activation exists, commit reacquires the run lock and reaches only
+// the non-allocating ASID-current check before changing TTBR0.
 private let mut scheduled_process_run_lock: Mutex;
 
 // THREADED, NOT ACQUIRED INTERNALLY, and that is the decision worth
@@ -3250,48 +3257,6 @@ fn kernel_process_schedulable_count() -> usize {
     return live;
 }
 
-// The switch itself, once a target has been chosen: park the outgoing
-// frame, hand the CPU over, and answer with the incoming process's own
-// saved frame. Both of this file's schedulers and both of its blockers end
-// here, so "how a switch is performed" has one implementation and only the
-// choice of target varies.
-private fn kernel_process_switch_to(guard: borrow ProcessRunGuard[lock],
-                                    from: ProcessHandle, to: ProcessHandle,
-                                    current_sp: usize) -> usize {
-    scheduled_process_record_of(from).saved_sp = current_sp;
-    if (kernel_process_yield_handle(guard, from) == false) {
-        return current_sp;
-    }
-    if (kernel_process_start_handle(guard, to) == false) {
-        if (kernel_process_start_handle(guard, from)) {}
-        return current_sp;
-    }
-    execution_here().current_handle = to;
-    profile_timeline_schedule(
-        scheduled_process_pid_of_handle(from),
-        scheduled_process_pid_of_handle(to));
-    // GitHub issue #448: the incoming process starts a WHOLE quantum here,
-    // rather than inheriting whatever is left of the outgoing one's.
-    //
-    // Without this the timer is periodic and a switch that does NOT
-    // originate from it -- the deferred kind, taken at syscall return
-    // because the tick landed at EL1 -- hands the incoming process only
-    // the remainder of the current period. That is not noise: it is
-    // systematic, because which process follows a syscall-heavy one in the
-    // rotation is a property of the tree, not of luck. Measured with two
-    // identical CPU-bound processes under a busy-looping PID 1, one got
-    // 21.5M counter ticks and the other 9.4M -- 2.3x -- from an equal
-    // number of selections (21 versus 18). Re-arming here made the same
-    // measurement 21562176 versus 21563097.
-    timer_tick_rearm();
-    workload_busy_note_selected_locked(
-        guard, scheduled_process_pid_of_handle(to));
-    kernel_process_trace_handle(ProcessTraceSchedule, to, from, 0);
-    process_image_activate_root(to.pool_index);
-    kernel_process_trace_handle(ProcessTraceResume, to, from, 0);
-    return scheduled_process_record_of(to).saved_sp;
-}
-
 // Walking up parent links from anywhere reaches the root, which is what
 // makes the rotation below definable without a run queue.
 //
@@ -3425,19 +3390,118 @@ private fn kernel_process_next_ready(from: ProcessHandle)
 // solves with finish_task_switch.
 fn kernel_process_schedule(current_sp: usize) -> usize {
     if (execution_here().current_live == false) { return current_sp; }
+    let mut from: ProcessHandle = execution_here().current_handle;
     let guard = process_run_lock();
-    let next: usize = kernel_process_schedule_locked(guard, current_sp);
-    process_run_unlock(guard);
-    return next;
+    match kernel_process_next_ready(from) {
+        ProcessNextReadyResult::Missing => {
+            process_run_unlock(guard);
+            return current_sp;
+        }
+        ProcessNextReadyResult::Next(to) => {
+            match scheduled_process_ready_take(guard, to) {
+                ScheduledProcessReadyTakeResult::Missing => {
+                    process_run_unlock(guard);
+                    return current_sp;
+                }
+                ScheduledProcessReadyTakeResult::Ready(resources) => {
+                    let (owner, ready) = resources;
+                    let running = scheduled_process_start(owner, ready);
+                    process_run_unlock(guard);
+                    return kernel_process_schedule_reserved(
+                        from, owner, running, current_sp);
+                }
+            }
+        }
+    }
 }
 
-private fn kernel_process_schedule_locked(guard: borrow ProcessRunGuard[lock],
-                                          current_sp: usize) -> usize {
-    match kernel_process_next_ready(execution_here().current_handle) {
-        ProcessNextReadyResult::Missing => { return current_sp; }
-        ProcessNextReadyResult::Next(to) => {
-            return kernel_process_switch_to(
-                guard, execution_here().current_handle, to, current_sp);
+private fn kernel_process_schedule_cancel_reserved(
+        owner: sink ScheduledProcessOwner[process],
+        running: sink ScheduledProcessState[process, ProcessState::Running]) {
+    let guard = process_run_lock();
+    let ready = scheduled_process_yield(owner, running);
+    scheduled_process_release(owner, ready);
+    process_run_unlock(guard);
+}
+
+private fn kernel_process_schedule_reserved(
+        from: ProcessHandle,
+        owner: sink ScheduledProcessOwner[process],
+        running: sink ScheduledProcessState[process, ProcessState::Running],
+        current_sp: usize) -> usize {
+    match process_image_prepare_activation(owner.pool_index) {
+        AddressSpaceActivationPrepareResult::Invalid => {
+            kernel_process_schedule_cancel_reserved(owner, running);
+            return current_sp;
+        }
+        AddressSpaceActivationPrepareResult::RolloverNeeded => {
+            match world_stop_begin(&kernel_world_stop, KERNEL_ACTIVE_CORES,
+                                   SCHEDULER_WORLD_STOP_SPINS) {
+                WorldStopResult::Busy => {
+                    kernel_process_schedule_cancel_reserved(owner, running);
+                    return current_sp;
+                }
+                WorldStopResult::Partial(partial) => {
+                    world_stop_partial_release(partial, &kernel_world_stop);
+                    kernel_process_schedule_cancel_reserved(owner, running);
+                    return current_sp;
+                }
+                WorldStopResult::Complete(stopped) => {
+                    if (asid_rollover_stopped(stopped)) {}
+                    world_stop_release(stopped, &kernel_world_stop);
+                    return kernel_process_schedule_reserved(
+                        from, owner, running, current_sp);
+                }
+            }
+        }
+        AddressSpaceActivationPrepareResult::Prepared(prepared) => {
+            let guard = process_run_lock();
+            let mut to: ProcessHandle = {
+                owner.pool_index, owner.generation
+            };
+            if (execution_here().current_live == false ||
+                scheduled_process_same_slot(
+                    execution_here().current_handle, from) == false ||
+                scheduled_process_handle_matches(from) == false ||
+                scheduled_process_state_of(from) != ProcessSlotState::Running ||
+                scheduled_process_handle_matches(to) == false ||
+                scheduled_process_state_of(to) != ProcessSlotState::Running) {
+                process_image_cancel_activation(prepared);
+                let ready = scheduled_process_yield(owner, running);
+                scheduled_process_release(owner, ready);
+                process_run_unlock(guard);
+                return current_sp;
+            }
+            scheduled_process_record_of(from).saved_sp = current_sp;
+            if (kernel_process_yield_handle(guard, from) == false) {
+                process_image_cancel_activation(prepared);
+                let ready = scheduled_process_yield(owner, running);
+                scheduled_process_release(owner, ready);
+                process_run_unlock(guard);
+                return current_sp;
+            }
+            if (process_image_commit_activation(prepared) == false) {
+                if (kernel_process_start_handle(guard, from)) {}
+                let ready = scheduled_process_yield(owner, running);
+                scheduled_process_release(owner, ready);
+                process_run_unlock(guard);
+                return current_sp;
+            }
+            execution_here().current_handle = to;
+            profile_timeline_schedule(
+                scheduled_process_pid_of_handle(from),
+                scheduled_process_pid_of_handle(to));
+            // GitHub issue #448: every incoming process starts a whole
+            // quantum, including a deferred switch taken at syscall return.
+            timer_tick_rearm();
+            workload_busy_note_selected_locked(
+                guard, scheduled_process_pid_of_handle(to));
+            kernel_process_trace_handle(ProcessTraceSchedule, to, from, 0);
+            kernel_process_trace_handle(ProcessTraceResume, to, from, 0);
+            let next_sp: usize = scheduled_process_record_of(to).saved_sp;
+            scheduled_process_release(owner, running);
+            process_run_unlock(guard);
+            return next_sp;
         }
     }
 }
