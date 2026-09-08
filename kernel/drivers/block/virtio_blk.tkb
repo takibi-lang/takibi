@@ -16,6 +16,10 @@ const VIRTIO_BLK_DESC_F_NEXT: i32 = 1;
 const VIRTIO_BLK_DESC_F_WRITE: i32 = 2;
 const VIRTIO_BLK_T_IN: u32 = 0;
 const VIRTIO_BLK_T_OUT: u32 = 1;
+// GitHub issue #527: this must be elapsed architectural time, not a number of
+// guest instructions. QEMU services the queue on a host thread whose progress
+// is independent of how quickly the vCPU executes this polling loop.
+const VIRTIO_BLK_COMPLETION_SECONDS: i64 = 1;
 
 struct packed VirtioBlkDesc {
     addr: usize;
@@ -156,11 +160,12 @@ fn virtio_blk_submit(request_type: u32, sector: u32,
     dma_publish();
     *(virtio_blk_reg(VIRTIO_BLK_QUEUE_NOTIFY)) = 0;
 
-    let mut spins: isize = 0;
-    while (spins < 10000000 &&
+    let completion_start: i64 = read_cntpct();
+    let completion_ticks: i64 =
+        read_cntfrq() * VIRTIO_BLK_COMPLETION_SECONDS;
+    while (read_cntpct() - completion_start < completion_ticks &&
            virtio_blk_used_seen == unsafe { ((queue + VIRTIO_BLK_PAGE_SIZE)
                                     as *io VirtioBlkUsed) }.idx) {
-        spins = spins + 1;
     }
     if (virtio_blk_used_seen == unsafe { ((queue + VIRTIO_BLK_PAGE_SIZE)
                                  as *io VirtioBlkUsed) }.idx) {
