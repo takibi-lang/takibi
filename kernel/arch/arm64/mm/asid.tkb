@@ -52,13 +52,14 @@
 // - asid_bits and asid_last are still plain globals, deliberately: written
 //   once by asid_init and never again, which is what keeps
 //   asid_width_bits() and asid_highest_value() lock-free.
-// - The ROLLOVER still requires one active core. GitHub issue #446 made
-//   mmu_tlb_invalidate_all() `tlbi vmalle1is`, so the invalidation reaches
-//   every core. That does not quiesce them: another core can refill an entry
-//   under its old-generation ASID immediately after the broadcast, while
-//   this core is already handing that number to a different address space.
-//   The assertion at the end keeps that silent alias from compiling until
-//   rollover has a cross-core quiescence protocol.
+// - A token-bound rollover entry can now require that every active peer is
+//   quiescent, and the address-space probe exercises it with two cores. The
+//   production asid_assign() path still requires one active core: scheduler
+//   activation currently calls it while holding ProcessRunGuard, whose IRQ
+//   mask prevents a peer waiting for that guard from acknowledging a stop
+//   SGI. The assertion at the end keeps that silent alias from compiling
+//   until activation reserves its target, drops the run lock, obtains the
+//   WorldStopped token, and then commits the switch.
 // - A number is not reused until the next rollover even if the address
 //   space holding it dies immediately. Linux keeps a bitmap and reuses
 //   freed numbers within a generation; here 65534 dynamic assignments
@@ -75,6 +76,7 @@
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/pool_lock.tkb";
 use "kernel/lib/locked_cell.tkb";
+use "kernel/lib/occupancy.tkb";
 
 const ASID_BITS_FLOOR: usize = 8;
 
@@ -209,6 +211,45 @@ private fn asid_rollover(state: borrow *AsidState) {
     state.next = 2;
     state.rollover_count = state.rollover_count + 1;
     mmu_tlb_invalidate_all();
+}
+
+// The non-blocking half needed by a scheduler that must leave its run lock
+// before stopping peers. RolloverNeeded carries no partial assignment: the
+// counter and generation are unchanged, so the caller can reserve its target,
+// obtain WorldStopped, perform the rollover below, and retry this exact call.
+must_use variant AsidAssignAttempt {
+    Assigned((usize, usize));
+    RolloverNeeded;
+}
+
+fn asid_assign_attempt() -> AsidAssignAttempt {
+    let guard = locked_cell_take(&asid_cell);
+    let state = locked_cell_value(guard, &asid_cell);
+    if (state.next > asid_last) {
+        locked_cell_give(&asid_cell, guard);
+        return AsidAssignAttempt::RolloverNeeded;
+    }
+    let value: usize = state.next;
+    state.next = state.next + 1;
+    state.assign_count = state.assign_count + 1;
+    let generation: usize = state.generation;
+    locked_cell_give(&asid_cell, guard);
+    return AsidAssignAttempt::Assigned((value, generation));
+}
+
+// Re-check under the ASID lock after the machine has stopped. Another caller
+// may have completed rollover while this caller was obtaining its token, so
+// false means the requested work is already done rather than failure.
+fn asid_rollover_stopped(stopped: borrow WorldStopped[stop]) -> bool {
+    let guard = locked_cell_take(&asid_cell);
+    let state = locked_cell_value(guard, &asid_cell);
+    let mut rolled: bool = false;
+    if (state.next > asid_last) {
+        asid_rollover(state);
+        rolled = true;
+    }
+    locked_cell_give(&asid_cell, guard);
+    return rolled;
 }
 
 // (asid, generation). Cannot fail: the caller that used to have to handle

@@ -157,6 +157,14 @@ generations. Old acknowledgements cannot satisfy a fresh stop, and a failed
 claim cannot restore an owner that has already released. The maintained probe
 adds sixteen immediate stop/release pairs and a stale-ack negative control.
 
+ASID assignment now has a nonblocking attempt that returns either a complete
+assignment or `RolloverNeeded`, plus a rollover entry requiring a
+`WorldStopped` token. The maintained address-space probe crosses the 16-bit
+edge only through that entry after stopping both cores; QEMU and RPi5 exercise
+the real SGI and acknowledgement. Production scheduler activation still uses
+the one-core entry under `ProcessRunGuard`, so the blocker and its assertion
+remain until the reserve-stop-revalidate switch described on #479 is in place.
+
 #### Handed over from Territory B, 2026-09-07
 
 **#524 is the one that should be read first, and it is not a decision -- it is

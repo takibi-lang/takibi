@@ -1181,6 +1181,8 @@ fn process_address_space_probe() -> bool !{unsafe} {
 // incoming root taking a current number by construction; a probe that rolls
 // over from outside a switch has to put the running root back on the CPU
 // itself. Root 0 instead keeps reserved ASID 1. Activation is this file's to do.
+const ASID_ROLLOVER_STOP_SPINS: usize = 10000000;
+
 fn address_space_asid_rollover_probe() -> bool {
     let bits: usize = asid_width_bits();
     if (bits != 8 && bits != 16) { return false; }
@@ -1197,17 +1199,41 @@ fn address_space_asid_rollover_probe() -> bool {
     let mut steps: usize = 0;
     // One full generation of assignments is enough to cross the edge from
     // wherever boot left the counter, whatever that was.
-    while (steps <= last && rolled == false) {
-        let (value, generation) = asid_assign();
-        if (value == 0 || value > last) { ok = false; }
-        if (generation == generation_before) {
-            if (value <= previous) { ok = false; }
-        } else {
-            if (generation != generation_before + 1) { ok = false; }
-            if (value != 2) { ok = false; }
-            rolled = true;
+    while (steps <= last + 1 && rolled == false) {
+        match asid_assign_attempt() {
+            AsidAssignAttempt::Assigned(assignment) => {
+                let (value, generation) = assignment;
+                if (value == 0 || value > last) { ok = false; }
+                if (generation == generation_before) {
+                    if (value <= previous) { ok = false; }
+                } else {
+                    if (generation != generation_before + 1) { ok = false; }
+                    if (value != 2) { ok = false; }
+                    rolled = true;
+                }
+                previous = value;
+            }
+            AsidAssignAttempt::RolloverNeeded => {
+                // Core 1 is already online here. Use the production stop
+                // controller with two cores so this exercises a real SGI and
+                // acknowledgement on both QEMU and RPi5.
+                match world_stop_begin(
+                        &kernel_world_stop, 2, ASID_ROLLOVER_STOP_SPINS) {
+                    WorldStopResult::Busy => { ok = false; }
+                    WorldStopResult::Partial(partial) => {
+                        world_stop_partial_release(
+                            partial, &kernel_world_stop);
+                        ok = false;
+                    }
+                    WorldStopResult::Complete(stopped) => {
+                        if (asid_rollover_stopped(stopped) == false) {
+                            ok = false;
+                        }
+                        world_stop_release(stopped, &kernel_world_stop);
+                    }
+                }
+            }
         }
-        previous = value;
         steps = steps + 1;
     }
     if (rolled == false) { ok = false; }
