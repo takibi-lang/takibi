@@ -164,6 +164,11 @@ edge only through that entry after stopping both cores; QEMU and RPi5 exercise
 the real SGI and acknowledgement. Production scheduler activation still uses
 the one-core entry under `ProcessRunGuard`, so the blocker and its assertion
 remain until the reserve-stop-revalidate switch described on #479 is in place.
+Address-space activation is also split into a fallible preparation and a
+linear prepared value whose only consumer commits TTBR0. Preparation changes
+neither TTBR0 nor the per-CPU target-root record; the probe now reactivates its
+stale running root through this boundary. The process-image wrapper publishes
+its target-root and trace only after address-space commit succeeds.
 
 #### Handed over from Territory B, 2026-09-07
 

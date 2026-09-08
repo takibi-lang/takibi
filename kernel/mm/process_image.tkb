@@ -800,6 +800,26 @@ fn process_image_activate_root(root: usize) {
     kernel_process_trace_address_space_activate(root);
 }
 
+// Split activation for scheduler handoffs that may need an ASID rollover.
+// Preparation changes neither this CPU's target-root record nor TTBR0; commit
+// changes both only after the caller has revalidated its reserved process.
+fn process_image_prepare_activation(root: usize)
+        -> AddressSpaceActivationPrepareResult {
+    return address_space_prepare_activation(root);
+}
+
+fn process_image_commit_activation(
+        prepared: sink AddressSpaceActivationPrepared[root]) -> bool {
+    match address_space_commit_activation(prepared) {
+        AddressSpaceActivationCommitResult::Invalid => { return false; }
+        AddressSpaceActivationCommitResult::Activated(target) => {
+            process_image_set_target_root_here(target);
+            kernel_process_trace_address_space_activate(target);
+            return true;
+        }
+    }
+}
+
 // Give the parent's copy-on-write pages back and put the parent's root
 // into TTBR0 again. `dest_root` is the root the clone was made INTO -- the
 // caller's own, at every one of the three call sites, since a clone is

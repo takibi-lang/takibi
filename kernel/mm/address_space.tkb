@@ -588,6 +588,81 @@ private fn address_space_refresh_asid(
     backing.asid_generation = generation;
 }
 
+// The half of activation that may discover global ASID work. A scheduler can
+// reserve a Ready target under its run lock, release that lock, and call this
+// without having changed TTBR0 or the recorded current process. Prepared is
+// linear so every successful preparation must end in the matching commit.
+linear struct AddressSpaceActivationPrepared[root: usize] {
+    private root: usize @ root;
+}
+
+must_use variant AddressSpaceActivationPrepareResult {
+    Invalid;
+    RolloverNeeded;
+    Prepared(exists root: usize. AddressSpaceActivationPrepared[root]);
+}
+
+private fn address_space_activation_prepared_new(root: usize @ identity)
+        -> AddressSpaceActivationPrepared[identity] {
+    let mut prepared: AddressSpaceActivationPrepared[identity] = { root };
+    return prepared;
+}
+
+fn address_space_prepare_activation(slot: usize)
+        -> AddressSpaceActivationPrepareResult {
+    if (scheduled_process_slot_valid(slot) == false) {
+        return AddressSpaceActivationPrepareResult::Invalid;
+    }
+    let checked: usize = slot;
+    let backing: *AddressSpaceBacking =
+        address_space_backing_existing_at(checked);
+    if (backing.live == false) {
+        return AddressSpaceActivationPrepareResult::Invalid;
+    }
+    if (checked != 0 &&
+            asid_generation_is_current(backing.asid_generation) == false) {
+        match asid_assign_attempt() {
+            AsidAssignAttempt::RolloverNeeded => {
+                return AddressSpaceActivationPrepareResult::RolloverNeeded;
+            }
+            AsidAssignAttempt::Assigned(assignment) => {
+                let (value, generation) = assignment;
+                backing.asid = value;
+                backing.asid_generation = generation;
+            }
+        }
+    }
+    return AddressSpaceActivationPrepareResult::Prepared(
+        address_space_activation_prepared_new(checked));
+}
+
+must_use variant AddressSpaceActivationCommitResult {
+    Invalid;
+    Activated(usize);
+}
+
+fn address_space_commit_activation(
+        prepared: sink AddressSpaceActivationPrepared[root])
+        -> AddressSpaceActivationCommitResult {
+    let slot: usize = prepared.root;
+    if (scheduled_process_slot_valid(slot) == false) {
+        return AddressSpaceActivationCommitResult::Invalid;
+    }
+    let checked: usize = slot;
+    let backing: *AddressSpaceBacking =
+        address_space_backing_existing_at(checked);
+    if (backing.live == false) {
+        return AddressSpaceActivationCommitResult::Invalid;
+    }
+    if (checked != 0 &&
+            asid_generation_is_current(backing.asid_generation) == false) {
+        return AddressSpaceActivationCommitResult::Invalid;
+    }
+    mmu_activate_root(backing.l1_physical, backing.asid);
+    address_space_set_active_slot_here(checked);
+    return AddressSpaceActivationCommitResult::Activated(checked);
+}
+
 fn address_space_activate_root(slot: usize) {
     if (scheduled_process_slot_valid(slot)) {
         let checked: usize = slot;
@@ -607,15 +682,6 @@ fn address_space_activate_root(slot: usize) {
         address_space_backing_existing_at(fallback);
     mmu_activate_root(fallback_backing.l1_physical, fallback_backing.asid);
     address_space_set_active_slot_here(0);
-}
-
-// Puts the root that is running back on the CPU with a current ASID. The
-// production paths never need it -- every switch goes through
-// address_space_activate_root above -- but a probe that deliberately rolls
-// the ASID generation over does: the running root's stamp is left behind
-// by that rollover, and its number is about to be handed to somebody else.
-fn address_space_reactivate_current_root() {
-    address_space_activate_root(address_space_active_slot_here());
 }
 
 must_use variant AddressSpacePteWriteResult {
@@ -1242,7 +1308,19 @@ fn address_space_asid_rollover_probe() -> bool {
     // for a new number instead of trusting the one it holds.
     if (asid_generation_is_current(generation_before)) { ok = false; }
 
-    address_space_reactivate_current_root();
+    let active_before: usize = address_space_active_slot_here();
+    match address_space_prepare_activation(active_before) {
+        AddressSpaceActivationPrepareResult::Invalid => { ok = false; }
+        AddressSpaceActivationPrepareResult::RolloverNeeded => { ok = false; }
+        AddressSpaceActivationPrepareResult::Prepared(prepared) => {
+            match address_space_commit_activation(prepared) {
+                AddressSpaceActivationCommitResult::Invalid => { ok = false; }
+                AddressSpaceActivationCommitResult::Activated(root) => {
+                    if (root != active_before) { ok = false; }
+                }
+            }
+        }
+    }
     let active: usize = address_space_active_slot_here();
     let running: *AddressSpaceBacking = address_space_backing_existing_at(active);
     if (active != 0 &&
