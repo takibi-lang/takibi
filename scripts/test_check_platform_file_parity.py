@@ -172,6 +172,20 @@ def main() -> int:
     failures += case("declared function is not reported twice",
                      plant_in_allowed, "", should_fail=False)
 
+    # A declaration outliving the duplication it describes is the way an
+    # exemption list rots: every remaining entry reads as current.
+    def plant_stale_declaration(root):
+        target = root / "scripts" / "check_platform_file_parity.py"
+        text = target.read_text(encoding="ascii")
+        target.write_text(text.replace(
+            "ALLOWED_RUNS = {",
+            'ALLOWED_RUNS = {\n    ("init.tkb", "planted stale declaration"):\n'
+            '        "describes duplication that does not exist",',
+            1), encoding="ascii")
+
+    failures += case("stale declaration", plant_stale_declaration,
+                     "planted stale declaration")
+
     for failure in failures:
         print(f"ERROR\tplatform-parity-controls: {failure}")
     if failures:
@@ -181,7 +195,8 @@ def main() -> int:
     print("PASS platform-parity controls: the repository passes, a duplicated "
           "function and a duplicated inline run of the threshold length are "
           "each refused, a run that is long only in punctuation is not, and a "
-          "run inside an already-declared function is not reported twice")
+          "run inside an already-declared function is not reported twice, "
+          "and a declaration that outlives its subject is refused")
     return 0
 
 

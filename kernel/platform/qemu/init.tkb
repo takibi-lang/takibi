@@ -1,5 +1,6 @@
 use "kernel/init/test_driver.tkb";
 use "kernel/arch/arm64/kernel/secondary.tkb";
+use "kernel/init/boot_memory.tkb";
 use "kernel/init/contention_probes.tkb";
 
 must_use variant SecondaryBootResult {
@@ -404,48 +405,17 @@ fn main() !{unsafe} {
         kernel_boot_log("kernel log: bounds probe failed\n");
     }
 
-    match platform_memory_detect() {
-        PlatformMemoryResult::Detected(detected) => {
-            match page_allocator_apply_memory(detected) {
-                PageAllocatorMemoryResult::Invalid => {
-                    kernel_boot_log("memory: usable regions exclude bootstrap page tables; halting\n");
-                    while (true) { }
-                }
-                PageAllocatorMemoryResult::Applied => {}
-            }
-            let mem_base: usize = fdt_memory_first_base(detected);
-            let mem_size: usize = fdt_memory_total_size(detected);
-            kernel_boot_log("memory: source=dtb base_bytes=");
-            uart_put_udec(mem_base as usize);
-            kernel_boot_log(" detected_mib=");
-            uart_put_udec((mem_size as usize) / (1024 * 1024));
-            kernel_boot_log(" regions=");
-            uart_put_udec(fdt_memory_region_count(detected));
-            kernel_boot_log(" reservations=");
-            uart_put_udec(fdt_memory_reservation_count(detected));
-            kernel_boot_log(" allocator_pages=");
-            uart_put_udec(page_allocator_total_count());
-            kernel_boot_log("\n");
-            match page_discontiguous_extent_probe() {
-                PageDiscontiguousProbeResult::Invalid => {
-                    kernel_boot_log(
-                        "memory: discontiguous extent probe failed; halting\n");
-                    while (true) { }
-                }
-                PageDiscontiguousProbeResult::NotDiscontiguous => { }
-                PageDiscontiguousProbeResult::Verified => {
-                    kernel_boot_log(
-                        "memory: physical hole excluded and both extent boundaries round-trip\n");
-                }
-            }
-        }
-        PlatformMemoryResult::InvalidDtb => {
-            kernel_boot_log("memory: invalid boot DTB; halting\n");
+    kernel_boot_memory_apply();
+    match page_discontiguous_extent_probe() {
+        PageDiscontiguousProbeResult::Invalid => {
+            kernel_boot_log(
+                "memory: discontiguous extent probe failed; halting\n");
             while (true) { }
         }
-        PlatformMemoryResult::MissingMemory => {
-            kernel_boot_log("memory: boot DTB has no usable /memory; halting\n");
-            while (true) { }
+        PageDiscontiguousProbeResult::NotDiscontiguous => { }
+        PageDiscontiguousProbeResult::Verified => {
+            kernel_boot_log(
+                "memory: physical hole excluded and both extent boundaries round-trip\n");
         }
     }
 

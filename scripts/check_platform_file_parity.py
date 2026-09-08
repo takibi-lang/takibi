@@ -103,11 +103,6 @@ ALLOWED_RUNS = {
         "the symlink half of the same ext2 fixture region",
     ("init.tkb", 'match ext2_lookup_root(mount, bs"large.txt") {'):
         "the multi-block half of the same ext2 fixture region",
-    ("init.tkb", "match platform_memory_detect() {"):
-        "applying the detected map and the three halts that answer a DTB "
-        "without one. The halt messages are also held by "
-        "check_kernel_log_expectations.py, so a drift in the text is caught "
-        "twice; the structure is not",
     ("init.tkb", "match kernel_secondary_boot_probe() {"):
         "reporting what the secondary core did, on top of the poll above",
     ("intc.tkb", "fn platform_world_stop_notify(cores: usize, owner: usize) "
@@ -229,6 +224,7 @@ def main():
 
     trees = {name: collect(name) for name in platforms}
     run_findings = []
+    used_declarations = set()
     declared_runs = 0
     compared_pairs = 0
     first_tree = {p.name: p for p in (PLATFORM_ROOT / platforms[0]).rglob("*.tkb")}
@@ -241,6 +237,7 @@ def main():
                                                       other_tree[name]):
                 if (name, opens) in ALLOWED_RUNS:
                     declared_runs += 1
+                    used_declarations.add((name, opens))
                     continue
                 run_findings.append((name, line, count, opens))
 
@@ -265,6 +262,23 @@ def main():
         where = ", ".join(
             str(p) for p, _ in [entries[0]] + [o[0] for o in others])
         findings.append((name, where, len(body.split("\n"))))
+
+    # A declaration that no longer matches anything is a claim about code that
+    # has moved or gone. Left in place it reads as current, and the list stops
+    # being the worklist it is meant to be -- the same reason pass_line refuses
+    # a verdict that cannot tell "it holds" from "I never looked".
+    stale = sorted(set(ALLOWED_RUNS) - used_declarations)
+    if stale:
+        print("FAIL platform-parity: ALLOWED_RUNS declares runs that no "
+              "longer exist")
+        for name, opens in stale:
+            print(f"  {name}: nothing now opens with `{opens[:60]}`")
+        print("  Remove the entry. The duplication it described is gone, and "
+              "a declaration")
+        print("  that outlives its subject makes the rest of the list look "
+              "current when it")
+        print("  is not.")
+        return 1
 
     if run_findings:
         print("FAIL platform-parity: identical inline runs in per-platform "
