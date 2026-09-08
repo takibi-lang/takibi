@@ -4,12 +4,6 @@
 // A usable DTB is part of this platform's boot contract, exactly as it is on
 // RPi5. The page allocator applies this normalized map after bootstrap page
 // tables have brought the MMU up and before any workload allocation.
-must_use variant PlatformMemoryResult {
-    InvalidDtb;
-    MissingMemory;
-    Detected(FdtMemoryMap);
-}
-
 fn platform_memory_detect() -> PlatformMemoryResult !{unsafe} {
     let dtb: usize = boot_dtb_address_read();
     let detected: FdtMemoryResult = fdt_detect_memory(dtb);

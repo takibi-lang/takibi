@@ -33,6 +33,17 @@ struct FdtMemoryMap {
     private tree_reservation_count: usize;
 }
 
+// GitHub issues #470/#517: what platform_memory_detect() answers, declared
+// once. Both platform memory.tkb files carried a byte-identical copy, and the
+// two trees are never compiled together -- a case added to one and not the
+// other would have been invisible until a board booted. It belongs here
+// because FdtMemoryMap, the payload it carries, is declared here.
+must_use variant PlatformMemoryResult {
+    InvalidDtb;
+    MissingMemory;
+    Detected(FdtMemoryMap);
+}
+
 must_use variant FdtMemoryResult {
     Invalid;
     NotFound;

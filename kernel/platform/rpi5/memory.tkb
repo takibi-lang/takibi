@@ -3,12 +3,6 @@
 // passes that physical address to the injected kernel in x0. A usable DTB is
 // therefore part of this platform's boot contract, just as it is for QEMU.
 
-must_use variant PlatformMemoryResult {
-    InvalidDtb;
-    MissingMemory;
-    Detected(FdtMemoryMap);
-}
-
 fn platform_memory_detect() -> PlatformMemoryResult !{unsafe} {
     let dtb: usize = boot_dtb_address_read();
     let detected: FdtMemoryResult = fdt_detect_memory(dtb);

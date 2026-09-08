@@ -32,6 +32,7 @@ them, are listed in ALLOWED below with the reason, so that the entry is a
 claim a reviewer can disagree with, where silence was not.
 """
 
+import difflib
 import pathlib
 import re
 import sys
@@ -54,6 +55,135 @@ ALLOWED = {
 }
 
 FN_RE = re.compile(r"^(?:private )?fn ([A-Za-z0-9_]+)\s*\(")
+
+# GitHub issue #517. The comparison above finds a FUNCTION defined identically
+# in both trees. Duplication written inline -- inside main(), inside a match
+# arm -- is not a function, and #470's failure mode does not care: two copies
+# that are identical today are free to stop agreeing, and only one is read on
+# any given boot. A 57-line probe sequence sat byte-identical in both platform
+# init.tkb files until it was extracted by hand, and this check said PASS
+# throughout.
+#
+# WHAT IS COUNTED, and why not raw lines. The longest identical run between
+# the two init.tkb files that raw line counting finds is thirteen closing
+# braces at decreasing indentation -- a structural artifact of deeply nested
+# code that nobody can make drift. Meanwhile a nine-line run that declares the
+# same variant twice is real. So a run is measured in SIGNIFICANT lines:
+# not blank, not a comment, and carrying something besides punctuation.
+#
+# THE THRESHOLD IS A JUDGEMENT, and the measured distribution does not make it
+# for us. Significant-line runs across the four file pairs today are
+# 40 30 29 20 16 12 12 9 9 8 6 6 5 4 4 3..., with no gap wide enough to point
+# at. Eight is chosen because everything at or above it in this tree is a
+# block somebody could extract, and everything at or below six is the two
+# platforms legitimately doing the same few things in the same order --
+# `match ext2_mount(device)`, `if (fpsimd_irq_probe() == 0)`. A check that
+# fires on those is one people learn to silence, which is the reasoning
+# check_pipefail_early_exit.py already records for its own narrowness.
+#
+# WHAT IT MISSES, deliberately: the two six-line runs, which are a repeated
+# `use` block with a variant declaration and a pair of identical halt arms.
+# Both are real duplication and both are below the line.
+MIN_SIGNIFICANT_RUN = 8
+
+# (file name, first significant line) -> why this run is not a finding yet.
+# Same contract as ALLOWED above: an entry is a claim a reviewer can disagree
+# with. Unlike ALLOWED, every entry here is also a piece of work -- these are
+# extractable, and the reason says so.
+ALLOWED_RUNS = {
+    ("init.tkb", "let start: i64 = read_cntpct();"):
+        "the secondary-core start poll: read the deadline, spin on the boot "
+        "state word, report Started/UnexpectedStatus/NotStarted. Extractable; "
+        "GitHub issue #517 tracks it",
+    ("init.tkb", "kernel_syscall_ext2_configure(mount);"):
+        "the ext2 fixture sequence, the largest of the three. It is one region "
+        "with a platform-specific hole in the middle, which is why it did not "
+        "come out with the variant above; GitHub issue #517 tracks it",
+    ("init.tkb", 'match ext2_lookup_root(mount, bs"latest") {'):
+        "the symlink half of the same ext2 fixture region",
+    ("init.tkb", 'match ext2_lookup_root(mount, bs"large.txt") {'):
+        "the multi-block half of the same ext2 fixture region",
+    ("init.tkb", "match platform_memory_detect() {"):
+        "applying the detected map and the three halts that answer a DTB "
+        "without one. The halt messages are also held by "
+        "check_kernel_log_expectations.py, so a drift in the text is caught "
+        "twice; the structure is not",
+    ("init.tkb", "match kernel_secondary_boot_probe() {"):
+        "reporting what the secondary core did, on top of the poll above",
+    ("intc.tkb", "fn platform_world_stop_notify(cores: usize, owner: usize) "
+                 "!{unsafe} {"):
+        "a function whose bodies genuinely diverge -- each GIC writes its own "
+        "SGI register -- but whose target-list computation is written twice. "
+        "The function comparison cannot see this one, which is the case "
+        "GitHub issue #517 was filed about",
+    ("intc.tkb", "timer_irq_handler();"):
+        "the dispatch tail: timer, then the EL0/EL1 preemption branch that "
+        "nine files assert against",
+    ("uart.tkb", "if ((received & (1 << 10)) != 0 || (*uart_mis & (1 << 9)) "
+                 "!= 0) {"):
+        "PL011 BREAK detection inside uart_irq_handler, whose surrounding "
+        "bodies differ by RP1's per-vector IACK",
+}
+
+
+def significant(line):
+    text = line.strip()
+    if not text or text.startswith("//"):
+        return False
+    return re.sub(r"[{}();,]", "", text).strip() != ""
+
+
+def allowed_function_spans(path):
+    """Line ranges of functions already declared identical by intent.
+
+    A run lying inside one of those is the same finding twice: the function
+    comparison above has already reported it and a reviewer has already
+    answered. Reporting it again would make the declaration look ineffective
+    and would teach people to widen the exemption rather than read it.
+    """
+    lines = path.read_text().split("\n")
+    spans = []
+    index = 0
+    while index < len(lines):
+        match = FN_RE.match(lines[index])
+        if not match or match.group(1) not in ALLOWED:
+            index += 1
+            continue
+        start = index
+        depth = 0
+        opened = False
+        while index < len(lines):
+            depth += lines[index].count("{") - lines[index].count("}")
+            opened = opened or "{" in lines[index]
+            index += 1
+            if opened and depth <= 0:
+                break
+        spans.append((start, index))
+    return spans
+
+
+def duplicated_runs(left, right):
+    """Identical inline runs between two same-named platform files."""
+    a = left.read_text().split("\n")
+    b = right.read_text().split("\n")
+    declared = allowed_function_spans(left)
+    found = []
+    for i, _, n in difflib.SequenceMatcher(None, a, b, autojunk=False
+                                           ).get_matching_blocks():
+        lines = [a[k] for k in range(i, i + n)]
+        count = sum(1 for line in lines if significant(line))
+        if count < MIN_SIGNIFICANT_RUN:
+            continue
+        # Containment is judged on the SIGNIFICANT lines: a run routinely
+        # picks up a trailing blank or brace past the closing line of the
+        # function it lies in, and that must not make a declared body report
+        # itself again.
+        body = [k for k in range(i, i + n) if significant(a[k])]
+        if any(all(start <= k < end for k in body) for start, end in declared):
+            continue
+        opens = next(line.strip() for line in lines if significant(line))
+        found.append((count, i + 1, opens))
+    return found
 
 
 def functions(path):
@@ -98,6 +228,22 @@ def main():
         return 0
 
     trees = {name: collect(name) for name in platforms}
+    run_findings = []
+    declared_runs = 0
+    compared_pairs = 0
+    first_tree = {p.name: p for p in (PLATFORM_ROOT / platforms[0]).rglob("*.tkb")}
+    for other in platforms[1:]:
+        other_tree = {p.name: p
+                      for p in (PLATFORM_ROOT / other).rglob("*.tkb")}
+        for name in sorted(set(first_tree) & set(other_tree)):
+            compared_pairs += 1
+            for count, line, opens in duplicated_runs(first_tree[name],
+                                                      other_tree[name]):
+                if (name, opens) in ALLOWED_RUNS:
+                    declared_runs += 1
+                    continue
+                run_findings.append((name, line, count, opens))
+
     findings = []
     allowed_hits = 0
     compared = 0
@@ -120,6 +266,23 @@ def main():
             str(p) for p, _ in [entries[0]] + [o[0] for o in others])
         findings.append((name, where, len(body.split("\n"))))
 
+    if run_findings:
+        print("FAIL platform-parity: identical inline runs in per-platform "
+              "files")
+        for name, line, count, opens in run_findings:
+            print(f"  {name}:{line}: {count} significant lines duplicated in "
+                  f"every platform tree, opening `{opens[:56]}`")
+        print("  A run this long is not two platforms doing the same few "
+              "things; it is one")
+        print("  body written twice, and only one copy is read on any given "
+              "boot (GitHub")
+        print("  issues #470, #517). Move it where both platforms read it -- "
+              "the precedent is")
+        print("  kernel/init/contention_probes.tkb -- or add it to "
+              "ALLOWED_RUNS in")
+        print("  scripts/check_platform_file_parity.py with the reason.")
+        return 1
+
     if findings:
         print("FAIL platform-parity: platform-independent code in a "
               "platform file")
@@ -137,7 +300,10 @@ def main():
     report_pass("platform-parity",
                 f"{compared} functions defined in all of "
                 f"{'/'.join(platforms)}, {allowed_hits} identical by "
-                "declared intent, 0 undeclared",
+                f"declared intent, 0 undeclared; {compared_pairs} same-named "
+                f"file pair(s) hold no undeclared inline run of "
+                f"{MIN_SIGNIFICANT_RUN} significant lines "
+                f"({declared_runs} declared)",
                 compared_functions=compared)
     return 0
 
