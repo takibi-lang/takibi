@@ -4268,60 +4268,140 @@ fn kernel_process_syscall_return_schedule(current_sp: usize) -> usize {
 // shell reading the terminal while its own child waits on a daemon is an
 // ordinary shape, and it is exactly the shape a script that starts a
 // background daemon produces.
-// GitHub issue #479 Group B: ONE critical section for the successor walk
-// and both transitions, for the same reason kernel_process_schedule has
-// one -- choosing a successor and then taking it are one decision, and the
-// walk reads links that clone and child_exit splice.
+// GitHub issue #479 Group B: the successor walk and target reservation share
+// one critical section. The target's linear Running token then survives while
+// the lock is dropped for ASID preparation; commit revalidates both processes
+// under a fresh section before publishing Blocked and changing TTBR0.
 private fn kernel_process_block_current(current_sp: usize,
                                         reason: ProcessWaitReason,
                                         trace_aux: usize) -> usize {
     if (execution_here().current_live == false) {
         return 0;
     }
-    let guard = process_run_lock();
-    let next: usize = kernel_process_block_current_locked(
-        guard, current_sp, reason, trace_aux);
-    process_run_unlock(guard);
-    return next;
-}
-
-private fn kernel_process_block_current_locked(
-        guard: borrow ProcessRunGuard[lock],
-        current_sp: usize,
-        reason: ProcessWaitReason,
-        trace_aux: usize) -> usize {
     let mut from: ProcessHandle = execution_here().current_handle;
-    let mut to: ProcessHandle = match kernel_process_next_ready(from) {
-        ProcessNextReadyResult::Missing => { return 0; }
-        ProcessNextReadyResult::Next(next) => { next }
-    };
-    scheduled_process_record_of(from).saved_sp = current_sp;
-    match scheduled_process_running_take(guard, from) {
-        ScheduledProcessRunningTakeResult::Missing => { return 0; }
-        ScheduledProcessRunningTakeResult::Running(resources) => {
-            let (owner, running) = resources;
-            let blocked = scheduled_process_block(owner, running);
-            scheduled_process_record_at(owner.pool_index).wait_reason = reason;
-            scheduled_process_release(owner, blocked);
-            kernel_process_trace_handle(ProcessTraceBlock, from, to,
-                                        trace_aux);
+    let guard = process_run_lock();
+    match kernel_process_next_ready(from) {
+        ProcessNextReadyResult::Missing => {
+            process_run_unlock(guard);
+            return 0;
+        }
+        ProcessNextReadyResult::Next(to) => {
+            match scheduled_process_ready_take(guard, to) {
+                ScheduledProcessReadyTakeResult::Missing => {
+                    process_run_unlock(guard);
+                    return 0;
+                }
+                ScheduledProcessReadyTakeResult::Ready(resources) => {
+                    let (owner, ready) = resources;
+                    let running = scheduled_process_start(owner, ready);
+                    process_run_unlock(guard);
+                    return kernel_process_block_reserved(
+                        from, owner, running, current_sp, reason, trace_aux);
+                }
+            }
         }
     }
-    if (kernel_process_start_handle(guard, to) == false) {
-        return 0;
+}
+
+private fn kernel_process_block_reserved(
+        from: ProcessHandle,
+        owner: sink ScheduledProcessOwner[process],
+        running: sink ScheduledProcessState[process, ProcessState::Running],
+        current_sp: usize, reason: ProcessWaitReason,
+        trace_aux: usize) -> usize {
+    match process_image_prepare_activation(owner.pool_index) {
+        AddressSpaceActivationPrepareResult::Invalid => {
+            kernel_process_schedule_cancel_reserved(owner, running);
+            return 0;
+        }
+        AddressSpaceActivationPrepareResult::RolloverNeeded => {
+            match world_stop_begin(&kernel_world_stop, KERNEL_ACTIVE_CORES,
+                                   SCHEDULER_WORLD_STOP_SPINS) {
+                WorldStopResult::Busy => {
+                    kernel_process_schedule_cancel_reserved(owner, running);
+                    return 0;
+                }
+                WorldStopResult::Partial(partial) => {
+                    world_stop_partial_release(partial, &kernel_world_stop);
+                    kernel_process_schedule_cancel_reserved(owner, running);
+                    return 0;
+                }
+                WorldStopResult::Complete(stopped) => {
+                    if (asid_rollover_stopped(stopped)) {}
+                    world_stop_release(stopped, &kernel_world_stop);
+                    return kernel_process_block_reserved(
+                        from, owner, running, current_sp, reason, trace_aux);
+                }
+            }
+        }
+        AddressSpaceActivationPrepareResult::Prepared(prepared) => {
+            let guard = process_run_lock();
+            let mut to: ProcessHandle = {
+                owner.pool_index, owner.generation
+            };
+            if (execution_here().current_live == false ||
+                scheduled_process_same_slot(
+                    execution_here().current_handle, from) == false ||
+                scheduled_process_handle_matches(from) == false ||
+                scheduled_process_state_of(from) != ProcessSlotState::Running ||
+                scheduled_process_handle_matches(to) == false ||
+                scheduled_process_state_of(to) != ProcessSlotState::Running) {
+                process_image_cancel_activation(prepared);
+                let ready = scheduled_process_yield(owner, running);
+                scheduled_process_release(owner, ready);
+                process_run_unlock(guard);
+                return 0;
+            }
+            scheduled_process_record_of(from).saved_sp = current_sp;
+            match scheduled_process_running_take(guard, from) {
+                ScheduledProcessRunningTakeResult::Missing => {
+                    process_image_cancel_activation(prepared);
+                    let ready = scheduled_process_yield(owner, running);
+                    scheduled_process_release(owner, ready);
+                    process_run_unlock(guard);
+                    return 0;
+                }
+                ScheduledProcessRunningTakeResult::Running(from_resources) => {
+                    let (from_owner, from_running) = from_resources;
+                    let blocked = scheduled_process_block(
+                        from_owner, from_running);
+                    scheduled_process_record_at(from_owner.pool_index)
+                        .wait_reason = reason;
+                    scheduled_process_release(from_owner, blocked);
+                }
+            }
+            kernel_process_trace_handle(
+                ProcessTraceBlock, from, to, trace_aux);
+            if (process_image_commit_activation(prepared) == false) {
+                match scheduled_process_blocked_take(from) {
+                    ScheduledProcessBlockedTakeResult::Missing => {}
+                    ScheduledProcessBlockedTakeResult::Blocked(resources) => {
+                        let (from_owner, blocked) = resources;
+                        let ready = scheduled_process_wake(from_owner, blocked);
+                        let from_running = scheduled_process_start(
+                            from_owner, ready);
+                        scheduled_process_record_at(from_owner.pool_index)
+                            .wait_reason = ProcessWaitReason::None;
+                        scheduled_process_release(from_owner, from_running);
+                    }
+                }
+                let ready = scheduled_process_yield(owner, running);
+                scheduled_process_release(owner, ready);
+                process_run_unlock(guard);
+                return 0;
+            }
+            execution_here().current_handle = to;
+            // GitHub issue #448/#469: every blocking handoff is accounted,
+            // not only the timer scheduler's switches.
+            workload_busy_note_selected_locked(
+                guard, scheduled_process_pid_of_handle(to));
+            kernel_process_trace_handle(ProcessTraceResume, to, from, 0);
+            let next_sp: usize = scheduled_process_record_of(to).saved_sp;
+            scheduled_process_release(owner, running);
+            process_run_unlock(guard);
+            return next_sp;
+        }
     }
-    execution_here().current_handle = to;
-    // GitHub issue #448/#469: every switch that changes who is running is
-    // accounted, not just the scheduler's own. A blocking syscall switches
-    // here, an exit switches in kernel_process_child_exit, and a clone
-    // switches to the child -- and while only the timer path was counted,
-    // the per-process CPU numbers went missing exactly when the machine
-    // was busiest, which is the one time they are worth reading.
-    workload_busy_note_selected_locked(
-        guard, scheduled_process_pid_of_handle(to));
-    process_image_activate_root(to.pool_index);
-    kernel_process_trace_handle(ProcessTraceResume, to, from, 0);
-    return scheduled_process_record_of(to).saved_sp;
 }
 
 // GitHub issue #469: block until something arrives on the network, or

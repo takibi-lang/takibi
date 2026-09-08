@@ -176,8 +176,17 @@ the reservation, drops `ProcessRunGuard`, prepares the ASID, then reacquires
 the guard and revalidates both handles and states before committing TTBR0 and
 the logical current process. A failed preparation, world stop, or revalidation
 returns the reserved target to Ready through the same linear state token. The
-block, clone, and exit handoffs still use direct activation and remain in the
-two-core worklist.
+At this point the block, clone, and exit handoffs still used direct activation;
+the next increment moved the common blocking path as described below.
+
+The common blocking handoff used by UART, network, wait4, deadlines, and
+signal waits now uses the same reservation and preparation sequence. Its
+caller-held IRQ mask remains in force while `ProcessRunGuard` is temporarily
+dropped, preserving the UART final-empty-check to Blocked-publication
+boundary. Commit revalidates both processes before publishing Blocked; every
+earlier failure returns the target reservation to Ready, and even the
+defensive activation-failure arm reconstructs the outgoing Running state.
+Clone and exit handoffs remain.
 
 #### Handed over from Territory B, 2026-09-07
 
