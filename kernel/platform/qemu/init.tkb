@@ -482,6 +482,11 @@ fn main() !{unsafe} {
     }
 
     platform_irq_init();
+    // GitHub issue #454: from here a logged byte is queued rather than spun
+    // on. Not before: a byte queued while the TX interrupt is masked would
+    // never be drained, which is why this is an explicit switch and not
+    // something the console infers.
+    kernel_log_tx_activate();
 
     if (fpsimd_irq_probe() == 0) {
         kernel_boot_log("fp/simd irq: q0-q31+fpsr preserved across current-el irq\n");

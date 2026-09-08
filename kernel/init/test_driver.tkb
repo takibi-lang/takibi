@@ -381,6 +381,8 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
     uart_put_udec(kernel_log_tx_spin_ticks_total());
     kernel_boot_log(" bytes=");
     uart_put_udec(kernel_log_tx_byte_total());
+    kernel_boot_log(" spun=");
+    uart_put_udec(kernel_log_tx_spun_total());
     kernel_boot_log(" tickfreq=");
     uart_put_udec(read_cntfrq() as usize);
     kernel_boot_log("\n");

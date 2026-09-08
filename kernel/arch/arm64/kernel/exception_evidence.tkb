@@ -1162,6 +1162,12 @@ private fn kernel_ddb_enter_stopped(
             ddb_snapshot_published_sequence_address(),
             ddb_snapshot.sequence);
     }
+    // GitHub issue #454: everything the console queued reaches the wire
+    // before the debugger writes a byte. ddb_puts goes through
+    // uart_debug_putc, which spins on the FIFO and knows nothing about the
+    // queue, so without this the prompt would arrive ahead of the output
+    // that explains why it is there.
+    uart_tx_flush();
     ddb_puts("\nddb: interrupt-safe UART debugger\n");
     ddb_puts("ddb: world-stop complete mask=");
     ddb_put_hex(world_stopped_mask(stopped_world));

@@ -805,6 +805,11 @@ fn main() !{unsafe} {
     // this is safe now that both the Current-EL-SPx and Lower-EL-AArch64
     // IRQ vector slots are wired.
     platform_irq_init();
+    // GitHub issue #454: from here a logged byte is queued rather than spun
+    // on. Not before: a byte queued while the TX interrupt is masked would
+    // never be drained, which is why this is an explicit switch and not
+    // something the console infers.
+    kernel_log_tx_activate();
 
     // GitHub issue #223: the Current-EL-SPx IRQ entry used to save general
     // registers only, so an interrupt taken while EL1 kernel code held live

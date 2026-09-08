@@ -87,9 +87,17 @@ fn kernel_log_begin_fragment() {
 // console does not already have.
 private let mut kernel_log_tx_spin_ticks: usize = 0;
 private let mut kernel_log_tx_bytes: usize = 0;
+// Bytes that had to WAIT, which is no longer every byte: once the queue is
+// live a caller usually returns without touching the FIFO at all, and the
+// share that still spins is what says whether the queue is big enough.
+private let mut kernel_log_tx_spun: usize = 0;
+
+fn kernel_log_note_tx_byte() {
+    kernel_log_tx_bytes = kernel_log_tx_bytes + 1;
+}
 
 fn kernel_log_note_tx_spin(ticks: i64) {
-    kernel_log_tx_bytes = kernel_log_tx_bytes + 1;
+    kernel_log_tx_spun = kernel_log_tx_spun + 1;
     if (ticks > 0) {
         kernel_log_tx_spin_ticks = kernel_log_tx_spin_ticks + (ticks as usize);
     }
@@ -101,6 +109,176 @@ fn kernel_log_tx_spin_ticks_total() -> usize {
 
 fn kernel_log_tx_byte_total() -> usize {
     return kernel_log_tx_bytes;
+}
+
+fn kernel_log_tx_spun_total() -> usize {
+    return kernel_log_tx_spun;
+}
+
+// GitHub issue #454: the transmit queue, and the switch that decides whether
+// a caller queues or spins.
+//
+// Measured before it existed: 2519 ms of an RPi5 boot spent inside
+// `uart_putc`'s TXFF wait, 78.9us per byte against the wire's own 86.8us --
+// the 16-entry FIFO absorbs a burst once and is full for the rest of a line,
+// so a caller waits out very nearly the whole transmission of every byte.
+//
+// SIZE, from the shape of the output rather than a pick. The producer is far
+// faster than the wire but is not continuously ahead of it: the boot moves
+// 31919 bytes over about 20 s, which is 14% of what the wire could carry in
+// that time. What costs is the BURST -- a line up to 180 characters arrives
+// with no gaps, and everything past the FIFO's 16 waits. A queue that holds
+// the largest burst removes the common case; one that tries to hold the
+// dmesg replay, ~90 lines back to back, would have to be as large as the
+// replay and would still fill. 512 bytes is a little under three
+// maximum-length lines, and what it does not absorb is the case where the
+// producer is genuinely wire-bound and ought to wait.
+//
+// OVERFLOW: drain by polling until there is room, never write past the
+// queue. Writing the overflowing byte straight to the FIFO would put it
+// ahead of everything already queued, which is the one failure a queue makes
+// easy and the one this kernel cannot have -- every view compares text.
+const KERNEL_LOG_TX_QUEUE_BYTES: usize = 512;
+private let mut kernel_log_tx_queue: [u8; KERNEL_LOG_TX_QUEUE_BYTES];
+private let mut kernel_log_tx_head: usize = 0;
+private let mut kernel_log_tx_tail: usize = 0;
+private let mut kernel_log_tx_count: usize = 0;
+
+// False until the platform has armed its TX interrupt. Early boot runs before
+// platform_irq_init(), so a byte queued then would never be drained; DDB and
+// the crash console must not depend on interrupts at all. Both therefore
+// spin, deliberately, and this says which regime is in effect rather than
+// letting anything infer it.
+private let mut kernel_log_tx_live: bool = false;
+
+fn kernel_log_tx_is_live() -> bool {
+    return kernel_log_tx_live;
+}
+
+fn kernel_log_tx_activate() {
+    kernel_log_tx_live = true;
+}
+
+fn kernel_log_tx_pending() -> bool {
+    return kernel_log_tx_count != 0;
+}
+
+fn kernel_log_tx_full() -> bool {
+    return kernel_log_tx_count >= KERNEL_LOG_TX_QUEUE_BYTES;
+}
+
+// Callers mask interrupts around these two: the drain runs from the TX
+// handler, so producer and consumer share the count. Masking rather than
+// locking is the sanctioned channel here -- kernel/lib/diagnostic_ring.tkb's
+// header explains why a console that can block on a lock is a console that
+// cannot report the deadlock it is in.
+fn kernel_log_tx_push(value: u8) -> bool {
+    if (kernel_log_tx_count >= KERNEL_LOG_TX_QUEUE_BYTES) { return false; }
+    let slot: usize = kernel_log_tx_tail;
+    if (slot >= KERNEL_LOG_TX_QUEUE_BYTES) { return false; }
+    let safe_slot: {0..<KERNEL_LOG_TX_QUEUE_BYTES as usize} = slot;
+    kernel_log_tx_queue[safe_slot] = value;
+    kernel_log_tx_tail = slot + 1;
+    if (kernel_log_tx_tail >= KERNEL_LOG_TX_QUEUE_BYTES) {
+        kernel_log_tx_tail = 0;
+    }
+    kernel_log_tx_count = kernel_log_tx_count + 1;
+    return true;
+}
+
+must_use variant KernelLogTxByte { Empty; Byte(u8); }
+
+fn kernel_log_tx_pop() -> KernelLogTxByte {
+    if (kernel_log_tx_count == 0) { return KernelLogTxByte::Empty; }
+    let slot: usize = kernel_log_tx_head;
+    if (slot >= KERNEL_LOG_TX_QUEUE_BYTES) { return KernelLogTxByte::Empty; }
+    let safe_slot: {0..<KERNEL_LOG_TX_QUEUE_BYTES as usize} = slot;
+    let value: u8 = kernel_log_tx_queue[safe_slot];
+    kernel_log_tx_head = slot + 1;
+    if (kernel_log_tx_head >= KERNEL_LOG_TX_QUEUE_BYTES) {
+        kernel_log_tx_head = 0;
+    }
+    kernel_log_tx_count = kernel_log_tx_count - 1;
+    return KernelLogTxByte::Byte(value);
+}
+
+// GitHub issue #454, and issue #470's rule about where a body belongs. What
+// follows is the console's transmit POLICY -- queue or spin, when to drain,
+// when to flush -- and none of it is platform-specific. The platform supplies
+// four MMIO primitives that genuinely differ by base address
+// (uart_tx_fifo_full, uart_tx_store, uart_tx_irq_enable, uart_tx_irq_disable);
+// everything built on them lives here, where both platforms read one copy.
+// scripts/check_platform_file_parity.py refused the first version of this
+// change for exactly that reason, naming all four bodies.
+// Wait out the FIFO and write. This is what every byte cost before the queue
+// existed, and it is still the whole story for early boot, for DDB, and for a
+// queue that has filled.
+private fn uart_tx_spin_store(c: u8) !{unsafe} {
+    let spin_from: i64 = read_cntpct();
+    while (uart_tx_fifo_full()) { }
+    kernel_log_note_tx_spin(read_cntpct() - spin_from);
+    uart_tx_store(c);
+}
+
+// Move queued bytes into the FIFO while both have room. Runs from the TX
+// interrupt as well as from the poll-drain paths, so it carries neither
+// `logs` nor `locks`: the effect system rejects `locks` on an `!{interrupt}`
+// function, and a console that could block on one could not report the
+// deadlock it is in.
+fn uart_tx_drain_into_fifo() !{unsafe} {
+    while (kernel_log_tx_pending() && uart_tx_fifo_full() == false) {
+        match kernel_log_tx_pop() {
+            KernelLogTxByte::Empty => { return; }
+            KernelLogTxByte::Byte(value) => { uart_tx_store(value); }
+        }
+    }
+}
+
+fn uart_putc(c: u8) !{logs, unsafe} {
+    kernel_log_capture_uart_byte(c);
+    kernel_log_note_tx_byte();
+    if (kernel_log_tx_is_live() == false) {
+        uart_tx_spin_store(c);
+        return;
+    }
+    // A full queue is drained by POLLING, never bypassed. Writing this byte
+    // straight to the FIFO would put it ahead of everything already queued,
+    // and every view in this kernel compares text.
+    // Restore the state FOUND, never enable unconditionally. kernel_boot_log
+    // is reached from paths that already hold IRQs masked, and a console that
+    // unmasked them underneath its caller would be a far worse defect than the
+    // spinning this replaces -- the same reasoning mutex_irq_save/_restore
+    // carries in kernel/lib/pool_lock.tkb.
+    let irq_flags: usize = mutex_irq_save();
+    while (kernel_log_tx_full()) {
+        mutex_irq_restore(irq_flags);
+        while (uart_tx_fifo_full()) { }
+        disable_irq();
+        uart_tx_drain_into_fifo();
+    }
+    let queued: bool = kernel_log_tx_push(c);
+    uart_tx_drain_into_fifo();
+    let still_pending: bool = kernel_log_tx_pending();
+    mutex_irq_restore(irq_flags);
+    if (queued == false) {
+        uart_tx_spin_store(c);
+        return;
+    }
+    if (still_pending) { uart_tx_irq_enable(); }
+}
+
+// Everything queued reaches the wire before this returns. Called before the
+// paths that must not depend on interrupts -- DDB entry, the crash console,
+// a halt -- because those write through uart_debug_putc, and a byte they emit
+// while the queue still holds earlier output would arrive out of order.
+fn uart_tx_flush() !{unsafe} {
+    let irq_flags: usize = mutex_irq_save();
+    while (kernel_log_tx_pending()) {
+        while (uart_tx_fifo_full()) { }
+        uart_tx_drain_into_fifo();
+    }
+    uart_tx_irq_disable();
+    mutex_irq_restore(irq_flags);
 }
 
 fn kernel_log_capture_uart_byte(value: u8) {

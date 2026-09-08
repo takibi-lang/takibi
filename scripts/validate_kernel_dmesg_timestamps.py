@@ -10,7 +10,7 @@ LINE = re.compile(rb"^\[(\d{6})\.(\d{6})\] (.*)$")
 # The console's own account of what it spent waiting on the wire, emitted once
 # at the end of the boot suite (GitHub issue #454).
 CONSOLE_SPIN = re.compile(
-    rb"console: tx spin ticks=(\d+) bytes=(\d+) tickfreq=(\d+)")
+    rb"console: tx spin ticks=(\d+) bytes=(\d+) spun=(\d+) tickfreq=(\d+)")
 
 
 def fail(message: str) -> None:
@@ -134,11 +134,13 @@ def main() -> None:
     console = CONSOLE_SPIN.search(data)
     spin = ""
     if console:
-        ticks, sent, frequency = (int(console.group(index)) for index in (1, 2, 3))
+        ticks, sent, spun, frequency = (
+            int(console.group(index)) for index in (1, 2, 3, 4))
         if frequency > 0 and sent > 0:
             seconds = ticks / frequency
+            per = f"{seconds / spun * 1e6:.1f} us each" if spun else "none spun"
             spin = (f", console tx spin={seconds * 1000:.0f} ms over {sent} "
-                    f"bytes ({seconds / sent * 1e6:.1f} us/byte)")
+                    f"bytes ({spun} spun, {per})")
     print(
         f"PASS kernel/{args.platform} dmesg: {len(records)} monotonic records, "
         f"assembled lines, delay={elapsed} us, boot={boot_us / 1_000_000:.1f} s"

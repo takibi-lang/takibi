@@ -162,13 +162,13 @@ def main() -> int:
     # Driven on the QEMU fixture because the parsing is platform-independent
     # and HEALTHY carries QEMU's network markers; the ticks are a real RPi5
     # sample, which is what makes the derived figures worth asserting.
-    spin = b"console: tx spin ticks=136043016 bytes=31919 tickfreq=54000000\r\n"
+    spin = b"console: tx spin ticks=136043016 bytes=31919 spun=31919 tickfreq=54000000\r\n"
     status, output = run(HEALTHY, "qemu", spin)
     if status != 0 or "console tx spin=2519 ms" not in output:
         print("FAIL dmesg-timestamps control: the console spin measurement "
               f"was not reported from a capture that carries it\n{output}")
         return 1
-    if "78.9 us/byte" not in output:
+    if "78.9 us each" not in output:
         print("FAIL dmesg-timestamps control: the per-byte cost, which is what "
               f"says the FIFO buys nothing, was not derived\n{output}")
         return 1
@@ -179,7 +179,7 @@ def main() -> int:
         return 1
     status, output = run(
         HEALTHY, "qemu",
-        b"console: tx spin ticks=136043016 bytes=0 tickfreq=54000000\r\n")
+        b"console: tx spin ticks=136043016 bytes=0 spun=0 tickfreq=54000000\r\n")
     if status != 0 or "console tx spin" in output:
         print("FAIL dmesg-timestamps control: zero bytes were divided by, or "
               f"reported as a measurement of something\n{output}")

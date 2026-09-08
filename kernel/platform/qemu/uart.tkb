@@ -17,17 +17,27 @@ use "kernel/platform/qemu/intc.tkb";
 use "kernel/arch/arm64/kernel/platform_uart_common.tkb";
 let mut uart_base: usize = 0x09000000;
 
-fn uart_putc(c: u8) !{logs, unsafe} {
-    kernel_log_capture_uart_byte(c);
-    let fr: *io u32 = unsafe { (uart_base + 0x18) as *io u32 }; // PL011 FR
-    // GitHub issue #454: time the wait, not the write. Everything
-    // after the loop is a single store; what a caller pays for is
-    // the FIFO being full, and this is the only place that knows.
-    let spin_from: i64 = read_cntpct();
-    while ((*fr & (1 << 5)) != 0) { } // wait while TXFF (TX FIFO full)
-    kernel_log_note_tx_spin(read_cntpct() - spin_from);
-    let dr: *io u8 = unsafe { uart_base as *io u8 }; // PL011 DR
+// The FIFO, reached without the logging path's bookkeeping: the drain below
+// and the emergency debug writer both need exactly these two operations and
+// neither may carry the `logs` effect (GitHub issue #454).
+fn uart_tx_fifo_full() -> bool !{unsafe} {
+    let fr: *io u32 = unsafe { (uart_base + 0x18) as *io u32 };
+    return (*fr & (1 << 5)) != 0; // TXFF
+}
+
+fn uart_tx_store(c: u8) !{unsafe} {
+    let dr: *io u8 = unsafe { uart_base as *io u8 };
     *dr = c;
+}
+
+fn uart_tx_irq_enable() !{unsafe} {
+    let imsc: *io u32 = unsafe { (uart_base + 0x38) as *io u32 };
+    *imsc = *imsc | (1 << 5); // TXIM
+}
+
+fn uart_tx_irq_disable() !{unsafe} {
+    let imsc: *io u32 = unsafe { (uart_base + 0x38) as *io u32 };
+    *imsc = *imsc & ~(1 << 5);
 }
 
 fn uart_rx_discard(discarded: u8) !{unsafe} {
@@ -54,7 +64,9 @@ fn uart_rx_ready() -> bool !{unsafe} {
     return (*fr & (1 << 4)) == 0; // RXFE clear = data available
 }
 
-fn uart_tx_isr() {
+fn uart_tx_isr() !{unsafe} {
+    uart_tx_drain_into_fifo();
+    if (kernel_log_tx_pending() == false) { uart_tx_irq_disable(); }
 }
 
 // Called by platform_irq_dispatch (kernel/platform/qemu/intc.tkb) after
@@ -64,6 +76,11 @@ fn uart_tx_isr() {
 fn uart_irq_handler() -> bool !{interrupt, unsafe} {
     let uart_mis: *io u32 = unsafe { (uart_base + 0x40) as *io u32 };
     let uart_icr: *io u32 = unsafe { (uart_base + 0x44) as *io u32 };
+    // GitHub issue #454: the queued transmitter's own source. Serviced before
+    // the receive path so a full FIFO is relieved as early in the handler as
+    // possible; the drain disarms TXIM itself once the queue empties, so an
+    // idle console raises no interrupt at all.
+    if ((*uart_mis & (1 << 5)) != 0) { uart_tx_isr(); }
     if (uart_rx_ready()) {
         let dr: *io u32 = unsafe { uart_base as *io u32 };
         let received: u32 = *dr;
