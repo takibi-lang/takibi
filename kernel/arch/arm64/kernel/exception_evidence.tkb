@@ -1162,12 +1162,14 @@ private fn kernel_ddb_enter_stopped(
             ddb_snapshot_published_sequence_address(),
             ddb_snapshot.sequence);
     }
-    // GitHub issue #454: everything the console queued reaches the wire
-    // before the debugger writes a byte. ddb_puts goes through
-    // uart_debug_putc, which spins on the FIFO and knows nothing about the
-    // queue, so without this the prompt would arrive ahead of the output
-    // that explains why it is there.
-    uart_tx_flush();
+    // GitHub issue #454: the debugger is a terminal path, so the console
+    // stands down to its pre-queue behaviour here. Everything queued reaches
+    // the wire first -- ddb_puts writes through uart_debug_putc, which spins
+    // on the FIFO and knows nothing about the queue, so the prompt would
+    // otherwise arrive ahead of the output that explains why it is there --
+    // and every byte after this one spins, because a debugger entered with
+    // interrupts masked has nothing left to drain a queue.
+    kernel_log_tx_stand_down();
     ddb_puts("\nddb: interrupt-safe UART debugger\n");
     ddb_puts("ddb: world-stop complete mask=");
     ddb_put_hex(world_stopped_mask(stopped_world));
@@ -1492,6 +1494,11 @@ private fn crash_console_run() !{unsafe} {
     // wake a process. Keep it out of a terminal exception monitor and poll
     // the device directly instead.
     disable_irq();
+    // GitHub issue #454: same reason as the debugger above, and here it is
+    // load-bearing rather than tidy. This loop blocks on input after every
+    // `ddb> `, with interrupts masked, so a prompt left in the transmit queue
+    // has nothing to drain it and the console would appear hung.
+    kernel_log_tx_stand_down();
     kernel_boot_log("ddb: read-only crash console\n");
     let mut line: [u8; CRASH_CONSOLE_LINE_BYTES];
     let mut length: usize = 0;

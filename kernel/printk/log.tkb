@@ -159,6 +159,23 @@ fn kernel_log_tx_activate() {
     kernel_log_tx_live = true;
 }
 
+// Put the console back the way it was before the queue existed: everything
+// already queued goes out, and every byte after this one spins.
+//
+// GitHub issue #454 asked for "a flush point before anything that must be on
+// the wire before it proceeds". A single flush is not enough for a TERMINAL
+// path. The crash console runs under disable_irq() and then blocks on input
+// after each `ddb> `, so a byte still in the queue has nothing left to drain
+// it -- the prompt would sit there and the console would look hung. Turning
+// the queue off at entry is one statement instead of a flush before every
+// write, and it makes the acceptance condition literal: DDB and the crash
+// console emit byte-identical output through exactly the path they used
+// before this change.
+fn kernel_log_tx_stand_down() !{unsafe} {
+    uart_tx_flush();
+    kernel_log_tx_live = false;
+}
+
 fn kernel_log_tx_pending() -> bool {
     return kernel_log_tx_count != 0;
 }
