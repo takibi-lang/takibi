@@ -131,8 +131,17 @@ The timeline assertion is removed after that boundary audit. Its buffers are
 per-core, activation and closure occur under complete world-stop, and each
 event is published with local IRQs masked. The host workload profiler already
 merges the stable per-core streams by timestamp, CPU, and local sequence. A
-fresh two-core negative build now reports eight unique blockers and no
-timeline diagnostic; profile samples and workload PMU ownership remain.
+fresh two-core negative build then reported eight unique blockers and no
+timeline diagnostic.
+
+Flat PC sampling remains intentionally single-core, now with an explicit
+interval owner. The complete-stop start boundary records the CPU that arms
+the PMU; when both tags reach exactly eight rounds their counters freeze, and
+only that CPU's next progress syscall may request the complete-stop finish.
+Thus the same local PMU is started and stopped without inflating the workload
+result while accounting and timeline evidence still cover every active CPU.
+The two profiling assertions are removed. A fresh negative build now reports
+six unique blockers, none in the profiling files.
 
 Before adding repeated interval stops, the world-stop controller now separates
 its nonblocking claim gate from the owner identity and uses non-reused request

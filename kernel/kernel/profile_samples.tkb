@@ -20,7 +20,7 @@
 // UART capture becomes a refusal rather than a quietly wrong profile. Change
 // one without the other and the lane fails, which is the intent.
 //
-// Current limitations (2026-09-04). Keep this list current; a stale one
+// Current limitations (2026-09-08). Keep this list current; a stale one
 // invites relying on a guarantee that quietly stopped holding.
 // - ONE SAMPLING CORE. PMU state is per-core and only the core that runs
 //   profile_sample_start arms its own counter, so exactly one core produces
@@ -28,8 +28,10 @@
 //   writes on whichever core took it and sharing one buffer would need a
 //   lock the interrupt path must not take. The DUMP is a plain per-core
 //   walk, which is timestamp-ordered only while one core samples. A second
-//   sampling core must merge the buffers by timestamp here, or the parser
-//   will (correctly) refuse the capture.
+//   sampling core would need the dump merged by timestamp here, or the parser
+//   would (correctly) refuse the capture. The workload interval records its
+//   sampling CPU and routes finish back to that CPU, so the local counter is
+//   stopped by the same CPU that armed it.
 // - DROP-TAIL, NOT A RING. When a core's buffer is full the sample is
 //   counted in `lost` and discarded, so the profile covers the START of the
 //   interval rather than a uniform draw from it. This matches what perf
@@ -264,14 +266,7 @@ fn profile_sample_report() {
 // is written under, and nothing else writes them until the interval has
 // ended. That much would survive a second core.
 //
-// `profile_sample_active` and the two availability flags would not. They
-// are written by the core that opens and closes the interval and read by
-// every core's interrupt, so on two cores a sample can be recorded into a
-// buffer the reporting core is already walking. The fix is not a lock in
-// the interrupt path; it is that the second core's sampling has to be
-// started and stopped by the same interval boundary, which is the multicore
-// milestone's own work and not something to guess at now.
-fn profile_sample_execution_model_assumption() {
-    static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "the sample buffers are per-core; the active flag and the interval boundary are shared");
-}
+// The active and availability fields are shared, but start and finish execute
+// with every active core stopped. A sample interrupt tests active while its
+// local IRQ is already masked; after finish publishes false under world-stop,
+// no producer can resume a write before reporting walks the stable buffers.
