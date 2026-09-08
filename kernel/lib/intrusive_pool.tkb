@@ -47,19 +47,18 @@ use "kernel/lib/locked_cell.tkb";
 //   checking rather than exclusion. The port supplies disable_irq on one
 //   core or a real acquire for SMP; nothing in this file changes when it
 //   does.
-// - READS are not guarded. A cursor retained across removal is safe to
-//   probe: intrusive_pool_slot_is_valid asks the page allocator whether
-//   the chunk is still pool-owned before dereferencing it, and issue #482's
-//   two-core rendezvous exercises that refusal on QEMU and RPi5. This is
-//   not general read-side exclusion. A caller must still prevent removal
-//   between a Live probe and its payload access, and a lockless walk can
-//   observe a newly inserted slot before its payload is initialized. Current
-//   callers provide that lifetime through their subsystem lock/execution
-//   model, or are stop-the-world diagnostics. Guarding every observer here
-//   was rejected because it would impose a lock across arbitrary caller work
-//   and every early-return path rather than express the lifetime actually
-//   needed. Today KERNEL_ACTIVE_CORES keeps ordinary consumers single-core;
-//   stop-the-world diagnostics have their own execution-model blocker.
+// - NORMAL LIVE VIEWS OWN THE POOL LOCK. probe_slot and probe_handle acquire
+//   it before validation and the linear view releases it only when consumed,
+//   so removal cannot race payload use and insertion cannot be observed before
+//   insert_zeroed finishes. Issue #479's two-core rendezvous reads a real
+//   payload while core 0 observes the lock on both sides of view release.
+//   Cursor traversal itself remains lockless: issue #482 proves that probing a
+//   cursor into a released chunk is refused before dereference. The explicitly
+//   unsafe probe_slot_unproven is reserved for that stale-cursor test and a
+//   reporter that has stopped every peer. payload_unproven_of releases a
+//   normal view before returning its bare pointer; those eleven caller-owned
+//   lifetime exceptions remain named and checked by
+//   scripts/check_liveness_proof_escapes.py rather than weakening every view.
 // - The guard is not re-entrant, and taking one twice on a path would
 //   deadlock under a real lock. It is not a compile error -- both
 //   acquires are individually correct, so nothing in the type ties the
@@ -111,13 +110,10 @@ use "kernel/lib/locked_cell.tkb";
 //   no such caveat left: intrusive_pool_probe_slot validates and reads
 //   the generation itself, and its Live view is the only key to the
 //   payload.
-// - A view is a SNAPSHOT. It says the slot was live when probed, which a
-//   later insert or remove can undo -- which is why
-//   intrusive_pool_payload_of sinks it rather than borrowing it, so one
-//   probe cannot justify a second look. Holding the resulting `*T` across
-//   a mutation is the caller's problem, exactly as it is for
-//   intrusive_pool_ref's; what changed is that getting the pointer at all
-//   now requires having looked.
+// - A view is a LOCKED SNAPSHOT. It says which occupant was live when probed
+//   and keeps that occupant stable through payload use. A wrapper that returns
+//   only the pointer cannot return that guarantee; it must use the explicitly
+//   unsafe payload_unproven_of escape and assume the caller supplies lifetime.
 // - intrusive_pool_probe_slot ANSWERS FOR WHOEVER IS THERE. It takes an
 //   address, so it cannot ask which occupant the caller meant: a slot that
 //   was freed and reallocated is Live, and the payload it returns belongs
@@ -1762,12 +1758,17 @@ fn intrusive_pool_probe_handle_untrusted(
         T: type, pool: &mut IntrusivePool(T) @ pool_id,
         slot_address: usize, generation: usize)
         -> IntrusiveSlotProbe[pool_id] !{unsafe} {
+    let flags: usize = pool_lock_acquire(pool.pool_tag, &(*pool).lock);
     if (intrusive_pool_matches_untrusted(
             pool, slot_address, generation) == false) {
+        pool_lock_release(pool.pool_tag, &(*pool).lock, flags);
         return IntrusiveSlotProbe::NoPayload;
     }
     let mut address: IntrusiveSlotAddress = { slot_address };
-    let mut minted: IntrusiveSlotView[pool_id] = { address, generation };
+    let mut minted: IntrusiveSlotView[pool_id] = {
+        address, generation, true, pool.pool_tag,
+        (&(*pool).lock) as usize, flags
+    };
     return IntrusiveSlotProbe::Live(minted);
 }
 
@@ -1839,11 +1840,19 @@ private fn intrusive_pool_payload_at(T: type, pool: &mut IntrusivePool(T) @ pool
 // examples/tcp_conn_view never hits that because nothing in it uses the
 // concrete connection; an allocator's whole purpose is to touch memory at
 // the address, so it does. Carrying the address as a runtime field
-// sidesteps the comparison entirely. The cost is 16 stack bytes per probe
-// in flight, never anything per slot.
+// sidesteps the comparison entirely. The cost is six machine words per probe
+// in flight, never anything per slot: occupant identity plus the state needed
+// to release the pool lock.
 private linear struct IntrusiveSlotView[pool_id: addr] {
     private slot: IntrusiveSlotAddress;
     private generation: usize;
+    // The address is stored as an inert integer, not a raw pointer: pointer
+    // fields can hide ownership relationships (#240). Only the backend turns
+    // this private value back into its Mutex when the linear view is consumed.
+    private locked: bool;
+    private lock_tag: usize;
+    private lock_address: usize;
+    private lock_flags: usize;
 }
 
 // Two cases, not three. "Not ours" and "free" are both "there is no
@@ -1856,25 +1865,51 @@ must_use variant IntrusiveSlotProbe[pool_id: addr] {
     Live(IntrusiveSlotView[pool_id]);
 }
 
-// The one entry point that mints a view, and the replacement for
+// The ordinary entry point that mints a view, and the replacement for
 // "intrusive_pool_slot_generation() != 0, then intrusive_pool_payload_at".
 // Safe on an address of unknown provenance: validation happens before the
 // generation is read, exactly as intrusive_pool_slot_generation did.
-// Costs the caller nothing extra -- it is the same validate-and-read that
-// filter already performed, with the result in a form that cannot be
-// skipped.
+// The pool lock is acquired BEFORE validation and stays owned by a Live view,
+// so neither removal nor the pre-initialization half of insertion can overlap
+// payload use. NoPayload releases before returning.
 fn intrusive_pool_probe_slot(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                              slot_address: usize)
         -> IntrusiveSlotProbe[pool_id] !{unsafe} {
+    let flags: usize = pool_lock_acquire(pool.pool_tag, &(*pool).lock);
     if (intrusive_pool_slot_is_valid(pool, slot_address) == false) {
+        pool_lock_release(pool.pool_tag, &(*pool).lock, flags);
         return IntrusiveSlotProbe::NoPayload;
     }
     let generation: usize = intrusive_slot_at(pool, slot_address).generation;
     if (generation == 0) {
+        pool_lock_release(pool.pool_tag, &(*pool).lock, flags);
         return IntrusiveSlotProbe::NoPayload;
     }
     let mut address: IntrusiveSlotAddress = { slot_address };
-    let mut minted: IntrusiveSlotView[pool_id] = { address, generation };
+    let mut minted: IntrusiveSlotView[pool_id] = {
+        address, generation, true, pool.pool_tag,
+        (&(*pool).lock) as usize, flags
+    };
+    return IntrusiveSlotProbe::Live(minted);
+}
+
+// Reporter/test escape: validate and mint the same payload proof without
+// taking a lock. A production reporter calls this only after stopping every
+// peer; the pool-walk contention probe uses it to exercise a stale cursor.
+// The explicit name and unsafe effect keep this weaker lifetime in the trusted
+// base instead of making every ordinary probe a snapshot again.
+fn intrusive_pool_probe_slot_unproven(
+        T: type, pool: &mut IntrusivePool(T) @ pool_id,
+        slot_address: usize) -> IntrusiveSlotProbe[pool_id] !{unsafe} {
+    if (intrusive_pool_slot_is_valid(pool, slot_address) == false) {
+        return IntrusiveSlotProbe::NoPayload;
+    }
+    let generation: usize = intrusive_slot_at(pool, slot_address).generation;
+    if (generation == 0) { return IntrusiveSlotProbe::NoPayload; }
+    let mut address: IntrusiveSlotAddress = { slot_address };
+    let mut minted: IntrusiveSlotView[pool_id] = {
+        address, generation, false, 0, 0, 0
+    };
     return IntrusiveSlotProbe::Live(minted);
 }
 
@@ -1890,12 +1925,17 @@ fn intrusive_view_generation(slot_view: borrow IntrusiveSlotView[pool_id]) -> us
 }
 
 // Discharges the obligation for a caller that looked and moved on.
-fn intrusive_view_drop(slot_view: sink IntrusiveSlotView[pool_id]) {}
+private fn intrusive_view_unlock(slot_view: sink IntrusiveSlotView[pool_id]) {
+    if (slot_view.locked) {
+        pool_lock_release_address(
+            slot_view.lock_tag, slot_view.lock_address, slot_view.lock_flags);
+    }
+}
 
-// The gated payload accessor. `sink` rather than `borrow` on purpose: the
-// view is a snapshot of a fact that a later insert or remove can undo, so
-// spending it here keeps a `*T` from being justified by a proof the
-// caller kept holding after it went stale.
+fn intrusive_view_drop(slot_view: sink IntrusiveSlotView[pool_id]) {
+    intrusive_view_unlock(slot_view);
+}
+
 // The payload, tied to the proof that there IS one.
 //
 // GitHub issue #488. This used to take the view as `sink` and return a
@@ -1918,10 +1958,10 @@ fn intrusive_view_drop(slot_view: sink IntrusiveSlotView[pool_id]) {}
 // dropping the view is "pointer is derived from linear value ... and
 // cannot be used after ... is consumed".
 //
-// It does NOT make the pointer safe against another core freeing the slot
-// while the view is held -- the view proves occupancy at PROBE time, not
-// exclusion. That is issue #482, and this change is what makes adding the
-// guard there a local decision rather than a redesign.
+// The view owns the pool lock, so the lifetime relation also excludes another
+// core from freeing or initializing this slot while the pointer is usable.
+// Returning the pointer from a wrapper still requires the explicit unproven
+// escape below, because the wrapper cannot return the view with it.
 fn intrusive_pool_payload_of(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                              slot_view: borrow IntrusiveSlotView[pool_id])
         -> *T @ pool_id !{unsafe} {
@@ -1931,7 +1971,18 @@ fn intrusive_pool_payload_of(T: type, pool: &mut IntrusivePool(T) @ pool_id,
 // Give a view back. Linear, so a probe whose Live case is taken cannot
 // simply be forgotten -- which is what stops the payload pointer from
 // being kept by dropping the proof early.
-fn intrusive_view_release(slot_view: sink IntrusiveSlotView[pool_id]) {}
+fn intrusive_view_release(slot_view: sink IntrusiveSlotView[pool_id]) {
+    intrusive_view_unlock(slot_view);
+}
+
+// Contention-evidence observability only. This does not grant access to a
+// payload and must not be used as a synchronization decision: it lets the
+// maintained two-core probe verify that a Live view really owns the pool lock
+// until the view is consumed.
+fn intrusive_pool_lock_is_held_for_probe(
+        T: type, pool: &mut IntrusivePool(T) @ pool_id) -> bool !{unsafe} {
+    return mutex_is_held(&(*pool).lock);
+}
 
 // THE ESCAPE, and it is the old behaviour with its name changed to say so.
 //
@@ -1949,7 +2000,9 @@ fn intrusive_view_release(slot_view: sink IntrusiveSlotView[pool_id]) {}
 fn intrusive_pool_payload_unproven_of(
         T: type, pool: &mut IntrusivePool(T) @ pool_id,
         slot_view: sink IntrusiveSlotView[pool_id]) -> *T !{unsafe} {
-    return intrusive_pool_payload_at(pool, intrusive_view_slot(slot_view).raw);
+    let slot_address: usize = intrusive_view_slot(slot_view).raw;
+    intrusive_view_unlock(slot_view);
+    return intrusive_pool_payload_at(pool, slot_address);
 }
 
 // The owner-shaped escape, same reasoning.
@@ -2446,19 +2499,4 @@ fn intrusive_pool_boot_probe() -> bool !{unsafe} {
            stale_refused && stale_counted && invariants_ok && pages_returned &&
            slot_probe_answered_live && handle_probe_refused &&
            handle_probe_current && recycled_counted;
-}
-
-// GitHub issues #479 and #482. The tag counter is a LockedCell, mutation
-// requires an indexed pool guard, and a cursor into a released chunk is
-// rejected before dereference by the page-ownership check. That last fact is
-// what #482's contention probe proves; it does NOT close the window after a
-// probe returns Live. IntrusiveSlotView proves occupancy at probe time but
-// does not exclude another core from removing the slot before or during the
-// payload access, and a concurrent insertion may expose uninitialized payload.
-// Process diagnostic walks as well as fd and TCP walks reach this API, so the
-// container needs read-side lifetime protection before ordinary consumers can
-// be active on two cores.
-fn intrusive_pool_execution_model_assumption() {
-    static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "a Live slot proof does not exclude another core from removing or initializing its payload");
 }

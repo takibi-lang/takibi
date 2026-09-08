@@ -143,6 +143,14 @@ result while accounting and timeline evidence still cover every active CPU.
 The two profiling assertions are removed. A fresh negative build now reports
 six unique blockers, none in the profiling files.
 
+`IntrusivePool` ordinary Live views now own the pool lock from validation
+through payload use. The explicit unproven path remains only for stopped
+reporting, the stale-cursor contention test, and the eleven caller-owned
+pointer-lifetime escapes already counted by the trusted-base check. The
+maintained two-core probe reads a payload while core 0 observes the lock held,
+then observes it released when the linear view is consumed. The pool assertion
+is removed; a fresh negative build reports five unique blockers.
+
 Before adding repeated interval stops, the world-stop controller now separates
 its nonblocking claim gate from the owner identity and uses non-reused request
 generations. Old acknowledgements cannot satisfy a fresh stop, and a failed

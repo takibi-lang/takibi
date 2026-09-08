@@ -87,23 +87,17 @@
 //   and it would catch the walk straying out of the chunk it is in.
 //
 // Current limitations:
-// - IT DOES NOT COVER THE PAYLOAD POINTER'S LIFETIME. probe_slot's answer
-//   is a snapshot; a caller holding the `*T` that payload_of hands back
-//   across a concurrent remove is issue #488's shape, not this one, and
-//   the eighteen declared `_unproven_` escapes are where that still lives.
-// - IT TESTS RELEASE, NOT INSERT. Measured while building this and worth
-//   recording, because the pool's own contract says it and nothing had
-//   observed it from the outside: a lockless walker CAN see a slot's first
-//   word holding the free-chain LINK that used to occupy it, in the window
-//   after intrusive_pool_insert_unchecked sets `slot.generation` nonzero
-//   and before the caller -- or insert_zeroed's own zero-loop -- writes the
-//   payload. `intrusive_pool_insert`'s comment states the contract exactly
-//   ("nothing zeroes the storage here... a freshly allocated payload is
-//   uninitialized, write it before reading it"), and the observed values
-//   were slot addresses inside the same chunk, which is what a free-chain
-//   link is. That is a second, narrower hazard than this file's subject,
-//   it belongs to insert rather than to walking, and it is recorded here
-//   rather than re-measured every boot.
+// - The ordinary probe now holds the pool lock for the Live view's lifetime.
+//   This file verifies that separately by reading a floor payload while core 0
+//   observes the lock before and after release. Accessors that explicitly turn
+//   that view into an unproven pointer are caller-owned lifetime exceptions;
+//   this probe neither blesses nor exercises them.
+// - The stale-cursor half tests release, not insert. The ordinary-view half
+//   covers insertion's relevant boundary indirectly: insert_zeroed holds the
+//   same lock through its zero loop, so the secondary cannot obtain Live until
+//   initialization has ended. It does not cover callers of the deliberately
+//   uninitialized insert entry point, whose contract requires initialization
+//   before publication by the caller.
 // - The verdict is a LOWER BOUND on a real machine, like every QEMU
 //   concurrency result -- see kernel/CONCURRENCY.md.
 
@@ -174,6 +168,15 @@ private let mut pool_walk_released_seq: usize;
 private let mut pool_walk_probed_seq: usize;
 private let mut pool_walk_stale: usize;
 
+// GitHub issue #479: a second rendezvous around the ordinary (locked) probe.
+// The secondary holds a Live view until core 0 asks it to release; core 0
+// observes the underlying mutex on both sides of that release.
+private let mut pool_view_request: usize;
+private let mut pool_view_held: usize;
+private let mut pool_view_release: usize;
+private let mut pool_view_done: usize;
+private let mut pool_view_payload_ok: usize;
+
 private let mut pool_walk_rounds_met: usize;
 private let mut pool_walk_refused: usize;
 private let mut pool_walk_admitted: usize;
@@ -219,6 +222,26 @@ private fn pool_walk_probed_seq_address() -> usize {
 
 private fn pool_walk_stale_address() -> usize {
     return (&pool_walk_stale) as usize;
+}
+
+private fn pool_view_request_address() -> usize {
+    return (&pool_view_request) as usize;
+}
+
+private fn pool_view_held_address() -> usize {
+    return (&pool_view_held) as usize;
+}
+
+private fn pool_view_release_address() -> usize {
+    return (&pool_view_release) as usize;
+}
+
+private fn pool_view_done_address() -> usize {
+    return (&pool_view_done) as usize;
+}
+
+private fn pool_view_payload_ok_address() -> usize {
+    return (&pool_view_payload_ok) as usize;
 }
 
 private fn pool_walk_refused_address() -> usize {
@@ -276,7 +299,7 @@ private fn pool_walk_once() !{unsafe} {
         budget = budget - 1;
         unsafe { atomic_fetch_add_relaxed(pool_walk_steps_address(), 1); }
         if (pool_walk_in_floor(cursor)) {
-            match intrusive_pool_probe_slot(&pool_walk_pool, cursor) {
+            match intrusive_pool_probe_slot_unproven(&pool_walk_pool, cursor) {
                 IntrusiveSlotProbe::NoPayload => {}
                 IntrusiveSlotProbe::Live(slot_view) => {
                     let payload: *PoolWalkItem =
@@ -326,7 +349,7 @@ private fn pool_walk_once() !{unsafe} {
                 // The whole point, in one call: the chunk this address
                 // names has been unlinked, scrubbed and handed back, and
                 // the walk is asking about it anyway.
-                match intrusive_pool_probe_slot(&pool_walk_pool, cursor) {
+                match intrusive_pool_probe_slot_unproven(&pool_walk_pool, cursor) {
                     IntrusiveSlotProbe::NoPayload => {
                         unsafe {
                             atomic_fetch_add_relaxed(
@@ -353,6 +376,43 @@ private fn pool_walk_once() !{unsafe} {
     }
 }
 
+// Hold an ordinary Live view across a cross-core rendezvous. Reading the
+// payload both before and after core 0 observes the lock makes the view an
+// actual consumer, rather than a lock-only test that could pass without
+// exercising the protected operation.
+private fn pool_view_hold_once() !{unsafe} {
+    match intrusive_pool_probe_slot(&pool_walk_pool, pool_walk_floor_base) {
+        IntrusiveSlotProbe::NoPayload => {
+            unsafe { atomic_store_release(pool_view_done_address(), 1); }
+        }
+        IntrusiveSlotProbe::Live(slot_view) => {
+            let payload: *PoolWalkItem =
+                intrusive_pool_payload_of(&pool_walk_pool, slot_view);
+            let first_ok: bool = payload.stamp == POOL_WALK_SENTINEL;
+            unsafe { atomic_store_release(pool_view_held_address(), 1); }
+            let window: i64 = read_cntfrq() >> POOL_WALK_RENDEZVOUS_SHIFT;
+            let start: i64 = read_cntpct();
+            let mut released: bool = false;
+            while (released == false && read_cntpct() - start < window &&
+                   unsafe {
+                       atomic_load_acquire(pool_walk_armed_address())
+                   } == 1) {
+                released = unsafe {
+                    atomic_load_acquire(pool_view_release_address())
+                } == 1;
+            }
+            if (first_ok && released &&
+                    payload.stamp == POOL_WALK_SENTINEL) {
+                unsafe {
+                    atomic_store_release(pool_view_payload_ok_address(), 1);
+                }
+            }
+            intrusive_view_release(slot_view);
+            unsafe { atomic_store_release(pool_view_done_address(), 1); }
+        }
+    }
+}
+
 fn pool_walk_contention_secondary_run() !{unsafe} {
     unsafe {
         atomic_fetch_add_relaxed(pool_walk_entries_address(), 1);
@@ -361,7 +421,14 @@ fn pool_walk_contention_secondary_run() !{unsafe} {
     while (unsafe {
                atomic_load_acquire(pool_walk_armed_address())
            } == 1) {
-        pool_walk_once();
+        if (unsafe {
+                atomic_load_acquire(pool_view_request_address())
+            } == 1) {
+            pool_view_hold_once();
+            unsafe { atomic_store_release(pool_view_request_address(), 0); }
+        } else {
+            pool_walk_once();
+        }
     }
     unsafe { atomic_store_release(pool_walk_active_address(), 0); }
 }
@@ -547,6 +614,35 @@ fn pool_walk_contention_probe() -> bool !{allocates, unsafe} {
     if (entered == false) {
         unsafe { atomic_store_release(pool_walk_armed_address(), 0); }
         pool_walk_report("secondary-never-entered" as *u8);
+        return false;
+    }
+
+    // First prove the new default read lifetime. The floor is immutable and
+    // live for this whole phase, so any failure is the view/lock protocol,
+    // not pool churn or address reuse.
+    unsafe { atomic_store_release(pool_view_request_address(), 1); }
+    if (pool_walk_await(pool_view_held_address(), 1) == false) {
+        unsafe { atomic_store_release(pool_walk_armed_address(), 0); }
+        pool_walk_report("view-never-held" as *u8);
+        return false;
+    }
+    let locked_while_live: bool =
+        intrusive_pool_lock_is_held_for_probe(&pool_walk_pool);
+    unsafe { atomic_store_release(pool_view_release_address(), 1); }
+    if (pool_walk_await(pool_view_done_address(), 1) == false) {
+        unsafe { atomic_store_release(pool_walk_armed_address(), 0); }
+        pool_walk_report("view-never-released" as *u8);
+        return false;
+    }
+    let unlocked_after_release: bool =
+        intrusive_pool_lock_is_held_for_probe(&pool_walk_pool) == false;
+    let view_payload_ok: bool = unsafe {
+        atomic_load_acquire(pool_view_payload_ok_address())
+    } == 1;
+    if (locked_while_live == false || unlocked_after_release == false ||
+            view_payload_ok == false) {
+        unsafe { atomic_store_release(pool_walk_armed_address(), 0); }
+        pool_walk_report("view-lifetime-failed" as *u8);
         return false;
     }
 

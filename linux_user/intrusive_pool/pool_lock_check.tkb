@@ -184,7 +184,7 @@ fn pool_lock_acquire(tag: usize, lock: *Mutex @ id) -> usize !{locks} {
 // a linear guard is released where its holder chooses, and releasing in a
 // different order than acquired is legal even though acquiring in a
 // different order is what this file is looking for.
-fn pool_lock_release(tag: usize, lock: *Mutex @ id, flags: usize) !{locks} {
+private fn pool_lock_release_tag(tag: usize) {
     let slot_value: usize = pool_lock_slot_of(tag);
     if (tag == 0 || slot_value >= POOL_LOCK_MAX_TAGS) { return; }
     let mut found: bool = false;
@@ -204,6 +204,17 @@ fn pool_lock_release(tag: usize, lock: *Mutex @ id, flags: usize) !{locks} {
         }
     }
     if (found == false) { pool_lock_unbalanced = pool_lock_unbalanced + 1; }
+}
+
+fn pool_lock_release(tag: usize, lock: *Mutex @ id, flags: usize) !{locks} {
+    pool_lock_release_tag(tag);
+}
+
+// Portable counterpart of the kernel backend. The checking implementation
+// keys locks by the pool tag and deliberately never dereferences the address.
+fn pool_lock_release_address(tag: usize, lock_address: usize, flags: usize)
+        !{locks} {
+    pool_lock_release_tag(tag);
 }
 
 // -- Observers ---------------------------------------------------------

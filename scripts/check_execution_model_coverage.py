@@ -102,6 +102,10 @@ EXEMPT = {
         "left (asid_bits, asid_last, asid_ready) is written once by "
         "asid_init in the MMU-off window, before PSCI has been asked for a "
         "second core",
+    "lib/intrusive_pool.tkb":
+        "GitHub issue #479: mutable pool metadata is protected by the pool "
+        "Mutex; mutations require its indexed guard and ordinary Live views "
+        "own the same lock through payload use",
     "fs/elf64.tkb":
         "ELF_IDENT_MAGIC is a lookup table that is never written; `let mut` "
         "is how this language declares an initialised array",

@@ -89,3 +89,13 @@ fn pool_lock_acquire(tag: usize, lock: *Mutex @ id) -> usize !{locks, unsafe} {
 fn pool_lock_release(tag: usize, lock: *Mutex @ id, flags: usize) !{locks, unsafe} {
     mutex_release(lock, flags);
 }
+
+// A locked IntrusiveSlotView stores the lock address as an inert integer so a
+// raw pointer cannot be hidden inside a linear owner (#240). Its private
+// constructor is the only source of this value; restore the typed boundary
+// here, at the backend that already owns the unsafe lock operation.
+fn pool_lock_release_address(tag: usize, lock_address: usize, flags: usize)
+        !{locks, unsafe} {
+    let lock: *Mutex = unsafe { lock_address as *Mutex };
+    pool_lock_release(tag, lock, flags);
+}

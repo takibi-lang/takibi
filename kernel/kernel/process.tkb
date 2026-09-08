@@ -839,7 +839,7 @@ fn kernel_process_ddb_copy(
     while (slot != 0 && probes < DDB_PROCESS_PROBE_BUDGET &&
             count < DDB_PROCESS_RECORDS) {
         let next: usize = intrusive_pool_next_slot(&scheduled_process_pool, slot);
-        match intrusive_pool_probe_slot(&scheduled_process_pool, slot) {
+        match intrusive_pool_probe_slot_unproven(&scheduled_process_pool, slot) {
             IntrusiveSlotProbe::NoPayload => {}
             IntrusiveSlotProbe::Live(slot_view) => {
                 // The view is held across the read and released after,

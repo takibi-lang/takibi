@@ -98,13 +98,11 @@ fn contention_probes() !{unsafe} {
     } else {
         kernel_boot_log("world stop: failed\n");
     }
-    // GitHub issue #482: a pool WALK takes no guard. The two
-    // cores rendezvous at the exact instruction boundary that
-    // matters -- the walk holding an address the release is about
-    // to invalidate -- so this is produced every round rather
-    // than waited for.
+    // GitHub issues #479 and #482: first hold an ordinary Live view while
+    // core 0 observes its read-side lock, then use the explicit unproven
+    // path to rendezvous a stale cursor against chunk release.
     if (pool_walk_contention_probe()) {
-        kernel_boot_log("pool walk: a walk holding an address into a chunk that is then unlinked, scrubbed and given back is refused rather than let into it ok\n");
+        kernel_boot_log("pool walk: a Live view holds the read lock through payload use, and a stale released-chunk cursor is refused ok\n");
     } else {
         kernel_boot_log("pool walk: failed\n");
     }
