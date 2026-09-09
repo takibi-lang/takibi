@@ -241,10 +241,41 @@ fn kernel_test_platform_network() {
     }
 }
 
+// GitHub issue #339: say which stage failed, not just that one did.
+//
+// The driver answers in values and this is where they become a line, which
+// is the whole point of the split: kernel/platform/rpi5/usb_xhci.tkb keeps
+// no UART dependency, and a hardware test reading this log learns whether
+// to look at the controller, the port, the descriptor, or the drive.
+fn kernel_boot_log_usb_init_failure() {
+    match usb_disk_init_last_report() {
+        UsbInitReportResult::NotRun => {
+            kernel_boot_log("usb msc: initialization failed stage=not-run\n");
+        }
+        UsbInitReportResult::Report(description) => {
+            kernel_boot_log("usb msc: initialization failed stage=");
+            uart_puts(usb_init_stage_name(description.stage));
+            if (description.has_code) {
+                kernel_boot_log(" code=");
+                uart_put_hex(description.code as usize);
+            }
+            // Only a retried stage has these, and for one the code above is
+            // the FIRST failing status rather than the only one.
+            if (description.attempts > 0) {
+                kernel_boot_log(" attempts=");
+                uart_put_udec(description.attempts);
+                kernel_boot_log(" last=");
+                uart_put_hex(description.last_code as usize);
+            }
+            kernel_boot_log("\n");
+        }
+    }
+}
+
 fn kernel_test_platform_storage() {
     match disk_initialize() {
         DiskIoResult::Err(error) => {
-            kernel_boot_log("usb msc: initialization failed\n");
+            kernel_boot_log_usb_init_failure();
         }
         DiskIoResult::Ok => {
             kernel_boot_log("usb msc: ready sector=512\n");

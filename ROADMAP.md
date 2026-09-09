@@ -419,18 +419,37 @@ Entries 2 and 3 (#520, #497) are still blocked on the same single thing --
 Territory A's second named profiling interval. Only `profile: begin
 name=busy-pair` exists today, so neither can be attributed rather than guessed
 at. #388's vectors are Territory A's files. So the startable work is the
-unordered list further down, and the recommended first move is **#339**:
-`xhci_configure()` in `kernel/platform/rpi5/usb_xhci.tkb` was just narrowed by
-#338, its stage-by-stage failures are exactly the ones #339 asks to name, and
-its acceptance criterion "covered by tests for its non-hardware decision logic"
-now has a place to live -- `linux_user/usb_config/` compiles the kernel file
-itself rather than a copy. Note the constraint in priority 3 below: take #339
-where a concrete diagnostic gap has been exposed, not as a blanket diagnostics
-project. After that, #275, #281 and #208 are the ext2/virtio pair that need no
-Territory A file, and **#530** and **#531** are the cheapest of the lot if
-the next session wants a short one -- #531 the shorter, and it restores a
-measured improvement rather than adding one. **#523 carries CI risk** -- it edits `dune-project` and
+unordered list further down. **#339 was that list's recommended first move and
+closed 2026-09-09; see below.** After it, #275, #281 and #208 are the
+ext2/virtio pair that need no Territory A file, and **#530** and **#531** are
+the cheapest of the lot if the next session wants a short one -- #531 the
+shorter, and it restores a measured improvement rather than adding one. **#523 carries CI risk** -- it edits `dune-project` and
 `.github/workflows/ci.yml` -- so it wants the same quiet window #526 does.
+
+**#339 closed 2026-09-09.** Every one of `disk_initialize()`'s failure
+points answered `DiskIoResult::Err(-1)`, so six different repairs -- controller
+reset, ring setup, slot enable, Address Device, configuration, unit readiness
+and block size -- arrived on the board as one sentence. They are now a closed
+`UsbInitOutcome`, and the ones that received a controller completion code, a
+transport status or a block size carry it. The public Media Access Interface is
+unchanged: `disk_initialize()` still answers `DiskIoResult`, and the detail
+survives the call in a record the boot path reads, so the driver keeps no UART
+dependency.
+
+Two things it found that reasoning had not. A `*u8` name cannot live in a
+struct field -- issue #240 refuses it, because a raw pointer there still
+supports arithmetic and can hide a lifetime relationship -- so the stage is an
+exhaustive `enum` beside the variant and the name comes from a `match` on it,
+which makes an unnamed new stage a compile error rather than a number in a log.
+And the retry rule is the half worth testing: `kernel/drivers/usb/init_report.tkb`
+keeps the FIRST failing status as well as the last, because a drive that
+reports Not Ready fifty times and one that fails once for a real reason and
+then goes quiet end at the same last status -- which is exactly what the
+temporary retry diagnostic the issue was filed from could not tell apart.
+`linux_user/usb_init_report` runs all of that natively, and the board proved
+the unchanged success path: `make kernelcheck-rpi5` passed all 44 views,
+`usb_storage` included. What no lane can show is the failure line itself,
+since producing it needs a drive that will not enumerate.
 
 **The tree is 13 commits ahead of `origin/main` and unpushed.** The maintainer
 owns that gate. Those commits are the console TX queue (#454), the four
@@ -526,7 +545,7 @@ whoever causes it rather than by whoever remembers.
 
 Waiting on Territory A: #456 and #486 on #504, #505 on #479, #465 on #222.
 
-Then, in this territory and unordered: #339, #275, #281, #208,
+Then, in this territory and unordered: #275, #281, #208,
 #182, #268, #283, #389, #430, plus two the CI work left behind: **#522**,
 counts written into prose that nothing derives -- **closed 2026-09-09**; the
 one current count is derived from the tree the way its runner derives it, and
@@ -1127,7 +1146,10 @@ QEMU is the contributor-acquisition strategy as well as a test target.
    `make kernelcheck-rpi5`.
 5. **#411** -- report how long a boot took, so a ten-second regression stops
    reading as a network bug. Cheap, and it is CI's most basic signal.
-6. Use **#339** only where this workflow exposes a concrete diagnostic gap.
+6. **#339** -- **closed 2026-09-09**, and taken exactly where this workflow
+   had exposed the gap: `disk_initialize()`'s eight failure points all
+   answered `DiskIoResult::Err(-1)`, so the board's log named none of the six
+   repairs they stand for.
 
 Do not promise native macOS or Windows toolchains. Windows through WSL2 and
 macOS-hosted Linux containers may be documented as unverified or

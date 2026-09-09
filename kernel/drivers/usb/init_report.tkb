@@ -1,0 +1,231 @@
+// What a USB mass-storage bring-up did, stage by stage.
+//
+// GitHub issue #339. kernel/platform/rpi5/usb_xhci.tkb's disk_initialize()
+// answered every one of its failure points with DiskIoResult::Err(-1), so a
+// board that would not enumerate a stick said "initialization failed" and
+// nothing else. Controller reset, slot enable, Address Device, descriptor
+// configuration, unit readiness and block size are six different repairs,
+// and the log named none of them -- which is what made the RPi5 USB
+// regression this issue was filed from expensive to chase.
+//
+// Naming a stage and remembering a retry are byte work, not hardware, so
+// they live here where linux_user/usb_init_report runs them in milliseconds
+// instead of a reset, an SWD load and a USB stick. That is the same split
+// kernel/drivers/usb/config_descriptor.tkb made for the descriptor walk, and
+// for the same reason: this is the single implementation, and the host test
+// compiles THIS file rather than a copy.
+//
+// Nothing here prints. The driver's public DiskIoResult interface is
+// unchanged and gains no UART dependency; this path answers in values and
+// the caller decides whether, and how, to say them out loud.
+
+// The attempt ceiling. Its only reader is a diagnostic, so the honest
+// answer at the ceiling is the ceiling; counting past it would trade a true
+// number for an untrue one.
+const USB_RETRY_ATTEMPTS_MAX: usize = 65535;
+
+// A bounded retry has two outcomes worth keeping, not one.
+//
+// The temporary retry diagnostic #339 was filed from recorded only the
+// final attempt, which is the attempt guaranteed to say least: a drive that
+// reports Not Ready fifty times and a drive that fails once with a real
+// status and then goes quiet both end at the same last status. So the first
+// failing status is written once and never overwritten, the last is
+// overwritten every time, and the count says which of the two to read.
+struct UsbRetryRecord {
+    attempts: usize;
+    first_status: u32;
+    last_status: u32;
+    succeeded: bool;
+}
+
+// A retry that has not attempted anything yet. `succeeded` false with zero
+// attempts is "nothing tried", which a caller that never enters its loop
+// must not be able to mistake for "tried and failed".
+fn usb_retry_record_start() -> UsbRetryRecord {
+    let mut record: UsbRetryRecord = { 0, 0, 0, false };
+    return record;
+}
+
+// `status` is the transport's own status word, zero for success -- the value
+// msc_run_command() already returns. Recording an attempt after one has
+// already succeeded is not this function's business to refuse; the caller
+// leaves its loop on `succeeded`.
+//
+// The attempt count saturates at USB_RETRY_ATTEMPTS_MAX rather than
+// wrapping.
+fn usb_retry_record_attempt(record: UsbRetryRecord,
+                            status: u32) -> UsbRetryRecord {
+    let mut updated: UsbRetryRecord = record;
+    if (record.attempts < USB_RETRY_ATTEMPTS_MAX) {
+        updated.attempts = record.attempts + 1;
+    }
+    updated.last_status = status;
+    if (status == 0) {
+        updated.succeeded = true;
+        return updated;
+    }
+    if (record.attempts == 0) {
+        updated.first_status = status;
+    }
+    return updated;
+}
+
+// Every way a bring-up can end. One case per place the driver gives up, so
+// that "it failed" is never the whole answer a caller can obtain.
+//
+// The payloads are the values that distinguish a real failure mode from its
+// neighbours: an xHCI completion code, a transport status word, a reported
+// block size, or the retry record above. A stage that has nothing to add
+// carries nothing rather than a zero that could be read as a code.
+must_use variant UsbInitOutcome {
+    Ok;
+    Reset;
+    RingSetup;
+    EnableSlot;
+    SlotIdOutOfRange(u32);
+    PortReset;
+    AddressDevice(u32);
+    Configure(u32);
+    ConfigureMalformed;
+    ConfigureNoBulkEndpoints;
+    TestUnitReady(UsbRetryRecord);
+    ReadCapacity(u32);
+    UnsupportedBlockSize(u32);
+}
+
+// The stage alone, once the outcome's payload has been read off it. It is an
+// enum rather than the variant repeated: a description is what is left after
+// the payloads have been pulled out into the fields above, and GitHub issue
+// #240 forbids the obvious alternative of parking a `*u8` name in the struct
+// anyway -- a raw pointer in a field still supports arithmetic and can hide
+// a lifetime relationship.
+//
+// Exhaustive, because every value of it is produced by the match below and
+// none is ever cast in from a byte.
+enum UsbInitStage {
+    Ok;
+    Reset;
+    RingSetup;
+    EnableSlot;
+    SlotIdOutOfRange;
+    PortReset;
+    AddressDevice;
+    Configure;
+    ConfigureMalformed;
+    ConfigureNoBulkEndpoints;
+    TestUnitReady;
+    ReadCapacity;
+    UnsupportedBlockSize;
+}
+
+// The name a log line uses. Kept beside the enum so that adding a stage
+// without naming it is a non-exhaustive match rather than a stage that
+// prints as a number.
+fn usb_init_stage_name(stage: UsbInitStage) -> *u8 {
+    match stage {
+        UsbInitStage::Ok => { return "ok"; }
+        UsbInitStage::Reset => { return "reset"; }
+        UsbInitStage::RingSetup => { return "ring-setup"; }
+        UsbInitStage::EnableSlot => { return "enable-slot"; }
+        UsbInitStage::SlotIdOutOfRange => { return "slot-id-out-of-range"; }
+        UsbInitStage::PortReset => { return "port-reset"; }
+        UsbInitStage::AddressDevice => { return "address-device"; }
+        UsbInitStage::Configure => { return "configure"; }
+        UsbInitStage::ConfigureMalformed => { return "configure-malformed"; }
+        UsbInitStage::ConfigureNoBulkEndpoints => {
+            return "configure-no-bulk-endpoints";
+        }
+        UsbInitStage::TestUnitReady => { return "test-unit-ready"; }
+        UsbInitStage::ReadCapacity => { return "read-capacity"; }
+        UsbInitStage::UnsupportedBlockSize => {
+            return "unsupported-block-size";
+        }
+    }
+}
+
+// One call answers every question a reporting caller has.
+//
+// UsbInitOutcome is must_use, so matching it consumes it: a pair of
+// single-answer accessors would force a caller to choose between "did it
+// fail" and "why", which is the defect the variant exists to remove.
+//
+// `code` is meaningful only when `has_code`. `attempts` is zero for a stage
+// that makes a single attempt, and `last_code` is meaningful only when
+// `attempts` is not zero -- for a retried stage `code` is the FIRST failing
+// status and `last_code` the final one, which is the distinction
+// UsbRetryRecord exists to preserve.
+struct UsbInitDescription {
+    failed: bool;
+    stage: UsbInitStage;
+    has_code: bool;
+    code: u32;
+    attempts: usize;
+    last_code: u32;
+}
+
+fn usb_init_outcome_describe(outcome: UsbInitOutcome) -> UsbInitDescription {
+    // Every arm below assigns a stage, so this initializer is a
+    // requirement of the language rather than a value anything can read:
+    // there is no inert UsbInitStage to spell here, and Ok paired with
+    // failed=true is a combination no arm leaves behind.
+    let mut description: UsbInitDescription =
+        { true, UsbInitStage::Ok, false, 0, 0, 0 };
+    match outcome {
+        UsbInitOutcome::Ok => {
+            description.failed = false;
+            description.stage = UsbInitStage::Ok;
+        }
+        UsbInitOutcome::Reset => {
+            description.stage = UsbInitStage::Reset;
+        }
+        UsbInitOutcome::RingSetup => {
+            description.stage = UsbInitStage::RingSetup;
+        }
+        UsbInitOutcome::EnableSlot => {
+            description.stage = UsbInitStage::EnableSlot;
+        }
+        UsbInitOutcome::SlotIdOutOfRange(slot) => {
+            description.stage = UsbInitStage::SlotIdOutOfRange;
+            description.has_code = true;
+            description.code = slot;
+        }
+        UsbInitOutcome::PortReset => {
+            description.stage = UsbInitStage::PortReset;
+        }
+        UsbInitOutcome::AddressDevice(completion) => {
+            description.stage = UsbInitStage::AddressDevice;
+            description.has_code = true;
+            description.code = completion;
+        }
+        UsbInitOutcome::Configure(completion) => {
+            description.stage = UsbInitStage::Configure;
+            description.has_code = true;
+            description.code = completion;
+        }
+        UsbInitOutcome::ConfigureMalformed => {
+            description.stage = UsbInitStage::ConfigureMalformed;
+        }
+        UsbInitOutcome::ConfigureNoBulkEndpoints => {
+            description.stage = UsbInitStage::ConfigureNoBulkEndpoints;
+        }
+        UsbInitOutcome::TestUnitReady(record) => {
+            description.stage = UsbInitStage::TestUnitReady;
+            description.has_code = true;
+            description.code = record.first_status;
+            description.attempts = record.attempts;
+            description.last_code = record.last_status;
+        }
+        UsbInitOutcome::ReadCapacity(status) => {
+            description.stage = UsbInitStage::ReadCapacity;
+            description.has_code = true;
+            description.code = status;
+        }
+        UsbInitOutcome::UnsupportedBlockSize(block_size) => {
+            description.stage = UsbInitStage::UnsupportedBlockSize;
+            description.has_code = true;
+            description.code = block_size;
+        }
+    }
+    return description;
+}

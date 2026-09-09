@@ -323,7 +323,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              affine_escape_via_index align_ptr_proof linear_obligation tuple_pair \
                              field_lease match_int_lit \
                              callstack ringbuf crc8 djb2 slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
-                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config
+                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report
 LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e).exe)
 LINUX_USER_OBJS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e)_exe.o)
 
@@ -402,6 +402,13 @@ $(LINUX_USER_DIR)/fdt/fdt_exe.o: LINUX_USER_EXTRA_SRCS := kernel/boot/fdt.tkb
 # drifting from what the board runs.
 $(LINUX_USER_DIR)/usb_config/usb_config_exe.o: kernel/drivers/usb/config_descriptor.tkb
 $(LINUX_USER_DIR)/usb_config/usb_config_exe.o: LINUX_USER_EXTRA_SRCS := kernel/drivers/usb/config_descriptor.tkb
+
+# GitHub issue #339: the kernel's own USB bring-up stage report and its retry
+# rule, compiled and run natively. Same source usb_xhci.tkb links -- the
+# stage names and "keep the first failing status" are byte work, and the
+# board is the wrong place to find out that one of them is wrong.
+$(LINUX_USER_DIR)/usb_init_report/usb_init_report_exe.o: kernel/drivers/usb/init_report.tkb
+$(LINUX_USER_DIR)/usb_init_report/usb_init_report_exe.o: LINUX_USER_EXTRA_SRCS := kernel/drivers/usb/init_report.tkb
 
 # GitHub issue #445: the kernel's own spinlock, compiled and run natively.
 # The same source the kernel links, not a copy -- see the freelist/slotmap

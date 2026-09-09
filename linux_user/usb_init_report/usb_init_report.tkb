@@ -1,0 +1,107 @@
+// The kernel's USB bring-up report, run where a test costs milliseconds
+// instead of a reset, an SWD load and a USB stick.
+//
+// GitHub issue #339. kernel/platform/rpi5/usb_xhci.tkb's disk_initialize()
+// answered every failure point with DiskIoResult::Err(-1), so "USB did not
+// come up" was the whole diagnosis available on a board. The stage names and
+// the retry rule that replace it are byte work -- nothing in them changes
+// between a Raspberry Pi 5 and native Linux/AMD64 -- so they belong in the
+// cheapest tier that can give a verdict, and the transport stays behind.
+//
+// This compiles kernel/drivers/usb/init_report.tkb itself, not a copy, for
+// the same reason linux_user/usb_config next door compiles the kernel's own
+// descriptor parser: a second implementation here would agree with this test
+// while drifting from what the board runs.
+//
+// Expected output (linux_user/usb_init_report/usb_init_report.expected). The
+// first block is one line per outcome, in the order a bring-up reaches them,
+// checking three things at once: success is not reported as a failure, each
+// stage names itself, and a stage carries a code only when it received one.
+// The second block is the retry rule on its own, which is the part that was
+// actually wrong -- a diagnostic that recorded only the final attempt.
+
+fn report(outcome: UsbInitOutcome) {
+    let mut description: UsbInitDescription =
+        usb_init_outcome_describe(outcome);
+    if (description.failed) {
+        uart_puts("failed");
+    } else {
+        uart_puts("ok    ");
+    }
+    uart_puts(" stage=");
+    uart_puts(usb_init_stage_name(description.stage));
+    if (description.has_code) {
+        uart_puts(" code=");
+        uart_print(description.code);
+    }
+    if (description.attempts > 0) {
+        uart_puts(" attempts=");
+        uart_print(description.attempts as u32);
+        uart_puts(" last=");
+        uart_print(description.last_code);
+    }
+    uart_puts("\r\n");
+}
+
+fn report_retry(label: *u8, record: UsbRetryRecord) {
+    uart_puts(label);
+    uart_puts(" succeeded=");
+    uart_print(record.succeeded);
+    uart_puts(" attempts=");
+    uart_print(record.attempts as u32);
+    uart_puts(" first=");
+    uart_print(record.first_status);
+    uart_puts(" last=");
+    uart_print(record.last_status);
+    uart_puts("\r\n");
+}
+
+fn app_main() {
+    report(UsbInitOutcome::Ok);
+    report(UsbInitOutcome::Reset);
+    report(UsbInitOutcome::RingSetup);
+    report(UsbInitOutcome::EnableSlot);
+    report(UsbInitOutcome::SlotIdOutOfRange(200));
+    report(UsbInitOutcome::PortReset);
+    // 0x11 is Parameter Error, the completion code a SuperSpeed link caught
+    // mid-retrain actually produced on this board.
+    report(UsbInitOutcome::AddressDevice(17));
+    // 0 is not an xHCI completion code, so it is how "no event arrived at
+    // all" is told apart from "the command completed badly".
+    report(UsbInitOutcome::AddressDevice(0));
+    report(UsbInitOutcome::Configure(6));
+    report(UsbInitOutcome::ConfigureMalformed);
+    report(UsbInitOutcome::ConfigureNoBulkEndpoints);
+    report(UsbInitOutcome::ReadCapacity(1));
+    report(UsbInitOutcome::UnsupportedBlockSize(4096));
+
+    // Nothing attempted. A caller whose loop never runs must not be able to
+    // read this as a failure, so it is reported as zero attempts rather than
+    // as a status of zero.
+    let mut untried: UsbRetryRecord = usb_retry_record_start();
+    report_retry("untried  ", untried);
+
+    // First try, first success: no failing status is ever recorded.
+    let mut immediate: UsbRetryRecord = usb_retry_record_start();
+    immediate = usb_retry_record_attempt(immediate, 0);
+    report_retry("immediate", immediate);
+
+    // The shape the issue is about. A real status arrives first, a duller
+    // one second, and then the drive answers. Reporting only the last
+    // attempt would have thrown away the 5 and kept the 7.
+    let mut recovered: UsbRetryRecord = usb_retry_record_start();
+    recovered = usb_retry_record_attempt(recovered, 5);
+    recovered = usb_retry_record_attempt(recovered, 7);
+    recovered = usb_retry_record_attempt(recovered, 0);
+    report_retry("recovered", recovered);
+
+    // The same first status survives a run that never succeeds, which is the
+    // run whose report anyone will actually read.
+    let mut exhausted: UsbRetryRecord = usb_retry_record_start();
+    exhausted = usb_retry_record_attempt(exhausted, 5);
+    for i: usize in 0..<49 {
+        exhausted = usb_retry_record_attempt(exhausted, 7);
+    }
+    report_retry("exhausted", exhausted);
+    report(UsbInitOutcome::TestUnitReady(exhausted));
+}

@@ -50,6 +50,7 @@
 // rp1_usbhost0_doorbell/rp1_usbhost0_ir0 below are NOT offset from
 // rp1_usbhost0_op.
 use "kernel/drivers/usb/config_descriptor.tkb";
+use "kernel/drivers/usb/init_report.tkb";
 
 const RP1_USBHOST0_BASE: usize = 0x1F00200000;
 let mut rp1_usbhost0_base: usize = RP1_USBHOST0_BASE;
@@ -238,6 +239,35 @@ let mut xhci_ready: bool = false;
 must_use variant DiskIoResult {
     Ok;
     Err(i32);
+}
+
+// GitHub issue #339: what a single bring-up stage did, for the two stages
+// that have more than one way to give up. They stay in this file because
+// every case names a controller event -- kernel/drivers/usb/init_report.tkb
+// holds the part a host can run.
+//
+// Each is mapped into UsbInitOutcome at its one call site rather than
+// returned onwards: a must_use variant is handled by being matched, and a
+// matched result cannot be forwarded, so the mapping is where the outcome
+// is read.
+must_use variant XhciAddressOutcome {
+    Ok;
+    SlotIdOutOfRange(u32);
+    PortReset;
+    Completion(u32);
+}
+
+// Transfer(code) carries the completion code of whichever control transfer
+// or command failed. Malformed and NoBulkEndpoints are the two ways the
+// transfers all succeed and the answer is still no: bytes the parser
+// refuses, and a configuration that describes no mass-storage bulk pair --
+// a stick that is not a disk, which is a different repair from a controller
+// that is not working.
+must_use variant XhciConfigureOutcome {
+    Ok;
+    Transfer(u32);
+    Malformed;
+    NoBulkEndpoints;
 }
 
 fn disk_io_ok(r: DiskIoResult) -> bool {
@@ -914,11 +944,13 @@ fn xhci_enable_slot() -> bool !{unsafe} {
 // controller, not the device, and firmware already enumerated this drive
 // before handoff, so Address Device's implicit SET_ADDRESS needs the
 // device back in the Default state a port reset produces.
-fn xhci_address_device() -> bool !{unsafe} {
+fn xhci_address_device() -> XhciAddressOutcome !{unsafe} {
     let dcbaa_base: usize = (xhci_dcbaa as *u8) as usize;
     let device_ctx_base: usize = (xhci_device_ctx as *u8) as usize;
     let device_ctx_dma: usize = device_ctx_base + rp1_dma_pci_offset;
-    if (xhci_slot_id >= 65) { return false; }
+    if (xhci_slot_id >= 65) {
+        return XhciAddressOutcome::SlotIdOutOfRange(xhci_slot_id as u32);
+    }
     let slot: {0..<65 as usize} = xhci_slot_id;
     xhci_dcbaa[slot * 2] = (device_ctx_dma & 0xFFFFFFFF) as u32;
     xhci_dcbaa[slot * 2 + 1] =
@@ -995,7 +1027,7 @@ fn xhci_address_device() -> bool !{unsafe} {
         delay_us(1000);
     }
     if (reset_confirmed == false) {
-        return false;
+        return XhciAddressOutcome::PortReset;
     }
 
     // Clear the change bits the reset raised (RW1C), same neutral mask.
@@ -1023,20 +1055,24 @@ fn xhci_address_device() -> bool !{unsafe} {
     // Completion Event (Type 33) -- usb_await_event() scans past it.
     let addr_cc: u32 = usb_await_event(33, 1000);
     if (addr_cc != 1) {
+        // usb_await_event() answers 0 when nothing arrived at all, and 0 is
+        // not an xHCI completion code, so the caller can tell a command
+        // that completed badly from one that never completed.
+        return XhciAddressOutcome::Completion(addr_cc);
     }
-    return addr_cc == 1;
+    return XhciAddressOutcome::Ok;
 }
 
 // Configuration Descriptor -> parse Mass Storage interface + bulk
 // endpoints -> Configure Endpoint -> SET_CONFIGURATION.
-fn xhci_configure() -> bool {
+fn xhci_configure() -> XhciConfigureOutcome {
     let ctrl_buf_base: usize = (xhci_ctrl_buf as *u8) as usize;
     let ctrl_buf_dma: usize = ctrl_buf_base + rp1_dma_pci_offset;
     let control_bytes = xhci_ctrl_buf as []u8;
 
     let cfg9_cc: u32 = usb_ctrl_xfer(0x80, 6, 0x0200, 0, 9, ctrl_buf_dma, true);
     if (cfg9_cc != 1) {
-        return false;
+        return XhciConfigureOutcome::Transfer(cfg9_cc);
     }
     dma_finish_rx(xhci_ctrl_buf, 256);
     let total_len: usize = (control_bytes[2] as usize) |
@@ -1045,13 +1081,13 @@ fn xhci_configure() -> bool {
     // wTotalLength to the DMA buffer used to make the parser accept a prefix
     // while raw pointers hid whether each child descriptor still fitted.
     if (total_len > control_bytes.len || total_len < 9) {
-        return false;
+        return XhciConfigureOutcome::Malformed;
     }
 
     let cfg_cc: u32 = usb_ctrl_xfer(0x80, 6, 0x0200, 0, total_len as u32,
                                     ctrl_buf_dma, true);
     if (cfg_cc != 1) {
-        return false;
+        return XhciConfigureOutcome::Transfer(cfg_cc);
     }
     dma_finish_rx(xhci_ctrl_buf, 256);
     // GitHub issue #338: the walk itself is byte work and now lives in
@@ -1059,7 +1095,9 @@ fn xhci_configure() -> bool {
     // without a board. What stays here is the transport: two control
     // transfers, a DMA wait, and publishing what came back.
     match usb_config_descriptor_parse(control_bytes[0..<total_len]) {
-        UsbConfigParseResult::Malformed => { return false; }
+        UsbConfigParseResult::Malformed => {
+            return XhciConfigureOutcome::Malformed;
+        }
         UsbConfigParseResult::Parsed(found) => {
             xhci_msc_config_value = found.config_value;
             xhci_msc_interface_num = found.interface_num;
@@ -1077,7 +1115,7 @@ fn xhci_configure() -> bool {
     if (in_num > 0 && out_num > 0) {
         return xhci_configure_endpoint(in_num, out_num);
     }
-    return false;
+    return XhciConfigureOutcome::NoBulkEndpoints;
 }
 
 // Split out of xhci_configure() above so in_num/out_num > 0 is a real
@@ -1085,7 +1123,8 @@ fn xhci_configure() -> bool {
 // rp1_usb_smoke.tkb's own proven pattern) -- --forbid-trap otherwise
 // rejects out_num*2-1 as a possible underflow.
 fn xhci_configure_endpoint(in_num: {1..<16 as usize},
-                           out_num: {1..<16 as usize}) -> bool !{unsafe} {
+                           out_num: {1..<16 as usize})
+        -> XhciConfigureOutcome !{unsafe} {
     let in_idx: usize = in_num * 2;
     let out_idx: usize = out_num * 2 - 1;
     let mut max_idx: usize = in_idx;
@@ -1165,38 +1204,61 @@ fn xhci_configure_endpoint(in_num: {1..<16 as usize},
     *doorbell0_ptr = 0;
     let ce_cc: u32 = usb_await_event(33, 1000);
     if (ce_cc != 1) {
-        return false;
+        return XhciConfigureOutcome::Transfer(ce_cc);
     }
 
     let setcfg_cc: u32 = usb_ctrl_xfer(0x00, 9, xhci_msc_config_value, 0, 0, 0, false);
     if (setcfg_cc != 1) {
-        return false;
+        return XhciConfigureOutcome::Transfer(setcfg_cc);
     }
 
     xhci_bulk_in_dci = in_idx + 1;
     xhci_bulk_out_dci = out_idx + 1;
-    return true;
+    return XhciConfigureOutcome::Ok;
 }
 
-// disk_initialize: halt -> HCRST -> DMA window + rings -> Enable Slot ->
+// The bring-up itself: halt -> HCRST -> DMA window + rings -> Enable Slot ->
 // Address Device -> Configuration Descriptor + Configure Endpoint +
 // SET_CONFIGURATION -> Bulk-Only Transport bring-up -> confirm the unit
 // is ready and reports 512-byte blocks.
-fn disk_initialize() -> DiskIoResult {
+//
+// GitHub issue #339: every one of these steps used to answer
+// DiskIoResult::Err(-1), so the six repairs they stand for arrived as one
+// sentence. Each now names itself, and the ones that received a controller
+// completion code, a transport status or a block size carry it.
+fn usb_disk_initialize_stages() -> UsbInitOutcome {
     if (xhci_halt_and_reset() == false) {
-        return DiskIoResult::Err(-1);
+        return UsbInitOutcome::Reset;
     }
     if (xhci_setup_rings_and_start() == false) {
-        return DiskIoResult::Err(-1);
+        return UsbInitOutcome::RingSetup;
     }
     if (xhci_enable_slot() == false) {
-        return DiskIoResult::Err(-1);
+        return UsbInitOutcome::EnableSlot;
     }
-    if (xhci_address_device() == false) {
-        return DiskIoResult::Err(-1);
+    match xhci_address_device() {
+        XhciAddressOutcome::SlotIdOutOfRange(slot) => {
+            return UsbInitOutcome::SlotIdOutOfRange(slot);
+        }
+        XhciAddressOutcome::PortReset => {
+            return UsbInitOutcome::PortReset;
+        }
+        XhciAddressOutcome::Completion(completion) => {
+            return UsbInitOutcome::AddressDevice(completion);
+        }
+        XhciAddressOutcome::Ok => { }
     }
-    if (xhci_configure() == false) {
-        return DiskIoResult::Err(-1);
+    match xhci_configure() {
+        XhciConfigureOutcome::Transfer(completion) => {
+            return UsbInitOutcome::Configure(completion);
+        }
+        XhciConfigureOutcome::Malformed => {
+            return UsbInitOutcome::ConfigureMalformed;
+        }
+        XhciConfigureOutcome::NoBulkEndpoints => {
+            return UsbInitOutcome::ConfigureNoBulkEndpoints;
+        }
+        XhciConfigureOutcome::Ok => { }
     }
 
     let scratch_base: usize = (msc_scratch_buf as *u8) as usize;
@@ -1220,36 +1282,82 @@ fn disk_initialize() -> DiskIoResult {
     // TEST UNIT READY, retried: a flash drive routinely reports Not
     // Ready for the first moment after configuration while it spins up
     // its own translation layer.
-    let mut ready: bool = false;
+    //
+    // The record keeps the FIRST failing status as well as the last. A
+    // drive that answers Not Ready fifty times and one that fails once for
+    // a real reason and then goes silent end at the same last status, and
+    // recording only that last one is what hid the original failure during
+    // the regression #339 was filed from.
+    let mut readiness: UsbRetryRecord = usb_retry_record_start();
     for i: usize in 0..<50 {
         msc_cbw_header(0, false, 6);
         msc_cbw_buf[15] = 0x00;
-        if (msc_run_command(0, false, msc_scratch_buf) == 0) {
-            ready = true;
+        readiness = usb_retry_record_attempt(
+            readiness, msc_run_command(0, false, msc_scratch_buf));
+        if (readiness.succeeded) {
             break;
         }
         delay_us(100000);
     }
-    if (ready == false) {
-        return DiskIoResult::Err(-1);
+    if (readiness.succeeded == false) {
+        return UsbInitOutcome::TestUnitReady(readiness);
     }
 
     // READ CAPACITY(10): confirm 512-byte blocks, this project's whole
     // storage stack's own fixed assumption.
     msc_cbw_header(8, true, 10);
     msc_cbw_buf[15] = 0x25;
-    if (msc_run_command(8, true, msc_scratch_buf) != 0) {
-        return DiskIoResult::Err(-1);
+    let capacity_status: u32 = msc_run_command(8, true, msc_scratch_buf);
+    if (capacity_status != 0) {
+        return UsbInitOutcome::ReadCapacity(capacity_status);
     }
     let mut block_size: u32 = 0;
     for i: usize in 4..<8 {
         block_size = (block_size << 8) | (msc_scratch_buf[i] as u32);
     }
     if (block_size != 512) {
-        return DiskIoResult::Err(-1);
+        return UsbInitOutcome::UnsupportedBlockSize(block_size);
     }
 
     xhci_ready = true;
+    return UsbInitOutcome::Ok;
+}
+
+// The last bring-up, kept so that the answer to "why" outlives the answer to
+// "did it work". disk_initialize() is asked its DiskIoResult question by
+// callers that have nothing to do with USB, and matching a must_use outcome
+// consumes it, so the detail is written down at the one place that holds it
+// rather than recomputed by whoever wants to print it.
+private let mut xhci_init_description: UsbInitDescription;
+private let mut xhci_init_attempted: bool = false;
+
+// NotRun is not a formality: xhci_init_description is BSS until the first
+// bring-up writes it, and its stage is a pointer. A caller that asks before
+// disk_initialize() has ever run gets a case to handle instead of a null to
+// walk.
+must_use variant UsbInitReportResult {
+    NotRun;
+    Report(UsbInitDescription);
+}
+
+fn usb_disk_init_last_report() -> UsbInitReportResult {
+    if (xhci_init_attempted == false) {
+        return UsbInitReportResult::NotRun;
+    }
+    return UsbInitReportResult::Report(xhci_init_description);
+}
+
+// The Media Access Interface entry point, unchanged for its callers: the
+// same name, the same DiskIoResult, and still no UART dependency. What
+// changed is that the stage it failed at survives the call.
+fn disk_initialize() -> DiskIoResult {
+    let mut description: UsbInitDescription =
+        usb_init_outcome_describe(usb_disk_initialize_stages());
+    xhci_init_description = description;
+    xhci_init_attempted = true;
+    if (description.failed) {
+        return DiskIoResult::Err(-1);
+    }
     return DiskIoResult::Ok;
 }
 

@@ -1,0 +1,18 @@
+ok     stage=ok
+failed stage=reset
+failed stage=ring-setup
+failed stage=enable-slot
+failed stage=slot-id-out-of-range code=200
+failed stage=port-reset
+failed stage=address-device code=17
+failed stage=address-device code=0
+failed stage=configure code=6
+failed stage=configure-malformed
+failed stage=configure-no-bulk-endpoints
+failed stage=read-capacity code=1
+failed stage=unsupported-block-size code=4096
+untried   succeeded=false attempts=0 first=0 last=0
+immediate succeeded=true attempts=1 first=0 last=0
+recovered succeeded=true attempts=3 first=5 last=0
+exhausted succeeded=false attempts=50 first=5 last=7
+failed stage=test-unit-ready code=5 attempts=50 last=7
