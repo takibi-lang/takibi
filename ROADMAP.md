@@ -427,8 +427,9 @@ now has a place to live -- `linux_user/usb_config/` compiles the kernel file
 itself rather than a copy. Note the constraint in priority 3 below: take #339
 where a concrete diagnostic gap has been exposed, not as a blanket diagnostics
 project. After that, #275, #281 and #208 are the ext2/virtio pair that need no
-Territory A file, and **#530** is the cheapest of the lot if the next session
-wants a short one. **#523 carries CI risk** -- it edits `dune-project` and
+Territory A file, and **#530** and **#531** are the cheapest of the lot if
+the next session wants a short one -- #531 the shorter, and it restores a
+measured improvement rather than adding one. **#523 carries CI risk** -- it edits `dune-project` and
 `.github/workflows/ci.yml` -- so it wants the same quiet window #526 does.
 
 **The tree is 13 commits ahead of `origin/main` and unpushed.** The maintainer
@@ -551,6 +552,15 @@ asserted one of the two lines the board asserted, and `distro_image.expected`
 was byte-identical in both platform directories. Both are shared now, 42
 common views rather than 40. The check does not decide what should be common;
 it requires the answer to exist.
+
+**#531**, also 2026-09-09: the console transmit queue never comes back after
+a DDB `continue`, so a single serial BREAK costs the rest of that run
+#454's whole improvement -- 81 ms of spinning becomes 2519 ms on the board.
+It was written up as deliberate and is not: `continue` resumes a kernel that
+was healthy all along, and three drivers exercise that resume. No lane can
+observe the loss, because both DDB lanes end at the shell rather than at the
+boot's own measurement, which is why it wants an observer as much as a fix.
+Small -- a return value and one call site -- and Territory B on both files.
 
 **#530**, filed 2026-09-09 by the audit that closed this session, is #517's
 shape one layer up: the two lane runners hold the view-comparison loop twice

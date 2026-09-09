@@ -172,13 +172,21 @@ fn kernel_log_tx_activate() {
 // console emit byte-identical output through exactly the path they used
 // before this change.
 //
-// One-way for the rest of the boot, including across DDB's `continue`.
-// Nothing re-activates the queue, and that is deliberate rather than an
-// oversight: re-arming an interrupt-driven console underneath a kernel that
-// has just been resumed from a debugger is a decision, not a tidy-up, and
-// nothing exercises that path. What it costs is visible rather than hidden --
-// every byte after a debugger visit is counted in `spun`, so the boot's own
-// `console: tx spin` line reports the cost that was actually paid.
+// One-way for the rest of the boot, including across DDB's `continue` --
+// and for the debugger that is a defect, not a decision. GitHub issue #531.
+// The crash console never returns, so one-way is right there. DDB does
+// return: `continue` resumes a kernel that was healthy all along, since
+// kernel_ddb_enter is reached only from the two IRQ dispatchers on a serial
+// BREAK, and three drivers exercise that resume today. Everything logged
+// afterwards pays 78.9 us/byte again, and no lane can see it because both
+// DDB lanes end at the shell rather than at the boot's own measurement.
+//
+// The fix is not `kernel_log_tx_activate()` on the way out: this must put
+// back the value it FOUND. platform_irq_init() and kernel_log_tx_activate()
+// are adjacent but not atomic, so a BREAK between them enters with the queue
+// not yet live, and enabling it there would queue bytes nothing drains.
+// Same rule as mutex_irq_restore against enable_irq, and getting that one
+// wrong is what removed DDB from RPi5 in the first place.
 fn kernel_log_tx_stand_down() !{unsafe} {
     uart_tx_flush();
     kernel_log_tx_live = false;
