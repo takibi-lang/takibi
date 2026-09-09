@@ -535,12 +535,31 @@ down three times, of which `check_ci_opam_deps.py` compares two and the third
 is already wrong; and #529, a causal DDB wait view derived from its existing
 stopped process snapshot.
 
+Two build checks landed with that audit, both narrow by measurement.
+`check_irq_restore_sites.py` refuses an `enable_irq()` that consults nothing
+about the state it overwrites -- the shape that removed DDB from RPi5 during
+#454. Counted first: 25 call sites, 18 already consult saved state on the
+line that restores it, 7 are boot-time, so the declaration list is four
+entries rather than an inventory. It is lexical and says so; the transitive
+case stays #528's.
+
+`check_platform_view_parity.py` requires a view compared on one lane only to
+say why. That question had been answered by accident twice this session, and
+writing the eight declarations found two more: `linux_file` carried a QEMU
+filter narrower than the common one, so the lane that runs on every push
+asserted one of the two lines the board asserted, and `distro_image.expected`
+was byte-identical in both platform directories. Both are shared now, 42
+common views rather than 40. The check does not decide what should be common;
+it requires the answer to exist.
+
 **#530**, filed 2026-09-09 by the audit that closed this session, is #517's
 shape one layer up: the two lane runners hold the view-comparison loop twice
 -- 27 significant lines, including the `.actual` purge whose own comment
 records what a stale one cost -- and their log normalization has already
 diverged, QEMU rewriting the dmesg timestamp prefix where the board does not.
-Nothing detects it, and it silently limits what a shared view may assert.
+Nothing detects it, and it silently limits what a shared view may assert --
+`kernel/tests/qemu/views/dmesg` is platform-specific for exactly that reason
+today, and its declaration names #530 as what would retire it.
 `check_platform_file_parity.py` cannot see it: the runners are shell and are
 not a same-named platform file pair.
 
