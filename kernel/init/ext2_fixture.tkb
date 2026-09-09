@@ -1,0 +1,289 @@
+// The ext2 fixture every platform runs, and the probes that mutate it.
+//
+// One body, for two reasons that arrived together (GitHub issue #517).
+//
+// It was DUPLICATED: 150-odd lines sat in kernel/platform/qemu/init.tkb and
+// kernel/platform/rpi5/init.tkb, differing in code by exactly one block. The
+// two platform trees are never compiled together, so a fixture step added to
+// one and not the other is invisible until a board boots.
+//
+// And that one block was a COVERAGE GAP. QEMU ran four mutation probes --
+// resize, bitmap, owners, create -- that the board never ran; measured 2026-09-08
+// against a real capture, zero occurrences of all four. Two of them were gated
+// behind helpers named `qemu_ext2_*` that had no `rpi5_` counterpart, and the
+// other two are shared functions the board simply never called. Nothing about
+// them was platform-specific: they call only shared ext2 operations, and the
+// board's filesystem is provisioned fresh on every boot by block_copy() onto
+// USB, so a mutation cannot outlive the run that made it. The bitmap and owner
+// probes are allocate/release round trips that restore the counts they read.
+//
+// So the union is what both platforms now run, and `ext2_mutation` became a
+// common view rather than a QEMU-only one.
+use "kernel/fs/ext2/ext2.tkb";
+use "kernel/printk/log.tkb";
+
+// QEMU-only ext2 mutation helpers for the virtio-blk fixture.
+fn ext2_resize_check(mount: Ext2Mount) -> bool {
+    match ext2_lookup_root(mount, bs"mutable.txt") {
+        Ext2LookupResult::Found(inode_number) => {
+            match ext2_resize_small_file(mount, inode_number, bs"tiny\n") {
+                Ext2ResizeResult::Invalid => { return false; }
+                Ext2ResizeResult::Resized => { }
+            }
+            match ext2_read_small_file(mount, inode_number,
+                                       ext2_read_fixture as []u8) {
+                Ext2ReadResult::Read(short_length) => {
+                    if (short_length != 5 ||
+                        slice_eq(ext2_read_fixture[0..<5], bs"tiny\n") == false) {
+                        return false;
+                    }
+                }
+                Ext2ReadResult::Invalid => { return false; }
+            }
+            match ext2_resize_small_file(
+                    mount, inode_number, bs"extended ext2\n") {
+                Ext2ResizeResult::Invalid => { return false; }
+                Ext2ResizeResult::Resized => { }
+            }
+            match ext2_read_small_file(mount, inode_number,
+                                       ext2_read_fixture as []u8) {
+                Ext2ReadResult::Read(long_length) => {
+                    return long_length == 14 &&
+                           slice_eq(ext2_read_fixture[0..<14],
+                                    bs"extended ext2\n");
+                }
+                Ext2ReadResult::Invalid => { return false; }
+            }
+        }
+        Ext2LookupResult::Invalid => { return false; }
+        Ext2LookupResult::NotFound => { return false; }
+    }
+}
+
+fn ext2_create_check(mount: Ext2Mount) -> bool {
+    match ext2_create_root_file(
+            mount, bs"created.txt", bs"created on ext2\n") {
+        Ext2CreateResult::Invalid => { return false; }
+        Ext2CreateResult::Created(linked) => {
+            let mut content_ok: bool = false;
+            match ext2_lookup_root(mount, bs"created.txt") {
+                Ext2LookupResult::Found(inode_number) => {
+                    match ext2_read_small_file(
+                            mount, inode_number, ext2_read_fixture as []u8) {
+                        Ext2ReadResult::Read(length) => {
+                            content_ok = length == 16 &&
+                                slice_eq(ext2_read_fixture[0..<16],
+                                         bs"created on ext2\n");
+                        }
+                        Ext2ReadResult::Invalid => { }
+                    }
+                }
+                Ext2LookupResult::Invalid => { }
+                Ext2LookupResult::NotFound => { }
+            }
+            match ext2_unlink_root_file(mount, linked, bs"created.txt") {
+                Ext2UnlinkResult::Invalid => { return false; }
+                Ext2UnlinkResult::Unlinked => { }
+            }
+            match ext2_lookup_root(mount, bs"created.txt") {
+                Ext2LookupResult::NotFound => { return content_ok; }
+                Ext2LookupResult::Invalid => { return false; }
+                Ext2LookupResult::Found(existing) => { return false; }
+            }
+        }
+    }
+}
+
+fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
+    // GitHub issue #249: save the mount for
+    // kernel_exec_resolve_argv0(), which runs later, from
+    // a syscall-return path outside fn main()'s own scope.
+    saved_ext2_mount = mount;
+    ext2_mount_ready = true;
+    // The memory-backed fixture is the root filesystem used
+    // by the init process below.  Configure the syscall
+    // path from this mount even when USB MSC provisioning
+    // was unavailable (and also replace the temporary USB
+    // mount when it was available); otherwise openat(2)
+    // observes syscall_ext2_ready == false and reports
+    // EBADF for /etc/init.sh.
+    kernel_syscall_ext2_configure(mount);
+    if (ext2_fixture_geometry_is_expected(mount)) {
+        kernel_boot_log("ext2 mount: block=1024 inodes=1024 blocks=2560\n");
+    }
+    match ext2_lookup_root(mount, bs"hello.txt") {
+        Ext2LookupResult::Invalid => {
+            kernel_boot_log("ext2 lookup: invalid\n");
+        }
+        Ext2LookupResult::NotFound => {
+            kernel_boot_log("ext2 lookup: not found\n");
+        }
+        Ext2LookupResult::Found(inode_number) => {
+            match ext2_read_small_file(
+                    mount, inode_number,
+                    ext2_read_fixture as []u8) {
+                Ext2ReadResult::Invalid => {
+                    kernel_boot_log("ext2 read: invalid\n");
+                }
+                Ext2ReadResult::Read(length) => {
+                    if (length == 16 &&
+                        slice_eq(ext2_read_fixture[0..<16],
+                                 bs"hello from ext2\n")) {
+                        kernel_boot_log("ext2 read: /hello.txt ok\n");
+                    }
+                }
+            }
+        }
+    }
+    match ext2_lookup_root(mount, bs"mutable.txt") {
+        Ext2LookupResult::Invalid => {
+            kernel_boot_log("ext2 write: invalid lookup\n");
+        }
+        Ext2LookupResult::NotFound => {
+            kernel_boot_log("ext2 write: not found\n");
+        }
+        Ext2LookupResult::Found(mutable_inode) => {
+            match ext2_write_small_file(
+                    mount, mutable_inode, bs"after!\n") {
+                Ext2WriteResult::Invalid => {
+                    kernel_boot_log("ext2 write: invalid\n");
+                }
+                Ext2WriteResult::Written => {
+                    match ext2_read_small_file(
+                            mount, mutable_inode,
+                            ext2_read_fixture as []u8) {
+                        Ext2ReadResult::Invalid => {
+                            kernel_boot_log("ext2 write: reread failed\n");
+                        }
+                        Ext2ReadResult::Read(written_length) => {
+                            if (written_length == 7 &&
+                                slice_eq(ext2_read_fixture[0..<7],
+                                         bs"after!\n")) {
+                                kernel_boot_log("ext2 write: /mutable.txt ok\n");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (ext2_resize_check(mount)) {
+        kernel_boot_log("ext2 resize: truncate+extend ok\n");
+    } else {
+        kernel_boot_log("ext2 resize: failed\n");
+    }
+    match ext2_bitmap_roundtrip_check(mount) {
+        Ext2BitmapProbeResult::Verified => {
+            kernel_boot_log("ext2 bitmap: block+inode counts ok\n");
+        }
+        Ext2BitmapProbeResult::Invalid => {
+            kernel_boot_log("ext2 bitmap: failed\n");
+        }
+    }
+    match ext2_owner_roundtrip_check(mount) {
+        Ext2BitmapProbeResult::Verified => {
+            kernel_boot_log("ext2 owners: block+inode owners ok\n");
+        }
+        Ext2BitmapProbeResult::Invalid => {
+            kernel_boot_log("ext2 owners: failed\n");
+        }
+    }
+    if (ext2_create_check(mount)) {
+        kernel_boot_log("ext2 create: create+lookup+unlink ok\n");
+    } else {
+        kernel_boot_log("ext2 create: failed\n");
+    }
+    match ext2_lookup_root(mount, bs"latest") {
+        Ext2LookupResult::Invalid => {
+            kernel_boot_log("ext2 symlink: invalid lookup\n");
+        }
+        Ext2LookupResult::NotFound => {
+            kernel_boot_log("ext2 symlink: not found\n");
+        }
+        Ext2LookupResult::Found(link_inode) => {
+            match ext2_read_fast_symlink(
+                    mount, link_inode,
+                    ext2_symlink_fixture as []u8) {
+                Ext2SymlinkResult::Invalid => {
+                    kernel_boot_log("ext2 symlink: invalid\n");
+                }
+                Ext2SymlinkResult::Read(target_length) => {
+                    if (target_length == 9 &&
+                        slice_eq(ext2_symlink_fixture[0..<9],
+                                 bs"hello.txt")) {
+                        match ext2_lookup_root(
+                                mount,
+                                ext2_symlink_fixture[0..<9]) {
+                            Ext2LookupResult::Invalid => { }
+                            Ext2LookupResult::NotFound => { }
+                            Ext2LookupResult::Found(target_inode) => {
+                                match ext2_read_small_file(
+                                        mount, target_inode,
+                                        ext2_read_fixture as []u8) {
+                                    Ext2ReadResult::Invalid => { }
+                                    Ext2ReadResult::Read(linked_length) => {
+                                        if (linked_length == 16 &&
+                                            slice_eq(ext2_read_fixture[0..<16],
+                                                     bs"hello from ext2\n")) {
+                                            kernel_boot_log("ext2 symlink: /latest -> hello.txt ok\n");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // GitHub issue #243: /large.txt is 3200 bytes, spanning
+    // 4 direct blocks (i_block[0..3]) -- the first fixture
+    // read past the single-block cap ext2_read_small_file
+    // used to enforce. Content is 3200 repetitions of 'A'
+    // (0x41); checking the first byte, the last byte, and
+    // the byte straddling the block-3/block-4 boundary
+    // (offset 3071, the last byte of the 3rd full block)
+    // catches an off-by-one in the per-block chunk/copy
+    // arithmetic that checking only the first byte would
+    // miss.
+    match ext2_lookup_root(mount, bs"large.txt") {
+        Ext2LookupResult::Invalid => {
+            kernel_boot_log("ext2 multi-block: invalid lookup\n");
+        }
+        Ext2LookupResult::NotFound => {
+            kernel_boot_log("ext2 multi-block: not found\n");
+        }
+        Ext2LookupResult::Found(large_inode) => {
+            match ext2_read_small_file(
+                    mount, large_inode,
+                    ext2_large_fixture as []u8) {
+                Ext2ReadResult::Invalid => {
+                    kernel_boot_log("ext2 multi-block: read invalid\n");
+                }
+                Ext2ReadResult::Read(large_length) => {
+                    if (large_length == 3200 &&
+                        ext2_large_fixture[0] == 0x41 &&
+                        ext2_large_fixture[3071] == 0x41 &&
+                        ext2_large_fixture[3199] == 0x41) {
+                        kernel_boot_log("ext2 multi-block: /large.txt 3200 bytes ok\n");
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Mounting the fixture image and running it, which both platforms reached the
+// same way once the body above stopped being written twice. Extracting the
+// body made this identical, and scripts/check_platform_file_parity.py said so
+// on the next run -- the check finding the next layer down is what it is for.
+fn kernel_ext2_mount_and_run(device: KernelBlockDevice) !{logs, unsafe} {
+    match ext2_mount(device) {
+        Ext2MountResult::Invalid => {
+            kernel_boot_log("ext2 mount: invalid\n");
+        }
+        Ext2MountResult::Mounted(mount) => {
+            kernel_ext2_fixture_run(mount);
+        }
+    }
+}
