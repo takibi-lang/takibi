@@ -134,21 +134,24 @@ the exact blocked signal and wait-set combination, with positive and negative
 cases in the existing scheduler probe. With that change the workload advances
 to a later failure, not successful completion.
 
-The next investigation is clone publication and physical stack ownership.
-QEMU then stopped core 0 at the exception-entry stack guard with SP
+QEMU next stopped core 0 at the exception-entry stack guard with SP
 0x403d0000, while core 1 entered crash capture from
 kernel_syscall_clone_child_return. The peer snapshot identified PID 36.
 An uninitialized clone stack being scheduled is a hypothesis: clone publishes
 Ready before installing the saved frame, and context_install publishes the
-parent Ready before writing saved_sp. Also audit outgoing Ready/Exited
+parent Ready before writing saved_sp. Commit 29ecde8f repairs those logical
+publication windows: clones stay Constructing until their frame is installed,
+and the parent frame is saved before Ready publication. The scheduler probe
+exercises both production selectors and a deliberately selectable negative
+control. This does not establish physical stack ownership. Still audit outgoing Ready/Exited
 publication before the old CPU stops using its process stack. Do not treat a
 run-lock release as proof that the physical stack switch has happened.
 
 Use the actual running ELF for GDB symbols: normal and debug kernels have
 different addresses. The historical takibi-oops helper reads core 0 only;
-peer evidence is in crash_snapshot_per_core[cpu]. Ordinary peer crash text
-can be hidden by printk suppression. Repair that diagnostic contract and the
-remaining global capture path before relying on absent UART text. Use DDB
+peer evidence is in crash_snapshot_per_core[cpu]. Commit bf10db5c makes terminal
+crash and stack-guard output bypass ordinary suppression and retained-line
+assembly on every core. Ordinary peer text is still suppressed. Use DDB
 first when responsive; use QEMU GDB or RPi5 OpenOCD for raw per-core evidence,
 checking that all inspected CPUs really stopped. No two-core RPi5 success has
 been established by this investigation.
@@ -164,8 +167,34 @@ PC 0x800e4). Before another invasive read, use a debug access path appropriate
 to an EL0 halt and account for dirty caches. Audit the suppressed completion
 marker: workload_busy_restart_step prints only from B, which ran on core 1
 in this hardware measurement. Missing text is not proof that the restart
-failed. Preserve the original positive and negative verdicts when repairing
-that reporting path.
+failed. Commit 0346845e preserves B's original restart verdict and freezes its
+inputs, then lets a core-0 progress syscall publish the pending result. Both
+QEMU and RPi5 subsequently printed the positive restart and completion markers.
+
+The current reproduced blocker is ordinary console delivery, not a missing
+busy-pair restart. In the RPi5 capture 20260909T104013Z, interactive HTTP GETs
+and the transfer measurement passed, but lifecycle text was missing. In QEMU
+capture 20260909T211357Z, the busy-pair view passed and DDB completed a world
+stop with mask 2. Both CPUs were running busy-loop processes; HTTPd's worker
+was blocked on NetRx, its parent on ChildExit, and no clone remained
+Constructing. The host waited for a listener notification suppressed on the
+peer before sending requests. The injected DDB break was an investigation
+action, not the original failure. This run passed 43 of 44 views, not the lane.
+
+Next repair ordinary multi-core console delivery without sharing core 0's
+partially assembled retained line or making crash/DDB reporters wait on a
+lock. Account explicitly for fragmented lines, direct userspace bytes,
+overflow, and a world stop interrupting a console drainer. Do not add another
+subsystem-specific notification exception or weaken the expected markers.
+The PID admission experiment still does not constrain subsequent scheduling.
+Physical outgoing-stack lifetime, per-core workload accounting, and peer PMU
+handling remain separate audits before the two-core acceptance claim.
+
+The three completed fixes passed the one-active-core QEMU main lane (all 44
+views and the kernelsh PTY script), all four QEMU oops cases, and langcheck.
+Both target kernels build under forbid-trap with the two-core experiment.
+The experimental activation changes remain uncommitted; neither a complete
+two-core QEMU lane nor a complete two-core hardware lane has passed.
 
 #432's remaining-time writeback still awaits an observable signal-handler
 interruption, not the busy-pair workload.
