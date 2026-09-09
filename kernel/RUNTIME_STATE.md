@@ -43,10 +43,10 @@ former `execution_*` scalars (`current_handle`, `current_live`,
 `scheduler_enabled`, `reschedule_pending`), grouped and made an array by
 issue #222.
 
-**Why global:** there is exactly one scheduler, because only core 0 ever
-runs one (see the file's own "SINGLE-CORE SCHEDULER" limitation header --
-core 1 stopped parking at issue #447 and still never enters here, because
-its dispatch returns before every path that reaches kernel state).
+**Why global:** the process pool and bootstrap record describe the one shared
+process namespace. The execution-state backing array is global storage, but
+each active CPU selects its own element with `cpu_id()`; core 1 still returns
+from dispatch before entering the scheduler while `KERNEL_ACTIVE_CORES` is 1.
 
 `execution_state` is no longer global in the sense this section means:
 issue #479 made `execution_here()` ask `cpu_id()` and index the array, and
@@ -75,15 +75,12 @@ scheduling decisions (`kernel_process_schedule`/
 scheduler they control rather than moving into a per-process record they
 are not scoped to.
 
-Issue #222 changed WHERE they live without changing that: they were four
-sibling scalars, which assumed not that there is one core but that there
-is one SET of them with nowhere to put a second. They are now
-`ExecutionState`, held in an array sized by `KERNEL_ACTIVE_CORES`
-(`kernel/lib/execution_model.tkb`), reached through one private
-`execution_here()`. That function returns slot 0 and carries the
-`static_assert` that fails when the constant is raised, so the 176
-references that used to name a scalar each are now one function to teach
-`cpu_id()` -- see issue #453 for the worklist that assertion joins.
+Issue #222 changed WHERE they live: four sibling scalars became
+`ExecutionState`, held in an array sized by `KERNEL_MAX_CORES`
+(`kernel/lib/execution_model.tkb`) and reached through one private
+`execution_here()`. Issue #479 then taught that function to select with
+`cpu_id()`. The active-core count still controls which CPUs may enter the
+scheduler; the maximum-core count reserves the storage they will use.
 
 ### Diagnostic/trace infrastructure (`kernel/kernel/process.tkb`)
 

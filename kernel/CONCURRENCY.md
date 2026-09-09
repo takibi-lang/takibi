@@ -121,11 +121,12 @@ so each one is counted in the trusted-base inventory, and they still require a
 successful probe -- what they drop is the lifetime relation, not the occupancy
 check. Laundering is not forbidden; it is a number.
 
-Two things a proof does NOT give you. It says the slot was occupied at PROBE
-time, not that another core cannot free it while you hold it. And the probe
-compares nothing against the generation the caller was expecting, so a
-recycled slot still answers Live -- which is why a stale handle can read a
-different live record in silence.
+A normal view is also the pool-lock owner, so another core cannot free or
+replace its occupant until the view is consumed. A slot-only probe answers for
+whoever occupies that slot and therefore cannot compare the generation a
+caller expected; handle-based callers use `intrusive_pool_probe_handle` for
+that check. The explicitly unsafe unproven accessors discard the lifetime
+relation and leave exclusion to their stopped-world or caller-owned contract.
 
 ## Reporters must not take locks
 

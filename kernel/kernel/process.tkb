@@ -2573,12 +2573,9 @@ fn scheduled_process_table_probe() -> bool !{unsafe} {
 // Now: execution_here().current_handle is whichever slot is actually running,
 // and each ProcessRecord tracks its own parent/child link instead of one
 // global pair. "Parent" and "child" become relative to whichever slot is
-// asking, not fixed identities -- kernel_process_switch_to_child()
-// switches from current to current's own child, kernel_process_switch_
-// to_parent() to current's own parent, and the same single-live-child-
-// per-parent invariant the old model enforced (kernel_process_clone_
-// begin() still rejects a second concurrent clone) still holds, just
-// per-slot instead of globally.
+// asking, not fixed identities. Each parent has a sibling list, so clone may
+// add children until the process/page pools are exhausted and wait4 can name
+// and reap any one of them.
 // GitHub issue #222: the scheduler's own state, grouped and made an
 // ARRAY, so that "which core is this" has somewhere to be asked.
 //
@@ -2589,11 +2586,9 @@ fn scheduled_process_table_probe() -> bool !{unsafe} {
 // name a field of whichever ExecutionState execution_here() hands back,
 // and there is exactly one function that decides which that is.
 //
-// Sized by KERNEL_ACTIVE_CORES (kernel/lib/execution_model.tkb) rather
-// than by how many cores the part has: what needs a slot is a core that
-// RUNS KERNEL CODE, which is 1 today because core 1 parks. Raising that
-// constant grows this array and fails execution_here()'s assertion in the
-// same build, which is the point -- see issue #453.
+// Sized by KERNEL_MAX_CORES (kernel/lib/execution_model.tkb), like NR_CPUS
+// rather than cpu_online_mask: storage exists before a core becomes an active
+// scheduler participant, while execution_here() rejects an out-of-range CPU.
 struct ExecutionState {
     current_handle: ProcessHandle;
     current_live: bool;
