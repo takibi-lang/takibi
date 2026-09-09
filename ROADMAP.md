@@ -407,6 +407,48 @@ next occurrence answers it in the lane's own artifacts.
 4. **#388** the hand-written exception vectors carry no stack-overflow test.
 5. **#429** in-kernel GDB stub, **#149** GDB without JTAG, **#444**
    controlled DDB memory mutation.
+
+#### Territory B cold-start handoff, 2026-09-09
+
+**#526 sits first and is held.** Read entry 1 again before doing anything with
+it: its position is its value per future round, and the maintainer has said
+explicitly not to start it without saying so. Starting it because it is first
+is the error it was filed about. Everything below is what to do instead.
+
+Entries 2 and 3 (#520, #497) are still blocked on the same single thing --
+Territory A's second named profiling interval. Only `profile: begin
+name=busy-pair` exists today, so neither can be attributed rather than guessed
+at. #388's vectors are Territory A's files. So the startable work is the
+unordered list further down, and the recommended first move is **#339**:
+`xhci_configure()` in `kernel/platform/rpi5/usb_xhci.tkb` was just narrowed by
+#338, its stage-by-stage failures are exactly the ones #339 asks to name, and
+its acceptance criterion "covered by tests for its non-hardware decision logic"
+now has a place to live -- `linux_user/usb_config/` compiles the kernel file
+itself rather than a copy. Note the constraint in priority 3 below: take #339
+where a concrete diagnostic gap has been exposed, not as a blanket diagnostics
+project. After that, #275, #281 and #208 are the ext2/virtio pair that need no
+Territory A file. **#523 carries CI risk** -- it edits `dune-project` and
+`.github/workflows/ci.yml` -- so it wants the same quiet window #526 does.
+
+**The tree is 13 commits ahead of `origin/main` and unpushed.** The maintainer
+owns that gate. Those commits are the console TX queue (#454), the four
+duplication removals #517 produced, the documented-count check (#522), and
+#338. Anything below that says "closed" means closed on GitHub with the work
+in those commits, not published.
+
+**#517's residue is two declarations, both in `intc.tkb`.** The parity check
+now compares inline runs as well as functions, and `ALLOWED_RUNS` is down to
+`platform_world_stop_notify`'s target-list computation and the dispatch tail's
+EOI write. Both want an abstraction that Territory A is actively reshaping for
+#479/#483/#478, so they are worth doing alongside that work rather than
+against it; a stale entry there is a hard failure by construction, so the list
+cannot rot silently while it waits.
+
+**#454's numbers are printed by `make kernelcheck-rpi5` on every run and QEMU
+cannot judge them.** If a console change shows 78 us/byte again, that is the
+queue not being used, not a measurement artifact. And `disable_irq`/
+`enable_irq` are absolute: anything entered with interrupts already masked
+must use `mutex_irq_save`/`mutex_irq_restore`.
 **#454 closed 2026-09-08**, and its numbers outlive it. Measured on the board
 before and after: `console tx spin=2519 ms over 31919 bytes (78.9 us/byte)`
 became `81 ms over 31999 bytes (1077 spun, 75.4 us each)`. `kernel_boot_log`
@@ -426,6 +468,18 @@ already carried. And `check_platform_file_parity.py` refused the first
 version, correctly: queue-or-spin, when to drain and when to flush are console
 decisions, not platform ones, so they live in `kernel/printk/log.tkb` and the
 platform keeps only the four MMIO primitives that differ by base address.
+
+**#517 closed 2026-09-09.** The parity check compared functions, and #517 was
+the same defect written inline -- a 57-line probe sequence byte-identical in
+both platform `init.tkb` files while the check said PASS. It now compares runs
+of eight or more significant lines as well, and the four it found became
+shared files: the boot memory map, the secondary-core bring-up, the ext2
+fixture, and the boot prologue. Two declarations remain, both in `intc.tkb`,
+and a declaration that outlives its subject is a hard failure, so the list
+cannot quietly become an inventory. The ext2 fixture also closed a coverage
+gap nobody had filed: the mutation views were QEMU-only because they were
+written there, not because the board could not run them, and they are now
+`kernel/tests/common/views/`.
 
 **#410 closed 2026-09-07**, and what it found is worth carrying: the tree held
 six of these counters rather than three, four were matched by no filter at
@@ -1018,8 +1072,13 @@ QEMU is the contributor-acquisition strategy as well as a test target.
 3. Keep the first-run path short: devcontainer, QEMU BusyBox, and the browser
    HTTP demonstration. Treat successful reproduction reports and documentation
    fixes as useful first contributions.
-4. **#338** -- run the pure USB descriptor parser cases at the Linux-native
-   tier while keeping the kernel implementation as the single source of truth.
+4. **#338** -- **closed 2026-09-09.** The descriptor walk left
+   `xhci_configure()` for `kernel/drivers/usb/config_descriptor.tkb`, and
+   `linux_user/usb_config/` compiles that same file rather than a copy, so
+   four malformed-descriptor cases cost milliseconds instead of a board. It
+   was verified by planting the original off-by-one, which fails the native
+   lane on the exact-end case; the real xHCI path is still only judged by
+   `make kernelcheck-rpi5`.
 5. **#411** -- report how long a boot took, so a ten-second regression stops
    reading as a network bug. Cheap, and it is CI's most basic signal.
 6. Use **#339** only where this workflow exposes a concrete diagnostic gap.
