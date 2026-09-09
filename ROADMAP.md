@@ -107,7 +107,7 @@ entry leaves the next one unable to be verified.
 Then, in this territory and unordered: #518, #468, #464, #516, #308, #414,
 #514, #202, #476, #386, #274, #493, #422, #252, #216, #297, #131, #132, #343,
 #342, #370, #374, #203, #200, #201, #212, #282, #417, #400, #109, #129, #155,
-#267, #28, #58, #13, #95, #8.
+#267, #28, #58, #13, #95, #8, #528.
 
 #### Territory A cold-start handoff, 2026-09-09
 
@@ -341,11 +341,12 @@ rootfs is blocked on #520 rather than merely unproven. What that leaves
 untested is persisting the rootfs across runs, since the board already writes
 the same filesystem to USB at about 29.8 MB/s.
 
-#336 left one item behind that this territory cannot decide:
+#336 left two stale references rather than an unowned design question:
 `scripts/find_stale_issue_workarounds.py` reports `linux_user/field_lease`
 and its `examples/` twin as saying they do not yet solve issue #89's
-escaping-index shape, and #89 has closed. Whether the closure covers that
-shape needs the compiler's affine analysis read, which is Territory A.
+escaping-index shape. The closing comment on #89 explicitly split that exact
+remaining shape to open issue #131. The historical example is not edited for
+parity; #131 already sits in Territory A's unordered queue.
 
 **Both of the 2026-09-07 Territory A audit's handoffs are done.**
 `kernel/RUNTIME_STATE.md`'s FD section no longer says both `fd_slot_total` and
@@ -428,7 +429,8 @@ Then, in this territory and unordered: #517, #339, #338, #275, #281, #208,
 counts written into prose that nothing derives -- four commits have existed
 only to repair one of them -- and **#523**, the build's dependencies written
 down three times, of which `check_ci_opam_deps.py` compares two and the third
-is already wrong.
+is already wrong; and #529, a causal DDB wait view derived from its existing
+stopped process snapshot.
 
 ### Not started by either
 
