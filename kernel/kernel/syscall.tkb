@@ -2235,8 +2235,12 @@ fn kernel_syscall_clone_child_return(parent_frame_sp: usize, child_pid: usize)
     if (installed_child_sp == 0) {
         kernel_syscall_fail_stop(parent_frame_sp);
     }
-    process_image_activate_root(
-        address_space_root_slot(kernel_process_current_root()));
+    match kernel_process_activate_current_root() {
+        CurrentRootActivationResult::Invalid => {
+            kernel_syscall_fail_stop(parent_frame_sp);
+        }
+        CurrentRootActivationResult::Activated => {}
+    }
     kernel_syscall_resume_return(installed_child_sp, 0);
 }
 
@@ -3996,7 +4000,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     address_space_root_slot(kernel_process_current_root());
                 match process_image_clone_vm_begin(child_slot) {
                     ProcessCloneVmResult::OutOfMemory => {
-                        kernel_process_clone_rollback();
+                        match kernel_process_clone_rollback() {
+                            ProcessCloneRollbackResult::Invalid => {
+                                return SyscallAction::Unreachable;
+                            }
+                            ProcessCloneRollbackResult::Restored => {}
+                        }
                         return SyscallAction::Resume(LINUX_EAGAIN);
                     }
                     ProcessCloneVmResult::Copied => {
@@ -4007,7 +4016,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                     ProcessCloneVmReapResult::Missing => {}
                                     ProcessCloneVmReapResult::Reaped => {}
                                 }
-                                kernel_process_clone_rollback();
+                                match kernel_process_clone_rollback() {
+                                    ProcessCloneRollbackResult::Invalid => {
+                                        return SyscallAction::Unreachable;
+                                    }
+                                    ProcessCloneRollbackResult::Restored => {}
+                                }
                                 return SyscallAction::Resume(LINUX_EAGAIN);
                             }
                             UnifiedFdResult::Ok => {}

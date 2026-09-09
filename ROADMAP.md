@@ -186,7 +186,12 @@ dropped, preserving the UART final-empty-check to Blocked-publication
 boundary. Commit revalidates both processes before publishing Blocked; every
 earlier failure returns the target reservation to Ready, and even the
 defensive activation-failure arm reconstructs the outgoing Running state.
-Clone and exit handoffs remain.
+
+Clone success and clone rollback now prepare the logically current child's or
+parent's ASID outside `ProcessRunGuard`, then reacquire the guard and revalidate
+that the same process is still Running before committing TTBR0. An incomplete
+world stop or stale current handle fails the syscall continuation instead of
+returning through a frame under the wrong address space. Exit handoffs remain.
 
 #### Handed over from Territory B, 2026-09-07
 
