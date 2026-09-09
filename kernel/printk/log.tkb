@@ -29,18 +29,21 @@ private let mut kernel_log_snapshot: [u8; KERNEL_LOG_SNAPSHOT_CAPACITY];
 private let mut kernel_log_snapshot_length: usize;
 // Core 1 and later do not write the retained ordinary log or its shared UART.
 // Suppression lasts through every numeric/string fragment until the newline;
-// direct crash/DDB output does not call kernel_log_begin_fragment and remains
-// available from every core.
-private let mut kernel_log_uart_suppressed: [bool; KERNEL_MAX_CORES];
+// DDB writes directly to the device; terminal crash reporting explicitly
+// enters emergency mode before using the ordinary formatting helpers.
+struct KernelLogCoreState { suppressed: bool; emergency: bool; }
+private let mut kernel_log_core_state: [KernelLogCoreState; KERNEL_MAX_CORES];
 
-private fn kernel_log_uart_suppressed_here() -> *bool {
-    let base: *bool = kernel_log_uart_suppressed;
+private fn kernel_log_core_here() -> *KernelLogCoreState {
+    let base: *KernelLogCoreState = kernel_log_core_state;
     let core: usize = cpu_id();
     if (core >= KERNEL_MAX_CORES) { return base; }
     return base + (core as isize);
 }
 
 fn kernel_log_init() {
+    kernel_log_core_here().suppressed = false;
+    kernel_log_core_here().emergency = false;
     kernel_log_oldest = 0;
     kernel_log_count = 0;
     kernel_log_overwritten = 0;
@@ -74,11 +77,12 @@ private fn kernel_log_start_line() {
 // Keeping the active flag set across a fragment without '\n' captures
 // uart_put_udec/uart_put_hex output between fragments in the same line.
 fn kernel_log_begin_fragment() {
+    if (kernel_log_core_here().emergency) { return; }
     // The current record arrays and UART line assembly have one writer.
     // Admitting secondary-core ordinary text would create silent retained-log
     // corruption and split physical UART lines.
     if (cpu_id() != 0) {
-        *kernel_log_uart_suppressed_here() = true;
+        kernel_log_core_here().suppressed = true;
         return;
     }
     kernel_log_capture_enabled = true;
@@ -337,10 +341,14 @@ fn uart_tx_flush() !{unsafe} {
 }
 
 fn kernel_log_capture_uart_byte(value: u8) -> bool {
-    if (*kernel_log_uart_suppressed_here()) {
-        if (value == 10) { *kernel_log_uart_suppressed_here() = false; }
+    if (kernel_log_core_here().emergency) { return true; }
+    if (kernel_log_core_here().suppressed) {
+        if (value == 10) { kernel_log_core_here().suppressed = false; }
         return false;
     }
+    // A peer's direct UART byte is not part of core 0's partially assembled
+    // retained line, even if the core-0 capture flag happens to be set.
+    if (cpu_id() != 0) { return true; }
     if (kernel_log_capture_enabled == false) { return true; }
     if (kernel_log_active == false) {
         if (value == 10) {
@@ -370,6 +378,13 @@ fn kernel_log_capture_uart_byte(value: u8) -> bool {
         kernel_log_capture_enabled = false;
     }
     return true;
+}
+
+// Terminal exception paths must remain visible on every CPU and must not
+// depend on ordinary line assembly. This bypass lasts until the next boot.
+fn kernel_log_enter_emergency() {
+    kernel_log_core_here().emergency = true;
+    kernel_log_core_here().suppressed = false;
 }
 
 private fn kernel_log_snapshot_push(value: u8) {
@@ -509,7 +524,16 @@ fn kernel_log_bounds_probe() -> bool {
     if (kernel_log_line_truncated[safe_slot] == false) {
         return false;
     }
-    return true;
+    // A fatal report must bypass even an unfinished suppressed line, and
+    // must leave the retained partial line untouched. init resets this mode
+    // immediately after the destructive boot probe.
+    let retained_length: usize = kernel_log_lengths[safe_slot];
+    kernel_log_core_here().suppressed = true;
+    kernel_log_enter_emergency();
+    kernel_log_begin_fragment();
+    let visible: bool = kernel_log_capture_uart_byte(122);
+    return visible && kernel_log_core_here().suppressed == false &&
+        kernel_log_lengths[safe_slot] == retained_length;
 }
 
 // Hexadecimal with its `0x`, through the log ring.

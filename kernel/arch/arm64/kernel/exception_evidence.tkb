@@ -1585,6 +1585,7 @@ private fn crash_snapshot_put_page_owner(what: *u8, address: usize) {
 }
 
 fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
+    kernel_log_enter_emergency();
     let snapshot: *CrashSnapshot = crash_snapshot_here();
     if (*crash_snapshot_capturing_here()) {
         kernel_boot_log("oops: recursive exception; parking\n");

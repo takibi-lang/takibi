@@ -3866,6 +3866,7 @@ private fn kernel_stack_below_witness(bottom: usize)
 private fn kernel_stack_guard_fail(reason: *u8, slot: usize,
                                    process_stack: bool, base: usize,
                                    sp: usize) !{unsafe} {
+    kernel_log_enter_emergency();
     kernel_boot_log("kernel stack: OVERFLOW -- ");
     kernel_boot_log(reason);
     kernel_boot_log(" (issues #373/#377) pid=");
@@ -4056,6 +4057,7 @@ fn kernel_linker_stacks_well_shaped() -> bool {
 // memory-free SP test possible spent the interrupted x0, so there is no
 // context left to resume even if the stack were sound.
 fn kernel_stack_overflow_fail_stop(sp: usize) !{unsafe} {
+    kernel_log_enter_emergency();
     kernel_boot_log("kernel stack: OVERFLOW at exception entry (issue #377) sp=");
     uart_put_udec(sp);
     kernel_boot_log(" ");

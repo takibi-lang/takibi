@@ -15,6 +15,17 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-09: terminal reports bypass ordinary log suppression
+
+Per-core crash storage did not make peer crashes visible: the terminal
+renderer still used ordinary kernel_boot_log fragments, which were suppressed
+on a peer. Terminal crash and stack-guard entry now select a per-core emergency
+mode before their first byte. It bypasses suppression and retained-line state
+without acquiring a lock. A peer's non-log UART byte also no longer consults
+core 0's capture flag. The log bounds probe covers emergency entry from an
+unfinished suppressed line and preservation of the retained partial record;
+the four maintained QEMU oops cases passed with the change.
+
 ## 2026-09-09: do not schedule a clone before its frame exists
 
 Process allocation formerly published Ready before clone copied the exception
