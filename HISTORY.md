@@ -15,6 +15,18 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-09: observe a workload verdict before reporting it
+
+RPi5 ran both busy loops in EL0 but the host never received the restart/done
+markers. The restart decision is made by B, which ran on core 1; ordinary
+peer printk suppression discarded both the verdict and the completion line.
+The workload now records Pending under the run lock, freezes the decision's
+inputs, and continues progress syscalls until core 0 emits the unchanged
+positive or negative verdict and completion marker. Only then is reporting
+finished. RPi5 reached both markers and served the subsequent interactive
+HTTPd requests with this change. Other peer lifecycle markers were still
+suppressed, so this was not a complete multicore console fix.
+
 ## 2026-09-09: SIGCHLD wait is an exit-produced successor
 
 During the two-core workload investigation, QEMU GDB captured core 0 in

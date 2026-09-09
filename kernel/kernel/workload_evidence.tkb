@@ -100,6 +100,10 @@ must_use variant WorkloadBusyProgressResult {
     FinishRequested;
 }
 
+// Observing the result on B's CPU is distinct from emitting it on the
+// ordinary console's owner. Pending freezes the verdict until core 0 prints.
+enum WorkloadRestartReportState { Waiting; Pending; Reported; }
+
 struct WorkloadBusyPair {
     // The pid currently reporting under each tag, and how many times that
     // pid has changed -- which is init having respawned that entry.
@@ -140,7 +144,7 @@ struct WorkloadBusyPair {
     restart_a_pid_before: usize;
     restart_b_pid_before: usize;
     restart_b_rounds_before: usize;
-    restart_reported: bool;
+    restart_report_state: WorkloadRestartReportState;
     // A report this file refused: an unknown tag, or a caller that is not
     // a child of init. Zero on a healthy boot, and printed only when it
     // is not.
@@ -502,7 +506,7 @@ fn workload_busy_pair_reset() {
     workload_busy_pair.restart_a_pid_before = 0;
     workload_busy_pair.restart_b_pid_before = 0;
     workload_busy_pair.restart_b_rounds_before = 0;
-    workload_busy_pair.restart_reported = false;
+    workload_busy_pair.restart_report_state = WorkloadRestartReportState::Waiting;
     workload_busy_pair.refused = 0;
 }
 
@@ -567,7 +571,14 @@ private fn workload_busy_absolute_difference(left: usize, right: usize)
 private fn workload_busy_record_progress_locked(
         guard: borrow ProcessRunGuard[lock], tag: usize, checksum: usize,
         input_steps: usize) -> WorkloadBusyProgressResult !{unsafe} {
-    if (workload_busy_pair.restart_reported) {
+    if (workload_busy_pair.restart_report_state ==
+            WorkloadRestartReportState::Reported) {
+        return WorkloadBusyProgressResult::Value(1);
+    }
+    if (workload_busy_pair.restart_report_state ==
+            WorkloadRestartReportState::Pending) {
+        if (cpu_id() != 0) { return WorkloadBusyProgressResult::Value(0); }
+        workload_busy_report_restart(guard);
         return WorkloadBusyProgressResult::Value(1);
     }
     // Started by init, from /etc/inittab. A report from anywhere else is
@@ -799,7 +810,16 @@ private fn workload_busy_restart_step(
     // check failed on a boot where nothing was wrong. Waiting for B's own
     // next report asks the same question with no clock in it.
     if (tag != WORKLOAD_BUSY_TAG_B) { return 0; }
-    workload_busy_pair.restart_reported = true;
+    workload_busy_pair.restart_report_state = WorkloadRestartReportState::Pending;
+    // B alone establishes the original predicate. A later progress call on
+    // core 0 only prints that frozen result; it cannot count another round
+    // or change the success/failure decision while the report is pending.
+    if (cpu_id() != 0) { return 0; }
+    workload_busy_report_restart(guard);
+    return 1;
+}
+
+private fn workload_busy_report_restart(guard: borrow ProcessRunGuard[lock]) {
     if (workload_busy_pair.a_restarts == 1 &&
         workload_busy_pair.b_restarts == 0 &&
         workload_busy_pair.b_pid == workload_busy_pair.restart_b_pid_before &&
@@ -828,7 +848,7 @@ private fn workload_busy_restart_step(
     // The host runner waits for it before starting anything that competes
     // for the machine, so it has to appear on a failing boot too.
     kernel_boot_log("workload: busy pair done\n");
-    return 1;
+    workload_busy_pair.restart_report_state = WorkloadRestartReportState::Reported;
 }
 
 // The verdict, and the numbers behind it.
