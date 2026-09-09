@@ -188,6 +188,7 @@ effect-matrix-control: build
 langcheck: unused-function-control effect-matrix-control pool-liveness-control
 	@bash scripts/lane_timing.sh begin langcheck
 	@python3 scripts/check_agents_paths.py
+	@python3 scripts/check_documented_counts.py
 	@python3 scripts/test_check_expected_line_endings.py
 	@python3 scripts/check_expected_line_endings.py
 	@python3 scripts/test_check_elf_symbol_alignment.py
@@ -208,6 +209,7 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 	@python3 scripts/test_check_ddb_command_inventory.py
 	@python3 scripts/test_check_fallback_counters.py
 	@python3 scripts/test_check_platform_file_parity.py
+	@python3 scripts/test_check_documented_counts.py
 	@python3 scripts/test_measure_trusted_base.py
 	@python3 scripts/test_profile_kernel_workload.py
 	@python3 scripts/test_profile_kernel_samples.py

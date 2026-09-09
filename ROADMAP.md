@@ -463,10 +463,12 @@ whoever causes it rather than by whoever remembers.
 
 Waiting on Territory A: #456 and #486 on #504, #505 on #479, #465 on #222.
 
-Then, in this territory and unordered: #517, #339, #338, #275, #281, #208,
+Then, in this territory and unordered: #339, #338, #275, #281, #208,
 #182, #268, #283, #389, #430, plus two the CI work left behind: **#522**,
-counts written into prose that nothing derives -- four commits have existed
-only to repair one of them -- and **#523**, the build's dependencies written
+counts written into prose that nothing derives -- **closed 2026-09-09**; the
+one current count is derived from the tree the way its runner derives it, and
+the check was verified against all four historical repairs, reporting at each
+commit's parent the exact number that commit went on to write -- and **#523**, the build's dependencies written
 down three times, of which `check_ci_opam_deps.py` compares two and the third
 is already wrong; and #529, a causal DDB wait view derived from its existing
 stopped process snapshot.
