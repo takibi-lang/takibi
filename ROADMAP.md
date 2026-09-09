@@ -153,6 +153,20 @@ first when responsive; use QEMU GDB or RPi5 OpenOCD for raw per-core evidence,
 checking that all inspected CPUs really stopped. No two-core RPi5 success has
 been established by this investigation.
 
+The same experimental tree was then run on RPi5. Network and both HTTPd GETs
+passed, and the busy pair emitted its measurement, but no restart/done marker
+arrived. After the lane failed, OpenOCD confirmed both active CPUs halted in
+EL0 at PC 0x400103c0, unlike QEMU's captured kernel failures. The subsequent
+CPU-context kernel-memory read aborted in OpenOCD; later register reads also
+failed, so those later states are not valid evidence of the original guest.
+The board was reset successfully to the resident stub (EL2H, MMU disabled,
+PC 0x800e4). Before another invasive read, use a debug access path appropriate
+to an EL0 halt and account for dirty caches. Audit the suppressed completion
+marker: workload_busy_restart_step prints only from B, which ran on core 1
+in this hardware measurement. Missing text is not proof that the restart
+failed. Preserve the original positive and negative verdicts when repairing
+that reporting path.
+
 #432's remaining-time writeback still awaits an observable signal-handler
 interruption, not the busy-pair workload.
 
