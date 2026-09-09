@@ -451,11 +451,12 @@ the unchanged success path: `make kernelcheck-rpi5` passed all 44 views,
 `usb_storage` included. What no lane can show is the failure line itself,
 since producing it needs a drive that will not enumerate.
 
-**The tree is 13 commits ahead of `origin/main` and unpushed.** The maintainer
-owns that gate. Those commits are the console TX queue (#454), the four
-duplication removals #517 produced, the documented-count check (#522), and
-#338. Anything below that says "closed" means closed on GitHub with the work
-in those commits, not published.
+**Those 13 commits are published.** The console TX queue (#454), the four
+duplication removals #517 produced, the documented-count check (#522) and #338
+were all pushed, and `origin/main` is at `deb445d`. This paragraph used to say
+they were not; it is left here rewritten rather than deleted because the next
+session reads the sentence, not the date on it. The tree is one commit ahead
+again -- #339 -- and the maintainer still owns that gate.
 
 **#517's residue is two declarations, both in `intc.tkb`.** The parity check
 now compares inline runs as well as functions, and `ALLOWED_RUNS` is down to
