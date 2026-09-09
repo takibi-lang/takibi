@@ -89,7 +89,10 @@ console_driver_pid=$!
 # Fault injection is the sole GDB role before the oops. It enables the
 # debugger-owned boot-test trace switch before process setup, then stops at
 # run_initial_user, where x0 is the mapped EL0 entry, and replaces only that
-# first user instruction. Stop once more at the common
+# first user instruction. Disable that breakpoint before resuming: another
+# process may enter the same routine first on a slower host, and treating that
+# stop as the evidence entry makes the following frame write miss silently.
+# Stop once more at the common
 # evidence entry and alter the saved TPIDR_EL0 word to a deliberately distinct
 # value.  This is a test-only proof that the report contains both the live
 # registers and the saved exception context; the injected BRK and its vector
@@ -134,6 +137,7 @@ for _ in $(seq 1 50); do
             -ex "continue"
             -ex "call (void) kernel_process_trace_report()"
             -ex "set {int}\$x0 = $fault_instruction"
+            -ex "disable 2"
             -ex "break el1_exception_evidence_from_frame"
             -ex "continue"
             -ex "set {long}(\$x1 + 0x320) = 0xfeedfacefeedface"
