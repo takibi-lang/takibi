@@ -427,7 +427,8 @@ now has a place to live -- `linux_user/usb_config/` compiles the kernel file
 itself rather than a copy. Note the constraint in priority 3 below: take #339
 where a concrete diagnostic gap has been exposed, not as a blanket diagnostics
 project. After that, #275, #281 and #208 are the ext2/virtio pair that need no
-Territory A file. **#523 carries CI risk** -- it edits `dune-project` and
+Territory A file, and **#530** is the cheapest of the lot if the next session
+wants a short one. **#523 carries CI risk** -- it edits `dune-project` and
 `.github/workflows/ci.yml` -- so it wants the same quiet window #526 does.
 
 **The tree is 13 commits ahead of `origin/main` and unpushed.** The maintainer
@@ -446,9 +447,16 @@ cannot rot silently while it waits.
 
 **#454's numbers are printed by `make kernelcheck-rpi5` on every run and QEMU
 cannot judge them.** If a console change shows 78 us/byte again, that is the
-queue not being used, not a measurement artifact. And `disable_irq`/
+queue not being used, not a measurement artifact. The figure is no longer
+optional: `validate_kernel_dmesg_timestamps.py` refuses a complete boot that
+does not carry the line, because no view can compare it -- it holds per-boot
+numbers -- and the validator is its only reader. And `disable_irq`/
 `enable_irq` are absolute: anything entered with interrupts already masked
-must use `mutex_irq_save`/`mutex_irq_restore`.
+must use `mutex_irq_save`/`mutex_irq_restore`. The measured shape of that rule
+across the tree is on #528, which is Territory A's: every valid restore in
+this kernel is conditional, and the four unconditional ones are all boot-time,
+so the narrow lexical check that issue assumed impractical is in fact a
+four-entry declaration list.
 **#454 closed 2026-09-08**, and its numbers outlive it. Measured on the board
 before and after: `console tx spin=2519 ms over 31919 bytes (78.9 us/byte)`
 became `81 ms over 31999 bytes (1077 spun, 75.4 us each)`. `kernel_boot_log`
@@ -526,6 +534,15 @@ commit's parent the exact number that commit went on to write -- and **#523**, t
 down three times, of which `check_ci_opam_deps.py` compares two and the third
 is already wrong; and #529, a causal DDB wait view derived from its existing
 stopped process snapshot.
+
+**#530**, filed 2026-09-09 by the audit that closed this session, is #517's
+shape one layer up: the two lane runners hold the view-comparison loop twice
+-- 27 significant lines, including the `.actual` purge whose own comment
+records what a stale one cost -- and their log normalization has already
+diverged, QEMU rewriting the dmesg timestamp prefix where the board does not.
+Nothing detects it, and it silently limits what a shared view may assert.
+`check_platform_file_parity.py` cannot see it: the runners are shell and are
+not a same-named platform file pair.
 
 ### Not started by either
 
