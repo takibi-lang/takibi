@@ -2026,10 +2026,11 @@ fn kernel_syscall_wait4_deliver(frame_sp: usize, reaped_pid: usize,
         scheduled_process_record_wait4_status_ptr(parent_slot);
     if (wait4_status_ptr != 0) {
         // The status buffer belongs to the parent being resumed.
-        // user_write_u32 dereferences the user VA directly, so TTBR0_EL1 has
-        // to name that parent's root -- and user_range_check has to validate
-        // against the same root -- before the status is written.
-        process_image_activate_root(parent_slot);
+        // user_write_u32 dereferences the user VA directly. The waking exit
+        // handoff commits this parent's prepared root before reaching here;
+        // the synchronous wait4 path is already running in the same parent.
+        // kernel_process_reap_zombie likewise restores that current root
+        // before teardown, so another direct activation here was redundant.
         match user_range_check_write(address_space_root_for_slot(parent_slot), wait4_status_ptr, 4) {
             UserWriteRangeResult::Fault => {
                 el0_context_set_x0(frame_sp, LINUX_EFAULT);

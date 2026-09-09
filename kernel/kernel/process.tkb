@@ -3554,6 +3554,51 @@ fn kernel_process_activate_current_root() -> CurrentRootActivationResult {
     }
 }
 
+// Activate a root while the current process remains fixed in non-preemptible
+// EL1. Unlike a scheduler handoff, no Ready target exists to reserve: callers
+// use this before tearing down a different root or to restore the already-
+// current Running process around kernel-only work. Rollover still requires a
+// complete world stop. Once teardown depends on this switch there is no safe
+// userspace return on failure, so the existing syscall fail-stop is explicit.
+fn kernel_process_activate_stable_root(root: usize) {
+    match process_image_prepare_activation(root) {
+        AddressSpaceActivationPrepareResult::Invalid => {
+            kernel_syscall_fail_stop(
+                scheduled_process_record_of(
+                    execution_here().current_handle).saved_sp);
+        }
+        AddressSpaceActivationPrepareResult::RolloverNeeded => {
+            match world_stop_begin(&kernel_world_stop, KERNEL_ACTIVE_CORES,
+                                   SCHEDULER_WORLD_STOP_SPINS) {
+                WorldStopResult::Busy => {
+                    kernel_syscall_fail_stop(
+                        scheduled_process_record_of(
+                            execution_here().current_handle).saved_sp);
+                }
+                WorldStopResult::Partial(partial) => {
+                    world_stop_partial_release(partial, &kernel_world_stop);
+                    kernel_syscall_fail_stop(
+                        scheduled_process_record_of(
+                            execution_here().current_handle).saved_sp);
+                }
+                WorldStopResult::Complete(stopped) => {
+                    if (asid_rollover_stopped(stopped)) {}
+                    world_stop_release(stopped, &kernel_world_stop);
+                    kernel_process_activate_stable_root(root);
+                    return;
+                }
+            }
+        }
+        AddressSpaceActivationPrepareResult::Prepared(prepared) => {
+            if (process_image_commit_activation(prepared) == false) {
+                kernel_syscall_fail_stop(
+                    scheduled_process_record_of(
+                        execution_here().current_handle).saved_sp);
+            }
+        }
+    }
+}
+
 // GitHub issue #244: distinguishes "no child at all" (wait4 should fail
 // with -ECHILD immediately, same as always) from "a child exists but
 // hasn't exited yet" (wait4 should block instead).
@@ -5957,6 +6002,9 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
     // same repair kernel_syscall_wait4_deliver already does for the same
     // reason, one call earlier in the same path.
     let resume_root: usize = process_image_root_index();
+    // Move away from any root the reap may release before teardown starts.
+    // The current process remains Running throughout this kernel-only span.
+    kernel_process_activate_stable_root(resume_root);
     let status: usize =
         scheduled_process_record_of(child).exit_status;
     let pid: usize = scheduled_process_pid_of_handle(child);
@@ -6019,7 +6067,10 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
         }
     }
     scheduled_process_record_of(parent).last_child_pid = pid;
-    process_image_activate_root(resume_root);
+    // scheduled_process_reap may clear the per-CPU process-image target while
+    // tearing down the child. Recommit the reaper's root so a later COW fault
+    // consults the same address space that TTBR0 already names.
+    kernel_process_activate_stable_root(resume_root);
     return status;
 }
 

@@ -795,9 +795,16 @@ fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsa
 // numbers.
 fn process_image_activate_root(root: usize) {
     if (scheduled_process_slot_valid(root) == false) { return; }
-    process_image_set_target_root_here(root);
-    address_space_activate_root(root);
-    kernel_process_trace_address_space_activate(root);
+    // Root 0 owns permanent ASID 1 and never participates in rollover. Every
+    // dynamic root uses the stopped preparation boundary, including exec and
+    // boot-fixture callers outside the scheduler handoff paths.
+    if (root == 0) {
+        process_image_set_target_root_here(root);
+        address_space_activate_root(root);
+        kernel_process_trace_address_space_activate(root);
+        return;
+    }
+    kernel_process_activate_stable_root(root);
 }
 
 // Split activation for scheduler handoffs that may need an ASID rollover.
@@ -844,8 +851,11 @@ fn process_image_clone_vm_reap(dest_root: usize) -> ProcessCloneVmReapResult {
     }
     let count: usize = process_image_record_at(dest).clone_vm_page_count;
     let source: usize = process_image_record_at(dest).clone_vm_source_root;
+    // The caller remains the logical current process throughout this
+    // non-preemptible EL1 span. Activate the retained source before releasing
+    // mappings from a destination that may still be installed in TTBR0.
+    kernel_process_activate_stable_root(source);
     process_clone_vm_rollback(dest_root);
-    process_image_activate_root(source);
     *process_image_counter_here(clone_last_reaped_count) = count;
     return ProcessCloneVmReapResult::Reaped;
 }
@@ -1199,7 +1209,7 @@ fn process_image_exec_teardown(root_index: usize) {
 // kernel_process_current_root() is already correct here, not a fixed
 // root 0.
 fn process_image_exec_resume_root() {
-    process_image_activate_root(
+    kernel_process_activate_stable_root(
         address_space_root_slot(kernel_process_current_root()));
 }
 
