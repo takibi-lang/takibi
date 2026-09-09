@@ -15,6 +15,25 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-09: do not schedule a clone before its frame exists
+
+Process allocation formerly published Ready before clone copied the exception
+frame, and context installation published the parent Ready before writing
+its saved_sp. Another CPU could therefore select either an unfinished child
+or an obsolete parent frame. Clones now remain Constructing until a guarded
+install consumes that state into Running. Parent saved_sp is written before
+the Ready publication; cancellation consumes Constructing directly into
+Exited. DDB reports the additional state without calling it runnable.
+
+The scheduler probe attempts both a Ready claim and an ordinary successor
+walk during construction. Its negative control temporarily recreates the
+early-Ready publication while holding the run lock and verifies that those
+same selectors detect it. The one-core QEMU lane passed all 44 views. In the
+experimental two-core lane, the busy-pair restart passed and one run reached
+all interactive HTTPd GETs; peer log loss and later lifecycle instability
+still prevented accepting the full two-core lane. Physical stack handoff is
+a separate invariant from this logical publication boundary.
+
 ## 2026-09-09: observe a workload verdict before reporting it
 
 RPi5 ran both busy loops in EL0 but the host never received the restart/done

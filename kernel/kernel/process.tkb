@@ -65,8 +65,8 @@ use "kernel/lib/locked_cell.tkb";
 //   never waits keeps its zombies until it exits (its own exit drains
 //   them), which is Linux's behaviour and is a real way to hold slots.
 //
-enum ProcessState: u8 { Ready; Running; Blocked; Exited; }
-enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; }
+enum ProcessState: u8 { Ready; Running; Blocked; Exited; Constructing; }
+enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; Constructing; }
 // GitHub issue #244: ChildExit lets wait4() actually block a parent whose
 // child hasn't exited yet, instead of returning -ECHILD immediately (safe
 // only when the scheduler never ran the parent before the child's own
@@ -799,6 +799,7 @@ private fn scheduled_process_ddb_copy_one(
         ProcessSlotState::Running => { output[index].state = 2; }
         ProcessSlotState::Blocked => { output[index].state = 3; }
         ProcessSlotState::Exited => { output[index].state = 4; }
+        ProcessSlotState::Constructing => { output[index].state = 5; }
     }
     match record.wait_reason {
         ProcessWaitReason::None => { output[index].wait_reason = 0; }
@@ -1183,6 +1184,7 @@ fn scheduled_process_diagnostic_snapshot(pid: usize)
         ProcessSlotState::Running => { snapshot.state = 0x52; }
         ProcessSlotState::Blocked => { snapshot.state = 0x53; }
         ProcessSlotState::Exited => { snapshot.state = 0x5A; }
+        ProcessSlotState::Constructing => { snapshot.state = 0x49; }
     }
     snapshot.resident_pages = process_image_active_page_count(slot);
     snapshot.start_time_ticks = record.start_time_ticks;
@@ -1520,6 +1522,13 @@ must_use variant ScheduledProcessReadyTakeResult {
     Ready(exists process: usize.
           (ScheduledProcessOwner[process],
            ScheduledProcessState[process, ProcessState::Ready]));
+}
+
+must_use variant ScheduledProcessConstructingTakeResult {
+    Missing;
+    Constructing(exists process: usize.
+        (ScheduledProcessOwner[process],
+         ScheduledProcessState[process, ProcessState::Constructing]));
 }
 
 must_use variant ScheduledProcessExitedTakeResult {
@@ -1883,6 +1892,13 @@ fn scheduled_process_table_clear() !{unsafe} {
 // page allocator is empty. The rollback chain is unchanged in shape: every
 // resource acquired below is given back on every later failure.
 fn scheduled_process_alloc() -> ScheduledPooledProcessAllocResult !{unsafe} {
+    return scheduled_process_alloc_pending(false);
+}
+
+// A clone is not schedulable until its copied frame, VM and descriptors are
+// installed. It must never pass through Ready while another CPU can select it.
+private fn scheduled_process_alloc_pending(clone_pending: bool)
+        -> ScheduledPooledProcessAllocResult !{unsafe} {
     scheduled_process_pool_init();
     let mut slot: usize = 0;
     let mut generation: usize = 0;
@@ -1904,7 +1920,7 @@ fn scheduled_process_alloc() -> ScheduledPooledProcessAllocResult !{unsafe} {
             intrusive_owner_drop(pool_owner);
         }
     }
-    match scheduled_process_alloc_finish(slot, generation) {
+    match scheduled_process_alloc_finish(slot, generation, clone_pending) {
         ScheduledProcessAllocResult::Full => {
             return ScheduledPooledProcessAllocResult::Full;
         }
@@ -1932,7 +1948,7 @@ fn scheduled_process_alloc_bootstrap() -> ScheduledBootstrapProcessAllocResult
     scheduled_process_boot_generation = scheduled_process_boot_generation + 1;
     scheduled_process_boot_live = true;
     match scheduled_process_alloc_finish(
-            0, scheduled_process_boot_generation) {
+            0, scheduled_process_boot_generation, false) {
         ScheduledProcessAllocResult::Full => {
             return ScheduledBootstrapProcessAllocResult::Full;
         }
@@ -1946,7 +1962,8 @@ fn scheduled_process_alloc_bootstrap() -> ScheduledBootstrapProcessAllocResult
 // Everything a new process needs once it has a record: the same rollback
 // chain for both entry points above, so a bootstrap and an ordinary
 // process cannot drift apart in what they are given.
-private fn scheduled_process_alloc_finish(slot: usize, generation: usize)
+private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
+                                         clone_pending: bool)
         -> ScheduledProcessAllocResult !{unsafe} {
     // A run the last reaped process left behind, before asking the page
     // allocator for another one. This is also what preserves the old
@@ -2039,7 +2056,6 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize)
         scheduled_process_slot_remove(slot);
         return ScheduledProcessAllocResult::Full;
     }
-    scheduled_process_record_at(slot).state = ProcessSlotState::Ready;
     let bottom: usize = kernel_stack_bottom(slot);
     // Unreachable given the branch above stored only a base
     // kernel_stack_run_usable accepted, but the two casts below are the
@@ -2076,6 +2092,11 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize)
     for i: usize in 0..<KERNEL_PROCESS_STACK_SIZE {
         stack.bytes[i] = KERNEL_STACK_POISON;
         below.bytes[i] = KERNEL_STACK_POISON;
+    }
+    if (clone_pending) {
+        scheduled_process_record_at(slot).state = ProcessSlotState::Constructing;
+    } else {
+        scheduled_process_record_at(slot).state = ProcessSlotState::Ready;
     }
     let mut handle: ProcessHandle = { slot, generation };
     return ScheduledProcessAllocResult::Allocated(handle);
@@ -2197,6 +2218,46 @@ fn scheduled_process_ready_take(guard: borrow ProcessRunGuard[lock],
                                             handle.generation);
     let state = scheduled_process_ready_state(owner);
     return ScheduledProcessReadyTakeResult::Ready((owner, state));
+}
+
+private fn scheduled_process_constructing_take(
+        guard: borrow ProcessRunGuard[lock], handle: ProcessHandle)
+        -> ScheduledProcessConstructingTakeResult {
+    if (scheduled_process_handle_matches(handle) == false ||
+        scheduled_process_state_of(handle) != ProcessSlotState::Constructing) {
+        return ScheduledProcessConstructingTakeResult::Missing;
+    }
+    let owner = scheduled_process_owner_new(handle.pool_index, handle.generation);
+    let state = scheduled_process_constructing_state(owner);
+    return ScheduledProcessConstructingTakeResult::Constructing((owner, state));
+}
+
+private fn scheduled_process_constructing_state(
+        owner: borrow ScheduledProcessOwner[process])
+        -> ScheduledProcessState[process, ProcessState::Constructing] {
+    let mut state: ScheduledProcessState[process, ProcessState::Constructing] =
+        { owner.pool_index };
+    return state;
+}
+
+private fn scheduled_process_finish_clone(
+        owner: borrow ScheduledProcessOwner[process],
+        state: sink ScheduledProcessState[process, ProcessState::Constructing],
+        frame_sp: usize)
+        -> ScheduledProcessState[process, ProcessState::Running] {
+    scheduled_process_state_drop(state);
+    scheduled_process_record_at(owner.pool_index).saved_sp = frame_sp;
+    scheduled_process_record_at(owner.pool_index).state = ProcessSlotState::Running;
+    return scheduled_process_running_state(owner);
+}
+
+private fn scheduled_process_cancel_clone(
+        owner: borrow ScheduledProcessOwner[process],
+        state: sink ScheduledProcessState[process, ProcessState::Constructing])
+        -> ScheduledProcessState[process, ProcessState::Exited] {
+    scheduled_process_state_drop(state);
+    scheduled_process_record_at(owner.pool_index).state = ProcessSlotState::Exited;
+    return scheduled_process_exited_state(owner);
 }
 
 fn scheduled_process_exited_take(handle: ProcessHandle)
@@ -3152,7 +3213,7 @@ fn kernel_process_yield_handle(guard: borrow ProcessRunGuard[lock],
 
 must_use variant ProcessCloneResult {
     Invalid;
-    ChildReady(usize);
+    ChildConstructing(usize);
 }
 
 fn kernel_process_execution_reset() {
@@ -5051,7 +5112,7 @@ fn kernel_process_trace_block_wake_probe() -> bool !{unsafe} {
     let mut setup_ok: bool = false;
     match kernel_process_clone_begin(0x11, 0) {
         ProcessCloneResult::Invalid => {}
-        ProcessCloneResult::ChildReady(child_pid) => {
+        ProcessCloneResult::ChildConstructing(child_pid) => {
             if (child_pid == 2 &&
                 kernel_process_clone_context_install(parent_frame, child_frame) ==
                     child_frame &&
@@ -5113,7 +5174,7 @@ fn kernel_process_trace_block_wake_probe() -> bool !{unsafe} {
 // Bookkeeping-only, like scheduled_process_table_probe beside it: the
 // children never run user code, they are driven Ready->Running->Exited
 // directly, so this needs no images and no address spaces.
-// Ready -> Running -> Exited for one handle, under the scheduler lock.
+// Constructing -> Running -> Exited for a synthetic clone, under the run lock.
 //
 // GitHub issue #479 Group B: hoisted out of the loop it was written in,
 // because the guard is linear and the match arm it lived in returns early
@@ -5129,11 +5190,13 @@ private fn kernel_process_probe_run_to_exit(handle: ProcessHandle) -> bool {
 private fn kernel_process_probe_run_to_exit_locked(
         guard: borrow ProcessRunGuard[lock],
         handle: ProcessHandle) -> bool {
-    match scheduled_process_ready_take(guard, handle) {
-        ScheduledProcessReadyTakeResult::Missing => { return false; }
-        ScheduledProcessReadyTakeResult::Ready(resources) => {
-            let (owner, ready) = resources;
-            let running = scheduled_process_start(owner, ready);
+    match scheduled_process_constructing_take(guard, handle) {
+        ScheduledProcessConstructingTakeResult::Missing => { return false; }
+        ScheduledProcessConstructingTakeResult::Constructing(resources) => {
+            let (owner, constructing) = resources;
+            // This bookkeeping fixture never restores its synthetic frame.
+            let running = scheduled_process_finish_clone(
+                owner, constructing, scheduled_process_record_of(handle).saved_sp);
             let exited = scheduled_process_exit(owner, running);
             scheduled_process_release(owner, exited);
         }
@@ -5153,7 +5216,7 @@ fn kernel_process_fanout_probe() -> bool !{unsafe} {
     for i: usize in 0..<3 {
         match kernel_process_clone_begin(0x11, 0) {
             ProcessCloneResult::Invalid => { return false; }
-            ProcessCloneResult::ChildReady(child_pid) => { pids[i] = child_pid; }
+            ProcessCloneResult::ChildConstructing(child_pid) => { pids[i] = child_pid; }
         }
         execution_here().current_handle = parent_handle;
         if (kernel_process_current_pid() != parent_pid) { return false; }
@@ -5168,9 +5231,8 @@ fn kernel_process_fanout_probe() -> bool !{unsafe} {
         if (kernel_process_current_has_child_pid(pids[i])) { seen = seen + 1; }
     }
     if (seen != 3) { return false; }
-    // Drive all three Ready->Running->Exited, the bookkeeping-only cycle
-    // scheduled_process_probe_cycle uses, and stamp each with its own
-    // status so the collection below can tell them apart.
+    // Complete all three synthetic clones and drive them to Exited without
+    // restoring their frames. Give each its own status for collection below.
     // seen == 3 above already means the link exists, but say so where the
     // read is: first_child is only readable when has_first_child says it
     // is, and a probe that assumes an invariant it does not state is how
@@ -5270,8 +5332,9 @@ fn kernel_process_scheduler_probe() -> bool {
     let mut root_handle: ProcessHandle = execution_here().current_handle;
     match kernel_process_clone_begin(0x11, 0) {
         ProcessCloneResult::Invalid => { return false; }
-        ProcessCloneResult::ChildReady(child_pid) => {
-            if (child_pid != root_pid + 1 ||
+        ProcessCloneResult::ChildConstructing(child_pid) => {
+            if (kernel_process_clone_unselectable_probe(root_handle) == false ||
+                child_pid != root_pid + 1 ||
                 kernel_process_clone_context_install(0x1000, 0x2000) !=
                     0x2000) {
                 return false;
@@ -5330,6 +5393,42 @@ fn kernel_process_scheduler_probe() -> bool {
     execution_here().current_live = false;
     kernel_process_trace_disable();
     return ok;
+}
+
+// Between allocation and frame installation, neither a Ready claim nor a
+// normal successor walk may expose the child to another CPU. This exercises
+// the production selection operations, not just the new state's numeric tag.
+private fn kernel_process_clone_unselectable_probe(parent: ProcessHandle) -> bool {
+    let guard = process_run_lock();
+    let protected: bool = kernel_process_clone_unselectable_locked(guard, parent);
+    // Negative control: reproduce the old early-Ready publication under the
+    // guard, so no peer can actually restore the intentionally invalid frame.
+    scheduled_process_record_of(execution_here().current_handle).state =
+        ProcessSlotState::Ready;
+    let detected: bool =
+        kernel_process_clone_unselectable_locked(guard, parent) == false;
+    scheduled_process_record_of(execution_here().current_handle).state =
+        ProcessSlotState::Constructing;
+    process_run_unlock(guard);
+    return protected && detected;
+}
+
+private fn kernel_process_clone_unselectable_locked(
+        guard: borrow ProcessRunGuard[lock], parent: ProcessHandle) -> bool {
+    let mut excluded: bool = true;
+    match scheduled_process_ready_take(guard, execution_here().current_handle) {
+        ScheduledProcessReadyTakeResult::Missing => {}
+        ScheduledProcessReadyTakeResult::Ready(resources) => {
+            let (owner, ready) = resources;
+            scheduled_process_release(owner, ready);
+            excluded = false;
+        }
+    }
+    match kernel_process_next_ready(parent) {
+        ProcessNextReadyResult::Missing => {}
+        ProcessNextReadyResult::Next(next) => { excluded = false; }
+    }
+    return excluded;
 }
 
 // Regression for the diagnostic ring itself. This runs only in the boot
@@ -5410,7 +5509,7 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
         return ProcessCloneResult::Invalid;
     }
     let mut parent: ProcessHandle = execution_here().current_handle;
-    match scheduled_process_alloc() {
+    match scheduled_process_alloc_pending(true) {
         ScheduledPooledProcessAllocResult::Full => {
             return ProcessCloneResult::Invalid;
         }
@@ -5424,6 +5523,7 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
             // child and no sibling -- the shape every existing view was
             // recorded against, which is why the enumeration change and
             // this one could be verified separately.
+            let publish_guard = process_run_lock();
             scheduled_process_record_of(child).next_sibling =
                 scheduled_process_record_of(parent).first_child;
             scheduled_process_record_of(child).has_next_sibling =
@@ -5433,11 +5533,11 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
             scheduled_process_record_of(child).parent = parent;
             scheduled_process_record_of(child).has_parent = true;
             // "current" becomes the CHILD right here, before this function
-            // returns ChildReady -- the assembly clone continuation resumes
+            // returns ChildConstructing -- the assembly clone continuation resumes
             // as the child directly (x0=0), so there is no separate
             // parent-side return path to switch on later. A caller reading
             // kernel_process_current_pid()/kernel_process_current_root() etc.
-            // immediately after matching ChildReady therefore observes the
+            // immediately after matching ChildConstructing therefore observes the
             // CHILD's identity, not the parent's; asking "did the parent do
             // this fork" needs kernel_process_parent_is_root() (which asks
             // about *current's own* parent) or the caller's own pre-call
@@ -5447,6 +5547,7 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
             // `kernel_process_current_pid() != 1`, which is always true here
             // regardless of who forked).
             execution_here().current_handle = child;
+            process_run_unlock(publish_guard);
             workload_busy_note_selected(
                 scheduled_process_pid_of_handle(child));
             process_test_evidence_record_clone();
@@ -5454,10 +5555,10 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
                 ProcessTraceFork, scheduled_process_pid_of_handle(child),
                 child.generation,
                 scheduled_process_pid_of_handle(parent), parent.generation,
-                1, 0, child.pool_index,
+                5, 0, child.pool_index,
                 scheduled_process_record_of(child).saved_sp,
                 flags);
-            return ProcessCloneResult::ChildReady(
+            return ProcessCloneResult::ChildConstructing(
                 scheduled_process_pid_of_handle(child));
         }
     }
@@ -5472,12 +5573,8 @@ fn kernel_process_clone_child_stack_top() -> usize {
 
 // GitHub issue #245: undoes kernel_process_clone_begin() when a later
 // step in the same clone() syscall (VM copy, fd-table clone) fails.
-// The child slot never actually ran (kernel_process_clone_context_
-// install() hasn't happened yet), so it cannot be exited/reaped through
-// the normal Running->Exited path clone_child_exit() uses -- this drives
-// it through Ready->Running->Exited->Reap directly instead, the same
-// bookkeeping-only cycle scheduled_process_probe_cycle() uses for its own
-// self-test.
+// The child never ran: cancellation consumes its Constructing token directly
+// into Exited, without ever publishing an executable Ready/Running context.
 must_use variant ProcessCloneRollbackResult { Invalid; Restored; }
 
 fn kernel_process_clone_rollback() -> ProcessCloneRollbackResult {
@@ -5496,17 +5593,16 @@ fn kernel_process_clone_rollback() -> ProcessCloneRollbackResult {
     // and exactly the kind of use-after-reap an array of never-freed slots
     // cannot show you.
     scheduled_process_record_of(child).has_parent = false;
-    // The rollback still runs on the child's unfinished clone frame, but the
+    // The rollback still runs on the parent's syscall stack, and the
     // logical current process must be the surviving parent before the child
     // record is returned to the pool.
     execution_here().current_handle = parent;
     let guard = process_run_lock();
-    match scheduled_process_ready_take(guard, child) {
-        ScheduledProcessReadyTakeResult::Missing => {}
-        ScheduledProcessReadyTakeResult::Ready(resources) => {
-            let (owner, ready) = resources;
-            let running = scheduled_process_start(owner, ready);
-            let exited = scheduled_process_exit(owner, running);
+    match scheduled_process_constructing_take(guard, child) {
+        ScheduledProcessConstructingTakeResult::Missing => {}
+        ScheduledProcessConstructingTakeResult::Constructing(resources) => {
+            let (owner, constructing) = resources;
+            let exited = scheduled_process_cancel_clone(owner, constructing);
             scheduled_process_release(owner, exited);
             match scheduled_process_exited_take(child) {
                 ScheduledProcessExitedTakeResult::Missing => {}
@@ -5549,19 +5645,30 @@ fn kernel_process_clone_context_install(parent_sp: usize, child_sp: usize)
     let mut child: ProcessHandle = execution_here().current_handle;
     let mut parent: ProcessHandle =
         scheduled_process_record_of(child).parent;
-    // GitHub issue #479 Group B: both transitions inside ONE section, and
-    // the guard given back before the early return -- which the compiler
-    // insists on, since it is linear.
+    // The copied child frame becomes Running in the same section that
+    // publishes the parent's frame and makes that parent Ready.
     let guard = process_run_lock();
-    let swapped: bool = kernel_process_yield_handle(guard, parent) &&
-                        kernel_process_start_handle(guard, child);
-    process_run_unlock(guard);
-    if (swapped == false) {
-        return 0;
+    match scheduled_process_constructing_take(guard, child) {
+        ScheduledProcessConstructingTakeResult::Missing => {
+            process_run_unlock(guard);
+            return 0;
+        }
+        ScheduledProcessConstructingTakeResult::Constructing(resources) => {
+            let (owner, constructing) = resources;
+            // Publish the parent's saved frame before Ready permits a peer
+            // to restore it. The child's VM and FD setup already succeeded.
+            scheduled_process_record_of(parent).saved_sp = parent_sp;
+            if (kernel_process_yield_handle(guard, parent) == false) {
+                scheduled_process_release(owner, constructing);
+                process_run_unlock(guard);
+                return 0;
+            }
+            let running = scheduled_process_finish_clone(owner, constructing, child_sp);
+            scheduled_process_release(owner, running);
+            process_run_unlock(guard);
+            return child_sp;
+        }
     }
-    scheduled_process_record_of(parent).saved_sp = parent_sp;
-    scheduled_process_record_of(child).saved_sp = child_sp;
-    return child_sp;
 }
 
 fn kernel_process_is_child() -> bool {
@@ -5643,6 +5750,7 @@ fn kernel_process_crash_state() -> usize !{unsafe} {
         ProcessSlotState::Running => { return 2; }
         ProcessSlotState::Blocked => { return 3; }
         ProcessSlotState::Exited => { return 4; }
+        ProcessSlotState::Constructing => { return 5; }
     }
 }
 

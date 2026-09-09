@@ -29,6 +29,13 @@ change what it is about.
 
 ## Lock classes
 
+A new clone stays `Constructing` while its VM, descriptors and copied frame
+are installed. Neither a Ready claim nor the successor walk may select it.
+The install transition consumes that state into Running under the run lock;
+the parent's saved frame is stored before the same section makes it Ready.
+Cancellation consumes Constructing directly into Exited. These are logical
+publication boundaries, not proof that the old CPU has left a process stack.
+
 Two, and the distinction is which contexts may take them.
 
 - `Mutex` (`kernel/lib/mutex.tkb`) masks interrupts around a spinlock, so it is

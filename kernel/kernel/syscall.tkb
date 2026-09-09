@@ -3972,7 +3972,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             ProcessCloneResult::Invalid => {
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
-            ProcessCloneResult::ChildReady(child_pid) => {
+            ProcessCloneResult::ChildConstructing(child_pid) => {
                 // Guard against PID 1's own fork of the interactive ash
                 // (BusyBox init starting the /etc/inittab respawn ash):
                 // that
