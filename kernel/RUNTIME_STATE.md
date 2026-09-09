@@ -97,8 +97,9 @@ also be snapshotted and printed without a crash by
 `kernel_process_trace_report()`; that entry point and the oops path share one
 row formatter, and neither prints from a scheduler or interrupt writer.
 
-`exception_evidence.tkb`'s `crash_snapshot`/`crash_snapshot_capturing` and
-`ddb_snapshot`.
+`exception_evidence.tkb`'s per-core crash snapshots/capture guards and the
+machine-global `ddb_snapshot`. The historical `crash_snapshot` and
+`crash_snapshot_capturing` symbols are core 0's debugger ABI.
 
 **Why global:** the terminal crash record must survive the failing context,
 while resumable DDB must retain one bounded trace/FD/VM/process-table copy
@@ -254,8 +255,9 @@ global scratch space, not per-process state.
 ### Driver / platform singletons (`kernel/drivers/`, `kernel/platform/`, `kernel/arch/`)
 
 virtio-blk/virtio-net/rp1_gem/usb_xhci device state, QEMU/RPi5 UART ring
-buffers, the RPi5 mailbox, `exception_evidence.tkb`'s `crash_snapshot`/
-`crash_snapshot_capturing`. `CrashSnapshot` itself now also carries
+buffers and the RPi5 mailbox. `exception_evidence.tkb` keeps crash snapshots
+and capture guards per core while preserving the historical core-0 symbols
+for debugger scripts. `CrashSnapshot` itself now also carries
 `wait4_status_ptr` and the current process's `fd_kind`/`fd_object`
 arrays (closing #294's own diagnostic-snapshot acceptance criterion --
 process/parent/wait-reason/address-space identity/syscall continuation/

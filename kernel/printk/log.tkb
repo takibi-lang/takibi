@@ -27,6 +27,18 @@ private let mut kernel_log_boot_tick: i64;
 private let mut kernel_log_frequency: i64;
 private let mut kernel_log_snapshot: [u8; KERNEL_LOG_SNAPSHOT_CAPACITY];
 private let mut kernel_log_snapshot_length: usize;
+// Core 1 and later do not write the retained ordinary log or its shared UART.
+// Suppression lasts through every numeric/string fragment until the newline;
+// direct crash/DDB output does not call kernel_log_begin_fragment and remains
+// available from every core.
+private let mut kernel_log_uart_suppressed: [bool; KERNEL_MAX_CORES];
+
+private fn kernel_log_uart_suppressed_here() -> *bool {
+    let base: *bool = kernel_log_uart_suppressed;
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) { return base; }
+    return base + (core as isize);
+}
 
 fn kernel_log_init() {
     kernel_log_oldest = 0;
@@ -62,10 +74,13 @@ private fn kernel_log_start_line() {
 // Keeping the active flag set across a fragment without '\n' captures
 // uart_put_udec/uart_put_hex output between fragments in the same line.
 fn kernel_log_begin_fragment() {
-    // The current record arrays have one writer. Secondary-core text remains
-    // live-UART-only until records gain atomic sequence reservation and
-    // release publication; admitting it here would create silent corruption.
-    if (cpu_id() != 0) { return; }
+    // The current record arrays and UART line assembly have one writer.
+    // Admitting secondary-core ordinary text would create silent retained-log
+    // corruption and split physical UART lines.
+    if (cpu_id() != 0) {
+        *kernel_log_uart_suppressed_here() = true;
+        return;
+    }
     kernel_log_capture_enabled = true;
 }
 
@@ -81,10 +96,8 @@ fn kernel_log_begin_fragment() {
 // longer is not a measurement that changes what it measures.
 //
 // Counted here rather than in the two platform drivers so both report one
-// number through one path, and so this file's own execution-model assertion
-// below -- KERNEL_ACTIVE_CORES == 1, because two cores logging split one line
-// across two -- already covers it. These add no concurrency question the
-// console does not already have.
+// number through one path. Secondary-core ordinary lines are suppressed, so
+// these counters retain their original meaning: core 0's console cost.
 private let mut kernel_log_tx_spin_ticks: usize = 0;
 private let mut kernel_log_tx_bytes: usize = 0;
 // Bytes that had to WAIT, which is no longer every byte: once the queue is
@@ -93,10 +106,12 @@ private let mut kernel_log_tx_bytes: usize = 0;
 private let mut kernel_log_tx_spun: usize = 0;
 
 fn kernel_log_note_tx_byte() {
+    if (cpu_id() != 0) { return; }
     kernel_log_tx_bytes = kernel_log_tx_bytes + 1;
 }
 
 fn kernel_log_note_tx_spin(ticks: i64) {
+    if (cpu_id() != 0) { return; }
     kernel_log_tx_spun = kernel_log_tx_spun + 1;
     if (ticks > 0) {
         kernel_log_tx_spin_ticks = kernel_log_tx_spin_ticks + (ticks as usize);
@@ -188,6 +203,7 @@ fn kernel_log_tx_activate() {
 // Same rule as mutex_irq_restore against enable_irq, and getting that one
 // wrong is what removed DDB from RPi5 in the first place.
 fn kernel_log_tx_stand_down() !{unsafe} {
+    if (cpu_id() != 0) { return; }
     uart_tx_flush();
     kernel_log_tx_live = false;
 }
@@ -268,7 +284,13 @@ fn uart_tx_drain_into_fifo() !{unsafe} {
 }
 
 fn uart_putc(c: u8) !{logs, unsafe} {
-    kernel_log_capture_uart_byte(c);
+    if (kernel_log_capture_uart_byte(c) == false) { return; }
+    // The IRQ-owned TX queue is still core-0-only. A peer's direct byte
+    // must not mutate it; ordinary peer log fragments are suppressed above.
+    if (cpu_id() != 0) {
+        uart_tx_spin_store(c);
+        return;
+    }
     kernel_log_note_tx_byte();
     if (kernel_log_tx_is_live() == false) {
         uart_tx_spin_store(c);
@@ -314,20 +336,24 @@ fn uart_tx_flush() !{unsafe} {
     mutex_irq_restore(irq_flags);
 }
 
-fn kernel_log_capture_uart_byte(value: u8) {
-    if (kernel_log_capture_enabled == false) { return; }
+fn kernel_log_capture_uart_byte(value: u8) -> bool {
+    if (*kernel_log_uart_suppressed_here()) {
+        if (value == 10) { *kernel_log_uart_suppressed_here() = false; }
+        return false;
+    }
+    if (kernel_log_capture_enabled == false) { return true; }
     if (kernel_log_active == false) {
         if (value == 10) {
             kernel_log_capture_enabled = false;
-            return;
+            return true;
         }
         kernel_log_start_line();
     }
-    if (kernel_log_active == false) { return; }
+    if (kernel_log_active == false) { return true; }
     let slot: usize = kernel_log_active_slot;
     if (slot >= KERNEL_LOG_RECORD_COUNT) {
         kernel_log_active = false;
-        return;
+        return true;
     }
     let length: usize = kernel_log_lengths[slot];
     if (length < KERNEL_LOG_TEXT_MAX) {
@@ -343,6 +369,7 @@ fn kernel_log_capture_uart_byte(value: u8) {
         kernel_log_active = false;
         kernel_log_capture_enabled = false;
     }
+    return true;
 }
 
 private fn kernel_log_snapshot_push(value: u8) {
@@ -529,38 +556,12 @@ fn kernel_boot_log_resource_exhausted(resource: *u8, capacity: usize) {
     kernel_boot_log("\n" as *u8);
 }
 
-// GitHub issue #479: the console's own state, which had no
-// execution-model assertion until scripts/check_execution_model_coverage.py
-// asked every file with state for one.
-//
-// Two cores logging interleave, and not only inside the ring:
-// kernel_boot_log is begin_fragment followed by uart_puts, so a second core
-// entering between them splits one line across two. Every view in this
-// kernel compares text, so that is not a cosmetic failure -- it is every
-// text-comparing test at once, reported as a diff nobody can attribute.
-//
-// The ring underneath has two different problems, not one. kernel_log_count,
-// _oldest and _overwritten are a read-modify-write set, the ordinary kind.
-// kernel_log_active and kernel_log_active_slot are NOT: they say which slot
-// THIS caller is assembling a line into, which is per-core state stored as
-// one global -- the same shape address_space_active_slot and
-// process_image_target_root had before GitHub issue #479 indexed them by
-// cpu_id().
-//
-// That is why the answer here is more likely per-CPU rings than a lock: two
-// cores assembling two lines is not contention to be serialised, it is two
-// pieces of state that a single global cannot hold. A lock would make them
-// take turns at something they should be doing independently.
-//
-// Not locked here, and the reason is a real question rather than a
-// deferral. A lock around logging is held across a UART write, which is
-// slow and is reached from fail-stop and DDB paths where the other core may
-// already be wedged -- a console that can block on a lock is a console that
-// cannot report the deadlock it is in. kernel/lib/diagnostic_ring.tkb
-// exists because of exactly that constraint and answers it with per-CPU
-// rings and atomic publication (issue #299) rather than with exclusion.
-// Whether the console follows it is the decision this assertion holds open.
+// Ordinary retained kernel text remains a core-0 stream. Other cores discard
+// a kernel_boot_log logical line at uart_putc until its newline, so fragments
+// cannot split core 0's view-sensitive text. The suppression bit is per-core;
+// direct userspace UART and the lock-free crash/DDB reporters remain live.
+// Re-entry on one core would still alias that core's line state.
 fn kernel_log_execution_model_assumption() {
-    static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "two cores logging split one line across two, and every view in this kernel compares text");
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+                  "per-core kernel-log line state cannot survive preemption into another writer");
 }

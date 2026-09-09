@@ -18,8 +18,22 @@ fn ext2_max_regular_file_size() -> usize {
            KERNEL_BLOCK_SIZE;
 }
 
-private let mut ext2_metadata_block: [u8; KERNEL_BLOCK_SIZE];
-private let mut ext2_file_block: [u8; KERNEL_BLOCK_SIZE];
+// One invocation-local pair per core. Kernel code is non-preemptible, so one
+// core cannot enter a second ext2 operation before its current operation
+// returns; different cores must not parse each other's block-I/O results.
+struct Ext2Scratch {
+    metadata: [u8; KERNEL_BLOCK_SIZE];
+    file: [u8; KERNEL_BLOCK_SIZE];
+}
+
+private let mut ext2_scratch: [Ext2Scratch; KERNEL_MAX_CORES];
+
+private fn ext2_scratch_here() -> *Ext2Scratch {
+    let base: *Ext2Scratch = ext2_scratch;
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) { return base; }
+    return base + (core as isize);
+}
 
 struct Ext2Mount {
     private device: KernelBlockDevice;
@@ -128,11 +142,11 @@ fn ext2_put_u16(bytes: borrow *u8, offset: usize, value: u16) -> bool {
 
 fn ext2_mount(device: KernelBlockDevice) -> Ext2MountResult {
     match block_read(device, EXT2_SUPERBLOCK_BLOCK,
-                     ext2_metadata_block as []u8) {
+                     ext2_scratch_here().metadata as []u8) {
         BlockIoResult::Invalid => { return Ext2MountResult::Invalid; }
         BlockIoResult::Ok => { }
     }
-    let superblock: *u8 = ext2_metadata_block as *u8;
+    let superblock: *u8 = ext2_scratch_here().metadata as *u8;
     let inode_count: usize = ext2_u32(superblock, 0) as usize;
     let filesystem_blocks: usize = ext2_u32(superblock, 4) as usize;
     let first_data_block: usize = ext2_u32(superblock, 20) as usize;
@@ -155,16 +169,16 @@ fn ext2_mount(device: KernelBlockDevice) -> Ext2MountResult {
         feature_ro_compat != 0) {
         return Ext2MountResult::Invalid;
     }
-    match block_read(device, 2, ext2_metadata_block as []u8) {
+    match block_read(device, 2, ext2_scratch_here().metadata as []u8) {
         BlockIoResult::Invalid => { return Ext2MountResult::Invalid; }
         BlockIoResult::Ok => { }
     }
     let inode_table_block: usize =
-        ext2_u32(ext2_metadata_block as *u8, 8) as usize;
+        ext2_u32(ext2_scratch_here().metadata as *u8, 8) as usize;
     let block_bitmap_block: usize =
-        ext2_u32(ext2_metadata_block as *u8, 0) as usize;
+        ext2_u32(ext2_scratch_here().metadata as *u8, 0) as usize;
     let inode_bitmap_block: usize =
-        ext2_u32(ext2_metadata_block as *u8, 4) as usize;
+        ext2_u32(ext2_scratch_here().metadata as *u8, 4) as usize;
     if (inode_table_block == 0 || inode_table_block >= filesystem_blocks ||
         block_bitmap_block == 0 || block_bitmap_block >= filesystem_blocks ||
         inode_bitmap_block == 0 || inode_bitmap_block >= filesystem_blocks) {
@@ -198,12 +212,12 @@ fn ext2_read_inode(mount: Ext2Mount, inode_number: usize)
         return Ext2InodeResult::Invalid;
     }
     match block_read(mount.device, table_block,
-                     ext2_metadata_block as []u8) {
+                     ext2_scratch_here().metadata as []u8) {
         BlockIoResult::Invalid => { return Ext2InodeResult::Invalid; }
         BlockIoResult::Ok => { }
     }
     let inode_bytes: *u8 =
-        (ext2_metadata_block as *u8) + (offset as isize);
+        (ext2_scratch_here().metadata as *u8) + (offset as isize);
     let mode: usize = ext2_u16(inode_bytes, 0) as usize;
     let size: usize = ext2_u32(inode_bytes, 4) as usize;
     let direct_block0: usize = ext2_u32(inode_bytes, 40) as usize;
@@ -263,14 +277,14 @@ fn ext2_lookup_directory(mount: Ext2Mount, directory_inode: usize,
                                      ext2_inode_block_pointer(
                                          mount, directory,
                                          cursor / KERNEL_BLOCK_SIZE),
-                                     ext2_file_block as []u8) {
+                                     ext2_scratch_here().file as []u8) {
                         BlockIoResult::Invalid => {
                             return Ext2LookupResult::Invalid;
                         }
                         BlockIoResult::Ok => { }
                     }
                 }
-                let entry: *u8 = (ext2_file_block as *u8) +
+                let entry: *u8 = (ext2_scratch_here().file as *u8) +
                                  (block_offset as isize);
                 let inode_number: usize = ext2_u32(entry, 0) as usize;
                 let record_length: usize = ext2_u16(entry, 4) as usize;
@@ -280,7 +294,7 @@ fn ext2_lookup_directory(mount: Ext2Mount, directory_inode: usize,
                     name_length > record_length - 8) {
                     return Ext2LookupResult::Invalid;
                 }
-                let file_bytes = ext2_file_block as []u8;
+                let file_bytes = ext2_scratch_here().file as []u8;
                 if (block_offset > file_bytes.len) {
                     return Ext2LookupResult::Invalid;
                 }
@@ -395,12 +409,12 @@ fn ext2_inode_block_pointer(mount: Ext2Mount, inode: Ext2Inode,
         return 0;
     }
     match block_read(mount.device, inode.table_block,
-                     ext2_metadata_block as []u8) {
+                     ext2_scratch_here().metadata as []u8) {
         BlockIoResult::Invalid => { return 0; }
         BlockIoResult::Ok => { }
     }
     let inode_pointer: *u8 =
-        (ext2_metadata_block as *u8) + (inode.table_offset as isize);
+        (ext2_scratch_here().metadata as *u8) + (inode.table_offset as isize);
     if (index < EXT2_MAX_DIRECT_BLOCKS) {
         return ext2_u32(inode_pointer, 40 + index * 4) as usize;
     }
@@ -411,11 +425,11 @@ fn ext2_inode_block_pointer(mount: Ext2Mount, inode: Ext2Inode,
             return 0;
         }
         match block_read(mount.device, indirect_block,
-                         ext2_file_block as []u8) {
+                         ext2_scratch_here().file as []u8) {
             BlockIoResult::Invalid => { return 0; }
             BlockIoResult::Ok => { }
         }
-        return ext2_u32(ext2_file_block as *u8,
+        return ext2_u32(ext2_scratch_here().file as *u8,
                         single_index * 4) as usize;
     }
     let double_block: usize = ext2_u32(inode_pointer, 92) as usize;
@@ -424,21 +438,21 @@ fn ext2_inode_block_pointer(mount: Ext2Mount, inode: Ext2Inode,
     }
     let double_index: usize = single_index - pointers;
     match block_read(mount.device, double_block,
-                     ext2_metadata_block as []u8) {
+                     ext2_scratch_here().metadata as []u8) {
         BlockIoResult::Invalid => { return 0; }
         BlockIoResult::Ok => { }
     }
     let second_level: usize = ext2_u32(
-        ext2_metadata_block as *u8, (double_index / pointers) * 4) as usize;
+        ext2_scratch_here().metadata as *u8, (double_index / pointers) * 4) as usize;
     if (second_level == 0 || second_level >= mount.filesystem_blocks) {
         return 0;
     }
     match block_read(mount.device, second_level,
-                     ext2_file_block as []u8) {
+                     ext2_scratch_here().file as []u8) {
         BlockIoResult::Invalid => { return 0; }
         BlockIoResult::Ok => { }
     }
-    let resolved: usize = ext2_u32(ext2_file_block as *u8,
+    let resolved: usize = ext2_u32(ext2_scratch_here().file as *u8,
                     (double_index % pointers) * 4) as usize;
     return resolved;
 }
@@ -464,13 +478,13 @@ fn ext2_read_small_file(mount: Ext2Mount, inode_number: usize,
                     return Ext2ReadResult::Invalid;
                 }
                 match block_read(mount.device, block_number,
-                                 ext2_file_block as []u8) {
+                                 ext2_scratch_here().file as []u8) {
                     BlockIoResult::Invalid => { return Ext2ReadResult::Invalid; }
                     BlockIoResult::Ok => { }
                 }
                 let mut chunk: usize = KERNEL_BLOCK_SIZE;
                 if (inode.size - copied < chunk) { chunk = inode.size - copied; }
-                let file_bytes = ext2_file_block as []u8;
+                let file_bytes = ext2_scratch_here().file as []u8;
                 if (chunk > file_bytes.len) {
                     return Ext2ReadResult::Invalid;
                 }
@@ -528,7 +542,7 @@ fn ext2_read_file_chunk(mount: Ext2Mount, inode_number: usize,
                 return Ext2ReadResult::Invalid;
             }
             match block_read(mount.device, block_number,
-                             ext2_file_block as []u8) {
+                             ext2_scratch_here().file as []u8) {
                 BlockIoResult::Invalid => { return Ext2ReadResult::Invalid; }
                 BlockIoResult::Ok => { }
             }
@@ -539,7 +553,7 @@ fn ext2_read_file_chunk(mount: Ext2Mount, inode_number: usize,
             if (chunk > inode.size - offset) {
                 chunk = inode.size - offset;
             }
-            let file_bytes = ext2_file_block as []u8;
+            let file_bytes = ext2_scratch_here().file as []u8;
             if (block_offset > file_bytes.len) {
                 return Ext2ReadResult::Invalid;
             }
@@ -578,7 +592,7 @@ fn ext2_read_directory_chunk(mount: Ext2Mount, inode_number: usize,
                 return Ext2ReadResult::Invalid;
             }
             match block_read(mount.device, block_number,
-                             ext2_file_block as []u8) {
+                             ext2_scratch_here().file as []u8) {
                 BlockIoResult::Invalid => { return Ext2ReadResult::Invalid; }
                 BlockIoResult::Ok => { }
             }
@@ -589,7 +603,7 @@ fn ext2_read_directory_chunk(mount: Ext2Mount, inode_number: usize,
             if (chunk > inode.size - offset) {
                 chunk = inode.size - offset;
             }
-            let file_bytes = ext2_file_block as []u8;
+            let file_bytes = ext2_scratch_here().file as []u8;
             if (block_offset > file_bytes.len) {
                 return Ext2ReadResult::Invalid;
             }
@@ -653,11 +667,11 @@ fn ext2_write_small_file(mount: Ext2Mount, inode_number: usize,
                 source.len != inode.size || source.len > KERNEL_BLOCK_SIZE) {
                 return Ext2WriteResult::Invalid;
             }
-            for i: usize in 0..<KERNEL_BLOCK_SIZE { ext2_file_block[i] = 0; }
-            let file_bytes = ext2_file_block as []u8;
+            for i: usize in 0..<KERNEL_BLOCK_SIZE { ext2_scratch_here().file[i] = 0; }
+            let file_bytes = ext2_scratch_here().file as []u8;
             slice_copy(file_bytes, source);
             match block_write(mount.device, inode.direct_block0,
-                              ext2_file_block as []u8) {
+                              ext2_scratch_here().file as []u8) {
                 BlockIoResult::Invalid => { return Ext2WriteResult::Invalid; }
                 BlockIoResult::Ok => { return Ext2WriteResult::Written; }
             }
@@ -680,27 +694,27 @@ fn ext2_resize_small_file(mount: Ext2Mount, inode_number: usize,
 
             // Publish data first. Until the inode table write succeeds, the
             // old i_size remains the only visible extent.
-            for i: usize in 0..<KERNEL_BLOCK_SIZE { ext2_file_block[i] = 0; }
-            let file_bytes = ext2_file_block as []u8;
+            for i: usize in 0..<KERNEL_BLOCK_SIZE { ext2_scratch_here().file[i] = 0; }
+            let file_bytes = ext2_scratch_here().file as []u8;
             slice_copy(file_bytes, source);
             match block_write(mount.device, inode.direct_block0,
-                              ext2_file_block as []u8) {
+                              ext2_scratch_here().file as []u8) {
                 BlockIoResult::Invalid => { return Ext2ResizeResult::Invalid; }
                 BlockIoResult::Ok => { }
             }
 
             match block_read(mount.device, inode.table_block,
-                             ext2_metadata_block as []u8) {
+                             ext2_scratch_here().metadata as []u8) {
                 BlockIoResult::Invalid => { return Ext2ResizeResult::Invalid; }
                 BlockIoResult::Ok => { }
             }
             let inode_pointer: *u8 =
-                (ext2_metadata_block as *u8) + (inode.table_offset as isize);
+                (ext2_scratch_here().metadata as *u8) + (inode.table_offset as isize);
             if (ext2_put_u32(inode_pointer, 4, source.len as u32) == false) {
                 return Ext2ResizeResult::Invalid;
             }
             match block_write(mount.device, inode.table_block,
-                              ext2_metadata_block as []u8) {
+                              ext2_scratch_here().metadata as []u8) {
                 BlockIoResult::Invalid => { return Ext2ResizeResult::Invalid; }
                 BlockIoResult::Ok => { return Ext2ResizeResult::Resized; }
             }
@@ -719,11 +733,11 @@ fn ext2_read_fast_symlink(mount: Ext2Mount, inode_number: usize,
                 return Ext2SymlinkResult::Invalid;
             }
             match block_read(mount.device, inode.table_block,
-                             ext2_metadata_block as []u8) {
+                             ext2_scratch_here().metadata as []u8) {
                 BlockIoResult::Invalid => { return Ext2SymlinkResult::Invalid; }
                 BlockIoResult::Ok => { }
             }
-            let metadata = ext2_metadata_block as []u8;
+            let metadata = ext2_scratch_here().metadata as []u8;
             let table_offset: usize = inode.table_offset;
             if (table_offset > metadata.len) {
                 return Ext2SymlinkResult::Invalid;
@@ -751,11 +765,11 @@ fn ext2_read_fast_symlink(mount: Ext2Mount, inode_number: usize,
 fn ext2_update_free_counts(mount: Ext2Mount, inode_counter: bool,
                            allocate: bool) -> Ext2CounterResult {
     match block_read(mount.device, EXT2_SUPERBLOCK_BLOCK,
-                     ext2_metadata_block as []u8) {
+                     ext2_scratch_here().metadata as []u8) {
         BlockIoResult::Invalid => { return Ext2CounterResult::Invalid; }
         BlockIoResult::Ok => { }
     }
-    match block_read(mount.device, 2, ext2_file_block as []u8) {
+    match block_read(mount.device, 2, ext2_scratch_here().file as []u8) {
         BlockIoResult::Invalid => { return Ext2CounterResult::Invalid; }
         BlockIoResult::Ok => { }
     }
@@ -765,8 +779,8 @@ fn ext2_update_free_counts(mount: Ext2Mount, inode_counter: bool,
         super_offset = 16;
         group_offset = 14;
     }
-    let super_bytes: *u8 = ext2_metadata_block as *u8;
-    let group_bytes: *u8 = ext2_file_block as *u8;
+    let super_bytes: *u8 = ext2_scratch_here().metadata as *u8;
+    let group_bytes: *u8 = ext2_scratch_here().file as *u8;
     let super_count: u32 = ext2_u32(super_bytes, super_offset);
     let group_count: u16 = ext2_u16(group_bytes, group_offset);
     let mut next_super: u32 = super_count;
@@ -789,11 +803,11 @@ fn ext2_update_free_counts(mount: Ext2Mount, inode_counter: bool,
         return Ext2CounterResult::Invalid;
     }
     match block_write(mount.device, EXT2_SUPERBLOCK_BLOCK,
-                      ext2_metadata_block as []u8) {
+                      ext2_scratch_here().metadata as []u8) {
         BlockIoResult::Invalid => { return Ext2CounterResult::Invalid; }
         BlockIoResult::Ok => { }
     }
-    match block_write(mount.device, 2, ext2_file_block as []u8) {
+    match block_write(mount.device, 2, ext2_scratch_here().file as []u8) {
         BlockIoResult::Invalid => { return Ext2CounterResult::Invalid; }
         BlockIoResult::Ok => { return Ext2CounterResult::Updated; }
     }
@@ -801,22 +815,22 @@ fn ext2_update_free_counts(mount: Ext2Mount, inode_counter: bool,
 
 fn ext2_free_counts(mount: Ext2Mount) -> Ext2FreeCountsResult {
     match block_read(mount.device, EXT2_SUPERBLOCK_BLOCK,
-                     ext2_metadata_block as []u8) {
+                     ext2_scratch_here().metadata as []u8) {
         BlockIoResult::Invalid => { return Ext2FreeCountsResult::Invalid; }
         BlockIoResult::Ok => { }
     }
     let free_blocks: usize =
-        ext2_u32(ext2_metadata_block as *u8, 12) as usize;
+        ext2_u32(ext2_scratch_here().metadata as *u8, 12) as usize;
     let free_inodes: usize =
-        ext2_u32(ext2_metadata_block as *u8, 16) as usize;
-    match block_read(mount.device, 2, ext2_file_block as []u8) {
+        ext2_u32(ext2_scratch_here().metadata as *u8, 16) as usize;
+    match block_read(mount.device, 2, ext2_scratch_here().file as []u8) {
         BlockIoResult::Invalid => { return Ext2FreeCountsResult::Invalid; }
         BlockIoResult::Ok => { }
     }
     let group_free_blocks: usize =
-        ext2_u16(ext2_file_block as *u8, 12) as usize;
+        ext2_u16(ext2_scratch_here().file as *u8, 12) as usize;
     let group_free_inodes: usize =
-        ext2_u16(ext2_file_block as *u8, 14) as usize;
+        ext2_u16(ext2_scratch_here().file as *u8, 14) as usize;
     if (free_blocks != group_free_blocks || free_inodes != group_free_inodes) {
         return Ext2FreeCountsResult::Invalid;
     }
@@ -833,11 +847,11 @@ fn ext2_bitmap_claim(mount: Ext2Mount, inode_bitmap: bool,
         return Ext2BitmapClaimResult::Invalid;
     }
     match block_read(mount.device, bitmap_block,
-                     ext2_metadata_block as []u8) {
+                     ext2_scratch_here().metadata as []u8) {
         BlockIoResult::Invalid => { return Ext2BitmapClaimResult::Invalid; }
         BlockIoResult::Ok => { }
     }
-    let bitmap: *u8 = ext2_metadata_block as *u8;
+    let bitmap: *u8 = ext2_scratch_here().metadata as *u8;
     let mut index: usize = first_index;
     while (index < item_count) {
         let byte_index: usize = index / 8;
@@ -847,7 +861,7 @@ fn ext2_bitmap_claim(mount: Ext2Mount, inode_bitmap: bool,
         if ((value & mask) == 0) {
             bitmap[byte_index as isize] = value | mask;
             match block_write(mount.device, bitmap_block,
-                              ext2_metadata_block as []u8) {
+                              ext2_scratch_here().metadata as []u8) {
                 BlockIoResult::Invalid => {
                     return Ext2BitmapClaimResult::Invalid;
                 }
@@ -877,11 +891,11 @@ fn ext2_bitmap_release(mount: Ext2Mount, inode_bitmap: bool,
     }
     if (index >= item_count) { return Ext2BitmapReleaseResult::Invalid; }
     match block_read(mount.device, bitmap_block,
-                     ext2_metadata_block as []u8) {
+                     ext2_scratch_here().metadata as []u8) {
         BlockIoResult::Invalid => { return Ext2BitmapReleaseResult::Invalid; }
         BlockIoResult::Ok => { }
     }
-    let bitmap: *u8 = ext2_metadata_block as *u8;
+    let bitmap: *u8 = ext2_scratch_here().metadata as *u8;
     let byte_index: usize = index / 8;
     let bit_index: usize = index % 8;
     let value: u8 = bitmap[byte_index as isize];
@@ -889,7 +903,7 @@ fn ext2_bitmap_release(mount: Ext2Mount, inode_bitmap: bool,
     if ((value & mask) == 0) { return Ext2BitmapReleaseResult::Invalid; }
     bitmap[byte_index as isize] = value & (mask ^ 0xFF);
     match block_write(mount.device, bitmap_block,
-                      ext2_metadata_block as []u8) {
+                      ext2_scratch_here().metadata as []u8) {
         BlockIoResult::Invalid => { return Ext2BitmapReleaseResult::Invalid; }
         BlockIoResult::Ok => { }
     }
@@ -1009,10 +1023,10 @@ fn ext2_allocate_block(mount: Ext2Mount) -> Ext2BlockAllocResult {
         Ext2BitmapClaimResult::Claimed(bitmap_index) => {
             let block_number: usize = bitmap_index + 1;
             for i: usize in 0..<KERNEL_BLOCK_SIZE {
-                ext2_file_block[i] = 0;
+                ext2_scratch_here().file[i] = 0;
             }
             match block_write(mount.device, block_number,
-                              ext2_file_block as []u8) {
+                              ext2_scratch_here().file as []u8) {
                 BlockIoResult::Invalid => {
                     match ext2_bitmap_release(mount, false, bitmap_index) {
                         Ext2BitmapReleaseResult::Invalid => { }
@@ -1052,7 +1066,7 @@ fn ext2_allocate_inode(mount: Ext2Mount) -> Ext2InodeAllocResult {
                 return Ext2InodeAllocResult::Failed;
             }
             match block_read(mount.device, table_block,
-                             ext2_metadata_block as []u8) {
+                             ext2_scratch_here().metadata as []u8) {
                 BlockIoResult::Invalid => {
                     match ext2_bitmap_release(mount, true, bitmap_index) {
                         Ext2BitmapReleaseResult::Invalid => { }
@@ -1063,10 +1077,10 @@ fn ext2_allocate_inode(mount: Ext2Mount) -> Ext2InodeAllocResult {
                 BlockIoResult::Ok => { }
             }
             let inode_pointer: *u8 =
-                (ext2_metadata_block as *u8) + (table_offset as isize);
+                (ext2_scratch_here().metadata as *u8) + (table_offset as isize);
             for i: isize in 0..<128 { inode_pointer[i] = 0; }
             match block_write(mount.device, table_block,
-                              ext2_metadata_block as []u8) {
+                              ext2_scratch_here().metadata as []u8) {
                 BlockIoResult::Invalid => {
                     match ext2_bitmap_release(mount, true, bitmap_index) {
                         Ext2BitmapReleaseResult::Invalid => { }
@@ -1095,9 +1109,9 @@ fn ext2_inode_number(owner: borrow Ext2InodeOwner[inode]) -> usize @ inode {
 fn ext2_release_block(mount: Ext2Mount,
                       owner: sink Ext2BlockOwner[block])
         -> Ext2OwnerReleaseResult {
-    for i: usize in 0..<KERNEL_BLOCK_SIZE { ext2_file_block[i] = 0; }
+    for i: usize in 0..<KERNEL_BLOCK_SIZE { ext2_scratch_here().file[i] = 0; }
     match block_write(mount.device, owner.block_number,
-                      ext2_file_block as []u8) {
+                      ext2_scratch_here().file as []u8) {
         BlockIoResult::Invalid => { return Ext2OwnerReleaseResult::Invalid; }
         BlockIoResult::Ok => { }
     }
@@ -1123,15 +1137,15 @@ fn ext2_release_inode(mount: Ext2Mount,
         return Ext2OwnerReleaseResult::Invalid;
     }
     match block_read(mount.device, table_block,
-                     ext2_metadata_block as []u8) {
+                     ext2_scratch_here().metadata as []u8) {
         BlockIoResult::Invalid => { return Ext2OwnerReleaseResult::Invalid; }
         BlockIoResult::Ok => { }
     }
     let inode_pointer: *u8 =
-        (ext2_metadata_block as *u8) + (table_offset as isize);
+        (ext2_scratch_here().metadata as *u8) + (table_offset as isize);
     for i: isize in 0..<128 { inode_pointer[i] = 0; }
     match block_write(mount.device, table_block,
-                      ext2_metadata_block as []u8) {
+                      ext2_scratch_here().metadata as []u8) {
         BlockIoResult::Invalid => { return Ext2OwnerReleaseResult::Invalid; }
         BlockIoResult::Ok => { }
     }
@@ -1220,14 +1234,14 @@ fn ext2_directory_add(mount: Ext2Mount, inode_number: usize,
                 return Ext2DirectoryResult::Invalid;
             }
             match block_read(mount.device, root.direct_block0,
-                             ext2_file_block as []u8) {
+                             ext2_scratch_here().file as []u8) {
                 BlockIoResult::Invalid => {
                     return Ext2DirectoryResult::Invalid;
                 }
                 BlockIoResult::Ok => { }
             }
             let needed: usize = (8 + name.len + 3) & 0xFFFFFFFFFFFFFFFC;
-            let base: *u8 = ext2_file_block as *u8;
+            let base: *u8 = ext2_scratch_here().file as *u8;
             let mut cursor: usize = 0;
             while (cursor < root.size) {
                 if (cursor > root.size - 8) {
@@ -1253,7 +1267,7 @@ fn ext2_directory_add(mount: Ext2Mount, inode_number: usize,
                     }
                     new_entry[6] = name.len as u8;
                     new_entry[7] = 0;
-                    let data = ext2_file_block as []u8;
+                    let data = ext2_scratch_here().file as []u8;
                     if (new_offset > data.len) {
                         return Ext2DirectoryResult::Invalid;
                     }
@@ -1268,7 +1282,7 @@ fn ext2_directory_add(mount: Ext2Mount, inode_number: usize,
                     }
                     slice_copy(name_target, name);
                     match block_write(mount.device, root.direct_block0,
-                                      ext2_file_block as []u8) {
+                                      ext2_scratch_here().file as []u8) {
                         BlockIoResult::Invalid => {
                             return Ext2DirectoryResult::Invalid;
                         }
@@ -1297,13 +1311,13 @@ fn ext2_directory_remove(mount: Ext2Mount, inode_number: usize,
                 return Ext2DirectoryResult::Invalid;
             }
             match block_read(mount.device, root.direct_block0,
-                             ext2_file_block as []u8) {
+                             ext2_scratch_here().file as []u8) {
                 BlockIoResult::Invalid => {
                     return Ext2DirectoryResult::Invalid;
                 }
                 BlockIoResult::Ok => { }
             }
-            let base: *u8 = ext2_file_block as *u8;
+            let base: *u8 = ext2_scratch_here().file as *u8;
             let mut cursor: usize = 0;
             let mut previous: usize = 0;
             let mut has_previous: bool = false;
@@ -1319,7 +1333,7 @@ fn ext2_directory_remove(mount: Ext2Mount, inode_number: usize,
                     name_length > record_length - 8) {
                     return Ext2DirectoryResult::Invalid;
                 }
-                let data = ext2_file_block as []u8;
+                let data = ext2_scratch_here().file as []u8;
                 let entry_start: usize = cursor;
                 if (entry_start > data.len) {
                     return Ext2DirectoryResult::Invalid;
@@ -1351,7 +1365,7 @@ fn ext2_directory_remove(mount: Ext2Mount, inode_number: usize,
                         return Ext2DirectoryResult::Invalid;
                     }
                     match block_write(mount.device, root.direct_block0,
-                                      ext2_file_block as []u8) {
+                                      ext2_scratch_here().file as []u8) {
                         BlockIoResult::Invalid => {
                             return Ext2DirectoryResult::Invalid;
                         }
@@ -1377,11 +1391,11 @@ fn ext2_initialize_regular_inode(mount: Ext2Mount,
     if (content.len == 0 || content.len > KERNEL_BLOCK_SIZE) {
         return Ext2DirectoryResult::Invalid;
     }
-    for i: usize in 0..<KERNEL_BLOCK_SIZE { ext2_file_block[i] = 0; }
-    let data = ext2_file_block as []u8;
+    for i: usize in 0..<KERNEL_BLOCK_SIZE { ext2_scratch_here().file[i] = 0; }
+    let data = ext2_scratch_here().file as []u8;
     slice_copy(data, content);
     match block_write(mount.device, block_owner.block_number,
-                      ext2_file_block as []u8) {
+                      ext2_scratch_here().file as []u8) {
         BlockIoResult::Invalid => { return Ext2DirectoryResult::Invalid; }
         BlockIoResult::Ok => { }
     }
@@ -1391,12 +1405,12 @@ fn ext2_initialize_regular_inode(mount: Ext2Mount,
                              byte_offset / KERNEL_BLOCK_SIZE;
     let table_offset: usize = byte_offset % KERNEL_BLOCK_SIZE;
     match block_read(mount.device, table_block,
-                     ext2_metadata_block as []u8) {
+                     ext2_scratch_here().metadata as []u8) {
         BlockIoResult::Invalid => { return Ext2DirectoryResult::Invalid; }
         BlockIoResult::Ok => { }
     }
     let inode_pointer: *u8 =
-        (ext2_metadata_block as *u8) + (table_offset as isize);
+        (ext2_scratch_here().metadata as *u8) + (table_offset as isize);
     for i: isize in 0..<128 { inode_pointer[i] = 0; }
     if (ext2_put_u16(inode_pointer, 0, 0x81A4) == false ||
         ext2_put_u32(inode_pointer, 4, content.len as u32) == false ||
@@ -1407,7 +1421,7 @@ fn ext2_initialize_regular_inode(mount: Ext2Mount,
         return Ext2DirectoryResult::Invalid;
     }
     match block_write(mount.device, table_block,
-                      ext2_metadata_block as []u8) {
+                      ext2_scratch_here().metadata as []u8) {
         BlockIoResult::Invalid => { return Ext2DirectoryResult::Invalid; }
         BlockIoResult::Ok => { return Ext2DirectoryResult::Updated; }
     }
@@ -1510,21 +1524,11 @@ fn ext2_unlink_root_file(mount: Ext2Mount,
     return Ext2UnlinkResult::Invalid;
 }
 
-// GitHub issue #479: two block-sized scratch buffers, shared by every
-// caller. ext2_metadata_block holds whatever inode, group descriptor or
-// bitmap the current operation is reading; ext2_file_block holds file
-// content. Two cores reading two files would each fill the same buffer and
-// each parse the other's bytes -- and the failure is not a fault, it is a
-// plausible-looking wrong answer, since one ext2 block looks much like
-// another.
-//
-// This is the same shape as kernel/net/arp.tkb's reply frame and
-// kernel/kernel/syscall.tkb's path buffer, and it wants the same decision:
-// a lock held across the read, or per-core buffers. Per-core costs one
-// block per core and holds no lock across block I/O, which is the slow
-// part; that trade is worth measuring rather than assuming, and the
-// measurement needs a second core issuing reads, which is #479 Group B.
+// The two block-sized buffers are per-core, so independent cores neither
+// serialize slow block I/O nor parse each other's results. One core still
+// relies on non-preemptible kernel execution: re-entering ext2 before the
+// current operation returns would overwrite that core's own staging blocks.
 fn ext2_execution_model_assumption() {
-    static_assert(KERNEL_ACTIVE_CORES == 1,
-                  "two block-sized scratch buffers shared by every caller: one core's read overwrites another's");
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+                  "per-core ext2 scratch cannot survive kernel preemption into another ext2 operation");
 }
