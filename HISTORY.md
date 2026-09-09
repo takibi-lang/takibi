@@ -15,6 +15,23 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-09: SIGCHLD wait is an exit-produced successor
+
+During the two-core workload investigation, QEMU GDB captured core 0 in
+the surviving EL0 busy loop and core 1 in kernel_process_exit_would_strand,
+called from the self-SIGTERM exit path. DDB had shown PID 1 blocked for a
+signal, with no Ready process. The exit admission predicate counted a
+wait4 parent, but not a parent whose blocked SIGCHLD was in its sigwait set.
+Child exit delivers that signal only after admission, so retrying admission
+could never produce the wake it required.
+
+The predicate now recognizes that exact signal-wake edge. The existing
+scheduler probe checks it with only a running child and a blocked parent,
+and rejects both an unrelated signal wait and an ignored SIGCHLD. The
+original workload restart expectation was retained. With the experimental
+secondary scheduler, this change advanced QEMU to a later clone/stack
+failure; it was not evidence that multicore lifecycle handoff was correct.
+
 ## 2026-09-05: one place to add a contention probe
 
 The two-core contention probes were driven by 57 lines that were

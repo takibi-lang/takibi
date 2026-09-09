@@ -111,43 +111,52 @@ Then, in this territory and unordered: #518, #468, #464, #516, #308, #414,
 
 #### Territory A cold-start handoff, 2026-09-09
 
-Start with #479. At `47ead30e`, the ordinary scheduler, common blocking
-handoff, clone success, and clone rollback all prepare ASIDs outside
-`ProcessRunGuard`, then revalidate under the lock before committing TTBR0.
-`make allcheck` passed all 12 lanes at that commit, including RPi5 UART wake
-in 0.3 seconds. #222, #431, and #504 are closed. #448's one-core workload is
-in the maintained lanes; its two-core criterion still depends on #479.
-#432's remaining-time writeback awaits an observable signal-handler
+The maintainer authorized Codex to cross both territories for the two-core
+blockers while Claude Code is unavailable. Continue #479; neither it nor
+#448 has met its two-core acceptance criteria.
+
+The exit ASID reserve/prepare/revalidate work and remaining activation audit
+landed in edd59f93 and 393519dd. Commit 055d09dd made ext2 scratch and crash
+capture per-core and suppressed peer ordinary printk fragments. These remove
+build assertions, not the need to verify their runtime contracts.
+
+The working tree contains experimental secondary scheduling, a two-core
+constant, peer timer scheduling, and an initial busy-pair PID admission gate.
+That gate is diagnostic staging only: subsequent scheduling can select other
+processes, so it does not enforce an I/O or syscall safety boundary. Do not
+commit it as the finished two-core design or weaken the workload's original
+restart and completion expectations to make it pass.
+
+QEMU GDB captured the first stall in kernel_process_exit_would_strand on core
+1 while core 0 computed in EL0. PID 1 was blocked waiting for SIGCHLD; exit
+admission counted wait4 but not that signal wake. The predicate now recognizes
+the exact blocked signal and wait-set combination, with positive and negative
+cases in the existing scheduler probe. With that change the workload advances
+to a later failure, not successful completion.
+
+The next investigation is clone publication and physical stack ownership.
+QEMU then stopped core 0 at the exception-entry stack guard with SP
+0x403d0000, while core 1 entered crash capture from
+kernel_syscall_clone_child_return. The peer snapshot identified PID 36.
+An uninitialized clone stack being scheduled is a hypothesis: clone publishes
+Ready before installing the saved frame, and context_install publishes the
+parent Ready before writing saved_sp. Also audit outgoing Ready/Exited
+publication before the old CPU stops using its process stack. Do not treat a
+run-lock release as proof that the physical stack switch has happened.
+
+Use the actual running ELF for GDB symbols: normal and debug kernels have
+different addresses. The historical takibi-oops helper reads core 0 only;
+peer evidence is in crash_snapshot_per_core[cpu]. Ordinary peer crash text
+can be hidden by printk suppression. Repair that diagnostic contract and the
+remaining global capture path before relying on absent UART text. Use DDB
+first when responsive; use QEMU GDB or RPi5 OpenOCD for raw per-core evidence,
+checking that all inspected CPUs really stopped. No two-core RPi5 success has
+been established by this investigation.
+
+#432's remaining-time writeback still awaits an observable signal-handler
 interruption, not the busy-pair workload.
 
-The next Territory A patch is the exit/wait activation handoff in
-`kernel_process_child_exit`. It has three successor shapes: a blocked wait4
-parent, an ordinary Ready parent, and an unrelated Ready successor. Do not
-hold `ProcessRunGuard` across `kernel_syscall_wait4_deliver`: that routine
-writes user memory and may fault back into the scheduler. Reserve the chosen
-successor as Running, drop the lock, prepare or roll over its ASID, reacquire
-the lock, revalidate, and only then publish it as current and write the saved
-wait4 frame. An exit cannot retry after returning failure, so Busy or Partial
-world stops need an explicit fail-stop or bounded retry decision rather than
-the scheduler's "try next tick" behavior.
-
-After exit, audit the remaining direct `process_image_activate_root` calls.
-The boot-root call and process-image probes are not scheduler handoffs.
-`kernel_process_reap_zombie`, `kernel_syscall_wait4_deliver`,
-`process_image_clone_vm_reap`, and `process_image_exec_resume_root` restore an
-address space around teardown or user-memory access and must be classified by
-their actual current-process invariant; do not mechanically replace them.
-Only then remove the ASID one-core assertion.
-
-A fresh `KERNEL_ACTIVE_CORES = 2` negative `kernelbuild` at `47ead30e`
-reported five blockers: secondary scheduler activation and ASID rollover in
-Territory A, plus ext2 scratch storage, printk line assembly, and exception
-evidence in Territory B. Once the activation audit removes the ASID blocker,
-the three Territory B blockers must land before Territory A can raise the
-constant and exercise the secondary scheduler. #479 and #448 remain open
-until a process actually progresses on core 1 on both QEMU and RPi5.
-
-The paragraphs below retain the completed increments and their rationale.
+The paragraphs below retain earlier increments and their rationale.
 
 The next profiling increment needs more than passing a `WorldStopped` token
 into the current start/finish functions. They run under `ProcessRunGuard`.

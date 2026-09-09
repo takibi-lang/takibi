@@ -3682,6 +3682,19 @@ fn kernel_process_exit_would_strand() -> bool {
             ProcessWaitReason::ChildExit) {
         return false;
     }
+    // BusyBox init waits for blocked SIGCHLD through rt_sigtimedwait,
+    // rather than waiting in wait4. Child exit delivers that signal before
+    // selecting its successor, so this parent is another exit-produced
+    // runnable context even when every other live process runs on a peer.
+    let sigchld_bit: usize = 1 << 16;
+    if (scheduled_process_state_of(parent) ==
+            ProcessSlotState::Blocked &&
+        scheduled_process_wait_reason_of(parent) ==
+            ProcessWaitReason::Signal &&
+        (scheduled_process_record_of(parent).signal_mask & sigchld_bit) != 0 &&
+        (scheduled_process_record_of(parent).sigwait_set & sigchld_bit) != 0) {
+        return false;
+    }
     match kernel_process_next_ready(execution_here().current_handle) {
         ProcessNextReadyResult::Missing => { return true; }
         ProcessNextReadyResult::Next(next) => { return false; }
@@ -5216,6 +5229,22 @@ private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
         kernel_process_current_exit_has_waiter() == false) {
         return false;
     }
+    // With only this child running, SIGCHLD is also an exit-produced
+    // successor. A different wait set or an ignored signal is not.
+    let sigchld_bit: usize = 1 << 16;
+    let old_mask: usize = scheduled_process_record_of(parent).signal_mask;
+    let old_wait_set: usize = scheduled_process_record_of(parent).sigwait_set;
+    scheduled_process_record_of(parent).wait_reason = ProcessWaitReason::Signal;
+    scheduled_process_record_of(parent).signal_mask = sigchld_bit;
+    scheduled_process_record_of(parent).sigwait_set = sigchld_bit;
+    let signal_successor: bool = kernel_process_exit_would_strand() == false;
+    scheduled_process_record_of(parent).sigwait_set = 1 << 14;
+    let unrelated_wait: bool = kernel_process_exit_would_strand();
+    scheduled_process_record_of(parent).sigwait_set = sigchld_bit;
+    scheduled_process_record_of(parent).signal_mask = 0;
+    let ignored_signal: bool = kernel_process_exit_would_strand();
+    scheduled_process_record_of(parent).signal_mask = old_mask;
+    scheduled_process_record_of(parent).sigwait_set = old_wait_set;
     let restore_guard = process_run_lock();
     let mut restored: bool = false;
     match scheduled_process_blocked_take(parent) {
@@ -5230,7 +5259,8 @@ private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
         }
     }
     process_run_unlock(restore_guard);
-    return restored && kernel_process_current_exit_has_waiter() == false;
+    return restored && kernel_process_current_exit_has_waiter() == false &&
+        signal_successor && unrelated_wait && ignored_signal;
 }
 
 fn kernel_process_scheduler_probe() -> bool {
