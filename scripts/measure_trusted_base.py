@@ -158,9 +158,19 @@ def main() -> None:
     outside = sorted(set(KERNEL_DIR.rglob("*.tkb")) - set(source_paths))
 
     sites: dict[str, list[tuple[Path, int]]] = defaultdict(list)
+    # How much code is inside them, not only how many there are. A block count
+    # alone cannot tell "one block wrapping forty lines" from "eight blocks
+    # wrapping one register access each", and those are opposite directions:
+    # splitting one platform routine into named single-access primitives
+    # RAISES the block count while lowering the amount of code the compiler
+    # cannot check. Measured on 2026-09-09, when exactly that change added
+    # eight blocks and no unchecked lines.
+    body_lines: dict[str, int] = defaultdict(int)
     for path in source_paths:
         for line, body in unsafe_blocks(path):
-            sites[classify_unsafe(body)].append((path, line))
+            category = classify_unsafe(body)
+            sites[category].append((path, line))
+            body_lines[category] += body.count("\n") + 1
     raw_casts = classify_raw_pointer_casts(source_paths)
     assembly = classify_assembly()
 
@@ -178,7 +188,11 @@ def main() -> None:
         "unchecked indexing/slice operation", "unclassified",
     )
     for category in categories:
-        print(f"  {category:36}: {len(sites[category])}")
+        print(f"  {category:36}: {len(sites[category]):4} blocks, "
+              f"{body_lines[category]:5} lines")
+    print(f"  {'total':36}: "
+          f"{sum(len(sites[c]) for c in categories):4} blocks, "
+          f"{sum(body_lines[c] for c in categories):5} lines")
 
     print("Other explicit source boundaries")
     print(f"  raw pointer casts                  : {raw_casts['total']}")

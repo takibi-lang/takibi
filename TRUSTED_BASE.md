@@ -151,6 +151,12 @@ raw casts, MMIO, extern declarations, and DMA/cache operations are reported as
 separate boundaries. Counts intentionally live in generated output rather than
 this document so that prose cannot silently become a stale status dashboard.
 
+Unsafe blocks are reported as both a count and the number of lines they
+enclose, because those two move independently and only the second is the size
+of what the compiler cannot check. Splitting one routine into named
+single-access primitives raises the block count while lowering the enclosed
+lines; wrapping a longer body in one block does the reverse. Read the pair.
+
 The classifier is deliberately mechanical. A block containing several kinds
 of operation receives one primary category, so the detailed list is a review
 queue rather than a semantic proof. A new explicit escape surface must either
