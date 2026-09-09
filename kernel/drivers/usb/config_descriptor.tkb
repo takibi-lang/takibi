@@ -41,6 +41,19 @@ must_use variant UsbConfigParseResult {
 // exactly at the end. A trailing fragment is malformed, and so is a bLength
 // that would run past the buffer -- the two shapes this refuses.
 fn usb_config_descriptor_parse(configuration: []u8) -> UsbConfigParseResult {
+    // And the buffer must BEGIN with the configuration descriptor itself,
+    // which is nine bytes. xhci_configure() already refuses a wTotalLength
+    // below nine before it asks the device for the bytes, but that guard
+    // belongs to the transport and this rule belongs to the input -- and the
+    // walk now has a second caller. Without it, a buffer carrying no
+    // configuration descriptor at all (an empty one included) parses
+    // SUCCESSFULLY and reports config_value 0, and 0 is the
+    // SET_CONFIGURATION request that unconfigures the device. "Parsed, and
+    // nothing found" has to keep meaning what the no-mass-storage case means.
+    if (configuration.len < 9) { return UsbConfigParseResult::Malformed; }
+    if ((configuration[1] as u32) != 2 || (configuration[0] as usize) < 9) {
+        return UsbConfigParseResult::Malformed;
+    }
     let mut found: UsbMscConfig = { 0, 0, 0, 0, 0, 0, 0, 0 };
     let mut pos: usize = 0;
     let mut in_msc_iface: bool = false;

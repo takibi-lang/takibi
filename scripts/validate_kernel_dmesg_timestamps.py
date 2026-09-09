@@ -131,7 +131,21 @@ def main() -> None:
     # on how much the kernel logs, which is not the thing under control.
     # Printed on every run for the reason the SWD and TCP figures are --
     # growth then shows in a diff between two runs rather than in a memory.
+    # Absence is a failure, not "nothing to report". This validator is the
+    # ONLY reader of that line: no view compares it, because it carries
+    # per-boot numbers. So a kernel that stops printing it, or prints it in a
+    # shape this pattern no longer matches, would silently retire issue
+    # #454's whole measurement while every lane stayed green -- the defect
+    # scripts/check_documented_counts.py exists for, one level up. Every
+    # capture that gets this far reached `foreground server: listener ready`,
+    # and the line is printed before that on both platforms.
     console = CONSOLE_SPIN.search(data)
+    if not console:
+        fail("the boot reached its last milestone without printing "
+             "`console: tx spin ticks=... bytes=... spun=... tickfreq=...`. "
+             "That is issue #454's measurement and this is its only reader, "
+             "so a missing line means the kernel's shape changed, not that "
+             "the console cost nothing")
     spin = ""
     if console:
         ticks, sent, spun, frequency = (

@@ -22,7 +22,9 @@
 use "kernel/fs/ext2/ext2.tkb";
 use "kernel/printk/log.tkb";
 
-// QEMU-only ext2 mutation helpers for the virtio-blk fixture.
+// The ext2 mutation helpers. They were reachable only from the QEMU fixture
+// until this file existed; both platforms run them now, and `ext2_mutation`
+// is a common view.
 fn ext2_resize_check(mount: Ext2Mount) -> bool {
     match ext2_lookup_root(mount, bs"mutable.txt") {
         Ext2LookupResult::Found(inode_number) => {

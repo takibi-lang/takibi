@@ -20,6 +20,15 @@
 // bulk endpoints; a trailing one-byte fragment is refused; a bLength running
 // past the end is refused; and a configuration with no mass-storage interface
 // parses while reporting nothing found.
+//
+// The last three cases are about what "parsed, and nothing found" is allowed
+// to mean. An empty buffer, a buffer too short to hold a configuration
+// descriptor, and one that begins with something else are all refused, rather
+// than parsing to config_value 0 -- which is the SET_CONFIGURATION request
+// that unconfigures the device. The kernel's caller cannot reach these
+// (it refuses a wTotalLength below nine before transferring), which is
+// exactly why they need a test: the guard that hides them lives in the other
+// file.
 
 // The lengths are named constants rather than values the builders return,
 // because a subslice bound has to be provable at compile time: this tree is
@@ -29,6 +38,9 @@ const MSC_TOTAL: usize = 44;
 const MSC_WITH_FRAGMENT: usize = 45;
 const OVERRUN_TOTAL: usize = 13;
 const PRINTER_TOTAL: usize = 18;
+const EMPTY_TOTAL: usize = 0;
+const SHORT_TOTAL: usize = 8;
+const IFACE_FIRST_TOTAL: usize = 9;
 
 let mut descriptor: [u8; 64];
 
@@ -95,6 +107,15 @@ fn build_overrun_length() {
     descriptor[11] = 0;   descriptor[12] = 0;
 }
 
+// Nine bytes that are a well-formed INTERFACE descriptor, so the buffer is
+// long enough and self-consistent and still is not a configuration.
+fn build_interface_first() {
+    descriptor[0] = 9;    descriptor[1] = 4;    // interface, not configuration
+    descriptor[2] = 0;    descriptor[3] = 0;
+    descriptor[4] = 2;    descriptor[5] = 8;    // class 8 = mass storage
+    descriptor[6] = 6;    descriptor[7] = 80;   descriptor[8] = 0;
+}
+
 fn report(label: *u8, result: UsbConfigParseResult) {
     uart_puts(label);
     match result {
@@ -141,4 +162,15 @@ fn app_main() {
     build_no_mass_storage();
     report("no-mass-storage",
            usb_config_descriptor_parse(descriptor[0..<PRINTER_TOTAL]));
+
+    report("empty",
+           usb_config_descriptor_parse(descriptor[0..<EMPTY_TOTAL]));
+
+    build_mass_storage();
+    report("short-header",
+           usb_config_descriptor_parse(descriptor[0..<SHORT_TOTAL]));
+
+    build_interface_first();
+    report("interface-first",
+           usb_config_descriptor_parse(descriptor[0..<IFACE_FIRST_TOTAL]));
 }

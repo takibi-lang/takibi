@@ -47,7 +47,17 @@ def transcript(records) -> bytes:
     return b"\r\n".join(out) + b"\r\n"
 
 
-def run(records, platform="qemu", extra=b"", profile="local"):
+# What a healthy boot prints for GitHub issue #454's console measurement. It
+# is the DEFAULT rather than an addition because the validator now refuses a
+# complete boot that lacks it: a case that says nothing about the console must
+# still carry one, or it would be testing the console rule instead of its own.
+HEALTHY_SPIN = (b"console: tx spin ticks=1000000 bytes=31919 spun=1077 "
+                b"tickfreq=54000000\r\n")
+
+
+def run(records, platform="qemu", extra=None, profile="local"):
+    if extra is None:
+        extra = HEALTHY_SPIN
     with tempfile.NamedTemporaryFile(suffix=".log") as log:
         log.write(transcript(records) + extra)
         log.flush()
@@ -172,10 +182,27 @@ def main() -> int:
         print("FAIL dmesg-timestamps control: the per-byte cost, which is what "
               f"says the FIFO buys nothing, was not derived\n{output}")
         return 1
-    status, output = run(HEALTHY, "qemu")
-    if status != 0 or "console tx spin" in output:
-        print("FAIL dmesg-timestamps control: a capture without the line "
-              f"reported a spin figure anyway\n{output}")
+    # The line gone entirely. Nothing else reads it, so "no figure reported"
+    # has to be a refusal rather than a quiet omission -- otherwise renaming a
+    # field in the kernel retires the measurement and every lane stays green.
+    status, output = run(HEALTHY, "qemu", b"")
+    if status == 0:
+        print("FAIL dmesg-timestamps control: a complete boot that never "
+              f"printed the console measurement passed\n{output}")
+        return 1
+    if "issue #454" not in output:
+        print("FAIL dmesg-timestamps control: the missing measurement was "
+              f"refused without naming what went missing\n{output}")
+        return 1
+    # A field renamed out from under the pattern is the same failure arriving
+    # by the likelier route, and must be refused the same way.
+    status, output = run(
+        HEALTHY, "qemu",
+        b"console: tx spin ticks=1000000 bytes=31919 waited=1077 "
+        b"tickfreq=54000000\r\n")
+    if status == 0:
+        print("FAIL dmesg-timestamps control: a renamed field silently "
+              f"retired the measurement\n{output}")
         return 1
     status, output = run(
         HEALTHY, "qemu",
@@ -190,7 +217,9 @@ def main() -> int:
           "a slow boot says INVESTIGATE on both platforms, a boot just inside "
           "each bound passes, and the monotonic, interval and assembled-line "
           "checks each fail when broken, and the console spin figure is "
-          "derived when present, absent when not, and refused for zero bytes")
+          "derived, refused for zero bytes, and required rather than merely "
+          "reported -- a complete boot that omits it, or renames a field out "
+          "from under the pattern, is refused")
     return 0
 
 

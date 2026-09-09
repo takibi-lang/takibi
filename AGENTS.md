@@ -135,9 +135,23 @@ It is a dated snapshot and is the file to edit when priorities move.
 
 These belong to neither territory, and each has a convention instead:
 
-- `kernel/init/contention_probes.tkb` is the single place a two-core
-  contention probe is added; the per-platform `init.tkb` files call it once
-  and must not regain an inline probe sequence.
+- `kernel/init/` holds the bodies both platforms run, and the per-platform
+  `init.tkb` files call them once rather than carrying a copy:
+  `contention_probes.tkb` (two-core contention probes), `boot_prologue.tkb`
+  (everything before the first platform-specific step), `boot_memory.tkb`,
+  `secondary_boot.tkb` and `ext2_fixture.tkb`. Add to the shared body; do not
+  let an `init.tkb` regain an inline sequence. This is enforced rather than
+  remembered: `scripts/check_platform_file_parity.py` compares identical
+  inline runs of eight significant lines between the two platform trees, not
+  only identical functions, which is what GitHub issue #517 was filed about
+  after a 57-line probe sequence sat byte-identical in both while the check
+  said PASS.
+- A body shared this way is only shared if BOTH platforms still call it, and
+  nothing in the compiler says so -- the two trees are never compiled
+  together. What says so is the view: `kernel/tests/common/views/` is compared
+  on both lanes, so a platform that stops running a shared fixture fails.
+  Put the view under `kernel/tests/common/views/` when the evidence is not
+  platform-specific.
 - `kernel/tests/*/views/*.expected` mirror that one source, so their order
   cannot diverge; append in the order the probe body runs.
 - `HISTORY.md` is `merge=union` in `.gitattributes`, so two entries added at

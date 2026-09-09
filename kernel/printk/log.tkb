@@ -171,6 +171,14 @@ fn kernel_log_tx_activate() {
 // write, and it makes the acceptance condition literal: DDB and the crash
 // console emit byte-identical output through exactly the path they used
 // before this change.
+//
+// One-way for the rest of the boot, including across DDB's `continue`.
+// Nothing re-activates the queue, and that is deliberate rather than an
+// oversight: re-arming an interrupt-driven console underneath a kernel that
+// has just been resumed from a debugger is a decision, not a tidy-up, and
+// nothing exercises that path. What it costs is visible rather than hidden --
+// every byte after a debugger visit is counted in `spun`, so the boot's own
+// `console: tx spin` line reports the cost that was actually paid.
 fn kernel_log_tx_stand_down() !{unsafe} {
     uart_tx_flush();
     kernel_log_tx_live = false;

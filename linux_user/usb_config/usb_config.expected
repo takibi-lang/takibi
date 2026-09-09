@@ -2,3 +2,6 @@ exact-end parsed cfg=1 iface=0 in=0x00000081/1024/15 out=0x00000002/1024/15
 trailing-fragment malformed
 overrun-length malformed
 no-mass-storage parsed cfg=1 iface=0 in=0x00000000/0/0 out=0x00000000/0/0
+empty malformed
+short-header malformed
+interface-first malformed
