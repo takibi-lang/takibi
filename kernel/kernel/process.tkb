@@ -5637,6 +5637,86 @@ fn kernel_process_current_child_pid() -> usize {
         scheduled_process_record_of(execution_here().current_handle).first_child);
 }
 
+// Finish an exit handoff after the successor has been reserved as Running.
+// The reservation keeps another CPU from selecting the same process while
+// ASID preparation runs without ProcessRunGuard. An exit cannot retry on a
+// later tick, so every preparation failure cancels the reservation and
+// returns 0 to the existing syscall fail-stop path.
+private fn kernel_process_exit_reserved(
+        child: ProcessHandle,
+        owner: sink ScheduledProcessOwner[process],
+        running: sink ScheduledProcessState[process, ProcessState::Running],
+        deliver_wait4: bool) -> usize {
+    match process_image_prepare_activation(owner.pool_index) {
+        AddressSpaceActivationPrepareResult::Invalid => {
+            kernel_process_schedule_cancel_reserved(owner, running);
+            return 0;
+        }
+        AddressSpaceActivationPrepareResult::RolloverNeeded => {
+            match world_stop_begin(&kernel_world_stop, KERNEL_ACTIVE_CORES,
+                                   SCHEDULER_WORLD_STOP_SPINS) {
+                WorldStopResult::Busy => {
+                    kernel_process_schedule_cancel_reserved(owner, running);
+                    return 0;
+                }
+                WorldStopResult::Partial(partial) => {
+                    world_stop_partial_release(partial, &kernel_world_stop);
+                    kernel_process_schedule_cancel_reserved(owner, running);
+                    return 0;
+                }
+                WorldStopResult::Complete(stopped) => {
+                    if (asid_rollover_stopped(stopped)) {}
+                    world_stop_release(stopped, &kernel_world_stop);
+                    return kernel_process_exit_reserved(
+                        child, owner, running, deliver_wait4);
+                }
+            }
+        }
+        AddressSpaceActivationPrepareResult::Prepared(prepared) => {
+            let guard = process_run_lock();
+            let mut successor: ProcessHandle = {
+                owner.pool_index, owner.generation
+            };
+            if (execution_here().current_live == false ||
+                scheduled_process_same_slot(
+                    execution_here().current_handle, child) == false ||
+                scheduled_process_handle_matches(child) == false ||
+                scheduled_process_state_of(child) != ProcessSlotState::Exited ||
+                scheduled_process_handle_matches(successor) == false ||
+                scheduled_process_state_of(successor) !=
+                    ProcessSlotState::Running) {
+                process_image_cancel_activation(prepared);
+                let ready = scheduled_process_yield(owner, running);
+                scheduled_process_release(owner, ready);
+                process_run_unlock(guard);
+                return 0;
+            }
+            if (process_image_commit_activation(prepared) == false) {
+                let ready = scheduled_process_yield(owner, running);
+                scheduled_process_release(owner, ready);
+                process_run_unlock(guard);
+                return 0;
+            }
+            execution_here().current_handle = successor;
+            let successor_sp: usize =
+                scheduled_process_record_of(successor).saved_sp;
+            let reaped_pid: usize =
+                scheduled_process_record_of(successor).last_child_pid;
+            scheduled_process_release(owner, running);
+            process_run_unlock(guard);
+            workload_busy_note_selected(
+                scheduled_process_pid_of_handle(successor));
+            kernel_process_trace_handle(
+                ProcessTraceResume, successor, child, 0);
+            if (deliver_wait4) {
+                kernel_syscall_wait4_deliver(
+                    successor_sp, reaped_pid, successor.pool_index);
+            }
+            return successor_sp;
+        }
+    }
+}
+
 fn kernel_process_child_exit(status: usize) -> usize {
     process_test_evidence_record_child_exit(status);
     // GitHub issue #209: a child exit used to close the scheduling gate
@@ -5723,111 +5803,74 @@ fn kernel_process_child_exit(status: usize) -> usize {
     // never finishes, which is exactly how this first went wrong.
     scheduled_process_record_of(parent).last_child_pid =
         scheduled_process_pid_of_handle(child);
-    // GitHub issue #479 Group B: three short sections in this function
-    // rather than one covering the whole exit, and that is a stated
-    // limitation rather than the finished shape. What each section does
-    // guarantee is that no two cores can take the same handle's state;
-    // what a single section would additionally give is that the exit, the
-    // parent wake and the successor choice are one decision. Widening it
-    // means holding the lock across kernel_syscall_wait4_deliver, which
-    // WRITES USER MEMORY and can therefore fault -- and a fault handler
-    // that reaches the scheduler while this lock is held is a deadlock.
-    // That is the same reason Linux does not touch user memory under a
-    // spinlock, and it needs its own answer before the section widens.
+    // GitHub issue #479 Group B: exit, parent wake, and successor reservation
+    // are one decision under ProcessRunGuard. The reserved Running owner/state
+    // then crosses the unlocked ASID preparation interval. wait4 delivery is
+    // deliberately later, after activation commits and the guard is released,
+    // because it writes user memory and may fault into the scheduler.
     let exit_guard = process_run_lock();
     match scheduled_process_running_take(exit_guard, child) {
-        ScheduledProcessRunningTakeResult::Missing => {}
+        ScheduledProcessRunningTakeResult::Missing => {
+            process_run_unlock(exit_guard);
+            return 0;
+        }
         ScheduledProcessRunningTakeResult::Running(resources) => {
             let (owner, running) = resources;
             let exited = scheduled_process_exit(owner, running);
             scheduled_process_release(owner, exited);
-        }
-    }
-    process_run_unlock(exit_guard);
-    // GitHub issue #244: the parent may be genuinely Blocked here (wait4
-    // called kernel_process_block_wait4() before this child had exited),
-    // not just Ready from an ordinary scheduler preemption. Waking alone
-    // is not enough: wait4's return value and optional status-buffer write
-    // must be delivered into the blocked frame.
-    //
-    // GitHub issue #488: keep the parent owner through Blocked -> Ready ->
-    // Running instead of publishing Ready and taking it again. The handoff
-    // makes the parent current before kernel_syscall_wait4_deliver reaps the
-    // child. Thus every child-based trace and successor decision happens
-    // while the child is live, and another core cannot run the parent and
-    // observe the same zombie between delivery and reap.
-    if (scheduled_process_state_of(parent) ==
-            ProcessSlotState::Blocked &&
-        scheduled_process_wait_reason_of(parent) ==
-            ProcessWaitReason::ChildExit) {
-        let parent_guard = process_run_lock();
-        match scheduled_process_blocked_take(parent) {
-            ScheduledProcessBlockedTakeResult::Missing => {}
-            ScheduledProcessBlockedTakeResult::Blocked(resources) => {
-                let (owner, blocked) = resources;
-                let ready = scheduled_process_wake(owner, blocked);
-                scheduled_process_record_at(owner.pool_index).wait_reason =
-                    ProcessWaitReason::None;
-                kernel_process_trace_handle(ProcessTraceWake, parent, child,
-                                            status);
-                let running = scheduled_process_start(owner, ready);
-                let parent_sp: usize =
-                    scheduled_process_record_at(owner.pool_index).saved_sp;
-                let reaped_pid: usize =
-                    scheduled_process_record_at(owner.pool_index)
-                        .last_child_pid;
-                execution_here().current_handle = parent;
-                scheduled_process_release(owner, running);
-                process_run_unlock(parent_guard);
-                workload_busy_note_selected(
-                    scheduled_process_pid_of_handle(parent));
-                process_image_activate_root(parent.pool_index);
-                kernel_process_trace_handle(
-                    ProcessTraceResume, parent, child, 0);
-                kernel_syscall_wait4_deliver(
-                    parent_sp, reaped_pid, parent.pool_index);
-                return parent_sp;
+            // GitHub issue #244: a parent blocked in wait4 needs both the
+            // wake transition and completion of its saved syscall frame.
+            if (scheduled_process_state_of(parent) ==
+                    ProcessSlotState::Blocked &&
+                scheduled_process_wait_reason_of(parent) ==
+                    ProcessWaitReason::ChildExit) {
+                match scheduled_process_blocked_take(parent) {
+                    ScheduledProcessBlockedTakeResult::Missing => {}
+                    ScheduledProcessBlockedTakeResult::Blocked(parent_resources) => {
+                        let (parent_owner, blocked) = parent_resources;
+                        let ready = scheduled_process_wake(parent_owner, blocked);
+                        scheduled_process_record_at(parent_owner.pool_index)
+                            .wait_reason = ProcessWaitReason::None;
+                        kernel_process_trace_handle(
+                            ProcessTraceWake, parent, child, status);
+                        let parent_running =
+                            scheduled_process_start(parent_owner, ready);
+                        process_run_unlock(exit_guard);
+                        return kernel_process_exit_reserved(
+                            child, parent_owner, parent_running, true);
+                    }
+                }
             }
-        }
-        process_run_unlock(parent_guard);
-    }
-    let parent_guard = process_run_lock();
-    let parent_started: bool =
-        kernel_process_start_handle(parent_guard, parent);
-    process_run_unlock(parent_guard);
-    if (parent_started) {
-        execution_here().current_handle = parent;
-        workload_busy_note_selected(
-            scheduled_process_pid_of_handle(parent));
-        process_image_activate_root(parent.pool_index);
-        kernel_process_trace_handle(ProcessTraceResume, parent, child, 0);
-        return scheduled_process_record_of(parent).saved_sp;
-    }
-    // GitHub issue #448: the parent is not always the answer.
-    //
-    // "A child exits, so its parent runs again" is true of a parent that
-    // called the child and is waiting for it, which is every child this
-    // kernel had until a shell could background one. A BACKGROUND job's
-    // parent is off doing something else -- for an interactive ash,
-    // blocked on the next keystroke -- and handing the CPU to a blocked
-    // frame is not something start_handle will do, so this returned 0 and
-    // the caller fail-stopped. Measured exactly that way: `/bin/true &`
-    // twice from the prompt, and the second one's exit killed the kernel.
-    //
-    // The scheduler already knows who should run when the current process
-    // cannot continue. Ask it, rather than insisting on a relative.
-    match kernel_process_exit_start_successor(child) {
-        ProcessNextReadyResult::Missing => {}
-        ProcessNextReadyResult::Next(successor) => {
-            {
-                execution_here().current_handle = successor;
-                workload_busy_note_selected(
-                    scheduled_process_pid_of_handle(successor));
-                process_image_activate_root(successor.pool_index);
-                kernel_process_trace_handle(
-                    ProcessTraceResume, successor, child, 0);
-                return scheduled_process_record_of(
-                    successor).saved_sp;
+            match scheduled_process_ready_take(exit_guard, parent) {
+                ScheduledProcessReadyTakeResult::Missing => {}
+                ScheduledProcessReadyTakeResult::Ready(parent_resources) => {
+                    let (parent_owner, parent_ready) = parent_resources;
+                    let parent_running =
+                        scheduled_process_start(parent_owner, parent_ready);
+                    process_run_unlock(exit_guard);
+                    return kernel_process_exit_reserved(
+                        child, parent_owner, parent_running, false);
+                }
+            }
+            // GitHub issue #448: a background child's parent may be blocked
+            // elsewhere. Reserve the scheduler's next Ready process instead.
+            match kernel_process_next_ready(child) {
+                ProcessNextReadyResult::Missing => {}
+                ProcessNextReadyResult::Next(successor) => {
+                    match scheduled_process_ready_take(exit_guard, successor) {
+                        ScheduledProcessReadyTakeResult::Missing => {}
+                        ScheduledProcessReadyTakeResult::Ready(successor_resources) => {
+                            let (successor_owner, successor_ready) =
+                                successor_resources;
+                            let successor_running = scheduled_process_start(
+                                successor_owner, successor_ready);
+                            process_run_unlock(exit_guard);
+                            return kernel_process_exit_reserved(
+                                child, successor_owner, successor_running,
+                                false);
+                        }
+                    }
+                }
             }
         }
     }
@@ -5836,39 +5879,8 @@ fn kernel_process_child_exit(status: usize) -> usize {
     // to stand on here -- unlike a blocking syscall, an exit has nothing to
     // retry -- so this is still a fail-stop, and a real idle task is what
     // would remove it.
+    process_run_unlock(exit_guard);
     return 0;
-}
-
-// Choose a successor and take it, in ONE critical section.
-//
-// GitHub issue #479 Group B: the walk and the take have to agree, so they
-// share a section -- selecting under one lock and taking under another
-// would let the chosen process be claimed in between, which reads as
-// "nothing can run" and fail-stops. Returns Missing when nothing was
-// chosen OR when the chosen one could not be started, which is what the
-// caller already did with those two cases.
-private fn kernel_process_exit_start_successor(child: ProcessHandle)
-        -> ProcessNextReadyResult {
-    let guard = process_run_lock();
-    // A bool and a handle rather than building the result inside the
-    // section and assigning over it: ProcessNextReadyResult is `must_use`,
-    // so overwriting a Missing placeholder discards an obligation and does
-    // not compile. Constructing it once, after the unlock, is what the
-    // checker is asking for and reads better anyway.
-    let mut started: bool = false;
-    let mut chosen: ProcessHandle = child;
-    match kernel_process_next_ready(child) {
-        ProcessNextReadyResult::Missing => {}
-        ProcessNextReadyResult::Next(successor) => {
-            if (kernel_process_start_handle(guard, successor)) {
-                started = true;
-                chosen = successor;
-            }
-        }
-    }
-    process_run_unlock(guard);
-    if (started) { return ProcessNextReadyResult::Next(chosen); }
-    return ProcessNextReadyResult::Missing;
 }
 
 // GitHub issue #248: per-slot now, indexed by whichever slot is CURRENTLY
