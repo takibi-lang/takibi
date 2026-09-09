@@ -1,0 +1,114 @@
+// A USB configuration descriptor, read as bytes.
+//
+// GitHub issue #338. This walk used to live inside
+// kernel/platform/rpi5/usb_xhci.tkb's xhci_configure(), between two control
+// transfers and a DMA completion, so the only way to run it was to boot the
+// board with a stick plugged in. A regression that treated input ending
+// EXACTLY at wTotalLength as malformed was found that way -- by the RPi5 USB
+// integration test -- although nothing about the bug was hardware.
+//
+// Parsing bytes is the definition of a verdict that does not change between a
+// board and native Linux/AMD64, so it belongs in the cheapest tier that can
+// give it (`linux_user/usb_config`). The transport stays where it was: the
+// caller performs the transfers, waits for DMA, and hands over the bytes.
+//
+// This is the single implementation. linux_user compiles THIS file rather
+// than a copy, because two parsers would let the test agree with itself while
+// drifting from what the board runs -- the failure kernel/boot/fdt.tkb's own
+// host test was set up to avoid.
+// What the mass-storage interface and its two bulk endpoints came out as.
+// Zero means "not seen": a configuration that describes no mass-storage
+// interface parses successfully and leaves these as they started, which is a
+// different answer from malformed input and the caller must tell them apart.
+struct UsbMscConfig {
+    config_value: u32;
+    interface_num: u32;
+    bulk_in_ep: u32;
+    bulk_in_mps: u32;
+    bulk_in_burst: u32;
+    bulk_out_ep: u32;
+    bulk_out_mps: u32;
+    bulk_out_burst: u32;
+}
+
+must_use variant UsbConfigParseResult {
+    Malformed;
+    Parsed(UsbMscConfig);
+}
+
+// A configuration descriptor is indivisible input: every child descriptor
+// must declare a length that fits in what is left, and the last one must end
+// exactly at the end. A trailing fragment is malformed, and so is a bLength
+// that would run past the buffer -- the two shapes this refuses.
+fn usb_config_descriptor_parse(configuration: []u8) -> UsbConfigParseResult {
+    let mut found: UsbMscConfig = { 0, 0, 0, 0, 0, 0, 0, 0 };
+    let mut pos: usize = 0;
+    let mut in_msc_iface: bool = false;
+    let mut last_ep_in: bool = false;
+    let mut last_ep_bulk: bool = false;
+    for step: usize in 0..<64 {
+        let descriptor_start: usize = pos;
+        // Ending exactly here is the success case, not the failure one. It is
+        // the case the regression got wrong.
+        if (descriptor_start == configuration.len) {
+            return UsbConfigParseResult::Parsed(found);
+        }
+        if (descriptor_start > configuration.len) {
+            return UsbConfigParseResult::Malformed;
+        }
+        let remaining = configuration[descriptor_start..<configuration.len];
+        if (remaining.len < 2) { return UsbConfigParseResult::Malformed; }
+        let blen: usize = remaining[0] as usize;
+        let btype: u32 = remaining[1] as u32;
+        if (blen < 2 || blen > remaining.len) {
+            return UsbConfigParseResult::Malformed;
+        }
+        let descriptor = remaining[0..<blen];
+
+        if (btype == 2 && descriptor.len >= 6) {
+            found.config_value = descriptor[5] as u32;
+        }
+
+        if (btype == 4 && descriptor.len >= 9) {
+            let icls: u32 = descriptor[5] as u32;
+            in_msc_iface = icls == 8;
+            if (in_msc_iface) {
+                found.interface_num = descriptor[2] as u32;
+            }
+        }
+
+        if (btype == 5 && descriptor.len >= 7) {
+            let epa: u32 = descriptor[2] as u32;
+            let attr: u32 = descriptor[3] as u32;
+            let mps: u32 = (descriptor[4] as u32) |
+                           ((descriptor[5] as u32) << 8);
+            last_ep_in = (epa & 0x80) != 0;
+            last_ep_bulk = (attr & 3) == 2;
+            if (in_msc_iface && last_ep_bulk) {
+                if (last_ep_in) {
+                    found.bulk_in_ep = epa;
+                    found.bulk_in_mps = mps;
+                } else {
+                    found.bulk_out_ep = epa;
+                    found.bulk_out_mps = mps;
+                }
+            }
+        }
+
+        if (btype == 0x30 && descriptor.len >= 6) {
+            let burst: u32 = descriptor[2] as u32;
+            if (in_msc_iface && last_ep_bulk) {
+                if (last_ep_in) {
+                    found.bulk_in_burst = burst;
+                } else {
+                    found.bulk_out_burst = burst;
+                }
+            }
+        }
+
+        pos = descriptor_start + blen;
+    }
+    // Sixty-four descriptors without reaching the end is not a configuration
+    // this kernel is willing to act on.
+    return UsbConfigParseResult::Malformed;
+}

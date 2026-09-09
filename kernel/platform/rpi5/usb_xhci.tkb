@@ -49,6 +49,8 @@
 // directly (DBOFF/RTSOFF are themselves Capability registers), so
 // rp1_usbhost0_doorbell/rp1_usbhost0_ir0 below are NOT offset from
 // rp1_usbhost0_op.
+use "kernel/drivers/usb/config_descriptor.tkb";
+
 const RP1_USBHOST0_BASE: usize = 0x1F00200000;
 let mut rp1_usbhost0_base: usize = RP1_USBHOST0_BASE;
 let mut rp1_usbhost0_op: usize = 0x1F00200020;
@@ -1052,65 +1054,22 @@ fn xhci_configure() -> bool {
         return false;
     }
     dma_finish_rx(xhci_ctrl_buf, 256);
-    let configuration = control_bytes[0..<total_len];
-
-    let mut pos: usize = 0;
-    let mut in_msc_iface: bool = false;
-    let mut last_ep_in: bool = false;
-    let mut last_ep_bulk: bool = false;
-    for step: usize in 0..<64 {
-        let descriptor_start: usize = pos;
-        if (descriptor_start == configuration.len) { break; }
-        if (descriptor_start > configuration.len) { return false; }
-        let remaining = configuration[descriptor_start..<configuration.len];
-        if (remaining.len < 2) { return false; }
-        let blen: usize = remaining[0] as usize;
-        let btype: u32 = remaining[1] as u32;
-        if (blen < 2 || blen > remaining.len) { return false; }
-        let descriptor = remaining[0..<blen];
-
-        if (btype == 2 && descriptor.len >= 6) {
-            xhci_msc_config_value = descriptor[5] as u32;
+    // GitHub issue #338: the walk itself is byte work and now lives in
+    // kernel/drivers/usb/config_descriptor.tkb, where linux_user can run it
+    // without a board. What stays here is the transport: two control
+    // transfers, a DMA wait, and publishing what came back.
+    match usb_config_descriptor_parse(control_bytes[0..<total_len]) {
+        UsbConfigParseResult::Malformed => { return false; }
+        UsbConfigParseResult::Parsed(found) => {
+            xhci_msc_config_value = found.config_value;
+            xhci_msc_interface_num = found.interface_num;
+            xhci_msc_bulk_in_ep = found.bulk_in_ep;
+            xhci_msc_bulk_in_mps = found.bulk_in_mps;
+            xhci_msc_bulk_in_burst = found.bulk_in_burst;
+            xhci_msc_bulk_out_ep = found.bulk_out_ep;
+            xhci_msc_bulk_out_mps = found.bulk_out_mps;
+            xhci_msc_bulk_out_burst = found.bulk_out_burst;
         }
-
-        if (btype == 4 && descriptor.len >= 9) {
-            let icls: u32 = descriptor[5] as u32;
-            in_msc_iface = icls == 8;
-            if (in_msc_iface) {
-                xhci_msc_interface_num = descriptor[2] as u32;
-            }
-        }
-
-        if (btype == 5 && descriptor.len >= 7) {
-            let epa: u32 = descriptor[2] as u32;
-            let attr: u32 = descriptor[3] as u32;
-            let mps: u32 = (descriptor[4] as u32) |
-                           ((descriptor[5] as u32) << 8);
-            last_ep_in = (epa & 0x80) != 0;
-            last_ep_bulk = (attr & 3) == 2;
-            if (in_msc_iface && last_ep_bulk) {
-                if (last_ep_in) {
-                    xhci_msc_bulk_in_ep = epa;
-                    xhci_msc_bulk_in_mps = mps;
-                } else {
-                    xhci_msc_bulk_out_ep = epa;
-                    xhci_msc_bulk_out_mps = mps;
-                }
-            }
-        }
-
-        if (btype == 0x30 && descriptor.len >= 6) {
-            let burst: u32 = descriptor[2] as u32;
-            if (in_msc_iface && last_ep_bulk) {
-                if (last_ep_in) {
-                    xhci_msc_bulk_in_burst = burst;
-                } else {
-                    xhci_msc_bulk_out_burst = burst;
-                }
-            }
-        }
-
-        pos = descriptor_start + blen;
     }
 
     let in_num: usize = (xhci_msc_bulk_in_ep & 0x0F) as usize;

@@ -319,7 +319,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              affine_escape_via_index align_ptr_proof linear_obligation tuple_pair \
                              field_lease match_int_lit \
                              callstack ringbuf crc8 djb2 slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
-                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number
+                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config
 LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e).exe)
 LINUX_USER_OBJS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e)_exe.o)
 
@@ -391,6 +391,13 @@ $(LINUX_USER_BUILD_DIR)/fdt_psci_smc_fixture.dtb: scripts/make_fdt_fixture.py | 
 
 $(LINUX_USER_DIR)/fdt/fdt_exe.o: kernel/boot/fdt.tkb $(LINUX_USER_BUILD_DIR)/fdt_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_memory_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_reservation_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_tree_reservation_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_device_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_interrupt_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_missing_interrupt_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_gic_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_pcie_ranges_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_pcie_dma_ranges_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_invalid_virtio_fixture.dtb $(LINUX_USER_BUILD_DIR)/fdt_psci_smc_fixture.dtb
 $(LINUX_USER_DIR)/fdt/fdt_exe.o: LINUX_USER_EXTRA_SRCS := kernel/boot/fdt.tkb
+
+# GitHub issue #338: the kernel's own USB configuration-descriptor parser,
+# compiled and run natively. The same source kernel/platform/rpi5/usb_xhci.tkb
+# links, not a copy -- a second parser here would agree with this test while
+# drifting from what the board runs.
+$(LINUX_USER_DIR)/usb_config/usb_config_exe.o: kernel/drivers/usb/config_descriptor.tkb
+$(LINUX_USER_DIR)/usb_config/usb_config_exe.o: LINUX_USER_EXTRA_SRCS := kernel/drivers/usb/config_descriptor.tkb
 
 # GitHub issue #445: the kernel's own spinlock, compiled and run natively.
 # The same source the kernel links, not a copy -- see the freelist/slotmap

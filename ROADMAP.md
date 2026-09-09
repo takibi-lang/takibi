@@ -463,7 +463,7 @@ whoever causes it rather than by whoever remembers.
 
 Waiting on Territory A: #456 and #486 on #504, #505 on #479, #465 on #222.
 
-Then, in this territory and unordered: #339, #338, #275, #281, #208,
+Then, in this territory and unordered: #339, #275, #281, #208,
 #182, #268, #283, #389, #430, plus two the CI work left behind: **#522**,
 counts written into prose that nothing derives -- **closed 2026-09-09**; the
 one current count is derived from the tree the way its runner derives it, and

@@ -1,0 +1,144 @@
+// The kernel's USB configuration-descriptor parser, run where a test costs
+// milliseconds instead of a reset, an SWD load and a USB stick.
+//
+// GitHub issue #338. A regression made this walk treat input ending EXACTLY
+// at wTotalLength as malformed. Nothing about that bug was hardware -- it is
+// arithmetic over bytes -- but the only thing that could see it was the RPi5
+// USB integration test, so it was found on a board.
+//
+// This compiles kernel/drivers/usb/config_descriptor.tkb itself, not a copy.
+// A second parser here would let this file agree with itself while drifting
+// from what the board runs, which is the whole reason the fdt test next door
+// links the kernel's own reader.
+//
+// The descriptors are written byte by byte because Takibi has no array
+// literal and byte strings carry no hex escapes -- and for a wire format that
+// is the better shape anyway: every field is named where it is set.
+//
+// Expected output (linux_user/usb_config/usb_config.expected), one line per
+// case: the exact-end configuration parses and reports its interface and both
+// bulk endpoints; a trailing one-byte fragment is refused; a bLength running
+// past the end is refused; and a configuration with no mass-storage interface
+// parses while reporting nothing found.
+
+// The lengths are named constants rather than values the builders return,
+// because a subslice bound has to be provable at compile time: this tree is
+// built with --forbid-trap, so a runtime-checked slice would be a trap the
+// parser is not allowed to carry.
+const MSC_TOTAL: usize = 44;
+const MSC_WITH_FRAGMENT: usize = 45;
+const OVERRUN_TOTAL: usize = 13;
+const PRINTER_TOTAL: usize = 18;
+
+let mut descriptor: [u8; 64];
+
+// A real mass-storage configuration: configuration (9), interface (9)
+// declaring class 8, bulk IN endpoint (7) with its SuperSpeed companion (6),
+// bulk OUT endpoint (7) with its companion (6). 9+9+7+6+7+6 = 44, and
+// wTotalLength says 44, so the last companion ends exactly at the end.
+fn build_mass_storage() {
+    descriptor[0] = 9;    descriptor[1] = 2;    // configuration, bLength 9
+    descriptor[2] = 44;   descriptor[3] = 0;    // wTotalLength = 44
+    descriptor[4] = 1;    descriptor[5] = 1;    // 1 interface, bConfigurationValue 1
+    descriptor[6] = 0;    descriptor[7] = 0x80; descriptor[8] = 50;
+
+    descriptor[9] = 9;    descriptor[10] = 4;   // interface, bLength 9
+    descriptor[11] = 0;   descriptor[12] = 0;   // bInterfaceNumber 0
+    descriptor[13] = 2;   descriptor[14] = 8;   // 2 endpoints, class 8 = mass storage
+    descriptor[15] = 6;   descriptor[16] = 80;  descriptor[17] = 0;
+
+    descriptor[18] = 7;   descriptor[19] = 5;   // endpoint, bLength 7
+    descriptor[20] = 0x81;                      // IN, endpoint 1
+    descriptor[21] = 2;                         // bulk
+    descriptor[22] = 0;   descriptor[23] = 4;   // wMaxPacketSize 1024
+    descriptor[24] = 0;
+
+    descriptor[25] = 6;   descriptor[26] = 0x30; // SuperSpeed companion
+    descriptor[27] = 15;                         // bMaxBurst
+    descriptor[28] = 0;   descriptor[29] = 0;    descriptor[30] = 0;
+
+    descriptor[31] = 7;   descriptor[32] = 5;   // endpoint, bLength 7
+    descriptor[33] = 0x02;                      // OUT, endpoint 2
+    descriptor[34] = 2;                         // bulk
+    descriptor[35] = 0;   descriptor[36] = 4;   // wMaxPacketSize 1024
+    descriptor[37] = 0;
+
+    descriptor[38] = 6;   descriptor[39] = 0x30; // SuperSpeed companion
+    descriptor[40] = 15;                         // bMaxBurst
+    descriptor[41] = 0;   descriptor[42] = 0;    descriptor[43] = 0;
+}
+
+// A configuration that describes a printer, not a disk. It parses, and the
+// answer is that nothing was found -- which the caller must be able to tell
+// apart from malformed input.
+fn build_no_mass_storage() {
+    descriptor[0] = 9;    descriptor[1] = 2;
+    descriptor[2] = 18;   descriptor[3] = 0;    // wTotalLength = 18
+    descriptor[4] = 1;    descriptor[5] = 1;
+    descriptor[6] = 0;    descriptor[7] = 0x80; descriptor[8] = 50;
+
+    descriptor[9] = 9;    descriptor[10] = 4;
+    descriptor[11] = 0;   descriptor[12] = 0;
+    descriptor[13] = 0;   descriptor[14] = 7;   // class 7 = printer
+    descriptor[15] = 1;   descriptor[16] = 0;   descriptor[17] = 0;
+}
+
+// A bLength that claims more than is left: the interface descriptor says nine
+// bytes with only four remaining.
+fn build_overrun_length() {
+    descriptor[0] = 9;    descriptor[1] = 2;
+    descriptor[2] = 13;   descriptor[3] = 0;
+    descriptor[4] = 1;    descriptor[5] = 1;
+    descriptor[6] = 0;    descriptor[7] = 0x80; descriptor[8] = 50;
+
+    descriptor[9] = 9;    descriptor[10] = 4;   // claims 9, only 4 left
+    descriptor[11] = 0;   descriptor[12] = 0;
+}
+
+fn report(label: *u8, result: UsbConfigParseResult) {
+    uart_puts(label);
+    match result {
+        UsbConfigParseResult::Malformed => {
+            uart_puts(" malformed\n");
+        }
+        UsbConfigParseResult::Parsed(found) => {
+            uart_puts(" parsed cfg=");
+            uart_print(found.config_value);
+            uart_puts(" iface=");
+            uart_print(found.interface_num);
+            uart_puts(" in=");
+            uart_print_hex(found.bulk_in_ep as i32);
+            uart_puts("/");
+            uart_print(found.bulk_in_mps);
+            uart_puts("/");
+            uart_print(found.bulk_in_burst);
+            uart_puts(" out=");
+            uart_print_hex(found.bulk_out_ep as i32);
+            uart_puts("/");
+            uart_print(found.bulk_out_mps);
+            uart_puts("/");
+            uart_print(found.bulk_out_burst);
+            uart_puts("\n");
+        }
+    }
+}
+
+fn app_main() {
+    build_mass_storage();
+    report("exact-end",
+           usb_config_descriptor_parse(descriptor[0..<MSC_TOTAL]));
+
+    // One byte past what the descriptors account for: too short to carry even
+    // a bLength/bType pair, and the shape the regression accepted.
+    descriptor[44] = 0;
+    report("trailing-fragment",
+           usb_config_descriptor_parse(descriptor[0..<MSC_WITH_FRAGMENT]));
+
+    build_overrun_length();
+    report("overrun-length",
+           usb_config_descriptor_parse(descriptor[0..<OVERRUN_TOTAL]));
+
+    build_no_mass_storage();
+    report("no-mass-storage",
+           usb_config_descriptor_parse(descriptor[0..<PRINTER_TOTAL]));
+}
