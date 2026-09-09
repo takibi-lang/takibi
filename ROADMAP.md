@@ -87,17 +87,18 @@ highest-priority items (#452, #450) are compiler work.
 The order is forced by M0's phase dependencies below, not chosen. Skipping an
 entry leaves the next one unable to be verified.
 
-1. **#448** a workload occupying two cores -- in progress. Must pass on ONE
-   core first, so that a later failure is provably a concurrency defect.
-2. **#431** SIGCHLD/kill and **#432** nanosleep -- what #448's `respawn`
-   needs. The 2026-08-27 decision stands: dependencies get implemented.
-3. **#222** per-core scheduler state, while the cores are still parked.
+1. **#448** a workload occupying two cores -- one-core coverage is done; its
+   two-core measurement remains. Must pass on one core first, so that a later
+   failure is provably a concurrency defect.
+2. **#431** SIGCHLD/kill is closed. **#432** nanosleep is partly complete;
+   remaining-time writeback still needs an observable early wake.
+3. **#222** per-core scheduler state -- closed.
 4. **#479** raise `KERNEL_ACTIVE_CORES` and clear its compiler-derived
-   worklist. The widest change in the milestone.
+   worklist -- in progress and the current Territory A starting point.
 5. **#483** the network stack's unsynchronized non-pool state -- the same
    files as #479, so the same hands.
 6. **#478** the spinlock excludes but does not arbitrate.
-7. **#504** one world-stopped token. Territory B's #456 and #486 wait on it.
+7. **#504** one world-stopped token -- closed.
 8. **#452** make a lock say what it protects to the compiler, then **#466**
    lock order and **#450** compare-and-swap.
 9. **#261** PTE mutation against the hardware page-table walker.
@@ -108,13 +109,45 @@ Then, in this territory and unordered: #518, #468, #464, #516, #308, #414,
 #342, #370, #374, #203, #200, #201, #212, #282, #417, #400, #109, #129, #155,
 #267, #28, #58, #13, #95, #8.
 
-#### Territory A resumption, 2026-09-08
+#### Territory A cold-start handoff, 2026-09-09
 
-CI is green at `db9ecb89`; resume #479's remaining two-core worklist.
-#222 and #504 are closed. #448's one-core workload is in the maintained
-lanes; its two-core criterion still depends on #479. #432's remaining-time
-writeback awaits an observable signal-handler interruption, not the busy-pair
-workload.
+Start with #479. At `47ead30e`, the ordinary scheduler, common blocking
+handoff, clone success, and clone rollback all prepare ASIDs outside
+`ProcessRunGuard`, then revalidate under the lock before committing TTBR0.
+`make allcheck` passed all 12 lanes at that commit, including RPi5 UART wake
+in 0.3 seconds. #222, #431, and #504 are closed. #448's one-core workload is
+in the maintained lanes; its two-core criterion still depends on #479.
+#432's remaining-time writeback awaits an observable signal-handler
+interruption, not the busy-pair workload.
+
+The next Territory A patch is the exit/wait activation handoff in
+`kernel_process_child_exit`. It has three successor shapes: a blocked wait4
+parent, an ordinary Ready parent, and an unrelated Ready successor. Do not
+hold `ProcessRunGuard` across `kernel_syscall_wait4_deliver`: that routine
+writes user memory and may fault back into the scheduler. Reserve the chosen
+successor as Running, drop the lock, prepare or roll over its ASID, reacquire
+the lock, revalidate, and only then publish it as current and write the saved
+wait4 frame. An exit cannot retry after returning failure, so Busy or Partial
+world stops need an explicit fail-stop or bounded retry decision rather than
+the scheduler's "try next tick" behavior.
+
+After exit, audit the remaining direct `process_image_activate_root` calls.
+The boot-root call and process-image probes are not scheduler handoffs.
+`kernel_process_reap_zombie`, `kernel_syscall_wait4_deliver`,
+`process_image_clone_vm_reap`, and `process_image_exec_resume_root` restore an
+address space around teardown or user-memory access and must be classified by
+their actual current-process invariant; do not mechanically replace them.
+Only then remove the ASID one-core assertion.
+
+A fresh `KERNEL_ACTIVE_CORES = 2` negative `kernelbuild` at `47ead30e`
+reported five blockers: secondary scheduler activation and ASID rollover in
+Territory A, plus ext2 scratch storage, printk line assembly, and exception
+evidence in Territory B. Once the activation audit removes the ASID blocker,
+the three Territory B blockers must land before Territory A can raise the
+constant and exercise the secondary scheduler. #479 and #448 remain open
+until a process actually progresses on core 1 on both QEMU and RPi5.
+
+The paragraphs below retain the completed increments and their rationale.
 
 The next profiling increment needs more than passing a `WorldStopped` token
 into the current start/finish functions. They run under `ProcessRunGuard`.
@@ -161,9 +194,10 @@ ASID assignment now has a nonblocking attempt that returns either a complete
 assignment or `RolloverNeeded`, plus a rollover entry requiring a
 `WorldStopped` token. The maintained address-space probe crosses the 16-bit
 edge only through that entry after stopping both cores; QEMU and RPi5 exercise
-the real SGI and acknowledgement. Production scheduler activation still uses
-the one-core entry under `ProcessRunGuard`, so the blocker and its assertion
-remain until the reserve-stop-revalidate switch described on #479 is in place.
+the real SGI and acknowledgement. At that increment, production scheduler
+activation still used the one-core entry under `ProcessRunGuard`, so the
+blocker remained until the reserve-stop-revalidate switch described on #479
+was added.
 Address-space activation is also split into a fallible preparation and a
 linear prepared value whose only consumer commits TTBR0. Preparation changes
 neither TTBR0 nor the per-CPU target-root record; the probe now reactivates its
@@ -175,8 +209,8 @@ target's existing linear owner and changes its state from Ready to Running as
 the reservation, drops `ProcessRunGuard`, prepares the ASID, then reacquires
 the guard and revalidates both handles and states before committing TTBR0 and
 the logical current process. A failed preparation, world stop, or revalidation
-returns the reserved target to Ready through the same linear state token. The
-At this point the block, clone, and exit handoffs still used direct activation;
+returns the reserved target to Ready through the same linear state token. At
+this point the block, clone, and exit handoffs still used direct activation;
 the next increment moved the common blocking path as described below.
 
 The common blocking handoff used by UART, network, wait4, deadlines, and
