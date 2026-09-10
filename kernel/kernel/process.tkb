@@ -4242,7 +4242,7 @@ private fn kernel_stack_owner_name(sp: usize) -> *u8 {
             if (sp >= spare && sp < spare + KERNEL_STACK_RUN_BYTES) {
                 return "below a reaped process kernel stack" as *u8;
             }
-            return page_owner_description(sp);
+            return page_owner_description_reporter(sp);
         }
     }
     scheduled_process_spare_unlock(
@@ -4251,7 +4251,7 @@ private fn kernel_stack_owner_name(sp: usize) -> *u8 {
     // know what it is, and on this path that answer is worth more than
     // "unknown" -- an SP that landed in a page table or a pool chunk is a
     // different bug from one that landed nowhere (issue #384).
-    return page_owner_description(sp);
+    return page_owner_description_reporter(sp);
 }
 
 // Slack left unpoisoned below the reported SP: kernel_boot_stack_arm's

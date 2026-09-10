@@ -102,8 +102,9 @@ entry leaves the next one unable to be verified.
    measured unfairness retained as an explicit limitation; FIFO replacement
    waits for a real bounded-wait requirement and #450's compare-and-swap.
 7. **#504** one world-stopped token -- closed.
-8. **#452** make a lock say what it protects to the compiler, then **#466**
-   lock order and **#450** compare-and-swap.
+8. **#452** make a lock say what it protects to the compiler -- complete,
+   including the page allocator. Next: **#466** lock order and **#450**
+   compare-and-swap.
 9. **#261** PTE mutation against the hardware page-table walker.
 10. **#9** processor affinity, with four cores.
 

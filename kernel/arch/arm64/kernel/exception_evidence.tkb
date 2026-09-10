@@ -2355,9 +2355,9 @@ private fn crash_snapshot_put_page_owner(what: *u8, address: usize,
     kernel_boot_log("oops: ");
     kernel_boot_log(what);
     kernel_boot_log(" page ");
-    if (page_owner_tag_at(address) != PageOwnerTag::Unowned) {
+    if (page_owner_tag_at_reporter(address) != PageOwnerTag::Unowned) {
         kernel_boot_log("(physical) is ");
-        kernel_boot_log(page_owner_description(address));
+        kernel_boot_log(page_owner_description_reporter(address));
         kernel_boot_log("\n");
         return;
     }
@@ -2365,7 +2365,7 @@ private fn crash_snapshot_put_page_owner(what: *u8, address: usize,
         address_space_user_physical(root_slot, address);
     if (physical == 0) {
         kernel_boot_log("is ");
-        kernel_boot_log(page_owner_description(address));
+        kernel_boot_log(page_owner_description_reporter(address));
         kernel_boot_log(", not mapped in root ");
         uart_put_udec(root_slot);
         kernel_boot_log("\n");
@@ -2376,7 +2376,7 @@ private fn crash_snapshot_put_page_owner(what: *u8, address: usize,
     kernel_boot_log(" -> ");
     uart_put_hex(physical);
     kernel_boot_log(") is ");
-    kernel_boot_log(page_owner_description(physical));
+    kernel_boot_log(page_owner_description_reporter(physical));
     kernel_boot_log("\n");
 }
 

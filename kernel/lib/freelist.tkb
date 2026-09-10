@@ -352,9 +352,9 @@ fn freelist_ref(T: type, target: &mut Freelist(T, N),
 // kernel/kernel/freelist_contention_evidence.tkb produces it on demand.
 //
 // But the fix was not a lock HERE. The one live kernel instance is
-// kernel/mm/page.tkb's boot_page_pool.core, and page_alloc pops from it and
-// then writes three fields of meta[index] -- a sequence a lock inside the
-// pop could not cover. page.tkb holds a Mutex across the whole of it.
+// kernel/mm/page.tkb's guarded boot page pool core. page_alloc pops from it
+// and then writes three fields of meta[index] -- a sequence a lock inside
+// the pop could not cover. page.tkb holds a Mutex across the whole of it.
 //
 // So this primitive is unlocked BY DESIGN, at any core count, and its
 // requirement is on the CALLER. A static_assert on the core count would

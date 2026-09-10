@@ -80,6 +80,11 @@
 //   and does not need to be, since that code runs before PSCI has been
 //   asked for a second core. Nothing checks that a caller is really in
 //   that window.
+// - locked_cell_value_reporter IS A DEBUG/TERMINAL-REPORT ESCAPE HATCH. It
+//   may observe fields from different moments unless its caller holds a
+//   complete world-stop proof, and must never decide a kernel mutation or
+//   continuation. Its callers cannot wait for a lock the inspected core may
+//   hold.
 // - THE GUARD IS 8 STACK BYTES while held, carrying the interrupt state
 //   the release must restore -- issue #451's `flags`, which is where
 //   Linux's `unsigned long flags` lives too.
@@ -194,6 +199,14 @@ fn guarded_usize_value(g: borrow GuardedFieldGuard[lock],
 // is an ordinary pointer with an ordinary lifetime, which is exactly the
 // weaker thing an escape hatch should hand back.
 fn locked_cell_value_boot(T: type, cell: &mut LockedCell(T) @ id)
+        -> *T !{unsafe} {
+    return &(*cell).value;
+}
+
+// Debug and terminal reporting cannot acquire: the failed or stopped CPU may
+// be the holder. The unsafe effect keeps every use in the trusted-base audit;
+// this accessor alone proves no stable snapshot.
+fn locked_cell_value_reporter(T: type, cell: &mut LockedCell(T) @ id)
         -> *T !{unsafe} {
     return &(*cell).value;
 }
