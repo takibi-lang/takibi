@@ -28,6 +28,7 @@ use "kernel/kernel/tag_contention_evidence.tkb";
 use "kernel/kernel/schedule_contention_evidence.tkb";
 use "kernel/kernel/occupancy_drain_evidence.tkb";
 use "kernel/kernel/pool_walk_contention_evidence.tkb";
+use "kernel/kernel/init_once_contention_evidence.tkb";
 
 fn contention_probes() !{unsafe} {
     // GitHub issue #445: the first evidence that this kernel's
@@ -97,6 +98,11 @@ fn contention_probes() !{unsafe} {
         kernel_boot_log("world stop: full token stopped and resumed the online peer, partial token refused a non-acknowledging peer ok\n");
     } else {
         kernel_boot_log("world stop: failed\n");
+    }
+    if (init_once_contention_probe()) {
+        kernel_boot_log("network init contention: unlocked check-set minted twice, typed one-shot gate admitted one initializer ok\n");
+    } else {
+        kernel_boot_log("network init contention: failed\n");
     }
     // GitHub issues #479 and #482: first hold an ordinary Live view while
     // core 0 observes its read-side lock, then use the explicit unproven

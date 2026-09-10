@@ -1,0 +1,145 @@
+// Two-core evidence for the one-shot gate used by network-driver init.
+// The first phase deterministically reproduces the old check-then-set race;
+// the second starts from the same rendezvous and uses production InitOnce.
+//
+// Current limitations (2026-09-10): one primary and one secondary participate,
+// matching the maintained KERNEL_ACTIVE_CORES=2 configuration.
+use "kernel/lib/execution_model.tkb";
+use "kernel/lib/init_once.tkb";
+
+private let mut init_once_probe_gate: InitOnce;
+private let mut init_once_probe_armed: usize;
+private let mut init_once_probe_phase: usize;
+private let mut init_once_probe_arrived: usize;
+private let mut init_once_probe_release: usize;
+private let mut init_once_probe_primary_won: usize;
+private let mut init_once_probe_secondary_won: usize;
+private let mut init_once_probe_secondary_active: usize;
+private let mut init_once_probe_naive_complete: usize;
+
+private fn init_once_probe_address(value: *usize) -> usize {
+    return value as usize;
+}
+
+fn init_once_contention_is_armed() -> bool !{unsafe} {
+    return unsafe { atomic_load_acquire(init_once_probe_address(
+        &init_once_probe_armed)) } == 1;
+}
+
+private fn init_once_probe_wait_release() !{unsafe} {
+    unsafe { atomic_fetch_add_relaxed(init_once_probe_address(
+        &init_once_probe_arrived), 1); }
+    while (unsafe { atomic_load_acquire(init_once_probe_address(
+               &init_once_probe_release)) } == 0 &&
+           unsafe { atomic_load_acquire(init_once_probe_address(
+               &init_once_probe_armed)) } == 1) { }
+}
+
+private fn init_once_probe_locked_attempt() -> usize {
+    match init_once_begin(&init_once_probe_gate) {
+        InitOnceBegin::AlreadyComplete => { return 0; }
+        InitOnceBegin::Start(guard) => {
+            init_once_commit(&init_once_probe_gate, guard);
+            return 1;
+        }
+    }
+}
+
+fn init_once_contention_secondary_run() !{unsafe} {
+    unsafe { atomic_store_release(init_once_probe_address(
+        &init_once_probe_secondary_active), 1); }
+    let phase: usize = unsafe { atomic_load_acquire(init_once_probe_address(
+        &init_once_probe_phase)) };
+    if (phase == 1) {
+        let saw_free: bool = init_once_probe_naive_complete == 0;
+        init_once_probe_wait_release();
+        if (saw_free) {
+            init_once_probe_naive_complete = 1;
+            unsafe { atomic_store_release(init_once_probe_address(
+                &init_once_probe_secondary_won), 1); }
+        }
+    } else if (phase == 2) {
+        init_once_probe_wait_release();
+        let won: usize = init_once_probe_locked_attempt();
+        unsafe { atomic_store_release(init_once_probe_address(
+            &init_once_probe_secondary_won), won); }
+    }
+    unsafe {
+        atomic_store_release(init_once_probe_address(
+            &init_once_probe_secondary_active), 0);
+        atomic_store_release(init_once_probe_address(&init_once_probe_armed), 0);
+    }
+}
+
+private fn init_once_probe_wait_arrived() -> bool !{unsafe} {
+    let start: i64 = read_cntpct();
+    let window: i64 = read_cntfrq() >> 1;
+    while (read_cntpct() - start < window) {
+        if (unsafe { atomic_load_acquire(init_once_probe_address(
+                &init_once_probe_arrived)) } == 2) { return true; }
+    }
+    return false;
+}
+
+private fn init_once_probe_wait_left() -> bool !{unsafe} {
+    let start: i64 = read_cntpct();
+    let window: i64 = read_cntfrq() >> 1;
+    while (read_cntpct() - start < window) {
+        if (unsafe { atomic_load_acquire(init_once_probe_address(
+                &init_once_probe_secondary_active)) } == 0) { return true; }
+    }
+    return false;
+}
+
+private fn init_once_probe_prepare(phase: usize) !{unsafe} {
+    unsafe {
+        atomic_store_release(init_once_probe_address(&init_once_probe_phase), phase);
+        atomic_store_release(init_once_probe_address(&init_once_probe_arrived), 0);
+        atomic_store_release(init_once_probe_address(&init_once_probe_release), 0);
+        atomic_store_release(init_once_probe_address(&init_once_probe_primary_won), 0);
+        atomic_store_release(init_once_probe_address(&init_once_probe_secondary_won), 0);
+        atomic_store_release(init_once_probe_address(&init_once_probe_secondary_active), 0);
+        atomic_store_release(init_once_probe_address(&init_once_probe_armed), 1);
+        atomic_fetch_add_relaxed(init_once_probe_address(&init_once_probe_arrived), 1);
+    }
+}
+
+fn init_once_contention_probe() -> bool !{unsafe} {
+    static_assert(KERNEL_ACTIVE_CORES == 2,
+                  "init-once contention evidence currently has one peer");
+    init_once_probe_naive_complete = 0;
+    init_once_probe_prepare(1);
+    let primary_saw_free: bool = init_once_probe_naive_complete == 0;
+    if (init_once_probe_wait_arrived() == false) { return false; }
+    unsafe { atomic_store_release(init_once_probe_address(
+        &init_once_probe_release), 1); }
+    if (primary_saw_free) {
+        init_once_probe_naive_complete = 1;
+        unsafe { atomic_store_release(init_once_probe_address(
+            &init_once_probe_primary_won), 1); }
+    }
+    if (init_once_probe_wait_left() == false) { return false; }
+    let unlocked_winners: usize = unsafe {
+        atomic_load_acquire(init_once_probe_address(&init_once_probe_primary_won)) +
+        atomic_load_acquire(init_once_probe_address(&init_once_probe_secondary_won))
+    };
+
+    init_once_probe_prepare(2);
+    if (init_once_probe_wait_arrived() == false) { return false; }
+    unsafe { atomic_store_release(init_once_probe_address(
+        &init_once_probe_release), 1); }
+    let primary_won: usize = init_once_probe_locked_attempt();
+    unsafe { atomic_store_release(init_once_probe_address(
+        &init_once_probe_primary_won), primary_won); }
+    if (init_once_probe_wait_left() == false) { return false; }
+    let locked_winners: usize = unsafe {
+        atomic_load_acquire(init_once_probe_address(&init_once_probe_primary_won)) +
+        atomic_load_acquire(init_once_probe_address(&init_once_probe_secondary_won))
+    };
+    kernel_boot_log("network init contention counts: unlocked=");
+    uart_put_udec(unlocked_winners);
+    kernel_boot_log(" locked=");
+    uart_put_udec(locked_winners);
+    kernel_boot_log("\n");
+    return unlocked_winners == 2 && locked_winners == 1;
+}

@@ -21,5 +21,7 @@ occupancy drain stage: complete
 occupancy drain: the second core held the region and the bounded drain gave up, then left and the same drain handed over a proof ok
 world stop counts: full=1 partial=1 resumed=1 inspections=1 repeated=16 busy=16 stale-refused=1
 world stop: full token stopped and resumed the online peer, partial token refused a non-acknowledging peer ok
+network init contention counts: unlocked=2 locked=1
+network init contention: unlocked check-set minted twice, typed one-shot gate admitted one initializer ok
 pool walk stage: complete
 pool walk: a Live view holds the read lock through payload use, and a stale released-chunk cursor is refused ok

@@ -18,5 +18,7 @@
 ^occupancy drain: 
 ^world stop counts:
 ^world stop:
+^network init contention counts:
+^network init contention:
 ^pool walk stage: 
 ^pool walk: 

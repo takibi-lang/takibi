@@ -35,6 +35,7 @@
 // has discovered the device's slot.
 
 use "kernel/net/netconfig.tkb";
+use "kernel/lib/init_once.tkb";
 
 const VIRTIO_GUEST_FEATURES:   i32 = 0x20;
 const VIRTIO_GUEST_PAGE_SIZE:  i32 = 0x28;
@@ -121,7 +122,7 @@ let mut virtio_base: i32 = 0;
 // base conversion. -1 means that no active virtio-net transport was found;
 // interrupt dispatch guards that sentinel before comparing it with GICC_IAR.
 let mut virtio_net_gic_intid: i32 = -1;
-private let mut net_rx_initialized: i32 = 0;
+private let mut net_init_once: InitOnce;
 let mut virtio_rx_irq_flag: io u32;
 let mut virtio_tx_irq_flag: io u32;
 
@@ -266,13 +267,14 @@ fn used_ring_get_len(queue_mem: *u8, slot: isize) -> i32 !{unsafe} {
 // -- Shared driver API (matches kernel/drivers/net/rp1_gem.tkb) -------------
 
 fn net_init() -> NetInitResult {
-    if (net_rx_initialized != 0) {
-        return NetInitResult::Failed;
-    }
+    let init_guard = match init_once_begin(&net_init_once) {
+        InitOnceBegin::AlreadyComplete => { return NetInitResult::Failed; }
+        InitOnceBegin::Start(guard) => { guard }
+    };
     if (virtio_net_find() == false) {
+        init_once_cancel(&net_init_once, init_guard);
         return NetInitResult::Failed;
     }
-    net_rx_initialized = 1;
 
     virtio_rx_irq_flag = 0;
     virtio_tx_irq_flag = 0;
@@ -293,6 +295,7 @@ fn net_init() -> NetInitResult {
     avail_publish(rx_queue_mem as *u8, rx_avail_idx);
     virtio_notify(0);
 
+    init_once_commit(&net_init_once, init_guard);
     return NetInitResult::Ready(view NetRxCanAcquire);
 }
 

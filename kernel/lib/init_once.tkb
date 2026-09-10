@@ -1,0 +1,42 @@
+// A typed one-shot gate for initialization that may be reached concurrently.
+// Exactly one caller receives the linear right to initialize.
+//
+// Current limitations (2026-09-10): the gate holds an IRQ-masking Mutex until
+// commit or cancel, so it is for bounded boot-time initialization. It does not
+// publish a value and waiters do not sleep. Cancel leaves it available.
+use "kernel/lib/mutex.tkb";
+
+struct InitOnce {
+    private complete: bool;
+    private mutex: Mutex;
+}
+
+linear struct InitOnceGuard[once: addr] {
+    private flags: usize;
+}
+
+must_use variant InitOnceBegin[once: addr] {
+    AlreadyComplete;
+    Start(InitOnceGuard[once]);
+}
+
+fn init_once_begin(once: &mut InitOnce @ id) -> InitOnceBegin[id] {
+    let flags: usize = mutex_acquire(&(*once).mutex);
+    if ((*once).complete) {
+        mutex_release(&(*once).mutex, flags);
+        return InitOnceBegin::AlreadyComplete;
+    }
+    let mut guard: InitOnceGuard[id] = { flags };
+    return InitOnceBegin::Start(guard);
+}
+
+fn init_once_commit(once: &mut InitOnce @ id,
+                    guard: sink InitOnceGuard[id]) {
+    (*once).complete = true;
+    mutex_release(&(*once).mutex, guard.flags);
+}
+
+fn init_once_cancel(once: &mut InitOnce @ id,
+                    guard: sink InitOnceGuard[id]) {
+    mutex_release(&(*once).mutex, guard.flags);
+}
