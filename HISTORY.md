@@ -15,6 +15,37 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-10: the admitted two-core workload runs on QEMU and RPi5 (#448, #479)
+
+`KERNEL_ACTIVE_CORES` is now 2. Core 1 starts the persistent busy-pair B
+process, takes its own timer interrupts and syscalls, and the ordinary
+scheduler selector keeps that admission boundary in force. A stays on core 0
+because its exit/respawn handoff intentionally exercises init; admitting
+arbitrary filesystem, network, shell, or direct-UART processes is separate
+work, not an accidental consequence of this milestone.
+
+Ordinary peer kernel text is assembled per CPU and published as complete
+bounded records with release/acquire ordering. Core 0 alone copies it into the
+retained log and interrupt-driven UART queue. This restored lifecycle output
+without putting a lock in a fatal reporter. Profiling now emits clipped
+schedule boundaries for a process that stays on one CPU for the whole interval
+and derives the two persistent processes' CPU time from the closed per-CPU
+accounting. Both contributions are nonzero and preserved in the host artifact.
+
+Three consecutive two-core QEMU main runs passed, followed by the full QEMU
+check. RPi5 passed all 44 views and its network/HTTP workload, then stopped the
+peer in DDB, recovered a guarded fault, continued, and resumed the shell. That
+run reported A/B CPU time of 9557022/7855074 cycles inside a 9557022-cycle wall
+interval. A separate one-core QEMU run passed all 45 views and PTY, four oops
+cases, and stack overflow.
+
+The final hardware failure was in the test harness, not the kernel: its
+OpenOCD byte writer assumed core 1 remained parked in EL1. Once B ran there,
+an EL0 `mwb` raised DSCR.ERR while OpenOCD still exited zero, leaving DDB's
+guarded-fault command disabled. The writer now catches core 0 deterministically
+at its next timer IRQ, writes in EL1, reads the byte back, and treats either an
+OpenOCD error or absent read-back as failure.
+
 ## 2026-09-10: preserve terminal output across TX-queue integration
 
 Rebasing the two-core investigation onto the upstream interrupt-driven UART

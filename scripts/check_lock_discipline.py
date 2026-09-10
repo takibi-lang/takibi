@@ -105,6 +105,10 @@ ATOMIC_ALLOWED = {
         "is the same reason Linux's printk ringbuffer is lock-free (see "
         "issues #465 and #486). Not boot-reachable: nothing here runs before "
         "main(), so issue #484's mmu_off hazard does not apply",
+    "printk/log.tkb":
+        "ordinary peer lines are single-producer per CPU and consumed by "
+        "core 0; release/acquire publishes complete bounded records without "
+        "making terminal reporters wait on a console lock",
 }
 
 

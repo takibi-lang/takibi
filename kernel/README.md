@@ -825,10 +825,8 @@ newest. `kernel_process_trace_report()` snapshots and prints that same tail on
 demand without crashing; it is callable from a fixture or as
 `call (void) kernel_process_trace_report()` in GDB. The live report and the
 oops report use one row formatter, so their field order cannot drift. Ordinary
-boots leave tracing and the report disabled. The current scheduler runs only
-on core 0; when real SMP scheduling is introduced, this ABI is intended to
-become one independently written ring per CPU rather than a false shared
-global order.
+boots leave tracing and the report disabled. Both scheduler CPUs write their
+own ring and a global atomic sequence preserves the cross-CPU order.
 
 ### Interactive HTTPd lifecycle checkpoints
 
@@ -1025,17 +1023,17 @@ common/platform view `.expected` files are the actual contracts; the
 list below is orientation for a reader deciding whether a workload will
 run, not a specification.
 
-- **Execution model: one core, and a kernel that does not preempt.** Most
-  of `kernel/` shares mutable state with no lock. That is correct today
-  because there is exactly one kernel execution context, which rests on
-  three separate facts: only core 0 runs kernel code (core 1 reaches EL1,
-  proves it can see the shared page table, and parks); a timer interrupt
-  taken inside a syscall only *requests* a reschedule, so the switch
+- **Execution model: two admitted scheduler cores, and a kernel that does not
+  preempt in EL1.** Core 1 runs the persistent CPU-bound B fixture; other
+  processes stay on core 0, so this is not yet general affinity or permission
+  for filesystem/network processes to migrate. A timer interrupt taken inside
+  a syscall only *requests* a reschedule, so the switch
   happens on the way out and a handler always runs to completion
   (Linux's `CONFIG_PREEMPT_NONE`); and interrupt handlers touch no shared
   state, which the effect system enforces by rejecting `locks` on an
   `!{interrupt}` function. The first two are constants in
-  `kernel/lib/execution_model.tkb` and nine files assert them, so changing
+  `kernel/lib/execution_model.tkb`; mutable-state coverage checks require each
+  remaining single-context assumption to be explicit, so changing
   either one fails the build at every site that depends on it rather than
   becoming a race. See GitHub issue #453.
 - **Filesystem.** One ext2 block group, nested path lookup, root-directory

@@ -207,6 +207,7 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 		python3 scripts/test_kernel_ddb_postmortem.py; \
 	fi
 	@python3 scripts/test_run_kernel_ddb_rpi5_driver.py
+	@python3 scripts/test_rpi5_set_kernel_byte.py
 	@python3 scripts/test_check_direct_mmio_literals.py
 	@python3 scripts/test_check_ddb_command_inventory.py
 	@python3 scripts/test_check_fallback_counters.py

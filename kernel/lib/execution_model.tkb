@@ -64,10 +64,10 @@
 //   of what the handlers happen to call, which is exactly the kind of
 //   accident this file exists to stop relying on silently.
 
-// How many cores execute kernel code. Not how many cores exist, and not
-// how many the platform brings up -- core 1 boots today and this is still
-// 1, because it parks without touching kernel state.
-const KERNEL_ACTIVE_CORES: usize = 1;
+// How many cores execute kernel code. Not how many cores exist, nor merely
+// how many the platform starts: both active cores take timer interrupts and
+// run one admitted userspace process each.
+const KERNEL_ACTIVE_CORES: usize = 2;
 
 // How many cores this build reserves per-core storage FOR. Distinct from
 // the number above, and the distinction is Linux's own NR_CPUS versus

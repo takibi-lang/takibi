@@ -45,8 +45,9 @@ issue #222.
 
 **Why global:** the process pool and bootstrap record describe the one shared
 process namespace. The execution-state backing array is global storage, but
-each active CPU selects its own element with `cpu_id()`; core 1 still returns
-from dispatch before entering the scheduler while `KERNEL_ACTIVE_CORES` is 1.
+each active CPU selects its own element with `cpu_id()`; core 1 claims Ready
+work from its architectural idle loop and then follows the same timer and
+syscall-return scheduling paths as core 0.
 
 `execution_state` is no longer global in the sense this section means:
 issue #479 made `execution_here()` ask `cpu_id()` and index the array, and

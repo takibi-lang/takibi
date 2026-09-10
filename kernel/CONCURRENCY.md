@@ -10,9 +10,11 @@ current behavior and must be correct without reading it.
 `kernel/lib/execution_model.tkb` holds two numbers, and most unsynchronized
 state in this kernel is safe *because of* them:
 
-- `KERNEL_ACTIVE_CORES` -- cores that run kernel code. Core 1 boots, takes its
-  own timer interrupts and idles; its dispatch returns before every path that
-  reaches kernel state.
+- `KERNEL_ACTIVE_CORES` -- cores that run kernel code. It is 2: core 1 takes
+  timer interrupts, runs the persistent busy-pair B process, and enters the
+  syscall and scheduler paths. Admission is deliberately narrower than CPU
+  affinity: all other processes remain on core 0 until their filesystem,
+  network, console, and physical stack-handoff boundaries are audited.
 - `KERNEL_PREEMPTIBLE` -- 0. A timer interrupt taken at EL1 sets a flag and the
   switch happens at syscall return. That is `CONFIG_PREEMPT_NONE`, and it is
   why many field accesses need no lock.
@@ -160,6 +162,13 @@ The crash trace ring uses one GLOBAL atomic sequence with per-CPU storage,
 unlike the diagnostic ring's per-CPU sequences, because on two cores the
 interesting version of "what was the kernel doing when it died" is the
 interleaving.
+
+Ordinary peer log lines use a bounded per-CPU publication ring. A peer builds
+one complete line locally and publishes its sequence with release ordering;
+core 0 copies a stable record with acquire ordering and alone updates the
+retained log and interrupt-driven UART queue. Overwrite and truncation are
+reported. Fatal and DDB paths bypass this channel and never wait for its
+consumer.
 
 ## Stopping the other cores
 

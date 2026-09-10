@@ -21,6 +21,7 @@
 
 use "kernel/arch/arm64/kernel/timer.tkb";
 use "kernel/lib/execution_model.tkb";
+use "kernel/lib/occupancy.tkb";
 
 const PROFILE_TIMELINE_EVENTS: usize = 512;
 
@@ -119,6 +120,52 @@ fn profile_timeline_start(pid_a: usize, pid_b: usize) {
     profile_timeline_pid_a = pid_a;
     profile_timeline_pid_b = pid_b;
     profile_timeline_active = true;
+}
+
+// A clipped profiling interval needs explicit scheduler boundaries even when
+// a process remains on its CPU for the whole interval. These writers require
+// a complete world stop, so they can name a stopped CPU directly rather than
+// pretending cpu_id() observed an event there.
+fn profile_timeline_interval_start_cpu(
+        stopped: borrow WorldStopped[stop],
+        cpu: {0..<KERNEL_MAX_CORES as usize}, pid: usize, timestamp: usize) {
+    if (profile_timeline_pid_relevant(pid) == false) { return; }
+    let slot: usize = profile_timeline_cores[cpu].stored;
+    if (slot >= PROFILE_TIMELINE_EVENTS) { return; }
+    let safe_slot: {0..<PROFILE_TIMELINE_EVENTS as usize} = slot;
+    profile_timeline_cores[cpu].next_sequence = slot + 1;
+    profile_timeline_cores[cpu].events[safe_slot].sequence = slot + 1;
+    profile_timeline_cores[cpu].events[safe_slot].timestamp = timestamp;
+    profile_timeline_cores[cpu].events[safe_slot].kind =
+        ProfileTimelineKind::ScheduleIn;
+    profile_timeline_cores[cpu].events[safe_slot].pid = pid;
+    profile_timeline_cores[cpu].events[safe_slot].peer = 0;
+    profile_timeline_cores[cpu].events[safe_slot].arg = 0;
+    profile_timeline_cores[cpu].stored = slot + 1;
+}
+
+fn profile_timeline_interval_finish_cpu(
+        stopped: borrow WorldStopped[stop],
+        cpu: {0..<KERNEL_MAX_CORES as usize}, pid: usize, timestamp: usize) {
+    if (profile_timeline_pid_relevant(pid) == false) { return; }
+    let slot: usize = profile_timeline_cores[cpu].stored;
+    if (slot >= PROFILE_TIMELINE_EVENTS) {
+        profile_timeline_cores[cpu].lost = profile_timeline_cores[cpu].lost + 1;
+        profile_timeline_cores[cpu].next_sequence =
+            profile_timeline_cores[cpu].next_sequence + 1;
+        return;
+    }
+    let safe_slot: {0..<PROFILE_TIMELINE_EVENTS as usize} = slot;
+    let sequence: usize = profile_timeline_cores[cpu].next_sequence + 1;
+    profile_timeline_cores[cpu].next_sequence = sequence;
+    profile_timeline_cores[cpu].events[safe_slot].sequence = sequence;
+    profile_timeline_cores[cpu].events[safe_slot].timestamp = timestamp;
+    profile_timeline_cores[cpu].events[safe_slot].kind =
+        ProfileTimelineKind::ScheduleOut;
+    profile_timeline_cores[cpu].events[safe_slot].pid = pid;
+    profile_timeline_cores[cpu].events[safe_slot].peer = 0;
+    profile_timeline_cores[cpu].events[safe_slot].arg = 0;
+    profile_timeline_cores[cpu].stored = slot + 1;
 }
 
 fn profile_timeline_finish() { profile_timeline_active = false; }

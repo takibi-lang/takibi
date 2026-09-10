@@ -3,8 +3,9 @@
 // the monotonic time at which their first byte was emitted. Userspace writes
 // and the direct crash/DDB UART paths do not enter this ring.
 //
-// Current limitation: the ordinary writer is core-0 main/syscall context only.
-// Interrupt-safe classified events remain kernel/diagnostic/event.tkb's job.
+// Core 0 remains the only retained-log and UART-queue writer. Other cores
+// publish complete bounded lines for core 0 to copy and emit; interrupt-safe
+// classified events remain kernel/diagnostic/event.tkb's job.
 use "kernel/lib/execution_model.tkb";
 use "kernel/printk/number.tkb";
 
@@ -27,12 +28,28 @@ private let mut kernel_log_boot_tick: i64;
 private let mut kernel_log_frequency: i64;
 private let mut kernel_log_snapshot: [u8; KERNEL_LOG_SNAPSHOT_CAPACITY];
 private let mut kernel_log_snapshot_length: usize;
-// Core 1 and later do not write the retained ordinary log or its shared UART.
-// Suppression lasts through every numeric/string fragment until the newline;
-// DDB writes directly to the device; terminal crash reporting explicitly
+// Peer capture lasts through every numeric/string fragment until the newline;
+// DDB writes directly to the device and terminal crash reporting explicitly
 // enters emergency mode before using the ordinary formatting helpers.
-struct KernelLogCoreState { suppressed: bool; emergency: bool; }
+const KERNEL_LOG_PEER_LINE_BYTES: usize = 192;
+const KERNEL_LOG_PEER_RECORDS: usize = 8;
+const KERNEL_LOG_PEER_SLOTS: usize = 16;
+const KERNEL_LOG_PEER_TEXT_BYTES: usize = 3072;
+struct KernelLogCoreState {
+    suppressed: bool;
+    emergency: bool;
+    peer_length: usize;
+    peer_truncated: bool;
+    peer_sequence: usize;
+    peer_line: [u8; KERNEL_LOG_PEER_LINE_BYTES];
+}
 private let mut kernel_log_core_state: [KernelLogCoreState; KERNEL_MAX_CORES];
+private let mut kernel_log_peer_published: [usize; KERNEL_LOG_PEER_SLOTS];
+private let mut kernel_log_peer_latest: [usize; KERNEL_MAX_CORES];
+private let mut kernel_log_peer_lengths: [usize; KERNEL_LOG_PEER_SLOTS];
+private let mut kernel_log_peer_truncated: [bool; KERNEL_LOG_PEER_SLOTS];
+private let mut kernel_log_peer_text: [u8; KERNEL_LOG_PEER_TEXT_BYTES];
+private let mut kernel_log_peer_consumed: [usize; KERNEL_MAX_CORES];
 
 private fn kernel_log_core_here() -> *KernelLogCoreState {
     let base: *KernelLogCoreState = kernel_log_core_state;
@@ -44,6 +61,9 @@ private fn kernel_log_core_here() -> *KernelLogCoreState {
 fn kernel_log_init() {
     kernel_log_core_here().suppressed = false;
     kernel_log_core_here().emergency = false;
+    kernel_log_core_here().peer_length = 0;
+    kernel_log_core_here().peer_truncated = false;
+    kernel_log_core_here().peer_sequence = 0;
     kernel_log_oldest = 0;
     kernel_log_count = 0;
     kernel_log_overwritten = 0;
@@ -86,6 +106,38 @@ fn kernel_log_begin_fragment() {
         return;
     }
     kernel_log_capture_enabled = true;
+}
+
+private fn kernel_log_peer_publish() !{unsafe} {
+    let cpu: usize = cpu_id();
+    if (cpu == 0 || cpu >= KERNEL_MAX_CORES) { return; }
+    let sequence: usize = kernel_log_core_here().peer_sequence + 1;
+    kernel_log_core_here().peer_sequence = sequence;
+    let slot: usize = cpu * KERNEL_LOG_PEER_RECORDS +
+        ((sequence - 1) % KERNEL_LOG_PEER_RECORDS);
+    if (slot >= KERNEL_LOG_PEER_SLOTS) { return; }
+    let safe_slot: {0..<KERNEL_LOG_PEER_SLOTS as usize} = slot;
+    let published: *usize = kernel_log_peer_published;
+    unsafe { atomic_store_release((published + (slot as isize)) as usize, 0); }
+    let length: usize = kernel_log_core_here().peer_length;
+    kernel_log_peer_lengths[safe_slot] = length;
+    kernel_log_peer_truncated[safe_slot] = kernel_log_core_here().peer_truncated;
+    for index: usize in 0..<KERNEL_LOG_PEER_LINE_BYTES {
+        if (index < length) {
+            let offset: usize = slot * KERNEL_LOG_PEER_LINE_BYTES + index;
+            if (offset < KERNEL_LOG_PEER_TEXT_BYTES) {
+                let safe_offset: {0..<KERNEL_LOG_PEER_TEXT_BYTES as usize} = offset;
+                kernel_log_peer_text[safe_offset] = kernel_log_core_here().peer_line[index];
+            }
+        }
+    }
+    let latest: *usize = kernel_log_peer_latest;
+    unsafe {
+        atomic_store_release((published + (slot as isize)) as usize, sequence);
+        atomic_store_release((latest + (cpu as isize)) as usize, sequence);
+    }
+    kernel_log_core_here().peer_length = 0;
+    kernel_log_core_here().peer_truncated = false;
 }
 
 // GitHub issue #454: what the console costs its callers, in the units the
@@ -343,7 +395,16 @@ fn uart_tx_flush() !{unsafe} {
 fn kernel_log_capture_uart_byte(value: u8) -> bool {
     if (kernel_log_core_here().emergency) { return true; }
     if (kernel_log_core_here().suppressed) {
-        if (value == 10) { kernel_log_core_here().suppressed = false; }
+        let length: usize = kernel_log_core_here().peer_length;
+        if (length < KERNEL_LOG_PEER_LINE_BYTES) {
+            let safe_length: {0..<KERNEL_LOG_PEER_LINE_BYTES as usize} = length;
+            kernel_log_core_here().peer_line[safe_length] = value;
+            kernel_log_core_here().peer_length = length + 1;
+        } else { kernel_log_core_here().peer_truncated = true; }
+        if (value == 10) {
+            kernel_log_peer_publish();
+            kernel_log_core_here().suppressed = false;
+        }
         return false;
     }
     // A peer's direct UART byte is not part of core 0's partially assembled
@@ -378,6 +439,59 @@ fn kernel_log_capture_uart_byte(value: u8) -> bool {
         kernel_log_capture_enabled = false;
     }
     return true;
+}
+
+fn kernel_log_peer_drain() !{unsafe} {
+    if (cpu_id() != 0) { return; }
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        let mut expected: usize = kernel_log_peer_consumed[cpu] + 1;
+        let latest_words: *usize = kernel_log_peer_latest;
+        let latest: usize = unsafe {
+            atomic_load_acquire((latest_words + (cpu as isize)) as usize)
+        };
+        if (latest >= expected + KERNEL_LOG_PEER_RECORDS) {
+            expected = latest - KERNEL_LOG_PEER_RECORDS + 1;
+            kernel_boot_log("kernel log: peer records overwritten\n");
+        }
+        let mut remaining: usize = KERNEL_LOG_PEER_RECORDS;
+        while (expected <= latest && remaining != 0) {
+            remaining = remaining - 1;
+            let slot: usize = cpu * KERNEL_LOG_PEER_RECORDS +
+                ((expected - 1) % KERNEL_LOG_PEER_RECORDS);
+            if (slot >= KERNEL_LOG_PEER_SLOTS) { return; }
+            let safe_slot: {0..<KERNEL_LOG_PEER_SLOTS as usize} = slot;
+            let published: *usize = kernel_log_peer_published;
+            let first: usize = unsafe {
+                atomic_load_acquire((published + (slot as isize)) as usize)
+            };
+            if (first != expected) { return; }
+            let length: usize = kernel_log_peer_lengths[safe_slot];
+            let truncated: bool = kernel_log_peer_truncated[safe_slot];
+            let mut copy: [u8; KERNEL_LOG_PEER_LINE_BYTES];
+            for index: usize in 0..<KERNEL_LOG_PEER_LINE_BYTES {
+                if (index < length) {
+                    let offset: usize = slot * KERNEL_LOG_PEER_LINE_BYTES + index;
+                    if (offset < KERNEL_LOG_PEER_TEXT_BYTES) {
+                        let safe_offset: {0..<KERNEL_LOG_PEER_TEXT_BYTES as usize} = offset;
+                        copy[index] = kernel_log_peer_text[safe_offset];
+                    }
+                }
+            }
+            let second: usize = unsafe {
+                atomic_load_acquire((published + (slot as isize)) as usize)
+            };
+            if (second != expected) { return; }
+            kernel_log_begin_fragment();
+            for index: usize in 0..<KERNEL_LOG_PEER_LINE_BYTES {
+                if (index < length) { uart_putc(copy[index]); }
+            }
+            if (truncated) {
+                kernel_boot_log("... [peer line truncated]\n");
+            }
+            kernel_log_peer_consumed[cpu] = expected;
+            expected = expected + 1;
+        }
+    }
 }
 
 // Terminal exception paths must remain visible on every CPU and must not

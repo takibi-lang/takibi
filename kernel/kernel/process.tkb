@@ -3420,8 +3420,9 @@ private fn kernel_process_next_ready(from: ProcessHandle)
         remaining = remaining - 1;
         cursor = kernel_process_next_successor(cursor, root);
         if (scheduled_process_same_slot(cursor, from) == false &&
-            scheduled_process_state_of(cursor) ==
-                ProcessSlotState::Ready) {
+            scheduled_process_state_of(cursor) == ProcessSlotState::Ready &&
+            (cpu_id() == 0 || workload_busy_secondary_candidate(
+                scheduled_process_pid_of_handle(cursor)))) {
             return ProcessNextReadyResult::Next(cursor);
         }
     }
@@ -3469,6 +3470,123 @@ fn kernel_process_schedule(current_sp: usize) -> usize {
             }
         }
     }
+}
+
+// Start a Ready process on a CPU that has no outgoing EL0 context yet. The
+// Ready -> Running state token is the reservation while ASID preparation may
+// drop ProcessRunGuard or stop the machine, exactly as in an ordinary switch.
+must_use variant ProcessSecondaryStart { Idle; Frame(usize); }
+
+private fn kernel_process_secondary_start_reserved(
+        owner: sink ScheduledProcessOwner[process],
+        running: sink ScheduledProcessState[process, ProcessState::Running])
+        -> ProcessSecondaryStart {
+    match process_image_prepare_activation(owner.pool_index) {
+        AddressSpaceActivationPrepareResult::Invalid => {
+            let guard = process_run_lock();
+            let ready = scheduled_process_yield(owner, running);
+            scheduled_process_release(owner, ready);
+            process_run_unlock(guard);
+            return ProcessSecondaryStart::Idle;
+        }
+        AddressSpaceActivationPrepareResult::RolloverNeeded => {
+            match world_stop_begin(&kernel_world_stop, KERNEL_ACTIVE_CORES,
+                                   SCHEDULER_WORLD_STOP_SPINS) {
+                WorldStopResult::Busy => {
+                    let guard = process_run_lock();
+                    let ready = scheduled_process_yield(owner, running);
+                    scheduled_process_release(owner, ready);
+                    process_run_unlock(guard);
+                    return ProcessSecondaryStart::Idle;
+                }
+                WorldStopResult::Partial(partial) => {
+                    world_stop_partial_release(partial, &kernel_world_stop);
+                    let guard = process_run_lock();
+                    let ready = scheduled_process_yield(owner, running);
+                    scheduled_process_release(owner, ready);
+                    process_run_unlock(guard);
+                    return ProcessSecondaryStart::Idle;
+                }
+                WorldStopResult::Complete(stopped) => {
+                    if (asid_rollover_stopped(stopped)) {}
+                    world_stop_release(stopped, &kernel_world_stop);
+                    return kernel_process_secondary_start_reserved(owner, running);
+                }
+            }
+        }
+        AddressSpaceActivationPrepareResult::Prepared(prepared) => {
+            let guard = process_run_lock();
+            let mut to: ProcessHandle = {
+                owner.pool_index, owner.generation
+            };
+            if (execution_here().current_live ||
+                scheduled_process_handle_matches(to) == false ||
+                scheduled_process_state_of(to) != ProcessSlotState::Running) {
+                process_image_cancel_activation(prepared);
+                let ready = scheduled_process_yield(owner, running);
+                scheduled_process_release(owner, ready);
+                process_run_unlock(guard);
+                return ProcessSecondaryStart::Idle;
+            }
+            if (process_image_commit_activation(prepared) == false) {
+                let ready = scheduled_process_yield(owner, running);
+                scheduled_process_release(owner, ready);
+                process_run_unlock(guard);
+                return ProcessSecondaryStart::Idle;
+            }
+            execution_here().current_handle = to;
+            execution_here().current_live = true;
+            execution_here().scheduler_enabled = true;
+            execution_here().reschedule_pending = false;
+            timer_tick_rearm();
+            workload_busy_note_selected_locked(
+                guard, scheduled_process_pid_of_handle(to));
+            kernel_process_trace_handle(ProcessTraceResume, to, to, 0);
+            let next_sp: usize = scheduled_process_record_of(to).saved_sp;
+            scheduled_process_release(owner, running);
+            process_run_unlock(guard);
+            return ProcessSecondaryStart::Frame(next_sp);
+        }
+    }
+}
+
+// Called by a secondary CPU's architectural idle loop. Idle means no admitted
+// Ready process exists yet; Frame carries a complete saved EL0 context.
+fn kernel_process_secondary_start() -> ProcessSecondaryStart {
+    if (cpu_id() >= KERNEL_ACTIVE_CORES) {
+        return ProcessSecondaryStart::Idle;
+    }
+    if (execution_here().current_live) { return ProcessSecondaryStart::Idle; }
+    let guard = process_run_lock();
+    let mut cursor = scheduled_process_first_slot();
+    let mut walking: bool = true;
+    while (walking) {
+        match cursor {
+            ProcessSlotCursor::Done => { walking = false; }
+            ProcessSlotCursor::At(slot) => {
+                if (scheduled_process_record_state(slot) ==
+                        ProcessSlotState::Ready &&
+                    workload_busy_secondary_candidate_locked(
+                        guard, scheduled_process_pid_of_slot(slot))) {
+                    let mut handle: ProcessHandle =
+                        scheduled_process_handle_of_slot(slot);
+                    match scheduled_process_ready_take(guard, handle) {
+                        ScheduledProcessReadyTakeResult::Missing => {}
+                        ScheduledProcessReadyTakeResult::Ready(resources) => {
+                            let (owner, ready) = resources;
+                            let running = scheduled_process_start(owner, ready);
+                            process_run_unlock(guard);
+                            return kernel_process_secondary_start_reserved(
+                                owner, running);
+                        }
+                    }
+                }
+                cursor = scheduled_process_next_slot(slot);
+            }
+        }
+    }
+    process_run_unlock(guard);
+    return ProcessSecondaryStart::Idle;
 }
 
 private fn kernel_process_schedule_cancel_reserved(

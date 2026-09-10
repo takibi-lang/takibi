@@ -424,6 +424,10 @@ fn workload_profile_note_network_tx(bytes: usize) {
 private fn workload_profile_start(
         stopped: borrow WorldStopped[stop],
         guard: borrow ProcessRunGuard[lock], now: usize, pid: usize) {
+    let mut selected_at_start: [usize; KERNEL_MAX_CORES];
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        selected_at_start[cpu] = workload_profile_selected_pid(cpu);
+    }
     for cpu: usize in 0..<KERNEL_MAX_CORES {
         workload_profile_core_reset(cpu);
     }
@@ -443,6 +447,12 @@ private fn workload_profile_start(
     workload_profile_active = true;
     profile_timeline_start(
         workload_busy_pair.a_pid, workload_busy_pair.b_pid);
+    for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
+        let selected: usize = selected_at_start[cpu];
+        workload_profile_cores[cpu].selected_pid = selected;
+        workload_profile_cores[cpu].has_selected_pid = selected != 0;
+        profile_timeline_interval_start_cpu(stopped, cpu, selected, now);
+    }
     // The flat PC profile shares this interval exactly: same IRQ-masked
     // boundary, same start timestamp, so a sample outside the interval the
     // artifact reports cannot exist.
@@ -454,6 +464,31 @@ private fn workload_profile_finish(
         guard: borrow ProcessRunGuard[lock], now: usize) {
     for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
         workload_profile_charge(cpu, now);
+        profile_timeline_interval_finish_cpu(
+            stopped, cpu, workload_profile_selected_pid(cpu), now);
+    }
+    // The original one-core counters charge at scheduler selections. With
+    // one permanently selected process on each CPU there is deliberately no
+    // switch at which to close either charge, so derive each process's CPU
+    // time from the already-closed per-CPU interval. This is valid for the
+    // admitted two-core workload because its scheduler boundary pins A to
+    // core 0 and B to core 1 for the entire measured interval.
+    if (KERNEL_ACTIVE_CORES > 1) {
+        workload_busy_pair.a_ticks = 0;
+        workload_busy_pair.b_ticks = 0;
+        for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
+            let running: usize = workload_profile_cores[cpu].el0_ticks +
+                workload_profile_cores[cpu].el1_ticks +
+                workload_profile_cores[cpu].irq_ticks;
+            let selected: usize = workload_profile_selected_pid(cpu);
+            if (selected == workload_busy_pair.a_pid) {
+                workload_busy_pair.a_ticks =
+                    workload_busy_pair.a_ticks + running;
+            } else if (selected == workload_busy_pair.b_pid) {
+                workload_busy_pair.b_ticks =
+                    workload_busy_pair.b_ticks + running;
+            }
+        }
     }
     profile_timeline_finish();
     workload_profile_active = false;
@@ -542,6 +577,22 @@ fn workload_busy_note_selected_locked(
     } else if (workload_busy_pair.b_pid != 0 && pid == workload_busy_pair.b_pid) {
         workload_busy_pair.b_slices = workload_busy_pair.b_slices + 1;
     }
+}
+
+// B is the persistent secondary participant. A deliberately remains on the
+// console-owning core because it exits once to exercise init's SIGCHLD respawn;
+// moving that handoff to the peer would admit init and its I/O descendants to
+// subsystems whose non-pool state has not completed the multicore audit.
+fn workload_busy_secondary_candidate_locked(
+        guard: borrow ProcessRunGuard[lock], pid: usize) -> bool {
+    return workload_busy_secondary_candidate(pid);
+}
+
+fn workload_busy_secondary_candidate(pid: usize) -> bool {
+    if (workload_busy_pair.a_pid == 0 || workload_busy_pair.b_pid == 0) {
+        return false;
+    }
+    return pid == workload_busy_pair.b_pid;
 }
 
 fn workload_busy_note_selected(pid: usize) {

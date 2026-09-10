@@ -678,10 +678,12 @@ DDB_LOG="$ARTIFACT_DIR/ddb-uart.log"
 : >"$DDB_LOG"
 RPI5_SWD_SPEED="${RPI5_SWD_SPEED:-}" \
     "$REPO_ROOT/scripts/rpi5_set_kernel_byte.sh" "$ELF" \
-    diagnostic_trace_test_enabled 1 >"$ARTIFACT_DIR/ddb-openocd.log" 2>&1
+    diagnostic_trace_test_enabled 1 \
+    >"$ARTIFACT_DIR/ddb-openocd.log" 2>&1
 RPI5_SWD_SPEED="${RPI5_SWD_SPEED:-}" \
     "$REPO_ROOT/scripts/rpi5_set_kernel_byte.sh" "$ELF" \
-    kernel_ddb_memory_fault_test_enabled 1 >>"$ARTIFACT_DIR/ddb-openocd.log" 2>&1
+    kernel_ddb_memory_fault_test_enabled 1 \
+    >>"$ARTIFACT_DIR/ddb-openocd.log" 2>&1
 ddb_status=0
 python3 "$REPO_ROOT/scripts/run_kernel_ddb_rpi5_driver.py" \
     --port "$SERIAL_DEV" --log "$DDB_LOG" || ddb_status=$?

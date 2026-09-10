@@ -30,6 +30,8 @@ def main():
             "profile: end name=busy-pair elapsed_cycles=10 tick_frequency=5 "
             "iterations_a=2 iterations_b=2 result_count=2 "
             "checksum_a=11 checksum_b=12\n"
+            "workload: busy pair measured skew=1 rounds=4 elapsed=10 "
+            "cpu_a=9 cpu_b=1 slices=2/1 tickfreq=5 restarts=0\n"
             "profile: cpu name=busy-pair cpu=0 wall_cycles=10 "
             "el0_cycles=6 el1_cycles=2 irq_cycles=1 idle_cycles=1 "
             "context_switches=2 blocks=1 wakeups=1 syscalls=3 "
@@ -69,8 +71,19 @@ def main():
         parsed = json.loads(artifact.read_text(encoding="ascii"))
         if (parsed["schema"] != "takibi.kernel.workload/v2" or
                 len(parsed["accounting"]["per_cpu"]) != 2 or
-                parsed["accounting"]["dominant_state"] != "balanced"):
+                parsed["accounting"]["dominant_state"] != "balanced" or
+                parsed["results"]["reported_cpu_cycles"] != [9, 1]):
             raise RuntimeError("positive per-CPU artifact was not preserved")
+
+        uart.write_text(good_text.replace("cpu_b=1", "cpu_b=0", 1),
+                        encoding="ascii")
+        result = run(
+            "collect", "--uart-log", str(uart), "--output", str(artifact),
+            "--target", "qemu", "--commit", "test")
+        if result.returncode == 0 or \
+                "CPU-time measurement is zero" not in result.stderr:
+            raise RuntimeError("zero peer CPU-time negative control did not reject")
+        uart.write_text(good_text, encoding="ascii")
 
         timeline_args = [
             "timeline", "--uart-log", str(uart), "--output", str(timeline),

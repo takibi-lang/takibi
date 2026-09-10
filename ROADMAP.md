@@ -87,14 +87,12 @@ highest-priority items (#452, #450) are compiler work.
 The order is forced by M0's phase dependencies below, not chosen. Skipping an
 entry leaves the next one unable to be verified.
 
-1. **#448** a workload occupying two cores -- one-core coverage is done; its
-   two-core measurement remains. Must pass on one core first, so that a later
-   failure is provably a concurrency defect.
+1. **#448** a workload occupying two cores -- complete on QEMU and RPi5.
 2. **#431** SIGCHLD/kill is closed. **#432** nanosleep is partly complete;
    remaining-time writeback still needs an observable early wake.
 3. **#222** per-core scheduler state -- closed.
 4. **#479** raise `KERNEL_ACTIVE_CORES` and clear its compiler-derived
-   worklist -- in progress and the current Territory A starting point.
+   worklist -- complete for the deliberately admitted busy-loop workload.
 5. **#483** the network stack's unsynchronized non-pool state -- the same
    files as #479, so the same hands.
 6. **#478** the spinlock excludes but does not arbitrate.
@@ -222,6 +220,29 @@ The stack-overflow lane and langcheck also passed on the integrated tree.
 The experimental peer timer policy now lives once in secondary.tkb, called
 from both interrupt dispatchers; the upstream inline-duplication check
 correctly refused the former duplicated sequence.
+
+Completion update, 2026-09-10: `KERNEL_ACTIVE_CORES` is 2. Core 1 admits only
+the persistent busy-pair B process; the ordinary selector enforces the same
+boundary after initial activation, so init, ash, HTTPd, filesystem, network,
+and direct userspace console paths remain on core 0. B takes its own timer
+interrupts and progress syscalls. Complete peer log lines publish through a
+bounded release/acquire ring to the sole core-0 retained-log and UART-queue
+writer, while fatal/DDB output remains independent.
+
+The two-core QEMU main lane passed three consecutive runs and a later full
+QEMU check passed. RPi5 passed all 44 views, network and HTTP integration,
+then DDB world-stop with peer mask 2, guarded-fault recovery, and shell resume.
+The RPi5 helper now catches core 0 at an EL1 IRQ breakpoint before changing a
+test byte and rejects OpenOCD's status-zero DSCR errors unless read-back
+confirms the write. Fresh CPU-time evidence reports QEMU A/B as
+30203442/25865922 cycles and RPi5 A/B as 9557022/7855074 cycles; the host
+collector rejects a zero peer contribution.
+
+The unchanged one-core fixture also passed QEMU main, four oops cases, and the
+stack-overflow lane. This closes the #448/#479 two-core workload milestone,
+not general process migration: physical outgoing-stack ownership and peer
+access to filesystem/network/direct userspace UART remain later requirements
+whose first admitting workload must carry its own audit.
 
 #432's remaining-time writeback still awaits an observable signal-handler
 interruption, not the busy-pair workload.

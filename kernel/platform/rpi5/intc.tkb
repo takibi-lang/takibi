@@ -395,10 +395,13 @@ fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
     // GICC_IAR is read before the branch, not after: acknowledging is the
     // interrupted core's own job on its own banked interface.
     if (cpu_id() != 0) {
-        if (id == rpi5_timer_gic_intid) { secondary_timer_tick(); }
+        let mut next_sp: usize = frame_sp;
+        if (id == rpi5_timer_gic_intid) {
+            next_sp = kernel_secondary_timer_schedule(frame_sp, lower_el);
+        }
         *gicc_eoir = id;
         workload_profile_irq_exit();
-        return frame_sp;
+        return next_sp;
     }
 
     let mut debug_break: bool = false;

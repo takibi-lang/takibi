@@ -23,6 +23,9 @@ TIMELINE_KINDS = {
     "irq-enter": "irq",
     "irq-exit": "irq",
 }
+BUSY_MEASUREMENT_RE = re.compile(
+    r"^workload: busy pair measured .*\bcpu_a=([0-9]+) "
+    r"cpu_b=([0-9]+)\b")
 
 
 def parse_fields(text):
@@ -100,6 +103,16 @@ def collect(args):
     if integer(end, "result_count") != 2:
         raise ValueError("busy-pair profile did not produce two results")
     cpu_count = integer(begin, "cpu_count")
+    reported_cpu_cycles = None
+    if args.name == "busy-pair":
+        measurements = [BUSY_MEASUREMENT_RE.match(line) for line in lines]
+        measurements = [match for match in measurements if match is not None]
+        if len(measurements) != 1:
+            raise ValueError("expected one busy-pair CPU-time measurement")
+        reported_cpu_cycles = [int(measurements[0].group(1)),
+                               int(measurements[0].group(2))]
+        if cpu_count > 1 and 0 in reported_cpu_cycles:
+            raise ValueError("two-core busy-pair CPU-time measurement is zero")
     cpu_records = all_records(lines, "cpu", args.name)
     if len(cpu_records) != cpu_count:
         raise ValueError(
@@ -162,6 +175,7 @@ def collect(args):
             "result_count": integer(end, "result_count"),
             "pids": [integer(begin, "pid_a"), integer(begin, "pid_b")],
             "checksums": [integer(end, "checksum_a"), integer(end, "checksum_b")],
+            "reported_cpu_cycles": reported_cpu_cycles,
         },
         "accounting": {
             "dominant_state": dominant_state,
