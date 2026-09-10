@@ -6,7 +6,10 @@ Takibi, whose runtime-error surface is lifted to compile time. It is a plan,
 not a contract. `AGENTS.md`'s YAGNI principle still decides what gets built:
 the ordering below does not authorize speculative implementation.
 
-Written 2026-08-27 against the 99 open GitHub issues at that date. The previous
+Written 2026-08-27 against the 99 open GitHub issues at that date. **The
+baseline below is that date's; the two territory queues were re-cut on
+2026-09-10** and carry their own dates, so read a queue's own heading rather
+than this one for what is current. The previous
 snapshot was written 2026-08-20, and three of its eight milestones have since
 closed outright, along with the first half of a fourth: the trusted base is
 defined and measurable (#236), the known evidence-machinery defects are
@@ -110,8 +113,25 @@ Then, in this territory and unordered: #518, #468, #464, #516, #308, #414,
 #### Territory A cold-start handoff, 2026-09-09
 
 The maintainer authorized Codex to cross both territories for the two-core
-blockers while Claude Code is unavailable. Continue #479; neither it nor
-#448 has met its two-core acceptance criteria.
+blockers while Claude Code was unavailable.
+
+**Status corrected 2026-09-10, by the other territory rather than this one:
+#479 and #448 are both closed**, and the paragraphs below were written while
+they were not. Read them as the investigation record they are -- the stalls,
+the hypotheses and what each commit repaired are still exactly right and still
+worth reading -- rather than as a description of what is left to do. What is
+left is entry 5 onward: #483, #478, then #452 with #466 and #450 behind it.
+
+Two things Territory B did on 2026-09-10 that this territory should know.
+`kernel_log_tx_stand_down()` now returns the console state it FOUND, as a
+`must_use` token with a third case, `NotConsoleOwner`, for a peer -- so a peer
+stands nothing down and puts nothing back, and cannot re-arm core 0's queue
+underneath a terminal path. And DDB has a `wait` command that derives the
+causal wait edges from the stopped snapshot: on a two-core stall it says which
+process is blocked collecting which child, which are waiting on events, and
+whether the running process is one somebody is blocked on. That last digit is
+issue #524's shape, and it is now one line rather than three views correlated
+by hand.
 
 The exit ASID reserve/prepare/revalidate work and remaining activation audit
 landed in edd59f93 and 393519dd. Commit 055d09dd made ext2 scratch and crash
@@ -388,11 +408,24 @@ None is queued above; they are recorded so they are not rediscovered.
    this territory converges the probes on one verdict shape, the check
    becomes possible and is worth revisiting.
 
-### Territory B queue -- debug environment and recurrence prevention
+### Territory B queue -- making two cores debuggable
 
-This order is a recommendation, not a dependency chain. Nothing here blocks
-Territory A, which is the point: the backlog exists so that the milestone
-above does not pay the same debugging cost twice.
+**Re-cut 2026-09-10, and the re-cut is the point.** Until now this queue was
+ordered to AVOID Territory A: entries were ranked by how little they needed
+from it, because everything that needed something from it was blocked. That
+was right while M0's foundations were unfinished. It is wrong now.
+
+#504, #479, #222 and #448 all closed, and with them the four entries this file
+listed as "Waiting on Territory A" became startable -- #456, #486, #505 and
+#465. All four are in this territory's own files
+(`kernel/arch/arm64/kernel/exception_evidence.tkb` and `kernel/printk/`), and
+all four are about the same thing: what the machine can still tell you once
+two cores are running. That is not a backlog beside the milestone. It is the
+milestone's other half, and it gets more valuable as Territory A moves toward
+four cores, not less.
+
+So the order below is now what Territory A will need when a two-core run
+fails, ahead of what merely does not collide with it.
 
 The first five entries of the 2026-09-05 order closed on 2026-09-05 and
 2026-09-06: #513, #515, #471, #387, #411, #336 and #56, plus #519, which was
@@ -475,72 +508,114 @@ core count and not its per-core speed. What was missing was any account of
 what the guest was doing, and that is what the paragraph above supplies. The
 next occurrence answers it in the lane's own artifacts.
 
-1. **#526 -- closed 2026-09-10, with the maintainer saying so and Codex
-   holding still for the quiet window it needed.** `langcheck` had grown from
-   one non-ASCII grep into a hand-listed gate of forty-eight invocations, and
-   a wall-clock control inside it cost CI nine consecutive runs on 2026-09-07;
-   for several of those rounds it gated `allbuild`, so no kernel lane ran and
-   the real defects behind it stayed invisible.
+1. **#486** -- one crash snapshot for the machine. Territory A's multicore
+   work already added `crash_snapshot_per_core` and
+   `crash_snapshot_capturing_per_core`, so this is very likely a VERIFY AND
+   CLOSE, not an implementation. Do that first: an issue that is already
+   satisfied and still open makes the rest of this queue look longer than it
+   is, and reading it is how the next three get their bearings.
+2. **#505** -- `bt` for a stopped peer. Genuinely untouched, and activated by
+   the same commit that closed #479: its own text says to begin once a process
+   makes progress on core 1, and one does. When a two-core run stalls, this is
+   the first question anyone asks and the kernel currently cannot answer it
+   for the core that is not running DDB.
+3. **#456's remaining half** -- the rendezvous exists (`world_stop_begin` in
+   `kernel_ddb_enter`, with Busy and Partial reported rather than waited out),
+   but `kernel_ddb_memory_access_active` is still one global. Two cores in a
+   guarded read cannot be told apart, which is the state a debugger must not
+   be wrong about.
+4. **#465's remaining half** -- peers no longer lose their lines: Codex's
+   `kernel_log_peer_publish` hands complete bounded lines to core 0. What the
+   retained record still does not carry is WHICH core wrote it, or a sequence
+   that orders two cores against each other. A dmesg that cannot attribute a
+   line is least useful exactly when two cores are interleaving.
+5. **#520** and **#497**, which have been parked on one missing thing since
+   2026-09-06: a second `profile: begin name=` interval, around a network
+   transfer, in `kernel/net/tcp.tkb`. That file is Territory A's, and the
+   maintainer has since allowed a minimal edit across the boundary -- so this
+   is now a small edit this territory can make for itself rather than a wait.
+   Then **#502** call chains and **#503** PMU counters.
+6. **#281** and **#208**, the ext2 and block-cache pair, and **#182**. These
+   need no Territory A file at all, which is why they sit here rather than
+   higher: they are what to do when the multicore half is blocked, not before
+   it.
+7. **#388** stack-overflow coverage for the hand-written vectors (Territory
+   A's files), **#429** in-kernel GDB stub, **#149** GDB without JTAG,
+   **#444** controlled DDB memory mutation.
 
-   Both lanes are globs now, and the prefix is the dispatch: `check_*` reads
-   tracked files and runs in `make langcheck` under a timeout, `slowcheck_*`
-   waits on something real and runs in `make slowcheck`. The agreed design did
-   not cover a third population the issue had not measured -- the five checks
-   that must be handed a linked ELF or a built kernel -- so those are
-   `buildcheck_*` and sit outside both globs, which is what keeps the prefix
-   meaning exactly one thing rather than usually one thing.
+**#523 carries CI risk** -- it edits `dune-project` and
+`.github/workflows/ci.yml` -- so like #526 before it, it wants a quiet window
+rather than a place in this order.
 
-   The payoff is measured, not argued: `langcheck` fell from 34-46s to 8.0s,
-   and the 34s of controls that used to gate it now run beside the kernel
-   lanes instead of in front of them. `allbuild`'s per-script escape hatch
-   (`ALLBUILD_DEFER_DDB_POSTMORTEM`) is gone with the wall clock it was cut
-   for.
+**#526 closed 2026-09-10**, with the maintainer saying so and Codex holding
+still for the quiet window it needed. `langcheck` had grown from
+one non-ASCII grep into a hand-listed gate of forty-eight invocations, and
+a wall-clock control inside it cost CI nine consecutive runs on 2026-09-07;
+for several of those rounds it gated `allbuild`, so no kernel lane ran and
+the real defects behind it stayed invisible.
 
-   Two things the acceptance list forced that were worth more than the
-   renaming. `check_pass_line_counts.py` now covers every member of both
-   lanes, and the thirty controls -- the one group nothing had held to the
-   rule -- assert a count of the scenarios they ran, so a control whose loop
-   never executes reports zero and is refused. And `docs/BUILD_CHECKS.md`,
-   which called itself the complete inventory while missing thirty langcheck
-   members, is complete and enforced.
+Both lanes are globs now, and the prefix is the dispatch: `check_*` reads
+tracked files and runs in `make langcheck` under a timeout, `slowcheck_*`
+waits on something real and runs in `make slowcheck`. The agreed design did
+not cover a third population the issue had not measured -- the five checks
+that must be handed a linked ELF or a built kernel -- so those are
+`buildcheck_*` and sit outside both globs, which is what keeps the prefix
+meaning exactly one thing rather than usually one thing.
 
-   The closing demonstration is the instance that actually occurred: the
-   2026-09-07 wall-clock control, restored under a fast-gate name, is killed
-   at the bound (`exit=124` after 10s) and the lane goes red. Two other rules
-   catch it even earlier -- it is not in the inventory, and it reports PASS
-   without a count.
+The payoff is measured, not argued: `langcheck` fell from 34-46s to 8.0s,
+and the 34s of controls that used to gate it now run beside the kernel
+lanes instead of in front of them. `allbuild`'s per-script escape hatch
+(`ALLBUILD_DEFER_DDB_POSTMORTEM`) is gone with the wall clock it was cut
+for.
 
-   Renaming `langcheck` and `allbuild` themselves is still deliberately after
-   this, not part of it.
-2. **#520** the kernel's TCP path sustains 15 KiB/s, 12x slower than SWD and
-   flat across transfer size. Measured 2026-09-06 and printed by
-   `make kernelcheck-rpi5` on every run. Attributing it needs a named
-   profiling interval around a network transfer, which is Territory A.
-3. **#497** post-boot profiling. Stages 1-4 turn out to be implemented
-   already and run on every lane; what is left of its first milestone is that
-   second named interval, then **#502** call chains and **#503** PMU
-   counters.
-4. **#388** the hand-written exception vectors carry no stack-overflow test.
-5. **#429** in-kernel GDB stub, **#149** GDB without JTAG, **#444**
-   controlled DDB memory mutation.
+Two things the acceptance list forced that were worth more than the
+renaming. `check_pass_line_counts.py` now covers every member of both
+lanes, and the thirty controls -- the one group nothing had held to the
+rule -- assert a count of the scenarios they ran, so a control whose loop
+never executes reports zero and is refused. And `docs/BUILD_CHECKS.md`,
+which called itself the complete inventory while missing thirty langcheck
+members, is complete and enforced.
 
-#### Territory B cold-start handoff, 2026-09-09
+The closing demonstration is the instance that actually occurred: the
+2026-09-07 wall-clock control, restored under a fast-gate name, is killed
+at the bound (`exit=124` after 10s) and the lane goes red. Two other rules
+catch it even earlier -- it is not in the inventory, and it reports PASS
+without a count.
 
-**#526 sits first and is held.** Read entry 1 again before doing anything with
-it: its position is its value per future round, and the maintainer has said
-explicitly not to start it without saying so. Starting it because it is first
-is the error it was filed about. Everything below is what to do instead.
+Renaming `langcheck` and `allbuild` themselves is still deliberately after
+this, not part of it.
 
-Entries 2 and 3 (#520, #497) are still blocked on the same single thing --
-Territory A's second named profiling interval. Only `profile: begin
-name=busy-pair` exists today, so neither can be attributed rather than guessed
-at. #388's vectors are Territory A's files. So the startable work is the
-unordered list further down, and three entries of it are now closed:
-**#339** on 2026-09-09, **#531**, **#530** and **#529** on 2026-09-10.
-Their entries below say what each found. #275, #281 and #208 -- the ext2/virtio pair that
-needs no Territory A file -- are the next of that list. **#523 carries CI
-risk**: it edits `dune-project` and `.github/workflows/ci.yml`, so it wants
-the same quiet window #526 does.
+#### Territory B cold-start handoff, 2026-09-10
+
+**Start at entry 1 and expect it to be a close, not a build.** The queue above
+was re-cut today and its first four entries are all multicore debuggability;
+two of them are already half-built by Territory A's own work, so read the tree
+before writing anything. The specific claims to check are named in each entry.
+
+Five issues closed since the previous handoff: **#339** and **#526** (the
+latter with the maintainer's explicit go-ahead and a quiet window), plus
+**#531**, **#530** and **#529** on 2026-09-10. Their entries below say what
+each found.
+
+**The territory rule was relaxed on 2026-09-10.** The maintainer asked that a
+minimal edit into the other territory be allowed rather than blocking an
+issue: "please be tolerant of rewriting a minimum of each other's territory".
+The boundary still holds for STRUCTURAL change to a file the other territory
+is reshaping -- that is what it was measured to prevent, and the one conflict
+in the 2026-09-10 rebase was exactly that shape and cost one careful merge.
+But a counter, a print, or a named profiling interval is now a thing to add,
+not a thing to wait for. Entry 5 exists because of that change.
+
+**What the 2026-09-10 rebase cost, for calibration.** Three Territory B
+commits onto Codex's two-core work produced exactly one conflict, in
+`kernel/printk/log.tkb`, where both sides had changed
+`kernel_log_tx_stand_down()` for different reasons: Codex made core 0 the only
+writer of the console queue, and #531 made the function return the state it
+found. Neither side was wrong and a textual merge of either would have been:
+returning a peer's found state lets a peer's resume re-arm core 0's queue
+underneath a terminal path. The merged answer is a third case,
+`NotConsoleOwner`. Expect that shape rather than a clean apply, and read both
+sides' reasons before choosing.
 
 **#339 closed 2026-09-09.** Every one of `disk_initialize()`'s failure
 points answered `DiskIoResult::Err(-1)`, so six different repairs -- controller
@@ -660,10 +735,14 @@ addition fails `langcheck` with the per-MiB cost of raising it in the
 message -- which is the conversation this issue existed to force, now had by
 whoever causes it rather than by whoever remembers.
 
-Waiting on Territory A: #456 and #486 on #504, #505 on #479, #465 on #222.
+Nothing in this territory is waiting on Territory A any more. #456, #486, #505
+and #465 were, on #504, #479 and #222, and all three of those closed -- which
+is what the queue above was re-cut around. The one remaining dependency is
+listed as entry 5 and is now a small edit rather than a wait.
 
-Then, in this territory and unordered: #275, #281, #208,
-#182, #268, #283, #389, #430, plus two the CI work left behind: **#522**,
+Unordered, and not in the queue above: #268, #283, #389, #430, and #275 --
+whose body asks for compiler diagnostics, so despite its place in this list it
+is Territory A work. Plus two the CI work left behind: **#522**,
 counts written into prose that nothing derives -- **closed 2026-09-09**; the
 one current count is derived from the tree the way its runner derives it, and
 the check was verified against all four historical repairs, reporting at each
