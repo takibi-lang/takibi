@@ -12,6 +12,7 @@ hand and nothing would compare it again.
 """
 
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -20,7 +21,29 @@ import tempfile
 REPO = pathlib.Path(__file__).resolve().parent.parent
 CHECK = "scripts/check_documented_counts.py"
 README = "kernel/README.md"
-COUNTED = "PASS kernel/rpi5 (44 views, one boot)"
+COUNTED_PATTERN = r"^PASS kernel/rpi5 \((\d+) views, one boot\)$"
+
+
+def counted():
+    """Read the anchor out of the README rather than transcribing it here.
+
+    This file used to carry the number itself, and went stale the first time
+    a view moved between directories -- which is the exact failure the check
+    it controls exists to prevent, committed by its own control. The number
+    still comes from the README and not from the tree: what the check
+    compares is those two, so a control that computed it the way the check
+    does could agree with a broken check.
+    """
+    text = (REPO / README).read_text(encoding="ascii")
+    match = re.search(COUNTED_PATTERN, text, re.M)
+    if match is None:
+        raise SystemExit(
+            f"{README} no longer carries a `PASS kernel/rpi5 (N views, one "
+            f"boot)` line for this control to plant defects in")
+    return match.group(0), int(match.group(1))
+
+
+COUNTED, COUNT = counted()
 
 
 def run(root):
@@ -84,19 +107,21 @@ def main() -> int:
 
     failures += case(
         "stale number",
-        edit_readme(COUNTED, "PASS kernel/rpi5 (43 views, one boot)"),
-        "says 43 views the RPi5 lane compares; the tree has 44")
+        edit_readme(COUNTED, f"PASS kernel/rpi5 ({COUNT - 1} views, one boot)"),
+        f"says {COUNT - 1} views the RPi5 lane compares; the tree has {COUNT}")
 
     # The failure this check exists to prevent, applied to the check itself.
     failures += case(
         "the sentence reworded out from under it",
-        edit_readme(COUNTED, "PASS kernel/rpi5 -- 44 views from one boot"),
+        edit_readme(COUNTED,
+                    f"PASS kernel/rpi5 -- {COUNT} views from one boot"),
         "the line was reworded or moved")
 
     # A count derived from a stale snapshot rather than from the tree would
     # pass this: the number in the file is untouched and the tree is not.
     failures += case("a view added and the number not", add_a_view,
-                     "says 44 views the RPi5 lane compares; the tree has 45")
+                     f"says {COUNT} views the RPi5 lane compares; the tree "
+                     f"has {COUNT + 1}")
 
     # Numbers this file does not declare are records of what was true at the
     # time, and must stay out of reach. kernel/RESOURCE_LIMITS.md carries four

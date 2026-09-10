@@ -8,6 +8,8 @@ set -euo pipefail
 trap 'takibi_status=$?; echo "[$(basename "$0")] aborted at line $LINENO with exit $takibi_status: $BASH_COMMAND" >&2' ERR
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/kernel_views.sh
+source "$REPO_ROOT/scripts/kernel_views.sh"
 . "$REPO_ROOT/scripts/board_link_gate.sh"
 SERIAL_DEV="${RPI5_SERIAL_DEV:-$($REPO_ROOT/scripts/rpi5_uart_dev.sh)}"
 ELF="$REPO_ROOT/kernel/build/rpi5/kernel.elf"
@@ -576,68 +578,13 @@ trap - EXIT INT TERM HUP
 # removing the trap here removed the only thing that read it.
 trap 'archive_failure $?' EXIT INT TERM HUP
 
-# The real UART echoes a shell command immediately after the prompt, so a
-# command's short output can arrive as `/ # repl-ok` rather than as a separate
-# line. Views describe semantic output, not the interactive prompt; normalize
-# that prefix before projecting the shared capture.
-# The persistent-shell checkpoints name the tracked child's pid, and a pid
-# is minted monotonically rather than read off the process slot (issue
-# #392), so its VALUE counts how many processes the boot created before
-# this fixture -- an artifact of fixture order, not of what this view
-# means. That the four checkpoints all name the SAME child is enforced in
-# the kernel, which logs each of the last three only on a match against
-# the pid the fork checkpoint recorded.
-sed -e 's|^/ # ||' \
-    -e 's|^\(persistent shell: [a-z ]*\)pid=[0-9][0-9]*$|\1pid=<child>|' \
-    <"$UART_LOG" | tr -d '\r' >"$UART_LOG.normalized"
+kernel_views_normalize "$UART_LOG"
 
-# One boot, several independent views. Common views are supplemented by
-# platform-specific views; a platform file overrides a common file with the
-# same name. Each filter projects the shared UART transcript onto one
-# contract, whose expected file is then compared exactly.
-# Adding a subsystem test does not require another reset/load cycle.
-# Same purge, same reason, as scripts/run_kernel_qemutest.sh's own loop: the
-# comparison stops at the first mismatch, so a leftover .actual from the
-# previous run reads like this run's output and is not.
-rm -f "$ARTIFACT_DIR"/*.actual
-view_count=0
-failed_views=""
-view_names="$(
-    for filter in "$COMMON_VIEW_DIR"/*.filter "$VIEW_DIR"/*.filter; do
-        [ -e "$filter" ] || continue
-        basename "$filter" .filter
-    done | LC_ALL=C sort -u
-)"
-while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    if [ -f "$VIEW_DIR/$name.filter" ]; then
-        filter="$VIEW_DIR/$name.filter"
-    else
-        filter="$COMMON_VIEW_DIR/$name.filter"
-    fi
-    if [ -f "$VIEW_DIR/$name.expected" ]; then
-        expected="$VIEW_DIR/$name.expected"
-    else
-        expected="$COMMON_VIEW_DIR/$name.expected"
-    fi
-    actual="$ARTIFACT_DIR/$name.actual"
-    if [ ! -f "$expected" ]; then
-        echo "error: missing expected file for kernel view $name" >&2
-        exit 1
-    fi
-    LC_ALL=C grep -E -f "$filter" "$UART_LOG.normalized" >"$actual" || true
-    if ! cmp -s "$expected" "$actual"; then
-        # Report and keep going, then archive once after the loop. Stopping
-        # at the first mismatch made the output say one view failed when
-        # several had, because every view after it was never compared.
-        echo "FAIL kernel/rpi5 view: $name" >&2
-        diff -u "$expected" "$actual" >&2 || true
-        failed_views="$failed_views $name"
-        continue
-    fi
-    echo "PASS kernel/rpi5 view: $name"
-    view_count=$((view_count + 1))
-done <<<"$view_names"
+views_status=0
+kernel_views_compare "kernel/rpi5" "$ARTIFACT_DIR" "$UART_LOG.normalized" \
+    "$COMMON_VIEW_DIR" "$VIEW_DIR" || views_status=$?
+view_count="$kernel_views_passed"
+failed_views="$kernel_views_failed"
 
 # Report the views BEFORE the DDB exercise, and let the DDB step fail the run
 # without taking them with it. Both orderings were available; this one is the
@@ -655,17 +602,13 @@ done <<<"$view_names"
 # capture left behind was briefly misread as stale because no view lines
 # accompanied it.
 views_failed=0
-if [ -n "$failed_views" ]; then
+if [ "$views_status" -eq 2 ]; then
+    archive_reason="no views compared"
+    exit 1
+elif [ "$views_status" -ne 0 ]; then
     echo "FAIL kernel/rpi5 views:$failed_views" >&2
     echo "artifacts: $ARTIFACT_DIR" >&2
     views_failed=1
-elif [ "$view_count" -eq 0 ]; then
-    # No view compared is not a pass. This is the whole `PASS about nothing`
-    # shape: the loop above finds its filters by glob, and a glob that stops
-    # matching reports success having read no contract at all.
-    echo "error: no kernel integration views found under $COMMON_VIEW_DIR or $VIEW_DIR" >&2
-    archive_reason="no views found"
-    exit 1
 else
     echo "PASS kernel/rpi5 ($view_count views, one boot)"
 fi

@@ -39,6 +39,8 @@ set -euo pipefail
 trap 'takibi_status=$?; echo "[$(basename "$0")] aborted at line $LINENO with exit $takibi_status: $BASH_COMMAND" >&2' ERR
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/kernel_views.sh
+source "$REPO_ROOT/scripts/kernel_views.sh"
 ELF="${KERNEL_QEMU_ELF:-$REPO_ROOT/kernel/build/qemu/kernel.elf}"
 RUN_LABEL="kernel/${KERNEL_QEMU_LABEL:-qemu}"
 VIEW_DIR="$REPO_ROOT/kernel/tests/qemu/views"
@@ -212,82 +214,22 @@ if [ ! -s "$UART_LOG" ]; then
     fi
     exit 1
 fi
-# The persistent-shell checkpoints name the tracked child's pid, and a pid
-# is minted monotonically rather than read off the process slot (issue
-# #392), so its VALUE counts how many processes the boot created before
-# this fixture -- an artifact of fixture order, not of what this view
-# means. That the four checkpoints all name the SAME child is enforced in
-# the kernel, which logs each of the last three only on a match against
-# the pid the fork checkpoint recorded.
-sed -e 's|^/ # ||' \
-    -e 's|^\[[0-9][0-9]*\.[0-9][0-9]*\] |[<time>] |' \
-    -e 's|^\(persistent shell: [a-z ]*\)pid=[0-9][0-9]*$|\1pid=<child>|' \
-    <"$UART_LOG" | tr -d '\r' >"$UART_LOG.normalized"
+kernel_views_normalize "$UART_LOG"
 
 python3 "$REPO_ROOT/scripts/validate_kernel_dmesg_timestamps.py" "$UART_LOG" \
     --timing-profile "${KERNEL_QEMU_TIMING_PROFILE:-local}"
 
-# One boot, several independent views -- see this file's header and
-# scripts/run_kernel_hwtest_rpi5.sh's own identical loop.
-# The view loop stops at the first mismatch, so every .actual after it keeps
-# LAST run's content -- which reads exactly like this run's output and is
-# not. That cost a debugging round trip: a fixed leak was re-diagnosed from
-# a stale file. Purge them so a missing .actual means "never compared",
-# which is the truth.
-rm -f "$ARTIFACT_DIR"/*.actual
-view_count=0
-failed_views=""
-view_names="$(
-    for filter in "$COMMON_VIEW_DIR"/*.filter "$VIEW_DIR"/*.filter; do
-        [ -e "$filter" ] || continue
-        basename "$filter" .filter
-    done | LC_ALL=C sort -u
-)"
-while IFS= read -r name; do
-    [ -n "$name" ] || continue
-    if [ -f "$VIEW_DIR/$name.filter" ]; then
-        filter="$VIEW_DIR/$name.filter"
-    else
-        filter="$COMMON_VIEW_DIR/$name.filter"
-    fi
-    if [ -f "$EXPECTED_VIEW_DIR/$name.expected" ]; then
-        expected="$EXPECTED_VIEW_DIR/$name.expected"
-    elif [ -f "$VIEW_DIR/$name.expected" ]; then
-        expected="$VIEW_DIR/$name.expected"
-    else
-        expected="$COMMON_VIEW_DIR/$name.expected"
-    fi
-    actual="$ARTIFACT_DIR/$name.actual"
-    if [ ! -f "$expected" ]; then
-        echo "error: missing expected file for kernel view $name" >&2
-        exit 1
-    fi
-    LC_ALL=C grep -E -f "$filter" "$UART_LOG.normalized" >"$actual" || true
-    if ! cmp -s "$expected" "$actual"; then
-        # Report and keep going. Stopping at the first mismatch made the
-        # output say "one view failed" when seventeen had, because every
-        # view after it was never compared -- which is also why the .actual
-        # purge above exists. Comparing all of them costs one grep each
-        # against an already-captured log, and a change that moves several
-        # views at once is exactly when the whole list is what you need.
-        echo "FAIL $RUN_LABEL view: $name" >&2
-        diff -u "$expected" "$actual" >&2 || true
-        failed_views="$failed_views $name"
-        continue
-    fi
-    echo "PASS $RUN_LABEL view: $name"
-    view_count=$((view_count + 1))
-done <<<"$view_names"
-
-if [ -n "$failed_views" ]; then
-    echo "FAIL $RUN_LABEL views:$failed_views" >&2
-    echo "artifacts: $ARTIFACT_DIR" >&2
-    archive_reason="failing views:$failed_views"
+views_status=0
+kernel_views_compare "$RUN_LABEL" "$ARTIFACT_DIR" "$UART_LOG.normalized" \
+    "$COMMON_VIEW_DIR" "$VIEW_DIR" "$EXPECTED_VIEW_DIR" || views_status=$?
+view_count="$kernel_views_passed"
+if [ "$views_status" -eq 2 ]; then
     exit 1
 fi
-
-if [ "$view_count" -eq 0 ]; then
-    echo "error: no kernel integration views found under $COMMON_VIEW_DIR or $VIEW_DIR" >&2
+if [ "$views_status" -ne 0 ]; then
+    echo "FAIL $RUN_LABEL views:$kernel_views_failed" >&2
+    echo "artifacts: $ARTIFACT_DIR" >&2
+    archive_reason="failing views:$kernel_views_failed"
     exit 1
 fi
 

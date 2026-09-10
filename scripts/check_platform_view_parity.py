@@ -60,13 +60,6 @@ ALLOWED = {
         "the debug build's image is larger, so the allocator reports fewer "
         "pages. Same filter, same milestones, one number that follows from "
         "the build rather than from the platform",
-    ("qemu", "dmesg"):
-        "the retained-log replay, which asserts timestamped records. The "
-        "board's runner does not normalize the dmesg timestamp prefix and "
-        "QEMU's does, so this view cannot be shared until GitHub issue #530 "
-        "settles that divergence. It also names virtio device markers. The "
-        "board's boot IS validated by scripts/validate_kernel_dmesg_"
-        "timestamps.py, which both lanes run",
     ("qemu", "network"):
         "the same test as rpi5/ethernet, named for the device that runs it: "
         "virtio-net against the host peer",

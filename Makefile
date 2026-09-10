@@ -225,6 +225,7 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 	@python3 scripts/test_validate_kernel_dmesg_timestamps.py
 	@python3 scripts/test_find_stale_issue_workarounds.py
 	@bash scripts/test_archive_kernel_failure.sh
+	@bash scripts/test_kernel_views.sh
 	@python3 scripts/check_direct_mmio_literals.py kernel
 	@python3 scripts/check_no_conflict_markers.py
 	@python3 scripts/test_check_no_conflict_markers.py

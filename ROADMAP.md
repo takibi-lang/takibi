@@ -519,11 +519,12 @@ Entries 2 and 3 (#520, #497) are still blocked on the same single thing --
 Territory A's second named profiling interval. Only `profile: begin
 name=busy-pair` exists today, so neither can be attributed rather than guessed
 at. #388's vectors are Territory A's files. So the startable work is the
-unordered list further down. **#339 was that list's recommended first move and
-closed 2026-09-09; see below, and **#531 closed 2026-09-10.** After them,
-#275, #281 and #208 are the ext2/virtio pair that need no Territory A file,
-and **#530** is the cheapest of what is left. **#523 carries CI risk** -- it edits `dune-project` and
-`.github/workflows/ci.yml` -- so it wants the same quiet window #526 does.
+unordered list further down, and three entries of it are now closed:
+**#339** on 2026-09-09, **#531** and **#530** on 2026-09-10. Their entries
+below say what each found. #275, #281 and #208 -- the ext2/virtio pair that
+needs no Territory A file -- are the next of that list. **#523 carries CI
+risk**: it edits `dune-project` and `.github/workflows/ci.yml`, so it wants
+the same quiet window #526 does.
 
 **#339 closed 2026-09-09.** Every one of `disk_initialize()`'s failure
 points answered `DiskIoResult::Err(-1)`, so six different repairs -- controller
@@ -697,16 +698,36 @@ removed, `kernelcheck-ddb-qemu` fails on `ddb: console tx=spinning`. The RPi5
 driver's control test gained a board that resumes correctly in every other
 respect and leaves the console spinning, and fails.
 
-**#530**, filed 2026-09-09 by the audit that closed this session, is #517's
-shape one layer up: the two lane runners hold the view-comparison loop twice
--- 27 significant lines, including the `.actual` purge whose own comment
-records what a stale one cost -- and their log normalization has already
-diverged, QEMU rewriting the dmesg timestamp prefix where the board does not.
-Nothing detects it, and it silently limits what a shared view may assert --
-`kernel/tests/qemu/views/dmesg` is platform-specific for exactly that reason
-today, and its declaration names #530 as what would retire it.
-`check_platform_file_parity.py` cannot see it: the runners are shell and are
-not a same-named platform file pair.
+**#530 closed 2026-09-10.** It was #517's shape one layer up: the two lane
+runners held the view-comparison loop twice, and the copies had already
+diverged. `scripts/kernel_views.sh` holds it once, and both runners source it.
+
+The divergence was not cosmetic, which is the part worth carrying. QEMU's
+normalization rewrote the dmesg timestamp prefix and the board's did not, so
+`kernel/tests/qemu/views/dmesg` was QEMU-only because of how its runner
+happened to preprocess text -- and the board asserted nothing at all about
+the retained-log replay. With one normalization the view is common, and the
+declaration that named this issue as what would retire it is gone. The shared
+view asserts more than the QEMU-only one did: five records spanning t=0 to
+about twenty seconds, so the ring is shown to have kept late records and not
+only its first two. The board compares 45 views now rather than 44.
+
+A second drift was found while extracting it. Both copies ran `sed` over the
+raw capture and deleted carriage returns afterwards, so a `$`-anchored rule
+only fired on lines the capture happened not to CR-terminate. The pid rule is
+one, it works today by luck of which lines carry a CR, and nothing would have
+noticed that changing. The CR is deleted first now, and the control writes
+that line CR-terminated on purpose.
+
+The loop was previously exercised only by a full boot. `test_kernel_views.sh`
+now asserts it directly in milliseconds: report every mismatch rather than
+stopping at the first, purge a stale `.actual`, refuse a run that compared
+nothing, refuse a filter with no expected file, and let platform and overlay
+lookup win in that order.
+
+Two dead `COMMON_VIEW_DIR` assignments went with it, in the lifecycle-gap and
+alloc-rollback runners -- assigned, never read, and a reader would reasonably
+have concluded those lanes compared views.
 
 ### Not started by either
 

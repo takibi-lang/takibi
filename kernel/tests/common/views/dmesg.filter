@@ -1,0 +1,2 @@
+^\[<time>\] (takibi kernel: EL1|kernel log: overwrite\+line truncation reported|distro stack: argc=2 argv auxv ready|linux socket: listener ready port=8080|foreground server: listener ready port=8080)$
+^busybox dmesg exit: 0$

@@ -43,7 +43,6 @@ trap 'takibi_status=$?; echo "[$(basename "$0")] aborted at line $LINENO with ex
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ELF="$REPO_ROOT/kernel/build/qemu/kernel-debug.elf"
 DEBUG_METADATA="$REPO_ROOT/_build/kernel-debug-metadata.json"
-COMMON_VIEW_DIR="$REPO_ROOT/kernel/tests/common/views"
 ASH_DIR="$REPO_ROOT/kernel/tests/common/ash"
 ARTIFACT_DIR="${KERNEL_QEMU_ALLOC_ROLLBACK_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-alloc-rollback-qemu}"
 UART_LOG="$ARTIFACT_DIR/uart.log"
