@@ -1,8 +1,12 @@
 (library
  (name takibi)
  (public_name takibi)
- (modules ast atomic_spec language_words trap_diagnostics target_info const_env generic_scope type_layout publish_registry publish_record local_bindings value_facts types monomorphize declared_type_resolver takibi_core effect_rules type_inf typechecker unused_functions llvm_gen lexer parser use_resolver)
+ (modules ast atomic_spec llvm_ext language_words trap_diagnostics target_info const_env generic_scope type_layout publish_registry publish_record local_bindings value_facts types monomorphize declared_type_resolver takibi_core effect_rules type_inf typechecker unused_functions llvm_gen lexer parser use_resolver)
  (libraries menhirLib llvm llvm.analysis llvm.target llvm.all_backends llvm.passbuilder llvm.debuginfo)
+ (foreign_stubs
+  (language c)
+  (names llvm_ext_stubs)
+  (flags (:standard -I/usr/lib/llvm-19/include)))
  (instrumentation
   (backend bisect_ppx_ng))
  (preprocess

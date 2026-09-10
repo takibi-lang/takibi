@@ -229,8 +229,8 @@ def check_eret_daif_mask(insns):
 
 
 
-# GitHub issue #445: the pool lock has to be an ATOMIC, and reading the
-# source is not evidence that it is one. Replacing the exchange in
+# GitHub issues #445/#450: the pool lock has to be ATOMIC, and reading the
+# source is not evidence that it is one. Replacing compare-exchange in
 # spin_trylock with a plain store leaves a lock that takes and releases
 # correctly, passes a take/release smoke test, and excludes nothing --
 # that exact substitution was made deliberately while writing
@@ -239,14 +239,13 @@ def check_eret_daif_mask(insns):
 # kernel, where there is no second thread to notice.
 #
 # Two accepted forms rather than one instruction, because WHICH one is the
-# backend's choice from --cpu and both are correct: ARMv8.0 (cortex-a53,
-# QEMU virt) has no LSE and gets an ldaxr/stxr retry loop, while ARMv8.2
-# (cortex-a76, RPi5) gets the single-instruction swpa. Pinning either one
-# specifically would fail on the other target for no reason.
-ATOMIC_EXCHANGE_RE = re.compile(r"^(swpa?l?|ldaxr|cas(a|l|al)?)\b")
+# backend's choice from --cpu and both are required: ARMv8.0 (cortex-a53,
+# QEMU virt) has no LSE and gets ldaxr/stxr, while ARMv8.2 (cortex-a76,
+# RPi5) gets the single-instruction casa. This is also the round-trip test
+# for the project-local LLVMBuildAtomicCmpXchg OCaml bridge.
 
 
-def check_spinlock_is_atomic(insns):
+def check_spinlock_is_atomic(insns, elf_path):
     failures = []
     seen = {}
     for _, text, fn in insns:
@@ -259,11 +258,16 @@ def check_spinlock_is_atomic(insns):
         # build that does and has lost the function is caught below by
         # spin_unlock, and a build with neither has no pool lock to guard.
         pass
-    elif not any(ATOMIC_EXCHANGE_RE.match(t) for t in body):
+    elif "qemu" in elf_path:
+        if not any(t.startswith("ldaxr") for t in body) or not any(
+                t.startswith("stxr") for t in body):
+            failures.append(
+                "QEMU spin_trylock is not the cortex-a53 ldaxr/stxr "
+                "compare-exchange loop"
+            )
+    elif "rpi5" in elf_path and not any(t.startswith("casa") for t in body):
         failures.append(
-            "spin_trylock contains no atomic exchange (looked for swpa/ldaxr/"
-            "cas): a lock that is a plain load and store excludes nothing, "
-            "and passes every single-threaded test"
+            "RPi5 spin_trylock is not the cortex-a76 casa selected by LLVM"
         )
 
     body = seen.get("spin_unlock")
@@ -560,7 +564,7 @@ def main():
     failures = (
         check_uxn(insns, expected_uxn_and_pxn_count)
         + check_eret_daif_mask(insns)
-        + check_spinlock_is_atomic(insns)
+        + check_spinlock_is_atomic(insns, elf_path)
         + check_sctlr_allows_normal_memory_unaligned_access(insns)
         + check_mutex_masks_before_taking(insns)
         + check_tlb_invalidate_all_is_broadcast(insns)
@@ -572,7 +576,7 @@ def main():
         return 1
     report_pass("kernel/asm-invariants", "UXN identity-block bits, eret DAIF.I "
           "masking, SCTLR_EL1.A clear for Normal memory, the spinlock's "
-          "atomicity, mutex_acquire masking "
+          "target-selected compare-exchange, mutex_acquire masking "
           "before it takes, the whole-TLB invalidate broadcasting "
           "while MMU activation stays local, and every exception entry "
           "switching to a stack of its own core, all verified statically",

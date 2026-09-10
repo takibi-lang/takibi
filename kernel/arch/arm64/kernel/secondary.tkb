@@ -46,8 +46,7 @@ private let mut kernel_secondary_boot_state: io usize;
 // kernel where that is load-bearing rather than defensive: the two accesses
 // genuinely run on different cores at the same time, which is the exact
 // situation `io` (volatile, no ordering) does not cover. One writer means
-// no compare-and-swap is needed -- see GitHub issue #450 for why there
-// isn't one to reach for anyway.
+// no compare-and-swap is needed here.
 private let mut secondary_tick_count: usize;
 
 private fn secondary_tick_address() -> usize {

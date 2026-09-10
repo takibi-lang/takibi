@@ -37,9 +37,8 @@
 //
 // Each core writes ONLY its own word, so there is no read-modify-write
 // here and nothing to exclude. That is deliberate twice over. A counter
-// would need an atomic subtract, which this language does not have
-// (`atomic_fetch_add_relaxed` is the only read-modify-write, GitHub issue
-// #450). And the paths this exists for are the paths where a lock is the
+// would need an atomic fetch-subtract, which this language does not have.
+// And the paths this exists for are the paths where a lock is the
 // WRONG answer -- the same reason kernel/lib/diagnostic_ring.tkb is
 // per-CPU and Linux's printk ringbuffer is lock-free: a mechanism that
 // runs while something is being torn down cannot block on the thing

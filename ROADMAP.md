@@ -106,7 +106,10 @@ entry leaves the next one unable to be verified.
    including the page allocator. **#466** lock order is complete: live linear
    guards and transitive minimum-rank acquisition summaries reject the
    Mutex-to-TaskMutex inversion, while equal-rank Mutex instances remain with
-   the existing instance-level checks. Next: **#450** compare-and-swap.
+   the existing instance-level checks. **#450** compare-and-swap is complete:
+   the local LLVM C-API bridge preserves backend instruction selection, and
+   `spin_trylock` is its first caller. Next: **#261** PTE mutation against the
+   hardware page-table walker.
 9. **#261** PTE mutation against the hardware page-table walker.
 10. **#9** processor affinity, with four cores.
 

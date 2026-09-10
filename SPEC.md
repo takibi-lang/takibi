@@ -2411,15 +2411,17 @@ of the pair -- see `kernel/lib/pool_lock.tkb`, and note that the saved
 value has to live in the caller's frame, which is why the guard holding
 it is a linear struct rather than an erased view.
 
-### Atomic Operations (GitHub issue #17)
+### Atomic Operations (GitHub issues #17 and #450)
 
-Four intrinsics, usable only inside `unsafe { ... }`:
+Five intrinsics, usable only inside `unsafe { ... }`:
 
 ```
 atomic_load_acquire(addr: usize) -> usize
 atomic_store_release(addr: usize, value: usize)
 atomic_swap_acquire(addr: usize, value: usize) -> usize
 atomic_fetch_add_relaxed(addr: usize, value: usize) -> usize
+atomic_compare_exchange_acquire(addr: usize, expected: usize,
+                                desired: usize) -> bool
 ```
 
 Their target-independent contracts are:
@@ -2430,6 +2432,7 @@ Their target-independent contracts are:
 | `atomic_store_release` | store | release |
 | `atomic_swap_acquire` | exchange | acquire |
 | `atomic_fetch_add_relaxed` | fetch-add | relaxed |
+| `atomic_compare_exchange_acquire` | compare-exchange | acquire on success, relaxed on failure |
 
 This table is one compiler contract, not a description inferred separately
 from each target's instructions. The type checker, effect inference, builtin
@@ -2463,7 +2466,7 @@ this is the raw instruction, below the level where a type would mean
 anything.
 
 **Which instruction each one becomes is a backend decision, not a spelling
-here.** The read-modify-write pair lowers to LLVM's `atomicrmw`, so the
+here.** The read-modify-write operations lower through LLVM, so the
 selected `--cpu` picks the encoding. Measured on real objdump output:
 
 | | `--cpu cortex-a53` (ARMv8.0, QEMU `virt`) | `--cpu cortex-a76` (ARMv8.2, RPi5) |
@@ -2472,13 +2475,15 @@ selected `--cpu` picks the encoding. Measured on real objdump output:
 | `atomic_store_release` | `stlr` | `stlr` |
 | `atomic_swap_acquire` | `ldaxr`/`stxr` retry loop | `swpa` |
 | `atomic_fetch_add_relaxed` | `ldxr`/`add`/`stxr` retry loop | `ldadd` |
+| `atomic_compare_exchange_acquire` | `ldaxr`/`stxr` retry loop | `casa` |
 
 The load and store are inline asm rather than LLVM atomics because the
 OCaml bindings expose no ordering on `build_load`/`build_store` -- there is
 no `set_ordering` and no `build_fence` in LLVM 19's bindings. Nothing is
 lost by naming them: `ldar`/`stlr` are ARMv8.0 baseline and have no LSE
-variant to miss. The RMW pair deliberately does NOT name its instruction,
-because naming it would cost the a76 the single instruction it has.
+variant to miss. The RMW operations deliberately do NOT name their
+instructions, because naming them would cost the a76 the single instructions
+it has.
 
 **x86-64 is supported as well**, so that a lock built on these can be
 exercised from `linux_user/` at the Linux-native tier, where a test costs
@@ -2489,15 +2494,15 @@ memory clobber that stops the compiler reordering across it. The
 read-modify-write pair needs no target branch at all and becomes `xchgq`
 and `lock xaddq`. It is not a target this kernel runs on.
 
-**Compare-and-swap is deliberately absent.** The same bindings expose
-`build_atomicrmw` but no `build_cmpxchg`, so a CAS would have to be a
-hand-written `ldaxr`/`stlxr` loop -- which would also give up the
-LSE-versus-exclusives choice above. A test-and-set spinlock does not need
-it: it is `atomic_swap_acquire` to take and `atomic_store_release` to
-give back. GitHub issue #450 holds CAS, including the measurement of what
-a hand-written `ldaxr`/`stlxr` loop would cost on the a76.
+LLVM 19's OCaml bindings omit `build_cmpxchg`, although the installed LLVM C
+API provides `LLVMBuildAtomicCmpXchg`. A narrow project-local C stub exposes
+that existing backend operation without patching or rebuilding LLVM. Its
+Takibi result is the success flag because that is the current caller's
+contract: `spin_trylock` must write HELD only when it observed FREE. The
+backend therefore retains its CPU-specific selection shown above rather than
+forcing a hand-written exclusives loop onto the RPi5.
 
-Any other target rejects all four at code generation, by name -- unlike
+Any other target rejects all five at code generation, by name -- unlike
 the intrinsics above, which reach the assembler and fail on the mnemonic.
 
 ### Publication Records (GitHub issue #299)

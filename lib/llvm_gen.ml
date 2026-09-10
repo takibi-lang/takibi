@@ -4378,6 +4378,18 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            (* singlethread = false. The whole point is the other core. *)
            let r = build_atomicrmw op p v ord false "atomic.rmw" builder in
            (TypeUsize, r)
+       | Atomic_spec.Compare_exchange, Atomic_spec.Acquire,
+         [addr_e; expected_e; desired_e] ->
+           let (_, a) = gen_expr ~expected_ty:TypeUsize locals addr_e in
+           let p = build_inttoptr a (pointer_type context) "atomic.addr"
+             builder in
+           let (_, expected) = gen_expr ~expected_ty:TypeUsize locals expected_e in
+           let (_, desired) = gen_expr ~expected_ty:TypeUsize locals desired_e in
+           let pair = Llvm_ext.build_atomic_cmpxchg p expected desired
+             AtomicOrdering.Acquire AtomicOrdering.Monotonic false
+             "atomic.cmpxchg" builder in
+           let success = build_extractvalue pair 1 "atomic.cmpxchg.success" builder in
+           (TypeBool, success)
        | _ ->
            (* Type inference has already rejected arity errors. Reaching
               this arm instead means Atomic_spec contains a contract for
@@ -4388,7 +4400,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              (match spec.operation with
               | Atomic_spec.Load -> "load" | Atomic_spec.Store -> "store"
               | Atomic_spec.Exchange -> "exchange"
-              | Atomic_spec.Fetch_add -> "fetch_add")
+              | Atomic_spec.Fetch_add -> "fetch_add"
+              | Atomic_spec.Compare_exchange -> "compare_exchange")
              (Atomic_spec.ordering_name spec.ordering) name)))
 
   | Call (("publish_begin" | "publish_commit" | "publish_abandon"

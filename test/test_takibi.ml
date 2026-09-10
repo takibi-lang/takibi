@@ -13122,7 +13122,8 @@ let codegen_tests = [
               call) ())
          ["atomic_load_acquire(addr)";
           "atomic_swap_acquire(addr, v)";
-          "atomic_fetch_add_relaxed(addr, v)"];
+          "atomic_fetch_add_relaxed(addr, v)";
+          "atomic_compare_exchange_acquire(addr, v, v)"];
        expect_type_error "raw atomic operation"
          "fn bad_unguarded_store(addr: usize, v: usize) {
             atomic_store_release(addr, v);
@@ -13140,6 +13141,10 @@ let codegen_tests = [
          "fn bad_store(a: usize) !{unsafe} {
             unsafe { atomic_store_release(a); }
           }" ();
+       expect_type_error "expects three arguments"
+         "fn bad_cas(a: usize, v: usize) -> bool !{unsafe} {
+            return unsafe { atomic_compare_exchange_acquire(a, v) };
+          }" ();
        expect_type_error "expects two arguments"
          "fn bad_swap(a: usize) -> usize !{unsafe} {
             return unsafe { atomic_swap_acquire(a) };
@@ -13154,7 +13159,7 @@ let codegen_tests = [
           }" ());
 
   (* The IR-shape half. What this compiler is responsible for is emitting an
-     `atomicrmw` with the right operation and ordering at all; WHICH
+     `atomicrmw`/`cmpxchg` with the right operation and ordering at all; WHICH
      instruction that becomes (ldxr/stxr retry loop on ARMv8.0, swpa/ldadd
      on ARMv8.2+LSE) is LLVM's instruction selection reading --cpu, so
      asserting it here would be testing the backend rather than this
@@ -13169,6 +13174,7 @@ let codegen_tests = [
            | Atomic_spec.Store -> "store"
            | Atomic_spec.Exchange -> "exchange"
            | Atomic_spec.Fetch_add -> "fetch_add"
+           | Atomic_spec.Compare_exchange -> "compare_exchange"
          in
          Printf.sprintf "%s:%s:%s" spec.name operation
            (Atomic_spec.ordering_name spec.ordering)
@@ -13177,11 +13183,12 @@ let codegen_tests = [
          ["atomic_load_acquire:load:acquire";
           "atomic_store_release:store:release";
           "atomic_swap_acquire:exchange:acquire";
-          "atomic_fetch_add_relaxed:fetch_add:relaxed"]
+          "atomic_fetch_add_relaxed:fetch_add:relaxed";
+          "atomic_compare_exchange_acquire:compare_exchange:acquire"]
          (List.map contract Atomic_spec.all));
 
   Alcotest.test_case
-    "issue #17: the RMW pair lowers to atomicrmw, the load/store to ldar/stlr"
+    "issues #17/#450: RMW/CAS use LLVM, load/store use ldar/stlr"
     `Quick
     (fun () ->
        with_codegen_target "aarch64-none-elf" (fun () ->
@@ -13190,6 +13197,9 @@ let codegen_tests = [
               unsafe { atomic_store_release(addr, v); }
               let seen: usize = unsafe { atomic_load_acquire(addr) };
               let old: usize = unsafe { atomic_swap_acquire(addr, v) };
+              let changed: bool = unsafe {
+                atomic_compare_exchange_acquire(addr, old, v)
+              };
               return seen + old
                      + unsafe { atomic_fetch_add_relaxed(addr, v) };
             }" ();
@@ -13202,6 +13212,12 @@ let codegen_tests = [
            true (contains_substring ir "atomicrmw add");
          Alcotest.(check bool) "fetch_add carries monotonic ordering"
            true (contains_substring ir "monotonic");
+         Alcotest.(check bool) "CAS bridge returns LLVM cmpxchg success"
+           true (contains_substring ir "cmpxchg ptr");
+         Alcotest.(check bool) "CAS bridge carries success/failure ordering"
+           true (contains_substring ir "acquire monotonic");
+         Alcotest.(check bool) "CAS success flag is extracted"
+           true (contains_substring ir "extractvalue { i64, i1 }");
          Alcotest.(check bool) "load is ldar"
            true (contains_substring ir "ldar $0, [$1]");
          Alcotest.(check bool) "store is stlr"
@@ -13227,6 +13243,9 @@ let codegen_tests = [
               unsafe { atomic_store_release(addr, v); }
               let seen: usize = unsafe { atomic_load_acquire(addr) };
               let old: usize = unsafe { atomic_swap_acquire(addr, v) };
+              let changed: bool = unsafe {
+                atomic_compare_exchange_acquire(addr, old, v)
+              };
               return seen + old
                      + unsafe { atomic_fetch_add_relaxed(addr, v) };
             }" ();
@@ -13243,6 +13262,8 @@ let codegen_tests = [
            true (contains_substring ir "atomicrmw add");
          Alcotest.(check bool) "x86-64 fetch-add carries relaxed ordering"
            true (contains_substring ir "monotonic");
+         Alcotest.(check bool) "x86-64 compare-exchange uses LLVM cmpxchg"
+           true (contains_substring ir "cmpxchg ptr");
          Alcotest.(check bool) "x86-64 atomics are not single-thread scoped"
            false (contains_substring ir "syncscope(\"singlethread\")"));
        with_codegen_target "thumbv7em-none-eabi" (fun () ->
@@ -13259,7 +13280,8 @@ let codegen_tests = [
          expect_type_error "compiler builtin"
            (Printf.sprintf "fn %s() {}" name) ())
          ["atomic_load_acquire"; "atomic_store_release";
-          "atomic_swap_acquire"; "atomic_fetch_add_relaxed"]);
+          "atomic_swap_acquire"; "atomic_fetch_add_relaxed";
+          "atomic_compare_exchange_acquire"]);
 
   (* ---- GitHub issue #299: fixed-layout records with atomic commit
      publication. The record whose declaration these reuse is the shape

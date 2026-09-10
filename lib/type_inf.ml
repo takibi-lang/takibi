@@ -3349,14 +3349,9 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
          intrinsic is the thing those two are built out of, which is why it
          is gated below.
 
-         Deliberately NOT here: compare-and-swap. LLVM's OCaml bindings
-         expose `build_atomicrmw` but no `build_cmpxchg` (LLVM 19), so a CAS
-         would have to be a hand-written ldaxr/stlxr loop in inline asm,
-         which would also give up the LSE-versus-exclusives choice the
-         backend makes for everything here. Nothing needs it yet: a
-         test-and-set spinlock is `atomic_swap_acquire` plus
-         `atomic_store_release`. GitHub issue #450 holds it, with the
-         measurement of what a hand-written loop would cost. *)
+         Compare-and-swap goes through the project-local LLVM C-API bridge;
+         LLVM 19's OCaml package omits that one binding even though Core.h
+         and the linked LLVM library provide it. *)
       let check_addr addr =
         let at = infer_expr senv eenv tyenv fenv addr in
         unify_at addr.loc at TUsize
@@ -3390,6 +3385,12 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
              "%s expects two arguments: %s(addr, value)" fname fname))
        | (Atomic_spec.Exchange | Atomic_spec.Fetch_add), [addr; v] ->
            check_addr addr; check_value v; TUsize
+       | Atomic_spec.Compare_exchange, [addr; expected; desired] ->
+           check_addr addr; check_value expected; check_value desired; TBool
+       | Atomic_spec.Compare_exchange, _ ->
+           raise (TypeError (e.loc, Printf.sprintf
+             "%s expects three arguments: %s(addr, expected, desired)"
+             fname fname))
        | _, _ ->
            raise (TypeError (e.loc, Printf.sprintf
              "%s expects two arguments: %s(addr, value)" fname fname)))

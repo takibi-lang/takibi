@@ -1,10 +1,10 @@
 // GitHub issue #445: the first thing in this kernel that actually excludes
 // a second core.
 //
-// A test-and-set lock. Taking it is one acquire swap; giving it back is one
-// release store. That pair is enough to build a lock because a swap is
-// atomic: exactly one of two cores swapping into the same word can observe
-// the free value, and the other observes what the winner wrote.
+// A test-and-set lock. Taking it is an acquire compare-exchange from free to
+// held; giving it back is one release store. Exactly one of two cores can
+// change the same free word, while a failed try does not write HELD back into
+// an already-held cache line.
 //
 // Current limitations (2026-08-27). Keep this list current as call sites
 // change; a limitation that goes stale here is worse than none, since it
@@ -13,7 +13,7 @@
 //   with two cores running the same allocate/free cycle against one pool,
 //   core 0 completed 4096 cycles and core 1 completed ONE, because a core
 //   that releases and immediately re-acquires is closest to the lock and
-//   wins the swap. Reversing which core loops tightest reverses the result
+//   wins the compare-exchange. Reversing which core loops tightest reverses the result
 //   (892134 to 4096 the other way), and across boots of the same binary
 //   the overlap measure came out 1, 44, 73 and 4096 -- so no bound on how
 //   long a waiter waits can be read off this lock at all. QEMU showed
@@ -23,8 +23,9 @@
 //   defect here: every current caller holds it for a short, straight-line
 //   critical section reached from syscall context, so what starvation
 //   costs is latency and not correctness. #478 holds the ticket-lock
-//   option, which this kernel's atomics could already express -- it needs
-//   fetch-add and not compare-and-swap. Do not read the cache-line
+//   option. Its blocking acquire needs fetch-add; preserving spin_trylock's
+//   nonblocking contract also needs the compare-exchange added by #450.
+//   Do not read the cache-line
 //   paragraph above as a fairness claim: it is about throughput under
 //   contention and says nothing about who goes next.
 // - NOT A PUBLIC API. kernel/lib/pool_lock.tkb is the only caller and
@@ -79,8 +80,10 @@ const SPIN_LOCK_HELD: usize = 1;
 // thread there is no other way to observe that the lock excludes anything,
 // and "it compiles" is not evidence a lock works.
 fn spin_trylock(lock: usize) -> bool !{requires_mmu, unsafe} {
-    let previous: usize = unsafe { atomic_swap_acquire(lock, SPIN_LOCK_HELD) };
-    return previous == SPIN_LOCK_FREE;
+    return unsafe {
+        atomic_compare_exchange_acquire(
+            lock, SPIN_LOCK_FREE, SPIN_LOCK_HELD)
+    };
 }
 
 // Blocks until taken.

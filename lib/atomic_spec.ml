@@ -3,7 +3,7 @@
    this table so an operation cannot acquire a different ordering merely by
    taking another backend branch. *)
 
-type operation = Load | Store | Exchange | Fetch_add
+type operation = Load | Store | Exchange | Fetch_add | Compare_exchange
 type ordering = Relaxed | Acquire | Release
 
 type t = {
@@ -18,6 +18,8 @@ let all = [
   { name = "atomic_swap_acquire"; operation = Exchange; ordering = Acquire };
   { name = "atomic_fetch_add_relaxed"; operation = Fetch_add;
     ordering = Relaxed };
+  { name = "atomic_compare_exchange_acquire"; operation = Compare_exchange;
+    ordering = Acquire };
 ]
 
 module StringMap = Map.Make (String)
