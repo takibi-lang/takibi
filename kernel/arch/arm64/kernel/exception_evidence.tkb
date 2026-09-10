@@ -134,6 +134,7 @@ private let mut ddb_snapshot_published_sequence: usize;
 let mut kernel_ddb_breakpoint_test_enabled: bool;
 let mut kernel_ddb_memory_fault_test_enabled: bool;
 let mut kernel_ddb_backtrace_test_enabled: bool;
+let mut kernel_ddb_wait_test_enabled: bool;
 let mut kernel_ddb_memory_access_active: bool;
 let mut kernel_ddb_memory_access_faulted: bool;
 let mut kernel_ddb_memory_access_address: usize;
@@ -1105,6 +1106,208 @@ private fn ddb_render_ps() !{unsafe} {
     }
 }
 
+// GitHub issue #529: the causal edge, derived from the snapshot already
+// taken.
+//
+// `ps`, `sched` and `current` between them held every fact needed to explain
+// issue #524's stall, and it was still assembled by hand: a parent Blocked on
+// ChildExit over a child that was itself the current, non-preemptible process
+// waiting in accept for a network event. Every fact was on the screen; the
+// relation between them was not. This adds no instrumentation to the failing
+// path -- it walks the stopped records once and prints what they already say.
+//
+// What it must not do is claim an edge the kernel does not know. A process
+// waiting for UART, network, a deadline or a signal is waiting for an EVENT,
+// not for another process, and guessing which future process will deliver it
+// would turn a diagnosis into a suggestion. Only ChildExit names a process,
+// because a parent's children name themselves in their own `ppid`.
+//
+// The names come from the same two integer vocabularies `ps` prints raw, and
+// scripts/check_ddb_wait_reason_names.py holds the two namers below to the
+// enums kernel/kernel/process.tkb encodes them from: a reason added there
+// and not named here would print as a number again, which is the thing this
+// view exists to stop.
+private fn ddb_state_name(state: usize) -> *u8 {
+    match state {
+        0 => { return "free"; }
+        1 => { return "ready"; }
+        2 => { return "running"; }
+        3 => { return "blocked"; }
+        4 => { return "exited"; }
+        5 => { return "constructing"; }
+        _ => { return "unknown"; }
+    }
+}
+
+private fn ddb_wait_reason_name(reason: usize) -> *u8 {
+    match reason {
+        0 => { return "none"; }
+        1 => { return "uart-rx"; }
+        2 => { return "child-exit"; }
+        3 => { return "net-rx"; }
+        4 => { return "deadline"; }
+        5 => { return "signal"; }
+        _ => { return "unknown"; }
+    }
+}
+
+// One edge per process that is waiting for anything, plus a header naming the
+// current process and a trailer counting what was rendered.
+//
+// `awaited` on the header is #524's whole shape in one digit: the current
+// process is Running and something is blocked on its exit, so the condition
+// that authorises holding the machine is produced by the thing the machine is
+// being held for.
+//
+// A process is asked about when it is Blocked OR when it carries a wait
+// reason, not only when it is Blocked. That is deliberate: #524's child was
+// the RUNNING process and its reason was the network. A loop over blocked
+// records alone would have dropped the one record that explains the stall.
+//
+// Records are matched by pid within this one snapshot; nothing is
+// dereferenced and no live structure is walked. A pid can be recycled, so a
+// parent whose child is gone reports `child unknown` rather than attaching
+// to whatever now answers to that number, and the trailer counts those
+// separately so an unresolved chain cannot read as a resolved one.
+private fn ddb_render_wait_from(
+        records: borrow [ProcessDdbRecord; DDB_PROCESS_RECORDS..],
+        count: usize, truncated: usize, current_pid: usize,
+        current_state: usize, current_reason: usize) !{unsafe} {
+    let mut awaited: usize = 0;
+    for index: usize in 0..<DDB_PROCESS_RECORDS {
+        if (index < count && records[index].state == 3 &&
+                records[index].wait_reason == 2) {
+            for child: usize in 0..<DDB_PROCESS_RECORDS {
+                if (child < count && records[child].pid == current_pid &&
+                        records[child].ppid == records[index].pid) {
+                    awaited = 1;
+                }
+            }
+        }
+    }
+    ddb_puts("ddb: wait current="); ddb_put_udec(current_pid);
+    ddb_puts(" state="); ddb_puts(ddb_state_name(current_state));
+    ddb_puts(" reason="); ddb_puts(ddb_wait_reason_name(current_reason));
+    ddb_puts(" awaited="); ddb_put_udec(awaited);
+    ddb_puts("\n");
+
+    let mut edges: usize = 0;
+    let mut blocked: usize = 0;
+    let mut unknown: usize = 0;
+    for index: usize in 0..<DDB_PROCESS_RECORDS {
+        if (index < count) {
+            let pid: usize = records[index].pid;
+            let state: usize = records[index].state;
+            let reason: usize = records[index].wait_reason;
+            if (state == 3) { blocked = blocked + 1; }
+            if (state == 3 || reason != 0) {
+                if (reason == 2) {
+                    let mut children: usize = 0;
+                    for child: usize in 0..<DDB_PROCESS_RECORDS {
+                        if (child < count && records[child].ppid == pid &&
+                                records[child].pid != 0) {
+                            ddb_puts("ddb: wait pid="); ddb_put_udec(pid);
+                            ddb_puts(" state="); ddb_puts(ddb_state_name(state));
+                            ddb_puts(" waits-for child pid=");
+                            ddb_put_udec(records[child].pid);
+                            ddb_puts(" state=");
+                            ddb_puts(ddb_state_name(records[child].state));
+                            ddb_puts("\n");
+                            children = children + 1;
+                            edges = edges + 1;
+                        }
+                    }
+                    if (children == 0) {
+                        ddb_puts("ddb: wait pid="); ddb_put_udec(pid);
+                        ddb_puts(" state="); ddb_puts(ddb_state_name(state));
+                        ddb_puts(" waits-for child unknown\n");
+                        unknown = unknown + 1;
+                    }
+                } else if (reason == 0) {
+                    // Blocked with nothing recorded to be blocked on. Said
+                    // rather than skipped: a process in that state is a
+                    // finding, and leaving it out of the listing would leave
+                    // the trailer's `blocked` count unexplained.
+                    ddb_puts("ddb: wait pid="); ddb_put_udec(pid);
+                    ddb_puts(" state="); ddb_puts(ddb_state_name(state));
+                    ddb_puts(" waits-for unknown\n");
+                    unknown = unknown + 1;
+                } else {
+                    ddb_puts("ddb: wait pid="); ddb_put_udec(pid);
+                    ddb_puts(" state="); ddb_puts(ddb_state_name(state));
+                    ddb_puts(" waits-for event=");
+                    ddb_puts(ddb_wait_reason_name(reason));
+                    ddb_puts("\n");
+                    edges = edges + 1;
+                }
+            }
+        }
+    }
+    ddb_puts("ddb: wait edges="); ddb_put_udec(edges);
+    ddb_puts(" blocked="); ddb_put_udec(blocked);
+    ddb_puts(" unknown="); ddb_put_udec(unknown);
+    ddb_puts(" truncated="); ddb_put_udec(truncated);
+    ddb_puts("\n");
+}
+
+private fn ddb_render_wait() !{unsafe} {
+    ddb_render_wait_from(ddb_snapshot.processes as []ProcessDdbRecord,
+                         ddb_snapshot.process_count,
+                         ddb_snapshot.process_truncated,
+                         ddb_snapshot.process_pid,
+                         ddb_snapshot.process_state,
+                         ddb_snapshot.wait_reason);
+}
+
+// Issue #524's topology, rendered from records this file wrote rather than
+// from a boot that has to reproduce the stall. A view compares it on both
+// lanes, so the presentation is asserted rather than trusted to whoever next
+// reads a capture.
+//
+// Held in a static rather than on the stack: DDB runs on the interrupted
+// stack, and 32 records is two kilobytes of it.
+private let mut ddb_wait_test_records: [ProcessDdbRecord; DDB_PROCESS_RECORDS];
+
+private fn ddb_wait_test_record(index: {0..<DDB_PROCESS_RECORDS as usize},
+                                pid: usize, ppid: usize,
+                                state: usize, reason: usize) {
+    ddb_wait_test_records[index].pid = pid;
+    ddb_wait_test_records[index].ppid = ppid;
+    ddb_wait_test_records[index].state = state;
+    ddb_wait_test_records[index].wait_reason = reason;
+    ddb_wait_test_records[index].saved_sp = 0;
+    ddb_wait_test_records[index].stack_bottom = 0;
+    ddb_wait_test_records[index].stack_top = 0;
+    ddb_wait_test_records[index].root_slot = 0;
+}
+
+private fn ddb_render_wait_test() !{unsafe} {
+    for index: usize in 0..<DDB_PROCESS_RECORDS {
+        ddb_wait_test_record(index, 0, 0, 0, 0);
+    }
+    // #524 itself: grandparent and parent both blocked collecting a child,
+    // and the child is the current process, running and waiting for a network
+    // event that only an interrupt can deliver.
+    ddb_wait_test_record(0, 1, 0, 3, 2);
+    ddb_wait_test_record(1, 2, 1, 3, 2);
+    ddb_wait_test_record(2, 3, 2, 2, 3);
+    // A parent whose child is not in the snapshot -- gone, recycled, or cut
+    // off by truncation. Reported as unknown rather than attached to whatever
+    // now answers to that number.
+    ddb_wait_test_record(3, 9, 0, 3, 2);
+    // The remaining event vocabularies, so every name this view can print is
+    // printed by something a lane compares.
+    // Parented at 0, which no record in this snapshot claims, so they add
+    // event nodes without adding children to the chain above.
+    ddb_wait_test_record(4, 10, 0, 3, 1);
+    ddb_wait_test_record(5, 11, 0, 3, 4);
+    ddb_wait_test_record(6, 12, 0, 3, 5);
+    // Blocked on nothing recorded.
+    ddb_wait_test_record(7, 13, 0, 3, 0);
+    ddb_render_wait_from(ddb_wait_test_records as []ProcessDdbRecord,
+                         8, 1, 3, 2, 3);
+}
+
 private fn ddb_render_proc(pid: usize) !{unsafe} {
     for index: usize in 0..<DDB_PROCESS_RECORDS {
         if (index < ddb_snapshot.process_count &&
@@ -1242,6 +1445,8 @@ private fn kernel_ddb_enter_stopped(
             ddb_render_fds();
         } else if (ddb_command_is(line as []u8, length, bs"ps")) {
             ddb_render_ps();
+        } else if (ddb_command_is(line as []u8, length, bs"wait")) {
+            ddb_render_wait();
         } else if (ddb_command_is(line as []u8, length, bs"events")) {
             ddb_render_events();
         } else {
@@ -1295,8 +1500,14 @@ private fn kernel_ddb_enter_stopped(
                         // L1 index 32 is unmapped on both maintained targets;
                         // index 64 is RPi5 device MMIO despite faulting on QEMU.
                         ddb_render_kernel_memory(0x800000000, 1);
+                    } else if (kernel_ddb_wait_test_enabled &&
+                            ddb_command_is(line as []u8, length, bs"waittest")) {
+                        // Test-only: issue #524's topology from records this
+                        // file wrote, so the presentation is compared by a
+                        // lane instead of waiting for the stall to recur.
+                        ddb_render_wait_test();
                     } else if (ddb_command_is(line as []u8, length, bs"help")) {
-                        ddb_puts("commands: oops regs intr sched current vm fds ps proc PID bt [PID] trace events xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] help continue\n");
+                        ddb_puts("commands: oops regs intr sched current vm fds ps wait proc PID bt [PID] trace events xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] help continue\n");
                     } else { ddb_puts("ddb: unknown command; try help\n"); }
                     }
                         }

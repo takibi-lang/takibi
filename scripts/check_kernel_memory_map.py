@@ -488,12 +488,27 @@ def check_allocator_expectations(problems, include_debug) -> int:
             fail("usable_ram_start is absent from the QEMU debug build")
         actual = page_span(debug_start, QEMU_RAM_END,
                            "QEMU debug managed RAM")
+        # The debug lane reads kernel/tests/qemu-debug/views/boot.expected
+        # when that overlay exists and the ordinary QEMU view when it does
+        # not, exactly as scripts/run_kernel_qemutest.sh resolves it. The
+        # overlay exists BECAUSE the larger DWARF-bearing image lands in a
+        # different 32 KiB granule -- when it does not, an overlay holding
+        # the same bytes is a duplicate, which
+        # scripts/check_platform_view_parity.py refuses. So its absence is a
+        # claim too: the two builds agree, and this comparison is what says
+        # whether they still do.
         relative = "kernel/tests/qemu-debug/views/boot.expected"
+        if not (REPO / relative).exists():
+            relative = "kernel/tests/qemu/views/boot.expected"
         documented = expected_boot_pages(REPO / relative)
         if documented != actual:
             problems.append(
                 f"`{relative}` says allocator_pages={documented}, "
-                f"linked layout requires {actual}")
+                f"linked layout requires {actual} for the debug build"
+                + ("" if relative.startswith("kernel/tests/qemu-debug")
+                   else " -- the two builds no longer agree, so the debug "
+                        "lane needs kernel/tests/qemu-debug/views/"
+                        "boot.expected back"))
         compared += 1
     return compared
 

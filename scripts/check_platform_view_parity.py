@@ -56,10 +56,6 @@ ALLOWED = {
         "the same inventory for the board: 1019 MiB behind two reservations, "
         "and the RP1 system timer cross-checked against the architected "
         "counter, which QEMU has no equivalent of",
-    ("qemu-debug", "boot"):
-        "the debug build's image is larger, so the allocator reports fewer "
-        "pages. Same filter, same milestones, one number that follows from "
-        "the build rather than from the platform",
     ("qemu", "network"):
         "the same test as rpi5/ethernet, named for the device that runs it: "
         "virtio-net against the host peer",

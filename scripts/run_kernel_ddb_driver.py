@@ -52,7 +52,7 @@ def main() -> int:
     commands = [
         b"oops\n", b"regs\n", b"intr\n", b"sched\n",
         b"current\n", b"vm\n", b"fds\n",
-        b"ps\n", b"proc 1\n",
+        b"ps\n", b"wait\n", b"waittest\n", b"proc 1\n",
         b"bt\n", b"bt 1\n", b"bt 0\n", b"bt 999999\n", b"bttest\n",
         b"trace\n", b"events\n",
         f"xk {args.kernel_address} 2\n".encode("ascii"),

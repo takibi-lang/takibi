@@ -191,6 +191,7 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 	@python3 scripts/check_documented_counts.py
 	@python3 scripts/check_irq_restore_sites.py
 	@python3 scripts/check_platform_view_parity.py
+	@python3 scripts/check_ddb_wait_reason_names.py
 	@python3 scripts/test_check_expected_line_endings.py
 	@python3 scripts/check_expected_line_endings.py
 	@python3 scripts/test_check_elf_symbol_alignment.py
@@ -210,6 +211,7 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 	@python3 scripts/test_rpi5_set_kernel_byte.py
 	@python3 scripts/test_check_direct_mmio_literals.py
 	@python3 scripts/test_check_ddb_command_inventory.py
+	@python3 scripts/test_check_ddb_wait_reason_names.py
 	@python3 scripts/test_check_fallback_counters.py
 	@python3 scripts/test_check_platform_file_parity.py
 	@python3 scripts/test_check_irq_restore_sites.py

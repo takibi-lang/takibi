@@ -54,6 +54,11 @@ REPLIES = {
             b"stack=0x00000000005bc000..0x00000000005c0000\n"
             b"ddb: bt frame=0 pc=0x00000000400103a0 boundary=user\n"
             b"ddb: bt stop=user-boundary fp=0x000000007ffffa40\n"),
+    # GitHub issue #529. A board mid-boot has nothing waiting on anything,
+    # which is the answer the driver has to accept as well as a stall: it
+    # asserts the header and the summary, not that an edge was found.
+    b"wait": (b"\nddb: wait current=37 state=running reason=none awaited=0\n"
+              b"ddb: wait edges=0 blocked=0 unknown=0 truncated=0\n"),
 }
 # What the board actually produces: the command's output on its own line,
 # then the next prompt. The `ddb: continuing` line supplies the newline in
@@ -233,12 +238,32 @@ def main() -> int:
                 restore_console=False) is None:
         return 1
 
+    # A board that answers `wait` with something the derivation could not have
+    # produced (GitHub issue #529). The driver asserts the shape of the header
+    # and of the summary, so a rendering that stops naming its states, or
+    # stops summarising at all, has to fail here -- otherwise it would pass
+    # quietly on a lane whose real snapshot happens to have nothing waiting.
+    intact_wait = REPLIES[b"wait"]
+    summary = b"ddb: wait edges=0 blocked=0 unknown=0 truncated=0\n"
+    REPLIES[b"wait"] = b"\nddb: wait current=37\n" + summary
+    outcome = run_case("a wait header the derivation could not produce", 1,
+                       6.0, False, ["did not render the wait header"])
+    if outcome is not None:
+        REPLIES[b"wait"] = (b"\nddb: wait current=37 state=running "
+                            b"reason=none awaited=0\n")
+        outcome = run_case("a wait listing with no summary", 1, 6.0, False,
+                           ["did not render the wait summary"])
+    REPLIES[b"wait"] = intact_wait
+    if outcome is None:
+        return 1
+
     print("PASS ddb-rpi5-driver controls: the wake byte is acknowledged "
           "before the BREAK and a board that never answers it says so, an "
           "immediate resume takes one command, a dropped first command is "
           "retried during silence, a workload that never answers fails "
-          "with the attempt count, and a resume that leaves the console "
-          "spinning fails")
+          "with the attempt count, a resume that leaves the console "
+          "spinning fails, and a wait view missing its header or its "
+          "summary fails")
     return 0
 
 

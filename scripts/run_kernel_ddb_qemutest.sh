@@ -74,6 +74,7 @@ GDB_COMMANDS=(
     -ex "continue"
     -ex "set *(char *)&kernel_ddb_memory_fault_test_enabled = 1"
     -ex "set *(char *)&kernel_ddb_backtrace_test_enabled = 1"
+    -ex "set *(char *)&kernel_ddb_wait_test_enabled = 1"
     -ex "set *(char *)&diagnostic_trace_test_enabled = 1"
     -ex "disable 1"
 )
@@ -159,6 +160,16 @@ wait "$driver_pid"
 python3 "$REPO_ROOT/scripts/validate_kernel_gdb_state.py" \
     --uart-log "$UART_LOG" --gdb-log "$GDB_VIEW_LOG"
 
+# GitHub issue #529: two claims, and they are different claims. The first two
+# patterns are the REAL snapshot's derivation -- whatever this boot's
+# processes were doing, the header and the summary must be there and must
+# name their states rather than print numbers. The rest is `waittest`, which
+# renders issue #524's own topology from records the debugger wrote: a
+# grandparent and a parent both blocked collecting a child, and the child the
+# current, running process waiting for a network event. That chain is the
+# thing the view exists to present, and reproducing the stall to see it is
+# exactly what this replaces.
+
 # GitHub issue #531: `console tx=queued` is the resume putting back the state
 # the stand-down found. Asserted here because nothing else on this lane can
 # see it -- the boot's own `console: tx spin` measurement is printed before
@@ -218,7 +229,19 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         [ "$(grep -c '^ddb: usage: xu PID HEX_ADDRESS \[COUNT_1_TO_64\]$' "$UART_LOG")" -ne 2 ] ||
         ! grep -q '^ddb: xu pid not captured$' "$UART_LOG" ||
         ! grep -q '^ddb: xu unmapped address=0x0000000070000000$' "$UART_LOG" ||
-        ! grep -q '^commands: oops regs intr sched current vm fds ps proc PID bt \[PID\] trace events xk ADDRESS \[COUNT\] xp PHYSICAL \[COUNT\] xu PID ADDRESS \[COUNT\] help continue$' "$UART_LOG" ||
+        ! grep -q '^commands: oops regs intr sched current vm fds ps wait proc PID bt \[PID\] trace events xk ADDRESS \[COUNT\] xp PHYSICAL \[COUNT\] xu PID ADDRESS \[COUNT\] help continue$' "$UART_LOG" ||
+        ! grep -Eq '^ddb: wait current=[0-9]+ state=[a-z-]+ reason=[a-z-]+ awaited=[01]$' "$UART_LOG" ||
+        ! grep -Eq '^ddb: wait edges=[0-9]+ blocked=[0-9]+ unknown=[0-9]+ truncated=[01]$' "$UART_LOG" ||
+        ! grep -q '^ddb: wait current=3 state=running reason=net-rx awaited=1$' "$UART_LOG" ||
+        ! grep -q '^ddb: wait pid=1 state=blocked waits-for child pid=2 state=blocked$' "$UART_LOG" ||
+        ! grep -q '^ddb: wait pid=2 state=blocked waits-for child pid=3 state=running$' "$UART_LOG" ||
+        ! grep -q '^ddb: wait pid=3 state=running waits-for event=net-rx$' "$UART_LOG" ||
+        ! grep -q '^ddb: wait pid=9 state=blocked waits-for child unknown$' "$UART_LOG" ||
+        ! grep -q '^ddb: wait pid=10 state=blocked waits-for event=uart-rx$' "$UART_LOG" ||
+        ! grep -q '^ddb: wait pid=11 state=blocked waits-for event=deadline$' "$UART_LOG" ||
+        ! grep -q '^ddb: wait pid=12 state=blocked waits-for event=signal$' "$UART_LOG" ||
+        ! grep -q '^ddb: wait pid=13 state=blocked waits-for unknown$' "$UART_LOG" ||
+        ! grep -q '^ddb: wait edges=6 blocked=7 unknown=2 truncated=1$' "$UART_LOG" ||
         ! grep -q '^ddb: continuing$' "$UART_LOG" ||
         ! grep -q '^ddb: console tx=queued$' "$UART_LOG" ||
         ! grep -q '^init: ash bootstrap$' "$UART_LOG"; then

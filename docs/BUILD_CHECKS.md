@@ -23,6 +23,7 @@ than warns; do not bypass or weaken one merely to complete a change.
 | `check_liveness_proof_escapes.py` | every place that drops a pool's liveness proof is declared with a reason |
 | `check_invariant_lines_unviewed.py` | invariant reports are either diagnostic-only or enforced by absence, never asserted as correct |
 | `check_fallback_counters.py` | every dead-slot fallback counter is summed into one positively reported line a view expects, so a fallback that fires loses a line rather than adding one |
+| `check_ddb_wait_reason_names.py` | DDB's wait view names every process state and wait reason the kernel encodes for the debugger snapshot, spelled from the enum case |
 | `check_dead_slot_peek_not_retained.py` | the dead-slot-tolerant record peek is read on the spot, never bound |
 | `check_probe_entry_gates.py` | a two-core probe's arrival gate waits on a count that only grows, never on a level the other core clears |
 | `check_execution_model_coverage.py` | mutable kernel state declares its execution model |

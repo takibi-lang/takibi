@@ -220,11 +220,13 @@ chardev to deliver the equivalent BREAK through a private QMP control socket.
 The existing TCP UART/miniterm data path is unchanged. The kernel prints
 `ddb>` and accepts the following commands.
 <!-- DDB-COMMAND-INVENTORY-START -->
-`oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `proc PID`;
-`bt [PID]`; `trace`; `events`; `xk ADDRESS [COUNT]`; `xp PHYSICAL [COUNT]`;
-`xu PID ADDRESS [COUNT]`; `help`; `continue`.
+`oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `wait`;
+`proc PID`; `bt [PID]`; `trace`; `events`; `xk ADDRESS [COUNT]`;
+`xp PHYSICAL [COUNT]`; `xu PID ADDRESS [COUNT]`; `help`; `continue`.
 <!-- DDB-COMMAND-INVENTORY-END -->
-Use
+`wait` derives who is waiting for what from that same snapshot: a blocked
+parent names the child it can collect, and a UART, network, deadline or signal
+wait is shown as an event node rather than as a guessed producer. Use
 `continue` to return through the saved exception frame. The debugger writes
 every byte by spinning on the UART FIFO -- it is entered with interrupts
 masked, so it has nothing to drain a transmit queue with -- and `continue`
@@ -706,9 +708,9 @@ reachable operation is fixed-size and polling-only, with no allocator, lock,
 scheduler, sleep, filesystem, network, or ordinary logging dependency. Its
 public command inventory follows.
 <!-- DDB-COMMAND-INVENTORY-START -->
-`oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `proc PID`;
-`bt [PID]`; `trace`; `events`; `xk ADDRESS [COUNT]`; `xp PHYSICAL [COUNT]`;
-`xu PID ADDRESS [COUNT]`; `help`; `continue`.
+`oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `wait`;
+`proc PID`; `bt [PID]`; `trace`; `events`; `xk ADDRESS [COUNT]`;
+`xp PHYSICAL [COUNT]`; `xu PID ADDRESS [COUNT]`; `help`; `continue`.
 <!-- DDB-COMMAND-INVENTORY-END -->
 `help` lists the same inventory.
 

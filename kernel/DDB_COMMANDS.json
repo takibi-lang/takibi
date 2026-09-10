@@ -8,6 +8,7 @@
     {"name": "vm", "usage": "vm", "coverage": "qemu"},
     {"name": "fds", "usage": "fds", "coverage": "qemu"},
     {"name": "ps", "usage": "ps", "coverage": "qemu"},
+    {"name": "wait", "usage": "wait", "coverage": "qemu"},
     {"name": "proc", "usage": "proc PID", "coverage": "qemu"},
     {"name": "bt", "usage": "bt [PID]", "coverage": "qemu"},
     {"name": "trace", "usage": "trace", "coverage": "qemu"},
@@ -29,6 +30,12 @@
       "name": "xkfault",
       "classification": "test-only",
       "reason": "bypasses the RAM classifier to exercise guarded fault recovery",
+      "coverage": "qemu"
+    },
+    {
+      "name": "waittest",
+      "classification": "test-only",
+      "reason": "renders issue #524's wait topology from records the debugger wrote, so the causal presentation is compared without reproducing the stall",
       "coverage": "qemu"
     }
   ]

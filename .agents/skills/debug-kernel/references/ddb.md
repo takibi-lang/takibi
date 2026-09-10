@@ -15,15 +15,23 @@ inspection, and resume.
 ## First-pass commands
 
 <!-- DDB-COMMAND-INVENTORY-START -->
-`oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `proc PID`;
-`bt [PID]`; `trace`; `events`; `xk ADDRESS [COUNT]`; `xp PHYSICAL [COUNT]`;
-`xu PID ADDRESS [COUNT]`; `help`; `continue`.
+`oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `wait`;
+`proc PID`; `bt [PID]`; `trace`; `events`; `xk ADDRESS [COUNT]`;
+`xp PHYSICAL [COUNT]`; `xu PID ADDRESS [COUNT]`; `help`; `continue`.
 <!-- DDB-COMMAND-INVENTORY-END -->
 
 - `regs`, `intr`, `sched`, `current`: saved CPU, interrupt-entry, scheduler,
   and current-process state.
 - `ps`, `proc PID`: bounded process snapshots. A truncated snapshot saying
   `not captured` does not prove that a PID does not exist.
+- `wait`: who is waiting for what, derived from the same snapshot. A parent
+  blocked collecting a child names that child; UART, network, deadline and
+  signal waits are event nodes, because the kernel does not know which future
+  process will deliver them and a guess would read as a finding. `awaited=1`
+  on the header means something is blocked on the exit of the process that is
+  currently running -- the shape a non-preemptible stall takes. A parent whose
+  child is not in the snapshot reports `child unknown` rather than attaching
+  to whatever now answers to that number, and the trailer counts those.
 - `bt [PID]`: checked compiler frame chain for the interrupted context or a
   captured non-current process. Any unsupported or damaged boundary stops
   explicitly instead of guessing.

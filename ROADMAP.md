@@ -520,8 +520,8 @@ Territory A's second named profiling interval. Only `profile: begin
 name=busy-pair` exists today, so neither can be attributed rather than guessed
 at. #388's vectors are Territory A's files. So the startable work is the
 unordered list further down, and three entries of it are now closed:
-**#339** on 2026-09-09, **#531** and **#530** on 2026-09-10. Their entries
-below say what each found. #275, #281 and #208 -- the ext2/virtio pair that
+**#339** on 2026-09-09, **#531**, **#530** and **#529** on 2026-09-10.
+Their entries below say what each found. #275, #281 and #208 -- the ext2/virtio pair that
 needs no Territory A file -- are the next of that list. **#523 carries CI
 risk**: it edits `dune-project` and `.github/workflows/ci.yml`, so it wants
 the same quiet window #526 does.
@@ -653,8 +653,7 @@ one current count is derived from the tree the way its runner derives it, and
 the check was verified against all four historical repairs, reporting at each
 commit's parent the exact number that commit went on to write -- and **#523**, the build's dependencies written
 down three times, of which `check_ci_opam_deps.py` compares two and the third
-is already wrong; and #529, a causal DDB wait view derived from its existing
-stopped process snapshot.
+is already wrong; and **#529 -- closed 2026-09-10**, see below.
 
 Two build checks landed with that audit, both narrow by measurement.
 `check_irq_restore_sites.py` refuses an `enable_irq()` that consults nothing
@@ -697,6 +696,43 @@ assert it, and it was validated by planting the defect: with the resume
 removed, `kernelcheck-ddb-qemu` fails on `ddb: console tx=spinning`. The RPi5
 driver's control test gained a board that resumes correctly in every other
 respect and leaves the console spinning, and fails.
+
+**#529 closed 2026-09-10.** DDB already held every fact needed to explain
+issue #524's stall -- `ps`, `sched` and `current` between them -- and the
+relation between the facts was still assembled by hand. `wait` derives it: a
+parent blocked collecting a child names that child; UART, network, deadline
+and signal waits are event nodes, because the kernel does not know which
+future process will deliver them and a guess would read as a finding.
+
+Two things it turned out to need that the issue did not say. The listing asks
+about a process that is Blocked OR carries a wait reason, not one that is
+Blocked -- #524's child was the RUNNING process and its reason was the
+network, so a loop over blocked records alone would have dropped the record
+that explains the stall. And the header's `awaited` digit is the shape itself:
+the current process is running and something is blocked on its exit.
+
+It found its own case immediately. The QEMU DDB lane's ordinary boot renders
+`current=8 state=running awaited=1` with two ancestors blocked collecting it,
+and the board renders a four-edge chain including a parent waiting on a child
+that is itself waiting for the network. Neither needed the stall to recur.
+
+`waittest` renders #524's topology from records the debugger wrote, so the
+presentation is compared by a lane rather than trusted; it costs two kilobytes
+of static, and the images' 32 KiB stack-alignment granule is what actually
+moved the boot views' allocator page counts. On the multicore tree that
+retired `kernel/tests/qemu-debug/views/boot.expected`: the debug build now
+lands in the same granule as the ordinary one, so the overlay held bytes
+identical to the view it overlaid.
+`check_kernel_memory_map.py` reads the ordinary view when the overlay is
+absent, which turns the overlay's absence into a claim -- the two builds
+agree -- rather than into a gap.
+`check_ddb_wait_reason_names.py` holds the two namers to the enums
+kernel/kernel/process.tkb encodes them from, and requires the word to be
+spelled FROM the case: a reason added there and not named here would print
+`unknown` where a word should be, silently, and only to whoever is mid-stall.
+It earned itself on the first rebase it met: Territory A's `Constructing`
+process state had arrived while this was being written, and the check named
+it rather than letting the view print a number.
 
 **#530 closed 2026-09-10.** It was #517's shape one layer up: the two lane
 runners held the view-comparison loop twice, and the copies had already
