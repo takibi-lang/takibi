@@ -11,7 +11,14 @@ def main() -> int:
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--log", required=True)
     parser.add_argument("--timeout", type=float, default=20.0)
+    # GitHub issue #486: hold the first command until every named line has
+    # arrived. The two-core mode's whole claim is that BOTH cores reported,
+    # and the console's first prompt belongs to whichever faulted first --
+    # asking it for `oops` then would answer about half the machine and pass.
+    parser.add_argument("--await-line", action="append", default=[],
+                        metavar="TEXT")
     args = parser.parse_args()
+    awaited = [text.encode("ascii") for text in args.await_line]
 
     deadline = time.monotonic() + args.timeout
     connection = None
@@ -39,6 +46,13 @@ def main() -> int:
             log.write(chunk)
             log.flush()
             received.extend(chunk)
+            # The console owner writes its prompt while another core is
+            # still rendering, so an awaited line can arrive with `ddb> `
+            # inside a word of it. Remove the prompt before asking, exactly
+            # as the lane's own assertions do.
+            plain = bytes(received).replace(b"ddb> ", b"")
+            if awaited and any(text not in plain for text in awaited):
+                continue
             found = received.count(b"ddb> ")
             while prompts < found:
                 if prompts < len(commands):
@@ -46,6 +60,13 @@ def main() -> int:
                 prompts += 1
             if prompts >= len(commands) + 1:
                 return 0
+    plain = bytes(received).replace(b"ddb> ", b"")
+    missing = [text.decode("ascii") for text in awaited if text not in plain]
+    if missing:
+        raise SystemExit(
+            "crash-console UART never saw " + ", ".join(repr(m) for m in missing)
+            + "; the console was never asked anything, so nothing here says "
+              "whether it works")
     raise SystemExit("crash-console UART did not complete all commands")
 
 

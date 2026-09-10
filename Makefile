@@ -1184,6 +1184,10 @@ _kernelcheck-oops-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=data_abort_write KERNEL_QEMU_OOPS_GDB_PORT=18693 KERNEL_QEMU_OOPS_SERIAL_PORT=18694 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-data-abort" bash scripts/run_kernel_oops_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=child_exec KERNEL_QEMU_OOPS_GDB_PORT=18695 KERNEL_QEMU_OOPS_SERIAL_PORT=18696 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-child-exec" bash scripts/run_kernel_oops_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=child_exec_prepare_failure KERNEL_QEMU_OOPS_GDB_PORT=18691 KERNEL_QEMU_OOPS_SERIAL_PORT=18692 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-child-exec-prepare-failure" bash scripts/run_kernel_oops_qemutest.sh
+	@# GitHub issue #486: two cores fault in one run. The peer's entry is
+	@# replaced before anything executes, so core 1 fail-stops during
+	@# bring-up and core 0 later at its own EL0 instruction.
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=peer_fault KERNEL_QEMU_OOPS_GDB_PORT=18707 KERNEL_QEMU_OOPS_SERIAL_PORT=18708 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-peer-fault" bash scripts/run_kernel_oops_qemutest.sh
 
 ## A real PL011 BREAK enters the resumable, interrupt-safe DDB subset. The
 ## check inspects state and guarded kernel memory, then proves `continue`

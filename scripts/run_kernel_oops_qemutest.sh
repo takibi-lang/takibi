@@ -60,6 +60,16 @@ case "$MODE" in
         expected_ec=15
         expected_detail=''
         ;;
+    peer_fault)
+        # GitHub issue #486: two cores fault in one run. The peer's entry
+        # instruction is replaced before anything executes, so core 1
+        # fail-stops during bring-up; core 0 then reaches the ordinary EL0
+        # BRK below. Core 0's wait for the secondary is bounded and reports
+        # rather than hangs, which is what makes this injectable at all.
+        fault_instruction=0xd4200000
+        expected_ec=3c
+        expected_detail=''
+        ;;
     *)
         echo "error: unknown KERNEL_QEMU_OOPS_MODE: $MODE" >&2
         exit 1
@@ -82,8 +92,19 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM HUP
 
+console_await=()
+if [ "$MODE" = peer_fault ]; then
+    # This mode waits for a WHOLE BOOT, not just a crash console: the peer
+    # fail-stops during bring-up and core 0 only reaches its own fault after
+    # userspace starts. The default budget is sized for the latter alone, and
+    # measured at 1-in-3 failures here before this was raised.
+    console_await=(--timeout 90)
+    # Both records before the first question: see the flag's own comment.
+    console_await+=(--await-line "oops: fail-stop seq=1 cpu=0"
+                    --await-line "oops: fail-stop seq=1 cpu=1")
+fi
 python3 "$REPO_ROOT/scripts/run_kernel_crash_console.py" \
-    --port "$SERIAL_PORT" --log "$UART_LOG" &
+    --port "$SERIAL_PORT" --log "$UART_LOG" "${console_await[@]}" &
 console_driver_pid=$!
 
 # Fault injection is the sole GDB role before the oops. It enables the
@@ -129,6 +150,14 @@ for _ in $(seq 1 50); do
     else
         gdb_commands=(
             -ex "target remote :$GDB_PORT"
+        )
+        if [ "$MODE" = peer_fault ]; then
+            # Written at the initial -S stop, before any core has executed:
+            # QEMU is halted at attach, so this is the one moment the peer's
+            # entry can be replaced without racing its own bring-up.
+            gdb_commands+=(-ex "set {int}kernel_secondary_main = 0xd4200000")
+        fi
+        gdb_commands+=(
             -ex "break kernel_process_execution_reset"
             -ex "continue"
             -ex "set *(char *)&kernel_process_trace_boot_enabled = 1"
@@ -212,6 +241,47 @@ if [ "$MODE" != child_exec ] && [ "$MODE" != child_exec_prepare_failure ] &&
     echo "FAIL kernel/qemu oops: saved TPIDR_EL0 was not retained" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1
+fi
+
+# GitHub issue #486: the two-core claim, and the three things it rests on.
+#
+# Both cores reported -- the single shared snapshot this replaced kept
+# whichever wrote last, so the FIRST fault, usually the interesting one, was
+# the one lost. The console then presents them in machine-wide fault order,
+# which is the fact that arrangement destroyed.
+#
+# Every one of these is anchored, and that is itself the assertion. The first
+# version of this lane could not anchor any of them: two cores wrote the UART
+# at once and shredded each other's reports, and the parking line landed
+# inside the word `ddb> ` -- which stopped the console driver counting prompts
+# and turned the whole lane into a timeout. Anchored lines are the evidence
+# that the report claim orders every write in that file.
+#
+# `abandoned=0` is the assertion that keeps the report claim honest. It counts
+# the times a core gave up waiting for the UART and rendered into another
+# core's output anyway -- deliberately allowed, because a wedged core must not
+# silence one that still has something to say, but never expected on a healthy
+# run. It is a membership rule for CRASH_REPORT_SPIN_TURNS, not an estimate:
+# if this fires, the bound stopped outlasting one report and wants
+# investigating rather than raising.
+if [ "$MODE" = peer_fault ]; then
+    if ! grep -Eq '^oops: fail-stop seq=1 cpu=1 slot=0 ' "$UART_LOG" ||
+            ! grep -Eq '^oops: fail-stop seq=1 cpu=0 slot=8 ' "$UART_LOG" ||
+            ! grep -q '^oops: console owned by another core; parking$' "$UART_LOG" ||
+            ! grep -Eq '^oops: cores reported=2 faults=2 contended=[0-9]+ abandoned=0$' "$UART_LOG"; then
+        echo "FAIL kernel/qemu oops: two cores faulted and the report does not show both" >&2
+        sed 's/^/  /' "$UART_LOG" >&2 || true
+        exit 1
+    fi
+    # Fault order, read off the console's own listing: the peer faulted during
+    # bring-up and core 0 later, so the peer's record must come first.
+    order="$(grep -n '^oops: fail-stop seq=1 cpu=[01] ' "$UART_LOG" | tail -2 |
+        sed 's/.*cpu=\([01]\) .*/\1/' | tr -d '\n')"
+    if [ "$order" != "10" ]; then
+        echo "FAIL kernel/qemu oops: the console listed the faults as '$order', not peer-then-core-0" >&2
+        sed 's/^/  /' "$UART_LOG" >&2 || true
+        exit 1
+    fi
 fi
 if [ "$MODE" = child_exec ] &&
         { ! grep -Eq '^oops: trace seq=[1-9][0-9]* cpu=0 event=1 pid=[1-9][0-9]* ' "$UART_LOG" ||

@@ -587,7 +587,7 @@ regression from the failure being investigated:
 ```bash
 make kernelcheck-ddb-qemu       # UART BREAK and software BRK, inspect, resume
 make kernelcheck-ddb-rpi5-software # physical software BRK compiler-frame walk
-make kernelcheck-oops-qemu      # fail-stop console and GDB crash-snapshot read
+make kernelcheck-oops-qemu      # fail-stop console, GDB crash-snapshot read, two cores faulting
 make kernelcheck-qemu-debug     # full QEMU suite against the DWARF kernel
 make kernelcheck-rpi5           # includes the maintained physical DDB check
 ```

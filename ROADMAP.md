@@ -510,12 +510,37 @@ core count and not its per-core speed. What was missing was any account of
 what the guest was doing, and that is what the paragraph above supplies. The
 next occurrence answers it in the lane's own artifacts.
 
-1. **#486** -- one crash snapshot for the machine. Territory A's multicore
-   work already added `crash_snapshot_per_core` and
-   `crash_snapshot_capturing_per_core`, so this is very likely a VERIFY AND
-   CLOSE, not an implementation. Do that first: an issue that is already
-   satisfied and still open makes the rest of this queue look longer than it
-   is, and reading it is how the next three get their bearings.
+1. **#486 closed 2026-09-10, and it was NOT the close this entry predicted.**
+   Territory A had added `crash_snapshot_per_core` and
+   `crash_snapshot_capturing_per_core`, so the storage half was done -- but
+   the reader still rendered only the calling core, the fault order between
+   two cores was unrecoverable (`sequence` counts one core's captures), and
+   publication was an ordinary store rather than a release. Checking the tree
+   before writing is what the entry asked for and it is what turned a
+   predicted close into three-quarters of an implementation. The next entry's
+   prediction deserves the same suspicion.
+**What #486 became, and what its lane found.** The machine-wide fault ticket
+orders two cores' faults; `valid` is published with release and read with
+acquire; the console's `oops` renders every published record in that order and
+says how many it found. One core runs the console -- claimed by a swap that
+never waits -- and the others park after reporting.
+
+Then the two-core lane was written, and it immediately found what reasoning
+had not: both cores wrote the UART at once and shredded each other's reports
+byte by byte. Both records survived in memory, so the acceptance criteria held
+and the output was unreadable, which is the moment a crash reporter exists
+for. The repair is a report claim that every write in that file takes and the
+blocking read does not -- a bounded spin that renders ANYWAY on expiry,
+because a wedged core must not silence one that still has something to say.
+`abandoned=0` in the summary is the lane's assertion that the bound is still
+enough; if it fires, the bound is investigated rather than raised.
+
+The last thing to fall was the smallest. A parked core's line landed inside
+the word `ddb> `, which stopped the lane's driver counting prompts and turned
+the run into a timeout -- 1-in-3 before the console's own prompt joined the
+claim, 8-in-8 after. Two cores racing one UART is not only ugly; it silently
+disables whatever is reading it.
+
 2. **#505** -- `bt` for a stopped peer. Genuinely untouched, and activated by
    the same commit that closed #479: its own text says to begin once a process
    makes progress on core 1, and one does. When a two-core run stalls, this is

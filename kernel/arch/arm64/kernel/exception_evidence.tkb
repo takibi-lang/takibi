@@ -20,9 +20,16 @@ const CRASH_FD_SNAPSHOT_SLOTS: usize = 16;
 // `sequence` changes before every capture, so a debugger cannot mistake an
 // all-zero or partial record for a fresh crash.  All fields are machine words
 // to keep this ABI straightforward for UART, GDB, and OpenOCD consumers.
+//
+// GitHub issue #486: `fault_order` is the machine-wide ticket, taken once per
+// capture from one atomic counter. `sequence` counts this CORE's captures and
+// cannot order two cores against each other -- and two cores faulting is a
+// more interesting event than one, so the order between them is the fact most
+// worth not destroying.
 struct CrashSnapshot {
     valid: usize;
     sequence: usize;
+    fault_order: usize;
     cpu: usize;
     vector_slot: usize;
     esr_el1: usize;
@@ -79,6 +86,38 @@ private fn crash_snapshot_here() -> *CrashSnapshot {
     return base + (core as isize);
 }
 
+// GitHub issue #486: the machine-wide fault ticket.
+//
+// Relaxed is the right strength and the reason is worth stating: this number
+// only has to be unique and increasing, and what makes a snapshot SAFE to read
+// is the release store on `valid` below, not this. A reader that has acquired
+// a published record has already acquired everything written before it,
+// including this.
+private let mut crash_fault_order: usize;
+
+private fn crash_fault_order_address() -> usize {
+    return (&crash_fault_order) as usize;
+}
+
+// `valid` is the publication word. A reader must not assemble a record from
+// a core that is still writing one, so it is stored with release after the
+// payload and loaded with acquire before any field is read -- the same
+// arrangement kernel/lib/diagnostic_ring.tkb uses, and the same one DDB's own
+// snapshot uses through ddb_snapshot_published_sequence.
+private fn crash_snapshot_valid_address(core: usize) -> usize {
+    if (core == 0) { return (&crash_snapshot.valid) as usize; }
+    let base: *CrashSnapshot = crash_snapshot_per_core;
+    if (core >= KERNEL_MAX_CORES) { return (&crash_snapshot.valid) as usize; }
+    return (&(base + (core as isize)).valid) as usize;
+}
+
+private fn crash_snapshot_of(core: usize) -> *CrashSnapshot {
+    if (core == 0) { return &crash_snapshot; }
+    let base: *CrashSnapshot = crash_snapshot_per_core;
+    if (core >= KERNEL_MAX_CORES) { return &crash_snapshot; }
+    return base + (core as isize);
+}
+
 private fn crash_snapshot_capturing_here() -> *bool {
     if (cpu_id() == 0) { return &crash_snapshot_capturing; }
     let base: *bool = crash_snapshot_capturing_per_core;
@@ -88,6 +127,85 @@ private fn crash_snapshot_capturing_here() -> *bool {
 }
 
 const CRASH_CONSOLE_LINE_BYTES: usize = 32;
+
+// GitHub issue #486: which core reads the crash console's input.
+//
+// Claimed by one non-blocking swap, never released -- the console is terminal,
+// so there is no second visit to arbitrate. A reporter that could BLOCK here
+// could not report the deadlock it is in, which is the rule this file already
+// states and the reason Linux's bust_spinlocks and FreeBSD's SCHEDULER_STOPPED
+// exist.
+const CRASH_CONSOLE_FREE: usize = 0;
+const CRASH_CONSOLE_CLAIMED: usize = 1;
+private let mut crash_console_owner: usize;
+
+private fn crash_console_owner_address() -> usize {
+    return (&crash_console_owner) as usize;
+}
+
+// GitHub issue #486: the two-core lane's first run shredded both reports into
+// each other, byte by byte, because two cores rendered to one UART at once.
+// Both records survived in memory and both were legible from the console
+// afterwards -- so the acceptance held -- but the lines a person reads first
+// were unreadable, which is the moment a crash reporter exists for.
+//
+// So a reporter takes this before rendering and gives it back after. It is
+// NOT a lock, and the difference is the whole design of this file: a loser
+// spins for a bounded number of turns and then renders ANYWAY. A garbled
+// report is worse than a clean one and far better than none, and the case
+// that must not happen is a core wedged mid-render silencing the core that
+// still has something to say. Linux answers the same question the same way:
+// bust_spinlocks() makes the console path skip its locks rather than wait on
+// them.
+//
+// The bound is turns, not time: there is no clock a fail-stopped core can
+// trust. It has to exceed one report's worth of UART writes, which is about
+// 2,400 bytes each waiting on the transmit FIFO. The first value tried here
+// was 2,000,000 and the two-core lane still shredded its output, which is how
+// the number below was chosen: measured against the thing it has to outlast
+// rather than guessed, and it is the loop the lane would fail again if it
+// stopped being enough.
+const CRASH_REPORT_SPIN_TURNS: usize = 50000000;
+private let mut crash_report_owner: usize;
+
+private fn crash_report_owner_address() -> usize {
+    return (&crash_report_owner) as usize;
+}
+
+// How many claims found the word held, and how many gave up waiting. The
+// summary line reports both, because "the reports came out clean" and "no two
+// cores ever tried to write at once" look identical on a healthy run and are
+// completely different claims.
+private let mut crash_report_contended: usize;
+private let mut crash_report_abandoned: usize;
+
+private fn crash_report_claim() !{unsafe} {
+    let mut waited: bool = false;
+    for turn: usize in 0..<CRASH_REPORT_SPIN_TURNS {
+        // Read before swapping: a swap every turn writes the word from every
+        // waiting core and keeps the line moving between them, which is the
+        // shape kernel/lib/spinlock.tkb's own acquire already avoids.
+        if (unsafe { atomic_load_acquire(crash_report_owner_address()) }
+                == CRASH_CONSOLE_FREE) {
+            if (unsafe { atomic_swap_acquire(crash_report_owner_address(),
+                                             CRASH_CONSOLE_CLAIMED) }
+                    == CRASH_CONSOLE_FREE) {
+                if (waited) {
+                    crash_report_contended = crash_report_contended + 1;
+                }
+                return;
+            }
+        }
+        waited = true;
+    }
+    crash_report_contended = crash_report_contended + 1;
+    crash_report_abandoned = crash_report_abandoned + 1;
+}
+
+private fn crash_report_release() !{unsafe} {
+    unsafe { atomic_store_release(crash_report_owner_address(),
+                                  CRASH_CONSOLE_FREE); }
+}
 
 // Resumable DDB state is intentionally smaller than CrashSnapshot. It is
 // captured and rendered entirely from an IRQ root, so every field is fixed
@@ -1607,20 +1725,73 @@ fn crash_snapshot_put_data_abort(esr: usize) {
     }
 }
 
-fn crash_snapshot_render() !{unsafe} {
-    kernel_boot_log("oops: fail-stop seq=");
-    uart_put_udec(crash_snapshot_here().sequence);
-    kernel_boot_log(" cpu=");
-    uart_put_udec(crash_snapshot_here().cpu & 0xFF);
-    kernel_boot_log(" slot=");
-    uart_put_udec(crash_snapshot_here().vector_slot);
-    kernel_boot_log(" ec=");
-    uart_put_hex((crash_snapshot_here().esr_el1 >> 26) & 0x3F);
-    kernel_boot_log(" esr="); uart_put_hex(crash_snapshot_here().esr_el1);
-    kernel_boot_log(" far="); uart_put_hex(crash_snapshot_here().far_el1);
-    kernel_boot_log(" elr="); uart_put_hex(crash_snapshot_here().elr_el1);
+// GitHub issue #486: every core that faulted, in the order they faulted.
+//
+// The immediate report at capture time renders the FAULTING core's own record
+// and nothing else -- a core reporting its own fail-stop must not depend on
+// reading another core's storage, and a single-core boot's output is
+// byte-identical to what it was before this existed. This is the reader for
+// afterwards: the console's `oops`, asked by a person or a lane that wants
+// the whole machine rather than the core that answered.
+//
+// Ordering is by the machine-wide ticket, so "which fault came first" -- the
+// question the single shared snapshot used to destroy by keeping whichever
+// wrote last -- is answerable. Selection sort over KERNEL_MAX_CORES, because
+// the set is two and a debugger must not allocate.
+// The caller holds the report claim: this is reached from the console's own
+// dispatch, which claims around every command's output. The claim is not
+// reentrant, so taking it here as well would spin this core against itself
+// until the bound ran out.
+private fn crash_snapshot_render_every_core() !{unsafe} {
+    let mut rendered: usize = 0;
+    let mut previous: usize = 0;
+    for round: usize in 0..<KERNEL_MAX_CORES {
+        let mut best_core: usize = KERNEL_MAX_CORES;
+        let mut best_order: usize = 0;
+        for core: usize in 0..<KERNEL_MAX_CORES {
+            // Acquire, so a record this reads is one whose payload the
+            // publishing core had finished writing.
+            let published: usize =
+                unsafe { atomic_load_acquire(crash_snapshot_valid_address(core)) };
+            if (published == 0) { continue; }
+            let order: usize = crash_snapshot_of(core).fault_order;
+            if (order <= previous) { continue; }
+            if (best_core == KERNEL_MAX_CORES || order < best_order) {
+                best_core = core;
+                best_order = order;
+            }
+        }
+        if (best_core == KERNEL_MAX_CORES) { break; }
+        previous = best_order;
+        rendered = rendered + 1;
+        crash_snapshot_render_core(best_core);
+    }
+    kernel_boot_log("oops: cores reported=");
+    uart_put_udec(rendered);
+    kernel_boot_log(" faults=");
+    uart_put_udec(unsafe { atomic_load_acquire(crash_fault_order_address()) });
+    kernel_boot_log(" contended=");
+    uart_put_udec(crash_report_contended);
+    kernel_boot_log(" abandoned=");
+    uart_put_udec(crash_report_abandoned);
     kernel_boot_log("\n");
-    crash_snapshot_put_data_abort(crash_snapshot_here().esr_el1);
+}
+
+private fn crash_snapshot_render_from(record: *CrashSnapshot,
+                                      root_slot: usize) !{unsafe} {
+    kernel_boot_log("oops: fail-stop seq=");
+    uart_put_udec(record.sequence);
+    kernel_boot_log(" cpu=");
+    uart_put_udec(record.cpu & 0xFF);
+    kernel_boot_log(" slot=");
+    uart_put_udec(record.vector_slot);
+    kernel_boot_log(" ec=");
+    uart_put_hex((record.esr_el1 >> 26) & 0x3F);
+    kernel_boot_log(" esr="); uart_put_hex(record.esr_el1);
+    kernel_boot_log(" far="); uart_put_hex(record.far_el1);
+    kernel_boot_log(" elr="); uart_put_hex(record.elr_el1);
+    kernel_boot_log("\n");
+    crash_snapshot_put_data_abort(record.esr_el1);
     // GitHub issue #384: WHO owns the pages this fault names. Both
     // addresses are user VAs when the fault came from EL0, so each is
     // translated through the faulting process's own page table first and
@@ -1628,44 +1799,58 @@ fn crash_snapshot_render() !{unsafe} {
     // answer "not a page from this allocator" for exactly the case worth
     // reporting. Issue #373 was a process's text page that was also a
     // kernel stack; that reads here as one line.
-    crash_snapshot_put_page_owner("far", crash_snapshot_here().far_el1);
-    crash_snapshot_put_page_owner("elr", crash_snapshot_here().elr_el1);
-    kernel_boot_log("oops: live sp_el0="); uart_put_hex(crash_snapshot_here().sp_el0);
-    kernel_boot_log(" tpidr_el0="); uart_put_hex(crash_snapshot_here().tpidr_el0);
-    kernel_boot_log(" ttbr0="); uart_put_hex(crash_snapshot_here().ttbr0_el1);
+    crash_snapshot_put_page_owner("far", record.far_el1, root_slot);
+    crash_snapshot_put_page_owner("elr", record.elr_el1, root_slot);
+    kernel_boot_log("oops: live sp_el0="); uart_put_hex(record.sp_el0);
+    kernel_boot_log(" tpidr_el0="); uart_put_hex(record.tpidr_el0);
+    kernel_boot_log(" ttbr0="); uart_put_hex(record.ttbr0_el1);
     kernel_boot_log("\n");
-    kernel_boot_log("oops: process pid="); uart_put_udec(crash_snapshot_here().process_pid);
-    kernel_boot_log(" parent="); uart_put_udec(crash_snapshot_here().parent_pid);
-    kernel_boot_log(" state="); uart_put_udec(crash_snapshot_here().process_state);
-    kernel_boot_log(" wait="); uart_put_udec(crash_snapshot_here().wait_reason);
-    kernel_boot_log(" wait4_status_ptr="); uart_put_hex(crash_snapshot_here().wait4_status_ptr);
-    kernel_boot_log(" root="); uart_put_udec(crash_snapshot_here().root_slot);
-    kernel_boot_log(" asid="); uart_put_udec(crash_snapshot_here().root_asid);
-    kernel_boot_log(" l1="); uart_put_hex(crash_snapshot_here().root_l1);
+    kernel_boot_log("oops: process pid="); uart_put_udec(record.process_pid);
+    kernel_boot_log(" parent="); uart_put_udec(record.parent_pid);
+    kernel_boot_log(" state="); uart_put_udec(record.process_state);
+    kernel_boot_log(" wait="); uart_put_udec(record.wait_reason);
+    kernel_boot_log(" wait4_status_ptr="); uart_put_hex(record.wait4_status_ptr);
+    kernel_boot_log(" root="); uart_put_udec(record.root_slot);
+    kernel_boot_log(" asid="); uart_put_udec(record.root_asid);
+    kernel_boot_log(" l1="); uart_put_hex(record.root_l1);
     kernel_boot_log(" image=");
-    if (crash_snapshot_here().image_kind == 1) { kernel_boot_log("exec\n"); }
+    if (record.image_kind == 1) { kernel_boot_log("exec\n"); }
     else { kernel_boot_log("bootstrap\n"); }
     kernel_process_exec_failure_render();
     for fd: usize in 0..<CRASH_FD_SNAPSHOT_SLOTS {
-        if (crash_snapshot_here().fd_kind[fd] != 0) {
+        if (record.fd_kind[fd] != 0) {
             kernel_boot_log("oops: fd="); uart_put_udec(fd);
-            kernel_boot_log(" kind="); uart_put_udec(crash_snapshot_here().fd_kind[fd]);
-            kernel_boot_log(" object="); uart_put_udec(crash_snapshot_here().fd_object[fd]);
+            kernel_boot_log(" kind="); uart_put_udec(record.fd_kind[fd]);
+            kernel_boot_log(" object="); uart_put_udec(record.fd_object[fd]);
             kernel_boot_log("\n");
         }
     }
-    if (crash_snapshot_here().saved_frame_available != 0) {
-        kernel_boot_log("oops: saved sp_el0="); uart_put_hex(crash_snapshot_here().saved_sp_el0);
-        kernel_boot_log(" tpidr_el0="); uart_put_hex(crash_snapshot_here().saved_tpidr_el0);
-        kernel_boot_log(" elr="); uart_put_hex(crash_snapshot_here().saved_elr_el1);
-        kernel_boot_log(" spsr="); uart_put_hex(crash_snapshot_here().saved_spsr_el1);
+    if (record.saved_frame_available != 0) {
+        kernel_boot_log("oops: saved sp_el0="); uart_put_hex(record.saved_sp_el0);
+        kernel_boot_log(" tpidr_el0="); uart_put_hex(record.saved_tpidr_el0);
+        kernel_boot_log(" elr="); uart_put_hex(record.saved_elr_el1);
+        kernel_boot_log(" spsr="); uart_put_hex(record.saved_spsr_el1);
         kernel_boot_log("\n");
     } else {
         kernel_boot_log("oops: saved-frame=unavailable\n");
     }
     kernel_process_trace_render(
-        crash_snapshot_here().trace as []usize, crash_snapshot_here().trace_count,
+        record.trace as []usize, record.trace_count,
         "oops: trace" as *u8);
+}
+
+
+// The faulting core's own record, rendered as it fail-stops. Unchanged
+// output: this is what a single-core boot has always printed.
+fn crash_snapshot_render() !{unsafe} {
+    crash_snapshot_render_from(crash_snapshot_here(),
+                               crash_snapshot_here().root_slot);
+}
+
+// One named core's published record, for the reader that walks them all.
+private fn crash_snapshot_render_core(core: usize) !{unsafe} {
+    crash_snapshot_render_from(crash_snapshot_of(core),
+                               crash_snapshot_of(core).root_slot);
 }
 
 private fn crash_console_command_is(line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..],
@@ -1714,7 +1899,7 @@ private fn crash_console_dispatch(
         line: borrow [u8; CRASH_CONSOLE_LINE_BYTES..], length: usize)
         !{unsafe} {
     if (crash_console_command_is(line, length, bs"oops")) {
-        crash_snapshot_render();
+        crash_snapshot_render_every_core();
         return;
     }
     if (crash_console_command_is(line, length, bs"trace")) {
@@ -1771,16 +1956,33 @@ private fn crash_console_run() !{unsafe} {
         KernelLogTxStandDown::WasSpinning => { }
         KernelLogTxStandDown::NotConsoleOwner => { }
     }
+    crash_report_claim();
     kernel_boot_log("ddb: read-only crash console\n");
+    crash_report_release();
     let mut line: [u8; CRASH_CONSOLE_LINE_BYTES];
     let mut length: usize = 0;
     while (true) {
+        // GitHub issue #486: the prompt is one of this file's writes and
+        // takes the claim like the rest. The BLOCKING READ below does not --
+        // holding it across uart_debug_getc() is the one thing that would
+        // turn this into the lock a crash reporter must not have, and a core
+        // still trying to report would wait for a person to type.
+        //
+        // The first version left the prompt unclaimed. A core that had just
+        // lost the console wrote its parking line into the middle of the
+        // word `ddb> `, and the lane's driver -- which counts prompts --
+        // stopped counting. Two cores' output racing is not only ugly; it
+        // silently disables whatever is reading it.
+        crash_report_claim();
         kernel_boot_log("ddb> ");
+        crash_report_release();
         let mut reading: bool = true;
         while (reading) {
             let byte: u8 = uart_debug_getc();
             if (byte == 0x0A || byte == 0x0D) {
+                crash_report_claim();
                 kernel_boot_log("\n");
+                crash_report_release();
                 reading = false;
             } else {
                 if (byte == 0x08 || byte == 0x7F) {
@@ -1792,7 +1994,9 @@ private fn crash_console_run() !{unsafe} {
                 }
             }
         }
+        crash_report_claim();
         crash_console_dispatch(line as []u8, length);
+        crash_report_release();
         length = 0;
     }
 }
@@ -1802,7 +2006,11 @@ private fn crash_console_run() !{unsafe} {
 // the faulting process's address space, saying which reading it used --
 // a report that silently switches between two meanings of an address is
 // worse than one that prints nothing.
-private fn crash_snapshot_put_page_owner(what: *u8, address: usize) {
+// GitHub issue #486: the root slot is a parameter now. A user VA is
+// translated through the FAULTING process's page table, and when this reader
+// is walking every core that is not the reading core's own.
+private fn crash_snapshot_put_page_owner(what: *u8, address: usize,
+                                         root_slot: usize) {
     kernel_boot_log("oops: ");
     kernel_boot_log(what);
     kernel_boot_log(" page ");
@@ -1813,17 +2021,17 @@ private fn crash_snapshot_put_page_owner(what: *u8, address: usize) {
         return;
     }
     let physical: usize =
-        address_space_user_physical(crash_snapshot_here().root_slot, address);
+        address_space_user_physical(root_slot, address);
     if (physical == 0) {
         kernel_boot_log("is ");
         kernel_boot_log(page_owner_description(address));
         kernel_boot_log(", not mapped in root ");
-        uart_put_udec(crash_snapshot_here().root_slot);
+        uart_put_udec(root_slot);
         kernel_boot_log("\n");
         return;
     }
     kernel_boot_log("(via root ");
-    uart_put_udec(crash_snapshot_here().root_slot);
+    uart_put_udec(root_slot);
     kernel_boot_log(" -> ");
     uart_put_hex(physical);
     kernel_boot_log(") is ");
@@ -1839,8 +2047,13 @@ fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
         while (true) { interrupt_wait(); }
     }
     *crash_snapshot_capturing_here() = true;
-    crash_snapshot_here().valid = 0;
+    // Unpublish before writing. A reader that arrives mid-capture must see
+    // "this core is writing one" rather than the previous record, which would
+    // still look entirely plausible.
+    unsafe { atomic_store_release(crash_snapshot_valid_address(cpu_id()), 0); }
     crash_snapshot_here().sequence = crash_snapshot_here().sequence + 1;
+    crash_snapshot_here().fault_order =
+        unsafe { atomic_fetch_add_relaxed(crash_fault_order_address(), 1) } + 1;
     crash_snapshot_here().cpu = crash_snapshot_read_mpidr_el1();
     crash_snapshot_here().vector_slot = slot;
     crash_snapshot_here().esr_el1 = mrs_esr_el1();
@@ -1872,12 +2085,37 @@ fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
     }
     crash_snapshot_here().trace_count = kernel_process_crash_trace_copy(
         crash_snapshot_here().trace as *usize);
-    crash_snapshot_here().valid = 1;
     // Write back the exact structured record before UART output or a debugger
     // observes it.  This is cache maintenance only, never a DMA submission.
     dma_prepare_tx(crash_snapshot_here() as *usize, sizeof(CrashSnapshot));
+    // Published last, with release, so the payload above is visible to anyone
+    // who acquires this word. The cache maintenance is for the debugger on the
+    // other side of the wire; this store is for the other core.
+    unsafe { atomic_store_release(crash_snapshot_valid_address(cpu_id()), 1); }
+    // Published BEFORE the claim, so a core that never wins the render still
+    // has its record readable by the console, by DDB and by a debugger.
+    crash_report_claim();
     crash_snapshot_render();
-    crash_console_run();
+    crash_report_release();
+    // GitHub issue #486: exactly one core runs the console.
+    //
+    // Every core that faults reports -- the lines above are already on the
+    // wire, and its record is published for any reader -- but two cores
+    // reading `uart_debug_getc()` would steal each other's bytes, so the
+    // second one to arrive parks instead. That is not a lock: the claim is
+    // one atomic swap that never waits, and a core that loses it is a core
+    // that has already said everything it knows.
+    if (unsafe { atomic_swap_acquire(crash_console_owner_address(),
+                                     CRASH_CONSOLE_CLAIMED) }
+            == CRASH_CONSOLE_FREE) {
+        crash_console_run();
+    }
+    // Under the claim like every other line this path writes: it was the
+    // last thing left interleaving after the reports stopped.
+    crash_report_claim();
+    kernel_boot_log("oops: console owned by another core; parking\n");
+    crash_report_release();
+    while (true) { interrupt_wait(); }
 }
 
 // Vector-table targets have no universally valid saved ExceptionFrame.
