@@ -727,15 +727,49 @@ this, not part of it.
 
 #### Territory B cold-start handoff, 2026-09-10
 
-**Start at entry 1 and expect it to be a close, not a build.** The queue above
-was re-cut today and its first four entries are all multicore debuggability;
-two of them are already half-built by Territory A's own work, so read the tree
-before writing anything. The specific claims to check are named in each entry.
+**Entries 1 to 4 are closed. Start at entry 6, and start by reading the
+tree.** That last clause is not boilerplate: this queue's own predictions were
+wrong four times in a row on 2026-09-10, and every time the reading was worth
+more than the entry.
 
-Five issues closed since the previous handoff: **#339** and **#526** (the
-latter with the maintainer's explicit go-ahead and a quiet window), plus
-**#531**, **#530** and **#529** on 2026-09-10. Their entries below say what
-each found.
+- Entry 1 (#486) predicted "very likely a verify and close". Three quarters of
+  it was missing.
+- Entry 5 (#520/#497) predicted "a small edit this territory can make for
+  itself". It is a restructuring of Territory A's profiling facility; the
+  correction is on #520 and the entry now says not to start it.
+- Entry 6 named #281 and #208 in that order. Measuring said the reverse:
+  126 MiB of 1 KiB block reads per boot for a 2.5 MiB filesystem, which is
+  metadata re-read rather than data uncoalesced.
+- #182 predicted an implementation. Half of its ten scope bullets were already
+  done under other numbers; it was split into #535-#539 and closed.
+
+What each of those cost was one hour of reading and what it saved was a week
+of building the wrong thing. Do the same here.
+
+**The next piece of work is #537's second half**, and it is the one place a
+session can pick up cold with no re-derivation: the issue comment written on
+2026-09-10 says exactly what is done, what is not, and why. Growing a
+directory by a block, then nested `mkdir` with `.`/`..` and link counts. Both
+need allocation rather than a walk, which is what makes them the same shape
+and different from the increment that landed. #538's three syscalls wait on
+them, and so does lifting `getdents64`'s direct-block limit.
+
+After that, **#208** -- and it is now the measured priority rather than an
+option, with `block io: reads=...` printed on every boot as the number it has
+to move.
+
+Eleven issues closed on 2026-09-09 and 2026-09-10: **#339**, **#531**,
+**#530**, **#529**, **#526** (with the maintainer's explicit go-ahead and a
+quiet window), then the four the re-cut put first -- **#486**, **#505**,
+**#456**, **#465** -- and **#182**, split into #535-#539 rather than finished.
+Their entries below say what each found.
+
+The four multicore-debuggability ones are worth reading together, because they
+are one story: a machine with two cores can now say which core faulted and in
+what order (#486), backtrace the core that is not running the debugger (#505),
+arm a guarded read without answering another core's fault (#456), and attribute
+a retained log line to the core that wrote it and the time that core wrote it
+(#465). Before them, every one of those questions had a single global answer.
 
 **The territory rule was relaxed on 2026-09-10.** The maintainer asked that a
 minimal edit into the other territory be allowed rather than blocking an
