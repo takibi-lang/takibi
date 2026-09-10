@@ -102,6 +102,12 @@ def main() -> int:
             "RPi5 DDB software BRK walk -- " + "; ".join(problems))
     if "ddb: continuing\n" not in text:
         raise SystemExit("RPi5 DDB did not continue after the compiler walk")
+    # GitHub issue #531: the resume puts back the console state the
+    # stand-down found, and the BRK fires from kernel_test_driver_run(),
+    # well after kernel_log_tx_activate(), so the queue was live.
+    if "ddb: console tx=queued\n" not in text:
+        raise SystemExit(
+            "RPi5 DDB did not restore the console transmit queue on continue")
     if "\nddb-software-resume-ok\n/ # " not in text:
         raise SystemExit("RPi5 shell did not resume in the same boot")
 

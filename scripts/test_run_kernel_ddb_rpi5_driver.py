@@ -71,7 +71,7 @@ def retry_seconds() -> float:
 
 
 def scripted_board(master: int, proc, answer_on_attempt: int, budget: float,
-                   answer_wake: bool = True):
+                   answer_wake: bool = True, restore_console: bool = True):
     """Play the kernel side; return how many resume commands were seen.
 
     The driver's opening move is a newline whose only job is to make the
@@ -79,6 +79,12 @@ def scripted_board(master: int, proc, answer_on_attempt: int, budget: float,
     breaking in. `answer_wake=False` plays a board that never answers it,
     which is the case the driver has to attribute correctly rather than
     reporting as a ring-retention defect.
+
+    `restore_console=False` plays the kernel this driver's newest assertion
+    exists for (GitHub issue #531): one that continues normally and leaves the
+    console spinning. Everything else about that boot is correct, which is why
+    it needs a control -- a lane that cannot fail on it is a lane that could
+    not have seen the defect.
 
     The BREAK itself is not observable from the master end of a pty, so the
     debugger banner follows the acknowledgement by a short delay instead --
@@ -119,7 +125,11 @@ def scripted_board(master: int, proc, answer_on_attempt: int, budget: float,
             if command in REPLIES:
                 os.write(master, REPLIES[command] + PROMPT)
             elif command == b"continue":
-                os.write(master, b"\nddb: continuing\n")
+                # The real kernel prints the restored console state after the
+                # loop it leaves, so it lands after `continuing`.
+                resumed_line = (b"ddb: console tx=queued\n"
+                                if restore_console else b"")
+                os.write(master, b"\nddb: continuing\n" + resumed_line)
                 continued = True
             elif command == b"echo ddb-resume-ok" and continued:
                 resume_seen += 1
@@ -130,7 +140,7 @@ def scripted_board(master: int, proc, answer_on_attempt: int, budget: float,
 
 
 def run_case(label, answer_on_attempt, timeout, expect_ok, needles,
-             answer_wake=True):
+             answer_wake=True, restore_console=True):
     master, slave = pty.openpty()
     try:
         port = os.ttyname(slave)
@@ -140,7 +150,8 @@ def run_case(label, answer_on_attempt, timeout, expect_ok, needles,
                  "--log", log.name, "--timeout", str(timeout)],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             attempts = scripted_board(master, proc, answer_on_attempt,
-                                      timeout + 10, answer_wake)
+                                      timeout + 10, answer_wake,
+                                      restore_console)
             stdout, stderr = proc.communicate(timeout=30)
     finally:
         os.close(master)
@@ -212,11 +223,22 @@ def main() -> int:
                 answer_wake=False) is None:
         return 1
 
+    # A kernel that resumes correctly in every other respect and leaves the
+    # console spinning (GitHub issue #531). This is the whole reason that
+    # assertion exists: the loss is invisible on this lane, which ends at the
+    # shell rather than at the boot's own `console: tx spin` measurement, so
+    # without a failure here the fix would be as unobservable as the defect.
+    if run_case("a resume that leaves the console spinning", 1, 6.0, False,
+                ["did not restore the console transmit queue"],
+                restore_console=False) is None:
+        return 1
+
     print("PASS ddb-rpi5-driver controls: the wake byte is acknowledged "
           "before the BREAK and a board that never answers it says so, an "
           "immediate resume takes one command, a dropped first command is "
-          "retried during silence, and a workload that never answers fails "
-          "with the attempt count")
+          "retried during silence, a workload that never answers fails "
+          "with the attempt count, and a resume that leaves the console "
+          "spinning fails")
     return 0
 
 

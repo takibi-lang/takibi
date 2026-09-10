@@ -243,25 +243,65 @@ fn kernel_log_tx_activate() {
 // console emit byte-identical output through exactly the path they used
 // before this change.
 //
-// One-way for the rest of the boot, including across DDB's `continue` --
-// and for the debugger that is a defect, not a decision. GitHub issue #531.
-// The crash console never returns, so one-way is right there. DDB does
-// return: `continue` resumes a kernel that was healthy all along, since
-// kernel_ddb_enter is reached only from the two IRQ dispatchers on a serial
-// BREAK, and three drivers exercise that resume today. Everything logged
-// afterwards pays 78.9 us/byte again, and no lane can see it because both
-// DDB lanes end at the shell rather than at the boot's own measurement.
+// It used to be one-way for the rest of the boot, DDB's `continue` included,
+// and for the debugger that was a defect rather than a decision: GitHub issue
+// #531. The crash console never returns, so one-way is right there. DDB does
+// return -- kernel_ddb_enter is reached only from the two IRQ dispatchers on a
+// serial BREAK, so `continue` resumes a kernel that was healthy all along --
+// and everything logged after it paid 78.9 us/byte again, turning a
+// `console tx spin=81 ms` boot into a 2519 ms one after a single BREAK.
 //
-// The fix is not `kernel_log_tx_activate()` on the way out: this must put
-// back the value it FOUND. platform_irq_init() and kernel_log_tx_activate()
-// are adjacent but not atomic, so a BREAK between them enters with the queue
-// not yet live, and enabling it there would queue bytes nothing drains.
-// Same rule as mutex_irq_restore against enable_irq, and getting that one
-// wrong is what removed DDB from RPi5 in the first place.
-fn kernel_log_tx_stand_down() !{unsafe} {
-    if (cpu_id() != 0) { return; }
+// The fix is not `kernel_log_tx_activate()` on the way out: the resume must
+// put back the value the stand-down FOUND. platform_irq_init() and
+// kernel_log_tx_activate() are adjacent but not atomic, so a BREAK between
+// them enters with the queue not yet live, and enabling it there would queue
+// bytes that nothing drains -- there is no armed TX interrupt yet. Same rule
+// as mutex_irq_restore against enable_irq, and getting that one wrong is what
+// removed DDB from RPi5 in the first place.
+//
+// So the found state is the return value, and it is the only argument the
+// resume takes. There is no kernel_log_tx_resume() that reads no saved state,
+// which is what "by construction" means here: the shape
+// scripts/check_irq_restore_sites.py has to look for lexically in the
+// interrupt case is, for this flag, the only shape that type-checks.
+//
+// NotConsoleOwner is the third answer, and it is not "it was spinning". Core
+// 0 owns this flag and this queue; a peer stands nothing down, so a peer must
+// put nothing back. Reporting a peer's finding as WasLive would let its
+// resume write core 0's flag back to true after core 0 had deliberately
+// stood the queue down -- the queue would come back under a terminal path
+// with interrupts masked and nothing left to drain it.
+must_use variant KernelLogTxStandDown {
+    WasLive;
+    WasSpinning;
+    NotConsoleOwner;
+}
+
+fn kernel_log_tx_stand_down() -> KernelLogTxStandDown !{unsafe} {
+    if (cpu_id() != 0) { return KernelLogTxStandDown::NotConsoleOwner; }
+    let was_live: bool = kernel_log_tx_live;
     uart_tx_flush();
     kernel_log_tx_live = false;
+    if (was_live) {
+        return KernelLogTxStandDown::WasLive;
+    }
+    return KernelLogTxStandDown::WasSpinning;
+}
+
+// Put back what was found, and nothing else. Re-arming the TX interrupt is
+// not this function's business: uart_tx_flush() disabled it, and the next
+// queued byte enables it again in uart_putc, so the flag is the whole of the
+// state a stand-down took away.
+//
+// must_use on the token is what makes a terminal path say so out loud: the
+// crash console has to match its stand-down and decide, rather than dropping
+// it, and a path that DOES return cannot forget.
+fn kernel_log_tx_resume(previous: KernelLogTxStandDown) {
+    match previous {
+        KernelLogTxStandDown::WasLive => { kernel_log_tx_live = true; }
+        KernelLogTxStandDown::WasSpinning => { }
+        KernelLogTxStandDown::NotConsoleOwner => { }
+    }
 }
 
 fn kernel_log_tx_pending() -> bool {
@@ -503,7 +543,15 @@ fn kernel_log_enter_emergency() {
     // Flush the owner queue here so neither their last line nor its prompt
     // depends on an interrupt after the terminal path masks IRQs. A peer
     // never touches this core-0 queue and already uses polling UART output.
-    kernel_log_tx_stand_down();
+    //
+    // Terminal on purpose, so the token is matched and dropped rather than
+    // discarded: GitHub issue #531 made that a decision the compiler asks
+    // for, which is what stops a path that DOES return from forgetting.
+    match kernel_log_tx_stand_down() {
+        KernelLogTxStandDown::WasLive => { }
+        KernelLogTxStandDown::WasSpinning => { }
+        KernelLogTxStandDown::NotConsoleOwner => { }
+    }
 }
 
 private fn kernel_log_snapshot_push(value: u8) {

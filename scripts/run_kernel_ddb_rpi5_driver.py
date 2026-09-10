@@ -261,6 +261,16 @@ def main() -> int:
     if "ddb: continuing\n" not in text:
         raise timeline.bail(
             "RPi5 DDB did not continue after post-fault inspection")
+    # GitHub issue #531. The queue was live when the BREAK landed -- this
+    # lane's fault is triggered from the resumed shell, long after
+    # kernel_log_tx_activate() -- so the resume must put it back. Nothing
+    # else on this lane can see it: the boot's own `console: tx spin`
+    # measurement is printed before the shell, so a console left spinning
+    # from here costs 78.9 us/byte for the rest of the run and fails
+    # nothing.
+    if "ddb: console tx=queued\n" not in text:
+        raise timeline.bail(
+            "RPi5 DDB did not restore the console transmit queue on continue")
     if not resumed(bytes(received).replace(b"\r", b"")):
         raise timeline.bail(
             f"RPi5 workload did not resume after DDB continue: "

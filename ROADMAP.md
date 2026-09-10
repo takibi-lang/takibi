@@ -520,10 +520,9 @@ Territory A's second named profiling interval. Only `profile: begin
 name=busy-pair` exists today, so neither can be attributed rather than guessed
 at. #388's vectors are Territory A's files. So the startable work is the
 unordered list further down. **#339 was that list's recommended first move and
-closed 2026-09-09; see below.** After it, #275, #281 and #208 are the
-ext2/virtio pair that need no Territory A file, and **#530** and **#531** are
-the cheapest of the lot if the next session wants a short one -- #531 the
-shorter, and it restores a measured improvement rather than adding one. **#523 carries CI risk** -- it edits `dune-project` and
+closed 2026-09-09; see below, and **#531 closed 2026-09-10.** After them,
+#275, #281 and #208 are the ext2/virtio pair that need no Territory A file,
+and **#530** is the cheapest of what is left. **#523 carries CI risk** -- it edits `dune-project` and
 `.github/workflows/ci.yml` -- so it wants the same quiet window #526 does.
 
 **#339 closed 2026-09-09.** Every one of `disk_initialize()`'s failure
@@ -673,14 +672,30 @@ was byte-identical in both platform directories. Both are shared now, 42
 common views rather than 40. The check does not decide what should be common;
 it requires the answer to exist.
 
-**#531**, also 2026-09-09: the console transmit queue never comes back after
-a DDB `continue`, so a single serial BREAK costs the rest of that run
-#454's whole improvement -- 81 ms of spinning becomes 2519 ms on the board.
-It was written up as deliberate and is not: `continue` resumes a kernel that
-was healthy all along, and three drivers exercise that resume. No lane can
-observe the loss, because both DDB lanes end at the shell rather than at the
-boot's own measurement, which is why it wants an observer as much as a fix.
-Small -- a return value and one call site -- and Territory B on both files.
+**#531 closed 2026-09-10.** The console transmit queue never came back after
+a DDB `continue`, so a single serial BREAK cost the rest of that run #454's
+whole improvement -- 81 ms of spinning becoming 2519 ms on the board. It had
+been written up as deliberate and was not.
+
+`kernel_log_tx_stand_down()` now returns the state it found, as a `must_use`
+token, and that token is the only argument the resume takes: there is no
+`kernel_log_tx_resume()` that reads no saved state, so the shape
+`check_irq_restore_sites.py` has to look for lexically in the interrupt case
+is, for this flag, the only shape that type-checks. The crash console has to
+match its own token and say that a path which never returns has nothing to
+restore -- which is precisely what stops a path that does return from
+forgetting.
+
+The half worth carrying is the observer. The loss was invisible because both
+DDB lanes end at the shell rather than at the boot's own `console: tx spin`
+measurement, so `continue` now says which state it restored, and it READS the
+console rather than restating what it just did -- a line printed from the arm
+that does the restoring keeps saying `queued` after someone deletes the
+restore, which would make the observer agree with the defect. Three lanes
+assert it, and it was validated by planting the defect: with the resume
+removed, `kernelcheck-ddb-qemu` fails on `ddb: console tx=spinning`. The RPi5
+driver's control test gained a board that resumes correctly in every other
+respect and leaves the console spinning, and fails.
 
 **#530**, filed 2026-09-09 by the audit that closed this session, is #517's
 shape one layer up: the two lane runners hold the view-comparison loop twice

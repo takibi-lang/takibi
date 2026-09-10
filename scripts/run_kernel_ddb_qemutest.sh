@@ -159,6 +159,15 @@ wait "$driver_pid"
 python3 "$REPO_ROOT/scripts/validate_kernel_gdb_state.py" \
     --uart-log "$UART_LOG" --gdb-log "$GDB_VIEW_LOG"
 
+# GitHub issue #531: `console tx=queued` is the resume putting back the state
+# the stand-down found. Asserted here because nothing else on this lane can
+# see it -- the boot's own `console: tx spin` measurement is printed before
+# DDB is ever entered, so a console left spinning after `continue` costs
+# 78.9 us/byte for the rest of the run and fails nothing. Both break sources
+# enter well after kernel_log_tx_activate(), so `queued` is the only correct
+# answer here; `spinning` would mean the resume stopped restoring, or that
+# the BREAK landed before the console was armed, and either is worth a
+# failure.
 expected_entry=irq
 expected_source=33
 if [ "$BREAK_SOURCE" = software ]; then
@@ -211,6 +220,7 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         ! grep -q '^ddb: xu unmapped address=0x0000000070000000$' "$UART_LOG" ||
         ! grep -q '^commands: oops regs intr sched current vm fds ps proc PID bt \[PID\] trace events xk ADDRESS \[COUNT\] xp PHYSICAL \[COUNT\] xu PID ADDRESS \[COUNT\] help continue$' "$UART_LOG" ||
         ! grep -q '^ddb: continuing$' "$UART_LOG" ||
+        ! grep -q '^ddb: console tx=queued$' "$UART_LOG" ||
         ! grep -q '^init: ash bootstrap$' "$UART_LOG"; then
     echo "FAIL kernel/qemu ddb: BREAK inspection did not resume boot" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true

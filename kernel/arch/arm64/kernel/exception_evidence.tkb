@@ -1194,7 +1194,13 @@ private fn kernel_ddb_enter_stopped(
     // otherwise arrive ahead of the output that explains why it is there --
     // and every byte after this one spins, because a debugger entered with
     // interrupts masked has nothing left to drain a queue.
-    kernel_log_tx_stand_down();
+    //
+    // GitHub issue #531: the token this returns is what `continue` puts back
+    // at the end of this function. It carries the state FOUND, not "on", so a
+    // BREAK that lands between platform_irq_init() and kernel_log_tx_activate()
+    // resumes into the spinning console it interrupted rather than queueing
+    // bytes that nothing would drain.
+    let console: KernelLogTxStandDown = kernel_log_tx_stand_down();
     ddb_puts("\nddb: interrupt-safe UART debugger\n");
     ddb_puts("ddb: world-stop complete mask=");
     ddb_put_hex(world_stopped_mask(stopped_world));
@@ -1302,6 +1308,26 @@ private fn kernel_ddb_enter_stopped(
             }
         }
         length = 0;
+    }
+    kernel_log_tx_resume(console);
+    // Said at all because nothing else could see this: both DDB lanes resume
+    // into the interactive shell and end there, so neither reaches the
+    // end-of-boot `console: tx spin` measurement that would otherwise show a
+    // resumed console costing 78.9 us/byte again.
+    //
+    // Read back rather than restated. A line printed from the same arm that
+    // does the restoring would keep saying `queued` after someone deleted the
+    // restore, which would make the observer agree with the defect -- the
+    // exact shape #531 is about. So it asks the console what it is.
+    //
+    // Written through the spinning debug path even though the queue may now
+    // be live: the stand-down flushed it and nothing has queued since, so
+    // this is the last byte order can be affected by, and the next queued
+    // byte re-arms the TX interrupt in uart_putc.
+    if (kernel_log_tx_is_live()) {
+        ddb_puts("ddb: console tx=queued\n");
+    } else {
+        ddb_puts("ddb: console tx=spinning\n");
     }
 }
 
@@ -1523,7 +1549,17 @@ private fn crash_console_run() !{unsafe} {
     // load-bearing rather than tidy. This loop blocks on input after every
     // `ddb> `, with interrupts masked, so a prompt left in the transmit queue
     // has nothing to drain it and the console would appear hung.
-    kernel_log_tx_stand_down();
+    //
+    // GitHub issue #531: terminal on purpose. crash_console_run() never
+    // returns, so there is no resume to put the queue back for -- and the
+    // token is matched rather than dropped because must_use will not let it
+    // be dropped, which is exactly what stops a path that DOES return from
+    // forgetting.
+    match kernel_log_tx_stand_down() {
+        KernelLogTxStandDown::WasLive => { }
+        KernelLogTxStandDown::WasSpinning => { }
+        KernelLogTxStandDown::NotConsoleOwner => { }
+    }
     kernel_boot_log("ddb: read-only crash console\n");
     let mut line: [u8; CRASH_CONSOLE_LINE_BYTES];
     let mut length: usize = 0;

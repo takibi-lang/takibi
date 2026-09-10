@@ -225,7 +225,11 @@ The existing TCP UART/miniterm data path is unchanged. The kernel prints
 `xu PID ADDRESS [COUNT]`; `help`; `continue`.
 <!-- DDB-COMMAND-INVENTORY-END -->
 Use
-`continue` to return through the saved exception frame. Ctrl-C remains an
+`continue` to return through the saved exception frame. The debugger writes
+every byte by spinning on the UART FIFO -- it is entered with interrupts
+masked, so it has nothing to drain a transmit queue with -- and `continue`
+puts the console back the way it found it, reporting the state it restored as
+`ddb: console tx=queued` or `ddb: console tx=spinning`. Ctrl-C remains an
 ordinary terminal byte and is not reserved by the debugger. The console
 prints this key reminder when it starts. Miniterm's generic Ctrl-T, Ctrl-B
 indefinite BREAK toggle is intentionally not the Takibi DDB binding.
