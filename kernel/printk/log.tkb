@@ -385,6 +385,11 @@ fn kernel_log_capture_uart_byte(value: u8) -> bool {
 fn kernel_log_enter_emergency() {
     kernel_log_core_here().emergency = true;
     kernel_log_core_here().suppressed = false;
+    // Terminal stack guards can park without entering crash_console_run.
+    // Flush the owner queue here so neither their last line nor its prompt
+    // depends on an interrupt after the terminal path masks IRQs. A peer
+    // never touches this core-0 queue and already uses polling UART output.
+    kernel_log_tx_stand_down();
 }
 
 private fn kernel_log_snapshot_push(value: u8) {
@@ -529,10 +534,15 @@ fn kernel_log_bounds_probe() -> bool {
     // immediately after the destructive boot probe.
     let retained_length: usize = kernel_log_lengths[safe_slot];
     kernel_log_core_here().suppressed = true;
+    // Arrange the live-queue case without emitting artificial bytes. A
+    // terminal writer must leave polling selected even without the later
+    // crash-console entry; stack-guard fail-stop has no such continuation.
+    kernel_log_tx_activate();
     kernel_log_enter_emergency();
     kernel_log_begin_fragment();
     let visible: bool = kernel_log_capture_uart_byte(122);
     return visible && kernel_log_core_here().suppressed == false &&
+        kernel_log_tx_is_live() == false &&
         kernel_log_lengths[safe_slot] == retained_length;
 }
 

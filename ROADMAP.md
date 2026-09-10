@@ -205,6 +205,17 @@ Both target kernels build under forbid-trap with the two-core experiment.
 The experimental activation changes remain uncommitted; neither a complete
 two-core QEMU lane nor a complete two-core hardware lane has passed.
 
+Integration update, 2026-09-10: rebased onto upstream 63e9d3c5. Upstream now
+has an interrupt-driven 512-byte TX queue and common uart_putc in printk,
+so the console task must extend that implementation rather than add another
+transport. The resolved integration keeps that queue and its accounting
+core-0-only; peer ordinary suppression and direct peer userspace output remain
+explicit limitations. Emergency entry stands down the owner queue before
+terminal text, including stack guards that never reach crash_console_run.
+The rebased one-core main lane passed all 45 views and PTY, and all four oops
+cases passed. Earlier two-core captures describe the pre-queue binary; do not
+reuse their addresses or treat them as post-integration test results.
+
 #432's remaining-time writeback still awaits an observable signal-handler
 interruption, not the busy-pair workload.
 

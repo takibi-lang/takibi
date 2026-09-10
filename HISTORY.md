@@ -15,6 +15,24 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-10: preserve terminal output across TX-queue integration
+
+Rebasing the two-core investigation onto the upstream interrupt-driven UART
+queue moved uart_putc from the platform drivers into printk. The integration
+keeps the queue on core 0: suppressed peer log fragments return before queue
+access, peer direct bytes poll the device, and a peer cannot stand down or
+update core 0's TX accounting. This preserves the experimental boundary; it
+does not solve peer ordinary-log delivery or serialize peer userspace output.
+
+Emergency entry now stands down the owner queue before any terminal text.
+Stack guards can park without entering the later crash-console loop, so
+waiting until that loop to flush could strand their final bytes. The retained
+log probe also arranges a live queue and checks emergency entry leaves polling
+selected without altering the retained partial line. After integration, the
+one-core QEMU main lane passed all 45 views and PTY, and all four oops cases
+passed. The linked RPi5 stack boundary also moved by 32 KiB; its allocator
+expectation was updated by eight pages, without changing the image ceiling.
+
 ## 2026-09-09: failed clones preserve older siblings
 
 The clone rollback audit found a remnant of the single-child model: after
