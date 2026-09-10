@@ -9,10 +9,12 @@
 // stable syntactic identity without relational reasoning, left for a
 // future increment once a concrete need shows up).
 //
-// This does not yet solve issue #89's actual fd-table shape (an escaping
-// index into a table living past the acquiring function -- see
-// examples/affine_escape_via_index for that pattern, still the right
-// idiom for cross-function escape). What this closes is the SAME-FUNCTION
+// This does not solve the escaping-index shape -- an index into a table
+// living past the acquiring function -- which is issue #131. That is the
+// half issue #89's own closing comment split out and left open, so the
+// sentence names the live issue rather than the closed one it came from;
+// see examples/affine_escape_via_index for the pattern, still the right
+// idiom for cross-function escape. What this closes is the SAME-FUNCTION
 // hole: a struct local holding a handle field, read/consumed more than
 // once, or never consumed, purely within the one function that owns it.
 

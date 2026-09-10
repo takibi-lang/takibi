@@ -18,6 +18,23 @@ private let mut kernel_log_text: [u8; KERNEL_LOG_TEXT_BYTES];
 private let mut kernel_log_ticks: [i64; KERNEL_LOG_RECORD_COUNT];
 private let mut kernel_log_lengths: [usize; KERNEL_LOG_RECORD_COUNT];
 private let mut kernel_log_line_truncated: [bool; KERNEL_LOG_RECORD_COUNT];
+// GitHub issue #465: which core's line this is, and when THAT core emitted it.
+//
+// A peer's line reaches the ring through core 0's drain, so without these two
+// it is recorded as core 0's, timestamped at the moment core 0 got round to
+// it. Both are wrong in the direction that matters: a retained log exists to
+// attribute concurrency failures, and one that cannot say which core wrote a
+// line is least useful exactly when two are interleaving.
+//
+// The ring keeps its own order as the machine-wide sequence, because core 0
+// is its only writer -- that is what makes a sequence unnecessary here and a
+// CPU column necessary. The order is therefore arrival-at-core-0, and a peer
+// record's tick can be EARLIER than the record before it. That relationship
+// is the one #465 asks to be stated rather than inferred.
+private let mut kernel_log_cpu: [usize; KERNEL_LOG_RECORD_COUNT];
+private let mut kernel_log_deferred_cpu: usize;
+private let mut kernel_log_deferred_tick: i64;
+private let mut kernel_log_deferred: bool;
 private let mut kernel_log_oldest: usize;
 private let mut kernel_log_count: usize;
 private let mut kernel_log_overwritten: usize;
@@ -48,6 +65,9 @@ private let mut kernel_log_peer_published: [usize; KERNEL_LOG_PEER_SLOTS];
 private let mut kernel_log_peer_latest: [usize; KERNEL_MAX_CORES];
 private let mut kernel_log_peer_lengths: [usize; KERNEL_LOG_PEER_SLOTS];
 private let mut kernel_log_peer_truncated: [bool; KERNEL_LOG_PEER_SLOTS];
+// GitHub issue #465: when the PEER emitted this line, not when core 0
+// drained it. The two differ by however long core 0 took to come back.
+private let mut kernel_log_peer_ticks: [i64; KERNEL_LOG_PEER_SLOTS];
 private let mut kernel_log_peer_text: [u8; KERNEL_LOG_PEER_TEXT_BYTES];
 private let mut kernel_log_peer_consumed: [usize; KERNEL_MAX_CORES];
 
@@ -86,7 +106,15 @@ private fn kernel_log_start_line() {
         kernel_log_overwritten = kernel_log_overwritten + 1;
     }
     if (slot < KERNEL_LOG_RECORD_COUNT) {
-        kernel_log_ticks[slot] = read_cntpct() - kernel_log_boot_tick;
+        // A drained peer line carries its own core and its own tick; anything
+        // else is this core writing now.
+        if (kernel_log_deferred) {
+            kernel_log_cpu[slot] = kernel_log_deferred_cpu;
+            kernel_log_ticks[slot] = kernel_log_deferred_tick;
+        } else {
+            kernel_log_cpu[slot] = cpu_id();
+            kernel_log_ticks[slot] = read_cntpct() - kernel_log_boot_tick;
+        }
         kernel_log_lengths[slot] = 0;
         kernel_log_line_truncated[slot] = false;
         kernel_log_active_slot = slot;
@@ -122,6 +150,7 @@ private fn kernel_log_peer_publish() !{unsafe} {
     let length: usize = kernel_log_core_here().peer_length;
     kernel_log_peer_lengths[safe_slot] = length;
     kernel_log_peer_truncated[safe_slot] = kernel_log_core_here().peer_truncated;
+    kernel_log_peer_ticks[safe_slot] = read_cntpct() - kernel_log_boot_tick;
     for index: usize in 0..<KERNEL_LOG_PEER_LINE_BYTES {
         if (index < length) {
             let offset: usize = slot * KERNEL_LOG_PEER_LINE_BYTES + index;
@@ -481,6 +510,40 @@ fn kernel_log_capture_uart_byte(value: u8) -> bool {
     return true;
 }
 
+// GitHub issue #465: a peer that writes a retained line, on request.
+//
+// No maintained boot path had a secondary core emitting ordinary log text, so
+// the publication Territory A built and the attribution added here were both
+// unobservable -- the whole facility could stop working and every lane would
+// stay green.
+//
+// So this runs on every boot rather than behind a switch, for the same reason
+// the two-core contention probes do: evidence nobody turns on is evidence
+// nobody has. It costs four lines.
+//
+// Bounded on purpose. It emits KERNEL_LOG_PEER_PROBE_LINES numbered lines and
+// then stops, so the count in the retained log is a fact a view can compare
+// rather than a stream whose length depends on how long the boot took.
+const KERNEL_LOG_PEER_PROBE_LINES: usize = 4;
+private let mut kernel_log_peer_probe_emitted: [usize; KERNEL_MAX_CORES];
+
+// Not an interrupt function, and the effect checker is what settled that: an
+// !{interrupt} version was rejected for reaching kernel_boot_log, which is
+// the same rule that keeps a handler out of the ordinary console. So this
+// runs in the secondary's ordinary loop, which is also the only context where
+// kernel_log_peer_publish is reachable at all.
+fn kernel_log_peer_probe_step() !{logs, unsafe} {
+    let raw_cpu: usize = cpu_id();
+    if (raw_cpu == 0 || raw_cpu >= KERNEL_MAX_CORES) { return; }
+    let core: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
+    let emitted: usize = kernel_log_peer_probe_emitted[core];
+    if (emitted >= KERNEL_LOG_PEER_PROBE_LINES) { return; }
+    kernel_log_peer_probe_emitted[core] = emitted + 1;
+    kernel_boot_log("peer log probe: line=");
+    uart_put_udec(emitted + 1);
+    kernel_boot_log("\n");
+}
+
 fn kernel_log_peer_drain() !{unsafe} {
     if (cpu_id() != 0) { return; }
     for cpu: usize in 1..<KERNEL_MAX_CORES {
@@ -507,6 +570,7 @@ fn kernel_log_peer_drain() !{unsafe} {
             if (first != expected) { return; }
             let length: usize = kernel_log_peer_lengths[safe_slot];
             let truncated: bool = kernel_log_peer_truncated[safe_slot];
+            let peer_tick: i64 = kernel_log_peer_ticks[safe_slot];
             let mut copy: [u8; KERNEL_LOG_PEER_LINE_BYTES];
             for index: usize in 0..<KERNEL_LOG_PEER_LINE_BYTES {
                 if (index < length) {
@@ -521,6 +585,12 @@ fn kernel_log_peer_drain() !{unsafe} {
                 atomic_load_acquire((published + (slot as isize)) as usize)
             };
             if (second != expected) { return; }
+            // Attribute the record to the core that WROTE it, with the tick
+            // that core took. Cleared straight after the line so nothing
+            // afterwards inherits a peer's identity.
+            kernel_log_deferred_cpu = cpu;
+            kernel_log_deferred_tick = peer_tick;
+            kernel_log_deferred = true;
             kernel_log_begin_fragment();
             for index: usize in 0..<KERNEL_LOG_PEER_LINE_BYTES {
                 if (index < length) { uart_putc(copy[index]); }
@@ -528,6 +598,7 @@ fn kernel_log_peer_drain() !{unsafe} {
             if (truncated) {
                 kernel_boot_log("... [peer line truncated]\n");
             }
+            kernel_log_deferred = false;
             kernel_log_peer_consumed[cpu] = expected;
             expected = expected + 1;
         }
@@ -619,6 +690,16 @@ fn kernel_log_snapshot_build() -> usize {
         let slot: usize = (kernel_log_oldest + index) % KERNEL_LOG_RECORD_COUNT;
         if (slot < KERNEL_LOG_RECORD_COUNT) {
             kernel_log_snapshot_timestamp(kernel_log_ticks[slot]);
+            // GitHub issue #465: a core column, printed only for a core that
+            // is not the console owner. Every line a single-core boot retains
+            // is core 0's, so its dmesg is byte-identical to what it was --
+            // and a peer's line is the one that could not previously be told
+            // from core 0's at all.
+            if (kernel_log_cpu[slot] != 0) {
+                kernel_log_snapshot_text("cpu" as *u8);
+                kernel_log_snapshot_push(((kernel_log_cpu[slot] % 10) + 48) as u8);
+                kernel_log_snapshot_push(32);
+            }
             let length: usize = kernel_log_lengths[slot];
             let mut byte_index: usize = 0;
             while (byte_index < length && byte_index < KERNEL_LOG_TEXT_MAX) {

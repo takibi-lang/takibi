@@ -93,7 +93,15 @@ NEGATION_WINDOW = 3
 # lines rather than file or line-number keys: a broad exemption would let an
 # unrelated future comment inherit it silently, and an edited line stops
 # matching and comes back for review, which is the behaviour wanted.
-DECLARED: dict[tuple[str, str], str] = {}
+DECLARED: dict[tuple[str, str], str] = {
+    ("examples/field_lease/field_lease.tkb",
+     "// This does not yet solve issue #89's actual fd-table shape (an escaping"):
+        "the historical twin of linux_user/field_lease. Issue #89's closing "
+        "comment split the escaping-index shape out as #131, which is still "
+        "open, and the maintained copy names that instead. AGENTS.md says not "
+        "to edit examples/ for parity with a maintained file, so this one "
+        "keeps the sentence it was written with",
+}
 
 
 def source_files(trees):

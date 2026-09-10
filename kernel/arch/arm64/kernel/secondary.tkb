@@ -127,6 +127,13 @@ fn kernel_secondary_main(context: usize) {
             // turns a timer period apart. It touches ONE pool, this
             // kernel's only pool that no kernel subsystem uses, and it
             // never reaches the page allocator -- see that file's floor.
+            // GitHub issue #465: the gated producer of retained peer text,
+            // here because the effect checker refuses to let an interrupt
+            // handler log and because this is the only peer context where
+            // kernel_log_peer_publish is reachable. Off on every ordinary
+            // boot; a lane turns it on to make the publication path
+            // observable at all.
+            kernel_log_peer_probe_step();
             if (pool_contention_is_armed()) {
                 pool_contention_secondary_run();
             }

@@ -579,11 +579,34 @@ disables whatever is reading it.
    conditions alone has looked like a match. DDB's snapshot stays
    machine-global on purpose and the file now says why: one writer, and the
    complete token is what says so.
-4. **#465's remaining half** -- peers no longer lose their lines: Codex's
-   `kernel_log_peer_publish` hands complete bounded lines to core 0. What the
-   retained record still does not carry is WHICH core wrote it, or a sequence
-   that orders two cores against each other. A dmesg that cannot attribute a
-   line is least useful exactly when two cores are interleaving.
+4. **#465 closed 2026-09-10.** Codex's publication was sound -- release
+   publish, acquire read, the sequence verified before and after the copy,
+   overwrite reported -- and it handed the peer's bytes to core 0, which
+   retained them as core 0's own, timestamped when core 0 got round to them.
+   Both wrong in the direction that matters.
+
+   The record carries the writing core and that core's own tick now, and the
+   replay prints `cpuN ` for anything that is not the console owner, so a
+   single-core dmesg is byte-identical and a peer's line is the one that could
+   not previously be told from core 0's at all.
+
+   Two things worth carrying. The ordering rule is stated rather than
+   inferred: the ring's order is arrival at core 0, because core 0 is its only
+   writer -- which is what makes a separate sequence number unnecessary --
+   and a record's timestamp is when its OWN core emitted it, so a peer record
+   can carry a tick earlier than the record before it. The dmesg validator's
+   monotonic rule is per CPU for exactly that reason, and it caught the change
+   the moment the first peer line was retained.
+
+   And the whole facility was unobservable. No maintained boot path had a
+   secondary emitting ordinary log text, so publication and attribution alike
+   could have stopped working with every lane green. A bounded four-line peer
+   probe runs on every boot, for the same reason the two-core contention
+   probes do, and the shared `dmesg` view compares it on both lanes. The
+   effect checker decided where it lives: an `!{interrupt}` version was
+   refused for reaching `kernel_boot_log`, which is also the only reason the
+   peer's publish path is reachable from the secondary's ordinary loop and
+   nowhere else.
 5. **#520** and **#497**, which have been parked on one missing thing since
    2026-09-06: a second `profile: begin name=` interval, around a network
    transfer, in `kernel/net/tcp.tkb`. That file is Territory A's, and the

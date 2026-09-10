@@ -17,6 +17,9 @@ def fail(message: str) -> None:
     raise SystemExit(f"FAIL kernel/dmesg: {message}")
 
 
+CPU_PREFIX = re.compile(rb"^cpu([0-9]) ")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("uart_log", type=Path)
@@ -35,8 +38,27 @@ def main() -> None:
             records.append((timestamp, match.group(3)))
     if not records:
         fail("BusyBox dmesg emitted no timestamped records")
-    if any(right[0] < left[0] for left, right in zip(records, records[1:])):
-        fail("record timestamps are not monotonic")
+    # GitHub issue #465: monotonic PER CPU, and the qualifier is the whole
+    # ordering rule rather than a relaxation to make a test pass.
+    #
+    # The ring's order is arrival at core 0, because core 0 is its only
+    # writer -- that is what makes a separate sequence number unnecessary. A
+    # record's timestamp is when its OWN core emitted the line, which for a
+    # peer is before core 0 drained it. So a peer record can and does carry a
+    # tick earlier than the record printed before it, and requiring one global
+    # ordering would be requiring the peer's timestamp to be a lie.
+    #
+    # What must still hold is that no core's own records go backwards. A
+    # `cpuN ` prefix names the writer; its absence means core 0.
+    latest: dict[bytes, int] = {}
+    for timestamp, text in records:
+        writer = b"0"
+        cpu = CPU_PREFIX.match(text)
+        if cpu:
+            writer = cpu.group(1)
+        if timestamp < latest.get(writer, 0):
+            fail(f"record timestamps are not monotonic on cpu{writer.decode()}")
+        latest[writer] = timestamp
 
     by_text = {text: timestamp for timestamp, text in records}
     first = b"takibi kernel: EL1"
