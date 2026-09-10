@@ -48,8 +48,8 @@ FAILED_TESTS=()
 HWTEST_ARTIFACT_ROOT="${RPI5_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/hwtest-rpi5}"
 FAILURE_ARTIFACT_ROOT="${RPI5_FAILURE_ARTIFACT_DIR:-$REPO_ROOT/_build/hwtest-rpi5-failures}"
 
-# shellcheck source=scripts/test_artifacts.sh
-source "$REPO_ROOT/scripts/test_artifacts.sh"
+# shellcheck source=scripts/artifact_dirs.sh
+source "$REPO_ROOT/scripts/artifact_dirs.sh"
 
 if [ -t 1 ]; then
     GRN='\033[32m' RED='\033[31m' RST='\033[0m'
@@ -196,7 +196,7 @@ run_hw_test_rpi5() {
 #
 # Reset/load once, then retain one PASS/FAIL result per original example by
 # splitting the marked UART stream with the shared suite-output checker --
-# same reasoning and same scripts/check_suite_output.py as
+# same reasoning and same scripts/buildcheck_suite_output.py as
 # run_hwtest_rpi3.sh's own run_hw_test_rpi3_suite.
 run_hw_test_rpi5_suite() {
     local suite_name="$1" elf="$2" manifest="$3"
@@ -225,7 +225,7 @@ run_hw_test_rpi5_suite() {
         exit 1
     fi
 
-    python3 "$(dirname "$0")/check_suite_output.py" "$tmp_out" \
+    python3 "$(dirname "$0")/buildcheck_suite_output.py" "$tmp_out" \
         "$manifest" > "$report" || true
     [ -s "$report" ] || printf 'ERROR\tsuite checker produced no result\n' > "$report"
 

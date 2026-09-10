@@ -135,7 +135,7 @@ POSTMORTEM_COMMANDS = (b"oops", b"intr", b"bt", b"sched", b"current", b"ps")
 # and whatever did arrive is still reported.
 #
 # Derived from the capture budget rather than fixed, for the reason
-# scripts/test_kernel_net_readiness.py exists: a flat sub-wait outlives the
+# scripts/slowcheck_kernel_net_readiness.py exists: a flat sub-wait outlives the
 # outer budget of every lane shorter than itself, and the branch that was
 # supposed to speak then never runs. The ceiling is what a six-command walk
 # over a 115200-baud UART needs several times over; the fraction is what keeps
@@ -174,7 +174,7 @@ def postmortem_budget(timeout: float) -> float:
 # Not a command-line option: this has to equal the `-chardev id=` the lane
 # gives QEMU, and a flag would let the two drift apart while every run still
 # looked fine -- the break would fail only at a stall, which is the one moment
-# nobody is watching. scripts/test_kernel_ddb_postmortem.py checks the lanes
+# nobody is watching. scripts/check_kernel_ddb_postmortem_controls.py checks the lanes
 # against this name instead.
 QMP_CHARDEV = "debug_uart"
 

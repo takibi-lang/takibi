@@ -1,7 +1,7 @@
 name: CI
 
 # The hardware-free half of `make allcheck`, which is what a hosted runner can
-# run: langcheck, the compiler unit tests, linux_user, and the seven QEMU
+# run: langcheck, slowcheck, the compiler unit tests, linux_user, and the seven QEMU
 # lanes. `make cicheck` is that set, derived from the same variable allcheck
 # uses so the two cannot drift apart.
 #
@@ -86,7 +86,7 @@ jobs:
             opam install -y llvm.19-static
           '
 
-      # Runs langcheck and the unit tests a second time, since cicheck below
+      # Runs langcheck, slowcheck and the unit tests a second time, since cicheck below
       # runs them too. The duplication is known and costs about 27 s locally.
       # It is kept because the alternative -- naming allbuild's pieces here by
       # hand -- silently stops covering whatever allbuild gains later, and

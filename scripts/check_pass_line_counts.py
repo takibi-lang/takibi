@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Every `scripts/check_*.py` must report PASS through `pass_line`.
+"""Every check must report PASS through a count it derived.
 
 A check that reports PASS while checking nothing is worse than no check,
 because PASS is read as "the property holds" and not as "I never looked".
@@ -28,6 +28,17 @@ scanned set was complete. `report_pass`'s docstring carries that part; it is
 a judgement, and this check is deliberately only the mechanical floor under
 it.
 
+GitHub issue #526 widened this from `check_*.py` to every check in the
+directory, in both languages. The controls were the one group the old glob
+did not reach, and a control is exactly as capable of the silent-zero failure
+as the check it controls: it plants defects, runs the check, and reports PASS
+whether or not any of that executed. `pass_line.CaseCount` is what they count
+with; `cases=` is what they assert.
+
+A shell member cannot import the helper, so it is held to the same claim in
+the form shell can make it: its PASS line must carry a value the run produced,
+not a fixed sentence.
+
 Usage: check_pass_line_counts.py [scripts_dir]
 Exit code only (0 = pass, 1 = fail).
 """
@@ -47,7 +58,7 @@ RESERVED = {"stream"}
 
 # (script, leading text) -> why this PASS line does not go through the helper.
 ALLOWED_BARE_PASS = {
-    ("check_suite_output.py", "PASS\t"):
+    ("buildcheck_suite_output.py", "PASS\t"):
         "a per-case result row in the batched UART report, not the check's "
         "verdict; the verdict is the aggregate report_pass below it",
 }
@@ -135,14 +146,40 @@ def problems_in(path: pathlib.Path) -> list[str]:
     return found
 
 
+PREFIXES = ("check", "slowcheck", "buildcheck")
+
+
+def shell_problems_in(path: pathlib.Path) -> list[str]:
+    """A shell check's PASS line must carry a value the run produced."""
+    found: list[str] = []
+    lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines()
+             if "PASS" in line and line.lstrip().startswith(("echo", "printf"))]
+    if not lines:
+        return [f"{path.name}: prints no PASS line, so a run that did nothing "
+                "is indistinguishable from one that passed."]
+    if not any("$" in line for line in lines):
+        found.append(
+            f"{path.name}: its PASS line is a fixed sentence. Report a value "
+            "the run produced -- the number of cases it exercised -- so the "
+            "verdict is zero when it exercised none.")
+    return found
+
+
 def main() -> int:
     scripts_dir = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else SCRIPTS
-    checks = sorted(scripts_dir.glob("check_*.py"))
+    checks = sorted(
+        path
+        for prefix in PREFIXES
+        for suffix in ("py", "sh")
+        for path in scripts_dir.glob(f"{prefix}_*.{suffix}"))
     problems: list[str] = []
     # This script matches its own glob, and is deliberately not skipped: it
     # reports through the helper like every other check.
     for path in checks:
-        problems.extend(problems_in(path))
+        if path.suffix == ".sh":
+            problems.extend(shell_problems_in(path))
+        else:
+            problems.extend(problems_in(path))
 
     if problems:
         print("ERROR: a check script can report PASS without asserting that "
@@ -153,8 +190,8 @@ def main() -> int:
 
     report_pass(
         "pass-line-counts",
-        f"{len(checks)} check scripts report PASS through pass_line, each "
-        "asserting a count that is zero when nothing was examined",
+        f"{len(checks)} checks in every lane report PASS through a count "
+        "that is zero when nothing was examined",
         check_scripts=len(checks),
     )
     return 0

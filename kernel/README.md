@@ -307,7 +307,7 @@ not.
 `kernelbuild-rpi5` does not require a board. It generates the ext2 root
 fixture, obtains the pinned Alpine packages, compiles all Takibi
 code under `--forbid-trap`, assembles the minimal AArch64 files, and links the
-ELF, then runs `scripts/check_kernel_asm_invariants.py` against the linked
+ELF, then runs `scripts/buildcheck_kernel_asm_invariants.py` against the linked
 `kernel.elf` -- a static, hardware-free disassembly check verifying the
 kernel identity block's UXN permission bits and the EL0 `eret` path's
 DAIF.I masking, catching a class of past hand-written-assembly regression
@@ -316,7 +316,7 @@ reproduce it. It also links `kernel/arch/arm64/kernel/user_payload.tkb`/
 `user_payload_asm.S` into their own real static-PIE ELF (placed on the ext2
 fixture image as `/bin/user_payload` and launched from `kernel/tests/ext2/init.sh`
 like any other external command) and runs
-`scripts/check_user_payload_no_rw_globals.py` against that link -- a static
+`scripts/buildcheck_user_payload_no_rw_globals.py` against that link -- a static
 check that a top-level mutable global in that file is not guaranteed to be
 writable at its runtime address, so writes into it can silently fail.
 

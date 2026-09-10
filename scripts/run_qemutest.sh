@@ -13,8 +13,8 @@ QEMU_COMMON="-machine virt -cpu cortex-a53 -nographic -semihosting-config enable
 TIMEOUT=10
 CHECK_ARTIFACT_ROOT="${CHECK_ARTIFACT_DIR:-$REPO_ROOT/_build/check}"
 
-# shellcheck source=scripts/test_artifacts.sh
-source "$REPO_ROOT/scripts/test_artifacts.sh"
+# shellcheck source=scripts/artifact_dirs.sh
+source "$REPO_ROOT/scripts/artifact_dirs.sh"
 
 # Invoke the built binary directly rather than "dune exec takibi --": under
 # `make -j`, this script's own recipe can run concurrently with other Make
@@ -89,7 +89,7 @@ check_suite_output() {
     local outfile="$1" manifest="$2" suite_name="$3" suffix="${4:-}"
     local report status name expected actual
     report=$(mktemp)
-    python3 "$(dirname "$0")/check_suite_output.py" "$outfile" \
+    python3 "$(dirname "$0")/buildcheck_suite_output.py" "$outfile" \
         "$manifest" > "$report" || true
     [ -s "$report" ] || printf 'ERROR\tsuite checker produced no result\n' > "$report"
 

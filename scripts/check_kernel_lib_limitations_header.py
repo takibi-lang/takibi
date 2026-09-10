@@ -63,14 +63,14 @@ def files_missing_header(directory):
     return missing
 
 
+# GitHub issue #526: the gate runs its members with no arguments. These three
+# were constants in the Makefile's own invocation, so they are constants here.
+DEFAULT_DIRECTORIES = ("kernel/lib", "kernel/kernel", "kernel/net")
+
+
 def main():
-    if len(sys.argv) < 2:
-        print(
-            "usage: check_kernel_lib_limitations_header.py <dir> [<dir> ...]",
-            file=sys.stderr,
-        )
-        return 1
-    directories = [Path(arg) for arg in sys.argv[1:]]
+    directories = [Path(arg) for arg in sys.argv[1:]] or \
+        [Path(name) for name in DEFAULT_DIRECTORIES]
     for directory in directories:
         if not directory.is_dir():
             print("error: %s is not a directory" % directory, file=sys.stderr)

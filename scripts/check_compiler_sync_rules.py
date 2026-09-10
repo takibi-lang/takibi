@@ -24,10 +24,15 @@ COMMENT = re.compile(r"\(\*.*?\*\)", re.DOTALL)
 
 
 def main() -> int:
-    quiet = "--quiet" in sys.argv[1:]
-    unknown = [arg for arg in sys.argv[1:] if arg != "--quiet"]
+    # GitHub issue #526: the gate runs its members with no arguments, and
+    # quiet is what it wants -- so quiet is the default and `--verbose` is
+    # the form that asks for the site listing.
+    quiet = "--verbose" not in sys.argv[1:]
+    unknown = [arg for arg in sys.argv[1:]
+               if arg not in ("--quiet", "--verbose")]
     if unknown:
-        print(f"usage: {pathlib.Path(sys.argv[0]).name} [--quiet]", file=sys.stderr)
+        print(f"usage: {pathlib.Path(sys.argv[0]).name} [--verbose]",
+              file=sys.stderr)
         return 2
     sites: list[tuple[pathlib.Path, int, str]] = []
     errors: list[str] = []

@@ -42,8 +42,8 @@ FAILED_TESTS=()
 HWTEST_ARTIFACT_ROOT="${RPI3_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/hwtest-rpi3}"
 FAILURE_ARTIFACT_ROOT="${RPI3_FAILURE_ARTIFACT_DIR:-$REPO_ROOT/_build/hwtest-rpi3-failures}"
 
-# shellcheck source=scripts/test_artifacts.sh
-source "$REPO_ROOT/scripts/test_artifacts.sh"
+# shellcheck source=scripts/artifact_dirs.sh
+source "$REPO_ROOT/scripts/artifact_dirs.sh"
 
 if [ -t 1 ]; then
     GRN='\033[32m' RED='\033[31m' RST='\033[0m'
@@ -288,7 +288,7 @@ run_hw_test_rpi3_suite() {
         exit 1
     fi
 
-    python3 "$(dirname "$0")/check_suite_output.py" "$tmp_out" \
+    python3 "$(dirname "$0")/buildcheck_suite_output.py" "$tmp_out" \
         "$manifest" > "$report" || true
     [ -s "$report" ] || printf 'ERROR\tsuite checker produced no result\n' > "$report"
 

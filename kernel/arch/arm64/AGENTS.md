@@ -19,7 +19,7 @@ Use the generated exception-entry or exception-restore mechanisms when their
 frame shapes fit. `el2_drop_to_el1` is a cold-boot exception because interrupt
 sources are still masked and its target PSTATE masks DAIF.
 
-`scripts/check_kernel_asm_invariants.py` disassembles the linked image and
+`scripts/buildcheck_kernel_asm_invariants.py` disassembles the linked image and
 enforces the return invariant. Do not replace that external check with a
 runtime probe or additional hand-written assembly.
 

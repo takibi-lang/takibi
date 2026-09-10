@@ -475,27 +475,43 @@ core count and not its per-core speed. What was missing was any account of
 what the guest was doing, and that is what the paragraph above supplies. The
 next occurrence answers it in the lane's own artifacts.
 
-1. **#526** `langcheck` grew from one non-ASCII grep into a hand-listed
-   48-line gate, and a wall-clock control inside it cost CI nine consecutive
-   runs on 2026-09-07 -- six of the nine failed on that one script, and for
-   several of those rounds it gated `allbuild`, so no kernel lane ran at all
-   and the real defects behind it stayed invisible. Placed first because it is
-   the only entry here that pays back on every future round rather than once.
-   Agreed design: two prefixes, `check_` and `slowcheck_`, dispatched by glob
-   with no hand-listed enumeration, and the fast gate running each member under
-   a timeout so a name that lies is refused by the mechanism rather than by a
-   document. Renaming `langcheck` and `allbuild` themselves comes after, not
-   with it: a name should be changed once it points at a fact. The timeout is
-   a membership rule and not an estimate -- a check that cannot finish inside
-   it has changed category, so it is investigated rather than raised, the same
-   discipline the boot-duration bound already carries.
-   **DO NOT START THIS WITHOUT THE MAINTAINER SAYING SO.** Its position here is
-   its value per future round, not its urgency, and starting it because it sits
-   first is the mistake it is about. It also needs a quiet window: 31 files
-   move, the Makefile is shared, and a `test_*` script added by either
-   territory mid-migration silently restores the old convention. Land it as one
-   commit after a few consecutive green runs -- a half-migrated tree has both
-   conventions live at once.
+1. **#526 -- closed 2026-09-10, with the maintainer saying so and Codex
+   holding still for the quiet window it needed.** `langcheck` had grown from
+   one non-ASCII grep into a hand-listed gate of forty-eight invocations, and
+   a wall-clock control inside it cost CI nine consecutive runs on 2026-09-07;
+   for several of those rounds it gated `allbuild`, so no kernel lane ran and
+   the real defects behind it stayed invisible.
+
+   Both lanes are globs now, and the prefix is the dispatch: `check_*` reads
+   tracked files and runs in `make langcheck` under a timeout, `slowcheck_*`
+   waits on something real and runs in `make slowcheck`. The agreed design did
+   not cover a third population the issue had not measured -- the five checks
+   that must be handed a linked ELF or a built kernel -- so those are
+   `buildcheck_*` and sit outside both globs, which is what keeps the prefix
+   meaning exactly one thing rather than usually one thing.
+
+   The payoff is measured, not argued: `langcheck` fell from 34-46s to 8.0s,
+   and the 34s of controls that used to gate it now run beside the kernel
+   lanes instead of in front of them. `allbuild`'s per-script escape hatch
+   (`ALLBUILD_DEFER_DDB_POSTMORTEM`) is gone with the wall clock it was cut
+   for.
+
+   Two things the acceptance list forced that were worth more than the
+   renaming. `check_pass_line_counts.py` now covers every member of both
+   lanes, and the thirty controls -- the one group nothing had held to the
+   rule -- assert a count of the scenarios they ran, so a control whose loop
+   never executes reports zero and is refused. And `docs/BUILD_CHECKS.md`,
+   which called itself the complete inventory while missing thirty langcheck
+   members, is complete and enforced.
+
+   The closing demonstration is the instance that actually occurred: the
+   2026-09-07 wall-clock control, restored under a fast-gate name, is killed
+   at the bound (`exit=124` after 10s) and the lane goes red. Two other rules
+   catch it even earlier -- it is not in the inventory, and it reports PASS
+   without a count.
+
+   Renaming `langcheck` and `allbuild` themselves is still deliberately after
+   this, not part of it.
 2. **#520** the kernel's TCP path sustains 15 KiB/s, 12x slower than SWD and
    flat across transfer size. Measured 2026-09-06 and printed by
    `make kernelcheck-rpi5` on every run. Attributing it needs a named
@@ -723,7 +739,7 @@ moved the boot views' allocator page counts. On the multicore tree that
 retired `kernel/tests/qemu-debug/views/boot.expected`: the debug build now
 lands in the same granule as the ordinary one, so the overlay held bytes
 identical to the view it overlaid.
-`check_kernel_memory_map.py` reads the ordinary view when the overlay is
+`buildcheck_kernel_memory_map.py` reads the ordinary view when the overlay is
 absent, which turns the overlay's absence into a claim -- the two builds
 agree -- rather than into a gap.
 `check_ddb_wait_reason_names.py` holds the two namers to the enums
@@ -755,7 +771,7 @@ one, it works today by luck of which lines carry a CR, and nothing would have
 noticed that changing. The CR is deleted first now, and the control writes
 that line CR-terminated on purpose.
 
-The loop was previously exercised only by a full boot. `test_kernel_views.sh`
+The loop was previously exercised only by a full boot. `check_kernel_views_controls.sh`
 now asserts it directly in milliseconds: report every mismatch rather than
 stopping at the first, purge a stale `.actual`, refuse a run that compared
 nothing, refuse a filter with no expected file, and let platform and overlay
@@ -1180,7 +1196,7 @@ test-driver special case.
   bought beyond the instruction: `kernel_mmu_activate` keeps the LOCAL form,
   so the tree now holds the two whole-TLB invalidates that want OPPOSITE
   answers, and the difference is checked on emitted instructions
-  (`check_kernel_asm_invariants.py`) in both directions rather than
+  (`buildcheck_kernel_asm_invariants.py`) in both directions rather than
   described in a comment. The two mnemonics differ by two characters, both
   are correct on one core, and the wrong one fails silently on two.
 - **#261 -- re-derived and split, 2026-08-30.** Its inventory was five parts

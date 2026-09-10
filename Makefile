@@ -52,7 +52,7 @@ LLVM_OBJCOPY := llvm-objcopy-19
 # `kernelcheck`), which made it easy to run the wrong one by accident.
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: _kernelcheck-qemu-main _kernelcheck-qemu-fdt-multibank _kernelcheck-qemu-ash _kernelcheck-shell-qemu _kernelcheck-qemu-debug-main _kernelcheck-qemu-debug-repeat _kernelcheck-qemu-debug-ash _kernelcheck-oops-qemu _kernelcheck-ddb-qemu _kernelcheck-stack-overflow-qemu _kernelcheck-lifecycle-gap-qemu _kernelcheck-alloc-rollback-qemu _kernelcheck-rpi5 _kernelcheck-ddb-rpi5-software build test coverage kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-ddb-rpi5-software kernelcheck-qemu kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-qemu-ash kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-qemu-debug-main kernelcheck-qemu-debug-repeat kernelcheck-qemu-debug-ash kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-alloc-rollback-qemu kernelcheck-repeat kernelsh-qemu kernelsh-rpi5 lease-status profile-kernel-workload-chart langcheck linuxbuild linuxcheck clean FORCE
+.PHONY: _kernelcheck-qemu-main _kernelcheck-qemu-fdt-multibank _kernelcheck-qemu-ash _kernelcheck-shell-qemu _kernelcheck-qemu-debug-main _kernelcheck-qemu-debug-repeat _kernelcheck-qemu-debug-ash _kernelcheck-oops-qemu _kernelcheck-ddb-qemu _kernelcheck-stack-overflow-qemu _kernelcheck-lifecycle-gap-qemu _kernelcheck-alloc-rollback-qemu _kernelcheck-rpi5 _kernelcheck-ddb-rpi5-software build test coverage kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-ddb-rpi5-software kernelcheck-qemu kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-qemu-ash kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-qemu-debug-main kernelcheck-qemu-debug-repeat kernelcheck-qemu-debug-ash kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-alloc-rollback-qemu kernelcheck-repeat kernelsh-qemu kernelsh-rpi5 lease-status profile-kernel-workload-chart langcheck slowcheck linuxbuild linuxcheck clean FORCE
 
 .DEFAULT_GOAL := build
 
@@ -185,69 +185,22 @@ effect-matrix-control: build
 	fi; \
 	echo "PASS effect-matrix-control: EFFECTS.md matches compiler effect rules"
 
+# GitHub issue #526: the fast gate's membership rule, expressed as a number.
+# The slowest legitimate member measured 0.6s locally; this sits far above it
+# so only a gross violation is caught, which is the deliberate limit. It is
+# not an estimate to be raised when something gets slower -- a member that
+# cannot finish inside it has changed category and belongs in `slowcheck`.
+CHECK_TIMEOUT_SECONDS    := 10
+
+# GitHub issue #526: the fast gate. Its members are discovered by glob --
+# every scripts/check_* -- so adding one is adding a file, and the seventh
+# author no longer copies the sixth's hand-written line. Each runs under
+# CHECK_TIMEOUT_SECONDS, which is what makes "the fast gate is for checks
+# that read tracked files" a mechanism instead of a sentence: a member that
+# waits is killed and this lane goes red.
 langcheck: unused-function-control effect-matrix-control pool-liveness-control
 	@bash scripts/lane_timing.sh begin langcheck
-	@python3 scripts/check_agents_paths.py
-	@python3 scripts/check_documented_counts.py
-	@python3 scripts/check_irq_restore_sites.py
-	@python3 scripts/check_platform_view_parity.py
-	@python3 scripts/check_ddb_wait_reason_names.py
-	@python3 scripts/test_check_expected_line_endings.py
-	@python3 scripts/check_expected_line_endings.py
-	@python3 scripts/test_check_elf_symbol_alignment.py
-	@python3 scripts/test_check_kernel_memory_map.py
-	@python3 scripts/test_check_kernel_asm_invariants.py
-	@bash scripts/test_run_kernel_build_locked.sh
-	@bash scripts/test_qemu_session_ports.sh
-	@bash scripts/test_resource_lease.sh
-	@python3 scripts/test_run_kernel_shell_console.py
-	@python3 scripts/test_run_kernel_uart_driver.py
-	@# allbuild defers this socket/timing control until its compiler-heavy
-	@# parallel section has ended. Every direct langcheck still runs it here.
-	@if [ "$(ALLBUILD_DEFER_DDB_POSTMORTEM)" != 1 ]; then \
-		python3 scripts/test_kernel_ddb_postmortem.py; \
-	fi
-	@python3 scripts/test_run_kernel_ddb_rpi5_driver.py
-	@python3 scripts/test_rpi5_set_kernel_byte.py
-	@python3 scripts/test_check_direct_mmio_literals.py
-	@python3 scripts/test_check_ddb_command_inventory.py
-	@python3 scripts/test_check_ddb_wait_reason_names.py
-	@python3 scripts/test_check_fallback_counters.py
-	@python3 scripts/test_check_platform_file_parity.py
-	@python3 scripts/test_check_irq_restore_sites.py
-	@python3 scripts/test_check_platform_view_parity.py
-	@python3 scripts/test_check_documented_counts.py
-	@python3 scripts/test_measure_trusted_base.py
-	@python3 scripts/test_profile_kernel_workload.py
-	@python3 scripts/test_profile_kernel_samples.py
-	@bash scripts/test_repeat_kernel_lane.sh
-	@bash scripts/test_run_lane.sh
-	@bash scripts/test_board_link_gate.sh
-	@python3 scripts/test_net_link_wait.py
-	@python3 scripts/test_validate_kernel_dmesg_timestamps.py
-	@python3 scripts/test_find_stale_issue_workarounds.py
-	@bash scripts/test_archive_kernel_failure.sh
-	@bash scripts/test_kernel_views.sh
-	@python3 scripts/check_direct_mmio_literals.py kernel
-	@python3 scripts/check_no_conflict_markers.py
-	@python3 scripts/test_check_no_conflict_markers.py
-	@python3 scripts/check_pass_line_counts.py
-	@python3 scripts/test_check_pass_line_counts.py
-	@python3 scripts/check_stale_depfiles.py
-	@python3 scripts/check_single_dune_invocation.py
-	@python3 scripts/check_ci_opam_deps.py
-	@python3 scripts/check_pipefail_early_exit.py
-	@python3 scripts/test_check_ci_opam_deps.py
-	@python3 scripts/test_measure_kernel_tcp_throughput.py
-	@python3 scripts/test_check_pipefail_early_exit.py
-	@python3 scripts/test_kernel_net_readiness.py
-	@python3 scripts/check_compiler_sync_rules.py --quiet
-	@python3 scripts/check_raw_pos_fname.py
-	@python3 scripts/check_qemu_lane_ports.py
-	@python3 scripts/check_kernel_interactive_httpd_protocol.py
-	@python3 scripts/check_pool_release_paths.py
-	@python3 scripts/check_platform_file_parity.py
-	@python3 scripts/check_kernel_log_expectations.py
+	@bash scripts/run_check_lane.sh check $(CHECK_TIMEOUT_SECONDS)
 # -I skips binary files. Without it a build directory left in the worktree
 # under any name but `_build` -- a copy taken for diagnosis, say -- makes grep
 # match dune's preprocessed .pp.ml files, which carry NUL. That reports
@@ -268,6 +221,16 @@ langcheck: unused-function-control effect-matrix-control pool-liveness-control
 		echo "OK: all files are ASCII-clean" \
 	'
 	@bash scripts/lane_timing.sh end langcheck 0
+
+# The slow lane: the members that must wait, and the reason the fast gate can
+# be fast. Kept out of langcheck deliberately -- a control that drives a pty,
+# a lease or a socket has no business gating a compile -- and run by every
+# aggregate below, so nothing is lost by moving it here.
+.PHONY: slowcheck
+slowcheck:
+	@bash scripts/lane_timing.sh begin slowcheck
+	@bash scripts/run_check_lane.sh slowcheck
+	@bash scripts/lane_timing.sh end slowcheck 0
 
 # -- linux_user/ (host-native Linux/AMD64 environment-independent tests) -----
 # See AGENTS.md's "Where Should a New Test Go?": this directory holds
@@ -763,7 +726,7 @@ $(KERNEL_RPI5_PMU_O): $(KERNEL_PMU_S) | $(KERNEL_BUILD_DIR)
 # through the kernel's general-purpose ELF loader like busybox-static-pie
 # rather than a custom flat-binary/embed_file mechanism. -pie
 # --no-dynamic-linker (no linker script) is sufficient: this payload has no
-# writable globals (enforced by check_user_payload_no_rw_globals.py below),
+# writable globals (enforced by buildcheck_user_payload_no_rw_globals.py below),
 # so the resulting ET_DYN ELF has zero dynamic relocations -- verified
 # empirically before this rule existed (see HISTORY.md's #241 entry).
 $(KERNEL_RPI5_USER_PAYLOAD_TKB_O): $(KERNEL_RPI5_USER_PAYLOAD_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
@@ -774,7 +737,7 @@ $(KERNEL_RPI5_USER_PAYLOAD_ASM_O): $(KERNEL_RPI5_USER_PAYLOAD_ASM_S) | $(KERNEL_
 
 $(KERNEL_RPI5_USER_PAYLOAD_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O)
 	$(LLD) -pie --no-dynamic-linker -e initial_user_payload $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5_USER_PAYLOAD_ASM_O) -o $@
-	python3 scripts/check_user_payload_no_rw_globals.py $@
+	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
 # GitHub issue #448: the CPU-bound pair /etc/inittab starts. One source and
 # one object, linked twice with different ELF entry points, so /bin/busy-a
@@ -788,15 +751,15 @@ $(KERNEL_BUSY_LOOP_O): $(KERNEL_BUSY_LOOP_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
 
 $(KERNEL_BUSY_LOOP_A_ELF): $(KERNEL_BUSY_LOOP_O)
 	$(LLD) -pie --no-dynamic-linker -e busy_loop_a $< -o $@
-	python3 scripts/check_user_payload_no_rw_globals.py $@
+	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
 $(KERNEL_BUSY_LOOP_B_ELF): $(KERNEL_BUSY_LOOP_O)
 	$(LLD) -pie --no-dynamic-linker -e busy_loop_b $< -o $@
-	python3 scripts/check_user_payload_no_rw_globals.py $@
+	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
 $(KERNEL_BUSY_LOOP_SPIN_ELF): $(KERNEL_BUSY_LOOP_O)
 	$(LLD) -pie --no-dynamic-linker -e busy_loop_spin $< -o $@
-	python3 scripts/check_user_payload_no_rw_globals.py $@
+	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
 $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_RPI5_MEMORY_TKB) $(KERNEL_FDT_TKB) \
     $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_INTC_TKB) $(KERNEL_RPI5_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile | $(KERNEL_BUILD_DIR)
@@ -808,8 +771,8 @@ $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(
 
 $(KERNEL_RPI5_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_RPI5_LINK_LD)
 	$(LLD) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_MAIN_O) -o $@
-	python3 scripts/check_kernel_asm_invariants.py $@ 2
-	python3 scripts/check_elf_symbol_alignment.py $@ boot_page_pool 16
+	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 2
+	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool 16
 
 # External RPi5 inspection uses the same code and load addresses as the
 # ordinary image, with DWARF added only to the host ELF. Depending on main.o
@@ -821,8 +784,8 @@ $(KERNEL_RPI5_MAIN_DEBUG_O): $(KERNEL_RPI5_MAIN_O)
 
 $(KERNEL_RPI5_DEBUG_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_MAIN_DEBUG_O) $(KERNEL_RPI5_LINK_LD)
 	$(LLD) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_MAIN_DEBUG_O) -o $@
-	python3 scripts/check_kernel_asm_invariants.py $@ 2
-	python3 scripts/check_elf_symbol_alignment.py $@ boot_page_pool 16
+	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 2
+	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool 16
 
 $(KERNEL_RPI5_DEBUG_METADATA): $(KERNEL_RPI5_MAIN_O) $(TAKIBI)
 	@mkdir -p $(dir $@)
@@ -909,8 +872,8 @@ $(KERNEL_QEMU_MAIN_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(
 
 $(KERNEL_QEMU_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_MAIN_O) $(KERNEL_QEMU_LINK_LD)
 	$(LLD) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_MAIN_O) -o $@
-	python3 scripts/check_kernel_asm_invariants.py $@ 1
-	python3 scripts/check_elf_symbol_alignment.py $@ boot_page_pool 16
+	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 1
+	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool 16
 
 .PHONY: _kernelbuild-qemu
 _kernelbuild-qemu: kernel-lib-check kernel-verify-exception-frame $(KERNEL_QEMU_ELF)
@@ -948,8 +911,8 @@ $(KERNEL_QEMU_MAIN_DEBUG_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_T
 
 $(KERNEL_QEMU_DEBUG_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_MAIN_DEBUG_O) $(KERNEL_QEMU_LINK_LD)
 	$(LLD) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_MAIN_DEBUG_O) -o $@
-	python3 scripts/check_kernel_asm_invariants.py $@ 1
-	python3 scripts/check_elf_symbol_alignment.py $@ boot_page_pool 16
+	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 1
+	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool 16
 
 .PHONY: _kernelbuild-qemu-debug
 _kernelbuild-qemu-debug: kernel-lib-check kernel-verify-exception-frame $(KERNEL_QEMU_DEBUG_ELF) $(KERNEL_DEBUG_METADATA)
@@ -1040,7 +1003,7 @@ kernelbuild-rpi5-debug: build
 ## slow suite is a memory map that is wrong when someone trusts it.
 .PHONY: kernel-memory-map-check
 kernel-memory-map-check: _kernelbuild-rpi5 _kernelbuild-qemu
-	python3 scripts/check_kernel_memory_map.py
+	python3 scripts/buildcheck_kernel_memory_map.py
 
 .PHONY: _kernelbuild
 _kernelbuild: _kernelbuild-rpi5 _kernelbuild-qemu kernel-memory-map-check
@@ -1062,7 +1025,7 @@ kernelbuild-check: build
 
 .PHONY: kernel-debug-layout-check
 kernel-debug-layout-check: _kernelbuild _kernelbuild-qemu-debug
-	python3 scripts/check_kernel_memory_map.py --debug
+	python3 scripts/buildcheck_kernel_memory_map.py --debug
 
 ## trustedbasecheck: repeatable inventory of the maintained kernel's checked
 ## source coverage and explicit trusted boundaries. Reads build-produced
@@ -1339,12 +1302,12 @@ allcheck:
 	rm -rf "$(LANE_TIMING_DIR)"; mkdir -p "$(LANE_TIMING_DIR)"; \
 	export TAKIBI_LANE_TIMING_DIR="$(LANE_TIMING_DIR)"; \
 	resource_lease_run_suite allcheck \
-		$(MAKE) langcheck test linuxcheck kernelcheck || status=$$?; \
+		$(MAKE) langcheck slowcheck test linuxcheck kernelcheck || status=$$?; \
 	echo; \
 	python3 scripts/summarize_lane_timing.py "$(LANE_TIMING_DIR)" || true; \
 	echo "lane timing artifact: $(LANE_TIMING_DIR:$(CURDIR)/%=%)"; \
 	if [ $$status -eq 0 ]; then \
-		echo "PASS allcheck: langcheck test linuxcheck $(KERNELCHECK_LANES)"; \
+		echo "PASS allcheck: langcheck slowcheck test linuxcheck $(KERNELCHECK_LANES)"; \
 	else \
 		echo "FAIL allcheck: one or more checks failed (see the lane output above)" >&2; \
 		exit $$status; \
@@ -1377,13 +1340,13 @@ cicheck:
 	rm -rf "$(LANE_TIMING_DIR)"; mkdir -p "$(LANE_TIMING_DIR)"; \
 	export TAKIBI_LANE_TIMING_DIR="$(LANE_TIMING_DIR)"; \
 	resource_lease_run_suite cicheck \
-		$(MAKE) langcheck test linuxcheck $(KERNELCHECK_QEMU_LANES) \
+		$(MAKE) langcheck slowcheck test linuxcheck $(KERNELCHECK_QEMU_LANES) \
 		|| status=$$?; \
 	echo; \
 	python3 scripts/summarize_lane_timing.py "$(LANE_TIMING_DIR)" || true; \
 	echo "lane timing artifact: $(LANE_TIMING_DIR:$(CURDIR)/%=%)"; \
 	if [ $$status -eq 0 ]; then \
-		echo "PASS cicheck: langcheck test linuxcheck $(KERNELCHECK_QEMU_LANES)"; \
+		echo "PASS cicheck: langcheck slowcheck test linuxcheck $(KERNELCHECK_QEMU_LANES)"; \
 	else \
 		echo "FAIL cicheck: one or more checks failed (see the lane output above)" >&2; \
 		exit $$status; \
@@ -1426,7 +1389,7 @@ cicheck-as-ci:
 # produces a final, unmistakable allcheck failure receipt after Make has
 # waited for the other scheduled jobs.
 ifneq (,$(filter allcheck,$(MAKECMDGOALS)))
-$(info [allcheck] includes: langcheck, compiler unit tests, linux_user, QEMU integration, QEMU debug integration, QEMU oops, QEMU DDB (UART BREAK and software BRK), QEMU stack overflow, QEMU lifecycle gap, QEMU allocation rollback, and RPi5 integration -- one board load, ending at the view line; the silicon-only software-BRK pass is make kernelcheck-ddb-rpi5-software)
+$(info [allcheck] includes: langcheck, slowcheck, compiler unit tests, linux_user, QEMU integration, QEMU debug integration, QEMU oops, QEMU DDB (UART BREAK and software BRK), QEMU stack overflow, QEMU lifecycle gap, QEMU allocation rollback, and RPi5 integration -- one board load, ending at the view line; the silicon-only software-BRK pass is make kernelcheck-ddb-rpi5-software)
 endif
 
 ## allbuild: a fast, no-execution/no-hardware smoke gate across all three
@@ -1445,14 +1408,17 @@ endif
 ## considering it done.
 .PHONY: allbuild
 allbuild:
-	@# Keep the build lanes parallel, but defer the host-timed DDB control: a
-	@# four-core cold build can starve its fake UART server past the lane budget.
-	@status=0; $(MAKE) ALLBUILD_DEFER_DDB_POSTMORTEM=1 \
-		langcheck test linuxbuild kernelbuild || status=$$?; \
+	@# GitHub issue #526: this used to defer one named script past the
+	@# compiler-heavy parallel section, because a four-core cold build could
+	@# starve its fake UART server past the lane budget. The escape hatch is
+	@# gone with the wall clock it was cut for: db9ecb8 drives that control's
+	@# state machine in process against a fake clock, 13.4s -> 0.06s, and a
+	@# check with no clock cannot be starved by a build.
+	@status=0; $(MAKE) langcheck slowcheck test linuxbuild kernelbuild \
+		|| status=$$?; \
 	$(MAKE) -f examples/Makefile allcheck-build || status=$$?; \
-	python3 scripts/test_kernel_ddb_postmortem.py || status=$$?; \
 	if [ $$status -eq 0 ]; then \
-		echo "PASS allbuild: langcheck + compiler unit + linux_user + kernel (RPi5+QEMU) + every examples/ target, all build-only"; \
+		echo "PASS allbuild: langcheck + slowcheck + compiler unit + linux_user + kernel (RPi5+QEMU) + every examples/ target, all build-only"; \
 	else \
 		echo "FAIL allbuild: one or more lanes failed to build (see the lane output above)" >&2; \
 		exit $$status; \

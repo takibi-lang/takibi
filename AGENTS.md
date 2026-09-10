@@ -248,7 +248,8 @@ Use the root Makefile for maintained surfaces:
 ```bash
 make build              # compiler only
 make test               # compiler unit tests
-make langcheck          # repository policy and ASCII checks
+make langcheck          # the fast check gate, plus the ASCII scan
+make slowcheck          # the checks that must wait on something real
 make linuxbuild         # build native executable tests
 make linuxcheck         # build and run native executable tests
 make kernelbuild        # build QEMU and RPi5 kernels
@@ -313,7 +314,28 @@ authoritative for the current target graph.
 
 `docs/BUILD_CHECKS.md` is the complete build-check inventory.
 `scripts/check_agents_paths.py` verifies that paths named here exist and that
-the inventory names every `scripts/check_*.py` file.
+the inventory names every check in `scripts/`, in either language.
+
+A check's NAME says which lane runs it, and both lanes are globs, so adding a
+check is adding a file:
+
+- `check_<subject>.py|sh` reads tracked files and nothing else. `make
+  langcheck` runs it under `CHECK_TIMEOUT_SECONDS`, and a member that waits is
+  killed rather than tolerated. `check_<subject>_controls` is the same lane;
+  the suffix says the file verifies a check rather than the product, and
+  dispatch never reads it.
+- `slowcheck_<subject>.py|sh` waits on something real -- a pty, a lease, a
+  lock, a port registry. `make slowcheck` runs it, no aggregate skips it, and
+  nothing else waits behind it.
+- `buildcheck_<subject>.py` must be handed a linked ELF or a built kernel, so
+  it runs from the rule that produces one. It is in neither glob.
+
+The bound is a membership rule, not an estimate. A check that cannot finish
+inside it has changed category and is renamed or investigated, never given a
+bigger number -- the same discipline the boot-duration bound carries. GitHub
+issue #526 is what this replaced: a hand-listed gate of forty-eight
+invocations in which one wall-clock control held CI red for nine consecutive
+runs, gating `allbuild` for several of them so no kernel lane ran at all.
 
 ## Working conventions
 

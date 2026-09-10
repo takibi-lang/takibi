@@ -48,8 +48,8 @@ HWTEST_ARTIFACT_ROOT="${RPI3_NET_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/hwtest-r
 mkdir -p "$HWTEST_ARTIFACT_ROOT"
 exec > >(tee "$HWTEST_ARTIFACT_ROOT/run.log") 2>&1
 
-# shellcheck source=scripts/test_artifacts.sh
-source "$REPO_ROOT/scripts/test_artifacts.sh"
+# shellcheck source=scripts/artifact_dirs.sh
+source "$REPO_ROOT/scripts/artifact_dirs.sh"
 
 if [ -z "$SERIAL_DEV" ] || [ ! -e "$SERIAL_DEV" ]; then
     echo "error: could not resolve the Raspberry Pi UART device (found: '$SERIAL_DEV')" >&2

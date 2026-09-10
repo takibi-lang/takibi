@@ -68,8 +68,8 @@ HWTEST_ARTIFACT_ROOT="${STM32_NET_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/hwtest-
 mkdir -p "$HWTEST_ARTIFACT_ROOT"
 exec > >(tee "$HWTEST_ARTIFACT_ROOT/run.log") 2>&1
 
-# shellcheck source=scripts/test_artifacts.sh
-source "$REPO_ROOT/scripts/test_artifacts.sh"
+# shellcheck source=scripts/artifact_dirs.sh
+source "$REPO_ROOT/scripts/artifact_dirs.sh"
 
 stty -F "$SERIAL_DEV" 115200 raw -echo
 ACTIVE_UART_PID=""

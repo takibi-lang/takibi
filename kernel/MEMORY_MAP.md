@@ -18,10 +18,10 @@ Both were lookups. This is the table.
 Rows are in one of five states, and which one is always stated:
 
 - **CHECKED (ELF)** -- read out of the linked `kernel.elf` by
-  `scripts/check_kernel_memory_map.py`, which fails the build if this
+  `scripts/buildcheck_kernel_memory_map.py`, which fails the build if this
   document and the build disagree. Run as part of `make kernelbuild`.
   After a change that legitimately moves the layout, refresh these rows
-  with `python3 scripts/check_kernel_memory_map.py --update` -- a separate
+  with `python3 scripts/buildcheck_kernel_memory_map.py --update` -- a separate
   command on purpose, because the point of the check is that somebody
   looks at a layout change, and a document that heals itself is one nobody
   reads.
@@ -161,7 +161,7 @@ Measured when this ceiling was set: RPi5 `0x390000`
 
 ### What still holds the boundaries that have no row
 
-`scripts/check_kernel_memory_map.py` reads these out of both linked kernels
+`scripts/buildcheck_kernel_memory_map.py` reads these out of both linked kernels
 on every `make kernelbuild`:
 
 - `_start` < `__bss_start` <= `__bss_end` <= `boot_stack_run_bottom` <

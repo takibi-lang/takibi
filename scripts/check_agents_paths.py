@@ -12,8 +12,13 @@ one direction that actually misleads a reader: **everything AGENTS.md names
 must exist.** The reverse direction is deliberately NOT enforced -- requiring
 every file to be documented is exactly what grew the section to 282 lines.
 
-The `scripts/check_*.py` list lives in `docs/BUILD_CHECKS.md`; its whole value
-is being complete, so every check must be named there.
+The check inventory lives in `docs/BUILD_CHECKS.md`; its whole value is being
+complete, so every check must be named there. GitHub issue #526 widened that
+from `scripts/check_*.py` to every member of every lane -- the fast gate, the
+slow lane, and the checks of a build product -- and to shell as well as
+Python. Before that, thirty langcheck members were absent from a table
+calling itself the complete inventory, which is the shape a list acquires
+when what it must cover is narrower than what exists.
 """
 
 from __future__ import annotations
@@ -62,7 +67,11 @@ def main() -> int:
     repo_paths = sorted({t for t in BACKTICKED.findall(text) if is_repo_path(t)})
     missing = [token for token in repo_paths if not exists(token)]
     checks_text = BUILD_CHECKS.read_text(encoding="utf-8")
-    checked = sorted(p.name for p in (ROOT / "scripts").glob("check_*.py"))
+    checked = sorted(
+        path.name
+        for prefix in ("check", "slowcheck", "buildcheck")
+        for suffix in ("py", "sh")
+        for path in (ROOT / "scripts").glob(f"{prefix}_*.{suffix}"))
     unnamed = [name for name in checked if name not in checks_text]
 
     for token in missing:

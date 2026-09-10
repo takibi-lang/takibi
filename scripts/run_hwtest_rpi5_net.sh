@@ -30,8 +30,8 @@ STORAGE_SETTLE_SECS="${RPI5_NET_STORAGE_SETTLE_SECS:-8}"
 L2_ONLY=0
 [ "${1:-}" = "--l2-only" ] && L2_ONLY=1
 
-# shellcheck source=scripts/test_artifacts.sh
-source "$REPO_ROOT/scripts/test_artifacts.sh"
+# shellcheck source=scripts/artifact_dirs.sh
+source "$REPO_ROOT/scripts/artifact_dirs.sh"
 mkdir -p "$ARTIFACT_ROOT"
 exec > >(tee "$ARTIFACT_ROOT/run.log") 2>&1
 

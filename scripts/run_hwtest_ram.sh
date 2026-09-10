@@ -51,8 +51,8 @@ BAUD=115200
 OPENOCD_BOARD_CFG="board/stm32f746g-disco.cfg"
 HWTEST_ARTIFACT_ROOT="${STM32_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/hwtest-stm32}"
 
-# shellcheck source=scripts/test_artifacts.sh
-source "$(dirname "$0")/test_artifacts.sh"
+# shellcheck source=scripts/artifact_dirs.sh
+source "$(dirname "$0")/artifact_dirs.sh"
 ACTIVE_READER_PID=""
 
 cleanup_reader() {
@@ -419,7 +419,7 @@ run_hw_test_ram_suite() {
     fi
     rm -f "$RAM_LOAD_LOG"
 
-    python3 "$(dirname "$0")/check_suite_output.py" "$tmp_out" \
+    python3 "$(dirname "$0")/buildcheck_suite_output.py" "$tmp_out" \
         "$manifest" > "$report" || true
     [ -s "$report" ] || printf 'ERROR\tsuite checker produced no result\n' > "$report"
 

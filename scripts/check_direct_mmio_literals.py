@@ -57,8 +57,14 @@ def source_files(arguments: list[str]) -> list[Path]:
     return sorted(files)
 
 
+# GitHub issue #526: the fast gate discovers its members by glob and runs
+# each with no arguments, so the root the Makefile used to pass is the
+# default. Naming one explicitly still works, which is what the control does.
+DEFAULT_ROOTS = ("kernel",)
+
+
 def main() -> int:
-    files = source_files(sys.argv[1:])
+    files = source_files(list(sys.argv[1:]) or list(DEFAULT_ROOTS))
     failures: list[str] = []
     for path in files:
         code = code_without_comments_or_strings(path.read_text())

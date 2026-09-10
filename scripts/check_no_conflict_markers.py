@@ -3,7 +3,7 @@
 
 An unresolved merge is not a document, a program, or a fixture, but it looks
 enough like one to be read as valid. The instance that produced this check:
-check_kernel_memory_map.py reported PASS on a kernel/MEMORY_MAP.md that still
+buildcheck_kernel_memory_map.py reported PASS on a kernel/MEMORY_MAP.md that still
 held `<<<<<<< HEAD`, because its table parser ends a table at the first line
 that is not a table row -- so the conflict truncated the table to one row and
 the check verified that row and nothing else. It passed at the one moment the
