@@ -64,6 +64,7 @@ must_use variant Ext2FreeCountsResult {
 
 struct Ext2Inode {
     private mode: usize;
+    private links: usize;
     private size: usize;
     private direct_block0: usize;
     private table_block: usize;
@@ -110,6 +111,37 @@ must_use variant Ext2CreateResult {
 
 must_use variant Ext2UnlinkResult { Invalid; Unlinked; }
 must_use variant Ext2CountResult { Invalid; Counted(usize); }
+
+// A directory made by ext2_make_directory_in. It is a distinct type from
+// Ext2LinkedFile on purpose: removing a directory also returns the parent's
+// link count and the group's directory count, so handing one to the regular
+// file unlink would leave both wrong -- and that is now a type error.
+linear struct Ext2LinkedDirectory[inode: usize, block: usize] {
+    private inode_bitmap_index: usize;
+    private block_bitmap_index: usize;
+    private inode_number: usize @ inode;
+    private block_number: usize @ block;
+}
+
+must_use variant Ext2MkdirResult {
+    Invalid;
+    Created(exists inode: usize. exists block: usize.
+            Ext2LinkedDirectory[inode, block]);
+}
+
+// NotEmpty and Refused hand the directory back: it is still linked, so its
+// owner is still owed to somebody. Invalid means removal started and could
+// not finish, and the owner was spent trying.
+must_use variant Ext2RmdirResult {
+    Invalid;
+    Removed;
+    NotEmpty(exists inode: usize. exists block: usize.
+             Ext2LinkedDirectory[inode, block]);
+    Refused(exists inode: usize. exists block: usize.
+            Ext2LinkedDirectory[inode, block]);
+}
+
+must_use variant Ext2RmdirStep { Refused; NotEmpty; Unlinked; }
 
 fn ext2_u16(bytes: borrow *u8, offset: usize) -> u16 {
     if (offset > KERNEL_BLOCK_SIZE - 2) { return 0; }
@@ -220,6 +252,7 @@ fn ext2_read_inode(mount: Ext2Mount, inode_number: usize)
     let inode_bytes: *u8 =
         (ext2_scratch_here().metadata as *u8) + (offset as isize);
     let mode: usize = ext2_u16(inode_bytes, 0) as usize;
+    let links: usize = ext2_u16(inode_bytes, 26) as usize;
     let size: usize = ext2_u32(inode_bytes, 4) as usize;
     let direct_block0: usize = ext2_u32(inode_bytes, 40) as usize;
     let indirect_block: usize = ext2_u32(inode_bytes, 88) as usize;
@@ -245,7 +278,7 @@ fn ext2_read_inode(mount: Ext2Mount, inode_number: usize)
         return Ext2InodeResult::Invalid;
     }
     let mut inode: Ext2Inode = {
-        mode, size, direct_block0, table_block, offset
+        mode, links, size, direct_block0, table_block, offset
     };
     return Ext2InodeResult::Inode(inode);
 }
@@ -368,15 +401,10 @@ fn ext2_lookup_path_from(mount: Ext2Mount, start_inode: usize, name: []u8)
                 continue;
             }
         }
-        if (component.len == 2) {
-            let first: u8 = component[0];
-            let second: u8 = component[1];
-            if (first == 0x2E && second == 0x2E) {
-                current_inode = 2;
-                if (cursor < name.len) { cursor = cursor + 1; }
-                continue;
-            }
-        }
+        // `..` is not special-cased: every ext2 directory carries its own
+        // `..` entry naming its parent, and the root's names the root. This
+        // used to answer the root for every `..`, which was right only while
+        // no directory was nested deeper than one level (GitHub issue #537).
         match ext2_lookup_directory(mount, current_inode, component) {
             Ext2LookupResult::Invalid => { return Ext2LookupResult::Invalid; }
             Ext2LookupResult::NotFound => { return Ext2LookupResult::NotFound; }
@@ -1773,6 +1801,312 @@ fn ext2_unlink_file_in(mount: Ext2Mount, directory_inode: usize,
         return Ext2UnlinkResult::Unlinked;
     }
     return Ext2UnlinkResult::Invalid;
+}
+
+// GitHub issue #537: nested directories.
+//
+// A new directory's block holds `.` naming itself and `..` naming its
+// parent, and the second record spans the rest of the block. Its inode
+// starts with two links -- the parent's entry and its own `.` -- and the
+// parent gains one, for the new directory's `..`. The group descriptor's
+// used-directories count moves with them; e2fsck's pass 5 compares it.
+private fn ext2_initialize_directory(mount: Ext2Mount, inode_number: usize,
+                                     block: usize, parent_inode: usize)
+        -> Ext2DirectoryResult !{unsafe} {
+    if (inode_number == 0 || parent_inode == 0 ||
+        inode_number > mount.inode_count) {
+        return Ext2DirectoryResult::Invalid;
+    }
+    for i: usize in 0..<KERNEL_BLOCK_SIZE { ext2_scratch_here().file[i] = 0; }
+    let base: *u8 = ext2_scratch_here().file as *u8;
+    let parent_entry: *u8 = base + 12;
+    if (ext2_put_u32(base, 0, inode_number as u32) == false ||
+        ext2_put_u16(base, 4, 12) == false ||
+        ext2_put_u32(parent_entry, 0, parent_inode as u32) == false ||
+        ext2_put_u16(parent_entry, 4,
+                     (KERNEL_BLOCK_SIZE - 12) as u16) == false) {
+        return Ext2DirectoryResult::Invalid;
+    }
+    base[6] = 1;
+    base[8] = 0x2E;
+    parent_entry[6] = 2;
+    parent_entry[8] = 0x2E;
+    parent_entry[9] = 0x2E;
+    match block_write(mount.device, block, ext2_scratch_here().file as []u8) {
+        BlockIoResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+
+    let byte_offset: usize = (inode_number - 1) * mount.inode_size;
+    let table_block: usize = mount.inode_table_block +
+                             byte_offset / KERNEL_BLOCK_SIZE;
+    let table_offset: usize = byte_offset % KERNEL_BLOCK_SIZE;
+    if (table_block >= mount.filesystem_blocks ||
+        table_offset > KERNEL_BLOCK_SIZE - 128) {
+        return Ext2DirectoryResult::Invalid;
+    }
+    match block_read(mount.device, table_block,
+                     ext2_scratch_here().metadata as []u8) {
+        BlockIoResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+    let inode_pointer: *u8 =
+        (ext2_scratch_here().metadata as *u8) + (table_offset as isize);
+    for i: isize in 0..<128 { inode_pointer[i] = 0; }
+    if (ext2_put_u16(inode_pointer, 0, 0x41ED) == false ||
+        ext2_put_u32(inode_pointer, 4, KERNEL_BLOCK_SIZE as u32) == false ||
+        ext2_put_u16(inode_pointer, 26, 2) == false ||
+        ext2_put_u32(inode_pointer, 28, 2) == false ||
+        ext2_put_u32(inode_pointer, 40, block as u32) == false) {
+        return Ext2DirectoryResult::Invalid;
+    }
+    match block_write(mount.device, table_block,
+                      ext2_scratch_here().metadata as []u8) {
+        BlockIoResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+        BlockIoResult::Ok => { return Ext2DirectoryResult::Updated; }
+    }
+}
+
+private fn ext2_write_parent_links(mount: Ext2Mount, parent: Ext2Inode,
+                                   links: usize) -> Ext2DirectoryResult {
+    match block_read(mount.device, parent.table_block,
+                     ext2_scratch_here().metadata as []u8) {
+        BlockIoResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+    let inode_pointer: *u8 =
+        (ext2_scratch_here().metadata as *u8) + (parent.table_offset as isize);
+    if (ext2_put_u16(inode_pointer, 26, links as u16) == false) {
+        return Ext2DirectoryResult::Invalid;
+    }
+    match block_write(mount.device, parent.table_block,
+                      ext2_scratch_here().metadata as []u8) {
+        BlockIoResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+        BlockIoResult::Ok => { return Ext2DirectoryResult::Updated; }
+    }
+}
+
+// The parent's link count and the group's used-directories count, both by
+// one, in that order. If the second write fails the first is put back, so a
+// failure leaves neither moved.
+private fn ext2_adjust_parent_links(mount: Ext2Mount, parent_inode: usize,
+                                    increment: bool) -> Ext2DirectoryResult {
+    match ext2_read_inode(mount, parent_inode) {
+        Ext2InodeResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+        Ext2InodeResult::Inode(parent) => {
+            // 32000 is ext2's own EXT2_LINK_MAX; a directory's own `.` and
+            // its entry in its parent mean it never has fewer than two.
+            if ((parent.mode & 0xF000) != 0x4000 ||
+                (increment && parent.links >= 32000) ||
+                (increment == false && parent.links <= 2)) {
+                return Ext2DirectoryResult::Invalid;
+            }
+            let mut links: usize = parent.links - 1;
+            if (increment) { links = parent.links + 1; }
+            match ext2_write_parent_links(mount, parent, links) {
+                Ext2DirectoryResult::Invalid => {
+                    return Ext2DirectoryResult::Invalid;
+                }
+                Ext2DirectoryResult::Updated => { }
+            }
+            let mut counted: bool = false;
+            match block_read(mount.device, 2,
+                             ext2_scratch_here().file as []u8) {
+                BlockIoResult::Invalid => { }
+                BlockIoResult::Ok => {
+                    let group: *u8 = ext2_scratch_here().file as *u8;
+                    let used: usize = ext2_u16(group, 16) as usize;
+                    if ((increment && used < 0xFFFF) ||
+                        (increment == false && used > 0)) {
+                        let mut next: usize = used - 1;
+                        if (increment) { next = used + 1; }
+                        if (ext2_put_u16(group, 16, next as u16)) {
+                            match block_write(mount.device, 2,
+                                              ext2_scratch_here().file as []u8) {
+                                BlockIoResult::Invalid => { }
+                                BlockIoResult::Ok => { counted = true; }
+                            }
+                        }
+                    }
+                }
+            }
+            if (counted) { return Ext2DirectoryResult::Updated; }
+            match ext2_write_parent_links(mount, parent, parent.links) {
+                Ext2DirectoryResult::Invalid => { }
+                Ext2DirectoryResult::Updated => { }
+            }
+            return Ext2DirectoryResult::Invalid;
+        }
+    }
+}
+
+private fn ext2_link_new_directory(mount: Ext2Mount, parent_inode: usize,
+                                   inode_number: usize, block: usize,
+                                   name: borrow []u8)
+        -> Ext2DirectoryResult !{unsafe} {
+    match ext2_initialize_directory(mount, inode_number, block, parent_inode) {
+        Ext2DirectoryResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+        Ext2DirectoryResult::Updated => { }
+    }
+    match ext2_directory_add(mount, parent_inode, inode_number, name) {
+        Ext2DirectoryResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+        Ext2DirectoryResult::Updated => { }
+    }
+    match ext2_adjust_parent_links(mount, parent_inode, true) {
+        Ext2DirectoryResult::Updated => { return Ext2DirectoryResult::Updated; }
+        Ext2DirectoryResult::Invalid => {
+            match ext2_directory_remove(mount, parent_inode, inode_number,
+                                        name) {
+                Ext2DirectoryResult::Invalid => { }
+                Ext2DirectoryResult::Updated => { }
+            }
+            return Ext2DirectoryResult::Invalid;
+        }
+    }
+}
+
+private fn ext2_linked_directory_new(block_owner: sink Ext2BlockOwner[block],
+                                     inode_owner: sink Ext2InodeOwner[inode])
+        -> Ext2LinkedDirectory[inode, block] {
+    let mut linked: Ext2LinkedDirectory[inode, block] = {
+        inode_owner.bitmap_index, block_owner.bitmap_index,
+        inode_owner.witness, block_owner.witness
+    };
+    return linked;
+}
+
+fn ext2_linked_directory_inode(linked: borrow Ext2LinkedDirectory[inode, block])
+        -> usize @ inode {
+    return linked.inode_number;
+}
+
+// A directory that stays. The tree names its inode and block from here on,
+// so the obligation ends without a release -- the directory counterpart of a
+// file that is never unlinked.
+fn ext2_directory_keep(linked: sink Ext2LinkedDirectory[inode, block]) {}
+
+fn ext2_inode_links(mount: Ext2Mount, inode_number: usize) -> usize {
+    match ext2_read_inode(mount, inode_number) {
+        Ext2InodeResult::Invalid => { return 0; }
+        Ext2InodeResult::Inode(inode) => { return inode.links; }
+    }
+}
+
+fn ext2_make_directory_in(mount: Ext2Mount, parent_inode: usize,
+                          name: borrow []u8) -> Ext2MkdirResult {
+    match ext2_lookup_directory(mount, parent_inode, name) {
+        Ext2LookupResult::Invalid => { return Ext2MkdirResult::Invalid; }
+        Ext2LookupResult::Found(existing) => { return Ext2MkdirResult::Invalid; }
+        Ext2LookupResult::NotFound => { }
+    }
+    match ext2_allocate_block(mount) {
+        Ext2BlockAllocResult::Failed => { return Ext2MkdirResult::Invalid; }
+        Ext2BlockAllocResult::Allocated(block_owner) => {
+            match ext2_allocate_inode(mount) {
+                Ext2InodeAllocResult::Failed => {
+                    match ext2_release_block(mount, block_owner) {
+                        Ext2OwnerReleaseResult::Invalid => { }
+                        Ext2OwnerReleaseResult::Released => { }
+                    }
+                    return Ext2MkdirResult::Invalid;
+                }
+                Ext2InodeAllocResult::Allocated(inode_owner) => {
+                    match ext2_link_new_directory(
+                            mount, parent_inode, inode_owner.inode_number,
+                            block_owner.block_number, name) {
+                        Ext2DirectoryResult::Invalid => {
+                            match ext2_release_inode(mount, inode_owner) {
+                                Ext2OwnerReleaseResult::Invalid => { }
+                                Ext2OwnerReleaseResult::Released => { }
+                            }
+                            match ext2_release_block(mount, block_owner) {
+                                Ext2OwnerReleaseResult::Invalid => { }
+                                Ext2OwnerReleaseResult::Released => { }
+                            }
+                            return Ext2MkdirResult::Invalid;
+                        }
+                        Ext2DirectoryResult::Updated => {
+                            return Ext2MkdirResult::Created(
+                                ext2_linked_directory_new(block_owner,
+                                                          inode_owner));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Everything short of releasing: the directory must be the one-block
+// directory this owner made, it must hold nothing but `.` and `..`, and its
+// entry must come out of the parent. Nothing is written before the last of
+// those, so Refused and NotEmpty leave the tree exactly as it was.
+private fn ext2_rmdir_unlink_entry(mount: Ext2Mount, parent_inode: usize,
+                                   inode_number: usize, block_number: usize,
+                                   name: borrow []u8)
+        -> Ext2RmdirStep !{unsafe} {
+    match ext2_read_inode(mount, inode_number) {
+        Ext2InodeResult::Invalid => { return Ext2RmdirStep::Refused; }
+        Ext2InodeResult::Inode(directory) => {
+            if ((directory.mode & 0xF000) != 0x4000 ||
+                directory.size != KERNEL_BLOCK_SIZE ||
+                directory.direct_block0 != block_number) {
+                return Ext2RmdirStep::Refused;
+            }
+        }
+    }
+    match ext2_directory_live_entries(mount, inode_number) {
+        Ext2CountResult::Invalid => { return Ext2RmdirStep::Refused; }
+        Ext2CountResult::Counted(live) => {
+            if (live != 2) { return Ext2RmdirStep::NotEmpty; }
+        }
+    }
+    match ext2_directory_remove(mount, parent_inode, inode_number, name) {
+        Ext2DirectoryResult::Invalid => { return Ext2RmdirStep::Refused; }
+        Ext2DirectoryResult::Updated => { return Ext2RmdirStep::Unlinked; }
+    }
+}
+
+// The directory is unreachable once its entry is gone, so from here on
+// releasing is the only way forward, and every step is attempted even when
+// an earlier one failed.
+private fn ext2_rmdir_release(mount: Ext2Mount, parent_inode: usize,
+                              linked: sink Ext2LinkedDirectory[inode, block])
+        -> Ext2RmdirResult {
+    let inode_owner = ext2_inode_owner_new(
+        linked.inode_bitmap_index, linked.inode_number, linked.inode_number);
+    let block_owner = ext2_block_owner_new(
+        linked.block_bitmap_index, linked.block_number, linked.block_number);
+    let mut links_ok: bool = false;
+    match ext2_adjust_parent_links(mount, parent_inode, false) {
+        Ext2DirectoryResult::Invalid => { }
+        Ext2DirectoryResult::Updated => { links_ok = true; }
+    }
+    let mut inode_ok: bool = false;
+    match ext2_release_inode(mount, inode_owner) {
+        Ext2OwnerReleaseResult::Invalid => { }
+        Ext2OwnerReleaseResult::Released => { inode_ok = true; }
+    }
+    let mut block_ok: bool = false;
+    match ext2_release_block(mount, block_owner) {
+        Ext2OwnerReleaseResult::Invalid => { }
+        Ext2OwnerReleaseResult::Released => { block_ok = true; }
+    }
+    if (links_ok && inode_ok && block_ok) { return Ext2RmdirResult::Removed; }
+    return Ext2RmdirResult::Invalid;
+}
+
+fn ext2_remove_directory_in(mount: Ext2Mount, parent_inode: usize,
+                            linked: sink Ext2LinkedDirectory[inode, block],
+                            name: borrow []u8) -> Ext2RmdirResult {
+    match ext2_rmdir_unlink_entry(mount, parent_inode, linked.inode_number,
+                                  linked.block_number, name) {
+        Ext2RmdirStep::Refused => { return Ext2RmdirResult::Refused(linked); }
+        Ext2RmdirStep::NotEmpty => { return Ext2RmdirResult::NotEmpty(linked); }
+        Ext2RmdirStep::Unlinked => {
+            return ext2_rmdir_release(mount, parent_inode, linked);
+        }
+    }
 }
 
 // The two block-sized buffers are per-core, so independent cores neither

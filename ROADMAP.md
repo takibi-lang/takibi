@@ -696,8 +696,11 @@ disables whatever is reading it.
    landed 2026-09-10 too**: a directory with no room grows by a block, the
    first entry of a block is removed as a dead record and reused, and the
    QEMU lane now runs the host's `e2fsck -fn` over the disk the guest wrote.
-   What #537 still wants is nested `mkdir`/`rmdir` with `.`/`..` and link
-   counts. #538's three syscalls wait on that.
+   **The third, the same day, is nested `mkdir`/`rmdir`** with `.`, `..`, the
+   parent's link count and the group's directory count, and `..` in a path
+   now resolves through the directory's own entry instead of always to the
+   root. What #537 has left is rename, which composes from add and remove and
+   is implemented with its syscall under #538.
 
    The one-block scan became a per-block scan because an ext2 directory entry
    never spans a block: each block is self-contained and its record lengths
@@ -779,13 +782,25 @@ more than the entry.
 What each of those cost was one hour of reading and what it saved was a week
 of building the wrong thing. Do the same here.
 
-**The next piece of work is #537's last part, nested `mkdir`/`rmdir`.**
-Growing a directory by a block landed 2026-09-10, and the two issue comments
-say what each increment did and did not do. What the growth work leaves for
-mkdir is its verifier. The QEMU lane runs `e2fsck -fn` over the guest's disk
-after every run, so a directory whose `..`, link count or `i_blocks` is wrong
-fails the lane even when the kernel's own view passes. A planted `i_blocks`
-defect was shown to do exactly that. #538's three syscalls wait on mkdir.
+**#537's ext2 half is done, and the maintainer wants it reachable from
+userspace next -- which is #538, and #538 is not this territory's alone.**
+Directory growth and nested `mkdir`/`rmdir` landed 2026-09-10. The QEMU
+lane runs `e2fsck -fn` over the guest's disk after every run, and two planted
+defects were caught there and nowhere else: a missing `i_blocks` increment,
+and a missing used-directories count. Every view passed both times.
+
+`mkdirat`, `unlinkat` and `renameat` belong in `kernel/kernel/syscall.tkb`,
+Territory A's second-largest file. Three syscalls with their errno contracts
+are more than the minimal edit the relaxed rule allows, so they want either
+the maintainer's go-ahead to cross or Territory A landing the syscall half.
+The ext2 calls they need already exist: `ext2_make_directory_in`,
+`ext2_remove_directory_in` and `ext2_unlink_file_in`. Two things the syscall
+side will meet: the file and directory owners are linear, so a syscall that
+creates something persistent consumes the owner with
+`ext2_directory_keep` rather than holding it; and a later unlink of
+something made earlier has no owner to hand in, which is the first design
+question the syscall half has to answer.
+
 `getdents64`'s limit is the twelve direct blocks, which growth also stops at.
 Lifting it means growing into an indirect block, and nothing needs that yet.
 

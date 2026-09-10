@@ -435,6 +435,11 @@ fn kernel_test_platform_storage() {
                                             } else {
                                                 kernel_boot_log("usb ext2: grow failed\n");
                                             }
+                                            if (ext2_nested_directory_check(usb_mount)) {
+                                                kernel_boot_log("usb ext2: mkdir /etc/made/inner with .. and rmdir ok\n");
+                                            } else {
+                                                kernel_boot_log("usb ext2: mkdir failed\n");
+                                            }
                                             match ext2_lookup_root(
                                                     usb_mount,
                                                     bs"hello.txt") {

@@ -87,8 +87,8 @@ The current RPi5 kernel includes:
   virtio-blk, and RPi5 USB Mass Storage;
 - a bounded ext2 implementation with direct, single-indirect, and
   double-indirect regular-file reads, nested path lookup, file creation and
-  removal in any directory, directory growth by a block, allocation bitmaps,
-  and fast symlinks;
+  removal in any directory, nested directory creation and removal, directory
+  growth by a block, allocation bitmaps, and fast symlinks;
 - RP1 PCIe, xHCI/USB Mass Storage, Cadence GEM Ethernet, ARP, IPv4, ICMP, and
   a bounded TCP slice with in-order stream reconstruction, short reads,
   partial writes, duplicate/out-of-order acknowledgement, and timed SYN/ACK,
@@ -1051,9 +1051,15 @@ run, not a specification.
   limited to one direct block. A directory grows a block at a time when none
   of its blocks has room, up to its twelve direct blocks; removing the first
   entry of a block leaves a dead record there, as Linux's ext2 does, and a
-  later add reuses it. There is no `mkdir`/`rmdir` below the syscall layer,
-  symlinks remain fast symlinks, and there are no additional block groups.
-  The QEMU lane runs the host's `e2fsck -fn` over the disk the guest wrote.
+  later add reuses it. A directory can be made in any directory, with `.`,
+  `..`, the parent's link count and the group's used-directories count, and
+  removed once it holds only `.` and `..`; a non-empty one is refused and its
+  owner handed back. `..` in a path resolves through each directory's own
+  `..` entry. None of this is reachable from userspace: no syscall calls it.
+  Symlinks remain fast symlinks, and there are no additional block groups.
+  The QEMU lane runs the host's `e2fsck -fn` over the disk the guest wrote,
+  after checking that the fixture's grown `/etc` and kept `/etc/made/inner`
+  are on it.
 - **Processes.** A pooled `ProcessRecord` scheduler table with no
   process-count ceiling, with lazily backed kernel stacks and directly owned
   address-space page tables, all on core 0.

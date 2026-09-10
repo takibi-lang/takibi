@@ -1,1 +1,1 @@
-^ext2 (resize:|bitmap:|owners:|create:|nested:|grow:)
+^ext2 (resize:|bitmap:|owners:|create:|nested:|grow:|mkdir:)
