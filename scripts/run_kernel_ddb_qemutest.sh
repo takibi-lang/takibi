@@ -160,6 +160,13 @@ wait "$driver_pid"
 python3 "$REPO_ROOT/scripts/validate_kernel_gdb_state.py" \
     --uart-log "$UART_LOG" --gdb-log "$GDB_VIEW_LOG"
 
+# GitHub issue #456: whose fault it is. The guarded read's arming is per core
+# now, because its writer is the one core inspecting but its READER is
+# whichever core takes a data abort -- a shared word let a peer's real fault
+# be answered by DDB's read, redirecting that core into a read it never made.
+# These four say what "answerable" requires: armed, the right exception class,
+# and the right address, each of which alone has looked like a match.
+
 # GitHub issue #505: a CPU that is not the one running the debugger.
 #
 # `bt cpu 1` is the peer, whose root it published as it entered the world-stop
@@ -234,6 +241,10 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         [ "$(grep -c '^ddb: usage: xk|xp HEX_ADDRESS \[COUNT_1_TO_64\]$' "$UART_LOG")" -ne 2 ] ||
         ! grep -q '^ddb: xk denied (not ordinary kernel RAM) address=0x0000001000000000 count=1$' "$UART_LOG" ||
         ! grep -q '^ddb: xk fault address=0x0000000800000000$' "$UART_LOG" ||
+        ! grep -q '^ddb: xk guarded-fault armed-match ours=yes$' "$UART_LOG" ||
+        ! grep -q '^ddb: xk guarded-fault armed-other-address ours=no$' "$UART_LOG" ||
+        ! grep -q '^ddb: xk guarded-fault armed-other-class ours=no$' "$UART_LOG" ||
+        ! grep -q '^ddb: xk guarded-fault unarmed ours=no$' "$UART_LOG" ||
         ! grep -Eq "^ddb: xp physical=0x0*$KERNEL_READ_ADDRESS count=2$" "$UART_LOG" ||
         [ "$(grep -c '^ddb: xp byte physical=0x.* value=0x' "$UART_LOG")" -lt 2 ] ||
         ! grep -q '^ddb: xp denied (not ordinary physical RAM) address=0x0000001000000000 count=1$' "$UART_LOG" ||

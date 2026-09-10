@@ -562,11 +562,22 @@ disables whatever is reading it.
    `check_kernel_ddb_postmortem_controls.py` read `bt [PID|cpu N]` as a
    command with a required argument, because it split usage on spaces; a
    bracketed group is one optional token even when it contains one.
-3. **#456's remaining half** -- the rendezvous exists (`world_stop_begin` in
-   `kernel_ddb_enter`, with Busy and Partial reported rather than waited out),
-   but `kernel_ddb_memory_access_active` is still one global. Two cores in a
-   guarded read cannot be told apart, which is the state a debugger must not
-   be wrong about.
+3. **#456 closed 2026-09-10.** The rendezvous already existed and the queue
+   entry said so; what was left was the guarded read's arming, and the reason
+   it mattered turned out to be sharper than "two cores cannot be told apart".
+   The WRITER is the one core inspecting, which is what the world-stop token
+   guarantees -- but the READER is whichever core takes a data abort. A peer
+   faulting for a real reason at the address DDB happened to be reading had
+   its fault swallowed: redirected to DDB's own recovery label, landing that
+   core in the middle of a read it never made, while DDB reported a fault it
+   never took. One shared word, two wrong answers.
+
+   Per core, a core can only match its own arming. The decision -- armed, the
+   right exception class, the right address -- is a pure function the existing
+   `xkfault` gate drives through all four cases, because each of the three
+   conditions alone has looked like a match. DDB's snapshot stays
+   machine-global on purpose and the file now says why: one writer, and the
+   complete token is what says so.
 4. **#465's remaining half** -- peers no longer lose their lines: Codex's
    `kernel_log_peer_publish` hands complete bounded lines to core 0. What the
    retained record still does not carry is WHICH core wrote it, or a sequence

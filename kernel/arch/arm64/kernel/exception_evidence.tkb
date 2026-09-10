@@ -253,9 +253,51 @@ let mut kernel_ddb_breakpoint_test_enabled: bool;
 let mut kernel_ddb_memory_fault_test_enabled: bool;
 let mut kernel_ddb_backtrace_test_enabled: bool;
 let mut kernel_ddb_wait_test_enabled: bool;
-let mut kernel_ddb_memory_access_active: bool;
-let mut kernel_ddb_memory_access_faulted: bool;
-let mut kernel_ddb_memory_access_address: usize;
+// GitHub issue #456: the guarded read's arming, per core.
+//
+// It used to be three machine-global words, and DDB's world stop was the
+// argument for that: only one core inspects at a time. The argument holds for
+// the WRITER and not for the READER. The claim is checked in
+// kernel_ddb_sync_dispatch on whichever core takes a data abort, so a peer
+// faulting for a real reason at the address DDB happened to be reading would
+// have had its fault swallowed -- redirected to DDB's own recovery label,
+// landing that core in the middle of a read it never made, while DDB reported
+// a fault it never took. Two wrong answers from one shared word.
+//
+// Per core, a core can only ever match its own arming, which is the only
+// arming that can be about it. This is the state #456 names; the snapshot
+// beside it stays machine-global on purpose, because it has exactly one
+// writer and the complete world-stop token is what says so.
+struct DdbGuardedRead {
+    active: bool;
+    faulted: bool;
+    address: usize;
+}
+
+private let mut kernel_ddb_memory_access: [DdbGuardedRead; KERNEL_MAX_CORES];
+
+// Whether a data abort taken on THIS core is the one its guarded read armed.
+//
+// Separated from the dispatcher because it is the part that can be wrong and
+// the part a single core can exercise: arming, the exception class, and the
+// faulting address all have to agree, and each of the three alone has been a
+// plausible-looking match. The dispatcher around it reads two system
+// registers and rewrites a return address.
+fn ddb_guarded_fault_is_ours(active: bool, armed_address: usize,
+                             esr: usize, far: usize) -> bool {
+    if (active == false) { return false; }
+    // 0x25 is a Current-EL data abort. A different class taken while a read
+    // is armed is a different event and must fail-stop.
+    if (((esr >> 26) & 0x3F) != 0x25) { return false; }
+    return far == armed_address;
+}
+
+private fn kernel_ddb_memory_access_here() -> *DdbGuardedRead {
+    let base: *DdbGuardedRead = kernel_ddb_memory_access;
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) { return base; }
+    return base + (core as isize);
+}
 
 fn kernel_ddb_breakpoint_test_checkpoint() {
     if (kernel_ddb_breakpoint_test_enabled) { kernel_ddb_breakpoint(); }
@@ -548,12 +590,13 @@ must_use variant DdbUserTranslateResult { Unmapped; Fault; Mapped(usize); }
 
 private fn ddb_read_kernel_byte(address: usize)
         -> DdbByteReadResult !{unsafe} {
-    kernel_ddb_memory_access_address = address;
-    kernel_ddb_memory_access_faulted = false;
-    kernel_ddb_memory_access_active = true;
+    let guard: *DdbGuardedRead = kernel_ddb_memory_access_here();
+    guard.address = address;
+    guard.faulted = false;
+    guard.active = true;
     let value: usize = kernel_ddb_guarded_read_u8(address);
-    kernel_ddb_memory_access_active = false;
-    if (kernel_ddb_memory_access_faulted) {
+    guard.active = false;
+    if (guard.faulted) {
         return DdbByteReadResult::Fault;
     }
     return DdbByteReadResult::Read(value);
@@ -1248,6 +1291,18 @@ private fn ddb_render_backtrace_process(pid: usize) !{unsafe} {
     ddb_puts("\n");
 }
 
+private fn ddb_guarded_fault_verdict(label: *u8, active: bool,
+                                     armed_address: usize, esr: usize,
+                                     far: usize) !{unsafe} {
+    ddb_puts("ddb: xk guarded-fault "); ddb_puts(label);
+    ddb_puts(" ours=");
+    if (ddb_guarded_fault_is_ours(active, armed_address, esr, far)) {
+        ddb_puts("yes\n");
+    } else {
+        ddb_puts("no\n");
+    }
+}
+
 private fn ddb_bt_test_stopped_check(label: *u8, before: usize,
                                      after: usize, frame_sp: usize)
         !{unsafe} {
@@ -1885,6 +1940,23 @@ private fn kernel_ddb_enter_stopped(
                         // L1 index 32 is unmapped on both maintained targets;
                         // index 64 is RPi5 device MMIO despite faulting on QEMU.
                         ddb_render_kernel_memory(0x800000000, 1);
+                        // GitHub issue #456: the same command's gate, one
+                        // decision over. A peer's real fault used to be
+                        // answerable by DDB's arming because the arming was
+                        // one machine-global word; these four say what
+                        // "answerable" now requires.
+                        ddb_guarded_fault_verdict("armed-match", true,
+                                                  0x800000000, 0x25 << 26,
+                                                  0x800000000);
+                        ddb_guarded_fault_verdict("armed-other-address", true,
+                                                  0x800000000, 0x25 << 26,
+                                                  0x800001000);
+                        ddb_guarded_fault_verdict("armed-other-class", true,
+                                                  0x800000000, 0x24 << 26,
+                                                  0x800000000);
+                        ddb_guarded_fault_verdict("unarmed", false,
+                                                  0x800000000, 0x25 << 26,
+                                                  0x800000000);
                     } else if (kernel_ddb_wait_test_enabled &&
                             ddb_command_is(line as []u8, length, bs"waittest")) {
                         // Test-only: issue #524's topology from records this
@@ -1956,11 +2028,13 @@ fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
 // every other Current-EL synchronous exception retains fail-stop semantics.
 fn kernel_ddb_sync_dispatch(frame_sp: usize) -> usize !{interrupt, unsafe} {
     let esr: usize = mrs_esr_el1();
-    if (kernel_ddb_memory_access_active &&
-            ((esr >> 26) & 0x3F) == 0x25 &&
-            mrs_far_el1() == kernel_ddb_memory_access_address) {
-        kernel_ddb_memory_access_active = false;
-        kernel_ddb_memory_access_faulted = true;
+    // This core's own arming, and no other's: a peer's real data abort must
+    // not be answered by whatever DDB is reading somewhere else.
+    let guard: *DdbGuardedRead = kernel_ddb_memory_access_here();
+    if (ddb_guarded_fault_is_ours(guard.active, guard.address, esr,
+                                  mrs_far_el1())) {
+        guard.active = false;
+        guard.faulted = true;
         let fault_frame: *ExceptionFrame = unsafe {
             frame_sp as *ExceptionFrame
         };
@@ -2395,8 +2469,15 @@ fn el1_exception_evidence_from_frame(slot: usize, frame_sp: usize) !{unsafe} {
 
 // Fail-stop snapshots and recursion flags are per-core, so simultaneous
 // faults retain both records without a reporter lock. The historical core-0
-// symbols remain the external-debugger ABI. DDB's smaller mutable snapshot is
-// machine-global by design and protected by its complete world-stop token.
+// symbols remain the external-debugger ABI. So is the guarded read's arming
+// (GitHub issue #456): its writer is the one core inspecting, but its READER
+// is whichever core takes a data abort, and a shared word let a peer's real
+// fault be answered by DDB's read.
+//
+// DDB's smaller mutable snapshot stays machine-global by design and is
+// protected by its complete world-stop token -- one writer, and the token is
+// what says so. The stopped-peer roots beside it are per-core because each
+// core publishes its own (issue #505).
 fn exception_evidence_execution_model_assumption() {
     static_assert(KERNEL_PREEMPTIBLE == 0,
                   "per-core crash capture cannot survive nested preemption on one core");
