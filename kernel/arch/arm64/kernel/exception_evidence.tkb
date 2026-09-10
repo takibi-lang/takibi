@@ -176,8 +176,20 @@ private fn crash_report_owner_address() -> usize {
 // summary line reports both, because "the reports came out clean" and "no two
 // cores ever tried to write at once" look identical on a healthy run and are
 // completely different claims.
+// Counted atomically, and the reason is the assertion rather than the tidiness:
+// the lane asserts `abandoned=0`, so an increment lost to two cores racing
+// would hide exactly the event the assertion exists to catch. Relaxed is
+// enough -- these are read once, after both cores have stopped.
 private let mut crash_report_contended: usize;
 private let mut crash_report_abandoned: usize;
+
+private fn crash_report_contended_address() -> usize {
+    return (&crash_report_contended) as usize;
+}
+
+private fn crash_report_abandoned_address() -> usize {
+    return (&crash_report_abandoned) as usize;
+}
 
 private fn crash_report_claim() !{unsafe} {
     let mut waited: bool = false;
@@ -191,15 +203,20 @@ private fn crash_report_claim() !{unsafe} {
                                              CRASH_CONSOLE_CLAIMED) }
                     == CRASH_CONSOLE_FREE) {
                 if (waited) {
-                    crash_report_contended = crash_report_contended + 1;
+                    unsafe {
+                        atomic_fetch_add_relaxed(
+                            crash_report_contended_address(), 1);
+                    }
                 }
                 return;
             }
         }
         waited = true;
     }
-    crash_report_contended = crash_report_contended + 1;
-    crash_report_abandoned = crash_report_abandoned + 1;
+    unsafe {
+        atomic_fetch_add_relaxed(crash_report_contended_address(), 1);
+        atomic_fetch_add_relaxed(crash_report_abandoned_address(), 1);
+    }
 }
 
 private fn crash_report_release() !{unsafe} {

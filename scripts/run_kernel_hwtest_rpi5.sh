@@ -13,6 +13,9 @@ source "$REPO_ROOT/scripts/kernel_views.sh"
 . "$REPO_ROOT/scripts/board_link_gate.sh"
 SERIAL_DEV="${RPI5_SERIAL_DEV:-$($REPO_ROOT/scripts/rpi5_uart_dev.sh)}"
 ELF="$REPO_ROOT/kernel/build/rpi5/kernel.elf"
+# shellcheck source=scripts/kernel_elf_freshness.sh
+. "$REPO_ROOT/scripts/kernel_elf_freshness.sh"
+kernel_elf_refuse_stale "$ELF" || exit 1
 VIEW_DIR="$REPO_ROOT/kernel/tests/rpi5/views"
 COMMON_VIEW_DIR="$REPO_ROOT/kernel/tests/common/views"
 ASH_DIR="$REPO_ROOT/kernel/tests/common/ash"

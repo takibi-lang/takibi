@@ -86,11 +86,41 @@ fn virtio_block_device_ext2() -> KernelBlockDeviceResult {
 // So these are boot totals, printed once at the end beside the console spin
 // figure, for the same reason that one is: a number in a diff rather than a
 // number in somebody's memory.
-private let mut block_read_calls: usize = 0;
-private let mut block_write_calls: usize = 0;
+// Per core, summed when reported. This file's execution-model exemption reads
+// "device state; SPIs are routed to CPU0", which is about interrupt delivery
+// -- but block_read is reached from a syscall, and a syscall runs on core 1
+// too, so one shared counter would lose increments to a race and understate
+// the very diff #208 is to be judged by.
+//
+// Per-core storage rather than an atomic: scripts/check_lock_discipline.py
+// refused the atomic and was right to. A raw intrinsic for a diagnostic
+// counter is a trusted-base entry bought to avoid arithmetic, and the
+// profiler beside it already counts this way.
+private let mut block_read_calls: [usize; KERNEL_MAX_CORES];
+private let mut block_write_calls: [usize; KERNEL_MAX_CORES];
 
-fn block_read_call_total() -> usize { return block_read_calls; }
-fn block_write_call_total() -> usize { return block_write_calls; }
+private fn block_call_total(counters: borrow [usize; KERNEL_MAX_CORES..])
+        -> usize {
+    let mut total: usize = 0;
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        total = total + counters[cpu];
+    }
+    return total;
+}
+
+private fn block_note_call(counters: borrow [usize; KERNEL_MAX_CORES..]) {
+    let raw_cpu: usize = cpu_id();
+    if (raw_cpu >= KERNEL_MAX_CORES) { return; }
+    let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
+    counters[cpu] = counters[cpu] + 1;
+}
+
+fn block_read_call_total() -> usize {
+    return block_call_total(block_read_calls as []usize);
+}
+fn block_write_call_total() -> usize {
+    return block_call_total(block_write_calls as []usize);
+}
 
 fn block_read(device: KernelBlockDevice, block: usize,
               destination: [u8; KERNEL_BLOCK_SIZE..])
@@ -98,7 +128,7 @@ fn block_read(device: KernelBlockDevice, block: usize,
     if (block >= device.length / KERNEL_BLOCK_SIZE) {
         return BlockIoResult::Invalid;
     }
-    block_read_calls = block_read_calls + 1;
+    block_note_call(block_read_calls as []usize);
     workload_profile_note_block_read(KERNEL_BLOCK_SIZE);
     if (device.backend == 0) {
             let offset: usize = block * KERNEL_BLOCK_SIZE;
@@ -141,7 +171,7 @@ fn block_write(device: KernelBlockDevice, block: usize,
     if (block >= device.length / KERNEL_BLOCK_SIZE) {
         return BlockIoResult::Invalid;
     }
-    block_write_calls = block_write_calls + 1;
+    block_note_call(block_write_calls as []usize);
     workload_profile_note_block_write(KERNEL_BLOCK_SIZE);
     if (device.backend == 0) {
             let offset: usize = block * KERNEL_BLOCK_SIZE;

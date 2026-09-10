@@ -15,6 +15,9 @@ trap 'takibi_status=$?; echo "[$(basename "$0")] aborted at line $LINENO with ex
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ELF="${KERNEL_QEMU_OOPS_ELF:-$REPO_ROOT/kernel/build/qemu/kernel-debug.elf}"
+# shellcheck source=scripts/kernel_elf_freshness.sh
+. "$REPO_ROOT/scripts/kernel_elf_freshness.sh"
+kernel_elf_refuse_stale "$ELF" || exit 1
 DEBUG_METADATA="$REPO_ROOT/_build/kernel-debug-metadata.json"
 ARTIFACT_DIR="${KERNEL_QEMU_OOPS_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-oops-qemu}"
 GDB_PORT="${KERNEL_QEMU_OOPS_GDB_PORT:-18697}"

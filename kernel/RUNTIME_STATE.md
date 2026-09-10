@@ -107,8 +107,21 @@ while resumable DDB must retain one bounded trace/FD/VM/process-table copy
 and the current compiler-defined IRQ-frame pointer while its polled command
 loop is active.
 Neither record owns scheduler or process resources. IRQ masking prevents a
-nested entry on the servicing CPU; the current scheduler and UART IRQ route
-remain confined to core 0.
+nested entry on the servicing CPU.
+
+**Four things in this file stopped being machine-global in September 2026,
+and the distinction they turn on is worth stating once: a single writer is
+not the same claim as a single reader.**
+
+| what | why it could not stay global |
+|---|---|
+| the crash snapshot's fault order and `valid` publication (#486) | two cores faulting produced one report and kept whichever wrote last, so the first fault -- usually the interesting one -- was lost. A machine-wide ticket orders them; `valid` is published with release and read with acquire |
+| the crash report's console and output claim (#486) | two cores rendering to one UART shredded each other's reports. One core runs the console, claimed by a swap that never waits; the rest park having already reported. The output claim is a bounded spin that renders ANYWAY on expiry, because a wedged core must not silence one that still has something to say |
+| DDB's guarded-read arming (#456) | its WRITER is the one core inspecting, which the world-stop token guarantees, but its READER is whichever core takes a data abort. A peer's real fault at DDB's armed address was answered by DDB's read |
+| the stopped-peer unwind roots (#505) | each core publishes its own as it enters the world-stop holding pen, which is the only moment its interrupted frame is addressable |
+
+`ddb_snapshot` itself stays machine-global on purpose: it has exactly one
+writer and the complete world-stop token is what says so.
 
 ### VM / address-space (`kernel/mm/`, `kernel/arch/arm64/mm/`)
 
@@ -245,13 +258,20 @@ than ported, along with `TcpConnectionValue`, `TcpConnectionGuard` and
 
 ### Filesystem (`kernel/fs/`)
 
-`ext2/ext2.tkb`'s `ext2_metadata_block`/`ext2_file_block` (one-block
-staging buffers); `elf64.tkb`'s `ELF_IDENT_MAGIC` (a constant table, not
-mutable runtime state in practice).
+`ext2/ext2.tkb`'s `ext2_scratch` (one-block staging buffers, **per core**
+since the two-core work: `ext2_scratch_here()` selects by `cpu_id()`, because
+a syscall reaching ext2 now runs on either core and one shared staging buffer
+would let two reads overwrite each other's block mid-parse); `elf64.tkb`'s
+`ELF_IDENT_MAGIC` (a constant table, not mutable runtime state in practice).
+
+`drivers/block/memory.tkb`'s `block_read_calls`/`block_write_calls` are
+per-core for the same reason and for a smaller stake: they are the boot totals
+issues #281 and #208 are ordered against, and a lost increment would
+understate the number a change is judged by.
 
 **Why global:** the kernel mounts exactly one ext2 filesystem at boot.
-Per-block scratch buffers for a single-mount filesystem are legitimately
-global scratch space, not per-process state.
+Per-block scratch for a single-mount filesystem is legitimately shared scratch
+space rather than per-process state; what it is not is shared between cores.
 
 ### Driver / platform singletons (`kernel/drivers/`, `kernel/platform/`, `kernel/arch/`)
 

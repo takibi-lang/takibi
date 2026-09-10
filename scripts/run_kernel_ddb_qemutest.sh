@@ -12,6 +12,9 @@ trap 'status=$?; echo "[kernel/qemu ddb] aborted at line $LINENO with exit $stat
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ELF="${KERNEL_QEMU_DDB_ELF:-$REPO_ROOT/kernel/build/qemu/kernel-debug.elf}"
+# shellcheck source=scripts/kernel_elf_freshness.sh
+. "$REPO_ROOT/scripts/kernel_elf_freshness.sh"
+kernel_elf_refuse_stale "$ELF" || exit 1
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
 ARTIFACT_DIR="${KERNEL_QEMU_DDB_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-ddb-qemu}"
 SERIAL_PORT="${KERNEL_QEMU_DDB_SERIAL_PORT:-18701}"

@@ -42,6 +42,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=scripts/kernel_views.sh
 source "$REPO_ROOT/scripts/kernel_views.sh"
 ELF="${KERNEL_QEMU_ELF:-$REPO_ROOT/kernel/build/qemu/kernel.elf}"
+# shellcheck source=scripts/kernel_elf_freshness.sh
+. "$REPO_ROOT/scripts/kernel_elf_freshness.sh"
+kernel_elf_refuse_stale "$ELF" || exit 1
 RUN_LABEL="kernel/${KERNEL_QEMU_LABEL:-qemu}"
 VIEW_DIR="$REPO_ROOT/kernel/tests/qemu/views"
 EXPECTED_VIEW_DIR="${KERNEL_QEMU_EXPECTED_VIEW_DIR:-$VIEW_DIR}"

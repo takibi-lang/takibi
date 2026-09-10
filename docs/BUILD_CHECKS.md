@@ -48,6 +48,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_irq_restore_sites.py` | no `enable_irq()` restores interrupts without consulting the state it overwrites |
 | `check_irq_restore_sites_controls.py` | Controls for the IRQ-restore site check |
 | `check_kernel_asm_invariants_controls.py` | Controls for the SCTLR alignment-policy disassembly check |
+| `check_kernel_elf_freshness_controls.sh` | Controls for the stale-kernel guard: a lane refuses to run against a kernel older than its own sources |
 | `check_kernel_ddb_postmortem_controls.py` | Controls for the UART driver's DDB postmortem walk, with no QEMU in the room |
 | `check_kernel_interactive_httpd_protocol.py` | interactive HTTP runners avoid listener/request deadlock |
 | `check_kernel_lib_limitations_header.py` | core kernel files state their current limitations |

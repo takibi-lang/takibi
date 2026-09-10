@@ -758,6 +758,17 @@ After that, **#208** -- and it is now the measured priority rather than an
 option, with `block io: reads=...` printed on every boot as the number it has
 to move.
 
+**#540 is the one new idea worth taking on its own**, filed by the end-of-
+session audit: `--reject-unused-functions` already exists and is scoped to one
+file, and an accessor with no reader is exactly what it detects. Three of the
+defects repaired on 2026-09-10 were a facility with no reader -- a counter
+nothing summed, a publication nothing produced, a profiling interval whose
+accounting had read zero since it was written -- and each was found by a
+person looking. Widening it is measured at two structural false positives,
+both named on the issue, and the first of them (a `static_assert`-only
+function is not "unused") is the compiler-side half and the same answer for
+all 21 of them.
+
 Eleven issues closed on 2026-09-09 and 2026-09-10: **#339**, **#531**,
 **#530**, **#529**, **#526** (with the maintainer's explicit go-ahead and a
 quiet window), then the four the re-cut put first -- **#486**, **#505**,

@@ -1336,10 +1336,14 @@ fn ext2_directory_add(mount: Ext2Mount, directory_inode: usize,
             }
         }
     }
-    // Every block was walked and none had room. Growing a directory by a
-    // block is its own increment; refusing is the honest answer until it
-    // exists, and it is a different answer from a malformed directory only
-    // because every malformed shape above returns before here.
+    // Every block was walked and none had room.
+    //
+    // The caller cannot tell this from a malformed directory, and that is a
+    // real limitation rather than a subtlety: Ext2DirectoryResult has two
+    // cases and both of these are Invalid. It is left that way deliberately,
+    // because no caller can act differently until a directory can be grown --
+    // and the increment that adds growing is the one that gives this its own
+    // case, when there is something to do with it. GitHub issue #537.
     return Ext2DirectoryResult::Invalid;
 }
 

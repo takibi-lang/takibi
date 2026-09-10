@@ -524,6 +524,11 @@ fn kernel_log_capture_uart_byte(value: u8) -> bool {
 // Bounded on purpose. It emits KERNEL_LOG_PEER_PROBE_LINES numbered lines and
 // then stops, so the count in the retained log is a fact a view can compare
 // rather than a stream whose length depends on how long the boot took.
+//
+// The shared `dmesg` view enumerates cpu1's four lines by name. A third core
+// would add four more and fail that view, which is the intended outcome: the
+// view is where somebody decides what a four-core boot's retained log should
+// look like, and failing there is cheaper than discovering it later.
 const KERNEL_LOG_PEER_PROBE_LINES: usize = 4;
 private let mut kernel_log_peer_probe_emitted: [usize; KERNEL_MAX_CORES];
 
