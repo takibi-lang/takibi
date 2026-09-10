@@ -15,6 +15,27 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-09: failed clones preserve older siblings
+
+The clone rollback audit found a remnant of the single-child model: after
+reaping a failed clone, rollback cleared the parent's has_first_child flag
+unconditionally. Any older live children or zombies became unreachable from
+wait4's sibling walk. Rollback now validates the Running parent and its head
+under the run lock, restores the cancelled child's successor before reaping,
+and restores logical current before releasing the failed child's resources.
+Invalid state returns without first mutating the process tree.
+
+The existing fanout probe now cancels a fourth clone while three siblings
+exist, checks process and clone counts return to baseline, and uses the real
+PID lookup and wait4 status collection to verify that the original siblings
+survive. This is a bookkeeping regression, not evidence that the experimental
+two-core physical stack handoff or console delivery is complete.
+The one-core main QEMU lane passed all 44 views and the PTY script, and the
+allocation-refusal lane passed its record/page recovery checks. Reintroducing
+only the old flag clear made process_lifecycle fail with process fanout:
+failed and exit status 2; all other views passed. The negative control was
+then removed.
+
 ## 2026-09-09: terminal reports bypass ordinary log suppression
 
 Per-core crash storage did not make peer crashes visible: the terminal

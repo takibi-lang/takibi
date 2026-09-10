@@ -27,7 +27,7 @@ An assertion message is prose and nothing checks it stays true. Three went
 stale within days of their subject being fixed. Re-read the assertion when you
 change what it is about.
 
-## Lock classes
+## Clone publication
 
 A new clone stays `Constructing` while its VM, descriptors and copied frame
 are installed. Neither a Ready claim nor the successor walk may select it.
@@ -35,6 +35,11 @@ The install transition consumes that state into Running under the run lock;
 the parent's saved frame is stored before the same section makes it Ready.
 Cancellation consumes Constructing directly into Exited. These are logical
 publication boundaries, not proof that the old CPU has left a process stack.
+Rollback validates the still-Running parent and its child-list head under the
+run lock, restores that head to the cancelled child's next sibling, and only
+then reaps the cancelled record. Older live children and zombies remain linked.
+
+## Lock classes
 
 Two, and the distinction is which contexts may take them.
 

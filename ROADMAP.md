@@ -190,6 +190,15 @@ The PID admission experiment still does not constrain subsequent scheduling.
 Physical outgoing-stack lifetime, per-core workload accounting, and peer PMU
 handling remain separate audits before the two-core acceptance claim.
 
+The rollback audit also found an independent, deterministic process-tree
+defect: cancelling a clone cleared the parent's whole child-list flag, losing
+older live children and zombies. Rollback now restores the head to the
+cancelled child's next sibling under the run lock before reaping. The fanout
+probe cancels a fourth clone, checks counts return to baseline, and still
+collects each original sibling by pid and status. The one-core main QEMU lane
+and the allocation-refusal lane pass. This fixes error-path bookkeeping, not
+ordinary console delivery or the physical outgoing-stack boundary.
+
 The three completed fixes passed the one-active-core QEMU main lane (all 44
 views and the kernelsh PTY script), all four QEMU oops cases, and langcheck.
 Both target kernels build under forbid-trap with the two-core experiment.

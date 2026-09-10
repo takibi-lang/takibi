@@ -5233,6 +5233,31 @@ fn kernel_process_fanout_probe() -> bool !{unsafe} {
         if (kernel_process_current_has_child_pid(pids[i])) { seen = seen + 1; }
     }
     if (seen != 3) { return false; }
+    // A failed fourth fork must remove only its own head link. Keep using
+    // the real wait4-by-pid checks below to prove that all older siblings
+    // remain reachable and retain their statuses after rollback.
+    let live_before_rollback: usize = scheduled_process_pool_live_count();
+    let clones_before_rollback: usize = process_test_evidence_clone_calls();
+    let mut cancelled_pid: usize = 0;
+    match kernel_process_clone_begin(0x11, 0) {
+        ProcessCloneResult::Invalid => { return false; }
+        ProcessCloneResult::ChildConstructing(pid) => { cancelled_pid = pid; }
+    }
+    match kernel_process_clone_rollback() {
+        ProcessCloneRollbackResult::Invalid => { return false; }
+        ProcessCloneRollbackResult::Restored => {}
+    }
+    if (kernel_process_current_pid() != parent_pid ||
+        scheduled_process_pool_live_count() != live_before_rollback ||
+        process_test_evidence_clone_calls() != clones_before_rollback ||
+        kernel_process_current_has_child_pid(cancelled_pid)) {
+        return false;
+    }
+    for i: usize in 0..<3 {
+        if (kernel_process_current_has_child_pid(pids[i]) == false) {
+            return false;
+        }
+    }
     // Complete all three synthetic clones and drive them to Exited without
     // restoring their frames. Give each its own status for collection below.
     // seen == 3 above already means the link exists, but say so where the
@@ -5589,21 +5614,40 @@ fn kernel_process_clone_rollback() -> ProcessCloneRollbackResult {
     let mut child: ProcessHandle = execution_here().current_handle;
     let mut parent: ProcessHandle =
         scheduled_process_record_of(child).parent;
-    // GitHub issue #392: BEFORE the reap. A reaped process's record is
-    // handed back to the pool now, so clearing its parent link afterwards
-    // wrote into the counted absent-record fallback -- harmless in effect,
-    // and exactly the kind of use-after-reap an array of never-freed slots
-    // cannot show you.
-    scheduled_process_record_of(child).has_parent = false;
-    // The rollback still runs on the parent's syscall stack, and the
-    // logical current process must be the surviving parent before the child
-    // record is returned to the pool.
-    execution_here().current_handle = parent;
     let guard = process_run_lock();
+    // Only this still-Running parent can insert or reap its children during
+    // the non-preemptible clone syscall. Validate the head before mutating
+    // anything; a stale or invalid rollback must not sever another chain.
+    if (scheduled_process_handle_matches(parent) == false ||
+        scheduled_process_state_of(parent) != ProcessSlotState::Running ||
+        scheduled_process_record_of(parent).has_first_child == false ||
+        scheduled_process_same_slot(
+            scheduled_process_record_of(parent).first_child, child) == false) {
+        process_run_unlock(guard);
+        return ProcessCloneRollbackResult::Invalid;
+    }
     match scheduled_process_constructing_take(guard, child) {
-        ScheduledProcessConstructingTakeResult::Missing => {}
+        ScheduledProcessConstructingTakeResult::Missing => {
+            process_run_unlock(guard);
+            return ProcessCloneRollbackResult::Invalid;
+        }
         ScheduledProcessConstructingTakeResult::Constructing(resources) => {
             let (owner, constructing) = resources;
+            // Read the successor before returning the child record to its
+            // pool. Clearing has_first_child unconditionally loses every
+            // older sibling, including live children and waitable zombies.
+            let has_following: bool =
+                scheduled_process_record_of(child).has_next_sibling;
+            if (has_following) {
+                scheduled_process_record_of(parent).first_child =
+                    scheduled_process_record_of(child).next_sibling;
+            }
+            scheduled_process_record_of(parent).has_first_child = has_following;
+            scheduled_process_record_of(child).has_parent = false;
+            scheduled_process_record_of(child).has_next_sibling = false;
+            // We still run on the parent's syscall stack. Restore logical
+            // current before releasing any of the failed child's resources.
+            execution_here().current_handle = parent;
             let exited = scheduled_process_cancel_clone(owner, constructing);
             scheduled_process_release(owner, exited);
             match scheduled_process_exited_take(child) {
@@ -5616,7 +5660,6 @@ fn kernel_process_clone_rollback() -> ProcessCloneRollbackResult {
         }
     }
     process_run_unlock(guard);
-    scheduled_process_record_of(parent).has_first_child = false;
     workload_busy_note_selected(
         scheduled_process_pid_of_handle(parent));
     let activation: CurrentRootActivationResult =
