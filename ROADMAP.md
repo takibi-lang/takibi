@@ -215,6 +215,13 @@ terminal text, including stack guards that never reach crash_console_run.
 The rebased one-core main lane passed all 45 views and PTY, and all four oops
 cases passed. Earlier two-core captures describe the pre-queue binary; do not
 reuse their addresses or treat them as post-integration test results.
+The first post-integration two-core QEMU run, capture 20260910T021642Z,
+passed 44 of 45 views: restart/done and all interactive HTTP GETs passed,
+while httpd_interactive_lifecycle lacked only the child-selected line.
+The stack-overflow lane and langcheck also passed on the integrated tree.
+The experimental peer timer policy now lives once in secondary.tkb, called
+from both interrupt dispatchers; the upstream inline-duplication check
+correctly refused the former duplicated sequence.
 
 #432's remaining-time writeback still awaits an observable signal-handler
 interruption, not the busy-pair workload.
