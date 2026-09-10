@@ -541,11 +541,27 @@ the run into a timeout -- 1-in-3 before the console's own prompt joined the
 claim, 8-in-8 after. Two cores racing one UART is not only ugly; it silently
 disables whatever is reading it.
 
-2. **#505** -- `bt` for a stopped peer. Genuinely untouched, and activated by
-   the same commit that closed #479: its own text says to begin once a process
-   makes progress on core 1, and one does. When a two-core run stalls, this is
-   the first question anyone asks and the kernel currently cannot answer it
-   for the core that is not running DDB.
+2. **#505 closed 2026-09-10.** `bt PID` for a Running process used to answer
+   "capture that cpu" and nothing could. The stop protocol the issue asks for
+   already existed -- DDB only inspects on a Complete world-stop token -- so
+   what was missing was a ROOT for a CPU that is not the one running the
+   debugger. The peer publishes one as it enters the holding pen, which is the
+   only moment its own interrupted frame is addressable and costs the stop
+   nothing, and retires it on the way out so a stale root cannot read as a
+   fresh one. `bt cpu N` selects it; a Running process now resolves through
+   the CPU holding it. Two refusals stay distinguishable and neither is a
+   trace: a CPU that never acknowledged, and a root that moved under the read.
+
+   Three things worth carrying. The publish/hold/retire body went into
+   `exception_evidence.tkb` rather than into both platform dispatchers,
+   because `check_platform_file_parity.py` refused the first version -- three
+   added lines took the shared run past its threshold, which is the check
+   working rather than complaining. The decision that cannot be exercised with
+   one core (a value moving between two loads) was separated into a pure
+   function that `bttest` drives through all five verdicts. And
+   `check_kernel_ddb_postmortem_controls.py` read `bt [PID|cpu N]` as a
+   command with a required argument, because it split usage on spaces; a
+   bracketed group is one optional token even when it contains one.
 3. **#456's remaining half** -- the rendezvous exists (`world_stop_begin` in
    `kernel_ddb_enter`, with Busy and Partial reported rather than waited out),
    but `kernel_ddb_memory_access_active` is still one global. Two cores in a

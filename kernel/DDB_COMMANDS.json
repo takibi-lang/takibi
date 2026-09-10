@@ -10,7 +10,7 @@
     {"name": "ps", "usage": "ps", "coverage": "qemu"},
     {"name": "wait", "usage": "wait", "coverage": "qemu"},
     {"name": "proc", "usage": "proc PID", "coverage": "qemu"},
-    {"name": "bt", "usage": "bt [PID]", "coverage": "qemu"},
+    {"name": "bt", "usage": "bt [PID|cpu N]", "coverage": "qemu"},
     {"name": "trace", "usage": "trace", "coverage": "qemu"},
     {"name": "events", "usage": "events", "coverage": "qemu"},
     {"name": "xk", "usage": "xk ADDRESS [COUNT]", "coverage": "qemu"},

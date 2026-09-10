@@ -381,7 +381,10 @@ fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
     // Stop before touching profiling, scheduler, driver, or reporter state:
     // those are consumers of the proof the initiator is waiting to receive.
     if (id == RPI5_WORLD_STOP_SGI) {
-        world_stop_interrupt_hold();
+        // GitHub issue #505: the pen, and the root this core publishes on
+        // the way into it -- one shared body, because the two platforms
+        // differ here only in the SGI id and the EOI register.
+        kernel_world_stop_serve(frame_sp);
         *gicc_eoir = id;
         return frame_sp;
     }

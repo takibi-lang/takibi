@@ -160,6 +160,15 @@ wait "$driver_pid"
 python3 "$REPO_ROOT/scripts/validate_kernel_gdb_state.py" \
     --uart-log "$UART_LOG" --gdb-log "$GDB_VIEW_LOG"
 
+# GitHub issue #505: a CPU that is not the one running the debugger.
+#
+# `bt cpu 1` is the peer, whose root it published as it entered the world-stop
+# holding pen -- the one moment its own interrupted frame is addressable. It
+# used to be unreachable: `bt PID` for a Running process answered "capture
+# that cpu" and nothing could. `bt cpu 9` is the refusal, and it is a
+# DIFFERENT refusal from a root that moved during the read; asserting the
+# wording is asserting that the two stay distinguishable.
+
 # GitHub issue #529: two claims, and they are different claims. The first two
 # patterns are the REAL snapshot's derivation -- whatever this boot's
 # processes were doing, the header and the summary must be there and must
@@ -203,7 +212,14 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         [ "$(grep -Ec '^ddb: bt source=(cpu cpu=[0-9]+|saved) pid=[0-9]+ stack=0x[0-9a-f]+\.\.0x[0-9a-f]+$' "$UART_LOG")" -lt 2 ] ||
         [ "$(grep -Ec '^ddb: bt frame=0 pc=0x[0-9a-f]+ boundary=(exception|user|assembly|assembly-bridge)$' "$UART_LOG")" -lt 2 ] ||
         ! grep -Eq '^ddb: bt (complete frames=[1-9][0-9]*|stop=(assembly-boundary|depth-limit|invalid-return-pc|nonmonotonic-frame|out-of-range) fp=0x[0-9a-f]+)$' "$UART_LOG" ||
-        ! grep -q '^ddb: usage: bt \[PID\]$' "$UART_LOG" ||
+        ! grep -q '^ddb: usage: bt \[PID|cpu N\]$' "$UART_LOG" ||
+        ! grep -Eq '^ddb: bt source=stopped cpu=1 pid=[0-9]+ stack=0x[0-9a-f]+\.\.0x[0-9a-f]+$' "$UART_LOG" ||
+        ! grep -q '^ddb: bt cpu=9 not stopped here$' "$UART_LOG" ||
+        ! grep -q '^ddb: bt test stopped-root unheld verdict=not-stopped$' "$UART_LOG" ||
+        ! grep -q '^ddb: bt test stopped-root publishing verdict=not-stopped$' "$UART_LOG" ||
+        ! grep -q '^ddb: bt test stopped-root moved verdict=changed$' "$UART_LOG" ||
+        ! grep -q '^ddb: bt test stopped-root retired verdict=not-stopped$' "$UART_LOG" ||
+        ! grep -q '^ddb: bt test stopped-root settled verdict=usable$' "$UART_LOG" ||
         ! grep -q '^ddb: bt pid not captured$' "$UART_LOG" ||
         ! grep -q '^ddb: bt stop=unsupported-pc fp=0x' "$UART_LOG" ||
         ! grep -q '^ddb: bt stop=misaligned-pc fp=0x' "$UART_LOG" ||
@@ -229,7 +245,7 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         [ "$(grep -c '^ddb: usage: xu PID HEX_ADDRESS \[COUNT_1_TO_64\]$' "$UART_LOG")" -ne 2 ] ||
         ! grep -q '^ddb: xu pid not captured$' "$UART_LOG" ||
         ! grep -q '^ddb: xu unmapped address=0x0000000070000000$' "$UART_LOG" ||
-        ! grep -q '^commands: oops regs intr sched current vm fds ps wait proc PID bt \[PID\] trace events xk ADDRESS \[COUNT\] xp PHYSICAL \[COUNT\] xu PID ADDRESS \[COUNT\] help continue$' "$UART_LOG" ||
+        ! grep -q '^commands: oops regs intr sched current vm fds ps wait proc PID bt \[PID|cpu N\] trace events xk ADDRESS \[COUNT\] xp PHYSICAL \[COUNT\] xu PID ADDRESS \[COUNT\] help continue$' "$UART_LOG" ||
         ! grep -Eq '^ddb: wait current=[0-9]+ state=[a-z-]+ reason=[a-z-]+ awaited=[01]$' "$UART_LOG" ||
         ! grep -Eq '^ddb: wait edges=[0-9]+ blocked=[0-9]+ unknown=[0-9]+ truncated=[01]$' "$UART_LOG" ||
         ! grep -q '^ddb: wait current=3 state=running reason=net-rx awaited=1$' "$UART_LOG" ||

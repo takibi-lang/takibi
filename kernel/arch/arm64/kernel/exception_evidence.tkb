@@ -483,6 +483,7 @@ must_use variant DdbBacktraceCommand {
     NotBacktrace;
     Invalid;
     Current;
+    Cpu(usize);
     Process(usize);
 }
 
@@ -491,6 +492,30 @@ private fn ddb_parse_backtrace(
         -> DdbBacktraceCommand {
     if (ddb_command_is(line, length, bs"bt")) {
         return DdbBacktraceCommand::Current;
+    }
+    // GitHub issue #505: selection is explicit. `bt` is the CPU running the
+    // debugger, `bt cpu N` is another stopped CPU, `bt PID` is a saved
+    // non-running process -- three different questions that used to be two,
+    // one of which answered "capture that cpu" and offered no way to.
+    if (ddb_command_starts_with(line, length, bs"bt cpu ")) {
+        let mut core: usize = 0;
+        let mut core_digits: usize = 0;
+        for index: usize in 7..<32 {
+            if (index < length) {
+                let byte: u8 = line[index];
+                if (byte < 0x30 || byte > 0x39) {
+                    return DdbBacktraceCommand::Invalid;
+                }
+                let digit: usize = (byte - 0x30) as usize;
+                if (core > (0xFFFFFFFFFFFFFFFF - digit) / 10) {
+                    return DdbBacktraceCommand::Invalid;
+                }
+                core = core * 10 + digit;
+                core_digits = core_digits + 1;
+            }
+        }
+        if (core_digits == 0) { return DdbBacktraceCommand::Invalid; }
+        return DdbBacktraceCommand::Cpu(core);
     }
     if (ddb_command_starts_with(line, length, bs"bt ") == false) {
         return DdbBacktraceCommand::NotBacktrace;
@@ -914,6 +939,154 @@ private fn ddb_walk_backtrace(root: DdbUnwindRoot, limit: usize) !{unsafe} {
     ddb_puts("\n");
 }
 
+// GitHub issue #505: where a stopped peer was, published by the peer itself.
+//
+// DDB already stops the world -- kernel_ddb_enter only inspects on a
+// Complete token -- so the protocol this issue asks for exists. What did not
+// exist is a ROOT for a CPU that is not the one running the debugger, so
+// `bt PID` refused a Running process with "capture that cpu" and there was
+// no way to capture it.
+//
+// The peer publishes as it enters the holding pen and retires as it leaves.
+// That is the only moment its own interrupted frame is addressable, and it
+// costs the stop nothing: the pen already spins there.
+//
+// `sequence` is odd while a core is publishing and even when a record is
+// settled, so a reader that sees the same EVEN value before and after its
+// read has a root that did not change under it -- which is the "reject a
+// root whose generation changed during capture" clause, expressed without
+// reaching into kernel/lib/occupancy.tkb's private generation.
+struct DdbStoppedRoot {
+    sequence: usize;
+    cpu: usize;
+    pid: usize;
+    frame_sp: usize;
+}
+
+private let mut ddb_stopped_root: [DdbStoppedRoot; KERNEL_MAX_CORES];
+
+private fn ddb_stopped_sequence_address(core: usize) -> usize {
+    let base: *DdbStoppedRoot = ddb_stopped_root;
+    if (core >= KERNEL_MAX_CORES) { return (&(base).sequence) as usize; }
+    return (&(base + (core as isize)).sequence) as usize;
+}
+
+// Called from each platform's interrupt dispatcher on the world-stop SGI,
+// with the frame that interrupt saved, immediately before the holding pen.
+fn kernel_ddb_stopped_root_publish(frame_sp: usize, pid: usize)
+        !{interrupt, unsafe} {
+    let raw_cpu: usize = cpu_id();
+    if (raw_cpu >= KERNEL_MAX_CORES) { return; }
+    let core: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
+    let settled: usize = ddb_stopped_root[core].sequence;
+    // Odd first: a reader arriving now sees "being written" rather than the
+    // previous stop's frame, which would still look entirely plausible.
+    unsafe {
+        atomic_store_release(ddb_stopped_sequence_address(raw_cpu),
+                             settled + 1);
+    }
+    ddb_stopped_root[core].cpu = raw_cpu;
+    ddb_stopped_root[core].pid = pid;
+    ddb_stopped_root[core].frame_sp = frame_sp;
+    unsafe {
+        atomic_store_release(ddb_stopped_sequence_address(raw_cpu),
+                             settled + 2);
+    }
+}
+
+// What a peer does when the world-stop SGI arrives: say where it is, wait,
+// then take the record back.
+//
+// One body rather than two. The platform dispatchers differ in the SGI id and
+// the EOI register and in nothing else here, and
+// scripts/check_platform_file_parity.py refused the first version of this for
+// exactly that reason -- three added lines took the shared run past its
+// threshold, which is the check working rather than the check complaining.
+fn kernel_world_stop_serve(frame_sp: usize) !{interrupt, unsafe} {
+    kernel_ddb_stopped_root_publish(frame_sp, kernel_process_current_pid());
+    world_stop_interrupt_hold();
+    kernel_ddb_stopped_root_retire();
+}
+
+// Called after the pen releases. The root is retired rather than left
+// standing: a stale one reads exactly like a fresh one, which is the failure
+// kernel/arch/arm64/kernel/exception_evidence.tkb's own crash snapshot was
+// repaired for in issue #486.
+fn kernel_ddb_stopped_root_retire() !{interrupt, unsafe} {
+    let raw_cpu: usize = cpu_id();
+    if (raw_cpu >= KERNEL_MAX_CORES) { return; }
+    let core: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
+    ddb_stopped_root[core].frame_sp = 0;
+    unsafe {
+        atomic_store_release(ddb_stopped_sequence_address(raw_cpu),
+                             ddb_stopped_root[core].sequence + 1);
+    }
+}
+
+must_use variant DdbStoppedRootResult {
+    NotStopped;
+    Changed;
+    Root(DdbUnwindRoot);
+}
+
+// The decision, separated from the read so it can be exercised without a
+// second core: whether a pair of sequence observations and a frame pointer
+// describe a root that may be walked.
+//
+// A single-threaded test cannot make a value change between two loads, so
+// what is testable is this -- and this is the part that can be wrong. The
+// read around it is three loads and a struct copy.
+must_use variant DdbStoppedCheck {
+    Unstopped;
+    Moved;
+    Usable;
+}
+
+private fn ddb_stopped_root_check(before: usize, after: usize,
+                                  frame_sp: usize) -> DdbStoppedCheck {
+    // Zero: never held here. Odd: a core is mid-publish, so the fields
+    // belong to no settled record.
+    if (before == 0 || (before % 2) != 0) { return DdbStoppedCheck::Unstopped; }
+    if (after != before) { return DdbStoppedCheck::Moved; }
+    // Retired: the core left the pen and its frame is no longer addressable.
+    if (frame_sp == 0) { return DdbStoppedCheck::Unstopped; }
+    return DdbStoppedCheck::Usable;
+}
+
+// Read one stopped peer's root, twice, and refuse anything that moved.
+private fn ddb_stopped_unwind_root(core: usize) -> DdbStoppedRootResult
+        !{unsafe} {
+    if (core >= KERNEL_MAX_CORES) { return DdbStoppedRootResult::NotStopped; }
+    let bounded: {0..<KERNEL_MAX_CORES as usize} = core;
+    let before: usize =
+        unsafe { atomic_load_acquire(ddb_stopped_sequence_address(core)) };
+    let frame_sp: usize = ddb_stopped_root[bounded].frame_sp;
+    let pid: usize = ddb_stopped_root[bounded].pid;
+    let after: usize =
+        unsafe { atomic_load_acquire(ddb_stopped_sequence_address(core)) };
+    match ddb_stopped_root_check(before, after, frame_sp) {
+        DdbStoppedCheck::Unstopped => {
+            return DdbStoppedRootResult::NotStopped;
+        }
+        DdbStoppedCheck::Moved => { return DdbStoppedRootResult::Changed; }
+        DdbStoppedCheck::Usable => { }
+    }
+    let frame: *ExceptionFrame = unsafe { frame_sp as *ExceptionFrame };
+    let run_bottom: usize =
+        (frame_sp / KERNEL_STACK_RUN_BYTES) * KERNEL_STACK_RUN_BYTES;
+    let mut root: DdbUnwindRoot = {
+        1,
+        core,
+        pid,
+        frame.elr_el1,
+        frame.x29,
+        frame_sp + EXC_CONTEXT_SIZE,
+        run_bottom + KERNEL_PROCESS_STACK_SIZE,
+        run_bottom + KERNEL_STACK_RUN_BYTES
+    };
+    return DdbStoppedRootResult::Root(root);
+}
+
 private fn ddb_current_unwind_root() -> DdbUnwindRoot !{unsafe} {
     let frame: *ExceptionFrame = unsafe {
         ddb_snapshot.frame_sp as *ExceptionFrame
@@ -954,6 +1127,53 @@ private fn ddb_render_backtrace_current() !{unsafe} {
     ddb_walk_backtrace(ddb_current_unwind_root(), DDB_BACKTRACE_FRAMES);
 }
 
+// GitHub issue #505: a CPU that is not the one running the debugger.
+//
+// Every refusal is explicit and says which one it is. "Not stopped" and "the
+// root moved" are different findings -- the first is a CPU that never
+// acknowledged, the second is one whose record changed under the read -- and
+// reading either as a historical trace is exactly what this must not do.
+private fn ddb_render_backtrace_cpu(core: usize) !{unsafe} {
+    if (core == (ddb_snapshot.cpu & 0xFF)) {
+        // The debugger's own CPU has a better root than the holding pen's:
+        // the exception frame DDB was entered through.
+        ddb_render_backtrace_current();
+        return;
+    }
+    match ddb_stopped_unwind_root(core) {
+        DdbStoppedRootResult::NotStopped => {
+            ddb_puts("ddb: bt cpu="); ddb_put_udec(core);
+            ddb_puts(" not stopped here\n");
+        }
+        DdbStoppedRootResult::Changed => {
+            ddb_puts("ddb: bt cpu="); ddb_put_udec(core);
+            ddb_puts(" root changed during capture\n");
+        }
+        DdbStoppedRootResult::Root(root) => {
+            let frame: *ExceptionFrame = unsafe {
+                root.stack_floor - EXC_CONTEXT_SIZE as *ExceptionFrame
+            };
+            if ((frame.spsr_el1 & 0xF) == 0) {
+                ddb_puts("ddb: bt source=stopped cpu="); ddb_put_udec(core);
+                ddb_puts(" pid="); ddb_put_udec(root.pid);
+                ddb_puts(" stack="); ddb_put_hex(root.stack_bottom);
+                ddb_puts(".."); ddb_put_hex(root.stack_top);
+                ddb_puts("\n");
+                ddb_puts("ddb: bt frame=0 pc="); ddb_put_hex(root.pc);
+                ddb_puts(" boundary=user\n");
+                ddb_bt_stop("user-boundary", root.fp);
+                return;
+            }
+            ddb_puts("ddb: bt source=stopped cpu="); ddb_put_udec(core);
+            ddb_puts(" pid="); ddb_put_udec(root.pid);
+            ddb_puts(" stack="); ddb_put_hex(root.stack_bottom);
+            ddb_puts(".."); ddb_put_hex(root.stack_top);
+            ddb_puts("\n");
+            ddb_walk_backtrace(root, DDB_BACKTRACE_FRAMES);
+        }
+    }
+}
+
 private fn ddb_render_backtrace_process(pid: usize) !{unsafe} {
     if (pid == ddb_snapshot.process_pid) {
         ddb_render_backtrace_current();
@@ -964,7 +1184,28 @@ private fn ddb_render_backtrace_process(pid: usize) !{unsafe} {
                 ddb_snapshot.processes[index].pid == pid) {
             let mut record: ProcessDdbRecord = ddb_snapshot.processes[index];
             if (record.state == 2) {
-                ddb_puts("ddb: bt running on another cpu; capture that cpu\n");
+                // GitHub issue #505: this used to end here. A running
+                // process's saved_sp is historical, so the answer is not that
+                // record -- it is the CPU the process is running ON, whose
+                // root the stop published. Search the stopped cores for it
+                // rather than making a person guess which one to ask.
+                for core: usize in 0..<KERNEL_MAX_CORES {
+                    match ddb_stopped_unwind_root(core) {
+                        DdbStoppedRootResult::NotStopped => { }
+                        DdbStoppedRootResult::Changed => { }
+                        DdbStoppedRootResult::Root(root) => {
+                            if (root.pid == pid) {
+                                ddb_render_backtrace_cpu(core);
+                                return;
+                            }
+                        }
+                    }
+                }
+                if (pid == ddb_snapshot.process_pid) {
+                    ddb_render_backtrace_current();
+                    return;
+                }
+                ddb_puts("ddb: bt pid running on no stopped cpu\n");
                 return;
             }
             if (ddb_saved_context_valid(record.saved_sp, record.stack_bottom,
@@ -1007,6 +1248,18 @@ private fn ddb_render_backtrace_process(pid: usize) !{unsafe} {
     ddb_puts("\n");
 }
 
+private fn ddb_bt_test_stopped_check(label: *u8, before: usize,
+                                     after: usize, frame_sp: usize)
+        !{unsafe} {
+    ddb_puts("ddb: bt test stopped-root "); ddb_puts(label);
+    ddb_puts(" verdict=");
+    match ddb_stopped_root_check(before, after, frame_sp) {
+        DdbStoppedCheck::Unstopped => { ddb_puts("not-stopped\n"); }
+        DdbStoppedCheck::Moved => { ddb_puts("changed\n"); }
+        DdbStoppedCheck::Usable => { ddb_puts("usable\n"); }
+    }
+}
+
 private fn ddb_render_backtrace_test() !{unsafe} {
     let mut valid: DdbUnwindRoot = ddb_current_unwind_root();
     let test_pc: usize = kernel_generated_text_start;
@@ -1045,6 +1298,17 @@ private fn ddb_render_backtrace_test() !{unsafe} {
         ddb_puts("ddb: bt test invalid saved context accepted\n");
     } else {
         ddb_puts("ddb: bt test invalid saved contexts rejected\n");
+    // GitHub issue #505: the stopped-root decision, exercised where a second
+    // core cannot be arranged to move a value between two loads. Each line
+    // names the observation and the verdict, so the two refusals stay
+    // distinguishable -- "never acknowledged" and "moved under the read" are
+    // different findings, and reading either as a historical trace is what
+    // this refuses to do.
+    ddb_bt_test_stopped_check("unheld", 0, 0, 0x1000);
+    ddb_bt_test_stopped_check("publishing", 3, 3, 0x1000);
+    ddb_bt_test_stopped_check("moved", 4, 6, 0x1000);
+    ddb_bt_test_stopped_check("retired", 4, 4, 0);
+    ddb_bt_test_stopped_check("settled", 4, 4, 0x1000);
     }
 }
 
@@ -1572,11 +1836,14 @@ private fn kernel_ddb_enter_stopped(
                 DdbBacktraceCommand::Current => {
                     ddb_render_backtrace_current();
                 }
+                DdbBacktraceCommand::Cpu(core) => {
+                    ddb_render_backtrace_cpu(core);
+                }
                 DdbBacktraceCommand::Process(pid) => {
                     ddb_render_backtrace_process(pid);
                 }
                 DdbBacktraceCommand::Invalid => {
-                    ddb_puts("ddb: usage: bt [PID]\n");
+                    ddb_puts("ddb: usage: bt [PID|cpu N]\n");
                 }
                 DdbBacktraceCommand::NotBacktrace => {
             match ddb_parse_memory(line as []u8, length) {
@@ -1625,7 +1892,7 @@ private fn kernel_ddb_enter_stopped(
                         // lane instead of waiting for the stall to recur.
                         ddb_render_wait_test();
                     } else if (ddb_command_is(line as []u8, length, bs"help")) {
-                        ddb_puts("commands: oops regs intr sched current vm fds ps wait proc PID bt [PID] trace events xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] help continue\n");
+                        ddb_puts("commands: oops regs intr sched current vm fds ps wait proc PID bt [PID|cpu N] trace events xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] help continue\n");
                     } else { ddb_puts("ddb: unknown command; try help\n"); }
                     }
                         }

@@ -16,7 +16,7 @@ inspection, and resume.
 
 <!-- DDB-COMMAND-INVENTORY-START -->
 `oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `wait`;
-`proc PID`; `bt [PID]`; `trace`; `events`; `xk ADDRESS [COUNT]`;
+`proc PID`; `bt [PID|cpu N]`; `trace`; `events`; `xk ADDRESS [COUNT]`;
 `xp PHYSICAL [COUNT]`; `xu PID ADDRESS [COUNT]`; `help`; `continue`.
 <!-- DDB-COMMAND-INVENTORY-END -->
 
@@ -32,9 +32,16 @@ inspection, and resume.
   currently running -- the shape a non-preemptible stall takes. A parent whose
   child is not in the snapshot reports `child unknown` rather than attaching
   to whatever now answers to that number, and the trailer counts those.
-- `bt [PID]`: checked compiler frame chain for the interrupted context or a
-  captured non-current process. Any unsupported or damaged boundary stops
-  explicitly instead of guessing.
+- `bt [PID|cpu N]`: checked compiler frame chain. Three explicit selections,
+  because they are three different questions: bare `bt` is the CPU running the
+  debugger, `bt cpu N` is another CPU stopped by DDB's world stop, and
+  `bt PID` is a saved non-running process. A process that is Running is
+  resolved through the CPU holding it rather than through its saved SP, which
+  is historical. `cpu N` refuses in two distinguishable ways -- a CPU that
+  never acknowledged the stop is `not stopped here`, and one whose published
+  root moved during the read is `root changed during capture`; neither is
+  presented as a trace. Any unsupported or damaged boundary stops explicitly
+  instead of guessing.
 - `vm`, `fds`: the captured current process's address space and bounded file
   descriptor view.
 - `trace`: the typed process-lifecycle tail.

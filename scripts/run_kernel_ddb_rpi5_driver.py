@@ -125,8 +125,8 @@ def main() -> int:
     prompt_count = 0
     resume_command_sent = False
     last_resume_write = 0.0
-    commands = (b"xkfault\n", b"events\n", b"bt\n", b"wait\n",
-                b"continue\n")
+    commands = (b"xkfault\n", b"events\n", b"bt\n", b"bt cpu 1\n",
+                b"wait\n", b"continue\n")
     with serial.Serial(args.port, 115200, timeout=0.25) as uart, open(
         args.log, "ab"
     ) as log:
@@ -259,6 +259,15 @@ def main() -> int:
     if "damaged=0 overwritten=0" not in text:
         raise timeline.bail(
             "RPi5 DDB diagnostic ring reported damaged/overwritten data")
+    # GitHub issue #505: the board's own peer, backtraced from the root it
+    # published entering the world-stop pen. QEMU proves the decision; only
+    # this lane proves that a real second core, stopped by a real SGI, has a
+    # frame the walker can follow.
+    if re.search(r"^ddb: bt source=stopped cpu=1 pid=\d+ "
+                 r"stack=0x[0-9a-f]+\.\.0x[0-9a-f]+$", text,
+                 re.MULTILINE) is None:
+        raise timeline.bail("RPi5 DDB did not backtrace the stopped peer")
+
     # GitHub issue #529. The synthetic topology is a QEMU control; what only
     # this lane can say is that the derivation runs on the board's own
     # snapshot and decodes it the same way -- same header, same trailer, no

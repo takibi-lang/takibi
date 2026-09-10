@@ -538,8 +538,13 @@ def check_read_only(driver) -> list[str]:
             continue
         # The walk sends a bare command and nothing else, so anything with a
         # required argument would be answered with a usage line at best.
-        required = [word for word in usage[name].split()[1:]
-                    if not word.startswith("[")]
+        #
+        # Bracketed groups are removed whole rather than word by word. An
+        # optional argument can contain a space -- `bt [PID|cpu N]` is one
+        # choice, not an optional `[PID|cpu` and a required `N]` -- and
+        # splitting on spaces first read that as a command the walk could not
+        # call. GitHub issue #505 is what found it.
+        required = re.sub(r"\[[^\]]*\]", " ", usage[name]).split()[1:]
         if required:
             failures.append(f"{name} requires {' '.join(required)}, which the "
                             "walk sends no way to supply")

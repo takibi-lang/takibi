@@ -59,6 +59,10 @@ REPLIES = {
     # GitHub issue #529. A board mid-boot has nothing waiting on anything,
     # which is the answer the driver has to accept as well as a stall: it
     # asserts the header and the summary, not that an edge was found.
+    # GitHub issue #505: what a stopped peer's root renders as.
+    b"bt cpu 1": (b"\nddb: bt source=stopped cpu=1 pid=37 "
+                  b"stack=0x00000000005bc000..0x00000000005c0000\n"
+                  b"ddb: bt complete frames=2\n"),
     b"wait": (b"\nddb: wait current=37 state=running reason=none awaited=0\n"
               b"ddb: wait edges=0 blocked=0 unknown=0 truncated=0\n"),
 }
