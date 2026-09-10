@@ -98,7 +98,9 @@ entry leaves the next one unable to be verified.
    worklist -- complete for the deliberately admitted busy-loop workload.
 5. **#483** the network stack's unsynchronized non-pool state -- the same
    files as #479, so the same hands.
-6. **#478** the spinlock excludes but does not arbitrate.
+6. **#478** the spinlock excludes but does not arbitrate -- closed with the
+   measured unfairness retained as an explicit limitation; FIFO replacement
+   waits for a real bounded-wait requirement and #450's compare-and-swap.
 7. **#504** one world-stopped token -- closed.
 8. **#452** make a lock say what it protects to the compiler, then **#466**
    lock order and **#450** compare-and-swap.
