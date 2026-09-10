@@ -73,12 +73,32 @@ fn virtio_block_device_ext2() -> KernelBlockDeviceResult {
     return KernelBlockDeviceResult::Ready(device);
 }
 
+// GitHub issues #281 and #208: what the block layer was actually asked for
+// over a boot.
+//
+// Both propose making ext2's I/O cheaper -- one by coalescing contiguous runs
+// into multi-sector transfers, the other by caching blocks -- and neither can
+// be ordered against the other without knowing where the reads go. The
+// profiler counts `block_read_bytes` already, but only inside the busy-pair
+// interval, which does no block I/O at all: the number is 0 on every boot and
+// has been for as long as it has existed.
+//
+// So these are boot totals, printed once at the end beside the console spin
+// figure, for the same reason that one is: a number in a diff rather than a
+// number in somebody's memory.
+private let mut block_read_calls: usize = 0;
+private let mut block_write_calls: usize = 0;
+
+fn block_read_call_total() -> usize { return block_read_calls; }
+fn block_write_call_total() -> usize { return block_write_calls; }
+
 fn block_read(device: KernelBlockDevice, block: usize,
               destination: [u8; KERNEL_BLOCK_SIZE..])
         -> BlockIoResult !{unsafe} {
     if (block >= device.length / KERNEL_BLOCK_SIZE) {
         return BlockIoResult::Invalid;
     }
+    block_read_calls = block_read_calls + 1;
     workload_profile_note_block_read(KERNEL_BLOCK_SIZE);
     if (device.backend == 0) {
             let offset: usize = block * KERNEL_BLOCK_SIZE;
@@ -121,6 +141,7 @@ fn block_write(device: KernelBlockDevice, block: usize,
     if (block >= device.length / KERNEL_BLOCK_SIZE) {
         return BlockIoResult::Invalid;
     }
+    block_write_calls = block_write_calls + 1;
     workload_profile_note_block_write(KERNEL_BLOCK_SIZE);
     if (device.backend == 0) {
             let offset: usize = block * KERNEL_BLOCK_SIZE;

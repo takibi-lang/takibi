@@ -607,16 +607,43 @@ disables whatever is reading it.
    refused for reaching `kernel_boot_log`, which is also the only reason the
    peer's publish path is reachable from the secondary's ordinary loop and
    nowhere else.
-5. **#520** and **#497**, which have been parked on one missing thing since
-   2026-09-06: a second `profile: begin name=` interval, around a network
-   transfer, in `kernel/net/tcp.tkb`. That file is Territory A's, and the
-   maintainer has since allowed a minimal edit across the boundary -- so this
-   is now a small edit this territory can make for itself rather than a wait.
+5. **#520** and **#497** -- and this entry's own prediction was wrong, which
+   is worth more than the entry was. It said the missing second
+   `profile: begin name=` interval was now "a small edit this territory can
+   make for itself" under the relaxed territory rule. Reading the instrument
+   on 2026-09-10 says otherwise, and the correction is on #520:
+
+   `workload_profile_start`/`_finish` are called from exactly one place each,
+   inside the busy-pair state machine, and both take a `WorldStopped` token
+   and a `ProcessRunGuard` -- an interval begins and ends at a complete world
+   stop, which is what gives every core the same boundary. The wall span the
+   report divides by is `workload_busy_pair.start_ticks`; the file names that
+   struct 166 times. The per-core accounting IS generic and would serve a
+   transfer unchanged; the interval around it is not.
+
+   So a second interval needs the interval lifted out of one workload's
+   struct, a world-stopped boundary of its own, and an EL0 trigger bracketing
+   a transfer that BusyBox `httpd` knows nothing about. That is #497 stage
+   1/2's own work in Territory A's file, not an edit across the boundary.
    Then **#502** call chains and **#503** PMU counters.
-6. **#281** and **#208**, the ext2 and block-cache pair, and **#182**. These
-   need no Territory A file at all, which is why they sit here rather than
-   higher: they are what to do when the multicore half is blocked, not before
-   it.
+
+   **Do not start this from here.** What a Territory B session can do is what
+   was done: read it, say so, and leave the measurement standing.
+6. **#208 first, then #281**, and the order is measured rather than argued.
+   `block io: reads=124173 writes=55 block_bytes=1024` on QEMU and 129384 on
+   the board -- about 126 MiB of 1 KiB block reads for a 2.5 MiB filesystem,
+   roughly fifty times the whole image, in a boot that reads a handful of
+   files. That is not a coalescing shortfall; it is the same blocks read over
+   and over, because `ext2_inode_block_pointer` re-reads the inode table and
+   the indirect blocks on EVERY 1 KiB chunk `ext2_read_file_chunk` returns.
+
+   #281 coalesces contiguous DATA runs, which is the minority of that number.
+   #208's cache is what removes the majority, and it makes #281 worth doing
+   afterwards rather than instead. The figure is printed on every boot and
+   `validate_kernel_dmesg_timestamps.py` is its reader, so whichever lands
+   first is judged by the same number in a diff.
+
+   **#182** is unrelated to both and needs no Territory A file either.
 7. **#388** stack-overflow coverage for the hand-written vectors (Territory
    A's files), **#429** in-kernel GDB stub, **#149** GDB without JTAG,
    **#444** controlled DDB memory mutation.

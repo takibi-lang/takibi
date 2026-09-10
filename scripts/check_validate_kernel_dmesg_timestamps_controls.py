@@ -55,11 +55,17 @@ def transcript(records) -> bytes:
 # still carry one, or it would be testing the console rule instead of its own.
 HEALTHY_SPIN = (b"console: tx spin ticks=1000000 bytes=31919 spun=1077 "
                 b"tickfreq=54000000\r\n")
+# GitHub issues #281/#208: same reasoning one measurement over. A complete
+# boot carries the block-layer total, so every case that is about something
+# else has to carry one too or it would be testing this rule instead of its
+# own.
+HEALTHY_BLOCK_IO = b"block io: reads=124173 writes=55 block_bytes=1024\r\n"
+HEALTHY_TAIL = HEALTHY_SPIN + HEALTHY_BLOCK_IO
 
 
 def run(records, platform="qemu", extra=None, profile="local"):
     if extra is None:
-        extra = HEALTHY_SPIN
+        extra = HEALTHY_TAIL
     with tempfile.NamedTemporaryFile(suffix=".log") as log:
         log.write(transcript(records) + extra)
         log.flush()
@@ -168,6 +174,21 @@ def main() -> int:
               f"by its 28s bound\n{output}")
         return 1
 
+    # GitHub issues #281/#208: the block-layer total is required, not merely
+    # reported. A complete boot that omits it is a kernel whose shape changed.
+    status, output = run(HEALTHY, "qemu", HEALTHY_SPIN)
+    if status == 0 or "block io: reads=" not in output:
+        print("FAIL dmesg-timestamps control: a complete boot without the "
+              "block-layer total was accepted")
+        return 1
+    status, output = run(
+        HEALTHY, "qemu",
+        HEALTHY_SPIN + b"block io: reads=0 writes=0 block_bytes=1024\r\n")
+    if status == 0 or "cannot be right" not in output:
+        print("FAIL dmesg-timestamps control: a boot claiming zero block "
+              "reads was accepted")
+        return 1
+
     # GitHub issue #454: the console's spin measurement rides along with the
     # boot duration it is a share of. A number that is only printed when it
     # parses is a number that quietly disappears when the kernel line changes
@@ -180,7 +201,7 @@ def main() -> int:
     # and HEALTHY carries QEMU's network markers; the ticks are a real RPi5
     # sample, which is what makes the derived figures worth asserting.
     spin = b"console: tx spin ticks=136043016 bytes=31919 spun=31919 tickfreq=54000000\r\n"
-    status, output = run(HEALTHY, "qemu", spin)
+    status, output = run(HEALTHY, "qemu", spin + HEALTHY_BLOCK_IO)
     if status != 0 or "console tx spin=2519 ms" not in output:
         print("FAIL dmesg-timestamps control: the console spin measurement "
               f"was not reported from a capture that carries it\n{output}")
@@ -205,7 +226,7 @@ def main() -> int:
     # by the likelier route, and must be refused the same way.
     status, output = run(
         HEALTHY, "qemu",
-        b"console: tx spin ticks=1000000 bytes=31919 waited=1077 "
+        HEALTHY_BLOCK_IO + b"console: tx spin ticks=1000000 bytes=31919 waited=1077 "
         b"tickfreq=54000000\r\n")
     if status == 0:
         print("FAIL dmesg-timestamps control: a renamed field silently "
@@ -213,7 +234,8 @@ def main() -> int:
         return 1
     status, output = run(
         HEALTHY, "qemu",
-        b"console: tx spin ticks=136043016 bytes=0 spun=0 tickfreq=54000000\r\n")
+        HEALTHY_BLOCK_IO
+        + b"console: tx spin ticks=136043016 bytes=0 spun=0 tickfreq=54000000\r\n")
     if status != 0 or "console tx spin" in output:
         print("FAIL dmesg-timestamps control: zero bytes were divided by, or "
               f"reported as a measurement of something\n{output}")
@@ -225,7 +247,8 @@ def main() -> int:
         "missing milestone are refused, a slow boot says INVESTIGATE on "
         "both platforms, a boot just inside each bound passes, and the "
         "monotonic, interval and assembled-line checks each fail when "
-        "broken, and the console spin figure is derived, refused for "
+        "broken, the block-layer total is required and refused when it "
+              "claims zero reads, and the console spin figure is derived, refused for "
         "zero bytes, and required rather than merely reported -- a "
         "complete boot that omits it, or renames a field out from under "
         "the pattern, is refused",

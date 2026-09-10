@@ -18,6 +18,12 @@ def fail(message: str) -> None:
 
 
 CPU_PREFIX = re.compile(rb"^cpu([0-9]) ")
+# GitHub issues #281/#208: the block layer's boot total. Held here for the
+# same reason the console spin figure is -- it is a per-boot number, so no
+# view can compare it, and a counter with no reader is the shape issue #410
+# was filed about.
+BLOCK_IO = re.compile(
+    rb"block io: reads=(\d+) writes=(\d+) block_bytes=(\d+)")
 
 
 def main() -> None:
@@ -177,10 +183,25 @@ def main() -> None:
             per = f"{seconds / spun * 1e6:.1f} us each" if spun else "none spun"
             spin = (f", console tx spin={seconds * 1000:.0f} ms over {sent} "
                     f"bytes ({spun} spun, {per})")
+    block = BLOCK_IO.search(data)
+    if not block:
+        fail("the boot reached its last milestone without printing "
+             "`block io: reads=... writes=... block_bytes=...`. That is the "
+             "measurement issues #281 and #208 are ordered against and this "
+             "is its only reader, so a missing line means the kernel's shape "
+             "changed rather than that the boot read no blocks")
+    reads, writes, block_bytes = (int(block.group(i)) for i in (1, 2, 3))
+    if reads == 0 or block_bytes == 0:
+        fail(f"the boot reports {reads} block reads of {block_bytes} bytes, "
+             "which cannot be right for a boot that mounts a filesystem and "
+             "runs BusyBox from it -- the counter is not being reached")
+    block_io = (f", block io={reads} reads/{writes} writes of {block_bytes} B "
+                f"({reads * block_bytes // 1024} KiB read)")
+
     print(
         f"PASS kernel/{args.platform} dmesg: {len(records)} monotonic records, "
         f"assembled lines, delay={elapsed} us, boot={boot_us / 1_000_000:.1f} s"
-        f"{spin}, timing-profile={args.timing_profile}, "
+        f"{spin}{block_io}, timing-profile={args.timing_profile}, "
         f"boot-bound={maximum_boot / 1_000_000:.0f} s"
     )
 

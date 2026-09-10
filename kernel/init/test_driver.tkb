@@ -386,6 +386,15 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
     kernel_boot_log(" tickfreq=");
     uart_put_udec(read_cntfrq() as usize);
     kernel_boot_log("\n");
+    // GitHub issues #281/#208: the block layer's own boot total, so the two
+    // proposals for making ext2 cheaper can be ordered against a number.
+    kernel_boot_log("block io: reads=");
+    uart_put_udec(block_read_call_total());
+    kernel_boot_log(" writes=");
+    uart_put_udec(block_write_call_total());
+    kernel_boot_log(" block_bytes=");
+    uart_put_udec(KERNEL_BLOCK_SIZE);
+    kernel_boot_log("\n");
     kernel_boot_log("resources: image target root unset uses=");
     uart_put_udec(process_image_root_unset_uses());
     kernel_boot_log("\n");
