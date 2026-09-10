@@ -1218,165 +1218,226 @@ fn ext2_owner_roundtrip_check(mount: Ext2Mount) -> Ext2BitmapProbeResult {
     }
 }
 
-fn ext2_directory_add(mount: Ext2Mount, inode_number: usize,
+// GitHub issue #537: the directory is a parameter, and its blocks are walked.
+//
+// Both of these used to read inode 2 by name and refuse a directory larger
+// than one block, while `ext2_lookup_directory` next door already walked any
+// directory across any number of blocks. So the kernel could find
+// `/etc/init.sh` and could not create a file beside it.
+//
+// An ext2 directory entry never spans a block: each block is self-contained
+// and its record lengths sum to exactly the block size. That is what makes
+// this a per-block scan rather than a flat one over `size`, and it is why the
+// modified block is the only one written back.
+//
+// Bounded by the direct blocks. A directory past 12 KiB needs the growth path
+// that is not here yet, and is refused rather than half-handled.
+private fn ext2_directory_block_count(directory: Ext2Inode) -> usize {
+    return directory.size / KERNEL_BLOCK_SIZE;
+}
+
+private fn ext2_directory_block_at(mount: Ext2Mount, directory: Ext2Inode,
+                                   index: usize) -> usize {
+    let block: usize = ext2_inode_block_pointer(mount, directory, index);
+    if (block == 0 || block >= mount.filesystem_blocks) { return 0; }
+    return block;
+}
+
+// A directory this code will mutate: a real directory, block-sized, and
+// within the direct blocks.
+private fn ext2_directory_mutable(directory: Ext2Inode) -> bool {
+    return (directory.mode & 0xF000) == 0x4000 &&
+           directory.size >= KERNEL_BLOCK_SIZE &&
+           directory.size <= ext2_direct_file_size() &&
+           directory.size % KERNEL_BLOCK_SIZE == 0;
+}
+
+fn ext2_directory_add(mount: Ext2Mount, directory_inode: usize,
+                      inode_number: usize,
                       name: []u8) -> Ext2DirectoryResult !{unsafe} {
-    if (name.len == 0 || name.len > 255 || inode_number == 0) {
+    if (name.len == 0 || name.len > 255 || inode_number == 0 ||
+        directory_inode == 0) {
         return Ext2DirectoryResult::Invalid;
     }
-    match ext2_read_inode(mount, 2) {
+    match ext2_read_inode(mount, directory_inode) {
         Ext2InodeResult::Invalid => { return Ext2DirectoryResult::Invalid; }
-        Ext2InodeResult::Inode(root) => {
-            // This mutation path loads only root.direct_block0 into the
-            // scratch buffer, so a larger directory needs a multi-block
-            // mutation implementation rather than pointer arithmetic past it.
-            if ((root.mode & 0xF000) != 0x4000 || root.size < 8 ||
-                root.size > KERNEL_BLOCK_SIZE) {
+        Ext2InodeResult::Inode(directory) => {
+            if (ext2_directory_mutable(directory) == false) {
                 return Ext2DirectoryResult::Invalid;
             }
-            match block_read(mount.device, root.direct_block0,
-                             ext2_scratch_here().file as []u8) {
-                BlockIoResult::Invalid => {
-                    return Ext2DirectoryResult::Invalid;
-                }
-                BlockIoResult::Ok => { }
-            }
             let needed: usize = (8 + name.len + 3) & 0xFFFFFFFFFFFFFFFC;
-            let base: *u8 = ext2_scratch_here().file as *u8;
-            let mut cursor: usize = 0;
-            while (cursor < root.size) {
-                if (cursor > root.size - 8) {
-                    return Ext2DirectoryResult::Invalid;
+            let blocks: usize = ext2_directory_block_count(directory);
+            for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
+                if (index >= blocks) { break; }
+                let block: usize =
+                    ext2_directory_block_at(mount, directory, index);
+                if (block == 0) { return Ext2DirectoryResult::Invalid; }
+                match block_read(mount.device, block,
+                                 ext2_scratch_here().file as []u8) {
+                    BlockIoResult::Invalid => {
+                        return Ext2DirectoryResult::Invalid;
+                    }
+                    BlockIoResult::Ok => { }
                 }
-                let entry: *u8 = base + (cursor as isize);
-                let record_length: usize = ext2_u16(entry, 4) as usize;
-                let name_length: usize = entry[6] as usize;
-                let actual: usize =
-                    (8 + name_length + 3) & 0xFFFFFFFFFFFFFFFC;
-                if (record_length < 8 || record_length > root.size - cursor ||
-                    name_length > record_length - 8 || actual > record_length) {
-                    return Ext2DirectoryResult::Invalid;
-                }
-                if (record_length - actual >= needed) {
-                    let new_offset: usize = cursor + actual;
-                    let new_length: usize = record_length - actual;
-                    let new_entry: *u8 = base + (new_offset as isize);
-                    if (ext2_put_u16(entry, 4, actual as u16) == false ||
-                        ext2_put_u32(new_entry, 0, inode_number as u32) == false ||
-                        ext2_put_u16(new_entry, 4, new_length as u16) == false) {
+                let base: *u8 = ext2_scratch_here().file as *u8;
+                let mut cursor: usize = 0;
+                while (cursor < KERNEL_BLOCK_SIZE) {
+                    if (cursor > KERNEL_BLOCK_SIZE - 8) {
                         return Ext2DirectoryResult::Invalid;
                     }
-                    new_entry[6] = name.len as u8;
-                    new_entry[7] = 0;
-                    let data = ext2_scratch_here().file as []u8;
-                    if (new_offset > data.len) {
+                    let entry: *u8 = base + (cursor as isize);
+                    let record_length: usize = ext2_u16(entry, 4) as usize;
+                    let name_length: usize = entry[6] as usize;
+                    let actual: usize =
+                        (8 + name_length + 3) & 0xFFFFFFFFFFFFFFFC;
+                    if (record_length < 8 ||
+                        record_length > KERNEL_BLOCK_SIZE - cursor ||
+                        name_length > record_length - 8 ||
+                        actual > record_length) {
                         return Ext2DirectoryResult::Invalid;
                     }
-                    let new_entry_bytes = data[new_offset..<data.len];
-                    if (new_entry_bytes.len < 8) {
-                        return Ext2DirectoryResult::Invalid;
-                    }
-                    let name_target =
-                        new_entry_bytes[8..<new_entry_bytes.len];
-                    if (name.len > name_target.len) {
-                        return Ext2DirectoryResult::Invalid;
-                    }
-                    slice_copy(name_target, name);
-                    match block_write(mount.device, root.direct_block0,
-                                      ext2_scratch_here().file as []u8) {
-                        BlockIoResult::Invalid => {
+                    if (record_length - actual >= needed) {
+                        let new_offset: usize = cursor + actual;
+                        let new_length: usize = record_length - actual;
+                        let new_entry: *u8 = base + (new_offset as isize);
+                        if (ext2_put_u16(entry, 4, actual as u16) == false ||
+                            ext2_put_u32(new_entry, 0, inode_number as u32) == false ||
+                            ext2_put_u16(new_entry, 4, new_length as u16) == false) {
                             return Ext2DirectoryResult::Invalid;
                         }
-                        BlockIoResult::Ok => {
-                            return Ext2DirectoryResult::Updated;
+                        new_entry[6] = name.len as u8;
+                        new_entry[7] = 0;
+                        let data = ext2_scratch_here().file as []u8;
+                        if (new_offset > data.len) {
+                            return Ext2DirectoryResult::Invalid;
+                        }
+                        let new_entry_bytes = data[new_offset..<data.len];
+                        if (new_entry_bytes.len < 8) {
+                            return Ext2DirectoryResult::Invalid;
+                        }
+                        let name_target =
+                            new_entry_bytes[8..<new_entry_bytes.len];
+                        if (name.len > name_target.len) {
+                            return Ext2DirectoryResult::Invalid;
+                        }
+                        slice_copy(name_target, name);
+                        match block_write(mount.device, block,
+                                          ext2_scratch_here().file as []u8) {
+                            BlockIoResult::Invalid => {
+                                return Ext2DirectoryResult::Invalid;
+                            }
+                            BlockIoResult::Ok => {
+                                return Ext2DirectoryResult::Updated;
+                            }
                         }
                     }
+                    cursor = cursor + record_length;
                 }
-                cursor = cursor + record_length;
             }
         }
     }
+    // Every block was walked and none had room. Growing a directory by a
+    // block is its own increment; refusing is the honest answer until it
+    // exists, and it is a different answer from a malformed directory only
+    // because every malformed shape above returns before here.
     return Ext2DirectoryResult::Invalid;
 }
 
-fn ext2_directory_remove(mount: Ext2Mount, inode_number: usize,
+fn ext2_directory_remove(mount: Ext2Mount, directory_inode: usize,
+                         inode_number: usize,
                          name: []u8) -> Ext2DirectoryResult !{unsafe} {
-    match ext2_read_inode(mount, 2) {
+    if (name.len == 0 || name.len > 255 || inode_number == 0 ||
+        directory_inode == 0) {
+        return Ext2DirectoryResult::Invalid;
+    }
+    match ext2_read_inode(mount, directory_inode) {
         Ext2InodeResult::Invalid => { return Ext2DirectoryResult::Invalid; }
-        Ext2InodeResult::Inode(root) => {
-            // This mutation path loads only root.direct_block0 into the
-            // scratch buffer, so a larger directory needs a multi-block
-            // mutation implementation rather than pointer arithmetic past it.
-            if ((root.mode & 0xF000) != 0x4000 || root.size < 8 ||
-                root.size > KERNEL_BLOCK_SIZE) {
+        Ext2InodeResult::Inode(directory) => {
+            if (ext2_directory_mutable(directory) == false) {
                 return Ext2DirectoryResult::Invalid;
             }
-            match block_read(mount.device, root.direct_block0,
-                             ext2_scratch_here().file as []u8) {
-                BlockIoResult::Invalid => {
-                    return Ext2DirectoryResult::Invalid;
-                }
-                BlockIoResult::Ok => { }
-            }
-            let base: *u8 = ext2_scratch_here().file as *u8;
-            let mut cursor: usize = 0;
-            let mut previous: usize = 0;
-            let mut has_previous: bool = false;
-            while (cursor < root.size) {
-                if (cursor > root.size - 8) {
-                    return Ext2DirectoryResult::Invalid;
-                }
-                let entry: *u8 = base + (cursor as isize);
-                let entry_inode: usize = ext2_u32(entry, 0) as usize;
-                let record_length: usize = ext2_u16(entry, 4) as usize;
-                let name_length: usize = entry[6] as usize;
-                if (record_length < 8 || record_length > root.size - cursor ||
-                    name_length > record_length - 8) {
-                    return Ext2DirectoryResult::Invalid;
-                }
-                let data = ext2_scratch_here().file as []u8;
-                let entry_start: usize = cursor;
-                if (entry_start > data.len) {
-                    return Ext2DirectoryResult::Invalid;
-                }
-                let entry_tail = data[entry_start..<data.len];
-                if (record_length > entry_tail.len) {
-                    return Ext2DirectoryResult::Invalid;
-                }
-                let entry_bytes = entry_tail[0..<record_length];
-                if (entry_bytes.len < 8) {
-                    return Ext2DirectoryResult::Invalid;
-                }
-                let entry_payload = entry_bytes[8..<entry_bytes.len];
-                if (name_length > entry_payload.len) {
-                    return Ext2DirectoryResult::Invalid;
-                }
-                let entry_name = entry_payload[0..<name_length];
-                if (entry_inode == inode_number &&
-                    ext2_name_matches(entry_name, name)) {
-                    if (has_previous == false) {
+            let blocks: usize = ext2_directory_block_count(directory);
+            for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
+                if (index >= blocks) { break; }
+                let block: usize =
+                    ext2_directory_block_at(mount, directory, index);
+                if (block == 0) { return Ext2DirectoryResult::Invalid; }
+                match block_read(mount.device, block,
+                                 ext2_scratch_here().file as []u8) {
+                    BlockIoResult::Invalid => {
                         return Ext2DirectoryResult::Invalid;
                     }
-                    let previous_entry: *u8 = base + (previous as isize);
-                    let previous_length: usize =
-                        ext2_u16(previous_entry, 4) as usize;
-                    if (previous_length > 0xFFFF - record_length ||
-                        ext2_put_u16(previous_entry, 4,
-                                     (previous_length + record_length) as u16) == false) {
+                    BlockIoResult::Ok => { }
+                }
+                let base: *u8 = ext2_scratch_here().file as *u8;
+                let mut cursor: usize = 0;
+                let mut previous: usize = 0;
+                let mut has_previous: bool = false;
+                while (cursor < KERNEL_BLOCK_SIZE) {
+                    if (cursor > KERNEL_BLOCK_SIZE - 8) {
                         return Ext2DirectoryResult::Invalid;
                     }
-                    match block_write(mount.device, root.direct_block0,
-                                      ext2_scratch_here().file as []u8) {
-                        BlockIoResult::Invalid => {
+                    let entry: *u8 = base + (cursor as isize);
+                    let entry_inode: usize = ext2_u32(entry, 0) as usize;
+                    let record_length: usize = ext2_u16(entry, 4) as usize;
+                    let name_length: usize = entry[6] as usize;
+                    if (record_length < 8 ||
+                        record_length > KERNEL_BLOCK_SIZE - cursor ||
+                        name_length > record_length - 8) {
+                        return Ext2DirectoryResult::Invalid;
+                    }
+                    let data = ext2_scratch_here().file as []u8;
+                    // Bound to an immutable let before comparing: narrowing
+                    // is immutable-only, and `cursor` is the loop's own
+                    // mutable position.
+                    let entry_start: usize = cursor;
+                    if (entry_start > data.len) {
+                        return Ext2DirectoryResult::Invalid;
+                    }
+                    let entry_tail = data[entry_start..<data.len];
+                    if (record_length > entry_tail.len) {
+                        return Ext2DirectoryResult::Invalid;
+                    }
+                    let entry_bytes = entry_tail[0..<record_length];
+                    if (entry_bytes.len < 8) {
+                        return Ext2DirectoryResult::Invalid;
+                    }
+                    let entry_payload = entry_bytes[8..<entry_bytes.len];
+                    if (name_length > entry_payload.len) {
+                        return Ext2DirectoryResult::Invalid;
+                    }
+                    let entry_name = entry_payload[0..<name_length];
+                    if (entry_inode == inode_number &&
+                        ext2_name_matches(entry_name, name)) {
+                        // The first entry of a block has no predecessor to
+                        // absorb it. ext2 keeps `.` and `..` there in every
+                        // directory, so this is reachable only for a block
+                        // this code grew, which it cannot yet do.
+                        if (has_previous == false) {
                             return Ext2DirectoryResult::Invalid;
                         }
-                        BlockIoResult::Ok => {
-                            return Ext2DirectoryResult::Updated;
+                        let previous_entry: *u8 = base + (previous as isize);
+                        let previous_length: usize =
+                            ext2_u16(previous_entry, 4) as usize;
+                        if (previous_length > 0xFFFF - record_length ||
+                            ext2_put_u16(previous_entry, 4,
+                                         (previous_length + record_length) as u16) == false) {
+                            return Ext2DirectoryResult::Invalid;
+                        }
+                        match block_write(mount.device, block,
+                                          ext2_scratch_here().file as []u8) {
+                            BlockIoResult::Invalid => {
+                                return Ext2DirectoryResult::Invalid;
+                            }
+                            BlockIoResult::Ok => {
+                                return Ext2DirectoryResult::Updated;
+                            }
                         }
                     }
+                    previous = cursor;
+                    has_previous = true;
+                    cursor = cursor + record_length;
                 }
-                previous = cursor;
-                has_previous = true;
-                cursor = cursor + record_length;
             }
         }
     }
@@ -1437,9 +1498,27 @@ fn ext2_linked_file_new(block_owner: sink Ext2BlockOwner[block],
     return linked;
 }
 
+// GitHub issue #537: create in any directory the mount can reach. The root
+// form below is this one with the root named, kept because most callers mean
+// the root and should not have to say 2.
+// The root, named once. EXT2_ROOT_INODE is 2 by the on-disk format, not by
+// this kernel's choice.
+const EXT2_ROOT_INODE: usize = 2;
+
 fn ext2_create_root_file(mount: Ext2Mount, name: []u8, content: []u8)
         -> Ext2CreateResult {
-    match ext2_lookup_root(mount, name) {
+    return ext2_create_file_in(mount, EXT2_ROOT_INODE, name, content);
+}
+
+fn ext2_unlink_root_file(mount: Ext2Mount,
+                         linked: sink Ext2LinkedFile[inode, block],
+                         name: []u8) -> Ext2UnlinkResult {
+    return ext2_unlink_file_in(mount, EXT2_ROOT_INODE, linked, name);
+}
+
+fn ext2_create_file_in(mount: Ext2Mount, directory_inode: usize,
+                       name: []u8, content: []u8) -> Ext2CreateResult {
+    match ext2_lookup_directory(mount, directory_inode, name) {
         Ext2LookupResult::Invalid => { return Ext2CreateResult::Invalid; }
         Ext2LookupResult::Found(existing) => { return Ext2CreateResult::Invalid; }
         Ext2LookupResult::NotFound => { }
@@ -1472,7 +1551,8 @@ fn ext2_create_root_file(mount: Ext2Mount, name: []u8, content: []u8)
                         Ext2DirectoryResult::Updated => { }
                     }
                     match ext2_directory_add(
-                            mount, inode_owner.inode_number, name) {
+                            mount, directory_inode,
+                            inode_owner.inode_number, name) {
                         Ext2DirectoryResult::Invalid => {
                             match ext2_release_inode(mount, inode_owner) {
                                 Ext2OwnerReleaseResult::Invalid => { }
@@ -1495,16 +1575,16 @@ fn ext2_create_root_file(mount: Ext2Mount, name: []u8, content: []u8)
     }
 }
 
-fn ext2_unlink_root_file(mount: Ext2Mount,
-                         linked: sink Ext2LinkedFile[inode, block],
-                         name: []u8) -> Ext2UnlinkResult {
+fn ext2_unlink_file_in(mount: Ext2Mount, directory_inode: usize,
+                       linked: sink Ext2LinkedFile[inode, block],
+                       name: []u8) -> Ext2UnlinkResult {
     let inode_number: usize = linked.inode_number;
     let inode_owner = ext2_inode_owner_new(
         linked.inode_bitmap_index, inode_number, linked.inode_number);
     let block_owner = ext2_block_owner_new(
         linked.block_bitmap_index, linked.block_number, linked.block_number);
     let mut directory_ok: bool = false;
-    match ext2_directory_remove(mount, inode_number, name) {
+    match ext2_directory_remove(mount, directory_inode, inode_number, name) {
         Ext2DirectoryResult::Invalid => { }
         Ext2DirectoryResult::Updated => { directory_ok = true; }
     }

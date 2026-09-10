@@ -146,6 +146,55 @@ fn usb_ext2_resize_check(mount: Ext2Mount) -> UsbExt2ResizeCheckResult {
     return UsbExt2ResizeCheckResult::Invalid;
 }
 
+// GitHub issue #537: the same round trip in a directory that is not the
+// root, over the real USB medium. The memory-backed fixture proves the walk;
+// only this proves it against a device whose writes go out as SCSI commands.
+fn usb_ext2_nested_check(mount: Ext2Mount) -> UsbExt2CreateCheckResult {
+    let mut directory: usize = 0;
+    match ext2_lookup_root(mount, bs"etc") {
+        Ext2LookupResult::Found(inode_number) => { directory = inode_number; }
+        Ext2LookupResult::Invalid => {
+            return UsbExt2CreateCheckResult::Invalid;
+        }
+        Ext2LookupResult::NotFound => {
+            return UsbExt2CreateCheckResult::Invalid;
+        }
+    }
+    match ext2_create_file_in(mount, directory, bs"nested.txt",
+                              bs"created in /etc\n") {
+        Ext2CreateResult::Invalid => {
+            return UsbExt2CreateCheckResult::Invalid;
+        }
+        Ext2CreateResult::Created(linked) => {
+            let mut found_ok: bool = false;
+            match ext2_lookup_directory(mount, directory, bs"nested.txt") {
+                Ext2LookupResult::Found(existing) => { found_ok = true; }
+                Ext2LookupResult::Invalid => { }
+                Ext2LookupResult::NotFound => { }
+            }
+            match ext2_unlink_file_in(mount, directory, linked,
+                                      bs"nested.txt") {
+                Ext2UnlinkResult::Invalid => {
+                    return UsbExt2CreateCheckResult::Invalid;
+                }
+                Ext2UnlinkResult::Unlinked => {
+                    if (found_ok) {
+                        match ext2_lookup_directory(mount, directory,
+                                                    bs"nested.txt") {
+                            Ext2LookupResult::NotFound => {
+                                return UsbExt2CreateCheckResult::Verified;
+                            }
+                            Ext2LookupResult::Invalid => { }
+                            Ext2LookupResult::Found(existing) => { }
+                        }
+                    }
+                }
+            }
+            return UsbExt2CreateCheckResult::Invalid;
+        }
+    }
+}
+
 fn usb_ext2_create_check(mount: Ext2Mount) -> UsbExt2CreateCheckResult {
     match ext2_create_root_file(
             mount, bs"created.txt", bs"created on ext2\n") {
@@ -371,6 +420,14 @@ fn kernel_test_platform_storage() {
                                                 }
                                                 UsbExt2CreateCheckResult::Verified => {
                                                     kernel_boot_log("usb ext2: create+lookup+unlink ok\n");
+                                                }
+                                            }
+                                            match usb_ext2_nested_check(usb_mount) {
+                                                UsbExt2CreateCheckResult::Invalid => {
+                                                    kernel_boot_log("usb ext2: nested create failed\n");
+                                                }
+                                                UsbExt2CreateCheckResult::Verified => {
+                                                    kernel_boot_log("usb ext2: nested create+lookup+unlink in /etc ok\n");
                                                 }
                                             }
                                             match ext2_lookup_root(

@@ -656,9 +656,26 @@ disables whatever is reading it.
    missing directory syscalls (behind #537), and **#539** long symlinks. The
    evidence table is on #182.
 
-   Of those, **#537 is the keystone** -- it is what `mkdirat`, `unlinkat` and
-   rename all wait on, and the kernel can currently find `/etc/init.sh` and
-   cannot create a file next to it.
+   Of those, **#537's first increment landed 2026-09-10**: the directory is a
+   parameter and its blocks are walked, so a file can be created, read and
+   unlinked in `/etc` on both lanes and over real USB. What #537 still wants
+   is growing a directory by a block when none has room, and nested `mkdir`
+   with `.`/`..` and link counts -- the two halves that need allocation rather
+   than a walk. #538's three syscalls wait on those.
+
+   The one-block scan became a per-block scan because an ext2 directory entry
+   never spans a block: each block is self-contained and its record lengths
+   sum to the block size. That is why only the modified block is written back.
+
+   **A finding for Territory A while running this.** One `cicheck` in twelve
+   lanes produced `process table: records MISSING uses=1 first_slot=0x403b37c0
+   reason=2` on the qemu-debug lane, and `resources: every pooled record
+   resolved to the slot its handle named` was absent. Three consecutive
+   re-runs of that lane alone passed, and so did the next full `cicheck`. One
+   sample is a rate of nothing -- recorded rather than filed, the same way the
+   2026-09-06 `freelist contention` sample was, because the probe reported its
+   own incompleteness rather than passing about nothing. If it recurs, that is
+   two.
 7. **#388** stack-overflow coverage for the hand-written vectors (Territory
    A's files), **#429** in-kernel GDB stub, **#149** GDB without JTAG,
    **#444** controlled DDB memory mutation.

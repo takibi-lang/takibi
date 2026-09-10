@@ -96,6 +96,66 @@ fn ext2_create_check(mount: Ext2Mount) -> bool {
     }
 }
 
+// GitHub issue #537: the same round trip, in a directory that is not the
+// root. Before this, the kernel could find `/etc/init.sh` and could not
+// create a file beside it -- the mutation paths read inode 2 by name while
+// lookup next door already walked any directory.
+//
+// `/etc` is used because the fixture already builds it and BusyBox already
+// reads from it, so this asserts against a directory the rest of the boot
+// depends on rather than one invented for the test.
+fn ext2_create_in_directory_check(mount: Ext2Mount) -> bool {
+    let mut directory: usize = 0;
+    match ext2_lookup_root(mount, bs"etc") {
+        Ext2LookupResult::Found(inode_number) => { directory = inode_number; }
+        Ext2LookupResult::Invalid => { return false; }
+        Ext2LookupResult::NotFound => { return false; }
+    }
+    if (directory == 2) { return false; }
+    match ext2_create_file_in(mount, directory, bs"nested.txt",
+                              bs"created in /etc\n") {
+        Ext2CreateResult::Invalid => { return false; }
+        Ext2CreateResult::Created(linked) => {
+            let mut content_ok: bool = false;
+            match ext2_lookup_directory(mount, directory, bs"nested.txt") {
+                Ext2LookupResult::Found(inode_number) => {
+                    match ext2_read_small_file(
+                            mount, inode_number, ext2_read_fixture as []u8) {
+                        Ext2ReadResult::Read(length) => {
+                            content_ok = length == 16 &&
+                                slice_eq(ext2_read_fixture[0..<16],
+                                         bs"created in /etc\n");
+                        }
+                        Ext2ReadResult::Invalid => { }
+                    }
+                }
+                Ext2LookupResult::Invalid => { }
+                Ext2LookupResult::NotFound => { }
+            }
+            // The root must not have gained it: a mutation that ignored its
+            // directory argument would still pass every check above.
+            let mut root_clean: bool = false;
+            match ext2_lookup_root(mount, bs"nested.txt") {
+                Ext2LookupResult::NotFound => { root_clean = true; }
+                Ext2LookupResult::Invalid => { }
+                Ext2LookupResult::Found(existing) => { }
+            }
+            match ext2_unlink_file_in(mount, directory, linked,
+                                      bs"nested.txt") {
+                Ext2UnlinkResult::Invalid => { return false; }
+                Ext2UnlinkResult::Unlinked => { }
+            }
+            match ext2_lookup_directory(mount, directory, bs"nested.txt") {
+                Ext2LookupResult::NotFound => {
+                    return content_ok && root_clean;
+                }
+                Ext2LookupResult::Invalid => { return false; }
+                Ext2LookupResult::Found(existing) => { return false; }
+            }
+        }
+    }
+}
+
 fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
     // GitHub issue #249: save the mount for
     // kernel_exec_resolve_argv0(), which runs later, from
@@ -194,6 +254,11 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
         kernel_boot_log("ext2 create: create+lookup+unlink ok\n");
     } else {
         kernel_boot_log("ext2 create: failed\n");
+    }
+    if (ext2_create_in_directory_check(mount)) {
+        kernel_boot_log("ext2 nested: create+lookup+unlink in /etc ok\n");
+    } else {
+        kernel_boot_log("ext2 nested: failed\n");
     }
     match ext2_lookup_root(mount, bs"latest") {
         Ext2LookupResult::Invalid => {
