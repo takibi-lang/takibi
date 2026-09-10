@@ -109,6 +109,7 @@ must_use variant Ext2CreateResult {
 }
 
 must_use variant Ext2UnlinkResult { Invalid; Unlinked; }
+must_use variant Ext2CountResult { Invalid; Counted(usize); }
 
 fn ext2_u16(bytes: borrow *u8, offset: usize) -> u16 {
     if (offset > KERNEL_BLOCK_SIZE - 2) { return 0; }
@@ -249,13 +250,13 @@ fn ext2_read_inode(mount: Ext2Mount, inode_number: usize)
     return Ext2InodeResult::Inode(inode);
 }
 
-fn ext2_name_matches(entry_name: borrow []u8, name: []u8) -> bool {
+fn ext2_name_matches(entry_name: borrow []u8, name: borrow []u8) -> bool {
     if (entry_name.len != name.len || entry_name.len > 255) { return false; }
     return slice_eq(entry_name, name);
 }
 
 fn ext2_lookup_directory(mount: Ext2Mount, directory_inode: usize,
-                         name: []u8) -> Ext2LookupResult !{unsafe} {
+                         name: borrow []u8) -> Ext2LookupResult !{unsafe} {
     if (name.len == 0 || name.len > 255) {
         return Ext2LookupResult::Invalid;
     }
@@ -1230,8 +1231,9 @@ fn ext2_owner_roundtrip_check(mount: Ext2Mount) -> Ext2BitmapProbeResult {
 // this a per-block scan rather than a flat one over `size`, and it is why the
 // modified block is the only one written back.
 //
-// Bounded by the direct blocks. A directory past 12 KiB needs the growth path
-// that is not here yet, and is refused rather than half-handled.
+// Bounded by the direct blocks. When no block has room the directory grows by
+// one, up to twelve; a directory past 12 KiB is refused rather than
+// half-handled.
 private fn ext2_directory_block_count(directory: Ext2Inode) -> usize {
     return directory.size / KERNEL_BLOCK_SIZE;
 }
@@ -1252,9 +1254,112 @@ private fn ext2_directory_mutable(directory: Ext2Inode) -> bool {
            directory.size % KERNEL_BLOCK_SIZE == 0;
 }
 
+// The allocation obligation ends here because the block is now named by a
+// directory's i_block and its bitmap bit stays set: there is nothing left to
+// release, and the directory, not this owner, is what holds it.
+private fn ext2_block_owner_linked(owner: sink Ext2BlockOwner[block]) {}
+
+// GitHub issue #537: the block a full directory grows into. It holds exactly
+// one entry, the new one, whose record spans the whole block -- the shape
+// ext2 requires of every block, whose record lengths sum to the block size.
+//
+// The block is written before the inode. Until the inode write lands, the old
+// i_size is the only visible extent and the new block is merely allocated,
+// which is the same order ext2_resize_small_file publishes in.
+private fn ext2_directory_grow_publish(mount: Ext2Mount, directory: Ext2Inode,
+                                       blocks: usize, block: usize,
+                                       inode_number: usize, name: borrow []u8)
+        -> Ext2DirectoryResult !{unsafe} {
+    if (blocks >= EXT2_MAX_DIRECT_BLOCKS || name.len == 0 || name.len > 255) {
+        return Ext2DirectoryResult::Invalid;
+    }
+    for i: usize in 0..<KERNEL_BLOCK_SIZE { ext2_scratch_here().file[i] = 0; }
+    let base: *u8 = ext2_scratch_here().file as *u8;
+    if (ext2_put_u32(base, 0, inode_number as u32) == false ||
+        ext2_put_u16(base, 4, KERNEL_BLOCK_SIZE as u16) == false) {
+        return Ext2DirectoryResult::Invalid;
+    }
+    base[6] = name.len as u8;
+    base[7] = 0;
+    let data = ext2_scratch_here().file as []u8;
+    if (data.len < 8) { return Ext2DirectoryResult::Invalid; }
+    let name_target = data[8..<data.len];
+    if (name.len > name_target.len) { return Ext2DirectoryResult::Invalid; }
+    slice_copy(name_target, name);
+    match block_write(mount.device, block, ext2_scratch_here().file as []u8) {
+        BlockIoResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+
+    match block_read(mount.device, directory.table_block,
+                     ext2_scratch_here().metadata as []u8) {
+        BlockIoResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+    let inode_pointer: *u8 =
+        (ext2_scratch_here().metadata as *u8) + (directory.table_offset as isize);
+    let pointer_offset: usize = 40 + blocks * 4;
+    let sectors: u32 = ext2_u32(inode_pointer, 28);
+    // The slot past the last block must be empty, and the size on disk must
+    // still be the one this walk was sized from: anything else means the
+    // inode is not the directory that was just read.
+    if (ext2_u32(inode_pointer, pointer_offset) != 0 ||
+        ext2_u32(inode_pointer, 4) as usize != directory.size ||
+        sectors > 0xFFFFFFFF - 2) {
+        return Ext2DirectoryResult::Invalid;
+    }
+    // i_blocks counts 512-byte sectors, so one 1 KiB block is two.
+    if (ext2_put_u32(inode_pointer, 4,
+                     (directory.size + KERNEL_BLOCK_SIZE) as u32) == false ||
+        ext2_put_u32(inode_pointer, 28, sectors + 2) == false ||
+        ext2_put_u32(inode_pointer, pointer_offset, block as u32) == false) {
+        return Ext2DirectoryResult::Invalid;
+    }
+    match block_write(mount.device, directory.table_block,
+                      ext2_scratch_here().metadata as []u8) {
+        BlockIoResult::Invalid => { return Ext2DirectoryResult::Invalid; }
+        BlockIoResult::Ok => { return Ext2DirectoryResult::Updated; }
+    }
+}
+
+// Every block was walked and none had room.
+//
+// Past twelve blocks, or on a volume with no free block, this still answers
+// Invalid, and the caller cannot tell that from a malformed directory:
+// Ext2DirectoryResult has two cases. No caller acts differently on a full
+// directory today. A syscall that reports ENOSPC is the caller that would,
+// and the case belongs with it.
+private fn ext2_directory_grow(mount: Ext2Mount, directory: Ext2Inode,
+                               blocks: usize, inode_number: usize,
+                               name: borrow []u8) -> Ext2DirectoryResult !{unsafe} {
+    if (blocks >= EXT2_MAX_DIRECT_BLOCKS) {
+        return Ext2DirectoryResult::Invalid;
+    }
+    match ext2_allocate_block(mount) {
+        Ext2BlockAllocResult::Failed => { return Ext2DirectoryResult::Invalid; }
+        Ext2BlockAllocResult::Allocated(owner) => {
+            match ext2_directory_grow_publish(mount, directory, blocks,
+                                              owner.block_number,
+                                              inode_number, name) {
+                Ext2DirectoryResult::Invalid => {
+                    match ext2_release_block(mount, owner) {
+                        Ext2OwnerReleaseResult::Invalid => { }
+                        Ext2OwnerReleaseResult::Released => { }
+                    }
+                    return Ext2DirectoryResult::Invalid;
+                }
+                Ext2DirectoryResult::Updated => {
+                    ext2_block_owner_linked(owner);
+                    return Ext2DirectoryResult::Updated;
+                }
+            }
+        }
+    }
+}
+
 fn ext2_directory_add(mount: Ext2Mount, directory_inode: usize,
                       inode_number: usize,
-                      name: []u8) -> Ext2DirectoryResult !{unsafe} {
+                      name: borrow []u8) -> Ext2DirectoryResult !{unsafe} {
     if (name.len == 0 || name.len > 255 || inode_number == 0 ||
         directory_inode == 0) {
         return Ext2DirectoryResult::Invalid;
@@ -1286,9 +1391,10 @@ fn ext2_directory_add(mount: Ext2Mount, directory_inode: usize,
                         return Ext2DirectoryResult::Invalid;
                     }
                     let entry: *u8 = base + (cursor as isize);
+                    let entry_inode: usize = ext2_u32(entry, 0) as usize;
                     let record_length: usize = ext2_u16(entry, 4) as usize;
                     let name_length: usize = entry[6] as usize;
-                    let actual: usize =
+                    let mut actual: usize =
                         (8 + name_length + 3) & 0xFFFFFFFFFFFFFFFC;
                     if (record_length < 8 ||
                         record_length > KERNEL_BLOCK_SIZE - cursor ||
@@ -1296,11 +1402,17 @@ fn ext2_directory_add(mount: Ext2Mount, directory_inode: usize,
                         actual > record_length) {
                         return Ext2DirectoryResult::Invalid;
                     }
+                    // A dead record -- inode zero, left behind when the first
+                    // entry of a block was removed -- holds no name, so the
+                    // whole record is free and the new entry takes its place
+                    // rather than splitting after a name that is not there.
+                    if (entry_inode == 0) { actual = 0; }
                     if (record_length - actual >= needed) {
                         let new_offset: usize = cursor + actual;
                         let new_length: usize = record_length - actual;
                         let new_entry: *u8 = base + (new_offset as isize);
-                        if (ext2_put_u16(entry, 4, actual as u16) == false ||
+                        if ((actual != 0 &&
+                             ext2_put_u16(entry, 4, actual as u16) == false) ||
                             ext2_put_u32(new_entry, 0, inode_number as u32) == false ||
                             ext2_put_u16(new_entry, 4, new_length as u16) == false) {
                             return Ext2DirectoryResult::Invalid;
@@ -1334,22 +1446,15 @@ fn ext2_directory_add(mount: Ext2Mount, directory_inode: usize,
                     cursor = cursor + record_length;
                 }
             }
+            return ext2_directory_grow(mount, directory, blocks,
+                                       inode_number, name);
         }
     }
-    // Every block was walked and none had room.
-    //
-    // The caller cannot tell this from a malformed directory, and that is a
-    // real limitation rather than a subtlety: Ext2DirectoryResult has two
-    // cases and both of these are Invalid. It is left that way deliberately,
-    // because no caller can act differently until a directory can be grown --
-    // and the increment that adds growing is the one that gives this its own
-    // case, when there is something to do with it. GitHub issue #537.
-    return Ext2DirectoryResult::Invalid;
 }
 
 fn ext2_directory_remove(mount: Ext2Mount, directory_inode: usize,
                          inode_number: usize,
-                         name: []u8) -> Ext2DirectoryResult !{unsafe} {
+                         name: borrow []u8) -> Ext2DirectoryResult !{unsafe} {
     if (name.len == 0 || name.len > 255 || inode_number == 0 ||
         directory_inode == 0) {
         return Ext2DirectoryResult::Invalid;
@@ -1414,11 +1519,25 @@ fn ext2_directory_remove(mount: Ext2Mount, directory_inode: usize,
                     if (entry_inode == inode_number &&
                         ext2_name_matches(entry_name, name)) {
                         // The first entry of a block has no predecessor to
-                        // absorb it. ext2 keeps `.` and `..` there in every
-                        // directory, so this is reachable only for a block
-                        // this code grew, which it cannot yet do.
+                        // absorb it, so it stays as a dead record -- inode
+                        // zero, record length kept -- which lookup and
+                        // getdents64 already skip and ext2_directory_add
+                        // reuses. That is what Linux's ext2 does. Block 0
+                        // opens with `.`, which is never removed by name.
                         if (has_previous == false) {
-                            return Ext2DirectoryResult::Invalid;
+                            if (index == 0 ||
+                                ext2_put_u32(entry, 0, 0) == false) {
+                                return Ext2DirectoryResult::Invalid;
+                            }
+                            match block_write(mount.device, block,
+                                              ext2_scratch_here().file as []u8) {
+                                BlockIoResult::Invalid => {
+                                    return Ext2DirectoryResult::Invalid;
+                                }
+                                BlockIoResult::Ok => {
+                                    return Ext2DirectoryResult::Updated;
+                                }
+                            }
                         }
                         let previous_entry: *u8 = base + (previous as isize);
                         let previous_length: usize =
@@ -1446,6 +1565,54 @@ fn ext2_directory_remove(mount: Ext2Mount, directory_inode: usize,
         }
     }
     return Ext2DirectoryResult::Invalid;
+}
+
+// The live entries of a directory, across every block it occupies, with dead
+// records skipped. It is the fixture's measure of "enumerated completely":
+// a walk that stopped at the first block would undercount a grown directory.
+fn ext2_directory_live_entries(mount: Ext2Mount, directory_inode: usize)
+        -> Ext2CountResult !{unsafe} {
+    match ext2_read_inode(mount, directory_inode) {
+        Ext2InodeResult::Invalid => { return Ext2CountResult::Invalid; }
+        Ext2InodeResult::Inode(directory) => {
+            if (ext2_directory_mutable(directory) == false) {
+                return Ext2CountResult::Invalid;
+            }
+            let blocks: usize = ext2_directory_block_count(directory);
+            let mut live: usize = 0;
+            for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
+                if (index >= blocks) { break; }
+                let block: usize =
+                    ext2_directory_block_at(mount, directory, index);
+                if (block == 0) { return Ext2CountResult::Invalid; }
+                match block_read(mount.device, block,
+                                 ext2_scratch_here().file as []u8) {
+                    BlockIoResult::Invalid => {
+                        return Ext2CountResult::Invalid;
+                    }
+                    BlockIoResult::Ok => { }
+                }
+                let base: *u8 = ext2_scratch_here().file as *u8;
+                let mut cursor: usize = 0;
+                while (cursor < KERNEL_BLOCK_SIZE) {
+                    if (cursor > KERNEL_BLOCK_SIZE - 8) {
+                        return Ext2CountResult::Invalid;
+                    }
+                    let entry: *u8 = base + (cursor as isize);
+                    let record_length: usize = ext2_u16(entry, 4) as usize;
+                    let name_length: usize = entry[6] as usize;
+                    if (record_length < 8 ||
+                        record_length > KERNEL_BLOCK_SIZE - cursor ||
+                        name_length > record_length - 8) {
+                        return Ext2CountResult::Invalid;
+                    }
+                    if (ext2_u32(entry, 0) != 0) { live = live + 1; }
+                    cursor = cursor + record_length;
+                }
+            }
+            return Ext2CountResult::Counted(live);
+        }
+    }
 }
 
 fn ext2_initialize_regular_inode(mount: Ext2Mount,

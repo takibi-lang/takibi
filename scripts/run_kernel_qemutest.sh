@@ -243,6 +243,28 @@ if [ "$interactive_peer_status" -ne 0 ] ||
     exit 1
 fi
 
+# GitHub issue #537: the kernel writes ext2 directory structure -- record
+# lengths, dead records, a grown block, i_size and i_blocks -- and reading it
+# back through the same code that wrote it cannot judge whether it is ext2.
+# The disk this lane handed QEMU is a file, so the host's own e2fsck reads
+# what the guest left on it. /etc is asserted grown first, so the check is
+# known to be reading the structure it exists for rather than passing an
+# untouched image.
+debugfs -R 'stat /etc' "$QEMU_EXT2_IMAGE" >"$ARTIFACT_DIR/etc-stat.log" 2>&1
+etc_size="$(sed -n 's/^User:.*Size: \([0-9][0-9]*\)$/\1/p' \
+    "$ARTIFACT_DIR/etc-stat.log")"
+if [ -z "$etc_size" ] || [ "$etc_size" -le 1024 ]; then
+    echo "FAIL $RUN_LABEL: /etc on the guest's disk is not past one block (size '${etc_size}')" >&2
+    archive_reason="ext2 /etc not grown"
+    exit 1
+fi
+if ! e2fsck -fn "$QEMU_EXT2_IMAGE" >"$ARTIFACT_DIR/e2fsck.log" 2>&1; then
+    sed 's/^/  /' "$ARTIFACT_DIR/e2fsck.log" >&2
+    echo "FAIL $RUN_LABEL: e2fsck rejected the disk the guest wrote" >&2
+    archive_reason="e2fsck"
+    exit 1
+fi
+
 python3 "$REPO_ROOT/scripts/profile_kernel_workload.py" collect \
     --uart-log "$UART_LOG" --output "$ARTIFACT_DIR/busy-pair-profile.json" \
     --target qemu

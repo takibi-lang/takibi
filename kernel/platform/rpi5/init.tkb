@@ -430,6 +430,11 @@ fn kernel_test_platform_storage() {
                                                     kernel_boot_log("usb ext2: nested create+lookup+unlink in /etc ok\n");
                                                 }
                                             }
+                                            if (ext2_grow_directory_check(usb_mount)) {
+                                                kernel_boot_log("usb ext2: grow /etc past one block ok\n");
+                                            } else {
+                                                kernel_boot_log("usb ext2: grow failed\n");
+                                            }
                                             match ext2_lookup_root(
                                                     usb_mount,
                                                     bs"hello.txt") {

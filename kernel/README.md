@@ -86,8 +86,9 @@ The current RPi5 kernel includes:
 - a block-device boundary shared by the embedded memory fixture, QEMU
   virtio-blk, and RPi5 USB Mass Storage;
 - a bounded ext2 implementation with direct, single-indirect, and
-  double-indirect regular-file reads, nested path lookup, root directory
-  mutation, allocation bitmaps, and fast symlinks;
+  double-indirect regular-file reads, nested path lookup, file creation and
+  removal in any directory, directory growth by a block, allocation bitmaps,
+  and fast symlinks;
 - RP1 PCIe, xHCI/USB Mass Storage, Cadence GEM Ethernet, ARP, IPv4, ICMP, and
   a bounded TCP slice with in-order stream reconstruction, short reads,
   partial writes, duplicate/out-of-order acknowledgement, and timed SYN/ACK,
@@ -1042,12 +1043,17 @@ run, not a specification.
   remaining single-context assumption to be explicit, so changing
   either one fails the build at every site that depends on it rather than
   becoming a race. See GitHub issue #453.
-- **Filesystem.** One ext2 block group, nested path lookup, root-directory
-  mutation, allocation bitmaps, and fast symlinks. Regular-file reads cover
-  twelve direct blocks plus single- and double-indirect blocks; the maximum
-  is derived from the 1-KiB block geometry rather than a file-size literal.
-  Writes and truncates remain limited to one direct block. Directories and
-  symlinks remain one block, and there are no additional block groups.
+- **Filesystem.** One ext2 block group, nested path lookup, file creation
+  and removal in any directory, allocation bitmaps, and fast symlinks.
+  Regular-file reads cover twelve direct blocks plus single- and
+  double-indirect blocks; the maximum is derived from the 1-KiB block
+  geometry rather than a file-size literal. Writes and truncates remain
+  limited to one direct block. A directory grows a block at a time when none
+  of its blocks has room, up to its twelve direct blocks; removing the first
+  entry of a block leaves a dead record there, as Linux's ext2 does, and a
+  later add reuses it. There is no `mkdir`/`rmdir` below the syscall layer,
+  symlinks remain fast symlinks, and there are no additional block groups.
+  The QEMU lane runs the host's `e2fsck -fn` over the disk the guest wrote.
 - **Processes.** A pooled `ProcessRecord` scheduler table with no
   process-count ceiling, with lazily backed kernel stacks and directly owned
   address-space page tables, all on core 0.

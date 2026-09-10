@@ -692,10 +692,12 @@ disables whatever is reading it.
 
    Of those, **#537's first increment landed 2026-09-10**: the directory is a
    parameter and its blocks are walked, so a file can be created, read and
-   unlinked in `/etc` on both lanes and over real USB. What #537 still wants
-   is growing a directory by a block when none has room, and nested `mkdir`
-   with `.`/`..` and link counts -- the two halves that need allocation rather
-   than a walk. #538's three syscalls wait on those.
+   unlinked in `/etc` on both lanes and over real USB. **Its second increment
+   landed 2026-09-10 too**: a directory with no room grows by a block, the
+   first entry of a block is removed as a dead record and reused, and the
+   QEMU lane now runs the host's `e2fsck -fn` over the disk the guest wrote.
+   What #537 still wants is nested `mkdir`/`rmdir` with `.`/`..` and link
+   counts. #538's three syscalls wait on that.
 
    The one-block scan became a per-block scan because an ext2 directory entry
    never spans a block: each block is self-contained and its record lengths
@@ -777,13 +779,15 @@ more than the entry.
 What each of those cost was one hour of reading and what it saved was a week
 of building the wrong thing. Do the same here.
 
-**The next piece of work is #537's second half**, and it is the one place a
-session can pick up cold with no re-derivation: the issue comment written on
-2026-09-10 says exactly what is done, what is not, and why. Growing a
-directory by a block, then nested `mkdir` with `.`/`..` and link counts. Both
-need allocation rather than a walk, which is what makes them the same shape
-and different from the increment that landed. #538's three syscalls wait on
-them, and so does lifting `getdents64`'s direct-block limit.
+**The next piece of work is #537's last part, nested `mkdir`/`rmdir`.**
+Growing a directory by a block landed 2026-09-10, and the two issue comments
+say what each increment did and did not do. What the growth work leaves for
+mkdir is its verifier. The QEMU lane runs `e2fsck -fn` over the guest's disk
+after every run, so a directory whose `..`, link count or `i_blocks` is wrong
+fails the lane even when the kernel's own view passes. A planted `i_blocks`
+defect was shown to do exactly that. #538's three syscalls wait on mkdir.
+`getdents64`'s limit is the twelve direct blocks, which growth also stops at.
+Lifting it means growing into an indirect block, and nothing needs that yet.
 
 After that, **#208** -- and it is now the measured priority rather than an
 option, with `block io: reads=...` printed on every boot as the number it has
