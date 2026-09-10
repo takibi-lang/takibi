@@ -20,5 +20,7 @@
 ^world stop:
 ^network init contention counts:
 ^network init contention:
+^tcp owner contention counts:
+^tcp owner contention:
 ^pool walk stage: 
 ^pool walk: 

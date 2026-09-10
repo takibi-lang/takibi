@@ -1,0 +1,105 @@
+// Two-core evidence that TcpConnectionOwner is the critical section around
+// one connection's multi-statement protocol-state transitions.
+//
+// Current limitations (2026-09-10): this uses one private connection and one
+// peer, matching KERNEL_ACTIVE_CORES=2. It tests exclusion and handoff, not
+// network-device timing.
+use "kernel/lib/execution_model.tkb";
+
+private let mut tcp_owner_probe_armed: usize;
+private let mut tcp_owner_probe_phase: usize;
+private let mut tcp_owner_probe_slot: usize;
+private let mut tcp_owner_probe_generation: usize;
+private let mut tcp_owner_probe_busy: usize;
+private let mut tcp_owner_probe_advanced: usize;
+private let mut tcp_owner_probe_active: usize;
+
+private fn tcp_owner_probe_addr(value: *usize) -> usize { return value as usize; }
+
+fn tcp_connection_contention_is_armed() -> bool !{unsafe} {
+    return unsafe { atomic_load_acquire(tcp_owner_probe_addr(
+        &tcp_owner_probe_armed)) } == 1;
+}
+
+fn tcp_connection_contention_secondary_run() !{unsafe} {
+    unsafe { atomic_store_release(tcp_owner_probe_addr(
+        &tcp_owner_probe_active), 1); }
+    let slot: usize = unsafe { atomic_load_acquire(tcp_owner_probe_addr(
+        &tcp_owner_probe_slot)) };
+    let generation: usize = unsafe { atomic_load_acquire(tcp_owner_probe_addr(
+        &tcp_owner_probe_generation)) };
+    let phase: usize = unsafe { atomic_load_acquire(tcp_owner_probe_addr(
+        &tcp_owner_probe_phase)) };
+    match tcp_connection_probe_step(slot, generation) {
+        TcpConnectionProbeStep::Missing => {}
+        TcpConnectionProbeStep::Busy => {
+            if (phase == 1) { unsafe { atomic_store_release(
+                tcp_owner_probe_addr(&tcp_owner_probe_busy), 1); } }
+        }
+        TcpConnectionProbeStep::Advanced => {
+            if (phase == 2) { unsafe { atomic_store_release(
+                tcp_owner_probe_addr(&tcp_owner_probe_advanced), 1); } }
+        }
+    }
+    unsafe {
+        atomic_store_release(tcp_owner_probe_addr(&tcp_owner_probe_active), 0);
+        atomic_store_release(tcp_owner_probe_addr(&tcp_owner_probe_armed), 0);
+    }
+}
+
+private fn tcp_owner_probe_run_phase(phase: usize) -> bool !{unsafe} {
+    unsafe {
+        atomic_store_release(tcp_owner_probe_addr(&tcp_owner_probe_phase), phase);
+        atomic_store_release(tcp_owner_probe_addr(&tcp_owner_probe_active), 0);
+        atomic_store_release(tcp_owner_probe_addr(&tcp_owner_probe_armed), 1);
+    }
+    let start: i64 = read_cntpct();
+    let window: i64 = read_cntfrq() >> 1;
+    while (read_cntpct() - start < window) {
+        if (unsafe { atomic_load_acquire(tcp_owner_probe_addr(
+                &tcp_owner_probe_armed)) } == 0) { return true; }
+    }
+    unsafe { atomic_store_release(tcp_owner_probe_addr(
+        &tcp_owner_probe_armed), 0); }
+    return false;
+}
+
+fn tcp_connection_contention_probe() -> bool !{unsafe} {
+    static_assert(KERNEL_ACTIVE_CORES == 2,
+                  "TCP connection contention evidence currently has one peer");
+    tcp_connection_pool_init();
+    let owner = match tcp_connection_alloc() {
+        TcpConnectionAllocResult::Full => { return false; }
+        TcpConnectionAllocResult::Allocated(value) => { value }
+    };
+    let slot: usize = tcp_connection_slot(owner);
+    let generation: usize = tcp_connection_identity(owner);
+    let before: u32 = tcp_connection_of(owner).snd_nxt;
+    unsafe {
+        atomic_store_release(tcp_owner_probe_addr(&tcp_owner_probe_slot), slot);
+        atomic_store_release(tcp_owner_probe_addr(
+            &tcp_owner_probe_generation), generation);
+        atomic_store_release(tcp_owner_probe_addr(&tcp_owner_probe_busy), 0);
+        atomic_store_release(tcp_owner_probe_addr(&tcp_owner_probe_advanced), 0);
+    }
+    let held_phase: bool = tcp_owner_probe_run_phase(1);
+    let busy: usize = unsafe { atomic_load_acquire(tcp_owner_probe_addr(
+        &tcp_owner_probe_busy)) };
+    tcp_connection_put(owner);
+    let released_phase: bool = tcp_owner_probe_run_phase(2);
+    let advanced: usize = unsafe { atomic_load_acquire(tcp_owner_probe_addr(
+        &tcp_owner_probe_advanced)) };
+    let final_owner = match tcp_connection_take(slot, generation) {
+        TcpConnectionTakeResult::Missing => { return false; }
+        TcpConnectionTakeResult::Ready(value) => { value }
+    };
+    let after: u32 = tcp_connection_of(final_owner).snd_nxt;
+    tcp_connection_free(final_owner);
+    kernel_boot_log("tcp owner contention counts: busy=");
+    uart_put_udec(busy);
+    kernel_boot_log(" advanced=");
+    uart_put_udec(advanced);
+    kernel_boot_log("\n");
+    return held_phase && released_phase && busy == 1 && advanced == 1 &&
+           after == before + 1;
+}

@@ -171,6 +171,9 @@ fn kernel_secondary_main(context: usize) {
             if (init_once_contention_is_armed()) {
                 init_once_contention_secondary_run();
             }
+            if (tcp_connection_contention_is_armed()) {
+                tcp_connection_contention_secondary_run();
+            }
             // GitHub issue #482: the walk side of the pool, which takes no
             // lock at all, against a core that is releasing chunks.
             if (pool_walk_contention_is_armed()) {

@@ -284,6 +284,12 @@ must_use variant TcpConnectionTakeResult {
     Ready(exists connection: usize. TcpConnectionOwner[connection]);
 }
 
+must_use variant TcpConnectionProbeStep {
+    Missing;
+    Busy;
+    Advanced;
+}
+
 // GitHub issue #257: THE PARKING LOT IS GONE.
 //
 // `tcp_connection_store` was a [TcpConnectionStore; TCP_CONNECTION_MAX] of
@@ -1109,10 +1115,43 @@ fn tcp_connection_take(slot_value: usize, generation: usize)
         // inside it. That direction matters: free() holds this lock while
         // taking the pool's, and the two orders together would deadlock.
         task_mutex_acquire(&tcp_connection_payload(slot_value).lock);
+        // The occupant can change while this caller waits for its lock.
+        // Revalidate after acquire so a freed-and-reused slot cannot mint an
+        // owner carrying the previous occupant's generation.
+        if (intrusive_pool_matches_untrusted(
+                &tcp_connection_pool, slot_value, generation) == false) {
+            task_mutex_release(&tcp_connection_payload(slot_value).lock);
+            return TcpConnectionTakeResult::Missing;
+        }
         return TcpConnectionTakeResult::Ready(
             tcp_connection_owner_new(slot_value, generation));
     }
     return TcpConnectionTakeResult::Missing;
+}
+
+// Test-only nonblocking entry through the same connection lock and
+// post-acquire generation check as tcp_connection_take. The increment is a
+// deliberately multi-statement read-modify-write of real connection state.
+fn tcp_connection_probe_step(slot_value: usize, generation: usize)
+        -> TcpConnectionProbeStep !{unsafe} {
+    if (intrusive_pool_matches_untrusted(
+            &tcp_connection_pool, slot_value, generation) == false) {
+        return TcpConnectionProbeStep::Missing;
+    }
+    let conn: *TcpConnection = tcp_connection_payload(slot_value);
+    if (task_mutex_trylock(&conn.lock) == false) {
+        return TcpConnectionProbeStep::Busy;
+    }
+    if (intrusive_pool_matches_untrusted(
+            &tcp_connection_pool, slot_value, generation) == false) {
+        task_mutex_release(&conn.lock);
+        return TcpConnectionProbeStep::Missing;
+    }
+    let owner = tcp_connection_owner_new(slot_value, generation);
+    let previous: u32 = tcp_connection_of(owner).snd_nxt;
+    tcp_connection_of(owner).snd_nxt = previous + 1;
+    tcp_connection_put(owner);
+    return TcpConnectionProbeStep::Advanced;
 }
 
 // Consumes the owner and the connection with it.

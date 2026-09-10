@@ -91,6 +91,9 @@ ATOMIC_ALLOWED = {
     "kernel/init_once_contention_evidence.tkb":
         "GitHub issue #483's two-core probe; atomics are only its rendezvous "
         "and counters, while the production gate goes through Mutex",
+    "kernel/tcp_connection_contention_evidence.tkb":
+        "GitHub issue #483's two-core TcpConnectionOwner probe; atomics are "
+        "only the cross-core phase publication and verdict counters",
     "lib/occupancy.tkb":
         "GitHub issue #479: \"no other core is inside this region\" as a "
         "linear value. Each core writes ONLY its own word, so there is no "
