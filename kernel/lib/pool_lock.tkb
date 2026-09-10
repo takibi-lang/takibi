@@ -78,7 +78,8 @@ fn mutex_irq_restore(flags: usize) {
 // dropping it from the signature -- a stand-in whose shape differs from
 // the real thing stops catching drift. `lock` is the address of that
 // pool's own lock word, which is the half a tag cannot supply.
-fn pool_lock_acquire(tag: usize, lock: *Mutex @ id) -> usize !{locks, unsafe} {
+fn pool_lock_acquire(tag: usize, lock: *Mutex @ id) -> usize
+        !{locks, unsafe, acquires_lock_40_pool} {
     return mutex_acquire(lock);
 }
 

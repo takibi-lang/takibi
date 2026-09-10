@@ -890,7 +890,8 @@ private linear struct IntrusivePoolGuard[pool_id: addr] {
 //
 // Deliberately NOT `!{may_block}`: see above.
 fn intrusive_pool_lock(T: type, pool: &mut IntrusivePool(T) @ pool_id)
-        -> IntrusivePoolGuard[pool_id] {
+        -> IntrusivePoolGuard[pool_id]
+        !{acquires_lock_40_pool, lock_guard_40_pool} {
     let mut guard: IntrusivePoolGuard[pool_id] =
         { pool_lock_acquire(pool.pool_tag, &(*pool).lock) };
     return guard;
@@ -1757,7 +1758,8 @@ fn intrusive_pool_probe_handle(T: type, pool: &mut IntrusivePool(T) @ pool_id,
 fn intrusive_pool_probe_handle_untrusted(
         T: type, pool: &mut IntrusivePool(T) @ pool_id,
         slot_address: usize, generation: usize)
-        -> IntrusiveSlotProbe[pool_id] !{unsafe} {
+        -> IntrusiveSlotProbe[pool_id]
+        !{unsafe, acquires_lock_40_pool, lock_guard_40_pool} {
     let flags: usize = pool_lock_acquire(pool.pool_tag, &(*pool).lock);
     if (intrusive_pool_matches_untrusted(
             pool, slot_address, generation) == false) {
@@ -1874,7 +1876,8 @@ must_use variant IntrusiveSlotProbe[pool_id: addr] {
 // payload use. NoPayload releases before returning.
 fn intrusive_pool_probe_slot(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                              slot_address: usize)
-        -> IntrusiveSlotProbe[pool_id] !{unsafe} {
+        -> IntrusiveSlotProbe[pool_id]
+        !{unsafe, acquires_lock_40_pool, lock_guard_40_pool} {
     let flags: usize = pool_lock_acquire(pool.pool_tag, &(*pool).lock);
     if (intrusive_pool_slot_is_valid(pool, slot_address) == false) {
         pool_lock_release(pool.pool_tag, &(*pool).lock, flags);

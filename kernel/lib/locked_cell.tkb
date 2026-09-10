@@ -109,7 +109,8 @@ private linear struct LockedCellGuard[cell: addr] {
 // else is holding. kernel/lib/mutex.tkb has the whole argument, and
 // scripts/check_lock_discipline.py makes forgetting it a build failure.
 fn locked_cell_take(T: type, cell: &mut LockedCell(T) @ id)
-        -> LockedCellGuard[id] {
+        -> LockedCellGuard[id]
+        !{acquires_lock_40_locked_cell, lock_guard_40_locked_cell} {
     let mut g: LockedCellGuard[id] = { mutex_acquire(&(*cell).lock) };
     return g;
 }
@@ -174,7 +175,8 @@ private linear struct GuardedFieldGuard[lock: addr] {
 
 // mutex_acquire, not pool_lock_acquire, for the reason at the top of this
 // file.
-fn guarded_field_take(m: *Mutex @ id) -> GuardedFieldGuard[id] {
+fn guarded_field_take(m: *Mutex @ id) -> GuardedFieldGuard[id]
+        !{acquires_lock_40_guarded_field, lock_guard_40_guarded_field} {
     let mut g: GuardedFieldGuard[id] = { mutex_acquire(m) };
     return g;
 }

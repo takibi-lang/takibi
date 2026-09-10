@@ -67,7 +67,8 @@ fn task_mutex_init(m: *TaskMutex @ id) {
 // kernel/lib/intrusive_pool.tkb had already worked out that this is what
 // the annotation would do, and declined it there because a pool lock IS
 // safe from a handler. This is the case it declined it FOR.
-fn task_mutex_acquire(m: *TaskMutex @ id) !{locks, may_block, unsafe} {
+fn task_mutex_acquire(m: *TaskMutex @ id)
+        !{locks, may_block, unsafe, acquires_lock_30_connection} {
     spin_lock(m as usize);
 }
 
@@ -77,7 +78,8 @@ fn task_mutex_release(m: *TaskMutex @ id) !{locks, unsafe} {
 
 // One attempt. For a caller with something else to do rather than wait,
 // and the only way to observe the exclusion with one thread.
-fn task_mutex_trylock(m: *TaskMutex @ id) -> bool !{locks, unsafe} {
+fn task_mutex_trylock(m: *TaskMutex @ id) -> bool
+        !{locks, unsafe, acquires_lock_30_connection} {
     return spin_trylock(m as usize);
 }
 

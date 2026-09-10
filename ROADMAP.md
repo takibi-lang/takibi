@@ -103,8 +103,10 @@ entry leaves the next one unable to be verified.
    waits for a real bounded-wait requirement and #450's compare-and-swap.
 7. **#504** one world-stopped token -- closed.
 8. **#452** make a lock say what it protects to the compiler -- complete,
-   including the page allocator. Next: **#466** lock order and **#450**
-   compare-and-swap.
+   including the page allocator. **#466** lock order is complete: live linear
+   guards and transitive minimum-rank acquisition summaries reject the
+   Mutex-to-TaskMutex inversion, while equal-rank Mutex instances remain with
+   the existing instance-level checks. Next: **#450** compare-and-swap.
 9. **#261** PTE mutation against the hardware page-table walker.
 10. **#9** processor affinity, with four cores.
 

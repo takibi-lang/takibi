@@ -101,7 +101,8 @@ fn mutex_init(m: *Mutex @ id) {
 // lock then waits for a holder that cannot run until the handler returns
 // -- a hang, not a delay. That ordering is the entire reason an interrupt
 // handler may take one of these at all (GitHub issue #449).
-fn mutex_acquire(m: *Mutex @ id) -> usize !{locks, unsafe} {
+fn mutex_acquire(m: *Mutex @ id) -> usize
+        !{locks, unsafe, acquires_lock_40_mutex} {
     let flags: usize = mutex_irq_save();
     spin_lock(m as usize);
     return flags;
@@ -119,7 +120,8 @@ fn mutex_release(m: *Mutex @ id, flags: usize) !{locks, unsafe} {
 // One attempt, without masking. For a caller that has something else to do
 // rather than wait -- and for proving the exclusion single-threaded, which
 // is the only way to observe it without a second core.
-fn mutex_trylock(m: *Mutex @ id) -> bool !{locks, unsafe} {
+fn mutex_trylock(m: *Mutex @ id) -> bool
+        !{locks, unsafe, acquires_lock_40_mutex} {
     return spin_trylock(m as usize);
 }
 

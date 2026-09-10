@@ -20,7 +20,8 @@ must_use variant InitOnceBegin[once: addr] {
     Start(InitOnceGuard[once]);
 }
 
-fn init_once_begin(once: &mut InitOnce @ id) -> InitOnceBegin[id] {
+fn init_once_begin(once: &mut InitOnce @ id) -> InitOnceBegin[id]
+        !{acquires_lock_40_init_once, lock_guard_40_init_once} {
     let flags: usize = mutex_acquire(&(*once).mutex);
     if ((*once).complete) {
         mutex_release(&(*once).mutex, flags);

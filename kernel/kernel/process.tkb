@@ -432,7 +432,8 @@ private linear struct SpareStackRunGuard[lock: addr] {
 }
 
 private fn scheduled_process_spare_lock(lock: *Mutex @ address)
-        -> SpareStackRunGuard[address] {
+        -> SpareStackRunGuard[address]
+        !{acquires_lock_40_spare_stack, lock_guard_40_spare_stack} {
     let mut guard: SpareStackRunGuard[address] = { mutex_acquire(lock) };
     return guard;
 }
@@ -2168,7 +2169,8 @@ linear struct ProcessRunGuard[lock: addr] {
 // the acquire in linux_user's finite lock-ORDER table, and this is not a
 // pool lock. See kernel/lib/intrusive_pool.tkb's tag counter for what
 // putting a non-pool in that table cost.
-fn process_run_lock() -> ProcessRunGuard[scheduled_process_run_lock] {
+fn process_run_lock() -> ProcessRunGuard[scheduled_process_run_lock]
+        !{acquires_lock_40_process_run, lock_guard_40_process_run} {
     let mut guard: ProcessRunGuard[scheduled_process_run_lock] =
         { mutex_acquire(&scheduled_process_run_lock) };
     return guard;

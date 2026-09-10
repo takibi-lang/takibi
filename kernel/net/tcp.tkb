@@ -557,7 +557,8 @@ private let mut tcp_frame_pool_ready: bool = false;
 // address 0 maps to. Every arrival is logged.
 private let mut tcp_frame_absent_fallback: [u8; 1514];
 
-fn tcp_frame_lock(m: *Mutex @ address) -> FrameGuard[address] {
+fn tcp_frame_lock(m: *Mutex @ address) -> FrameGuard[address]
+        !{acquires_lock_40_frame, lock_guard_40_frame} {
     let mut guard: FrameGuard[address] = { mutex_acquire(m) };
     return guard;
 }
@@ -774,7 +775,7 @@ fn tcp_connection_inetd_slice(conn: *TcpConnection) -> [u8; 1460..] !{unsafe} {
 }
 
 fn tcp_connection_owner_new(slot: usize, generation: usize @ connection)
-        -> TcpConnectionOwner[connection] {
+        -> TcpConnectionOwner[connection] !{lock_guard_30_connection} {
     let mut owner: TcpConnectionOwner[connection] = { slot, generation };
     return owner;
 }
@@ -1115,16 +1116,17 @@ fn tcp_connection_take(slot_value: usize, generation: usize)
         // inside it. That direction matters: free() holds this lock while
         // taking the pool's, and the two orders together would deadlock.
         task_mutex_acquire(&tcp_connection_payload(slot_value).lock);
+        let owner = tcp_connection_owner_new(slot_value, generation);
         // The occupant can change while this caller waits for its lock.
         // Revalidate after acquire so a freed-and-reused slot cannot mint an
         // owner carrying the previous occupant's generation.
         if (intrusive_pool_matches_untrusted(
                 &tcp_connection_pool, slot_value, generation) == false) {
+            tcp_connection_owner_drop(owner);
             task_mutex_release(&tcp_connection_payload(slot_value).lock);
             return TcpConnectionTakeResult::Missing;
         }
-        return TcpConnectionTakeResult::Ready(
-            tcp_connection_owner_new(slot_value, generation));
+        return TcpConnectionTakeResult::Ready(owner);
     }
     return TcpConnectionTakeResult::Missing;
 }
@@ -1142,12 +1144,13 @@ fn tcp_connection_probe_step(slot_value: usize, generation: usize)
     if (task_mutex_trylock(&conn.lock) == false) {
         return TcpConnectionProbeStep::Busy;
     }
+    let owner = tcp_connection_owner_new(slot_value, generation);
     if (intrusive_pool_matches_untrusted(
             &tcp_connection_pool, slot_value, generation) == false) {
+        tcp_connection_owner_drop(owner);
         task_mutex_release(&conn.lock);
         return TcpConnectionProbeStep::Missing;
     }
-    let owner = tcp_connection_owner_new(slot_value, generation);
     let previous: u32 = tcp_connection_of(owner).snd_nxt;
     tcp_connection_of(owner).snd_nxt = previous + 1;
     tcp_connection_put(owner);
@@ -1374,7 +1377,8 @@ fn kernel_tcp_restore_stream_policy() {
     tcp_ack_each_stream_segment = false;
 }
 
-fn retx_lock(m: *Mutex @ address) -> RetxGuard[address] {
+fn retx_lock(m: *Mutex @ address) -> RetxGuard[address]
+        !{acquires_lock_40_retx, lock_guard_40_retx} {
     let mut guard: RetxGuard[address] = { mutex_acquire(m) };
     return guard;
 }

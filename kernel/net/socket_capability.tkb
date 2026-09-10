@@ -55,7 +55,9 @@ must_use variant NetworkCapabilityTakeResult {
 must_use variant NetworkCapabilityPutResult { Stored; Conflict; }
 
 fn network_capability_lock(lock: *Mutex @ address)
-        -> NetworkCapabilityGuard[address] {
+        -> NetworkCapabilityGuard[address]
+        !{acquires_lock_40_network_capability,
+          lock_guard_40_network_capability} {
     let mut guard: NetworkCapabilityGuard[address] = { mutex_acquire(lock) };
     return guard;
 }

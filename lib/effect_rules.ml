@@ -13,6 +13,44 @@ type rule = {
   forbids_reentry : bool;
 }
 
+type lock_annotation = {
+  rank : int;
+  label : string;
+}
+
+let parse_lock_annotation prefix name =
+  let prefix_len = String.length prefix in
+  if String.length name <= prefix_len
+     || String.sub name 0 prefix_len <> prefix then None
+  else
+    let rest = String.sub name prefix_len (String.length name - prefix_len) in
+    match String.index_opt rest '_' with
+    | None -> None
+    | Some separator ->
+        let rank_text = String.sub rest 0 separator in
+        let label = String.sub rest (separator + 1)
+          (String.length rest - separator - 1) in
+        (match int_of_string_opt rank_text with
+         | Some rank when rank >= 0 && label <> "" -> Some { rank; label }
+         | _ -> None)
+
+let lock_acquire_annotation =
+  parse_lock_annotation "acquires_lock_"
+
+let lock_guard_annotation =
+  parse_lock_annotation "lock_guard_"
+
+let dynamic_rule name =
+  match lock_acquire_annotation name, lock_guard_annotation name with
+  | None, None -> None
+  | _ -> Some {
+      name; declaration = Required; declaration_role = false;
+      function_pointer = false; propagates = false;
+      effect_free_forbidden = false; excludes_declared = [];
+      excludes_reachable = []; rejects_unknown_indirect = false;
+      forbids_reentry = false;
+    }
+
 let rules = [
   { name = "may_block"; declaration = Inferred; declaration_role = false;
     function_pointer = true; propagates = true; effect_free_forbidden = true;
@@ -59,7 +97,9 @@ let rules = [
     rejects_unknown_indirect = false; forbids_reentry = false };
 ]
 
-let find name = List.find_opt (fun rule -> rule.name = name) rules
+let find name = match List.find_opt (fun rule -> rule.name = name) rules with
+  | Some _ as rule -> rule
+  | None -> dynamic_rule name
 let names = List.map (fun rule -> rule.name) rules
 let propagating = List.filter_map (fun rule ->
   if rule.propagates then Some rule.name else None) rules

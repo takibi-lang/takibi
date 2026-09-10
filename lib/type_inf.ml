@@ -8012,6 +8012,142 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       when List.mem "noreturn" effects -> StringSet.add name names
     | _ -> names
   ) StringSet.empty prog in
+  (* Lock-order contracts (GitHub issue #466).  Acquisition annotations are
+     transitive summaries: a caller acquires the lowest-ranked lock reachable
+     from its body.  Guard annotations associate a returned linear type with
+     the lock that remains held.  Keeping the held set in the existing affine
+     flow means consuming a guard also removes its lock-order obligation. *)
+  let lock_annotation effects parse =
+    Option.bind effects (fun effects -> List.find_map parse effects) in
+  let add_lock_guard_types loc ret annotation guards =
+    let rec visit seen guards ty = match strip_borrow ty with
+      | Ast.TypeIndexed (name, _) | Ast.TypeView (name, _)
+      | Ast.TypeNamed name ->
+          if StringSet.mem name seen then guards else
+          let seen = StringSet.add name seen in
+          let guards =
+            if not (is_linear_type ty) then guards else
+            match StringMap.find_opt name guards with
+            | Some previous when previous <> annotation ->
+                raise (TypeError (loc, Printf.sprintf
+                  "lock guard type '%s' has conflicting lock annotations" name))
+            | _ -> StringMap.add name annotation guards in
+          (match Hashtbl.find_opt variant_defs name with
+           | Some cases -> List.fold_left (fun acc (_, payload) ->
+               Option.fold ~none:acc ~some:(visit seen acc) payload) guards cases
+           | None -> guards)
+      | Ast.TypeVariant (name, _) -> visit seen guards (Ast.TypeNamed name)
+      | Ast.TypeTuple parts -> List.fold_left (visit seen) guards parts
+      | Ast.TypeExists (_, _, body) -> visit seen guards body
+      | _ -> guards
+    in
+    visit StringSet.empty guards ret
+  in
+  let declared_lock_acquires, lock_guard_types =
+    List.fold_left (fun (acquires, guards) item -> match item with
+      | Ast.FuncDef f ->
+          let key = overload_key f.name f.params in
+          let acquire = lock_annotation f.effects
+            Effect_rules.lock_acquire_annotation in
+          let guard = lock_annotation f.effects Effect_rules.lock_guard_annotation in
+          let acquires = match acquire with
+            | Some annotation -> StringMap.add key annotation acquires
+            | None -> acquires in
+          let guards = match guard, f.ret_type with
+            | Some annotation, Some ret ->
+                if not (is_linear_type ret) then
+                  raise (TypeError (f.def_loc,
+                    "lock_guard annotation requires a linear returned guard type"));
+                add_lock_guard_types f.def_loc ret annotation guards
+            | Some _, None -> raise (TypeError (f.def_loc,
+                "lock_guard annotation requires a returned guard type"))
+            | None, _ -> guards
+          in
+          (acquires, guards)
+      | Ast.ExternFuncDef (name, params, ret, effects) ->
+          let key = overload_key name params in
+          let acquires = match lock_annotation effects
+              Effect_rules.lock_acquire_annotation with
+            | Some annotation -> StringMap.add key annotation acquires
+            | None -> acquires in
+          let guards = match lock_annotation effects
+              Effect_rules.lock_guard_annotation, ret with
+            | Some annotation, Some guard_type ->
+                if not (is_linear_type guard_type) then
+                  raise (TypeError (Lexing.dummy_pos,
+                    "lock_guard annotation requires a linear returned guard type"));
+                add_lock_guard_types Lexing.dummy_pos guard_type annotation guards
+            | Some _, _ -> raise (TypeError (Lexing.dummy_pos,
+                "lock_guard annotation requires a named returned guard type"))
+            | None, _ -> guards in
+          (acquires, guards)
+      | _ -> (acquires, guards))
+      (StringMap.empty, StringMap.empty) prog
+  in
+  let lock_callees =
+    let rec expr callees (e : Ast.expr) =
+      let sub = expr callees in
+      match e.desc with
+      | Ast.Call (name, args) ->
+          let callees = List.fold_left expr callees args in
+          let target = Option.value
+            (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)
+            ~default:name in
+          StringSet.add target callees
+      | Ast.VariantCtor (_, _, x) | Ast.Bnot x | Ast.Deref x | Ast.AddrOf x
+      | Ast.Cast (_, x) | Ast.FieldGet (x, _) | Ast.Unsafe x -> sub x
+      | Ast.BinOp (_, a, b) | Ast.Assign (a, b) ->
+          expr (expr callees a) b
+      | Ast.StructLit xs | Ast.TupleLit xs -> List.fold_left expr callees xs
+      | Ast.Index (a, b) -> expr (expr callees a) b
+      | Ast.SliceOf (a, b, c) -> expr (expr (expr callees a) b) c
+      | _ -> callees
+    in
+    let rec stmt callees (s : Ast.stmt) = match s.desc with
+      | Ast.Return (Some e) | Ast.Expr e | Ast.LetTuple (_, e) | Ast.Yield e ->
+          expr callees e
+      | Ast.Block xs | Ast.UnsafeBlock xs -> List.fold_left stmt callees xs
+      | Ast.Let (_, _, _, init, _) -> Option.fold ~none:callees ~some:(expr callees) init
+      | Ast.If (c, yes, no) ->
+          List.fold_left stmt (List.fold_left stmt (expr callees c) yes) no
+      | Ast.While (c, xs) -> List.fold_left stmt (expr callees c) xs
+      | Ast.For (_, _, lo, hi, xs) ->
+          List.fold_left stmt (expr (expr callees lo) hi) xs
+      | Ast.ForEach (_, collection, xs) ->
+          List.fold_left stmt (expr callees collection) xs
+      | Ast.Match (subject, arms) | Ast.LetMatch (_, _, _, subject, arms) ->
+          List.fold_left (fun acc arm -> match arm with
+            | Ast.ArmVariant (_, _, _, xs) | Ast.ArmWild xs
+            | Ast.ArmIntLit (_, xs) | Ast.ArmByteSliceLit (_, xs) ->
+                List.fold_left stmt acc xs) (expr callees subject) arms
+      | _ -> callees
+    in
+    List.fold_left (fun result -> function
+      | Ast.FuncDef f -> StringMap.add (overload_key f.name f.params)
+          (List.fold_left stmt StringSet.empty f.body) result
+      | _ -> result) StringMap.empty prog
+  in
+  (* On equal ranks retain the caller's own annotation.  It names the API
+     class (for example pool) more precisely than its raw Mutex callee. *)
+  let lower_lock a b = if a.Effect_rules.rank < b.Effect_rules.rank then a else b in
+  let lock_acquire_summaries = ref declared_lock_acquires in
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    StringMap.iter (fun caller callees ->
+      let summary = StringSet.fold (fun callee current ->
+        match StringMap.find_opt callee !lock_acquire_summaries, current with
+        | None, _ -> current
+        | Some found, None -> Some found
+        | Some found, Some old -> Some (lower_lock found old))
+        callees (StringMap.find_opt caller declared_lock_acquires) in
+      match summary, StringMap.find_opt caller !lock_acquire_summaries with
+      | Some found, Some old when found = old -> ()
+      | Some found, _ ->
+          lock_acquire_summaries := StringMap.add caller found !lock_acquire_summaries;
+          changed := true
+      | None, _ -> ()) lock_callees
+  done;
   let check_affine_func fdef =
     let finfo = StringMap.find (overload_key fdef.Ast.name fdef.params) functions in
     let binding_resolution = finfo.bindings in
@@ -8589,6 +8725,25 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Call (name, args) ->
           let target = Option.value
             (StringMap.find_opt (loc_key e.loc) !resolved_call_targets) ~default:name in
+          (match StringMap.find_opt target !lock_acquire_summaries with
+           | None -> ()
+           | Some acquired ->
+               Hashtbl.iter (fun visible_name id ->
+                 let rec guard_annotation ty = match strip_borrow ty with
+                   | Ast.TypeIndexed (guard_name, _) | Ast.TypeView (guard_name, _)
+                   | Ast.TypeNamed guard_name ->
+                       StringMap.find_opt guard_name lock_guard_types
+                   | Ast.TypeExists (_, _, body) -> guard_annotation body
+                   | _ -> None
+                 in
+                 let path = PVar (id, visible_name) in
+                 match guard_annotation (binding_type id visible_name) with
+                 | Some held when not (ResourceFlow.is_consumed_on_all_paths path moved)
+                                  && acquired.Effect_rules.rank < held.Effect_rules.rank ->
+                     raise (TypeError (e.loc, Printf.sprintf
+                       "lock order violation: cannot acquire '%s' (rank %d) while holding '%s' (rank %d)"
+                       acquired.label acquired.rank held.label held.rank))
+                 | _ -> ()) visible_bindings);
           let params = Option.value (StringMap.find_opt target call_params) ~default:[] in
           let rec check_args moved args params = match args with
             | [] -> moved
@@ -8944,7 +9099,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                  (kind_word p) name))
            | _ -> ());
           let moved = match init with
-            | Some e -> check_expr taints moved (is_tracked_path p) e
+            | Some e ->
+                (* The new binding is visible to expression resolution, but
+                   its value does not exist until the initializer returns.
+                   Mark a tracked destination unavailable during that walk
+                   so lock-order checking cannot mistake the guard being
+                   produced for a lock already held by the caller. *)
+                let before_init =
+                  if is_tracked_path p then mv_consume p moved else moved in
+                check_expr taints before_init (is_tracked_path p) e
             | None -> moved
           in
           let taints = TaintEnv.set name
@@ -8969,7 +9132,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              variable, or propagates into a direct TupleLit's tracked
              components); each bound name starts as a fresh obligation/
              handle of its component type. *)
-          let moved = check_expr taints moved true rhs in
+          let before_rhs = List.fold_left (fun m n ->
+            let p = pvar n in
+            if is_tracked_path p then mv_consume p m else m) moved names in
+          let moved = check_expr taints before_rhs true rhs in
           let moved = List.fold_left (fun m n -> mv_clear (pvar n) m) moved names in
           let taints = List.fold_left
             (fun t n -> TaintEnv.set n PathSet.empty t) taints names in

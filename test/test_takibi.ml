@@ -12953,6 +12953,73 @@ let codegen_tests = [
           }" ());
 
   Alcotest.test_case
+    "issue #466: live lock guards enforce transitive rank order"
+    `Quick
+    (fun () ->
+       expect_type_error "lock_guard annotation requires a linear returned guard type"
+         "fn issue466_not_a_guard() -> usize !{lock_guard_40_pool} {
+            return 0;
+          }" ();
+       expect_ok
+         "linear view Issue466ConnectionGuard[id: usize];
+          linear view Issue466PoolGuard[id: usize];
+          fn issue466_connection_take(id: usize) -> Issue466ConnectionGuard[id]
+              !{acquires_lock_30_connection, lock_guard_30_connection} {
+            return view Issue466ConnectionGuard[id];
+          }
+          fn issue466_pool_take(id: usize) -> Issue466PoolGuard[id]
+              !{acquires_lock_40_pool, lock_guard_40_pool} {
+            return view Issue466PoolGuard[id];
+          }
+          fn issue466_connection_put(g: sink Issue466ConnectionGuard[id]) {}
+          fn issue466_pool_put(g: sink Issue466PoolGuard[id]) {}
+          fn issue466_allowed() {
+            let connection = issue466_connection_take(1);
+            let pool = issue466_pool_take(2);
+            issue466_pool_put(pool);
+            issue466_connection_put(connection);
+          }" ();
+       expect_type_error "cannot acquire 'connection' (rank 30) while holding 'pool' (rank 40)"
+         "linear view Issue466BadPoolGuard[id: usize];
+          fn issue466_bad_pool_take(id: usize) -> Issue466BadPoolGuard[id]
+              !{acquires_lock_40_pool, lock_guard_40_pool} {
+            return view Issue466BadPoolGuard[id];
+          }
+          fn issue466_bad_pool_put(g: sink Issue466BadPoolGuard[id]) {}
+          fn issue466_bad_connection_leaf() !{acquires_lock_30_connection} {}
+          fn issue466_bad_connection_wrapper() { issue466_bad_connection_leaf(); }
+          fn issue466_reversed() {
+            let pool = issue466_bad_pool_take(1);
+            issue466_bad_connection_wrapper();
+            issue466_bad_pool_put(pool);
+          }" ();
+       (* The concrete regression shape from #466: a formerly boolean pool
+          helper is changed to return a variant whose Live arm retains its
+          pool guard, then tcp_connection_take is reached from that arm. *)
+       expect_type_error "cannot acquire 'connection' (rank 30) while holding 'pool' (rank 40)"
+         "linear view Issue466MutationPoolGuard[id: usize];
+          must_use variant Issue466MutationResult[id: usize] {
+            Missing;
+            Live(Issue466MutationPoolGuard[id]);
+          }
+          fn issue466_matches_mutated(id: usize) -> Issue466MutationResult[id]
+              !{acquires_lock_40_pool, lock_guard_40_pool} {
+            return Issue466MutationResult::Live(
+              view Issue466MutationPoolGuard[id]);
+          }
+          fn issue466_mutation_release(g: sink Issue466MutationPoolGuard[id]) {}
+          fn issue466_tcp_connection_take() !{acquires_lock_30_connection} {}
+          fn issue466_mutation_caller() {
+            match issue466_matches_mutated(1) {
+              Issue466MutationResult::Missing => {}
+              Issue466MutationResult::Live(pool_guard) => {
+                issue466_tcp_connection_take();
+                issue466_mutation_release(pool_guard);
+              }
+            }
+          }" ());
+
+  Alcotest.test_case
     "issue #226: zero-argument register/barrier intrinsics take no arguments"
     `Quick
     (fun () ->

@@ -1548,6 +1548,20 @@ function attribute. Takibi functions and function-pointer rows cannot claim
 it yet; this narrow surface models the reviewed assembly fail-stop without
 pretending arbitrary Takibi loops are proven not to return.
 
+Lock order is checked with two structured checker annotations. An acquisition
+function declares `acquires_lock_<rank>_<name>`; its minimum reachable rank is
+inferred through resolved direct calls. A function returning the linear token
+for a held lock also declares `lock_guard_<rank>_<name>`. While such a token is
+live, calling a function whose minimum acquisition rank is less than the held
+rank is a compile error naming both lock classes. Consuming the linear token
+ends the held-lock fact. Ranks therefore increase with nesting;
+for example, a connection guard at rank 30 may nest a pool guard at rank 40,
+while the reverse order is rejected. Equal-rank acquisitions are allowed: a
+rank identifies a lock class rather than a particular instance, and the
+kernel deliberately holds several independent connections in its pool probe.
+These annotations are checker-only and do not appear in function-pointer
+effect rows.
+
 `exception` marks a synchronous-exception handler root. Like `interrupt`, it
 is a declaration role rather than a callable function-pointer effect, and an
 extern function cannot claim it because there is no Takibi body to check.
