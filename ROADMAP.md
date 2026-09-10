@@ -645,7 +645,20 @@ disables whatever is reading it.
    `validate_kernel_dmesg_timestamps.py` is its reader, so whichever lands
    first is judged by the same number in a diff.
 
-   **#182** is unrelated to both and needs no Territory A file either.
+   **#182 was split and closed 2026-09-10.** It was a follow-up to #177 and
+   described a 1 MiB, one-block-group, direct-block-only filesystem; about
+   half of its ten scope bullets had since been done under other numbers --
+   indirect reads, multi-block directory lookup, path walking into
+   subdirectories, `getdents64`, and the offset validation. The remaining five
+   have different dependency chains, which is why the bar kept rising:
+   **#535** indirect writes, **#536** multiple block groups, **#537**
+   directory mutation beyond root and beyond one block, **#538** the three
+   missing directory syscalls (behind #537), and **#539** long symlinks. The
+   evidence table is on #182.
+
+   Of those, **#537 is the keystone** -- it is what `mkdirat`, `unlinkat` and
+   rename all wait on, and the kernel can currently find `/etc/init.sh` and
+   cannot create a file next to it.
 7. **#388** stack-overflow coverage for the hand-written vectors (Territory
    A's files), **#429** in-kernel GDB stub, **#149** GDB without JTAG,
    **#444** controlled DDB memory mutation.
