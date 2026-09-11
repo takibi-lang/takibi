@@ -550,6 +550,51 @@ def check_exception_stacks_are_per_core(insns):
     return failures
 
 
+# GitHub issue #532: logical Running publication does not prove that the old
+# CPU has left a process's physical kernel stack. Both generated paths that
+# return to EL0 must call the ownership hook after selecting the returned
+# frame as SP, with IRQs masked. `after_switch` is optional language syntax,
+# so compiler tests can prove its lowering while still letting a kernel caller
+# accidentally omit the key. Check the linked image, which is the contract the
+# CPU actually executes.
+STACK_SWITCH_FUNCTIONS = ("el0_irq_entry", "el0_context_resume")
+STACK_SWITCH_HOOK = "kernel_process_stack_switch_complete"
+
+
+def check_process_stack_handoff_hook(insns):
+    failures = []
+    bodies = {}
+    for _, text, fn in insns:
+        if fn in STACK_SWITCH_FUNCTIONS:
+            bodies.setdefault(fn, []).append(text)
+
+    required = [
+        re.compile(r"^mov\s+sp,\s*x0$", re.I),
+        re.compile(r"^msr\s+DAIFSet,\s*#0x2$", re.I),
+        re.compile(r"^mov\s+x0,\s*sp$", re.I),
+        re.compile(r"^bl\s+.*<%s>$" % STACK_SWITCH_HOOK),
+    ]
+    for fn in STACK_SWITCH_FUNCTIONS:
+        body = bodies.get(fn)
+        if body is None:
+            failures.append(
+                "issue #532 regression: %s is absent, so its process-stack "
+                "handoff boundary cannot be verified" % fn)
+            continue
+        found = any(
+            all(pattern.match(body[start + offset])
+                for offset, pattern in enumerate(required))
+            for start in range(max(0, len(body) - len(required) + 1))
+        )
+        if not found:
+            failures.append(
+                "issue #532 regression: %s does not select the returned "
+                "frame, mask IRQs, and call %s in that order; another CPU "
+                "could acquire the process stack before this CPU leaves it"
+                % (fn, STACK_SWITCH_HOOK))
+    return failures
+
+
 def main():
     if len(sys.argv) != 3:
         print(
@@ -569,6 +614,7 @@ def main():
         + check_mutex_masks_before_taking(insns)
         + check_tlb_invalidate_all_is_broadcast(insns)
         + check_exception_stacks_are_per_core(insns)
+        + check_process_stack_handoff_hook(insns)
     )
     if failures:
         for f in failures:
@@ -579,7 +625,9 @@ def main():
           "target-selected compare-exchange, mutex_acquire masking "
           "before it takes, the whole-TLB invalidate broadcasting "
           "while MMU activation stays local, and every exception entry "
-          "switching to a stack of its own core, all verified statically",
+          "switching to a stack of its own core, with every EL0 process "
+          "return crossing the physical stack-handoff hook, all verified "
+          "statically",
                 insns=len(insns))
     return 0
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Controls for the SCTLR alignment-policy disassembly check."""
+"""Offline controls for kernel linked-assembly invariant checks."""
 
 import buildcheck_kernel_asm_invariants as checker
 
@@ -54,9 +54,42 @@ def main():
         print("FAIL kernel-asm-alignment control: missing function passed")
         return 1
 
+    handoff_ok = [
+        (0x2000, "mov sp, x0", "el0_irq_entry"),
+        (0x2004, "msr DAIFSet, #0x2", "el0_irq_entry"),
+        (0x2008, "mov x0, sp", "el0_irq_entry"),
+        (0x200C, "bl 0x3000 <kernel_process_stack_switch_complete>",
+         "el0_irq_entry"),
+        (0x2100, "mov sp, x0", "el0_context_resume"),
+        (0x2104, "msr DAIFSet, #0x2", "el0_context_resume"),
+        (0x2108, "mov x0, sp", "el0_context_resume"),
+        (0x210C, "bl 0x3000 <kernel_process_stack_switch_complete>",
+         "el0_context_resume"),
+    ]
+    CASES.note()
+    if checker.check_process_stack_handoff_hook(handoff_ok):
+        print("FAIL kernel-asm-alignment control: valid stack handoff failed")
+        return 1
+
+    CASES.note()
+    missing = checker.check_process_stack_handoff_hook(
+        [item for item in handoff_ok if item[2] != "el0_context_resume"])
+    if len(missing) != 1 or "el0_context_resume is absent" not in missing[0]:
+        print("FAIL kernel-asm-alignment control: missing return path passed")
+        return 1
+
+    CASES.note()
+    wrong_order = list(handoff_ok)
+    wrong_order[1], wrong_order[2] = wrong_order[2], wrong_order[1]
+    failures = checker.check_process_stack_handoff_hook(wrong_order)
+    if len(failures) != 1 or "does not select" not in failures[0]:
+        print("FAIL kernel-asm-alignment control: reordered handoff passed")
+        return 1
+
     report_pass(
         "kernel-asm-alignment controls",
-        "A-bit clear accepted, set rejected",
+        "A-bit clear accepted and set rejected; both physical stack-handoff "
+        "paths required in order",
         cases=CASES.ran)
     return 0
 
