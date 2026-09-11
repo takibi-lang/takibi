@@ -121,6 +121,18 @@ def answered(text: bytes) -> bool:
     return any(line.removeprefix("/ # ") == ANSWER for line in lines)
 
 
+class Counter(gdb.Breakpoint):
+    """Counts passes without stopping the guest."""
+
+    def __init__(self, spec: str):
+        super().__init__(spec, internal=True)
+        self.count = 0
+
+    def stop(self) -> bool:
+        self.count += 1
+        return False
+
+
 def interrupt_after(seconds: float) -> threading.Timer:
     timer = threading.Timer(seconds, lambda: os.kill(os.getpid(), signal.SIGINT))
     timer.start()
@@ -156,6 +168,12 @@ def run() -> None:
     gdb.execute("set confirm off")
     gdb.execute(f"target remote 127.0.0.1:{GDB_PORT}")
     window = gdb.Breakpoint(WINDOW)
+    # The lane's premise, checked rather than assumed: the window only exists
+    # when the read goes on to BLOCK. A first version of this lane typed into
+    # a shell whose reads never blocked, and it passed on the kernel with the
+    # lost wakeup. Each window pass but the last is resumed inside this run,
+    # so that many block returns are required.
+    blocking = Counter("kernel_syscall_block_return")
     for index, value in enumerate(COMMAND):
         connection.sendall(bytes([value]))
         # The guest is stopped; QEMU's main loop still moves the byte into
@@ -177,8 +195,17 @@ def run() -> None:
                     "(GitHub issue #546)")
             gdb.execute("detach")
             return
+    blocked = blocking.count
     window.delete()
+    blocking.delete()
     gdb.execute("detach")
+    if blocked < len(COMMAND) - 1:
+        verdict(False, f"only {blocked} of the {len(COMMAND) - 1} reads resumed "
+                "inside the window went on to block, so the window this lane "
+                "opens was not on their path. It would pass on a kernel with "
+                "the lost wakeup: the reader needs something else runnable "
+                "beside it")
+        return
     if not seen(answered, 15.0):
         verdict(False, f"every byte of {COMMAND!r} was read, but `{ANSWER}` "
                 "never came back from the shell")

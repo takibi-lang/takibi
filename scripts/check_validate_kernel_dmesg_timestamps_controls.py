@@ -212,7 +212,10 @@ def main() -> int:
              t.replace("virtio net", "rp1 gem")) for s, t in HEALTHY]
     status, output = run(replace(
         rpi5, "foreground server: listener ready port=8080", 27.2), "rpi5")
-    if status == 0 or "INVESTIGATE, do not raise" not in output:
+    # GitHub issue #545: a bound failure also says where the time went.
+    if (status == 0 or "INVESTIGATE, do not raise" not in output or
+            "The largest gaps in the host timing log: " not in output or
+            " s before " not in output):
         print("FAIL dmesg-timestamps control: an RPi5 boot 25.2 s outside "
               f"its ash session was accepted or reported oddly\n{output}")
         return 1

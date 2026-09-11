@@ -75,6 +75,26 @@ def ash_session_us(timing_log: Path) -> int:
     return round((end - start) * 1_000_000)
 
 
+def largest_gaps(timing_log: Path, count: int = 5) -> str:
+    """The longest silences in the host timing log, for a bound failure.
+
+    GitHub issue #545's first USB boot failed the bound, and the question
+    after INVESTIGATE was where the time went. That answer was a script typed
+    by hand over this same log: nearly every exec took about 3 s. Printing it
+    with the failure makes that question free.
+    """
+    rows = []
+    for line in timing_log.read_bytes().replace(b"\r", b"").splitlines():
+        match = TIMED.match(line)
+        if match:
+            rows.append((float(match.group(1)),
+                         match.group(2).strip().decode("ascii", "replace")[:60]))
+    gaps = sorted(((later[0] - earlier[0], later[1])
+                   for earlier, later in zip(rows, rows[1:])), reverse=True)
+    return "; ".join(f"{gap:.1f} s before {text!r}"
+                     for gap, text in gaps[:count])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("uart_log", type=Path)
@@ -238,7 +258,8 @@ def main() -> None:
             f"{maximum_boot / 1_000_000:.0f} s bound. INVESTIGATE, do not "
             "raise the bound: the number this guards against is complexity "
             "added to a path that runs per page or per record, which does "
-            "not announce itself any other way."
+            "not announce itself any other way. The largest gaps in the host "
+            f"timing log: {largest_gaps(args.timing_log)}."
         )
     elapsed = by_text[resumed] - by_text[listener]
     if elapsed < minimum_delay or elapsed > maximum_delay:

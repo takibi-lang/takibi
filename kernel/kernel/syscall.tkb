@@ -2324,6 +2324,19 @@ fn kernel_syscall_block_return(frame_sp: usize) {
         // this same write again rather than resuming after it -- what it
         // wants is room in the transmit queue, and another look finds it.
         el0_context_retry_syscall(frame_sp);
+        // The window #546 closed for reads, on the transmit side. Between
+        // the write's look at the queue and this sleep, the TX interrupt can
+        // drain the queue past the mark and find no Blocked writer to wake.
+        // Once the queue is empty it also disables itself, and the writer
+        // would then sleep until some other output happened to start it
+        // again. With interrupts masked from here, either the room is there
+        // now and the rewound write runs again, or the interrupt that makes
+        // the room arrives after this process is Blocked.
+        disable_irq();
+        if (kernel_log_tx_writer_room()) {
+            workload_profile_el0_enter();
+            el0_context_resume(frame_sp);
+        }
         next_sp = kernel_process_block_uart_tx(frame_sp);
         if (next_sp == 0) {
             workload_profile_el0_enter();

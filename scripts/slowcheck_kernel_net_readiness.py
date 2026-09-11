@@ -122,24 +122,25 @@ def main() -> int:
                   "wire readiness into kernel_net_test.py")
             return 1
         # The UART end is whatever reads this lane's guest: the ash driver,
-        # the DDB lane's driver (which starts the peer too since e2b0dea), or
-        # -- for GitHub issue #546's lane, whose UART is typed by gdb -- the
-        # gdb script, which takes the same two files from its environment.
-        # Whichever a runner uses must be wired, and it must use one of them.
-        uart_ends = (
-            ("run_kernel_uart_driver.py",
-             ("--init-listener-file", "--network-ready-file")),
-            ("run_kernel_ddb_driver.py",
-             ("--init-listener-file", "--network-ready-file")),
-            ("kernel_uart_wake_check.py",
-             ("UART_WAKE_INIT_LISTENER=", "UART_WAKE_NETWORK_READY=")))
-        verdicts = [(program, wired(program, flags))
-                    for program, flags in uart_ends]
-        present = [(program, ok) for program, ok in verdicts if ok is not None]
-        if not present or not all(ok for _, ok in present):
-            named = present[0][0] if present else "run_kernel_uart_driver.py"
+        # the DDB lane's driver, or the uart-wake lane's gdb script (GitHub
+        # issue #546), which takes the files from its environment. It is
+        # recognised by what it is handed rather than by name: an earlier
+        # version listed the programs, and refused the DDB lane the day that
+        # lane started the peer (CI run 34571244409). Some call other than
+        # the peer's must carry both files, and no call may carry only one.
+        pairs = (("--init-listener-file", "--network-ready-file"),
+                 ("UART_WAKE_INIT_LISTENER=", "UART_WAKE_NETWORK_READY="))
+        others = [line for line in commands
+                  if '"$REPO_ROOT/scripts/kernel_net_test.py"' not in line]
+        whole = [line for line in others
+                 if any(all(flag in line for flag in pair) for pair in pairs)]
+        partial = [line for line in others
+                   if any(any(flag in line for flag in pair) and
+                          not all(flag in line for flag in pair)
+                          for pair in pairs)]
+        if not whole or partial:
             print(f"FAIL net-readiness control: {runner.name} does not "
-                  f"wire readiness into {named}")
+                  "hand both readiness files to its UART end")
             return 1
     # 0. Protocol retries must start only after the kernel link is ready, and
     # the init socket exchange must wait for its own later listener. Otherwise

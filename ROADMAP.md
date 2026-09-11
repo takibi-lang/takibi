@@ -543,8 +543,8 @@ The active order, re-derived 2026-09-11, is:
 4. **#534** publish direct userspace UART output from peer CPUs through the
    sole ordinary core-0 writer, with bounded backpressure and an emergency
    DDB/fatal path that never waits for it. This is the console half #9 must
-   not bypass. It covers output only. UART input on a peer CPU is outside
-   its scope; see the #9 phase B entry in the Territory A queue.
+   not bypass. It covers output only. UART input on a peer CPU is #547; see
+   the #9 phase B entry in the Territory A queue.
 5. **#281, re-scoped by measurement before any code.** #545's block-layer
    read-ahead (6a4828f) already turns a device read that continues the last
    one into a single 64-block command. On the first measured boot, 663 runs
@@ -556,7 +556,17 @@ The active order, re-derived 2026-09-11, is:
 6. **#542** finish the inventory of kernel-side verification machinery and
    move userspace-observable checks behind fork/exec. This is independent of
    scheduler affinity and can follow #281 without touching Territory A.
-7. **#537 close audit**, then #535 or #536 only when a current filesystem
+7. **#550 and #551, from the #546 audit.** #550 sweeps every
+   `ProcessWaitReason` for the check-then-block window #546 found. UartRx
+   and UartTx are closed. NetRx has the window but recovers on the peer's
+   retransmission. ChildExit, Signal and Deadline are unexamined. #550 also
+   asks for a structural re-check, so the next wait reason cannot omit it.
+   The kernel side of that (`kernel/kernel/`) is Territory A, so it is
+   coordinated like #544 was. #551 makes DDB print the waker-side state
+   (queued RX bytes, TX room, pending frames) beside each blocked waiter:
+   #546's two postmortems showed the blocked shell and not the byte it was
+   waiting for. #549 (depfiles, `lib/`) is Territory A's.
+8. **#537 close audit**, then #535 or #536 only when a current filesystem
    caller requires them. Rename landed under the already-closed #538, so the
    remaining task on #537 is to re-check its acceptance evidence and close it
    if nothing remains, not to grow its scope.

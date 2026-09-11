@@ -278,6 +278,25 @@ slot is valid only while the epoch it was filled at is still the current one.
 `memory.tkb` asserts the core count and `KERNEL_PREEMPTIBLE == 0` beside its
 only caller.
 
+The same file's read-ahead run is per core too (GitHub issue #545). It is
+one 64-block buffer per core, with the block range, backend and write
+epoch it was filled at, and the block after that core's last device read.
+It is held to the block cache's epoch through `block_cache_epoch_now()`, so
+any write retires it exactly as it retires a cached block. The run and
+per-block read totals `block io:` prints are per core for the reason the
+other counters are.
+
+`kernel/platform/rpi5/usb_provision.tkb` holds the embedded ext2 image and
+its two copy buffers. It is used once, by CPU0, while storage is set up and
+before any process exists. Only the board's init uses that file, and the
+image is private to it: `KernelBlockDevice` has no memory backend, so the
+image cannot be mounted (94f1c36).
+
+`kernel/printk/log.tkb`'s `uart_user_write_waits` and
+`uart_user_write_sleeps` (GitHub issue #544) count terminal writes that
+found no room in the transmit queue, and those of them that slept. They are
+written only on core 0, the queue's owner.
+
 **Why global:** the kernel mounts exactly one ext2 filesystem at boot.
 Per-block scratch for a single-mount filesystem is legitimately shared scratch
 space rather than per-process state; what it is not is shared between cores.
