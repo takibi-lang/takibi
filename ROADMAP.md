@@ -782,24 +782,45 @@ more than the entry.
 What each of those cost was one hour of reading and what it saved was a week
 of building the wrong thing. Do the same here.
 
-**#537's ext2 half is done, and the maintainer wants it reachable from
-userspace next -- which is #538, and #538 is not this territory's alone.**
-Directory growth and nested `mkdir`/`rmdir` landed 2026-09-10. The QEMU
-lane runs `e2fsck -fn` over the guest's disk after every run, and two planted
-defects were caught there and nowhere else: a missing `i_blocks` increment,
-and a missing used-directories count. Every view passed both times.
+**#538 is this territory's, by the maintainer's decision on 2026-09-11:**
+Codex stays on multicore, so Claude Code crosses into
+`kernel/kernel/syscall.tkb` for `mkdirat`, `unlinkat` and `renameat`. It is
+additions beside `openat`, not a restructuring, which is the shape the
+territory rule tolerates.
 
-`mkdirat`, `unlinkat` and `renameat` belong in `kernel/kernel/syscall.tkb`,
-Territory A's second-largest file. Three syscalls with their errno contracts
-are more than the minimal edit the relaxed rule allows, so they want either
-the maintainer's go-ahead to cross or Territory A landing the syscall half.
-The ext2 calls they need already exist: `ext2_make_directory_in`,
-`ext2_remove_directory_in` and `ext2_unlink_file_in`. Two things the syscall
-side will meet: the file and directory owners are linear, so a syscall that
-creates something persistent consumes the owner with
-`ext2_directory_keep` rather than holding it; and a later unlink of
-something made earlier has no owner to hand in, which is the first design
-question the syscall half has to answer.
+Directory growth and nested `mkdir`/`rmdir` landed 2026-09-10 under #537.
+The QEMU lane runs `e2fsck -fn` over the guest's disk after every run, and two
+planted defects were caught there and nowhere else: a missing `i_blocks`
+increment, and a missing used-directories count. Every view passed both
+times.
+
+**#538's first increment, 2026-09-11: `mkdirat` and `unlinkat` with
+`AT_REMOVEDIR`**, reached by BusyBox `mkdir`/`rmdir` from the shared ash
+script on both lanes. The design question the linear owners raised is
+answered by `ext2_claim_directory`. `ext2_directory_keep` ended a kept
+directory's obligation when it was made, so a later rmdir mints the owner
+back from the on-disk entry. That is sound only while one core at a time
+reaches ext2 mutation, and the admission rule in `kernel/CONCURRENCY.md` is
+what holds that today. When Territory A admits a filesystem-reaching process
+to core 1, this is one of the sites that changes meaning.
+
+Next: `unlinkat` for files (BusyBox `rm`), then `renameat` (`mv`). **The
+budget they share is the boot-duration bound, and it is measured.** Each
+BusyBox exec costs about 0.5 s under QEMU, because each one streams the
+1.09 MB static ELF through ext2, and #208's metadata re-reads are most of
+that. The first version of the mkdir/rmdir test was nine one-command lines.
+It took the boot's last milestone from 22.3 s to 27.3 s against a 25 s bound.
+It is two lines now, one exec each, because `mkdir` and `rmdir` carry on past
+a failing argument and each names its target twice -- the second EEXIST and
+the second ENOENT are what show the first call worked, so no `ls` is spent
+confirming it. The block costs about a second, and the milestone was 22.3 s
+on the run that landed it. So `rm` and `mv` get about four execs between
+them before the bound fires. Fold them into lines that carry on the same
+way, or land #208 first, which buys the budget back for every exec.
+
+One thing that folding gave up: no lane runs `ls` on a directory this
+kernel made. getdents64 over a kernel-written directory block is covered only
+by the kernel's own `ext2_directory_live_entries` walk.
 
 `getdents64`'s limit is the twelve direct blocks, which growth also stops at.
 Lifting it means growing into an indirect block, and nothing needs that yet.

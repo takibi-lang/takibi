@@ -109,7 +109,8 @@ The current RPi5 kernel includes:
 
 The rootfs keeps executable files under `/bin`: Alpine's original
 `busybox.static` and `busybox-extras` names identify the two real binaries;
-`sh`, `cat`, `echo`, `ls`, `od`, and `uname` are hard links to the static
+`sh`, `cat`, `echo`, `ls`, `od`, `ps`, `dmesg`, `mkdir`, `rmdir`, and
+`uname` are hard links to the static
 binary, while `httpd` is a hard link to BusyBox Extras. The independent
 Takibi test programs are `/bin/user_payload` (the EL0 syscall-ABI fixture)
 and the pair `/bin/busy-a`/`/bin/busy-b`, which are the same object linked

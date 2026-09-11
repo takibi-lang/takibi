@@ -109,6 +109,11 @@ const LINUX_ENOEXEC: usize = 0xFFFFFFFFFFFFFFF8;
 // this when the header read itself fails, rather than with a verdict about a
 // format it never saw.
 const LINUX_EIO: usize = 0xFFFFFFFFFFFFFFFB;
+// GitHub issue #538: the errnos BusyBox mkdir and rmdir tell apart.
+const LINUX_EEXIST: usize = 0xFFFFFFFFFFFFFFEF;
+const LINUX_ENOTDIR: usize = 0xFFFFFFFFFFFFFFEC;
+const LINUX_ENOTEMPTY: usize = 0xFFFFFFFFFFFFFFD9;
+const LINUX_AT_REMOVEDIR: usize = 0x200;
 // RLIMIT_NOFILE, and Linux's RLIM64_INFINITY.
 const LINUX_RLIMIT_NOFILE: usize = 7;
 // Linux's RLIM_NLIMITS (include/uapi/asm-generic/resource.h): the number of
@@ -1449,6 +1454,95 @@ fn kernel_syscall_path_name(address: usize) -> SyscallPathResult {
     return SyscallPathResult::Name(full_path);
 }
 
+// GitHub issue #538: a path a mutating syscall names, split into the
+// directory that holds its last component and that component's span in the
+// path. Lookup can walk any path; a mutation needs the directory it changes,
+// which is the path minus its last component.
+struct SyscallParent {
+    inode: usize;
+    leaf_start: usize;
+    leaf_end: usize;
+}
+
+must_use variant SyscallParentResult { Errno(usize); Found(SyscallParent); }
+
+fn kernel_syscall_parent_of(dirfd: usize, absolute: bool, path_name: []u8)
+        -> SyscallParentResult !{unsafe} {
+    // Trailing slashes name the same directory entry (`mkdir a/` is `a`).
+    let mut end: usize = path_name.len;
+    for step: usize in 0..<256 {
+        if (end > 1) {
+            let probe: usize = end - 1;
+            if (probe < path_name.len) {
+                if (path_name[probe] == 0x2F) { end = probe; }
+            }
+        }
+    }
+    let mut leaf_start: usize = 0;
+    for position: usize in 0..<256 {
+        if (position < end && position < path_name.len) {
+            if (path_name[position] == 0x2F) { leaf_start = position + 1; }
+        }
+    }
+    let mut start_inode: usize = 2;
+    if (absolute == false && dirfd != LINUX_AT_FDCWD) {
+        if (kernel_syscall_directory_is_open(dirfd) == false) {
+            return SyscallParentResult::Errno(LINUX_EBADF);
+        }
+        start_inode = kernel_syscall_directory_inode(dirfd);
+    }
+    let mut parent_inode: usize = start_inode;
+    if (leaf_start > 1) {
+        let parent_end: usize = leaf_start - 1;
+        if (parent_end > path_name.len) {
+            return SyscallParentResult::Errno(LINUX_EINVAL);
+        }
+        let parent_path = path_name[0..<parent_end];
+        match ext2_lookup_path_from(syscall_ext2_mount, start_inode,
+                                    parent_path) {
+            Ext2LookupResult::Invalid => {
+                return SyscallParentResult::Errno(LINUX_ENOENT);
+            }
+            Ext2LookupResult::NotFound => {
+                return SyscallParentResult::Errno(LINUX_ENOENT);
+            }
+            Ext2LookupResult::Found(found) => { parent_inode = found; }
+        }
+    }
+    if ((ext2_inode_mode(syscall_ext2_mount, parent_inode) & 0xF000) !=
+        0x4000) {
+        return SyscallParentResult::Errno(LINUX_ENOTDIR);
+    }
+    if (leaf_start >= end) {
+        return SyscallParentResult::Errno(LINUX_ENOENT);
+    }
+    let mut parent: SyscallParent = { parent_inode, leaf_start, end };
+    return SyscallParentResult::Found(parent);
+}
+
+// The last component, or an empty slice when the span does not fit. Each end
+// is checked against what it slices, one at a time, because two ends found
+// by separate scans cannot be related to each other.
+fn kernel_syscall_leaf(path_name: []u8, parent: SyscallParent) -> []u8 {
+    let leaf_end: usize = parent.leaf_end;
+    if (leaf_end > path_name.len) { return path_name[0..<0]; }
+    let head = path_name[0..<leaf_end];
+    let leaf_start: usize = parent.leaf_start;
+    if (leaf_start > head.len) { return path_name[0..<0]; }
+    return head[leaf_start..<head.len];
+}
+
+// `.` and `..` are names a directory has, not entries it can gain or lose.
+fn kernel_syscall_leaf_is_dot(leaf: []u8) -> bool {
+    if (leaf.len == 1) { return leaf[0] == 0x2E; }
+    return false;
+}
+
+fn kernel_syscall_leaf_is_dot_dot(leaf: []u8) -> bool {
+    if (leaf.len == 2) { return leaf[0] == 0x2E && leaf[1] == 0x2E; }
+    return false;
+}
+
 // Issue #196: writev(2)/readv(2) per-segment results, kept distinct from
 // the underlying byte count instead of encoding "this is actually an
 // errno" via a magnitude heuristic (Linux -errno values happen to be
@@ -2654,6 +2748,106 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                             }
                             UnifiedOpenResult::Ok => { return SyscallAction::Resume(fd); }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    if (number == 34) {
+        // mkdirat(dirfd, pathname, mode), GitHub issue #538. The mode is not
+        // applied: every directory is 0755 and every process is root, which
+        // is the whole of this kernel's permission model today.
+        if (syscall_ext2_ready == false) {
+            return SyscallAction::Resume(LINUX_EBADF);
+        }
+        let path_name: []u8 = match kernel_syscall_path_name(x1) {
+            SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+            SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
+            SyscallPathResult::Name(path) => { path }
+        };
+        let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
+        let absolute: bool = path_view[0] == 0x2F;
+        let parent: SyscallParent = match kernel_syscall_parent_of(
+                x0, absolute, path_name) {
+            SyscallParentResult::Errno(errno) => {
+                return SyscallAction::Resume(errno);
+            }
+            SyscallParentResult::Found(found) => { found }
+        };
+        let leaf: []u8 = kernel_syscall_leaf(path_name, parent);
+        if (leaf.len == 0) { return SyscallAction::Resume(LINUX_ENOENT); }
+        if (kernel_syscall_leaf_is_dot(leaf) ||
+            kernel_syscall_leaf_is_dot_dot(leaf)) {
+            return SyscallAction::Resume(LINUX_EEXIST);
+        }
+        match ext2_lookup_directory(syscall_ext2_mount, parent.inode, leaf) {
+            Ext2LookupResult::Found(existing) => {
+                return SyscallAction::Resume(LINUX_EEXIST);
+            }
+            Ext2LookupResult::Invalid => { return SyscallAction::Resume(LINUX_EIO); }
+            Ext2LookupResult::NotFound => { }
+        }
+        // The directory stays, so its owner ends here: the tree names it from
+        // now on, and a later rmdir claims it back from the tree.
+        match ext2_make_directory_in(syscall_ext2_mount, parent.inode, leaf) {
+            Ext2MkdirResult::Invalid => { return SyscallAction::Resume(LINUX_EIO); }
+            Ext2MkdirResult::Created(directory) => {
+                ext2_directory_keep(directory);
+                return SyscallAction::Resume(0);
+            }
+        }
+    }
+
+    if (number == 35 && x2 == LINUX_AT_REMOVEDIR) {
+        // unlinkat(dirfd, pathname, AT_REMOVEDIR) -- rmdir, GitHub issue
+        // #538. Without the flag this is unlink, which is not handled here.
+        if (syscall_ext2_ready == false) {
+            return SyscallAction::Resume(LINUX_EBADF);
+        }
+        let path_name: []u8 = match kernel_syscall_path_name(x1) {
+            SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+            SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
+            SyscallPathResult::Name(path) => { path }
+        };
+        let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
+        let absolute: bool = path_view[0] == 0x2F;
+        let parent: SyscallParent = match kernel_syscall_parent_of(
+                x0, absolute, path_name) {
+            SyscallParentResult::Errno(errno) => {
+                return SyscallAction::Resume(errno);
+            }
+            SyscallParentResult::Found(found) => { found }
+        };
+        let leaf: []u8 = kernel_syscall_leaf(path_name, parent);
+        if (leaf.len == 0) { return SyscallAction::Resume(LINUX_ENOENT); }
+        // Linux's own answers: rmdir(".") is EINVAL, rmdir("..") ENOTEMPTY.
+        if (kernel_syscall_leaf_is_dot(leaf)) {
+            return SyscallAction::Resume(LINUX_EINVAL);
+        }
+        if (kernel_syscall_leaf_is_dot_dot(leaf)) {
+            return SyscallAction::Resume(LINUX_ENOTEMPTY);
+        }
+        match ext2_claim_directory(syscall_ext2_mount, parent.inode, leaf) {
+            Ext2ClaimResult::Invalid => { return SyscallAction::Resume(LINUX_EIO); }
+            Ext2ClaimResult::NotFound => { return SyscallAction::Resume(LINUX_ENOENT); }
+            Ext2ClaimResult::NotDirectory => {
+                return SyscallAction::Resume(LINUX_ENOTDIR);
+            }
+            Ext2ClaimResult::Claimed(directory) => {
+                match ext2_remove_directory_in(syscall_ext2_mount,
+                                               parent.inode, directory, leaf) {
+                    Ext2RmdirResult::Removed => { return SyscallAction::Resume(0); }
+                    Ext2RmdirResult::Invalid => {
+                        return SyscallAction::Resume(LINUX_EIO);
+                    }
+                    Ext2RmdirResult::NotEmpty(kept) => {
+                        ext2_directory_keep(kept);
+                        return SyscallAction::Resume(LINUX_ENOTEMPTY);
+                    }
+                    Ext2RmdirResult::Refused(kept) => {
+                        ext2_directory_keep(kept);
+                        return SyscallAction::Resume(LINUX_EIO);
                     }
                 }
             }

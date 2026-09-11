@@ -258,13 +258,17 @@ if [ -z "$etc_size" ] || [ "$etc_size" -le 1024 ]; then
     archive_reason="ext2 /etc not grown"
     exit 1
 fi
-debugfs -R 'stat /etc/made/inner' "$QEMU_EXT2_IMAGE" \
-    >"$ARTIFACT_DIR/nested-stat.log" 2>&1
-if ! grep -q 'Type: directory' "$ARTIFACT_DIR/nested-stat.log"; then
-    echo "FAIL $RUN_LABEL: /etc/made/inner is not a directory on the guest's disk" >&2
-    archive_reason="ext2 nested directory absent"
-    exit 1
-fi
+# /etc/made/inner is the boot fixture's; /kept is the shell's, made through
+# mkdirat, so e2fsck judges the syscall path's directories too.
+for kept_directory in /etc/made/inner /kept; do
+    debugfs -R "stat $kept_directory" "$QEMU_EXT2_IMAGE" \
+        >"$ARTIFACT_DIR/kept-stat.log" 2>&1
+    if ! grep -q 'Type: directory' "$ARTIFACT_DIR/kept-stat.log"; then
+        echo "FAIL $RUN_LABEL: $kept_directory is not a directory on the guest's disk" >&2
+        archive_reason="ext2 kept directory absent: $kept_directory"
+        exit 1
+    fi
+done
 if ! e2fsck -fn "$QEMU_EXT2_IMAGE" >"$ARTIFACT_DIR/e2fsck.log" 2>&1; then
     sed 's/^/  /' "$ARTIFACT_DIR/e2fsck.log" >&2
     echo "FAIL $RUN_LABEL: e2fsck rejected the disk the guest wrote" >&2

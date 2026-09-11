@@ -143,6 +143,14 @@ must_use variant Ext2RmdirResult {
 
 must_use variant Ext2RmdirStep { Refused; NotEmpty; Unlinked; }
 
+must_use variant Ext2ClaimResult {
+    Invalid;
+    NotFound;
+    NotDirectory;
+    Claimed(exists inode: usize. exists block: usize.
+            Ext2LinkedDirectory[inode, block]);
+}
+
 fn ext2_u16(bytes: borrow *u8, offset: usize) -> u16 {
     if (offset > KERNEL_BLOCK_SIZE - 2) { return 0; }
     return (bytes[offset as isize] as u16) |
@@ -1354,9 +1362,9 @@ private fn ext2_directory_grow_publish(mount: Ext2Mount, directory: Ext2Inode,
 //
 // Past twelve blocks, or on a volume with no free block, this still answers
 // Invalid, and the caller cannot tell that from a malformed directory:
-// Ext2DirectoryResult has two cases. No caller acts differently on a full
-// directory today. A syscall that reports ENOSPC is the caller that would,
-// and the case belongs with it.
+// Ext2DirectoryResult has two cases. mkdirat therefore answers EIO where
+// Linux would answer ENOSPC; the case is worth adding with the first lane
+// that fills a directory or a volume, since nothing exercises either.
 private fn ext2_directory_grow(mount: Ext2Mount, directory: Ext2Inode,
                                blocks: usize, inode_number: usize,
                                name: borrow []u8) -> Ext2DirectoryResult !{unsafe} {
@@ -2094,6 +2102,63 @@ private fn ext2_rmdir_release(mount: Ext2Mount, parent_inode: usize,
     }
     if (links_ok && inode_ok && block_ok) { return Ext2RmdirResult::Removed; }
     return Ext2RmdirResult::Invalid;
+}
+
+private fn ext2_linked_directory_mint(inode_bitmap_index: usize,
+                                      block_bitmap_index: usize,
+                                      inode_number: usize @ inode,
+                                      block_number: usize @ block)
+        -> Ext2LinkedDirectory[inode, block] {
+    let mut linked: Ext2LinkedDirectory[inode, block] = {
+        inode_bitmap_index, block_bitmap_index, inode_number, block_number
+    };
+    return linked;
+}
+
+// GitHub issue #538: the owner of a directory made earlier and kept.
+// ext2_directory_keep ended that directory's obligation when it was made, so
+// a later rmdir has nothing to hand in; this mints the owner again from the
+// tree -- the entry in the parent and the inode it names. `.` and `..` are
+// refused here rather than only by the caller: minting an owner for `..`
+// would hand a removal the parent's own parent.
+//
+// Minting from the tree is sound only while one core at a time reaches ext2
+// mutation: two claims of the same entry would be two owners of one block.
+// kernel/CONCURRENCY.md's admission rule is what holds that today -- every
+// process that reaches the filesystem is admitted to core 0 only -- and it is
+// a claim about admission that nothing here can check.
+fn ext2_claim_directory(mount: Ext2Mount, parent_inode: usize,
+                        name: borrow []u8) -> Ext2ClaimResult !{unsafe} {
+    if (name.len == 0) { return Ext2ClaimResult::Invalid; }
+    if (name.len == 1) {
+        if (name[0] == 0x2E) { return Ext2ClaimResult::Invalid; }
+    }
+    if (name.len == 2) {
+        if (name[0] == 0x2E && name[1] == 0x2E) {
+            return Ext2ClaimResult::Invalid;
+        }
+    }
+    match ext2_lookup_directory(mount, parent_inode, name) {
+        Ext2LookupResult::Invalid => { return Ext2ClaimResult::Invalid; }
+        Ext2LookupResult::NotFound => { return Ext2ClaimResult::NotFound; }
+        Ext2LookupResult::Found(inode_number) => {
+            match ext2_read_inode(mount, inode_number) {
+                Ext2InodeResult::Invalid => { return Ext2ClaimResult::Invalid; }
+                Ext2InodeResult::Inode(directory) => {
+                    if ((directory.mode & 0xF000) != 0x4000) {
+                        return Ext2ClaimResult::NotDirectory;
+                    }
+                    let block_number: usize = directory.direct_block0;
+                    if (inode_number < 2 || block_number < 2) {
+                        return Ext2ClaimResult::Invalid;
+                    }
+                    return Ext2ClaimResult::Claimed(ext2_linked_directory_mint(
+                        inode_number - 1, block_number - 1,
+                        inode_number, block_number));
+                }
+            }
+        }
+    }
 }
 
 fn ext2_remove_directory_in(mount: Ext2Mount, parent_inode: usize,
