@@ -5201,7 +5201,6 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
             }
 
             user_pte_clear(probe_index);
-            user_tlb_invalidate(oldact_va);
             return ok;
         }
     }

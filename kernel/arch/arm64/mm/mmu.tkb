@@ -10,14 +10,14 @@ const MMU_TABLE_ENTRY_COUNT: usize = 512;
 const UXN_BIT: usize = 0x40000000000000;
 const PXN_BIT: usize = 0x20000000000000;
 
-fn mmu_table_entry_write(base: usize, index: usize, value: usize) !{unsafe} {
+private fn mmu_table_entry_write(base: usize, index: usize, value: usize) !{unsafe} {
     // `base` is a resolved physical page-table address.  The architecture
     // boundary, rather than ordinary memory, establishes that it is mapped.
     let entry: *usize = unsafe { (base + index * 8) as *usize };
     *entry = value;
 }
 
-fn mmu_table_entry_read(base: usize, index: usize) -> usize !{unsafe} {
+private fn mmu_table_entry_read(base: usize, index: usize) -> usize !{unsafe} {
     // See mmu_table_entry_write: this is a physical page-table trust root.
     let entry: *usize = unsafe { (base + index * 8) as *usize };
     return *entry;
@@ -30,15 +30,10 @@ fn init_root_entry(base: usize, index: usize, value: usize) {
     mmu_table_entry_write(base, index, value);
 }
 
-fn mmu_table_clear(base: usize) {
+private fn mmu_table_clear(base: usize) {
     for i: usize in 0..<MMU_TABLE_ENTRY_COUNT {
         mmu_table_entry_write(base, i, 0);
     }
-}
-
-fn mmu_pte_write(l3_physical: usize, index: usize, value: usize) {
-    mmu_table_entry_write(l3_physical, index, value);
-    dsb_ishst();
 }
 
 fn mmu_pte_read(l3_physical: usize, index: usize) -> usize {
@@ -50,6 +45,33 @@ fn mmu_tlb_invalidate(asid: usize, va: usize) {
     tlbi_vae1is((asid << 48) | (va >> 12));
     dsb_ish();
     isb();
+}
+
+// Replace one last-level descriptor using Arm's break-before-make sequence.
+// A live descriptor is first made invalid and made globally unobservable
+// before a replacement is installed. The same completed break is also the
+// lifetime boundary for an unmap: its physical page may be released only
+// after this function returns.
+//
+// ASID 0 names a root which has never been activated, so no PE can have a
+// cached translation for it. Such a root still takes the break store and
+// barriers, but has no translation to invalidate.
+fn mmu_pte_update(l3_physical: usize, index: usize, value: usize,
+                  asid: usize, va: usize) {
+    let old: usize = mmu_table_entry_read(l3_physical, index);
+    if (old == value) { return; }
+    if (old != 0) {
+        mmu_table_entry_write(l3_physical, index, 0);
+        if (asid != 0) {
+            mmu_tlb_invalidate(asid, va);
+        } else {
+            dsb_ishst();
+        }
+    }
+    if (value != 0) {
+        mmu_table_entry_write(l3_physical, index, value);
+        dsb_ishst();
+    }
 }
 
 fn mmu_clear_user_table(l3_physical: usize) {

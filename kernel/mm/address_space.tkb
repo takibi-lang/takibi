@@ -25,6 +25,14 @@ const USER_PAGE_PHYS_MASK: usize = 0x0000FFFFFFFFF000;
 // available to software. COW is meaningful only with a read-only user PTE.
 const USER_COW_BIT: usize = 0x0080000000000000;
 
+// PTE mutation is serialized by process ownership today: a process is never
+// scheduled on two cores at once, and clone/exec/reap mutate only roots which
+// their caller owns. That software-writer exclusion is distinct from the
+// hardware page-table walker, which takes no kernel lock. Every last-level
+// mutation therefore goes through mmu_pte_update, whose completed
+// break-before-make sequence is also the point after which an unmapped
+// physical page may be released.
+
 // Capability naming one live address-space root. Its slot is private so
 // users of the PTE and UserRange APIs cannot substitute a bare integer
 // (especially the bootstrap root 0) for the calling process's root.
@@ -741,7 +749,9 @@ fn address_space_pte_write(slot: usize, index: usize, value: usize)
             }
         }
     }
-    mmu_pte_write(l3_physical, entry, value);
+    mmu_pte_update(l3_physical, entry, value,
+                   address_space_backing_at(checked).asid,
+                   USER_TEXT_VA + index * PAGE_SIZE);
     return AddressSpacePteWriteResult::Written;
 }
 
@@ -753,7 +763,9 @@ fn address_space_pte_clear(slot: usize, index: usize) {
         let entry: usize = index % USER_L3_PAGE_COUNT;
         let pte: usize = mmu_pte_read(l3_physical, entry);
         if (pte != 0) {
-            mmu_pte_write(l3_physical, entry, 0);
+            mmu_pte_update(l3_physical, entry, 0,
+                           address_space_asid(slot),
+                           USER_TEXT_VA + index * PAGE_SIZE);
             page_mapping_release_physical(pte & USER_PAGE_PHYS_MASK);
         }
     }
@@ -784,13 +796,6 @@ fn address_space_user_physical(slot: usize, va: usize) -> usize {
     let pte: usize = address_space_pte_read(slot, index);
     if (pte == 0) { return 0; }
     return pte & USER_PAGE_PHYS_MASK;
-}
-
-fn address_space_tlb_invalidate(slot: usize, va: usize) {
-    let asid: usize = address_space_asid(slot);
-    if (asid != 0) {
-        mmu_tlb_invalidate(asid, va);
-    }
 }
 
 fn address_space_pte_is_cow(pte: usize) -> bool {
@@ -824,8 +829,6 @@ fn address_space_map_page(slot: usize, index: usize,
         }
         AddressSpacePteWriteResult::Written => {
             page_mapping_install(page);
-            address_space_tlb_invalidate(
-                slot, USER_TEXT_VA + index * PAGE_SIZE);
             return AddressSpacePteWriteResult::Written;
         }
     }
@@ -848,8 +851,6 @@ fn address_space_resolve_cow(slot: usize, index: usize) -> bool !{unsafe} {
             AddressSpacePteWriteResult::Invalid => { return false; }
             AddressSpacePteWriteResult::OutOfMemory => { return false; }
             AddressSpacePteWriteResult::Written => {
-                address_space_tlb_invalidate(
-                    slot, USER_TEXT_VA + index * PAGE_SIZE);
                 return true;
             }
         }
@@ -874,8 +875,6 @@ fn address_space_resolve_cow(slot: usize, index: usize) -> bool !{unsafe} {
                 }
                 AddressSpacePteWriteResult::Written => {
                     page_mapping_install(page);
-                    address_space_tlb_invalidate(
-                        slot, USER_TEXT_VA + index * PAGE_SIZE);
                     page_mapping_release_physical(old_physical);
                     return true;
                 }
@@ -900,8 +899,12 @@ fn address_space_release_user_mappings(slot: usize) {
             for entry: usize in 0..<USER_L3_PAGE_COUNT {
                 let pte: usize = mmu_pte_read(l3_physical, entry);
                 if (pte != 0) {
+                    mmu_pte_update(
+                        l3_physical, entry, 0,
+                        address_space_backing_at(checked).asid,
+                        USER_TEXT_VA +
+                            (branch * USER_L3_PAGE_COUNT + entry) * PAGE_SIZE);
                     page_mapping_release_physical(pte & USER_PAGE_PHYS_MASK);
-                    mmu_pte_write(l3_physical, entry, 0);
                 }
             }
             mmu_clear_user_table(l3_physical);
@@ -1012,10 +1015,6 @@ fn user_pte_clear(index: usize) {
 
 fn user_pte_read(index: usize) -> usize {
     return address_space_pte_read(0, index);
-}
-
-fn user_tlb_invalidate(va: usize) {
-    address_space_tlb_invalidate(0, va);
 }
 
 fn process_address_space_probe_map(

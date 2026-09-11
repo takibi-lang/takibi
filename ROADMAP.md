@@ -108,9 +108,10 @@ entry leaves the next one unable to be verified.
    Mutex-to-TaskMutex inversion, while equal-rank Mutex instances remain with
    the existing instance-level checks. **#450** compare-and-swap is complete:
    the local LLVM C-API bridge preserves backend instruction selection, and
-   `spin_trylock` is its first caller. Next: **#261** PTE mutation against the
-   hardware page-table walker.
-9. **#261** PTE mutation against the hardware page-table walker.
+   `spin_trylock` is its first caller.
+9. **#261** PTE mutation against the hardware page-table walker -- complete
+   with compiler-enforced raw-write privacy and Arm break-before-make on every
+   live last-level replacement. Next: **#9** processor affinity.
 10. **#9** processor affinity, with four cores.
 
 Then, in this territory and unordered: #518, #468, #464, #516, #308, #414,

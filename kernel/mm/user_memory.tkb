@@ -355,10 +355,7 @@ fn user_range_reprotect(root: AddressSpaceRoot, first_l3: usize, last_l3: usize,
         match address_space_pte_write(root_slot, index, phys | new_flags) {
             AddressSpacePteWriteResult::Invalid => { return; }
             AddressSpacePteWriteResult::OutOfMemory => { return; }
-            AddressSpacePteWriteResult::Written => {
-                address_space_tlb_invalidate(
-                    root_slot, USER_TEXT_VA + index * PAGE_SIZE);
-            }
+            AddressSpacePteWriteResult::Written => {}
         }
         index = index + 1;
     }
@@ -414,12 +411,10 @@ fn user_memory_boundary_probe_run(base: usize,
     match address_space_map_page(0, base + 2, text_page, USER_TEXT_RX_FLAGS) {
         AddressSpacePteWriteResult::Invalid => {
             user_pte_clear(base);
-            user_tlb_invalidate(USER_TEXT_VA + base * PAGE_SIZE);
             return false;
         }
         AddressSpacePteWriteResult::OutOfMemory => {
             user_pte_clear(base);
-            user_tlb_invalidate(USER_TEXT_VA + base * PAGE_SIZE);
             return false;
         }
         AddressSpacePteWriteResult::Written => {}
@@ -482,9 +477,7 @@ fn user_memory_boundary_probe_run(base: usize,
     }
 
     user_pte_clear(base);
-    user_tlb_invalidate(data_va);
     user_pte_clear(base + 2);
-    user_tlb_invalidate(text_va);
     return ok;
 }
 
@@ -594,12 +587,10 @@ fn user_memory_root_isolation_probe_run(root_a: usize, root_b: usize,
     match address_space_map_page(root_b, index, page_b, USER_RODATA_R_FLAGS) {
         AddressSpacePteWriteResult::Invalid => {
             address_space_pte_clear(root_a, index);
-            address_space_tlb_invalidate(root_a, va);
             return false;
         }
         AddressSpacePteWriteResult::OutOfMemory => {
             address_space_pte_clear(root_a, index);
-            address_space_tlb_invalidate(root_a, va);
             return false;
         }
         AddressSpacePteWriteResult::Written => {}
@@ -622,8 +613,6 @@ fn user_memory_root_isolation_probe_run(root_a: usize, root_b: usize,
     if (user_page_class_at(checked_root_b, index) != 2) { ok = false; }
 
     address_space_pte_clear(root_a, index);
-    address_space_tlb_invalidate(root_a, va);
     address_space_pte_clear(root_b, index);
-    address_space_tlb_invalidate(root_b, va);
     return ok;
 }

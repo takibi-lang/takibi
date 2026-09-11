@@ -15,6 +15,28 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-11: live PTE replacement uses break-before-make (#261)
+
+Last-level page-table mutation now has one architecture API. Replacing a live
+descriptor first stores an invalid descriptor, completes that store, broadcasts
+the VA-and-ASID invalidation to the Inner Shareable domain, waits for its
+completion, and only then installs the replacement. Unmap uses the same break
+and releases the physical mapping after it completes. Raw table-entry access is
+file-private, so maintained MM callers cannot bypass this sequence. Callers no
+longer perform a later, separate TLB invalidation whose ordering was too late to
+make a live-to-live replacement valid.
+
+There is no reliable software negative probe for the old defect. An Arm
+break-before-make violation permits microarchitecture-dependent observations;
+it does not promise a fault or a particular stale translation, and QEMU does
+not model the physical cache and walker timing needed to turn that permission
+into a repeatable failure. The substitute evidence is the compiler-enforced
+private raw-write boundary, linked Cortex-A53 and Cortex-A76 disassembly showing
+`store invalid; dsb ishst; tlbi vae1is; dsb ish; isb; store replacement; dsb
+ishst`, and complete QEMU and RPi5 kernel lanes. The RPi5 run passed all 45
+views, the admitted two-core busy pair, network and storage workloads, and DDB
+fault recovery.
+
 ## 2026-09-10: the admitted two-core workload runs on QEMU and RPi5 (#448, #479)
 
 `KERNEL_ACTIVE_CORES` is now 2. Core 1 starts the persistent busy-pair B

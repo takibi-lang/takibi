@@ -508,11 +508,6 @@ fn process_image_pte_clear(index: usize) {
     address_space_pte_clear(process_image_target_root_here(), index);
 }
 
-fn process_image_pte_invalidate(index: usize) {
-    address_space_tlb_invalidate(process_image_target_root_here(),
-                                 USER_TEXT_VA + index * PAGE_SIZE);
-}
-
 // Do not transfer PageOwner until the lazy-L3 allocation and PTE write have
 // both succeeded. This is the mapping-side half of address_space.tkb's OOM
 // contract; the failure arm returns the still-owned physical page directly.
@@ -737,8 +732,6 @@ fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsa
                     return ProcessCloneVmResult::OutOfMemory;
                 }
                 AddressSpacePteWriteResult::Written => {
-                    address_space_tlb_invalidate(
-                        dest_root, USER_TEXT_VA + l3_index * PAGE_SIZE);
                     if (address_space_pte_is_writable(parent_pte)) {
                         match address_space_pte_write(
                                 source, l3_index,
@@ -752,8 +745,6 @@ fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsa
                                 return ProcessCloneVmResult::OutOfMemory;
                             }
                             AddressSpacePteWriteResult::Written => {
-                                address_space_tlb_invalidate(
-                                    source, USER_TEXT_VA + l3_index * PAGE_SIZE);
                             }
                         }
                     }
@@ -1030,8 +1021,6 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
         ok = false;
     }
     address_space_pte_clear(0, process_stack_top_page());
-    address_space_tlb_invalidate(
-        0, USER_TEXT_VA + process_stack_top_page() * PAGE_SIZE);
     process_image_record_at(0).stack_growth_active = false;
     process_image_record_at(0).active_page_count = 0;
     process_image_record_at(0).stack_lowest_l3 = process_stack_top_page();
