@@ -505,21 +505,27 @@ None is queued above; they are recorded so they are not rediscovered.
 
 The active order, re-derived 2026-09-11, is:
 
-1. **#533** admit one bounded read-only ext2 workload on core 1. The first
+1. **#9 block-cache capacity handoff:** replace
+   `BLOCK_CACHE_CORES = 2` with the existing `KERNEL_MAX_CORES` constant in
+   `kernel/drivers/block/block_cache.tkb`. This is green while the maximum is
+   still two, and lets Territory A raise it later without a lockstep edit
+   across the boundary. The compiler's existing static assertion exposed this
+   dependency when the four-core capacity build was tried.
+2. **#533** admit one bounded read-only ext2 workload on core 1. The first
    contract is read-only; mutation remains serialized until its separate
    ownership audit. This is the filesystem half #9 must not invent in
    Territory A.
-2. **#534** publish direct userspace UART output from peer CPUs through the
+3. **#534** publish direct userspace UART output from peer CPUs through the
    sole ordinary core-0 writer, with bounded backpressure and an emergency
    DDB/fatal path that never waits for it. This is the console half #9 must
    not bypass.
-3. **#281** coalesce validated contiguous ext2 reads into bounded multi-sector
+4. **#281** coalesce validated contiguous ext2 reads into bounded multi-sector
    transfers. #208 and #545 changed the measured baseline, so measure the
    remaining device-read share before choosing the first run size.
-4. **#542** finish the inventory of kernel-side verification machinery and
+5. **#542** finish the inventory of kernel-side verification machinery and
    move userspace-observable checks behind fork/exec. This is independent of
    scheduler affinity and can follow #281 without touching Territory A.
-5. **#537 close audit**, then #535 or #536 only when a current filesystem
+6. **#537 close audit**, then #535 or #536 only when a current filesystem
    caller requires them. Rename landed under the already-closed #538, so the
    remaining task on #537 is to re-check its acceptance evidence and close it
    if nothing remains, not to grow its scope.
