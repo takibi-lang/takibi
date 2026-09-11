@@ -79,17 +79,43 @@ def main():
         return 1
 
     CASES.note()
-    wrong_order = list(handoff_ok)
-    wrong_order[1], wrong_order[2] = wrong_order[2], wrong_order[1]
-    failures = checker.check_process_stack_handoff_hook(wrong_order)
+    mask_before_select = list(handoff_ok)
+    mask_before_select[4], mask_before_select[5] = (
+        mask_before_select[5], mask_before_select[4])
+    if checker.check_process_stack_handoff_hook(mask_before_select):
+        print("FAIL kernel-asm-alignment control: safe mask-first handoff failed")
+        return 1
+
+    CASES.note()
+    hook_before_select = list(handoff_ok)
+    hook_before_select[4], hook_before_select[6] = (
+        hook_before_select[6], hook_before_select[4])
+    failures = checker.check_process_stack_handoff_hook(hook_before_select)
     if len(failures) != 1 or "does not select" not in failures[0]:
-        print("FAIL kernel-asm-alignment control: reordered handoff passed")
+        print("FAIL kernel-asm-alignment control: hook before selection passed")
+        return 1
+
+    CASES.note()
+    missing_mask = [item for item in handoff_ok
+                    if item[:2] != (0x2104, "msr DAIFSet, #0x2")]
+    failures = checker.check_process_stack_handoff_hook(missing_mask)
+    if len(failures) != 1 or "IRQs remain masked" not in failures[0]:
+        print("FAIL kernel-asm-alignment control: unmasked handoff passed")
+        return 1
+
+    CASES.note()
+    unmasked_before_hook = list(handoff_ok)
+    unmasked_before_hook.insert(
+        6, (0x2106, "msr DAIFClr, #0x2", "el0_context_resume"))
+    failures = checker.check_process_stack_handoff_hook(unmasked_before_hook)
+    if len(failures) != 1 or "IRQs remain masked" not in failures[0]:
+        print("FAIL kernel-asm-alignment control: intervening unmask passed")
         return 1
 
     report_pass(
         "kernel-asm-alignment controls",
         "A-bit clear accepted and set rejected; both physical stack-handoff "
-        "paths required in order",
+        "paths select the returned frame and call with IRQs masked",
         cases=CASES.ran)
     return 0
 

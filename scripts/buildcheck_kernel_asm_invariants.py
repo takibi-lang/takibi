@@ -568,12 +568,11 @@ def check_process_stack_handoff_hook(insns):
         if fn in STACK_SWITCH_FUNCTIONS:
             bodies.setdefault(fn, []).append(text)
 
-    required = [
-        re.compile(r"^mov\s+sp,\s*x0$", re.I),
-        re.compile(r"^msr\s+DAIFSet,\s*#0x2$", re.I),
-        re.compile(r"^mov\s+x0,\s*sp$", re.I),
-        re.compile(r"^bl\s+.*<%s>$" % STACK_SWITCH_HOOK),
-    ]
+    select_returned_sp = re.compile(r"^mov\s+sp,\s*x0$", re.I)
+    mask_irqs = re.compile(r"^msr\s+DAIFSet,\s*#0x2$", re.I)
+    unmask_irqs = re.compile(r"^msr\s+DAIFClr,\s*#0x2$", re.I)
+    pass_current_sp = re.compile(r"^mov\s+x0,\s*sp$", re.I)
+    call_hook = re.compile(r"^bl\s+.*<%s>$" % STACK_SWITCH_HOOK)
     for fn in STACK_SWITCH_FUNCTIONS:
         body = bodies.get(fn)
         if body is None:
@@ -581,15 +580,32 @@ def check_process_stack_handoff_hook(insns):
                 "issue #532 regression: %s is absent, so its process-stack "
                 "handoff boundary cannot be verified" % fn)
             continue
-        found = any(
-            all(pattern.match(body[start + offset])
-                for offset, pattern in enumerate(required))
-            for start in range(max(0, len(body) - len(required) + 1))
-        )
+        found = False
+        for hook_index, text in enumerate(body):
+            if not call_hook.match(text):
+                continue
+            if hook_index == 0 or not pass_current_sp.match(
+                    body[hook_index - 1]):
+                continue
+            before_hook = body[:hook_index - 1]
+            selected = any(select_returned_sp.match(item)
+                           for item in before_hook)
+            mask_indexes = [
+                index for index, item in enumerate(before_hook)
+                if mask_irqs.match(item)
+            ]
+            masked = bool(mask_indexes) and not any(
+                unmask_irqs.match(item)
+                for item in before_hook[mask_indexes[-1] + 1:]
+            )
+            if selected and masked:
+                found = True
+                break
         if not found:
             failures.append(
                 "issue #532 regression: %s does not select the returned "
-                "frame, mask IRQs, and call %s in that order; another CPU "
+                "frame and call %s with its current SP while IRQs remain "
+                "masked; another CPU "
                 "could acquire the process stack before this CPU leaves it"
                 % (fn, STACK_SWITCH_HOOK))
     return failures
