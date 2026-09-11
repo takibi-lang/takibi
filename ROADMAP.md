@@ -132,6 +132,17 @@ entry leaves the next one unable to be verified.
 12. **#9 phase B** after #533 and #534 land, add the affinity ABI and its
     userspace-visible policy, widen admission, and verify four cores on QEMU
     and RPi5. This is the integration point, not parallel work.
+    One boundary is owned by neither issue: UART **input** on a peer CPU.
+    #546's fix (a83fcc8) closes the lost wakeup between a terminal read's
+    look at the ring and its sleep with a local interrupt mask. That is
+    enough only because the RX interrupt and every terminal reader are on
+    core 0 (the UartRx branch of `kernel_syscall_block_return` in
+    `kernel/kernel/syscall.tkb` says so). #543's ring also assumes one reader
+    on core 0. Admitting a terminal reader to another core would reopen the
+    lost wakeup across cores, and a local mask cannot close that. Until an
+    issue owns cross-CPU terminal input, phase B keeps processes that read the
+    terminal on core 0, and its admission rule says so. Widening that is
+    separate work, not part of this entry.
 13. **#528** make IRQ restoration under an IRQ-owning guard a build error.
     Arbitrary affinity increases the number of paths that can expose this
     invariant, but the work remains in Territory A's compiler/kernel files.
@@ -505,27 +516,46 @@ None is queued above; they are recorded so they are not rediscovered.
 
 The active order, re-derived 2026-09-11, is:
 
-1. **#9 block-cache capacity handoff:** replace
+1. **Board lane first.** `make kernelcheck-rpi5` has not run since #546's
+   fix and the rebase onto #532. The RPi5 allocator expectation
+   (`allocator_pages=259624`) was derived from the linked ELF only. Run the
+   board before #533 changes what core 1 admits, so that any board
+   regression is attributed to the right change.
+2. **#9 block-cache capacity handoff:** replace
    `BLOCK_CACHE_CORES = 2` with the existing `KERNEL_MAX_CORES` constant in
    `kernel/drivers/block/block_cache.tkb`. This is green while the maximum is
    still two, and lets Territory A raise it later without a lockstep edit
    across the boundary. The compiler's existing static assertion exposed this
-   dependency when the four-core capacity build was tried.
-2. **#533** admit one bounded read-only ext2 workload on core 1. The first
+   dependency when the four-core capacity build was tried. One wiring step
+   comes with it:
+   - The native test `linux_user/block_cache` compiles `block_cache.tkb` on
+     its own, and that file has no `use`.
+   - `KERNEL_MAX_CORES` is defined in `kernel/lib/execution_model.tkb`.
+   - So in the same change, add that file to the test's
+     `LINUX_USER_EXTRA_SRCS` and to its Makefile prerequisite, and check that
+     it passes the native unused-function rule.
+   - The test's cases name only cores 0 and 1, so they stay valid at four.
+3. **#533** admit one bounded read-only ext2 workload on core 1. The first
    contract is read-only; mutation remains serialized until its separate
    ownership audit. This is the filesystem half #9 must not invent in
    Territory A.
-3. **#534** publish direct userspace UART output from peer CPUs through the
+4. **#534** publish direct userspace UART output from peer CPUs through the
    sole ordinary core-0 writer, with bounded backpressure and an emergency
    DDB/fatal path that never waits for it. This is the console half #9 must
-   not bypass.
-4. **#281** coalesce validated contiguous ext2 reads into bounded multi-sector
-   transfers. #208 and #545 changed the measured baseline, so measure the
-   remaining device-read share before choosing the first run size.
-5. **#542** finish the inventory of kernel-side verification machinery and
+   not bypass. It covers output only. UART input on a peer CPU is outside
+   its scope; see the #9 phase B entry in the Territory A queue.
+5. **#281, re-scoped by measurement before any code.** #545's block-layer
+   read-ahead (6a4828f) already turns a device read that continues the last
+   one into a single 64-block command. On the first measured boot, 663 runs
+   answered 36,963 block reads, and about 500 single-block reads remained.
+   Before choosing anything, measure what those remaining reads are, and the
+   write side, which #281 also names. The likely outcomes are closing #281 as
+   superseded, or narrowing it to writes. This is the only place the plan
+   tracks #281.
+6. **#542** finish the inventory of kernel-side verification machinery and
    move userspace-observable checks behind fork/exec. This is independent of
    scheduler affinity and can follow #281 without touching Territory A.
-6. **#537 close audit**, then #535 or #536 only when a current filesystem
+7. **#537 close audit**, then #535 or #536 only when a current filesystem
    caller requires them. Rename landed under the already-closed #538, so the
    remaining task on #537 is to re-check its acceptance evidence and close it
    if nothing remains, not to grow its scope.
@@ -936,9 +966,11 @@ out, so no generational owner is needed. A write epoch retires the other
 core's copies. On QEMU the boot's device reads went from 140,030 to 29,799,
 with 110,231 cache hits beside them: the same requests, four in five answered
 from memory. The whole boot went from about 23 s to 17.2 s. `block io:` now
-carries `cache_hits=`, and the dmesg validator requires it. #281, coalescing
-contiguous data runs, is the remaining lever on the device-read figure.
-Measure it against the new number before starting it.
+carries `cache_hits=`, and the dmesg validator requires it. At the time,
+#281 (coalescing contiguous data runs) was the remaining lever on the
+device-read figure. #545's read-ahead has since pulled most of that lever
+in the block layer, so what is left of #281 is decided in the Territory B
+queue.
 
 **#541, the same day: the ash session no longer counts as boot.** The dmesg
 validator bounded the boot at `foreground server: listener ready`, and the
@@ -1020,8 +1052,8 @@ same core's last read ended reads a 64-block run in one command. The run is
 held to the block cache's write epoch, and a scattered read still reads one
 block, now as one command instead of two. The board is back to 18.3 s
 outside a 3.6 s session, and the bound is 25 s again. 663 runs answer
-36,963 of the boot's block reads. #281 remains the ext2-level version of the
-same idea. Measure what is left before starting it.
+36,963 of the boot's block reads. What that leaves for #281 is tracked in the
+Territory B queue.
 
 The same run printed `uart tx: ... writers_slept=0`, which #544's check
 refused on the board. A writer sleeps only when another process can run,
@@ -1030,10 +1062,6 @@ counts `writers_waited`, every write that found no room, and the board is
 held to that count instead. A write six times the queue must wait on a
 115200-baud wire, whatever else is ready.
 
-**The next storage optimization is #281.** With BusyBox exec'd from USB, the
-multi-sector coalescing it proposes finally sits on a path that runs. Measure
-the USB share of the device reads first.
-
 One thing that folding gave up: no lane runs `ls` on a directory this
 kernel made. getdents64 over a kernel-written directory block is covered only
 by the kernel's own `ext2_directory_live_entries` walk.
@@ -1041,9 +1069,10 @@ by the kernel's own `ext2_directory_live_entries` walk.
 `getdents64`'s limit is the twelve direct blocks, which growth also stops at.
 Lifting it means growing into an indirect block, and nothing needs that yet.
 
-The earlier plan put **#208** after that measurement; #208 has since landed.
-Its `block io: reads=... cache_hits=...` line is now the baseline #281 has to
-move.
+The earlier plan put **#208** after that measurement. #208 has since landed,
+and #545's read-ahead followed it. The `block io: reads=... cache_hits=...
+runs=... run_hits=...` line printed on every boot is now the baseline, and
+#281's place is in the Territory B queue.
 
 **#540 is the one new idea worth taking on its own**, filed by the end-of-
 session audit: `--reject-unused-functions` already exists and is scoped to one
