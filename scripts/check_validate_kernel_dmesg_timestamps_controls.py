@@ -63,15 +63,35 @@ HEALTHY_BLOCK_IO = b"block io: reads=124173 writes=55 block_bytes=1024\r\n"
 HEALTHY_TAIL = HEALTHY_SPIN + HEALTHY_BLOCK_IO
 
 
-def run(records, platform="qemu", extra=None, profile="local"):
+# GitHub issue #541: the host timing log the UART driver writes, reduced to
+# the interactive ash session's two edges. The end carries the prompt the
+# driver sees in front of it, because the real one does. A 2 s session puts
+# HEALTHY's 17.4 s boot at 15.4 s separated.
+HEALTHY_SESSION = (11.0, 13.0)
+
+
+def timing(session) -> bytes:
+    if session is None:
+        return b""
+    start, end = session
+    return (f"{start:8.3f}\tinteractive shell: uart blocked\n"
+            f"{end:8.3f}\t/ # busybox interactive shell exit: 0\n"
+            ).encode("ascii")
+
+
+def run(records, platform="qemu", extra=None, profile="local",
+        session=HEALTHY_SESSION):
     if extra is None:
         extra = HEALTHY_TAIL
-    with tempfile.NamedTemporaryFile(suffix=".log") as log:
+    with tempfile.NamedTemporaryFile(suffix=".log") as log, \
+            tempfile.NamedTemporaryFile(suffix=".timing") as timed:
         log.write(transcript(records) + extra)
         log.flush()
+        timed.write(timing(session))
+        timed.flush()
         result = subprocess.run(
             [sys.executable, str(VALIDATOR), log.name, "--platform", platform,
-             "--timing-profile", profile],
+             "--timing-profile", profile, "--timing-log", timed.name],
             capture_output=True, text=True)
     return result.returncode, result.stdout + result.stderr
 
@@ -80,9 +100,9 @@ def run(records, platform="qemu", extra=None, profile="local"):
 CASES = CaseCount()
 
 
-def expect(label, records, ok, needle=""):
+def expect(label, records, ok, needle="", session=HEALTHY_SESSION):
     CASES.note()
-    status, output = run(records)
+    status, output = run(records, session=session)
     if (status == 0) != ok:
         print(f"FAIL dmesg-timestamps control: {label} exited {status}, "
               f"expected {'0' if ok else 'nonzero'}\n{output}")
@@ -101,7 +121,8 @@ def replace(records, text, seconds):
 
 def main() -> int:
     cases = [
-        ("a healthy boot", HEALTHY, True, "boot=17.4 s"),
+        ("a healthy boot", HEALTHY, True,
+         "boot=17.4 s, ash-session=2.0 s, bounded=15.4 s"),
 
         # Nothing to read at all. A summary of no records would read as a
         # boot with no problems.
@@ -119,11 +140,17 @@ def main() -> int:
          replace(HEALTHY, "foreground server: listener ready port=8080", 28.4),
          False, "INVESTIGATE, do not raise"),
 
+        # GitHub issue #541's acceptance: +7 s in the boot proper, outside
+        # the ash session, still fails the recalibrated bound.
+        ("a boot 7 seconds slower outside the ash session",
+         replace(HEALTHY, "foreground server: listener ready port=8080", 24.4),
+         False, "outside the 2.0 s interactive ash session"),
+
         # A boot just inside the bound stays green, so the bound is a bound
         # and not a coincidence.
         ("a boot just inside the bound",
-         replace(HEALTHY, "foreground server: listener ready port=8080", 24.9),
-         True, "boot=24.9 s"),
+         replace(HEALTHY, "foreground server: listener ready port=8080", 23.9),
+         True, "bounded=21.9 s"),
 
         # The checks that were here before #411 and had no control either.
         ("a non-monotonic record",
@@ -142,7 +169,24 @@ def main() -> int:
         if not expect(label, records, ok, needle):
             return 1
 
-    for duration, ok in ((25.869018, True), (34.9, True), (36.569018, False)):
+    # GitHub issue #541: what the separation is for. An ash script that grew
+    # by eight seconds of execs moves the whole boot and not the bounded
+    # figure; a boot that would have failed the old whole-boot bound passes.
+    if not expect("a long ash session",
+                  replace(HEALTHY,
+                          "foreground server: listener ready port=8080", 30.0),
+                  True, "ash-session=10.0 s, bounded=20.0 s",
+                  session=(11.0, 21.0)):
+        return 1
+    # And a timing log that lacks the session is refused rather than read as
+    # a session of zero, which would bill the whole script as boot again.
+    if not expect("a timing log without the ash session", HEALTHY, False,
+                  "were not both found in the host timing log",
+                  session=None):
+        return 1
+
+    # With HEALTHY_SESSION's 2 s subtracted: 25.9, 34.9 and 35.1 s separated.
+    for duration, ok in ((27.869018, True), (36.9, True), (37.1, False)):
         status, output = run(replace(
             HEALTHY, "foreground server: listener ready port=8080", duration),
             profile="hosted")
@@ -162,16 +206,16 @@ def main() -> int:
     rpi5 = [(10.1 if "reconnect ok" in t else s,
              t.replace("virtio net", "rp1 gem")) for s, t in HEALTHY]
     status, output = run(replace(
-        rpi5, "foreground server: listener ready port=8080", 30.0), "rpi5")
+        rpi5, "foreground server: listener ready port=8080", 27.2), "rpi5")
     if status == 0 or "INVESTIGATE, do not raise" not in output:
-        print("FAIL dmesg-timestamps control: a 30s RPi5 boot was accepted "
-              f"or reported oddly\n{output}")
+        print("FAIL dmesg-timestamps control: an RPi5 boot 25.2 s outside "
+              f"its ash session was accepted or reported oddly\n{output}")
         return 1
     status, output = run(replace(
-        rpi5, "foreground server: listener ready port=8080", 27.9), "rpi5")
+        rpi5, "foreground server: listener ready port=8080", 26.9), "rpi5")
     if status != 0:
-        print("FAIL dmesg-timestamps control: a 27.9s RPi5 boot was rejected "
-              f"by its 28s bound\n{output}")
+        print("FAIL dmesg-timestamps control: an RPi5 boot 24.9 s outside "
+              f"its ash session was rejected by its 25 s bound\n{output}")
         return 1
 
     # GitHub issues #281/#208: the block-layer total is required, not merely
@@ -245,7 +289,9 @@ def main() -> int:
         "dmesg-timestamps controls",
         "a healthy boot reports its duration, an empty transcript and a "
         "missing milestone are refused, a slow boot says INVESTIGATE on "
-        "both platforms, a boot just inside each bound passes, and the "
+        "both platforms, a boot just inside each bound passes, a long ash "
+        "session is not billed as boot and a timing log without one is "
+        "refused, and the "
         "monotonic, interval and assembled-line checks each fail when "
         "broken, the block-layer total is required and refused when it "
               "claims zero reads, and the console spin figure is derived, refused for "

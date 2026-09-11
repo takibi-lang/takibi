@@ -220,6 +220,7 @@ fi
 kernel_views_normalize "$UART_LOG"
 
 python3 "$REPO_ROOT/scripts/validate_kernel_dmesg_timestamps.py" "$UART_LOG" \
+    --timing-log "$UART_TIMING_LOG" \
     --timing-profile "${KERNEL_QEMU_TIMING_PROFILE:-local}"
 
 views_status=0
@@ -258,14 +259,17 @@ if [ -z "$etc_size" ] || [ "$etc_size" -le 1024 ]; then
     archive_reason="ext2 /etc not grown"
     exit 1
 fi
-# /etc/made/inner is the one the boot fixture made and kept.
-debugfs -R 'stat /etc/made/inner' "$QEMU_EXT2_IMAGE" \
-    >"$ARTIFACT_DIR/kept-stat.log" 2>&1
-if ! grep -q 'Type: directory' "$ARTIFACT_DIR/kept-stat.log"; then
-    echo "FAIL $RUN_LABEL: /etc/made/inner is not a directory on the guest's disk" >&2
-    archive_reason="ext2 kept directory absent"
-    exit 1
-fi
+# /etc/made and /kept are the ones the ash script made through mkdirat and
+# kept, so e2fsck judges directories made through the syscall.
+for kept_directory in /etc/made /kept; do
+    debugfs -R "stat $kept_directory" "$QEMU_EXT2_IMAGE" \
+        >"$ARTIFACT_DIR/kept-stat.log" 2>&1
+    if ! grep -q 'Type: directory' "$ARTIFACT_DIR/kept-stat.log"; then
+        echo "FAIL $RUN_LABEL: $kept_directory is not a directory on the guest's disk" >&2
+        archive_reason="ext2 kept directory absent: $kept_directory"
+        exit 1
+    fi
+done
 if ! e2fsck -fn "$QEMU_EXT2_IMAGE" >"$ARTIFACT_DIR/e2fsck.log" 2>&1; then
     sed 's/^/  /' "$ARTIFACT_DIR/e2fsck.log" >&2
     echo "FAIL $RUN_LABEL: e2fsck rejected the disk the guest wrote" >&2

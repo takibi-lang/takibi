@@ -86,6 +86,13 @@ interpreter-argument /bin/script-interpreter-argument.sh three
 no-trailing-newline /etc/no-newline.sh
 LONG-SHEBANG-FELL-BACK
 re-exec-ok
+mkdir: can't create directory '/etc/made': File exists
+mkdir: can't create directory '/hello.txt/x': Not a directory
+rmdir: '/etc/made': Directory not empty
+rmdir: '/etc/made/sub': No such file or directory
+rmdir: '/hello.txt': Not a directory
+rm: can't remove '/etc/gone': No such file or directory
+rm: can't remove '/etc/hlink': No such file or directory
 / # / # [2]+  Running                    
 [1]-  Running                    
 two-jobs-ok

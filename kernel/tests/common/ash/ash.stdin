@@ -15,6 +15,17 @@ script-interpreter-argument.sh three
 /etc/no-newline.sh
 /etc/long-shebang.sh
 /bin/sh -c 'exec /bin/echo re-exec-ok'
+# GitHub issues #538 and #541: mkdir, rmdir and rm through mkdirat and
+# unlinkat, one exec each. mkdir and rmdir carry on past a failing argument,
+# so one call covers every outcome in order, and each target is named twice:
+# the second EEXIST or ENOENT is what shows the first call worked. /etc/made
+# and /kept stay, so the lane's e2fsck judges directories made through the
+# syscall; /etc/gone is the image's one-link file and /etc/hlink a second
+# link to /hello.txt. Every line fits the kernel's 63-byte UART receive ring
+# (#543), which drops what does not.
+mkdir /etc/made /etc/made/sub /etc/made /hello.txt/x /kept
+rmdir /etc/made /etc/made/sub /etc/made/sub /hello.txt
+rm /etc/gone /etc/gone /etc/hlink /etc/hlink
 # Two background jobs at once, and ash's own account of them. /bin/spin is
 # one round of the busy loop and then exit: silent, because output that
 # interleaved with the prompt would arrive in an order nothing here can

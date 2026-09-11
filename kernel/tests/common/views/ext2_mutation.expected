@@ -4,5 +4,3 @@ ext2 owners: block+inode owners ok
 ext2 create: create+lookup+unlink ok
 ext2 nested: create+lookup+unlink in /etc ok
 ext2 grow: /etc past one block ok
-ext2 mkdir: /etc/made/inner with .. and rmdir ok
-ext2 unlink: a hard link and a last link in /etc ok

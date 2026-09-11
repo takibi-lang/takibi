@@ -25,6 +25,40 @@ CPU_PREFIX = re.compile(rb"^cpu([0-9]) ")
 BLOCK_IO = re.compile(
     rb"block io: reads=(\d+) writes=(\d+) block_bytes=(\d+)")
 
+# GitHub issue #541: the interactive ash session, on the host's clock. The
+# UART driver writes every line it receives with the seconds since it
+# connected, so the session's two edges are there even though the kernel's
+# retained ring has overwritten its own record of the first by the time the
+# final dmesg replays it, and never held the second (an `echo` in init.sh).
+TIMED = re.compile(rb"^\s*(\d+\.\d+)\s(.*)$")
+SESSION_START = b"interactive shell: uart blocked"
+SESSION_END = b"busybox interactive shell exit: 0"
+
+
+def ash_session_us(timing_log: Path) -> int:
+    start = None
+    end = None
+    for line in timing_log.read_bytes().replace(b"\r", b"").splitlines():
+        match = TIMED.match(line)
+        if not match:
+            continue
+        text = match.group(2).strip()
+        while text.startswith(b"/ # "):
+            text = text[4:]
+        seconds = float(match.group(1))
+        if start is None and text == SESSION_START:
+            start = seconds
+        elif start is not None and end is None and text == SESSION_END:
+            end = seconds
+    if start is None or end is None or end < start:
+        fail("the interactive ash session's edges -- `interactive shell: "
+             "uart blocked` and then `busybox interactive shell exit: 0` -- "
+             "were not both found in the host timing log, so the boot "
+             "figure cannot be separated from the ash script's length. "
+             "Refused rather than left unsubtracted: the bound below was "
+             "calibrated on the separated figure")
+    return round((end - start) * 1_000_000)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -32,6 +66,10 @@ def main() -> None:
     parser.add_argument("--platform", choices=("qemu", "rpi5"), default="qemu")
     parser.add_argument("--timing-profile", choices=("local", "hosted"),
                         default="local")
+    # The UART driver's per-line host timestamps. Required rather than
+    # optional: without it the ash session would silently count as boot time
+    # again, against a bound calibrated without it.
+    parser.add_argument("--timing-log", type=Path, required=True)
     args = parser.parse_args()
     if args.platform != "qemu" and args.timing_profile != "local":
         parser.error("the hosted timing profile is only valid for QEMU")
@@ -102,13 +140,43 @@ def main() -> None:
     # The number is printed on every run, passing or not, because the bound
     # only catches the large regressions: a +3 s one stays green and is
     # visible only as a difference between two runs' output.
+    # Recalibrated 2026-09-11, GitHub issue #541: the bound no longer
+    # counts the interactive ash session. That session runs before the
+    # milestone, so every command added to kernel/tests/common/ash/ash.stdin
+    # was billed as boot time. One BusyBox exec costs 0.6-1.0 s under
+    # cicheck's parallel load, and #538's first three commands took the
+    # figure above to 25.2 s. At that point the only moves left were to stop
+    # adding userspace tests, or to verify userspace-visible behaviour from
+    # inside the kernel. Neither is what the bound is for.
+    #
+    # So the session's length, measured on the host's clock, is subtracted
+    # and the bound applies to what is left. The two clocks run at the same
+    # rate, which is all a subtraction of one length needs; they do not
+    # share an origin (the RPi5 host log starts about 17 s before the guest,
+    # at SWD load), which is why the length is subtracted rather than either
+    # edge compared with a ring timestamp.
+    #
+    # Measured on the separated figure, 2026-09-11:
+    #
+    #   QEMU  main 15.5 s, debug 15.0 s, both under cicheck's parallel load
+    #         (whole boots of 23.9 and 23.3 s, ash sessions of 8.4 and 8.3 s).
+    #   RPi5  18.0 s (a 20.2 s boot, a 2.2 s session: real cores run
+    #         BusyBox's execs about four times faster).
+    #
+    # The margin keeps the rule the 2026-09-06 numbers set: catch anything
+    # over about +7 s, and in particular the +10.7 s of #411. 22 s is 6.5 s
+    # above QEMU's worst and 25 s is 7 s above the board's. The hosted
+    # profile's 35 s is kept as it was and now applies to the smaller
+    # figure, so it is looser than before rather than stricter: no CI
+    # session length has been measured yet. This validator prints all three
+    # numbers on every run, and CI's own are what to recalibrate it from.
     assembled_prefix = b"memory: source=dtb base_bytes="
     if args.platform == "qemu":
         listener = b"virtio net: link ready mac=02:00:20:00:00:02"
         resumed = b"virtio net: tcp handshake echo close reconnect ok"
         minimum_delay = 3_500_000
         maximum_delay = 5_500_000
-        maximum_boot = 25_000_000
+        maximum_boot = 22_000_000
         if args.timing_profile == "hosted":
             # CI run 34160800357, same 8924f4a6 kernel as the local 17.5s
             # boot: main 22.621s, debug 25.869s, both completed every network
@@ -125,7 +193,7 @@ def main() -> None:
         resumed = b"rp1 gem: tcp handshake echo close reconnect ok"
         minimum_delay = 5_000_000
         maximum_delay = 9_000_000
-        maximum_boot = 28_000_000
+        maximum_boot = 25_000_000
     if first not in by_text:
         fail("first kernel marker is absent")
     assembled = [item for item in records if item[1].startswith(assembled_prefix)]
@@ -139,13 +207,18 @@ def main() -> None:
              "kernel/tests/common/views/boot_milestone.expected so its "
              "disappearance fails a view too; the reasoning is in this file.")
     boot_us = by_text[boot_done]
-    if boot_us > maximum_boot:
+    session_us = ash_session_us(args.timing_log)
+    bounded_us = boot_us - session_us
+    if bounded_us > maximum_boot:
         fail(
             f"{args.platform} ({args.timing_profile}) reached its last boot milestone in "
-            f"{boot_us / 1_000_000:.1f} s, over the {maximum_boot / 1_000_000:.0f} s "
-            "bound. INVESTIGATE, do not raise the bound: the number this "
-            "guards against is complexity added to a path that runs per page "
-            "or per record, which does not announce itself any other way."
+            f"{bounded_us / 1_000_000:.1f} s outside the "
+            f"{session_us / 1_000_000:.1f} s interactive ash session "
+            f"({boot_us / 1_000_000:.1f} s in all), over the "
+            f"{maximum_boot / 1_000_000:.0f} s bound. INVESTIGATE, do not "
+            "raise the bound: the number this guards against is complexity "
+            "added to a path that runs per page or per record, which does "
+            "not announce itself any other way."
         )
     elapsed = by_text[resumed] - by_text[listener]
     if elapsed < minimum_delay or elapsed > maximum_delay:
@@ -200,7 +273,9 @@ def main() -> None:
 
     print(
         f"PASS kernel/{args.platform} dmesg: {len(records)} monotonic records, "
-        f"assembled lines, delay={elapsed} us, boot={boot_us / 1_000_000:.1f} s"
+        f"assembled lines, delay={elapsed} us, boot={boot_us / 1_000_000:.1f} s, "
+        f"ash-session={session_us / 1_000_000:.1f} s, "
+        f"bounded={bounded_us / 1_000_000:.1f} s"
         f"{spin}{block_io}, timing-profile={args.timing_profile}, "
         f"boot-bound={maximum_boot / 1_000_000:.0f} s"
     )

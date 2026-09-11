@@ -547,7 +547,7 @@ fi
 echo "[kernel/rpi5] interactive background HTTPd passed"
 
 python3 "$REPO_ROOT/scripts/validate_kernel_dmesg_timestamps.py" \
-    --platform rpi5 "$UART_LOG"
+    --platform rpi5 --timing-log "$UART_TIMING_LOG" "$UART_LOG"
 python3 "$REPO_ROOT/scripts/profile_kernel_workload.py" collect \
     --uart-log "$UART_LOG" --output "$ARTIFACT_DIR/busy-pair-profile.json" \
     --target rpi5

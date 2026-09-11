@@ -1061,8 +1061,8 @@ run, not a specification.
   direct blocks and refuses a symlink or a file reaching an indirect block.
   Symlinks remain fast symlinks, and there are no additional block groups.
   The QEMU lane runs the host's `e2fsck -fn` over the disk the guest wrote,
-  after checking that the fixture's grown `/etc` and kept `/etc/made/inner`
-  are on it.
+  after checking that the fixture's grown `/etc` and the directories the
+  shell made through `mkdirat`, `/etc/made` and `/kept`, are on it.
 - **Processes.** A pooled `ProcessRecord` scheduler table with no
   process-count ceiling, with lazily backed kernel stacks and directly owned
   address-space page tables, all on core 0.

@@ -15,6 +15,7 @@ use "kernel/arch/arm64/kernel/secondary.tkb";
 use "kernel/init/boot_memory.tkb";
 use "kernel/init/boot_prologue.tkb";
 use "kernel/init/ext2_fixture.tkb";
+use "kernel/platform/rpi5/usb_ext2_fixture.tkb";
 use "kernel/init/secondary_boot.tkb";
 use "kernel/init/contention_probes.tkb";
 

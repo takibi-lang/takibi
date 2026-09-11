@@ -668,7 +668,7 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.read_indirect.tmp $@.tmp:/read_indirect.txt
 	rm -f $@.read_indirect.tmp
 	printf 'removable\n' >$@.removable.tmp
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.removable.tmp $@.tmp:/etc/removable.txt
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.removable.tmp $@.tmp:/etc/gone
 	rm -f $@.removable.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_RPI5_USER_PAYLOAD_ELF) $@.tmp:/bin/user_payload
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSY_LOOP_A_ELF) $@.tmp:/bin/busy-a
@@ -711,7 +711,7 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	done
 	debugfs -w -R 'set_inode_field /bin/busybox.static links_count 33' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/busybox-extras links_count 2' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'link /hello.txt /etc/hello-link' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'link /hello.txt /etc/hlink' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /hello.txt links_count 2' $@.tmp >/dev/null 2>&1
 	e2fsck -fn $@.tmp >/dev/null
 	mv $@.tmp $@
