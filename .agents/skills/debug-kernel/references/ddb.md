@@ -15,7 +15,7 @@ inspection, and resume.
 ## First-pass commands
 
 <!-- DDB-COMMAND-INVENTORY-START -->
-`oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `wait`;
+`oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `stacks`; `wait`;
 `proc PID`; `bt [PID|cpu N]`; `trace`; `events`; `xk ADDRESS [COUNT]`;
 `xp PHYSICAL [COUNT]`; `xu PID ADDRESS [COUNT]`; `help`; `continue`.
 <!-- DDB-COMMAND-INVENTORY-END -->
@@ -24,6 +24,10 @@ inspection, and resume.
   and current-process state.
 - `ps`, `proc PID`: bounded process snapshots. A truncated snapshot saying
   `not captured` does not prove that a PID does not exist.
+- `stacks`: process-to-CPU-to-stack attribution from two independent witnesses:
+  stopped CPU roots and the scheduler's physical stack-owner ledger. Missing
+  records, mismatched owners or ranges, and duplicate PID/stack attribution
+  remain distinct outcomes.
 - `wait`: who is waiting for what, derived from the same snapshot. A parent
   blocked collecting a child names that child; UART, network, deadline and
   signal waits are event nodes, because the kernel does not know which future

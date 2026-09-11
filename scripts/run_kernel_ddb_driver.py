@@ -26,6 +26,9 @@ def main() -> int:
     parser.add_argument("--log", required=True)
     parser.add_argument("--snapshot-ready-file")
     parser.add_argument("--snapshot-release-file")
+    parser.add_argument("--network-ready-file", required=True)
+    parser.add_argument("--foreground-listener-file", required=True)
+    parser.add_argument("--init-listener-file", required=True)
     parser.add_argument("--timeout", type=float, default=30.0)
     args = parser.parse_args()
     if ((args.snapshot_ready_file is None)
@@ -39,6 +42,12 @@ def main() -> int:
     release_file = (
         Path(args.snapshot_release_file) if args.snapshot_release_file else None
     )
+    network_ready_file = Path(args.network_ready_file)
+    foreground_listener_file = Path(args.foreground_listener_file)
+    init_listener_file = Path(args.init_listener_file)
+    for marker in (network_ready_file, foreground_listener_file,
+                   init_listener_file):
+        marker.unlink(missing_ok=True)
     if ready_file is not None:
         ready_file.unlink(missing_ok=True)
         release_file.unlink(missing_ok=True)
@@ -49,10 +58,12 @@ def main() -> int:
     break_sent = args.break_source == "software"
     wake_byte_sent = args.break_source == "software"
     prompt_count = 0
+    migration_context_sent = False
+    payload_sent = False
     commands = [
         b"oops\n", b"regs\n", b"intr\n", b"sched\n",
         b"current\n", b"vm\n", b"fds\n",
-        b"ps\n", b"wait\n", b"waittest\n", b"proc 1\n",
+        b"ps\n", b"stacks\n", b"wait\n", b"waittest\n", b"proc 1\n",
         b"bt\n", b"bt 1\n", b"bt 0\n", b"bt 999999\n",
         b"bt cpu 1\n", b"bt cpu 9\n", b"bt cpu x\n", b"bttest\n",
         b"trace\n", b"events\n",
@@ -89,10 +100,46 @@ def main() -> int:
             # recorded wake before BREAK.
             if (not wake_byte_sent and
                     b"interactive shell: uart blocked\n" in received):
-                serial.sendall(b"\n")
+                # The UART-BREAK lane now stops during the maintained
+                # migration workload. Leave this first interactive shell so
+                # init can reach the busy pair; a bare newline would wake the
+                # read and immediately park at the same prompt forever.
+                serial.sendall(b"exit\n")
                 wake_byte_sent = True
 
-            if wake_byte_sent and not break_sent:
+            if (not network_ready_file.exists() and
+                    b"virtio net: link ready " in received):
+                network_ready_file.touch()
+            if (not foreground_listener_file.exists() and
+                    b"foreground server: listener ready port=8080\n"
+                    in received):
+                foreground_listener_file.touch()
+            if (not init_listener_file.exists() and
+                    b"linux socket: listener ready port=8080\n" in received):
+                init_listener_file.touch()
+
+            if (not payload_sent and
+                    b"concurrency: parent progressed while child uart-blocked\n"
+                    in received):
+                serial.sendall(b"irqtest\n")
+                payload_sent = True
+
+            # The pair deliberately waits until its restart verdict before
+            # measuring migration. Match the maintained integration lane's
+            # third runnable context: its persistent shell starts a
+            # background HTTPd, allowing each busy process to become Ready
+            # and be selected by the other CPU.
+            if (not migration_context_sent and
+                    b"workload: busy pair done\n" in received and
+                    b"persistent shell: uart blocked\n" in received):
+                serial.sendall(b"httpd-serve.sh &\n")
+                migration_context_sent = True
+
+            migration_ready = (
+                b"workload: busy pair migrated across both cpus with stack "
+                b"handoff intact\n" in received
+            )
+            if wake_byte_sent and migration_ready and not break_sent:
                 with connect(args.qmp_port, deadline) as qmp:
                     qmp_file = qmp.makefile("rwb", buffering=0)
                     # Say what arrived instead of naming only what did

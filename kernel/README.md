@@ -228,7 +228,7 @@ chardev to deliver the equivalent BREAK through a private QMP control socket.
 The existing TCP UART/miniterm data path is unchanged. The kernel prints
 `ddb>` and accepts the following commands.
 <!-- DDB-COMMAND-INVENTORY-START -->
-`oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `wait`;
+`oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `stacks`; `wait`;
 `proc PID`; `bt [PID|cpu N]`; `trace`; `events`; `xk ADDRESS [COUNT]`;
 `xp PHYSICAL [COUNT]`; `xu PID ADDRESS [COUNT]`; `help`; `continue`.
 <!-- DDB-COMMAND-INVENTORY-END -->
@@ -716,7 +716,7 @@ reachable operation is fixed-size and polling-only, with no allocator, lock,
 scheduler, sleep, filesystem, network, or ordinary logging dependency. Its
 public command inventory follows.
 <!-- DDB-COMMAND-INVENTORY-START -->
-`oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `wait`;
+`oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `stacks`; `wait`;
 `proc PID`; `bt [PID|cpu N]`; `trace`; `events`; `xk ADDRESS [COUNT]`;
 `xp PHYSICAL [COUNT]`; `xu PID ADDRESS [COUNT]`; `help`; `continue`.
 <!-- DDB-COMMAND-INVENTORY-END -->
@@ -741,6 +741,11 @@ The header prints `truncated=1` when either budget prevents a complete view;
 `proc PID` then says that an absent PID was not captured rather than claiming
 it does not exist. The terminal crash console above intentionally has no
 `continue`.
+
+`stacks` cross-checks each stopped CPU's published process frame against that
+same process snapshot. It reports the CPU, PID, stack range, and scheduler
+physical-stack owner, then separately counts missing records, owner or range
+mismatches, duplicate PIDs, and duplicate stack ranges.
 
 `bt` walks the interrupted CPU's compiler-generated frame chain. `bt PID`
 uses the same walker with a non-current process's saved exception frame.

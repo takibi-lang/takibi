@@ -1223,7 +1223,7 @@ kernelcheck-ddb-qemu: kernelbuild-check
 
 _kernelcheck-ddb-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_DDB_ELF="$(KERNEL_QEMU_DEBUG_ELF)" bash scripts/run_kernel_ddb_qemutest.sh
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_DDB_ELF="$(KERNEL_QEMU_DEBUG_ELF)" KERNEL_QEMU_DDB_BREAK_SOURCE=software KERNEL_QEMU_DDB_SERIAL_PORT=18704 KERNEL_QEMU_DDB_QMP_PORT=18705 KERNEL_QEMU_DDB_GDB_PORT=18706 KERNEL_QEMU_DDB_ARTIFACT_DIR="$(CURDIR)/_build/kernel-ddb-qemu-software" bash scripts/run_kernel_ddb_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_DDB_ELF="$(KERNEL_QEMU_DEBUG_ELF)" KERNEL_QEMU_DDB_BREAK_SOURCE=software KERNEL_QEMU_DDB_SERIAL_PORT=18704 KERNEL_QEMU_DDB_QMP_PORT=18705 KERNEL_QEMU_DDB_GDB_PORT=18706 KERNEL_QEMU_DDB_NETDEV_LOCAL_PORT=18709 KERNEL_QEMU_DDB_NETDEV_REMOTE_PORT=18710 KERNEL_QEMU_DDB_ARTIFACT_DIR="$(CURDIR)/_build/kernel-ddb-qemu-software" bash scripts/run_kernel_ddb_qemutest.sh
 
 ## Issue #377 regression: the exception-entry stack guard.  Deliberately
 ## separate from the ordinary QEMU suite for the same reason as

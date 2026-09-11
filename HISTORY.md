@@ -54,6 +54,17 @@ The process is still Running in that case, so the trampoline now retries its
 syscall on the same frame. QEMU and RPi5 then passed all 45 views; the RPi5 run
 also passed its network, storage, and DDB recovery lanes.
 
+DDB now closes the observability half of the same invariant. Its `stacks`
+command correlates every stopped CPU root with the bounded process snapshot,
+the process stack range, and the authoritative physical owner. It reports
+missing or duplicate process records, owner/range mismatches, and duplicate
+root PIDs or stack ranges separately. The UART-BREAK regression reaches the
+live workload only after the network-driven init sequence, supplies the same
+third runnable context as the main lane, waits for both processes to migrate,
+then requires two distinct roots with no mismatch. The early software-BRK
+checkpoint remains a negative control: both boot CPUs still identify PID 1,
+and `stacks` reports that duplicate instead of claiming unique attribution.
+
 ## 2026-09-11: live PTE replacement uses break-before-make (#261)
 
 Last-level page-table mutation now has one architecture API. Replacing a live

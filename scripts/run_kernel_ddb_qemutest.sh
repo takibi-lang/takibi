@@ -20,6 +20,8 @@ ARTIFACT_DIR="${KERNEL_QEMU_DDB_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-ddb-qemu}
 SERIAL_PORT="${KERNEL_QEMU_DDB_SERIAL_PORT:-18701}"
 QMP_PORT="${KERNEL_QEMU_DDB_QMP_PORT:-18702}"
 GDB_PORT="${KERNEL_QEMU_DDB_GDB_PORT:-18703}"
+NETDEV_LOCAL_PORT="${KERNEL_QEMU_DDB_NETDEV_LOCAL_PORT:-18704}"
+NETDEV_REMOTE_PORT="${KERNEL_QEMU_DDB_NETDEV_REMOTE_PORT:-18705}"
 BREAK_SOURCE="${KERNEL_QEMU_DDB_BREAK_SOURCE:-uart}"
 UART_LOG="$ARTIFACT_DIR/uart.log"
 GDB_VIEW_LOG="$ARTIFACT_DIR/kernel-state-gdb.log"
@@ -28,6 +30,11 @@ GDB_REPLACED_TEST="$ARTIFACT_DIR/kernel-state-replaced-test.gdb"
 SNAPSHOT_READY="$ARTIFACT_DIR/snapshot.ready"
 SNAPSHOT_RELEASE="$ARTIFACT_DIR/snapshot.release"
 QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
+NETWORK_READY="$ARTIFACT_DIR/network.ready"
+FOREGROUND_LISTENER="$ARTIFACT_DIR/foreground-httpd.listener"
+INIT_LISTENER="$ARTIFACT_DIR/init.listener"
+PEER_LOG="$ARTIFACT_DIR/net-peer.log"
+TIMEOUT_SECS="${KERNEL_QEMU_DDB_TIMEOUT:-180}"
 KERNEL_READ_ADDRESS="$(llvm-nm-19 "$ELF" | awk '$3 == "kernel_ddb_breakpoint_test_enabled" && !seen { print $1; seen = 1 }')"
 if [ -z "$KERNEL_READ_ADDRESS" ]; then
     echo "kernel DDB read-test symbol not found" >&2
@@ -35,12 +42,15 @@ if [ -z "$KERNEL_READ_ADDRESS" ]; then
 fi
 
 mkdir -p "$ARTIFACT_DIR"
-rm -f "$SNAPSHOT_READY" "$SNAPSHOT_RELEASE"
+rm -f "$SNAPSHOT_READY" "$SNAPSHOT_RELEASE" "$NETWORK_READY" \
+    "$FOREGROUND_LISTENER" "$INIT_LISTENER"
 cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
 . "$REPO_ROOT/scripts/qemu_session_ports.sh"
-qemu_session_shift_ports SERIAL_PORT QMP_PORT GDB_PORT
+qemu_session_shift_ports SERIAL_PORT QMP_PORT GDB_PORT NETDEV_LOCAL_PORT \
+    NETDEV_REMOTE_PORT
 python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "kernel/qemu ddb" \
-    "tcp:$SERIAL_PORT" "tcp:$QMP_PORT" "tcp:$GDB_PORT" || exit 1
+    "tcp:$SERIAL_PORT" "tcp:$QMP_PORT" "tcp:$GDB_PORT" \
+    "udp:$NETDEV_LOCAL_PORT" "udp:$NETDEV_REMOTE_PORT" || exit 1
 
 qemu-system-aarch64 \
     -machine virt -cpu cortex-a53 -smp 2 -m 1024 -display none \
@@ -51,11 +61,15 @@ qemu-system-aarch64 \
     -global virtio-mmio.force-legacy=on \
     -drive "file=$QEMU_EXT2_IMAGE,if=none,format=raw,id=vd0" \
     -device virtio-blk-device,drive=vd0 \
+    -netdev "dgram,id=net0,local.type=inet,local.host=127.0.0.1,local.port=$NETDEV_LOCAL_PORT,remote.type=inet,remote.host=127.0.0.1,remote.port=$NETDEV_REMOTE_PORT" \
+    -device virtio-net-device,netdev=net0,mac=02:00:20:00:00:02,csum=off,guest_csum=off,gso=off,guest_tso4=off,guest_tso6=off,guest_ufo=off,guest_uso4=off,guest_uso6=off,mrg_rxbuf=off,ctrl_vq=off,mq=off,indirect_desc=off,event_idx=off \
     -kernel "$ELF" >"$ARTIFACT_DIR/qemu.log" 2>&1 &
 qemu_pid=$!
 driver_pid=""
+peer_pid=""
 cleanup() {
     if [ -n "$driver_pid" ]; then kill "$driver_pid" 2>/dev/null || true; fi
+    if [ -n "$peer_pid" ]; then kill "$peer_pid" 2>/dev/null || true; fi
     kill "$qemu_pid" 2>/dev/null || true
     wait "$qemu_pid" 2>/dev/null || true
 }
@@ -68,8 +82,19 @@ python3 "$REPO_ROOT/scripts/run_kernel_ddb_driver.py" \
     --log "$UART_LOG" \
     --snapshot-ready-file "$SNAPSHOT_READY" \
     --snapshot-release-file "$SNAPSHOT_RELEASE" \
-    --timeout 90 &
+    --network-ready-file "$NETWORK_READY" \
+    --foreground-listener-file "$FOREGROUND_LISTENER" \
+    --init-listener-file "$INIT_LISTENER" \
+    --timeout "$TIMEOUT_SECS" &
 driver_pid=$!
+
+KERNEL_QEMU_TIMEOUT="$TIMEOUT_SECS" \
+python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" \
+    "$NETDEV_LOCAL_PORT" "$NETDEV_REMOTE_PORT" \
+    --daemon-ready-file "$FOREGROUND_LISTENER" \
+    --init-ready-file "$INIT_LISTENER" \
+    --network-ready-file "$NETWORK_READY" >"$PEER_LOG" 2>&1 &
+peer_pid=$!
 
 GDB_COMMANDS=(
     -ex "target remote 127.0.0.1:$GDB_PORT"
@@ -89,7 +114,11 @@ fi
 gdb-multiarch -q -batch "$ELF" "${GDB_COMMANDS[@]}" \
     -ex "detach" >/dev/null
 
-for _wait in $(seq 1 300); do
+# The UART BREAK path now reaches the live migration phase rather than the
+# first shell prompt. Give it the driver's full boot budget; the indirect-file
+# fixture alone can consume most of the former 30-second snapshot wait on a
+# loaded host.
+for _wait in $(seq 1 "$((TIMEOUT_SECS * 10))"); do
     [ -e "$SNAPSHOT_READY" ] && break
     kill -0 "$driver_pid" 2>/dev/null || break
     sleep 0.1
@@ -218,6 +247,7 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         ! grep -Eq '^ddb: fds pid=[0-9]+ slots=[0-9]+$' "$UART_LOG" ||
         ! grep -Eq '^ddb: ps count=[1-9][0-9]* truncated=[01]$' "$UART_LOG" ||
         ! grep -Eq '^ddb: ps pid=1 ppid=0 state=[0-9]+ wait=[0-9]+ root=0 sp=0x[0-9a-f]+$' "$UART_LOG" ||
+        ! grep -q '^ddb: stacks cpus=2 processes=' "$UART_LOG" ||
         ! grep -Eq '^ddb: proc pid=1 ppid=0 state=[0-9]+ wait=[0-9]+ root=0 sp=0x[0-9a-f]+$' "$UART_LOG" ||
         [ "$(grep -Ec '^ddb: bt source=(cpu cpu=[0-9]+|saved) pid=[0-9]+ stack=0x[0-9a-f]+\.\.0x[0-9a-f]+$' "$UART_LOG")" -lt 2 ] ||
         [ "$(grep -Ec '^ddb: bt frame=0 pc=0x[0-9a-f]+ boundary=(exception|user|assembly|assembly-bridge)$' "$UART_LOG")" -lt 2 ] ||
@@ -259,7 +289,7 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         [ "$(grep -c '^ddb: usage: xu PID HEX_ADDRESS \[COUNT_1_TO_64\]$' "$UART_LOG")" -ne 2 ] ||
         ! grep -q '^ddb: xu pid not captured$' "$UART_LOG" ||
         ! grep -q '^ddb: xu unmapped address=0x0000000070000000$' "$UART_LOG" ||
-        ! grep -q '^commands: oops regs intr sched current vm fds ps wait proc PID bt \[PID|cpu N\] trace events xk ADDRESS \[COUNT\] xp PHYSICAL \[COUNT\] xu PID ADDRESS \[COUNT\] help continue$' "$UART_LOG" ||
+        ! grep -q '^commands: oops regs intr sched current vm fds ps stacks wait proc PID bt \[PID|cpu N\] trace events xk ADDRESS \[COUNT\] xp PHYSICAL \[COUNT\] xu PID ADDRESS \[COUNT\] help continue$' "$UART_LOG" ||
         ! grep -Eq '^ddb: wait current=[0-9]+ state=[a-z-]+ reason=[a-z-]+ awaited=[01]$' "$UART_LOG" ||
         ! grep -Eq '^ddb: wait edges=[0-9]+ blocked=[0-9]+ unknown=[0-9]+ truncated=[01]$' "$UART_LOG" ||
         ! grep -q '^ddb: wait current=3 state=running reason=net-rx awaited=1$' "$UART_LOG" ||
@@ -281,11 +311,43 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
 fi
 
 if [ "$BREAK_SOURCE" = uart ] &&
+        { [ "$(grep -Ec '^ddb: stack cpu=[01] pid=[0-9]+ stack=0x[0-9a-f]+\.\.0x[0-9a-f]+ owner=(none|[01]) record=match$' "$UART_LOG")" -ne 2 ] ||
+          ! grep -q '^ddb: stacks roots=2 matched=2 missing=0 duplicate-process=0 owner-mismatch=0 range-mismatch=0 duplicate-pid=0 duplicate-stack=0$' "$UART_LOG"; }; then
+    echo "FAIL kernel/qemu ddb: migration stack attribution was not unique" >&2
+    exit 1
+fi
+
+# The software checkpoint deliberately precedes process scheduling: both
+# boot CPUs still identify PID 1, while only CPU 0 owns PID 1's process stack.
+# Keep that negative control explicit so `stacks` cannot silently call this
+# early topology a unique process assignment.
+if [ "$BREAK_SOURCE" = software ] &&
+        ! grep -q '^ddb: stacks roots=2 matched=1 missing=0 duplicate-process=0 owner-mismatch=1 range-mismatch=1 duplicate-pid=1 duplicate-stack=0$' "$UART_LOG"; then
+    echo "FAIL kernel/qemu ddb: boot-time duplicate-root control missing" >&2
+    exit 1
+fi
+
+if [ "$BREAK_SOURCE" = uart ] &&
         { ! grep -q '^ddb: bt stop=user-boundary fp=0x' "$UART_LOG" ||
-          ! grep -Eq '^ddb: event seq=1 cpu=0 id=0x0000000000000201 a=0x000000000000000a b=0x0*[1-9a-f][0-9a-f]* c=0x0000000000000000 d=0x0000000000000001$' "$UART_LOG" ||
-          ! grep -q '^ddb: event seq=2 cpu=0 id=0x0000000000000101 a=0x' "$UART_LOG"; }; then
-    echo "FAIL kernel/qemu ddb: interleaved UART wake/BREAK events missing" >&2
+          ! grep -Eq '^ddb: events cpu=0 count=[1-9][0-9]* damaged=0 overwritten=[1-9][0-9]*$' "$UART_LOG" ||
+          ! grep -Eq '^ddb: event seq=[1-9][0-9]* cpu=0 id=0x0000000000000101 a=0x' "$UART_LOG"; }; then
+    echo "FAIL kernel/qemu ddb: late UART BREAK evidence missing" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
+    exit 1
+fi
+
+if [ "$BREAK_SOURCE" = uart ] && ! python3 - "$UART_LOG" <<'PY'
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="ascii", errors="replace")
+migrated = text.find(
+    "workload: busy pair migrated across both cpus with stack handoff intact\n")
+stacks = text.find("ddb: stacks cpus=2 processes=")
+raise SystemExit(0 if 0 <= migrated < stacks else 1)
+PY
+then
+    echo "FAIL kernel/qemu ddb: snapshot did not follow live migration" >&2
     exit 1
 fi
 

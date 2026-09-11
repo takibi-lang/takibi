@@ -112,11 +112,9 @@ entry leaves the next one unable to be verified.
 9. **#261** PTE mutation against the hardware page-table walker -- complete
    with compiler-enforced raw-write privacy and Arm break-before-make on every
    live last-level replacement.
-10. **#532** physical process-stack ownership across CPU migration. The
-    architectural relinquish/acquire boundary and exit-time deferred reap are
-    implemented. The maintained workload moves both busy processes between
-    CPU 0 and CPU 1 and requires each to cross that boundary twice. Next add
-    DDB's during-workload process/CPU/stack attribution evidence.
+10. **#532** physical process-stack ownership across CPU migration -- complete.
+    DDB stops both CPUs after the maintained migration workload and correlates
+    each stopped root with exactly one captured process, CPU, and stack.
 11. **#9** processor affinity, with four cores.
 
 Then, in this territory and unordered: #518, #468, #464, #516, #308, #414,

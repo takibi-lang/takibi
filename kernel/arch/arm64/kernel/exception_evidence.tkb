@@ -1560,6 +1560,169 @@ private fn ddb_render_ps() !{unsafe} {
     }
 }
 
+// A world stop gives DDB two independent accounts of process-stack use:
+// each CPU publishes the process frame it stopped with, while the bounded
+// process snapshot carries the scheduler's physical stack-owner ledger. Keep
+// both accounts visible and compare them here; deriving one from the other
+// would make an ownership defect agree with its own diagnostic.
+must_use variant DdbStackProcessResult {
+    Missing;
+    Duplicate;
+    Found(ProcessDdbRecord);
+}
+
+struct DdbStackRootSummary {
+    present: bool;
+    pid: usize;
+    stack_bottom: usize;
+    stack_top: usize;
+}
+
+struct DdbStackAudit {
+    roots: usize;
+    matched: usize;
+    missing: usize;
+    duplicate_process: usize;
+    owner_mismatch: usize;
+    range_mismatch: usize;
+    duplicate_pid: usize;
+    duplicate_stack: usize;
+}
+
+struct DdbStackRenderResult {
+    root: DdbStackRootSummary;
+    audit: DdbStackAudit;
+}
+
+private fn ddb_stack_process(pid: usize) -> DdbStackProcessResult {
+    for index: usize in 0..<DDB_PROCESS_RECORDS {
+        if (index < ddb_snapshot.process_count &&
+                ddb_snapshot.processes[index].pid == pid) {
+            for other: usize in 0..<DDB_PROCESS_RECORDS {
+                if (other > index && other < ddb_snapshot.process_count &&
+                        ddb_snapshot.processes[other].pid == pid) {
+                    return DdbStackProcessResult::Duplicate;
+                }
+            }
+            return DdbStackProcessResult::Found(
+                ddb_snapshot.processes[index]);
+        }
+    }
+    return DdbStackProcessResult::Missing;
+}
+
+private fn ddb_stack_root(core: usize) -> DdbStoppedRootResult !{unsafe} {
+    if (core == (ddb_snapshot.cpu & 0xFF)) {
+        return DdbStoppedRootResult::Root(ddb_current_unwind_root());
+    }
+    return ddb_stopped_unwind_root(core);
+}
+
+private fn ddb_render_stack_root(
+        core: usize, audit: DdbStackAudit)
+        -> DdbStackRenderResult !{unsafe} {
+    let mut next: DdbStackAudit = audit;
+    match ddb_stack_root(core) {
+        DdbStoppedRootResult::NotStopped => {
+            ddb_puts("ddb: stack cpu="); ddb_put_udec(core);
+            ddb_puts(" status=not-stopped\n");
+        }
+        DdbStoppedRootResult::Changed => {
+            ddb_puts("ddb: stack cpu="); ddb_put_udec(core);
+            ddb_puts(" status=root-changed\n");
+        }
+        DdbStoppedRootResult::Root(root) => {
+            next.roots = next.roots + 1;
+            ddb_puts("ddb: stack cpu="); ddb_put_udec(core);
+            ddb_puts(" pid="); ddb_put_udec(root.pid);
+            ddb_puts(" stack="); ddb_put_hex(root.stack_bottom);
+            ddb_puts(".."); ddb_put_hex(root.stack_top);
+            match ddb_stack_process(root.pid) {
+                DdbStackProcessResult::Missing => {
+                    next.missing = next.missing + 1;
+                    ddb_puts(" owner=unknown record=missing\n");
+                }
+                DdbStackProcessResult::Duplicate => {
+                    next.duplicate_process = next.duplicate_process + 1;
+                    ddb_puts(" owner=unknown record=duplicate-pid\n");
+                }
+                DdbStackProcessResult::Found(record) => {
+                    let range_matches: bool =
+                        record.stack_bottom == root.stack_bottom &&
+                        record.stack_top == root.stack_top;
+                    let owner_matches: bool =
+                        record.stack_owner_cpu >= KERNEL_MAX_CORES ||
+                        record.stack_owner_cpu == core;
+                    ddb_puts(" owner=");
+                    if (record.stack_owner_cpu >= KERNEL_MAX_CORES) {
+                        ddb_puts("none");
+                    } else {
+                        ddb_put_udec(record.stack_owner_cpu);
+                    }
+                    if (range_matches && owner_matches) {
+                        next.matched = next.matched + 1;
+                        ddb_puts(" record=match\n");
+                    } else if (range_matches == false &&
+                               owner_matches == false) {
+                        next.range_mismatch = next.range_mismatch + 1;
+                        next.owner_mismatch = next.owner_mismatch + 1;
+                        ddb_puts(" record=range+owner-mismatch\n");
+                    } else if (range_matches == false) {
+                        next.range_mismatch = next.range_mismatch + 1;
+                        ddb_puts(" record=range-mismatch\n");
+                    } else {
+                        next.owner_mismatch = next.owner_mismatch + 1;
+                        ddb_puts(" record=owner-mismatch\n");
+                    }
+                }
+            }
+            let mut summary: DdbStackRootSummary = {
+                true, root.pid, root.stack_bottom, root.stack_top
+            };
+            let mut result: DdbStackRenderResult = { summary, next };
+            return result;
+        }
+    }
+    let mut absent: DdbStackRootSummary = { false, 0, 0, 0 };
+    let mut result: DdbStackRenderResult = { absent, next };
+    return result;
+}
+
+private fn ddb_render_stacks() !{unsafe} {
+    ddb_puts("ddb: stacks cpus="); ddb_put_udec(DDB_ONLINE_CORES);
+    ddb_puts(" processes="); ddb_put_udec(ddb_snapshot.process_count);
+    ddb_puts(" truncated="); ddb_put_udec(ddb_snapshot.process_truncated);
+    ddb_puts("\n");
+    let mut audit: DdbStackAudit = { 0, 0, 0, 0, 0, 0, 0, 0 };
+    let mut first_result: DdbStackRenderResult =
+        ddb_render_stack_root(0, audit);
+    audit = first_result.audit;
+    let mut first: DdbStackRootSummary = first_result.root;
+    let mut second_result: DdbStackRenderResult =
+        ddb_render_stack_root(1, audit);
+    audit = second_result.audit;
+    let mut second: DdbStackRootSummary = second_result.root;
+    if (first.present && second.present) {
+        if (first.pid == second.pid) {
+            audit.duplicate_pid = audit.duplicate_pid + 1;
+        }
+        if (first.stack_bottom == second.stack_bottom &&
+                first.stack_top == second.stack_top) {
+            audit.duplicate_stack = audit.duplicate_stack + 1;
+        }
+    }
+    ddb_puts("ddb: stacks roots="); ddb_put_udec(audit.roots);
+    ddb_puts(" matched="); ddb_put_udec(audit.matched);
+    ddb_puts(" missing="); ddb_put_udec(audit.missing);
+    ddb_puts(" duplicate-process=");
+    ddb_put_udec(audit.duplicate_process);
+    ddb_puts(" owner-mismatch="); ddb_put_udec(audit.owner_mismatch);
+    ddb_puts(" range-mismatch="); ddb_put_udec(audit.range_mismatch);
+    ddb_puts(" duplicate-pid="); ddb_put_udec(audit.duplicate_pid);
+    ddb_puts(" duplicate-stack="); ddb_put_udec(audit.duplicate_stack);
+    ddb_puts("\n");
+}
+
 // GitHub issue #529: the causal edge, derived from the snapshot already
 // taken.
 //
@@ -1900,6 +2063,8 @@ private fn kernel_ddb_enter_stopped(
             ddb_render_fds();
         } else if (ddb_command_is(line as []u8, length, bs"ps")) {
             ddb_render_ps();
+        } else if (ddb_command_is(line as []u8, length, bs"stacks")) {
+            ddb_render_stacks();
         } else if (ddb_command_is(line as []u8, length, bs"wait")) {
             ddb_render_wait();
         } else if (ddb_command_is(line as []u8, length, bs"events")) {
@@ -1982,7 +2147,7 @@ private fn kernel_ddb_enter_stopped(
                         // lane instead of waiting for the stall to recur.
                         ddb_render_wait_test();
                     } else if (ddb_command_is(line as []u8, length, bs"help")) {
-                        ddb_puts("commands: oops regs intr sched current vm fds ps wait proc PID bt [PID|cpu N] trace events xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] help continue\n");
+                        ddb_puts("commands: oops regs intr sched current vm fds ps stacks wait proc PID bt [PID|cpu N] trace events xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] help continue\n");
                     } else { ddb_puts("ddb: unknown command; try help\n"); }
                     }
                         }

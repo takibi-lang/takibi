@@ -8,6 +8,7 @@
     {"name": "vm", "usage": "vm", "coverage": "qemu"},
     {"name": "fds", "usage": "fds", "coverage": "qemu"},
     {"name": "ps", "usage": "ps", "coverage": "qemu"},
+    {"name": "stacks", "usage": "stacks", "coverage": "qemu"},
     {"name": "wait", "usage": "wait", "coverage": "qemu"},
     {"name": "proc", "usage": "proc PID", "coverage": "qemu"},
     {"name": "bt", "usage": "bt [PID|cpu N]", "coverage": "qemu"},
