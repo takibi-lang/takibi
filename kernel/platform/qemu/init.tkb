@@ -122,17 +122,16 @@ fn kernel_test_platform_network() {
 
 }
 
+// QEMU's root filesystem is the virtio disk every lane attaches. Without one
+// there is no root: the kernel used to mount an embedded copy of the image
+// instead, and print a line no view compared.
 fn kernel_test_platform_storage() {
     match virtio_block_device_ext2() {
         KernelBlockDeviceResult::Invalid => {
-            kernel_boot_log("ext2 image: invalid\n");
+            kernel_boot_log("virtio blk: unavailable, no root filesystem\n");
         }
         KernelBlockDeviceResult::Ready(device) => {
-            if (block_device_is_virtio(device)) {
-                kernel_boot_log("virtio blk: ext2 backend ready\n");
-            } else {
-                kernel_boot_log("virtio blk: unavailable, memory fallback\n");
-            }
+            kernel_boot_log("virtio blk: ext2 backend ready\n");
             kernel_ext2_mount_and_run(device);
         }
     }

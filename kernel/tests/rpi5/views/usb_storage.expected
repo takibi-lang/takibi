@@ -1,13 +1,4 @@
 usb msc: ready sector=512
 usb ext2: provisioned blocks=2560
 usb ext2: provision verify byte-equal
-usb ext2: write /mutable.txt ok
-usb ext2: resize truncate+extend ok
-usb ext2: block+inode bitmap counts ok
-usb ext2: block+inode owners ok
-usb ext2: create+lookup+unlink ok
-usb ext2: nested create+lookup+unlink in /etc ok
-usb ext2: grow /etc past one block ok
-usb ext2: mkdir /etc/made/inner with .. and rmdir ok
-usb ext2: unlink a hard link and a last link in /etc ok
-usb ext2: mounted /hello.txt ok
+rootfs: ext2 on usb

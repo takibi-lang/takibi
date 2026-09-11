@@ -96,6 +96,9 @@ EXEMPT = {
     "platform/qemu/timer_irq.tkb":
         "GIC device state is initialized before interrupts and used by its routed cores",
     "platform/rpi5/uart.tkb": "device state; MSI-X is routed to CPU0",
+    "platform/rpi5/usb_provision.tkb":
+        "the image and its copy buffers, used once by CPU0 while storage is "
+        "set up, before any process exists",
     "platform/rpi5/pcie.tkb":
         "PCIe2 device state is initialized and used only by CPU0",
     "platform/rpi5/timer_irq.tkb":

@@ -894,10 +894,11 @@ before the guest. The bounds were recalibrated on the separated figure, keeping
 the rule of catching anything over about +7 s: QEMU 22 s against a worst of
 15.5 s, and the board 25 s against 18.0 s. With all three commands back in
 the script, the separated figure read 13.6 to 13.8 s on QEMU. The
-mkdir/rmdir/unlink ext2 checks moved to
-`kernel/platform/rpi5/usb_ext2_fixture.tkb`, where they run on the board's USB
-copy of the image, which no process mounts. The grow check stays shared,
-because its dead-record reuse is not visible from userspace.
+mkdir/rmdir/unlink ext2 checks moved for a while to a board-only file that
+ran them on the USB copy of the image, which no process mounted then. Once the
+board's root moved to USB (below), the ash script exercised them there, as it
+does on QEMU, and that file was removed. The grow check stays shared, because
+its dead-record reuse is not visible from userspace.
 
 What #541 left: the hosted CI profile keeps 35 s, now on the smaller figure,
 which is looser than before. Recalibrate it from the numbers CI itself prints.
@@ -921,15 +922,44 @@ shares the kernel log's queue. A queue of its own would need a policy for
 merging two streams without splitting a line, which is the tty layer's (#435)
 and has no caller yet.
 
-**Next, by the maintainer's decision on 2026-09-11: the board's runtime root
-moves to the USB medium.** Today every boot writes the image to USB, mounts
-it for the USB checks, and then switches the syscall layer and exec back to
-the in-memory image. Nobody had noticed, because the two start
-byte-identical. The switch comes with a guard against drifting back, which
-the maintainer asked for. Each platform prints which device its root is on,
-for a view to compare. On the board, the memory image becomes something that
-can only be copied to USB, never mounted, so mounting it is a type error.
-QEMU's silent "virtio unavailable, memory fallback" falls under the same line.
+**The board's runtime root is now the USB medium**, by the maintainer's
+decision on 2026-09-11. Until then every boot wrote the image to USB, mounted
+it for a dozen USB-only checks, and then switched the syscall layer and exec
+back to the in-memory image. Nobody had noticed, because the two start
+byte-identical. The stick is now what `ext2_fixture` checks and every
+process runs from, and the USB-only duplicates of the shared checks are gone.
+The switch comes with the guard the maintainer asked for against drifting
+back:
+
+- `KernelBlockDevice` has no memory backend. The embedded image lives only
+  in `kernel/platform/rpi5/usb_provision.tkb`, which can copy it to the stick
+  and compare it back, and nothing else can reach it. Handing `ext2_mount` the
+  image is not a type error to avoid; there is no value to hand it. The QEMU
+  kernel does not carry the image at all, which returned 656 pages to its
+  allocator.
+- Each boot prints `rootfs: ext2 on usb` or `rootfs: ext2 on virtio`, named
+  from the mounted device itself. Each platform's storage view compares it.
+- QEMU's "virtio unavailable, memory fallback" is gone. A QEMU boot without
+  a disk now says it has no root filesystem, so the oops and stack-overflow
+  lanes, which relied on the fallback without saying so, attach the disk like
+  every other lane.
+
+**What it cost, and what is still open: the board lane fails its boot bound.**
+The switch was committed with `make kernelcheck-rpi5` failing, by the
+maintainer's choice to sync the repository before shortening anything. The
+first board boot from USB reached its last milestone 33.6 s outside the ash
+session, against 18.0 s from RAM and a bound of 25 s, and the ash session
+itself took 38.8 s against 3.3 s. The shape is one cost repeated: nearly
+every exec in the ash script now takes about 3 s, because each one reads
+BusyBox from the stick one 512-byte sector at a time. That is exactly the
+path #281 proposes to coalesce, and it now runs on every exec. The bound
+stays where it is.
+
+The same run printed `uart tx: ... writers_slept=0`, which the #544 check
+refuses on the board. A writer sleeps only when another process can run, and
+while ash waits for `cat` that is a matter of timing, so the criterion is
+flaky: it should count every wait for room, slept or not. Fix that first; it
+is small.
 
 **After that, #281.** With BusyBox exec'd from USB, the multi-sector
 coalescing it proposes finally sits on a path that runs. Measure the USB share

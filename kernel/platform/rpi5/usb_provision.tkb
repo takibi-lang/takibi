@@ -1,0 +1,170 @@
+use "kernel/drivers/block/memory.tkb";
+
+// The board's root filesystem is the USB medium, and this file is the only
+// place the embedded image exists: it is copied to the stick at boot and
+// compared back, and nothing else can reach it. There is no memory backend in
+// KernelBlockDevice, so ext2_mount cannot be handed the image -- the board
+// used to mount the stick for a few checks and then run every process from
+// this image, and nobody noticed for as long as the two started identical.
+//
+// The QEMU kernel does not `use` this file, so it carries no image at all:
+// its root is the virtio disk, or nothing.
+//
+// kernel/build/user/ext2.img is exactly KERNEL_EXT2_IMAGE_LEN bytes, fixed
+// by its recipe's `truncate`; embed_file checks the length at compile time.
+private let mut usb_provision_image: [u8; KERNEL_EXT2_IMAGE_LEN] =
+    embed_file("kernel/build/user/ext2.img");
+
+const USB_PROVISION_BLOCKS: usize = KERNEL_EXT2_IMAGE_LEN / KERNEL_BLOCK_SIZE;
+
+must_use variant UsbProvisionResult { Invalid; Copied; }
+must_use variant UsbProvisionVerifyResult { Invalid; Different; Equal; }
+
+private let mut usb_provision_block: [u8; KERNEL_BLOCK_SIZE];
+private let mut usb_provision_batch:
+    [u8; KERNEL_BLOCK_SIZE * KERNEL_BLOCK_BATCH];
+
+private fn usb_provision_image_block(block: usize) -> bool {
+    let offset: usize = block * KERNEL_BLOCK_SIZE;
+    if (offset < KERNEL_EXT2_IMAGE_LEN - KERNEL_BLOCK_SIZE + 1) {
+        let bounded_offset:
+            {0..<KERNEL_EXT2_IMAGE_LEN - KERNEL_BLOCK_SIZE + 1 as usize} =
+            offset;
+        let image = usb_provision_image as []u8;
+        slice_copy(usb_provision_block as []u8,
+                   image[bounded_offset..<bounded_offset + KERNEL_BLOCK_SIZE]);
+        return true;
+    }
+    return false;
+}
+
+// Write the image to the stick in bounded multi-sector WRITE(10) batches.
+// A batch the device refuses is retried in progressively smaller runs, so a
+// device with a lower practical maximum keeps most of the batching benefit;
+// replaying a range is content-idempotent, and the one-block case uses the
+// single-sector path.
+fn usb_provision_rootfs(destination: KernelBlockDevice) -> UsbProvisionResult {
+    if (block_device_is_usb(destination) == false ||
+        USB_PROVISION_BLOCKS > block_count(destination)) {
+        return UsbProvisionResult::Invalid;
+    }
+    // These writes go around block_write, so every cached copy is retired
+    // before and after them (GitHub issue #208).
+    block_cache_forget_all(cpu_id());
+    let mut first_block: usize = 0;
+    while (first_block < USB_PROVISION_BLOCKS) {
+        let mut batch: usize = USB_PROVISION_BLOCKS - first_block;
+        if (batch > KERNEL_BLOCK_BATCH) {
+            batch = KERNEL_BLOCK_BATCH;
+        }
+        for offset: usize in 0..<KERNEL_BLOCK_BATCH {
+            if (offset < batch) {
+                if (usb_provision_image_block(first_block + offset) == false) {
+                    return UsbProvisionResult::Invalid;
+                }
+                let base: usize = offset * KERNEL_BLOCK_SIZE;
+                slice_copy(
+                    usb_provision_batch[base..<base + KERNEL_BLOCK_SIZE],
+                    usb_provision_block as []u8);
+            }
+        }
+        let bytes: *u8 = usb_provision_batch as *u8;
+        match disk_write_sectors((first_block * 2) as u32,
+                                 bytes, batch * 2) {
+            DiskIoResult::Err(error) => {
+                let mut fallback_offset: usize = 0;
+                let mut fallback_blocks: usize = batch / 2;
+                if (fallback_blocks == 0) {
+                    fallback_blocks = 1;
+                }
+                while (fallback_offset < batch) {
+                    let mut transfer_blocks: usize = fallback_blocks;
+                    if (transfer_blocks > batch - fallback_offset) {
+                        transfer_blocks = batch - fallback_offset;
+                    }
+                    let block_offset: isize =
+                        (fallback_offset * KERNEL_BLOCK_SIZE) as isize;
+                    let block_bytes: *u8 = bytes + block_offset;
+                    if (transfer_blocks == 1) {
+                        match disk_write(
+                                ((first_block + fallback_offset) * 2) as u32,
+                                block_bytes) {
+                            DiskIoResult::Err(single_error) => {
+                                return UsbProvisionResult::Invalid;
+                            }
+                            DiskIoResult::Ok => { }
+                        }
+                        match disk_write(
+                                ((first_block + fallback_offset) * 2 + 1) as u32,
+                                block_bytes + 512) {
+                            DiskIoResult::Err(single_error) => {
+                                return UsbProvisionResult::Invalid;
+                            }
+                            DiskIoResult::Ok => { }
+                        }
+                        fallback_offset = fallback_offset + 1;
+                    } else {
+                        match disk_write_sectors(
+                                ((first_block + fallback_offset) * 2) as u32,
+                                block_bytes, transfer_blocks * 2) {
+                            DiskIoResult::Err(smaller_error) => {
+                                fallback_blocks = transfer_blocks / 2;
+                                if (fallback_blocks == 0) {
+                                    fallback_blocks = 1;
+                                }
+                            }
+                            DiskIoResult::Ok => {
+                                fallback_offset = fallback_offset +
+                                                   transfer_blocks;
+                            }
+                        }
+                    }
+                }
+            }
+            DiskIoResult::Ok => { }
+        }
+        first_block = first_block + batch;
+    }
+    block_cache_forget_all(cpu_id());
+    return UsbProvisionResult::Copied;
+}
+
+// Read the stick back in the same 64 KiB ranges and compare it with the
+// image byte for byte, without issuing 5120 single-sector reads.
+fn usb_provision_rootfs_verify(destination: KernelBlockDevice)
+        -> UsbProvisionVerifyResult {
+    if (block_device_is_usb(destination) == false ||
+        USB_PROVISION_BLOCKS > block_count(destination)) {
+        return UsbProvisionVerifyResult::Invalid;
+    }
+    let mut first_block: usize = 0;
+    while (first_block < USB_PROVISION_BLOCKS) {
+        let mut batch: usize = USB_PROVISION_BLOCKS - first_block;
+        if (batch > KERNEL_BLOCK_BATCH) {
+            batch = KERNEL_BLOCK_BATCH;
+        }
+        let bytes: *u8 = usb_provision_batch as *u8;
+        match disk_read_sectors((first_block * 2) as u32,
+                                bytes, batch * 2) {
+            DiskIoResult::Err(error) => {
+                return UsbProvisionVerifyResult::Invalid;
+            }
+            DiskIoResult::Ok => { }
+        }
+        for offset: usize in 0..<KERNEL_BLOCK_BATCH {
+            if (offset < batch) {
+                if (usb_provision_image_block(first_block + offset) == false) {
+                    return UsbProvisionVerifyResult::Invalid;
+                }
+                let base: usize = offset * KERNEL_BLOCK_SIZE;
+                if (slice_eq(
+                        usb_provision_batch[base..<base + KERNEL_BLOCK_SIZE],
+                        usb_provision_block as []u8) == false) {
+                    return UsbProvisionVerifyResult::Different;
+                }
+            }
+        }
+        first_block = first_block + batch;
+    }
+    return UsbProvisionVerifyResult::Equal;
+}

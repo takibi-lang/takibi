@@ -31,6 +31,10 @@ ARTIFACT_DIR="${KERNEL_QEMU_STACK_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-stack-o
 GDB_PORT="${KERNEL_QEMU_STACK_GDB_PORT:-18677}"
 UART_LOG="$ARTIFACT_DIR/uart.log"
 mkdir -p "$ARTIFACT_DIR"
+# The root filesystem is the virtio disk; the kernel carries no copy of the
+# image to fall back to.
+QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
+cp "$REPO_ROOT/kernel/build/user/ext2.img" "$QEMU_EXT2_IMAGE"
 : >"$UART_LOG"
 
 # GitHub issue #407: see scripts/qemu_port_guard.py. Refuse to start if
@@ -47,6 +51,8 @@ fi
 
 qemu-system-aarch64 -machine virt -cpu cortex-a53 -smp 2 -m 1024 \
     -display none -monitor none -serial "file:$UART_LOG" \
+    -drive "file=$QEMU_EXT2_IMAGE,if=none,format=raw,id=vd0" \
+    -device virtio-blk-device,drive=vd0 \
     -S -gdb "tcp::$GDB_PORT" -kernel "$ELF" >"$ARTIFACT_DIR/qemu.log" 2>&1 &
 qemu_pid=$!
 cleanup() {

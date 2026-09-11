@@ -154,7 +154,7 @@ BOOT_PHASE_MARKERS = (
     (b"virtio blk: ext2 backend", "virtio-blk/ext2 init"),
     (b"usb msc: ready", "USB mass-storage ready"),
     (b"usb ext2: provisioned", "USB ext2 provision"),
-    (b"usb ext2: mounted", "USB ext2 mount"),
+    (b"rootfs: ext2 on", "root filesystem"),
     (b"ext2 mount:", "ext2 mount"),
     (b"rootfs image:", "rootfs image resolve"),
     (b"persistent shell: uart blocked", "ash readiness"),

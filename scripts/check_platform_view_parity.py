@@ -67,10 +67,12 @@ ALLOWED = {
         "the same test as qemu/network, on RP1's GEM",
     ("qemu", "storage"):
         "the same test as rpi5/usb_storage on a different transport: virtio "
-        "blk, including its used-index wrap, which has no USB counterpart",
+        "blk, including its used-index wrap, which has no USB counterpart, "
+        "and naming the virtio disk as the root filesystem's device",
     ("rpi5", "usb_storage"):
         "the same test as qemu/storage over USB mass storage, including the "
-        "provisioning step that writes the filesystem to the stick",
+        "provisioning step that writes the filesystem to the stick, and "
+        "naming the stick as the root filesystem's device",
 }
 
 

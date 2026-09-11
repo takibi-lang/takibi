@@ -6,19 +6,17 @@ const KERNEL_BLOCK_SIZE: usize = 1024;
 // 192/256-sector commands stalled during provisioning.
 const KERNEL_BLOCK_BATCH: usize = 64;
 
-// GitHub issue #230: the writable RAM-backed ext2 fixture is now a real
-// compile-time file embed instead of kernel/user/ext2_image.S's `.incbin`
-// plus an `extern symbol start`/`end` pair. `let mut` matches this image
-// actually being written through by block_write below. KERNEL_EXT2_IMAGE_LEN
-// is kernel/build/user/ext2.img's real size -- fixed by its own build
-// recipe's `truncate -s 2621440`, so it is a real build-system constant;
-// embed_file's own compile-time check still verifies it regardless.
+// The fixture's extent: kernel/build/user/ext2.img's real size, fixed by its
+// own build recipe's `truncate -s 2621440`. The USB device exposes exactly
+// this much of the medium, and kernel/platform/rpi5/usb_provision.tkb embeds
+// the image it writes there.
 const KERNEL_EXT2_IMAGE_LEN: usize = 2621440;
-let mut kernel_ext2_image: [u8; KERNEL_EXT2_IMAGE_LEN] =
-    embed_file("kernel/build/user/ext2.img");
 
 struct KernelBlockDevice {
-    // 0 = embedded memory image, 1 = USB Mass Storage, 2 = QEMU virtio-blk.
+    // 1 = USB Mass Storage, 2 = QEMU virtio-blk. There is no memory backend:
+    // 0 was the embedded image, which the board ran every process from while
+    // the USB copy sat mounted for a few checks, so it was removed rather
+    // than guarded. Nothing can hand ext2_mount the image now.
     // Kept as a private
     // representation byte because the current backend rejects matching an
     // enum stored in a struct field when lowering LLVM IR.
@@ -32,22 +30,6 @@ must_use variant KernelBlockDeviceResult {
 }
 
 must_use variant BlockIoResult { Invalid; Ok; }
-must_use variant BlockCopyResult { Invalid; Copied; }
-
-private let mut block_copy_buffer: [u8; KERNEL_BLOCK_SIZE];
-private let mut block_copy_batch_buffer:
-    [u8; KERNEL_BLOCK_SIZE * KERNEL_BLOCK_BATCH];
-
-fn memory_block_device_ext2() -> KernelBlockDeviceResult {
-    let length: usize = KERNEL_EXT2_IMAGE_LEN;
-    if (length == 0 || length % KERNEL_BLOCK_SIZE != 0) {
-        return KernelBlockDeviceResult::Invalid;
-    }
-    let mut device: KernelBlockDevice = {
-        0, length
-    };
-    return KernelBlockDeviceResult::Ready(device);
-}
 
 fn usb_mass_storage_block_device() -> KernelBlockDeviceResult {
     match disk_status() {
@@ -67,11 +49,9 @@ fn usb_mass_storage_block_device() -> KernelBlockDeviceResult {
 fn virtio_block_device_ext2() -> KernelBlockDeviceResult {
     let sectors: usize = virtio_blk_capacity_sectors();
     if (sectors == 0 || sectors % 2 != 0) {
-        return memory_block_device_ext2();
+        return KernelBlockDeviceResult::Invalid;
     }
-    let mut device: KernelBlockDevice = { 0, 0 };
-    device.backend = 2;
-    device.length = sectors * 512;
+    let mut device: KernelBlockDevice = { 2, sectors * 512 };
     return KernelBlockDeviceResult::Ready(device);
 }
 
@@ -175,20 +155,7 @@ private fn block_read_device(device: KernelBlockDevice, block: usize,
     }
     block_note_call(block_read_calls as []usize);
     workload_profile_note_block_read(KERNEL_BLOCK_SIZE);
-    if (device.backend == 0) {
-            let offset: usize = block * KERNEL_BLOCK_SIZE;
-            if (offset < KERNEL_EXT2_IMAGE_LEN - KERNEL_BLOCK_SIZE + 1) {
-                let bounded_offset:
-                    {0..<KERNEL_EXT2_IMAGE_LEN - KERNEL_BLOCK_SIZE + 1 as usize} =
-                    offset;
-                let image = kernel_ext2_image as []u8;
-                let source_bytes =
-                    image[bounded_offset..<bounded_offset + KERNEL_BLOCK_SIZE];
-                slice_copy(destination[0..<KERNEL_BLOCK_SIZE], source_bytes);
-                return BlockIoResult::Ok;
-            }
-            return BlockIoResult::Invalid;
-    } else if (device.backend == 1) {
+    if (device.backend == 1) {
         let sector: u32 = (block * 2) as u32;
         let target: *u8 = destination as *u8;
         match disk_read(sector, target) {
@@ -218,20 +185,7 @@ private fn block_write_device(device: KernelBlockDevice, block: usize,
     }
     block_note_call(block_write_calls as []usize);
     workload_profile_note_block_write(KERNEL_BLOCK_SIZE);
-    if (device.backend == 0) {
-            let offset: usize = block * KERNEL_BLOCK_SIZE;
-            if (offset < KERNEL_EXT2_IMAGE_LEN - KERNEL_BLOCK_SIZE + 1) {
-                let bounded_offset:
-                    {0..<KERNEL_EXT2_IMAGE_LEN - KERNEL_BLOCK_SIZE + 1 as usize} =
-                    offset;
-                let image = kernel_ext2_image as []u8;
-                let destination_bytes =
-                    image[bounded_offset..<bounded_offset + KERNEL_BLOCK_SIZE];
-                slice_copy(destination_bytes, source[0..<KERNEL_BLOCK_SIZE]);
-                return BlockIoResult::Ok;
-            }
-            return BlockIoResult::Invalid;
-    } else if (device.backend == 1) {
+    if (device.backend == 1) {
         let sector: u32 = (block * 2) as u32;
         let bytes: *u8 = source as *u8;
         match disk_write(sector, bytes) {
@@ -261,172 +215,8 @@ fn block_device_is_virtio(device: KernelBlockDevice) -> bool {
     return device.backend == 2;
 }
 
-fn block_copy(source: KernelBlockDevice, destination: KernelBlockDevice,
-              count: usize) -> BlockCopyResult {
-    if (count == 0 || count > block_count(source) ||
-        count > block_count(destination)) {
-        return BlockCopyResult::Invalid;
-    }
-    if (destination.backend == 1) {
-        // These writes go around block_write, so every cached copy is
-        // retired before and after them (GitHub issue #208).
-        block_cache_forget_all(cpu_id());
-        // The USB path has a bounded multi-sector WRITE(10) operation. Fill
-        // a complete batch from the source, then issue one command for the
-        // contiguous destination range. The tail remains safe through the
-        // same path with a smaller transfer count.
-        let mut first_block: usize = 0;
-        while (first_block < count) {
-            let mut batch: usize = count - first_block;
-            if (batch > KERNEL_BLOCK_BATCH) {
-                batch = KERNEL_BLOCK_BATCH;
-            }
-            for offset: usize in 0..<KERNEL_BLOCK_BATCH {
-                if (offset < batch) {
-                    match block_read(source, first_block + offset,
-                                     block_copy_buffer as []u8) {
-                        BlockIoResult::Invalid => {
-                            return BlockCopyResult::Invalid;
-                        }
-                        BlockIoResult::Ok => { }
-                    }
-                    let base: usize = offset * KERNEL_BLOCK_SIZE;
-                    slice_copy(
-                        block_copy_batch_buffer[
-                            base..<base + KERNEL_BLOCK_SIZE],
-                        block_copy_buffer as []u8);
-                }
-            }
-            let bytes: *u8 = block_copy_batch_buffer as *u8;
-            match disk_write_sectors((first_block * 2) as u32,
-                                     bytes, batch * 2) {
-                DiskIoResult::Err(error) => {
-                    // Some devices reject a multi-sector WRITE(10), or a
-                    // transport can fail only for the larger transfer. Do
-                    // not immediately fall all the way back to one sector:
-                    // retry the same bytes in progressively smaller runs so
-                    // a device with a lower practical maximum keeps most of
-                    // the batching benefit. Replaying a failed range is
-                    // content-idempotent, and the final one-block case uses
-                    // the established single-sector path.
-                    let mut fallback_offset: usize = 0;
-                    let mut fallback_blocks: usize = batch / 2;
-                    if (fallback_blocks == 0) {
-                        fallback_blocks = 1;
-                    }
-                    while (fallback_offset < batch) {
-                        let mut transfer_blocks: usize = fallback_blocks;
-                        if (transfer_blocks > batch - fallback_offset) {
-                            transfer_blocks = batch - fallback_offset;
-                        }
-                        let block_offset: isize =
-                            (fallback_offset * KERNEL_BLOCK_SIZE) as isize;
-                        let block_bytes: *u8 = bytes +
-                            block_offset;
-                        if (transfer_blocks == 1) {
-                            match disk_write(
-                                    ((first_block + fallback_offset) * 2) as u32,
-                                    block_bytes) {
-                                DiskIoResult::Err(single_error) => {
-                                    return BlockCopyResult::Invalid;
-                                }
-                                DiskIoResult::Ok => { }
-                            }
-                            match disk_write(
-                                    ((first_block + fallback_offset) * 2 + 1) as u32,
-                                    block_bytes + 512) {
-                                DiskIoResult::Err(single_error) => {
-                                    return BlockCopyResult::Invalid;
-                                }
-                                DiskIoResult::Ok => { }
-                            }
-                            fallback_offset = fallback_offset + 1;
-                        } else {
-                            match disk_write_sectors(
-                                    ((first_block + fallback_offset) * 2) as u32,
-                                    block_bytes, transfer_blocks * 2) {
-                                DiskIoResult::Err(smaller_error) => {
-                                    fallback_blocks = transfer_blocks / 2;
-                                    if (fallback_blocks == 0) {
-                                        fallback_blocks = 1;
-                                    }
-                                }
-                                DiskIoResult::Ok => {
-                                    fallback_offset = fallback_offset +
-                                                       transfer_blocks;
-                                }
-                            }
-                        }
-                    }
-                }
-                DiskIoResult::Ok => { }
-            }
-            first_block = first_block + batch;
-        }
-        block_cache_forget_all(cpu_id());
-        return BlockCopyResult::Copied;
-    }
-    for block: usize in 0..<count {
-        match block_read(source, block, block_copy_buffer as []u8) {
-            BlockIoResult::Invalid => { return BlockCopyResult::Invalid; }
-            BlockIoResult::Ok => { }
-        }
-        match block_write(destination, block, block_copy_buffer as []u8) {
-            BlockIoResult::Invalid => { return BlockCopyResult::Invalid; }
-            BlockIoResult::Ok => { }
-        }
-    }
-    return BlockCopyResult::Copied;
-}
-
-must_use variant BlockCompareResult { Invalid; Different; Equal; }
-
-// Verify a USB provision in bounded multi-sector reads. The source is read
-// through the normal block interface, while the USB destination is read in
-// the same 64 KiB maximum ranges used by the provision writer. This keeps the
-// acceptance check byte-for-byte without issuing 8192 single-sector reads.
-fn block_compare_usb(source: KernelBlockDevice,
-                     destination: KernelBlockDevice,
-                     count: usize) -> BlockCompareResult {
-    if (destination.backend != 1 || count == 0 ||
-        count > block_count(source) || count > block_count(destination)) {
-        return BlockCompareResult::Invalid;
-    }
-    let mut first_block: usize = 0;
-    while (first_block < count) {
-        let mut batch: usize = count - first_block;
-        if (batch > KERNEL_BLOCK_BATCH) {
-            batch = KERNEL_BLOCK_BATCH;
-        }
-        let bytes: *u8 = block_copy_batch_buffer as *u8;
-        match disk_read_sectors((first_block * 2) as u32,
-                                bytes, batch * 2) {
-            DiskIoResult::Err(error) => {
-                return BlockCompareResult::Invalid;
-            }
-            DiskIoResult::Ok => { }
-        }
-        for offset: usize in 0..<KERNEL_BLOCK_BATCH {
-            if (offset < batch) {
-                match block_read(source, first_block + offset,
-                                 block_copy_buffer as []u8) {
-                    BlockIoResult::Invalid => {
-                        return BlockCompareResult::Invalid;
-                    }
-                    BlockIoResult::Ok => { }
-                }
-                let base: usize = offset * KERNEL_BLOCK_SIZE;
-                if (slice_eq(
-                        block_copy_batch_buffer[
-                            base..<base + KERNEL_BLOCK_SIZE],
-                        block_copy_buffer as []u8) == false) {
-                    return BlockCompareResult::Different;
-                }
-            }
-        }
-        first_block = first_block + batch;
-    }
-    return BlockCompareResult::Equal;
+fn block_device_is_usb(device: KernelBlockDevice) -> bool {
+    return device.backend == 1;
 }
 
 // GitHub issue #208: the cache keeps one set of slots per core, indexed by

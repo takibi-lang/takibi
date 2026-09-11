@@ -888,7 +888,7 @@ fn xhci_setup_rings_and_start() -> bool !{unsafe} {
     // controller-wide enable. IMOD (Interrupt Moderation, at IR0+0x04) is
     // zeroed explicitly rather than trusting its post-HCRST reset value --
     // a nonzero moderation interval would add real per-interrupt latency
-    // across the many bulk transfers block_copy's 1024-block USB-ext2
+    // across the many bulk transfers usb_provision_rootfs's USB-ext2
     // provisioning issues, which is unnecessary now that every wait is a
     // real interrupt rather than a 1ms polling step.
     let imod_ptr: *io u32 = unsafe { (rp1_usbhost0_ir0 + 0x04) as *io u32 };

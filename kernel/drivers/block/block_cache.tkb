@@ -170,7 +170,8 @@ fn block_cache_note_write(core: usize, backend: u8, block: usize,
     }
 }
 
-// A write that went around block_write -- block_copy's batched USB path --
+// A write that went around block_write -- usb_provision_rootfs's batched
+// USB path --
 // retires every copy the same way.
 fn block_cache_forget_all(core: usize) {
     if (core >= BLOCK_CACHE_CORES) { return; }

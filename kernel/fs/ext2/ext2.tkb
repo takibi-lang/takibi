@@ -47,6 +47,11 @@ struct Ext2Mount {
 }
 
 must_use variant Ext2MountResult { Invalid; Mounted(Ext2Mount); }
+
+// The device a mount reads, so the boot can say which one the root is on.
+fn ext2_mount_device(mount: Ext2Mount) -> KernelBlockDevice {
+    return mount.device;
+}
 must_use variant Ext2InodeResult { Invalid; Inode(Ext2Inode); }
 must_use variant Ext2LookupResult { Invalid; NotFound; Found(usize); }
 must_use variant Ext2ReadResult { Invalid; Read(usize); }
