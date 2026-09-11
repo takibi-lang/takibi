@@ -8,4 +8,5 @@ ok     a write on another core retires this core's copies
 ok     the core that wrote keeps what it wrote
 ok     a failed write retires the block and keeps no copy
 ok     a write around the cache retires every copy
+ok     a write moves the epoch a copy outside the cache is held to
 ok     every hit is counted

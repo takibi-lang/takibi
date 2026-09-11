@@ -180,6 +180,12 @@ fn block_cache_forget_all(core: usize) {
     signal_fence();
 }
 
+// The current write epoch, for a copy kept outside this file -- memory.tkb's
+// read-ahead run (GitHub issue #545) -- to be retired by the same writes.
+fn block_cache_epoch_now() -> usize {
+    return block_cache_write_epoch();
+}
+
 fn block_cache_hit_total() -> usize {
     let mut total: usize = 0;
     for core: usize in 0..<BLOCK_CACHE_CORES {

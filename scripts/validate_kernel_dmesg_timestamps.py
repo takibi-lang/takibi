@@ -28,7 +28,7 @@ CPU_PREFIX = re.compile(rb"^cpu([0-9]) ")
 # kernel's line, would retire the measurement with every lane green.
 BLOCK_IO = re.compile(
     rb"block io: reads=(\d+) writes=(\d+) block_bytes=(\d+) "
-    rb"cache_hits=(\d+)")
+    rb"cache_hits=(\d+) runs=(\d+) run_hits=(\d+)")
 
 # GitHub issue #544: how often a userspace write to the UART waited for room
 # in the transmit queue instead of spinning in the kernel, and how many of
@@ -208,15 +208,12 @@ def main() -> None:
         resumed = b"rp1 gem: tcp handshake echo close reconnect ok"
         minimum_delay = 5_000_000
         maximum_delay = 9_000_000
-        # TEMPORARY, GitHub issue #545. Raised from 25 s by the maintainer's
-        # decision on 2026-09-11, when the board's root moved from the
-        # in-memory image to the USB stick (94f1c36) and the first boot from
-        # it measured 33.6 s outside a 38.8 s ash session: almost every exec
-        # reads BusyBox from the stick one sector at a time. 41 s is that
-        # figure plus the 7 s margin above, so a further regression of the
-        # #411 kind still fails. It is not a recalibration -- 25 s was
-        # measured against a root in RAM -- and #545 owns bringing it back.
-        maximum_boot = 41_000_000
+        # GitHub issue #545: this was 41 s for a day, after the board's root
+        # moved to the USB stick (94f1c36) and every exec read BusyBox from
+        # it one sector at a time (33.6 s outside a 38.8 s session). The
+        # block layer's read-ahead brought the board back to 18.3 s outside
+        # a 3.6 s session, the figure the 25 s above was calibrated on.
+        maximum_boot = 25_000_000
     if first not in by_text:
         fail("first kernel marker is absent")
     assembled = [item for item in records if item[1].startswith(assembled_prefix)]
@@ -282,13 +279,14 @@ def main() -> None:
     block = BLOCK_IO.search(data)
     if not block:
         fail("the boot reached its last milestone without printing "
-             "`block io: reads=... writes=... block_bytes=... cache_hits=...`. "
+             "`block io: reads=... writes=... block_bytes=... cache_hits=... "
+             "runs=... run_hits=...`. "
              "That is the "
              "measurement issues #281 and #208 are ordered against and this "
              "is its only reader, so a missing line means the kernel's shape "
              "changed rather than that the boot read no blocks")
-    reads, writes, block_bytes, hits = (
-        int(block.group(i)) for i in (1, 2, 3, 4))
+    reads, writes, block_bytes, hits, runs, run_hits = (
+        int(block.group(i)) for i in (1, 2, 3, 4, 5, 6))
     if reads == 0 or block_bytes == 0:
         fail(f"the boot reports {reads} block reads of {block_bytes} bytes, "
              "which cannot be right for a boot that mounts a filesystem and "
@@ -311,7 +309,8 @@ def main() -> None:
              "wire, so a zero means writes are spinning in the kernel again, "
              "or the command that exercised it has gone from the ash script")
     block_io = (f", block io={reads} reads/{writes} writes of {block_bytes} B "
-                f"({reads * block_bytes // 1024} KiB read, {hits} cache hits)")
+                f"({reads * block_bytes // 1024} KiB read, {hits} cache hits, "
+                f"{runs} read-ahead runs answering {run_hits})")
 
     print(
         f"PASS kernel/{args.platform} dmesg: {len(records)} monotonic records, "

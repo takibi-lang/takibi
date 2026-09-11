@@ -15,7 +15,7 @@ from pathlib import Path
 
 MULTIBANK_EXPECTED = (
     b"memory: source=dtb base_bytes=1073741824 detected_mib=1024 "
-    b"regions=1 reservations=0 allocator_pages=261848")
+    b"regions=1 reservations=0 allocator_pages=261816")
 # The page count is what is left after every statically laid-out kernel
 # region, so it moves whenever the image or the linker script does -- which
 # is the point of asserting it exactly rather than as a range. It went
@@ -28,11 +28,11 @@ MULTIBANK_EXPECTED = (
 # moving them down by another 8 pages.
 LOW_MEMORY_EXPECTED = (
     b"memory: source=dtb base_bytes=1073741824 detected_mib=128 "
-    b"regions=1 reservations=0 allocator_pages=32472")
+    b"regions=1 reservations=0 allocator_pages=32440")
 MISSING_EXPECTED = b"memory: boot DTB has no usable /memory; halting"
 DISCONTIGUOUS_MEMORY_EXPECTED = (
     b"memory: source=dtb base_bytes=1073741824 detected_mib=768 "
-    b"regions=2 reservations=0 allocator_pages=196312")
+    b"regions=2 reservations=0 allocator_pages=196280")
 DISCONTIGUOUS_PROBE_EXPECTED = (
     b"memory: physical hole excluded and both extent boundaries round-trip")
 

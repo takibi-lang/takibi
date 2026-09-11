@@ -60,7 +60,7 @@ HEALTHY_SPIN = (b"console: tx spin ticks=1000000 bytes=31919 spun=1077 "
 # else has to carry one too or it would be testing this rule instead of its
 # own.
 HEALTHY_BLOCK_IO = (b"block io: reads=31000 writes=55 block_bytes=1024 "
-                    b"cache_hits=93000\r\n")
+                    b"cache_hits=93000 runs=400 run_hits=25000\r\n")
 # GitHub issue #544: a board boot must show a writer that waited, so the
 # default carries a non-zero count that serves both platforms.
 HEALTHY_UART_TX = (b"uart tx: queue=512 low_water=256 writers_waited=5 "
@@ -210,19 +210,17 @@ def main() -> int:
     # marker moves with the platform.
     rpi5 = [(10.1 if "reconnect ok" in t else s,
              t.replace("virtio net", "rp1 gem")) for s, t in HEALTHY]
-    # The bound is 41 s while GitHub issue #545 is open; bring these back to
-    # 25.2 and 24.9 s with it.
     status, output = run(replace(
-        rpi5, "foreground server: listener ready port=8080", 43.2), "rpi5")
+        rpi5, "foreground server: listener ready port=8080", 27.2), "rpi5")
     if status == 0 or "INVESTIGATE, do not raise" not in output:
-        print("FAIL dmesg-timestamps control: an RPi5 boot 41.2 s outside "
+        print("FAIL dmesg-timestamps control: an RPi5 boot 25.2 s outside "
               f"its ash session was accepted or reported oddly\n{output}")
         return 1
     status, output = run(replace(
-        rpi5, "foreground server: listener ready port=8080", 42.9), "rpi5")
+        rpi5, "foreground server: listener ready port=8080", 26.9), "rpi5")
     if status != 0:
-        print("FAIL dmesg-timestamps control: an RPi5 boot 40.9 s outside "
-              f"its ash session was rejected by its 41 s bound\n{output}")
+        print("FAIL dmesg-timestamps control: an RPi5 boot 24.9 s outside "
+              f"its ash session was rejected by its 25 s bound\n{output}")
         return 1
 
     # GitHub issues #281/#208: the block-layer total is required, not merely
@@ -235,7 +233,8 @@ def main() -> int:
     status, output = run(
         HEALTHY, "qemu",
         HEALTHY_SPIN
-        + b"block io: reads=0 writes=0 block_bytes=1024 cache_hits=0\r\n")
+        + b"block io: reads=0 writes=0 block_bytes=1024 cache_hits=0 "
+        b"runs=0 run_hits=0\r\n")
     if status == 0 or "cannot be right" not in output:
         print("FAIL dmesg-timestamps control: a boot claiming zero block "
               "reads was accepted")
@@ -282,6 +281,15 @@ def main() -> int:
     if status == 0:
         print("FAIL dmesg-timestamps control: a block-layer total without "
               f"cache_hits was accepted\n{output}")
+        return 1
+    # GitHub issue #545: the read-ahead figures are required the same way.
+    status, output = run(
+        HEALTHY, "qemu",
+        HEALTHY_SPIN + b"block io: reads=31000 writes=55 block_bytes=1024 "
+        b"cache_hits=93000\r\n")
+    if status == 0:
+        print("FAIL dmesg-timestamps control: a block-layer total without "
+              f"the read-ahead runs was accepted\n{output}")
         return 1
     status, output = run(HEALTHY, "qemu", HEALTHY_TAIL)
     if status != 0 or "93000 cache hits" not in output:

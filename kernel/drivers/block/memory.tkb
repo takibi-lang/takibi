@@ -119,13 +119,176 @@ fn block_read(device: KernelBlockDevice, block: usize,
         BlockCacheReadResult::Hit => { return BlockIoResult::Ok; }
         BlockCacheReadResult::Miss => { }
     }
-    match block_read_device(device, block, destination) {
-        BlockIoResult::Invalid => { return BlockIoResult::Invalid; }
-        BlockIoResult::Ok => {
-            block_cache_fill(core, device.backend, block, destination);
-            return BlockIoResult::Ok;
+    if (block_run_take(core, device, block, destination)) {
+        block_cache_fill(core, device.backend, block, destination);
+        return BlockIoResult::Ok;
+    }
+    // A run that was read and then cannot answer -- another core wrote in
+    // between and moved the epoch -- falls through to the single read.
+    if (block_run_wanted(core, device, block)) {
+        if (block_run_read(core, device, block)) {
+            if (block_run_take(core, device, block, destination)) {
+                block_cache_fill(core, device.backend, block, destination);
+                return BlockIoResult::Ok;
+            }
         }
     }
+    match block_read_device(device, block, destination) {
+        BlockIoResult::Invalid => { return BlockIoResult::Invalid; }
+        BlockIoResult::Ok => { }
+    }
+    block_run_note_single(core, device, block);
+    block_cache_fill(core, device.backend, block, destination);
+    return BlockIoResult::Ok;
+}
+
+// GitHub issue #545: read-ahead for sequential device reads.
+//
+// Every device read used to be one 1 KiB block, which on the USB stick is
+// a SCSI command of its own -- two, before this change, one per sector --
+// and a command costs about 0.7 ms however little it moves. The board's
+// first boot from USB spent some 51 s more than it had from RAM, over
+// 37,461 device reads: 1.36 ms a block. Nearly all of them were an exec
+// streaming BusyBox a page at a time, block after physically contiguous
+// block, while ext2's metadata re-reads already came from the cache.
+//
+// So a device read that continues where this core's last one ended reads a
+// run instead: BLOCK_RUN_BLOCKS blocks in one command on USB, kept per core
+// and handed out a block at a time until something else is asked for. A
+// read that does not continue the last one still reads one block, so a
+// scattered read pays nothing for this. The run belongs to the block
+// cache's write epoch: any write on any core, including the provisioning
+// writes that go around block_write, retires it the way it retires every
+// cached block. QEMU fills the same run sector by sector, which buys it
+// nothing but runs the same bookkeeping, and the invalidation, on every
+// QEMU lane.
+const BLOCK_RUN_BLOCKS: usize = KERNEL_BLOCK_BATCH;
+
+private let mut block_run_data:
+    [u8; KERNEL_MAX_CORES * BLOCK_RUN_BLOCKS * KERNEL_BLOCK_SIZE];
+private let mut block_run_backend: [u8; KERNEL_MAX_CORES];
+private let mut block_run_first: [usize; KERNEL_MAX_CORES];
+private let mut block_run_count: [usize; KERNEL_MAX_CORES];
+private let mut block_run_epoch: [usize; KERNEL_MAX_CORES];
+// The block after this core's last device read, and its backend: a miss
+// on that block is a sequential read.
+private let mut block_run_next: [usize; KERNEL_MAX_CORES];
+private let mut block_run_next_backend: [u8; KERNEL_MAX_CORES];
+private let mut block_run_reads: [usize; KERNEL_MAX_CORES];
+private let mut block_run_hits: [usize; KERNEL_MAX_CORES];
+
+// Whether this core's run holds (device, block) at the current epoch.
+private fn block_run_hit_here(core: usize, device: KernelBlockDevice,
+                              block: usize) -> bool {
+    if (core >= KERNEL_MAX_CORES) { return false; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = core;
+    let first: usize = block_run_first[here];
+    return block_run_count[here] != 0 &&
+           block_run_backend[here] == device.backend &&
+           block_run_epoch[here] == block_cache_epoch_now() &&
+           block >= first && block - first < block_run_count[here];
+}
+
+// Copy (device, block) out of this core's run, if it holds it.
+private fn block_run_take(core: usize, device: KernelBlockDevice,
+                          block: usize,
+                          destination: [u8; KERNEL_BLOCK_SIZE..]) -> bool {
+    if (block_run_hit_here(core, device, block) == false) { return false; }
+    if (core >= KERNEL_MAX_CORES) { return false; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = core;
+    let offset: usize = block - block_run_first[here];
+    if (offset >= BLOCK_RUN_BLOCKS) { return false; }
+    let within: {0..<BLOCK_RUN_BLOCKS as usize} = offset;
+    let slot: {0..<KERNEL_MAX_CORES * BLOCK_RUN_BLOCKS as usize} =
+        here * BLOCK_RUN_BLOCKS + within;
+    let base: usize = slot * KERNEL_BLOCK_SIZE;
+    slice_copy(destination[0..<KERNEL_BLOCK_SIZE],
+               block_run_data[base..<base + KERNEL_BLOCK_SIZE]);
+    block_run_hits[here] = block_run_hits[here] + 1;
+    return true;
+}
+
+private fn block_run_wanted(core: usize, device: KernelBlockDevice,
+                            block: usize) -> bool {
+    if (core >= KERNEL_MAX_CORES) { return false; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = core;
+    return block_run_next[here] == block &&
+           block_run_next_backend[here] == device.backend;
+}
+
+private fn block_run_note_single(core: usize, device: KernelBlockDevice,
+                                 block: usize) {
+    if (core >= KERNEL_MAX_CORES) { return; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = core;
+    block_run_next[here] = block + 1;
+    block_run_next_backend[here] = device.backend;
+}
+
+// Read the run starting at `first` into this core's buffer. False leaves
+// no run behind, and the caller reads the one block it wanted instead.
+private fn block_run_read(core: usize, device: KernelBlockDevice,
+                          first: usize) -> bool !{unsafe} {
+    if (core >= KERNEL_MAX_CORES) { return false; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = core;
+    let available: usize = block_count(device);
+    if (first >= available) { return false; }
+    let mut count: usize = available - first;
+    if (count > BLOCK_RUN_BLOCKS) { count = BLOCK_RUN_BLOCKS; }
+    // The epoch is taken before the device is, so a write that lands while
+    // the run is being read retires it.
+    block_run_count[here] = 0;
+    let epoch: usize = block_cache_epoch_now();
+    if (device.backend == 1) {
+        let target: *u8 = (block_run_data as *u8) +
+            ((here * BLOCK_RUN_BLOCKS * KERNEL_BLOCK_SIZE) as isize);
+        match disk_read_sectors((first * 2) as u32, target, count * 2) {
+            DiskIoResult::Err(error) => { return false; }
+            DiskIoResult::Ok => { }
+        }
+    } else {
+        for offset: usize in 0..<BLOCK_RUN_BLOCKS {
+            if (offset < count) {
+                // Counted in 512-byte sectors, two to a block, so each
+                // half is an index the compiler can bound.
+                let low: {0..<KERNEL_MAX_CORES * BLOCK_RUN_BLOCKS * 2 as usize} =
+                    (here * BLOCK_RUN_BLOCKS + offset) * 2;
+                let high: {0..<KERNEL_MAX_CORES * BLOCK_RUN_BLOCKS * 2 as usize} =
+                    (here * BLOCK_RUN_BLOCKS + offset) * 2 + 1;
+                let low_base: usize = low * 512;
+                let high_base: usize = high * 512;
+                let sector: u32 = ((first + offset) * 2) as u32;
+                if (virtio_blk_read_sector(
+                        sector, block_run_data[low_base..<low_base + 512]) == false ||
+                    virtio_blk_read_sector(
+                        sector + 1,
+                        block_run_data[high_base..<high_base + 512]) == false) {
+                    return false;
+                }
+            }
+        }
+    }
+    for offset: usize in 0..<BLOCK_RUN_BLOCKS {
+        if (offset < count) {
+            block_note_call(block_read_calls as []usize);
+        }
+    }
+    workload_profile_note_block_read(count * KERNEL_BLOCK_SIZE);
+    block_run_backend[here] = device.backend;
+    block_run_first[here] = first;
+    block_run_epoch[here] = epoch;
+    block_run_count[here] = count;
+    block_run_next[here] = first + count;
+    block_run_next_backend[here] = device.backend;
+    block_run_reads[here] = block_run_reads[here] + 1;
+    return true;
+}
+
+fn block_run_read_total() -> usize {
+    return block_call_total(block_run_reads as []usize);
+}
+
+fn block_run_hit_total() -> usize {
+    return block_call_total(block_run_hits as []usize);
 }
 
 fn block_write(device: KernelBlockDevice, block: usize,
@@ -156,13 +319,10 @@ private fn block_read_device(device: KernelBlockDevice, block: usize,
     block_note_call(block_read_calls as []usize);
     workload_profile_note_block_read(KERNEL_BLOCK_SIZE);
     if (device.backend == 1) {
-        let sector: u32 = (block * 2) as u32;
+        // Both sectors of the block in one READ(10): a command costs the
+        // same however few sectors it moves (GitHub issue #545).
         let target: *u8 = destination as *u8;
-        match disk_read(sector, target) {
-            DiskIoResult::Err(error) => { return BlockIoResult::Invalid; }
-            DiskIoResult::Ok => { }
-        }
-        match disk_read(sector + 1, target + 512) {
+        match disk_read_sectors((block * 2) as u32, target, 2) {
             DiskIoResult::Err(error) => { return BlockIoResult::Invalid; }
             DiskIoResult::Ok => { return BlockIoResult::Ok; }
         }

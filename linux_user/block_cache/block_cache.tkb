@@ -94,6 +94,14 @@ fn app_main() {
     block_cache_forget_all(1);
     check("a write around the cache retires every copy", misses(0, 0, 300));
 
+    // GitHub issue #545: a copy kept outside the cache -- memory.tkb's
+    // read-ahead run -- is held to the same epoch, so every kind of write
+    // must move it, a refused one included.
+    let epoch_before: usize = block_cache_epoch_now();
+    block_cache_note_write(0, 0, 400, block_in as []u8, false);
+    check("a write moves the epoch a copy outside the cache is held to",
+          block_cache_epoch_now() != epoch_before);
+
     // Hits so far: 0x11 once, 0x22 twenty-one times, 0x43 once, 0x55 once.
     check("every hit is counted", block_cache_hit_total() == 24);
 }

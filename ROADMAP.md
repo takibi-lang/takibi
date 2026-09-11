@@ -371,9 +371,10 @@ returning through a frame under the wrong address space. Exit handoffs remain.
    ext2 unlink and `unlinkat`, which is disjoint from the wake and scheduler
    paths, and the same tree passed the lane alone straight afterwards. None of
    the fifteen archived QEMU failures carries this signature.
-   Capture: `_build/kernel-hwtest-qemu-failures/20260911T010803Z`. One sample
-   is a rate of nothing, so it is recorded rather than filed; if it recurs,
-   that is two.
+   Capture: `_build/kernel-hwtest-qemu-failures/20260911T010803Z`. It recurred
+   the same day with the identical signature, on a lane run alone
+   (`20260911T062011Z`, while #545's read-ahead was under test). That is two
+   samples, and it is now #546.
 
 2. **#533 changes the meaning of two ext2 sites.** `ext2_claim_directory` and
    `ext2_unlink_name` mint block, inode and directory owners from the on-disk
@@ -948,18 +949,21 @@ back:
   lanes, which relied on the fallback without saying so, attach the disk like
   every other lane.
 
-**What it cost: #545, and a temporary 41 s board bound.** The first board
-boot from USB reached its last milestone 33.6 s outside the ash session,
-against 18.0 s from RAM and a bound of 25 s. The ash session itself took
-38.8 s against 3.3 s. The shape is one cost repeated: nearly every exec in
-the ash script now takes about 3 s, because each one reads BusyBox from the
-stick one 512-byte sector at a time. That is exactly the path #281 proposes
-to coalesce, and it now runs on every exec. By the maintainer's decision the
-RPi5 bound was raised to 41 s, the measured figure plus the usual 7 s margin,
-so the board lane is green on the USB root while the time is won back
-separately. That is not a recalibration, since 25 s was measured against a
-root in RAM. #545 owns bringing it back to 25 s. The validator's comment and
-the controls both point there.
+**What it cost, and how it was won back (#545).** The first board boot
+from USB reached its last milestone 33.6 s outside the ash session, against
+18.0 s from RAM and a bound of 25 s. The ash session itself took 38.8 s
+against 3.3 s. Nearly every exec took about 3 s, because each one read
+BusyBox from the stick one 512-byte sector at a time, and a USB command costs
+about 0.7 ms however little it moves. For one day the RPi5 bound was 41 s, by
+the maintainer's decision, so the lane stayed green on the USB root.
+
+The block layer now reads ahead. A device read that continues where the
+same core's last read ended reads a 64-block run in one command. The run is
+held to the block cache's write epoch, and a scattered read still reads one
+block, now as one command instead of two. The board is back to 18.3 s
+outside a 3.6 s session, and the bound is 25 s again. 663 runs answer
+36,963 of the boot's block reads. #281 remains the ext2-level version of the
+same idea. Measure what is left before starting it.
 
 The same run printed `uart tx: ... writers_slept=0`, which #544's check
 refused on the board. A writer sleeps only when another process can run,
