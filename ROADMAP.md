@@ -74,18 +74,28 @@ the deepest dependency: it needs a language primitive this compiler does not
 have, and every week of single-core code written before that primitive exists
 is a week of code whose synchronization argument has to be reconstructed later.
 
-## Work split between two agents, 2026-09-05
+## Work split between two agents, re-cut 2026-09-11
 
 Two agents run in parallel, one per territory, with the territories and the
 shared-file conventions defined in `AGENTS.md`. This section is the part that
 moves: when a new issue outranks what is queued below, edit it here.
 
-**Codex holds Territory A. Claude Code holds Territory B.** The one measured
-asymmetry is compiler experience -- of the last 40 commits by each, Codex
-touched `lib/` 19 times and Claude Code did not -- and Territory A's
-highest-priority items (#452, #450) are compiler work.
+**Codex holds Territory A and the multicore integration path. Claude Code
+holds Territory B and the highest-priority work outside that path.** The
+directory exclusion in `AGENTS.md` remains the mechanism that makes the two
+queues loosely coupled. A prerequisite in the other territory is implemented
+there and consumed through a committed boundary; it is not a reason for both
+agents to edit the same files.
 
-### Territory A queue -- the multicore critical path
+The immediate exception in theme, but not in file ownership, is #533 and
+#534. They are multicore prerequisites whose implementation is predominantly
+Territory B. Claude Code owns those two bounded changes while Codex advances
+the four-core machinery in Territory A without admitting the affected
+filesystem or direct-UART paths. Neither stream waits for the other to start.
+The #9 integration and affinity admission happen only after both boundaries
+land.
+
+### Territory A queue -- multicore integration, held by Codex
 
 The order is forced by M0's phase dependencies below, not chosen. Skipping an
 entry leaves the next one unable to be verified.
@@ -115,7 +125,16 @@ entry leaves the next one unable to be verified.
 10. **#532** physical process-stack ownership across CPU migration -- complete.
     DDB stops both CPUs after the maintained migration workload and correlates
     each stopped root with exactly one captured process, CPU, and stack.
-11. **#9** processor affinity, with four cores.
+11. **#9 phase A** generalize secondary boot, per-CPU state, world-stop, DDB,
+    and the scheduler's deliberately restricted workload from two cores to
+    four. Do not admit arbitrary filesystem or direct userspace UART work in
+    this phase; #533 and #534 still own those contracts.
+12. **#9 phase B** after #533 and #534 land, add the affinity ABI and its
+    userspace-visible policy, widen admission, and verify four cores on QEMU
+    and RPi5. This is the integration point, not parallel work.
+13. **#528** make IRQ restoration under an IRQ-owning guard a build error.
+    Arbitrary affinity increases the number of paths that can expose this
+    invariant, but the work remains in Territory A's compiler/kernel files.
 
 Then, in this territory and unordered: #518, #468, #464, #516, #308, #414,
 #514, #202, #476, #386, #274, #493, #422, #252, #216, #297, #131, #132, #343,
@@ -482,7 +501,34 @@ None is queued above; they are recorded so they are not rediscovered.
    this territory converges the probes on one verdict shape, the check
    becomes possible and is worth revisiting.
 
-### Territory B queue -- making two cores debuggable
+### Territory B queue -- multicore boundaries, then independent priorities
+
+The active order, re-derived 2026-09-11, is:
+
+1. **#533** admit one bounded read-only ext2 workload on core 1. The first
+   contract is read-only; mutation remains serialized until its separate
+   ownership audit. This is the filesystem half #9 must not invent in
+   Territory A.
+2. **#534** publish direct userspace UART output from peer CPUs through the
+   sole ordinary core-0 writer, with bounded backpressure and an emergency
+   DDB/fatal path that never waits for it. This is the console half #9 must
+   not bypass.
+3. **#281** coalesce validated contiguous ext2 reads into bounded multi-sector
+   transfers. #208 and #545 changed the measured baseline, so measure the
+   remaining device-read share before choosing the first run size.
+4. **#542** finish the inventory of kernel-side verification machinery and
+   move userspace-observable checks behind fork/exec. This is independent of
+   scheduler affinity and can follow #281 without touching Territory A.
+5. **#537 close audit**, then #535 or #536 only when a current filesystem
+   caller requires them. Rename landed under the already-closed #538, so the
+   remaining task on #537 is to re-check its acceptance evidence and close it
+   if nothing remains, not to grow its scope.
+
+Do not start #540 from Territory B: its useful half changes compiler unused-
+function semantics in `lib/` and belongs in Territory A after the multicore
+integration boundary. Likewise #497/#502/#503 remain Territory A profiling
+work. This leaves Claude Code's queue free of the files Codex is actively
+reshaping for four cores.
 
 **Direction, set by the maintainer on 2026-09-11: verification belongs in
 userspace.** Userspace launches everything through fork/exec, and the kernel
@@ -872,8 +918,8 @@ and every boot prints `uart rx: capacity=4096 dropped=N` for a common view to
 compare. `linux_user/uart_rx_ring` drives the kernel's own ring past full
 natively, and the ash script now sends a 131-byte line on both lanes.
 
-**Territory B's next piece is #208**, the ext2 block cache, by the
-maintainer's choice on 2026-09-11. It is the measured priority, at about
+**At that point Territory B's next piece was #208**, the ext2 block cache, by
+the maintainer's choice on 2026-09-11. It was the measured priority, at about
 126 MiB of block reads per boot for a 2.5 MiB filesystem, and most of every
 BusyBox exec's cost.
 
@@ -978,9 +1024,9 @@ counts `writers_waited`, every write that found no room, and the board is
 held to that count instead. A write six times the queue must wait on a
 115200-baud wire, whatever else is ready.
 
-**After that, #281.** With BusyBox exec'd from USB, the multi-sector
-coalescing it proposes finally sits on a path that runs. Measure the USB share
-of the device reads first.
+**The next storage optimization is #281.** With BusyBox exec'd from USB, the
+multi-sector coalescing it proposes finally sits on a path that runs. Measure
+the USB share of the device reads first.
 
 One thing that folding gave up: no lane runs `ls` on a directory this
 kernel made. getdents64 over a kernel-written directory block is covered only
@@ -989,9 +1035,9 @@ by the kernel's own `ext2_directory_live_entries` walk.
 `getdents64`'s limit is the twelve direct blocks, which growth also stops at.
 Lifting it means growing into an indirect block, and nothing needs that yet.
 
-After that, **#208** -- and it is now the measured priority rather than an
-option, with `block io: reads=...` printed on every boot as the number it has
-to move.
+The earlier plan put **#208** after that measurement; #208 has since landed.
+Its `block io: reads=... cache_hits=...` line is now the baseline #281 has to
+move.
 
 **#540 is the one new idea worth taking on its own**, filed by the end-of-
 session audit: `--reject-unused-functions` already exists and is scoped to one
