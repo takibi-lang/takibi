@@ -559,6 +559,14 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
         uart_put_udec(fd_context_baseline);
         kernel_boot_log("\n");
     }
+    // GitHub issue #543: every byte the UART received this boot either
+    // reached a process or is counted here. A view compares the line, so a
+    // drop fails a lane rather than stalling one.
+    kernel_boot_log("uart rx: capacity=");
+    uart_put_udec(KERNEL_UART_RX_CAPACITY);
+    kernel_boot_log(" dropped=");
+    uart_put_udec(kernel_uart_rx_dropped_count());
+    kernel_boot_log("\n");
     if (page_allocator_live_count() == page_baseline) {
         kernel_boot_log("resources: pages=0\n");
         // GitHub issue #376: reported beside the other
@@ -1306,22 +1314,12 @@ fn kernel_uart_rx_isr(c: u8) !{unsafe} {
         }
         ProcessUartWakeResult::RetryRead => {}
     }
-    let head: usize = kernel_uart_rx_head;
-    let next: usize = (head + 1) % 64;
-    if (next != kernel_uart_rx_tail) {
-        let ring: *u8 = kernel_uart_rx_buf;
-        ring[head as isize] = c;
-        signal_fence();
-        kernel_uart_rx_head = next;
+    // A byte the ring cannot hold is counted there and reported at the end
+    // of the boot (GitHub issue #543); the interrupt has nothing else to do
+    // with it.
+    match kernel_uart_rx_push(c) {
+        UartRxPushResult::Stored => { }
+        UartRxPushResult::Dropped => { }
     }
     interrupt_notify();
-}
-
-fn kernel_uart_rx_getc() -> u8 {
-    signal_fence();
-    let tail: usize = kernel_uart_rx_tail;
-    let ring: *u8 = kernel_uart_rx_buf;
-    let c: u8 = ring[tail as isize];
-    kernel_uart_rx_tail = (tail + 1) % 64;
-    return c;
 }

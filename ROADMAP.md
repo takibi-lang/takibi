@@ -854,8 +854,17 @@ bytes with its newline. Its end never arrived, the shell waited for it, and all
 four QEMU lanes ran to their budget with no line after the previous command.
 DDB's walk showed no `rm` process ever existed, which is what separated this
 from an ext2 stall. A person typing a line longer than 63 bytes at the serial
-console meets the same silence. Linux's tty buffers 4096. Every test line is
-under 63 bytes now; the ring itself is unchanged.
+console meets the same silence. Linux's tty buffers 4096. **#543 closed it the same
+day:** the ring moved to `kernel/drivers/serial/uart_rx_ring.tkb` and holds
+4096 bytes, Linux n_tty's size. A byte that still does not fit is counted,
+and every boot prints `uart rx: capacity=4096 dropped=N` for a common view to
+compare. `linux_user/uart_rx_ring` drives the kernel's own ring past full
+natively, and the ash script now sends a 131-byte line on both lanes.
+
+**Territory B's next piece is #208**, the ext2 block cache, by the
+maintainer's choice on 2026-09-11. It is the measured priority, at about
+126 MiB of block reads per boot for a 2.5 MiB filesystem, and most of every
+BusyBox exec's cost.
 
 **#541, the same day: the ash session no longer counts as boot.** The dmesg
 validator bounded the boot at `foreground server: listener ready`, and the

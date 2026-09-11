@@ -26,6 +26,11 @@ script-interpreter-argument.sh three
 mkdir /etc/made /etc/made/sub /etc/made /hello.txt/x /kept
 rmdir /etc/made /etc/made/sub /etc/made/sub /hello.txt
 rm /etc/gone /etc/gone /etc/hlink /etc/hlink
+# GitHub issue #543: a line longer than the 63 bytes the kernel's UART
+# receive ring used to hold, sent at once. The old ring dropped the rest of a
+# line like this one, newline included, and the shell waited for it until the
+# lane's budget ran out. echo is a shell builtin, so this costs no exec.
+echo uart-rx-ring-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 # Two background jobs at once, and ash's own account of them. /bin/spin is
 # one round of the busy loop and then exit: silent, because output that
 # interleaved with the prompt would arrive in an order nothing here can

@@ -93,6 +93,7 @@ rmdir: '/etc/made/sub': No such file or directory
 rmdir: '/hello.txt': Not a directory
 rm: can't remove '/etc/gone': No such file or directory
 rm: can't remove '/etc/hlink': No such file or directory
+uart-rx-ring-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 / # / # [2]+  Running                    
 [1]-  Running                    
 two-jobs-ok

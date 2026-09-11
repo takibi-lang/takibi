@@ -1,3 +1,4 @@
 uart rx: scheduler child blocked
 concurrency: parent progressed while child uart-blocked
 uart rx: scheduler block+wake ok
+uart rx: capacity=4096 dropped=0

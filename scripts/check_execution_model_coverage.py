@@ -84,6 +84,10 @@ EXEMPT = {
     "drivers/net/rp1_gem.tkb": "device state; MSI-X is routed to CPU0",
     "drivers/block/virtio_blk.tkb": "device state; SPIs are routed to CPU0",
     "drivers/block/memory.tkb": "device state; SPIs are routed to CPU0",
+    "drivers/serial/uart_rx_ring.tkb":
+        "one producer, one consumer: the UART RX interrupt, routed to CPU0, "
+        "writes head and the drop count; a syscall from a process admitted "
+        "to CPU0 writes tail with interrupts masked",
     "platform/qemu/uart.tkb": "device state; SPIs are routed to CPU0",
     "platform/qemu/timer_irq.tkb":
         "GIC device state is initialized before interrupts and used by its routed cores",

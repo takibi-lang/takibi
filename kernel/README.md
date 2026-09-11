@@ -204,6 +204,12 @@ be opened from the host browser. Both use pyserial's
 python3-serial`. Press Ctrl-] to leave either console.
 Exiting this way also restores the host terminal settings.
 
+Input the shell has not read yet waits in the kernel's 4096-byte UART
+receive ring (`kernel/drivers/serial/uart_rx_ring.tkb`), the size Linux's
+n_tty buffers, so a pasted line up to that length arrives whole. A byte that
+arrives when the ring is full is counted rather than lost without trace, and
+every boot's total is printed as `uart rx: capacity=4096 dropped=N`.
+
 The shared console continuously flushes the raw UART bytes it receives to
 `_build/kernel-shell-qemu/uart-transcript.log` or
 `_build/kernel-shell-rpi5/uart-transcript.log`. It prints that path both when

@@ -1,0 +1,82 @@
+// The bytes the UART has received that no process has taken yet.
+//
+// GitHub issue #543. This was a 64-byte ring in kernel/kernel/syscall.tkb,
+// which holds 63, and a byte that arrived when it was full was dropped with
+// nothing counting it. A 68-byte ash test line lost its newline that way:
+// the shell waited for the end of a line that would never come, four QEMU
+// lanes ran to their budget, and a person pasting a long command at the
+// serial console would have met the same silence.
+//
+// The capacity is Linux's: n_tty buffers 4096 bytes of input, which is what
+// BusyBox and anyone typing at it assume. A byte that still does not fit is
+// counted rather than lost without trace, and the count is printed at the
+// end of every boot, so a drop is a reported number rather than a stall.
+//
+// One producer and one consumer, and each index has one writer: the UART RX
+// interrupt (kernel_uart_rx_isr in kernel/init/test_driver.tkb) writes head
+// and the drop count, and a syscall, with interrupts masked by its caller,
+// writes tail. The byte is fenced before the head that publishes it, and the
+// consumer fences before it reads.
+//
+// Kept free of logging and of process state, so linux_user/uart_rx_ring can
+// compile this file itself and drive it past full.
+
+const KERNEL_UART_RX_CAPACITY: usize = 4096;
+
+must_use variant UartRxPushResult { Stored; Dropped; }
+
+private let mut kernel_uart_rx_buf: [u8; KERNEL_UART_RX_CAPACITY];
+private let mut kernel_uart_rx_head: io usize;
+private let mut kernel_uart_rx_tail: io usize;
+private let mut kernel_uart_rx_dropped: io usize;
+
+// Empties the ring. The drop count is a boot total and survives this.
+fn kernel_uart_rx_ring_reset() {
+    kernel_uart_rx_head = 0;
+    kernel_uart_rx_tail = 0;
+}
+
+fn kernel_uart_rx_pending() -> bool {
+    return kernel_uart_rx_tail != kernel_uart_rx_head;
+}
+
+private fn kernel_uart_rx_count_drop() -> UartRxPushResult {
+    let dropped: usize = kernel_uart_rx_dropped;
+    if (dropped < 0xFFFFFFFFFFFFFFFF) {
+        kernel_uart_rx_dropped = dropped + 1;
+    }
+    return UartRxPushResult::Dropped;
+}
+
+fn kernel_uart_rx_push(c: u8) -> UartRxPushResult {
+    let head: usize = kernel_uart_rx_head;
+    if (head >= KERNEL_UART_RX_CAPACITY) {
+        return kernel_uart_rx_count_drop();
+    }
+    let next: usize = (head + 1) % KERNEL_UART_RX_CAPACITY;
+    if (next == kernel_uart_rx_tail) {
+        return kernel_uart_rx_count_drop();
+    }
+    kernel_uart_rx_buf[head] = c;
+    signal_fence();
+    kernel_uart_rx_head = next;
+    return UartRxPushResult::Stored;
+}
+
+// The caller has asked kernel_uart_rx_pending() first, with interrupts
+// masked, and this is only reached when it answered true.
+fn kernel_uart_rx_getc() -> u8 {
+    signal_fence();
+    let tail: usize = kernel_uart_rx_tail;
+    if (tail >= KERNEL_UART_RX_CAPACITY) {
+        kernel_uart_rx_tail = 0;
+        return 0;
+    }
+    let c: u8 = kernel_uart_rx_buf[tail];
+    kernel_uart_rx_tail = (tail + 1) % KERNEL_UART_RX_CAPACITY;
+    return c;
+}
+
+fn kernel_uart_rx_dropped_count() -> usize {
+    return kernel_uart_rx_dropped;
+}

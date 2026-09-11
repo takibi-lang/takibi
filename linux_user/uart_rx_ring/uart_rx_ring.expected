@@ -1,0 +1,6 @@
+ok     a ring of 4096 holds 4095 bytes
+ok     the byte that did not fit was counted, not lost silently
+ok     the bytes came out in the order they went in
+ok     an emptied ring has nothing pending
+ok     ten bytes cross the end of the ring and come back in order
+ok     a 68-byte line fits whole, and a reset keeps the drop total

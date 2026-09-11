@@ -1,0 +1,84 @@
+// The kernel's UART receive ring, driven past full where that costs nothing.
+//
+// GitHub issue #543. The ring held 63 bytes and dropped the next one without
+// counting it, and the only way anyone found out was four QEMU lanes stalling
+// on a 68-byte shell line. Filling a 4096-byte ring over a real UART on every
+// boot would spend the boot on something that is byte work, so the capacity,
+// the drop rule, the order and the wrap are checked here, natively.
+//
+// This compiles kernel/drivers/serial/uart_rx_ring.tkb itself, not a copy,
+// for the reason linux_user/usb_init_report does: a second implementation
+// here would agree with this test while drifting from what the kernel runs.
+
+fn check(label: *u8, ok: bool) {
+    if (ok) {
+        uart_puts("ok     ");
+    } else {
+        uart_puts("FAILED ");
+    }
+    uart_puts(label);
+    uart_puts("\r\n");
+}
+
+// The numbers below are the requirement, written out, not the kernel's
+// constant. A test phrased in terms of the constant agrees with any capacity
+// at all: planting the old 64 left five of these six checks green, still
+// labelled 4096, and only the 68-byte line caught it.
+fn app_main() {
+    kernel_uart_rx_ring_reset();
+    let mut stored: usize = 0;
+    for i: usize in 0..<4096 {
+        match kernel_uart_rx_push((i % 251) as u8) {
+            UartRxPushResult::Stored => { stored = stored + 1; }
+            UartRxPushResult::Dropped => { }
+        }
+    }
+    check("a ring of 4096 holds 4095 bytes", stored == 4095);
+    check("the byte that did not fit was counted, not lost silently",
+          kernel_uart_rx_dropped_count() == 1);
+
+    let mut in_order: bool = true;
+    let mut taken: usize = 0;
+    for i: usize in 0..<4096 {
+        if (kernel_uart_rx_pending()) {
+            if (kernel_uart_rx_getc() != (i % 251) as u8) { in_order = false; }
+            taken = taken + 1;
+        }
+    }
+    check("the bytes came out in the order they went in",
+          in_order && taken == 4095);
+    check("an emptied ring has nothing pending",
+          kernel_uart_rx_pending() == false);
+
+    // Head and tail both sit at the last slot now, so these ten cross the
+    // end of the array.
+    let mut wrapped: bool = true;
+    for i: usize in 0..<10 {
+        match kernel_uart_rx_push((0x40 + i) as u8) {
+            UartRxPushResult::Stored => { }
+            UartRxPushResult::Dropped => { wrapped = false; }
+        }
+    }
+    for i: usize in 0..<10 {
+        if (kernel_uart_rx_pending()) {
+            if (kernel_uart_rx_getc() != (0x40 + i) as u8) { wrapped = false; }
+        } else {
+            wrapped = false;
+        }
+    }
+    check("ten bytes cross the end of the ring and come back in order",
+          wrapped && kernel_uart_rx_pending() == false);
+
+    // The line that stalled the lanes, and a reset between: the ring
+    // empties, the boot's drop total does not.
+    kernel_uart_rx_ring_reset();
+    let mut whole: bool = true;
+    for i: usize in 0..<68 {
+        match kernel_uart_rx_push(0x61) {
+            UartRxPushResult::Stored => { }
+            UartRxPushResult::Dropped => { whole = false; }
+        }
+    }
+    check("a 68-byte line fits whole, and a reset keeps the drop total",
+          whole && kernel_uart_rx_dropped_count() == 1);
+}
