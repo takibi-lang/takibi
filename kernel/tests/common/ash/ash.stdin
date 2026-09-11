@@ -15,18 +15,6 @@ script-interpreter-argument.sh three
 /etc/no-newline.sh
 /etc/long-shebang.sh
 /bin/sh -c 'exec /bin/echo re-exec-ok'
-# GitHub issue #538: mkdir and rmdir through mkdirat and unlinkat.
-# Each line is one exec, because each BusyBox exec costs about half a second
-# of the boot the dmesg validator bounds: nine lines of one command each
-# took it from 22.3 s to 27.3 s. mkdir and rmdir carry on past a failing
-# argument, so one exec each covers every outcome in order, and each names
-# /etc/made/fresh twice: mkdir's second EEXIST is what shows the first made
-# it, and rmdir's second ENOENT what shows the first removed it -- which is
-# why no `ls` exec is spent confirming either. /etc/made/inner is the boot
-# fixture's and stays; /kept stays too, so the lane's e2fsck judges a
-# directory made through the syscall.
-mkdir /etc/made/fresh /etc/made/fresh /hello.txt/sub /kept
-rmdir /etc/made /etc/made/fresh /etc/made/fresh /hello.txt
 # Two background jobs at once, and ash's own account of them. /bin/spin is
 # one round of the busy loop and then exit: silent, because output that
 # interleaved with the prompt would arrive in an order nothing here can

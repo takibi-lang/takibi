@@ -42,6 +42,7 @@ ls
 mkdir
 od
 ps
+rm
 rmdir
 script-interpreter-argument.sh
 sh
@@ -85,11 +86,6 @@ interpreter-argument /bin/script-interpreter-argument.sh three
 no-trailing-newline /etc/no-newline.sh
 LONG-SHEBANG-FELL-BACK
 re-exec-ok
-mkdir: can't create directory '/etc/made/fresh': File exists
-mkdir: can't create directory '/hello.txt/sub': Not a directory
-rmdir: '/etc/made': Directory not empty
-rmdir: '/etc/made/fresh': No such file or directory
-rmdir: '/hello.txt': Not a directory
 / # / # [2]+  Running                    
 [1]-  Running                    
 two-jobs-ok

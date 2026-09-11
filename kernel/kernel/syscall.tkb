@@ -113,6 +113,8 @@ const LINUX_EIO: usize = 0xFFFFFFFFFFFFFFFB;
 const LINUX_EEXIST: usize = 0xFFFFFFFFFFFFFFEF;
 const LINUX_ENOTDIR: usize = 0xFFFFFFFFFFFFFFEC;
 const LINUX_ENOTEMPTY: usize = 0xFFFFFFFFFFFFFFD9;
+const LINUX_EISDIR: usize = 0xFFFFFFFFFFFFFFEB;
+const LINUX_EPERM: usize = 0xFFFFFFFFFFFFFFFF;
 const LINUX_AT_REMOVEDIR: usize = 0x200;
 // RLIMIT_NOFILE, and Linux's RLIM64_INFINITY.
 const LINUX_RLIMIT_NOFILE: usize = 7;
@@ -2799,9 +2801,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
     }
 
-    if (number == 35 && x2 == LINUX_AT_REMOVEDIR) {
-        // unlinkat(dirfd, pathname, AT_REMOVEDIR) -- rmdir, GitHub issue
-        // #538. Without the flag this is unlink, which is not handled here.
+    if (number == 35) {
+        // unlinkat(dirfd, pathname, flags), GitHub issue #538: unlink with no
+        // flag, rmdir with AT_REMOVEDIR, and EINVAL for any other flag.
+        if (x2 != 0 && x2 != LINUX_AT_REMOVEDIR) {
+            return SyscallAction::Resume(LINUX_EINVAL);
+        }
         if (syscall_ext2_ready == false) {
             return SyscallAction::Resume(LINUX_EBADF);
         }
@@ -2821,6 +2826,28 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         };
         let leaf: []u8 = kernel_syscall_leaf(path_name, parent);
         if (leaf.len == 0) { return SyscallAction::Resume(LINUX_ENOENT); }
+        if (x2 == 0) {
+            // Unsupported is a symlink or a file reaching an indirect block,
+            // which the ext2 layer does not release; EPERM is Linux's word
+            // for a filesystem that does not allow the unlink.
+            match ext2_unlink_name(syscall_ext2_mount, parent.inode, leaf) {
+                Ext2UnlinkNameResult::Unlinked => {
+                    return SyscallAction::Resume(0);
+                }
+                Ext2UnlinkNameResult::NotFound => {
+                    return SyscallAction::Resume(LINUX_ENOENT);
+                }
+                Ext2UnlinkNameResult::IsDirectory => {
+                    return SyscallAction::Resume(LINUX_EISDIR);
+                }
+                Ext2UnlinkNameResult::Unsupported => {
+                    return SyscallAction::Resume(LINUX_EPERM);
+                }
+                Ext2UnlinkNameResult::Invalid => {
+                    return SyscallAction::Resume(LINUX_EIO);
+                }
+            }
+        }
         // Linux's own answers: rmdir(".") is EINVAL, rmdir("..") ENOTEMPTY.
         if (kernel_syscall_leaf_is_dot(leaf)) {
             return SyscallAction::Resume(LINUX_EINVAL);

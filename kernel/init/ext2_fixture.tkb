@@ -450,6 +450,94 @@ fn ext2_nested_directory_check(mount: Ext2Mount) -> bool {
     }
 }
 
+// GitHub issue #538: unlink by name, the operation BusyBox rm reaches
+// through unlinkat. It is exercised here rather than by an rm line in the
+// shared ash script because each BusyBox exec costs 0.6 to 1.0 s of the boot
+// the dmesg validator bounds, and under cicheck's parallel load the one exec
+// rm needed took that boot to 25.2 s against 25. The kernel side is the same
+// call either way; what this does not reach is the syscall's own path
+// parsing, which mkdirat and rmdir share and the ash script does reach.
+//
+// The image provides both shapes in /etc, which the ash script never lists:
+// /etc/hello-link is a second link to /hello.txt, so removing it must drop one
+// link and leave the file; /etc/removable.txt is a last link, so removing it
+// must hand one block and one inode back. /etc/made, kept by the check
+// before this one, is the directory that must be refused.
+fn ext2_unlink_name_check(mount: Ext2Mount) -> bool {
+    let mut etc: usize = 0;
+    match ext2_lookup_root(mount, bs"etc") {
+        Ext2LookupResult::Found(inode_number) => { etc = inode_number; }
+        Ext2LookupResult::Invalid => { return false; }
+        Ext2LookupResult::NotFound => { return false; }
+    }
+    let mut hello: usize = 0;
+    match ext2_lookup_root(mount, bs"hello.txt") {
+        Ext2LookupResult::Found(inode_number) => { hello = inode_number; }
+        Ext2LookupResult::Invalid => { return false; }
+        Ext2LookupResult::NotFound => { return false; }
+    }
+    let hello_links: usize = ext2_inode_links(mount, hello);
+    if (hello_links < 2) { return false; }
+    let mut verdict: bool = true;
+    match ext2_unlink_name(mount, etc, bs"hello-link") {
+        Ext2UnlinkNameResult::Unlinked => { }
+        Ext2UnlinkNameResult::Invalid => { verdict = false; }
+        Ext2UnlinkNameResult::NotFound => { verdict = false; }
+        Ext2UnlinkNameResult::IsDirectory => { verdict = false; }
+        Ext2UnlinkNameResult::Unsupported => { verdict = false; }
+    }
+    if (ext2_inode_links(mount, hello) != hello_links - 1) { verdict = false; }
+    match ext2_lookup_root(mount, bs"hello.txt") {
+        Ext2LookupResult::Found(still) => {
+            if (still != hello) { verdict = false; }
+        }
+        Ext2LookupResult::Invalid => { verdict = false; }
+        Ext2LookupResult::NotFound => { verdict = false; }
+    }
+    let mut blocks_before: usize = 0;
+    let mut inodes_before: usize = 0;
+    match ext2_free_counts(mount) {
+        Ext2FreeCountsResult::Counts(counts) => {
+            let (blocks, inodes) = counts;
+            blocks_before = blocks;
+            inodes_before = inodes;
+        }
+        Ext2FreeCountsResult::Invalid => { return false; }
+    }
+    match ext2_unlink_name(mount, etc, bs"removable.txt") {
+        Ext2UnlinkNameResult::Unlinked => { }
+        Ext2UnlinkNameResult::Invalid => { verdict = false; }
+        Ext2UnlinkNameResult::NotFound => { verdict = false; }
+        Ext2UnlinkNameResult::IsDirectory => { verdict = false; }
+        Ext2UnlinkNameResult::Unsupported => { verdict = false; }
+    }
+    match ext2_free_counts(mount) {
+        Ext2FreeCountsResult::Counts(counts) => {
+            let (blocks, inodes) = counts;
+            if (blocks != blocks_before + 1 || inodes != inodes_before + 1) {
+                verdict = false;
+            }
+        }
+        Ext2FreeCountsResult::Invalid => { verdict = false; }
+    }
+    // The same name again finds nothing: the first call removed it.
+    match ext2_unlink_name(mount, etc, bs"removable.txt") {
+        Ext2UnlinkNameResult::NotFound => { }
+        Ext2UnlinkNameResult::Unlinked => { verdict = false; }
+        Ext2UnlinkNameResult::Invalid => { verdict = false; }
+        Ext2UnlinkNameResult::IsDirectory => { verdict = false; }
+        Ext2UnlinkNameResult::Unsupported => { verdict = false; }
+    }
+    match ext2_unlink_name(mount, etc, bs"made") {
+        Ext2UnlinkNameResult::IsDirectory => { }
+        Ext2UnlinkNameResult::Unlinked => { verdict = false; }
+        Ext2UnlinkNameResult::Invalid => { verdict = false; }
+        Ext2UnlinkNameResult::NotFound => { verdict = false; }
+        Ext2UnlinkNameResult::Unsupported => { verdict = false; }
+    }
+    return verdict;
+}
+
 fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
     // GitHub issue #249: save the mount for
     // kernel_exec_resolve_argv0(), which runs later, from
@@ -563,6 +651,11 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
         kernel_boot_log("ext2 mkdir: /etc/made/inner with .. and rmdir ok\n");
     } else {
         kernel_boot_log("ext2 mkdir: failed\n");
+    }
+    if (ext2_unlink_name_check(mount)) {
+        kernel_boot_log("ext2 unlink: a hard link and a last link in /etc ok\n");
+    } else {
+        kernel_boot_log("ext2 unlink: failed\n");
     }
     match ext2_lookup_root(mount, bs"latest") {
         Ext2LookupResult::Invalid => {

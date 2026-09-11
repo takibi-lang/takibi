@@ -1056,7 +1056,9 @@ run, not a specification.
   `..`, the parent's link count and the group's used-directories count, and
   removed once it holds only `.` and `..`; a non-empty one is refused and its
   owner handed back. `..` in a path resolves through each directory's own
-  `..` entry. None of this is reachable from userspace: no syscall calls it.
+  `..` entry. Userspace reaches it through `mkdirat` and `unlinkat`, which
+  is BusyBox `mkdir`, `rmdir` and `rm`; `unlinkat` releases a regular file's
+  direct blocks and refuses a symlink or a file reaching an indirect block.
   Symlinks remain fast symlinks, and there are no additional block groups.
   The QEMU lane runs the host's `e2fsck -fn` over the disk the guest wrote,
   after checking that the fixture's grown `/etc` and kept `/etc/made/inner`

@@ -355,6 +355,30 @@ that the same process is still Running before committing TTBR0. An incomplete
 world stop or stale current handle fails the syscall continuation instead of
 returning through a frame under the wrong address space. Exit handoffs remain.
 
+#### Handed over from Territory B, 2026-09-11
+
+1. **One qemu-debug stall with a signature not seen before, under cicheck's
+   parallel load.** After `httpd-shell-ready`, the UART driver sent the
+   interactive HTTPd command and the guest said nothing more. The QMP BREAK 41 s
+   later found the shell blocked on `uart-rx` with nothing ready, core 0 running
+   a respawned busy loop at EL0 (`elr=0x800103c0`, the same PC the busy-pair
+   samples report), and init blocked on `signal`. The byte reached the guest,
+   and the process waiting for it was never woken. The change under test was
+   ext2 unlink and `unlinkat`, which is disjoint from the wake and scheduler
+   paths, and the same tree passed the lane alone straight afterwards. None of
+   the fifteen archived QEMU failures carries this signature.
+   Capture: `_build/kernel-hwtest-qemu-failures/20260911T010803Z`. One sample
+   is a rate of nothing, so it is recorded rather than filed; if it recurs,
+   that is two.
+
+2. **#533 changes the meaning of two ext2 sites.** `ext2_claim_directory` and
+   `ext2_unlink_name` mint block, inode and directory owners from the on-disk
+   tree, which is sound only while one core at a time reaches ext2 mutation.
+   The admission rule in `kernel/CONCURRENCY.md` is what holds that today.
+   Admitting a filesystem workload to core 1 is exactly the event that ends it,
+   so those two functions, and the per-core-scratch-only ext2 write paths
+   generally, want a lock or a single-writer boundary in the same change.
+
 #### Handed over from Territory B, 2026-09-10
 
 Two findings this territory owns. Both were reported on #448, which is closed,
@@ -448,6 +472,16 @@ None is queued above; they are recorded so they are not rediscovered.
    becomes possible and is worth revisiting.
 
 ### Territory B queue -- making two cores debuggable
+
+**Direction, set by the maintainer on 2026-09-11: verification belongs in
+userspace.** Userspace launches everything through fork/exec, and the kernel
+starts only PID 1. Kernel-side test machinery that stands in for what
+userspace could check is temporary: in-kernel fixtures, test-only syscalls,
+evidence hooks in production paths. Adding more of it is acceptable only as
+a stopgap that names its way out. **#542** is the inventory and the way out.
+**#541** is its first concrete step: the harness change that lets the #538
+BusyBox checks, which went into a boot fixture that day, come back to the ash
+script.
 
 **Re-cut 2026-09-10, and the re-cut is the point.** Until now this queue was
 ordered to AVOID Territory A: entries were ranked by how little they needed
@@ -795,8 +829,9 @@ increment, and a missing used-directories count. Every view passed both
 times.
 
 **#538's first increment, 2026-09-11: `mkdirat` and `unlinkat` with
-`AT_REMOVEDIR`**, reached by BusyBox `mkdir`/`rmdir` from the shared ash
-script on both lanes. The design question the linear owners raised is
+`AT_REMOVEDIR`**, reached by BusyBox `mkdir`/`rmdir`. It landed with those
+two commands in the shared ash script; the same day they were moved out
+again, for the exec budget below, so no lane runs them now. The design question the linear owners raised is
 answered by `ext2_claim_directory`. `ext2_directory_keep` ended a kept
 directory's obligation when it was made, so a later rmdir mints the owner
 back from the on-disk entry. That is sound only while one core at a time
@@ -804,19 +839,62 @@ reaches ext2 mutation, and the admission rule in `kernel/CONCURRENCY.md` is
 what holds that today. When Territory A admits a filesystem-reaching process
 to core 1, this is one of the sites that changes meaning.
 
-Next: `unlinkat` for files (BusyBox `rm`), then `renameat` (`mv`). **The
-budget they share is the boot-duration bound, and it is measured.** Each
-BusyBox exec costs about 0.5 s under QEMU, because each one streams the
-1.09 MB static ELF through ext2, and #208's metadata re-reads are most of
-that. The first version of the mkdir/rmdir test was nine one-command lines.
-It took the boot's last milestone from 22.3 s to 27.3 s against a 25 s bound.
-It is two lines now, one exec each, because `mkdir` and `rmdir` carry on past
-a failing argument and each names its target twice -- the second EEXIST and
-the second ENOENT are what show the first call worked, so no `ls` is spent
-confirming it. The block costs about a second, and the milestone was 22.3 s
-on the run that landed it. So `rm` and `mv` get about four execs between
-them before the bound fires. Fold them into lines that carry on the same
-way, or land #208 first, which buys the budget back for every exec.
+**The second, the same day: `unlinkat` for files**, which is what BusyBox
+`rm` calls. `ext2_unlink_name` drops one link from a hard-linked file and
+releases the direct data blocks and the inode of the last one. It refuses a
+symlink, or the last link of a file reaching an indirect block, with `EPERM`
+rather than half-releasing it. **No lane runs `rm`, `mkdir` or `rmdir`**, by
+the maintainer's choice on 2026-09-11. Its one exec took the main lane's boot to 25.2 s under
+cicheck's parallel load, against 25. The boot fixture exercises the ext2
+operation instead: a hard link and a last link in `/etc`, both shipped in the
+image for it. The BusyBox `rm` line is ready to add back once #208 has
+returned the budget; the first run of that line is also what found the size
+check ordered before the link count.
+
+**A finding from landing it, not filed yet:** the kernel's UART receive ring
+(`kernel_uart_rx_buf` in `kernel/kernel/syscall.tkb`) holds 63 bytes, and
+`kernel_uart_rx_isr` drops a byte that arrives when it is full. Nothing
+counts or reports the drop. The first spelling of the `rm` test line was 68
+bytes with its newline. Its end never arrived, the shell waited for it, and all
+four QEMU lanes ran to their budget with no line after the previous command.
+DDB's walk showed no `rm` process ever existed, which is what separated this
+from an ext2 stall. A person typing a line longer than 63 bytes at the serial
+console meets the same silence. Linux's tty buffers 4096. The test line is
+59 bytes now; the ring itself is unchanged.
+
+**The boot-duration bound is the budget every userspace test here shares,
+and it is measured.** Each BusyBox exec costs about 0.5 s under QEMU, because
+each one streams the 1.09 MB static ELF through ext2, and #208's metadata
+re-reads are most of that. The cost is per exec, not per line, so folding
+commands onto one line saves nothing; folding them into one exec does. The
+first version of the mkdir/rmdir test was nine one-command lines, and it took
+the boot's last milestone from 22.3 s to 27.3 s against a 25 s bound. It is
+two execs now, because `mkdir` and `rmdir` carry on past a failing argument
+and each names its target twice -- the second EEXIST and the second ENOENT
+are what show the first call worked, so no `ls` is spent confirming it. That
+brought the milestone back to 22.3 s. `rm` is one exec more, the same way.
+
+Under cicheck's parallel load the same milestone reads higher, and that is
+the number that binds: 23.0 to 23.1 s before #537, 24.2 to 24.3 s with the
+mkdir/rmdir execs, and 25.0 to 25.2 s with an `rm` exec -- over the bound on
+the main lane. One exec costs 0.6 to 1.0 s there. The budget is spent.
+
+Without the `rm` exec the milestone still read 24.8 s (main) and 25.0 s
+(debug) under that load: the two mkdir/rmdir execs alone had spent the
+margin, and every clone runs the same local cicheck. So those two lines left
+the ash script too, and the boot fixture carries the ext2 side of all three
+commands.
+
+**This is a temporary step back from the direction above, and #541 is the
+way out.** The bound measures the boot up to `foreground server: listener
+ready`, and the whole ash script runs before that line. So the budget meant
+to catch per-page and per-record complexity is being spent on userspace test
+volume. #541 times the ash session apart from the bound, then puts BusyBox
+`mkdir`, `rmdir` and `rm` back into the script and shrinks the ext2 fixtures
+to what userspace cannot observe. #208 would also return the budget, one exec
+at a time, but it does not fix what the bound is measuring. Meanwhile the
+fixture does not reach the syscall layer's own path parsing. `renameat` itself composes from add and remove and can land
+with fixture coverage the way `rm` did, if it is wanted before #208.
 
 One thing that folding gave up: no lane runs `ls` on a directory this
 kernel made. getdents64 over a kernel-written directory block is covered only

@@ -143,6 +143,14 @@ must_use variant Ext2RmdirResult {
 
 must_use variant Ext2RmdirStep { Refused; NotEmpty; Unlinked; }
 
+must_use variant Ext2UnlinkNameResult {
+    Invalid;
+    NotFound;
+    IsDirectory;
+    Unsupported;
+    Unlinked;
+}
+
 must_use variant Ext2ClaimResult {
     Invalid;
     NotFound;
@@ -1875,8 +1883,8 @@ private fn ext2_initialize_directory(mount: Ext2Mount, inode_number: usize,
     }
 }
 
-private fn ext2_write_parent_links(mount: Ext2Mount, parent: Ext2Inode,
-                                   links: usize) -> Ext2DirectoryResult {
+private fn ext2_write_inode_links(mount: Ext2Mount, parent: Ext2Inode,
+                                  links: usize) -> Ext2DirectoryResult {
     match block_read(mount.device, parent.table_block,
                      ext2_scratch_here().metadata as []u8) {
         BlockIoResult::Invalid => { return Ext2DirectoryResult::Invalid; }
@@ -1911,7 +1919,7 @@ private fn ext2_adjust_parent_links(mount: Ext2Mount, parent_inode: usize,
             }
             let mut links: usize = parent.links - 1;
             if (increment) { links = parent.links + 1; }
-            match ext2_write_parent_links(mount, parent, links) {
+            match ext2_write_inode_links(mount, parent, links) {
                 Ext2DirectoryResult::Invalid => {
                     return Ext2DirectoryResult::Invalid;
                 }
@@ -1939,7 +1947,7 @@ private fn ext2_adjust_parent_links(mount: Ext2Mount, parent_inode: usize,
                 }
             }
             if (counted) { return Ext2DirectoryResult::Updated; }
-            match ext2_write_parent_links(mount, parent, parent.links) {
+            match ext2_write_inode_links(mount, parent, parent.links) {
                 Ext2DirectoryResult::Invalid => { }
                 Ext2DirectoryResult::Updated => { }
             }
@@ -2157,6 +2165,118 @@ fn ext2_claim_directory(mount: Ext2Mount, parent_inode: usize,
                         inode_number, block_number));
                 }
             }
+        }
+    }
+}
+
+// GitHub issue #538: unlink by name, for a file the syscall layer reaches.
+// Such a file has no owner to hand in -- it came from the image or from a
+// call that ended its owner -- so the owners of its blocks and inode are
+// minted from the tree here, under the same one-core-at-a-time claim
+// ext2_claim_directory states.
+//
+// A file with more than one link loses the entry and one link, which is what
+// removing a BusyBox applet name is. The last link releases the data blocks
+// and the inode. Their pointers are read before anything is written, because
+// once the inode is released they read as zero.
+//
+// A symlink, or the last link of a file reaching an indirect block, is
+// Unsupported: releasing those is more code than any caller asks for yet.
+fn ext2_unlink_name(mount: Ext2Mount, parent_inode: usize,
+                    name: borrow []u8) -> Ext2UnlinkNameResult !{unsafe} {
+    if (name.len == 0) { return Ext2UnlinkNameResult::Invalid; }
+    if (name.len == 1) {
+        if (name[0] == 0x2E) { return Ext2UnlinkNameResult::IsDirectory; }
+    }
+    if (name.len == 2) {
+        if (name[0] == 0x2E && name[1] == 0x2E) {
+            return Ext2UnlinkNameResult::IsDirectory;
+        }
+    }
+    let mut inode_number: usize = 0;
+    match ext2_lookup_directory(mount, parent_inode, name) {
+        Ext2LookupResult::Invalid => { return Ext2UnlinkNameResult::Invalid; }
+        Ext2LookupResult::NotFound => { return Ext2UnlinkNameResult::NotFound; }
+        Ext2LookupResult::Found(found) => { inode_number = found; }
+    }
+    match ext2_read_inode(mount, inode_number) {
+        Ext2InodeResult::Invalid => { return Ext2UnlinkNameResult::Invalid; }
+        Ext2InodeResult::Inode(file) => {
+            if ((file.mode & 0xF000) == 0x4000) {
+                return Ext2UnlinkNameResult::IsDirectory;
+            }
+            if ((file.mode & 0xF000) != 0x8000) {
+                return Ext2UnlinkNameResult::Unsupported;
+            }
+            if (file.links == 0 || inode_number < 2) {
+                return Ext2UnlinkNameResult::Invalid;
+            }
+            // A file that keeps another link keeps its blocks, so its size
+            // is no reason to refuse -- removing a BusyBox applet name is a
+            // 1 MiB file losing one of its links.
+            if (file.links > 1) {
+                match ext2_directory_remove(mount, parent_inode, inode_number,
+                                            name) {
+                    Ext2DirectoryResult::Invalid => {
+                        return Ext2UnlinkNameResult::Invalid;
+                    }
+                    Ext2DirectoryResult::Updated => { }
+                }
+                match ext2_write_inode_links(mount, file, file.links - 1) {
+                    Ext2DirectoryResult::Invalid => {
+                        return Ext2UnlinkNameResult::Invalid;
+                    }
+                    Ext2DirectoryResult::Updated => {
+                        return Ext2UnlinkNameResult::Unlinked;
+                    }
+                }
+            }
+            if (file.size > ext2_direct_file_size()) {
+                return Ext2UnlinkNameResult::Unsupported;
+            }
+            let blocks: usize =
+                (file.size + KERNEL_BLOCK_SIZE - 1) / KERNEL_BLOCK_SIZE;
+            let mut pointers: [usize; EXT2_MAX_DIRECT_BLOCKS];
+            for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
+                pointers[index] = 0;
+                if (index < blocks) {
+                    let block: usize =
+                        ext2_inode_block_pointer(mount, file, index);
+                    if (block < 2 || block >= mount.filesystem_blocks) {
+                        return Ext2UnlinkNameResult::Invalid;
+                    }
+                    pointers[index] = block;
+                }
+            }
+            match ext2_directory_remove(mount, parent_inode, inode_number,
+                                        name) {
+                Ext2DirectoryResult::Invalid => {
+                    return Ext2UnlinkNameResult::Invalid;
+                }
+                Ext2DirectoryResult::Updated => { }
+            }
+            // The entry is gone and it was the last one, so releasing is the
+            // only way forward: every step is attempted.
+            let mut released: bool = true;
+            for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
+                if (index < blocks) {
+                    let block: usize = pointers[index];
+                    match ext2_release_block(
+                            mount, ext2_block_owner_new(block - 1, block,
+                                                        block)) {
+                        Ext2OwnerReleaseResult::Invalid => { released = false; }
+                        Ext2OwnerReleaseResult::Released => { }
+                    }
+                }
+            }
+            match ext2_release_inode(
+                    mount, ext2_inode_owner_new(inode_number - 1, inode_number,
+                                                inode_number)) {
+                Ext2OwnerReleaseResult::Invalid => { released = false; }
+                Ext2OwnerReleaseResult::Released => { }
+            }
+            if (released) { return Ext2UnlinkNameResult::Unlinked; }
+            return Ext2UnlinkNameResult::Invalid;
         }
     }
 }
