@@ -26,6 +26,16 @@ script-interpreter-argument.sh three
 mkdir /etc/made /etc/made/sub /etc/made /hello.txt/x /kept
 rmdir /etc/made /etc/made/sub /etc/made/sub /hello.txt
 rm /etc/gone /etc/gone /etc/hlink /etc/hlink
+# GitHub issue #538: mv through renameat. The first line renames within a
+# directory and then over an existing file; the second moves a file into
+# another directory and renames a directory within its parent. The third
+# asks for a name the first line moved away (ENOENT) and a directory move to
+# another parent, which the ext2 layer refuses (EPERM). The cat shows the
+# chain arrived: /etc/mva's bytes, now under /etc/moved/mvb.
+mv /etc/mva /etc/mvc && mv /etc/mvc /etc/mvb && echo mv1
+mv /etc/mvb /etc/made && mv /etc/made /etc/moved && echo mv2
+mv /etc/mva /kept /etc/moved
+/bin/cat /etc/moved/mvb
 # GitHub issue #543: a line longer than the 63 bytes the kernel's UART
 # receive ring used to hold, sent at once. The old ring dropped the rest of a
 # line like this one, newline included, and the shell waited for it until the

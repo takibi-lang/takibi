@@ -116,6 +116,7 @@ const LINUX_ENOTDIR: usize = 0xFFFFFFFFFFFFFFEC;
 const LINUX_ENOTEMPTY: usize = 0xFFFFFFFFFFFFFFD9;
 const LINUX_EISDIR: usize = 0xFFFFFFFFFFFFFFEB;
 const LINUX_EPERM: usize = 0xFFFFFFFFFFFFFFFF;
+const LINUX_EBUSY: usize = 0xFFFFFFFFFFFFFFF0;
 const LINUX_AT_REMOVEDIR: usize = 0x200;
 // RLIMIT_NOFILE, and Linux's RLIM64_INFINITY.
 const LINUX_RLIMIT_NOFILE: usize = 7;
@@ -2862,6 +2863,89 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         return SyscallAction::Resume(LINUX_EIO);
                     }
                 }
+            }
+        }
+    }
+
+    if (number == 38) {
+        // renameat(olddirfd, oldpath, newdirfd, newpath), GitHub issue #538.
+        // Both paths are read through the one per-core path buffer, so the
+        // old path's directory is resolved and its last component copied out
+        // before the new path is read over it.
+        if (syscall_ext2_ready == false) {
+            return SyscallAction::Resume(LINUX_EBADF);
+        }
+        let old_path: []u8 = match kernel_syscall_path_name(x1) {
+            SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+            SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
+            SyscallPathResult::Name(path) => { path }
+        };
+        let old_view: []u8 = syscall_scratch_here().path_buffer as []u8;
+        let old_absolute: bool = old_view[0] == 0x2F;
+        let old_parent: SyscallParent = match kernel_syscall_parent_of(
+                x0, old_absolute, old_path) {
+            SyscallParentResult::Errno(errno) => {
+                return SyscallAction::Resume(errno);
+            }
+            SyscallParentResult::Found(found) => { found }
+        };
+        let old_leaf: []u8 = kernel_syscall_leaf(old_path, old_parent);
+        if (old_leaf.len == 0) { return SyscallAction::Resume(LINUX_ENOENT); }
+        // Linux's answer for renaming `.` or `..`.
+        if (kernel_syscall_leaf_is_dot(old_leaf) ||
+            kernel_syscall_leaf_is_dot_dot(old_leaf)) {
+            return SyscallAction::Resume(LINUX_EBUSY);
+        }
+        let mut old_name_storage: [u8; 256];
+        let old_name_view: []u8 = old_name_storage as []u8;
+        let old_length: usize = old_leaf.len;
+        if (old_length > old_name_view.len) {
+            return SyscallAction::Resume(LINUX_EINVAL);
+        }
+        let old_name: []u8 = old_name_view[0..<old_length];
+        slice_copy(old_name, old_leaf);
+        let old_directory: usize = old_parent.inode;
+
+        let new_path: []u8 = match kernel_syscall_path_name(x3) {
+            SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+            SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
+            SyscallPathResult::Name(path) => { path }
+        };
+        let new_view: []u8 = syscall_scratch_here().path_buffer as []u8;
+        let new_absolute: bool = new_view[0] == 0x2F;
+        let new_parent: SyscallParent = match kernel_syscall_parent_of(
+                x2, new_absolute, new_path) {
+            SyscallParentResult::Errno(errno) => {
+                return SyscallAction::Resume(errno);
+            }
+            SyscallParentResult::Found(found) => { found }
+        };
+        let new_leaf: []u8 = kernel_syscall_leaf(new_path, new_parent);
+        if (new_leaf.len == 0) { return SyscallAction::Resume(LINUX_ENOENT); }
+        if (kernel_syscall_leaf_is_dot(new_leaf) ||
+            kernel_syscall_leaf_is_dot_dot(new_leaf)) {
+            return SyscallAction::Resume(LINUX_EBUSY);
+        }
+        // Unsupported is a directory moved to another parent, which the
+        // ext2 layer does not do; EPERM is Linux's word for a filesystem that
+        // does not allow the rename.
+        match ext2_rename_in(syscall_ext2_mount, old_directory, old_name,
+                             new_parent.inode, new_leaf) {
+            Ext2RenameResult::Renamed => { return SyscallAction::Resume(0); }
+            Ext2RenameResult::NotFound => {
+                return SyscallAction::Resume(LINUX_ENOENT);
+            }
+            Ext2RenameResult::IsDirectory => {
+                return SyscallAction::Resume(LINUX_EISDIR);
+            }
+            Ext2RenameResult::NotDirectory => {
+                return SyscallAction::Resume(LINUX_ENOTDIR);
+            }
+            Ext2RenameResult::Unsupported => {
+                return SyscallAction::Resume(LINUX_EPERM);
+            }
+            Ext2RenameResult::Invalid => {
+                return SyscallAction::Resume(LINUX_EIO);
             }
         }
     }

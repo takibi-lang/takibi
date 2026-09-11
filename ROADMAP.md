@@ -902,7 +902,29 @@ because its dead-record reuse is not visible from userspace.
 What #541 left: the hosted CI profile keeps 35 s, now on the smaller figure,
 which is looser than before. Recalibrate it from the numbers CI itself prints.
 #208 still returns time on every exec, but it no longer gates userspace
-tests. Next in #538 is `renameat` (`mv`), which composes from add and remove.
+tests. **#538's last piece, `renameat`, landed the same day too**, so BusyBox `mv`
+now reaches ext2 alongside `mkdir`, `rmdir` and `rm`. It is composed from the
+directory add and remove that were already there. A file moves within a
+directory or into another one. A directory is renamed only within its own
+parent: moving one elsewhere would mean rewriting its `..` and refusing a move
+into its own subtree, nothing calls for that, and it answers `EPERM`.
+
+**#544, filed the same day, is the next thing the console needs.** It is not
+queued yet, because its ownership is undecided. A userspace `write` to the
+UART still calls `uart_putc` once per byte. When the TX queue is full the
+writer spins inside the non-preemptible kernel instead of sleeping, so a 4 KiB
+write holds its core for about a third of a second. #544 moves bytes in chunks,
+blocks the writer on a UART-transmit wait, and gives userspace output a queue
+separate from the kernel log. The wait reason and the write path are Territory
+A's (`process.tkb`, `syscall.tkb`), and the queue is this territory's
+(`kernel/printk/`), so it wants the same decision #538 got. The tty layer that
+termios implies, which is line discipline, echo and control characters, sits on
+top of it and is recorded on #435.
+
+**After that, #281**, measured first against the post-cache figure. On the
+board the syscall-visible filesystem is the in-memory image, and #281's
+multi-sector transfers are a USB-path optimisation, so the number to measure
+is how much of the remaining 35,152 device reads go to the USB medium at all.
 
 One thing that folding gave up: no lane runs `ls` on a directory this
 kernel made. getdents64 over a kernel-written directory block is covered only

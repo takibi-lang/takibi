@@ -151,6 +151,15 @@ must_use variant Ext2UnlinkNameResult {
     Unlinked;
 }
 
+must_use variant Ext2RenameResult {
+    Invalid;
+    NotFound;
+    IsDirectory;
+    NotDirectory;
+    Unsupported;
+    Renamed;
+}
+
 must_use variant Ext2ClaimResult {
     Invalid;
     NotFound;
@@ -2279,6 +2288,97 @@ fn ext2_unlink_name(mount: Ext2Mount, parent_inode: usize,
             }
             if (released) { return Ext2UnlinkNameResult::Unlinked; }
             return Ext2UnlinkNameResult::Invalid;
+        }
+    }
+}
+
+private fn ext2_name_is_dot_entry(name: borrow []u8) -> bool {
+    if (name.len == 1) {
+        if (name[0] == 0x2E) { return true; }
+    }
+    if (name.len == 2) {
+        if (name[0] == 0x2E && name[1] == 0x2E) { return true; }
+    }
+    return false;
+}
+
+// GitHub issue #538: rename, composed from the add and remove the directory
+// operations already have. The inode keeps its links: one name is added and
+// one taken away, so no link count moves.
+//
+// A directory is renamed only within its own parent, where its `..` stays
+// right. Moving one to another parent means rewriting its `..`, both
+// parents' link counts, and refusing a move into its own subtree, and
+// nothing calls for that yet, so it is Unsupported. An existing regular-file
+// target is replaced, as rename(2) specifies, through ext2_unlink_name; an
+// existing directory target is refused. A target that already names the
+// source is left alone and counts as done, as POSIX says.
+fn ext2_rename_in(mount: Ext2Mount, old_parent: usize, old_name: borrow []u8,
+                  new_parent: usize, new_name: borrow []u8)
+        -> Ext2RenameResult !{unsafe} {
+    if (old_name.len == 0 || new_name.len == 0 ||
+        ext2_name_is_dot_entry(old_name) || ext2_name_is_dot_entry(new_name)) {
+        return Ext2RenameResult::Invalid;
+    }
+    let mut inode_number: usize = 0;
+    match ext2_lookup_directory(mount, old_parent, old_name) {
+        Ext2LookupResult::Invalid => { return Ext2RenameResult::Invalid; }
+        Ext2LookupResult::NotFound => { return Ext2RenameResult::NotFound; }
+        Ext2LookupResult::Found(found) => { inode_number = found; }
+    }
+    let mut source_is_directory: bool = false;
+    match ext2_read_inode(mount, inode_number) {
+        Ext2InodeResult::Invalid => { return Ext2RenameResult::Invalid; }
+        Ext2InodeResult::Inode(source) => {
+            source_is_directory = (source.mode & 0xF000) == 0x4000;
+        }
+    }
+    if (source_is_directory && old_parent != new_parent) {
+        return Ext2RenameResult::Unsupported;
+    }
+    match ext2_lookup_directory(mount, new_parent, new_name) {
+        Ext2LookupResult::Invalid => { return Ext2RenameResult::Invalid; }
+        Ext2LookupResult::NotFound => { }
+        Ext2LookupResult::Found(target) => {
+            if (target == inode_number) { return Ext2RenameResult::Renamed; }
+            if ((ext2_inode_mode(mount, target) & 0xF000) == 0x4000) {
+                if (source_is_directory) {
+                    return Ext2RenameResult::Unsupported;
+                }
+                return Ext2RenameResult::IsDirectory;
+            }
+            if (source_is_directory) { return Ext2RenameResult::NotDirectory; }
+            match ext2_unlink_name(mount, new_parent, new_name) {
+                Ext2UnlinkNameResult::Unlinked => { }
+                Ext2UnlinkNameResult::NotFound => {
+                    return Ext2RenameResult::Invalid;
+                }
+                Ext2UnlinkNameResult::IsDirectory => {
+                    return Ext2RenameResult::IsDirectory;
+                }
+                Ext2UnlinkNameResult::Unsupported => {
+                    return Ext2RenameResult::Unsupported;
+                }
+                Ext2UnlinkNameResult::Invalid => {
+                    return Ext2RenameResult::Invalid;
+                }
+            }
+        }
+    }
+    match ext2_directory_add(mount, new_parent, inode_number, new_name) {
+        Ext2DirectoryResult::Invalid => { return Ext2RenameResult::Invalid; }
+        Ext2DirectoryResult::Updated => { }
+    }
+    match ext2_directory_remove(mount, old_parent, inode_number, old_name) {
+        Ext2DirectoryResult::Updated => { return Ext2RenameResult::Renamed; }
+        Ext2DirectoryResult::Invalid => {
+            // Put the tree back: the new name goes, the old one never left.
+            match ext2_directory_remove(mount, new_parent, inode_number,
+                                        new_name) {
+                Ext2DirectoryResult::Invalid => { }
+                Ext2DirectoryResult::Updated => { }
+            }
+            return Ext2RenameResult::Invalid;
         }
     }
 }

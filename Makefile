@@ -682,6 +682,11 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	printf 'removable\n' >$@.removable.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.removable.tmp $@.tmp:/etc/gone
 	rm -f $@.removable.tmp
+	printf 'mva\n' >$@.mva.tmp
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.mva.tmp $@.tmp:/etc/mva
+	printf 'mvb\n' >$@.mvb.tmp
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $@.mvb.tmp $@.tmp:/etc/mvb
+	rm -f $@.mva.tmp $@.mvb.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_RPI5_USER_PAYLOAD_ELF) $@.tmp:/bin/user_payload
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSY_LOOP_A_ELF) $@.tmp:/bin/busy-a
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSY_LOOP_B_ELF) $@.tmp:/bin/busy-b
@@ -715,13 +720,14 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	debugfs -w -R 'link /bin/busybox.static /bin/mkdir' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /bin/busybox.static /bin/rmdir' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /bin/busybox.static /bin/rm' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/mv' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /bin/busybox-extras /bin/httpd' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'mkdir /many' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'expand /many' $@.tmp >/dev/null 2>&1
 	for index in $$(seq -w 0 19); do \
 		debugfs -w -R "link /bin/busybox.static /many/entry-$$index" $@.tmp >/dev/null 2>&1; \
 	done
-	debugfs -w -R 'set_inode_field /bin/busybox.static links_count 33' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/busybox.static links_count 34' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/busybox-extras links_count 2' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /hello.txt /etc/hlink' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /hello.txt links_count 2' $@.tmp >/dev/null 2>&1

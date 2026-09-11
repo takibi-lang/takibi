@@ -259,9 +259,10 @@ if [ -z "$etc_size" ] || [ "$etc_size" -le 1024 ]; then
     archive_reason="ext2 /etc not grown"
     exit 1
 fi
-# /etc/made and /kept are the ones the ash script made through mkdirat and
-# kept, so e2fsck judges directories made through the syscall.
-for kept_directory in /etc/made /kept; do
+# /etc/moved and /kept are the ones the ash script made through mkdirat and
+# kept -- /etc/moved being /etc/made after its renameat -- so e2fsck judges
+# directories made and renamed through the syscalls.
+for kept_directory in /etc/moved /kept; do
     debugfs -R "stat $kept_directory" "$QEMU_EXT2_IMAGE" \
         >"$ARTIFACT_DIR/kept-stat.log" 2>&1
     if ! grep -q 'Type: directory' "$ARTIFACT_DIR/kept-stat.log"; then
