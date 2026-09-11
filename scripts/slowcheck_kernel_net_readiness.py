@@ -121,12 +121,15 @@ def main() -> int:
             print(f"FAIL net-readiness control: {runner.name} does not "
                   "wire readiness into kernel_net_test.py")
             return 1
-        # The UART end is the ash driver, or -- for GitHub issue #546's lane,
-        # whose UART is typed by gdb -- the gdb script, which takes the same
-        # two files from its environment. Whichever a runner uses must be
-        # wired, and it must use one of them.
+        # The UART end is whatever reads this lane's guest: the ash driver,
+        # the DDB lane's driver (which starts the peer too since e2b0dea), or
+        # -- for GitHub issue #546's lane, whose UART is typed by gdb -- the
+        # gdb script, which takes the same two files from its environment.
+        # Whichever a runner uses must be wired, and it must use one of them.
         uart_ends = (
             ("run_kernel_uart_driver.py",
+             ("--init-listener-file", "--network-ready-file")),
+            ("run_kernel_ddb_driver.py",
              ("--init-listener-file", "--network-ready-file")),
             ("kernel_uart_wake_check.py",
              ("UART_WAKE_INIT_LISTENER=", "UART_WAKE_NETWORK_READY=")))
