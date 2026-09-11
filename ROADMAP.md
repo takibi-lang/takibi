@@ -114,8 +114,9 @@ entry leaves the next one unable to be verified.
    live last-level replacement.
 10. **#532** physical process-stack ownership across CPU migration. The
     architectural relinquish/acquire boundary and exit-time deferred reap are
-    implemented and pass QEMU and RPi5; next add the maintained cross-CPU
-    migration workload and DDB attribution evidence.
+    implemented. The maintained workload moves both busy processes between
+    CPU 0 and CPU 1 at least sixteen times and passes QEMU and RPi5. Next add
+    DDB's during-workload process/CPU/stack attribution evidence.
 11. **#9** processor affinity, with four cores.
 
 Then, in this territory and unordered: #518, #468, #464, #516, #308, #414,

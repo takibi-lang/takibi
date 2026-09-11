@@ -93,6 +93,7 @@ const WORKLOAD_BUSY_ROUNDS: usize = 8;
 // diagnostic here only because no bound has been chosen for them yet.
 const WORKLOAD_BUSY_SKEW_BOUND: usize = 4;
 const WORKLOAD_PROFILE_WORLD_STOP_SPINS: usize = 10000000;
+const WORKLOAD_BUSY_MIGRATION_GOAL: usize = 16;
 
 must_use variant WorkloadBusyProgressResult {
     Value(usize);
@@ -145,6 +146,13 @@ struct WorkloadBusyPair {
     restart_b_pid_before: usize;
     restart_b_rounds_before: usize;
     restart_report_state: WorkloadRestartReportState;
+    a_last_cpu: usize;
+    b_last_cpu: usize;
+    a_cpu_seen: bool;
+    b_cpu_seen: bool;
+    a_migrations: usize;
+    b_migrations: usize;
+    migration_reported: bool;
     // A report this file refused: an unknown tag, or a caller that is not
     // a child of init. Zero on a healthy boot, and printed only when it
     // is not.
@@ -542,6 +550,11 @@ fn workload_busy_pair_reset() {
     workload_busy_pair.restart_b_pid_before = 0;
     workload_busy_pair.restart_b_rounds_before = 0;
     workload_busy_pair.restart_report_state = WorkloadRestartReportState::Waiting;
+    workload_busy_pair.a_cpu_seen = false;
+    workload_busy_pair.b_cpu_seen = false;
+    workload_busy_pair.a_migrations = 0;
+    workload_busy_pair.b_migrations = 0;
+    workload_busy_pair.migration_reported = false;
     workload_busy_pair.refused = 0;
 }
 
@@ -574,8 +587,28 @@ fn workload_busy_note_selected_locked(
     workload_busy_pair.last_tick = now;
     if (workload_busy_pair.a_pid != 0 && pid == workload_busy_pair.a_pid) {
         workload_busy_pair.a_slices = workload_busy_pair.a_slices + 1;
+        if (workload_busy_pair.restart_report_state ==
+                WorkloadRestartReportState::Reported) {
+            if (workload_busy_pair.a_cpu_seen &&
+                workload_busy_pair.a_last_cpu != cpu_id()) {
+                workload_busy_pair.a_migrations =
+                    workload_busy_pair.a_migrations + 1;
+            }
+            workload_busy_pair.a_last_cpu = cpu_id();
+            workload_busy_pair.a_cpu_seen = true;
+        }
     } else if (workload_busy_pair.b_pid != 0 && pid == workload_busy_pair.b_pid) {
         workload_busy_pair.b_slices = workload_busy_pair.b_slices + 1;
+        if (workload_busy_pair.restart_report_state ==
+                WorkloadRestartReportState::Reported) {
+            if (workload_busy_pair.b_cpu_seen &&
+                workload_busy_pair.b_last_cpu != cpu_id()) {
+                workload_busy_pair.b_migrations =
+                    workload_busy_pair.b_migrations + 1;
+            }
+            workload_busy_pair.b_last_cpu = cpu_id();
+            workload_busy_pair.b_cpu_seen = true;
+        }
     }
 }
 
@@ -591,6 +624,11 @@ fn workload_busy_secondary_candidate_locked(
 fn workload_busy_secondary_candidate(pid: usize) -> bool {
     if (workload_busy_pair.a_pid == 0 || workload_busy_pair.b_pid == 0) {
         return false;
+    }
+    if (workload_busy_pair.restart_report_state ==
+            WorkloadRestartReportState::Reported) {
+        return pid == workload_busy_pair.a_pid ||
+               pid == workload_busy_pair.b_pid;
     }
     return pid == workload_busy_pair.b_pid;
 }
@@ -624,7 +662,17 @@ private fn workload_busy_record_progress_locked(
         input_steps: usize) -> WorkloadBusyProgressResult !{unsafe} {
     if (workload_busy_pair.restart_report_state ==
             WorkloadRestartReportState::Reported) {
-        return WorkloadBusyProgressResult::Value(1);
+        if (workload_busy_pair.migration_reported == false && cpu_id() == 0 &&
+            workload_busy_pair.a_migrations >= WORKLOAD_BUSY_MIGRATION_GOAL &&
+            workload_busy_pair.b_migrations >= WORKLOAD_BUSY_MIGRATION_GOAL) {
+            kernel_boot_log(
+                "\nworkload: busy pair migrated across both cpus with stack handoff intact\n");
+            workload_busy_pair.migration_reported = true;
+        }
+        if (workload_busy_pair.migration_reported) {
+            return WorkloadBusyProgressResult::Value(1);
+        }
+        return WorkloadBusyProgressResult::Value(0);
     }
     if (workload_busy_pair.restart_report_state ==
             WorkloadRestartReportState::Pending) {
@@ -895,9 +943,9 @@ private fn workload_busy_report_restart(guard: borrow ProcessRunGuard[lock]) {
                       workload_busy_pair.restart_b_rounds_before);
         kernel_boot_log("\n");
     }
-    // The last line the workload ever prints, whichever way the check went.
-    // The host runner waits for it before starting anything that competes
-    // for the machine, so it has to appear on a failing boot too.
+    // The host starts its interactive workload at this marker. That supplies
+    // the third runnable context which lets the two currently Running busy
+    // processes become Ready in turn and exchange CPUs.
     kernel_boot_log("workload: busy pair done\n");
     workload_busy_pair.restart_report_state = WorkloadRestartReportState::Reported;
 }

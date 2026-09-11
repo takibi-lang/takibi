@@ -35,6 +35,22 @@ RPi5 two-core lane including DDB passed. General cross-CPU migration remains
 the next #532 stage; this change establishes and enforces the boundary it must
 cross.
 
+The maintained busy pair now continues making progress syscalls after its
+init-respawn check and admits both members on either CPU. Once the interactive
+shell supplies a third runnable context, both processes repeatedly move
+between CPU 0 and CPU 1; the view requires at least sixteen CPU changes for
+each. Every successful return crosses the compiler-generated stack acquisition
+check. The scheduler probe also recreates a logically Ready parent whose old
+CPU still owns its stack and proves the ordinary Ready take refuses it.
+
+This exposed a second real-hardware race after the migration verdict. A shell
+could decide to block while a Ready successor existed, then lose that successor
+to the peer CPU before the block trampoline acquired the run lock. The old
+single-selector assumption treated the resulting empty selection as fatal.
+The process is still Running in that case, so the trampoline now retries its
+syscall on the same frame. QEMU and RPi5 then passed all 45 views; the RPi5 run
+also passed its network, storage, and DDB recovery lanes.
+
 ## 2026-09-11: live PTE replacement uses break-before-make (#261)
 
 Last-level page-table mutation now has one architecture API. Replacing a live

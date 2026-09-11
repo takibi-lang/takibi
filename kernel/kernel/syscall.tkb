@@ -2340,7 +2340,22 @@ fn kernel_syscall_block_return(frame_sp: usize) {
         next_sp = kernel_process_block_uart(frame_sp);
     }
     if (next_sp == 0) {
-        kernel_syscall_fail_stop(frame_sp);
+        // Another CPU may reserve the last Ready successor after dispatch
+        // chose Block but before kernel_process_block_current takes the run
+        // lock. The current process is still Running in that case. Retry its
+        // syscall instead of treating an ordinary multicore race as fatal.
+        // A terminal read was already rewound by uart_block_prepare above;
+        // every other blocker still needs the rewind here.
+        let uart_read_prepared: bool =
+            kernel_process_current_pending_block_reason() ==
+                ProcessWaitReason::UartRx &&
+            scheduled_process_uart_block_delivery(
+                kernel_syscall_process_slot()) == UartBlockDelivery::Read;
+        if (uart_read_prepared == false) {
+            el0_context_retry_syscall(frame_sp);
+        }
+        workload_profile_el0_enter();
+        el0_context_resume(frame_sp);
     }
     workload_profile_el0_enter();
     el0_context_resume(next_sp);

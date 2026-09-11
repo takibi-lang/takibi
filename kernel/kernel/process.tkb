@@ -5662,6 +5662,25 @@ private fn kernel_process_scheduler_probe_stack_depart() -> bool {
     return valid;
 }
 
+// Negative control for the physical half of publication: clone installation
+// has made the parent logically Ready, but generated restore code has not yet
+// left its stack. The ordinary Ready take must still refuse it.
+private fn kernel_process_owned_ready_unselectable_probe(
+        handle: ProcessHandle) -> bool {
+    let guard = process_run_lock();
+    let mut refused: bool = true;
+    match scheduled_process_ready_take(guard, handle) {
+        ScheduledProcessReadyTakeResult::Missing => {}
+        ScheduledProcessReadyTakeResult::Ready(resources) => {
+            let (owner, ready) = resources;
+            scheduled_process_release(owner, ready);
+            refused = false;
+        }
+    }
+    process_run_unlock(guard);
+    return refused;
+}
+
 private fn kernel_process_scheduler_probe_stack_arrive() -> bool {
     let core: usize = cpu_id();
     if (core >= KERNEL_MAX_CORES || execution_here().current_live == false) {
@@ -5701,7 +5720,8 @@ fn kernel_process_scheduler_probe() -> bool {
     // clone_context_install returns through generated context-restore code in
     // production. Complete that parent-stack -> child-stack handoff before
     // this direct-call probe tries to reserve the now-Ready parent.
-    if (kernel_process_scheduler_probe_stack_depart() == false ||
+    if (kernel_process_owned_ready_unselectable_probe(root_handle) == false ||
+        kernel_process_scheduler_probe_stack_depart() == false ||
         kernel_process_scheduler_probe_stack_arrive() == false) {
         return false;
     }
