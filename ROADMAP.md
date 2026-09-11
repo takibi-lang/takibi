@@ -909,22 +909,31 @@ directory or into another one. A directory is renamed only within its own
 parent: moving one elsewhere would mean rewriting its `..` and refusing a move
 into its own subtree, nothing calls for that, and it answers `EPERM`.
 
-**#544, filed the same day, is the next thing the console needs.** It is not
-queued yet, because its ownership is undecided. A userspace `write` to the
-UART still calls `uart_putc` once per byte. When the TX queue is full the
-writer spins inside the non-preemptible kernel instead of sleeping, so a 4 KiB
-write holds its core for about a third of a second. #544 moves bytes in chunks,
-blocks the writer on a UART-transmit wait, and gives userspace output a queue
-separate from the kernel log. The wait reason and the write path are Territory
-A's (`process.tkb`, `syscall.tkb`), and the queue is this territory's
-(`kernel/printk/`), so it wants the same decision #538 got. The tty layer that
-termios implies, which is line discipline, echo and control characters, sits on
-top of it and is recorded on #435.
+**#544, filed and landed the same day**, by the maintainer's choice to have
+this territory take it across both. A userspace write to the UART used to
+call `uart_putc` once per byte, and when the TX queue was full the writer
+spun inside the non-preemptible kernel. It now copies in chunks and queues
+while the queue is at or below half full. It returns a short count when the
+queue fills, and when it can queue nothing it sleeps on a `UartTx` wait until
+the PL011 interrupt has drained the queue back to half. That is BSD's high and
+low water rule. The scope was narrowed on the way: userspace output still
+shares the kernel log's queue. A queue of its own would need a policy for
+merging two streams without splitting a line, which is the tty layer's (#435)
+and has no caller yet.
 
-**After that, #281**, measured first against the post-cache figure. On the
-board the syscall-visible filesystem is the in-memory image, and #281's
-multi-sector transfers are a USB-path optimisation, so the number to measure
-is how much of the remaining 35,152 device reads go to the USB medium at all.
+**Next, by the maintainer's decision on 2026-09-11: the board's runtime root
+moves to the USB medium.** Today every boot writes the image to USB, mounts
+it for the USB checks, and then switches the syscall layer and exec back to
+the in-memory image. Nobody had noticed, because the two start
+byte-identical. The switch comes with a guard against drifting back, which
+the maintainer asked for. Each platform prints which device its root is on,
+for a view to compare. On the board, the memory image becomes something that
+can only be copied to USB, never mounted, so mounting it is a type error.
+QEMU's silent "virtio unavailable, memory fallback" falls under the same line.
+
+**After that, #281.** With BusyBox exec'd from USB, the multi-sector
+coalescing it proposes finally sits on a path that runs. Measure the USB share
+of the device reads first.
 
 One thing that folding gave up: no lane runs `ls` on a directory this
 kernel made. getdents64 over a kernel-written directory block is covered only

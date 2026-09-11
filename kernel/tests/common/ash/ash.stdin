@@ -36,6 +36,12 @@ mv /etc/mva /etc/mvc && mv /etc/mvc /etc/mvb && echo mv1
 mv /etc/mvb /etc/made && mv /etc/made /etc/moved && echo mv2
 mv /etc/mva /kept /etc/moved
 /bin/cat /etc/moved/mvb
+# GitHub issue #544: a write six times the console transmit queue. On the
+# board the wire cannot keep up, so cat's write fills the queue, returns
+# short, and the next one sleeps until the TX interrupt has drained it; the
+# boot's `uart tx: ... writers_slept=` line has to be non-zero there. The file
+# has no trailing newline, so echo ends the line.
+/bin/cat /large.txt && echo
 # GitHub issue #543: a line longer than the 63 bytes the kernel's UART
 # receive ring used to hold, sent at once. The old ring dropped the rest of a
 # line like this one, newline included, and the shell waited for it until the

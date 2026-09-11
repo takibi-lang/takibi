@@ -87,19 +87,19 @@ def main() -> int:
     status, report = run(REPO)
     if status != 0:
         failures.append(f"the repository itself does not pass: {report.strip()!r}")
-    elif "12 process state and wait reason(s)" not in report:
+    elif "13 process state and wait reason(s)" not in report:
         failures.append(f"the repository passed about an unexpected "
                         f"vocabulary size: {report.strip()!r}")
 
-    # A sixth wait reason, encoded and never named. The kernel keeps working
+    # A seventh wait reason, encoded and never named. The kernel keeps working
     # and the view prints a word for every reason but this one.
     failures += case(
         "a reason encoded and not named",
         edit(PROCESS,
-             "        ProcessWaitReason::Signal => { output[index].wait_reason = 5; }",
-             "        ProcessWaitReason::Signal => { output[index].wait_reason = 5; }\n"
-             "        ProcessWaitReason::DiskIo => { output[index].wait_reason = 6; }"),
-        "names no 6")
+             "        ProcessWaitReason::UartTx => { output[index].wait_reason = 6; }",
+             "        ProcessWaitReason::UartTx => { output[index].wait_reason = 6; }\n"
+             "        ProcessWaitReason::DiskIo => { output[index].wait_reason = 7; }"),
+        "names no 7")
 
     # The word left behind after the enum case it stood for was renamed.
     failures += case(
@@ -111,8 +111,8 @@ def main() -> int:
     # subject, the same failure kernel/tests' own view declarations refuse.
     failures += case(
         "a name for a state that cannot occur",
-        edit(DEBUGGER, '5 => { return "signal"; }',
-             '5 => { return "signal"; }\n        6 => { return "disk-io"; }'),
+        edit(DEBUGGER, '6 => { return "uart-tx"; }',
+             '6 => { return "uart-tx"; }\n        7 => { return "disk-io"; }'),
         "a word for a state that cannot occur")
 
     # The check reads process.tkb's own snapshot encoding. If that moves, the

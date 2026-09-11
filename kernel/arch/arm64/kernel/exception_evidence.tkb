@@ -1601,6 +1601,7 @@ private fn ddb_wait_reason_name(reason: usize) -> *u8 {
         3 => { return "net-rx"; }
         4 => { return "deadline"; }
         5 => { return "signal"; }
+        6 => { return "uart-tx"; }
         _ => { return "unknown"; }
     }
 }

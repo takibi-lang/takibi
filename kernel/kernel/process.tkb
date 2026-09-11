@@ -79,7 +79,7 @@ enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; Constructing;
 // preempt. Added at the end so the numbers the oops path prints for the
 // first three are unchanged.
 enum ProcessWaitReason: u8 {
-    None; UartRx; ChildExit; NetRx; Deadline; Signal;
+    None; UartRx; ChildExit; NetRx; Deadline; Signal; UartTx;
 }
 
 // GitHub issue #392: declared here, with the rest of a process's
@@ -809,6 +809,7 @@ private fn scheduled_process_ddb_copy_one(
         ProcessWaitReason::NetRx => { output[index].wait_reason = 3; }
         ProcessWaitReason::Deadline => { output[index].wait_reason = 4; }
         ProcessWaitReason::Signal => { output[index].wait_reason = 5; }
+        ProcessWaitReason::UartTx => { output[index].wait_reason = 6; }
     }
     output[index].saved_sp = record.saved_sp;
     output[index].stack_bottom = 0;
@@ -1284,6 +1285,7 @@ fn kernel_process_monitor_proc(pid: usize) !{unsafe} {
         ProcessWaitReason::NetRx => { uart_put_udec(3); }
         ProcessWaitReason::Deadline => { uart_put_udec(4); }
         ProcessWaitReason::Signal => { uart_put_udec(5); }
+        ProcessWaitReason::UartTx => { uart_put_udec(6); }
     }
     kernel_boot_log(" saved_sp=");
     uart_put_hex(scheduled_process_peek_saved_sp(slot));
@@ -4966,6 +4968,45 @@ fn kernel_process_net_wake_all() !{interrupt, unsafe} {
     }
 }
 
+// GitHub issue #544: a userspace write to the UART found the transmit queue
+// above its low-water mark and queued nothing, so it sleeps until the TX
+// interrupt has drained the queue back down. The syscall frame was rewound
+// before this, so the writer runs the same write again when it wakes.
+fn kernel_process_block_uart_tx(current_sp: usize) -> usize {
+    return kernel_process_block_current(
+        current_sp, ProcessWaitReason::UartTx, 6);
+}
+
+// Every process waiting for room in the UART transmit queue becomes runnable.
+// Called from the PL011 interrupt once the TX drain has brought the queue to
+// its low-water mark, the counterpart of kernel_process_net_wake_all.
+fn kernel_process_uart_tx_wake_all() !{interrupt, unsafe} {
+    if (execution_here().current_live == false) { return; }
+    let mut root: ProcessHandle =
+        kernel_process_chain_root(execution_here().current_handle);
+    let mut cursor: ProcessHandle = root;
+    let mut steps: usize = scheduled_process_pool_live_count() + 1;
+    while (steps != 0) {
+        steps = steps - 1;
+        if (scheduled_process_state_of(cursor) ==
+                ProcessSlotState::Blocked &&
+            scheduled_process_wait_reason_of(cursor) ==
+                ProcessWaitReason::UartTx) {
+            match scheduled_process_blocked_take(cursor) {
+                ScheduledProcessBlockedTakeResult::Missing => {}
+                ScheduledProcessBlockedTakeResult::Blocked(resources) => {
+                    let (owner, blocked) = resources;
+                    let ready = scheduled_process_wake(owner, blocked);
+                    scheduled_process_record_at(owner.pool_index).wait_reason =
+                        ProcessWaitReason::None;
+                    scheduled_process_release(owner, ready);
+                }
+            }
+        }
+        cursor = kernel_process_next_successor(cursor, root);
+    }
+}
+
 fn kernel_process_block_uart(current_sp: usize) -> usize {
     // GitHub issue #448: the one-shot marker belongs to the fixture that
     // means it, and that is now a distinguishable thing rather than
@@ -5930,6 +5971,7 @@ fn kernel_process_crash_wait_reason() -> usize !{unsafe} {
         ProcessWaitReason::NetRx => { return 3; }
         ProcessWaitReason::Deadline => { return 4; }
         ProcessWaitReason::Signal => { return 5; }
+        ProcessWaitReason::UartTx => { return 6; }
     }
 }
 

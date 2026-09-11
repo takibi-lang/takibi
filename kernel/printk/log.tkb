@@ -447,6 +447,95 @@ fn uart_putc(c: u8) !{logs, unsafe} {
     if (still_pending) { uart_tx_irq_enable(); }
 }
 
+// GitHub issue #544: userspace output through the same queue, in chunks,
+// and a writer that sleeps rather than spins.
+//
+// A user write queues only while the queue is at or below its low-water
+// mark, half the queue, and then takes as much as there is room for. Above
+// the mark it takes nothing, and the syscall layer puts the writer to sleep
+// until the TX interrupt has drained the queue back down. That is BSD's
+// high/low water rule; without the gap a writer would come back every time
+// the FIFO freed a byte, and spin in userspace instead of in the kernel.
+//
+// Kernel log text keeps its own rule: it polls when the queue is full. The
+// kernel cannot sleep at an arbitrary logging call, and one queue keeps the
+// order on the wire exactly what the calls made it -- which every view
+// compares. A queue of userspace output's own is the boundary a tty layer
+// would sit on (#435), and it needs a policy for merging two streams without
+// splitting a line; nothing calls for that yet.
+const KERNEL_LOG_TX_WRITER_LOW_WATER: usize = 256;
+private let mut uart_user_write_sleeps: usize = 0;
+
+// Bytes a user write may queue now; zero means sleep. Off core 0, or before
+// the queue is live, there is no queue to wait on and the bytes spin as they
+// always have, so the answer is the most one call takes.
+fn uart_user_write_room() -> usize {
+    if (cpu_id() != 0 || kernel_log_tx_is_live() == false) {
+        return KERNEL_LOG_TX_QUEUE_BYTES;
+    }
+    let irq_flags: usize = mutex_irq_save();
+    let count: usize = kernel_log_tx_count;
+    mutex_irq_restore(irq_flags);
+    if (count > KERNEL_LOG_TX_WRITER_LOW_WATER) { return 0; }
+    if (count >= KERNEL_LOG_TX_QUEUE_BYTES) { return 0; }
+    return KERNEL_LOG_TX_QUEUE_BYTES - count;
+}
+
+// Whether the TX interrupt should wake sleeping writers.
+fn kernel_log_tx_writer_room() -> bool {
+    return kernel_log_tx_count <= KERNEL_LOG_TX_WRITER_LOW_WATER;
+}
+
+// Queue what fits of a user write and return how many bytes that was. Each
+// byte gets the bookkeeping uart_putc gives it, in the same order, and a byte
+// is only counted once it is certain to be queued, so the one a full queue
+// turns away is counted when the retried write takes it.
+fn uart_user_write(bytes: borrow []u8) -> usize !{logs, unsafe} {
+    if (cpu_id() != 0 || kernel_log_tx_is_live() == false) {
+        let mut spun: usize = 0;
+        for index: usize in 0..<KERNEL_LOG_TX_QUEUE_BYTES {
+            if (index < bytes.len) {
+                uart_putc(bytes[index]);
+                spun = spun + 1;
+            }
+        }
+        return spun;
+    }
+    let irq_flags: usize = mutex_irq_save();
+    let mut taken: usize = 0;
+    let mut room: bool = true;
+    for index: usize in 0..<KERNEL_LOG_TX_QUEUE_BYTES {
+        if (room) {
+            if (index < bytes.len) {
+                if (kernel_log_tx_full()) {
+                    room = false;
+                } else {
+                    let value: u8 = bytes[index];
+                    if (kernel_log_capture_uart_byte(value)) {
+                        kernel_log_note_tx_byte();
+                        if (kernel_log_tx_push(value) == false) { room = false; }
+                    }
+                    if (room) { taken = taken + 1; }
+                }
+            }
+        }
+    }
+    uart_tx_drain_into_fifo();
+    let still_pending: bool = kernel_log_tx_pending();
+    mutex_irq_restore(irq_flags);
+    if (still_pending) { uart_tx_irq_enable(); }
+    return taken;
+}
+
+fn uart_user_write_note_sleep() {
+    if (cpu_id() != 0) { return; }
+    uart_user_write_sleeps = uart_user_write_sleeps + 1;
+}
+
+fn uart_user_write_sleep_total() -> usize {
+    return uart_user_write_sleeps;
+}
+
 // Everything queued reaches the wire before this returns. Called before the
 // paths that must not depend on interrupts -- DDB entry, the crash console,
 // a halt -- because those write through uart_debug_putc, and a byte they emit

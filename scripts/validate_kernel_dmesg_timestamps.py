@@ -30,6 +30,14 @@ BLOCK_IO = re.compile(
     rb"block io: reads=(\d+) writes=(\d+) block_bytes=(\d+) "
     rb"cache_hits=(\d+)")
 
+# GitHub issue #544: how often a userspace write to the UART slept for room
+# in the transmit queue instead of spinning in the kernel. Required on both
+# platforms, and required to be non-zero on the board, whose 115200-baud wire
+# is slow enough that the shell's `cat /large.txt` must have waited. QEMU's
+# PL011 drains as fast as it is written, so zero is a legitimate answer there.
+UART_TX = re.compile(
+    rb"uart tx: queue=(\d+) low_water=(\d+) writers_slept=(\d+)")
+
 # GitHub issue #541: the interactive ash session, on the host's clock. The
 # UART driver writes every line it receives with the seconds since it
 # connected, so the session's two edges are there even though the kernel's
@@ -275,6 +283,18 @@ def main() -> None:
         fail(f"the boot reports {reads} block reads of {block_bytes} bytes, "
              "which cannot be right for a boot that mounts a filesystem and "
              "runs BusyBox from it -- the counter is not being reached")
+    uart_tx = UART_TX.search(data)
+    if not uart_tx:
+        fail("the boot reached its last milestone without printing "
+             "`uart tx: queue=... low_water=... writers_slept=...`. That is "
+             "issue #544's evidence that a UART write sleeps rather than "
+             "spins, and this is its only reader")
+    tx_queue, tx_low, tx_slept = (int(uart_tx.group(i)) for i in (1, 2, 3))
+    if args.platform == "rpi5" and tx_slept == 0:
+        fail("no userspace write slept for room in the UART transmit queue. "
+             "On the board the shell's `cat /large.txt` outruns a 115200-baud "
+             "wire, so a zero means writes are spinning in the kernel again, "
+             "or the command that exercised it has gone from the ash script")
     block_io = (f", block io={reads} reads/{writes} writes of {block_bytes} B "
                 f"({reads * block_bytes // 1024} KiB read, {hits} cache hits)")
 
@@ -283,7 +303,9 @@ def main() -> None:
         f"assembled lines, delay={elapsed} us, boot={boot_us / 1_000_000:.1f} s, "
         f"ash-session={session_us / 1_000_000:.1f} s, "
         f"bounded={bounded_us / 1_000_000:.1f} s"
-        f"{spin}{block_io}, timing-profile={args.timing_profile}, "
+        f"{spin}{block_io}, uart tx sleeps={tx_slept} "
+        f"(queue {tx_queue}, low water {tx_low}), "
+        f"timing-profile={args.timing_profile}, "
         f"boot-bound={maximum_boot / 1_000_000:.0f} s"
     )
 

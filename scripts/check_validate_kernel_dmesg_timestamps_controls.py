@@ -61,7 +61,10 @@ HEALTHY_SPIN = (b"console: tx spin ticks=1000000 bytes=31919 spun=1077 "
 # own.
 HEALTHY_BLOCK_IO = (b"block io: reads=31000 writes=55 block_bytes=1024 "
                     b"cache_hits=93000\r\n")
-HEALTHY_TAIL = HEALTHY_SPIN + HEALTHY_BLOCK_IO
+# GitHub issue #544: a board boot must show a writer that slept, so the
+# default carries a non-zero count that serves both platforms.
+HEALTHY_UART_TX = b"uart tx: queue=512 low_water=256 writers_slept=3\r\n"
+HEALTHY_TAIL = HEALTHY_SPIN + HEALTHY_BLOCK_IO + HEALTHY_UART_TX
 
 
 # GitHub issue #541: the host timing log the UART driver writes, reduced to
@@ -235,6 +238,28 @@ def main() -> int:
               "reads was accepted")
         return 1
 
+    # GitHub issue #544: the UART transmit line is required on both
+    # platforms, and a board boot where no writer slept is refused.
+    status, output = run(HEALTHY, "qemu", HEALTHY_SPIN + HEALTHY_BLOCK_IO)
+    if status == 0 or "uart tx: queue=" not in output:
+        print("FAIL dmesg-timestamps control: a boot without the uart tx "
+              f"line was accepted\n{output}")
+        return 1
+    zero_sleeps = (HEALTHY_SPIN + HEALTHY_BLOCK_IO
+                   + b"uart tx: queue=512 low_water=256 writers_slept=0\r\n")
+    status, output = run(HEALTHY, "qemu", zero_sleeps)
+    if status != 0 or "uart tx sleeps=0" not in output:
+        print("FAIL dmesg-timestamps control: QEMU was refused for a writer "
+              f"that never had to sleep\n{output}")
+        return 1
+    rpi5_ok = [(10.1 if "reconnect ok" in t else s,
+                t.replace("virtio net", "rp1 gem")) for s, t in HEALTHY]
+    status, output = run(rpi5_ok, "rpi5", zero_sleeps)
+    if status == 0 or "writes are spinning in the kernel again" not in output:
+        print("FAIL dmesg-timestamps control: a board boot where no UART "
+              f"writer slept was accepted\n{output}")
+        return 1
+
     # GitHub issue #208: the cache's hit count is required too. The line in
     # the shape it had before the cache is a kernel that stopped reporting it.
     status, output = run(
@@ -262,7 +287,7 @@ def main() -> int:
     # and HEALTHY carries QEMU's network markers; the ticks are a real RPi5
     # sample, which is what makes the derived figures worth asserting.
     spin = b"console: tx spin ticks=136043016 bytes=31919 spun=31919 tickfreq=54000000\r\n"
-    status, output = run(HEALTHY, "qemu", spin + HEALTHY_BLOCK_IO)
+    status, output = run(HEALTHY, "qemu", spin + HEALTHY_BLOCK_IO + HEALTHY_UART_TX)
     if status != 0 or "console tx spin=2519 ms" not in output:
         print("FAIL dmesg-timestamps control: the console spin measurement "
               f"was not reported from a capture that carries it\n{output}")
@@ -295,7 +320,7 @@ def main() -> int:
         return 1
     status, output = run(
         HEALTHY, "qemu",
-        HEALTHY_BLOCK_IO
+        HEALTHY_BLOCK_IO + HEALTHY_UART_TX
         + b"console: tx spin ticks=136043016 bytes=0 spun=0 tickfreq=54000000\r\n")
     if status != 0 or "console tx spin" in output:
         print("FAIL dmesg-timestamps control: zero bytes were divided by, or "
@@ -312,7 +337,9 @@ def main() -> int:
         "monotonic, interval and assembled-line checks each fail when "
         "broken, the block-layer total and its cache hit count are "
               "required and the total refused when it claims zero reads, and the console spin figure is derived, refused for "
-        "zero bytes, and required rather than merely reported -- a "
+        "zero bytes, and required rather than merely reported, the uart tx "
+        "line is required and a board boot with no writer that slept is "
+        "refused -- a "
         "complete boot that omits it, or renames a field out from under "
         "the pattern, is refused",
         cases=CASES.ran)

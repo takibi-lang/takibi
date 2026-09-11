@@ -25,7 +25,13 @@ use "kernel/printk/log.tkb";
 // platforms, because the kernel that runs under QEMU is the one that runs on
 // the board.
 fn uart_irq_service() -> bool !{interrupt, unsafe} {
-    if (uart_tx_irq_flagged()) { uart_tx_isr(); }
+    if (uart_tx_irq_flagged()) {
+        uart_tx_isr();
+        // GitHub issue #544: a userspace writer that found the transmit
+        // queue above its low-water mark is asleep; once this drain brings
+        // the queue down to the mark, it runs its write again.
+        if (kernel_log_tx_writer_room()) { kernel_process_uart_tx_wake_all(); }
+    }
     if (uart_rx_ready()) {
         let received: u32 = uart_rx_word();
         if ((received & (1 << 10)) != 0 || uart_break_flagged()) {

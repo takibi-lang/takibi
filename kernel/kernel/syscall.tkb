@@ -1553,7 +1553,75 @@ fn kernel_syscall_leaf_is_dot_dot(leaf: []u8) -> bool {
 // huge as unsigned usize, which would work, but a discriminated variant
 // makes the distinction a type-level fact instead of a convention every
 // call site has to remember).
-must_use variant WriteSegmentResult { Errno(usize); Written(usize); }
+must_use variant WriteSegmentResult { Errno(usize); Written(usize); WouldBlock; }
+
+// GitHub issue #544: a userspace write to the UART terminal, in chunks. Each
+// chunk is one bounded copy from user memory into the syscall scratch buffer,
+// then as much of it as the transmit queue will take. A write that queues
+// some bytes returns that count -- a short write, which POSIX allows and
+// musl and BusyBox both finish by writing again. One that can queue nothing,
+// because the queue is above its low-water mark, answers WouldBlock and the
+// caller puts the writer to sleep instead of spinning in the kernel.
+must_use variant TerminalWriteResult { Errno(usize); Written(usize); WouldBlock; }
+
+fn syscall_terminal_write(address: usize, length: usize)
+        -> TerminalWriteResult !{unsafe} {
+    if (length == 0) { return TerminalWriteResult::Written(0); }
+    let mut written: usize = 0;
+    while (written < length) {
+        let room: usize = uart_user_write_room();
+        if (room == 0) {
+            if (written == 0) { return TerminalWriteResult::WouldBlock; }
+            return TerminalWriteResult::Written(written);
+        }
+        let mut chunk: usize = length - written;
+        if (chunk > room) { chunk = room; }
+        if (chunk > KERNEL_BLOCK_SIZE) { chunk = KERNEL_BLOCK_SIZE; }
+        let chunk_address: usize = match checked_add_usize(address, written) {
+            CheckedUsize::Overflow => {
+                if (written == 0) { return TerminalWriteResult::Errno(LINUX_EFAULT); }
+                return TerminalWriteResult::Written(written);
+            }
+            CheckedUsize::Value(v) => { v }
+        };
+        let staging_buffer = syscall_scratch_here().file_buffer as []u8;
+        if (chunk > staging_buffer.len) {
+            return TerminalWriteResult::Errno(LINUX_EINVAL);
+        }
+        let staging = staging_buffer[0..<chunk];
+        match user_range_check_read(kernel_process_current_root(),
+                                    chunk_address, chunk) {
+            UserReadRangeResult::Fault => {
+                if (written == 0) { return TerminalWriteResult::Errno(LINUX_EFAULT); }
+                return TerminalWriteResult::Written(written);
+            }
+            UserReadRangeResult::Ok(range) => {
+                if (copy_from_user(range, staging) == false) {
+                    if (written == 0) { return TerminalWriteResult::Errno(LINUX_EFAULT); }
+                    return TerminalWriteResult::Written(written);
+                }
+            }
+        }
+        let queued: usize = uart_user_write(staging);
+        written = written + queued;
+        if (queued < chunk) {
+            return TerminalWriteResult::Written(written);
+        }
+    }
+    return TerminalWriteResult::Written(written);
+}
+
+// The writer that could queue nothing sleeps when something else can run --
+// the same question a UART read asks -- and otherwise waits here for the TX
+// interrupt and runs the write again, which is what being alone means.
+fn syscall_terminal_write_wait() -> SyscallAction {
+    if (kernel_process_other_ready()) {
+        uart_user_write_note_sleep();
+        kernel_process_current_set_pending_block(ProcessWaitReason::UartTx, 0);
+        return SyscallAction::Block;
+    }
+    return SyscallAction::WaitInterrupt;
+}
 must_use variant ReadSegmentResult { Errno(usize); Read(usize); }
 
 // Single-segment write, fd 1/2 (raw UART) only. Deliberately NOT shared
@@ -1569,22 +1637,17 @@ fn syscall_writev_segment(fd: usize, address: usize, length: usize)
     if (kernel_syscall_terminal_is_open(fd) == false) {
         return WriteSegmentResult::Errno(LINUX_EBADF);
     }
-    if (length == 0) { return WriteSegmentResult::Written(0); }
-    match user_range_check_read(kernel_process_current_root(), address, length) {
-        UserReadRangeResult::Fault => {
-            return WriteSegmentResult::Errno(LINUX_EFAULT);
+    match syscall_terminal_write(address, length) {
+        TerminalWriteResult::Errno(errno) => {
+            return WriteSegmentResult::Errno(errno);
         }
-        UserReadRangeResult::Ok(range) => {
-            let mut remaining: usize = length;
-            let mut offset: usize = 0;
-            while (remaining != 0) {
-                uart_putc(user_read_byte(range, offset));
-                offset = offset + 1;
-                remaining = remaining - 1;
-            }
+        TerminalWriteResult::Written(count) => {
+            return WriteSegmentResult::Written(count);
+        }
+        TerminalWriteResult::WouldBlock => {
+            return WriteSegmentResult::WouldBlock;
         }
     }
-    return WriteSegmentResult::Written(length);
 }
 
 // Single-segment read from any open ext2 file descriptor.
@@ -2256,6 +2319,17 @@ fn kernel_syscall_block_return(frame_sp: usize) {
             el0_context_resume(frame_sp);
         }
     } else if (kernel_process_current_pending_block_reason() ==
+                   ProcessWaitReason::UartTx) {
+        // GitHub issue #544: as with accept above, the woken writer runs
+        // this same write again rather than resuming after it -- what it
+        // wants is room in the transmit queue, and another look finds it.
+        el0_context_retry_syscall(frame_sp);
+        next_sp = kernel_process_block_uart_tx(frame_sp);
+        if (next_sp == 0) {
+            workload_profile_el0_enter();
+            el0_context_resume(frame_sp);
+        }
+    } else if (kernel_process_current_pending_block_reason() ==
                    ProcessWaitReason::Deadline) {
         next_sp = kernel_process_block_deadline(frame_sp);
     } else if (kernel_process_current_pending_block_reason() ==
@@ -2631,19 +2705,17 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (kernel_syscall_terminal_is_open(fd) == false) {
             return SyscallAction::Resume(LINUX_EBADF);
         }
-        match user_range_check_read(kernel_process_current_root(), address, length) {
-            UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
-            UserReadRangeResult::Ok(range) => {
-                let mut remaining: usize = length;
-                let mut offset: usize = 0;
-                while (remaining != 0) {
-                    uart_putc(user_read_byte(range, offset));
-                    offset = offset + 1;
-                    remaining = remaining - 1;
-                }
+        match syscall_terminal_write(address, length) {
+            TerminalWriteResult::Errno(errno) => {
+                return SyscallAction::Resume(errno);
+            }
+            TerminalWriteResult::Written(count) => {
+                return SyscallAction::Resume(count);
+            }
+            TerminalWriteResult::WouldBlock => {
+                return syscall_terminal_write_wait();
             }
         }
-        return SyscallAction::Resume(length);
     }
 
     if (number == 56) {
@@ -4867,10 +4939,21 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                 if (total == 0) { return SyscallAction::Resume(e); }
                                 return SyscallAction::Resume(total);
                             }
+                            WriteSegmentResult::WouldBlock => {
+                                if (total == 0) {
+                                    return syscall_terminal_write_wait();
+                                }
+                                return SyscallAction::Resume(total);
+                            }
                             WriteSegmentResult::Written(n) => {
                                 match checked_add_usize(total, n) {
                                     CheckedUsize::Overflow => { return SyscallAction::Resume(total); }
                                     CheckedUsize::Value(v) => { total = v; }
+                                }
+                                // A short segment ends the call: what is left
+                                // goes in the caller's next writev.
+                                if (n < iov_len as usize) {
+                                    return SyscallAction::Resume(total);
                                 }
                             }
                         }
