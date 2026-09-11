@@ -47,6 +47,10 @@ LANES = ("qemu", "rpi5", "qemu-debug")
 
 # (lane, view name) -> why this view is not in common/views/.
 ALLOWED = {
+    ("qemu-debug", "boot"):
+        "the debug image falls in a different 32 KiB allocation granule "
+        "from the release QEMU image once the issue #208 block cache's "
+        "slots are linked, so its usable-RAM start differs by one granule",
     ("qemu", "boot"):
         "the boot inventory is the machine's own physical facts -- DTB memory "
         "base, detected size, allocator pages, and the GIC/UART addresses "

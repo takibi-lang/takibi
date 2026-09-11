@@ -84,6 +84,10 @@ EXEMPT = {
     "drivers/net/rp1_gem.tkb": "device state; MSI-X is routed to CPU0",
     "drivers/block/virtio_blk.tkb": "device state; SPIs are routed to CPU0",
     "drivers/block/memory.tkb": "device state; SPIs are routed to CPU0",
+    "drivers/block/block_cache.tkb":
+        "per-core slots indexed by the caller's cpu_id(); memory.tkb asserts "
+        "the core count and KERNEL_PREEMPTIBLE == 0 beside its only caller, "
+        "and another core's writes arrive through the write epoch",
     "drivers/serial/uart_rx_ring.tkb":
         "one producer, one consumer: the UART RX interrupt, routed to CPU0, "
         "writes head and the drop count; a syscall from a process admitted "

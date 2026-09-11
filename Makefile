@@ -290,7 +290,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              affine_escape_via_index align_ptr_proof linear_obligation tuple_pair \
                              field_lease match_int_lit \
                              callstack ringbuf crc8 djb2 slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
-                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report uart_rx_ring
+                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report uart_rx_ring block_cache
 LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e).exe)
 LINUX_USER_OBJS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e)_exe.o)
 
@@ -382,6 +382,12 @@ $(LINUX_USER_DIR)/usb_init_report/usb_init_report_exe.o: LINUX_USER_EXTRA_SRCS :
 # boot what this costs nothing, and the capacity and drop rule are byte work.
 $(LINUX_USER_DIR)/uart_rx_ring/uart_rx_ring_exe.o: kernel/drivers/serial/uart_rx_ring.tkb
 $(LINUX_USER_DIR)/uart_rx_ring/uart_rx_ring_exe.o: LINUX_USER_EXTRA_SRCS := kernel/drivers/serial/uart_rx_ring.tkb
+
+# GitHub issue #208: the kernel's own block read cache, with two simulated
+# cores. Whether a write on one core retires the other's copies is exactly
+# what a single-core boot cannot show.
+$(LINUX_USER_DIR)/block_cache/block_cache_exe.o: kernel/drivers/block/block_cache.tkb
+$(LINUX_USER_DIR)/block_cache/block_cache_exe.o: LINUX_USER_EXTRA_SRCS := kernel/drivers/block/block_cache.tkb
 
 # GitHub issue #445: the kernel's own spinlock, compiled and run natively.
 # The same source the kernel links, not a copy -- see the freelist/slotmap

@@ -22,8 +22,13 @@ CPU_PREFIX = re.compile(rb"^cpu([0-9]) ")
 # same reason the console spin figure is -- it is a per-boot number, so no
 # view can compare it, and a counter with no reader is the shape issue #410
 # was filed about.
+# GitHub issue #208: reads= counts what reached a device, and cache_hits= is
+# what the block cache answered instead. Both are required, for the same
+# reason the total is: a field this is the only reader of, dropped from the
+# kernel's line, would retire the measurement with every lane green.
 BLOCK_IO = re.compile(
-    rb"block io: reads=(\d+) writes=(\d+) block_bytes=(\d+)")
+    rb"block io: reads=(\d+) writes=(\d+) block_bytes=(\d+) "
+    rb"cache_hits=(\d+)")
 
 # GitHub issue #541: the interactive ash session, on the host's clock. The
 # UART driver writes every line it receives with the seconds since it
@@ -259,17 +264,19 @@ def main() -> None:
     block = BLOCK_IO.search(data)
     if not block:
         fail("the boot reached its last milestone without printing "
-             "`block io: reads=... writes=... block_bytes=...`. That is the "
+             "`block io: reads=... writes=... block_bytes=... cache_hits=...`. "
+             "That is the "
              "measurement issues #281 and #208 are ordered against and this "
              "is its only reader, so a missing line means the kernel's shape "
              "changed rather than that the boot read no blocks")
-    reads, writes, block_bytes = (int(block.group(i)) for i in (1, 2, 3))
+    reads, writes, block_bytes, hits = (
+        int(block.group(i)) for i in (1, 2, 3, 4))
     if reads == 0 or block_bytes == 0:
         fail(f"the boot reports {reads} block reads of {block_bytes} bytes, "
              "which cannot be right for a boot that mounts a filesystem and "
              "runs BusyBox from it -- the counter is not being reached")
     block_io = (f", block io={reads} reads/{writes} writes of {block_bytes} B "
-                f"({reads * block_bytes // 1024} KiB read)")
+                f"({reads * block_bytes // 1024} KiB read, {hits} cache hits)")
 
     print(
         f"PASS kernel/{args.platform} dmesg: {len(records)} monotonic records, "

@@ -866,6 +866,17 @@ maintainer's choice on 2026-09-11. It is the measured priority, at about
 126 MiB of block reads per boot for a 2.5 MiB filesystem, and most of every
 BusyBox exec's cost.
 
+**#208 landed the same day**, as a smaller design than its body sketched. It
+is a per-core, write-through, least-recently-used read cache of sixteen 1 KiB
+blocks in `kernel/drivers/block/block_cache.tkb`. Contents are copied in and
+out, so no generational owner is needed. A write epoch retires the other
+core's copies. On QEMU the boot's device reads went from 140,030 to 29,799,
+with 110,231 cache hits beside them: the same requests, four in five answered
+from memory. The whole boot went from about 23 s to 17.2 s. `block io:` now
+carries `cache_hits=`, and the dmesg validator requires it. #281, coalescing
+contiguous data runs, is the remaining lever on the device-read figure.
+Measure it against the new number before starting it.
+
 **#541, the same day: the ash session no longer counts as boot.** The dmesg
 validator bounded the boot at `foreground server: listener ready`, and the
 whole ash script runs before that line. One BusyBox exec costs about 0.5 s

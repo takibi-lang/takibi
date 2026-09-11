@@ -442,7 +442,9 @@ fn ext2_lookup_path(mount: Ext2Mount, name: []u8)
 }
 
 // Resolve a regular file's i_block[index]. The inode table is re-read on
-// every call rather than trusting a cached metadata block. Direct entries
+// every call rather than trusting a copy held here; since GitHub issue #208
+// the block layer's cache answers those re-reads, so they cost a copy rather
+// than a device round trip. Direct entries
 // reside at byte 40; i_block[12] at byte 88 names a singly-indirect block
 // of 256 little-endian u32 entries. Returns 0 (never a valid data block)
 // for an out-of-range index or any failed metadata read.

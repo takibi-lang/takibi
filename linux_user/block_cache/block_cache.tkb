@@ -1,0 +1,99 @@
+// The kernel's block read cache, with two simulated cores.
+//
+// GitHub issue #208. The cache is what turns ext2's per-chunk metadata
+// re-reads into copies, and what it must never do is answer with bytes a
+// write has replaced -- including a write made on the other core, which a
+// boot that runs its filesystem on one core would never exercise. So the
+// rules are checked here, natively, against the kernel's own source.
+//
+// This compiles kernel/drivers/block/block_cache.tkb itself, not a copy, for
+// the reason linux_user/usb_init_report does.
+//
+// The numbers below are the requirement written out -- 16 slots, cores 0
+// and 1 -- not the file's constants. linux_user/uart_rx_ring is where a test
+// phrased in terms of the constant was shown to agree with any value at all.
+
+fn check(label: *u8, ok: bool) {
+    if (ok) {
+        uart_puts("ok     ");
+    } else {
+        uart_puts("FAILED ");
+    }
+    uart_puts(label);
+    uart_puts("\r\n");
+}
+
+let mut block_in: [u8; 1024];
+let mut block_out: [u8; 1024];
+
+fn fill_pattern(value: u8) {
+    for i: usize in 0..<1024 { block_in[i] = value; }
+}
+
+fn read_is(core: usize, backend: u8, block: usize, value: u8) -> bool {
+    for i: usize in 0..<1024 { block_out[i] = 0; }
+    match block_cache_read(core, backend, block, block_out as []u8) {
+        BlockCacheReadResult::Miss => { return false; }
+        BlockCacheReadResult::Hit => { }
+    }
+    for i: usize in 0..<1024 {
+        if (block_out[i] != value) { return false; }
+    }
+    return true;
+}
+
+fn misses(core: usize, backend: u8, block: usize) -> bool {
+    match block_cache_read(core, backend, block, block_out as []u8) {
+        BlockCacheReadResult::Miss => { return true; }
+        BlockCacheReadResult::Hit => { return false; }
+    }
+}
+
+fn app_main() {
+    check("a block never filled misses", misses(0, 0, 7));
+    fill_pattern(0x11);
+    block_cache_fill(0, 0, 7, block_in as []u8);
+    check("a filled block hits with the bytes it was filled with",
+          read_is(0, 0, 7, 0x11));
+    check("the backend is part of the key", misses(0, 1, 7));
+    check("each core has its own slots", misses(1, 0, 7));
+
+    // A streamed file: its metadata block is touched between every data
+    // block, and each data block once. Twenty data blocks through sixteen
+    // slots must not cost the metadata block its place.
+    fill_pattern(0x22);
+    block_cache_fill(0, 0, 100, block_in as []u8);
+    let mut hot_kept: bool = true;
+    for data: usize in 0..<20 {
+        if (read_is(0, 0, 100, 0x22) == false) { hot_kept = false; }
+        fill_pattern((0x30 + data) as u8);
+        block_cache_fill(0, 0, 200 + data, block_in as []u8);
+    }
+    check("the least recently used block goes, not the one read every step",
+          hot_kept && read_is(0, 0, 100, 0x22));
+    check("the oldest data block was the one given up",
+          misses(0, 0, 200) && read_is(0, 0, 219, 0x43));
+
+    // A write on core 1 retires core 0's copy of the block, and of every
+    // other block; core 1 keeps the bytes it wrote.
+    fill_pattern(0x55);
+    block_cache_note_write(1, 0, 100, block_in as []u8, true);
+    check("a write on another core retires this core's copies",
+          misses(0, 0, 100) && misses(0, 0, 219));
+    check("the core that wrote keeps what it wrote", read_is(1, 0, 100, 0x55));
+
+    // A write the device refused keeps nothing: what the device holds is
+    // not known.
+    fill_pattern(0x66);
+    block_cache_note_write(1, 0, 100, block_in as []u8, false);
+    check("a failed write retires the block and keeps no copy",
+          misses(1, 0, 100));
+
+    fill_pattern(0x77);
+    block_cache_fill(0, 0, 300, block_in as []u8);
+    block_cache_forget_all(1);
+    check("a write around the cache retires every copy", misses(0, 0, 300));
+
+    // Hits so far: 0x11 once, 0x22 twenty-one times, 0x43 once, 0x55 once.
+    check("every hit is counted", block_cache_hit_total() == 24);
+}

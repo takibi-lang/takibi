@@ -1,0 +1,188 @@
+// A small read cache in front of the block devices, one per core.
+//
+// GitHub issue #208. ext2 re-read the same few metadata blocks for every
+// kilobyte it returned: ext2_read_file_chunk reads the inode table block to
+// validate the inode, ext2_inode_block_pointer reads it again and then the
+// single- or double-indirect blocks, and only then the data. Exec streams a
+// 1.09 MB BusyBox that way, so a boot read about 140 MiB of 1 KiB blocks from
+// a 2.5 MiB filesystem, nearly all of it blocks it had just read.
+//
+// Deliberately small, and write-through:
+//
+// - Contents are copied in and out. No pointer into a slot leaves this file,
+//   so there is nothing that could outlive a slot being reused -- which is
+//   what a generational owner would have been for.
+// - Every write goes to the device before block_write returns, so there is no
+//   dirty data and no question of when to flush it.
+// - Least-recently-used replacement. A streamed file touches its metadata on
+//   every chunk and each data block once, so the data blocks are what an LRU
+//   gives up; round-robin would have evicted the metadata instead.
+//
+// One set of slots per core, indexed by the core number the caller passes,
+// the way ext2's scratch buffers and the block counters already are: a
+// syscall that reaches the filesystem may run on either core. What one core
+// writes reaches the others through the write epoch -- the sum of every
+// core's write count, each count written only by its own core. A slot records
+// the epoch it was filled at and is valid only while that is still the
+// epoch, so any write anywhere retires every other core's copies. Writes are
+// rare once the boot's fixtures are done, and the core that wrote refreshes
+// its own copy of the block it wrote.
+//
+// Kept free of device access and logging, so linux_user/block_cache can
+// compile this file itself and drive two simulated cores against it.
+
+const BLOCK_CACHE_BYTES: usize = 1024;
+const BLOCK_CACHE_SLOTS: usize = 16;
+const BLOCK_CACHE_CORES: usize = 2;
+
+must_use variant BlockCacheReadResult { Hit; Miss; }
+
+private let mut block_cache_data:
+    [u8; BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS * BLOCK_CACHE_BYTES];
+private let mut block_cache_backend: [u8; BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS];
+private let mut block_cache_block: [usize; BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS];
+private let mut block_cache_valid: [bool; BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS];
+private let mut block_cache_epoch: [usize; BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS];
+private let mut block_cache_used: [usize; BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS];
+private let mut block_cache_tick: [usize; BLOCK_CACHE_CORES];
+private let mut block_cache_hits: [usize; BLOCK_CACHE_CORES];
+private let mut block_cache_writes: [usize; BLOCK_CACHE_CORES];
+
+private fn block_cache_write_epoch() -> usize {
+    signal_fence();
+    let mut epoch: usize = 0;
+    for core: usize in 0..<BLOCK_CACHE_CORES {
+        epoch = epoch + block_cache_writes[core];
+    }
+    return epoch;
+}
+
+private fn block_cache_touch(core: {0..<BLOCK_CACHE_CORES as usize},
+                             index: {0..<BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS as usize}) {
+    let tick: usize = block_cache_tick[core] + 1;
+    block_cache_tick[core] = tick;
+    block_cache_used[index] = tick;
+}
+
+// The slot of this core that holds (backend, block) at the current epoch.
+must_use variant BlockCacheSlot {
+    Missing;
+    Found({0..<BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS as usize});
+}
+
+private fn block_cache_find(core: {0..<BLOCK_CACHE_CORES as usize},
+                            backend: u8, block: usize) -> BlockCacheSlot {
+    let epoch: usize = block_cache_write_epoch();
+    for slot: usize in 0..<BLOCK_CACHE_SLOTS {
+        let index: {0..<BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS as usize} =
+            core * BLOCK_CACHE_SLOTS + slot;
+        if (block_cache_valid[index] && block_cache_epoch[index] == epoch &&
+            block_cache_backend[index] == backend &&
+            block_cache_block[index] == block) {
+            return BlockCacheSlot::Found(index);
+        }
+    }
+    return BlockCacheSlot::Missing;
+}
+
+// The slot a fill takes: the one already holding the block if there is one,
+// else an empty or stale one, else the least recently used.
+private fn block_cache_victim(core: {0..<BLOCK_CACHE_CORES as usize},
+                              backend: u8, block: usize)
+        -> {0..<BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS as usize} {
+    let epoch: usize = block_cache_write_epoch();
+    let base: {0..<BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS as usize} =
+        core * BLOCK_CACHE_SLOTS;
+    let mut victim: {0..<BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS as usize} = base;
+    let mut oldest: usize = 0xFFFFFFFFFFFFFFFF;
+    for slot: usize in 0..<BLOCK_CACHE_SLOTS {
+        let index: {0..<BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS as usize} =
+            core * BLOCK_CACHE_SLOTS + slot;
+        if (block_cache_valid[index] == false ||
+            block_cache_epoch[index] != epoch) {
+            return index;
+        }
+        if (block_cache_backend[index] == backend &&
+            block_cache_block[index] == block) {
+            return index;
+        }
+        if (block_cache_used[index] < oldest) {
+            oldest = block_cache_used[index];
+            victim = index;
+        }
+    }
+    return victim;
+}
+
+private fn block_cache_store(core: {0..<BLOCK_CACHE_CORES as usize},
+                             backend: u8, block: usize,
+                             source: borrow [u8; BLOCK_CACHE_BYTES..]) {
+    let index: {0..<BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS as usize} =
+        block_cache_victim(core, backend, block);
+    let base: usize = index * BLOCK_CACHE_BYTES;
+    slice_copy(block_cache_data[base..<base + BLOCK_CACHE_BYTES],
+               source[0..<BLOCK_CACHE_BYTES]);
+    block_cache_backend[index] = backend;
+    block_cache_block[index] = block;
+    block_cache_epoch[index] = block_cache_write_epoch();
+    block_cache_valid[index] = true;
+    block_cache_touch(core, index);
+}
+
+// Copy (backend, block) into destination if this core holds it.
+fn block_cache_read(core: usize, backend: u8, block: usize,
+                    destination: borrow [u8; BLOCK_CACHE_BYTES..])
+        -> BlockCacheReadResult {
+    if (core >= BLOCK_CACHE_CORES) { return BlockCacheReadResult::Miss; }
+    let here: {0..<BLOCK_CACHE_CORES as usize} = core;
+    match block_cache_find(here, backend, block) {
+        BlockCacheSlot::Missing => { return BlockCacheReadResult::Miss; }
+        BlockCacheSlot::Found(index) => {
+            let base: usize = index * BLOCK_CACHE_BYTES;
+            slice_copy(destination[0..<BLOCK_CACHE_BYTES],
+                       block_cache_data[base..<base + BLOCK_CACHE_BYTES]);
+            block_cache_touch(here, index);
+            block_cache_hits[here] = block_cache_hits[here] + 1;
+            return BlockCacheReadResult::Hit;
+        }
+    }
+}
+
+// After a device read: keep what was read.
+fn block_cache_fill(core: usize, backend: u8, block: usize,
+                    source: borrow [u8; BLOCK_CACHE_BYTES..]) {
+    if (core >= BLOCK_CACHE_CORES) { return; }
+    let here: {0..<BLOCK_CACHE_CORES as usize} = core;
+    block_cache_store(here, backend, block, source);
+}
+
+// After a device write, whatever its outcome: every core's copies stop
+// matching. When the write succeeded, this core keeps the bytes it wrote.
+fn block_cache_note_write(core: usize, backend: u8, block: usize,
+                          source: borrow [u8; BLOCK_CACHE_BYTES..],
+                          written: bool) {
+    if (core >= BLOCK_CACHE_CORES) { return; }
+    let here: {0..<BLOCK_CACHE_CORES as usize} = core;
+    block_cache_writes[here] = block_cache_writes[here] + 1;
+    signal_fence();
+    if (written) {
+        block_cache_store(here, backend, block, source);
+    }
+}
+
+// A write that went around block_write -- block_copy's batched USB path --
+// retires every copy the same way.
+fn block_cache_forget_all(core: usize) {
+    if (core >= BLOCK_CACHE_CORES) { return; }
+    let here: {0..<BLOCK_CACHE_CORES as usize} = core;
+    block_cache_writes[here] = block_cache_writes[here] + 1;
+    signal_fence();
+}
+
+fn block_cache_hit_total() -> usize {
+    let mut total: usize = 0;
+    for core: usize in 0..<BLOCK_CACHE_CORES {
+        total = total + block_cache_hits[core];
+    }
+    return total;
+}

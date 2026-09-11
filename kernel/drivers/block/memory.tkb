@@ -1,3 +1,5 @@
+use "kernel/drivers/block/block_cache.tkb";
+
 const KERNEL_BLOCK_SIZE: usize = 1024;
 // 64 1 KiB filesystem blocks = 128 USB sectors = 64 KiB. This is the
 // largest contiguous rootfs batch validated on the RPi5 device; larger
@@ -122,8 +124,51 @@ fn block_write_call_total() -> usize {
     return block_call_total(block_write_calls as []usize);
 }
 
+// GitHub issue #208: block_read and block_write go through the per-core
+// read cache in kernel/drivers/block/block_cache.tkb. `block io: reads=`
+// counts what reached a device, so the figure #208 is judged by moves with
+// the cache; the hits are counted beside it.
 fn block_read(device: KernelBlockDevice, block: usize,
               destination: [u8; KERNEL_BLOCK_SIZE..])
+        -> BlockIoResult !{unsafe} {
+    if (block >= device.length / KERNEL_BLOCK_SIZE) {
+        return BlockIoResult::Invalid;
+    }
+    let core: usize = cpu_id();
+    match block_cache_read(core, device.backend, block, destination) {
+        BlockCacheReadResult::Hit => { return BlockIoResult::Ok; }
+        BlockCacheReadResult::Miss => { }
+    }
+    match block_read_device(device, block, destination) {
+        BlockIoResult::Invalid => { return BlockIoResult::Invalid; }
+        BlockIoResult::Ok => {
+            block_cache_fill(core, device.backend, block, destination);
+            return BlockIoResult::Ok;
+        }
+    }
+}
+
+fn block_write(device: KernelBlockDevice, block: usize,
+               source: [u8; KERNEL_BLOCK_SIZE..])
+        -> BlockIoResult !{unsafe} {
+    if (block >= device.length / KERNEL_BLOCK_SIZE) {
+        return BlockIoResult::Invalid;
+    }
+    let core: usize = cpu_id();
+    match block_write_device(device, block, source) {
+        BlockIoResult::Invalid => {
+            block_cache_note_write(core, device.backend, block, source, false);
+            return BlockIoResult::Invalid;
+        }
+        BlockIoResult::Ok => {
+            block_cache_note_write(core, device.backend, block, source, true);
+            return BlockIoResult::Ok;
+        }
+    }
+}
+
+private fn block_read_device(device: KernelBlockDevice, block: usize,
+                             destination: [u8; KERNEL_BLOCK_SIZE..])
         -> BlockIoResult !{unsafe} {
     if (block >= device.length / KERNEL_BLOCK_SIZE) {
         return BlockIoResult::Invalid;
@@ -165,8 +210,8 @@ fn block_read(device: KernelBlockDevice, block: usize,
     }
 }
 
-fn block_write(device: KernelBlockDevice, block: usize,
-               source: [u8; KERNEL_BLOCK_SIZE..])
+private fn block_write_device(device: KernelBlockDevice, block: usize,
+                              source: [u8; KERNEL_BLOCK_SIZE..])
         -> BlockIoResult !{unsafe} {
     if (block >= device.length / KERNEL_BLOCK_SIZE) {
         return BlockIoResult::Invalid;
@@ -223,6 +268,9 @@ fn block_copy(source: KernelBlockDevice, destination: KernelBlockDevice,
         return BlockCopyResult::Invalid;
     }
     if (destination.backend == 1) {
+        // These writes go around block_write, so every cached copy is
+        // retired before and after them (GitHub issue #208).
+        block_cache_forget_all(cpu_id());
         // The USB path has a bounded multi-sector WRITE(10) operation. Fill
         // a complete batch from the source, then issue one command for the
         // contiguous destination range. The tail remains safe through the
@@ -315,6 +363,7 @@ fn block_copy(source: KernelBlockDevice, destination: KernelBlockDevice,
             }
             first_block = first_block + batch;
         }
+        block_cache_forget_all(cpu_id());
         return BlockCopyResult::Copied;
     }
     for block: usize in 0..<count {
@@ -378,4 +427,17 @@ fn block_compare_usb(source: KernelBlockDevice,
         first_block = first_block + batch;
     }
     return BlockCompareResult::Equal;
+}
+
+// GitHub issue #208: the cache keeps one set of slots per core, indexed by
+// the cpu_id() block_read and block_write pass it, and one slot holds one
+// block. And a core must not enter block_read again before its first call
+// returns, which is what a non-preemptible kernel guarantees.
+fn block_cache_execution_model_assumption() {
+    static_assert(BLOCK_CACHE_CORES == KERNEL_MAX_CORES,
+                  "block_cache.tkb keeps one set of slots per core");
+    static_assert(BLOCK_CACHE_BYTES == KERNEL_BLOCK_SIZE,
+                  "a block cache slot holds exactly one block");
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+                  "per-core cache slots cannot survive preemption into another block_read on the same core");
 }

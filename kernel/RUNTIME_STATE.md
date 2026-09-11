@@ -269,6 +269,15 @@ per-core for the same reason and for a smaller stake: they are the boot totals
 issues #281 and #208 are ordered against, and a lost increment would
 understate the number a change is judged by.
 
+`drivers/block/block_cache.tkb` is the block layer's read cache (GitHub issue
+#208), and it is per core for the same reason: sixteen 1 KiB slots for each
+core, indexed by the `cpu_id()` that `block_read` and `block_write` pass in.
+What one core writes reaches the other through a write epoch. The epoch is
+the sum of the per-core write counts, each written only by its own core. A
+slot is valid only while the epoch it was filled at is still the current one.
+`memory.tkb` asserts the core count and `KERNEL_PREEMPTIBLE == 0` beside its
+only caller.
+
 **Why global:** the kernel mounts exactly one ext2 filesystem at boot.
 Per-block scratch for a single-mount filesystem is legitimately shared scratch
 space rather than per-process state; what it is not is shared between cores.

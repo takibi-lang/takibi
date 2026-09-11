@@ -394,6 +394,8 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
     uart_put_udec(block_write_call_total());
     kernel_boot_log(" block_bytes=");
     uart_put_udec(KERNEL_BLOCK_SIZE);
+    kernel_boot_log(" cache_hits=");
+    uart_put_udec(block_cache_hit_total());
     kernel_boot_log("\n");
     kernel_boot_log("resources: image target root unset uses=");
     uart_put_udec(process_image_root_unset_uses());

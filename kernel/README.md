@@ -1069,6 +1069,10 @@ run, not a specification.
   The QEMU lane runs the host's `e2fsck -fn` over the disk the guest wrote,
   after checking that the fixture's grown `/etc` and the directories the
   shell made through `mkdirat`, `/etc/made` and `/kept`, are on it.
+  Block reads go through a write-through, least-recently-used cache of
+  sixteen 1 KiB blocks per core (`kernel/drivers/block/block_cache.tkb`),
+  which is what keeps ext2's per-chunk metadata re-reads from reaching the
+  device. A write on either core retires the other's copies.
 - **Processes.** A pooled `ProcessRecord` scheduler table with no
   process-count ceiling, with lazily backed kernel stacks and directly owned
   address-space page tables, all on core 0.

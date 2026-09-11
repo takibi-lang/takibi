@@ -59,7 +59,8 @@ HEALTHY_SPIN = (b"console: tx spin ticks=1000000 bytes=31919 spun=1077 "
 # boot carries the block-layer total, so every case that is about something
 # else has to carry one too or it would be testing this rule instead of its
 # own.
-HEALTHY_BLOCK_IO = b"block io: reads=124173 writes=55 block_bytes=1024\r\n"
+HEALTHY_BLOCK_IO = (b"block io: reads=31000 writes=55 block_bytes=1024 "
+                    b"cache_hits=93000\r\n")
 HEALTHY_TAIL = HEALTHY_SPIN + HEALTHY_BLOCK_IO
 
 
@@ -227,10 +228,26 @@ def main() -> int:
         return 1
     status, output = run(
         HEALTHY, "qemu",
-        HEALTHY_SPIN + b"block io: reads=0 writes=0 block_bytes=1024\r\n")
+        HEALTHY_SPIN
+        + b"block io: reads=0 writes=0 block_bytes=1024 cache_hits=0\r\n")
     if status == 0 or "cannot be right" not in output:
         print("FAIL dmesg-timestamps control: a boot claiming zero block "
               "reads was accepted")
+        return 1
+
+    # GitHub issue #208: the cache's hit count is required too. The line in
+    # the shape it had before the cache is a kernel that stopped reporting it.
+    status, output = run(
+        HEALTHY, "qemu",
+        HEALTHY_SPIN + b"block io: reads=31000 writes=55 block_bytes=1024\r\n")
+    if status == 0:
+        print("FAIL dmesg-timestamps control: a block-layer total without "
+              f"cache_hits was accepted\n{output}")
+        return 1
+    status, output = run(HEALTHY, "qemu", HEALTHY_TAIL)
+    if status != 0 or "93000 cache hits" not in output:
+        print("FAIL dmesg-timestamps control: the cache hit count was not "
+              f"reported from a capture that carries it\n{output}")
         return 1
 
     # GitHub issue #454: the console's spin measurement rides along with the
@@ -293,8 +310,8 @@ def main() -> int:
         "session is not billed as boot and a timing log without one is "
         "refused, and the "
         "monotonic, interval and assembled-line checks each fail when "
-        "broken, the block-layer total is required and refused when it "
-              "claims zero reads, and the console spin figure is derived, refused for "
+        "broken, the block-layer total and its cache hit count are "
+              "required and the total refused when it claims zero reads, and the console spin figure is derived, refused for "
         "zero bytes, and required rather than merely reported -- a "
         "complete boot that omits it, or renames a field out from under "
         "the pattern, is refused",
