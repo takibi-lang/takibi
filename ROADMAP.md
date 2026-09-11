@@ -132,17 +132,17 @@ entry leaves the next one unable to be verified.
 12. **#9 phase B** after #533 and #534 land, add the affinity ABI and its
     userspace-visible policy, widen admission, and verify four cores on QEMU
     and RPi5. This is the integration point, not parallel work.
-    One boundary is owned by neither issue: UART **input** on a peer CPU.
+    **#547** owns the remaining UART **input** boundary on a peer CPU.
     #546's fix (a83fcc8) closes the lost wakeup between a terminal read's
     look at the ring and its sleep with a local interrupt mask. That is
     enough only because the RX interrupt and every terminal reader are on
     core 0 (the UartRx branch of `kernel_syscall_block_return` in
     `kernel/kernel/syscall.tkb` says so). #543's ring also assumes one reader
     on core 0. Admitting a terminal reader to another core would reopen the
-    lost wakeup across cores, and a local mask cannot close that. Until an
-    issue owns cross-CPU terminal input, phase B keeps processes that read the
-    terminal on core 0, and its admission rule says so. Widening that is
-    separate work, not part of this entry.
+    lost wakeup across cores, and a local mask cannot close that. Until #547
+    lands, phase B keeps processes that read the terminal on core 0, and its
+    admission rule says so. #547 widens that
+    boundary separately; it is not part of this entry.
 13. **#528** make IRQ restoration under an IRQ-owning guard a build error.
     Arbitrary affinity increases the number of paths that can expose this
     invariant, but the work remains in Territory A's compiler/kernel files.
@@ -150,7 +150,7 @@ entry leaves the next one unable to be verified.
 Then, in this territory and unordered: #518, #468, #464, #516, #308, #414,
 #514, #202, #476, #386, #274, #493, #422, #252, #216, #297, #131, #132, #343,
 #342, #370, #374, #203, #200, #201, #212, #282, #417, #400, #109, #129, #155,
-#267, #28, #58, #13, #95, #8, #528.
+#267, #28, #58, #13, #95, #8.
 
 #### Territory A cold-start handoff, 2026-09-09
 
@@ -516,11 +516,12 @@ None is queued above; they are recorded so they are not rediscovered.
 
 The active order, re-derived 2026-09-11, is:
 
-1. **Board lane first.** `make kernelcheck-rpi5` has not run since #546's
-   fix and the rebase onto #532. The RPi5 allocator expectation
-   (`allocator_pages=259624`) was derived from the linked ELF only. Run the
-   board before #533 changes what core 1 admits, so that any board
-   regression is attributed to the right change.
+1. **Board lane complete on the combined tree.** `make kernelcheck-rpi5`
+   passed after #546's fix and the rebase onto #532, including the migration
+   marker, the persistent HTTP lifecycle, and DDB world-stop/continue. The
+   linked-ELF-derived RPi5 allocator expectation
+   (`allocator_pages=259624`) therefore has physical-board evidence before
+   #533 changes what core 1 admits.
 2. **#9 block-cache capacity handoff:** replace
    `BLOCK_CACHE_CORES = 2` with the existing `KERNEL_MAX_CORES` constant in
    `kernel/drivers/block/block_cache.tkb`. This is green while the maximum is
