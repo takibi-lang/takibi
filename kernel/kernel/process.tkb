@@ -779,6 +779,11 @@ struct ProcessDdbRecord {
     saved_sp: usize;
     stack_bottom: usize;
     stack_top: usize;
+    // PROCESS_STACK_UNOWNED or the one CPU permitted to execute with this
+    // process stack as SP_EL1. DDB copies the value while the world is
+    // stopped so its per-CPU roots can be checked against the scheduler's
+    // authoritative physical-ownership record.
+    stack_owner_cpu: usize;
     root_slot: usize;
 }
 
@@ -832,6 +837,7 @@ private fn scheduled_process_ddb_copy_one(
             record.stack_run + KERNEL_PROCESS_STACK_SIZE;
         output[index].stack_top = record.stack_run + KERNEL_STACK_RUN_BYTES;
     }
+    output[index].stack_owner_cpu = record.stack_owner_cpu;
     output[index].root_slot = slot;
 }
 
