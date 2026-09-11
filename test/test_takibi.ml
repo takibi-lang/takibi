@@ -12558,6 +12558,24 @@ let codegen_tests = [
          (contains_substring asm "mov\tx19, sp");
        Target_info.configure "thumbv7em-none-eabi");
 
+  Alcotest.test_case "exception_entry after_switch runs masked on the selected frame" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       ignore (gen_codegen
+         (exc_frame_src ^
+          "fn my_dispatch(frame_sp: usize) -> usize { return frame_sp; }
+           fn my_after(frame_sp: usize) {}
+           exception_entry el0_irq_entry {
+             frame: ExcFrame;
+             dispatch: my_dispatch;
+             after_switch: my_after;
+           }"));
+       let asm = Buffer.contents Llvm_gen.raw_asm_buf in
+       Alcotest.(check bool) "switch, mask, then hook" true
+         (contains_substring asm
+            "bl\tmy_dispatch\n\tmov\tsp, x0\n\tmsr\tDAIFSet, #0x2\n\tmov\tx0, sp\n\tbl\tmy_after");
+       Target_info.configure "thumbv7em-none-eabi");
+
   Alcotest.test_case "exception_entry rejects a dispatch_stack that is not an extern symbol" `Quick
     (fun () ->
        Target_info.configure "aarch64-none-elf";
@@ -12730,6 +12748,45 @@ let codegen_tests = [
        let asm = Buffer.contents Llvm_gen.raw_asm_buf in
        Alcotest.(check bool) "thread pointer restored" true
          (contains_substring asm "msr\ttpidr_el0, x9");
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "exception_restore after_switch runs after masking and SP switch" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       ignore (gen_codegen
+         (exc_frame_src ^
+          "fn my_after(frame_sp: usize) {}
+           exception_restore el0_context_resume {
+             frame: ExcFrame;
+             after_switch: my_after;
+           }"));
+       let asm = Buffer.contents Llvm_gen.raw_asm_buf in
+       Alcotest.(check bool) "mask, switch, then hook" true
+         (contains_substring asm
+            "msr\tDAIFSet, #0x2\n\tmov\tsp, x0\n\tmov\tx0, sp\n\tbl\tmy_after");
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "exception_restore rejects a missing after_switch function" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_type_error "after_switch target 'missing_hook' is not defined"
+         (exc_frame_src ^
+          "exception_restore el0_context_resume {
+             frame: ExcFrame;
+             after_switch: missing_hook;
+           }") ();
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "exception_restore rejects a wrong after_switch signature" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_type_error "wrong signature (expected fn(usize))"
+         (exc_frame_src ^
+          "fn bad_after() {}
+           exception_restore el0_context_resume {
+             frame: ExcFrame;
+             after_switch: bad_after;
+           }") ();
        Target_info.configure "thumbv7em-none-eabi");
 
   (* 2026-08-13 post-mortem on issue #286: exception_frame_offsets (this

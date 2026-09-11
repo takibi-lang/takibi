@@ -7158,7 +7158,7 @@ let emit_exception_restore off total =
    instruction-count increase for not depending on declaration order,
    correctness over micro-optimization for what is an interrupt/fail-stop
    path, not a hot loop). *)
-let gen_exception_entry name frame dispatch before guard dispatch_stack =
+let gen_exception_entry name frame dispatch before after_switch guard dispatch_stack =
   let triple = target_triple !the_module in
   if not (starts_with triple "aarch64") then
     raise (Error
@@ -7249,6 +7249,8 @@ let gen_exception_entry name frame dispatch before guard dispatch_stack =
    | Some _ -> a "\tbl\t%s\n\tmov\tsp, x0\n" dispatch
    | None -> a "\tmov\tx0, sp\n\tbl\t%s\n\tmov\tsp, x0\n" dispatch);
   a "\tmsr\tDAIFSet, #0x2\n";
+  Option.iter (fun hook ->
+    a "\tmov\tx0, sp\n\tbl\t%s\n" hook) after_switch;
   emit_exception_restore off total;
   (* Placed after the eret so the good path falls straight through the
      entry sequence and never branches over this. DAIF is masked before
@@ -7284,7 +7286,7 @@ let gen_exception_entry name frame dispatch before guard dispatch_stack =
    eret half, for a standalone resume entry point reached via an ordinary
    call with the frame's own address already in x0 (AAPCS first-argument
    register) -- exactly el0_context_resume's existing shape. *)
-let gen_exception_restore name frame =
+let gen_exception_restore name frame after_switch =
   let triple = target_triple !the_module in
   if not (starts_with triple "aarch64") then
     raise (Error
@@ -7305,6 +7307,8 @@ let gen_exception_restore name frame =
      this generator got it backwards (mov sp, x0 first) before that
      comment was found and read closely. *)
   a "\tmsr\tDAIFSet, #0x2\n\tmov\tsp, x0\n";
+  Option.iter (fun hook ->
+    a "\tmov\tx0, sp\n\tbl\t%s\n" hook) after_switch;
   emit_exception_restore off total
 
 let gen_program ?prog_types prog =
@@ -7700,13 +7704,15 @@ let gen_program ?prog_types prog =
     | UseDef _        -> ()
     | VectorTableDef (entries, _) -> gen_vector_table entries
     | ExceptionEntryDef (name, fields, _) ->
-        let frame = ref "" and dispatch = ref "" and before = ref None in
+        let frame = ref "" and dispatch = ref "" and before = ref None
+        and after_switch = ref None in
         let guard_shift = ref None and guard_stack = ref None
         and guard_handler = ref None and dispatch_stack = ref None in
         List.iter (function
           | ("frame", v) -> frame := v
           | ("dispatch", v) -> dispatch := v
           | ("before", v) -> before := Some v
+          | ("after_switch", v) -> after_switch := Some v
           | ("dispatch_stack", v) -> dispatch_stack := Some v
           | ("stack_guard_shift", v) -> guard_shift := Const_env.find v
           | ("stack_guard_stack", v) -> guard_stack := Some v
@@ -7716,11 +7722,14 @@ let gen_program ?prog_types prog =
           | (Some sh, Some st, Some h) -> Some (sh, st, h)
           | _ -> None
         in
-        gen_exception_entry name !frame !dispatch !before guard !dispatch_stack
+        gen_exception_entry name !frame !dispatch !before !after_switch guard !dispatch_stack
     | ExceptionRestoreDef (name, fields, _) ->
-        let frame = ref "" in
-        List.iter (function ("frame", v) -> frame := v | _ -> ()) fields;
-        gen_exception_restore name !frame
+        let frame = ref "" and after_switch = ref None in
+        List.iter (function
+          | ("frame", v) -> frame := v
+          | ("after_switch", v) -> after_switch := Some v
+          | _ -> ()) fields;
+        gen_exception_restore name !frame !after_switch
     | GenericStructDef _ -> ()
   ) prog;
   if Buffer.length raw_asm_buf > 0 then

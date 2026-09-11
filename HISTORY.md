@@ -15,6 +15,26 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-11: process stacks have an architectural ownership boundary (#532)
+
+Ready and Running describe scheduler publication, not physical SP_EL1 use. A
+per-process owner now records which CPU is physically using its kernel stack,
+and a Ready process remains unselectable until that owner is relinquished.
+Lower-EL IRQ entry relinquishes only after moving to the per-CPU IRQ stack;
+exception return acquires only after moving SP to the selected process frame
+with interrupts masked. The compiler generates that post-switch hook and
+rejects a missing or wrongly typed `fn(usize)` target.
+
+The first QEMU run exposed a distinct exit case: blocked-parent wait4 delivery
+reaped the exiting child after logical current changed to the parent but before
+the return sequence left the child's physical stack. That reap is now deferred
+until the generated post-switch hook has claimed the parent stack. Direct-call
+scheduler probes explicitly model the same boundaries instead of weakening the
+production selector. Compiler tests, allbuild, the complete QEMU lane, and the
+RPi5 two-core lane including DDB passed. General cross-CPU migration remains
+the next #532 stage; this change establishes and enforces the boundary it must
+cross.
+
 ## 2026-09-11: live PTE replacement uses break-before-make (#261)
 
 Last-level page-table mutation now has one architecture API. Replacing a live

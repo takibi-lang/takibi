@@ -111,8 +111,12 @@ entry leaves the next one unable to be verified.
    `spin_trylock` is its first caller.
 9. **#261** PTE mutation against the hardware page-table walker -- complete
    with compiler-enforced raw-write privacy and Arm break-before-make on every
-   live last-level replacement. Next: **#9** processor affinity.
-10. **#9** processor affinity, with four cores.
+   live last-level replacement.
+10. **#532** physical process-stack ownership across CPU migration. The
+    architectural relinquish/acquire boundary and exit-time deferred reap are
+    implemented and pass QEMU and RPi5; next add the maintained cross-CPU
+    migration workload and DDB attribution evidence.
+11. **#9** processor affinity, with four cores.
 
 Then, in this territory and unordered: #518, #468, #464, #516, #308, #414,
 #514, #202, #476, #386, #274, #493, #422, #252, #216, #297, #131, #132, #343,

@@ -2661,6 +2661,12 @@ record readable; per-CPU rings stay independently written.
   `exception_entry` only covers the uniform save -> dispatch -> restore ->
   `eret` shape.
 
+  The optional `after_switch: fn_name;` hook runs after `dispatch` has selected
+  the frame and SP has changed to that frame, with interrupts masked and the
+  frame address as its `usize` argument. It is the architectural boundary for
+  state which may be released only after the interrupted stack is no longer in
+  use.
+
   One further optional key, `dispatch_stack: extern_symbol;`, runs
   `dispatch` on a stack of its own: the generated code switches SP to that
   symbol's address after the frame save and calls `dispatch` there, then
@@ -2699,7 +2705,8 @@ record readable; per-CPU rings stay independently written.
   masked and SP already switched; it must never return, because the
   interrupted context is not recoverable (the register shuffle that makes
   a memory-free SP test possible consumes the interrupted `x0`).
-- `exception_restore name { frame: FrameStruct; }` (same issue, same
+- `exception_restore name { frame: FrameStruct; after_switch: fn_name; }`
+  (same issue, same
   prototype-syntax caveat) generates just the restore-frame/`eret` half,
   for a standalone resume entry point reached via an ordinary call with
   the frame's own address already in the platform's first-argument
@@ -2709,7 +2716,8 @@ record readable; per-CPU rings stay independently written.
   usize) !{noreturn};` declaration alongside it for other `.tkb` code to
   call it normally -- this declaration only supplies the generated raw-asm
   BODY, the same relationship an `extern fn` normally has with a
-  hand-written assembly body.
+  hand-written assembly body. `after_switch` is optional and has the same
+  masked, post-SP-switch `fn(usize)` contract as on `exception_entry`.
 - `inline fn name(params) -> ret { ... }` marks a Takibi-defined function
   as an explicit inlining request. In normal optimized builds the backend
   emits LLVM's `alwaysinline` function attribute and runs the corresponding

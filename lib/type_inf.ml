@@ -7354,7 +7354,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         let frame_name = ref None and dispatch_name = ref None
         and before_name = ref None and guard_shift = ref None
         and guard_stack = ref None and guard_handler = ref None
-        and dispatch_stack = ref None in
+        and dispatch_stack = ref None and after_switch = ref None in
         List.iter (fun (key, value) -> match key with
           | "frame" -> frame_name := Some value
           | "dispatch" -> dispatch_name := Some value
@@ -7363,8 +7363,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           | "stack_guard_stack" -> guard_stack := Some value
           | "stack_guard_handler" -> guard_handler := Some value
           | "dispatch_stack" -> dispatch_stack := Some value
+          | "after_switch" -> after_switch := Some value
           | other -> raise (TypeError (loc, Printf.sprintf
-              "exception_entry '%s' has unknown key '%s' (expected frame, dispatch, before, dispatch_stack, stack_guard_shift, stack_guard_stack, or stack_guard_handler)"
+              "exception_entry '%s' has unknown key '%s' (expected frame, dispatch, before, after_switch, dispatch_stack, stack_guard_shift, stack_guard_stack, or stack_guard_handler)"
               name other))
         ) fields;
         (* GitHub issue #377: the three stack_guard keys describe ONE
@@ -7397,6 +7398,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         in
         check_fn_target "dispatch" dispatch;
         Option.iter (check_fn_target "before") !before_name;
+        Option.iter (check_fn_target "after_switch") !after_switch;
         Option.iter (check_fn_target "stack_guard_handler") !guard_handler;
         (* The shift is the log of a kernel stack's size, so it has to be a
            number the generated `tbz` can carry -- a recorded `const` with
@@ -7429,11 +7431,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         Option.iter (check_symbol_target "dispatch_stack") !dispatch_stack;
         validate_exception_frame "exception_entry" name loc frame
     | Ast.ExceptionRestoreDef (name, fields, loc) ->
-        let frame_name = ref None in
+        let frame_name = ref None and after_switch = ref None in
         List.iter (fun (key, value) -> match key with
           | "frame" -> frame_name := Some value
+          | "after_switch" -> after_switch := Some value
           | other -> raise (TypeError (loc, Printf.sprintf
-              "exception_restore '%s' has unknown key '%s' (expected frame)"
+              "exception_restore '%s' has unknown key '%s' (expected frame or after_switch)"
               name other))
         ) fields;
         let frame = match !frame_name with
@@ -7441,6 +7444,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           | None -> raise (TypeError (loc, Printf.sprintf
               "exception_restore '%s' is missing required key 'frame'" name))
         in
+        Option.iter (fun target ->
+          match Hashtbl.find_opt toplevel_names target with
+          | Some "function" -> ()
+          | Some other -> raise (TypeError (loc, Printf.sprintf
+              "exception_restore '%s' after_switch target '%s' is %s %s, not a function"
+              name target (article_for other) other))
+          | None -> raise (TypeError (loc, Printf.sprintf
+              "exception_restore '%s' after_switch target '%s' is not defined"
+              name target))) !after_switch;
         validate_exception_frame "exception_restore" name loc frame
     | Ast.OpaqueStructDef _ | Ast.EnumDef _ | Ast.UseDef _
     | Ast.GenericStructDef _ | Ast.ExternSymbolDef _ -> ()) prog;
@@ -7636,38 +7648,49 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      whatever the linker finds, so a name with more than one signature is
      inherently ambiguous here regardless of which one might happen to
      match. *)
-  let check_exception_entry_target_signature loc entry_name key target
+  let check_exception_target_signature construct loc entry_name key target
       ~want_params ~want_ret =
     match StringMap.find_opt target fenv with
     | None -> raise (TypeError (loc, Printf.sprintf
-        "exception_entry '%s' %s target '%s' is not defined" entry_name key target))
+        "%s '%s' %s target '%s' is not defined"
+        construct entry_name key target))
     | Some [(_, TFun (pts, rt, _))] ->
         if pts <> want_params || rt <> want_ret then
           raise (TypeError (loc, Printf.sprintf
-            "exception_entry '%s' %s target '%s' has the wrong signature (expected %s)"
-            entry_name key target
+            "%s '%s' %s target '%s' has the wrong signature (expected %s)"
+            construct entry_name key target
             (match key with
              | "dispatch" -> "fn(usize) -> usize"
-             | "stack_guard_handler" -> "fn(usize)"
+             | "stack_guard_handler" | "after_switch" -> "fn(usize)"
              | _ -> "fn()")))
     | Some _ -> raise (TypeError (loc, Printf.sprintf
-        "exception_entry '%s' %s target '%s' is overloaded, which a raw branch cannot resolve"
-        entry_name key target))
+        "%s '%s' %s target '%s' is overloaded, which a raw branch cannot resolve"
+        construct entry_name key target))
   in
   List.iter (function
     | Ast.ExceptionEntryDef (entry_name, fields, loc) ->
         List.iter (fun (key, target) -> match key with
           | "dispatch" ->
-              check_exception_entry_target_signature loc entry_name "dispatch" target
+              check_exception_target_signature "exception_entry" loc entry_name "dispatch" target
                 ~want_params:[TUsize] ~want_ret:TUsize
           | "before" ->
-              check_exception_entry_target_signature loc entry_name "before" target
+              check_exception_target_signature "exception_entry" loc entry_name "before" target
                 ~want_params:[] ~want_ret:TVoid
+          | "after_switch" ->
+              check_exception_target_signature "exception_entry" loc entry_name
+                "after_switch" target ~want_params:[TUsize] ~want_ret:TVoid
           | "stack_guard_handler" ->
               (* Takes the offending SP and never comes back: the stack it
                  would return onto is the one that just overflowed. *)
-              check_exception_entry_target_signature loc entry_name
+              check_exception_target_signature "exception_entry" loc entry_name
                 "stack_guard_handler" target ~want_params:[TUsize] ~want_ret:TVoid
+          | _ -> ()
+        ) fields
+    | Ast.ExceptionRestoreDef (entry_name, fields, loc) ->
+        List.iter (fun (key, target) -> match key with
+          | "after_switch" ->
+              check_exception_target_signature "exception_restore" loc entry_name
+                "after_switch" target ~want_params:[TUsize] ~want_ret:TVoid
           | _ -> ()
         ) fields
     | _ -> ()

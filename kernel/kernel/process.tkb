@@ -153,6 +153,10 @@ const KERNEL_STACK_RUN_BYTES: usize = KERNEL_STACK_RUN_PAGES * PAGE_SIZE;
 // scheduled_process_table_init checks it against the size it claims to be
 // the log of.
 const KERNEL_STACK_SHIFT: usize = 14;
+// No hardware CPU has this identity. A Ready process carrying any smaller
+// value still has an old CPU physically using its saved-frame stack and is
+// not selectable, even though its logical state is already public.
+const PROCESS_STACK_UNOWNED: usize = KERNEL_MAX_CORES;
 
 // A failed stop only cancels this scheduling attempt; the next tick retries.
 // The bound is deliberately the same as the maintained stop probes, while
@@ -212,6 +216,10 @@ struct ProcessRecord {
     command_line: [u8; 512];
     command_line_length: usize;
     saved_sp: usize;
+    // Physical SP_EL1 ownership, separate from logical Ready/Running state.
+    // The run lock serializes every transition. PROCESS_STACK_UNOWNED is the
+    // only value from which another CPU may acquire this stack.
+    stack_owner_cpu: usize;
     state: ProcessSlotState;
     wait_reason: ProcessWaitReason;
     // Absolute generic-counter deadline for nanosleep/clock_nanosleep and
@@ -1667,6 +1675,7 @@ private fn scheduled_process_record_reset(slot: usize) !{unsafe} {
     record.start_time_ticks = 0;
     record.command_line_length = 0;
     record.saved_sp = 0;
+    record.stack_owner_cpu = PROCESS_STACK_UNOWNED;
     record.state = ProcessSlotState::Free;
     record.wait_reason = ProcessWaitReason::None;
     record.deadline_ticks = 0;
@@ -2074,6 +2083,8 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
     }
     scheduled_process_record_at(slot).saved_sp =
         bottom + KERNEL_PROCESS_STACK_SIZE;
+    scheduled_process_record_at(slot).stack_owner_cpu =
+        PROCESS_STACK_UNOWNED;
     // GitHub issue #392: the one place a pid is minted. Past every branch
     // that can still refuse the slot.
     scheduled_process_record_at(slot).pid = scheduled_process_mint_pid();
@@ -2216,6 +2227,10 @@ fn scheduled_process_ready_take(guard: borrow ProcessRunGuard[lock],
         return ScheduledProcessReadyTakeResult::Missing;
     }
     if (scheduled_process_handle_matches(handle) == false) {
+        return ScheduledProcessReadyTakeResult::Missing;
+    }
+    if (scheduled_process_record_of(handle).stack_owner_cpu !=
+            PROCESS_STACK_UNOWNED) {
         return ScheduledProcessReadyTakeResult::Missing;
     }
     let owner = scheduled_process_owner_new(handle.pool_index,
@@ -2657,12 +2672,21 @@ fn scheduled_process_table_probe() -> bool !{unsafe} {
 struct ExecutionState {
     current_handle: ProcessHandle;
     current_live: bool;
+    // The process stack SP_EL1 physically occupies. During a syscall
+    // handoff this intentionally remains the outgoing handle after
+    // current_handle has become the incoming one, until the generated
+    // post-switch hook runs on the incoming stack.
+    stack_handle: ProcessHandle;
+    stack_live: bool;
+    // A child whose blocked-parent wait4 completion must reap only after
+    // generated return code has left that child's physical kernel stack.
+    deferred_reap_handle: ProcessHandle;
+    deferred_reap_live: bool;
     reschedule_pending: bool;
     scheduler_enabled: bool;
 }
 
 private let mut execution_state: [ExecutionState; KERNEL_MAX_CORES];
-
 // Which ExecutionState belongs to the core asking.
 //
 // It asks cpu_id() which core is running, and indexes the array by that.
@@ -2695,6 +2719,94 @@ private fn execution_here() -> *ExecutionState {
     let core: usize = cpu_id();
     if (core >= KERNEL_MAX_CORES) { return base; }
     return base + (core as isize);
+}
+
+private fn kernel_process_frame_belongs_to(
+        handle: ProcessHandle, frame_sp: usize) -> bool {
+    let mut bottom: usize = 0;
+    let mut top: usize = 0;
+    if (handle.pool_index == 0) {
+        bottom = boot_stack_bottom;
+        top = boot_stack_top;
+    } else {
+        bottom = kernel_stack_bottom(handle.pool_index);
+        if (bottom != 0) { top = bottom + KERNEL_PROCESS_STACK_SIZE; }
+    }
+    if (bottom == 0 || top <= bottom || frame_sp < bottom ||
+        frame_sp >= top) {
+        return false;
+    }
+    return top - frame_sp >= EXC_CONTEXT_SIZE;
+}
+
+// Lower-EL IRQ entry calls this only after generated entry code has moved SP
+// onto this CPU's IRQ stack. The interrupted process frame remains intact,
+// but the physical process stack is no longer in use and may become eligible
+// for another CPU once its logical state becomes Ready.
+fn kernel_process_stack_interrupt_depart() {
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES || execution_here().stack_live == false) {
+        return;
+    }
+    let guard = process_run_lock();
+    let mut physical: ProcessHandle = execution_here().stack_handle;
+    if (scheduled_process_handle_matches(physical) &&
+        scheduled_process_record_of(physical).stack_owner_cpu == core) {
+        scheduled_process_record_of(physical).stack_owner_cpu =
+            PROCESS_STACK_UNOWNED;
+        execution_here().stack_live = false;
+    }
+    process_run_unlock(guard);
+}
+
+// Generated exception-return code calls this with interrupts masked and SP
+// already changed to frame_sp. Until that instruction executes,
+// stack_handle deliberately continues to name the outgoing process even when
+// current_handle has logically moved to the incoming one. This is the
+// physical handoff boundary that a run-lock release alone cannot express.
+fn kernel_process_stack_switch_complete(frame_sp: usize) {
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) {
+        kernel_syscall_fail_stop(frame_sp);
+    }
+    let guard = process_run_lock();
+    if (execution_here().stack_live) {
+        let mut outgoing: ProcessHandle = execution_here().stack_handle;
+        if (scheduled_process_handle_matches(outgoing) == false ||
+            scheduled_process_record_of(outgoing).stack_owner_cpu != core) {
+            process_run_unlock(guard);
+            kernel_syscall_fail_stop(frame_sp);
+        }
+        scheduled_process_record_of(outgoing).stack_owner_cpu =
+            PROCESS_STACK_UNOWNED;
+        execution_here().stack_live = false;
+    }
+    if (execution_here().current_live == false) {
+        process_run_unlock(guard);
+        kernel_syscall_fail_stop(frame_sp);
+    }
+    let mut incoming: ProcessHandle = execution_here().current_handle;
+    if (scheduled_process_handle_matches(incoming) == false ||
+        scheduled_process_state_of(incoming) != ProcessSlotState::Running ||
+        scheduled_process_record_of(incoming).stack_owner_cpu !=
+            PROCESS_STACK_UNOWNED ||
+        kernel_process_frame_belongs_to(incoming, frame_sp) == false) {
+        process_run_unlock(guard);
+        kernel_syscall_fail_stop(frame_sp);
+    }
+    scheduled_process_record_of(incoming).stack_owner_cpu = core;
+    execution_here().stack_handle = incoming;
+    execution_here().stack_live = true;
+    let reap_live: bool = execution_here().deferred_reap_live;
+    let mut reap_child: ProcessHandle = execution_here().deferred_reap_handle;
+    execution_here().deferred_reap_live = false;
+    process_run_unlock(guard);
+    if (reap_live) {
+        let reaped_status: usize =
+            kernel_process_reap_zombie(incoming, reap_child);
+        kernel_init_boot_fixture_reaped(
+            scheduled_process_pid_of_handle(incoming));
+    }
 }
 // GitHub issue #264 first stage keeps the #248 wait4 result fields and
 // #245 exec-image flag in the same ProcessRecord as their slot's state
@@ -3196,6 +3308,15 @@ fn kernel_process_start_handle(guard: borrow ProcessRunGuard[lock],
         ScheduledProcessReadyTakeResult::Ready(resources) => {
             let (owner, ready) = resources;
             let running = scheduled_process_start(owner, ready);
+            let core: usize = cpu_id();
+            if (core >= KERNEL_MAX_CORES) {
+                let back = scheduled_process_yield(owner, running);
+                scheduled_process_release(owner, back);
+                return false;
+            }
+            scheduled_process_record_of(handle).stack_owner_cpu = core;
+            execution_here().stack_handle = handle;
+            execution_here().stack_live = true;
             scheduled_process_release(owner, running);
             return true;
         }
@@ -3227,6 +3348,8 @@ fn kernel_process_execution_reset() {
     // to select a half-cleared stale context.
     execution_here().scheduler_enabled = false;
     execution_here().reschedule_pending = false;
+    execution_here().stack_live = false;
+    execution_here().deferred_reap_live = false;
     scheduled_process_table_clear();
     execution_here().current_live = false;
     process_test_evidence_reset();
@@ -5279,7 +5402,11 @@ fn kernel_process_trace_block_wake_probe() -> bool !{unsafe} {
             if (child_pid == 2 &&
                 kernel_process_clone_context_install(parent_frame, child_frame) ==
                     child_frame &&
-                kernel_process_block_uart(child_frame) == parent_frame) {
+                kernel_process_scheduler_probe_stack_depart() &&
+                kernel_process_scheduler_probe_stack_arrive() &&
+                kernel_process_block_uart(child_frame) == parent_frame &&
+                kernel_process_scheduler_probe_stack_depart() &&
+                kernel_process_scheduler_probe_stack_arrive()) {
                 match kernel_process_uart_record_parent_progress() {
                     ProcessUartProgressResult::Invalid => {}
                     ProcessUartProgressResult::Recorded => {
@@ -5513,6 +5640,48 @@ private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
         signal_successor && unrelated_wait && ignored_signal;
 }
 
+// The scheduler probe calls scheduling functions directly instead of entering
+// through generated exception code. Mirror only the physical stack boundary
+// that those entry/return sequences provide; all logical selection still uses
+// the production scheduler below.
+private fn kernel_process_scheduler_probe_stack_depart() -> bool {
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES || execution_here().stack_live == false) {
+        return false;
+    }
+    let guard = process_run_lock();
+    let mut physical: ProcessHandle = execution_here().stack_handle;
+    let valid: bool = scheduled_process_handle_matches(physical) &&
+        scheduled_process_record_of(physical).stack_owner_cpu == core;
+    if (valid) {
+        scheduled_process_record_of(physical).stack_owner_cpu =
+            PROCESS_STACK_UNOWNED;
+        execution_here().stack_live = false;
+    }
+    process_run_unlock(guard);
+    return valid;
+}
+
+private fn kernel_process_scheduler_probe_stack_arrive() -> bool {
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES || execution_here().current_live == false) {
+        return false;
+    }
+    let guard = process_run_lock();
+    let mut incoming: ProcessHandle = execution_here().current_handle;
+    let valid: bool = scheduled_process_handle_matches(incoming) &&
+        scheduled_process_state_of(incoming) == ProcessSlotState::Running &&
+        scheduled_process_record_of(incoming).stack_owner_cpu ==
+            PROCESS_STACK_UNOWNED;
+    if (valid) {
+        scheduled_process_record_of(incoming).stack_owner_cpu = core;
+        execution_here().stack_handle = incoming;
+        execution_here().stack_live = true;
+    }
+    process_run_unlock(guard);
+    return valid;
+}
+
 fn kernel_process_scheduler_probe() -> bool {
     kernel_process_execution_reset();
     kernel_process_trace_enable();
@@ -5528,6 +5697,13 @@ fn kernel_process_scheduler_probe() -> bool {
                 return false;
             }
         }
+    }
+    // clone_context_install returns through generated context-restore code in
+    // production. Complete that parent-stack -> child-stack handoff before
+    // this direct-call probe tries to reserve the now-Ready parent.
+    if (kernel_process_scheduler_probe_stack_depart() == false ||
+        kernel_process_scheduler_probe_stack_arrive() == false) {
+        return false;
     }
     if (kernel_process_exit_waiter_probe(root_handle) == false) {
         return false;
@@ -5548,11 +5724,25 @@ fn kernel_process_scheduler_probe() -> bool {
         }
     }
     kernel_process_scheduler_enable();
+    if (kernel_process_scheduler_probe_stack_depart() == false) {
+        return false;
+    }
     let parent_sp: usize = kernel_process_timer_schedule(0x2000);
+    if (kernel_process_scheduler_probe_stack_arrive() == false ||
+        kernel_process_scheduler_probe_stack_depart() == false) {
+        return false;
+    }
     let child_sp: usize = kernel_process_timer_schedule(0x1000);
+    if (kernel_process_scheduler_probe_stack_arrive() == false) {
+        return false;
+    }
     kernel_process_request_reschedule();
     let deferred_parent_sp: usize =
         kernel_process_syscall_return_schedule(0x2000);
+    if (kernel_process_scheduler_probe_stack_depart() == false ||
+        kernel_process_scheduler_probe_stack_arrive() == false) {
+        return false;
+    }
     let mut trace: [usize; KERNEL_CRASH_TRACE_WORDS];
     let trace_count: usize = kernel_process_crash_trace_copy(trace as *usize);
     let mut saw_schedule: bool = false;
@@ -6090,6 +6280,14 @@ private fn kernel_process_exit_reserved(
             execution_here().current_handle = successor;
             let successor_sp: usize =
                 scheduled_process_record_of(successor).saved_sp;
+            if (deliver_wait4) {
+                if (execution_here().deferred_reap_live) {
+                    process_run_unlock(guard);
+                    kernel_syscall_fail_stop(successor_sp);
+                }
+                execution_here().deferred_reap_handle = child;
+                execution_here().deferred_reap_live = true;
+            }
             let reaped_pid: usize =
                 scheduled_process_record_of(successor).last_child_pid;
             scheduled_process_release(owner, running);

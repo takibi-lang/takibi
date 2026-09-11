@@ -2193,10 +2193,9 @@ fn kernel_syscall_wait4_deliver(frame_sp: usize, reaped_pid: usize,
             }
         }
     }
-    kernel_process_child_wait_status_consume_for(parent_slot);
-    // GitHub issue #270: credit the reap to the explicitly named parent.
-    kernel_init_boot_fixture_reaped(
-        scheduled_process_pid_of_slot(parent_slot));
+    // The exiting child is still the physical SP_EL1 stack here even though
+    // logical current already names this parent. The generated return hook
+    // consumes the deferred reap after `mov sp` has reached the parent frame.
     el0_context_set_x0(frame_sp, reaped_pid);
 }
 

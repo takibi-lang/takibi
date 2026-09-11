@@ -94,7 +94,9 @@ exception_entry el1_current_sync_entry {
 // Lower-EL AArch64 IRQ entry: the same frame, no fixture hook.
 exception_entry el0_irq_entry {
     frame: ExceptionFrame;
+    before: kernel_process_stack_interrupt_depart;
     dispatch: platform_el0_irq_dispatch;
+    after_switch: kernel_process_stack_switch_complete;
     stack_guard_shift: KERNEL_STACK_SHIFT;
     stack_guard_stack: overflow_stack_top;
     stack_guard_handler: kernel_stack_overflow_fail_stop;
@@ -113,4 +115,5 @@ exception_entry el0_irq_entry {
 // extern fn normally has with a hand-written assembly body.
 exception_restore el0_context_resume {
     frame: ExceptionFrame;
+    after_switch: kernel_process_stack_switch_complete;
 }
