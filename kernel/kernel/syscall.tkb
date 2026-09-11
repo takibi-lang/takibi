@@ -2336,6 +2336,26 @@ fn kernel_syscall_block_return(frame_sp: usize) {
                    ProcessWaitReason::Signal) {
         next_sp = kernel_process_block_signal(frame_sp);
     } else {
+        // GitHub issue #546: look at the ring once more, with interrupts
+        // masked, before sleeping on it. A terminal read found the ring
+        // empty and unmasked interrupts before choosing to block, so a byte
+        // that arrived since then found no Blocked reader to hand itself
+        // to, went into the ring, and raised nothing further: the reader
+        // slept beside the byte it was waiting for until another one came.
+        // Masked from here, a byte either is in the ring now -- and the
+        // syscall runs again and takes it -- or raises its interrupt after
+        // this process is Blocked, where the wake finds it. The run lock
+        // kernel_process_block_uart takes restores this masked state rather
+        // than unmasking, and the next context's eret sets its own.
+        //
+        // One core is enough: the RX interrupt is routed to CPU0, and a
+        // terminal reader runs there too -- CPU1 admits only the busy pair.
+        disable_irq();
+        if (kernel_uart_rx_pending()) {
+            el0_context_retry_syscall(frame_sp);
+            workload_profile_el0_enter();
+            el0_context_resume(frame_sp);
+        }
         kernel_syscall_uart_block_prepare(frame_sp);
         next_sp = kernel_process_block_uart(frame_sp);
     }

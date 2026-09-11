@@ -108,15 +108,36 @@ def main() -> int:
         if '"$REPO_ROOT/scripts/kernel_net_test.py"' not in source:
             continue
         commands = source.replace("\\\n", " ").splitlines()
-        for program, flags in (
-                ("kernel_net_test.py", ("--init-ready-file", "--network-ready-file")),
-                ("run_kernel_uart_driver.py", ("--init-listener-file", "--network-ready-file"))):
+
+        def wired(program, flags):
             calls = [line for line in commands
                      if f'"$REPO_ROOT/scripts/{program}"' in line]
-            if not calls or any(flag not in line for line in calls for flag in flags):
-                print(f"FAIL net-readiness control: {runner.name} does not "
-                      f"wire readiness into {program}")
-                return 1
+            if not calls:
+                return None
+            return all(flag in line for line in calls for flag in flags)
+
+        if not wired("kernel_net_test.py",
+                     ("--init-ready-file", "--network-ready-file")):
+            print(f"FAIL net-readiness control: {runner.name} does not "
+                  "wire readiness into kernel_net_test.py")
+            return 1
+        # The UART end is the ash driver, or -- for GitHub issue #546's lane,
+        # whose UART is typed by gdb -- the gdb script, which takes the same
+        # two files from its environment. Whichever a runner uses must be
+        # wired, and it must use one of them.
+        uart_ends = (
+            ("run_kernel_uart_driver.py",
+             ("--init-listener-file", "--network-ready-file")),
+            ("kernel_uart_wake_check.py",
+             ("UART_WAKE_INIT_LISTENER=", "UART_WAKE_NETWORK_READY=")))
+        verdicts = [(program, wired(program, flags))
+                    for program, flags in uart_ends]
+        present = [(program, ok) for program, ok in verdicts if ok is not None]
+        if not present or not all(ok for _, ok in present):
+            named = present[0][0] if present else "run_kernel_uart_driver.py"
+            print(f"FAIL net-readiness control: {runner.name} does not "
+                  f"wire readiness into {named}")
+            return 1
     # 0. Protocol retries must start only after the kernel link is ready, and
     # the init socket exchange must wait for its own later listener. Otherwise
     # a slow guest spends a bounded retry budget on boot rather than traffic.

@@ -374,7 +374,13 @@ returning through a frame under the wrong address space. Exit handoffs remain.
    Capture: `_build/kernel-hwtest-qemu-failures/20260911T010803Z`. It recurred
    the same day with the identical signature, on a lane run alone
    (`20260911T062011Z`, while #545's read-ahead was under test). That is two
-   samples, and it is now #546.
+   samples, and it became #546. It was a lost wakeup. A terminal read found
+   the ring empty, unmasked interrupts, and only then blocked, so a byte that
+   arrived in between went into the ring with no Blocked reader to wake. The
+   read now looks at the ring again with interrupts masked before it sleeps.
+   `make kernelcheck-uart-wake-qemu` holds the guest inside that window with
+   a gdb breakpoint while each byte of a command is typed, so the stall now
+   reproduces on every byte instead of once a day.
 
 2. **#533 changes the meaning of two ext2 sites.** `ext2_claim_directory` and
    `ext2_unlink_name` mint block, inode and directory owners from the on-disk
