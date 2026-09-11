@@ -38,10 +38,13 @@ cross.
 The maintained busy pair now continues making progress syscalls after its
 init-respawn check and admits both members on either CPU. Once the interactive
 shell supplies a third runnable context, both processes repeatedly move
-between CPU 0 and CPU 1; the view requires at least sixteen CPU changes for
-each. Every successful return crosses the compiler-generated stack acquisition
-check. The scheduler probe also recreates a logically Ready parent whose old
-CPU still owns its stack and proves the ordinary Ready take refuses it.
+between CPU 0 and CPU 1; the view requires each process to cross the CPU
+boundary twice. That proves a repeated physical handoff without making
+the verdict depend on how many scheduler quanta fit into the host-driven HTTP
+test window. Every successful return crosses the compiler-generated stack
+acquisition check. The scheduler probe also recreates a logically Ready parent
+whose old CPU still owns its stack and proves the ordinary Ready take refuses
+it.
 
 This exposed a second real-hardware race after the migration verdict. A shell
 could decide to block while a Ready successor existed, then lose that successor

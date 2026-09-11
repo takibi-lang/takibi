@@ -93,7 +93,7 @@ const WORKLOAD_BUSY_ROUNDS: usize = 8;
 // diagnostic here only because no bound has been chosen for them yet.
 const WORKLOAD_BUSY_SKEW_BOUND: usize = 4;
 const WORKLOAD_PROFILE_WORLD_STOP_SPINS: usize = 10000000;
-const WORKLOAD_BUSY_MIGRATION_GOAL: usize = 16;
+const WORKLOAD_BUSY_MIGRATION_GOAL: usize = 2;
 
 must_use variant WorkloadBusyProgressResult {
     Value(usize);

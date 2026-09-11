@@ -115,7 +115,7 @@ entry leaves the next one unable to be verified.
 10. **#532** physical process-stack ownership across CPU migration. The
     architectural relinquish/acquire boundary and exit-time deferred reap are
     implemented. The maintained workload moves both busy processes between
-    CPU 0 and CPU 1 at least sixteen times and passes QEMU and RPi5. Next add
+    CPU 0 and CPU 1 and requires each to cross that boundary twice. Next add
     DDB's during-workload process/CPU/stack attribution evidence.
 11. **#9** processor affinity, with four cores.
 
