@@ -61,9 +61,10 @@ HEALTHY_SPIN = (b"console: tx spin ticks=1000000 bytes=31919 spun=1077 "
 # own.
 HEALTHY_BLOCK_IO = (b"block io: reads=31000 writes=55 block_bytes=1024 "
                     b"cache_hits=93000\r\n")
-# GitHub issue #544: a board boot must show a writer that slept, so the
+# GitHub issue #544: a board boot must show a writer that waited, so the
 # default carries a non-zero count that serves both platforms.
-HEALTHY_UART_TX = b"uart tx: queue=512 low_water=256 writers_slept=3\r\n"
+HEALTHY_UART_TX = (b"uart tx: queue=512 low_water=256 writers_waited=5 "
+                   b"writers_slept=3\r\n")
 HEALTHY_TAIL = HEALTHY_SPIN + HEALTHY_BLOCK_IO + HEALTHY_UART_TX
 
 
@@ -209,17 +210,19 @@ def main() -> int:
     # marker moves with the platform.
     rpi5 = [(10.1 if "reconnect ok" in t else s,
              t.replace("virtio net", "rp1 gem")) for s, t in HEALTHY]
+    # The bound is 41 s while GitHub issue #545 is open; bring these back to
+    # 25.2 and 24.9 s with it.
     status, output = run(replace(
-        rpi5, "foreground server: listener ready port=8080", 27.2), "rpi5")
+        rpi5, "foreground server: listener ready port=8080", 43.2), "rpi5")
     if status == 0 or "INVESTIGATE, do not raise" not in output:
-        print("FAIL dmesg-timestamps control: an RPi5 boot 25.2 s outside "
+        print("FAIL dmesg-timestamps control: an RPi5 boot 41.2 s outside "
               f"its ash session was accepted or reported oddly\n{output}")
         return 1
     status, output = run(replace(
-        rpi5, "foreground server: listener ready port=8080", 26.9), "rpi5")
+        rpi5, "foreground server: listener ready port=8080", 42.9), "rpi5")
     if status != 0:
-        print("FAIL dmesg-timestamps control: an RPi5 boot 24.9 s outside "
-              f"its ash session was rejected by its 25 s bound\n{output}")
+        print("FAIL dmesg-timestamps control: an RPi5 boot 40.9 s outside "
+              f"its ash session was rejected by its 41 s bound\n{output}")
         return 1
 
     # GitHub issues #281/#208: the block-layer total is required, not merely
@@ -239,25 +242,36 @@ def main() -> int:
         return 1
 
     # GitHub issue #544: the UART transmit line is required on both
-    # platforms, and a board boot where no writer slept is refused.
+    # platforms, and a board boot where no writer waited is refused. One
+    # where writers waited and none slept passes: whether a waiting writer
+    # sleeps depends on another process being ready at that moment.
     status, output = run(HEALTHY, "qemu", HEALTHY_SPIN + HEALTHY_BLOCK_IO)
     if status == 0 or "uart tx: queue=" not in output:
         print("FAIL dmesg-timestamps control: a boot without the uart tx "
               f"line was accepted\n{output}")
         return 1
-    zero_sleeps = (HEALTHY_SPIN + HEALTHY_BLOCK_IO
-                   + b"uart tx: queue=512 low_water=256 writers_slept=0\r\n")
-    status, output = run(HEALTHY, "qemu", zero_sleeps)
-    if status != 0 or "uart tx sleeps=0" not in output:
+    zero_waits = (HEALTHY_SPIN + HEALTHY_BLOCK_IO
+                  + b"uart tx: queue=512 low_water=256 writers_waited=0 "
+                  b"writers_slept=0\r\n")
+    status, output = run(HEALTHY, "qemu", zero_waits)
+    if status != 0 or "uart tx waits=0 sleeps=0" not in output:
         print("FAIL dmesg-timestamps control: QEMU was refused for a writer "
-              f"that never had to sleep\n{output}")
+              f"that never had to wait\n{output}")
         return 1
     rpi5_ok = [(10.1 if "reconnect ok" in t else s,
                 t.replace("virtio net", "rp1 gem")) for s, t in HEALTHY]
-    status, output = run(rpi5_ok, "rpi5", zero_sleeps)
+    status, output = run(rpi5_ok, "rpi5", zero_waits)
     if status == 0 or "writes are spinning in the kernel again" not in output:
         print("FAIL dmesg-timestamps control: a board boot where no UART "
-              f"writer slept was accepted\n{output}")
+              f"writer waited was accepted\n{output}")
+        return 1
+    waited_not_slept = (HEALTHY_SPIN + HEALTHY_BLOCK_IO
+                        + b"uart tx: queue=512 low_water=256 writers_waited=4 "
+                        b"writers_slept=0\r\n")
+    status, output = run(rpi5_ok, "rpi5", waited_not_slept)
+    if status != 0 or "uart tx waits=4 sleeps=0" not in output:
+        print("FAIL dmesg-timestamps control: a board boot whose writers "
+              f"waited without sleeping was refused\n{output}")
         return 1
 
     # GitHub issue #208: the cache's hit count is required too. The line in
@@ -338,7 +352,7 @@ def main() -> int:
         "broken, the block-layer total and its cache hit count are "
               "required and the total refused when it claims zero reads, and the console spin figure is derived, refused for "
         "zero bytes, and required rather than merely reported, the uart tx "
-        "line is required and a board boot with no writer that slept is "
+        "line is required and a board boot with no writer that waited is "
         "refused -- a "
         "complete boot that omits it, or renames a field out from under "
         "the pattern, is refused",

@@ -564,14 +564,20 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
     // GitHub issue #543: every byte the UART received this boot either
     // reached a process or is counted here. A view compares the line, so a
     // drop fails a lane rather than stalling one.
-    // GitHub issue #544: how often a userspace write slept for room in the
-    // transmit queue instead of spinning. The dmesg validator requires it,
-    // and requires it to be non-zero on the board, where the wire is slow
-    // enough that the shell's `cat /large.txt` must have waited.
+    // GitHub issue #544: how often a userspace write found no room in the
+    // transmit queue and waited instead of spinning, and how many of those
+    // waits slept. The dmesg validator requires the line, and requires the
+    // waits to be non-zero on the board, where the wire is slow enough that
+    // the shell's `cat /large.txt` must wait. The sleeps are reported only:
+    // a writer sleeps when another process happens to be ready, and on
+    // 2026-09-11 the same kernel slept once on one board run and not at all
+    // on the next.
     kernel_boot_log("uart tx: queue=");
     uart_put_udec(KERNEL_LOG_TX_QUEUE_BYTES);
     kernel_boot_log(" low_water=");
     uart_put_udec(KERNEL_LOG_TX_WRITER_LOW_WATER);
+    kernel_boot_log(" writers_waited=");
+    uart_put_udec(uart_user_write_wait_total());
     kernel_boot_log(" writers_slept=");
     uart_put_udec(uart_user_write_sleep_total());
     kernel_boot_log("\n");

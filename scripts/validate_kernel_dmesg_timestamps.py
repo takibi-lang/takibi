@@ -30,13 +30,15 @@ BLOCK_IO = re.compile(
     rb"block io: reads=(\d+) writes=(\d+) block_bytes=(\d+) "
     rb"cache_hits=(\d+)")
 
-# GitHub issue #544: how often a userspace write to the UART slept for room
-# in the transmit queue instead of spinning in the kernel. Required on both
-# platforms, and required to be non-zero on the board, whose 115200-baud wire
+# GitHub issue #544: how often a userspace write to the UART waited for room
+# in the transmit queue instead of spinning in the kernel, and how many of
+# those waits slept. Required on both platforms, and the waits are required
+# to be non-zero on the board, whose 115200-baud wire
 # is slow enough that the shell's `cat /large.txt` must have waited. QEMU's
 # PL011 drains as fast as it is written, so zero is a legitimate answer there.
 UART_TX = re.compile(
-    rb"uart tx: queue=(\d+) low_water=(\d+) writers_slept=(\d+)")
+    rb"uart tx: queue=(\d+) low_water=(\d+) writers_waited=(\d+) "
+    rb"writers_slept=(\d+)")
 
 # GitHub issue #541: the interactive ash session, on the host's clock. The
 # UART driver writes every line it receives with the seconds since it
@@ -206,7 +208,15 @@ def main() -> None:
         resumed = b"rp1 gem: tcp handshake echo close reconnect ok"
         minimum_delay = 5_000_000
         maximum_delay = 9_000_000
-        maximum_boot = 25_000_000
+        # TEMPORARY, GitHub issue #545. Raised from 25 s by the maintainer's
+        # decision on 2026-09-11, when the board's root moved from the
+        # in-memory image to the USB stick (94f1c36) and the first boot from
+        # it measured 33.6 s outside a 38.8 s ash session: almost every exec
+        # reads BusyBox from the stick one sector at a time. 41 s is that
+        # figure plus the 7 s margin above, so a further regression of the
+        # #411 kind still fails. It is not a recalibration -- 25 s was
+        # measured against a root in RAM -- and #545 owns bringing it back.
+        maximum_boot = 41_000_000
     if first not in by_text:
         fail("first kernel marker is absent")
     assembled = [item for item in records if item[1].startswith(assembled_prefix)]
@@ -286,12 +296,17 @@ def main() -> None:
     uart_tx = UART_TX.search(data)
     if not uart_tx:
         fail("the boot reached its last milestone without printing "
-             "`uart tx: queue=... low_water=... writers_slept=...`. That is "
+             "`uart tx: queue=... low_water=... writers_waited=... "
+             "writers_slept=...`. That is "
              "issue #544's evidence that a UART write sleeps rather than "
              "spins, and this is its only reader")
-    tx_queue, tx_low, tx_slept = (int(uart_tx.group(i)) for i in (1, 2, 3))
-    if args.platform == "rpi5" and tx_slept == 0:
-        fail("no userspace write slept for room in the UART transmit queue. "
+    tx_queue, tx_low, tx_waited, tx_slept = (
+        int(uart_tx.group(i)) for i in (1, 2, 3, 4))
+    # The waits, not the sleeps: a waiting writer sleeps only when another
+    # process happens to be ready, and the same kernel slept once on one
+    # board run and not at all on the next (2026-09-11).
+    if args.platform == "rpi5" and tx_waited == 0:
+        fail("no userspace write waited for room in the UART transmit queue. "
              "On the board the shell's `cat /large.txt` outruns a 115200-baud "
              "wire, so a zero means writes are spinning in the kernel again, "
              "or the command that exercised it has gone from the ash script")
@@ -303,7 +318,7 @@ def main() -> None:
         f"assembled lines, delay={elapsed} us, boot={boot_us / 1_000_000:.1f} s, "
         f"ash-session={session_us / 1_000_000:.1f} s, "
         f"bounded={bounded_us / 1_000_000:.1f} s"
-        f"{spin}{block_io}, uart tx sleeps={tx_slept} "
+        f"{spin}{block_io}, uart tx waits={tx_waited} sleeps={tx_slept} "
         f"(queue {tx_queue}, low water {tx_low}), "
         f"timing-profile={args.timing_profile}, "
         f"boot-bound={maximum_boot / 1_000_000:.0f} s"

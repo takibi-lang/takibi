@@ -464,6 +464,11 @@ fn uart_putc(c: u8) !{logs, unsafe} {
 // would sit on (#435), and it needs a policy for merging two streams without
 // splitting a line; nothing calls for that yet.
 const KERNEL_LOG_TX_WRITER_LOW_WATER: usize = 256;
+// Every write that found no room waited, and those that had something else
+// to run slept. The waits are the deterministic count: on the board a
+// write larger than the queue must wait. Whether it sleeps depends on
+// whether another process happened to be ready at that moment.
+private let mut uart_user_write_waits: usize = 0;
 private let mut uart_user_write_sleeps: usize = 0;
 
 // Bytes a user write may queue now; zero means sleep. Off core 0, or before
@@ -525,6 +530,15 @@ fn uart_user_write(bytes: borrow []u8) -> usize !{logs, unsafe} {
     mutex_irq_restore(irq_flags);
     if (still_pending) { uart_tx_irq_enable(); }
     return taken;
+}
+
+fn uart_user_write_note_wait() {
+    if (cpu_id() != 0) { return; }
+    uart_user_write_waits = uart_user_write_waits + 1;
+}
+
+fn uart_user_write_wait_total() -> usize {
+    return uart_user_write_waits;
 }
 
 fn uart_user_write_note_sleep() {

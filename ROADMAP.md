@@ -944,22 +944,25 @@ back:
   lanes, which relied on the fallback without saying so, attach the disk like
   every other lane.
 
-**What it cost, and what is still open: the board lane fails its boot bound.**
-The switch was committed with `make kernelcheck-rpi5` failing, by the
-maintainer's choice to sync the repository before shortening anything. The
-first board boot from USB reached its last milestone 33.6 s outside the ash
-session, against 18.0 s from RAM and a bound of 25 s, and the ash session
-itself took 38.8 s against 3.3 s. The shape is one cost repeated: nearly
-every exec in the ash script now takes about 3 s, because each one reads
-BusyBox from the stick one 512-byte sector at a time. That is exactly the
-path #281 proposes to coalesce, and it now runs on every exec. The bound
-stays where it is.
+**What it cost: #545, and a temporary 41 s board bound.** The first board
+boot from USB reached its last milestone 33.6 s outside the ash session,
+against 18.0 s from RAM and a bound of 25 s. The ash session itself took
+38.8 s against 3.3 s. The shape is one cost repeated: nearly every exec in
+the ash script now takes about 3 s, because each one reads BusyBox from the
+stick one 512-byte sector at a time. That is exactly the path #281 proposes
+to coalesce, and it now runs on every exec. By the maintainer's decision the
+RPi5 bound was raised to 41 s, the measured figure plus the usual 7 s margin,
+so the board lane is green on the USB root while the time is won back
+separately. That is not a recalibration, since 25 s was measured against a
+root in RAM. #545 owns bringing it back to 25 s. The validator's comment and
+the controls both point there.
 
-The same run printed `uart tx: ... writers_slept=0`, which the #544 check
-refuses on the board. A writer sleeps only when another process can run, and
-while ash waits for `cat` that is a matter of timing, so the criterion is
-flaky: it should count every wait for room, slept or not. Fix that first; it
-is small.
+The same run printed `uart tx: ... writers_slept=0`, which #544's check
+refused on the board. A writer sleeps only when another process can run,
+and while ash waits for `cat` that is a matter of timing. The line now also
+counts `writers_waited`, every write that found no room, and the board is
+held to that count instead. A write six times the queue must wait on a
+115200-baud wire, whatever else is ready.
 
 **After that, #281.** With BusyBox exec'd from USB, the multi-sector
 coalescing it proposes finally sits on a path that runs. Measure the USB share

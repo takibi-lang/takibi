@@ -1615,6 +1615,7 @@ fn syscall_terminal_write(address: usize, length: usize)
 // the same question a UART read asks -- and otherwise waits here for the TX
 // interrupt and runs the write again, which is what being alone means.
 fn syscall_terminal_write_wait() -> SyscallAction {
+    uart_user_write_note_wait();
     if (kernel_process_other_ready()) {
         uart_user_write_note_sleep();
         kernel_process_current_set_pending_block(ProcessWaitReason::UartTx, 0);
