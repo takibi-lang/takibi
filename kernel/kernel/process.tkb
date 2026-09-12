@@ -2920,9 +2920,9 @@ const KERNEL_CRASH_TRACE_WORDS: usize = 192;
 // expression, so the product is its own constant -- which is exactly the
 // shape that goes stale when somebody raises the core count, so it is
 // checked rather than remembered (see kernel_crash_trace_slot below).
-const KERNEL_CRASH_TRACE_STORAGE_WORDS: usize = 384;
+const KERNEL_CRASH_TRACE_STORAGE_WORDS: usize = 768;
 // How many records the storage holds in total, for the reader's walk.
-const KERNEL_CRASH_TRACE_SLOTS: usize = 32;
+const KERNEL_CRASH_TRACE_SLOTS: usize = 64;
 const ProcessTraceFork: usize = 1;
 const ProcessTraceExecPrepare: usize = 2;
 const ProcessTraceExecCommit: usize = 3;

@@ -80,9 +80,9 @@ const KERNEL_ACTIVE_CORES: usize = 2;
 // the scheduler", a state no Unix-like kernel has. This one is an array
 // bound against a participation count, which every one of them does.
 //
-// 2, because PSCI starts exactly one secondary (decision of 2026-08-27:
-// every class of race appears at two, and four adds a different problem).
-const KERNEL_MAX_CORES: usize = 2;
+// Four slots match both maintained targets. KERNEL_ACTIVE_CORES remains the
+// independent statement of how many cores actually execute kernel code.
+const KERNEL_MAX_CORES: usize = 4;
 
 // Whether a syscall handler can lose the CPU before it returns. 0 today:
 // see leg 2 above. A separate number from the core count because the two
