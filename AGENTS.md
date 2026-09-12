@@ -117,13 +117,18 @@ most-touched files were cross-cutting infrastructure, not subsystem code, and
 every expensive conflict in the 2026-09-05 rebase came from two streams
 editing the same API in one file.
 
-- **Territory A**, the multicore critical path: `kernel/kernel/`,
-  `kernel/net/`, `kernel/mm/`, `kernel/lib/`, `lib/`, and
-  `kernel/arch/arm64/kernel/` except `exception_evidence.tkb`.
-- **Territory B**, debug environment and recurrence prevention: `scripts/`,
-  `test/`, `linux_user/`, `kernel/arch/arm64/kernel/exception_evidence.tkb`
-  (DDB), `kernel/printk/`, `kernel/drivers/`, `kernel/fs/`,
-  `kernel/platform/`, and `docs/`.
+- **Territory A**, the maintained kernel vertical: all of `kernel/` and
+  `scripts/`. This includes architecture and platform code, DDB, drivers,
+  filesystems, kernel tests and views, and the host runners that verify them.
+- **Territory B**, the compiler and native-language vertical: `lib/`, `bin/`,
+  `test/`, `linux_user/`, `docs/`, and `examples/`.
+
+This vertical split deliberately gives one agent every file needed to take a
+kernel change from implementation through QEMU, DDB, and hardware evidence.
+It replaces the earlier split that put kernel implementation and its runners
+in different territories, which made each multicore integration step a
+cross-agent handoff. A compiler change required by a kernel issue is still
+sequenced through Territory B rather than edited concurrently.
 
 An issue that needs both territories is not parallel work. Sequence it: the
 owning territory lands its half first, and the other waits.
@@ -131,9 +136,11 @@ owning territory lands its half first, and the other waits.
 `ROADMAP.md` carries the current queues and which agent holds which territory.
 It is a dated snapshot and is the file to edit when priorities move.
 
-### Files both territories touch
+### Cross-platform and shared-file conventions
 
-These belong to neither territory, and each has a convention instead:
+The `kernel/` paths below belong to Territory A, but still have conventions
+that prevent the two platform builds from drifting. The root files named at
+the end belong to neither territory and require frequent rebasing:
 
 - `kernel/init/` holds the bodies both platforms run, and the per-platform
   `init.tkb` files call them once rather than carrying a copy:

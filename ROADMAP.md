@@ -74,26 +74,24 @@ the deepest dependency: it needs a language primitive this compiler does not
 have, and every week of single-core code written before that primitive exists
 is a week of code whose synchronization argument has to be reconstructed later.
 
-## Work split between two agents, re-cut 2026-09-11
+## Work split between two agents, re-cut 2026-09-12
 
 Two agents run in parallel, one per territory, with the territories and the
 shared-file conventions defined in `AGENTS.md`. This section is the part that
 moves: when a new issue outranks what is queued below, edit it here.
 
-**Codex holds Territory A and the multicore integration path. Claude Code
-holds Territory B and the highest-priority work outside that path.** The
-directory exclusion in `AGENTS.md` remains the mechanism that makes the two
-queues loosely coupled. A prerequisite in the other territory is implemented
-there and consumed through a committed boundary; it is not a reason for both
-agents to edit the same files.
+**Codex holds Territory A: the whole maintained-kernel vertical, including
+platform code, DDB, drivers, filesystems, kernel views, and their runners.
+Claude Code holds Territory B: the compiler, native language tests, and
+documentation.** The directory exclusion in `AGENTS.md` remains the mechanism
+that makes the two queues loosely coupled.
 
-The immediate exception in theme, but not in file ownership, is #533 and
-#534. They are multicore prerequisites whose implementation is predominantly
-Territory B. Claude Code owns those two bounded changes while Codex advances
-the four-core machinery in Territory A without admitting the affected
-filesystem or direct-UART paths. Neither stream waits for the other to start.
-The #9 integration and affinity admission happen only after both boundaries
-land.
+This replaces the split that assigned kernel implementation to Codex but its
+verification and several multicore boundaries to Claude Code. In #9 that
+created a handoff at almost every executable milestone. Codex now owns #9,
+#533, #534's remaining verification, #547, and their end-to-end QEMU/RPi5
+evidence. A language change still crosses once into Territory B through a
+committed boundary; ordinary kernel work no longer does.
 
 ### Territory A queue -- multicore integration, held by Codex
 
@@ -127,11 +125,13 @@ entry leaves the next one unable to be verified.
     each stopped root with exactly one captured process, CPU, and stack.
 11. **#9 phase A** generalize secondary boot, per-CPU state, world-stop, DDB,
     and the scheduler's deliberately restricted workload from two cores to
-    four. Do not admit arbitrary filesystem or direct userspace UART work in
-    this phase; #533 and #534 still own those contracts.
-12. **#9 phase B** after #533 and #534 land, add the affinity ABI and its
-    userspace-visible policy, widen admission, and verify four cores on QEMU
-    and RPi5. This is the integration point, not parallel work.
+    four. The active set is runtime state: RPi5 has four online CPUs, while
+    maintained QEMU lanes remain at two vCPUs for CI capacity. Do not admit
+    arbitrary filesystem or direct userspace UART work in this phase.
+12. **#9 phase B**, including #533 and #534's remaining verification: add the
+    affinity ABI and its userspace-visible policy, widen admission, and verify
+    four cores on RPi5 plus the two-online-CPU boundary on QEMU. This is one
+    Territory A integration path now, not cross-agent work.
     **#547** owns the remaining UART **input** boundary on a peer CPU.
     #546's fix (a83fcc8) closes the lost wakeup between a terminal read's
     look at the ring and its sleep with a local interrupt mask. That is
@@ -584,9 +584,12 @@ None is queued above; they are recorded so they are not rediscovered.
    this territory converges the probes on one verdict shape, the check
    becomes possible and is worth revisiting.
 
-### Territory B queue -- multicore boundaries, then independent priorities
+### Territory B queue -- compiler, native tests, and documentation
 
-The active order, re-derived 2026-09-12, is:
+The active order, re-derived 2026-09-12, is below. The completed kernel
+handoffs remain recorded here for their evidence, but #533, #534's remaining
+verification, #547, #550 and #551 moved to Territory A with the maintained
+kernel vertical. Claude Code need not wait on or modify kernel files for them.
 
 1. **Board lane complete on the combined tree.** `make kernelcheck-rpi5`
    passed after #546's fix and the rebase onto #532, including the migration
@@ -609,7 +612,8 @@ The active order, re-derived 2026-09-12, is:
    `kernel/lib/execution_model.tkb` beside the cache and passes the native
    unused-function rule. The same test, built against a scratch copy with
    the maximum at four, also passes.
-3. **#533** admit one bounded read-only ext2 workload on core 1. The first
+3. **Transferred to Territory A: #533** admits one bounded read-only ext2
+   workload on a peer core. The first
    contract is read-only; mutation remains serialized until its separate
    ownership audit. This is the filesystem half #9 must not invent in
    Territory A. **Paused 2026-09-12 by the maintainer's decision**, after
@@ -624,7 +628,8 @@ The active order, re-derived 2026-09-12, is:
    whole symbol to an integer. Every DDB postmortem failed with `Cannot
    convert value to long`. It now reads each slot and counts core N as
    online when slot N holds `0x100 + N`.
-5. **#534** publish direct userspace UART output from peer CPUs through the
+5. **Transferred to Territory A: #534's remaining verification.** Direct
+   userspace UART output from peer CPUs publishes through the
    sole ordinary core-0 writer, with bounded backpressure and an emergency
    DDB/fatal path that never waits for it. This is the console half #9 must
    not bypass. It covers output only. UART input on a peer CPU is #547; see
@@ -662,7 +667,8 @@ The active order, re-derived 2026-09-12, is:
 7. **#542** finish the inventory of kernel-side verification machinery and
    move userspace-observable checks behind fork/exec. This is independent of
    scheduler affinity and can follow #281 without touching Territory A.
-8. **#550 and #551, from the #546 audit.** #550 sweeps every
+8. **Transferred to Territory A: #550 and #551, from the #546 audit.** #550
+   sweeps every
    `ProcessWaitReason` for the check-then-block window #546 found. UartRx
    and UartTx are closed. NetRx has the window but recovers on the peer's
    retransmission. ChildExit, Signal and Deadline are unexamined. #550 also
