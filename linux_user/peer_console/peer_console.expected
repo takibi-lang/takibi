@@ -1,0 +1,17 @@
+ok     an empty ring has nothing to peek
+ok     an empty ring has room for sixteen 64-byte records
+ok     a short write is taken whole
+ok     it is one record, with its bytes
+ok     a 150-byte write is taken whole
+ok     as three records whose bytes join up
+ok     a full ring takes sixteen records of a longer write
+ok     and then has no room
+ok     a write to a full ring takes nothing
+ok     one record drained after the ring filled
+ok     frees exactly one record's room
+ok     which the retried write takes
+ok     and the stream reads through the wrap with nothing lost or repeated
+ok     core 0 publishes into its own ring
+ok     which core 1's drain does not see
+ok     and its own drain does
+ok     a CPU past the maximum has no ring

@@ -290,7 +290,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              affine_escape_via_index align_ptr_proof linear_obligation tuple_pair \
                              field_lease match_int_lit \
                              callstack ringbuf crc8 djb2 slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
-                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report uart_rx_ring block_cache
+                             bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report uart_rx_ring block_cache peer_console
 LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e).exe)
 LINUX_USER_OBJS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e)_exe.o)
 
@@ -389,6 +389,11 @@ $(LINUX_USER_DIR)/uart_rx_ring/uart_rx_ring_exe.o: LINUX_USER_EXTRA_SRCS := kern
 # because the cache's per-core slots are sized by its KERNEL_MAX_CORES.
 $(LINUX_USER_DIR)/block_cache/block_cache_exe.o: kernel/drivers/block/block_cache.tkb kernel/lib/execution_model.tkb
 $(LINUX_USER_DIR)/block_cache/block_cache_exe.o: LINUX_USER_EXTRA_SRCS := kernel/lib/execution_model.tkb kernel/drivers/block/block_cache.tkb
+
+# GitHub issue #534: the ring a peer CPU's console output crosses to core 0
+# in, driven past full. Both ends are the kernel's own functions.
+$(LINUX_USER_DIR)/peer_console/peer_console_exe.o: kernel/printk/peer_console.tkb kernel/lib/execution_model.tkb
+$(LINUX_USER_DIR)/peer_console/peer_console_exe.o: LINUX_USER_EXTRA_SRCS := kernel/lib/execution_model.tkb kernel/printk/peer_console.tkb
 
 # GitHub issue #445: the kernel's own spinlock, compiled and run natively.
 # The same source the kernel links, not a copy -- see the freelist/slotmap

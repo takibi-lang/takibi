@@ -1,0 +1,156 @@
+// Console output a peer CPU hands to core 0, one bounded record at a time.
+//
+// GitHub issue #534. Core 0 owns the UART: its interrupt-driven transmit
+// queue in kernel/printk/log.tkb is the only ordinary writer. A process on
+// another CPU used to poll the PL011 itself, so its bytes could land inside
+// core 0's queued output, and a write could report bytes that had no
+// defined place in the stream. A peer now puts its bytes here, and core 0
+// moves them into the queue.
+//
+// One ring per CPU, with one producer and one consumer:
+// - the producer is that CPU. Only it writes its published count and its
+//   records;
+// - the consumer is core 0. Only it writes the cursor saying how many
+//   records it has taken.
+// Records and cursors are publication records (SPEC.md, "Publication
+// Records"), so the order of every store that crosses between the two
+// cores is the compiler's. Nothing here uses a raw atomic.
+//
+// The unit is a record: up to PEER_CONSOLE_RECORD_BYTES of one write,
+// which reaches the wire contiguously. A longer write is several records in
+// order, and another CPU's records may fall between them.
+//
+// Full is a short count, never a drop. A record is written only into a slot
+// the cursor says core 0 has finished with. A write that finds no slot takes
+// nothing and reports nothing, and the syscall layer retries it. While core
+// 0 is rewriting the cursor, the producer cannot read it and keeps the
+// value it read last, which can only understate the room.
+//
+// Kept free of device access, logging and process state, so
+// linux_user/peer_console can compile this file and drive both ends.
+
+const PEER_CONSOLE_RECORD_BYTES: usize = 64;
+const PEER_CONSOLE_RECORDS: usize = 16;
+
+struct publish PeerConsoleRecord {
+    seq: usize;
+    len: usize;
+    bytes: [u8; PEER_CONSOLE_RECORD_BYTES];
+}
+
+// Written by core 0 alone; `consumed` is how many records it has taken from
+// this CPU's ring.
+struct publish PeerConsoleCursor {
+    seq: usize;
+    consumed: usize;
+}
+
+// Ready carries the record's length; its bytes are in the caller's copy.
+must_use variant PeerConsolePeek { Empty; Ready(usize); }
+
+private let mut peer_console_records:
+    [PeerConsoleRecord; KERNEL_MAX_CORES * PEER_CONSOLE_RECORDS];
+private let mut peer_console_cursors: [PeerConsoleCursor; KERNEL_MAX_CORES];
+// The producer's own: records published, and the consumed count it read
+// from the cursor last.
+private let mut peer_console_published: [usize; KERNEL_MAX_CORES];
+private let mut peer_console_seen_consumed: [usize; KERNEL_MAX_CORES];
+// The consumer's own: records core 0 has taken from each ring.
+private let mut peer_console_consumed: [usize; KERNEL_MAX_CORES];
+
+// The slot a record's zero-based sequence lands in.
+private fn peer_console_slot(cpu: {0..<KERNEL_MAX_CORES as usize},
+                             index: usize)
+        -> {0..<KERNEL_MAX_CORES * PEER_CONSOLE_RECORDS as usize} {
+    let within: {0..<PEER_CONSOLE_RECORDS as usize} =
+        index % PEER_CONSOLE_RECORDS;
+    return cpu * PEER_CONSOLE_RECORDS + within;
+}
+
+// How many slots this CPU may write now.
+private fn peer_console_free_records(cpu: {0..<KERNEL_MAX_CORES as usize})
+        -> usize {
+    let mut cursor: PeerConsoleCursor;
+    if (publish_copy(&peer_console_cursors[cpu], &cursor) != 0) {
+        peer_console_seen_consumed[cpu] = cursor.consumed;
+    }
+    let published: usize = peer_console_published[cpu];
+    let consumed: usize = peer_console_seen_consumed[cpu];
+    if (consumed > published) { return 0; }
+    let in_flight: usize = published - consumed;
+    if (in_flight >= PEER_CONSOLE_RECORDS) { return 0; }
+    return PEER_CONSOLE_RECORDS - in_flight;
+}
+
+// Bytes a write on this CPU may hand over now.
+fn peer_console_room(cpu: usize) -> usize {
+    if (cpu >= KERNEL_MAX_CORES) { return 0; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    return peer_console_free_records(here) * PEER_CONSOLE_RECORD_BYTES;
+}
+
+// Publish as much of `bytes` as there are free slots for, in order, and
+// return how many bytes that was.
+fn peer_console_publish(cpu: usize, bytes: borrow []u8) -> usize {
+    // The producer's counts belong to whatever runs on this CPU. A second
+    // writer on the same CPU entering in the middle of a write -- which a
+    // preemptible kernel would allow -- would reuse its sequence.
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+                  "a peer's console producer state cannot survive preemption into a second writer on its CPU");
+    if (cpu >= KERNEL_MAX_CORES) { return 0; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    let length: usize = bytes.len;
+    let mut taken: usize = 0;
+    let mut free: usize = peer_console_free_records(here);
+    for record: usize in 0..<PEER_CONSOLE_RECORDS {
+        if (free != 0 && taken < length) {
+            let mut count: usize = length - taken;
+            if (count > PEER_CONSOLE_RECORD_BYTES) {
+                count = PEER_CONSOLE_RECORD_BYTES;
+            }
+            let index: usize = peer_console_published[here];
+            let w = publish_begin(
+                &peer_console_records[peer_console_slot(here, index)]);
+            for i: usize in 0..<PEER_CONSOLE_RECORD_BYTES {
+                if (i < count) {
+                    let source: usize = taken + i;
+                    if (source < bytes.len) { w.bytes[i] = bytes[source]; }
+                }
+            }
+            w.len = count;
+            publish_commit(w, index + 1);
+            peer_console_published[here] = index + 1;
+            taken = taken + count;
+            free = free - 1;
+        }
+    }
+    return taken;
+}
+
+// Core 0: copy this CPU's next record into `record`, if it is published.
+// The slot stays the producer's to reuse only after peer_console_retire.
+fn peer_console_peek(cpu: usize, record: *PeerConsoleRecord)
+        -> PeerConsolePeek {
+    if (cpu >= KERNEL_MAX_CORES) { return PeerConsolePeek::Empty; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    let index: usize = peer_console_consumed[here];
+    let taken: usize = publish_copy(
+        &peer_console_records[peer_console_slot(here, index)], record);
+    if (taken != index + 1) { return PeerConsolePeek::Empty; }
+    let length: usize = record.len;
+    if (length > PEER_CONSOLE_RECORD_BYTES) {
+        return PeerConsolePeek::Ready(PEER_CONSOLE_RECORD_BYTES);
+    }
+    return PeerConsolePeek::Ready(length);
+}
+
+// Core 0: the record peek returned has reached the transmit queue.
+fn peer_console_retire(cpu: usize) {
+    if (cpu >= KERNEL_MAX_CORES) { return; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    let consumed: usize = peer_console_consumed[here] + 1;
+    peer_console_consumed[here] = consumed;
+    let w = publish_begin(&peer_console_cursors[here]);
+    w.consumed = consumed;
+    publish_commit(w, consumed);
+}
