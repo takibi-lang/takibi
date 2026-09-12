@@ -67,18 +67,28 @@ fn kernel_secondary_boot_state_clear() {
     }
 }
 
+fn kernel_secondary_boot_state_value_for(
+        core: {0..<KERNEL_MAX_CORES as usize}) -> usize {
+    return kernel_secondary_boot_state[core] as usize;
+}
+
 fn kernel_secondary_boot_state_value() -> usize {
-    return kernel_secondary_boot_state[1] as usize;
+    return kernel_secondary_boot_state_value_for(1);
 }
 
 // Read by core 0 for the view. The acquire pairs with the handler's own
 // release-free fetch-add on the same word: what is being ordered is this
 // core's view of a counter another core is incrementing, and the only
 // claim made is that the value read was one this core actually reached.
-fn secondary_tick_value() -> usize !{unsafe} {
+private fn secondary_tick_value_for(
+        core: {0..<KERNEL_MAX_CORES as usize}) -> usize !{unsafe} {
     return unsafe {
-        atomic_load_acquire(secondary_tick_address(1))
+        atomic_load_acquire(secondary_tick_address(core))
     };
+}
+
+fn secondary_tick_value() -> usize !{unsafe} {
+    return secondary_tick_value_for(1);
 }
 
 // Called from a platform IRQ dispatch when the interrupted core is not core
@@ -256,13 +266,19 @@ fn kernel_secondary_timer_schedule(frame_sp: usize, lower_el: bool)
 // frequencies (54 MHz on RPi5) and a fixed spin count would be a different
 // duration on each. The secondary's tick period is CNTFRQ >> 6, so a
 // window of CNTFRQ >> 4 covers several ticks with margin.
-fn secondary_ticks_independent() -> bool !{unsafe} {
+fn secondary_ticks_independent_for(
+        core: {0..<KERNEL_MAX_CORES as usize}) -> bool !{unsafe} {
+    if (core == 0) { return false; }
     let window: i64 = read_cntfrq() >> 4;
     disable_irq();
-    let before: usize = secondary_tick_value();
+    let before: usize = secondary_tick_value_for(core);
     let start: i64 = read_cntpct();
     while (read_cntpct() - start < window) { }
-    let after: usize = secondary_tick_value();
+    let after: usize = secondary_tick_value_for(core);
     enable_irq();
     return after > before;
+}
+
+fn secondary_ticks_independent() -> bool !{unsafe} {
+    return secondary_ticks_independent_for(1);
 }
