@@ -170,6 +170,20 @@ retained log and interrupt-driven UART queue. Overwrite and truncation are
 reported. Fatal and DDB paths bypass this channel and never wait for its
 consumer.
 
+A peer's userspace terminal output (GitHub issue #534) takes the same route
+through its own channel, `kernel/printk/peer_console.tkb`, and never touches
+the PL011. A write on a peer publishes up to sixteen 64-byte records into
+that CPU's ring and returns the count the ring took. Core 0 moves a record
+into its transmit queue only when all of it fits, so a record reaches the
+wire unbroken. It drains at syscall entry and on a timer interrupt taken from
+EL0, and both points lie between its own lines. Core 0's count of consumed
+records travels back as a publication record too, and a slot is reused only
+after that count says so. So a full ring is a short count, never a drop. A
+peer that can hand over nothing retries on its own tick rather than sleeping
+on the TX interrupt. Records from different CPUs interleave only at record
+boundaries. While the queue is stood down for DDB or a fatal report, nothing
+is moved, and published records wait there.
+
 ## Stopping the other cores
 
 `kernel/lib/occupancy.tkb` also owns the machine-wide `WorldStop` controller.

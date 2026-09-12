@@ -584,7 +584,20 @@ The active order, re-derived 2026-09-12, is:
    sole ordinary core-0 writer, with bounded backpressure and an emergency
    DDB/fatal path that never waits for it. This is the console half #9 must
    not bypass. It covers output only. UART input on a peer CPU is #547; see
-   the #9 phase B entry in the Territory A queue.
+   the #9 phase B entry in the Territory A queue. **The channel landed
+   2026-09-12.** `kernel/printk/peer_console.tkb` holds a ring of sixteen
+   64-byte publication records per CPU, and a peer's `uart_user_write`
+   publishes into it instead of polling the PL011. Core 0 moves whole
+   records into its queue at syscall entry and on a timer interrupt from
+   EL0. A full ring is a short count, and the peer retries on its own tick.
+   This rests on `struct publish` accepting arrays of scalars, a
+   maintainer-approved crossing into `lib/`. `linux_user/peer_console`
+   drives the ring past full. A bounded probe sends four records from
+   core 1 through `uart_user_write` on every boot, and the shared
+   `peer_console` view compares them. **Still owed:** an RPi5 run at the
+   next hardware boundary; a DDB BREAK while peer records are queued; and
+   a real writing process on a peer, which is phase B's admission to widen
+   once this contract is in.
 6. **#281, re-scoped by measurement before any code.** #545's block-layer
    read-ahead (6a4828f) already turns a device read that continues the last
    one into a single 64-block command. On the first measured boot, 663 runs

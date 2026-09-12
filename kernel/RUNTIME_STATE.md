@@ -307,6 +307,13 @@ image cannot be mounted (94f1c36).
 found no room in the transmit queue, and those of them that slept. They are
 written only on core 0, the queue's owner.
 
+`kernel/printk/peer_console.tkb` (GitHub issue #534) holds one ring per CPU
+for a peer's terminal output: sixteen 64-byte publication records, the
+producer's published and last-seen counts, and core 0's consumed count and
+the cursor that publishes it. Each CPU writes only its own records and
+counts; core 0 writes only the consumed counts and cursors. What crosses
+between them is a publication record in both directions.
+
 **Why global:** the kernel mounts exactly one ext2 filesystem at boot.
 Per-block scratch for a single-mount filesystem is legitimately shared scratch
 space rather than per-process state; what it is not is shared between cores.

@@ -1615,6 +1615,12 @@ fn syscall_terminal_write(address: usize, length: usize)
 // the same question a UART read asks -- and otherwise waits here for the TX
 // interrupt and runs the write again, which is what being alone means.
 fn syscall_terminal_write_wait() -> SyscallAction {
+    // GitHub issue #534: a peer waits for room in its console ring, which
+    // only core 0's drain frees. Sleeping on UartTx would have core 0's TX
+    // interrupt wake a process on another CPU, a path nothing has audited;
+    // retrying on this CPU's own tick needs nothing from core 0 but the
+    // drain it does anyway.
+    if (cpu_id() != 0) { return SyscallAction::WaitInterrupt; }
     uart_user_write_note_wait();
     if (kernel_process_other_ready()) {
         uart_user_write_note_sleep();

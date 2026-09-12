@@ -450,6 +450,7 @@ fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
         // constant, which will tell you which nine.
         if (lower_el) {
             kernel_stack_guard_check_interrupt(frame_sp);  // issue #375
+            kernel_log_peer_console_drain();  // issue #534
             let next_sp: usize = kernel_process_timer_schedule(frame_sp);
             *gicc_eoir = id;
             workload_profile_irq_exit();

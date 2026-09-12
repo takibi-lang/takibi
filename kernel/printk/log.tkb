@@ -5,9 +5,12 @@
 //
 // Core 0 remains the only retained-log and UART-queue writer. Other cores
 // publish complete bounded lines for core 0 to copy and emit; interrupt-safe
-// classified events remain kernel/diagnostic/event.tkb's job.
+// classified events remain kernel/diagnostic/event.tkb's job. A peer's
+// userspace output takes the same route through its own channel,
+// kernel/printk/peer_console.tkb, and never enters the retained log.
 use "kernel/lib/execution_model.tkb";
 use "kernel/printk/number.tkb";
+use "kernel/printk/peer_console.tkb";
 
 const KERNEL_LOG_RECORD_COUNT: usize = 256;
 const KERNEL_LOG_TEXT_MAX: usize = 160;
@@ -471,11 +474,14 @@ const KERNEL_LOG_TX_WRITER_LOW_WATER: usize = 256;
 private let mut uart_user_write_waits: usize = 0;
 private let mut uart_user_write_sleeps: usize = 0;
 
-// Bytes a user write may queue now; zero means sleep. Off core 0, or before
-// the queue is live, there is no queue to wait on and the bytes spin as they
-// always have, so the answer is the most one call takes.
+// Bytes a user write may queue now; zero means wait. On a peer the answer is
+// the room in its console ring (GitHub issue #534). Before core 0's queue is
+// live there is no queue to wait on and the bytes spin as they always have,
+// so the answer is the most one call takes.
 fn uart_user_write_room() -> usize {
-    if (cpu_id() != 0 || kernel_log_tx_is_live() == false) {
+    let cpu: usize = cpu_id();
+    if (cpu != 0) { return peer_console_room(cpu); }
+    if (kernel_log_tx_is_live() == false) {
         return KERNEL_LOG_TX_QUEUE_BYTES;
     }
     let irq_flags: usize = mutex_irq_save();
@@ -496,7 +502,12 @@ fn kernel_log_tx_writer_room() -> bool {
 // is only counted once it is certain to be queued, so the one a full queue
 // turns away is counted when the retried write takes it.
 fn uart_user_write(bytes: borrow []u8) -> usize !{logs, unsafe} {
-    if (cpu_id() != 0 || kernel_log_tx_is_live() == false) {
+    // GitHub issue #534: a peer never touches the PL011 or core 0's queue.
+    // What it hands over is published whole records, and the count is only
+    // what the ring took.
+    let cpu: usize = cpu_id();
+    if (cpu != 0) { return peer_console_publish(cpu, bytes); }
+    if (kernel_log_tx_is_live() == false) {
         let mut spun: usize = 0;
         for index: usize in 0..<KERNEL_LOG_TX_QUEUE_BYTES {
             if (index < bytes.len) {
@@ -645,15 +656,97 @@ fn kernel_log_peer_probe_step() !{logs, unsafe} {
     if (raw_cpu == 0 || raw_cpu >= KERNEL_MAX_CORES) { return; }
     let core: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
     let emitted: usize = kernel_log_peer_probe_emitted[core];
-    if (emitted >= KERNEL_LOG_PEER_PROBE_LINES) { return; }
+    if (emitted >= KERNEL_LOG_PEER_PROBE_LINES) {
+        kernel_log_peer_console_probe_step(core);
+        return;
+    }
     kernel_log_peer_probe_emitted[core] = emitted + 1;
     kernel_boot_log("peer log probe: line=");
     uart_put_udec(emitted + 1);
     kernel_boot_log("\n");
 }
 
+// GitHub issue #534: the same argument for a peer's userspace output. No
+// maintained workload runs a writing process on a peer yet, because this
+// channel is what has to exist first, so without this nothing would send a
+// byte through it. Four one-record lines, through uart_user_write itself --
+// the function a peer's write(2) reaches -- and a line is sent again on the
+// next pass if the ring had no room for it. The shared `peer_console` view
+// compares them on both lanes.
+const KERNEL_LOG_PEER_CONSOLE_PROBE_LINES: usize = 4;
+private let mut kernel_log_peer_console_probe_sent: [usize; KERNEL_MAX_CORES];
+
+private fn kernel_log_peer_console_probe_step(
+        core: {0..<KERNEL_MAX_CORES as usize}) !{logs, unsafe} {
+    let sent: usize = kernel_log_peer_console_probe_sent[core];
+    if (sent >= KERNEL_LOG_PEER_CONSOLE_PROBE_LINES) { return; }
+    let mut line = bs"peer console probe: record=1 of 4\n";
+    if (sent == 1) { line = bs"peer console probe: record=2 of 4\n"; }
+    if (sent == 2) { line = bs"peer console probe: record=3 of 4\n"; }
+    if (sent == 3) { line = bs"peer console probe: record=4 of 4\n"; }
+    if (uart_user_write(line) == line.len) {
+        kernel_log_peer_console_probe_sent[core] = sent + 1;
+    }
+}
+
+// GitHub issue #534: move each peer's published console records into the
+// transmit queue, a whole record at a time. Core 0 only, from two places
+// that cannot be in the middle of one of its own lines: syscall entry,
+// through kernel_log_peer_drain below, and a timer interrupt taken from
+// EL0, through each platform's dispatcher -- the second so that a core 0
+// computing in EL0 without a syscall still drains.
+//
+// A record goes in only when the queue has room for all of it, with
+// interrupts masked, so it reaches the wire unbroken and the TX interrupt
+// cannot run in between. One that does not fit stays published and the
+// next drain takes it. Emergency and DDB paths never wait for any of this:
+// with the queue stood down nothing is moved, and whatever is published
+// stays there until the queue is live again.
+//
+// No `logs`, no `locks`: the interrupt dispatcher calls it.
+fn kernel_log_peer_console_drain() {
+    if (cpu_id() != 0) { return; }
+    if (kernel_log_core_here().emergency || kernel_log_tx_is_live() == false) {
+        return;
+    }
+    let mut record: PeerConsoleRecord;
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        let mut draining: bool = true;
+        for step: usize in 0..<PEER_CONSOLE_RECORDS {
+            if (draining) {
+                match peer_console_peek(cpu, &record) {
+                    PeerConsolePeek::Empty => { draining = false; }
+                    PeerConsolePeek::Ready(length) => {
+                        let irq_flags: usize = mutex_irq_save();
+                        let count: usize = kernel_log_tx_count;
+                        if (count > KERNEL_LOG_TX_QUEUE_BYTES ||
+                            KERNEL_LOG_TX_QUEUE_BYTES - count < length) {
+                            mutex_irq_restore(irq_flags);
+                            draining = false;
+                        } else {
+                            for i: usize in 0..<PEER_CONSOLE_RECORD_BYTES {
+                                if (i < length) {
+                                    kernel_log_note_tx_byte();
+                                    let pushed: bool =
+                                        kernel_log_tx_push(record.bytes[i]);
+                                }
+                            }
+                            uart_tx_drain_into_fifo();
+                            let still_pending: bool = kernel_log_tx_pending();
+                            mutex_irq_restore(irq_flags);
+                            if (still_pending) { uart_tx_irq_enable(); }
+                            peer_console_retire(cpu);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn kernel_log_peer_drain() !{unsafe} {
     if (cpu_id() != 0) { return; }
+    kernel_log_peer_console_drain();
     for cpu: usize in 1..<KERNEL_MAX_CORES {
         let mut expected: usize = kernel_log_peer_consumed[cpu] + 1;
         let latest_words: *usize = kernel_log_peer_latest;
