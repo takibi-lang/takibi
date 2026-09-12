@@ -129,6 +129,25 @@ def diverge_a_function(root):
                      "    return 1;\n}\n", encoding="ascii")
 
 
+def refined_signature(bodies):
+    """One function per tree whose parameter is a refined type, over two lines.
+
+    The refined type's `{...}` used to be counted as a block, which closed
+    the function on its first line. Its body was then never compared: two
+    kernel_secondary_boot_cpu_on copies that call different PSCI conduits
+    were refused as identical, and two identical copies would have passed
+    whatever their bodies said.
+    """
+    def plant(root):
+        for platform, body in zip(PLATFORMS, bodies):
+            target = root / platform / "uart.tkb"
+            target.write_text(
+                target.read_text(encoding="ascii") +
+                "\nfn planted_refined(core: {0..<4 as usize})\n"
+                "        -> usize {\n" + body + "}\n", encoding="ascii")
+    return plant
+
+
 def main() -> int:
     failures = []
 
@@ -150,6 +169,16 @@ def main() -> int:
     failures += case(
         "identical function", diverge_a_function,
         "planted_only_here")
+
+    failures += case(
+        "a refined parameter does not end the function",
+        refined_signature(["    return core;\n", "    return core << 8;\n"]),
+        "", should_fail=False)
+
+    failures += case(
+        "an identical body after a refined parameter is still refused",
+        refined_signature(["    return core;\n", "    return core;\n"]),
+        "planted_refined")
 
     # The run rule must not report what the function rule has already put in
     # front of a reviewer, or the declaration would look ineffective and the
@@ -202,7 +231,9 @@ def main() -> int:
     report_pass(
         "platform-parity controls",
         "the repository passes, a duplicated function and a duplicated "
-        "inline run of the threshold length are each refused, a run "
+        "inline run of the threshold length are each refused, a refined "
+        "parameter's braces neither end a function early nor hide an "
+        "identical body, a run "
         "that is long only in punctuation is not, and a run inside an "
         "already-declared function is not reported twice, and a "
         "declaration that outlives its subject is refused",

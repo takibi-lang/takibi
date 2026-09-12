@@ -110,6 +110,45 @@ def significant(line):
     return re.sub(r"[{}();,]", "", text).strip() != ""
 
 
+def block_braces(line, parens):
+    """One line's block-brace depth change, whether it opened a block, and
+    the parenthesis depth after it.
+
+    A refined parameter type is written `{lo..<hi as T}` inside a parameter
+    list. Counted as a block, its braces closed the function on its own
+    signature line, so the body compared was the signature alone -- and two
+    platforms' `kernel_secondary_boot_cpu_on`, which call different PSCI
+    conduits, read as identical. Braces inside parentheses are not blocks,
+    and neither is anything in a comment or a string.
+    """
+    delta = 0
+    opened = False
+    quoted = False
+    index = 0
+    while index < len(line):
+        ch = line[index]
+        if quoted:
+            if ch == "\\":
+                index += 1
+            elif ch == '"':
+                quoted = False
+        elif ch == '"':
+            quoted = True
+        elif line.startswith("//", index):
+            break
+        elif ch == "(":
+            parens += 1
+        elif ch == ")":
+            parens = max(0, parens - 1)
+        elif parens == 0 and ch == "{":
+            delta += 1
+            opened = True
+        elif parens == 0 and ch == "}":
+            delta -= 1
+        index += 1
+    return delta, opened, parens
+
+
 def allowed_function_spans(path):
     """Line ranges of functions already declared identical by intent.
 
@@ -129,9 +168,11 @@ def allowed_function_spans(path):
         start = index
         depth = 0
         opened = False
+        parens = 0
         while index < len(lines):
-            depth += lines[index].count("{") - lines[index].count("}")
-            opened = opened or "{" in lines[index]
+            delta, opens, parens = block_braces(lines[index], parens)
+            depth += delta
+            opened = opened or opens
             index += 1
             if opened and depth <= 0:
                 break
@@ -176,10 +217,12 @@ def functions(path):
         body = []
         depth = 0
         opened = False
+        parens = 0
         while i < len(lines):
             body.append(lines[i])
-            depth += lines[i].count("{") - lines[i].count("}")
-            opened = opened or "{" in lines[i]
+            delta, opens, parens = block_braces(lines[i], parens)
+            depth += delta
+            opened = opened or opens
             i += 1
             if opened and depth <= 0:
                 break
