@@ -3986,19 +3986,21 @@ fn kernel_process_current_exit_has_waiter() -> bool {
 //
 // Asked BEFORE the exit does anything, so the caller can wait for an
 // interrupt and ask again with nothing torn down in between.
-fn kernel_process_exit_would_strand() -> bool {
+private fn kernel_process_exit_would_strand_on(cpu: usize) -> bool {
     if (execution_here().current_live == false) { return false; }
     let slot: usize = execution_here().current_handle.pool_index;
     if (scheduled_process_record_at(slot).has_parent == false) { return false; }
     let mut parent: ProcessHandle = scheduled_process_record_at(slot).parent;
     if (scheduled_process_handle_matches(parent) == false) { return false; }
+    let parent_admitted: bool = kernel_process_cpu_admits(
+        cpu, scheduled_process_pid_of_handle(parent));
     // A parent already waiting for this exit is woken BY it, so it counts
     // as somewhere to go even though it is blocked right now.
-    if (scheduled_process_state_of(parent) ==
+    if (parent_admitted && scheduled_process_state_of(parent) ==
             ProcessSlotState::Ready) {
         return false;
     }
-    if (scheduled_process_state_of(parent) ==
+    if (parent_admitted && scheduled_process_state_of(parent) ==
             ProcessSlotState::Blocked &&
         scheduled_process_wait_reason_of(parent) ==
             ProcessWaitReason::ChildExit) {
@@ -4009,7 +4011,7 @@ fn kernel_process_exit_would_strand() -> bool {
     // selecting its successor, so this parent is another exit-produced
     // runnable context even when every other live process runs on a peer.
     let sigchld_bit: usize = 1 << 16;
-    if (scheduled_process_state_of(parent) ==
+    if (parent_admitted && scheduled_process_state_of(parent) ==
             ProcessSlotState::Blocked &&
         scheduled_process_wait_reason_of(parent) ==
             ProcessWaitReason::Signal &&
@@ -4017,10 +4019,14 @@ fn kernel_process_exit_would_strand() -> bool {
         (scheduled_process_record_of(parent).sigwait_set & sigchld_bit) != 0) {
         return false;
     }
-    match kernel_process_next_ready(execution_here().current_handle, cpu_id()) {
+    match kernel_process_next_ready(execution_here().current_handle, cpu) {
         ProcessNextReadyResult::Missing => { return true; }
         ProcessNextReadyResult::Next(next) => { return false; }
     }
+}
+
+fn kernel_process_exit_would_strand() -> bool {
+    return kernel_process_exit_would_strand_on(cpu_id());
 }
 
 fn kernel_process_current_has_relative() -> bool {
@@ -5622,6 +5628,11 @@ private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
         kernel_process_current_exit_has_waiter() == false) {
         return false;
     }
+    // The synthetic parent is deliberately not a secondary workload
+    // candidate. Exit may wake it on core 0, but that must not make it an
+    // admissible successor for core 1.
+    let peer_wait_parent_rejected: bool =
+        kernel_process_exit_would_strand_on(1);
     // With only this child running, SIGCHLD is also an exit-produced
     // successor. A different wait set or an ignored signal is not.
     let sigchld_bit: usize = 1 << 16;
@@ -5653,7 +5664,8 @@ private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
     }
     process_run_unlock(restore_guard);
     return restored && kernel_process_current_exit_has_waiter() == false &&
-        signal_successor && unrelated_wait && ignored_signal;
+        peer_wait_parent_rejected && signal_successor && unrelated_wait &&
+        ignored_signal;
 }
 
 // The scheduler probe calls scheduling functions directly instead of entering
@@ -6368,7 +6380,6 @@ fn kernel_process_child_exit(status: usize) -> usize {
     let mut child: ProcessHandle = execution_here().current_handle;
     let mut parent: ProcessHandle =
         scheduled_process_record_of(child).parent;
-    kernel_process_signal_child_exit(parent);
     kernel_process_trace_record(
         ProcessTraceExit, scheduled_process_pid_of_handle(child),
         child.generation,
@@ -6433,6 +6444,11 @@ fn kernel_process_child_exit(status: usize) -> usize {
     // deliberately later, after activation commits and the guard is released,
     // because it writes user memory and may fault into the scheduler.
     let exit_guard = process_run_lock();
+    // Signal state and a possible blocked-to-ready transition are part of
+    // the same exit scheduling decision. In particular, a peer scheduler
+    // must not observe the parent wake before this CPU has stopped exposing
+    // the child as Running.
+    kernel_process_signal_child_exit(parent);
     match scheduled_process_running_take(exit_guard, child) {
         ScheduledProcessRunningTakeResult::Missing => {
             process_run_unlock(exit_guard);
