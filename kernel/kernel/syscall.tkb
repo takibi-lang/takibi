@@ -2525,6 +2525,9 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) {
 fn kernel_syscall_clone_parent_return(parent_sp: usize) {
     kernel_process_child_exec_reap();
     if (parent_sp == 0) {
+        if (cpu_id() != 0) {
+            kernel_secondary_idle_enter();
+        }
         kernel_syscall_fail_stop(parent_sp);
     }
     workload_profile_el0_enter();

@@ -2239,6 +2239,24 @@ fn scheduled_process_ready_take(guard: borrow ProcessRunGuard[lock],
             PROCESS_STACK_UNOWNED) {
         return ScheduledProcessReadyTakeResult::Missing;
     }
+    // A Ready parent may still carry a blocked wait4 continuation when a
+    // child exits on a CPU that cannot admit that parent. Do not let another
+    // CPU resume and reap it until the exiting CPU has physically left the
+    // child's kernel stack.
+    if (scheduled_process_wait_reason_of(handle) ==
+            ProcessWaitReason::ChildExit) {
+        match kernel_process_pending_wait4_child(handle) {
+            ProcessNextReadyResult::Missing => {
+                return ScheduledProcessReadyTakeResult::Missing;
+            }
+            ProcessNextReadyResult::Next(child) => {
+                if (scheduled_process_record_of(child).stack_owner_cpu !=
+                        PROCESS_STACK_UNOWNED) {
+                    return ScheduledProcessReadyTakeResult::Missing;
+                }
+            }
+        }
+    }
     let owner = scheduled_process_owner_new(handle.pool_index,
                                             handle.generation);
     let state = scheduled_process_ready_state(owner);
@@ -2813,6 +2831,30 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
         kernel_init_boot_fixture_reaped(
             scheduled_process_pid_of_handle(incoming));
     }
+}
+
+// Called only after kernel_secondary_idle_enter has moved SP_EL1 onto this
+// CPU's IRQ stack. The exiting process remains a zombie for its parent, but
+// its kernel stack is now physically free and may be reaped safely.
+fn kernel_process_stack_idle_complete() {
+    let core: usize = cpu_id();
+    if (core == 0 || core >= KERNEL_MAX_CORES ||
+        execution_here().current_live || execution_here().stack_live == false) {
+        kernel_syscall_fail_stop(0);
+    }
+    let guard = process_run_lock();
+    let mut outgoing: ProcessHandle = execution_here().stack_handle;
+    if (scheduled_process_handle_matches(outgoing) == false ||
+        scheduled_process_state_of(outgoing) != ProcessSlotState::Exited ||
+        scheduled_process_record_of(outgoing).stack_owner_cpu != core) {
+        process_run_unlock(guard);
+        kernel_syscall_fail_stop(0);
+    }
+    scheduled_process_record_of(outgoing).stack_owner_cpu =
+        PROCESS_STACK_UNOWNED;
+    execution_here().stack_live = false;
+    process_run_unlock(guard);
+    workload_profile_idle_enter();
 }
 // GitHub issue #264 first stage keeps the #248 wait4 result fields and
 // #245 exec-image flag in the same ProcessRecord as their slot's state
@@ -3686,6 +3728,11 @@ private fn kernel_process_secondary_start_reserved(
                 guard, scheduled_process_pid_of_handle(to));
             kernel_process_trace_handle(ProcessTraceResume, to, to, 0);
             let next_sp: usize = scheduled_process_record_of(to).saved_sp;
+            if (scheduled_process_wait_reason_of(to) ==
+                    ProcessWaitReason::ChildExit) {
+                scheduled_process_record_of(to).wait_reason =
+                    ProcessWaitReason::None;
+            }
             scheduled_process_release(owner, running);
             process_run_unlock(guard);
             return ProcessSecondaryStart::Frame(next_sp);
@@ -3816,6 +3863,11 @@ private fn kernel_process_schedule_reserved(
             kernel_process_trace_handle(ProcessTraceSchedule, to, from, 0);
             kernel_process_trace_handle(ProcessTraceResume, to, from, 0);
             let next_sp: usize = scheduled_process_record_of(to).saved_sp;
+            if (scheduled_process_wait_reason_of(to) ==
+                    ProcessWaitReason::ChildExit) {
+                scheduled_process_record_of(to).wait_reason =
+                    ProcessWaitReason::None;
+            }
             scheduled_process_release(owner, running);
             process_run_unlock(guard);
             return next_sp;
@@ -4833,6 +4885,11 @@ private fn kernel_process_block_reserved(
                 guard, scheduled_process_pid_of_handle(to));
             kernel_process_trace_handle(ProcessTraceResume, to, from, 0);
             let next_sp: usize = scheduled_process_record_of(to).saved_sp;
+            if (scheduled_process_wait_reason_of(to) ==
+                    ProcessWaitReason::ChildExit) {
+                scheduled_process_record_of(to).wait_reason =
+                    ProcessWaitReason::None;
+            }
             scheduled_process_release(owner, running);
             process_run_unlock(guard);
             return next_sp;
@@ -6469,18 +6526,34 @@ fn kernel_process_child_exit(status: usize) -> usize {
                     ScheduledProcessBlockedTakeResult::Blocked(parent_resources) => {
                         let (parent_owner, blocked) = parent_resources;
                         let ready = scheduled_process_wake(parent_owner, blocked);
-                        scheduled_process_record_at(parent_owner.pool_index)
-                            .wait_reason = ProcessWaitReason::None;
                         kernel_process_trace_handle(
                             ProcessTraceWake, parent, child, status);
-                        let parent_running =
-                            scheduled_process_start(parent_owner, ready);
-                        process_run_unlock(exit_guard);
-                        return kernel_process_exit_reserved(
-                            child, parent_owner, parent_running, true);
+                        if (kernel_process_cpu_admits(
+                                cpu_id(), scheduled_process_pid_of_handle(
+                                    parent))) {
+                            scheduled_process_record_at(
+                                parent_owner.pool_index).wait_reason =
+                                ProcessWaitReason::None;
+                            let parent_running =
+                                scheduled_process_start(parent_owner, ready);
+                            process_run_unlock(exit_guard);
+                            return kernel_process_exit_reserved(
+                                child, parent_owner, parent_running, true);
+                        }
+                        // Keep ChildExit on the Ready parent as its pending
+                        // wait4 continuation. Rewind the saved frame so a CPU
+                        // that admits the parent runs ordinary synchronous
+                        // wait4 after activating the parent's root; that path
+                        // can validate user memory without making timer IRQ
+                        // scheduling allocate.
+                        el0_context_retry_syscall(
+                            scheduled_process_record_of(parent).saved_sp);
+                        scheduled_process_release(parent_owner, ready);
                     }
                 }
             }
+            if (kernel_process_cpu_admits(
+                    cpu_id(), scheduled_process_pid_of_handle(parent))) {
             match scheduled_process_ready_take(exit_guard, parent) {
                 ScheduledProcessReadyTakeResult::Missing => {}
                 ScheduledProcessReadyTakeResult::Ready(parent_resources) => {
@@ -6491,6 +6564,7 @@ fn kernel_process_child_exit(status: usize) -> usize {
                     return kernel_process_exit_reserved(
                         child, parent_owner, parent_running, false);
                 }
+            }
             }
             // GitHub issue #448: a background child's parent may be blocked
             // elsewhere. Reserve the scheduler's next Ready process instead.
@@ -6514,11 +6588,12 @@ fn kernel_process_child_exit(status: usize) -> usize {
             }
         }
     }
-    // Nothing at all can run: every process is blocked and the one that
-    // could have woken somebody is the one exiting. There is no frame left
-    // to stand on here -- unlike a blocking syscall, an exit has nothing to
-    // retry -- so this is still a fail-stop, and a real idle task is what
-    // would remove it.
+    // No admitted successor remains. Publish this CPU as having no current
+    // EL0 context; the syscall tail switches to the per-CPU IRQ stack before
+    // the architectural secondary idle loop releases this zombie's stack.
+    execution_here().current_live = false;
+    execution_here().scheduler_enabled = false;
+    execution_here().reschedule_pending = false;
     process_run_unlock(exit_guard);
     return 0;
 }
@@ -6554,6 +6629,36 @@ private fn kernel_process_first_zombie_of(parent: ProcessHandle)
         }
         if (scheduled_process_record_of(cursor).has_next_sibling
                 == false) {
+            return ProcessNextReadyResult::Missing;
+        }
+        cursor = scheduled_process_record_of(cursor).next_sibling;
+    }
+    return ProcessNextReadyResult::Missing;
+}
+
+// A parent woken on a CPU that cannot admit it retains ChildExit as a
+// continuation marker while Ready. last_child_pid identifies the exact
+// zombie whose wait4 result still has to be delivered after that parent's
+// address space is active.
+private fn kernel_process_pending_wait4_child(parent: ProcessHandle)
+        -> ProcessNextReadyResult {
+    if (scheduled_process_record_of(parent).has_first_child == false) {
+        return ProcessNextReadyResult::Missing;
+    }
+    let wanted: usize = scheduled_process_record_of(parent).last_child_pid;
+    let mut cursor: ProcessHandle =
+        scheduled_process_record_of(parent).first_child;
+    let mut remaining: usize = scheduled_process_pool_live_count() + 1;
+    while (remaining != 0) {
+        remaining = remaining - 1;
+        if (scheduled_process_handle_matches(cursor) == false) {
+            return ProcessNextReadyResult::Missing;
+        }
+        if (scheduled_process_state_of(cursor) == ProcessSlotState::Exited &&
+            scheduled_process_pid_of_handle(cursor) == wanted) {
+            return ProcessNextReadyResult::Next(cursor);
+        }
+        if (scheduled_process_record_of(cursor).has_next_sibling == false) {
             return ProcessNextReadyResult::Missing;
         }
         cursor = scheduled_process_record_of(cursor).next_sibling;

@@ -385,3 +385,17 @@ crash_snapshot_copy_saved_frame:
     ldr     x2, [x0, #EXC_CONTEXT_TPIDR_EL0]
     str     x2, [x1, #24]
     ret
+
+/* Leave an exiting secondary process's kernel stack before making it
+ * reclaimable. Return to the same architectural secondary stack used at
+ * boot; Current-EL interrupts still dispatch on the separate per-CPU IRQ
+ * stack selected by generated exception entry. */
+    .global kernel_secondary_idle_enter
+    .type kernel_secondary_idle_enter, %function
+kernel_secondary_idle_enter:
+    msr     DAIFSet, #0x2
+    adrp    x1, secondary_stack_top
+    add     x1, x1, :lo12:secondary_stack_top
+    mov     sp, x1
+    mov     x29, xzr
+    b       kernel_secondary_idle_reenter

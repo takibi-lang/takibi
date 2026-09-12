@@ -115,10 +115,11 @@ fn secondary_timer_tick() !{interrupt, unsafe} {
 fn kernel_secondary_main(context: usize) {
     let core_id: usize = cpu_id();
     if (core_id > 0 && core_id < KERNEL_ACTIVE_CORES &&
-            core_id < KERNEL_MAX_CORES && context == 0x190 + core_id) {
+            core_id < KERNEL_MAX_CORES) {
         let core: {0..<KERNEL_MAX_CORES as usize} = core_id;
-        kernel_secondary_boot_state[core] = 0x100 + core_id;
-        signal_fence();
+        if (context == 0x190 + core_id) {
+            kernel_secondary_boot_state[core] = 0x100 + core_id;
+            signal_fence();
         // Everything a core has to do FOR ITSELF, in the order it has to
         // do it. Core 0 reaches the same three through its platform's
         // platform_irq_init(), which additionally does the distributor and
@@ -127,9 +128,14 @@ fn kernel_secondary_main(context: usize) {
         // rather than in two files that could drift
         // (scripts/check_platform_file_parity.py caught exactly that when
         // this was first written as a per-platform helper).
-        platform_irq_cpu_interface_init();
-        timer_irq_setup();
-        enable_irq();
+            platform_irq_cpu_interface_init();
+            timer_irq_setup();
+            enable_irq();
+        } else if (context != 0x290 + core_id) {
+            return;
+        } else {
+            enable_irq();
+        }
         while (true) {
             // GitHub issue #445: the two-core contention probe, driven
             // from here rather than from the tick, so both cores are
@@ -208,6 +214,15 @@ fn kernel_secondary_main(context: usize) {
     // Falls through to the entry path's own park for any core that is not
     // the one PSCI was asked to start, or a context that does not match.
     // That is a "this should not have happened" path, not an idle one.
+}
+
+// Re-enter the established architectural idle loop after an EL0 process
+// exits without another process admitted on this CPU. The assembly boundary
+// has already selected this CPU's IRQ stack before releasing ownership of
+// the exiting process stack.
+fn kernel_secondary_idle_reenter() {
+    kernel_process_stack_idle_complete();
+    kernel_secondary_main(0x290 + cpu_id());
 }
 
 // Shared timer policy; each platform still acknowledges its own GIC source
