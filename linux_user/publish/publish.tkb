@@ -27,6 +27,41 @@ struct publish Event {
 let mut slot: Event;
 let mut snapshot: Event;
 
+// GitHub issue #534: a run of bytes in one record, which is what a peer
+// CPU's console output is. The array is written one element at a time
+// through the token and read back one element at a time from the copy.
+struct publish Line {
+    seq: usize;
+    len: usize;
+    bytes: [u8; 8];
+}
+
+let mut line_slot: Line;
+let mut line_copy: Line;
+
+fn write_line(first: u8, len: usize, sequence: usize) {
+    let w = publish_begin(&line_slot);
+    for i: usize in 0..<8 {
+        if (i < len) { w.bytes[i] = first + (i as u8); }
+    }
+    w.len = len;
+    publish_commit(w, sequence);
+}
+
+fn report_line(label: *u8, taken: usize) {
+    uart_puts(label);
+    uart_puts(" taken=");
+    uart_put_udec(taken);
+    uart_puts(" len=");
+    uart_put_udec(line_copy.len);
+    uart_puts(" bytes=");
+    for i: usize in 0..<8 {
+        uart_put_udec(line_copy.bytes[i] as usize);
+        if (i < 7) { uart_puts(","); }
+    }
+    uart_puts("\r\n");
+}
+
 fn write_event(cpu: usize, code: usize, detail: usize, sequence: usize) {
     let w = publish_begin(&slot);
     w.cpu = cpu;
@@ -104,4 +139,20 @@ fn app_main() {
     write_or_abandon(5, 55, 8, true);
     uart_puts("kept, detail never written");
     report(publish_copy(&slot, &snapshot));
+
+    // GitHub issue #534: the byte-array record, through the same states.
+    report_line("line empty", publish_copy(&line_slot, &line_copy));
+    write_line(65, 8, 1);
+    report_line("line committed", publish_copy(&line_slot, &line_copy));
+    // Shorter than the last: the three bytes this write does not reach
+    // read 0, because publish_begin scrubs an array field as it scrubs a
+    // scalar one, rather than showing the previous line's tail.
+    write_line(97, 5, 2);
+    report_line("line shorter", publish_copy(&line_slot, &line_copy));
+    let w = publish_begin(&line_slot);
+    w.bytes[0] = 120;
+    w.len = 1;
+    report_line("line in-flight", publish_copy(&line_slot, &line_copy));
+    publish_commit(w, 3);
+    report_line("line after commit", publish_copy(&line_slot, &line_copy));
 }

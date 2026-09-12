@@ -4,3 +4,8 @@ in-flight taken=0 seq=5 cpu=3 code=77 detail=1000
 after commit taken=6 seq=6 cpu=9 code=99 detail=9999
 abandoned taken=0 seq=6 cpu=9 code=99 detail=9999
 kept, detail never written taken=8 seq=8 cpu=5 code=55 detail=0
+line empty taken=0 len=0 bytes=0,0,0,0,0,0,0,0
+line committed taken=1 len=8 bytes=65,66,67,68,69,70,71,72
+line shorter taken=2 len=5 bytes=97,98,99,100,101,0,0,0
+line in-flight taken=0 len=5 bytes=97,98,99,100,101,0,0,0
+line after commit taken=3 len=1 bytes=120,0,0,0,0,0,0,0

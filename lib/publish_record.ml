@@ -38,24 +38,40 @@ let fail pos msg = raise (Types.TypeError (pos, msg))
    value, and decoded from raw bytes against the emitted layout. Integers,
    `bool`, and enums do all three. A pointer names an address space that
    may no longer exist by the time anyone reads the record, and an
-   aggregate or array turns "copy the payload" into a question about
-   interior padding -- so both are refused here rather than accepted and
-   then documented as unwise. *)
-let rec payload_field_ok ty =
+   aggregate turns "copy the payload" into a question about interior
+   padding -- so both are refused here rather than accepted and then
+   documented as unwise.
+
+   A fixed-length array OF those scalars is accepted (GitHub issue #534,
+   which needed a record to carry a run of bytes). It has no interior
+   padding -- its elements are contiguous and a scalar's size is a
+   multiple of its alignment -- so it is copied, compared and decoded
+   exactly as the same number of separate scalar fields would be. An
+   array of anything else, including of arrays, keeps the element's own
+   reason for refusal. What an array field adds is places a store could
+   be spelled through other than `w.f = v`; lib/type_inf.ml closes those,
+   beside the rule for scalar fields. *)
+let scalar_payload_ok ty =
   match ty with
   | TypeBool
   | TypeI8 | TypeI16 | TypeI32 | TypeI64
   | TypeU8 | TypeU16 | TypeU32 | TypeU64
   | TypeIsize | TypeUsize -> true
-  | TypeRefined (_, _, base) -> payload_field_ok base
   | TypeNamed name -> Hashtbl.mem Type_layout.enums name
   | _ -> false
+
+let rec payload_field_ok ty =
+  match ty with
+  | TypeRefined (_, _, base) -> payload_field_ok base
+  | TypeArray (elem, n) -> n > 0 && scalar_payload_ok elem
+  | _ -> scalar_payload_ok ty
 
 let describe_type ty =
   match ty with
   | TypePtr _ -> "a pointer"
   | TypeIo _ -> "an io value"
-  | TypeArray _ -> "an array"
+  | TypeArray (_, 0) -> "an empty array"
+  | TypeArray _ -> "an array whose elements are not scalars"
   | TypeU16Be | TypeU32Be -> "a big-endian wire integer"
   | TypeNamed _ -> "an aggregate"
   | _ -> "not a scalar"

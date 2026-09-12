@@ -1266,6 +1266,38 @@ let publish_record_behind sname =
   | Some record -> record
   | None -> sname
 
+(* GitHub issue #534: which field accesses name a publish record's field,
+   keyed by the FieldGet's own location, and whether they went through a
+   write token. Filled by infer_field_access, which every field read and
+   every Index/SliceOf base passes through, so the checks on the forms
+   built from a field -- an element store, a slice, an address -- read the
+   answer instead of inferring the base a second time.
+
+   Those forms are the other ways to spell a store. `w.f = v` was the only
+   one while every payload field was a scalar, except for `&r.f`, which
+   compiled with no `unsafe` and stored with no token. An array field adds
+   an element store, a range slice, and the decay to `*elem`. Each is
+   refused below except the element store through a live token, which is
+   `w.f = v` for one element. *)
+let publish_field_at : (Ast.loc, string * string * bool) Hashtbl.t =
+  Hashtbl.create 16
+
+let publish_place_of (base : Ast.expr) =
+  match base.desc with
+  | Ast.FieldGet _ -> Hashtbl.find_opt publish_field_at base.loc
+  | _ -> None
+
+let reject_publish_place loc (base : Ast.expr) what =
+  match publish_place_of base with
+  | Some (record, field, _) ->
+      raise (TypeError (loc, Printf.sprintf
+        "%s of publish record field '%s.%s' is refused: it would be a place \
+         to store through outside publish_begin/publish_commit, where no \
+         write token orders the store. Read the field element by element, \
+         and write it through the token as `w.%s[i] = v`"
+        what record field field))
+  | None -> ()
+
 let is_linear_ptr_ty t = match repr t with
   | TPtr (TStruct n) -> StringSet.mem n !linear_opaque_names
   | TIndexedStruct (n, _) ->
@@ -2791,6 +2823,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
 
   | SliceOf (base, lo_e, hi_e) ->
       let vt = place_undecayed_type senv eenv tyenv fenv base in
+      reject_publish_place e.loc base "A slice";
       let lo_t = infer_expr senv eenv tyenv fenv lo_e in
       let hi_t = infer_expr senv eenv tyenv fenv hi_e in
       (* A subslice range is indexing too: array/slice bounds use usize,
@@ -3945,6 +3978,17 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | Index (base, idx) ->
            check_no_write_through_shared_ref senv eenv tyenv fenv base;
            let vt = place_undecayed_type senv eenv tyenv fenv base in
+           (* GitHub issue #534: `w.f[i] = v` is `w.f = v` for one element,
+              so a live token is what permits it, as it permits the other. *)
+           (match publish_place_of base with
+            | Some (record, field, false) ->
+                raise (TypeError (e.loc, Printf.sprintf
+                  "an element of field '%s.%s' cannot be assigned directly: \
+                   a publish record's payload is written through the linear \
+                   token publish_begin returns, so that every store to it \
+                   happens between the clear and the commit"
+                  record field))
+            | _ -> ());
            let it = infer_expr senv eenv tyenv fenv idx in
            Hashtbl.replace index_resolved_ty idx.loc (to_ast it);  (* GitHub issue #311 *)
            let elem_ty = match repr vt with
@@ -4194,6 +4238,17 @@ and infer_addrof_wrapped senv eenv tyenv fenv (e : Ast.expr) (inner : Ast.expr)
              Printf.sprintf "field address '.%s' on non-struct type '%s'"
                fname (to_string bt)))
        in
+       (* GitHub issue #534: a pointer to a payload field is a store with
+          no token, and it compiled with no `unsafe` before this -- through
+          a token as well as without one, since the pointer outlives the
+          commit either way. *)
+       if Publish_registry.is_publish (publish_record_behind sname) then
+         raise (TypeError (e.loc, Printf.sprintf
+           "cannot take the address of publish record field '%s.%s': a \
+            pointer to it is a place to store through outside \
+            publish_begin/publish_commit, where no write token orders the \
+            store"
+           (publish_record_behind sname) fname));
        let fields = match StringMap.find_opt sname senv with
          | Some (fs, _, _) -> fs
          | None -> raise (TypeError (e.loc,
@@ -4220,6 +4275,7 @@ and infer_addrof_wrapped senv eenv tyenv fenv (e : Ast.expr) (inner : Ast.expr)
           proof) after first ruling out raw-pointer indexing: a raw address
           cannot mint a safe reference merely by being indexed. *)
        let storage_ty = place_undecayed_type senv eenv tyenv fenv base in
+       reject_publish_place e.loc base "The address of an element";
        (match repr storage_ty with
         | TArray _ | TSlice _ -> ()
         | _ -> raise (TypeError (e.loc,
@@ -4258,7 +4314,10 @@ and infer_field_access ~decay senv eenv tyenv fenv (loc : Ast.loc)
          fields of its own; `w.cpu` means the field of the RECORD it was
          minted from. Reads through it are ordinary -- what the token
          gates is stores, which is what the protocol is about. *)
+      let via_token = Publish_registry.is_token sname in
       let sname = publish_record_behind sname in
+      if Publish_registry.is_publish sname then
+        Hashtbl.replace publish_field_at loc (sname, fname, via_token);
       let fields = match StringMap.find_opt sname senv with
         | Some (fs, _, _) -> fs
         | None ->
@@ -4276,6 +4335,18 @@ and infer_field_access ~decay senv eenv tyenv fenv (loc : Ast.loc)
            if not decay then raw
            else (match raw with
              | TArray (inner, _) ->
+                 (* GitHub issue #534: the decay is the widest of the
+                    forms publish_field_at describes -- a cast, a call
+                    argument and an annotated `let` all reach it -- so it
+                    is refused here, at the one place it happens. *)
+                 if Publish_registry.is_publish sname then
+                   raise (TypeError (loc, Printf.sprintf
+                     "array payload field '%s.%s' is read element by element \
+                      (`r.%s[i]`): as a pointer or a slice it would be a \
+                      place to store through outside \
+                      publish_begin/publish_commit, where no write token \
+                      orders the store"
+                     sname fname fname));
                  check_no_nested_ptr_mint loc inner;
                  TPtr inner  (* array field decays to *elem *)
              | TIo    inner      -> inner        (* io field returns value type T (volatile handled in codegen) *)
@@ -5823,6 +5894,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   type_checker_lint_active := false;
   Hashtbl.reset type_checker_consumed_unsafe_at;
   Hashtbl.reset index_resolved_ty;  (* GitHub issue #311, fresh per compilation / per unit test *)
+  Hashtbl.reset publish_field_at;   (* GitHub issue #534, same lifetime *)
   Hashtbl.reset slice_cast_len;     (* GitHub issue #372, same lifetime *)
   Hashtbl.reset overflow_audit_table;
   Hashtbl.reset divisor_proven_nonzero_at;

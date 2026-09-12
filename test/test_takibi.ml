@@ -13427,8 +13427,10 @@ let codegen_tests = [
          "struct publish Ev { seq: u32; cpu: usize; }" ();
        expect_type_error "is a pointer"
          "struct publish Ev { seq: usize; p: *usize; }" ();
-       expect_type_error "is an array"
-         "struct publish Ev { seq: usize; a: [usize; 4]; }" ();
+       (* GitHub issue #534: an array of scalars is a payload, and an array
+          of anything else keeps its element's reason for refusal. *)
+       expect_type_error "elements are not scalars"
+         "struct publish Ev { seq: usize; a: [*usize; 4]; }" ();
        expect_type_error "publishes nothing"
          "struct publish Ev { seq: usize; }" ();
        (* An enum payload is fine: it decodes from the emitted layout the
@@ -13442,6 +13444,70 @@ let codegen_tests = [
             w.kind = Kind::Wake;
             publish_commit(w, 1);
           }" ());
+
+  Alcotest.test_case
+    "issue #534: an array payload is written element by element through the token"
+    `Quick
+    (fun () ->
+       let record =
+         "struct publish Line { seq: usize; len: usize; bytes: [u8; 8]; }
+          let mut slot: Line;
+          let mut out: Line;
+          " in
+       expect_ok (record ^
+         "fn issue534_write(value: u8, n: usize) {
+            let w = publish_begin(&slot);
+            for i: usize in 0..<8 { w.bytes[i] = value; }
+            w.len = 8;
+            publish_commit(w, n);
+          }
+          fn issue534_read() -> u8 {
+            if (publish_copy(&slot, &out) == 0) { return 0; }
+            return out.bytes[7];
+          }") ();
+       with_codegen_target "aarch64-none-elf" (fun () ->
+         expect_codegen_ok (record ^
+           "fn issue534_write(value: u8) {
+              let w = publish_begin(&slot);
+              w.bytes[3] = value;
+              publish_commit(w, 1);
+            }
+            fn issue534_read() -> usize { return publish_copy(&slot, &out); }")
+           ());
+       (* An element store without the token is `slot.len = 1` spelled
+          one element at a time. *)
+       expect_type_error "cannot be assigned directly" (record ^
+         "fn issue534_bypass() { slot.bytes[0] = 1; }") ();
+       (* The forms that make a place to store through later. Each one is
+          refused through a token too: the place outlives the commit. *)
+       expect_type_error "read element by element" (record ^
+         "fn issue534_decay() -> u8 { let p: *u8 = slot.bytes; return p[0]; }") ();
+       expect_type_error "read element by element" (record ^
+         "fn issue534_cast() -> usize { let s = slot.bytes as []u8; return s.len; }") ();
+       expect_type_error "A slice of publish record field" (record ^
+         "fn issue534_slice() -> usize { let s = slot.bytes[0..<4]; return s.len; }") ();
+       expect_type_error "A slice of publish record field" (record ^
+         "fn issue534_token_slice() {
+            let w = publish_begin(&slot);
+            let s = w.bytes[0..<4];
+            publish_commit(w, 1);
+          }") ();
+       expect_type_error "The address of an element" (record ^
+         "fn issue534_element_address() -> u8 { let p: *u8 = &slot.bytes[0]; return *p; }") ();
+       (* GitHub issue #534's review found this one with every field a
+          scalar: `&r.f` compiled, with no `unsafe`, and stored with no
+          token. *)
+       expect_type_error "cannot take the address of publish record field"
+         (record ^
+          "fn issue534_scalar_address() { let p: *usize = &slot.len; *p = 1; }") ();
+       expect_type_error "cannot take the address of publish record field"
+         (record ^
+          "fn issue534_token_address() {
+             let w = publish_begin(&slot);
+             let p: *usize = &w.len;
+             publish_commit(w, 1);
+             *p = 2;
+           }") ());
 
   Alcotest.test_case
     "issue #299: the operations reject wrong arities and wrong arguments"

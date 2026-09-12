@@ -2535,10 +2535,25 @@ publish_commit(w, sequence);             // consumes w, release-stores it
   be `usize`. It is also the field at offset 0, which is the address the
   atomic takes -- a separate marker would let those two drift apart and
   then need a check that they had not.
-- **Payload fields are integers, `bool`, and enums.** No pointers, no
-  aggregates, no arrays. The record is copied by value and decoded from
-  its emitted layout by a debugger outside this program; a pointer names
-  an address space that may not exist by the time anyone reads it.
+- **Payload fields are integers, `bool`, enums, and fixed-length arrays
+  of those.** No pointers and no aggregates. The record is copied by value
+  and decoded from its emitted layout by a debugger outside this program;
+  a pointer names an address space that may not exist by the time anyone
+  reads it, and an aggregate brings interior padding. An array of scalars
+  has none, so it is copied and decoded exactly as that many scalar fields
+  would be (GitHub issue #534).
+- **An array field is written one element at a time, through the token:
+  `w.bytes[i] = v`.** It is read the same way, `out.bytes[i]`. Everything
+  else that would make a place to store through later is refused, on a
+  record and on a token alike, because the place outlives the commit:
+  taking the address of any payload field or element (`&r.f`,
+  `&r.bytes[i]`), a range slice (`r.bytes[a..<b]`), and the array's decay
+  to `*elem` by a cast, a call argument or an annotated `let`.
+- **Not yet refused: assigning a whole record.** `slot = other;`,
+  `ring[i] = other;` and `*p = other;` compile, and each stores the
+  publication field as well as the payload, with no token. The rules above
+  cover every way to reach one FIELD; a store of the record as a value is
+  the remaining shape.
 - **`publish_begin` returns a LINEAR token.** A record left in flight is
   a compile error on every path that could leave it that way, not a slot
   that stays torn until something wraps over it.
