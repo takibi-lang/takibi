@@ -418,13 +418,13 @@ private fn block_write_device_locked(
     block_note_call(block_write_calls as []usize);
     workload_profile_note_block_write(KERNEL_BLOCK_SIZE);
     if (device.backend == 1) {
-        let sector: u32 = (block * 2) as u32;
+        // GitHub issue #281, as measured: both sectors of the block in one
+        // WRITE(10), the way block_read_device already reads them (#545).
+        // A boot's writes are single metadata blocks -- 188 of them over 18
+        // distinct blocks on 2026-09-12 -- so there is no run across blocks
+        // to coalesce; the command per sector was the whole of the waste.
         let bytes: *u8 = source as *u8;
-        match disk_write(sector, bytes) {
-            DiskIoResult::Err(error) => { return BlockIoResult::Invalid; }
-            DiskIoResult::Ok => { }
-        }
-        match disk_write(sector + 1, bytes + 512) {
+        match disk_write_sectors((block * 2) as u32, bytes, 2) {
             DiskIoResult::Err(error) => { return BlockIoResult::Invalid; }
             DiskIoResult::Ok => { return BlockIoResult::Ok; }
         }

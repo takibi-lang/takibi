@@ -607,14 +607,23 @@ The active order, re-derived 2026-09-12, is:
    2026-09-12. **Still owed:** a DDB BREAK while peer records are queued;
    and a real writing process on a peer, which is phase B's admission to
    widen once this contract is in.
-6. **#281, re-scoped by measurement before any code.** #545's block-layer
-   read-ahead (6a4828f) already turns a device read that continues the last
-   one into a single 64-block command. On the first measured boot, 663 runs
-   answered 36,963 block reads, and about 500 single-block reads remained.
-   Before choosing anything, measure what those remaining reads are, and the
-   write side, which #281 also names. The likely outcomes are closing #281 as
-   superseded, or narrowing it to writes. This is the only place the plan
-   tracks #281.
+6. **#281, measured and narrowed, 2026-09-12.** A scratch boot logged every
+   single-block device read and write by block number, and `debugfs icheck`
+   named the owners.
+   - **Reads:** 517 single-block reads touched only 44 distinct blocks.
+     They are metadata: the inode table (203), directories (125), the
+     superblock and group descriptors (41), and the bitmaps (32). File data
+     was about 33, mostly BusyBox's first blocks and indirect blocks. They
+     repeat because the block cache's single write epoch retires every copy
+     on every write, and a boot writes 188 times. Coalescing contiguous
+     runs, which is what #281 proposed, cannot touch scattered metadata
+     re-reads. What would touch them is per-block invalidation in the cache.
+     That is a different change, and it is recorded here rather than filed.
+   - **Writes:** 188 writes to 18 distinct metadata blocks, with no run
+     across blocks to coalesce. The only waste was one USB WRITE(10) per
+     sector. A block write is now one two-sector command, as reads became
+     under #545, which halves the board's write commands. That was #281's
+     remaining content, and the commit closes it.
 7. **#542** finish the inventory of kernel-side verification machinery and
    move userspace-observable checks behind fork/exec. This is independent of
    scheduler affinity and can follow #281 without touching Territory A.
