@@ -271,12 +271,22 @@ understate the number a change is judged by.
 
 `drivers/block/block_cache.tkb` is the block layer's read cache (GitHub issue
 #208), and it is per core for the same reason: sixteen 1 KiB slots for each
-core, indexed by the `cpu_id()` that `block_read` and `block_write` pass in.
+core, sized by `KERNEL_MAX_CORES` and indexed by the `cpu_id()` that
+`block_read` and `block_write` pass in.
 What one core writes reaches the other through a write epoch. The epoch is
 the sum of the per-core write counts, each written only by its own core. A
 slot is valid only while the epoch it was filled at is still the current one.
-`memory.tkb` asserts the core count and `KERNEL_PREEMPTIBLE == 0` beside its
-only caller.
+`memory.tkb` asserts `KERNEL_PREEMPTIBLE == 0` beside its only caller.
+
+The device under all of that is NOT per core, and `memory.tkb`'s
+`block_device_lock` is what makes it safe (GitHub issue #533). Virtio-blk
+has one queue, request, bounce sector and used-ring shadow, and the USB
+path has one command block, bounce buffer and event-ring cursor. Every
+single-block read, single-block write and read-ahead transfer holds that
+lock, through a linear `BlockDeviceGuard` the device functions take as a
+parameter. It is a `TaskMutex` rather than a `Mutex` because the USB path
+waits for the xHCI interrupt on core 0, which a masking lock would block.
+`usb_provision.tkb` writes around it, once, before any process exists.
 
 The same file's read-ahead run is per core too (GitHub issue #545). It is
 one 64-block buffer per core, with the block range, backend and write

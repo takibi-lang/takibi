@@ -82,12 +82,16 @@ EXEMPT = {
     # syscall from a second core would reach.
     "drivers/net/virtio_net.tkb": "device state; SPIs are routed to CPU0",
     "drivers/net/rp1_gem.tkb": "device state; MSI-X is routed to CPU0",
-    "drivers/block/virtio_blk.tkb": "device state; SPIs are routed to CPU0",
-    "drivers/block/memory.tkb": "device state; SPIs are routed to CPU0",
+    "drivers/block/virtio_blk.tkb":
+        "device state; every command is issued under memory.tkb's "
+        "block_device_lock (GitHub issue #533)",
+    "drivers/block/memory.tkb":
+        "per-core counters and read-ahead run indexed by cpu_id(), and the "
+        "device reached only under block_device_lock (GitHub issue #533)",
     "drivers/block/block_cache.tkb":
-        "per-core slots indexed by the caller's cpu_id(); memory.tkb asserts "
-        "the core count and KERNEL_PREEMPTIBLE == 0 beside its only caller, "
-        "and another core's writes arrive through the write epoch",
+        "per-core slots sized by KERNEL_MAX_CORES and indexed by the caller's "
+        "cpu_id(); memory.tkb asserts KERNEL_PREEMPTIBLE == 0 beside its only "
+        "caller, and another core's writes arrive through the write epoch",
     "drivers/serial/uart_rx_ring.tkb":
         "one producer, one consumer: the UART RX interrupt, routed to CPU0, "
         "writes head and the drop count; a syscall from a process admitted "
@@ -103,7 +107,10 @@ EXEMPT = {
         "PCIe2 device state is initialized and used only by CPU0",
     "platform/rpi5/timer_irq.tkb":
         "GIC device state is initialized before interrupts and used by its routed cores",
-    "platform/rpi5/usb_xhci.tkb": "device state; MSI-X is routed to CPU0",
+    "platform/rpi5/usb_xhci.tkb":
+        "device state; MSI-X is routed to CPU0, and every mass-storage "
+        "command after provisioning is issued under memory.tkb's "
+        "block_device_lock (GitHub issue #533)",
 
     # --- Not state that depends on either number.
     "arch/arm64/mm/asid.tkb":

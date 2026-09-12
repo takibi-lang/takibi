@@ -1,4 +1,5 @@
 use "kernel/drivers/block/block_cache.tkb";
+use "kernel/lib/task_mutex.tkb";
 
 const KERNEL_BLOCK_SIZE: usize = 1024;
 // 64 1 KiB filesystem blocks = 128 USB sectors = 64 KiB. This is the
@@ -102,6 +103,43 @@ fn block_read_call_total() -> usize {
 }
 fn block_write_call_total() -> usize {
     return block_call_total(block_write_calls as []usize);
+}
+
+// GitHub issue #533: one command at a time on the device.
+//
+// Everything above the device is per core -- the cache, the read-ahead run,
+// ext2's scratch -- and the device is not. virtio_blk.tkb has one queue, one
+// request, one bounce sector and one used-ring shadow; usb_xhci.tkb has one
+// command block, one bounce buffer and one event-ring cursor. A read reached
+// from a syscall on core 1 while core 0 was mid-command would rewrite the
+// other's request under it, or consume the other's completion.
+//
+// A TaskMutex, not a Mutex, because a Mutex masks interrupts and the USB
+// path WAITS for one: usb_await_event sleeps in interrupt_wait until
+// xhci_irq_handler's SEV, and that handler runs on core 0. Core 0 holding a
+// masking lock across its own command would never take the interrupt that
+// completes it. Nothing reaches the device from a handler, and the
+// acquire's `may_block` makes that a compile error rather than a rule.
+//
+// usb_provision.tkb writes around this lock, once, on core 0, before any
+// process exists -- so before any other core can reach a block device.
+private let mut block_device_lock: TaskMutex;
+
+// `[lock: addr]` names the one lock it came from, and linear, so no path
+// through a device access can leave it held.
+linear struct BlockDeviceGuard[lock: addr] {
+    private cpu: usize;
+}
+
+private fn block_device_take() -> BlockDeviceGuard[block_device_lock]
+        !{acquires_lock_30_block_device, lock_guard_30_block_device} {
+    task_mutex_acquire(&block_device_lock);
+    let mut guard: BlockDeviceGuard[block_device_lock] = { cpu_id() };
+    return guard;
+}
+
+private fn block_device_give(guard: sink BlockDeviceGuard[block_device_lock]) {
+    task_mutex_release(&block_device_lock);
 }
 
 // GitHub issue #208: block_read and block_write go through the per-core
@@ -238,12 +276,37 @@ private fn block_run_read(core: usize, device: KernelBlockDevice,
     // the run is being read retires it.
     block_run_count[here] = 0;
     let epoch: usize = block_cache_epoch_now();
+    let guard = block_device_take();
+    let transferred: bool =
+        block_run_transfer_locked(guard, here, device, first, count);
+    block_device_give(guard);
+    if (transferred == false) { return false; }
+    for offset: usize in 0..<BLOCK_RUN_BLOCKS {
+        if (offset < count) {
+            block_note_call(block_read_calls as []usize);
+        }
+    }
+    workload_profile_note_block_read(count * KERNEL_BLOCK_SIZE);
+    block_run_backend[here] = device.backend;
+    block_run_first[here] = first;
+    block_run_epoch[here] = epoch;
+    block_run_count[here] = count;
+    block_run_next[here] = first + count;
+    block_run_next_backend[here] = device.backend;
+    block_run_reads[here] = block_run_reads[here] + 1;
+    return true;
+}
+
+private fn block_run_transfer_locked(
+        guard: borrow BlockDeviceGuard[block_device_lock],
+        here: {0..<KERNEL_MAX_CORES as usize}, device: KernelBlockDevice,
+        first: usize, count: usize) -> bool !{unsafe} {
     if (device.backend == 1) {
         let target: *u8 = (block_run_data as *u8) +
             ((here * BLOCK_RUN_BLOCKS * KERNEL_BLOCK_SIZE) as isize);
         match disk_read_sectors((first * 2) as u32, target, count * 2) {
             DiskIoResult::Err(error) => { return false; }
-            DiskIoResult::Ok => { }
+            DiskIoResult::Ok => { return true; }
         }
     } else {
         for offset: usize in 0..<BLOCK_RUN_BLOCKS {
@@ -266,21 +329,8 @@ private fn block_run_read(core: usize, device: KernelBlockDevice,
                 }
             }
         }
+        return true;
     }
-    for offset: usize in 0..<BLOCK_RUN_BLOCKS {
-        if (offset < count) {
-            block_note_call(block_read_calls as []usize);
-        }
-    }
-    workload_profile_note_block_read(count * KERNEL_BLOCK_SIZE);
-    block_run_backend[here] = device.backend;
-    block_run_first[here] = first;
-    block_run_epoch[here] = epoch;
-    block_run_count[here] = count;
-    block_run_next[here] = first + count;
-    block_run_next_backend[here] = device.backend;
-    block_run_reads[here] = block_run_reads[here] + 1;
-    return true;
 }
 
 fn block_run_read_total() -> usize {
@@ -312,7 +362,28 @@ fn block_write(device: KernelBlockDevice, block: usize,
 
 private fn block_read_device(device: KernelBlockDevice, block: usize,
                              destination: [u8; KERNEL_BLOCK_SIZE..])
-        -> BlockIoResult !{unsafe} {
+        -> BlockIoResult {
+    let guard = block_device_take();
+    let result: BlockIoResult =
+        block_read_device_locked(guard, device, block, destination);
+    block_device_give(guard);
+    return result;
+}
+
+private fn block_write_device(device: KernelBlockDevice, block: usize,
+                              source: [u8; KERNEL_BLOCK_SIZE..])
+        -> BlockIoResult {
+    let guard = block_device_take();
+    let result: BlockIoResult =
+        block_write_device_locked(guard, device, block, source);
+    block_device_give(guard);
+    return result;
+}
+
+private fn block_read_device_locked(
+        guard: borrow BlockDeviceGuard[block_device_lock],
+        device: KernelBlockDevice, block: usize,
+        destination: [u8; KERNEL_BLOCK_SIZE..]) -> BlockIoResult !{unsafe} {
     if (block >= device.length / KERNEL_BLOCK_SIZE) {
         return BlockIoResult::Invalid;
     }
@@ -337,9 +408,10 @@ private fn block_read_device(device: KernelBlockDevice, block: usize,
     }
 }
 
-private fn block_write_device(device: KernelBlockDevice, block: usize,
-                              source: [u8; KERNEL_BLOCK_SIZE..])
-        -> BlockIoResult !{unsafe} {
+private fn block_write_device_locked(
+        guard: borrow BlockDeviceGuard[block_device_lock],
+        device: KernelBlockDevice, block: usize,
+        source: [u8; KERNEL_BLOCK_SIZE..]) -> BlockIoResult !{unsafe} {
     if (block >= device.length / KERNEL_BLOCK_SIZE) {
         return BlockIoResult::Invalid;
     }
