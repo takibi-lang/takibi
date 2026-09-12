@@ -445,20 +445,29 @@ private fn workload_profile_start(
     for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
         workload_profile_cores[cpu].last_tick = now;
     }
-    let cpu: usize = cpu_id();
-    if (cpu < KERNEL_ACTIVE_CORES && cpu < KERNEL_MAX_CORES) {
-        workload_profile_cores[cpu].mode = WorkloadCpuMode::El1;
-        workload_profile_cores[cpu].last_tick = now;
-        workload_profile_cores[cpu].selected_pid = pid;
-        workload_profile_cores[cpu].has_selected_pid = true;
+    for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
+        let selected: usize = selected_at_start[cpu];
+        workload_profile_cores[cpu].selected_pid = selected;
+        workload_profile_cores[cpu].has_selected_pid = selected != 0;
+    }
+    // The core opening the interval is known even when it has not crossed a
+    // scheduler selection since the busy pair registered. Restore the other
+    // cores first, then make this current witness authoritative; doing this
+    // before the restore loop let a saved zero overwrite `pid`, and the
+    // process-attributed CPU-time report intermittently assigned this core's
+    // entire nonzero profile to nobody.
+    let current_cpu: usize = cpu_id();
+    if (current_cpu < KERNEL_ACTIVE_CORES && current_cpu < KERNEL_MAX_CORES) {
+        workload_profile_cores[current_cpu].mode = WorkloadCpuMode::El1;
+        workload_profile_cores[current_cpu].last_tick = now;
+        workload_profile_cores[current_cpu].selected_pid = pid;
+        workload_profile_cores[current_cpu].has_selected_pid = true;
     }
     workload_profile_active = true;
     profile_timeline_start(
         workload_busy_pair.a_pid, workload_busy_pair.b_pid);
     for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
-        let selected: usize = selected_at_start[cpu];
-        workload_profile_cores[cpu].selected_pid = selected;
-        workload_profile_cores[cpu].has_selected_pid = selected != 0;
+        let selected: usize = workload_profile_selected_pid(cpu);
         profile_timeline_interval_start_cpu(stopped, cpu, selected, now);
     }
     // The flat PC profile shares this interval exactly: same IRQ-masked
