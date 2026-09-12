@@ -16,10 +16,11 @@
 // the secondary core that reached it.
 //
 // Current limitations:
-// - ONE secondary core, by decision of 2026-08-27: every class of race
-//   appears at two, and four adds reduced reproducibility plus a different
-//   problem (scalability) to a phase that is finding correctness bugs.
-//   SECONDARY_CORE_ID is that decision, not a hardware limit.
+// - Only core 1 is started by today's platform boot wrappers. The state and
+//   tick evidence below are per-core so phase A of processor affinity can
+//   start cores 2 and 3 without turning a one-writer scalar into shared
+//   state. The architectural entry path still has one secondary stack and
+//   must be split before either additional core is actually started.
 // - The core's exception stacks are its own as of GitHub issue #477. That
 //   was not true when this file was first written, and the first timer
 //   tick here landed on core 0's saved frame -- its INTID came back as
@@ -30,14 +31,14 @@
 
 use "kernel/lib/execution_model.tkb";
 
-// Which core PSCI starts. Two cores, not four.
+// Which core today's platform wrapper starts. The common path below accepts
+// every non-boot core reserved by KERNEL_MAX_CORES.
 const SECONDARY_CORE_ID: usize = 1;
 
-// The handshake word core 0 polls to know the secondary reached compiled
-// Takibi. `io` rather than an atomic because that is what it has always
-// been and it is verified on both boards; it is a one-shot publication with
-// a single writer and a bounded poll, not a value read repeatedly.
-private let mut kernel_secondary_boot_state: io usize;
+// One handshake word per possible secondary. Core 0 polls the target core's
+// slot to know it reached compiled Takibi. `io` rather than an atomic because
+// each slot is a one-shot publication with one writer and a bounded reader.
+private let mut kernel_secondary_boot_state: [io usize; KERNEL_MAX_CORES];
 
 // This core's timer-interrupt count. Written only by the secondary core,
 // from its interrupt handler; read only by core 0, for a view.
@@ -47,10 +48,11 @@ private let mut kernel_secondary_boot_state: io usize;
 // genuinely run on different cores at the same time, which is the exact
 // situation `io` (volatile, no ordering) does not cover. One writer means
 // no compare-and-swap is needed here.
-private let mut secondary_tick_count: usize;
+private let mut secondary_tick_count: [usize; KERNEL_MAX_CORES];
 
-private fn secondary_tick_address() -> usize {
-    return (&secondary_tick_count) as usize;
+private fn secondary_tick_address(core: {0..<KERNEL_MAX_CORES as usize})
+        -> usize {
+    return (&secondary_tick_count[core]) as usize;
 }
 
 fn kernel_secondary_boot_state_clear() {
@@ -60,11 +62,13 @@ fn kernel_secondary_boot_state_clear() {
     // this barrier the shared ready flags are immutable and cannot race.
     process_image_pool_init_before_secondary();
     address_space_backing_pool_init_before_secondary();
-    kernel_secondary_boot_state = 0;
+    for core: usize in 0..<KERNEL_MAX_CORES {
+        kernel_secondary_boot_state[core] = 0;
+    }
 }
 
 fn kernel_secondary_boot_state_value() -> usize {
-    return kernel_secondary_boot_state;
+    return kernel_secondary_boot_state[1] as usize;
 }
 
 // Read by core 0 for the view. The acquire pairs with the handler's own
@@ -72,7 +76,9 @@ fn kernel_secondary_boot_state_value() -> usize {
 // core's view of a counter another core is incrementing, and the only
 // claim made is that the value read was one this core actually reached.
 fn secondary_tick_value() -> usize !{unsafe} {
-    return unsafe { atomic_load_acquire(secondary_tick_address()) };
+    return unsafe {
+        atomic_load_acquire(secondary_tick_address(1))
+    };
 }
 
 // Called from a platform IRQ dispatch when the interrupted core is not core
@@ -82,7 +88,10 @@ fn secondary_tick_value() -> usize !{unsafe} {
 // per-core timer accounting.
 fn secondary_timer_tick() !{interrupt, unsafe} {
     timer_tick_rearm();
-    unsafe { atomic_fetch_add_relaxed(secondary_tick_address(), 1); }
+    let raw_core: usize = cpu_id();
+    if (raw_core >= KERNEL_MAX_CORES) { return; }
+    let core: {0..<KERNEL_MAX_CORES as usize} = raw_core;
+    unsafe { atomic_fetch_add_relaxed(secondary_tick_address(core), 1); }
 }
 
 // Reached only by the secondary core, after PSCI has installed the entry
@@ -105,8 +114,10 @@ fn secondary_timer_tick() !{interrupt, unsafe} {
 // interrupt and nothing else.
 fn kernel_secondary_main(context: usize) {
     let core_id: usize = cpu_id();
-    if (context == 0x191 && core_id == SECONDARY_CORE_ID) {
-        kernel_secondary_boot_state = 0x100 + core_id;
+    if (core_id > 0 && core_id < KERNEL_ACTIVE_CORES &&
+            core_id < KERNEL_MAX_CORES && context == 0x190 + core_id) {
+        let core: {0..<KERNEL_MAX_CORES as usize} = core_id;
+        kernel_secondary_boot_state[core] = 0x100 + core_id;
         signal_fence();
         // Everything a core has to do FOR ITSELF, in the order it has to
         // do it. Core 0 reaches the same three through its platform's
