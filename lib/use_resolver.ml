@@ -136,12 +136,23 @@ let resolve
    it is unit-testable the same dependency-injected way `resolve` itself
    is (see this file's own header comment and test_takibi.ml's
    `use_resolver_tests`). *)
+(* GitHub issue #549: then one empty rule per prerequisite, as gcc's -MP
+   adds. Without them a prerequisite that has been deleted is, to make, a
+   target with no rule to build it, and every existing tree stopped with
+   "No rule to make target" until `make clean` -- which is what happened
+   after 94f1c36 removed a used file. With them a deleted prerequisite is
+   simply out of date, and the rebuild that follows writes a depfile that
+   no longer names it. *)
 let depfile_contents (output : string) (deps : string list) : string =
   let buf = Buffer.create 256 in
   Buffer.add_string buf output;
   Buffer.add_char buf ':';
   List.iter (fun dep -> Buffer.add_char buf ' '; Buffer.add_string buf dep) deps;
   Buffer.add_char buf '\n';
+  List.iter (fun dep ->
+    Buffer.add_char buf '\n';
+    Buffer.add_string buf dep;
+    Buffer.add_string buf ":\n") deps;
   Buffer.contents buf
 
 let write_depfile (path : string) (output : string) (deps : string list) : unit =

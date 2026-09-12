@@ -31,8 +31,19 @@ DEPFILE_FLAT_ROOTS = (ROOT / "_build",)
 
 
 def prerequisites(depfile: Path) -> list[str]:
+    """The first rule's prerequisites.
+
+    Since GitHub issue #549 a depfile also carries one empty `dep:` rule per
+    prerequisite, as gcc's -MP does. Those name the same files again, with a
+    colon a path read would take for part of the name. Only the first
+    logical line is the dependency list. The -MP rules are also why a
+    deleted prerequisite no longer stops make, which is the failure this
+    check was written for; whether it still earns its place is Territory
+    A's to decide.
+    """
     text = depfile.read_text().replace("\\\n", " ")
-    _, separator, dependency_text = text.partition(":")
+    first_rule = text.split("\n", 1)[0]
+    _, separator, dependency_text = first_rule.partition(":")
     if not separator:
         raise ValueError("missing ':' between target and prerequisites")
     return shlex.split(dependency_text, comments=False, posix=True)

@@ -17202,14 +17202,28 @@ let depfile_tests =
 
     Alcotest.test_case "depfile_contents: single dep" `Quick (fun () ->
       Alcotest.(check string) "line"
-        "main.o: a.tkb\n" (Use_resolver.depfile_contents "main.o" ["a.tkb"]));
+        "main.o: a.tkb\n\na.tkb:\n"
+        (Use_resolver.depfile_contents "main.o" ["a.tkb"]));
 
     Alcotest.test_case "depfile_contents: multiple deps stay in the given order, \
                          space-separated, matching Use_resolver.resolve's own \
                          dependency-before-dependent order" `Quick (fun () ->
       Alcotest.(check string) "line"
-        "main.o: c.tkb b.tkb a.tkb\n"
+        "main.o: c.tkb b.tkb a.tkb\n\nc.tkb:\n\nb.tkb:\n\na.tkb:\n"
         (Use_resolver.depfile_contents "main.o" ["c.tkb"; "b.tkb"; "a.tkb"]));
+
+    (* GitHub issue #549: each prerequisite also gets an empty rule, gcc -MP
+       style, so a deleted one is out of date rather than a target make has
+       no rule for. The first line alone is still the dependency list. *)
+    Alcotest.test_case "depfile_contents: an empty rule per prerequisite, after \
+                         the dependency line" `Quick (fun () ->
+      let text = Use_resolver.depfile_contents "main.o" ["b.tkb"; "a.tkb"] in
+      let lines = String.split_on_char '\n' text in
+      Alcotest.(check string) "the first line is the dependency list"
+        "main.o: b.tkb a.tkb" (List.hd lines);
+      Alcotest.(check (list string)) "then one empty rule per prerequisite"
+        ["b.tkb:"; "a.tkb:"]
+        (List.filter (fun l -> l <> "" && l <> List.hd lines) lines));
 
     Alcotest.test_case "depfile_contents: output composed directly with \
                          Use_resolver.resolve's own result" `Quick (fun () ->
@@ -17222,7 +17236,7 @@ let depfile_tests =
       let prescan path = uses_of (parse_file path) in
       let resolved = Use_resolver.resolve ~parse_file ~prescan ["a.tkb"] in
       Alcotest.(check string) "line"
-        "main.o: b.tkb a.tkb\n"
+        "main.o: b.tkb a.tkb\n\nb.tkb:\n\na.tkb:\n"
         (Use_resolver.depfile_contents "main.o" (List.map fst resolved)));
   ]
 
