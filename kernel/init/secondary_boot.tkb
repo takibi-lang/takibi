@@ -11,8 +11,8 @@
 //
 // What genuinely differs is one call. QEMU uses Aff0 target numbering and HVC
 // for PSCI; RPi5 uses Aff1 and SMC. So each platform keeps its own
-// kernel_secondary_boot_probe(), which makes that call and hands the status
-// here; the wait, the three outcomes and the reporting are shared.
+// kernel_secondary_boot_cpu_on(core), which makes that call and returns the
+// status; the wait, the four outcomes and the reporting are shared.
 //
 // The deadline is one second of the architected counter, and it is what
 // separates NotStarted from a core that simply has not answered yet.
@@ -21,20 +21,32 @@ use "kernel/init/contention_probes.tkb";
 
 must_use variant SecondaryBootResult {
     Started;
+    NotPresent;
     UnexpectedStatus(usize);
     NotStarted(usize);
 }
 
-// Wait for the secondary to publish its boot state, then say what happened.
+// PSCI's INVALID_PARAMETERS, -2, as the register CPU_ON returns it. For
+// CPU_ON it means the target names no CPU this machine has -- QEMU given
+// `-smp 2` answers it for cores 2 and 3 -- so there is nothing to wait for.
+const PSCI_RET_INVALID_PARAMETERS: usize = 0xFFFFFFFFFFFFFFFE;
+
+// Wait for one secondary to publish its boot state, then say what happened.
 // `status` is what the platform's own PSCI CPU_ON returned: a core that comes
 // up anyway after a nonzero status is a different finding from one that never
-// comes up, and both are different from success.
-fn kernel_secondary_boot_await(status: usize) -> SecondaryBootResult {
+// comes up, and both are different from success. A core PSCI says does not
+// exist is the fourth answer, and the only one that does not wait out the
+// deadline.
+fn kernel_secondary_boot_await(core: {0..<KERNEL_MAX_CORES as usize},
+                               status: usize) -> SecondaryBootResult {
+    if (status == PSCI_RET_INVALID_PARAMETERS) {
+        return SecondaryBootResult::NotPresent;
+    }
     let start: i64 = read_cntpct();
     let deadline_ticks: i64 = read_cntfrq();
     while ((read_cntpct() - start) < deadline_ticks) {
         signal_fence();
-        if (kernel_secondary_boot_state_value() == 0x101) {
+        if (kernel_secondary_boot_state_value_for(core) == 0x100 + core) {
             if (status == 0) {
                 return SecondaryBootResult::Started;
             }
@@ -44,26 +56,45 @@ fn kernel_secondary_boot_await(status: usize) -> SecondaryBootResult {
     return SecondaryBootResult::NotStarted(status);
 }
 
+// Every core the build reserves storage for, one at a time, each verified
+// before the next is asked for. What is shown here -- that a core started
+// and takes its own timer -- is what has to hold before
+// KERNEL_ACTIVE_CORES may admit it to the scheduler.
 fn kernel_secondary_boot_report() !{logs, unsafe} {
-    match kernel_secondary_boot_probe() {
-        SecondaryBootResult::Started => {
-            // GitHub issue #447: "and then it parked" is what this
-            // line used to mean. The core runs an idle loop with its own
-            // GIC CPU interface and its own timer now, so the assertion
-            // that replaces it is the one that could not be made before.
-            if (secondary_ticks_independent()) {
-                kernel_boot_log(
-                    "smp bringup: core1 psci+el1+takibi+own-timer ok\n");
-            } else {
-                kernel_boot_log("smp bringup: core1 idle but no ticks\n");
+    kernel_secondary_boot_state_clear();
+    signal_fence();
+    let mut core_one_started: bool = false;
+    for raw: usize in 1..<KERNEL_MAX_CORES {
+        let core: {0..<KERNEL_MAX_CORES as usize} = raw;
+        kernel_boot_log("smp bringup: core");
+        uart_put_udec(raw);
+        match kernel_secondary_boot_await(
+                core, kernel_secondary_boot_cpu_on(core)) {
+            SecondaryBootResult::Started => {
+                // GitHub issue #447: "and then it parked" is what this
+                // line used to mean. The core runs an idle loop with its
+                // own GIC CPU interface and its own timer now, so the
+                // assertion that replaces it is the one that could not be
+                // made before.
+                if (secondary_ticks_independent_for(core)) {
+                    kernel_boot_log(" psci+el1+takibi+own-timer ok\n");
+                } else {
+                    kernel_boot_log(" idle but no ticks\n");
+                }
+                if (raw == SECONDARY_CORE_ID) { core_one_started = true; }
             }
-            contention_probes();
-        }
-        SecondaryBootResult::UnexpectedStatus(status) => {
-            kernel_boot_log("smp bringup: core1 unexpected psci status\n");
-        }
-        SecondaryBootResult::NotStarted(status) => {
-            kernel_boot_log("smp bringup: core1 failed\n");
+            SecondaryBootResult::NotPresent => {
+                kernel_boot_log(" not present\n");
+            }
+            SecondaryBootResult::UnexpectedStatus(status) => {
+                kernel_boot_log(" unexpected psci status\n");
+            }
+            SecondaryBootResult::NotStarted(status) => {
+                kernel_boot_log(" failed\n");
+            }
         }
     }
+    // The probes race core 1 against core 0 and nothing else; see the
+    // matching gate in kernel_secondary_main.
+    if (core_one_started) { contention_probes(); }
 }

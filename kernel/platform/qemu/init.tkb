@@ -39,13 +39,12 @@ fn cpu_id() -> usize {
     return mrs_mpidr_el1() & 0xff;
 }
 
-// QEMU uses Aff0 target numbering and HVC for PSCI, unlike RPi5's Aff1/SMC path.
-fn kernel_secondary_boot_probe() -> SecondaryBootResult {
-    kernel_secondary_boot_state_clear();
-    signal_fence();
-    return kernel_secondary_boot_await(
-        qemu_psci_cpu_on(
-            0x1, kernel_secondary_entry, 0x191));
+// QEMU uses Aff0 target numbering and HVC for PSCI, unlike RPi5's Aff1/SMC
+// path. This one call is what differs; kernel/init/secondary_boot.tkb waits
+// for the core and reports it.
+fn kernel_secondary_boot_cpu_on(core: {0..<KERNEL_MAX_CORES as usize})
+        -> usize {
+    return qemu_psci_cpu_on(core, kernel_secondary_entry, 0x190 + core);
 }
 
 fn kernel_test_platform_network() {

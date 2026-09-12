@@ -420,11 +420,46 @@ returning through a frame under the wrong address space. Exit handoffs remain.
    storage, which has to become CORES x EVENTS (64 slots and 768 words).
    The memory-map half of 06e44cb4 is done. The stack offsets and the six
    allocator expectations follow the new stacks, which cost 48 pages, and
-   the image ceiling was raised to `0x4c0000` on purpose. That covers four
+   the image ceiling was raised to `0x4c0000` on purpose.
+   **Superseded in part the same day:** 514768ee moved the six allocator
+   expectations again, to 261704 / 32328 / 196168 / 259520 and the debug
+   image's 261696, and this territory refreshed them. The debug one is
+   checked only by `kernel-debug-layout-check`, which is why a list of
+   five missed it. That covers four
    cores with 512 KiB to spare, and the growth is NOBITS, which costs no
    SWD time (`kernel/MEMORY_MAP.md` records why). The allocator
    expectations will move again at four cores. The RPi5 figure has board
    evidence only at the two-core layout of 2026-09-11.
+
+5. **Cores 1, 2 and 3 are started and verified one at a time, and
+   `KERNEL_ACTIVE_CORES` can rise once there is an online set.**
+   - `kernel_secondary_boot_report` asks each platform's
+     `kernel_secondary_boot_cpu_on(core)` for PSCI CPU_ON and waits on
+     `kernel_secondary_boot_state_value_for(core)`. A core that starts is
+     checked with `secondary_ticks_independent_for(core)`.
+   - PSCI's INVALID_PARAMETERS is reported as `coreN not present`, without
+     waiting out the deadline.
+   - The bring-up view is now per platform. RPi5 expects three
+     `own-timer ok` lines. QEMU expects core 1 ok and cores 2 and 3 not
+     present.
+   - Every QEMU lane stays at `-smp 2`. CI's four-core runner already
+     starved at four guest vCPUs (#509, recorded in `ci.yml`), and the
+     maintainer chose to keep CI safe over four-core coverage on QEMU.
+   - This crossed into `secondary.tkb`, with the maintainer's approval, in
+     two places:
+     - `kernel_secondary_main` now brings up and idles every core below
+       `KERNEL_MAX_CORES`. Scheduler participation is still decided
+       against `KERNEL_ACTIVE_CORES` in `kernel_process_secondary_start`.
+     - The contention probes and the peer log and console probes run on
+       core 1 alone, since each is written for two participants.
+   - `log.tkb`'s peer log ring now has a run of records for every core.
+     At sixteen slots, cores 2 and 3 were dropped without trace.
+   - **What raising `KERNEL_ACTIVE_CORES` still needs:** world stop sends
+     SGIs to `[0, KERNEL_ACTIVE_CORES)`. On a QEMU lane at `-smp 2`, cores
+     2 and 3 do not exist, so they can never acknowledge, and a stop would
+     never complete. Either the active set becomes the cores that actually
+     started -- a runtime online mask, Linux's `cpu_online_mask` -- or
+     every QEMU lane needs four vCPUs, which CI cannot run.
 
 #### Handed over from Territory B, 2026-09-11
 

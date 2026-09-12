@@ -69,6 +69,15 @@ ALLOWED = {
         "the same test as rpi5/usb_storage on a different transport: virtio "
         "blk, including its used-index wrap, which has no USB counterpart, "
         "and naming the virtio disk as the root filesystem's device",
+    ("qemu", "smp_bringup"):
+        "how many CPUs the machine has: every QEMU lane runs `-smp 2`, so "
+        "PSCI answers cores 2 and 3 as not present, while the board starts "
+        "all three. CI's four-core runner cannot give a lane four guest "
+        "vCPUs (#509), and the maintainer chose CI over four-core QEMU "
+        "coverage on 2026-09-12",
+    ("rpi5", "smp_bringup"):
+        "the same bring-up on the board's four cores: cores 1, 2 and 3 each "
+        "started through PSCI and taking their own timer",
     ("rpi5", "usb_storage"):
         "the same test as qemu/storage over USB mass storage, including the "
         "provisioning step that writes the filesystem to the stick, and "

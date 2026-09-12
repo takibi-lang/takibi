@@ -53,8 +53,13 @@ private let mut kernel_log_snapshot_length: usize;
 // enters emergency mode before using the ordinary formatting helpers.
 const KERNEL_LOG_PEER_LINE_BYTES: usize = 192;
 const KERNEL_LOG_PEER_RECORDS: usize = 8;
-const KERNEL_LOG_PEER_SLOTS: usize = 16;
-const KERNEL_LOG_PEER_TEXT_BYTES: usize = 3072;
+// One run of KERNEL_LOG_PEER_RECORDS per core the build reserves, and
+// KERNEL_LOG_PEER_LINE_BYTES of text per slot. Literal, because an array
+// bound cannot be a product expression; kernel_log_peer_publish asserts
+// both products. At sixteen, cores 2 and 3 computed a slot past the end
+// and their lines were dropped with nothing saying so.
+const KERNEL_LOG_PEER_SLOTS: usize = 32;
+const KERNEL_LOG_PEER_TEXT_BYTES: usize = 6144;
 struct KernelLogCoreState {
     suppressed: bool;
     emergency: bool;
@@ -140,6 +145,12 @@ fn kernel_log_begin_fragment() {
 }
 
 private fn kernel_log_peer_publish() !{unsafe} {
+    static_assert(KERNEL_LOG_PEER_SLOTS ==
+                  KERNEL_MAX_CORES * KERNEL_LOG_PEER_RECORDS,
+                  "one run of peer records per core the build reserves");
+    static_assert(KERNEL_LOG_PEER_TEXT_BYTES ==
+                  KERNEL_LOG_PEER_SLOTS * KERNEL_LOG_PEER_LINE_BYTES,
+                  "one line of text per peer record slot");
     let cpu: usize = cpu_id();
     if (cpu == 0 || cpu >= KERNEL_MAX_CORES) { return; }
     let sequence: usize = kernel_log_core_here().peer_sequence + 1;

@@ -42,15 +42,12 @@ fn rpi5_psci_cpu_on(target_affinity: usize, entry: usize, context: usize)
     return smc4(0xc4000003, target_affinity, entry, context);
 }
 
-// Reached only by core 1 after PSCI has installed the secondary entry point,
-// that entry has selected its private stack, and the shared EL1 page table is
-// active. The context value prevents a coincidental stale write from passing.
-fn kernel_secondary_boot_probe() -> SecondaryBootResult {
-    kernel_secondary_boot_state_clear();
-    signal_fence();
-    return kernel_secondary_boot_await(
-        rpi5_psci_cpu_on(
-            0x100, kernel_secondary_entry, 0x191));
+// RPi5 numbers its cores in MPIDR_EL1.Aff1, so core N is target N << 8. The
+// context value, 0x190 + N, is what the core checks before it publishes, so
+// a coincidental stale write cannot pass for a start.
+fn kernel_secondary_boot_cpu_on(core: {0..<KERNEL_MAX_CORES as usize})
+        -> usize {
+    return rpi5_psci_cpu_on(core << 8, kernel_secondary_entry, 0x190 + core);
 }
 
 fn kernel_test_platform_network() {

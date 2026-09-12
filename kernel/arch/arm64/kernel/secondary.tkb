@@ -124,8 +124,13 @@ fn secondary_timer_tick() !{interrupt, unsafe} {
 // interrupt and nothing else.
 fn kernel_secondary_main(context: usize) {
     let core_id: usize = cpu_id();
-    if (core_id > 0 && core_id < KERNEL_ACTIVE_CORES &&
-            core_id < KERNEL_MAX_CORES) {
+    // Every core the build reserves storage for comes up and idles here;
+    // whether it may run processes is kernel_process_secondary_start's
+    // question, answered against KERNEL_ACTIVE_CORES. The two used to be
+    // one test, which kept cores 2 and 3 from ever publishing that they
+    // had started -- and starting them is what has to be shown before the
+    // active count can rise.
+    if (core_id > 0 && core_id < KERNEL_MAX_CORES) {
         let core: {0..<KERNEL_MAX_CORES as usize} = core_id;
         if (context == 0x190 + core_id) {
             kernel_secondary_boot_state[core] = 0x100 + core_id;
@@ -147,70 +152,76 @@ fn kernel_secondary_main(context: usize) {
             enable_irq();
         }
         while (true) {
-            // GitHub issue #445: the two-core contention probe, driven
-            // from here rather than from the tick, so both cores are
-            // inside the same lock at the same time instead of taking
-            // turns a timer period apart. It touches ONE pool, this
-            // kernel's only pool that no kernel subsystem uses, and it
-            // never reaches the page allocator -- see that file's floor.
-            // GitHub issue #465: the gated producer of retained peer text,
-            // here because the effect checker refuses to let an interrupt
-            // handler log and because this is the only peer context where
-            // kernel_log_peer_publish is reachable. Off on every ordinary
-            // boot; a lane turns it on to make the publication path
-            // observable at all.
-            kernel_log_peer_probe_step();
-            if (pool_contention_is_armed()) {
-                pool_contention_secondary_run();
-            }
-            // GitHub issue #479 Group A: the same arrangement, one
-            // subsystem over. Each probe owns its own instance, so a
-            // failure names the primitive rather than whatever else shares
-            // a live one.
-            if (freelist_contention_is_armed()) {
-                freelist_contention_secondary_run();
-            }
-            if (page_contention_is_armed()) {
-                page_contention_secondary_run();
-            }
-            if (asid_contention_is_armed()) {
-                asid_contention_secondary_run();
-            }
-            if (fd_refcount_contention_is_armed()) {
-                fd_refcount_contention_secondary_run();
-            }
-            if (pid_contention_is_armed()) {
-                pid_contention_secondary_run();
-            }
-            if (tag_contention_is_armed()) {
-                tag_contention_secondary_run();
-            }
-            // GitHub issue #479 Group B: the scheduler's own state
-            // transition, which is the first probe here to race a
-            // subsystem the kernel actually schedules with rather than a
-            // private instance. It races for a process this probe
-            // allocated and never runs, so a failure names the transition
-            // rather than whatever else is live.
-            if (schedule_contention_is_armed()) {
-                schedule_contention_secondary_run();
-            }
-            // GitHub issue #508: the one probe here that is not about a
-            // subsystem. It holds kernel/lib/occupancy.tkb's region open so
-            // core 0's drain has to give up, which is the branch of that
-            // primitive no boot had ever executed.
-            if (occupancy_drain_is_armed()) {
-                occupancy_drain_secondary_run();
-            }
-            if (init_once_contention_is_armed()) {
-                init_once_contention_secondary_run();
-            }
-            if (tcp_connection_contention_is_armed()) {
-                tcp_connection_contention_secondary_run();
-            }
-            // GitHub issue #482: the walk side of the pool, which takes no
-            // lock at all, against a core that is releasing chunks.
-            if (pool_walk_contention_is_armed()) {
-                pool_walk_contention_secondary_run();
+            // Core 1 alone. Each probe below, and the peer log and console
+            // probes, is written for exactly two participants and its view
+            // counts one peer's lines; a third core in the same round would
+            // make them different probes. Cores 2 and 3 only idle.
+            if (core_id == SECONDARY_CORE_ID) {
+                // GitHub issue #445: the two-core contention probe, driven
+                // from here rather than from the tick, so both cores are
+                // inside the same lock at the same time instead of taking
+                // turns a timer period apart. It touches ONE pool, this
+                // kernel's only pool that no kernel subsystem uses, and it
+                // never reaches the page allocator -- see that file's floor.
+                // GitHub issue #465: the gated producer of retained peer text,
+                // here because the effect checker refuses to let an interrupt
+                // handler log and because this is the only peer context where
+                // kernel_log_peer_publish is reachable. Off on every ordinary
+                // boot; a lane turns it on to make the publication path
+                // observable at all.
+                kernel_log_peer_probe_step();
+                if (pool_contention_is_armed()) {
+                    pool_contention_secondary_run();
+                }
+                // GitHub issue #479 Group A: the same arrangement, one
+                // subsystem over. Each probe owns its own instance, so a
+                // failure names the primitive rather than whatever else shares
+                // a live one.
+                if (freelist_contention_is_armed()) {
+                    freelist_contention_secondary_run();
+                }
+                if (page_contention_is_armed()) {
+                    page_contention_secondary_run();
+                }
+                if (asid_contention_is_armed()) {
+                    asid_contention_secondary_run();
+                }
+                if (fd_refcount_contention_is_armed()) {
+                    fd_refcount_contention_secondary_run();
+                }
+                if (pid_contention_is_armed()) {
+                    pid_contention_secondary_run();
+                }
+                if (tag_contention_is_armed()) {
+                    tag_contention_secondary_run();
+                }
+                // GitHub issue #479 Group B: the scheduler's own state
+                // transition, which is the first probe here to race a
+                // subsystem the kernel actually schedules with rather than a
+                // private instance. It races for a process this probe
+                // allocated and never runs, so a failure names the transition
+                // rather than whatever else is live.
+                if (schedule_contention_is_armed()) {
+                    schedule_contention_secondary_run();
+                }
+                // GitHub issue #508: the one probe here that is not about a
+                // subsystem. It holds kernel/lib/occupancy.tkb's region open so
+                // core 0's drain has to give up, which is the branch of that
+                // primitive no boot had ever executed.
+                if (occupancy_drain_is_armed()) {
+                    occupancy_drain_secondary_run();
+                }
+                if (init_once_contention_is_armed()) {
+                    init_once_contention_secondary_run();
+                }
+                if (tcp_connection_contention_is_armed()) {
+                    tcp_connection_contention_secondary_run();
+                }
+                // GitHub issue #482: the walk side of the pool, which takes no
+                // lock at all, against a core that is releasing chunks.
+                if (pool_walk_contention_is_armed()) {
+                    pool_walk_contention_secondary_run();
+                }
             }
             match kernel_process_secondary_start() {
                 ProcessSecondaryStart::Idle => {}

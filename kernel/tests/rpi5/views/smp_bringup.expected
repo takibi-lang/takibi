@@ -1,0 +1,3 @@
+smp bringup: core1 psci+el1+takibi+own-timer ok
+smp bringup: core2 psci+el1+takibi+own-timer ok
+smp bringup: core3 psci+el1+takibi+own-timer ok
