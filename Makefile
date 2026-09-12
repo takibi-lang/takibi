@@ -385,9 +385,10 @@ $(LINUX_USER_DIR)/uart_rx_ring/uart_rx_ring_exe.o: LINUX_USER_EXTRA_SRCS := kern
 
 # GitHub issue #208: the kernel's own block read cache, with two simulated
 # cores. Whether a write on one core retires the other's copies is exactly
-# what a single-core boot cannot show.
-$(LINUX_USER_DIR)/block_cache/block_cache_exe.o: kernel/drivers/block/block_cache.tkb
-$(LINUX_USER_DIR)/block_cache/block_cache_exe.o: LINUX_USER_EXTRA_SRCS := kernel/drivers/block/block_cache.tkb
+# what a single-core boot cannot show. execution_model.tkb comes along
+# because the cache's per-core slots are sized by its KERNEL_MAX_CORES.
+$(LINUX_USER_DIR)/block_cache/block_cache_exe.o: kernel/drivers/block/block_cache.tkb kernel/lib/execution_model.tkb
+$(LINUX_USER_DIR)/block_cache/block_cache_exe.o: LINUX_USER_EXTRA_SRCS := kernel/lib/execution_model.tkb kernel/drivers/block/block_cache.tkb
 
 # GitHub issue #445: the kernel's own spinlock, compiled and run natively.
 # The same source the kernel links, not a copy -- see the freelist/slotmap

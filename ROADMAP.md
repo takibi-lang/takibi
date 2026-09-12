@@ -522,20 +522,15 @@ The active order, re-derived 2026-09-11, is:
    linked-ELF-derived RPi5 allocator expectation
    (`allocator_pages=259624`) therefore has physical-board evidence before
    #533 changes what core 1 admits.
-2. **#9 block-cache capacity handoff:** replace
-   `BLOCK_CACHE_CORES = 2` with the existing `KERNEL_MAX_CORES` constant in
-   `kernel/drivers/block/block_cache.tkb`. This is green while the maximum is
-   still two, and lets Territory A raise it later without a lockstep edit
-   across the boundary. The compiler's existing static assertion exposed this
-   dependency when the four-core capacity build was tried. One wiring step
-   comes with it:
-   - The native test `linux_user/block_cache` compiles `block_cache.tkb` on
-     its own, and that file has no `use`.
-   - `KERNEL_MAX_CORES` is defined in `kernel/lib/execution_model.tkb`.
-   - So in the same change, add that file to the test's
-     `LINUX_USER_EXTRA_SRCS` and to its Makefile prerequisite, and check that
-     it passes the native unused-function rule.
-   - The test's cases name only cores 0 and 1, so they stay valid at four.
+2. **#9 block-cache capacity handoff, done 2026-09-12.**
+   `kernel/drivers/block/block_cache.tkb` sizes its per-core slots by
+   `KERNEL_MAX_CORES` directly, so Territory A can raise the maximum without
+   an edit across the boundary. `memory.tkb`'s `BLOCK_CACHE_CORES ==
+   KERNEL_MAX_CORES` assertion went with the constant, since it could no
+   longer fail. `linux_user/block_cache` now compiles
+   `kernel/lib/execution_model.tkb` beside the cache and passes the native
+   unused-function rule. The same test, built against a scratch copy with
+   the maximum at four, also passes.
 3. **#533** admit one bounded read-only ext2 workload on core 1. The first
    contract is read-only; mutation remains serialized until its separate
    ownership audit. This is the filesystem half #9 must not invent in

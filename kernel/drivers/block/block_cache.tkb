@@ -18,8 +18,10 @@
 //   every chunk and each data block once, so the data blocks are what an LRU
 //   gives up; round-robin would have evicted the metadata instead.
 //
-// One set of slots per core, indexed by the core number the caller passes,
-// the way ext2's scratch buffers and the block counters already are: a
+// One set of slots per core, indexed by the core number the caller passes
+// and sized by execution_model.tkb's KERNEL_MAX_CORES, the way ext2's scratch
+// buffers and the block counters already are, so raising the build's core
+// maximum resizes this file with no edit here (GitHub issue #9): a
 // syscall that reaches the filesystem may run on either core. What one core
 // writes reaches the others through the write epoch -- the sum of every
 // core's write count, each count written only by its own core. A slot records
@@ -33,32 +35,31 @@
 
 const BLOCK_CACHE_BYTES: usize = 1024;
 const BLOCK_CACHE_SLOTS: usize = 16;
-const BLOCK_CACHE_CORES: usize = 2;
 
 must_use variant BlockCacheReadResult { Hit; Miss; }
 
 private let mut block_cache_data:
-    [u8; BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS * BLOCK_CACHE_BYTES];
-private let mut block_cache_backend: [u8; BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS];
-private let mut block_cache_block: [usize; BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS];
-private let mut block_cache_valid: [bool; BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS];
-private let mut block_cache_epoch: [usize; BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS];
-private let mut block_cache_used: [usize; BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS];
-private let mut block_cache_tick: [usize; BLOCK_CACHE_CORES];
-private let mut block_cache_hits: [usize; BLOCK_CACHE_CORES];
-private let mut block_cache_writes: [usize; BLOCK_CACHE_CORES];
+    [u8; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS * BLOCK_CACHE_BYTES];
+private let mut block_cache_backend: [u8; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS];
+private let mut block_cache_block: [usize; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS];
+private let mut block_cache_valid: [bool; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS];
+private let mut block_cache_epoch: [usize; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS];
+private let mut block_cache_used: [usize; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS];
+private let mut block_cache_tick: [usize; KERNEL_MAX_CORES];
+private let mut block_cache_hits: [usize; KERNEL_MAX_CORES];
+private let mut block_cache_writes: [usize; KERNEL_MAX_CORES];
 
 private fn block_cache_write_epoch() -> usize {
     signal_fence();
     let mut epoch: usize = 0;
-    for core: usize in 0..<BLOCK_CACHE_CORES {
+    for core: usize in 0..<KERNEL_MAX_CORES {
         epoch = epoch + block_cache_writes[core];
     }
     return epoch;
 }
 
-private fn block_cache_touch(core: {0..<BLOCK_CACHE_CORES as usize},
-                             index: {0..<BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS as usize}) {
+private fn block_cache_touch(core: {0..<KERNEL_MAX_CORES as usize},
+                             index: {0..<KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS as usize}) {
     let tick: usize = block_cache_tick[core] + 1;
     block_cache_tick[core] = tick;
     block_cache_used[index] = tick;
@@ -67,14 +68,14 @@ private fn block_cache_touch(core: {0..<BLOCK_CACHE_CORES as usize},
 // The slot of this core that holds (backend, block) at the current epoch.
 must_use variant BlockCacheSlot {
     Missing;
-    Found({0..<BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS as usize});
+    Found({0..<KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS as usize});
 }
 
-private fn block_cache_find(core: {0..<BLOCK_CACHE_CORES as usize},
+private fn block_cache_find(core: {0..<KERNEL_MAX_CORES as usize},
                             backend: u8, block: usize) -> BlockCacheSlot {
     let epoch: usize = block_cache_write_epoch();
     for slot: usize in 0..<BLOCK_CACHE_SLOTS {
-        let index: {0..<BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS as usize} =
+        let index: {0..<KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS as usize} =
             core * BLOCK_CACHE_SLOTS + slot;
         if (block_cache_valid[index] && block_cache_epoch[index] == epoch &&
             block_cache_backend[index] == backend &&
@@ -87,16 +88,16 @@ private fn block_cache_find(core: {0..<BLOCK_CACHE_CORES as usize},
 
 // The slot a fill takes: the one already holding the block if there is one,
 // else an empty or stale one, else the least recently used.
-private fn block_cache_victim(core: {0..<BLOCK_CACHE_CORES as usize},
+private fn block_cache_victim(core: {0..<KERNEL_MAX_CORES as usize},
                               backend: u8, block: usize)
-        -> {0..<BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS as usize} {
+        -> {0..<KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS as usize} {
     let epoch: usize = block_cache_write_epoch();
-    let base: {0..<BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS as usize} =
+    let base: {0..<KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS as usize} =
         core * BLOCK_CACHE_SLOTS;
-    let mut victim: {0..<BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS as usize} = base;
+    let mut victim: {0..<KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS as usize} = base;
     let mut oldest: usize = 0xFFFFFFFFFFFFFFFF;
     for slot: usize in 0..<BLOCK_CACHE_SLOTS {
-        let index: {0..<BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS as usize} =
+        let index: {0..<KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS as usize} =
             core * BLOCK_CACHE_SLOTS + slot;
         if (block_cache_valid[index] == false ||
             block_cache_epoch[index] != epoch) {
@@ -114,10 +115,10 @@ private fn block_cache_victim(core: {0..<BLOCK_CACHE_CORES as usize},
     return victim;
 }
 
-private fn block_cache_store(core: {0..<BLOCK_CACHE_CORES as usize},
+private fn block_cache_store(core: {0..<KERNEL_MAX_CORES as usize},
                              backend: u8, block: usize,
                              source: borrow [u8; BLOCK_CACHE_BYTES..]) {
-    let index: {0..<BLOCK_CACHE_CORES * BLOCK_CACHE_SLOTS as usize} =
+    let index: {0..<KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS as usize} =
         block_cache_victim(core, backend, block);
     let base: usize = index * BLOCK_CACHE_BYTES;
     slice_copy(block_cache_data[base..<base + BLOCK_CACHE_BYTES],
@@ -133,8 +134,8 @@ private fn block_cache_store(core: {0..<BLOCK_CACHE_CORES as usize},
 fn block_cache_read(core: usize, backend: u8, block: usize,
                     destination: borrow [u8; BLOCK_CACHE_BYTES..])
         -> BlockCacheReadResult {
-    if (core >= BLOCK_CACHE_CORES) { return BlockCacheReadResult::Miss; }
-    let here: {0..<BLOCK_CACHE_CORES as usize} = core;
+    if (core >= KERNEL_MAX_CORES) { return BlockCacheReadResult::Miss; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = core;
     match block_cache_find(here, backend, block) {
         BlockCacheSlot::Missing => { return BlockCacheReadResult::Miss; }
         BlockCacheSlot::Found(index) => {
@@ -151,8 +152,8 @@ fn block_cache_read(core: usize, backend: u8, block: usize,
 // After a device read: keep what was read.
 fn block_cache_fill(core: usize, backend: u8, block: usize,
                     source: borrow [u8; BLOCK_CACHE_BYTES..]) {
-    if (core >= BLOCK_CACHE_CORES) { return; }
-    let here: {0..<BLOCK_CACHE_CORES as usize} = core;
+    if (core >= KERNEL_MAX_CORES) { return; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = core;
     block_cache_store(here, backend, block, source);
 }
 
@@ -161,8 +162,8 @@ fn block_cache_fill(core: usize, backend: u8, block: usize,
 fn block_cache_note_write(core: usize, backend: u8, block: usize,
                           source: borrow [u8; BLOCK_CACHE_BYTES..],
                           written: bool) {
-    if (core >= BLOCK_CACHE_CORES) { return; }
-    let here: {0..<BLOCK_CACHE_CORES as usize} = core;
+    if (core >= KERNEL_MAX_CORES) { return; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = core;
     block_cache_writes[here] = block_cache_writes[here] + 1;
     signal_fence();
     if (written) {
@@ -174,8 +175,8 @@ fn block_cache_note_write(core: usize, backend: u8, block: usize,
 // USB path --
 // retires every copy the same way.
 fn block_cache_forget_all(core: usize) {
-    if (core >= BLOCK_CACHE_CORES) { return; }
-    let here: {0..<BLOCK_CACHE_CORES as usize} = core;
+    if (core >= KERNEL_MAX_CORES) { return; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = core;
     block_cache_writes[here] = block_cache_writes[here] + 1;
     signal_fence();
 }
@@ -188,7 +189,7 @@ fn block_cache_epoch_now() -> usize {
 
 fn block_cache_hit_total() -> usize {
     let mut total: usize = 0;
-    for core: usize in 0..<BLOCK_CACHE_CORES {
+    for core: usize in 0..<KERNEL_MAX_CORES {
         total = total + block_cache_hits[core];
     }
     return total;

@@ -381,11 +381,10 @@ fn block_device_is_usb(device: KernelBlockDevice) -> bool {
 
 // GitHub issue #208: the cache keeps one set of slots per core, indexed by
 // the cpu_id() block_read and block_write pass it, and one slot holds one
-// block. And a core must not enter block_read again before its first call
-// returns, which is what a non-preemptible kernel guarantees.
+// block. Its slots are sized by KERNEL_MAX_CORES itself, so the core count
+// needs no assertion here. And a core must not enter block_read again before
+// its first call returns, which is what a non-preemptible kernel guarantees.
 fn block_cache_execution_model_assumption() {
-    static_assert(BLOCK_CACHE_CORES == KERNEL_MAX_CORES,
-                  "block_cache.tkb keeps one set of slots per core");
     static_assert(BLOCK_CACHE_BYTES == KERNEL_BLOCK_SIZE,
                   "a block cache slot holds exactly one block");
     static_assert(KERNEL_PREEMPTIBLE == 0,
