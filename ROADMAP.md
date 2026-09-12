@@ -411,12 +411,20 @@ returning through a frame under the wrong address space. Exit handoffs remain.
    runs on core 0, so the peer side of the rule can only be tested that way.
    It is also where #533's reader will plug in, through a third progress tag
    that this territory adds to `workload_evidence.tkb` once #552 lands.
-4. **Raising `KERNEL_MAX_CORES` grows the block layer.** Each core carries
-   16 KiB of block cache, a 64 KiB read-ahead run and 2 KiB of ext2
-   scratch. Going from two cores to four adds about 164 KiB of `.bss`, so
-   the linked-kernel allocator expectations in
-   `buildcheck_kernel_memory_map.py` will move. The RPi5 figure has board
-   evidence only at two cores.
+4. **Raising `KERNEL_MAX_CORES` grows `.bss`, and the memory map is ready
+   for it.** The block layer alone carries 16 KiB of cache, a 64 KiB
+   read-ahead run and 2 KiB of ext2 scratch per core. A scratch build at
+   four cores measured the whole growth: about 244 KiB of `.bss`, taking
+   RPi5's image span from `0x408000` to `0x440000` and QEMU's from
+   `0x178000` to `0x1b8000`. Its only compile error was the crash-trace
+   storage, which has to become CORES x EVENTS (64 slots and 768 words).
+   The memory-map half of 06e44cb4 is done. The stack offsets and the six
+   allocator expectations follow the new stacks, which cost 48 pages, and
+   the image ceiling was raised to `0x4c0000` on purpose. That covers four
+   cores with 512 KiB to spare, and the growth is NOBITS, which costs no
+   SWD time (`kernel/MEMORY_MAP.md` records why). The allocator
+   expectations will move again at four cores. The RPi5 figure has board
+   evidence only at the two-core layout of 2026-09-11.
 
 #### Handed over from Territory B, 2026-09-11
 

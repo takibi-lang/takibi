@@ -15,7 +15,7 @@ from pathlib import Path
 
 MULTIBANK_EXPECTED = (
     b"memory: source=dtb base_bytes=1073741824 detected_mib=1024 "
-    b"regions=1 reservations=0 allocator_pages=261816")
+    b"regions=1 reservations=0 allocator_pages=261768")
 # The page count is what is left after every statically laid-out kernel
 # region, so it moves whenever the image or the linker script does -- which
 # is the point of asserting it exactly rather than as a range. It went
@@ -25,14 +25,16 @@ MULTIBANK_EXPECTED = (
 # frame pointers later grew the linked QEMU image by 8 pages (32 KiB), moving
 # this count and the topology variants below down by 8. The deterministic
 # contention probes later crossed the next stack-group alignment boundary,
-# moving them down by another 8 pages.
+# moving them down by another 8 pages. Reserving boot and per-core stacks
+# for cores 2 and 3 as well as core 1 then moved them down by 48 pages
+# (192 KiB): two 32 KiB boot stacks and two 64 KiB per-core groups.
 LOW_MEMORY_EXPECTED = (
     b"memory: source=dtb base_bytes=1073741824 detected_mib=128 "
-    b"regions=1 reservations=0 allocator_pages=32440")
+    b"regions=1 reservations=0 allocator_pages=32392")
 MISSING_EXPECTED = b"memory: boot DTB has no usable /memory; halting"
 DISCONTIGUOUS_MEMORY_EXPECTED = (
     b"memory: source=dtb base_bytes=1073741824 detected_mib=768 "
-    b"regions=2 reservations=0 allocator_pages=196280")
+    b"regions=2 reservations=0 allocator_pages=196232")
 DISCONTIGUOUS_PROBE_EXPECTED = (
     b"memory: physical hole excluded and both extent boundaries round-trip")
 

@@ -127,20 +127,22 @@ kernels.
 | `boot_stack_run_bottom` | `+0x00000` | linker script `.stack` | CHECKED (ELF offset) |
 | `boot_stack_bottom` | `+0x04000` | linker script `.stack` | CHECKED (ELF offset) |
 | `boot_stack_top` | `+0x08000` | linker script `.stack` | CHECKED (ELF offset) |
+| `secondary_stack_base` | `+0x08000` | linker script `.stack` | CHECKED (ELF offset) |
 | `secondary_stack_run_bottom` | `+0x08000` | linker script `.stack` | CHECKED (ELF offset) |
 | `secondary_stack_bottom` | `+0x0c000` | linker script `.stack` | CHECKED (ELF offset) |
 | `secondary_stack_top` | `+0x10000` | linker script `.stack` | CHECKED (ELF offset) |
-| `percpu_stack_base` | `+0x10000` | linker script `.stack` | CHECKED (ELF offset) |
-| `overflow_stack_run_bottom` | `+0x10000` | linker script `.stack` | CHECKED (ELF offset) |
-| `overflow_stack_bottom` | `+0x14000` | linker script `.stack` | CHECKED (ELF offset) |
-| `overflow_stack_top` | `+0x18000` | linker script `.stack` | CHECKED (ELF offset) |
-| `irq_stack_run_bottom` | `+0x18000` | linker script `.stack` | CHECKED (ELF offset) |
-| `irq_stack_bottom` | `+0x1c000` | linker script `.stack` | CHECKED (ELF offset) |
-| `irq_stack_top` | `+0x20000` | linker script `.stack` | CHECKED (ELF offset) |
-| `percpu_stack_group_end` | `+0x20000` | linker script `.stack` | CHECKED (ELF offset) |
-| `secondary_percpu_stack_base` | `+0x20000` | linker script `.stack` | CHECKED (ELF offset) |
-| `percpu_stack_end` | `+0x30000` | linker script `.stack` | CHECKED (ELF offset) |
-| `usable_ram_start` | `+0x30000` | linker script, `ALIGN(4096)` | CHECKED (ELF offset) |
+| `secondary_stack_group_end` | `+0x10000` | linker script `.stack` | CHECKED (ELF offset) |
+| `percpu_stack_base` | `+0x20000` | linker script `.stack` | CHECKED (ELF offset) |
+| `overflow_stack_run_bottom` | `+0x20000` | linker script `.stack` | CHECKED (ELF offset) |
+| `overflow_stack_bottom` | `+0x24000` | linker script `.stack` | CHECKED (ELF offset) |
+| `overflow_stack_top` | `+0x28000` | linker script `.stack` | CHECKED (ELF offset) |
+| `irq_stack_run_bottom` | `+0x28000` | linker script `.stack` | CHECKED (ELF offset) |
+| `irq_stack_bottom` | `+0x2c000` | linker script `.stack` | CHECKED (ELF offset) |
+| `irq_stack_top` | `+0x30000` | linker script `.stack` | CHECKED (ELF offset) |
+| `percpu_stack_group_end` | `+0x30000` | linker script `.stack` | CHECKED (ELF offset) |
+| `secondary_percpu_stack_base` | `+0x30000` | linker script `.stack` | CHECKED (ELF offset) |
+| `percpu_stack_end` | `+0x60000` | linker script `.stack` | CHECKED (ELF offset) |
+| `usable_ram_start` | `+0x60000` | linker script, `ALIGN(4096)` | CHECKED (ELF offset) |
 
 ### The image ceiling
 
@@ -153,11 +155,26 @@ the one row `--update` refuses to move for you.
 
 | Span | Ceiling | State |
 |---|---|---|
-| `usable_ram_start` - `_start` | `0x00400000` | CHECKED (ELF ceiling) |
+| `usable_ram_start` - `_start` | `0x004c0000` | CHECKED (ELF ceiling) |
 
-Measured when this ceiling was set: RPi5 `0x390000`
-(3.56 MiB), QEMU `0x398000`
-(3.59 MiB).
+Raised from `0x400000` on 2026-09-12, when reserving boot and per-core
+stacks for cores 2 and 3 took RPi5 to `0x408000` (4.03 MiB). QEMU was
+`0x178000` (1.47 MiB); it embeds no root filesystem, so RPi5 is the
+platform this bound is about. The growth was `0x30000`, all of it stacks.
+
+The new value covers the next step already in view. With
+`KERNEL_MAX_CORES` at 4 -- measured in a scratch build before that change
+landed -- RPi5 is `0x440000` (4.25 MiB) and QEMU `0x1b8000`, and `.bss`
+grows by about 244 KiB of per-core arrays. `0x4c0000` leaves 512 KiB above
+that, close to the 448 KiB the previous value left when it was set.
+
+What the span costs is not one number. The RPi5 lane loads the ELF with
+OpenOCD's `load_image ... elf`, which writes each LOAD segment's file
+contents, so SWD time follows the file bytes -- about 3.0 MiB, mostly the
+embedded root filesystem in `.data`. It does not follow the span. `.bss`
+and `.stack` are NOBITS, and growth in either costs no transfer time; all
+of this raise is growth of that kind. A growth that adds file bytes is the
+kind that costs SWD time.
 
 ### What still holds the boundaries that have no row
 
@@ -176,10 +193,20 @@ it. `percpu_stack_end` and `usable_ram_start` are the same address:
 `.stack` ends where the page pool begins, and it is already page-aligned.
 
 The rows from `percpu_stack_base` to `percpu_stack_group_end` are core 0's
-PER-CORE stack group, and `secondary_percpu_stack_base` is core 1's copy of
-the same shape one stride later. The named symbols are core 0's; each core's
-entry path puts its own byte offset into TPIDR_EL1, and the generated
-exception entries add it.
+PER-CORE stack group, and `secondary_percpu_stack_base` is where cores 1 to 3
+begin: three more copies of the same shape, one stride apart, so
+`percpu_stack_end` sits four strides above `percpu_stack_base`. The named
+symbols are core 0's; each core's entry path puts its own byte offset into
+TPIDR_EL1, and the generated exception entries add it.
+
+The secondary boot stacks have the same arrangement.
+`secondary_stack_base` to `secondary_stack_group_end` is core 1's, and
+cores 2 and 3 follow at that stride, with no symbols of their own. Their
+entry code derives the stride from those two symbols. So the block reserves
+storage for four cores whatever `KERNEL_MAX_CORES` says. The allocator
+counts in the views and in `kernel/tests/check_fdt_multibank_qemu.py` fell
+by 48 pages when cores 2 and 3 were added: two 32 KiB boot stacks and two
+64 KiB per-core groups.
 
 ### An address between `_start` and `usable_ram_start` is kernel image
 

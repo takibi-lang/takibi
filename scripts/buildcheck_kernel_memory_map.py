@@ -329,11 +329,17 @@ def check_image_ceiling(text, problems):
                 # and then fail to transfer -- while a 30x clock over 1 MHz
                 # bought only 4x throughput, so the link is overhead-bound
                 # and there is nothing left to tune.
-                f"Raising it is not free: the whole image is pushed to the "
-                f"board over SWD at about 187 KiB/s, so each added MiB costs "
-                f"roughly 5.5 s on every RPi5 lane run, inside the stretch "
-                f"where make allcheck is waiting on that lane alone. Most of "
-                f"the image is the embedded ext2 rootfs, so if what grew is "
+                # The span is not what SWD pays for: load_image writes each
+                # LOAD segment's file bytes, and .bss and .stack have none.
+                # The 2026-09-12 raise was entirely stacks and cost nothing
+                # to load; kernel/MEMORY_MAP.md records that decision.
+                f"Look at what grew. .bss and .stack are NOBITS, and OpenOCD's "
+                f"load_image writes only file bytes, so growth there costs no "
+                f"transfer time. Growth in file bytes is not free: those go "
+                f"to the board over SWD at about 187 KiB/s, so each added MiB "
+                f"costs roughly 5.5 s on every RPi5 lane run, inside the "
+                f"stretch where make allcheck is waiting on that lane alone. "
+                f"Most of the file is the embedded ext2 rootfs, so if what grew is "
                 f"rootfs CONTENT rather than kernel code, the cheaper answer "
                 f"may be to stop embedding it: the board already writes that "
                 f"same filesystem to USB mass storage at about 29 MB/s "
