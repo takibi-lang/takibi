@@ -558,12 +558,13 @@ The active order, re-derived 2026-09-12, is:
    marker, the persistent HTTP lifecycle, and DDB world-stop/continue. The
    linked-ELF-derived RPi5 allocator expectation
    (`allocator_pages=259624`) therefore has physical-board evidence before
-   #533 changes what core 1 admits. **Owed at the next natural hardware
-   boundary:** the block-device serialization commit has QEMU evidence
-   only. Take it with the next board run rather than running the board
-   for that commit alone. With no board attached, `make allcheck` refuses
-   the RPi5 lane on purpose; `make cicheck` is the aggregate for that
-   case.
+   #533 changes what core 1 admits. **The board has run everything since
+   too**, on 2026-09-12. Territory A ran it after the block-device
+   serialization. This territory ran it after the peer console channel and
+   the memory map's four-core stacks: all 46 views, `peer_console` among
+   them, and `allocator_pages=259576`. With no board attached, `make
+   allcheck` refuses the RPi5 lane on purpose; `make cicheck` is the
+   aggregate for that case.
 2. **#9 block-cache capacity handoff, done 2026-09-12.**
    `kernel/drivers/block/block_cache.tkb` sizes its per-core slots by
    `KERNEL_MAX_CORES` directly, so Territory A can raise the maximum without
@@ -602,10 +603,10 @@ The active order, re-derived 2026-09-12, is:
    maintainer-approved crossing into `lib/`. `linux_user/peer_console`
    drives the ring past full. A bounded probe sends four records from
    core 1 through `uart_user_write` on every boot, and the shared
-   `peer_console` view compares them. **Still owed:** an RPi5 run at the
-   next hardware boundary; a DDB BREAK while peer records are queued; and
-   a real writing process on a peer, which is phase B's admission to widen
-   once this contract is in.
+   `peer_console` view compares them, and the RPi5 lane passed it on
+   2026-09-12. **Still owed:** a DDB BREAK while peer records are queued;
+   and a real writing process on a peer, which is phase B's admission to
+   widen once this contract is in.
 6. **#281, re-scoped by measurement before any code.** #545's block-layer
    read-ahead (6a4828f) already turns a device read that continues the last
    one into a single 64-block command. On the first measured boot, 663 runs
