@@ -406,6 +406,17 @@ returning through a frame under the wrong address space. Exit handoffs remain.
    reaches a block device from a new path goes through `block_read` or
    `block_write` and gets it for free. `usb_provision.tkb` is the one
    exception: it runs before any process exists.
+3. **A request for #552's shape.** When the admission rule becomes one
+   predicate, please let it take the CPU as a parameter. The scheduler probe
+   runs on core 0, so the peer side of the rule can only be tested that way.
+   It is also where #533's reader will plug in, through a third progress tag
+   that this territory adds to `workload_evidence.tkb` once #552 lands.
+4. **Raising `KERNEL_MAX_CORES` grows the block layer.** Each core carries
+   16 KiB of block cache, a 64 KiB read-ahead run and 2 KiB of ext2
+   scratch. Going from two cores to four adds about 164 KiB of `.bss`, so
+   the linked-kernel allocator expectations in
+   `buildcheck_kernel_memory_map.py` will move. The RPi5 figure has board
+   evidence only at two cores.
 
 #### Handed over from Territory B, 2026-09-11
 
@@ -532,14 +543,19 @@ None is queued above; they are recorded so they are not rediscovered.
 
 ### Territory B queue -- multicore boundaries, then independent priorities
 
-The active order, re-derived 2026-09-11, is:
+The active order, re-derived 2026-09-12, is:
 
 1. **Board lane complete on the combined tree.** `make kernelcheck-rpi5`
    passed after #546's fix and the rebase onto #532, including the migration
    marker, the persistent HTTP lifecycle, and DDB world-stop/continue. The
    linked-ELF-derived RPi5 allocator expectation
    (`allocator_pages=259624`) therefore has physical-board evidence before
-   #533 changes what core 1 admits.
+   #533 changes what core 1 admits. **Owed at the next natural hardware
+   boundary:** the block-device serialization commit has QEMU evidence
+   only. Take it with the next board run rather than running the board
+   for that commit alone. With no board attached, `make allcheck` refuses
+   the RPi5 lane on purpose; `make cicheck` is the aggregate for that
+   case.
 2. **#9 block-cache capacity handoff, done 2026-09-12.**
    `kernel/drivers/block/block_cache.tkb` sizes its per-core slots by
    `KERNEL_MAX_CORES` directly, so Territory A can raise the maximum without
@@ -553,16 +569,23 @@ The active order, re-derived 2026-09-11, is:
    contract is read-only; mutation remains serialized until its separate
    ownership audit. This is the filesystem half #9 must not invent in
    Territory A. **Paused 2026-09-12 by the maintainer's decision**, after
-   its first half: block-device exclusion (commit "issue one block-device command at a time across cores"). The read-path audit
-   and the workload design are on #533. The workload cannot end safely
-   on core 1 until **#552**, in Territory A, is fixed; see the handover
-   below.
-4. **#534** publish direct userspace UART output from peer CPUs through the
+   its first half: block-device exclusion (commit "issue one block-device
+   command at a time across cores"). The read-path audit and the workload
+   design are on #533. The workload cannot end safely on core 1 until
+   **#552** is fixed. Territory A took #552 as its next item on 2026-09-12;
+   keep #533 paused until that boundary lands.
+4. **`kernelcheck-ddb-qemu`, repaired 2026-09-12.** Territory A's b0922aab
+   made `kernel_secondary_boot_state` one slot per core, and
+   `scripts/kernel_state.gdb`'s `_tk_online_cpus()` still converted the
+   whole symbol to an integer. Every DDB postmortem failed with `Cannot
+   convert value to long`. It now reads each slot and counts core N as
+   online when slot N holds `0x100 + N`.
+5. **#534** publish direct userspace UART output from peer CPUs through the
    sole ordinary core-0 writer, with bounded backpressure and an emergency
    DDB/fatal path that never waits for it. This is the console half #9 must
    not bypass. It covers output only. UART input on a peer CPU is #547; see
    the #9 phase B entry in the Territory A queue.
-5. **#281, re-scoped by measurement before any code.** #545's block-layer
+6. **#281, re-scoped by measurement before any code.** #545's block-layer
    read-ahead (6a4828f) already turns a device read that continues the last
    one into a single 64-block command. On the first measured boot, 663 runs
    answered 36,963 block reads, and about 500 single-block reads remained.
@@ -570,10 +593,10 @@ The active order, re-derived 2026-09-11, is:
    write side, which #281 also names. The likely outcomes are closing #281 as
    superseded, or narrowing it to writes. This is the only place the plan
    tracks #281.
-6. **#542** finish the inventory of kernel-side verification machinery and
+7. **#542** finish the inventory of kernel-side verification machinery and
    move userspace-observable checks behind fork/exec. This is independent of
    scheduler affinity and can follow #281 without touching Territory A.
-7. **#550 and #551, from the #546 audit.** #550 sweeps every
+8. **#550 and #551, from the #546 audit.** #550 sweeps every
    `ProcessWaitReason` for the check-then-block window #546 found. UartRx
    and UartTx are closed. NetRx has the window but recovers on the peer's
    retransmission. ChildExit, Signal and Deadline are unexamined. #550 also
@@ -583,7 +606,7 @@ The active order, re-derived 2026-09-11, is:
    (queued RX bytes, TX room, pending frames) beside each blocked waiter:
    #546's two postmortems showed the blocked shell and not the byte it was
    waiting for. #549 (depfiles, `lib/`) is Territory A's.
-8. **#537 close audit**, then #535 or #536 only when a current filesystem
+9. **#537 close audit**, then #535 or #536 only when a current filesystem
    caller requires them. Rename landed under the already-closed #538, so the
    remaining task on #537 is to re-check its acceptance evidence and close it
    if nothing remains, not to grow its scope.

@@ -120,12 +120,15 @@ def _tk_thread_cpus():
     return [thread.num for thread in threads], stopped_threads, stopped_cpus
 
 
+# kernel_secondary_boot_state has one slot per core, and a started core
+# publishes 0x100 + its own number in its own slot. Nothing writes slot 0:
+# core 0 is online by being the core that booted.
 def _tk_online_cpus():
     online = [0]
-    secondary = _tk_constant("SECONDARY_CORE_ID")
-    state = _tk_int(_tk_eval("kernel_secondary_boot_state"))
-    if state == 0x100 + secondary:
-        online.append(secondary)
+    state = _tk_eval("kernel_secondary_boot_state")
+    for cpu in range(1, _tk_constant("KERNEL_MAX_CORES")):
+        if _tk_int(_tk_array_item(state, cpu)) == 0x100 + cpu:
+            online.append(cpu)
     return online
 
 
