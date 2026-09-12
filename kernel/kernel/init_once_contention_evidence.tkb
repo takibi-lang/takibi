@@ -2,8 +2,9 @@
 // The first phase deterministically reproduces the old check-then-set race;
 // the second starts from the same rendezvous and uses production InitOnce.
 //
-// Current limitations (2026-09-10): one primary and one secondary participate,
-// matching the maintained KERNEL_ACTIVE_CORES=2 configuration.
+// Current limitations (2026-09-12): one primary and one secondary participate.
+// secondary.tkb admits only core 1 to this probe even when more CPUs are
+// online.
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/init_once.tkb";
 
@@ -105,8 +106,8 @@ private fn init_once_probe_prepare(phase: usize) !{unsafe} {
 }
 
 fn init_once_contention_probe() -> bool !{unsafe} {
-    static_assert(KERNEL_ACTIVE_CORES == 2,
-                  "init-once contention evidence currently has one peer");
+    static_assert(KERNEL_ACTIVE_CORES >= 2,
+                  "init-once contention evidence requires one peer");
     init_once_probe_naive_complete = 0;
     init_once_probe_prepare(1);
     let primary_saw_free: bool = init_once_probe_naive_complete == 0;

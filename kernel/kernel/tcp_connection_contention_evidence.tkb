@@ -1,9 +1,9 @@
 // Two-core evidence that TcpConnectionOwner is the critical section around
 // one connection's multi-statement protocol-state transitions.
 //
-// Current limitations (2026-09-10): this uses one private connection and one
-// peer, matching KERNEL_ACTIVE_CORES=2. It tests exclusion and handoff, not
-// network-device timing.
+// Current limitations (2026-09-12): this uses one private connection and one
+// peer. secondary.tkb admits only core 1 to this probe even when more CPUs are
+// online. It tests exclusion and handoff, not network-device timing.
 use "kernel/lib/execution_model.tkb";
 
 private let mut tcp_owner_probe_armed: usize;
@@ -65,8 +65,8 @@ private fn tcp_owner_probe_run_phase(phase: usize) -> bool !{unsafe} {
 }
 
 fn tcp_connection_contention_probe() -> bool !{unsafe} {
-    static_assert(KERNEL_ACTIVE_CORES == 2,
-                  "TCP connection contention evidence currently has one peer");
+    static_assert(KERNEL_ACTIVE_CORES >= 2,
+                  "TCP connection contention evidence requires one peer");
     tcp_connection_pool_init();
     let owner = match tcp_connection_alloc() {
         TcpConnectionAllocResult::Full => { return false; }
