@@ -1298,6 +1298,114 @@ let reject_publish_place loc (base : Ast.expr) what =
         what record field field))
   | None -> ()
 
+(* GitHub issue #476: which record each `publish_begin` call began, keyed by
+   the call's own location. Filled where inference resolves the argument's
+   type; read by check_publish_definite_assignment, which walks the AST
+   after inference and has no types of its own. *)
+let publish_begin_record : (Ast.loc, string) Hashtbl.t = Hashtbl.create 16
+
+(* The payload fields a commit requires. An array field is not among them:
+   it is written element by element, usually in a loop that may run no
+   times, so "assigned on every path" would never hold of it. Its unwritten
+   elements read as publish_begin's scrub leaves them, and a record that
+   carries one says how much of it is meaningful in a scalar field of its
+   own -- which IS required. *)
+let publish_required_fields record =
+  let rec is_array = function
+    | Ast.TypeArray _ -> true
+    | Ast.TypeRefined (_, _, t) -> is_array t
+    | _ -> false
+  in
+  List.filter_map (fun (fname, fty) ->
+    if is_array fty then None else Some fname)
+    (Publish_registry.payload_fields record)
+
+(* GitHub issue #476: definite assignment for a publish record's payload.
+   The token proved every payload store happens between the clear and the
+   commit; it did not prove the writer wrote them all, and a forgotten
+   field was published as the scrub's zero, indistinguishable from a zero
+   the writer meant.
+
+   A token cannot leave the function that began it -- its type name is not
+   one a parameter can spell -- so one walk per function body sees
+   everything that happens to it. State per live token: the fields assigned
+   on every path so far. An `if` or `match` merges its arms by
+   intersection; an arm that returns reaches nothing after it and is left
+   out. A loop body may run no times, so what it assigns does not survive
+   it, though a commit inside it is checked against what the body did.
+   publish_abandon has no requirement: abandoning says the record is not
+   being published. *)
+let check_publish_definite_assignment (body : Ast.stmt list) =
+  let arm_body = function
+    | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b)
+    | Ast.ArmByteSliceLit (_, b) -> b
+  in
+  let merge results =
+    match List.filter (fun (_, dead) -> not dead) results with
+    | [] -> (StringMap.empty, true)
+    | (first, _) :: rest ->
+        (List.fold_left (fun acc (m, _) ->
+           StringMap.merge (fun _ a b -> match a, b with
+             | Some (r, s1), Some (_, s2) -> Some (r, StringSet.inter s1 s2)
+             | Some x, None | None, Some x -> Some x
+             | None, None -> None) acc m) first rest, false)
+  in
+  let rec walk env stmts =
+    List.fold_left (fun (env, dead) s ->
+      if dead then (env, dead) else walk_stmt env s) (env, false) stmts
+  and walk_stmt env (s : Ast.stmt) = match s.desc with
+    | Ast.Let (_, name, _, init, _) ->
+        let env = StringMap.remove name env in
+        (match init with
+         | Some ({ desc = Ast.Call ("publish_begin", _); _ } as call) ->
+             (match Hashtbl.find_opt publish_begin_record call.loc with
+              | Some record ->
+                  (StringMap.add name (record, StringSet.empty) env, false)
+              | None -> (env, false))
+         | _ -> (env, false))
+    | Ast.LetTuple (names, _) ->
+        (List.fold_left (fun env n -> StringMap.remove n env) env names, false)
+    | Ast.LetMatch (_, name, _, _, arms) ->
+        let (env, dead) = merge (List.map (fun a -> walk env (arm_body a)) arms) in
+        (StringMap.remove name env, dead)
+    | Ast.Expr e -> (walk_expr env e, false)
+    | Ast.Return _ -> (env, true)
+    | Ast.Block b | Ast.UnsafeBlock b -> walk env b
+    | Ast.If (_, yes, no) -> merge [walk env yes; walk env no]
+    | Ast.Match (_, arms) -> merge (List.map (fun a -> walk env (arm_body a)) arms)
+    | Ast.While (_, loop) | Ast.For (_, _, _, _, loop)
+    | Ast.ForEach (_, _, loop) ->
+        ignore (walk env loop);
+        (env, false)
+    | _ -> (env, false)
+  and walk_expr env (e : Ast.expr) = match e.desc with
+    | Ast.Assign ({ desc = Ast.FieldGet ({ desc = Ast.Var w; _ }, f); _ }, _) ->
+        (match StringMap.find_opt w env with
+         | Some (record, set) -> StringMap.add w (record, StringSet.add f set) env
+         | None -> env)
+    | Ast.Call ("publish_commit", { desc = Ast.Var w; _ } :: _) ->
+        (match StringMap.find_opt w env with
+         | Some (record, set) ->
+             let missing = List.filter (fun f -> not (StringSet.mem f set))
+                 (publish_required_fields record) in
+             if missing <> [] then
+               raise (TypeError (e.loc, Printf.sprintf
+                 "publish_commit publishes '%s' with payload field%s %s not \
+                  assigned on every path to it: a forgotten field would be \
+                  published as publish_begin's zero, which no reader can tell \
+                  from a zero that was meant. Assign %s through the token on \
+                  every path, or publish_abandon the record"
+                 record (if List.length missing = 1 then "" else "s")
+                 (String.concat ", " (List.map (fun f -> "'" ^ f ^ "'") missing))
+                 (if List.length missing = 1 then "it" else "them")));
+             StringMap.remove w env
+         | None -> env)
+    | Ast.Call ("publish_abandon", { desc = Ast.Var w; _ } :: _) ->
+        StringMap.remove w env
+    | _ -> env
+  in
+  ignore (walk StringMap.empty body)
+
 let is_linear_ptr_ty t = match repr t with
   | TPtr (TStruct n) -> StringSet.mem n !linear_opaque_names
   | TIndexedStruct (n, _) ->
@@ -3517,6 +3625,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       (match fname, args with
        | "publish_begin", [record] ->
            let name = record_of_ptr record "one argument" in
+           Hashtbl.replace publish_begin_record e.loc name;
            TPtr (TStruct (Publish_registry.token_name name))
        | "publish_begin", _ ->
            raise (TypeError (e.loc,
@@ -5934,6 +6043,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset type_checker_consumed_unsafe_at;
   Hashtbl.reset index_resolved_ty;  (* GitHub issue #311, fresh per compilation / per unit test *)
   Hashtbl.reset publish_field_at;   (* GitHub issue #534, same lifetime *)
+  Hashtbl.reset publish_begin_record;  (* GitHub issue #476, same lifetime *)
   Hashtbl.reset slice_cast_len;     (* GitHub issue #372, same lifetime *)
   Hashtbl.reset overflow_audit_table;
   Hashtbl.reset divisor_proven_nonzero_at;
@@ -9563,6 +9673,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     ) fdef.params
   in
   List.iter (function Ast.FuncDef f -> check_affine_func f | _ -> ()) prog;
+  (* GitHub issue #476: after the linear pass has proved every token is
+     consumed on every path, prove each commit saw every field written. *)
+  List.iter (function
+    | Ast.FuncDef f -> check_publish_definite_assignment f.Ast.body
+    | _ -> ()) prog;
   (* Effects are checker-only facts. Operational call effects are transitive properties of
      direct calls and effect-contracted indirect calls; `interrupt` and
      `exception` are declaration roots. Their root contracts are checked

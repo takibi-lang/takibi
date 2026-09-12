@@ -73,10 +73,12 @@ fn write_event(cpu: usize, code: usize, detail: usize, sequence: usize) {
 // The abandon path. A writer that decides mid-record not to publish still
 // has to discharge the token, and what it leaves behind is the same
 // unpublished state publish_begin created -- not a half-record.
-fn write_or_abandon(cpu: usize, code: usize, sequence: usize, keep: bool) {
+fn write_or_abandon(cpu: usize, code: usize, detail: usize, sequence: usize,
+                    keep: bool) {
     let w = publish_begin(&slot);
     w.cpu = cpu;
     w.code = code;
+    w.detail = detail;
     if (keep) {
         publish_commit(w, sequence);
     } else {
@@ -124,20 +126,20 @@ fn app_main() {
     uart_puts("after commit");
     report(publish_copy(&slot, &snapshot));
 
-    write_or_abandon(4, 44, 7, false);
+    write_or_abandon(4, 44, 444, 7, false);
     uart_puts("abandoned");
     report(publish_copy(&slot, &snapshot));
 
-    // write_or_abandon never touches `detail`. Before publish_begin
-    // scrubbed the payload this line reported detail=9999 -- a value
-    // belonging to an event two writes earlier, published as this one's,
-    // every field individually plausible and the record as a whole never
-    // having happened. It reads 0 now: a field the writer forgot reads as
-    // forgotten. The linear token proves the payload is written only
-    // between the clear and the commit; it does not prove the writer wrote
-    // ALL of it, and GitHub issue #476 holds making that a compile error.
-    write_or_abandon(5, 55, 8, true);
-    uart_puts("kept, detail never written");
+    // This used to leave `detail` unwritten. Before publish_begin scrubbed
+    // the payload the line reported detail=9999 -- a value belonging to an
+    // event two writes earlier, every field individually plausible and the
+    // record as a whole never having happened -- and after the scrub it
+    // read 0, which no reader could tell from a 0 that was meant. GitHub
+    // issue #476 made the forgetting itself a compile error: a commit
+    // requires every scalar payload field on every path to it, so the
+    // writer above has to name `detail` and this line reports what it set.
+    write_or_abandon(5, 55, 555, 8, true);
+    uart_puts("kept");
     report(publish_copy(&slot, &snapshot));
 
     // GitHub issue #534: the byte-array record, through the same states.

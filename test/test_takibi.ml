@@ -13470,6 +13470,7 @@ let codegen_tests = [
            "fn issue534_write(value: u8) {
               let w = publish_begin(&slot);
               w.bytes[3] = value;
+              w.len = 4;
               publish_commit(w, 1);
             }
             fn issue534_read() -> usize { return publish_copy(&slot, &out); }")
@@ -13553,6 +13554,87 @@ let codegen_tests = [
           }") ());
 
   Alcotest.test_case
+    "issue #476: a commit requires every scalar payload field on every path"
+    `Quick
+    (fun () ->
+       let record =
+         "struct publish Ev { seq: usize; cpu: usize; code: usize; detail: usize; }
+          let mut slot: Ev;
+          " in
+       (* The issue's own shape: detail is never written. The message names
+          the field. *)
+       expect_type_error "'detail'" (record ^
+         "fn issue476_forgot(cpu: usize, code: usize) {
+            let w = publish_begin(&slot);
+            w.cpu = cpu;
+            w.code = code;
+            publish_commit(w, 1);
+          }") ();
+       (* Path-sensitive: one arm is not every path. *)
+       expect_type_error "not assigned on every path" (record ^
+         "fn issue476_one_arm(keep: bool) {
+            let w = publish_begin(&slot);
+            w.cpu = 1;
+            w.code = 2;
+            if (keep) { w.detail = 3; }
+            publish_commit(w, 1);
+          }") ();
+       (* A loop may run no times, so a field it writes is not written. *)
+       expect_type_error "'detail'" (record ^
+         "fn issue476_loop() {
+            let w = publish_begin(&slot);
+            w.cpu = 1;
+            w.code = 2;
+            for i: usize in 0..<4 { w.detail = i; }
+            publish_commit(w, 1);
+          }") ();
+       expect_ok (record ^
+         "fn issue476_both_arms(keep: bool) {
+            let w = publish_begin(&slot);
+            w.cpu = 1;
+            w.code = 2;
+            if (keep) { w.detail = 3; } else { w.detail = 4; }
+            publish_commit(w, 1);
+          }") ();
+       (* An arm that returns reaches no commit after it. *)
+       expect_ok (record ^
+         "fn issue476_early(keep: bool) {
+            let w = publish_begin(&slot);
+            if (keep == false) { publish_abandon(w); return; }
+            w.cpu = 1;
+            w.code = 2;
+            w.detail = 3;
+            publish_commit(w, 1);
+          }") ();
+       (* Abandoning publishes nothing and requires nothing. *)
+       expect_ok (record ^
+         "fn issue476_abandon() {
+            let w = publish_begin(&slot);
+            w.cpu = 1;
+            publish_abandon(w);
+          }") ();
+       (* An array field is written element by element, usually in a loop;
+          it is scrubbed rather than required, and the scalar saying how
+          much of it is meaningful IS required. *)
+       expect_ok
+         "struct publish Line { seq: usize; len: usize; bytes: [u8; 8]; }
+          let mut line: Line;
+          fn issue476_array(n: usize) {
+            let w = publish_begin(&line);
+            for i: usize in 0..<8 { if (i < n) { w.bytes[i] = 1; } }
+            w.len = n;
+            publish_commit(w, 1);
+          }" ();
+       expect_type_error "'len'"
+         "struct publish Line { seq: usize; len: usize; bytes: [u8; 8]; }
+          let mut line: Line;
+          fn issue476_array_no_len() {
+            let w = publish_begin(&line);
+            w.bytes[0] = 1;
+            publish_commit(w, 1);
+          }" ());
+
+  Alcotest.test_case
     "issue #299: the operations reject wrong arities and wrong arguments"
     `Quick
     (fun () ->
@@ -13611,10 +13693,12 @@ let codegen_tests = [
     (fun () ->
        (* Order, not presence. The commit word goes first with a release so
           that no reader accepts the record while the payload scrub that
-          follows is scribbling on it; the payload goes at all so that a
-          field the writer forgets reads as forgotten rather than carrying
-          the previous record's value into this one. linux_user/publish
-          measured exactly that leak before the scrub existed. *)
+          follows is scribbling on it; the payload goes at all so that
+          nothing the writer leaves unwritten carries the previous record's
+          value into this one. linux_user/publish measured exactly that leak
+          before the scrub existed. Since GitHub issue #476 a scalar field
+          cannot be left unwritten, so the writer below sets both; the scrub
+          stores are publish_begin's own and are counted all the same. *)
        with_codegen_target "aarch64-none-elf" (fun () ->
          expect_codegen_ok
            "struct publish Ev { seq: usize; cpu: usize; code: usize; }
@@ -13622,6 +13706,7 @@ let codegen_tests = [
             fn issue299_begin() {
               let w = publish_begin(&slot);
               w.cpu = 1;
+              w.code = 2;
               publish_commit(w, 2);
             }" ();
          let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in

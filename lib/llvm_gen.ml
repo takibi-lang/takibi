@@ -4483,9 +4483,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
           gap the linear token does not close.
 
           The token proves the payload is written only between the clear
-          and the commit. It does not prove the writer wrote all of it.
-          Zeroing makes a forgotten field READ as forgotten; making it a
-          compile error is GitHub issue #476. *)
+          and the commit, and since GitHub issue #476 the type checker
+          proves every scalar payload field was assigned on every path to
+          the commit. What that leaves to this scrub is an array field,
+          written element by element and exempt from that rule: its
+          unwritten elements read as zero here rather than as a previous
+          record's bytes. *)
        | "publish_begin", [record_e] ->
            let (sname, ptr, seq_addr) = record_and_seq record_e in
            store_release seq_addr (const_int ity 0);

@@ -2577,8 +2577,18 @@ payload is scrubbed at all because a field the writer does not set would
 otherwise keep the PREVIOUS record's value and be published as this one's
 -- `linux_user/publish` measured exactly that before the scrub existed.
 The token proves the payload is written only between the clear and the
-commit; it does not prove the writer wrote all of it, and making THAT a
-compile error is GitHub issue #476.
+commit. **A commit also requires every scalar, `bool` and enum payload
+field to have been assigned through the token on every path reaching it**
+(GitHub issue #476), and the error names the fields that were not. An `if`
+or `match` counts a field only if every arm that falls through assigns it,
+and an arm that returns is not counted. A loop body may run no times, so
+what it assigns does not count after it. `publish_abandon` requires
+nothing. An array field is exempt, because it is written element by element
+and usually in a loop. Its unwritten elements read as the scrub leaves them,
+and a record carrying one says how much of it is meaningful in a scalar
+field, which is required. That exemption is why the scrub stays: it is what
+an array's unwritten tail reads as, and it keeps a slot from carrying a
+previous record's bytes forward.
 
 The reader:
 
