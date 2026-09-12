@@ -13510,6 +13510,49 @@ let codegen_tests = [
            }") ());
 
   Alcotest.test_case
+    "issue #554: a publish record is never assigned as a whole"
+    `Quick
+    (fun () ->
+       let record =
+         "struct publish Ev { seq: usize; cpu: usize; }
+          let mut slot: Ev;
+          let mut other: Ev;
+          " in
+       (* Each stores the publication field with an ordinary store. *)
+       expect_type_error "cannot be assigned as a whole" (record ^
+         "fn issue554_var() { slot = other; }") ();
+       expect_type_error "cannot be assigned as a whole" (record ^
+         "let mut ring: [Ev; 4];
+          fn issue554_index() { ring[1] = other; }") ();
+       expect_type_error "cannot be assigned as a whole" (record ^
+         "fn issue554_deref(p: *Ev) { *p = other; }") ();
+       (* Embedded by value, a record is stored by storing what holds it. *)
+       expect_type_error "cannot be assigned as a whole" (record ^
+         "struct Holder { ev: Ev; n: usize; }
+          let mut h: Holder;
+          let mut h2: Holder;
+          fn issue554_holder() { h = h2; }") ();
+       expect_type_error "cannot be assigned as a whole" (record ^
+         "struct Holder { ev: Ev; n: usize; }
+          let mut h: Holder;
+          fn issue554_field() { h.ev = other; }") ();
+       (* What the protocol needs is untouched: the token, publish_copy
+          into a record of the caller's, and reading the copy's fields.
+          An ordinary field beside an embedded record is still stored. *)
+       expect_ok (record ^
+         "struct Holder { ev: Ev; n: usize; }
+          let mut h: Holder;
+          let mut out: Ev;
+          fn issue554_protocol() -> usize {
+            let w = publish_begin(&slot);
+            w.cpu = 1;
+            publish_commit(w, 1);
+            h.n = 2;
+            if (publish_copy(&slot, &out) == 0) { return 0; }
+            return out.cpu;
+          }") ());
+
+  Alcotest.test_case
     "issue #299: the operations reject wrong arities and wrong arguments"
     `Quick
     (fun () ->

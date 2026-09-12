@@ -1545,6 +1545,37 @@ let rec contains_stable_owner_value_ty t = match repr t with
   | TPtr _ | TAlignedPtr _ -> false
   | _ -> false
 
+(* GitHub issue #554: a publish record stored as a whole value. `slot =
+   other`, `ring[i] = r`, `*p = r` and `h.ev = r` each write the
+   publication field with an ordinary store, and no write token orders it
+   against the payload. #299's rule gates every store to one FIELD through
+   the token; these store the record itself. A record embedded by value in
+   an ordinary struct is stored by assigning that struct, so fields are
+   followed. Pointers are not -- storing a pointer writes no record. *)
+let rec type_contains_publish (senv : senv) (t : Ast.type_expr) = match t with
+  | Ast.TypeNamed name ->
+      Publish_registry.is_publish name
+      || (match StringMap.find_opt name senv with
+          | Some (fields, _, _) ->
+              List.exists (fun (_, ft) -> type_contains_publish senv ft) fields
+          | None -> false)
+  | Ast.TypeArray (t, _) | Ast.TypeRefined (_, _, t) | Ast.TypeIo t
+  | Ast.TypeSingleton (t, _) -> type_contains_publish senv t
+  | _ -> false
+
+let rec contains_publish_value_ty (senv : senv) t = match repr t with
+  | TStruct name -> type_contains_publish senv (Ast.TypeNamed name)
+  | TIo t | TArray (t, _) | TSingleton (t, _) | TExists (_, _, _, t) ->
+      contains_publish_value_ty senv t
+  | TTuple ts -> List.exists (contains_publish_value_ty senv) ts
+  | _ -> false
+
+let publish_whole_store_message =
+  "a publish record cannot be assigned as a whole: the store would write its \
+   publication field with no write token to order it after the payload. \
+   Write the payload through publish_begin's token, and copy a record out \
+   with publish_copy"
+
 (* struct name -> declaring file, present iff the struct has at least one
    private field: constructing such a struct via a struct literal writes
    every field, private ones included, so the literal itself is
@@ -3922,6 +3953,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            if contains_stable_owner_value_ty vty then
              raise (TypeError (e.loc,
                "stable owner container storage cannot be assigned or copied as a whole"));
+           if contains_publish_value_ty senv vty then
+             raise (TypeError (e.loc, publish_whole_store_message));
            if not is_mut then
              raise (TypeError (e.loc,
                Printf.sprintf "cannot assign to immutable variable '%s'; use 'let mut'" name));
@@ -3957,6 +3990,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            if contains_stable_owner_value_ty inner then
              raise (TypeError (e.loc,
                "stable owner container storage cannot be overwritten or copied through a pointer"));
+           if contains_publish_value_ty senv inner then
+             raise (TypeError (e.loc, publish_whole_store_message));
            let vt = check_expr senv eenv tyenv fenv rhs inner in
            if contains_view_ty vt then
              raise (TypeError (rhs.loc,
@@ -4020,6 +4055,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            if contains_stable_owner_value_ty elem_ty then
              raise (TypeError (e.loc,
                "stable owner container storage cannot be overwritten or copied through an index"));
+           if contains_publish_value_ty senv elem_ty then
+             raise (TypeError (e.loc, publish_whole_store_message));
            let rt = check_expr senv eenv tyenv fenv rhs elem_ty in
            if contains_view_ty rt then
              raise (TypeError (rhs.loc,
@@ -4129,6 +4166,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  raise (TypeError (e.loc,
                    Printf.sprintf "no field '%s' in struct '%s'" fname sname))
            in
+           if contains_publish_value_ty senv field_ty then
+             raise (TypeError (e.loc, publish_whole_store_message));
            let vt = check_expr senv eenv tyenv fenv rhs (strip_io field_ty) in
            if contains_view_ty vt then
              raise (TypeError (rhs.loc,

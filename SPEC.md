@@ -2549,11 +2549,13 @@ publish_commit(w, sequence);             // consumes w, release-stores it
   taking the address of any payload field or element (`&r.f`,
   `&r.bytes[i]`), a range slice (`r.bytes[a..<b]`), and the array's decay
   to `*elem` by a cast, a call argument or an annotated `let`.
-- **Not yet refused: assigning a whole record.** `slot = other;`,
-  `ring[i] = other;` and `*p = other;` compile, and each stores the
-  publication field as well as the payload, with no token. The rules above
-  cover every way to reach one FIELD; a store of the record as a value is
-  the remaining shape.
+- **A record is never assigned as a whole** (GitHub issue #554).
+  `slot = other;`, `ring[i] = other;`, `*p = other;`, and a store of an
+  ordinary struct or field that holds a record by value are refused. Each
+  would write the publication field with an ordinary store, which no token
+  orders after the payload. A record is written through the token and read
+  out with `publish_copy`. Taking `&slot` for those two, and reading a
+  copied record's fields, are unaffected.
 - **`publish_begin` returns a LINEAR token.** A record left in flight is
   a compile error on every path that could leave it that way, not a slot
   that stays torn until something wraps over it.
