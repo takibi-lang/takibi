@@ -68,11 +68,8 @@ _start:
      * variables to reach; the only per-core thing a vector here has to
      * find is its stack, so the offset is the whole answer.
      *
-     * Neither entry path asks MPIDR which core it is.  It does not have
-     * to: PSCI starts exactly one secondary, so _start is core 0 by
-     * construction and kernel_secondary_entry is core 1 by construction.
-     * That is what keeps the per-platform affinity-field difference
-     * (GitHub issue #445) out of this file's shared logic. */
+     * The primary offset is zero. Secondary entry reads QEMU's Aff0 field
+     * and multiplies this linker-derived stride for cores 1 through 3. */
     msr     tpidr_el1, xzr
 
     adrp    x0, el1_vectors
@@ -112,19 +109,34 @@ kernel_secondary_entry:
     msr     DAIFSet, #0xf
     mov     x19, x0
 
+    mrs     x20, mpidr_el1
+    and     x20, x20, #0xff
+    cmp     x20, #1
+    b.lo    .Lsecondary_park
+    cmp     x20, #3
+    b.hi    .Lsecondary_park
+
     adrp    x0, secondary_stack_top
     add     x0, x0, :lo12:secondary_stack_top
+    adrp    x1, secondary_stack_group_end
+    add     x1, x1, :lo12:secondary_stack_group_end
+    adrp    x2, secondary_stack_base
+    add     x2, x2, :lo12:secondary_stack_base
+    sub     x1, x1, x2
+    sub     x2, x20, #1
+    madd    x0, x2, x1, x0
     mov     sp, x0
 
-    /* GitHub issue #477: this core's offset into the per-core stack groups.
-     * Computed from the two linker symbols rather than from a stride
-     * constant repeated here, so changing the layout moves this with it.
-     * See _start for why neither path reads MPIDR. */
+    /* GitHub issue #477/#9: this core's offset into the per-core stack
+     * groups. The secondary affinity comes from QEMU's Aff0 field above;
+     * multiplying the linker-derived stride keeps cores 1 through 3 out of
+     * one another's exception stacks. */
     adrp    x0, secondary_percpu_stack_base
     add     x0, x0, :lo12:secondary_percpu_stack_base
     adrp    x1, percpu_stack_base
     add     x1, x1, :lo12:percpu_stack_base
     sub     x0, x0, x1
+    mul     x0, x0, x20
     msr     tpidr_el1, x0
 
     adrp    x0, el1_vectors
@@ -135,12 +147,8 @@ kernel_secondary_entry:
     bl      el1_fpsimd_enable
     bl      kernel_mmu_init_secondary
     mov     x0, x19
-    /* GitHub issue #445: the core index used to be extracted here, and
-     * getting the field wrong was a real bug -- see cpu_id()'s comment in
-     * kernel/platform/qemu/init.tkb, which now owns that knowledge for
-     * both this file and its RPi5 counterpart. Nothing about which
-     * affinity field this machine numbers cores in is stated in assembly
-     * any more. */
+    /* kernel_secondary_main verifies the platform cpu_id() against the
+     * context supplied by that core's PSCI request. */
     mov     x29, xzr
     bl      kernel_secondary_main
 .Lsecondary_park:

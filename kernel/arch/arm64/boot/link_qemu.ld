@@ -64,11 +64,16 @@ SECTIONS {
         stack_top = boot_stack_top;
         /* 0x8000-aligned again by construction, the run above being
            exactly 0x8000 long. */
+        secondary_stack_base = .;
         secondary_stack_run_bottom = .;
         . += 0x4000;
         secondary_stack_bottom = .;
         . += 0x4000;
         secondary_stack_top = .;
+        secondary_stack_group_end = .;
+        /* Core 1's named group above plus identical groups for cores 2 and
+           3. Entry code derives the stride from these symbols. */
+        . += 2 * (secondary_stack_group_end - secondary_stack_base);
         /* GitHub issue #477: the two stacks below are PER CORE, laid out as
            KERNEL_CORES contiguous groups of identical shape.  A core's own
            pair is its group index times one stride from these symbols, and
@@ -116,11 +121,9 @@ SECTIONS {
         . += 0x4000;
         irq_stack_top = .;
         percpu_stack_group_end = .;
-        /* One more group, for the one secondary this kernel starts
-           (kernel/arch/arm64/kernel/secondary.tkb's SECONDARY_CORE_ID).
-           Adding a core is adding a line here and raising KERNEL_CORES. */
+        /* Three more groups, one for each possible secondary. */
         secondary_percpu_stack_base = .;
-        . += (percpu_stack_group_end - percpu_stack_base);
+        . += 3 * (percpu_stack_group_end - percpu_stack_base);
         percpu_stack_end = .;
     }
 

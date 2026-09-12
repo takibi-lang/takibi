@@ -396,6 +396,20 @@ kernel_secondary_idle_enter:
     msr     DAIFSet, #0x2
     adrp    x1, secondary_stack_top
     add     x1, x1, :lo12:secondary_stack_top
+    mrs     x2, tpidr_el1
+    adrp    x3, percpu_stack_group_end
+    add     x3, x3, :lo12:percpu_stack_group_end
+    adrp    x4, percpu_stack_base
+    add     x4, x4, :lo12:percpu_stack_base
+    sub     x3, x3, x4
+    udiv    x2, x2, x3
+    adrp    x3, secondary_stack_group_end
+    add     x3, x3, :lo12:secondary_stack_group_end
+    adrp    x4, secondary_stack_base
+    add     x4, x4, :lo12:secondary_stack_base
+    sub     x3, x3, x4
+    sub     x2, x2, #1
+    madd    x1, x2, x3, x1
     mov     sp, x1
     mov     x29, xzr
     b       kernel_secondary_idle_reenter
