@@ -145,12 +145,14 @@ entry leaves the next one unable to be verified.
     boundary separately; it is not part of this entry.
 13. **#528** make IRQ restoration under an IRQ-owning guard a build error.
     Arbitrary affinity increases the number of paths that can expose this
-    invariant, but the work remains in Territory A's compiler/kernel files.
+    invariant. Since the 2026-09-12 re-cut the compiler mechanism is Territory
+    B's (its queue entry 5); marking the kernel's guards and call sites stays
+    here, after that lands.
 
 Then, in this territory and unordered: #518, #468, #464, #516, #308, #414,
-#514, #202, #476, #386, #274, #493, #422, #252, #216, #297, #131, #132, #343,
-#342, #370, #374, #203, #200, #201, #212, #282, #417, #400, #109, #129, #155,
-#267, #28, #58, #13, #95, #8.
+#514, #202, #386, #274, #422, and the kernel side of #553. The compiler and
+language issues this list used to carry (#476, #493, #131, #132, #212 and the
+rest) moved to the Territory B queue with `lib/` on 2026-09-12.
 
 #### Territory A cold-start handoff, 2026-09-09
 
@@ -586,10 +588,46 @@ None is queued above; they are recorded so they are not rediscovered.
 
 ### Territory B queue -- compiler, native tests, and documentation
 
-The active order, re-derived 2026-09-12, is below. The completed kernel
-handoffs remain recorded here for their evidence, but #533, #534's remaining
-verification, #547, #550 and #551 moved to Territory A with the maintained
-kernel vertical. Claude Code need not wait on or modify kernel files for them.
+The active order, re-derived 2026-09-12 for the compiler and native-language
+vertical, is below. Each entry is in `lib/`, `bin/`, `test/`, `linux_user/`,
+`docs/` or `examples/`. Where an issue also needs kernel call sites or a
+runner changed, this territory lands the language half as a committed
+boundary and Territory A applies it, rather than both editing at once.
+
+1. **#554** assigning a whole publish record stores its commit word without
+   a token. `slot = other;` and `ring[i] = r` compile today, and so does
+   `*p = r`, so the #299 protocol's order is bypassable by a plain store.
+   Found while probing the #534 array extension, which closed every
+   field-level path. SPEC.md lists it as not yet refused.
+2. **#476** a publish writer can forget a field; the scrub makes it read as
+   zero rather than making it a compile error. The same record type as #554,
+   so it follows while that code is fresh.
+3. **#549** depfiles: emit a `-MP`-style empty rule per prerequisite in
+   `Use_resolver.write_depfile`, so deleting a used `.tkb` rebuilds instead
+   of stopping make. The half that wires or corrects
+   `scripts/check_stale_depfiles.py` is Territory A's and follows.
+4. **#540** the compiler side of widening `--reject-unused-functions`: the
+   two structural false positives it measured (execution-model assumption
+   functions that exist only for their `static_assert`s, and accessors a
+   platform build does not reach). Widening the flag over kernel files is
+   Territory A's, after this lands.
+5. **#528** reject IRQ restoration while an IRQ-masking guard is live: the
+   compiler-known effect and the guard marking are this territory's; marking
+   the kernel's guards and call sites is Territory A's.
+6. **#493** effect-indexed invalidation: a design first, since it generalises
+   a rule rather than special-casing process handles.
+
+Then, unordered, the compiler and language issues that moved here with
+`lib/`: #131, #132, #212, #216, #252, #267, #282, #297, #342, #343, #370,
+#374, #400, #417, #200, #201, #203, #109, #129, #155, #122, #123, #124, #28,
+#58, #13, #95, #8, #50, #51, #85.
+
+#### Completed and transferred entries of the previous order
+
+Kept for their evidence. #533, #534's remaining verification, #547, #550 and
+#551 moved to Territory A with the maintained kernel vertical, and so did
+#542 and the ext2 issues (#535-#539). Claude Code need not wait on or modify
+kernel files for any of them.
 
 1. **Board lane complete on the combined tree.** `make kernelcheck-rpi5`
    passed after #546's fix and the rebase onto #532, including the migration
@@ -683,11 +721,9 @@ kernel vertical. Claude Code need not wait on or modify kernel files for them.
    remaining task on #537 is to re-check its acceptance evidence and close it
    if nothing remains, not to grow its scope.
 
-Do not start #540 from Territory B: its useful half changes compiler unused-
-function semantics in `lib/` and belongs in Territory A after the multicore
-integration boundary. Likewise #497/#502/#503 remain Territory A profiling
-work. This leaves Claude Code's queue free of the files Codex is actively
-reshaping for four cores.
+#540's useful half changes compiler unused-function semantics in `lib/`,
+which since the 2026-09-12 re-cut is this territory's; it is entry 4 above.
+#497/#502/#503 remain Territory A profiling work.
 
 **Direction, set by the maintainer on 2026-09-11: verification belongs in
 userspace.** Userspace launches everything through fork/exec, and the kernel
