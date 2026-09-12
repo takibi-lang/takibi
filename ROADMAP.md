@@ -389,6 +389,24 @@ that the same process is still Running before committing TTBR0. An incomplete
 world stop or stale current handle fails the syscall continuation instead of
 returning through a frame under the wrong address space. Exit handoffs remain.
 
+#### Handed over from Territory B, 2026-09-12
+
+1. **#552: an exit on core 1 hands core 1 to the exiting process's parent
+   without the admission rule.** `kernel_process_child_exit`'s two parent
+   handoffs skip the rule that `kernel_process_next_ready` applies, so an
+   admitted process ending on core 1 would run init or ash there. It is
+   latent, because no admitted process exits on a peer yet. Filtering
+   alone does not fix it. A peer has no idle transition. A zombie is
+   collectable before core 1 leaves its stack, because
+   `scheduled_process_exited_take` does not check `stack_owner_cpu`.
+   SIGCHLD delivery runs outside the run lock. The analysis is on #552.
+   #533's workload waits for it.
+2. **Device access is now serialized** by `block_device_lock` in
+   `kernel/drivers/block/memory.tkb`, a rank-30 `TaskMutex`. Anything that
+   reaches a block device from a new path goes through `block_read` or
+   `block_write` and gets it for free. `usb_provision.tkb` is the one
+   exception: it runs before any process exists.
+
 #### Handed over from Territory B, 2026-09-11
 
 1. **One qemu-debug stall with a signature not seen before, under cicheck's
@@ -534,7 +552,11 @@ The active order, re-derived 2026-09-11, is:
 3. **#533** admit one bounded read-only ext2 workload on core 1. The first
    contract is read-only; mutation remains serialized until its separate
    ownership audit. This is the filesystem half #9 must not invent in
-   Territory A.
+   Territory A. **Paused 2026-09-12 by the maintainer's decision**, after
+   its first half: block-device exclusion (commit "issue one block-device command at a time across cores"). The read-path audit
+   and the workload design are on #533. The workload cannot end safely
+   on core 1 until **#552**, in Territory A, is fixed; see the handover
+   below.
 4. **#534** publish direct userspace UART output from peer CPUs through the
    sole ordinary core-0 writer, with bounded backpressure and an emergency
    DDB/fatal path that never waits for it. This is the console half #9 must
