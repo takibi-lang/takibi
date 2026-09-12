@@ -410,6 +410,16 @@ fn schedule_contention_probe() -> bool !{unsafe} {
         }
     }
 
+    // Exercise the production admission policy with an explicit CPU. This
+    // probe runs on core 0, so consulting cpu_id() here would only prove the
+    // unrestricted answer and leave the peer policy untested. Its private
+    // process is not one of the admitted busy-pair PIDs.
+    let schedule_probe_pid: usize =
+        scheduled_process_pid_of_handle(schedule_probe_handle);
+    let admission_separated: bool =
+        kernel_process_cpu_admits(0, schedule_probe_pid) &&
+        kernel_process_cpu_admits(1, schedule_probe_pid) == false;
+
     // Phase 1: no lock. The race is the expected result, and a run with no
     // duplicates at all means the window closed rather than that the
     // kernel is safe -- so it FAILS, loudly, instead of passing.
@@ -505,6 +515,10 @@ fn schedule_contention_probe() -> bool !{unsafe} {
             }
             if (cleaned == false) {
                 kernel_boot_log("schedule contention: the record this probe raced for was not given back\n");
+                return false;
+            }
+            if (admission_separated == false) {
+                kernel_boot_log("schedule contention: the explicit cpu admission policy did not separate core 0 from core 1\n");
                 return false;
             }
             return true;

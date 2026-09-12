@@ -3544,7 +3544,17 @@ private fn kernel_process_next_successor(from: ProcessHandle,
     return root;
 }
 
-private fn kernel_process_next_ready(from: ProcessHandle)
+// One policy for every scheduler selection point. Core 0 owns the unrestricted
+// compatibility path; a peer may run only the deliberately admitted workload.
+// Taking the CPU as a value is load-bearing: the scheduler probe runs on core
+// 0 but must exercise the answer for core 1.
+fn kernel_process_cpu_admits(cpu: usize, pid: usize) -> bool {
+    if (cpu == 0) { return true; }
+    if (cpu >= KERNEL_ACTIVE_CORES) { return false; }
+    return workload_busy_secondary_candidate(pid);
+}
+
+private fn kernel_process_next_ready(from: ProcessHandle, cpu: usize)
         -> ProcessNextReadyResult {
     let mut root: ProcessHandle = kernel_process_chain_root(from);
     let mut cursor: ProcessHandle = from;
@@ -3554,8 +3564,8 @@ private fn kernel_process_next_ready(from: ProcessHandle)
         cursor = kernel_process_next_successor(cursor, root);
         if (scheduled_process_same_slot(cursor, from) == false &&
             scheduled_process_state_of(cursor) == ProcessSlotState::Ready &&
-            (cpu_id() == 0 || workload_busy_secondary_candidate(
-                scheduled_process_pid_of_handle(cursor)))) {
+            kernel_process_cpu_admits(
+                cpu, scheduled_process_pid_of_handle(cursor))) {
             return ProcessNextReadyResult::Next(cursor);
         }
     }
@@ -3582,7 +3592,7 @@ fn kernel_process_schedule(current_sp: usize) -> usize {
     if (execution_here().current_live == false) { return current_sp; }
     let mut from: ProcessHandle = execution_here().current_handle;
     let guard = process_run_lock();
-    match kernel_process_next_ready(from) {
+    match kernel_process_next_ready(from, cpu_id()) {
         ProcessNextReadyResult::Missing => {
             process_run_unlock(guard);
             return current_sp;
@@ -3699,8 +3709,8 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
             ProcessSlotCursor::At(slot) => {
                 if (scheduled_process_record_state(slot) ==
                         ProcessSlotState::Ready &&
-                    workload_busy_secondary_candidate_locked(
-                        guard, scheduled_process_pid_of_slot(slot))) {
+                    kernel_process_cpu_admits(
+                        cpu_id(), scheduled_process_pid_of_slot(slot))) {
                     let mut handle: ProcessHandle =
                         scheduled_process_handle_of_slot(slot);
                     match scheduled_process_ready_take(guard, handle) {
@@ -3935,7 +3945,7 @@ fn kernel_process_current_has_live_child() -> bool {
 // is the whole machine.
 fn kernel_process_other_ready() -> bool {
     if (execution_here().current_live == false) { return false; }
-    match kernel_process_next_ready(execution_here().current_handle) {
+    match kernel_process_next_ready(execution_here().current_handle, cpu_id()) {
         ProcessNextReadyResult::Missing => { return false; }
         ProcessNextReadyResult::Next(next) => { return true; }
     }
@@ -4007,7 +4017,7 @@ fn kernel_process_exit_would_strand() -> bool {
         (scheduled_process_record_of(parent).sigwait_set & sigchld_bit) != 0) {
         return false;
     }
-    match kernel_process_next_ready(execution_here().current_handle) {
+    match kernel_process_next_ready(execution_here().current_handle, cpu_id()) {
         ProcessNextReadyResult::Missing => { return true; }
         ProcessNextReadyResult::Next(next) => { return false; }
     }
@@ -4700,7 +4710,7 @@ private fn kernel_process_block_current(current_sp: usize,
     }
     let mut from: ProcessHandle = execution_here().current_handle;
     let guard = process_run_lock();
-    match kernel_process_next_ready(from) {
+    match kernel_process_next_ready(from, cpu_id()) {
         ProcessNextReadyResult::Missing => {
             process_run_unlock(guard);
             return 0;
@@ -5828,7 +5838,7 @@ private fn kernel_process_clone_unselectable_locked(
             excluded = false;
         }
     }
-    match kernel_process_next_ready(parent) {
+    match kernel_process_next_ready(parent, cpu_id()) {
         ProcessNextReadyResult::Missing => {}
         ProcessNextReadyResult::Next(next) => { excluded = false; }
     }
@@ -6468,7 +6478,7 @@ fn kernel_process_child_exit(status: usize) -> usize {
             }
             // GitHub issue #448: a background child's parent may be blocked
             // elsewhere. Reserve the scheduler's next Ready process instead.
-            match kernel_process_next_ready(child) {
+            match kernel_process_next_ready(child, cpu_id()) {
                 ProcessNextReadyResult::Missing => {}
                 ProcessNextReadyResult::Next(successor) => {
                     match scheduled_process_ready_take(exit_guard, successor) {
