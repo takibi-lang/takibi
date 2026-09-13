@@ -128,6 +128,13 @@ def verify_loader_injection_context() -> None:
         "CACHE_PUBLISH_ADDR=0x00180100",
         '-c \'targets bcm2712.cpu0\'',
         '-c "mww $CACHE_PUBLISH_ADDR 0xd50b7e20"',
+        '-c "mww $((CACHE_PUBLISH_ADDR + 4)) 0x91010000"',
+        '-c "mww $((CACHE_PUBLISH_ADDR + 8)) 0xeb01001f"',
+        '-c "mww $((CACHE_PUBLISH_ADDR + 12)) 0x54ffffa3"',
+        '-c "mww $((CACHE_PUBLISH_ADDR + 16)) 0xd5033f9f"',
+        '-c "mww $((CACHE_PUBLISH_ADDR + 20)) 0xd508751f"',
+        '-c "mww $((CACHE_PUBLISH_ADDR + 24)) 0xd5033f9f"',
+        '-c "mww $((CACHE_PUBLISH_ADDR + 28)) 0xd5033fdf"',
         '-c "mww $((CACHE_PUBLISH_ADDR + 32)) 0x14000000"',
     ]
     for fragment in required_reset:
@@ -135,10 +142,56 @@ def verify_loader_injection_context() -> None:
             raise SystemExit(f"reset omits persistent cache helper step: {fragment}")
 
 
+def verify_loader_refuses_high_pc() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        temp = Path(raw)
+        elf = temp / "kernel.elf"
+        elf.write_bytes(b"ELF")
+        executable = temp / "openocd"
+        executable.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' \"$*\" >> \"$RPI5_FAKE_CALLS\"\n"
+            "printf '%s\\n' "
+            "'bcm2712.cpu0 halted in AArch64 state, current mode: EL2H'\n"
+            "printf '%s\\n' 'pc (/64): 0xffffd06fcf296448'\n"
+            "printf '%s\\n' 'MMU: enabled'\n"
+            "printf '%s\\n' '0x00100000: edfe0dd0'\n",
+            encoding="ascii")
+        executable.chmod(0o755)
+        readelf = temp / "llvm-readelf-19"
+        readelf.write_text(
+            "#!/bin/sh\nprintf '%s\\n' 'Entry point address: 0x200000'\n",
+            encoding="ascii")
+        readelf.chmod(0o755)
+        nm = temp / "llvm-nm-19"
+        nm.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' "
+            "'0000000000200000 T kernel_warm_el1_entry' "
+            "'0000000000200100 T kernel_secondary_warm_el1_entry' "
+            "'0000000000300000 R kernel_file_end' "
+            "'0000000000200200 T kernel_secondary_boot_cpu_on' "
+            "'0000000000400000 B stack_top'\n",
+            encoding="ascii")
+        nm.chmod(0o755)
+        calls = temp / "calls"
+        environment = os.environ.copy()
+        environment["PATH"] = f"{temp}:{environment['PATH']}"
+        environment["RPI5_FAKE_CALLS"] = str(calls)
+        result = subprocess.run(
+            ["bash", str(LOADER), str(elf)], cwd=ROOT, env=environment,
+            text=True, capture_output=True, check=False)
+        if result.returncode == 0 or "genuinely running Raspberry Pi OS" not in result.stderr:
+            raise SystemExit("loader accepted or misdiagnosed a high-PC VHE kernel")
+        if "load_image" in calls.read_text(encoding="ascii"):
+            raise SystemExit("loader wrote memory after observing a high-PC VHE kernel")
+
+
 
 def main() -> int:
     verify()
     verify_loader_injection_context()
+    verify_loader_refuses_high_pc()
     print("RPi5 JTAG reset controls passed")
     return 0
 

@@ -131,6 +131,12 @@ The next multicore increment is phase B. Its order is now:
    device path it reaches, plus QEMU and four-core RPi5 evidence. Do not turn
    phase B into one unrestricted switch.
 
+**#556 is evidence-gated, not a phase B blocker.** One parallel allcheck run
+failed the two-core oops lane with interleaved peer-fault text, but the exact
+assertion was overwritten and the next twelve focused plus four aggregate
+runs passed. The runner now archives the whole failing capture. Diagnose the
+next preserved occurrence before changing crash or console serialization.
+
 The numbered history below records the dependency chain that produced phase
 A. Its requirements through entry 11 are complete; explicitly noted residual
 work such as #432 remains separate. Entries 12 and 13 are represented by the

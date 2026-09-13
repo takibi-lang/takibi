@@ -99,7 +99,22 @@ cleanup() {
     kill "$qemu_pid" 2>/dev/null || true
     wait "$qemu_pid" 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM HUP
+archive_on_failure() {
+    local status="$1"
+    if [ "$status" -ne 0 ]; then
+        bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" "$ARTIFACT_DIR" \
+            "$REPO_ROOT/_build/kernel-oops-qemu-failures" \
+            "exit status $status (mode $MODE)" || true
+    fi
+}
+cleanup_and_archive() {
+    local status=$?
+    cleanup
+    archive_on_failure "$status"
+    return "$status"
+}
+trap cleanup_and_archive EXIT
+trap 'cleanup; exit 130' INT TERM HUP
 
 console_await=()
 if [ "$MODE" = peer_fault ]; then

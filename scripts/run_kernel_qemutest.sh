@@ -142,15 +142,20 @@ stop_qemu() {
 # comparison, so a failure that stops earlier still leaves evidence.
 archive_reason=""
 archive_on_failure() {
-    status=$?
+    local status="$1"
     if [ "$status" -ne 0 ]; then
         bash "$REPO_ROOT/scripts/archive_kernel_failure.sh" "$ARTIFACT_DIR" \
             "$REPO_ROOT/_build/kernel-hwtest-qemu-failures" \
             "${archive_reason:-exit status $status}" || true
     fi
-    return $status
 }
-trap 'stop_qemu; archive_on_failure' EXIT
+cleanup_and_archive() {
+    local status=$?
+    stop_qemu
+    archive_on_failure "$status"
+    return "$status"
+}
+trap cleanup_and_archive EXIT
 trap 'stop_qemu; exit 130' INT TERM HUP
 
 python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
@@ -200,7 +205,7 @@ stop_qemu
 # QEMU is down, but the archive trap stays: every failure below this line
 # is a view or an integration mismatch, which is exactly what somebody
 # needs the raw capture for.
-trap archive_on_failure EXIT
+trap 'archive_on_failure $?' EXIT
 trap - INT TERM HUP
 
 if [ ! -s "$UART_LOG" ]; then

@@ -11,6 +11,7 @@ from pass_line import CaseCount, report_pass
 from rpi5_jtag_reset_controls import (
     verify as verify_reset_retry,
     verify_loader_injection_context,
+    verify_loader_refuses_high_pc,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -75,13 +76,16 @@ def main() -> int:
     verify_loader_injection_context()
     CASES.note()
     CASES.note()
+    verify_loader_refuses_high_pc()
+    CASES.note()
     report_pass(
         "rpi5 kernel-byte writer controls",
         "verified writes pass, while status-zero DSCR errors and "
         "missing read-back fail; reset observations resume and retry before "
         "accepting a safe state or failing bounded; the loader selects a "
-        "privileged secondary, uses a persistent cache helper, and redirects "
-        "warm peers to fresh EL1 entries",
+        "privileged secondary, uses a complete persistent cache helper, "
+        "redirects warm peers to fresh EL1 entries, and refuses a high-PC "
+        "VHE kernel before load_image",
         cases=CASES.ran)
     return 0
 

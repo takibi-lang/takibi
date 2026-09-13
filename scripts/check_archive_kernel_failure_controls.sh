@@ -47,4 +47,20 @@ count="$(find "$root" -mindepth 1 -maxdepth 1 -type d | wc -l)"
 bash "$archiver" "$tmp_dir/absent" "$root" "none" >/dev/null 2>&1 && claim ||
     fail "archiver failed on a missing artifact directory"
 
+# The archiver is useful only when a runner preserves the ORIGINAL exit status
+# before cleanup. The main QEMU runner used to run stop_qemu first and then
+# read $?, so cleanup's success silently suppressed every archive. The focused
+# oops runner had no archive connection at all, which let the next reproduction
+# overwrite the UART evidence.
+for runner in scripts/run_kernel_qemutest.sh scripts/run_kernel_oops_qemutest.sh; do
+    grep -Fq 'cleanup_and_archive()' "$repo_root/$runner" && claim ||
+        fail "$runner has no combined cleanup/archive trap"
+    grep -Fq 'local status=$?' "$repo_root/$runner" && claim ||
+        fail "$runner does not save the failing status before cleanup"
+    grep -Fq 'archive_on_failure "$status"' "$repo_root/$runner" && claim ||
+        fail "$runner does not pass the saved status to the archiver"
+    grep -Fq 'trap cleanup_and_archive EXIT' "$repo_root/$runner" && claim ||
+        fail "$runner does not arm the failure archive for early exits"
+done
+
 echo "PASS archive-control: $cases claims -- a failing lane's whole capture survives, and two failures do not merge"

@@ -15,6 +15,56 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-13: four-core phase A and repeatable warm SWD reloads (#9, #165)
+
+The first four-core boundary is complete. The RPi5 starts cores 1 through 3,
+records the contiguous online prefix at runtime, runs only the deliberately
+admitted busy workload on peers, and has DDB stop and inspect all three peers.
+QEMU keeps two vCPUs because four guest CPUs under the CI budget caused host
+starvation rather than useful four-core evidence. This boundary does not admit
+arbitrary filesystem, network, or terminal readers to peers.
+
+Raising the scheduler ceiling exposed that an RPi5 SWD reload is not a cold
+boot. PSCI SYSTEM_RESET may replay the resident Takibi image at EL1 instead of
+returning cpu0 to the EL2 SD stub; every secondary may already be executing
+EL0; private instruction caches may retain the replaced image; and RP1 GEM DMA
+state survives the CPU reset. A fixed cpu3 memory-access context consequently
+became unsafe, polling for cpu0's short EL1 interval could repeatedly miss, and
+PSCI CPU_ON could not restart peers that were already on.
+
+The loader now catches an EL0 cpu0 at the next lower-EL IRQ entry, chooses a
+privileged low-PC secondary for memory access, publishes the replaced image
+through a persistent cache-maintenance helper outside the ELF load range, and
+redirects warm peers through fresh EL1 entries after cpu0 clears boot state.
+The GEM driver halts and drains retained transmission before replacing its
+descriptor bases. The high-PC refusal remains the protection against writing
+over a live VHE Linux kernel.
+
+After one physical power cycle, two consecutive RPi5 lanes passed without
+another cycle. A later `make kernelcheck-rpi5` followed immediately by `make
+allcheck` also passed: all 46 RPi5 views, physical network and storage, the
+four-core workload, and DDB stop/inspect/resume. Host controls cover bounded
+reset observation, the EL0-to-EL1 breakpoint path, privileged injection-core
+selection, cache publication, warm peer redirection, and failed OpenOCD
+read-back. Real cache coherence, device retention, and SWD timing remain
+hardware evidence rather than compiler claims.
+
+## 2026-09-13: failing QEMU captures preserve the status that caused them
+
+The failure archiver itself was tested, and the main QEMU runner said it used
+it, but its EXIT trap stopped QEMU before reading `$?`. Successful cleanup
+therefore replaced the original nonzero status with zero and silently skipped
+the archive. The focused oops runner had no archive connection at all. A rare
+two-core oops failure was followed by a diagnostic rerun, which overwrote the
+UART transcript before the exact failing assertion could be recovered.
+
+Both runners now save the original status before cleanup and pass that saved
+value to the common archiver. The oops archive also records the injected mode.
+The build-time control checks this wiring as well as the archiver's copy and
+same-second collision behavior. This does not claim to fix the unreproduced
+oops event; it makes the next occurrence diagnosable without relying on a
+person remembering not to rerun it.
+
 ## 2026-09-11: process stacks have an architectural ownership boundary (#532)
 
 Ready and Running describe scheduler publication, not physical SP_EL1 use. A
