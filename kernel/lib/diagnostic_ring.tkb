@@ -20,10 +20,9 @@
 //   test configuration. There is no production control surface yet.
 // - Readers preserve per-CPU order only. They do not invent a global order
 //   between CPUs and do not yet carry timestamps for causal correlation.
-// - A writer that does not set every payload field publishes a zero there
-//   rather than an error. publish_begin scrubs, which makes a forgotten
-//   field read as forgotten; GitHub issue #476 is what would make it a
-//   compile error. Every writer here sets all six today.
+// - A writer must set all six payload fields before publish_commit. Since
+//   GitHub issue #476 a forgotten scalar field is a compile error there,
+//   not a zero left by publish_begin's scrub.
 
 const DIAGNOSTIC_TRACE_CPUS: usize = 4;
 const DIAGNOSTIC_TRACE_EVENTS: usize = 8;

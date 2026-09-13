@@ -486,10 +486,10 @@ a compiler change that is already committed.
    for. Its parser was changed, with the maintainer's approval, to read only
    the first line. Keeping it or retiring it is its owner's call. If it
    goes, its `docs/BUILD_CHECKS.md` row is this territory's to remove.
-4. **A stale comment in `kernel/lib/diagnostic_ring.tkb`, lines 23-26.** It
-   says #476 "is what would make" a forgotten payload field a compile error.
-   #476 is closed, and a forgotten scalar field is now a compile error at
-   `publish_commit`. The scrub now matters only for array fields.
+4. **Done: the stale #476 comment in `kernel/lib/diagnostic_ring.tkb`.**
+   It now says a forgotten scalar field is a compile error at
+   `publish_commit`. Once territories stopped being directories, Territory B
+   could fix it directly.
 5. **#493: effect-indexed invalidation is in the compiler, and it does
    nothing until the kernel uses it.** The commit "kill a plain handle at a
    call that may destroy its object" adds two checker-only words:
@@ -756,7 +756,10 @@ the other side needs to know.
 Then, unordered, the compiler and language issues that moved here with
 `lib/`: #131, #132, #212, #216, #252, #267, #282, #297, #342, #343, #370,
 #374, #400, #417, #200, #201, #203, #109, #129, #155, #122, #123, #124, #28,
-#58, #13, #95, #8, #50, #51, #85.
+#58, #13, #95, #8, #50, #51, #85, and two filed by the 2026-09-13 audit:
+#557 (a lock struct can be overwritten by whole-value assignment) and #558
+(#528's and #493's checks do not follow indirect calls; worth settling
+before Territory A relies on either).
 
 #### Completed and transferred entries of the previous order
 
