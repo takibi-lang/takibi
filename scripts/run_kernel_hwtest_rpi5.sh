@@ -125,7 +125,7 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --port "$SERIAL_DEV" --log "$UART_LOG" --timing-log "$UART_TIMING_LOG" --timeout 180 \
     --postmortem-log "$ARTIFACT_DIR/ddb-postmortem.log" \
     --stdin "$ASH_DIR/ash.stdin" --expected "$ASH_DIR/ash.expected" \
-    --stop-marker 'resources: pages=0' \
+    --stop-marker 'workload: peer exit returned to idle, init collected on core 0 after stack release' \
     --interactive-httpd-listener-file "$INTERACTIVE_HTTPD_LISTENER" \
     --interactive-httpd-ready-file "$INTERACTIVE_HTTPD_READY" \
     --interactive-httpd-done-file "$INTERACTIVE_HTTPD_DONE" \

@@ -15,6 +15,26 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-13: a peer process can exit back to architectural idle (#552)
+
+A secondary CPU may now complete its current process's exit even when no
+other process is admitted there. The preflight used to classify that state as
+stranded and retry the exit forever, although the exit tail already knew how
+to move onto the per-CPU architectural stack, release physical ownership of
+the process stack, and re-enter the interrupt-enabled idle loop. Core 0 keeps
+the old preflight: without a runnable successor it still has no corresponding
+idle return.
+
+The maintained busy-pair fixture now selects one process while it is running
+on a peer, makes it the peer's only admitted process, and asks it to exit. A
+common QEMU/RPi5 view is emitted only after the peer's idle-stack boundary has
+released the target stack and PID 1 has collected that exact zombie on core 0
+with the stack ledger still unowned. The interactive UART harness waits for
+this final boundary instead of ending after the earlier migration report;
+controls preserve that stop-marker contract. Both the two-vCPU QEMU lane and
+the four-core RPi5 lane passed all 46 views and their surrounding integration
+checks.
+
 ## 2026-09-13: four-core phase A and repeatable warm SWD reloads (#9, #165)
 
 The first four-core boundary is complete. The RPi5 starts cores 1 through 3,

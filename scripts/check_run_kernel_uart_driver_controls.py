@@ -89,6 +89,28 @@ def main() -> int:
     if not driver.workload_ready(before_workload, None):
         failures.append("an ungated lane was made to wait for a workload marker")
 
+    # Interactive capture has three independent gates: host-side HTTP work,
+    # the workload marker that starts it, and the caller's final stop marker.
+    # The last one used to be ignored in this mode, so a new recurrence view
+    # could be truncated even though the runner explicitly named its line.
+    stop_marker = ("workload: peer exit returned to idle, init collected on "
+                   "core 0 after stack release")
+    before_stop = after_workload + b"httpd-background-ok\n"
+    CASES.note()
+    if driver.interactive_capture_complete(
+            before_stop, True, True, True, stop_marker):
+        failures.append("interactive capture ended before its stop marker")
+    CASES.note()
+    if not driver.interactive_capture_complete(
+            before_stop + stop_marker.encode("ascii") + b"\n",
+            True, True, True, stop_marker):
+        failures.append("interactive capture ignored its completed stop marker")
+    CASES.note()
+    if driver.interactive_capture_complete(
+            before_stop + stop_marker.encode("ascii") + b"\n",
+            True, False, True, stop_marker):
+        failures.append("interactive capture skipped unfinished host-side work")
+
     for failure in failures:
         print(f"ERROR\tuart-driver-silence: {failure}")
     if failures:
@@ -99,7 +121,7 @@ def main() -> int:
         "uart-driver-silence",
         "a timed-out capture says whether the guest stopped or merely "
         "ran late and names its last line; an interactive command waits "
-        "for its requested workload boundary",
+        "for its requested workload and stop boundaries",
         cases=CASES.ran)
     return 0
 

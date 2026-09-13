@@ -65,6 +65,14 @@ def workload_ready(output: bytes, marker: str | None) -> bool:
     return marker is None or marker.encode("ascii") in output
 
 
+def interactive_capture_complete(output: bytes, httpd_ready: bool,
+                                 httpd_done: bool, workload_seen: bool,
+                                 stop_marker: str) -> bool:
+    """Whether every independently requested interactive boundary is done."""
+    return (httpd_ready and httpd_done and workload_seen and
+            stop_marker.encode("ascii") in output)
+
+
 # Below this, a capture that timed out was merely slow rather than stopped.
 SILENCE_SECONDS = 2.0
 
@@ -517,7 +525,10 @@ def main() -> int:
                         httpd_ready_file.touch()
                         httpd_ready = True
 
-                if httpd_ready and httpd_done_file.exists() and workload_seen:
+                if interactive_capture_complete(
+                        output, httpd_ready,
+                        httpd_done_file is not None and httpd_done_file.exists(),
+                        workload_seen, args.stop_marker):
                     if httpd_done_seen_at is None:
                         httpd_done_seen_at = time.monotonic()
                     elif time.monotonic() - httpd_done_seen_at >= 0.5:

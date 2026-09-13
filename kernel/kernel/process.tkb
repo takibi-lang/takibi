@@ -2853,6 +2853,8 @@ fn kernel_process_stack_idle_complete() {
     scheduled_process_record_of(outgoing).stack_owner_cpu =
         PROCESS_STACK_UNOWNED;
     execution_here().stack_live = false;
+    workload_busy_peer_exit_stack_released(
+        scheduled_process_pid_of_handle(outgoing), core);
     process_run_unlock(guard);
     workload_profile_idle_enter();
 }
@@ -4025,7 +4027,7 @@ fn kernel_process_current_exit_has_waiter() -> bool {
                ProcessWaitReason::ChildExit;
 }
 
-// Would this process's exit leave the machine with nothing to run?
+// Would this process's exit leave this CPU with nowhere safe to continue?
 //
 // GitHub issue #448: an exit hands the CPU somewhere, and until a shell
 // could background a job that somewhere was always its parent, which was
@@ -4037,13 +4039,17 @@ fn kernel_process_current_exit_has_waiter() -> bool {
 // the next keystroke.
 //
 // Asked BEFORE the exit does anything, so the caller can wait for an
-// interrupt and ask again with nothing torn down in between.
+// interrupt and ask again with nothing torn down in between. A secondary CPU
+// has a third outcome: the exit tail switches to its architectural stack and
+// re-enters the idle loop, so absence of an admitted successor is not a
+// strand there.
 private fn kernel_process_exit_would_strand_on(cpu: usize) -> bool {
     if (execution_here().current_live == false) { return false; }
     let slot: usize = execution_here().current_handle.pool_index;
     if (scheduled_process_record_at(slot).has_parent == false) { return false; }
     let mut parent: ProcessHandle = scheduled_process_record_at(slot).parent;
     if (scheduled_process_handle_matches(parent) == false) { return false; }
+    if (cpu != 0) { return false; }
     let parent_admitted: bool = kernel_process_cpu_admits(
         cpu, scheduled_process_pid_of_handle(parent));
     // A parent already waiting for this exit is woken BY it, so it counts
@@ -5689,7 +5695,10 @@ private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
     // candidate. Exit may wake it on core 0, but that must not make it an
     // admissible successor for core 1.
     let peer_wait_parent_rejected: bool =
-        kernel_process_exit_would_strand_on(1);
+        kernel_process_cpu_admits(
+            1, scheduled_process_pid_of_handle(parent)) == false;
+    let peer_idle_available: bool =
+        kernel_process_exit_would_strand_on(1) == false;
     // With only this child running, SIGCHLD is also an exit-produced
     // successor. A different wait set or an ignored signal is not.
     let sigchld_bit: usize = 1 << 16;
@@ -5721,8 +5730,8 @@ private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
     }
     process_run_unlock(restore_guard);
     return restored && kernel_process_current_exit_has_waiter() == false &&
-        peer_wait_parent_rejected && signal_successor && unrelated_wait &&
-        ignored_signal;
+        peer_wait_parent_rejected && peer_idle_available && signal_successor &&
+        unrelated_wait && ignored_signal;
 }
 
 // The scheduler probe calls scheduling functions directly instead of entering
@@ -6708,6 +6717,10 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
     let status: usize =
         scheduled_process_record_of(child).exit_status;
     let pid: usize = scheduled_process_pid_of_handle(child);
+    workload_busy_peer_exit_reaped(
+        pid, scheduled_process_pid_of_handle(parent),
+        scheduled_process_record_of(child).stack_owner_cpu ==
+            PROCESS_STACK_UNOWNED);
     // Unlink first: the record is about to be handed back, and its
     // next_sibling has to be read while it is still ours to read.
     let mut following: ProcessHandle =

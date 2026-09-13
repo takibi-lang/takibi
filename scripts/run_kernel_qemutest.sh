@@ -164,7 +164,8 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --postmortem-log "$ARTIFACT_DIR/ddb-postmortem.log" \
     --qmp-port "$QMP_PORT" \
     --stdin "$ASH_DIR/ash.stdin" --expected "$ASH_DIR/ash.expected" \
-    --timeout "$TIMEOUT_SECS" --stop-marker 'resources: pages=0' \
+    --timeout "$TIMEOUT_SECS" \
+    --stop-marker 'workload: peer exit returned to idle, init collected on core 0 after stack release' \
     --interactive-httpd-listener-file "$INTERACTIVE_HTTPD_LISTENER" \
     --foreground-httpd-listener-file "$FOREGROUND_HTTPD_LISTENER" \
     --init-listener-file "$INIT_LISTENER" \

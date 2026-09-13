@@ -106,10 +106,10 @@ claim that arbitrary processes may now run on every CPU.
 
 The next multicore increment is phase B. Its order is now:
 
-1. Finish **#552's recurrence evidence**: an admitted process exits on a peer,
-   that peer returns to architectural idle, and the parent wakes and collects
-   it on core 0 only after physical stack ownership is released. The kernel
-   mechanism is present; the explicit end-to-end view is the remaining gate.
+1. **#552 is complete**: an admitted process exits on a peer, that peer returns
+   to architectural idle, and PID 1 collects it on core 0 only after physical
+   stack ownership is released. The shared end-to-end view passes on two-vCPU
+   QEMU and four-core RPi5.
 2. Apply the already-landed compiler boundaries for **#528** and **#493** to
    the kernel. IRQ-owning guards must reject premature restoration, and
    process reaping must invalidate unwitnessed handles before affinity is

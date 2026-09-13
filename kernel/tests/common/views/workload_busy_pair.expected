@@ -2,3 +2,4 @@ workload: busy pair two pids under init, 8 rounds each side by side, neither sta
 workload: busy pair init restarted a only, b kept its pid and its counter
 workload: busy pair done
 workload: busy pair migrated across both cpus with stack handoff intact
+workload: peer exit returned to idle, init collected on core 0 after stack release

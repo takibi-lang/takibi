@@ -153,6 +153,13 @@ struct WorkloadBusyPair {
     a_migrations: usize;
     b_migrations: usize;
     migration_reported: bool;
+    // The one post-migration exit that proves a peer can give up its
+    // process stack, return to architectural idle, and leave init to reap
+    // the zombie on core 0. The exiting pid is immutable once selected.
+    peer_exit_pid: usize;
+    peer_exit_cpu: usize;
+    peer_exit_stack_released: bool;
+    peer_exit_reported: bool;
     // A report this file refused: an unknown tag, or a caller that is not
     // a child of init. Zero on a healthy boot, and printed only when it
     // is not.
@@ -576,6 +583,10 @@ fn workload_busy_pair_reset() {
     workload_busy_pair.a_migrations = 0;
     workload_busy_pair.b_migrations = 0;
     workload_busy_pair.migration_reported = false;
+    workload_busy_pair.peer_exit_pid = 0;
+    workload_busy_pair.peer_exit_cpu = 0;
+    workload_busy_pair.peer_exit_stack_released = false;
+    workload_busy_pair.peer_exit_reported = false;
     workload_busy_pair.refused = 0;
 }
 
@@ -646,6 +657,12 @@ fn workload_busy_secondary_candidate(pid: usize) -> bool {
     if (workload_busy_pair.a_pid == 0 || workload_busy_pair.b_pid == 0) {
         return false;
     }
+    // Once a peer exit is armed, keep only that currently-running process
+    // admitted there. Its exit must find no eligible successor, which is the
+    // architectural-idle boundary this recurrence fixture exists to cover.
+    if (workload_busy_pair.peer_exit_pid != 0) {
+        return pid == workload_busy_pair.peer_exit_pid;
+    }
     if (workload_busy_pair.restart_report_state ==
             WorkloadRestartReportState::Reported) {
         return pid == workload_busy_pair.a_pid ||
@@ -683,14 +700,27 @@ private fn workload_busy_record_progress_locked(
         input_steps: usize) -> WorkloadBusyProgressResult !{unsafe} {
     if (workload_busy_pair.restart_report_state ==
             WorkloadRestartReportState::Reported) {
-        if (workload_busy_pair.migration_reported == false && cpu_id() == 0 &&
+        if (workload_busy_pair.migration_reported == false && cpu_id() != 0 &&
             workload_busy_pair.a_migrations >= WORKLOAD_BUSY_MIGRATION_GOAL &&
             workload_busy_pair.b_migrations >= WORKLOAD_BUSY_MIGRATION_GOAL) {
             kernel_boot_log(
                 "\nworkload: busy pair migrated across both cpus with stack handoff intact\n");
             workload_busy_pair.migration_reported = true;
+            workload_busy_pair.peer_exit_pid = kernel_process_current_pid();
         }
         if (workload_busy_pair.migration_reported) {
+            // Ask exactly the armed process to exit, and only while it is
+            // actually running on a peer. Its replacement and the surviving
+            // process stop reporting, but remain CPU-bound as before.
+            if (workload_busy_pair.peer_exit_pid ==
+                    kernel_process_current_pid() && cpu_id() != 0) {
+                workload_busy_pair.peer_exit_cpu = cpu_id();
+                return WorkloadBusyProgressResult::Value(2);
+            }
+            if (workload_busy_pair.peer_exit_pid ==
+                    kernel_process_current_pid()) {
+                return WorkloadBusyProgressResult::Value(0);
+            }
             return WorkloadBusyProgressResult::Value(1);
         }
         return WorkloadBusyProgressResult::Value(0);
@@ -789,6 +819,31 @@ private fn workload_busy_record_progress_locked(
     // acknowledge the stop SGI until this guard is released.
     workload_busy_pair.finish_requested = true;
     return WorkloadBusyProgressResult::FinishRequested;
+}
+
+// Called at the physical boundary after the peer has moved from the exiting
+// process stack to its architectural IRQ/idle stack. ProcessRunGuard orders
+// this publication before core 0 can take and reap the zombie.
+fn workload_busy_peer_exit_stack_released(pid: usize, cpu: usize) {
+    if (workload_busy_pair.peer_exit_pid == pid &&
+        workload_busy_pair.peer_exit_cpu == cpu && cpu != 0) {
+        workload_busy_pair.peer_exit_stack_released = true;
+    }
+}
+
+// Called immediately before the target zombie's record is consumed. The
+// caller has already checked the real ProcessRecord's stack_owner_cpu, so the
+// fixed line is end-to-end evidence rather than a synthetic state probe.
+fn workload_busy_peer_exit_reaped(pid: usize, parent_pid: usize,
+                                  stack_unowned: bool) {
+    if (workload_busy_pair.peer_exit_reported == false &&
+        workload_busy_pair.peer_exit_pid == pid &&
+        workload_busy_pair.peer_exit_stack_released && stack_unowned &&
+        cpu_id() == 0 && parent_pid == 1) {
+        kernel_boot_log(
+            "workload: peer exit returned to idle, init collected on core 0 after stack release\n");
+        workload_busy_pair.peer_exit_reported = true;
+    }
 }
 
 private fn workload_busy_start_profile(pid: usize, input_steps: usize)
