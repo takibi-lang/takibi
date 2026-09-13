@@ -447,6 +447,51 @@ a compiler change that is already committed.
    says #476 "is what would make" a forgotten payload field a compile error.
    #476 is closed, and a forgotten scalar field is now a compile error at
    `publish_commit`. The scrub now matters only for array fields.
+5. **#493: effect-indexed invalidation is in the compiler, and it does
+   nothing until the kernel uses it.** The commit "kill a plain handle at a
+   call that may destroy its object" adds two checker-only words:
+   - `invalidates_ProcessHandle` goes on `scheduled_process_reap`. After a
+     call from which it is reachable, every local `ProcessHandle` binding is
+     dead. Reading one is a compile error naming the call.
+   - `handle_of_witness` goes on an accessor that takes one borrowed linear
+     witness and returns the handle of the process that witness proves
+     alive. A binding taken from it, and never reassigned, survives while
+     the witness is live.
+
+   The maintainer chose this design: linearity proves that a handle
+   survives, and nothing is trusted per call site. So exiting a process has
+   to consume its witness. The natural witness is a per-CPU
+   `CurrentProcess[p]` token, minted at the context switch and consumed by
+   the exit transition. With it, 5e952dc5's order (make the parent current
+   before the reap) becomes the only order that compiles.
+
+   A scratch copy with only the annotation on `scheduled_process_reap`
+   reports six functions:
+   - `process.tkb:2625` `scheduled_process_table_probe`: `first` after
+     `scheduled_process_probe_cycle`.
+   - `2832` `kernel_process_stack_switch_complete`: `incoming` after
+     `kernel_process_reap_zombie`.
+   - `5634` `kernel_process_fanout_probe`: `parent_handle` after
+     `kernel_process_clone_rollback`.
+   - `6120` `kernel_process_clone_rollback`: `parent` after
+     `scheduled_process_reap`.
+   - `6482` `kernel_process_child_exit`: `child`, read at the top of the
+     drain loop's next iteration after `kernel_process_reap_zombie`.
+   - `6769` `kernel_process_reap_zombie`: `parent` after its own reap.
+
+   A function stops at its first error, so more will surface as these are
+   fixed; the prototype counted 28 reads in these six functions. Each read
+   needs a witness or a re-derivation after the call. A witness fits
+   `child`, `incoming`, and `parent` wherever `parent` is already current.
+
+   On the tree before 5e952dc5, the build is rejected at #488's own line,
+   naming `kernel_syscall_wait4_deliver`, for both `parent` and `child`.
+   That scratch run added a witness for `child`, given up at the exit
+   transition.
+
+   Handles read from records or from `execution_here().current_handle`
+   stay under #492's runtime check. #493 stays open until the kernel
+   carries the annotations.
 
 #### Handed over from Territory B, 2026-09-12
 
@@ -667,8 +712,10 @@ boundary and Territory A applies it, rather than both editing at once.
    `restores_saved_irq` exist and are inert until the kernel uses them.
    Marking the guards and converting the call sites is Territory A's; see
    the 2026-09-13 handoff for the measured sites.
-6. **#493** effect-indexed invalidation: a design first, since it generalises
-   a rule rather than special-casing process handles.
+6. **#493, compiler half done 2026-09-13.** `invalidates_<Type>` and
+   `handle_of_witness` exist and are inert until the kernel uses them. The
+   kernel half, a current-process witness and six call sites, is Territory
+   A's; see the 2026-09-13 handoff.
 
 Then, unordered, the compiler and language issues that moved here with
 `lib/`: #131, #132, #212, #216, #252, #267, #282, #297, #342, #343, #370,
