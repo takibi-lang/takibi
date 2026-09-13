@@ -19,6 +19,8 @@ use "kernel/platform/rpi5/usb_provision.tkb";
 use "kernel/init/secondary_boot.tkb";
 use "kernel/init/contention_probes.tkb";
 
+extern fn kernel_boot_is_warm() -> usize;
+
 // GitHub issue #445: which core is asking, as a callable function.
 //
 // BCM2712 numbers its cores in MPIDR_EL1.Aff1 (bits [9:8]), not Aff0 --
@@ -47,6 +49,7 @@ fn rpi5_psci_cpu_on(target_affinity: usize, entry: usize, context: usize)
 // a coincidental stale write cannot pass for a start.
 fn kernel_secondary_boot_cpu_on(core: {0..<KERNEL_MAX_CORES as usize})
         -> usize {
+    if (kernel_boot_is_warm() != 0) { return 0; }
     return rpi5_psci_cpu_on(core << 8, kernel_secondary_entry, 0x190 + core);
 }
 

@@ -8,6 +8,10 @@ import tempfile
 from pathlib import Path
 
 from pass_line import CaseCount, report_pass
+from rpi5_jtag_reset_controls import (
+    verify as verify_reset_retry,
+    verify_loader_injection_context,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "scripts" / "rpi5_set_kernel_byte.sh"
@@ -65,10 +69,19 @@ def main() -> int:
     no_readback = run_case("no_readback")
     if no_readback.returncode == 0 or "read-back" not in no_readback.stderr:
         raise SystemExit("missing read-back was accepted")
+    verify_reset_retry()
+    CASES.note()
+    CASES.note()
+    verify_loader_injection_context()
+    CASES.note()
+    CASES.note()
     report_pass(
         "rpi5 kernel-byte writer controls",
         "verified writes pass, while status-zero DSCR errors and "
-        "missing read-back fail",
+        "missing read-back fail; reset observations resume and retry before "
+        "accepting a safe state or failing bounded; the loader selects a "
+        "privileged secondary, uses a persistent cache helper, and redirects "
+        "warm peers to fresh EL1 entries",
         cases=CASES.ran)
     return 0
 

@@ -23,6 +23,7 @@ SECTIONS {
     .data : ALIGN(8) {
         *(.data .data.*)
     }
+    kernel_file_end = .;
 
     .bss (NOLOAD) : ALIGN(16) {
         __bss_start = .;

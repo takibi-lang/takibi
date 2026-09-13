@@ -158,6 +158,23 @@ fn gem_rearm_rx() {
     dma_prepare_tx(gem_rx_desc as *u8, 64);
 }
 
+fn gem_halt() -> bool {
+    // Cadence's halt sequence sets NCR.THalt before disabling the MAC, then
+    // waits for TSR.TGO to report that an in-flight frame has drained.  This
+    // matters on an SWD warm reload because RP1 and its DMA engine are not
+    // reset along with the CPU cores.
+    let ncr: u32 = gem_read(0x00);
+    gem_write(0x00, ncr | (1 << 10));
+    for i: i32 in 0..<1000000 {
+        if ((gem_read(0x14) & (1 << 3)) == 0) {
+            gem_write(0x00, 1 << 5); // disable RX/TX and clear statistics
+            return true;
+        }
+    }
+    gem_write(0x00, 1 << 5);
+    return false;
+}
+
 fn net_init() -> NetInitResult !{unsafe} {
     let init_guard = match init_once_begin(&net_init_once) {
         InitOnceBegin::AlreadyComplete => { return NetInitResult::Failed; }
@@ -174,7 +191,14 @@ fn net_init() -> NetInitResult !{unsafe} {
     };
     *eth_clk_ctrl = *eth_clk_ctrl | (1 << 11);
 
-    // Stop RX/TX, enable management port, mask all queue-0 interrupts.
+    // Drain any transmission retained by an earlier SWD-loaded kernel before
+    // replacing the descriptor base.  A cold boot completes immediately.
+    if (gem_halt() == false) {
+        init_once_cancel(&net_init_once, init_guard);
+        return NetInitResult::Failed;
+    }
+    // Enable management port while RX/TX remain stopped, and mask all
+    // queue-0 interrupts.
     gem_write(0x00, 1 << 4);
     gem_write(0x0620, 0xFFFFFFFF);
     gem_write(0x0C, 1); // RGMII

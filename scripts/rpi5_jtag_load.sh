@@ -28,12 +28,15 @@
 # from our own code on this board -- that finding is still true and still
 # part of this check.
 #
-# NEW discriminator: current mode == EL2H AND halted PC < RPI5_SAFE_PC_MAX
+# NEW discriminator: current mode is EL1H or EL2H AND halted PC is below
+# RPI5_SAFE_PC_MAX
 # (32MB, 0x02000000). Every takibi payload here (jtag_stub.S at 0x80000,
 # every examples/*/kernel_rpi5.elf at 0x200000, see link.ld) executes
 # from a fixed LOW physical address with the EL2 stage 1 MMU either off or
 # identity-mapped -- comfortably under 32MB with over 100x headroom for
-# growth. A live, fully-booted Raspberry Pi OS kernel, by contrast, runs
+# growth. A warm reset may replay the resident Takibi payload at EL1 instead
+# of returning to the EL2 SD stub. A live, fully-booted Raspberry Pi OS
+# kernel, by contrast, runs
 # from a canonical HIGH virtual address once its own MMU is up (confirmed
 # empirically: 0xffffd0... above) -- nowhere near this range regardless of
 # EL/MMU state, so this check no longer needs to care whether OUR MMU
@@ -78,6 +81,10 @@ if [ ! -f "$ELF" ]; then
 fi
 
 entry_pc="0x$(llvm-readelf-19 -h "$ELF" | awk '/Entry point address/{sub(/^0x/,"",$NF); print $NF}')"
+warm_entry_pc="0x$(llvm-nm-19 "$ELF" | awk '$3=="kernel_warm_el1_entry"{print $1}')"
+warm_secondary_pc="0x$(llvm-nm-19 "$ELF" | awk '$3=="kernel_secondary_warm_el1_entry"{print $1}')"
+kernel_file_end="0x$(llvm-nm-19 "$ELF" | awk '$3=="kernel_file_end"{print $1}')"
+secondary_boot_call_pc="0x$(llvm-nm-19 "$ELF" | awk '$3=="kernel_secondary_boot_cpu_on"{print $1}')"
 stack_top="0x$(llvm-nm-19 "$ELF" | awk '$3=="stack_top"{print $1}')"
 SMP_CORES="${RPI5_SMP_CORES:-0}"
 if [ "$SMP_CORES" != "0" ] && [ "$SMP_CORES" != "2" ]; then
@@ -109,7 +116,11 @@ elif [ "${RPI5_ARM_KERNEL_DDB_BREAKPOINT:-0}" != "0" ]; then
     exit 1
 fi
 
-if [ -z "${entry_pc#0x}" ] || [ -z "${stack_top#0x}" ]; then
+if [ -z "${entry_pc#0x}" ] || [ -z "${warm_entry_pc#0x}" ] ||
+        [ -z "${warm_secondary_pc#0x}" ] ||
+        [ -z "${kernel_file_end#0x}" ] ||
+        [ -z "${secondary_boot_call_pc#0x}" ] ||
+        [ -z "${stack_top#0x}" ]; then
     echo "error: could not read entry point / stack_top from $ELF" >&2
     exit 1
 fi
@@ -133,6 +144,7 @@ fi
 CHECK_LOG=$(mktemp)
 if ! openocd "${OPENOCD_ARGS[@]}" "${OPENOCD_SPEED_ARGS[@]}" \
     -c 'init' \
+    -c 'targets bcm2712.cpu0' \
     -c 'halt' \
     -c 'reg pc' \
     -c 'mdw 0x00100000 1' \
@@ -146,8 +158,8 @@ then
 fi
 
 halted_pc=$(awk '/^pc \(/{print $3}' "$CHECK_LOG" | head -1)
-current_mode=$(grep -oE 'current mode: EL[0-9][A-Za-z]' "$CHECK_LOG" | head -1 | awk '{print $3}')
-mmu_state=$(grep -oE 'MMU: (enabled|disabled)' "$CHECK_LOG" | head -1 | awk '{print $2}')
+current_mode=$(grep -oE 'current mode: EL[0-9][A-Za-z]' "$CHECK_LOG" | tail -1 | awk '{print $3}')
+mmu_state=$(grep -oE 'MMU: (enabled|disabled)' "$CHECK_LOG" | tail -1 | awk '{print $2}')
 dtb_magic=$(awk '/^0x00100000: /{print $2}' "$CHECK_LOG" | head -1)
 
 if [ -z "$current_mode" ] || [ -z "$mmu_state" ] || [ -z "$dtb_magic" ]; then
@@ -178,7 +190,10 @@ if [ "${#halted_pc_hex}" -ne 16 ]; then
     exit 1
 fi
 
-if [ "$current_mode" != "EL2H" ] || [[ "$halted_pc_hex" > "$RPI5_SAFE_PC_MAX_HEX" || "$halted_pc_hex" == "$RPI5_SAFE_PC_MAX_HEX" ]]; then
+if { [ "$current_mode" != "EL1H" ] &&
+        [ "$current_mode" != "EL2H" ]; } ||
+        [[ "$halted_pc_hex" > "$RPI5_SAFE_PC_MAX_HEX" ||
+           "$halted_pc_hex" == "$RPI5_SAFE_PC_MAX_HEX" ]]; then
     printf 'error: halted core is at %s with PC=%s (MMU %s) -- this looks\n' \
          "$current_mode" "$halted_pc" "$mmu_state" >&2
     printf 'like a genuinely running Raspberry Pi OS, not our own\n' >&2
@@ -193,23 +208,130 @@ if [ "$current_mode" != "EL2H" ] || [[ "$halted_pc_hex" > "$RPI5_SAFE_PC_MAX_HEX
     printf 'found -- this check only read/resumed, it never wrote anything.)\n' >&2
     exit 1
 fi
-echo "halted core is at EL2H with PC=$halted_pc (< 0x$RPI5_SAFE_PC_MAX_HEX, MMU $mmu_state) -- safe to inject"
+echo "halted core is at $current_mode with PC=$halted_pc (< 0x$RPI5_SAFE_PC_MAX_HEX, MMU $mmu_state) -- safe to inject"
 
-# Pass 2: only reached once the check above confirms a clean catch. Load the
-# shared physical RAM through cpu3's debug context, then set/resume cpu0. A
-# completed payload leaves cpu0 parked at .Lhalt, where this OpenOCD/aarch64
-# combination can subsequently report a sticky debug abort when load_image
-# itself uses cpu0. The other core reaches the same RAM without that stale
-# cpu0 debug state; execution still starts exclusively on cpu0.
+# Pick a privileged secondary as the memory-access context. A completed
+# single-core payload made cpu0's debug state unsuitable for load_image, which
+# is why this path historically used cpu3. Four-core scheduling invalidated
+# the fixed choice: cpu3 may now be caught in EL0, whose translation context
+# makes OpenOCD abort the write. Fresh firmware secondaries are at EL3; an
+# idle Takibi secondary is at EL1. Both are usable, so inspect rather than
+# assume. Keep cpu0 solely as the execution core and safety authority above.
+INJECT_CORE=""
+WARM_REPLAY=false
+if [ "$current_mode" = "EL1H" ]; then WARM_REPLAY=true; fi
+launch_pc="$entry_pc"
+if [ "$WARM_REPLAY" = true ]; then launch_pc="$warm_entry_pc"; fi
+if [ "$WARM_REPLAY" = false ]; then
+    INJECT_CORE=3
+    INJECT_MODE=EL3H
+fi
+for core in 3 2 1; do
+    if [ "$WARM_REPLAY" = false ]; then break; fi
+    CORE_LOG=$(mktemp)
+    if openocd "${OPENOCD_ARGS[@]}" "${OPENOCD_SPEED_ARGS[@]}" \
+        -c 'init' \
+        -c "targets bcm2712.cpu$core" \
+        -c 'halt' \
+        -c 'reg pc' \
+        -c 'shutdown' > "$CORE_LOG" 2>&1
+    then
+        core_mode=$(grep -oE 'current mode: EL[0-9][A-Za-z]' "$CORE_LOG" | tail -1 | awk '{print $3}')
+        core_pc=$(awk '/^pc \(/{print $3}' "$CORE_LOG" | tail -1)
+        core_pc_hex="${core_pc#0x}"
+        core_pc_hex="$(printf '%s' "$core_pc_hex" | tr 'A-F' 'a-f')"
+        if { [ "$core_mode" = "EL1H" ] || [ "$core_mode" = "EL2H" ] ||
+                [ "$core_mode" = "EL3H" ] || [ "$core_mode" = "EL3T" ]; } &&
+                { [ "$WARM_REPLAY" = false ] || [ "$core_mode" = "EL1H" ] ||
+                    [ "$core_mode" = "EL2H" ]; } &&
+                [ "${#core_pc_hex}" -eq 16 ] &&
+                [[ "$core_pc_hex" < "$RPI5_SAFE_PC_MAX_HEX" ]]; then
+            INJECT_CORE="$core"
+            INJECT_MODE="$core_mode"
+            rm -f "$CORE_LOG"
+            break
+        fi
+    fi
+    openocd "${OPENOCD_ARGS[@]}" "${OPENOCD_SPEED_ARGS[@]}" \
+        -c 'init' -c "targets bcm2712.cpu$core" -c 'resume' \
+        -c 'shutdown' > /dev/null 2>&1 || true
+    rm -f "$CORE_LOG"
+done
+if [ -z "$INJECT_CORE" ]; then
+    echo "error: no privileged low-PC secondary is available for SWD injection" >&2
+    exit 1
+fi
+echo "using cpu$INJECT_CORE at $INJECT_MODE as the SWD memory-access context"
+
+# A warm reset can replay the previous Takibi kernel, including secondaries
+# already running its EL0 processes. Halt every non-writer secondary before
+# replacing its instructions. Sampling waits for an EL0 core's next timer IRQ
+# to return it to privileged Takibi code; changing PSTATE across exception
+# levels in debug state is architecturally invalid on this target. The cores
+# remain halted until cpu0 has restarted and is waiting for their handshake.
+if [ "$WARM_REPLAY" = true ]; then
+    for core in 1 2 3; do
+        if [ "$core" = "$INJECT_CORE" ]; then continue; fi
+        parked=false
+        for attempt in $(seq 1 20); do
+            CORE_LOG=$(mktemp)
+            if openocd "${OPENOCD_ARGS[@]}" "${OPENOCD_SPEED_ARGS[@]}" \
+                -c 'init' -c "targets bcm2712.cpu$core" -c 'halt' \
+                -c 'reg pc' -c 'shutdown' > "$CORE_LOG" 2>&1
+            then
+                core_mode=$(grep -oE 'current mode: EL[0-9][A-Za-z]' "$CORE_LOG" | tail -1 | awk '{print $3}')
+                core_pc=$(awk '/^pc \(/{print $3}' "$CORE_LOG" | tail -1)
+                core_pc_hex="${core_pc#0x}"
+                if { [ "$core_mode" = "EL1H" ] || [ "$core_mode" = "EL2H" ]; } &&
+                        [ "${#core_pc_hex}" -eq 16 ] &&
+                        [[ "$core_pc_hex" < "$RPI5_SAFE_PC_MAX_HEX" ]]; then
+                    parked=true
+                else
+                    openocd "${OPENOCD_ARGS[@]}" "${OPENOCD_SPEED_ARGS[@]}" \
+                        -c 'init' -c "targets bcm2712.cpu$core" -c 'resume' \
+                        -c 'shutdown' > /dev/null 2>&1 || true
+                fi
+            fi
+            rm -f "$CORE_LOG"
+            if [ "$parked" = true ]; then break; fi
+            sleep 0.05
+        done
+        if [ "$parked" != true ]; then
+            echo "error: cpu$core never returned to privileged Takibi code for warm-load quiescence" >&2
+            exit 1
+        fi
+    done
+fi
+
+# Pass 2: load shared physical RAM through the selected core, then set and
+# resume cpu0.
 LOG=$(mktemp)
 LOAD_COMMANDS=(
     -c 'init'
     -c 'targets bcm2712.cpu0'
     -c 'halt'
-    -c 'targets bcm2712.cpu3'
+    -c "targets bcm2712.cpu$INJECT_CORE"
     -c 'halt'
     -c "load_image $ELF 0 elf"
 )
+if [ "$WARM_REPLAY" = true ]; then
+    # load_image writes through the selected core and can leave its old cache
+    # lines resident. The cache-maintenance routine therefore lives outside
+    # the replaced image. rpi5_jtag_reset.sh installs the stable helper before
+    # resetting; the warm reset preserves this RAM while returning the cores
+    # to a state from which the loader can call it.
+    cache_publish_pc=0x00180100
+    cache_publish_done_pc=0x00180120
+    LOAD_COMMANDS+=(
+        -c "bp $cache_publish_done_pc 4 hw"
+        -c 'reg x0 0x00200000'
+        -c "reg x1 $kernel_file_end"
+        -c "reg pc $cache_publish_pc"
+        -c 'resume'
+        -c 'wait_halt 30000'
+        -c "rbp $cache_publish_done_pc"
+    )
+fi
 LOAD_COMMANDS+=(
     -c 'targets bcm2712.cpu0'
     -c "reg sp $stack_top"
@@ -217,25 +339,50 @@ LOAD_COMMANDS+=(
     -c 'reg x1 0'
     -c 'reg x2 0'
     -c 'reg x3 0'
-    -c "reg pc $entry_pc"
+    -c "reg pc $launch_pc"
 )
 if [ -n "$ddb_breakpoint_test_address" ]; then
     # BSS zeroing happens after cpu0 starts, so a byte written immediately
     # after load_image would be erased. Stop at the checkpoint first, then
-    # write through the already-halted cpu3 before releasing cpu0 again.
+    # write through the selected secondary before releasing cpu0 again.
     LOAD_COMMANDS+=(
         -c "bp $ddb_breakpoint_checkpoint_address 4 hw"
         -c 'resume'
         -c 'wait_halt 30000'
-        -c 'targets bcm2712.cpu3'
+        -c "targets bcm2712.cpu$INJECT_CORE"
         -c "mwb $ddb_breakpoint_test_address 1"
         -c 'targets bcm2712.cpu0'
         -c "rbp $ddb_breakpoint_checkpoint_address"
     )
 fi
-LOAD_COMMANDS+=(
-    -c 'resume'
-)
+if [ "$WARM_REPLAY" = true ]; then
+    LOAD_COMMANDS+=(
+        -c "bp $secondary_boot_call_pc 4 hw"
+        -c 'targets bcm2712.cpu0'
+        -c 'resume'
+        -c 'wait_halt 30000'
+        -c "rbp $secondary_boot_call_pc"
+    )
+    for core in 1 2 3; do
+        LOAD_COMMANDS+=(
+            -c "targets bcm2712.cpu$core"
+            -c 'halt'
+            -c "reg x0 $((0x190 + core))"
+            -c "reg pc $warm_secondary_pc"
+            -c 'resume'
+        )
+    done
+    LOAD_COMMANDS+=(-c 'targets bcm2712.cpu0' -c 'resume')
+elif [ "$INJECT_CORE" != "0" ]; then
+    LOAD_COMMANDS+=(
+        -c "targets bcm2712.cpu$INJECT_CORE"
+        -c 'resume'
+        -c 'targets bcm2712.cpu0'
+    )
+else
+    LOAD_COMMANDS+=(-c 'targets bcm2712.cpu0')
+fi
+if [ "$WARM_REPLAY" = false ]; then LOAD_COMMANDS+=(-c 'resume'); fi
 if [ "$SMP_CORES" = "2" ]; then
     LOAD_COMMANDS+=(
         -c 'sleep 200'
@@ -245,11 +392,7 @@ if [ "$SMP_CORES" = "2" ]; then
         -c 'resume'
     )
 fi
-LOAD_COMMANDS+=(
-    -c 'targets bcm2712.cpu3'
-    -c 'resume'
-    -c 'shutdown'
-)
+LOAD_COMMANDS+=(-c 'shutdown')
 if ! openocd "${OPENOCD_ARGS[@]}" "${OPENOCD_SPEED_ARGS[@]}" "${LOAD_COMMANDS[@]}" > "$LOG" 2>&1
 then
     echo "error: openocd failed during injection -- log follows" >&2
@@ -258,6 +401,6 @@ then
     exit 1
 fi
 
-echo "injected $ELF and resumed (PC=$entry_pc SP=$stack_top)"
+echo "injected $ELF and resumed (PC=$launch_pc SP=$stack_top)"
 cat "$LOG"
 rm -f "$LOG"

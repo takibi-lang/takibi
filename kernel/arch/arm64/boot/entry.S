@@ -13,7 +13,25 @@ _start:
     lsr     x0, x0, #8
     and     x0, x0, #3
     cbnz    x0, .Lpark
+    mov     x21, xzr
+    b       .Lprimary_bss
 
+    /* A PSCI SYSTEM_RESET can replay an injected image without restoring
+     * cpu0 to TF-A's EL2 handoff. The SWD loader selects this entry only
+     * after observing the same low-address Takibi image still at EL1H. */
+    .global kernel_warm_el1_entry
+kernel_warm_el1_entry:
+    msr     DAIFSet, #0xf
+    ic      iallu
+    dsb     ish
+    isb
+    mov     x19, x0
+    mov     x21, #1
+    adrp    x0, el1_vectors
+    add     x0, x0, :lo12:el1_vectors
+    msr     vbar_el1, x0
+
+.Lprimary_bss:
     adrp    x0, __bss_start
     add     x0, x0, :lo12:__bss_start
     adrp    x1, __bss_end
@@ -29,8 +47,17 @@ _start:
     str     x19, [x0]
     adrp    x0, boot_stack_top
     add     x0, x0, :lo12:boot_stack_top
+    cbnz    x21, .Lwarm_el1_entry
     adr     x1, .Lel1_entry
     bl      el2_drop_to_el1
+
+.Lwarm_el1_entry:
+    adrp    x1, boot_warm_flag
+    add     x1, x1, :lo12:boot_warm_flag
+    mov     x2, #1
+    str     x2, [x1]
+    mov     sp, x0
+    b       .Lel1_entry
 
 .Lel1_entry:
     /* GitHub issue #477: this core's byte offset into the per-core stack
@@ -71,9 +98,19 @@ boot_dtb_address_read:
     ldr     x0, [x0]
     ret
 
+    .global kernel_boot_is_warm
+    .type kernel_boot_is_warm, %function
+kernel_boot_is_warm:
+    adrp    x0, boot_warm_flag
+    add     x0, x0, :lo12:boot_warm_flag
+    ldr     x0, [x0]
+    ret
+
     .section .bss.boot, "aw", %nobits
     .align 3
 boot_dtb_address:
+    .skip 8
+boot_warm_flag:
     .skip 8
 
     .section .text.boot, "ax"
@@ -85,7 +122,25 @@ boot_dtb_address:
 kernel_secondary_entry:
     msr     DAIFSet, #0xf
     mov     x19, x0
+    mov     x21, xzr
+    b       .Lsecondary_prepare
 
+    /* The SWD warm loader halts an already-running secondary at EL1 before
+     * replacing RAM, then redirects it here after the primary has restarted.
+     * PSCI cannot power that already-on core up a second time. */
+    .global kernel_secondary_warm_el1_entry
+kernel_secondary_warm_el1_entry:
+    msr     DAIFSet, #0xf
+    ic      iallu
+    dsb     ish
+    isb
+    mov     x19, x0
+    mov     x21, #1
+    adrp    x0, el1_vectors
+    add     x0, x0, :lo12:el1_vectors
+    msr     vbar_el1, x0
+
+.Lsecondary_prepare:
     mrs     x20, mpidr_el1
     ubfx    x20, x20, #8, #2
     cmp     x20, #1
@@ -102,8 +157,13 @@ kernel_secondary_entry:
     sub     x1, x1, x2
     sub     x2, x20, #1
     madd    x0, x2, x1, x0
+    cbnz    x21, .Lsecondary_warm_el1
     adr     x1, .Lsecondary_el1
     bl      el2_drop_to_el1
+
+.Lsecondary_warm_el1:
+    mov     sp, x0
+    b       .Lsecondary_el1
 
 .Lsecondary_el2_park:
     wfe
