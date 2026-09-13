@@ -1060,7 +1060,8 @@ fn kernel_ddb_stopped_root_publish(frame_sp: usize, pid: usize)
 // exactly that reason -- three added lines took the shared run past its
 // threshold, which is the check working rather than the check complaining.
 fn kernel_world_stop_serve(frame_sp: usize) !{interrupt, unsafe} {
-    kernel_ddb_stopped_root_publish(frame_sp, kernel_process_current_pid());
+    kernel_ddb_stopped_root_publish(
+        frame_sp, kernel_process_frame_pid_or_zero(frame_sp));
     world_stop_interrupt_hold();
     kernel_ddb_stopped_root_retire();
 }
@@ -1154,7 +1155,7 @@ private fn ddb_current_unwind_root() -> DdbUnwindRoot !{unsafe} {
     let mut root: DdbUnwindRoot = {
         1,
         ddb_snapshot.cpu,
-        ddb_snapshot.process_pid,
+        kernel_process_frame_pid_or_zero(ddb_snapshot.frame_sp),
         frame.elr_el1,
         frame.x29,
         ddb_snapshot.frame_sp + EXC_CONTEXT_SIZE,
@@ -1629,6 +1630,13 @@ private fn ddb_render_stack_root(
             ddb_puts(" status=root-changed\n");
         }
         DdbStoppedRootResult::Root(root) => {
+            if (root.pid == 0) {
+                ddb_puts("ddb: stack cpu="); ddb_put_udec(core);
+                ddb_puts(" status=idle\n");
+                let mut absent: DdbStackRootSummary = { false, 0, 0, 0 };
+                let mut idle: DdbStackRenderResult = { absent, next };
+                return idle;
+            }
             next.roots = next.roots + 1;
             ddb_puts("ddb: stack cpu="); ddb_put_udec(core);
             ddb_puts(" pid="); ddb_put_udec(root.pid);

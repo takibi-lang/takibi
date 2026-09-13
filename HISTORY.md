@@ -15,6 +15,22 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-13: DDB attributes saved frames to physical stacks (#505)
+
+The QEMU DDB lane could stop after peer exit with CPU 1 in architectural idle,
+but stopped-root publication called the ordinary current-pid API whose fallback
+reported PID 1. It consequently presented the idle exception stack as PID 1's
+process stack and failed migration attribution. A second valid stop shape also
+exposed that logical current can move to an incoming process after IRQ entry
+has saved the outgoing process's frame.
+
+DDB now derives the process identity from the saved frame's address and the
+retained physical `stack_handle`. A frame on an architectural idle stack names
+no process and is rendered as `status=idle`; a frame caught during handoff stays
+with the process whose stack physically contains it. The QEMU runner accepts
+both two-running-process and one-running-plus-idle snapshots while continuing
+to require every reported process root to match the scheduler's stack ledger.
+
 ## 2026-09-13: destroying pooled objects invalidates plain handles (#493)
 
 Process and unified-object destruction now declare which plain handle kind

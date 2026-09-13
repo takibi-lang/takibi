@@ -6241,6 +6241,20 @@ fn kernel_process_current_pid() -> usize {
     return 1;
 }
 
+// DDB attributes an exception to the process whose physical stack holds its
+// saved frame. IRQ entry may already have released that stack for migration,
+// and logical current may then name the incoming process. The retained
+// stack_handle plus the frame range remain the independent authority. An
+// architectural idle-stack frame matches no process and reports zero.
+fn kernel_process_frame_pid_or_zero(frame_sp: usize) -> usize {
+    let mut physical: ProcessHandle = execution_here().stack_handle;
+    if (scheduled_process_handle_matches(physical) &&
+        kernel_process_frame_belongs_to(physical, frame_sp)) {
+        return scheduled_process_pid_of_handle(physical);
+    }
+    return 0;
+}
+
 // GitHub issue #302: replaces kernel/kernel/syscall.tkb's own
 // syscall_block_reason/syscall_wait4_status_ptr module globals, which used
 // to relay a syscall handler's block decision across the one-way

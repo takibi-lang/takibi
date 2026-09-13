@@ -241,7 +241,7 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         ! grep -q '^ddb: sp_el0=0x' "$UART_LOG" ||
         ! grep -Eq "^ddb: intr cpu=[0-9]+ entry=$expected_entry source=$expected_source live_daif=0x[0-9a-f]+ saved_daif=0x[0-9a-f]+$" "$UART_LOG" ||
         ! grep -Eq '^ddb: intr esr=(0x[0-9a-f]+|unavailable) far=(0x[0-9a-f]+|unavailable)$' "$UART_LOG" ||
-        ! grep -Eq '^ddb: sched enabled=[01] pending=[01] current=[0-9]+ ready=[0-9]+ running=[0-9]+ blocked=[0-9]+ exited=[0-9]+ truncated=[01]$' "$UART_LOG" ||
+        ! grep -Eq '^ddb: sched enabled=[01] pending=[01] current=[0-9]+ ready=[0-9]+ running=[0-9]+ blocked=[0-9]+ exited=[0-9]+( constructing=[1-9][0-9]*)? truncated=[01]$' "$UART_LOG" ||
         ! grep -Eq '^ddb: current pid=[0-9]+ parent=[0-9]+ state=[0-9]+ wait=[0-9]+$' "$UART_LOG" ||
         ! grep -Eq '^ddb: vm pid=[0-9]+ root=[0-9]+ live=[01] asid=[0-9]+ l1=0x[0-9a-f]+$' "$UART_LOG" ||
         ! grep -Eq '^ddb: fds pid=[0-9]+ slots=[0-9]+$' "$UART_LOG" ||
@@ -310,20 +310,29 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
     exit 1
 fi
 
-if [ "$BREAK_SOURCE" = uart ] &&
-        { [ "$(grep -Ec '^ddb: stack cpu=[01] pid=[0-9]+ stack=0x[0-9a-f]+\.\.0x[0-9a-f]+ owner=(none|[01]) record=match$' "$UART_LOG")" -ne 2 ] ||
-          ! grep -q '^ddb: stacks roots=2 matched=2 missing=0 duplicate-process=0 owner-mismatch=0 range-mismatch=0 duplicate-pid=0 duplicate-stack=0$' "$UART_LOG"; }; then
-    echo "FAIL kernel/qemu ddb: migration stack attribution was not unique" >&2
-    exit 1
+if [ "$BREAK_SOURCE" = uart ]; then
+    matched_stacks="$(grep -Ec '^ddb: stack cpu=[01] pid=[0-9]+ stack=0x[0-9a-f]+\.\.0x[0-9a-f]+ owner=(none|[01]) record=match$' "$UART_LOG" || true)"
+    if { [ "$matched_stacks" -eq 2 ] &&
+         grep -q '^ddb: stacks roots=2 matched=2 missing=0 duplicate-process=0 owner-mismatch=0 range-mismatch=0 duplicate-pid=0 duplicate-stack=0$' "$UART_LOG"; } ||
+       { [ "$matched_stacks" -eq 1 ] &&
+         grep -q '^ddb: stack cpu=1 status=idle$' "$UART_LOG" &&
+         grep -q '^ddb: stacks roots=1 matched=1 missing=0 duplicate-process=0 owner-mismatch=0 range-mismatch=0 duplicate-pid=0 duplicate-stack=0$' "$UART_LOG"; }; then
+        :
+    else
+        echo "FAIL kernel/qemu ddb: migration stack attribution was not unique" >&2
+        exit 1
+    fi
 fi
 
-# The software checkpoint deliberately precedes process scheduling: both
-# boot CPUs still identify PID 1, while only CPU 0 owns PID 1's process stack.
-# Keep that negative control explicit so `stacks` cannot silently call this
-# early topology a unique process assignment.
+# The software checkpoint deliberately precedes process scheduling. CPU 0
+# owns PID 1's boot stack, while CPU 1 has already entered architectural idle
+# and therefore has no process stack to attribute. Before #552 made that idle
+# state reachable, the PID API's bootstrap fallback mislabeled CPU 1 as PID 1
+# and this check expected the resulting mismatch instead of the real topology.
 if [ "$BREAK_SOURCE" = software ] &&
-        ! grep -q '^ddb: stacks roots=2 matched=1 missing=0 duplicate-process=0 owner-mismatch=1 range-mismatch=1 duplicate-pid=1 duplicate-stack=0$' "$UART_LOG"; then
-    echo "FAIL kernel/qemu ddb: boot-time duplicate-root control missing" >&2
+        { ! grep -q '^ddb: stack cpu=1 status=idle$' "$UART_LOG" ||
+          ! grep -q '^ddb: stacks roots=1 matched=1 missing=0 duplicate-process=0 owner-mismatch=0 range-mismatch=0 duplicate-pid=0 duplicate-stack=0$' "$UART_LOG"; }; then
+    echo "FAIL kernel/qemu ddb: boot-time idle-root attribution missing" >&2
     exit 1
 fi
 
