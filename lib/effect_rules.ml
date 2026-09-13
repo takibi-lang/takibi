@@ -40,10 +40,22 @@ let lock_acquire_annotation =
 let lock_guard_annotation =
   parse_lock_annotation "lock_guard_"
 
+(* GitHub issue #528: the two checker-only words of the IRQ-restoration rule.
+   `irq_masking_guard` marks a function returning a linear guard whose
+   acquire saved and masked the interrupt state; `restores_saved_irq` marks
+   a function that restores exactly a state its caller saved, which is the
+   trusted boundary the rule stops at. Like the lock annotations, neither
+   appears in a function-pointer row. *)
+let irq_masking_guard_annotation = "irq_masking_guard"
+let restores_saved_irq_annotation = "restores_saved_irq"
+
 let dynamic_rule name =
-  match lock_acquire_annotation name, lock_guard_annotation name with
-  | None, None -> None
-  | _ -> Some {
+  let checker_only =
+    lock_acquire_annotation name <> None
+    || lock_guard_annotation name <> None
+    || name = irq_masking_guard_annotation
+    || name = restores_saved_irq_annotation in
+  if not checker_only then None else Some {
       name; declaration = Required; declaration_role = false;
       function_pointer = false; propagates = false;
       effect_free_forbidden = false; excludes_declared = [];

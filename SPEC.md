@@ -1572,6 +1572,19 @@ kernel deliberately holds several independent connections in its pool probe.
 These annotations are checker-only and do not appear in function-pointer
 effect rows.
 
+IRQ restoration under an IRQ-masking guard is checked the same way (GitHub
+issue #528). A function returning the linear token of a guard whose acquire
+saved and masked the interrupt state declares `irq_masking_guard`. A
+function that restores exactly a state its caller saved -- the kernel's
+`mutex_irq_restore(flags)` -- declares `restores_saved_irq`, and the check
+trusts that claim. While a marked guard is live, calling a function from
+which `msr_daifclr_irq` is reachable through resolved direct calls, without
+passing through a `restores_saved_irq` function, is a compile error naming
+the guard. So is calling `msr_daifclr_irq` directly. A guard passed to the
+call is being released rather than held across it, and is not counted. With
+no guard marked, nothing is checked: a local save and conditional restore
+with no outer guard is unaffected. Both words are checker-only.
+
 `exception` marks a synchronous-exception handler root. Like `interrupt`, it
 is a declaration role rather than a callable function-pointer effect, and an
 extern function cannot claim it because there is no Takibi body to check.

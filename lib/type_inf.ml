@@ -8393,6 +8393,68 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           changed := true
       | None, _ -> ()) lock_callees
   done;
+  (* GitHub issue #528: IRQ delivery must not be restored while a live guard
+     whose acquire masked IRQs still owns the prior interrupt state.
+
+     Three facts, mirroring the lock-order machinery above:
+     - irq_guard_types: the linear types returned by an `irq_masking_guard`
+       function;
+     - irq_restore_discharged: functions marked `restores_saved_irq`, which
+       restore exactly a state their caller saved. That claim is trusted, and
+       it is what lets a nested lock's release pass while an outer guard is
+       held;
+     - irq_restorers: every function from which `msr_daifclr_irq` is
+       reachable through resolved direct calls without crossing a discharged
+       function.
+
+     The check itself is in check_affine_func, beside the lock-order one: a
+     call to a restorer while a marked guard is live and not being handed to
+     that very call. With nothing marked, nothing is checked. *)
+  let has_annotation effects word = match effects with
+    | Some effects -> List.mem word effects
+    | None -> false in
+  let irq_restore_discharged, irq_guard_types =
+    List.fold_left (fun (discharged, guards) item -> match item with
+      | Ast.FuncDef f ->
+          let key = overload_key f.name f.params in
+          let discharged =
+            if has_annotation f.effects Effect_rules.restores_saved_irq_annotation
+            then StringSet.add key discharged else discharged in
+          let guards =
+            if not (has_annotation f.effects
+                      Effect_rules.irq_masking_guard_annotation) then guards
+            else match f.ret_type with
+              | Some ret when is_linear_type ret ->
+                  add_lock_guard_types f.def_loc ret
+                    { Effect_rules.rank = 0; label = "irq" } guards
+              | Some _ -> raise (TypeError (f.def_loc,
+                  "irq_masking_guard annotation requires a linear returned guard type"))
+              | None -> raise (TypeError (f.def_loc,
+                  "irq_masking_guard annotation requires a returned guard type"))
+          in
+          (discharged, guards)
+      | _ -> (discharged, guards))
+      (StringSet.empty, StringMap.empty) prog
+  in
+  let irq_restorers =
+    let restores = ref (StringMap.fold (fun caller callees acc ->
+        if StringSet.mem "msr_daifclr_irq" callees
+           && not (StringSet.mem caller irq_restore_discharged)
+        then StringSet.add caller acc else acc) lock_callees StringSet.empty) in
+    let changed = ref true in
+    while !changed do
+      changed := false;
+      StringMap.iter (fun caller callees ->
+        if not (StringSet.mem caller !restores)
+           && not (StringSet.mem caller irq_restore_discharged)
+           && not (StringSet.is_empty (StringSet.inter callees !restores))
+        then begin
+          restores := StringSet.add caller !restores;
+          changed := true
+        end) lock_callees
+    done;
+    !restores
+  in
   let check_affine_func fdef =
     let finfo = StringMap.find (overload_key fdef.Ast.name fdef.params) functions in
     let binding_resolution = finfo.bindings in
@@ -8989,6 +9051,36 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                        "lock order violation: cannot acquire '%s' (rank %d) while holding '%s' (rank %d)"
                        acquired.label acquired.rank held.label held.rank))
                  | _ -> ()) visible_bindings);
+          (* GitHub issue #528; see irq_restorers. A guard passed to this
+             call is being handed over -- released, usually -- rather than
+             held across it. *)
+          if target = "msr_daifclr_irq" || StringSet.mem target irq_restorers
+          then begin
+            let passed = List.filter_map (fun (a : Ast.expr) -> match a.desc with
+              | Ast.Var v -> Some v | _ -> None) args in
+            Hashtbl.iter (fun visible_name id ->
+              let rec irq_guard ty = match strip_borrow ty with
+                | Ast.TypeIndexed (guard_name, _) | Ast.TypeView (guard_name, _)
+                | Ast.TypeNamed guard_name ->
+                    if StringMap.mem guard_name irq_guard_types
+                    then Some guard_name else None
+                | Ast.TypeExists (_, _, body) -> irq_guard body
+                | _ -> None
+              in
+              let path = PVar (id, visible_name) in
+              match irq_guard (binding_type id visible_name) with
+              | Some guard_name
+                when not (List.mem visible_name passed)
+                     && not (ResourceFlow.is_consumed_on_all_paths path moved) ->
+                  raise (TypeError (e.loc, Printf.sprintf
+                    "cannot restore IRQs while '%s' (%s) is live: its acquire \
+                     masked IRQs and it still owns the interrupt state it \
+                     saved, and '%s' reaches msr_daifclr_irq. Release the \
+                     guard first, or restore through a function marked \
+                     restores_saved_irq"
+                    visible_name guard_name name))
+              | _ -> ()) visible_bindings
+          end;
           let params = Option.value (StringMap.find_opt target call_params) ~default:[] in
           let rec check_args moved args params = match args with
             | [] -> moved

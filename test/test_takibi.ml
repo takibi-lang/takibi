@@ -13057,6 +13057,62 @@ let codegen_tests = [
           }" ());
 
   Alcotest.test_case
+    "issue #528: IRQs are not restored under a live IRQ-masking guard"
+    `Quick
+    (fun () ->
+       let base =
+         "linear view Issue528Guard[id: usize];
+          fn issue528_enable() { msr_daifclr_irq(); }
+          fn issue528_restore(flags: usize) !{restores_saved_irq} {
+            if (flags == 0) { issue528_enable(); }
+          }
+          fn issue528_take(id: usize) -> Issue528Guard[id] !{irq_masking_guard} {
+            return view Issue528Guard[id];
+          }
+          fn issue528_put(g: sink Issue528Guard[id]) { issue528_restore(0); }
+          " in
+       (* 4c17d48f's shape: a helper reachable while the guard is live
+          restores IRQs before the guard is released. *)
+       expect_type_error "cannot restore IRQs while" (base ^
+         "fn issue528_helper() { issue528_enable(); }
+          fn issue528_bad() {
+            let g = issue528_take(1);
+            issue528_helper();
+            issue528_put(g);
+          }") ();
+       (* Indirect: the restore is two calls down. *)
+       expect_type_error "cannot restore IRQs while" (base ^
+         "fn issue528_inner() { issue528_enable(); }
+          fn issue528_outer() { issue528_inner(); }
+          fn issue528_deep() {
+            let g = issue528_take(1);
+            issue528_outer();
+            issue528_put(g);
+          }") ();
+       (* A helper that is handed the guard and restores is refused inside
+          itself, where the guard is still live. *)
+       expect_type_error "cannot restore IRQs while" (base ^
+         "fn issue528_borrowing(g: borrow Issue528Guard[id]) {
+            issue528_enable();
+          }") ();
+       (* Restoring a saved state, releasing the guard, and restoring after
+          the release are all fine. *)
+       expect_ok (base ^
+         "fn issue528_ok() {
+            let g = issue528_take(1);
+            issue528_restore(1);
+            issue528_put(g);
+            issue528_enable();
+          }") ();
+       (* A local mask/restore section with no outer guard still compiles. *)
+       expect_ok (base ^
+         "fn issue528_local(masked: usize) {
+            if (masked == 0) { issue528_enable(); }
+          }") ();
+       expect_type_error "irq_masking_guard annotation requires a linear returned guard type"
+         "fn issue528_not_guard() -> usize !{irq_masking_guard} { return 0; }" ());
+
+  Alcotest.test_case
     "issue #466: live lock guards enforce transitive rank order"
     `Quick
     (fun () ->
