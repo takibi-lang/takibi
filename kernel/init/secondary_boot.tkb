@@ -68,8 +68,9 @@ fn kernel_secondary_boot_report() !{logs, unsafe} {
         let core: {0..<KERNEL_MAX_CORES as usize} = raw;
         kernel_boot_log("smp bringup: core");
         uart_put_udec(raw);
-        match kernel_secondary_boot_await(
-                core, kernel_secondary_boot_cpu_on(core)) {
+        let status: usize = kernel_secondary_boot_cpu_on(core);
+        kernel_online_core_note_cpu_on(core, status);
+        match kernel_secondary_boot_await(core, status) {
             SecondaryBootResult::Started => {
                 // GitHub issue #447: "and then it parked" is what this
                 // line used to mean. The core runs an idle loop with its
@@ -86,10 +87,10 @@ fn kernel_secondary_boot_report() !{logs, unsafe} {
             SecondaryBootResult::NotPresent => {
                 kernel_boot_log(" not present\n");
             }
-            SecondaryBootResult::UnexpectedStatus(status) => {
+            SecondaryBootResult::UnexpectedStatus(unexpected) => {
                 kernel_boot_log(" unexpected psci status\n");
             }
-            SecondaryBootResult::NotStarted(status) => {
+            SecondaryBootResult::NotStarted(not_started) => {
                 kernel_boot_log(" failed\n");
             }
         }

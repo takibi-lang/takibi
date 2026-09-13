@@ -117,11 +117,12 @@ most-touched files were cross-cutting infrastructure, not subsystem code, and
 every expensive conflict in the 2026-09-05 rebase came from two streams
 editing the same API in one file.
 
-- **Territory A**, the maintained kernel vertical: all of `kernel/` and
-  `scripts/`. This includes architecture and platform code, DDB, drivers,
-  filesystems, kernel tests and views, and the host runners that verify them.
+- **Territory A**, the maintained kernel vertical: all of `kernel/`,
+  `scripts/`, and `linux_user/`. This includes architecture and platform code,
+  DDB, drivers, filesystems, kernel tests and views, portable executable tests
+  of kernel components, and the host runners that verify them.
 - **Territory B**, the compiler and native-language vertical: `lib/`, `bin/`,
-  `test/`, `linux_user/`, `docs/`, and `examples/`.
+  `test/`, `docs/`, and `examples/`.
 
 This vertical split deliberately gives one agent every file needed to take a
 kernel change from implementation through QEMU, DDB, and hardware evidence.

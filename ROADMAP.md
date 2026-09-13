@@ -81,9 +81,10 @@ shared-file conventions defined in `AGENTS.md`. This section is the part that
 moves: when a new issue outranks what is queued below, edit it here.
 
 **Codex holds Territory A: the whole maintained-kernel vertical, including
-platform code, DDB, drivers, filesystems, kernel views, and their runners.
-Claude Code holds Territory B: the compiler, native language tests, and
-documentation.** The directory exclusion in `AGENTS.md` remains the mechanism
+platform code, DDB, drivers, filesystems, kernel views, portable executable
+kernel-component tests under `linux_user/`, and their runners. Claude Code
+holds Territory B: the compiler, its Alcotest suite, and documentation.** The
+directory exclusion in `AGENTS.md` remains the mechanism
 that makes the two queues loosely coupled.
 
 This replaces the split that assigned kernel implementation to Codex but its
@@ -127,7 +128,10 @@ entry leaves the next one unable to be verified.
     and the scheduler's deliberately restricted workload from two cores to
     four. The active set is runtime state: RPi5 has four online CPUs, while
     maintained QEMU lanes remain at two vCPUs for CI capacity. Do not admit
-    arbitrary filesystem or direct userspace UART work in this phase.
+    arbitrary filesystem or direct userspace UART work in this phase. Complete
+    on QEMU and RPi5: the RPi5 DDB stops all three peers and the restricted
+    workload records four-core execution, while QEMU retains its two-online-
+    CPU boundary.
 12. **#9 phase B**, including #533 and #534's remaining verification: add the
     affinity ABI and its userspace-visible policy, widen admission, and verify
     four cores on RPi5 plus the two-online-CPU boundary on QEMU. This is one

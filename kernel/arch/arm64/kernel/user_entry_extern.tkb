@@ -15,6 +15,7 @@ extern fn kernel_syscall_fail_stop(frame_sp: usize) !{noreturn};
 extern fn kernel_ddb_breakpoint();
 extern fn kernel_ddb_guarded_read_u8(address: usize) -> usize !{unsafe};
 extern symbol kernel_ddb_memory_fault_return;
+extern fn kernel_ddb_restore_fault_state(esr_el1: usize, far_el1: usize);
 extern fn kernel_current_sync_fail_stop(frame_sp: usize) !{noreturn};
 
 // The fail-stop snapshot deliberately keeps these architectural reads in the

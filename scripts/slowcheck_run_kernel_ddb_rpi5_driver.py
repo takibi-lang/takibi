@@ -36,7 +36,7 @@ DRIVER = ROOT / "scripts" / "run_kernel_ddb_rpi5_driver.py"
 
 PROMPT = b"ddb> "
 BANNER = (b"\nddb: interrupt-safe UART debugger\n"
-          b"ddb: world-stop complete mask=0x0000000000000002\n"
+          b"ddb: world-stop complete mask=0x000000000000000e\n"
           b"ddb: break seq=1 cpu=0 elr=0x00000000400103a0 "
           b"sp_el0=0x000000007ffffdf0\n")
 

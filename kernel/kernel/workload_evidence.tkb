@@ -247,7 +247,7 @@ private fn workload_profile_transition_masked(next: WorkloadCpuMode) {
         return;
     }
     let cpu: usize = cpu_id();
-    if (cpu >= KERNEL_ACTIVE_CORES || cpu >= KERNEL_MAX_CORES) {
+    if (cpu >= kernel_online_core_count() || cpu >= KERNEL_MAX_CORES) {
         if (before_irq_masked == 0) { enable_irq(); }
         return;
     }
@@ -282,7 +282,7 @@ fn workload_profile_interrupt_wait() !{may_block} {
 fn workload_profile_irq_enter() {
     if (workload_profile_active == false) { return; }
     let cpu: usize = cpu_id();
-    if (cpu >= KERNEL_ACTIVE_CORES || cpu >= KERNEL_MAX_CORES) { return; }
+    if (cpu >= kernel_online_core_count() || cpu >= KERNEL_MAX_CORES) { return; }
     let bounded_cpu: {0..<KERNEL_MAX_CORES as usize} = cpu;
     profile_timeline_irq_enter(
         workload_profile_selected_pid(bounded_cpu));
@@ -294,7 +294,7 @@ fn workload_profile_irq_enter() {
 fn workload_profile_irq_exit() {
     if (workload_profile_active == false) { return; }
     let cpu: usize = cpu_id();
-    if (cpu >= KERNEL_ACTIVE_CORES || cpu >= KERNEL_MAX_CORES) { return; }
+    if (cpu >= kernel_online_core_count() || cpu >= KERNEL_MAX_CORES) { return; }
     let bounded_cpu: {0..<KERNEL_MAX_CORES as usize} = cpu;
     profile_timeline_irq_exit(
         workload_profile_selected_pid(bounded_cpu));
@@ -308,7 +308,7 @@ private fn workload_profile_current_cpu() -> usize {
     // for a complete update, rather than resume a half-finished one later.
     if (workload_profile_active == false) { return KERNEL_MAX_CORES; }
     let cpu: usize = cpu_id();
-    if (cpu >= KERNEL_ACTIVE_CORES || cpu >= KERNEL_MAX_CORES) {
+    if (cpu >= kernel_online_core_count() || cpu >= KERNEL_MAX_CORES) {
         return KERNEL_MAX_CORES;
     }
     return cpu;
@@ -432,6 +432,7 @@ fn workload_profile_note_network_tx(bytes: usize) {
 private fn workload_profile_start(
         stopped: borrow WorldStopped[stop],
         guard: borrow ProcessRunGuard[lock], now: usize, pid: usize) {
+    let online: usize = kernel_online_core_count();
     let mut selected_at_start: [usize; KERNEL_MAX_CORES];
     for cpu: usize in 0..<KERNEL_MAX_CORES {
         selected_at_start[cpu] = workload_profile_selected_pid(cpu);
@@ -442,13 +443,17 @@ private fn workload_profile_start(
     // A core with no transition during the interval is idle for the whole
     // interval, not absent from the partition. This also gives every active
     // core the same wall-time boundary for the future multicore re-audit.
-    for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
-        workload_profile_cores[cpu].last_tick = now;
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if (cpu < online) {
+            workload_profile_cores[cpu].last_tick = now;
+        }
     }
-    for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
-        let selected: usize = selected_at_start[cpu];
-        workload_profile_cores[cpu].selected_pid = selected;
-        workload_profile_cores[cpu].has_selected_pid = selected != 0;
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if (cpu < online) {
+            let selected: usize = selected_at_start[cpu];
+            workload_profile_cores[cpu].selected_pid = selected;
+            workload_profile_cores[cpu].has_selected_pid = selected != 0;
+        }
     }
     // The core opening the interval is known even when it has not crossed a
     // scheduler selection since the busy pair registered. Restore the other
@@ -457,7 +462,7 @@ private fn workload_profile_start(
     // process-attributed CPU-time report intermittently assigned this core's
     // entire nonzero profile to nobody.
     let current_cpu: usize = cpu_id();
-    if (current_cpu < KERNEL_ACTIVE_CORES && current_cpu < KERNEL_MAX_CORES) {
+    if (current_cpu < online && current_cpu < KERNEL_MAX_CORES) {
         workload_profile_cores[current_cpu].mode = WorkloadCpuMode::El1;
         workload_profile_cores[current_cpu].last_tick = now;
         workload_profile_cores[current_cpu].selected_pid = pid;
@@ -466,9 +471,11 @@ private fn workload_profile_start(
     workload_profile_active = true;
     profile_timeline_start(
         workload_busy_pair.a_pid, workload_busy_pair.b_pid);
-    for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
-        let selected: usize = workload_profile_selected_pid(cpu);
-        profile_timeline_interval_start_cpu(stopped, cpu, selected, now);
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if (cpu < online) {
+            let selected: usize = workload_profile_selected_pid(cpu);
+            profile_timeline_interval_start_cpu(stopped, cpu, selected, now);
+        }
     }
     // The flat PC profile shares this interval exactly: same IRQ-masked
     // boundary, same start timestamp, so a sample outside the interval the
@@ -479,10 +486,13 @@ private fn workload_profile_start(
 private fn workload_profile_finish(
         stopped: borrow WorldStopped[stop],
         guard: borrow ProcessRunGuard[lock], now: usize) {
-    for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
-        workload_profile_charge(cpu, now);
-        profile_timeline_interval_finish_cpu(
-            stopped, cpu, workload_profile_selected_pid(cpu), now);
+    let online: usize = kernel_online_core_count();
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if (cpu < online) {
+            workload_profile_charge(cpu, now);
+            profile_timeline_interval_finish_cpu(
+                stopped, cpu, workload_profile_selected_pid(cpu), now);
+        }
     }
     // The original one-core counters charge at scheduler selections. With
     // one permanently selected process on each CPU there is deliberately no
@@ -490,20 +500,22 @@ private fn workload_profile_finish(
     // time from the already-closed per-CPU interval. This is valid for the
     // admitted two-core workload because its scheduler boundary pins A to
     // core 0 and B to core 1 for the entire measured interval.
-    if (KERNEL_ACTIVE_CORES > 1) {
+    if (online > 1) {
         workload_busy_pair.a_ticks = 0;
         workload_busy_pair.b_ticks = 0;
-        for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
-            let running: usize = workload_profile_cores[cpu].el0_ticks +
-                workload_profile_cores[cpu].el1_ticks +
-                workload_profile_cores[cpu].irq_ticks;
-            let selected: usize = workload_profile_selected_pid(cpu);
-            if (selected == workload_busy_pair.a_pid) {
-                workload_busy_pair.a_ticks =
-                    workload_busy_pair.a_ticks + running;
-            } else if (selected == workload_busy_pair.b_pid) {
-                workload_busy_pair.b_ticks =
-                    workload_busy_pair.b_ticks + running;
+        for cpu: usize in 0..<KERNEL_MAX_CORES {
+            if (cpu < online) {
+                let running: usize = workload_profile_cores[cpu].el0_ticks +
+                    workload_profile_cores[cpu].el1_ticks +
+                    workload_profile_cores[cpu].irq_ticks;
+                let selected: usize = workload_profile_selected_pid(cpu);
+                if (selected == workload_busy_pair.a_pid) {
+                    workload_busy_pair.a_ticks =
+                        workload_busy_pair.a_ticks + running;
+                } else if (selected == workload_busy_pair.b_pid) {
+                    workload_busy_pair.b_ticks =
+                        workload_busy_pair.b_ticks + running;
+                }
             }
         }
     }
@@ -781,7 +793,7 @@ private fn workload_busy_record_progress_locked(
 
 private fn workload_busy_start_profile(pid: usize, input_steps: usize)
         !{unsafe} {
-    match world_stop_begin(&kernel_world_stop, KERNEL_ACTIVE_CORES,
+    match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
                            WORKLOAD_PROFILE_WORLD_STOP_SPINS) {
         WorldStopResult::Busy => {
             let retry_guard = process_run_lock();
@@ -817,7 +829,7 @@ private fn workload_busy_start_profile(pid: usize, input_steps: usize)
                 kernel_boot_log("profile: begin name=busy-pair input_steps=");
                 uart_put_udec(input_steps);
                 kernel_boot_log(" cpu_count=");
-                uart_put_udec(KERNEL_ACTIVE_CORES);
+                uart_put_udec(kernel_online_core_count());
                 kernel_boot_log(" iterations_goal=");
                 uart_put_udec(WORKLOAD_BUSY_ROUNDS * 2);
                 kernel_boot_log(" pid_a=");
@@ -851,7 +863,7 @@ fn workload_busy_record_progress(tag: usize, checksum: usize,
             process_run_unlock(guard);
         }
     }
-    match world_stop_begin(&kernel_world_stop, KERNEL_ACTIVE_CORES,
+    match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
                            WORKLOAD_PROFILE_WORLD_STOP_SPINS) {
         WorldStopResult::Busy => {
             let retry_guard = process_run_lock();
@@ -967,6 +979,7 @@ private fn workload_busy_report_restart(guard: borrow ProcessRunGuard[lock]) {
 // belong in the capture for a person (and for the one-core versus
 // two-core comparison) rather than in a fixture's expected output.
 private fn workload_busy_pair_report() !{unsafe} {
+    let online: usize = kernel_online_core_count();
     if (workload_busy_pair.a_pid != workload_busy_pair.b_pid &&
         workload_busy_pair.max_skew <= WORKLOAD_BUSY_SKEW_BOUND) {
         kernel_boot_log("workload: busy pair two pids under init, ");
@@ -1022,7 +1035,8 @@ private fn workload_busy_pair_report() !{unsafe} {
     kernel_boot_log(" checksum_b=");
     uart_put_udec(workload_busy_pair.b_checksum);
     kernel_boot_log("\n");
-    for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if (cpu < online) {
         kernel_boot_log("profile: cpu name=busy-pair cpu=");
         uart_put_udec(cpu);
         kernel_boot_log(" wall_cycles=");
@@ -1053,6 +1067,7 @@ private fn workload_busy_pair_report() !{unsafe} {
         kernel_boot_log(" network_tx_bytes=");
         uart_put_udec(workload_profile_cores[cpu].network_tx_bytes);
         kernel_boot_log("\n");
+        }
     }
     profile_timeline_report(
         workload_busy_pair.start_ticks, workload_busy_pair.end_ticks);

@@ -16,11 +16,9 @@
 // the secondary core that reached it.
 //
 // Current limitations:
-// - Only core 1 is started by today's platform boot wrappers. The state and
-//   tick evidence below are per-core so phase A of processor affinity can
-//   start cores 2 and 3 without turning a one-writer scalar into shared
-//   state. The architectural entry path still has one secondary stack and
-//   must be split before either additional core is actually started.
+// - Online CPUs must form the contiguous prefix [0, count). PSCI bring-up
+//   probes every reserved secondary, but scheduler and world-stop admission
+//   stop at the first absent core rather than representing a sparse set.
 // - The core's exception stacks are its own as of GitHub issue #477. That
 //   was not true when this file was first written, and the first timer
 //   tick here landed on core 0's saved frame -- its INTID came back as
@@ -39,6 +37,13 @@ const SECONDARY_CORE_ID: usize = 1;
 // slot to know it reached compiled Takibi. `io` rather than an atomic because
 // each slot is a one-shot publication with one writer and a bounded reader.
 private let mut kernel_secondary_boot_state: [io usize; KERNEL_MAX_CORES];
+
+// Core 0's PSCI authority for the contiguous online prefix. A successful
+// CPU_ON joins the prefix before the target publishes its Takibi handshake.
+// This is deliberately conservative: if that CPU faults during entry, a
+// later world stop must return Partial rather than claim the broken CPU did
+// not exist.
+private let mut kernel_online_cores: io usize;
 
 // This core's timer-interrupt count. Written only by the secondary core,
 // from its interrupt handler; read only by core 0, for a view.
@@ -65,6 +70,7 @@ fn kernel_secondary_boot_state_clear() {
     for core: usize in 0..<KERNEL_MAX_CORES {
         kernel_secondary_boot_state[core] = 0;
     }
+    kernel_online_cores = 1;
 }
 
 fn kernel_secondary_boot_state_value_for(
@@ -74,6 +80,28 @@ fn kernel_secondary_boot_state_value_for(
 
 fn kernel_secondary_boot_state_value() -> usize {
     return kernel_secondary_boot_state_value_for(1);
+}
+
+// Record only a contiguous prefix. A platform with a sparse topology keeps
+// the later CPU reserved but not schedulable until the representation grows
+// into a mask.
+fn kernel_online_core_note_cpu_on(
+        core: {0..<KERNEL_MAX_CORES as usize}, status: usize) {
+    let online: usize = kernel_online_cores as usize;
+    if (status == 0 && core == online && online < KERNEL_MAX_CORES) {
+        kernel_online_cores = online + 1;
+    }
+}
+
+// The one runtime authority for the contiguous online CPU set. QEMU reports
+// two while the RPi5 reports four, even though both images reserve and compile
+// for KERNEL_ACTIVE_CORES.
+fn kernel_online_core_count() -> usize {
+    let online: usize = kernel_online_cores as usize;
+    if (online >= 1 && online <= KERNEL_MAX_CORES) {
+        return online;
+    }
+    return 1;
 }
 
 // Read by core 0 for the view. The acquire pairs with the handler's own

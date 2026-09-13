@@ -64,10 +64,11 @@
 //   of what the handlers happen to call, which is exactly the kind of
 //   accident this file exists to stop relying on silently.
 
-// How many cores execute kernel code. Not how many cores exist, nor merely
-// how many the platform starts: both active cores take timer interrupts and
-// run one admitted userspace process each.
-const KERNEL_ACTIVE_CORES: usize = 2;
+// Maximum number of cores admitted to scheduler work. The runtime online
+// prefix can be smaller: maintained QEMU has two vCPUs while RPi5 starts all
+// four. kernel_online_core_count() is the authority for operations, such as a
+// world stop, that require every addressed CPU to answer.
+const KERNEL_ACTIVE_CORES: usize = 4;
 
 // How many cores this build reserves per-core storage FOR. Distinct from
 // the number above, and the distinction is Linux's own NR_CPUS versus
@@ -81,7 +82,8 @@ const KERNEL_ACTIVE_CORES: usize = 2;
 // bound against a participation count, which every one of them does.
 //
 // Four slots match both maintained targets. KERNEL_ACTIVE_CORES remains the
-// independent statement of how many cores actually execute kernel code.
+// compile-time scheduler ceiling; the runtime online prefix decides how many
+// of those cores currently participate.
 const KERNEL_MAX_CORES: usize = 4;
 
 // Whether a syscall handler can lose the CPU before it returns. 0 today:

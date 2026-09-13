@@ -124,6 +124,15 @@ EXEMPT = {
         "GitHub issue #479: mutable pool metadata is protected by the pool "
         "Mutex; mutations require its indexed guard and ordinary Live views "
         "own the same lock through payload use",
+    "kernel/profile_samples.tkb":
+        "per-CPU samples are indexed below KERNEL_MAX_CORES and opened or "
+        "read only for kernel_online_core_count() under a world stop",
+    "kernel/profile_timeline.tkb":
+        "per-CPU intervals are indexed below KERNEL_MAX_CORES and opened or "
+        "read only for kernel_online_core_count() under a world stop",
+    "kernel/workload_evidence.tkb":
+        "per-CPU evidence is indexed below KERNEL_MAX_CORES and its shared "
+        "profile snapshots use kernel_online_core_count() under a world stop",
     "fs/elf64.tkb":
         "ELF_IDENT_MAGIC is a lookup table that is never written; `let mut` "
         "is how this language declares an initialised array",

@@ -118,8 +118,8 @@ fn app_main() {
           drain(0) == 1 && output_is(0, 5));
 
     check("a CPU past the maximum has no ring",
-          peer_console_room(2) == 0 && publish_bytes(2, 5) == 0 &&
-          drain(2) == 0);
+          peer_console_room(4) == 0 && publish_bytes(4, 5) == 0 &&
+          drain(4) == 0);
 }
 
 // One record only, for the step after the ring filled.

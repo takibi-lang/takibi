@@ -3675,7 +3675,7 @@ private fn kernel_process_secondary_start_reserved(
             return ProcessSecondaryStart::Idle;
         }
         AddressSpaceActivationPrepareResult::RolloverNeeded => {
-            match world_stop_begin(&kernel_world_stop, KERNEL_ACTIVE_CORES,
+            match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
                                    SCHEDULER_WORLD_STOP_SPINS) {
                 WorldStopResult::Busy => {
                     let guard = process_run_lock();
@@ -3799,7 +3799,7 @@ private fn kernel_process_schedule_reserved(
             return current_sp;
         }
         AddressSpaceActivationPrepareResult::RolloverNeeded => {
-            match world_stop_begin(&kernel_world_stop, KERNEL_ACTIVE_CORES,
+            match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
                                    SCHEDULER_WORLD_STOP_SPINS) {
                 WorldStopResult::Busy => {
                     kernel_process_schedule_cancel_reserved(owner, running);
@@ -3892,7 +3892,7 @@ fn kernel_process_activate_current_root() -> CurrentRootActivationResult {
             return CurrentRootActivationResult::Invalid;
         }
         AddressSpaceActivationPrepareResult::RolloverNeeded => {
-            match world_stop_begin(&kernel_world_stop, KERNEL_ACTIVE_CORES,
+            match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
                                    SCHEDULER_WORLD_STOP_SPINS) {
                 WorldStopResult::Busy => {
                     return CurrentRootActivationResult::Invalid;
@@ -3942,7 +3942,7 @@ fn kernel_process_activate_stable_root(root: usize) {
                     execution_here().current_handle).saved_sp);
         }
         AddressSpaceActivationPrepareResult::RolloverNeeded => {
-            match world_stop_begin(&kernel_world_stop, KERNEL_ACTIVE_CORES,
+            match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
                                    SCHEDULER_WORLD_STOP_SPINS) {
                 WorldStopResult::Busy => {
                     kernel_syscall_fail_stop(
@@ -4803,7 +4803,7 @@ private fn kernel_process_block_reserved(
             return 0;
         }
         AddressSpaceActivationPrepareResult::RolloverNeeded => {
-            match world_stop_begin(&kernel_world_stop, KERNEL_ACTIVE_CORES,
+            match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
                                    SCHEDULER_WORLD_STOP_SPINS) {
                 WorldStopResult::Busy => {
                     kernel_process_schedule_cancel_reserved(owner, running);
@@ -6338,7 +6338,7 @@ private fn kernel_process_exit_reserved(
             return 0;
         }
         AddressSpaceActivationPrepareResult::RolloverNeeded => {
-            match world_stop_begin(&kernel_world_stop, KERNEL_ACTIVE_CORES,
+            match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
                                    SCHEDULER_WORLD_STOP_SPINS) {
                 WorldStopResult::Busy => {
                     kernel_process_schedule_cancel_reserved(owner, running);

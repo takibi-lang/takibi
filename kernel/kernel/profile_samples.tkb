@@ -164,7 +164,7 @@ fn profile_sample_irq(frame_sp: usize) !{interrupt, unsafe} {
         return;
     }
     let cpu: usize = cpu_id();
-    if (cpu >= KERNEL_ACTIVE_CORES || cpu >= KERNEL_MAX_CORES) {
+    if (cpu >= kernel_online_core_count() || cpu >= KERNEL_MAX_CORES) {
         pmu_sample_stop();
         return;
     }
@@ -192,6 +192,7 @@ private fn profile_sample_put_level(level: ProfileSampleLevel) {
 // workload_evidence.tkb names on its own `profile: begin`/`profile: end`
 // lines -- a second interval would make the name a parameter of both.
 fn profile_sample_report() {
+    let online: usize = kernel_online_core_count();
     // The stable half of this dump, and the one a view asserts: whether the
     // hardware source this file needs was actually there and armed. The
     // counts below are load-dependent and belong to the artifact, not to a
@@ -206,7 +207,8 @@ fn profile_sample_report() {
     uart_put_udec(PROFILE_SAMPLE_PERIOD_CYCLES);
     kernel_boot_log("\n");
     let mut sequence: usize = 0;
-    for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if (cpu < online) {
         let stored: usize = profile_sample_cores[cpu].stored;
         for slot: usize in 0..<PROFILE_SAMPLE_MAX {
             if (slot < stored) {
@@ -229,10 +231,13 @@ fn profile_sample_report() {
                 sequence = sequence + 1;
             }
         }
+        }
     }
     let mut lost: usize = 0;
-    for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
-        lost = lost + profile_sample_cores[cpu].lost;
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if (cpu < online) {
+            lost = lost + profile_sample_cores[cpu].lost;
+        }
     }
     kernel_boot_log("profile: sample-summary name=busy-pair stored=");
     uart_put_udec(sequence);

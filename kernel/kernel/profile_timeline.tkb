@@ -86,7 +86,7 @@ private fn profile_timeline_note(kind: ProfileTimelineKind, pid: usize,
         return;
     }
     let raw_cpu: usize = cpu_id();
-    if (raw_cpu >= KERNEL_ACTIVE_CORES || raw_cpu >= KERNEL_MAX_CORES) {
+    if (raw_cpu >= kernel_online_core_count() || raw_cpu >= KERNEL_MAX_CORES) {
         if (irq_was_masked == 0) { enable_irq(); }
         return;
     }
@@ -248,6 +248,7 @@ private fn profile_timeline_put_kind(kind: ProfileTimelineKind) {
 }
 
 fn profile_timeline_report(start: usize, finish: usize) {
+    let online: usize = kernel_online_core_count();
     kernel_boot_log(
         "profile: timeline name=busy-pair start_cycles=");
     uart_put_udec(start);
@@ -256,11 +257,12 @@ fn profile_timeline_report(start: usize, finish: usize) {
     kernel_boot_log(" frequency=");
     uart_put_udec(read_cntfrq() as usize);
     kernel_boot_log(" cpu_count=");
-    uart_put_udec(KERNEL_ACTIVE_CORES);
+    uart_put_udec(online);
     kernel_boot_log(" capacity=");
     uart_put_udec(PROFILE_TIMELINE_EVENTS);
     kernel_boot_log("\n");
-    for cpu: usize in 0..<KERNEL_ACTIVE_CORES {
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if (cpu < online) {
         let stored: usize = profile_timeline_cores[cpu].stored;
         kernel_boot_log("profile: timeline-cpu name=busy-pair cpu=");
         uart_put_udec(cpu);
@@ -292,6 +294,7 @@ fn profile_timeline_report(start: usize, finish: usize) {
                 uart_put_udec(profile_timeline_cores[cpu].events[slot].arg);
                 kernel_boot_log("\n");
             }
+        }
         }
     }
 }

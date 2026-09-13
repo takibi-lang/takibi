@@ -4,11 +4,8 @@ use "kernel/kernel/fd_table.tkb";
 use "kernel/arch/arm64/kernel/user_entry_extern.tkb";
 use "kernel/lib/occupancy.tkb";
 
-// Both maintained platforms start core 1 before any DDB entry is enabled.
-// KERNEL_ACTIVE_CORES remains the scheduler count and is deliberately not
-// used here: the idle secondary still executes timer and SGI handlers and
-// therefore must acknowledge inspection quiescence.
-const DDB_ONLINE_CORES: usize = 2;
+// DDB stops the runtime online prefix, including idle secondaries: they still
+// execute timer and SGI handlers and must acknowledge inspection quiescence.
 const DDB_WORLD_STOP_SPINS: usize = 10000000;
 
 // How many of a process's descriptors an oops report prints. GitHub issue
@@ -1688,8 +1685,25 @@ private fn ddb_render_stack_root(
     return result;
 }
 
+private fn ddb_stack_audit_pair(
+        left: DdbStackRootSummary, right: DdbStackRootSummary,
+        audit: DdbStackAudit) -> DdbStackAudit {
+    let mut next: DdbStackAudit = audit;
+    if (left.present && right.present) {
+        if (left.pid == right.pid) {
+            next.duplicate_pid = next.duplicate_pid + 1;
+        }
+        if (left.stack_bottom == right.stack_bottom &&
+                left.stack_top == right.stack_top) {
+            next.duplicate_stack = next.duplicate_stack + 1;
+        }
+    }
+    return next;
+}
+
 private fn ddb_render_stacks() !{unsafe} {
-    ddb_puts("ddb: stacks cpus="); ddb_put_udec(DDB_ONLINE_CORES);
+    let online: usize = kernel_online_core_count();
+    ddb_puts("ddb: stacks cpus="); ddb_put_udec(online);
     ddb_puts(" processes="); ddb_put_udec(ddb_snapshot.process_count);
     ddb_puts(" truncated="); ddb_put_udec(ddb_snapshot.process_truncated);
     ddb_puts("\n");
@@ -1702,14 +1716,24 @@ private fn ddb_render_stacks() !{unsafe} {
         ddb_render_stack_root(1, audit);
     audit = second_result.audit;
     let mut second: DdbStackRootSummary = second_result.root;
-    if (first.present && second.present) {
-        if (first.pid == second.pid) {
-            audit.duplicate_pid = audit.duplicate_pid + 1;
-        }
-        if (first.stack_bottom == second.stack_bottom &&
-                first.stack_top == second.stack_top) {
-            audit.duplicate_stack = audit.duplicate_stack + 1;
-        }
+    audit = ddb_stack_audit_pair(first, second, audit);
+    let mut third: DdbStackRootSummary = { false, 0, 0, 0 };
+    if (online > 2) {
+        let mut third_result: DdbStackRenderResult =
+            ddb_render_stack_root(2, audit);
+        audit = third_result.audit;
+        third = third_result.root;
+        audit = ddb_stack_audit_pair(first, third, audit);
+        audit = ddb_stack_audit_pair(second, third, audit);
+    }
+    if (online > 3) {
+        let mut fourth_result: DdbStackRenderResult =
+            ddb_render_stack_root(3, audit);
+        audit = fourth_result.audit;
+        let mut fourth: DdbStackRootSummary = fourth_result.root;
+        audit = ddb_stack_audit_pair(first, fourth, audit);
+        audit = ddb_stack_audit_pair(second, fourth, audit);
+        audit = ddb_stack_audit_pair(third, fourth, audit);
     }
     ddb_puts("ddb: stacks roots="); ddb_put_udec(audit.roots);
     ddb_puts(" matched="); ddb_put_udec(audit.matched);
@@ -1955,6 +1979,13 @@ private fn kernel_ddb_enter_stopped(
     ddb_snapshot.entry_kind = entry_kind;
     ddb_snapshot.entry_source = entry_source;
     ddb_snapshot.live_daif = mrs_daif();
+    // An IRQ may interrupt the EL0 synchronous handler after it unmasks IRQs
+    // but before it has finished consuming ESR_EL1. A guarded DDB read then
+    // takes a nested Current-EL data abort and replaces ESR_EL1/FAR_EL1. Keep
+    // the interrupted handler's architectural inputs across the whole DDB
+    // session; QEMU happened not to expose the replay, while the RPi5 did.
+    let outer_esr_el1: usize = mrs_esr_el1();
+    let outer_far_el1: usize = mrs_far_el1();
     let entry_frame: *ExceptionFrame = unsafe { frame_sp as *ExceptionFrame };
     ddb_snapshot.saved_daif = entry_frame.spsr_el1 & 0x3C0;
     ddb_snapshot.esr_valid = 0;
@@ -2180,6 +2211,8 @@ private fn kernel_ddb_enter_stopped(
     } else {
         ddb_puts("ddb: console tx=spinning\n");
     }
+    // Do this last: every command above may exercise the nested-fault path.
+    kernel_ddb_restore_fault_state(outer_esr_el1, outer_far_el1);
 }
 
 // Stop every online peer before touching the machine-global snapshot or the
@@ -2189,7 +2222,8 @@ private fn kernel_ddb_enter_stopped(
 fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
         !{interrupt, unsafe} {
     match world_stop_begin(
-            &kernel_world_stop, DDB_ONLINE_CORES, DDB_WORLD_STOP_SPINS) {
+            &kernel_world_stop, kernel_online_core_count(),
+            DDB_WORLD_STOP_SPINS) {
         WorldStopResult::Busy => {
             ddb_puts("\nddb: world-stop busy; inspection refused\n");
         }

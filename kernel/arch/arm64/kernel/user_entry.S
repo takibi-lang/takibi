@@ -335,6 +335,15 @@ kernel_ddb_memory_fault_return:
     mov     x0, #0
     ret
 
+    /* DDB's guarded read nests a synchronous exception inside an IRQ.  An
+     * interrupted EL0 sync handler still needs its original syndrome after
+     * that IRQ returns, so restore the two fault-state registers together. */
+    .global kernel_ddb_restore_fault_state
+kernel_ddb_restore_fault_state:
+    msr     esr_el1, x0
+    msr     far_el1, x1
+    ret
+
     /* Non-resumable tail for every other generated Current-EL sync frame. */
     .global kernel_current_sync_fail_stop
 kernel_current_sync_fail_stop:
