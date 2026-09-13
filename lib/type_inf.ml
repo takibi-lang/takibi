@@ -8455,6 +8455,87 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     done;
     !restores
   in
+  (* GitHub issue #493: effect-indexed invalidation.
+
+     A plain handle -- a copyable struct naming a pooled object by slot and
+     generation -- can outlive its object, and a call several layers down
+     that destroys the object leaves the caller's copy looking valid.
+     Nothing local connects the two, so the rule is kind-wide: after a call
+     from which an `invalidates_<Type>` function is reachable, every local
+     binding of struct type <Type> is dead, and reading it is a compile
+     error naming the call.
+
+     What survives is what a linear witness proves alive. A function marked
+     `handle_of_witness` takes exactly one borrowed linear (or affine)
+     argument and returns the handle of the object that argument is about;
+     that claim is trusted, as `restores_saved_irq` is for #528. A binding
+     initialized from such a call, and never reassigned, survives any
+     invalidating call during which its witness stays live. The witness is
+     linear, so whatever destroys the object has to consume it first, and
+     then the handle dies with it.
+
+     Three facts, computed once:
+     - invalidation_seeds: <Type> -> the functions that declare
+       `invalidates_<Type>`;
+     - witness_accessors: accessor -> (<Type>, index of the witness
+       parameter);
+     - invalidators: <Type> -> every function from which a seed is reachable
+       through resolved direct calls.
+
+     The check is in check_affine_func. With nothing marked, nothing is
+     checked. *)
+  let invalidation_seeds, witness_accessors =
+    List.fold_left (fun (seeds, accessors) item -> match item with
+      | Ast.FuncDef f ->
+          let key = overload_key f.name f.params in
+          let words = Option.value f.effects ~default:[] in
+          let seeds = List.fold_left (fun seeds word ->
+            match Effect_rules.invalidation_annotation word with
+            | None -> seeds
+            | Some kind ->
+                if not (StringMap.mem kind senv) then
+                  raise (TypeError (f.def_loc, Printf.sprintf
+                    "%s names no struct type '%s'" word kind));
+                let existing = Option.value (StringMap.find_opt kind seeds)
+                  ~default:StringSet.empty in
+                StringMap.add kind (StringSet.add key existing) seeds)
+            seeds words in
+          let accessors =
+            if not (List.mem Effect_rules.handle_of_witness_annotation words)
+            then accessors
+            else
+              let kind = match f.ret_type with
+                | Some (Ast.TypeNamed kind) -> kind
+                | _ -> raise (TypeError (f.def_loc,
+                    "handle_of_witness annotation requires a named struct return type")) in
+              let witnesses = List.filter_map (fun (index, (_, ty)) ->
+                match ty with
+                | Some (Ast.TypeBorrow inner) when is_tracked_type inner -> Some index
+                | _ -> None) (List.mapi (fun index p -> (index, p)) f.params) in
+              match witnesses with
+              | [index] -> StringMap.add key (kind, index) accessors
+              | _ -> raise (TypeError (f.def_loc,
+                  "handle_of_witness annotation requires exactly one borrowed linear or affine witness parameter"))
+          in
+          (seeds, accessors)
+      | _ -> (seeds, accessors))
+      (StringMap.empty, StringMap.empty) prog
+  in
+  let invalidators = StringMap.map (fun seeds ->
+    let reach = ref seeds in
+    let changed = ref true in
+    while !changed do
+      changed := false;
+      StringMap.iter (fun caller callees ->
+        if not (StringSet.mem caller !reach)
+           && not (StringSet.is_empty (StringSet.inter callees !reach))
+        then begin
+          reach := StringSet.add caller !reach;
+          changed := true
+        end) lock_callees
+    done;
+    !reach) invalidation_seeds
+  in
   let check_affine_func fdef =
     let finfo = StringMap.find (overload_key fdef.Ast.name fdef.params) functions in
     let binding_resolution = finfo.bindings in
@@ -8615,6 +8696,108 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       if is_tracked_path p && ResourceFlow.may_be_consumed p moved then
         raise (TypeError (loc, Printf.sprintf
           "%s value '%s' was already consumed" (kind_word p) (path_to_string p)))
+    in
+    (* GitHub issue #493; see invalidators. An invalidated handle is marked
+       consumed in `moved`: branch joins then treat "invalidated on some
+       path" as dead, and an assignment or a fresh `let` revives it, both
+       for free. Handles are untracked, so no other rule sees the mark. *)
+    let handle_kind ty = match strip_borrow ty with
+      | Ast.TypeNamed kind when StringMap.mem kind invalidators -> Some kind
+      | _ -> None in
+    let path_handle_kind = function
+      | PVar (id, name) -> handle_kind (binding_type id name)
+      | PField _ -> None in
+    let handle_witness : (path, path) Hashtbl.t = Hashtbl.create 8 in
+    let handle_killer : (path, string * Ast.loc) Hashtbl.t = Hashtbl.create 8 in
+    (* Only a binding that is never reassigned can keep a witness: the
+       table is not flow-sensitive, so this is what keeps it sound. *)
+    let reassigned_names =
+      let names = ref StringSet.empty in
+      let rec expr (e : Ast.expr) = match e.desc with
+        | Ast.Assign ({ desc = Ast.Var n; _ }, rhs) ->
+            names := StringSet.add n !names; expr rhs
+        | Ast.Assign (a, b) | Ast.BinOp (_, a, b) | Ast.Index (a, b) ->
+            expr a; expr b
+        | Ast.SliceOf (a, b, c) -> expr a; expr b; expr c
+        | Ast.Call (_, xs) | Ast.StructLit xs | Ast.TupleLit xs ->
+            List.iter expr xs
+        | Ast.VariantCtor (_, _, x) | Ast.Bnot x | Ast.Deref x | Ast.AddrOf x
+        | Ast.Cast (_, x) | Ast.FieldGet (x, _) | Ast.Unsafe x -> expr x
+        | _ -> ()
+      and stmts body = List.iter stmt body
+      and stmt (s : Ast.stmt) = match s.desc with
+        | Ast.Return (Some e) | Ast.Expr e | Ast.Yield e -> expr e
+        | Ast.Let (_, _, _, Some e, _) | Ast.LetTuple (_, e) -> expr e
+        | Ast.Block b | Ast.UnsafeBlock b -> stmts b
+        | Ast.If (c, y, n) -> expr c; stmts y; stmts n
+        | Ast.While (c, b) -> expr c; stmts b
+        | Ast.For (_, _, lo, hi, b) -> expr lo; expr hi; stmts b
+        | Ast.ForEach (_, c, b) -> expr c; stmts b
+        | Ast.Match (e, arms) | Ast.LetMatch (_, _, _, e, arms) ->
+            expr e;
+            List.iter (function
+              | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b
+              | Ast.ArmIntLit (_, b) | Ast.ArmByteSliceLit (_, b) -> stmts b)
+              arms
+        | _ -> ()
+      in
+      stmts fdef.Ast.body;
+      !names
+    in
+    let require_handle_live loc moved p =
+      match path_handle_kind p with
+      | Some kind when ResourceFlow.may_be_consumed p moved ->
+          let (killer, at) = Option.value (Hashtbl.find_opt handle_killer p)
+            ~default:("an earlier call", loc) in
+          raise (TypeError (loc, Printf.sprintf
+            "'%s' (%s) may name a destroyed object: '%s' at line %d reaches \
+             a function marked invalidates_%s, and no live witness vouches \
+             for this handle. Re-derive it after that call, or take it from \
+             a handle_of_witness accessor and keep the witness live across \
+             the call"
+            (path_to_string p) kind killer at.Lexing.pos_lnum kind))
+      | _ -> ()
+    in
+    let invalidate_handles loc name target moved =
+      let kinds = StringMap.fold (fun kind reach acc ->
+        if StringSet.mem target reach then kind :: acc else acc)
+        invalidators [] in
+      if kinds = [] then moved
+      else Hashtbl.fold (fun visible_name id moved ->
+        let path = PVar (id, visible_name) in
+        match handle_kind (binding_type id visible_name) with
+        | Some kind when List.mem kind kinds
+                         && not (ResourceFlow.may_be_consumed path moved) ->
+            let witnessed = match Hashtbl.find_opt handle_witness path with
+              | Some w -> not (ResourceFlow.may_be_consumed w moved)
+              | None -> false in
+            if witnessed then moved
+            else begin
+              Hashtbl.replace handle_killer path (name, loc);
+              mv_consume path moved
+            end
+        | _ -> moved) visible_bindings moved
+    in
+    (* A handle a loop body invalidates is still invalidated when the next
+       iteration starts and after the loop. The body is walked once more
+       from that state, so a use at its top is seen. With no handle
+       invalidated this costs nothing. *)
+    let carry_handles moved body_moved recheck =
+      let carried = PathSet.filter (fun p -> path_handle_kind p <> None)
+        (PathSet.diff (ResourceFlow.maybe_consumed body_moved)
+           (ResourceFlow.maybe_consumed moved)) in
+      if PathSet.is_empty carried then moved
+      else begin
+        let moved = PathSet.fold mv_consume carried moved in
+        recheck moved;
+        moved
+      end
+    in
+    let outer_consumed declared moved body_moved =
+      PathSet.filter (fun p -> path_handle_kind p = None)
+        (PathSet.inter declared
+           (PathSet.diff (ResourceFlow.maybe_consumed body_moved)
+              (ResourceFlow.maybe_consumed moved)))
     in
     (* Linear early-exit rule (OWNERSHIP_KERNEL.md 4.2): wherever control
        leaves the region that owes the obligations (return, break,
@@ -8980,6 +9163,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Var name ->
           let p = pvar_expr e name in
           require_available e.loc moved p;
+          require_handle_live e.loc moved p;
           require_region_live e.loc taints moved name;
           if consume && PathSet.mem p borrowed_params then
             raise (TypeError (e.loc, Printf.sprintf
@@ -9115,7 +9299,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             let moved = check_expr taints moved consume_arg arg in
             check_args moved rest (match params with _ :: ps -> ps | [] -> [])
           in
-          let moved = check_args moved args params in
+          let moved =
+            invalidate_handles e.loc name target (check_args moved args params) in
           let returns_obligation = match StringMap.find_opt target call_returns with
             | Some ty -> is_linear_type ty || is_must_use_type ty
             | None -> false
@@ -9447,6 +9632,31 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                 check_expr taints before_init (is_tracked_path p) e
             | None -> moved
           in
+          (* GitHub issue #493: a handle taken from a witness accessor, or
+             copied from one that was, keeps that witness. *)
+          (match init with
+           | Some init_e when path_handle_kind p <> None
+                              && not (StringSet.mem name reassigned_names) ->
+               (match init_e.desc with
+                | Ast.Call (callee, args) ->
+                    let target = Option.value
+                      (StringMap.find_opt (loc_key init_e.loc) !resolved_call_targets)
+                      ~default:callee in
+                    (match StringMap.find_opt target witness_accessors with
+                     | Some (_, index) ->
+                         (match List.nth_opt args index with
+                          | Some ({ desc = Ast.Var w; _ } as witness_e) ->
+                              Hashtbl.replace handle_witness p
+                                (pvar_expr witness_e w)
+                          | _ -> ())
+                     | None -> ())
+                | Ast.Var source ->
+                    (match Hashtbl.find_opt handle_witness
+                             (pvar_expr init_e source) with
+                     | Some w -> Hashtbl.replace handle_witness p w
+                     | None -> ())
+                | _ -> ())
+           | _ -> ());
           let taints = TaintEnv.set name
             (match StringMap.find_opt name !var_types, init with
              (* A local array is stack storage. Its value expression decays
@@ -9499,13 +9709,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let moved = check_expr taints moved false cond in
           let (body_moved, _, body_taints) =
             check_stmts moved declared taints body in
-          let newly_moved_outer =
-            PathSet.inter declared
-              (PathSet.diff (ResourceFlow.maybe_consumed body_moved)
-                 (ResourceFlow.maybe_consumed moved)) in
+          let newly_moved_outer = outer_consumed declared moved body_moved in
           if not (PathSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
               "cannot consume an affine/linear value declared outside a loop inside that loop"));
+          let moved = carry_handles moved body_moved (fun carried ->
+            let carried = check_expr taints carried false cond in
+            ignore (check_stmts carried declared taints body)) in
           (moved, declared, TaintEnv.join_branches taints body_taints)
       | Ast.For (name, _, lo, hi, body) ->
           require_no_authority_rebind s.loc declared taints name;
@@ -9520,13 +9730,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let body_taints_in = TaintEnv.set name PathSet.empty taints in
           let (body_moved, _, body_taints) =
             check_stmts moved declared_body body_taints_in body in
-          let newly_moved_outer =
-            PathSet.inter declared
-              (PathSet.diff (ResourceFlow.maybe_consumed body_moved)
-                 (ResourceFlow.maybe_consumed moved)) in
+          let newly_moved_outer = outer_consumed declared moved body_moved in
           if not (PathSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
               "cannot consume an affine/linear value declared outside a loop inside that loop"));
+          let moved = carry_handles moved body_moved (fun carried ->
+            ignore (check_stmts carried declared_body body_taints_in body)) in
           (match old_binding with
            | Some id -> Hashtbl.replace visible_bindings name id
            | None -> Hashtbl.remove visible_bindings name);
@@ -9541,13 +9750,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let (body_moved, _, body_taints) =
             check_stmts moved (PathSet.add (pvar name) declared)
               body_taints_in body in
-          let newly_moved_outer =
-            PathSet.inter declared
-              (PathSet.diff (ResourceFlow.maybe_consumed body_moved)
-                 (ResourceFlow.maybe_consumed moved)) in
+          let newly_moved_outer = outer_consumed declared moved body_moved in
           if not (PathSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
               "cannot consume an affine/linear value declared outside a loop inside that loop"));
+          let moved = carry_handles moved body_moved (fun carried ->
+            ignore (check_stmts carried (PathSet.add (pvar name) declared)
+                      body_taints_in body)) in
           (match old_binding with
            | Some id -> Hashtbl.replace visible_bindings name id
            | None -> Hashtbl.remove visible_bindings name);

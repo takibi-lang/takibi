@@ -49,12 +49,31 @@ let lock_guard_annotation =
 let irq_masking_guard_annotation = "irq_masking_guard"
 let restores_saved_irq_annotation = "restores_saved_irq"
 
+(* GitHub issue #493: the two checker-only words of effect-indexed
+   invalidation. `invalidates_<Type>` marks a function after which a
+   plain handle of struct type <Type> may name a destroyed object; the
+   checker propagates it to every caller. `handle_of_witness` marks the
+   trusted accessor that returns the handle of the object its one
+   borrowed linear argument proves alive. *)
+let invalidation_prefix = "invalidates_"
+
+let invalidation_annotation name =
+  let prefix_len = String.length invalidation_prefix in
+  if String.length name > prefix_len
+     && String.sub name 0 prefix_len = invalidation_prefix
+  then Some (String.sub name prefix_len (String.length name - prefix_len))
+  else None
+
+let handle_of_witness_annotation = "handle_of_witness"
+
 let dynamic_rule name =
   let checker_only =
     lock_acquire_annotation name <> None
     || lock_guard_annotation name <> None
     || name = irq_masking_guard_annotation
-    || name = restores_saved_irq_annotation in
+    || name = restores_saved_irq_annotation
+    || invalidation_annotation name <> None
+    || name = handle_of_witness_annotation in
   if not checker_only then None else Some {
       name; declaration = Required; declaration_role = false;
       function_pointer = false; propagates = false;

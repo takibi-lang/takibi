@@ -13057,6 +13057,112 @@ let codegen_tests = [
           }" ());
 
   Alcotest.test_case
+    "issue #493: a handle is dead after a call that may destroy its object"
+    `Quick
+    (fun () ->
+       let base =
+         "linear view Issue493Current[id: usize];
+          linear view Issue493Zombie[id: usize];
+          struct Issue493Handle { slot: usize; generation: usize; }
+          struct Issue493Other { slot: usize; }
+          fn issue493_reap(z: sink Issue493Zombie[id]) !{invalidates_Issue493Handle} {}
+          fn issue493_current(c: borrow Issue493Current[id]) -> Issue493Handle
+              !{handle_of_witness} {
+            let mut h: Issue493Handle = { 0, 0 };
+            return h;
+          }
+          fn issue493_take() -> Issue493Current[1] { return view Issue493Current[1]; }
+          fn issue493_exit(c: sink Issue493Current[id]) {}
+          fn issue493_fresh() -> Issue493Handle {
+            let mut h: Issue493Handle = { 1, 1 };
+            return h;
+          }
+          fn issue493_use(h: Issue493Handle) -> usize { return h.slot; }
+          fn issue493_wait_deliver(parent_slot: usize) {
+            let z = view Issue493Zombie[3];
+            issue493_reap(z);
+          }
+          fn issue493_deliver(parent_slot: usize) { issue493_wait_deliver(parent_slot); }
+          " in
+       (* #488's shape: the reap is two calls down and never sees the
+          caller's handle. *)
+       expect_type_error "'issue493_deliver' at line" (base ^
+         "fn issue493_bad(child: Issue493Handle) -> usize {
+            issue493_deliver(0);
+            return issue493_use(child);
+          }") ();
+       (* A live witness vouches for the handle across the call. *)
+       expect_ok (base ^
+         "fn issue493_witnessed() -> usize {
+            let c = issue493_take();
+            let mut me: Issue493Handle = issue493_current(c);
+            let mut copy: Issue493Handle = me;
+            issue493_deliver(0);
+            let n: usize = issue493_use(me) + issue493_use(copy);
+            issue493_exit(c);
+            return n;
+          }") ();
+       (* The 2026-08-30 order: the witness is given up first, so the handle
+          dies at the reap. *)
+       expect_type_error "may name a destroyed object" (base ^
+         "fn issue493_exit_then_reap() -> usize {
+            let c = issue493_take();
+            let mut me: Issue493Handle = issue493_current(c);
+            issue493_exit(c);
+            issue493_deliver(0);
+            return issue493_use(me);
+          }") ();
+       (* Re-deriving after the call is a fresh value. *)
+       expect_ok (base ^
+         "fn issue493_rederive(parent: Issue493Handle) -> usize {
+            let mut h: Issue493Handle = parent;
+            issue493_deliver(0);
+            h = issue493_fresh();
+            return issue493_use(h);
+          }") ();
+       (* Invalidated on one path is dead after the join. *)
+       expect_type_error "may name a destroyed object" (base ^
+         "fn issue493_branch(h: Issue493Handle, reap: bool) -> usize {
+            if (reap) { issue493_deliver(0); }
+            return issue493_use(h);
+          }") ();
+       (* Invalidated late in one iteration, read early in the next. *)
+       expect_type_error "may name a destroyed object" (base ^
+         "fn issue493_loop(h: Issue493Handle) {
+            let mut i: usize = 0;
+            while (i < 2) {
+              let n: usize = issue493_use(h);
+              issue493_deliver(0);
+              i = i + 1;
+            }
+          }") ();
+       (* A reassigned binding keeps no witness. *)
+       expect_type_error "may name a destroyed object" (base ^
+         "fn issue493_reassigned(other: Issue493Handle, swap: bool) -> usize {
+            let c = issue493_take();
+            let mut me: Issue493Handle = issue493_current(c);
+            if (swap) { me = other; }
+            issue493_deliver(0);
+            let n: usize = issue493_use(me);
+            issue493_exit(c);
+            return n;
+          }") ();
+       (* A type nothing invalidates is untouched. *)
+       expect_ok (base ^
+         "fn issue493_other(o: Issue493Other) -> usize {
+            issue493_deliver(0);
+            return o.slot;
+          }") ();
+       expect_type_error "names no struct type 'Issue493Missing'"
+         "fn issue493_bad_word() !{invalidates_Issue493Missing} {}" ();
+       expect_type_error "handle_of_witness annotation requires exactly one borrowed"
+         "struct Issue493H { slot: usize; }
+          fn issue493_no_witness(slot: usize) -> Issue493H !{handle_of_witness} {
+            let mut h: Issue493H = { slot };
+            return h;
+          }" ());
+
+  Alcotest.test_case
     "issue #528: IRQs are not restored under a live IRQ-masking guard"
     `Quick
     (fun () ->

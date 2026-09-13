@@ -1585,6 +1585,33 @@ call is being released rather than held across it, and is not counted. With
 no guard marked, nothing is checked: a local save and conditional restore
 with no outer guard is unaffected. Both words are checker-only.
 
+Effect-indexed invalidation (GitHub issue #493) covers plain handles: the
+copyable structs that name a pooled object by slot and generation.
+- A function after which a handle of struct type `T` may name a destroyed
+  object declares `invalidates_T`. The checker extends that to every function
+  from which it is reachable through resolved direct calls.
+- After a call to any of them, every local binding of type `T` is dead.
+  Reading one is a compile error naming the call.
+- A use on any path that may follow the call counts, including the next
+  iteration of a loop.
+- Assigning the binding, or binding a fresh value, makes it live again.
+
+A handle survives when a linear witness vouches for it.
+- A function marked `handle_of_witness` takes exactly one borrowed linear or
+  affine argument and returns the handle of the object that argument proves
+  alive. The check trusts that claim.
+- A binding initialized from such a call, or copied from one that was, and
+  never reassigned, survives every invalidating call during which its
+  witness stays live.
+- Destroying the object has to consume the witness, so the handle dies with
+  it.
+
+The rule covers local bindings of type `T` itself. A handle read from a
+record or a global is a fresh value. Whether that value is stale is a
+question for run time, and #492's generation checks answer it. Arrays and
+structs that contain a `T` are not tracked. Both words are checker-only,
+and with neither in use nothing is checked.
+
 `exception` marks a synchronous-exception handler root. Like `interrupt`, it
 is a declaration role rather than a callable function-pointer effect, and an
 extern function cannot claim it because there is no Takibi body to check.
