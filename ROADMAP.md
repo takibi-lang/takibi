@@ -121,7 +121,12 @@ The next multicore increment is phase B. Its order is now:
 4. Complete **#547** before admitting a terminal reader to a peer. A local IRQ
    mask closes the current core-0 UART check-then-block window, but cannot
    serialize a reader and RX interrupt on different CPUs.
-5. Widen admission one subsystem at a time. Each newly admitted workload owns
+5. Finish the kernel/build integration for **#540** and decide the scripts
+   half of **#549**. The compiler already retains assertion-only and external
+   entry points and emits deletion-tolerant depfiles; the remaining Makefile
+   reachability coverage and stale-depfile-check decision belong wholly to
+   Territory A.
+6. Widen admission one subsystem at a time. Each newly admitted workload owns
    the synchronization audit for every filesystem, network, console, and
    device path it reaches, plus QEMU and four-core RPi5 evidence. Do not turn
    phase B into one unrestricted switch.
@@ -181,13 +186,12 @@ active order above.
     boundary separately; it is not part of this entry.
 13. **#528** make IRQ restoration under an IRQ-owning guard a build error.
     Arbitrary affinity increases the number of paths that can expose this
-    invariant. Since the 2026-09-12 re-cut the compiler mechanism is Territory
-    B's (its queue entry 6); marking the kernel's guards and call sites stays
-    here, after that lands.
+    invariant. The compiler mechanism is complete; marking the kernel's guards
+    and converting its call sites is Territory A's active entry 2.
 
 Then, in this territory and unordered: #518, #468, #464, #516, #308, #414,
 #514, #202, #386, #274, #422, and the kernel side of #553. The compiler and
-language issues this list used to carry (#476, #493, #131, #132, #212 and the
+language issues this list used to carry (#476, #131, #132, #212 and the
 rest) moved to the Territory B queue with `lib/` on 2026-09-12.
 
 #### Territory A cold-start handoff, 2026-09-09
@@ -740,26 +744,6 @@ once.
    answer without a separately measured improvement. This discovery work may
    conclude that firmware TFTP, PXE-style boot, or a small resident loader is
    viable; it must not commit platform or runner code from this territory.
-2. **#554, done 2026-09-12.** Every whole-record store of a publish record
-   is refused (commit "refuse assigning a publish record as a whole").
-3. **#476, done 2026-09-13.** `publish_commit` requires every scalar payload
-   field to be assigned on every path (commit "require every scalar publish
-   field to be assigned before the commit"). Array fields are exempt, which
-   is why the scrub stays.
-4. **#549, lib/ half done 2026-09-12.** Depfiles carry `-MP`-style empty
-   rules. Whether `scripts/check_stale_depfiles.py` stays is Territory A's
-   call; see the 2026-09-13 handoff.
-5. **#540, compiler half done 2026-09-13.** Assertion-only functions and
-   every exception hook count as reachable. The Makefile half is Territory
-   A's; see the 2026-09-13 handoff.
-6. **#528, compiler half done 2026-09-13.** `irq_masking_guard` and
-   `restores_saved_irq` exist and are inert until the kernel uses them.
-   Marking the guards and converting the call sites is Territory A's; see
-   the 2026-09-13 handoff for the measured sites.
-7. **#493, compiler half done 2026-09-13.** `invalidates_<Type>` and
-   `handle_of_witness` exist and are inert until the kernel uses them. The
-   kernel half, a current-process witness and six call sites, is Territory
-   A's; see the 2026-09-13 handoff.
 
 Then, unordered, the compiler and language issues that moved here with
 `lib/`: #131, #132, #212, #216, #252, #267, #282, #297, #342, #343, #370,
@@ -768,10 +752,13 @@ Then, unordered, the compiler and language issues that moved here with
 
 #### Completed and transferred entries of the previous order
 
-Kept for their evidence. #533, #534's remaining verification, #547, #550 and
-#551 moved to Territory A with the maintained kernel vertical, and so did
-#542 and the ext2 issues (#535-#539). Claude Code need not wait on or modify
-kernel files for any of them.
+Kept for their evidence. **#554 and #476 are complete.** The compiler halves
+of **#549, #540, #528 and #493 are also complete; every remaining action for
+those four is now listed and prioritized in Territory A rather than left as a
+"half done" item in Territory B.** #533, #534's remaining verification, #547,
+#550 and #551 moved to Territory A with the maintained kernel vertical, and so
+did #542 and the ext2 issues (#535-#539). Claude Code need not wait on or
+modify kernel files for any of them.
 
 1. **Board lane complete on the combined tree.** `make kernelcheck-rpi5`
    passed after #546's fix and the rebase onto #532, including the migration
@@ -859,14 +846,15 @@ kernel files for any of them.
    coordinated like #544 was. #551 makes DDB print the waker-side state
    (queued RX bytes, TX room, pending frames) beside each blocked waiter:
    #546's two postmortems showed the blocked shell and not the byte it was
-   waiting for. #549 (depfiles, `lib/`) is Territory A's.
+   waiting for. #549's compiler depfile change is complete; its remaining
+   stale-depfile-check decision is Territory A's active entry 5.
 9. **#537 close audit**, then #535 or #536 only when a current filesystem
    caller requires them. Rename landed under the already-closed #538, so the
    remaining task on #537 is to re-check its acceptance evidence and close it
    if nothing remains, not to grow its scope.
 
-#540's useful half changes compiler unused-function semantics in `lib/`,
-which since the 2026-09-12 re-cut is this territory's; it is entry 5 above.
+#540's compiler half changed unused-function semantics in `lib/` and is
+complete. Its remaining Makefile integration is Territory A's active entry 5.
 #497/#502/#503 remain Territory A profiling work.
 
 **Direction, set by the maintainer on 2026-09-11: verification belongs in
