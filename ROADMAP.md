@@ -395,6 +395,59 @@ that the same process is still Running before committing TTBR0. An incomplete
 world stop or stale current handle fails the syscall continuation instead of
 returning through a frame under the wrong address space. Exit handoffs remain.
 
+#### Handed over from Territory B, 2026-09-13
+
+None of these blocks current work. Each one is the kernel or scripts half of
+a compiler change that is already committed.
+
+1. **#528: the IRQ-restore rule is in the compiler, and it does nothing
+   until the kernel uses it.** The commit "refuse restoring IRQs under a
+   live IRQ-masking guard" adds two checker-only annotations:
+   - `irq_masking_guard` goes on a function that returns a linear guard
+     whose acquire saved and masked IRQs.
+   - `restores_saved_irq` goes on a function that restores exactly the
+     state its caller saved. The reachability walk stops there.
+
+   While such a guard is live and not passed to the call, calling
+   `msr_daifclr_irq`, or anything that reaches it, is a compile error.
+   A scratch copy of today's kernel measured the kernel half:
+   - Marking `process_run_lock` and `mutex_irq_restore` alone stops the
+     build at `process.tkb:3855`, where `profile_timeline_schedule` is
+     called under the run guard.
+   - Rewriting the 18 one-line `if (x == 0) { enable_irq(); }` restores
+     as `mutex_irq_restore(x);` makes both kernels build. No multi-line
+     variant was left. The sites:
+     - `process.tkb` 2192;
+     - `profile_timeline.tkb` 85, 90, 101, 113;
+     - `workload_evidence.tkb` 246, 251, 257, 269, 338, 351, 363, 374, 385,
+       396, 407, 418, 429.
+   - On top of that, putting 4c17d48f's `disable_irq(); ... enable_irq();`
+     back around `workload_profile_start` and `workload_profile_finish` is
+     rejected at `workload_evidence.tkb:814`, naming `start_guard`. That is
+     the issue's acceptance item.
+
+   Only `ProcessRunGuard` was marked. Other guards whose acquire masks IRQs
+   can take the same word. #528 stays open until the kernel carries the
+   annotations.
+2. **#540: the Makefile half.** The compiler no longer reports
+   assertion-only functions or exception hooks (commit "keep assertion-only
+   functions and every exception hook reachable"). On the QEMU build, with
+   the files the issue named checked and the 14 functions kernel assembly
+   calls by name declared as `--external-entry`, 7 reports remain. Among
+   them is the accessor the issue was filed about. The list is on #540.
+   It also suggests deriving the entry list from the `.S` branch and
+   address operands rather than writing it by hand.
+3. **#549: whether `scripts/check_stale_depfiles.py` stays.** Takibi's
+   depfiles now carry `-MP`-style empty rules. A deleted prerequisite
+   therefore no longer stops make, and that is the failure the check exists
+   for. Its parser was changed, with the maintainer's approval, to read only
+   the first line. Keeping it or retiring it is its owner's call. If it
+   goes, its `docs/BUILD_CHECKS.md` row is this territory's to remove.
+4. **A stale comment in `kernel/lib/diagnostic_ring.tkb`, lines 23-26.** It
+   says #476 "is what would make" a forgotten payload field a compile error.
+   #476 is closed, and a forgotten scalar field is now a compile error at
+   `publish_commit`. The scrub now matters only for array fields.
+
 #### Handed over from Territory B, 2026-09-12
 
 1. **#552: an exit on core 1 hands core 1 to the exiting process's parent
@@ -598,26 +651,22 @@ vertical, is below. Each entry is in `lib/`, `bin/`, `test/`, `linux_user/`,
 runner changed, this territory lands the language half as a committed
 boundary and Territory A applies it, rather than both editing at once.
 
-1. **#554** assigning a whole publish record stores its commit word without
-   a token. `slot = other;` and `ring[i] = r` compile today, and so does
-   `*p = r`, so the #299 protocol's order is bypassable by a plain store.
-   Found while probing the #534 array extension, which closed every
-   field-level path. SPEC.md lists it as not yet refused.
-2. **#476** a publish writer can forget a field; the scrub makes it read as
-   zero rather than making it a compile error. The same record type as #554,
-   so it follows while that code is fresh.
-3. **#549** depfiles: emit a `-MP`-style empty rule per prerequisite in
-   `Use_resolver.write_depfile`, so deleting a used `.tkb` rebuilds instead
-   of stopping make. The half that wires or corrects
-   `scripts/check_stale_depfiles.py` is Territory A's and follows.
-4. **#540** the compiler side of widening `--reject-unused-functions`: the
-   two structural false positives it measured (execution-model assumption
-   functions that exist only for their `static_assert`s, and accessors a
-   platform build does not reach). Widening the flag over kernel files is
-   Territory A's, after this lands.
-5. **#528** reject IRQ restoration while an IRQ-masking guard is live: the
-   compiler-known effect and the guard marking are this territory's; marking
-   the kernel's guards and call sites is Territory A's.
+1. **#554, done 2026-09-12.** Every whole-record store of a publish record
+   is refused (commit "refuse assigning a publish record as a whole").
+2. **#476, done 2026-09-13.** `publish_commit` requires every scalar payload
+   field to be assigned on every path (commit "require every scalar publish
+   field to be assigned before the commit"). Array fields are exempt, which
+   is why the scrub stays.
+3. **#549, lib/ half done 2026-09-12.** Depfiles carry `-MP`-style empty
+   rules. Whether `scripts/check_stale_depfiles.py` stays is Territory A's
+   call; see the 2026-09-13 handoff.
+4. **#540, compiler half done 2026-09-13.** Assertion-only functions and
+   every exception hook count as reachable. The Makefile half is Territory
+   A's; see the 2026-09-13 handoff.
+5. **#528, compiler half done 2026-09-13.** `irq_masking_guard` and
+   `restores_saved_irq` exist and are inert until the kernel uses them.
+   Marking the guards and converting the call sites is Territory A's; see
+   the 2026-09-13 handoff for the measured sites.
 6. **#493** effect-indexed invalidation: a design first, since it generalises
    a rule rather than special-casing process handles.
 
