@@ -414,16 +414,17 @@ a compiler change that is already committed.
    - Marking `process_run_lock` and `mutex_irq_restore` alone stops the
      build at `process.tkb:3855`, where `profile_timeline_schedule` is
      called under the run guard.
-   - Rewriting the 18 one-line `if (x == 0) { enable_irq(); }` restores
+   - Rewriting the 17 one-line `if (x == 0) { enable_irq(); }` restores
      as `mutex_irq_restore(x);` makes both kernels build. No multi-line
-     variant was left. The sites:
-     - `process.tkb` 2192;
+     variant was left. The one in `mutex_irq_restore`'s own body
+     (`pool_lock.tkb:70`) stays: it is the restore the annotation vouches
+     for. The sites:
      - `profile_timeline.tkb` 85, 90, 101, 113;
      - `workload_evidence.tkb` 246, 251, 257, 269, 338, 351, 363, 374, 385,
        396, 407, 418, 429.
    - On top of that, putting 4c17d48f's `disable_irq(); ... enable_irq();`
      back around `workload_profile_start` and `workload_profile_finish` is
-     rejected at `workload_evidence.tkb:814`, naming `start_guard`. That is
+     rejected at `workload_evidence.tkb:826`, naming `start_guard`. That is
      the issue's acceptance item.
 
    Only `ProcessRunGuard` was marked. Other guards whose acquire masks IRQs
