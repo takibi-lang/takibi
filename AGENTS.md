@@ -108,40 +108,43 @@ Re-check `git status` and `git log` before relying on an earlier build or test
 result, and do not treat recent local commits as exclusively yours when
 considering a destructive git operation.
 
-### File territories
+### Territories are roles, not directories
 
-Two agents work at a time and each owns a set of directories. **The territory
-is the exclusion: do not edit a file outside yours.** Splitting the work by
-theme instead does not prevent conflicts -- measured over 200 commits, the
-most-touched files were cross-cutting infrastructure, not subsystem code, and
-every expensive conflict in the 2026-09-05 rebase came from two streams
-editing the same API in one file.
+Two agents work at a time, each on its own line of work, called Territory A
+and Territory B. **A territory is a role and a queue, not a set of
+directories. Either agent may edit any file its work needs.** `ROADMAP.md`
+says which agent holds which territory, what each role currently covers, and
+in what order.
 
-- **Territory A**, the maintained kernel vertical: all of `kernel/`,
-  `scripts/`, and `linux_user/`. This includes architecture and platform code,
-  DDB, drivers, filesystems, kernel tests and views, portable executable tests
-  of kernel components, and the host runners that verify them.
-- **Territory B**, the compiler and native-language vertical: `lib/`, `bin/`,
-  `test/`, `docs/`, and `examples/`.
+The maintainer decided this on 2026-09-13. Directory ownership had been the
+rule since 2026-09-05, and the split was re-cut three times. In practice most
+work still crossed the line, and every crossing needed approval and a
+handoff. The coming work is disjoint by role (multicore in one territory,
+network-boot discovery and the compiler in the other). A conflict in a shared
+file is expected to be incidental, not structural.
 
-This vertical split deliberately gives one agent every file needed to take a
-kernel change from implementation through QEMU, DDB, and hardware evidence.
-It replaces the earlier split that put kernel implementation and its runners
-in different territories, which made each multicore integration step a
-cross-agent handoff. A compiler change required by a kernel issue is still
-sequenced through Territory B rather than edited concurrently.
+What keeps two concurrent streams from colliding without an exclusion:
+- **Rebase before and after every commit**, and keep commits small, so
+  another stream's edit to the same file lands as a short, local conflict.
+- **Look before editing a file the other role is actively reshaping.** Check
+  `git log -5 -- <file>`. If the other agent changed it in the last few
+  commits, make the smallest edit that does the job, and mention it in the
+  commit message.
+- **Land a change to an interface both roles use as its own commit.** Such
+  interfaces include a compiler annotation, a shared runner, and a file in
+  `kernel/init/`. Record what the other side needs to do in the issue.
+- **An issue that needs both roles is still sequenced, not split.** The role
+  whose queue holds it lands the first half, and the other follows.
 
-An issue that needs both territories is not parallel work. Sequence it: the
-owning territory lands its half first, and the other waits.
-
-`ROADMAP.md` carries the current queues and which agent holds which territory.
-It is a dated snapshot and is the file to edit when priorities move.
+Findings belong on the GitHub issue they concern, not only in `ROADMAP.md`.
+`ROADMAP.md` is a dated snapshot that is rewritten when priorities move, and
+what it said last week is gone from it.
 
 ### Cross-platform and shared-file conventions
 
-The `kernel/` paths below belong to Territory A, but still have conventions
-that prevent the two platform builds from drifting. The root files named at
-the end belong to neither territory and require frequent rebasing:
+The `kernel/` paths below have conventions that prevent the two platform
+builds from drifting, whoever edits them. The root files named at the end are
+edited by both roles and require frequent rebasing:
 
 - `kernel/init/` holds the bodies both platforms run, and the per-platform
   `init.tkb` files call them once rather than carrying a copy:

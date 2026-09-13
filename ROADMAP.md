@@ -80,19 +80,19 @@ Two agents run in parallel, one per territory, with the territories and the
 shared-file conventions defined in `AGENTS.md`. This section is the part that
 moves: when a new issue outranks what is queued below, edit it here.
 
-**Codex holds Territory A: the whole maintained-kernel vertical, including
-platform code, DDB, drivers, filesystems, kernel views, portable executable
-kernel-component tests under `linux_user/`, and their runners. Claude Code
-holds Territory B: the compiler, its Alcotest suite, and documentation.** The
-directory exclusion in `AGENTS.md` remains the mechanism
-that makes the two queues loosely coupled.
+**Codex holds Territory A: multicore. That is #9 phase B and what it gates,
+with its QEMU, DDB and RPi5 evidence. Claude Code holds Territory B: first,
+the RPi5 network-boot exploration (#555); then the compiler and language
+issues.** A territory is a role, not a set of directories (`AGENTS.md`,
+since 2026-09-13). Either agent edits what its work needs. The roles keep
+the two streams apart in practice: multicore integration works in the
+scheduler, process and platform paths, while network-boot discovery works in
+the boot and transport path. A conflict in a shared file is expected to be
+incidental.
 
-This replaces the split that assigned kernel implementation to Codex but its
-verification and several multicore boundaries to Claude Code. In #9 that
-created a handoff at almost every executable milestone. Codex now owns #9,
-#533, #534's remaining verification, #547, and their end-to-end QEMU/RPi5
-evidence. A language change still crosses once into Territory B through a
-committed boundary; ordinary kernel work no longer does.
+Codex owns #9, #533, #534's remaining verification, #547, and their
+end-to-end QEMU/RPi5 evidence. It also owns the kernel halves of #528, #493,
+#540 and #549, whose compiler halves have landed.
 
 ### Territory A queue -- multicore integration, held by Codex
 
@@ -735,21 +735,23 @@ None is queued above; they are recorded so they are not rediscovered.
 
 The active order was re-derived 2026-09-13 after the compiler boundaries below
 landed and four-core RPi5 phase A exposed the operational cost of warm SWD
-reloads. Each entry stays in `lib/`, `bin/`, `test/`, `linux_user/`, `docs/`
-or `examples/`. Where an issue also needs kernel call sites, platform code or
-a runner changed, this territory lands the design or language half as a
-committed boundary and Territory A applies it, rather than both editing at
-once.
+reloads. Entries are not confined to any directory. Some changes touch what
+Territory A's lanes depend on: a runner, the board lease, or the platform
+boot path. Land those as their own commits, and record on the issue what
+the other side needs to know.
 
 1. **#555: make the network-boot decision concrete.** Treat this as both an
    alternative to rewriting a live four-core machine through SWD and a way to
    remove the roughly 16-second image-transfer tail from each hardware lane.
    First choose the resident boundary, boot protocol, bad-image recovery, and
-   DDB/UART path; then write a measured implementation handoff for Territory
-   A. The current maintained TCP path is only 15--18 KiB/s and is not the
-   answer without a separately measured improvement. This discovery work may
-   conclude that firmware TFTP, PXE-style boot, or a small resident loader is
-   viable; it must not commit platform or runner code from this territory.
+   DDB/UART path, measuring rather than assuming. The current maintained TCP
+   path is only 15--18 KiB/s and is not the answer without a separately
+   measured improvement. This discovery work may conclude that firmware TFTP,
+   PXE-style boot, or a small resident loader is viable, and it may prototype
+   whatever the measurement needs. Before changing a runner, the board lease
+   or the platform boot path that Territory A's hardware lanes use, say so on
+   #555, and keep the existing SWD lane working until the replacement has
+   board evidence.
 
 Then, unordered, the compiler and language issues that moved here with
 `lib/`: #131, #132, #212, #216, #252, #267, #282, #297, #342, #343, #370,
