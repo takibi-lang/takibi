@@ -2359,6 +2359,29 @@ let infer_tests = [
       Alcotest.(check int) "no unused functions" 0
         (List.length (unused_errors ~external_entries:["asm_entry"]
           "fn asm_entry() {}")));
+
+  (* GitHub issue #540: a function that only holds static_asserts is doing
+     its job uncalled -- the assertion is evaluated either way -- so it is
+     not reported. One that does anything else beside them is. *)
+  Alcotest.test_case "unused function reachability keeps an assertion-only function" `Quick
+    (fun () ->
+      Alcotest.(check int) "no unused functions" 0
+        (List.length (unused_errors
+          "const CORES: usize = 2;
+           fn model_assumption() {
+             static_assert(CORES == 2, \"two cores\");
+             static_assert(CORES > 0, \"some cores\");
+           }
+           fn main() {}")));
+
+  Alcotest.test_case "unused function reachability still rejects an assertion beside other work" `Quick
+    (fun () ->
+      match unused_errors
+        "fn mixed() -> usize { static_assert(1 == 1, \"holds\"); return 2; }
+         fn main() {}" with
+      | [Unused_functions.Unused f] ->
+          Alcotest.(check string) "the mixed function" "mixed" f.Ast.name
+      | _ -> Alcotest.fail "expected exactly one unused function");
   Alcotest.test_case "overflow audit records source integer operators only and resets" `Quick
     (fun () ->
       ignore (infer_files ["audit.tkb",
@@ -12507,6 +12530,30 @@ let codegen_tests = [
        Alcotest.(check bool) "calls the named handler" true
          (contains_substring asm "bl\tmy_overflow");
        Target_info.configure "thumbv7em-none-eabi");
+
+  (* GitHub issue #540: the code generated for an exception entry calls every
+     hook it names, not only `dispatch` and `before`. The unused-function
+     check read those two, and reported the stack-guard handler -- which is
+     the kernel's kernel_stack_overflow_fail_stop -- as nobody's callee. *)
+  Alcotest.test_case "unused function reachability counts every exception entry hook" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       let errors = Fun.protect
+           ~finally:(fun () -> Target_info.configure "thumbv7em-none-eabi")
+           (fun () -> unused_errors ~external_entries:[]
+              (exc_frame_src ^
+               "const STACK_SHIFT: usize = 14;
+                extern symbol guard_stack_top;
+                fn my_dispatch(frame_sp: usize) -> usize { return frame_sp; }
+                fn my_overflow(sp: usize) {}
+                exception_entry el1_current_irq_entry {
+                  frame: ExcFrame;
+                  dispatch: my_dispatch;
+                  stack_guard_shift: STACK_SHIFT;
+                  stack_guard_stack: guard_stack_top;
+                  stack_guard_handler: my_overflow;
+                }")) in
+       Alcotest.(check int) "no hook is reported unused" 0 (List.length errors));
 
   (* GitHub issue #378: `dispatch_stack` runs the handler on a stack of its
      own. The FRAME is deliberately NOT moved -- it is the interrupted

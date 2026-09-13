@@ -59,14 +59,34 @@ let check ~external_entries ~check_files (prog : toplevel list) (types : program
     | Some effects when List.mem "interrupt" effects || List.mem "exception" effects ->
         roots := StringSet.add (key_of f) !roots
     | _ -> ()) definitions;
+  (* GitHub issue #540: a function whose whole body is static_assert
+     statements exists to hold them, and does its job by being compiled --
+     the type checker evaluates them whether or not anything calls it. The
+     kernel's *_execution_model_assumption functions are that shape by
+     design, and reporting them made the check unusable beyond one file. A
+     function that does anything else besides is still a function nobody
+     calls. *)
+  List.iter (fun (f : Ast.func) ->
+    let assertion_only (s : stmt) =
+      match s.desc with StaticAssert _ -> true | _ -> false in
+    if f.body <> [] && List.for_all assertion_only f.body then
+      roots := StringSet.add (key_of f) !roots) definitions;
   List.iter (function
     | ConstDef (_, _, init, _) | LetDef (_, _, Some init, _, _, _, _) -> expr None init
     | VectorTableDef (entries, _) ->
         List.iter (fun (_, name) ->
           List.iter (add_reference None)
             (Option.value (StringMap.find_opt name by_name) ~default:[])) entries
-    | ExceptionEntryDef (_, fields, _) ->
-        List.iter (fun (field, name) -> if field = "dispatch" || field = "before" then
+    (* Every hook an exception entry or restore names is called by the code
+       the compiler generates for it -- `before`, `dispatch`, `after_switch`,
+       `stack_guard_handler` alike -- so each is a root. GitHub issue #540's
+       measurement found the check reading only `dispatch` and `before`, and
+       reporting kernel_process_stack_switch_complete and
+       kernel_stack_overflow_fail_stop, which every exception return and
+       every stack-guard trip reaches. A field whose value is not a function
+       (`frame`, `stack_guard_shift`) finds nothing in by_name. *)
+    | ExceptionEntryDef (_, fields, _) | ExceptionRestoreDef (_, fields, _) ->
+        List.iter (fun (_, name) ->
           List.iter (add_reference None)
             (Option.value (StringMap.find_opt name by_name) ~default:[])) fields
     | _ -> ()) prog;

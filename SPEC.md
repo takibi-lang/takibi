@@ -23,6 +23,16 @@ File extension: `.tkb`. Compiler invocation: `takibi <file1.tkb>
 concatenated (flat global namespace) before compilation -- there is no
 module/import system beyond `use` (see "Known Limitations" below).
 
+`--reject-unused-functions` fails the build for a function that nothing
+reachable calls or takes the value of. Reachability starts at each
+`--external-entry` (a function called from outside Takibi, such as
+assembly), at `!{interrupt}` and `!{exception}` roots, at vector-table and
+exception-entry declarations, and at global initialisers. With
+`--check-unused-file`, only functions defined in the named files are
+reported. A function whose body consists only of `static_assert`
+statements is never reported (GitHub issue #540): its assertions are
+evaluated whether or not it is called, so being compiled is its whole use.
+
 `-g` emits full DWARF debug information for source-level debugging. The
 current implementation prioritizes practical GDB value inspection, so it
 may preserve extra debug-only storage compared with an optimized build
