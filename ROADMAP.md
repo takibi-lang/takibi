@@ -8,7 +8,7 @@ the ordering below does not authorize speculative implementation.
 
 Written 2026-08-27 against the 99 open GitHub issues at that date. **The
 baseline below is that date's; the two territory queues were re-cut on
-2026-09-10** and carry their own dates, so read a queue's own heading rather
+2026-09-13** and carry their own dates, so read a queue's own heading rather
 than this one for what is current. The previous
 snapshot was written 2026-08-20, and three of its eight milestones have since
 closed outright, along with the first half of a fourth: the trusted base is
@@ -74,7 +74,7 @@ the deepest dependency: it needs a language primitive this compiler does not
 have, and every week of single-core code written before that primitive exists
 is a week of code whose synchronization argument has to be reconstructed later.
 
-## Work split between two agents, re-cut 2026-09-12
+## Work split between two agents, re-cut 2026-09-13
 
 Two agents run in parallel, one per territory, with the territories and the
 shared-file conventions defined in `AGENTS.md`. This section is the part that
@@ -96,8 +96,40 @@ committed boundary; ordinary kernel work no longer does.
 
 ### Territory A queue -- multicore integration, held by Codex
 
-The order is forced by M0's phase dependencies below, not chosen. Skipping an
-entry leaves the next one unable to be verified.
+**The first four-core increment is complete as of 2026-09-13.** #9 phase A
+starts all four RPi5 CPUs, derives the online set at runtime, stops every peer
+in DDB, and runs the deliberately restricted workload on all four cores. QEMU
+deliberately remains a two-vCPU boundary. Repeated RPi5 integration also
+forced the SWD loader to account for warm EL0/EL1 entries, private instruction
+caches, and live device state. That is a finished acceptance boundary, not a
+claim that arbitrary processes may now run on every CPU.
+
+The next multicore increment is phase B. Its order is now:
+
+1. Finish **#552's recurrence evidence**: an admitted process exits on a peer,
+   that peer returns to architectural idle, and the parent wakes and collects
+   it on core 0 only after physical stack ownership is released. The kernel
+   mechanism is present; the explicit end-to-end view is the remaining gate.
+2. Apply the already-landed compiler boundaries for **#528** and **#493** to
+   the kernel. IRQ-owning guards must reject premature restoration, and
+   process reaping must invalidate unwitnessed handles before affinity is
+   widened further.
+3. Finish **#9 phase B** through **#533** and **#534**: add the affinity ABI and
+   userspace-visible policy, admit one bounded read-only filesystem workload
+   that exits, and verify real peer userspace console output. Keep filesystem
+   mutation and terminal readers on core 0 at this boundary.
+4. Complete **#547** before admitting a terminal reader to a peer. A local IRQ
+   mask closes the current core-0 UART check-then-block window, but cannot
+   serialize a reader and RX interrupt on different CPUs.
+5. Widen admission one subsystem at a time. Each newly admitted workload owns
+   the synchronization audit for every filesystem, network, console, and
+   device path it reaches, plus QEMU and four-core RPi5 evidence. Do not turn
+   phase B into one unrestricted switch.
+
+The numbered history below records the dependency chain that produced phase
+A. Its requirements through entry 11 are complete; explicitly noted residual
+work such as #432 remains separate. Entries 12 and 13 are represented by the
+active order above.
 
 1. **#448** a workload occupying two cores -- complete on QEMU and RPi5.
 2. **#431** SIGCHLD/kill is closed. **#432** nanosleep is partly complete;
@@ -150,7 +182,7 @@ entry leaves the next one unable to be verified.
 13. **#528** make IRQ restoration under an IRQ-owning guard a build error.
     Arbitrary affinity increases the number of paths that can expose this
     invariant. Since the 2026-09-12 re-cut the compiler mechanism is Territory
-    B's (its queue entry 5); marking the kernel's guards and call sites stays
+    B's (its queue entry 6); marking the kernel's guards and call sites stays
     here, after that lands.
 
 Then, in this territory and unordered: #518, #468, #464, #516, #308, #414,
@@ -689,31 +721,42 @@ None is queued above; they are recorded so they are not rediscovered.
    this territory converges the probes on one verdict shape, the check
    becomes possible and is worth revisiting.
 
-### Territory B queue -- compiler, native tests, and documentation
+### Territory B queue -- network-boot discovery, compiler, native tests, and documentation
 
-The active order, re-derived 2026-09-12 for the compiler and native-language
-vertical, is below. Each entry is in `lib/`, `bin/`, `test/`, `linux_user/`,
-`docs/` or `examples/`. Where an issue also needs kernel call sites or a
-runner changed, this territory lands the language half as a committed
-boundary and Territory A applies it, rather than both editing at once.
+The active order was re-derived 2026-09-13 after the compiler boundaries below
+landed and four-core RPi5 phase A exposed the operational cost of warm SWD
+reloads. Each entry stays in `lib/`, `bin/`, `test/`, `linux_user/`, `docs/`
+or `examples/`. Where an issue also needs kernel call sites, platform code or
+a runner changed, this territory lands the design or language half as a
+committed boundary and Territory A applies it, rather than both editing at
+once.
 
-1. **#554, done 2026-09-12.** Every whole-record store of a publish record
+1. **#555: make the network-boot decision concrete.** Treat this as both an
+   alternative to rewriting a live four-core machine through SWD and a way to
+   remove the roughly 16-second image-transfer tail from each hardware lane.
+   First choose the resident boundary, boot protocol, bad-image recovery, and
+   DDB/UART path; then write a measured implementation handoff for Territory
+   A. The current maintained TCP path is only 15--18 KiB/s and is not the
+   answer without a separately measured improvement. This discovery work may
+   conclude that firmware TFTP, PXE-style boot, or a small resident loader is
+   viable; it must not commit platform or runner code from this territory.
+2. **#554, done 2026-09-12.** Every whole-record store of a publish record
    is refused (commit "refuse assigning a publish record as a whole").
-2. **#476, done 2026-09-13.** `publish_commit` requires every scalar payload
+3. **#476, done 2026-09-13.** `publish_commit` requires every scalar payload
    field to be assigned on every path (commit "require every scalar publish
    field to be assigned before the commit"). Array fields are exempt, which
    is why the scrub stays.
-3. **#549, lib/ half done 2026-09-12.** Depfiles carry `-MP`-style empty
+4. **#549, lib/ half done 2026-09-12.** Depfiles carry `-MP`-style empty
    rules. Whether `scripts/check_stale_depfiles.py` stays is Territory A's
    call; see the 2026-09-13 handoff.
-4. **#540, compiler half done 2026-09-13.** Assertion-only functions and
+5. **#540, compiler half done 2026-09-13.** Assertion-only functions and
    every exception hook count as reachable. The Makefile half is Territory
    A's; see the 2026-09-13 handoff.
-5. **#528, compiler half done 2026-09-13.** `irq_masking_guard` and
+6. **#528, compiler half done 2026-09-13.** `irq_masking_guard` and
    `restores_saved_irq` exist and are inert until the kernel uses them.
    Marking the guards and converting the call sites is Territory A's; see
    the 2026-09-13 handoff for the measured sites.
-6. **#493, compiler half done 2026-09-13.** `invalidates_<Type>` and
+7. **#493, compiler half done 2026-09-13.** `invalidates_<Type>` and
    `handle_of_witness` exist and are inert until the kernel uses them. The
    kernel half, a current-process witness and six call sites, is Territory
    A's; see the 2026-09-13 handoff.
@@ -823,7 +866,7 @@ kernel files for any of them.
    if nothing remains, not to grow its scope.
 
 #540's useful half changes compiler unused-function semantics in `lib/`,
-which since the 2026-09-12 re-cut is this territory's; it is entry 4 above.
+which since the 2026-09-12 re-cut is this territory's; it is entry 5 above.
 #497/#502/#503 remain Territory A profiling work.
 
 **Direction, set by the maintainer on 2026-09-11: verification belongs in
