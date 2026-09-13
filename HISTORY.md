@@ -15,6 +15,20 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-13: IRQ-owning guards prevent premature restoration (#528)
+
+`ProcessRunGuard` now tells the checker that its acquire saved and masked the
+caller's interrupt state, while `mutex_irq_restore` declares that it restores
+exactly a state its caller saved. The seventeen local save/conditional-enable
+sequences in workload profiling and its timeline now use that single restore
+boundary. A direct or transitive unconditional restore while a process-run
+guard remains live is therefore a compile error rather than a multicore race.
+
+Reintroducing the original profiling mutation made both maintained kernel
+builds fail at the restoring call, naming `start_guard`; the unmodified QEMU
+and RPi5 kernels compile under `--forbid-trap`. Compiler tests retain the
+indirect-call rejection and the legal local-save/restore cases.
+
 ## 2026-09-13: a peer process can exit back to architectural idle (#552)
 
 A secondary CPU may now complete its current process's exit even when no

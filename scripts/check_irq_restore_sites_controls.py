@@ -91,13 +91,12 @@ def main() -> int:
                 "    while (kernel_log_tx_full()) {"),
         "kernel/printk/log.tkb")
 
-    # The guard dropped from a site that had one: the seventeen hand-written
-    # restores are one edit away from being absolute, which is the likeliest
-    # route back to the incident.
+    # Replacing the shared restore helper with its absolute inner operation is
+    # the direct one-line route back to the incident.
     failures += case(
         "a guard dropped from a restore that had one",
         planted("kernel/kernel/profile_timeline.tkb",
-                "    if (irq_was_masked == 0) { enable_irq(); }\n"
+                "    mutex_irq_restore(irq_was_masked);\n"
                 "}",
                 "    enable_irq();\n}"),
         "profile_timeline.tkb")
@@ -112,7 +111,7 @@ def main() -> int:
                 "    mutex_irq_restore(irq_state);"),
         "no such line is there any more")
 
-    # A NEW site written the sanctioned way must pass without being declared,
+    # A new site written through the sanctioned helper must pass undeclared,
     # or the check would push people toward the declaration list instead of
     # toward the fix -- which is how an exemption list becomes an inventory.
     failures += case(
@@ -120,7 +119,7 @@ def main() -> int:
         planted("kernel/printk/log.tkb",
                 "fn kernel_log_tx_pending() -> bool {",
                 "fn planted_restore_probe(saved_flags: usize) {\n"
-                "    if (saved_flags == 0) { enable_irq(); }\n}\n\n"
+                "    mutex_irq_restore(saved_flags);\n}\n\n"
                 "fn kernel_log_tx_pending() -> bool {"),
         "", should_fail=False)
 

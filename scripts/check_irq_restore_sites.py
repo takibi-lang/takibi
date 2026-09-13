@@ -16,24 +16,17 @@ so it cost four instrumented board runs to bisect. The failure presents as
 "the debugger is gone", which is the worst possible presentation, because the
 debugger is what one would use to investigate it.
 
-WHAT IT IS NOT. This is lexical. It does not follow the call graph, so it
-cannot see a helper that restores IRQs while a caller's guard is live -- that
-is GitHub issue #528, and it needs the compiler's effect and liveness
-machinery rather than a grep. What this catches is the direct, common shape,
-at `langcheck` cost, today. The two are complementary and #528 stays open.
+WHAT IT IS NOT. This is lexical. It does not follow the call graph, so the
+compiler's effect and liveness rule separately rejects a helper that restores
+IRQs while a caller's IRQ-owning guard is live. What this catches is the
+direct, common shape at `langcheck` cost. The two checks are complementary.
 
-THE RULE. A call is accepted when the same line consults saved state: either
-a condition naming a mask variable (`if (irq_was_masked == 0) {
-enable_irq(); }`, which is `mutex_irq_restore` written by hand and appears 17
-times in this tree) or the definition of `mutex_irq_restore` itself. Anything
+THE RULE. A call is accepted when the same line consults saved state. The
+conditional inside `mutex_irq_restore` is the kernel's one such site. Anything
 else must be declared below with the reason it is allowed to be absolute.
-Seven sites are, and all seven are places where nothing could have been
-masked yet. Declaring is not a workaround -- it is the check asking for the
-sentence a reviewer would otherwise have to reconstruct.
-
-A guarded site is not PROVEN correct by this check; it is proven to consult
-something. Turning the seventeen into real `mutex_irq_restore` calls is
-issue #528's first step and lives in Territory A's files.
+Eight sites are places where nothing could have been masked yet. Declaring is
+not a workaround -- it is the check asking for the sentence a reviewer would
+otherwise have to reconstruct.
 """
 
 import pathlib
@@ -49,7 +42,8 @@ CALL = re.compile(r"\benable_irq\s*\(\s*\)")
 DEFINITION = re.compile(r"\bfn\s+enable_irq\s*\(")
 # The saved state, consulted on the same line as the call. `mask` covers
 # `irq_was_masked` and `before_irq_masked`; `flags` covers the saved word
-# mutex_irq_save returns.
+# `mutex_irq_save` returns. Ordinary restores call `mutex_irq_restore`, so its
+# definition is the sole guarded `enable_irq` site.
 GUARDED = re.compile(
     r"\bif\s*\(\s*\b[A-Za-z0-9_]*(?:mask|flags)[A-Za-z0-9_]*\b\s*=="
     r"[^)]*\)\s*\{[^}]*\benable_irq\s*\(\s*\)")
@@ -77,8 +71,7 @@ ALLOWED = {
         "enable_irq();":
             "a syscall entered from EL0, which cannot have been entered with "
             "IRQs masked, closing a mask this same function opened a few "
-            "lines above. Issue #528's first step would make these "
-            "mutex_irq_restore calls and this declaration would go",
+            "lines above",
     },
 }
 

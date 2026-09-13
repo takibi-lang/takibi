@@ -110,10 +110,10 @@ The next multicore increment is phase B. Its order is now:
    to architectural idle, and PID 1 collects it on core 0 only after physical
    stack ownership is released. The shared end-to-end view passes on two-vCPU
    QEMU and four-core RPi5.
-2. Apply the already-landed compiler boundaries for **#528** and **#493** to
-   the kernel. IRQ-owning guards must reject premature restoration, and
-   process reaping must invalidate unwitnessed handles before affinity is
-   widened further.
+2. **#528 is complete**: the kernel's IRQ-owning process guard rejects
+   premature restoration through direct and transitive calls. Apply #493's
+   already-landed invalidation boundary next, so process reaping invalidates
+   unwitnessed handles before affinity is widened further.
 3. Finish **#9 phase B** through **#533** and **#534**: add the affinity ABI and
    userspace-visible policy, admit one bounded read-only filesystem workload
    that exits, and verify real peer userspace console output. Keep filesystem

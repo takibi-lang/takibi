@@ -82,12 +82,12 @@ private fn profile_timeline_note(kind: ProfileTimelineKind, pid: usize,
     // SGI between an earlier test and this mask could close the interval,
     // then resume this writer into an already reported buffer.
     if (profile_timeline_active == false) {
-        if (irq_was_masked == 0) { enable_irq(); }
+        mutex_irq_restore(irq_was_masked);
         return;
     }
     let raw_cpu: usize = cpu_id();
     if (raw_cpu >= kernel_online_core_count() || raw_cpu >= KERNEL_MAX_CORES) {
-        if (irq_was_masked == 0) { enable_irq(); }
+        mutex_irq_restore(irq_was_masked);
         return;
     }
     let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
@@ -98,7 +98,7 @@ private fn profile_timeline_note(kind: ProfileTimelineKind, pid: usize,
     if (stored >= PROFILE_TIMELINE_EVENTS) {
         profile_timeline_cores[cpu].lost =
             profile_timeline_cores[cpu].lost + 1;
-        if (irq_was_masked == 0) { enable_irq(); }
+        mutex_irq_restore(irq_was_masked);
         return;
     }
     let slot: {0..<PROFILE_TIMELINE_EVENTS as usize} = stored;
@@ -110,7 +110,7 @@ private fn profile_timeline_note(kind: ProfileTimelineKind, pid: usize,
     profile_timeline_cores[cpu].events[slot].peer = peer;
     profile_timeline_cores[cpu].events[slot].arg = arg;
     profile_timeline_cores[cpu].stored = stored + 1;
-    if (irq_was_masked == 0) { enable_irq(); }
+    mutex_irq_restore(irq_was_masked);
 }
 
 fn profile_timeline_start(pid_a: usize, pid_b: usize) {

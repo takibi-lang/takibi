@@ -2189,7 +2189,8 @@ linear struct ProcessRunGuard[lock: addr] {
 // pool lock. See kernel/lib/intrusive_pool.tkb's tag counter for what
 // putting a non-pool in that table cost.
 fn process_run_lock() -> ProcessRunGuard[scheduled_process_run_lock]
-        !{acquires_lock_40_process_run, lock_guard_40_process_run} {
+        !{acquires_lock_40_process_run, lock_guard_40_process_run,
+          irq_masking_guard} {
     let mut guard: ProcessRunGuard[scheduled_process_run_lock] =
         { mutex_acquire(&scheduled_process_run_lock) };
     return guard;
