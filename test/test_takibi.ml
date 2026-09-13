@@ -13057,6 +13057,21 @@ let codegen_tests = [
           }" ());
 
   Alcotest.test_case
+    "issue #327: the affine pass reports one error per function"
+    `Quick
+    (fun () ->
+       match infer
+         "linear view Issue327Tok[id: usize];
+          fn issue327_take() -> Issue327Tok[1] { return view Issue327Tok[1]; }
+          fn issue327_leak_a() { let t = issue327_take(); }
+          fn issue327_leak_b() { let t = issue327_take(); }" with
+       | exception Types.MultiTypeError errors ->
+           Alcotest.(check int) "one error per function" 2 (List.length errors)
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.failf "expected two errors, got one: %s" msg
+       | _ -> Alcotest.fail "expected two linear errors");
+
+  Alcotest.test_case
     "issue #493: a handle is dead after a call that may destroy its object"
     `Quick
     (fun () ->
@@ -13153,6 +13168,33 @@ let codegen_tests = [
             issue493_deliver(0);
             return o.slot;
           }") ();
+       (* The message spells the chain down to the destroying function. *)
+       expect_type_error
+         "(issue493_deliver -> issue493_wait_deliver -> issue493_reap)" (base ^
+         "fn issue493_chain(child: Issue493Handle) -> usize {
+            issue493_deliver(0);
+            return issue493_use(child);
+          }") ();
+       (* A witness the destroying call itself consumes protects nothing
+          after it. *)
+       expect_type_error "may name a destroyed object" (base ^
+         "fn issue493_exit_and_reap(c: sink Issue493Current[id]) {
+            issue493_deliver(0);
+          }
+          fn issue493_sink_witness() -> usize {
+            let c = issue493_take();
+            let mut me: Issue493Handle = issue493_current(c);
+            issue493_exit_and_reap(c);
+            return issue493_use(me);
+          }") ();
+       (* A counted loop carries the death into its next iteration too. *)
+       expect_type_error "may name a destroyed object" (base ^
+         "fn issue493_for(h: Issue493Handle) {
+            for i: usize in 0..<2 {
+              let n: usize = issue493_use(h);
+              issue493_deliver(0);
+            }
+          }") ();
        expect_type_error "names no struct type 'Issue493Missing'"
          "fn issue493_bad_word() !{invalidates_Issue493Missing} {}" ();
        expect_type_error "handle_of_witness annotation requires exactly one borrowed"
@@ -13187,7 +13229,10 @@ let codegen_tests = [
             issue528_put(g);
           }") ();
        (* Indirect: the restore is two calls down. *)
-       expect_type_error "cannot restore IRQs while" (base ^
+       (* The message spells the chain, so the reader need not walk it. *)
+       expect_type_error
+         "(issue528_outer -> issue528_inner -> issue528_enable -> msr_daifclr_irq)"
+         (base ^
          "fn issue528_inner() { issue528_enable(); }
           fn issue528_outer() { issue528_inner(); }
           fn issue528_deep() {

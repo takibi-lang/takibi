@@ -8536,6 +8536,31 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     done;
     !reach) invalidation_seeds
   in
+  (* The shortest chain of resolved direct calls from [start] to a function
+     [is_goal] accepts, never entering one [blocked] rejects. An error uses it
+     to say how a call reaches the thing that makes it dangerous, which is
+     otherwise a manual walk through the call graph. *)
+  let call_chain start is_goal blocked =
+    let rec bfs frontier seen = match frontier with
+      | [] -> None
+      | (node, path) :: rest ->
+          if is_goal node then Some (List.rev (node :: path))
+          else
+            let callees = Option.value (StringMap.find_opt node lock_callees)
+              ~default:StringSet.empty in
+            let next, seen = StringSet.fold (fun callee (next, seen) ->
+              if StringSet.mem callee seen || blocked callee then (next, seen)
+              else ((callee, node :: path) :: next, StringSet.add callee seen))
+              callees ([], seen) in
+            bfs (rest @ List.rev next) seen
+    in
+    bfs [(start, [])] (StringSet.singleton start)
+  in
+  let chain_text = function
+    | Some chain when List.length chain > 1 ->
+        " (" ^ String.concat " -> " chain ^ ")"
+    | _ -> ""
+  in
   let check_affine_func fdef =
     let finfo = StringMap.find (overload_key fdef.Ast.name fdef.params) functions in
     let binding_resolution = finfo.bindings in
@@ -8708,7 +8733,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | PVar (id, name) -> handle_kind (binding_type id name)
       | PField _ -> None in
     let handle_witness : (path, path) Hashtbl.t = Hashtbl.create 8 in
-    let handle_killer : (path, string * Ast.loc) Hashtbl.t = Hashtbl.create 8 in
+    let handle_killer : (path, string * string * Ast.loc) Hashtbl.t =
+      Hashtbl.create 8 in
     (* Only a binding that is never reassigned can keep a witness: the
        table is not flow-sensitive, so this is what keeps it sound. *)
     let reassigned_names =
@@ -8747,15 +8773,21 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     let require_handle_live loc moved p =
       match path_handle_kind p with
       | Some kind when ResourceFlow.may_be_consumed p moved ->
-          let (killer, at) = Option.value (Hashtbl.find_opt handle_killer p)
-            ~default:("an earlier call", loc) in
+          let (killer, target, at) =
+            Option.value (Hashtbl.find_opt handle_killer p)
+              ~default:("an earlier call", "", loc) in
+          let via = match StringMap.find_opt kind invalidation_seeds with
+            | Some seeds when target <> "" ->
+                chain_text (call_chain target
+                  (fun callee -> StringSet.mem callee seeds) (fun _ -> false))
+            | _ -> "" in
           raise (TypeError (loc, Printf.sprintf
-            "'%s' (%s) may name a destroyed object: '%s' at line %d reaches \
-             a function marked invalidates_%s, and no live witness vouches \
-             for this handle. Re-derive it after that call, or take it from \
-             a handle_of_witness accessor and keep the witness live across \
-             the call"
-            (path_to_string p) kind killer at.Lexing.pos_lnum kind))
+            "'%s' (%s) may name a destroyed object: '%s' at line %d%s \
+             reaches a function marked invalidates_%s, and no live witness \
+             vouches for this handle. Re-derive it after that call, or take \
+             it from a handle_of_witness accessor and keep the witness live \
+             across the call"
+            (path_to_string p) kind killer at.Lexing.pos_lnum via kind))
       | _ -> ()
     in
     let invalidate_handles loc name target moved =
@@ -8773,7 +8805,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               | None -> false in
             if witnessed then moved
             else begin
-              Hashtbl.replace handle_killer path (name, loc);
+              Hashtbl.replace handle_killer path (name, target, loc);
               mv_consume path moved
             end
         | _ -> moved) visible_bindings moved
@@ -9259,10 +9291,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                   raise (TypeError (e.loc, Printf.sprintf
                     "cannot restore IRQs while '%s' (%s) is live: its acquire \
                      masked IRQs and it still owns the interrupt state it \
-                     saved, and '%s' reaches msr_daifclr_irq. Release the \
+                     saved, and '%s' reaches msr_daifclr_irq%s. Release the \
                      guard first, or restore through a function marked \
                      restores_saved_irq"
-                    visible_name guard_name name))
+                    visible_name guard_name name
+                    (chain_text (call_chain target
+                       (fun callee -> callee = "msr_daifclr_irq")
+                       (fun callee ->
+                          StringSet.mem callee irq_restore_discharged)))))
               | _ -> ()) visible_bindings
           end;
           let params = Option.value (StringMap.find_opt target call_params) ~default:[] in
@@ -9973,7 +10009,21 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | _ -> ()
     ) fdef.params
   in
-  List.iter (function Ast.FuncDef f -> check_affine_func f | _ -> ()) prog;
+  (* GitHub issue #327, for this pass too: one broken function no longer
+     hides the next. Each function's first affine/linear error is recorded
+     and the pass moves on, so a kernel-wide annotation shows every site in
+     one build. Exactly one error is still a plain TypeError. Nothing below
+     runs on a program that failed here. *)
+  let affine_errors = ref [] in
+  List.iter (function
+    | Ast.FuncDef f ->
+        (try check_affine_func f with Types.TypeError (loc, msg) ->
+           affine_errors := (loc, msg) :: !affine_errors)
+    | _ -> ()) prog;
+  (match List.rev !affine_errors with
+   | [] -> ()
+   | [(loc, msg)] -> raise (Types.TypeError (loc, msg))
+   | errors -> raise (Types.MultiTypeError errors));
   (* GitHub issue #476: after the linear pass has proved every token is
      consumed on every path, prove each commit saw every field written. *)
   List.iter (function
