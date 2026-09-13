@@ -188,6 +188,32 @@ struct ProcessHandle {
     private generation: usize;
 }
 
+private fn process_handle_new(slot: usize, generation: usize)
+        -> ProcessHandle {
+    let mut handle: ProcessHandle = { slot, generation };
+    return handle;
+}
+
+// A live token says that this CPU is still executing the Running process
+// whose generation supplies `process`. Handles derived through the accessor
+// below remain valid across calls that may reap some other process. The exit
+// path consumes the token before its own process becomes Exited.
+private linear view CurrentProcess[process: usize];
+
+private fn current_process_new(
+        generation: usize @ process) -> CurrentProcess[process] {
+    return view CurrentProcess[process];
+}
+
+private fn current_process_handle(
+        current: borrow CurrentProcess[process]) -> ProcessHandle
+        !{handle_of_witness} {
+    return execution_here().current_handle;
+}
+
+private fn current_process_exit(
+        current: sink CurrentProcess[process]) {}
+
 // GitHub issue #264 first stage: keep the scheduler/lifecycle bookkeeping
 // for one process slot together. This is deliberately a plain data struct:
 // the linear ScheduledProcessOwner/state protocol, stable store, SlotMap,
@@ -2418,7 +2444,7 @@ fn scheduled_process_exit(
 fn scheduled_process_reap(
         owner: sink ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Exited])
-        !{unsafe} {
+        !{unsafe, invalidates_ProcessHandle} {
     // GitHub issue #488: see scheduled_process_reaped_current_count.
     if (execution_here().current_live &&
         execution_here().current_handle.pool_index == owner.pool_index) {
@@ -2622,7 +2648,10 @@ fn scheduled_process_table_probe() -> bool !{unsafe} {
     // refused either way, and refused on the generation rather than on a
     // range check, since there is no range left to fail.
     let mut first: ProcessHandle = handles[0];
+    let first_slot: usize = first.pool_index;
+    let first_generation: usize = first.generation;
     if (scheduled_process_probe_cycle(first) == false) { return false; }
+    first = process_handle_new(first_slot, first_generation);
     if (scheduled_process_stack_top(first) != 0) { return false; }
     match scheduled_process_alloc() {
         ScheduledPooledProcessAllocResult::Full => { return false; }
@@ -2829,6 +2858,7 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
     if (reap_live) {
         let reaped_status: usize =
             kernel_process_reap_zombie(incoming, reap_child);
+        incoming = execution_here().current_handle;
         kernel_init_boot_fixture_reaped(
             scheduled_process_pid_of_handle(incoming));
     }
@@ -5621,6 +5651,7 @@ fn kernel_process_fanout_probe() -> bool !{unsafe} {
         ProcessCloneRollbackResult::Invalid => { return false; }
         ProcessCloneRollbackResult::Restored => {}
     }
+    parent_handle = execution_here().current_handle;
     if (kernel_process_current_pid() != parent_pid ||
         scheduled_process_pool_live_count() != live_before_rollback ||
         process_test_evidence_clone_calls() != clones_before_rollback ||
@@ -6121,6 +6152,7 @@ fn kernel_process_clone_rollback() -> ProcessCloneRollbackResult {
                 ScheduledProcessExitedTakeResult::Exited(done) => {
                     let (exited_owner, exited_state) = done;
                     scheduled_process_reap(exited_owner, exited_state);
+                    parent = execution_here().current_handle;
                 }
             }
         }
@@ -6444,7 +6476,9 @@ fn kernel_process_child_exit(status: usize) -> usize {
             false) {
         return 0;
     }
-    let mut child: ProcessHandle = execution_here().current_handle;
+    let current = current_process_new(
+        execution_here().current_handle.generation);
+    let mut child: ProcessHandle = current_process_handle(current);
     let mut parent: ProcessHandle =
         scheduled_process_record_of(child).parent;
     kernel_process_trace_record(
@@ -6497,6 +6531,7 @@ fn kernel_process_child_exit(status: usize) -> usize {
             }
         }
     }
+    parent = scheduled_process_record_of(child).parent;
     scheduled_process_record_of(child).exit_status = status;
     // Set here as well as in the reap, and both are needed. The blocked-
     // parent path below hands this value to kernel_syscall_wait4_deliver
@@ -6518,11 +6553,13 @@ fn kernel_process_child_exit(status: usize) -> usize {
     kernel_process_signal_child_exit(parent);
     match scheduled_process_running_take(exit_guard, child) {
         ScheduledProcessRunningTakeResult::Missing => {
+            current_process_exit(current);
             process_run_unlock(exit_guard);
             return 0;
         }
         ScheduledProcessRunningTakeResult::Running(resources) => {
             let (owner, running) = resources;
+            current_process_exit(current);
             let exited = scheduled_process_exit(owner, running);
             scheduled_process_release(owner, exited);
             // GitHub issue #244: a parent blocked in wait4 needs both the
@@ -6693,6 +6730,8 @@ private fn kernel_process_pending_wait4_child(parent: ProcessHandle)
 private fn kernel_process_reap_zombie(parent: ProcessHandle,
                                       child: ProcessHandle)
         -> usize !{unsafe} {
+    let parent_slot: usize = parent.pool_index;
+    let parent_generation: usize = parent.generation;
     // GitHub issue #437: scheduled_process_reap ends in
     // process_image_exec_teardown, which used to leave the image target at
     // root 0 and now leaves it unset. While the reap ran inside
@@ -6778,6 +6817,7 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
             scheduled_process_record_of(child).has_next_sibling =
                 false;
             scheduled_process_reap(exited_owner, exited_state);
+            parent = process_handle_new(parent_slot, parent_generation);
         }
     }
     scheduled_process_record_of(parent).last_child_pid = pid;

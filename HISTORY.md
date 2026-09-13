@@ -15,6 +15,21 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-13: destroying pooled objects invalidates plain handles (#493)
+
+Process and unified-object destruction now declare which plain handle kind
+they may invalidate. A linear `CurrentProcess` witness vouches for the process
+that remains Running while its exiting child drains unrelated zombies, and
+the exit transition consumes that witness before publishing Exited. Other
+handles are explicitly re-derived after a possibly destructive call, making
+the source of their renewed validity visible at the call site.
+
+The same rule covers `UnifiedObjectHandle`. The refcount ceiling probe rebuilds
+its handle after descriptor destruction and after each release; another loop
+iteration is possible only after `StillHeld`, while `Freed` has no subsequent
+use. Both maintained kernels therefore compile under the kind-wide rule, and
+the compiler's negative controls reject the former use-after-reap ordering.
+
 ## 2026-09-13: IRQ-owning guards prevent premature restoration (#528)
 
 `ProcessRunGuard` now tells the checker that its acquire saved and masked the

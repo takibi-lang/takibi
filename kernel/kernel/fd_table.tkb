@@ -831,7 +831,8 @@ fn unified_object_double_release_count() -> usize {
 }
 
 private fn unified_object_release(handle: UnifiedObjectHandle)
-        -> UnifiedObjectReleaseResult !{unsafe} {
+        -> UnifiedObjectReleaseResult
+        !{unsafe, invalidates_UnifiedObjectHandle} {
     let guard = guarded_field_take(&object_refcount_lock);
     let result: UnifiedObjectReleaseResult =
         unified_object_release_locked(guard, handle);
@@ -926,6 +927,12 @@ must_use variant UnifiedFdInstallResult { Invalid; RefOverflow; NoMemory; Ok; }
 struct UnifiedObjectHandle {
     private slot: usize;
     private generation: usize;
+}
+
+private fn unified_object_handle_new(slot: usize, generation: usize)
+        -> UnifiedObjectHandle {
+    let mut handle: UnifiedObjectHandle = { slot, generation };
+    return handle;
 }
 must_use variant UnifiedObjectResult {
     Invalid;
@@ -2214,6 +2221,8 @@ fn unified_object_ref_ceiling_probe() -> bool !{unsafe} {
         UnifiedObjectResult::Invalid => { return false; }
         UnifiedObjectResult::Full => { return false; }
         UnifiedObjectResult::Allocated(handle) => {
+            let object_slot: usize = handle.slot;
+            let object_generation: usize = handle.generation;
             // Installing it is what makes the first block, and therefore
             // the first descriptor slots, exist. Before this line the
             // bound is 0, which is the check above.
@@ -2289,14 +2298,18 @@ fn unified_object_ref_ceiling_probe() -> bool !{unsafe} {
                 UnifiedFdResult::Invalid => { ok = false; }
                 UnifiedFdResult::Ok => {}
             }
+            let mut release_handle: UnifiedObjectHandle =
+                unified_object_handle_new(object_slot, object_generation);
             let mut released: usize = 1;
             while (released < retained) {
-                match unified_object_release(handle) {
+                match unified_object_release(release_handle) {
                     UnifiedObjectReleaseResult::Invalid => { ok = false; }
                     UnifiedObjectReleaseResult::StillHeld => {}
                     UnifiedObjectReleaseResult::Freed => {}
                 }
                 released = released + 1;
+                release_handle = unified_object_handle_new(
+                    object_slot, object_generation);
             }
             unified_fd_table_init();
             return ok;
