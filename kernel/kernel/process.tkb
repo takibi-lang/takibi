@@ -3624,8 +3624,9 @@ private fn kernel_process_next_successor(from: ProcessHandle,
 // Taking the CPU as a value is load-bearing: the scheduler probe runs on core
 // 0 but must exercise the answer for core 1.
 fn kernel_process_cpu_admits(cpu: usize, pid: usize) -> bool {
-    if (cpu == 0) { return true; }
+    if (cpu == 0) { return workload_busy_primary_candidate(pid); }
     if (cpu >= KERNEL_ACTIVE_CORES) { return false; }
+    if (cpu != SECONDARY_CORE_ID) { return false; }
     return workload_busy_secondary_candidate(pid);
 }
 

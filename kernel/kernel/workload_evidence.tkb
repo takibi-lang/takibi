@@ -155,11 +155,18 @@ struct WorkloadBusyPair {
     migration_reported: bool;
     // The one post-migration exit that proves a peer can give up its
     // process stack, return to architectural idle, and leave init to reap
-    // the zombie on core 0. The exiting pid is immutable once selected.
+    // the zombie on core 0. The pid identifies that one lifetime only; init
+    // may reuse its number for the replacement, so post-reap routing uses tag.
     peer_exit_pid: usize;
+    peer_exit_tag: usize;
     peer_exit_cpu: usize;
     peer_exit_stack_released: bool;
     peer_exit_reported: bool;
+    // The read-only filesystem fixture is admitted to a peer only after the
+    // exit fixture above has completed. Its pid is fixed by its first tag-3
+    // report, before it opens the fixture file.
+    peer_read_pid: usize;
+    peer_read_reported: bool;
     // A report this file refused: an unknown tag, or a caller that is not
     // a child of init. Zero on a healthy boot, and printed only when it
     // is not.
@@ -584,9 +591,12 @@ fn workload_busy_pair_reset() {
     workload_busy_pair.b_migrations = 0;
     workload_busy_pair.migration_reported = false;
     workload_busy_pair.peer_exit_pid = 0;
+    workload_busy_pair.peer_exit_tag = 0;
     workload_busy_pair.peer_exit_cpu = 0;
     workload_busy_pair.peer_exit_stack_released = false;
     workload_busy_pair.peer_exit_reported = false;
+    workload_busy_pair.peer_read_pid = 0;
+    workload_busy_pair.peer_read_reported = false;
     workload_busy_pair.refused = 0;
 }
 
@@ -658,10 +668,17 @@ fn workload_busy_secondary_candidate(pid: usize) -> bool {
         return false;
     }
     // Once a peer exit is armed, keep only that currently-running process
-    // admitted there. Its exit must find no eligible successor, which is the
-    // architectural-idle boundary this recurrence fixture exists to cover.
-    if (workload_busy_pair.peer_exit_pid != 0) {
+    // admitted until the physical idle-stack boundary publishes its release.
+    // The idle loop immediately asks this policy again, so widening here lets
+    // it select the next workload without waiting for a second idle wakeup.
+    if (workload_busy_pair.peer_exit_pid != 0 &&
+        workload_busy_pair.peer_exit_stack_released == false) {
         return pid == workload_busy_pair.peer_exit_pid;
+    }
+    if (workload_busy_pair.peer_exit_reported &&
+        workload_busy_pair.peer_read_pid != 0 &&
+        workload_busy_pair.peer_read_reported == false) {
+        return pid == workload_busy_pair.peer_read_pid;
     }
     if (workload_busy_pair.restart_report_state ==
             WorkloadRestartReportState::Reported) {
@@ -669,6 +686,16 @@ fn workload_busy_secondary_candidate(pid: usize) -> bool {
                pid == workload_busy_pair.b_pid;
     }
     return pid == workload_busy_pair.b_pid;
+}
+
+// The peer reader registers before opening the fixture. From that point it
+// belongs exclusively to CPU 1: excluding it from core 0 is the other half
+// of secondary admission and makes every accepted read's placement stable
+// across a blocking wakeup.
+fn workload_busy_primary_candidate(pid: usize) -> bool {
+    return workload_busy_pair.peer_read_pid == 0 ||
+           workload_busy_pair.peer_read_reported ||
+           pid != workload_busy_pair.peer_read_pid;
 }
 
 fn workload_busy_note_selected(pid: usize) {
@@ -707,21 +734,25 @@ private fn workload_busy_record_progress_locked(
                 "\nworkload: busy pair migrated across both cpus with stack handoff intact\n");
             workload_busy_pair.migration_reported = true;
             workload_busy_pair.peer_exit_pid = kernel_process_current_pid();
+            workload_busy_pair.peer_exit_tag = tag;
         }
         if (workload_busy_pair.migration_reported) {
             // Ask exactly the armed process to exit, and only while it is
-            // actually running on a peer. Its replacement and the surviving
-            // process stop reporting, but remain CPU-bound as before.
-            if (workload_busy_pair.peer_exit_pid ==
-                    kernel_process_current_pid() && cpu_id() != 0) {
-                workload_busy_pair.peer_exit_cpu = cpu_id();
-                return WorkloadBusyProgressResult::Value(2);
-            }
-            if (workload_busy_pair.peer_exit_pid ==
-                    kernel_process_current_pid()) {
+            // actually running on a peer. Before reap, its pid names that
+            // lifetime; after reap, the stable tag routes the replacement
+            // and survivor to the two filesystem images.
+            if (workload_busy_pair.peer_exit_reported == false) {
+                if (workload_busy_pair.peer_exit_pid ==
+                        kernel_process_current_pid() && cpu_id() != 0) {
+                    workload_busy_pair.peer_exit_cpu = cpu_id();
+                    return WorkloadBusyProgressResult::Value(2);
+                }
                 return WorkloadBusyProgressResult::Value(0);
             }
-            return WorkloadBusyProgressResult::Value(1);
+            if (tag == workload_busy_pair.peer_exit_tag) {
+                return WorkloadBusyProgressResult::Value(4);
+            }
+            return WorkloadBusyProgressResult::Value(5);
         }
         return WorkloadBusyProgressResult::Value(0);
     }
@@ -844,6 +875,44 @@ fn workload_busy_peer_exit_reaped(pid: usize, parent_pid: usize,
             "workload: peer exit returned to idle, init collected on core 0 after stack release\n");
         workload_busy_pair.peer_exit_reported = true;
     }
+}
+
+// Tag 3 belongs to /bin/peer-read, not to the CPU-bound pair. The first call
+// registers the init child for peer admission. Later calls claim one complete
+// 96 KiB read; accept one only when it returns on a peer and both CPUs have
+// actually waited for the device mutex at least once.
+fn workload_peer_read_progress(bytes: usize, checksum: usize) -> usize {
+    let guard = process_run_lock();
+    let pid: usize = kernel_process_current_pid();
+    if (workload_busy_pair.peer_read_pid == 0) {
+        if (kernel_process_parent_is_root() == false) {
+            workload_busy_pair.refused = workload_busy_pair.refused + 1;
+            process_run_unlock(guard);
+            return 0;
+        } else {
+            workload_busy_pair.peer_read_pid = pid;
+        }
+        process_run_unlock(guard);
+        return SECONDARY_CORE_ID;
+    }
+    if (pid != workload_busy_pair.peer_read_pid ||
+        workload_busy_pair.peer_read_reported || bytes != 98304 ||
+        checksum != 8847360 || cpu_id() != SECONDARY_CORE_ID) {
+        workload_busy_pair.refused = workload_busy_pair.refused + 1;
+        process_run_unlock(guard);
+        return 0;
+    }
+    if (block_read_call_count(SECONDARY_CORE_ID) == 0 ||
+        block_device_wait_count(0) == 0 ||
+        block_device_wait_count(SECONDARY_CORE_ID) == 0) {
+        process_run_unlock(guard);
+        return 0;
+    }
+    workload_busy_pair.peer_read_reported = true;
+    kernel_boot_log(
+        "workload: peer read 98304 pattern bytes; block device mutex contended on both cpus\n");
+    process_run_unlock(guard);
+    return 2;
 }
 
 private fn workload_busy_start_profile(pid: usize, input_steps: usize)

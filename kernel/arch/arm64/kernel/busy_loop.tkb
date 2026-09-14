@@ -26,6 +26,9 @@ const WORKLOAD_PROGRESS_SYSCALL: usize = 453;
 const WORKLOAD_EXIT_SYSCALL: usize = 93;
 const WORKLOAD_ANSWER_EXIT: usize = 2;
 const WORKLOAD_ANSWER_SIGTERM: usize = 3;
+const WORKLOAD_ANSWER_PEER_READ: usize = 4;
+const WORKLOAD_ANSWER_CORE_READ: usize = 5;
+const EXECVE_SYSCALL: usize = 221;
 const GETPID_SYSCALL: usize = 172;
 const KILL_SYSCALL: usize = 129;
 const LINUX_SIGTERM: usize = 15;
@@ -80,7 +83,7 @@ fn busy_loop_run(tag: usize) {
             state = state ^ (state >> 7);
             state = state ^ (state << 17);
         }
-        if (done == 0) {
+        if (done == 0 || done == 1) {
             let answer: usize = svc5(
                 WORKLOAD_PROGRESS_SYSCALL, tag, state,
                 BUSY_LOOP_ROUND_STEPS, 0, 0);
@@ -95,7 +98,23 @@ fn busy_loop_run(tag: usize) {
                 let pid: usize = svc5(GETPID_SYSCALL, 0, 0, 0, 0, 0);
                 svc5(KILL_SYSCALL, pid, LINUX_SIGTERM, 0, 0, 0);
             }
-            done = answer;
+            if (answer == WORKLOAD_ANSWER_PEER_READ ||
+                answer == WORKLOAD_ANSWER_CORE_READ) {
+                let mut path: *u8 = "/bin/peer-read" as *u8;
+                if (answer == WORKLOAD_ANSWER_CORE_READ) {
+                    path = "/bin/core-read" as *u8;
+                }
+                let mut argv: [usize; 2];
+                argv[0] = path as usize;
+                argv[1] = 0;
+                svc5(EXECVE_SYSCALL, path as usize,
+                    argv as *usize as usize, 0, 0, 0);
+                // An allocation failure is transient while another exec is
+                // committing. A successful exec never returns here.
+                done = 0;
+            } else {
+                done = answer;
+            }
         }
     }
 }

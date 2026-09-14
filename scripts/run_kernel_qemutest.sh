@@ -165,7 +165,7 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --qmp-port "$QMP_PORT" \
     --stdin "$ASH_DIR/ash.stdin" --expected "$ASH_DIR/ash.expected" \
     --timeout "$TIMEOUT_SECS" \
-    --stop-marker 'workload: peer exit returned to idle, init collected on core 0 after stack release' \
+    --stop-marker 'workload: peer read 98304 pattern bytes; block device mutex contended on both cpus' \
     --interactive-httpd-listener-file "$INTERACTIVE_HTTPD_LISTENER" \
     --foreground-httpd-listener-file "$FOREGROUND_HTTPD_LISTENER" \
     --init-listener-file "$INIT_LISTENER" \

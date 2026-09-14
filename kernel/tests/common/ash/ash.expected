@@ -11,6 +11,7 @@ lib
 lost+found
 many
 mutable.txt
+peer-read.bin
 read_indirect.txt
 .
 ..
@@ -27,6 +28,7 @@ lib
 lost+found
 many
 mutable.txt
+peer-read.bin
 read_indirect.txt
 busy-a
 busy-b
@@ -34,6 +36,7 @@ busybox
 busybox-extras
 busybox.static
 cat
+core-read
 dmesg
 echo
 httpd
@@ -42,6 +45,7 @@ ls
 mkdir
 mv
 od
+peer-read
 ps
 rm
 rmdir

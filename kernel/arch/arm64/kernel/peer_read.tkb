@@ -1,0 +1,108 @@
+/* GitHub issue #533: a bounded read-only filesystem workload admitted to
+ * the secondary CPU. This is a standalone static-PIE EL0 program, kept free
+ * of writable globals and compiled with --forbid-trap.
+ *
+ * The fixture contains exactly 96 KiB of 'Z'. Each attempt opens it afresh
+ * and accepts all 96 chunks only when getcpu() brackets every read on the
+ * platform's admitted secondary CPU.
+ * A migration invalidates that attempt instead of attributing its bytes to
+ * the peer. The kernel validates the final byte count, checksum, placement,
+ * and real block-device lock contention before asking this one-shot process
+ * to exit.
+ */
+
+const OPENAT_SYSCALL: usize = 56;
+const CLOSE_SYSCALL: usize = 57;
+const READ_SYSCALL: usize = 63;
+const EXIT_SYSCALL: usize = 93;
+const GETCPU_SYSCALL: usize = 168;
+const WORKLOAD_PROGRESS_SYSCALL: usize = 453;
+const PEER_READ_TAG: usize = 3;
+const PEER_READ_CHUNK: usize = 1024;
+const PEER_READ_CHUNKS: usize = 96;
+const PEER_READ_ATTEMPTS: usize = 64;
+const PEER_READ_CHECKSUM: usize = 8847360;
+
+private fn peer_read_cpu(cpu_bytes: borrow [u8; 4..]) -> usize {
+    if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize, 0, 0, 0, 0) != 0) {
+        return 99;
+    }
+    return cpu_bytes[0] as usize |
+           ((cpu_bytes[1] as usize) << 8) |
+           ((cpu_bytes[2] as usize) << 16) |
+           ((cpu_bytes[3] as usize) << 24);
+}
+
+fn peer_read() {
+    let mut cpu_bytes: [u8; 4];
+    let mut buffer: [u8; PEER_READ_CHUNK];
+
+    // The busy-pair replacement enters only after peer exit. Registration
+    // still happens before open(), so every operation remains constrained.
+    let peer_cpu: usize = svc5(
+        WORKLOAD_PROGRESS_SYSCALL, PEER_READ_TAG, 0, 0, 0, 0);
+    if (peer_cpu == 0) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
+    // Registration excludes this pid from CPU 0 at the next scheduler
+    // selection. Do not spend the bounded read attempts before that handoff.
+    while (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {}
+
+    for attempt: usize in 0..<PEER_READ_ATTEMPTS {
+        let mut valid: bool = peer_read_cpu(cpu_bytes as []u8) == peer_cpu;
+        let mut bytes: usize = 0;
+        let mut checksum: usize = 0;
+        if (valid) {
+            let fd: usize = svc5(OPENAT_SYSCALL, 0,
+                                  "/peer-read.bin" as *u8 as usize,
+                                  0, 0, 0);
+            for chunk: usize in 0..<PEER_READ_CHUNKS {
+                if (valid) {
+                    if (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {
+                        valid = false;
+                    } else {
+                        let got: usize = svc5(READ_SYSCALL, fd,
+                                              buffer as *u8 as usize,
+                                              PEER_READ_CHUNK, 0, 0);
+                        if (got != PEER_READ_CHUNK ||
+                            peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {
+                            valid = false;
+                        } else {
+                            for index: usize in 0..<PEER_READ_CHUNK {
+                                if (buffer[index] != 90) { valid = false; }
+                                checksum = checksum + 90;
+                            }
+                            bytes = bytes + got;
+                        }
+                    }
+                }
+            }
+            svc5(CLOSE_SYSCALL, fd, 0, 0, 0, 0);
+            if (valid && bytes == PEER_READ_CHUNK * PEER_READ_CHUNKS &&
+                checksum == PEER_READ_CHECKSUM) {
+                if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_READ_TAG,
+                         bytes, checksum, 0, 0) == 2) {
+                    svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+                }
+            }
+        }
+    }
+    svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+}
+
+fn core_read() {
+    let mut cpu_bytes: [u8; 4];
+    let mut buffer: [u8; PEER_READ_CHUNK];
+    // The competing reader is the core-0 half of the evidence. It may have
+    // been dispatched just before peer registration narrows CPU 1.
+    while (peer_read_cpu(cpu_bytes as []u8) != 0) {}
+    for attempt: usize in 0..<64 {
+        let fd: usize = svc5(OPENAT_SYSCALL, 0,
+                              "/peer-read.bin" as *u8 as usize,
+                              0, 0, 0);
+        for chunk: usize in 0..<PEER_READ_CHUNKS {
+            svc5(READ_SYSCALL, fd, buffer as *u8 as usize,
+                 PEER_READ_CHUNK, 0, 0);
+        }
+        svc5(CLOSE_SYSCALL, fd, 0, 0, 0, 0);
+    }
+    svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+}

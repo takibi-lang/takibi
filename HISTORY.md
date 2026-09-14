@@ -15,6 +15,20 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-14: a peer performs bounded read-only filesystem I/O (#533)
+
+The first filesystem process admitted to the platform's secondary CPU reads
+and validates a 96 KiB
+pattern file while the existing CPU-0 BusyBox/HTTPd path performs filesystem
+I/O. The block-device
+boundary records a failed first TaskMutex acquisition per CPU, and the common
+QEMU/RPi5 verdict requires secondary-CPU device reads plus contention on both
+participating CPUs.
+The exiting busy entry's replacement and its survivor become the peer and
+core-0 readers only after the earlier migration and peer-exit recurrence
+fixture, preserving that fixture's measurement window. Both platform
+runners now capture through this later verdict.
+
 ## 2026-09-13: DDB attributes saved frames to physical stacks (#505)
 
 The QEMU DDB lane could stop after peer exit with CPU 1 in architectural idle,

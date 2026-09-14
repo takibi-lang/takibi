@@ -115,10 +115,11 @@ The next multicore increment is phase B. Its order is now:
    invalidates unwitnessed handles through direct and transitive calls. The
    current-process witness is consumed by exit; unrelated survivors are
    explicitly re-derived after a destructive call.
-3. Finish **#9 phase B** through **#533** and **#534**: add the affinity ABI and
-   userspace-visible policy, admit one bounded read-only filesystem workload
-   that exits, and verify real peer userspace console output. Keep filesystem
-   mutation and terminal readers on core 0 at this boundary.
+3. **#533 is complete**: the affinity observation ABI and fixture-specific
+   scheduler policy admit one bounded read-only filesystem workload, with
+   contended device reads verified on QEMU and RPi5. Finish **#9 phase B**
+   through **#534** by verifying real peer userspace console output. Keep
+   filesystem mutation and terminal readers on core 0 at this boundary.
 4. Complete **#547** before admitting a terminal reader to a peer. A local IRQ
    mask closes the current core-0 UART check-then-block window, but cannot
    serialize a reader and RX interrupt on different CPUs.

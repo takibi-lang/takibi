@@ -103,6 +103,16 @@ The current RPi5 kernel includes:
   ever got and reports both processes' CPU time, then asks one of them to
   exit and checks that `init` brought back only that one while the other
   kept its pid and its counter;
+- a bounded read-only filesystem workload started after that scheduler
+  fixture: `/bin/peer-read` validates a 96 KiB pattern file while every read
+  is bracketed by `getcpu()` on the platform's admitted secondary CPU, while
+  `/bin/core-read` issues the
+  competing CPU-0 reads. The common QEMU/RPi5 verdict
+  requires both CPUs to have
+  failed an initial block-device mutex acquisition. This admission covers
+  only `openat`, `read`, `close`, `getcpu`, the private progress
+  syscall, and exit in this fixed static-PIE program; arbitrary ext2
+  mutation, network, terminal, and general process execution remain on CPU 0;
 - one-boot integration views that independently compare boot, VM, process,
   syscall, filesystem, USB, Ethernet, BusyBox, HTTPd, and workload-fairness
   evidence.
@@ -112,8 +122,10 @@ The rootfs keeps executable files under `/bin`: Alpine's original
 `sh`, `cat`, `echo`, `ls`, `od`, `ps`, `dmesg`, `mkdir`, `rmdir`, and
 `uname` are hard links to the static
 binary, while `httpd` is a hard link to BusyBox Extras. The independent
-Takibi test programs are `/bin/user_payload` (the EL0 syscall-ABI fixture)
-and the pair `/bin/busy-a`/`/bin/busy-b`, which are the same object linked
+Takibi test programs are `/bin/user_payload` (the EL0 syscall-ABI fixture),
+`/bin/peer-read` and `/bin/core-read` (the read-only block contention
+fixture), and the pair
+`/bin/busy-a`/`/bin/busy-b`, which are the same object linked
 twice with different ELF entry points so each knows which `respawn` entry it
 is without parsing `argv`. `/bin/spin` is a third link of the same object: one
 round of that work and then exit. The ash session backgrounds two of them
@@ -413,7 +425,7 @@ probe/board setup. A successful run includes:
 [kernel/rpi5] BusyBox httpd curl passed
 [kernel/rpi5] second BusyBox httpd curl passed
 [kernel/rpi5] userspace connected I/O passed
-PASS kernel/rpi5 (46 views, one boot)
+PASS kernel/rpi5 (47 views, one boot)
 ```
 
 It tests negative and positive ARP/ICMP behavior, TCP lifecycle, USB ext2

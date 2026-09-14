@@ -81,6 +81,7 @@ fn virtio_block_device_ext2() -> KernelBlockDeviceResult {
 // profiler beside it already counts this way.
 private let mut block_read_calls: [usize; KERNEL_MAX_CORES];
 private let mut block_write_calls: [usize; KERNEL_MAX_CORES];
+private let mut block_device_waits: [usize; KERNEL_MAX_CORES];
 
 private fn block_call_total(counters: borrow [usize; KERNEL_MAX_CORES..])
         -> usize {
@@ -101,8 +102,19 @@ private fn block_note_call(counters: borrow [usize; KERNEL_MAX_CORES..]) {
 fn block_read_call_total() -> usize {
     return block_call_total(block_read_calls as []usize);
 }
+fn block_read_call_count(core: usize) -> usize {
+    if (core >= KERNEL_MAX_CORES) { return 0; }
+    let index: {0..<KERNEL_MAX_CORES as usize} = core;
+    return block_read_calls[index];
+}
 fn block_write_call_total() -> usize {
     return block_call_total(block_write_calls as []usize);
+}
+
+fn block_device_wait_count(core: usize) -> usize {
+    if (core >= KERNEL_MAX_CORES) { return 0; }
+    let index: {0..<KERNEL_MAX_CORES as usize} = core;
+    return block_device_waits[index];
 }
 
 // GitHub issue #533: one command at a time on the device.
@@ -133,7 +145,10 @@ linear struct BlockDeviceGuard[lock: addr] {
 
 private fn block_device_take() -> BlockDeviceGuard[block_device_lock]
         !{acquires_lock_30_block_device, lock_guard_30_block_device} {
-    task_mutex_acquire(&block_device_lock);
+    if (task_mutex_trylock(&block_device_lock) == false) {
+        block_note_call(block_device_waits as []usize);
+        task_mutex_acquire(&block_device_lock);
+    }
     let mut guard: BlockDeviceGuard[block_device_lock] = { cpu_id() };
     return guard;
 }
