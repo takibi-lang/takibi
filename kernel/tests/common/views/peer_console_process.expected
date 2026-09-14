@@ -1,0 +1,18 @@
+peer user console: record=01/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+peer user console: record=02/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+peer user console: record=03/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+peer user console: record=04/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+peer user console: record=05/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+peer user console: record=06/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+peer user console: record=07/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+peer user console: record=08/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+peer user console: record=09/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+peer user console: record=10/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+peer user console: record=11/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+peer user console: record=12/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+peer user console: record=13/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+peer user console: record=14/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+peer user console: record=15/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+peer user console: record=16/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+workload: peer console short-wrote 1024 of 1088 bytes, then delivered the final record
+peer user console: record=17/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

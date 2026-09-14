@@ -75,11 +75,15 @@ def problems(tree: dict[str, str]) -> list[str]:
         result.append("expected verdict changed")
     if view_filter.strip() != "^workload: peer read 98304 pattern bytes":
         result.append("view no longer selects the verdict")
+    final_marker = (
+        "peer user console: record=17/17 "
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    )
     for runner in (
         "scripts/run_kernel_qemutest.sh",
         "scripts/run_kernel_hwtest_rpi5.sh",
     ):
-        if f"--stop-marker '{marker}'" not in tree[runner]:
+        if f"--stop-marker '{final_marker}'" not in tree[runner]:
             result.append(f"{runner} can stop before the verdict")
     return result
 

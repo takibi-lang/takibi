@@ -182,7 +182,11 @@ after that count says so. So a full ring is a short count, never a drop. A
 peer that can hand over nothing retries on its own tick rather than sleeping
 on the TX interrupt. Records from different CPUs interleave only at record
 boundaries. While the queue is stood down for DDB or a fatal report, nothing
-is moved, and published records wait there.
+is moved, and published records wait there. The maintained peer process makes
+one seventeen-record write into the sixteen-record ring, observes the exact
+1024-byte short count, and retries the final record. Its common view fixes the
+observed core-0 verdict between records 16 and 17, so record-boundary
+interleaving is executable on both platforms rather than only specified here.
 
 ## Stopping the other cores
 

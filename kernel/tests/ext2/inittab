@@ -1,4 +1,5 @@
 ::sysinit:/etc/init.sh
 ::respawn:/bin/busy-a
 ::respawn:/bin/busy-b
+::once:/bin/peer-console
 ::respawn:/bin/sh -i

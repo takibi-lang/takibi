@@ -15,6 +15,18 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-14: a real peer process fills the userspace console ring (#534)
+
+An init-launched static-PIE process now registers before its first terminal
+write and runs exclusively on the admitted secondary CPU after the filesystem
+fixture. Its first write contains seventeen exact 64-byte records while the
+publication ring holds sixteen. The kernel accepts the required 1024-byte
+short count, the process retries from that offset, and a shared QEMU/RPi5 view
+compares every record plus the kernel-side placement and byte-count verdict.
+Core 0's verdict line can occur between records 16 and 17, demonstrating the
+specified record-boundary interleave without mixed, duplicated, or missing
+bytes. The DDB-while-pending case remains the separate final verification.
+
 ## 2026-09-14: a peer performs bounded read-only filesystem I/O (#533)
 
 The first filesystem process admitted to the platform's secondary CPU reads

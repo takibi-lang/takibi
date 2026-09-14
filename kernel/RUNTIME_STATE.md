@@ -314,6 +314,12 @@ the cursor that publishes it. Each CPU writes only its own records and
 counts; core 0 writes only the consumed counts and cursors. What crosses
 between them is a publication record in both directions.
 
+`kernel/kernel/workload_evidence.tkb` retains the one admitted peer-console
+PID until its bounded writer has proved the 1024-of-1088 short write, CPU
+placement, and final retry. The process registers before writing, is excluded
+from core 0, and is admitted to the secondary only after the peer-filesystem
+verdict.
+
 **Why global:** the kernel mounts exactly one ext2 filesystem at boot.
 Per-block scratch for a single-mount filesystem is legitimately shared scratch
 space rather than per-process state; what it is not is shared between cores.

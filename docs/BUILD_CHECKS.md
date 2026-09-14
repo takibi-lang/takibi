@@ -71,6 +71,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_platform_view_parity.py` | a view compared on one lane only says why it is not shared |
 | `check_platform_view_parity_controls.py` | Controls for the platform-view parity check |
 | `check_peer_filesystem_controls.py` | the peer filesystem verdict requires CPU-1 reads, failed first lock attempts on both CPUs, and capture completion on both platforms; controls remove each link |
+| `check_peer_console_process_controls.py` | the peer-console verdict remains tied to a real CPU-1 EL0 writer, a forced 16-record full ring, retry of the final record, and capture completion on both platforms |
 | `check_pool_release_paths.py` | every kernel pool has a release path or explicit exemption |
 | `check_probe_entry_gates.py` | a two-core probe's arrival gate waits on a count that only grows, never on a level the other core clears |
 | `check_profile_kernel_samples_controls.py` | Controls for bounded flat-PC sample validation and symbolization |

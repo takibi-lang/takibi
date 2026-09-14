@@ -826,9 +826,11 @@ modify kernel files for any of them.
    drives the ring past full. A bounded probe sends four records from
    core 1 through `uart_user_write` on every boot, and the shared
    `peer_console` view compares them, and the RPi5 lane passed it on
-   2026-09-12. **Still owed:** a DDB BREAK while peer records are queued;
-   and a real writing process on a peer, which is phase B's admission to
-   widen once this contract is in.
+   2026-09-12. **The real writer landed 2026-09-14:** an init child runs on
+   the admitted secondary, fills all sixteen ring records with one 1088-byte
+   write, observes the exact 1024-byte short count, retries the final record,
+   and a common view compares the record-boundary interleave. **Still owed:**
+   a DDB BREAK while peer records are queued.
 6. **#281, measured and narrowed, 2026-09-12.** A scratch boot logged every
    single-block device read and write by block number, and `debugfs icheck`
    named the owners.

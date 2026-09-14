@@ -22,6 +22,8 @@ const PEER_READ_CHUNK: usize = 1024;
 const PEER_READ_CHUNKS: usize = 96;
 const PEER_READ_ATTEMPTS: usize = 64;
 const PEER_READ_CHECKSUM: usize = 8847360;
+const WRITE_SYSCALL: usize = 64;
+const PEER_CONSOLE_TAG: usize = 4;
 
 private fn peer_read_cpu(cpu_bytes: borrow [u8; 4..]) -> usize {
     if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize, 0, 0, 0, 0) != 0) {
@@ -105,4 +107,33 @@ fn core_read() {
         svc5(CLOSE_SYSCALL, fd, 0, 0, 0, 0);
     }
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+}
+
+// GitHub issue #534: a real EL0 writer on the admitted peer. Each line is
+// exactly one 64-byte publication record. The single first write asks for
+// seventeen records, one more than the ring can hold, and must therefore be
+// short. Retrying from the returned offset proves the byte count names data
+// that has a defined place in the stream rather than data silently dropped.
+fn peer_console() {
+    let mut cpu_bytes: [u8; 4];
+    let output = bs"peer user console: record=01/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=02/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=03/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=04/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=05/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=06/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=07/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=08/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=09/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=10/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=11/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=12/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=13/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=14/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=15/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=16/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=17/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n";
+    let peer_cpu: usize = svc5(
+        WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG, 0, 0, 0, 0);
+    if (peer_cpu == 0) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
+    while (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {}
+
+    let first: usize = svc5(WRITE_SYSCALL, 1,
+                              output as *u8 as usize, output.len, 0, 0);
+    let mut total: usize = first;
+    while (total < output.len) {
+        let wrote: usize = svc5(
+            WRITE_SYSCALL, 1, output as *u8 as usize + total,
+            output.len - total, 0, 0);
+        total = total + wrote;
+    }
+    if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG,
+             first, total, 0, 0) == 2) {
+        svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+    }
+    svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
 }

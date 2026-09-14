@@ -167,6 +167,11 @@ struct WorkloadBusyPair {
     // report, before it opens the fixture file.
     peer_read_pid: usize;
     peer_read_reported: bool;
+    // The output-only process follows the filesystem reader. It registers
+    // before writing, then belongs exclusively to the admitted peer until
+    // one deliberately over-capacity write and its retry have completed.
+    peer_console_pid: usize;
+    peer_console_reported: bool;
     // A report this file refused: an unknown tag, or a caller that is not
     // a child of init. Zero on a healthy boot, and printed only when it
     // is not.
@@ -597,6 +602,8 @@ fn workload_busy_pair_reset() {
     workload_busy_pair.peer_exit_reported = false;
     workload_busy_pair.peer_read_pid = 0;
     workload_busy_pair.peer_read_reported = false;
+    workload_busy_pair.peer_console_pid = 0;
+    workload_busy_pair.peer_console_reported = false;
     workload_busy_pair.refused = 0;
 }
 
@@ -680,6 +687,11 @@ fn workload_busy_secondary_candidate(pid: usize) -> bool {
         workload_busy_pair.peer_read_reported == false) {
         return pid == workload_busy_pair.peer_read_pid;
     }
+    if (workload_busy_pair.peer_read_reported &&
+        workload_busy_pair.peer_console_pid != 0 &&
+        workload_busy_pair.peer_console_reported == false) {
+        return pid == workload_busy_pair.peer_console_pid;
+    }
     if (workload_busy_pair.restart_report_state ==
             WorkloadRestartReportState::Reported) {
         return pid == workload_busy_pair.a_pid ||
@@ -693,9 +705,14 @@ fn workload_busy_secondary_candidate(pid: usize) -> bool {
 // of secondary admission and makes every accepted read's placement stable
 // across a blocking wakeup.
 fn workload_busy_primary_candidate(pid: usize) -> bool {
-    return workload_busy_pair.peer_read_pid == 0 ||
-           workload_busy_pair.peer_read_reported ||
-           pid != workload_busy_pair.peer_read_pid;
+    if (workload_busy_pair.peer_read_pid != 0 &&
+        workload_busy_pair.peer_read_reported == false &&
+        pid == workload_busy_pair.peer_read_pid) {
+        return false;
+    }
+    return workload_busy_pair.peer_console_pid == 0 ||
+           workload_busy_pair.peer_console_reported ||
+           pid != workload_busy_pair.peer_console_pid;
 }
 
 fn workload_busy_note_selected(pid: usize) {
@@ -911,6 +928,41 @@ fn workload_peer_read_progress(bytes: usize, checksum: usize) -> usize {
     workload_busy_pair.peer_read_reported = true;
     kernel_boot_log(
         "workload: peer read 98304 pattern bytes; block device mutex contended on both cpus\n");
+    process_run_unlock(guard);
+    return 2;
+}
+
+// Tag 4 belongs to /bin/peer-console. Registration happens before its first
+// write, and the process then stays off core 0. The first write is exactly
+// seventeen publication records while the ring holds sixteen, so accepting
+// only 1024 bytes proves the full-ring path returned a short count. The
+// payload retries the remaining record and reports all 1088 bytes only after
+// write(2) has accepted them.
+fn workload_peer_console_progress(first: usize, total: usize) -> usize {
+    let guard = process_run_lock();
+    let pid: usize = kernel_process_current_pid();
+    if (workload_busy_pair.peer_console_pid == 0) {
+        if (kernel_process_parent_is_root() == false) {
+            workload_busy_pair.refused = workload_busy_pair.refused + 1;
+            process_run_unlock(guard);
+            return 0;
+        }
+        workload_busy_pair.peer_console_pid = pid;
+        process_run_unlock(guard);
+        return SECONDARY_CORE_ID;
+    }
+    if (pid != workload_busy_pair.peer_console_pid ||
+        workload_busy_pair.peer_console_reported ||
+        workload_busy_pair.peer_read_reported == false ||
+        first != 1024 || total != 1088 ||
+        cpu_id() != SECONDARY_CORE_ID) {
+        workload_busy_pair.refused = workload_busy_pair.refused + 1;
+        process_run_unlock(guard);
+        return 0;
+    }
+    workload_busy_pair.peer_console_reported = true;
+    kernel_boot_log(
+        "workload: peer console short-wrote 1024 of 1088 bytes, then delivered the final record\n");
     process_run_unlock(guard);
     return 2;
 }

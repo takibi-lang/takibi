@@ -45,6 +45,7 @@ ls
 mkdir
 mv
 od
+peer-console
 peer-read
 ps
 rm
