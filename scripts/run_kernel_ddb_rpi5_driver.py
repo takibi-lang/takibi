@@ -291,6 +291,21 @@ def main() -> int:
     if "ddb: console tx=queued\n" not in text:
         raise timeline.bail(
             "RPi5 DDB did not restore the console transmit queue on continue")
+    # GitHub issue #534. The loader armed this boot's peer console hold, so
+    # the peer published one record that core 0 left undrained for this
+    # BREAK; it must still be there at entry and reach the wire after
+    # `continue`, not before and not never.
+    if "ddb: peer console=pending\n" not in text:
+        raise timeline.bail(
+            "RPi5 DDB did not observe the held peer console record")
+    continuing = text.find("ddb: continuing\n")
+    delivered = text.find(
+        "peer user console: queued before DDB, delivered after continue \n",
+        continuing,
+    )
+    if continuing < 0 or delivered < 0:
+        raise timeline.bail(
+            "RPi5 peer console record did not follow DDB continue")
     if not resumed(bytes(received).replace(b"\r", b"")):
         raise timeline.bail(
             f"RPi5 workload did not resume after DDB continue: "

@@ -267,6 +267,10 @@ let mut kernel_ddb_breakpoint_test_enabled: bool;
 let mut kernel_ddb_memory_fault_test_enabled: bool;
 let mut kernel_ddb_backtrace_test_enabled: bool;
 let mut kernel_ddb_wait_test_enabled: bool;
+// GitHub issue #534: set by the UART-BREAK DDB lanes before init starts. It
+// keeps /bin/peer-console alive after its view, holding one record published
+// but undrained until a debugger entry releases it.
+let mut kernel_ddb_peer_console_test_enabled: bool;
 // GitHub issue #456: the guarded read's arming, per core.
 //
 // It used to be three machine-global words, and DDB's world stop was the
@@ -2062,6 +2066,14 @@ private fn kernel_ddb_enter_stopped(
     // bytes that nothing would drain.
     let console: KernelLogTxStandDown = kernel_log_tx_stand_down();
     ddb_puts("\nddb: interrupt-safe UART debugger\n");
+    if (peer_console_ddb_any_pending()) {
+        ddb_puts("ddb: peer console=pending\n");
+    } else {
+        ddb_puts("ddb: peer console=empty\n");
+    }
+    // A held record stays published and undrained while the debugger runs;
+    // each peer sees this release only once `continue` lets it run again.
+    if (cpu_id() == 0) { peer_console_ddb_release_all(); }
     ddb_puts("ddb: world-stop complete mask=");
     ddb_put_hex(world_stopped_mask(stopped_world));
     ddb_puts("\n");

@@ -170,7 +170,12 @@ struct WorkloadBusyPair {
     // The output-only process follows the filesystem reader. It registers
     // before writing, then belongs exclusively to the admitted peer until
     // one deliberately over-capacity write and its retry have completed.
+    // A UART-BREAK DDB lane keeps it for one more record: held, pending,
+    // then released by the debugger's entry.
     peer_console_pid: usize;
+    peer_console_initial_reported: bool;
+    peer_console_holding: bool;
+    peer_console_pending: bool;
     peer_console_reported: bool;
     // A report this file refused: an unknown tag, or a caller that is not
     // a child of init. Zero on a healthy boot, and printed only when it
@@ -603,6 +608,9 @@ fn workload_busy_pair_reset() {
     workload_busy_pair.peer_read_pid = 0;
     workload_busy_pair.peer_read_reported = false;
     workload_busy_pair.peer_console_pid = 0;
+    workload_busy_pair.peer_console_initial_reported = false;
+    workload_busy_pair.peer_console_holding = false;
+    workload_busy_pair.peer_console_pending = false;
     workload_busy_pair.peer_console_reported = false;
     workload_busy_pair.refused = 0;
 }
@@ -938,6 +946,9 @@ fn workload_peer_read_progress(bytes: usize, checksum: usize) -> usize {
 // only 1024 bytes proves the full-ring path returned a short count. The
 // payload retries the remaining record and reports all 1088 bytes only after
 // write(2) has accepted them.
+//
+// Returns 0 for a refused report, 1 to keep polling, 2 to exit, and 3 to
+// write the one record a UART-BREAK DDB lane holds.
 fn workload_peer_console_progress(first: usize, total: usize) -> usize {
     let guard = process_run_lock();
     let pid: usize = kernel_process_current_pid();
@@ -953,18 +964,69 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
     }
     if (pid != workload_busy_pair.peer_console_pid ||
         workload_busy_pair.peer_console_reported ||
-        workload_busy_pair.peer_read_reported == false ||
-        first != 1024 || total != 1088 ||
         cpu_id() != SECONDARY_CORE_ID) {
         workload_busy_pair.refused = workload_busy_pair.refused + 1;
         process_run_unlock(guard);
         return 0;
     }
-    workload_busy_pair.peer_console_reported = true;
-    kernel_boot_log(
-        "workload: peer console short-wrote 1024 of 1088 bytes, then delivered the final record\n");
+    if (workload_busy_pair.peer_console_initial_reported == false) {
+        if (workload_busy_pair.peer_read_reported == false ||
+            first != 1024 || total != 1088) {
+            workload_busy_pair.refused = workload_busy_pair.refused + 1;
+            process_run_unlock(guard);
+            return 0;
+        }
+        workload_busy_pair.peer_console_initial_reported = true;
+        kernel_boot_log(
+            "workload: peer console short-wrote 1024 of 1088 bytes, then delivered the final record\n");
+        if (kernel_ddb_peer_console_test_enabled == false) {
+            workload_busy_pair.peer_console_reported = true;
+            process_run_unlock(guard);
+            return 2;
+        }
+        process_run_unlock(guard);
+        return 1;
+    }
+    // The DDB phase. Hold only once core 0 has drained every earlier
+    // record, so the hold covers the DDB record alone and the view's
+    // seventeen records reach the wire whether or not a debugger follows.
+    if (workload_busy_pair.peer_console_holding == false) {
+        if (first != 0 || total != 0) {
+            workload_busy_pair.refused = workload_busy_pair.refused + 1;
+            process_run_unlock(guard);
+            return 0;
+        }
+        if (peer_console_drained(SECONDARY_CORE_ID) == false) {
+            process_run_unlock(guard);
+            return 1;
+        }
+        workload_busy_pair.peer_console_holding = true;
+        peer_console_ddb_hold(SECONDARY_CORE_ID);
+        process_run_unlock(guard);
+        return 3;
+    }
+    if (first != 0 || total != 0) {
+        if (workload_busy_pair.peer_console_pending ||
+            first != 64 || total != 64) {
+            workload_busy_pair.refused = workload_busy_pair.refused + 1;
+            process_run_unlock(guard);
+            return 0;
+        }
+        workload_busy_pair.peer_console_pending = true;
+        peer_console_ddb_note_pending(SECONDARY_CORE_ID);
+        kernel_boot_log("workload: peer console record pending for DDB\n");
+        process_run_unlock(guard);
+        return 1;
+    }
+    if (workload_busy_pair.peer_console_pending &&
+        peer_console_ddb_released_since_hold(SECONDARY_CORE_ID)) {
+        peer_console_ddb_clear(SECONDARY_CORE_ID);
+        workload_busy_pair.peer_console_reported = true;
+        process_run_unlock(guard);
+        return 2;
+    }
     process_run_unlock(guard);
-    return 2;
+    return 1;
 }
 
 private fn workload_busy_start_profile(pid: usize, input_steps: usize)

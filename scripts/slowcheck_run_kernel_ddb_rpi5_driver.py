@@ -35,10 +35,17 @@ ROOT = Path(__file__).resolve().parent.parent
 DRIVER = ROOT / "scripts" / "run_kernel_ddb_rpi5_driver.py"
 
 PROMPT = b"ddb> "
-BANNER = (b"\nddb: interrupt-safe UART debugger\n"
-          b"ddb: world-stop complete mask=0x000000000000000e\n"
-          b"ddb: break seq=1 cpu=0 elr=0x00000000400103a0 "
-          b"sp_el0=0x000000007ffffdf0\n")
+BANNER_HEAD = b"\nddb: interrupt-safe UART debugger\n"
+BANNER_TAIL = (b"ddb: world-stop complete mask=0x000000000000000e\n"
+               b"ddb: break seq=1 cpu=0 elr=0x00000000400103a0 "
+               b"sp_el0=0x000000007ffffdf0\n")
+# GitHub issue #534: the loader arms /bin/peer-console to hold one record
+# undrained for this BREAK, and the kernel names it at entry and delivers it
+# once `continue` lets the peer run.
+PEER_PENDING = b"ddb: peer console=pending\n"
+PEER_EMPTY = b"ddb: peer console=empty\n"
+PEER_RECORD = (b"peer user console: queued before DDB, delivered after "
+               b"continue \n")
 
 # The exact lines the driver asserts on, taken from a real capture so a
 # change to either side shows up here rather than only on the board.
@@ -82,7 +89,8 @@ def retry_seconds() -> float:
 
 
 def scripted_board(master: int, proc, answer_on_attempt: int, budget: float,
-                   answer_wake: bool = True, restore_console: bool = True):
+                   answer_wake: bool = True, restore_console: bool = True,
+                   hold_peer: bool = True, deliver_peer: bool = True):
     """Play the kernel side; return how many resume commands were seen.
 
     The driver's opening move is a newline whose only job is to make the
@@ -97,10 +105,16 @@ def scripted_board(master: int, proc, answer_on_attempt: int, budget: float,
     it needs a control -- a lane that cannot fail on it is a lane that could
     not have seen the defect.
 
+    `hold_peer=False` plays a boot whose peer record was never held, and
+    `deliver_peer=False` one that held it but lost it across `continue`
+    (GitHub issue #534).
+
     The BREAK itself is not observable from the master end of a pty, so the
     debugger banner follows the acknowledgement by a short delay instead --
     the same ordering a real board produces.
     """
+    banner = (BANNER_HEAD + (PEER_PENDING if hold_peer else PEER_EMPTY) +
+              BANNER_TAIL)
     pending = b""
     resume_seen = 0
     continued = False
@@ -112,7 +126,7 @@ def scripted_board(master: int, proc, answer_on_attempt: int, budget: float,
         readable, _, _ = select.select([master], [], [], 0.05)
         if announce_at is not None and not announced \
                 and time.monotonic() >= announce_at:
-            os.write(master, BANNER + PROMPT)
+            os.write(master, banner + PROMPT)
             announced = True
         if not readable:
             continue
@@ -140,6 +154,8 @@ def scripted_board(master: int, proc, answer_on_attempt: int, budget: float,
                 # loop it leaves, so it lands after `continuing`.
                 resumed_line = (b"ddb: console tx=queued\n"
                                 if restore_console else b"")
+                if hold_peer and deliver_peer:
+                    resumed_line += PEER_RECORD
                 os.write(master, b"\nddb: continuing\n" + resumed_line)
                 continued = True
             elif command == b"echo ddb-resume-ok" and continued:
@@ -155,7 +171,8 @@ CASES = CaseCount()
 
 
 def run_case(label, answer_on_attempt, timeout, expect_ok, needles,
-             answer_wake=True, restore_console=True):
+             answer_wake=True, restore_console=True, hold_peer=True,
+             deliver_peer=True):
     CASES.note()
     master, slave = pty.openpty()
     try:
@@ -167,7 +184,8 @@ def run_case(label, answer_on_attempt, timeout, expect_ok, needles,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             attempts = scripted_board(master, proc, answer_on_attempt,
                                       timeout + 10, answer_wake,
-                                      restore_console)
+                                      restore_console, hold_peer,
+                                      deliver_peer)
             stdout, stderr = proc.communicate(timeout=30)
     finally:
         os.close(master)
@@ -249,6 +267,18 @@ def main() -> int:
                 restore_console=False) is None:
         return 1
 
+    # GitHub issue #534: a BREAK that found no held peer record proves
+    # nothing about queued peer output, and a held record that never reaches
+    # the wire after `continue` is the loss the contract forbids.
+    if run_case("a break with no held peer record", 1, 6.0, False,
+                ["did not observe the held peer console record"],
+                hold_peer=False) is None:
+        return 1
+    if run_case("a held peer record lost across continue", 1, 6.0, False,
+                ["peer console record did not follow DDB continue"],
+                deliver_peer=False) is None:
+        return 1
+
     # A board that answers `wait` with something the derivation could not have
     # produced (GitHub issue #529). The driver asserts the shape of the header
     # and of the summary, so a rendering that stops naming its states, or
@@ -274,8 +304,9 @@ def main() -> int:
         "that never answers it says so, an immediate resume takes one "
         "command, a dropped first command is retried during silence, a "
         "workload that never answers fails with the attempt count, a "
-        "resume that leaves the console spinning fails, and a wait view "
-        "missing its header or its summary fails",
+        "resume that leaves the console spinning fails, a break with no "
+        "held peer record or one that loses it across continue fails, and "
+        "a wait view missing its header or its summary fails",
         cases=CASES.ran)
     return 0
 

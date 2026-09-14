@@ -15,6 +15,47 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-14: DDB breaks in while a peer console record is held (#534)
+
+The last acceptance criterion of #534: a BREAK during queued peer output stays
+prompt, completes world-stop, continues, and leaves a defined stream. The
+UART-BREAK DDB lane now sets `kernel_ddb_peer_console_test_enabled` at the load
+checkpoint (gdb on QEMU, the SWD loader on RPi5). After its view,
+`/bin/peer-console` then waits for its ring to drain, holds it, writes one more
+record, and reports it pending. The driver breaks in only after that report.
+DDB prints `ddb: peer console=pending` and publishes a release, and the record
+reaches the wire after `ddb: continuing`.
+
+The first draft armed the hold from the UART RX interrupt, on any received
+byte, and kept the writer alive on every boot. Two defects in it were found in
+review before commit. Every boot without DDB would have left the process
+spinning on the secondary CPU, holding that CPU's admission, and one byte typed
+into the shell would have held its ring forever. The hold also stopped
+draining immediately, so record 17 of the view reached the wire only after
+`continue`, and an RPi5 view compared before the DDB half would have lost it.
+The debugger-set flag replaces the RX hook, so boots without DDB behave exactly
+as before, and the hold waits for the ring to drain. Between polls the waiting
+process spins on getcpu, which takes no lock.
+
+The first RPi5 run then exposed two more problems, neither of them in the
+kernel. The loader first wrote the flag at the DDB breakpoint checkpoint, which
+comes after init has started. Halting there held the loader until after the
+RP1 GEM had spent its single boot ARP window, so the integration's ARP test
+timed out twice in a row. The flag is now written at `kernel_boot_prologue`:
+entry.S has zeroed BSS and enabled cpu0's MMU by then, and the network is not
+yet up. The second problem was the peer-console view from the previous entry,
+which had only ever run on QEMU. It pinned the verdict line between records 16
+and 17. That line is a peer kernel log line on its own channel, and on RPi5 it
+landed after record 8, where eight records fill the 512-byte transmit queue.
+The position is drain timing, not a contract, so the records and the verdict
+are now two views.
+
+With both fixed, one four-core RPi5 boot passed 49 views and then the DDB half,
+where the held record printed after `ddb: continuing`. QEMU's main, debug and
+DDB lanes passed as well.
+
+Found-by: review -- session review of the uncommitted DDB-pending draft
+
 ## 2026-09-14: a real peer process fills the userspace console ring (#534)
 
 An init-launched static-PIE process now registers before its first terminal

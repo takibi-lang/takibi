@@ -139,7 +139,13 @@ def main() -> int:
                 b"workload: busy pair migrated across both cpus with stack "
                 b"handoff intact\n" in received
             )
-            if wake_byte_sent and migration_ready and not break_sent:
+            # The runner armed the held peer record at the checkpoint, so
+            # this line means one is published and undrained right now.
+            peer_console_pending = (
+                b"workload: peer console record pending for DDB\n" in received
+            )
+            if (wake_byte_sent and migration_ready and peer_console_pending
+                    and not break_sent):
                 with connect(args.qmp_port, deadline) as qmp:
                     qmp_file = qmp.makefile("rwb", buffering=0)
                     # Say what arrived instead of naming only what did
@@ -186,9 +192,15 @@ def main() -> int:
                     serial.sendall(commands[prompt_count])
                 prompt_count += 1
 
+            peer_delivery_ready = (
+                args.break_source == "software" or
+                b"peer user console: queued before DDB, delivered after "
+                b"continue \n" in received
+            )
             if (prompt_count >= len(commands) and
                     b"ddb: continuing\n" in received and
-                    b"init: ash bootstrap\n" in received):
+                    b"init: ash bootstrap\n" in received and
+                    peer_delivery_ready):
                 return 0
 
     raise SystemExit("DDB BREAK/inspect/continue sequence did not complete")

@@ -117,9 +117,11 @@ The next multicore increment is phase B. Its order is now:
    explicitly re-derived after a destructive call.
 3. **#533 is complete**: the affinity observation ABI and fixture-specific
    scheduler policy admit one bounded read-only filesystem workload, with
-   contended device reads verified on QEMU and RPi5. Finish **#9 phase B**
-   through **#534** by verifying real peer userspace console output. Keep
-   filesystem mutation and terminal readers on core 0 at this boundary.
+   contended device reads verified on QEMU and RPi5. **#534 is complete**
+   (2026-09-14): a real peer writer fills the ring, takes its short count and
+   retries, and a UART BREAK lands while one peer record is held undrained and
+   delivers it after `continue`, on QEMU and four-core RPi5. Keep filesystem
+   mutation and terminal readers on core 0 at this boundary.
 4. Complete **#547** before admitting a terminal reader to a peer. A local IRQ
    mask closes the current core-0 UART check-then-block window, but cannot
    serialize a reader and RX interrupt on different CPUs.
@@ -829,8 +831,9 @@ modify kernel files for any of them.
    2026-09-12. **The real writer landed 2026-09-14:** an init child runs on
    the admitted secondary, fills all sixteen ring records with one 1088-byte
    write, observes the exact 1024-byte short count, retries the final record,
-   and a common view compares the record-boundary interleave. **Still owed:**
-   a DDB BREAK while peer records are queued.
+   and common views compare the records and the verdict. **Complete
+   2026-09-14:** a DDB BREAK while a peer record is held undrained, verified
+   on QEMU and RPi5.
 6. **#281, measured and narrowed, 2026-09-12.** A scratch boot logged every
    single-block device read and write by block number, and `debugfs icheck`
    named the owners.

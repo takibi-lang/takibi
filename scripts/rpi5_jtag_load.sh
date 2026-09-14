@@ -115,6 +115,28 @@ elif [ "${RPI5_ARM_KERNEL_DDB_BREAKPOINT:-0}" != "0" ]; then
     echo "error: RPI5_ARM_KERNEL_DDB_BREAKPOINT must be 0 or 1" >&2
     exit 1
 fi
+# GitHub issue #534: the integration boot whose DDB half breaks in while a
+# peer console record is held. Its checkpoint is kernel_boot_prologue, not
+# the DDB one: entry.S has zeroed BSS and turned cpu0's MMU on by then, and
+# the loader returns long before the RP1 GEM answers its one boot ARP. Halting
+# at the later DDB checkpoint held the loader past that window, and the
+# integration's ARP test failed against a kernel that had already given up.
+peer_console_ddb_test_address=""
+peer_console_ddb_checkpoint_address=""
+if [ "${RPI5_ARM_PEER_CONSOLE_DDB:-0}" = "1" ]; then
+    peer_console_ddb_test_address="0x$(llvm-nm-19 "$ELF" |
+        awk '$3=="kernel_ddb_peer_console_test_enabled" && !seen{print $1; seen = 1 }')"
+    peer_console_ddb_checkpoint_address="0x$(llvm-nm-19 "$ELF" |
+        awk '$3=="kernel_boot_prologue" && !seen{print $1; seen = 1 }')"
+    if [ -z "${peer_console_ddb_test_address#0x}" ] ||
+            [ -z "${peer_console_ddb_checkpoint_address#0x}" ]; then
+        echo "error: peer console DDB test symbols absent from $ELF" >&2
+        exit 1
+    fi
+elif [ "${RPI5_ARM_PEER_CONSOLE_DDB:-0}" != "0" ]; then
+    echo "error: RPI5_ARM_PEER_CONSOLE_DDB must be 0 or 1" >&2
+    exit 1
+fi
 
 if [ -z "${entry_pc#0x}" ] || [ -z "${warm_entry_pc#0x}" ] ||
         [ -z "${warm_secondary_pc#0x}" ] ||
@@ -341,10 +363,22 @@ LOAD_COMMANDS+=(
     -c 'reg x3 0'
     -c "reg pc $launch_pc"
 )
+# BSS zeroing happens after cpu0 starts, so a byte written immediately after
+# load_image would be erased. Stop at a checkpoint first, then write through
+# the selected secondary before releasing cpu0 again. The peer console
+# checkpoint is earlier in boot than the DDB one, so it is taken first.
+if [ -n "$peer_console_ddb_test_address" ]; then
+    LOAD_COMMANDS+=(
+        -c "bp $peer_console_ddb_checkpoint_address 4 hw"
+        -c 'resume'
+        -c 'wait_halt 30000'
+        -c "targets bcm2712.cpu$INJECT_CORE"
+        -c "mwb $peer_console_ddb_test_address 1"
+        -c 'targets bcm2712.cpu0'
+        -c "rbp $peer_console_ddb_checkpoint_address"
+    )
+fi
 if [ -n "$ddb_breakpoint_test_address" ]; then
-    # BSS zeroing happens after cpu0 starts, so a byte written immediately
-    # after load_image would be erased. Stop at the checkpoint first, then
-    # write through the selected secondary before releasing cpu0 again.
     LOAD_COMMANDS+=(
         -c "bp $ddb_breakpoint_checkpoint_address 4 hw"
         -c 'resume'

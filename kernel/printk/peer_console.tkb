@@ -45,6 +45,23 @@ struct publish PeerConsoleCursor {
     consumed: usize;
 }
 
+// The DDB regression's two-way rendezvous: a BREAK must land while a peer
+// record is published but not yet drained. The peer publishes Holding, then
+// Pending once its one held record is in the ring; core 0's drain leaves that
+// CPU's ring alone until the state is Clear again. Core 0's debugger entry
+// publishes a release, which the peer acts on after `continue`. Only a DDB
+// lane asks for this, but it crosses the production publication boundary,
+// because the property under test is that DDB can interrupt that boundary.
+struct publish PeerConsoleDdbRelease {
+    seq: usize;
+    releases: usize;
+}
+
+struct publish PeerConsoleDdbState {
+    seq: usize;
+    phase: usize;
+}
+
 // Ready carries the record's length; its bytes are in the caller's copy.
 must_use variant PeerConsolePeek { Empty; Ready(usize); }
 
@@ -57,6 +74,15 @@ private let mut peer_console_published: [usize; KERNEL_MAX_CORES];
 private let mut peer_console_seen_consumed: [usize; KERNEL_MAX_CORES];
 // The consumer's own: records core 0 has taken from each ring.
 private let mut peer_console_consumed: [usize; KERNEL_MAX_CORES];
+private let mut peer_console_ddb_releases:
+    [PeerConsoleDdbRelease; KERNEL_MAX_CORES];
+private let mut peer_console_ddb_states: [PeerConsoleDdbState; KERNEL_MAX_CORES];
+// Core 0's own: releases published to each CPU.
+private let mut peer_console_ddb_released: [usize; KERNEL_MAX_CORES];
+// Each peer's own: the release it had seen when it began holding, and its
+// state sequence.
+private let mut peer_console_ddb_seen: [usize; KERNEL_MAX_CORES];
+private let mut peer_console_ddb_state_seq: [usize; KERNEL_MAX_CORES];
 
 // The slot a record's zero-based sequence lands in.
 private fn peer_console_slot(cpu: {0..<KERNEL_MAX_CORES as usize},
@@ -153,4 +179,90 @@ fn peer_console_retire(cpu: usize) {
     let w = publish_begin(&peer_console_cursors[here]);
     w.consumed = consumed;
     publish_commit(w, consumed);
+}
+
+// Producer: core 0 has taken every record this CPU published.
+fn peer_console_drained(cpu: usize) -> bool {
+    if (cpu >= KERNEL_MAX_CORES) { return false; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    return peer_console_free_records(here) == PEER_CONSOLE_RECORDS;
+}
+
+private fn peer_console_ddb_publish_state(
+        cpu: {0..<KERNEL_MAX_CORES as usize}, phase: usize) {
+    let seq: usize = peer_console_ddb_state_seq[cpu] + 1;
+    peer_console_ddb_state_seq[cpu] = seq;
+    let w = publish_begin(&peer_console_ddb_states[cpu]);
+    w.phase = phase;
+    publish_commit(w, seq);
+}
+
+// Peer: stop core 0 draining this CPU. A release an earlier debugger entry
+// published does not count; only the next one ends the hold.
+fn peer_console_ddb_hold(cpu: usize) {
+    if (cpu >= KERNEL_MAX_CORES) { return; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    let mut release: PeerConsoleDdbRelease;
+    let copied: usize = publish_copy(
+        &peer_console_ddb_releases[here], &release);
+    if (copied != 0) { peer_console_ddb_seen[here] = copied; }
+    peer_console_ddb_publish_state(here, 1);
+}
+
+// Peer: a debugger entry has released this CPU since it began holding.
+fn peer_console_ddb_released_since_hold(cpu: usize) -> bool {
+    if (cpu >= KERNEL_MAX_CORES) { return false; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    let mut release: PeerConsoleDdbRelease;
+    let copied: usize = publish_copy(
+        &peer_console_ddb_releases[here], &release);
+    return copied != 0 && copied != peer_console_ddb_seen[here];
+}
+
+fn peer_console_ddb_note_pending(cpu: usize) {
+    if (cpu >= KERNEL_MAX_CORES) { return; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    peer_console_ddb_publish_state(here, 2);
+}
+
+fn peer_console_ddb_clear(cpu: usize) {
+    if (cpu >= KERNEL_MAX_CORES) { return; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    peer_console_ddb_publish_state(here, 0);
+}
+
+// Core-0 consumer: held includes the interval before and after publication.
+fn peer_console_ddb_held(cpu: usize) -> bool {
+    if (cpu >= KERNEL_MAX_CORES) { return false; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    let mut state: PeerConsoleDdbState;
+    if (publish_copy(&peer_console_ddb_states[here], &state) == 0) {
+        return false;
+    }
+    return state.phase != 0;
+}
+
+fn peer_console_ddb_any_pending() -> bool {
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        let here: {0..<KERNEL_MAX_CORES as usize} = cpu;
+        let mut state: PeerConsoleDdbState;
+        if (publish_copy(&peer_console_ddb_states[here], &state) != 0) {
+            if (state.phase == 2) { return true; }
+        }
+    }
+    return false;
+}
+
+// Core 0 only, from the debugger entry after world-stop: every peer resumes
+// into a release. The caller checks the core, since this file does not know
+// which one it runs on.
+fn peer_console_ddb_release_all() {
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        let here: {0..<KERNEL_MAX_CORES as usize} = cpu;
+        let seq: usize = peer_console_ddb_released[here] + 1;
+        peer_console_ddb_released[here] = seq;
+        let w = publish_begin(&peer_console_ddb_releases[here]);
+        w.releases = seq;
+        publish_commit(w, seq);
+    }
 }

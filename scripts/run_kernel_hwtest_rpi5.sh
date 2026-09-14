@@ -159,7 +159,10 @@ trap cleanup EXIT INT TERM HUP
 sleep 0.2
 load_started=$SECONDS
 echo "[kernel/rpi5] loading kernel over SWD"
-if ! "$REPO_ROOT/scripts/rpi5_jtag_load.sh" "$ELF" >"$LOADER_LOG" 2>&1; then
+# The DDB half at the end breaks in while /bin/peer-console holds a record,
+# and the kernel can only be told so at the load checkpoint (issue #534).
+if ! RPI5_ARM_PEER_CONSOLE_DDB=1 \
+        "$REPO_ROOT/scripts/rpi5_jtag_load.sh" "$ELF" >"$LOADER_LOG" 2>&1; then
     echo "FAIL kernel/rpi5: load failed (see $LOADER_LOG)" >&2
     resource_lease_board_failed
     exit 1

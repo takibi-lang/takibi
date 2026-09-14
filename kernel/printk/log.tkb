@@ -725,6 +725,9 @@ fn kernel_log_peer_console_drain() {
         let mut draining: bool = true;
         for step: usize in 0..<PEER_CONSOLE_RECORDS {
             if (draining) {
+                if (peer_console_ddb_held(cpu)) { draining = false; }
+            }
+            if (draining) {
                 match peer_console_peek(cpu, &record) {
                     PeerConsolePeek::Empty => { draining = false; }
                     PeerConsolePeek::Ready(length) => {

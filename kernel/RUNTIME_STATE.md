@@ -318,7 +318,13 @@ between them is a publication record in both directions.
 PID until its bounded writer has proved the 1024-of-1088 short write, CPU
 placement, and final retry. The process registers before writing, is excluded
 from core 0, and is admitted to the secondary only after the peer-filesystem
-verdict.
+verdict. When a UART-BREAK DDB lane has set the debugger-written
+`kernel_ddb_peer_console_test_enabled`, it keeps that PID for one more
+held record, through its holding and pending flags, until a debugger entry
+releases it. `kernel/printk/peer_console.tkb` carries that rendezvous in two
+more publication records per CPU: a state the peer writes (Clear, Holding,
+Pending) and a release sequence core 0's debugger entry writes. Each side
+keeps its own sequence counter.
 
 **Why global:** the kernel mounts exactly one ext2 filesystem at boot.
 Per-block scratch for a single-mount filesystem is legitimately shared scratch

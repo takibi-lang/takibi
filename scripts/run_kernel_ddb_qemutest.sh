@@ -110,6 +110,11 @@ if [ "$BREAK_SOURCE" = software ]; then
     GDB_COMMANDS+=(
         -ex "set *(char *)&kernel_ddb_breakpoint_test_enabled = 1"
     )
+else
+    # GitHub issue #534: the BREAK must land while a peer record is held.
+    GDB_COMMANDS+=(
+        -ex "set *(char *)&kernel_ddb_peer_console_test_enabled = 1"
+    )
 fi
 gdb-multiarch -q -batch "$ELF" "${GDB_COMMANDS[@]}" \
     -ex "detach" >/dev/null
@@ -304,9 +309,30 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         ! grep -q '^ddb: wait edges=6 blocked=7 unknown=2 truncated=1$' "$UART_LOG" ||
         ! grep -q '^ddb: continuing$' "$UART_LOG" ||
         ! grep -q '^ddb: console tx=queued$' "$UART_LOG" ||
+        { [ "$BREAK_SOURCE" = uart ] && ! grep -q '^ddb: peer console=pending$' "$UART_LOG"; } ||
+        { [ "$BREAK_SOURCE" = uart ] && ! grep -q '^peer user console: queued before DDB, delivered after continue $' "$UART_LOG"; } ||
         ! grep -q '^init: ash bootstrap$' "$UART_LOG"; then
     echo "FAIL kernel/qemu ddb: BREAK inspection did not resume boot" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
+    exit 1
+fi
+
+if [ "$BREAK_SOURCE" = uart ] && ! python3 - "$UART_LOG" <<'PY'
+from pathlib import Path
+import sys
+
+text = Path(sys.argv[1]).read_text(errors="replace").replace("\r", "")
+pending = text.find("workload: peer console record pending for DDB\n")
+ddb = text.find("ddb: peer console=pending\n", pending)
+continuing = text.find("ddb: continuing\n", ddb)
+delivered = text.find(
+    "peer user console: queued before DDB, delivered after continue \n",
+    continuing,
+)
+raise SystemExit(0 if min(pending, ddb, continuing, delivered) >= 0 else 1)
+PY
+then
+    echo "FAIL kernel/qemu ddb: peer console pending/resume order was not preserved" >&2
     exit 1
 fi
 

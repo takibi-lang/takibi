@@ -18,8 +18,11 @@ def sources() -> dict[str, str]:
         "kernel/tests/ext2/inittab",
         "kernel/tests/common/views/peer_console_process.expected",
         "kernel/tests/common/views/peer_console_process.filter",
+        "kernel/tests/common/views/peer_console_verdict.expected",
+        "kernel/tests/common/views/peer_console_verdict.filter",
         "scripts/run_kernel_qemutest.sh",
         "scripts/run_kernel_hwtest_rpi5.sh",
+        "scripts/run_kernel_ddb_qemutest.sh",
     ]
     return {name: (ROOT / name).read_text() for name in names}
 
@@ -40,11 +43,21 @@ def problems(tree: dict[str, str]) -> list[str]:
     for condition in (
         "first != 1024",
         "total != 1088",
-        "first != 1024 || total != 1088 ||\n"
+        "workload_busy_pair.peer_console_reported ||\n"
         "        cpu_id() != SECONDARY_CORE_ID",
     ):
         if condition not in evidence:
             result.append(f"verdict no longer rejects missing {condition}")
+    # The DDB lanes keep the writer past its view; every other boot must
+    # release it at its first verdict, or it spins on the peer forever.
+    if "if (kernel_ddb_peer_console_test_enabled == false) {" not in evidence:
+        result.append("writer outlives its view on boots without a DDB lane")
+    if "kernel_ddb_peer_console_test_enabled = 1" not in \
+            tree["scripts/run_kernel_ddb_qemutest.sh"]:
+        result.append("QEMU DDB lane no longer holds a peer record")
+    if "RPI5_ARM_PEER_CONSOLE_DDB=1" not in \
+            tree["scripts/run_kernel_hwtest_rpi5.sh"]:
+        result.append("RPi5 DDB half no longer holds a peer record")
     if "pid == workload_busy_pair.peer_console_pid" not in evidence:
         result.append("secondary admission no longer selects the writer")
     primary_shape = (
@@ -62,13 +75,22 @@ def problems(tree: dict[str, str]) -> list[str]:
         result.append("init no longer starts the real writer")
     if "$(KERNEL_PEER_CONSOLE_ELF)" not in tree["Makefile"]:
         result.append("rootfs no longer depends on the writer ELF")
+    # The records and the verdict are two views. The verdict is a peer kernel
+    # log line, which reaches the wire through a different channel, so where
+    # it falls among the records is drain timing: after record 16 on QEMU,
+    # after record 8 on RPi5, whose 512-byte transmit queue holds eight.
     lines = expected.splitlines()
-    if len(lines) != 18 or "record=01/17" not in lines[0] or \
+    if len(lines) != 17 or "record=01/17" not in lines[0] or \
             "record=17/17" not in lines[-1]:
         result.append("view no longer fixes all seventeen bounded records")
     if tree["kernel/tests/common/views/peer_console_process.filter"].strip() != \
-            "^peer user console:|^workload: peer console short-wrote":
-        result.append("view no longer selects records and short-write verdict")
+            "^peer user console: record=":
+        result.append("view no longer selects exactly the numbered records")
+    if tree["kernel/tests/common/views/peer_console_verdict.filter"].strip() != \
+            "^workload: peer console short-wrote" or \
+            "1024 of 1088 bytes" not in \
+            tree["kernel/tests/common/views/peer_console_verdict.expected"]:
+        result.append("verdict view no longer fixes the short-write verdict")
     stop = "--stop-marker 'peer user console: record=17/17 " \
            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'"
     for runner in ("scripts/run_kernel_qemutest.sh",
@@ -92,10 +114,17 @@ def main() -> int:
         "short count": ("kernel/kernel/workload_evidence.tkb",
                         "first != 1024", "first != 1088"),
         "placement": ("kernel/kernel/workload_evidence.tkb",
-                      "first != 1024 || total != 1088 ||\n"
                       "        cpu_id() != SECONDARY_CORE_ID",
-                      "first != 1024 || total != 1088 ||\n"
                       "        cpu_id() == SECONDARY_CORE_ID"),
+        "ddb gate": ("kernel/kernel/workload_evidence.tkb",
+                     "kernel_ddb_peer_console_test_enabled == false",
+                     "kernel_ddb_peer_console_test_enabled == true"),
+        "qemu ddb hold": ("scripts/run_kernel_ddb_qemutest.sh",
+                          "kernel_ddb_peer_console_test_enabled = 1",
+                          "kernel_ddb_peer_console_test_enabled = 0"),
+        "rpi5 ddb hold": ("scripts/run_kernel_hwtest_rpi5.sh",
+                          "RPI5_ARM_PEER_CONSOLE_DDB=1",
+                          "RPI5_ARM_PEER_CONSOLE_DDB=0"),
         "primary exclusion": ("kernel/kernel/workload_evidence.tkb",
                               "           pid != workload_busy_pair.peer_console_pid;",
                               "           pid == workload_busy_pair.peer_console_pid;"),

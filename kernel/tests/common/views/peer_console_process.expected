@@ -14,5 +14,4 @@ peer user console: record=13/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 peer user console: record=14/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 peer user console: record=15/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 peer user console: record=16/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-workload: peer console short-wrote 1024 of 1088 bytes, then delivered the final record
 peer user console: record=17/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

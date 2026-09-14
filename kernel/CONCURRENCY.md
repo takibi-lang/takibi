@@ -184,9 +184,26 @@ on the TX interrupt. Records from different CPUs interleave only at record
 boundaries. While the queue is stood down for DDB or a fatal report, nothing
 is moved, and published records wait there. The maintained peer process makes
 one seventeen-record write into the sixteen-record ring, observes the exact
-1024-byte short count, and retries the final record. Its common view fixes the
-observed core-0 verdict between records 16 and 17, so record-boundary
+1024-byte short count, and retries the final record. One common view compares
+the seventeen records, in order and byte for byte; a second compares the
+kernel's verdict. The verdict is a peer kernel log line, which crosses a
+different channel, so where it lands among the records is drain timing, not a
+contract: after record 16 on QEMU, and after record 8 on RPi5, where eight
+records fill the 512-byte transmit queue. Other lines land between the
+records too, and every record still arrives whole, so record-boundary
 interleaving is executable on both platforms rather than only specified here.
+
+The UART-BREAK DDB lanes also make a BREAK land while a peer record is
+published but undrained. Their runner sets `kernel_ddb_peer_console_test_enabled`
+at the load checkpoint. The same process then waits until core 0 has drained
+all seventeen records, publishes a Holding state, writes one more record, and
+reports it Pending. Core 0's drain leaves a CPU's ring alone while its state is
+not Clear. DDB entry reports `ddb: peer console=pending` and publishes a
+release to every peer. The peer acts on that release only after `continue`
+lets it run again; it clears its state, and core 0 drains the record into the
+restored queue. Both directions cross publication records, and no lock is
+taken. On every other boot the flag is clear and the process exits at its
+first verdict, as before.
 
 ## Stopping the other cores
 
