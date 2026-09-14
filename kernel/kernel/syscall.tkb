@@ -2611,6 +2611,9 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             return SyscallAction::Resume(
                 workload_peer_console_progress(x1, x2));
         }
+        if (x0 == 5) {
+            return SyscallAction::Resume(workload_peer_tty_progress(x1, x2));
+        }
         return SyscallAction::Resume(workload_busy_record_progress(x0, x1, x2));
     }
 

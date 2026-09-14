@@ -47,6 +47,7 @@ mv
 od
 peer-console
 peer-read
+peer-tty
 ps
 rm
 rmdir

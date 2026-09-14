@@ -302,6 +302,10 @@ def main() -> int:
     parser.add_argument("--network-ready-file")
     parser.add_argument("--interactive-httpd-ready-file")
     parser.add_argument("--interactive-httpd-done-file")
+    # GitHub issue #547: after the background server, run /bin/peer-tty in
+    # the persistent shell and type it one line; the capture then also waits
+    # for the kernel's verdict on that line.
+    parser.add_argument("--peer-tty", action="store_true")
     args = parser.parse_args()
 
     interactive_httpd = args.interactive_httpd_ready_file is not None
@@ -377,6 +381,8 @@ def main() -> int:
     httpd_sent = False
     httpd_probe_sent = False
     httpd_ready = False
+    peer_tty_sent = False
+    peer_tty_line_sent = False
     httpd_done_seen_at = None
     capture_started = time.monotonic()
     last_chunk_at = capture_started
@@ -525,7 +531,31 @@ def main() -> int:
                         httpd_ready_file.touch()
                         httpd_ready = True
 
-                if interactive_capture_complete(
+                # GitHub issue #547: a terminal reader on the secondary CPU.
+                # The shell runs it in the foreground and waits for it, so it
+                # is the terminal's only reader. Its line goes out only once
+                # the kernel says it is reading; typed earlier, it would sit
+                # in the ring, which proves less.
+                # Not before the stop marker: the peer console writer's
+                # records are still arriving until then, the shell's echo of
+                # the command would land in the middle of one, and the kernel
+                # refuses a reader that registers before that writer's view.
+                if (args.peer_tty and httpd_ready and not peer_tty_sent and
+                        args.stop_marker.encode("ascii") in output):
+                    # The full path: ash in this BusyBox looks a bare name
+                    # up as an applet first and reports it not found.
+                    write_uart_line(connection, b"/bin/peer-tty")
+                    peer_tty_sent = True
+                if (peer_tty_sent and not peer_tty_line_sent and
+                        b"workload: peer tty reading the terminal on the "
+                        b"secondary cpu\n" in output):
+                    write_uart_line(connection, b"peer-tty-line-ok")
+                    peer_tty_line_sent = True
+                peer_tty_done = (
+                    not args.peer_tty or
+                    b"workload: peer tty read its 17-byte line" in output)
+
+                if peer_tty_done and interactive_capture_complete(
                         output, httpd_ready,
                         httpd_done_file is not None and httpd_done_file.exists(),
                         workload_seen, args.stop_marker):

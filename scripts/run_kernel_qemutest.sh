@@ -172,6 +172,7 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --network-ready-file "$NETWORK_READY" \
     --interactive-httpd-ready-file "$INTERACTIVE_HTTPD_READY" \
     --interactive-httpd-done-file "$INTERACTIVE_HTTPD_DONE" \
+    --peer-tty \
     --workload-marker 'workload: busy pair done' \
     --validate-ash &
 uart_driver_pid=$!

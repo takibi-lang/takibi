@@ -205,6 +205,27 @@ restored queue. Both directions cross publication records, and no lock is
 taken. On every other boot the flag is clear and the process exits at its
 first verdict, as before.
 
+Terminal input (GitHub issue #547) goes the other way: the RX interrupt is
+routed to core 0, and the reader may be on another CPU. One lock orders it,
+the process-run lock that publishes Blocked:
+- the interrupt holds it across its search for a Blocked UartRx reader and,
+  when none takes the byte, its push into the receive ring;
+- a reader takes a byte out of the ring under it;
+- a reader about to sleep looks at the ring once more inside
+  kernel_process_block_reserved, in the critical section that publishes
+  Blocked, and runs its read again if a byte is there.
+So for any byte and any reader, either the interrupt comes first and the
+reader's later look sees the byte, or the reader's Blocked comes first and
+the interrupt finds it. The lock's release and acquire order the ring's
+contents between CPUs; the ring's own fences are compiler-only. #546's look
+with local interrupts masked stays as a cheap early exit, since a local mask
+cannot hold off an interrupt taken on another CPU.
+`/bin/peer-tty` is the admitted reader on the secondary. The deterministic
+`peer` mode of kernelcheck-uart-wake-qemu uses gdb to hold CPU1 after the
+reader's last lockless look. While it is held, CPU0 alone takes the RX
+interrupt and pushes the byte, and then both CPUs run. The reader has to come
+back for the next byte.
+
 ## Stopping the other cores
 
 `kernel/lib/occupancy.tkb` also owns the machine-wide `WorldStop` controller.

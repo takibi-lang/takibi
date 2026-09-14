@@ -25,6 +25,8 @@ const PEER_READ_CHECKSUM: usize = 8847360;
 const WRITE_SYSCALL: usize = 64;
 const PEER_CONSOLE_TAG: usize = 4;
 const PEER_CONSOLE_POLL_PAUSE: usize = 1024;
+const PEER_TTY_TAG: usize = 5;
+const PEER_TTY_LINE_MAX: usize = 64;
 
 private fn peer_read_cpu(cpu_bytes: borrow [u8; 4..]) -> usize {
     if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize, 0, 0, 0, 0) != 0) {
@@ -156,4 +158,44 @@ fn peer_console() {
         }
     }
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+}
+
+// GitHub issue #547: a terminal reader admitted to the secondary CPU. The
+// persistent shell starts it in the foreground, so the shell waits in wait4
+// and this is the terminal's only reader while it runs. It reads one line a
+// byte at a time, and after every read getcpu must still name the peer. The
+// count and a position-weighted sum let the kernel tell a lost, repeated or
+// reordered byte from the line the driver typed.
+fn peer_tty() {
+    let mut cpu_bytes: [u8; 4];
+    let mut byte: [u8; 1];
+    let peer_cpu: usize = svc5(
+        WORKLOAD_PROGRESS_SYSCALL, PEER_TTY_TAG, 0, 0, 0, 0);
+    if (peer_cpu == 0) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
+    while (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {}
+    if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_TTY_TAG, 0, 0, 0, 0) != 1) {
+        svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+    }
+    let mut count: usize = 0;
+    let mut sum: usize = 0;
+    let mut reading: bool = true;
+    for position: usize in 0..<PEER_TTY_LINE_MAX {
+        if (reading) {
+            let got: usize = svc5(READ_SYSCALL, 0, byte as *u8 as usize,
+                                  1, 0, 0);
+            if (got != 1 || peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {
+                sum = 0;
+                reading = false;
+            } else {
+                let value: usize = byte[0] as usize;
+                count = count + 1;
+                sum = sum + value * (position + 1);
+                if (value == 10) { reading = false; }
+            }
+        }
+    }
+    if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_TTY_TAG, count, sum, 0, 0) == 2) {
+        svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+    }
+    svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
 }

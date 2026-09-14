@@ -122,9 +122,15 @@ The next multicore increment is phase B. Its order is now:
    retries, and a UART BREAK lands while one peer record is held undrained and
    delivers it after `continue`, on QEMU and four-core RPi5. Keep filesystem
    mutation and terminal readers on core 0 at this boundary.
-4. Complete **#547** before admitting a terminal reader to a peer. A local IRQ
-   mask closes the current core-0 UART check-then-block window, but cannot
-   serialize a reader and RX interrupt on different CPUs.
+4. **#547, all but its DDB criterion, landed 2026-09-14.** One lock now
+   orders terminal input across CPUs: the process-run lock, held by the RX
+   interrupt's wake and push, by a read's take, and by the last look before
+   Blocked is published. `/bin/peer-tty` reads a typed line on the secondary
+   on QEMU and four-core RPi5. The `peer` mode of kernelcheck-uart-wake-qemu
+   holds CPU1 inside the window with gdb while CPU0 pushes, and fails at byte
+   1 without the look under the lock. Still owed: DDB identifying the blocked
+   or woken peer reader during that test. Only this one fixture reads the
+   terminal on a peer; the shells stay on CPU 0.
 5. Finish the kernel/build integration for **#540** and decide the scripts
    half of **#549**. The compiler already retains assertion-only and external
    entry points and emits deletion-tolerant depfiles; the remaining Makefile

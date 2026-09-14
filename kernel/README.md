@@ -113,6 +113,12 @@ The current RPi5 kernel includes:
   only `openat`, `read`, `close`, `getcpu`, the private progress
   syscall, and exit in this fixed static-PIE program; arbitrary ext2
   mutation, network, terminal, and general process execution remain on CPU 0;
+- a terminal reader on the secondary CPU, once the peer console writer has
+  finished: the persistent shell runs `/bin/peer-tty` in the foreground, the
+  kernel admits it only on the secondary, and it reads one typed line a byte
+  at a time from the UART whose RX interrupt CPU 0 takes. The common view
+  compares the kernel's count and position-weighted sum of that line. Every
+  other terminal reader, the shells included, stays on CPU 0;
 - one-boot integration views that independently compare boot, VM, process,
   syscall, filesystem, USB, Ethernet, BusyBox, HTTPd, and workload-fairness
   evidence.
@@ -124,7 +130,8 @@ The rootfs keeps executable files under `/bin`: Alpine's original
 binary, while `httpd` is a hard link to BusyBox Extras. The independent
 Takibi test programs are `/bin/user_payload` (the EL0 syscall-ABI fixture),
 `/bin/peer-read` and `/bin/core-read` (the read-only block contention
-fixture), and the pair
+fixture), `/bin/peer-console` (the secondary-CPU console writer),
+`/bin/peer-tty` (the secondary-CPU terminal reader), and the pair
 `/bin/busy-a`/`/bin/busy-b`, which are the same object linked
 twice with different ELF entry points so each knows which `respawn` entry it
 is without parsing `argv`. `/bin/spin` is a third link of the same object: one
@@ -222,6 +229,10 @@ receive ring (`kernel/drivers/serial/uart_rx_ring.tkb`), the size Linux's
 n_tty buffers, so a pasted line up to that length arrives whole. A byte that
 arrives when the ring is full is counted rather than lost without trace, and
 every boot's total is printed as `uart rx: capacity=4096 dropped=N`.
+The RX interrupt's push, a reader's take, and a reader's last look before it
+sleeps all hold the process-run lock. So a reader on any CPU either finds a
+byte in the ring or is found Blocked by the interrupt that brings it (GitHub
+issue #547).
 
 The shared console continuously flushes the raw UART bytes it receives to
 `_build/kernel-shell-qemu/uart-transcript.log` or
@@ -425,7 +436,7 @@ probe/board setup. A successful run includes:
 [kernel/rpi5] BusyBox httpd curl passed
 [kernel/rpi5] second BusyBox httpd curl passed
 [kernel/rpi5] userspace connected I/O passed
-PASS kernel/rpi5 (49 views, one boot)
+PASS kernel/rpi5 (50 views, one boot)
 ```
 
 It tests negative and positive ARP/ICMP behavior, TCP lifecycle, USB ext2

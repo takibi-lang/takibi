@@ -177,6 +177,12 @@ struct WorkloadBusyPair {
     peer_console_holding: bool;
     peer_console_pending: bool;
     peer_console_reported: bool;
+    // GitHub issue #547: the terminal reader the persistent shell starts
+    // after the whole chain. Its pid is fixed by its first tag-5 report, and
+    // it then runs only on the admitted secondary until its line is read.
+    peer_tty_pid: usize;
+    peer_tty_reading: bool;
+    peer_tty_reported: bool;
     // A report this file refused: an unknown tag, or a caller that is not
     // a child of init. Zero on a healthy boot, and printed only when it
     // is not.
@@ -612,6 +618,9 @@ fn workload_busy_pair_reset() {
     workload_busy_pair.peer_console_holding = false;
     workload_busy_pair.peer_console_pending = false;
     workload_busy_pair.peer_console_reported = false;
+    workload_busy_pair.peer_tty_pid = 0;
+    workload_busy_pair.peer_tty_reading = false;
+    workload_busy_pair.peer_tty_reported = false;
     workload_busy_pair.refused = 0;
 }
 
@@ -697,8 +706,26 @@ fn workload_busy_secondary_candidate(pid: usize) -> bool {
     }
     if (workload_busy_pair.peer_read_reported &&
         workload_busy_pair.peer_console_pid != 0 &&
-        workload_busy_pair.peer_console_reported == false) {
+        workload_busy_pair.peer_console_initial_reported == false) {
         return pid == workload_busy_pair.peer_console_pid;
+    }
+    // After its view the console writer shares the secondary: a UART-BREAK
+    // DDB lane keeps it there until the debugger releases it. The terminal
+    // reader shares it too (GitHub issue #547). Neither needs the CPU to
+    // itself, and a reader with nothing else runnable beside it never
+    // blocks, so it would never reach the window #547 closes.
+    // Gated on its first report: it registers the moment init starts it,
+    // long before the filesystem reader, and admitted then it reports early
+    // and is refused.
+    if (workload_busy_pair.peer_console_initial_reported &&
+        workload_busy_pair.peer_console_reported == false &&
+        pid == workload_busy_pair.peer_console_pid) {
+        return true;
+    }
+    if (workload_busy_pair.peer_tty_pid != 0 &&
+        workload_busy_pair.peer_tty_reported == false &&
+        pid == workload_busy_pair.peer_tty_pid) {
+        return true;
     }
     if (workload_busy_pair.restart_report_state ==
             WorkloadRestartReportState::Reported) {
@@ -716,6 +743,11 @@ fn workload_busy_primary_candidate(pid: usize) -> bool {
     if (workload_busy_pair.peer_read_pid != 0 &&
         workload_busy_pair.peer_read_reported == false &&
         pid == workload_busy_pair.peer_read_pid) {
+        return false;
+    }
+    if (workload_busy_pair.peer_tty_pid != 0 &&
+        workload_busy_pair.peer_tty_reported == false &&
+        pid == workload_busy_pair.peer_tty_pid) {
         return false;
     }
     return workload_busy_pair.peer_console_pid == 0 ||
@@ -1027,6 +1059,64 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
     }
     process_run_unlock(guard);
     return 1;
+}
+
+// The line scripts/run_kernel_uart_driver.py types, "peer-tty-line-ok\n":
+// its length, and the sum of each byte times its one-based position.
+const PEER_TTY_LINE_BYTES: usize = 17;
+const PEER_TTY_LINE_CHECKSUM: usize = 13224;
+
+// Tag 5 belongs to /bin/peer-tty (GitHub issue #547), which the persistent
+// shell starts once the chain above is done. It registers before it reads,
+// then runs only on the admitted secondary and reports twice. The first
+// report, (0, 0), says it is about to read the terminal. The second gives
+// the count and the position-weighted sum of the line it read, each byte
+// read on the secondary.
+//
+// Returns 0 for a refused report, the secondary CPU on registration, 1 once
+// reading is announced, and 2 when the line is accepted and it may exit.
+fn workload_peer_tty_progress(count: usize, checksum: usize) -> usize {
+    let guard = process_run_lock();
+    let pid: usize = kernel_process_current_pid();
+    if (workload_busy_pair.peer_tty_pid == 0) {
+        if (workload_busy_pair.peer_console_initial_reported == false) {
+            workload_busy_pair.refused = workload_busy_pair.refused + 1;
+            process_run_unlock(guard);
+            return 0;
+        }
+        workload_busy_pair.peer_tty_pid = pid;
+        process_run_unlock(guard);
+        return SECONDARY_CORE_ID;
+    }
+    if (pid != workload_busy_pair.peer_tty_pid ||
+        workload_busy_pair.peer_tty_reported ||
+        cpu_id() != SECONDARY_CORE_ID) {
+        workload_busy_pair.refused = workload_busy_pair.refused + 1;
+        process_run_unlock(guard);
+        return 0;
+    }
+    if (workload_busy_pair.peer_tty_reading == false) {
+        if (count != 0 || checksum != 0) {
+            workload_busy_pair.refused = workload_busy_pair.refused + 1;
+            process_run_unlock(guard);
+            return 0;
+        }
+        workload_busy_pair.peer_tty_reading = true;
+        kernel_boot_log(
+            "workload: peer tty reading the terminal on the secondary cpu\n");
+        process_run_unlock(guard);
+        return 1;
+    }
+    if (count != PEER_TTY_LINE_BYTES || checksum != PEER_TTY_LINE_CHECKSUM) {
+        workload_busy_pair.refused = workload_busy_pair.refused + 1;
+        process_run_unlock(guard);
+        return 0;
+    }
+    workload_busy_pair.peer_tty_reported = true;
+    kernel_boot_log(
+        "workload: peer tty read its 17-byte line on the secondary cpu, none lost, repeated or reordered\n");
+    process_run_unlock(guard);
+    return 2;
 }
 
 private fn workload_busy_start_profile(pid: usize, input_steps: usize)

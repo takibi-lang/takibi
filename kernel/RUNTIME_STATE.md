@@ -324,7 +324,15 @@ held record, through its holding and pending flags, until a debugger entry
 releases it. `kernel/printk/peer_console.tkb` carries that rendezvous in two
 more publication records per CPU: a state the peer writes (Clear, Holding,
 Pending) and a release sequence core 0's debugger entry writes. Each side
-keeps its own sequence counter.
+keeps its own sequence counter. After its first verdict the writer shares the
+secondary instead of holding it alone.
+
+The same file retains the one admitted peer-tty PID (GitHub issue #547). The
+persistent shell starts `/bin/peer-tty`, which registers before its first
+read. The kernel refuses it until the peer console writer's first verdict.
+From registration until its line is accepted, it is excluded from core 0 and
+admitted to the secondary. There it shares the CPU with the busy pair, so its
+reads really block.
 
 **Why global:** the kernel mounts exactly one ext2 filesystem at boot.
 Per-block scratch for a single-mount filesystem is legitimately shared scratch

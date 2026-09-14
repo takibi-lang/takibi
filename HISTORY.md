@@ -15,6 +15,40 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-14: terminal input across CPUs (#547)
+
+#546 closed the gap between a terminal read's look at the RX ring and its
+sleep by masking local interrupts. That was enough only while the reader ran
+on CPU0, where the RX interrupt is taken. The first commit moved every part
+of the handshake under the process-run lock:
+- the interrupt's search for a Blocked reader and its push into the ring,
+- a reader's take from the ring,
+- and a last look at the ring inside the critical section that publishes
+  Blocked.
+The wake had also been changing process state without any lock. The ring's
+fences are compiler-only, so the lock is what orders a byte between CPUs.
+
+The second commit put a real reader there. `/bin/peer-tty` is started by the
+persistent shell, admitted only on the secondary, and reads one typed line.
+The common view compares that line's count and position-weighted sum on
+QEMU and four-core RPi5. The deterministic control is a `peer` mode of
+kernelcheck-uart-wake-qemu. gdb holds CPU1 at kernel_process_block_uart,
+after the reader's last lockless look and before the lock. With CPU1 held,
+gdb's scheduler-locking runs CPU0 alone until its RX interrupt is inside
+kernel_uart_rx_push. Then both CPUs run. All 16 bytes after the first passed
+that way. With the look under the lock disabled, the lane failed at byte 1,
+the reader asleep beside a byte already in the ring.
+
+Three things went wrong on the way:
+- Admitting peer-console to the shared secondary without gating that on its
+  first report let it run, and be refused, long before its turn.
+- ash in this BusyBox resolves a bare command name as an applet first.
+- The first harness run never reached its window, because nothing in the
+  uart-wake boot gave the busy pair the third runnable context it waits for
+  before migrating. It now backgrounds the same server the other drivers do.
+
+---
+
 ## 2026-09-14: DDB breaks in while a peer console record is held (#534)
 
 The last acceptance criterion of #534: a BREAK during queued peer output stays

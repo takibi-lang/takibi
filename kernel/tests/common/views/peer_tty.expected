@@ -1,0 +1,2 @@
+workload: peer tty reading the terminal on the secondary cpu
+workload: peer tty read its 17-byte line on the secondary cpu, none lost, repeated or reordered
