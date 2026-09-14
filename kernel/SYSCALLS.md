@@ -42,6 +42,7 @@ runs: pinned Alpine `busybox-static`/`busybox-extras` 1.37.0-r31 (ash +
 | 135 | rt_sigprocmask | Implemented | per-process mask with `SIG_BLOCK`, `SIG_UNBLOCK`, and `SIG_SETMASK`; the old mask is returned and SIGKILL/SIGSTOP are kept unblocked |
 | 137 | rt_sigtimedwait | Partial | consumes a pending signal from the requested set, blocks indefinitely for a null timeout, polls for a zero timeout, and shares the per-process scheduler-tick deadline for finite timeouts. The null `siginfo` form used by BusyBox init is supported; non-null `siginfo` is rejected |
 | 160 | uname | Implemented | real `struct utsname` reply via the user-memory boundary (`sysname="Linux"`, `nodename="takibi"`, `release="6.1.0-takibi"`, `version="#1"`, `machine="aarch64"`), zero-filled scratch buffer first so no uninitialized kernel memory reaches userspace |
+| 168 | getcpu | Implemented | writes the calling CPU number and NUMA node 0 through independently optional output pointers; a non-null invalid pointer returns `EFAULT`. The third cache argument is ignored, matching modern Linux where it is unused |
 | 172 | getpid | Implemented | |
 | 173 | getppid | Implemented | always returns 0; a real parent link exists (`scheduled_process_parent`) but nothing traced needs a real ppid, so it is not wired up |
 | 174-177 | getuid/geteuid/getgid/getegid | Implemented | return 0 (always-root model) |

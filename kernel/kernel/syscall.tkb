@@ -56,6 +56,7 @@ const AARCH64_NR_KILL: usize = 129;
 const AARCH64_NR_RT_SIGTIMEDWAIT: usize = 137;
 const AARCH64_NR_SYSLOG: usize = 116;
 const AARCH64_NR_UNAME: usize = 160;
+const AARCH64_NR_GETCPU: usize = 168;
 // GitHub issue #393: the only rlimit syscall this architecture has.
 // asm-generic (and therefore arm64) has no getrlimit/setrlimit numbers at
 // all, and musl 1.2.6's getrlimit()/setrlimit() go through SYS_prlimit64
@@ -4814,6 +4815,37 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
     if (number == 96) {
         return SyscallAction::Resume(kernel_process_current_pid());
+    }
+    if (number == AARCH64_NR_GETCPU) {
+        // Linux permits either output pointer to be null. This kernel has no
+        // NUMA topology, so every online CPU belongs to node 0.
+        if (x0 != 0) {
+            match user_range_check_write(
+                    kernel_process_current_root(), x0, 4) {
+                UserWriteRangeResult::Fault => {
+                    return SyscallAction::Resume(LINUX_EFAULT);
+                }
+                UserWriteRangeResult::Ok(cpu_range) => {
+                    if (user_write_u32(cpu_range, 0, cpu_id() as u32) == false) {
+                        return SyscallAction::Resume(LINUX_EFAULT);
+                    }
+                }
+            }
+        }
+        if (x1 != 0) {
+            match user_range_check_write(
+                    kernel_process_current_root(), x1, 4) {
+                UserWriteRangeResult::Fault => {
+                    return SyscallAction::Resume(LINUX_EFAULT);
+                }
+                UserWriteRangeResult::Ok(node_range) => {
+                    if (user_write_u32(node_range, 0, 0) == false) {
+                        return SyscallAction::Resume(LINUX_EFAULT);
+                    }
+                }
+            }
+        }
+        return SyscallAction::Resume(0);
     }
     if (number == 172 || number == 178) {
         return SyscallAction::Resume(kernel_process_current_pid());

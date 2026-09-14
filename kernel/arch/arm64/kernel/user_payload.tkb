@@ -51,6 +51,16 @@ fn initial_user_payload() {
      * of the literal 2 it used to be. */
     let my_pid: usize = svc5(172, 0, 0, 0, 0, 0);
 
+    /* getcpu(2): both outputs are optional, CPU 0 is where this unrestricted
+     * ABI payload runs, and this non-NUMA kernel reports node 0. */
+    let mut cpu_node: [u8; 8];
+    let cpu_node_base: *u8 = cpu_node as *u8;
+    fail_if(svc5(168, ptr_of(cpu_node_base, 0), ptr_of(cpu_node_base, 4),
+                 0, 0, 0) != 0);
+    fail_if(payload_read_u64(cpu_node_base, 0) != 0);
+    fail_if(svc5(168, 0, 0, 0, 0, 0) != 0);
+    fail_if(svc5(168, 1, 0, 0, 0, 0) != EFAULT_RC);
+
     /* write(9, ..., 1) must return -EBADF. The length `1` is deliberately
      * NOT the literal's real length (22 bytes) -- fd 9 is invalid, so the
      * write never reaches a length check at all; this is not a candidate
