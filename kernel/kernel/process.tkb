@@ -4878,6 +4878,20 @@ private fn kernel_process_block_reserved(
                 process_run_unlock(guard);
                 return 0;
             }
+            // GitHub issue #547: the last look at the terminal ring, in the
+            // critical section that publishes Blocked. The RX interrupt
+            // pushes a byte only while holding this lock, after finding no
+            // Blocked reader. So a byte is either in the ring now, and the
+            // read runs again and takes it, or its interrupt finds this
+            // process Blocked. That holds whichever CPU the reader is on,
+            // which a local interrupt mask cannot promise.
+            if (reason == ProcessWaitReason::UartRx && kernel_uart_rx_pending()) {
+                process_image_cancel_activation(prepared);
+                let ready = scheduled_process_yield(owner, running);
+                scheduled_process_release(owner, ready);
+                process_run_unlock(guard);
+                return 0;
+            }
             scheduled_process_record_of(from).saved_sp = current_sp;
             match scheduled_process_running_take(guard, from) {
                 ScheduledProcessRunningTakeResult::Missing => {
@@ -5301,7 +5315,12 @@ fn kernel_process_block_wait4(current_sp: usize) -> usize {
 must_use variant ProcessUartWakeResult { Missing; Consumed; RetryRead; }
 
 
-fn kernel_process_uart_wake(value: usize)
+// GitHub issue #547: the caller holds the process-run lock, and keeps it
+// across its push of an undelivered byte into the ring. The reader publishes
+// Blocked under the same lock only after finding the ring empty (see
+// kernel_process_block_reserved). So on any CPU, either this finds the reader
+// Blocked, or the reader finds this byte in the ring.
+fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[lock], value: usize)
         -> ProcessUartWakeResult !{interrupt, unsafe} {
     if (execution_here().current_live == false) {
         diagnostic_trace_record(
@@ -5527,11 +5546,14 @@ fn kernel_process_trace_block_wake_probe() -> bool !{unsafe} {
                 match kernel_process_uart_record_parent_progress() {
                     ProcessUartProgressResult::Invalid => {}
                     ProcessUartProgressResult::Recorded => {
-                        match kernel_process_uart_wake(0x41) {
+                        // Under the lock the RX interrupt holds (#547).
+                        let guard = process_run_lock();
+                        match kernel_process_uart_wake(guard, 0x41) {
                             ProcessUartWakeResult::Missing => {}
                             ProcessUartWakeResult::Consumed => { setup_ok = true; }
                             ProcessUartWakeResult::RetryRead => { setup_ok = true; }
                         }
+                        process_run_unlock(guard);
                     }
                 }
             }

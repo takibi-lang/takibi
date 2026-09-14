@@ -2009,9 +2009,12 @@ fn syscall_read_uart(address: usize, requested: usize) -> SyscallAction {
     match user_range_check_write(kernel_process_current_root(), address, requested) {
         UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
         UserWriteRangeResult::Ok(range) => {
-            disable_irq();
+            // GitHub issue #547: the ring is read under the lock its
+            // producer holds, so a reader on any CPU sees a byte only
+            // after that byte is stored.
+            let guard = process_run_lock();
             if (kernel_uart_rx_pending() == false) {
-                enable_irq();
+                process_run_unlock(guard);
                 if (syscall_test_evidence_record_read_uart_wait()) {
                     if (kernel_syscall_persistent_shell_active()) {
                         kernel_boot_log(
@@ -2045,7 +2048,7 @@ fn syscall_read_uart(address: usize, requested: usize) -> SyscallAction {
                 return SyscallAction::WaitInterrupt;
             }
             let value: u8 = kernel_uart_rx_getc();
-            enable_irq();
+            process_run_unlock(guard);
             if (user_write_byte(range, 0, value) == false) {
                 return SyscallAction::Resume(LINUX_EFAULT);
             }
@@ -2369,8 +2372,11 @@ fn kernel_syscall_block_return(frame_sp: usize) {
         // kernel_process_block_uart takes restores this masked state rather
         // than unmasking, and the next context's eret sets its own.
         //
-        // One core is enough: the RX interrupt is routed to CPU0, and a
-        // terminal reader runs there too -- CPU1 admits only the busy pair.
+        // This look is now the cheap early exit, not the proof. The mask is
+        // local, and the RX interrupt is routed to CPU0. The look that
+        // decides is in kernel_process_block_reserved, under the lock the
+        // interrupt's push holds too, so it holds for a reader on any CPU
+        // (GitHub issue #547).
         disable_irq();
         if (kernel_uart_rx_pending()) {
             el0_context_retry_syscall(frame_sp);
@@ -2580,12 +2586,13 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
     }
     if (number == AARCH64_NR_TAKIBI_UART_RX_WAIT) {
-        disable_irq();
+        let guard = process_run_lock();
         if (kernel_uart_rx_pending()) {
             let value: usize = kernel_uart_rx_getc() as usize;
-            enable_irq();
+            process_run_unlock(guard);
             return SyscallAction::Resume(value);
         }
+        process_run_unlock(guard);
         kernel_process_current_set_pending_block(
             ProcessWaitReason::UartRx, 0);
         return SyscallAction::Block;

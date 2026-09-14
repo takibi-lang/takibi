@@ -1330,10 +1330,18 @@ irq_uart_rx_unmask();
 }
 
 // Shared UART RX bridge used by syscall wait paths on both platforms.
+//
+// GitHub issue #547: the search for a Blocked reader and the push of a byte
+// nobody took are one critical section under the process-run lock, which is
+// the lock a reader publishes Blocked under. A reader on another CPU can then
+// neither become Blocked between the two, nor miss the byte afterwards. The
+// lock masks interrupts, so this core never interrupts its own holder.
 fn kernel_uart_rx_isr(c: u8) !{unsafe} {
-    match kernel_process_uart_wake(c as usize) {
+    let guard = process_run_lock();
+    match kernel_process_uart_wake(guard, c as usize) {
         ProcessUartWakeResult::Missing => {}
         ProcessUartWakeResult::Consumed => {
+            process_run_unlock(guard);
             interrupt_notify();
             return;
         }
@@ -1346,5 +1354,6 @@ fn kernel_uart_rx_isr(c: u8) !{unsafe} {
         UartRxPushResult::Stored => { }
         UartRxPushResult::Dropped => { }
     }
+    process_run_unlock(guard);
     interrupt_notify();
 }

@@ -24,7 +24,10 @@ direct, common shape at `langcheck` cost. The two checks are complementary.
 THE RULE. A call is accepted when the same line consults saved state. The
 conditional inside `mutex_irq_restore` is the kernel's one such site. Anything
 else must be declared below with the reason it is allowed to be absolute.
-Eight sites are places where nothing could have been masked yet. Declaring is
+Every declared site is a place where nothing could have been masked yet. The
+terminal read in syscall.tkb used to be one more: it masked, looked at the
+ring, and unmasked absolutely. It now holds the process-run lock instead, whose
+release restores what it saved (GitHub issue #547). Declaring is
 not a workaround -- it is the check asking for the sentence a reviewer would
 otherwise have to reconstruct.
 """
@@ -66,12 +69,6 @@ ALLOWED = {
     "kernel/platform/rpi5/intc.tkb": {
         "enable_irq();":
             "platform_irq_init(), same as QEMU's",
-    },
-    "kernel/kernel/syscall.tkb": {
-        "enable_irq();":
-            "a syscall entered from EL0, which cannot have been entered with "
-            "IRQs masked, closing a mask this same function opened a few "
-            "lines above",
     },
 }
 

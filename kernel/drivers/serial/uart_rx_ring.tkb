@@ -14,9 +14,11 @@
 //
 // One producer and one consumer, and each index has one writer: the UART RX
 // interrupt (kernel_uart_rx_isr in kernel/init/test_driver.tkb) writes head
-// and the drop count, and a syscall, with interrupts masked by its caller,
-// writes tail. The byte is fenced before the head that publishes it, and the
-// consumer fences before it reads.
+// and the drop count, and a syscall writes tail. Every caller in the kernel
+// holds the process-run lock around its access. That lock, not the compiler
+// fences below, orders a byte between CPUs, because a terminal reader need
+// not run on the CPU that takes the RX interrupt (GitHub issue #547). The
+// fences keep the single-threaded order for linux_user.
 //
 // Kept free of logging and of process state, so linux_user/uart_rx_ring can
 // compile this file itself and drive it past full.
