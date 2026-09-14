@@ -195,7 +195,7 @@ fi
 touch "$SNAPSHOT_RELEASE"
 wait "$driver_pid"
 python3 "$REPO_ROOT/scripts/validate_kernel_gdb_state.py" \
-    --uart-log "$UART_LOG" --gdb-log "$GDB_VIEW_LOG"
+    --uart-log "$UART_LOG" --gdb-log "$GDB_VIEW_LOG" --online-cpus 0,1
 
 # GitHub issue #456: whose fault it is. The guarded read's arming is per core
 # now, because its writer is the one core inspecting but its READER is

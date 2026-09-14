@@ -71,7 +71,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--uart-log", required=True)
     parser.add_argument("--gdb-log", required=True)
+    # The runner knows its platform's boundary: QEMU lanes keep two vCPUs,
+    # while RPi5 has brought up all four cores since #9 phase A. A fixed
+    # {0, 1} here failed every RPi5 run once the board went to four.
+    parser.add_argument("--online-cpus", required=True,
+                        help="comma-separated CPU ids the fixture must report")
     args = parser.parse_args()
+    expected_online = cpu_set(args.online_cpus)
+    if not expected_online:
+        raise ValueError(f"--online-cpus is not a CPU list: {args.online_cpus!r}")
 
     with open(args.uart_log, encoding="ascii") as stream:
         uart = stream.read().replace("\r", "").splitlines()
@@ -84,9 +92,10 @@ def main() -> int:
         raise ValueError("GDB did not stop every online CPU")
     online_cpus = cpu_set(cpus.get("online_cpus"))
     stopped_cpus = cpu_set(cpus.get("stopped_cpus"))
-    if online_cpus != {0, 1}:
+    if online_cpus != expected_online:
         raise ValueError(
-            f"maintained two-core fixture reported online CPUs {online_cpus}")
+            f"fixture reported online CPUs {online_cpus}, "
+            f"expected {expected_online}")
     if not online_cpus.issubset(stopped_cpus):
         raise ValueError(
             f"online CPUs {online_cpus} not all stopped in {stopped_cpus}")

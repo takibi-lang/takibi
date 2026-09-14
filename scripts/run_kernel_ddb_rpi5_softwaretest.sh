@@ -165,6 +165,7 @@ wait "$openocd_pid" 2>/dev/null || true
 openocd_pid=""
 touch "$SNAPSHOT_RELEASE"
 wait "$driver_pid"
+# The board brings up all four cores; see validate_kernel_gdb_state.py.
 python3 "$REPO_ROOT/scripts/validate_kernel_gdb_state.py" \
-    --uart-log "$UART_LOG" --gdb-log "$GDB_VIEW_LOG"
+    --uart-log "$UART_LOG" --gdb-log "$GDB_VIEW_LOG" --online-cpus 0,1,2,3
 trap - EXIT INT TERM HUP
