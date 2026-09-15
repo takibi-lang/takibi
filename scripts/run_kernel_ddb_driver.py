@@ -4,8 +4,64 @@
 import argparse
 import json
 from pathlib import Path
+import re
 import socket
 import time
+
+from run_kernel_uart_driver import (
+    QMP_CHARDEV, postmortem_budget, send_serial_break)
+
+# GitHub issue #9's peer-read stall. The scripted BREAK below waits for
+# fixtures that, one run in five, never start, so a lost run ended as a bare
+# timeout with nothing to read. Past the point where the lane cannot pass,
+# this breaks in anyway and walks read-only commands, the way the ordinary
+# lanes' driver does (#511): run_kernel_uart_driver.py's walk, plus the
+# waiting graph, the physical stacks and the peer's own root, which are what
+# says why a workload handoff never happened.
+STALL_COMMANDS = (b"oops", b"intr", b"bt", b"sched", b"current", b"ps",
+                  b"wait", b"stacks", b"bt cpu 1")
+
+
+# The first caught stall answered the postmortem BREAK with `world-stop
+# partial mask=0`: the peer never took the stop SGI, so DDB refused and the
+# walk above had nothing to read. QEMU still knows where each CPU is. Sample
+# every CPU's registers a few times before the BREAK: a PC that never moves
+# and one that circles a loop are different defects, and PSTATE says whether
+# IRQs were masked there.
+REGISTER_SAMPLES = 3
+
+
+def sample_cpu_registers(port: int, budget: float) -> tuple[str, str]:
+    """Return (raw dump, one-line summary); failures are reported, not raised."""
+    deadline = time.monotonic() + budget
+    dumps = []
+    try:
+        with socket.create_connection(("127.0.0.1", port), budget) as qmp:
+            qmp.settimeout(max(0.5, deadline - time.monotonic()))
+            stream = qmp.makefile("rwb", buffering=0)
+            if b"QMP" not in stream.readline():
+                return "", "QMP produced no greeting"
+            stream.write(b'{"execute":"qmp_capabilities"}\n')
+            if b"return" not in stream.readline():
+                return "", "QMP capability negotiation failed"
+            for _ in range(REGISTER_SAMPLES):
+                stream.write(
+                    b'{"execute":"human-monitor-command","arguments":'
+                    b'{"command-line":"info registers -a"}}\n')
+                reply = json.loads(stream.readline())
+                if "return" not in reply:
+                    return "\n".join(dumps), f"QMP refused: {reply!r:.160}"
+                dumps.append(reply["return"])
+                time.sleep(0.1)
+    except (OSError, ValueError) as error:
+        return "\n".join(dumps), f"register sampling failed: {error}"
+    samples = []
+    for dump in dumps:
+        cpus = re.findall(r"CPU#(\d+).*?PC=([0-9a-f]+).*?PSTATE=([0-9a-f]+)",
+                          dump, re.S)
+        samples.append(" ".join(f"cpu{cpu} pc={pc} pstate={pstate}"
+                                for cpu, pc, pstate in cpus))
+    return "\n".join(dumps), "; ".join(samples)
 
 
 def connect(port: int, deadline: float) -> socket.socket:
@@ -71,6 +127,10 @@ def main() -> int:
     peer_tty_sent = False
     peer_tty_reading_at = None
     peer_tty_line_sent = False
+    stall_break_at = None
+    stall_sent = 0
+    stall_reason = ""
+    stall_registers = ""
     payload_sent = False
     commands = [
         b"oops\n", b"regs\n", b"intr\n", b"sched\n",
@@ -177,6 +237,42 @@ def main() -> int:
                 args.break_source != "uart" or
                 (peer_tty_reading_at is not None and
                  time.monotonic() - peer_tty_reading_at >= 1.0))
+            # The lane is inside the last of its budget and the scripted BREAK
+            # never fired, so it has already failed. Ask the debugger why. The
+            # snapshot-ready file stays untouched: the runner's GDB comparison
+            # belongs to the scripted stop, not to this one.
+            if (args.break_source == "uart" and not break_sent and
+                    stall_break_at is None and
+                    time.monotonic()
+                    >= deadline - postmortem_budget(args.timeout)):
+                missing = [name for name, ready in (
+                    ("the first shell's exit", wake_byte_sent),
+                    ("the busy-pair migration", migration_ready),
+                    ("the held peer console record", peer_console_pending),
+                    ("the peer terminal reader asleep", peer_tty_asleep),
+                ) if not ready]
+                stall_reason = ", ".join(missing) or "nothing it waits for"
+                dump, stall_registers = sample_cpu_registers(
+                    args.qmp_port, 5.0)
+                Path(args.log + ".cpus").write_text(dump)
+                failure = send_serial_break(
+                    args.qmp_port, QMP_CHARDEV, 5.0)
+                stall_break_at = time.monotonic()
+                deadline = stall_break_at + postmortem_budget(args.timeout)
+                print("[kernel/qemu ddb] the scripted BREAK never fired; still "
+                      f"missing: {stall_reason}. Breaking in for a postmortem"
+                      + (f" -- {failure}" if failure else ""), flush=True)
+            if stall_break_at is not None:
+                prompts = received.count(b"ddb> ")
+                while (stall_sent < prompts and
+                       stall_sent < len(STALL_COMMANDS)):
+                    serial.sendall(STALL_COMMANDS[stall_sent] + b"\n")
+                    stall_sent += 1
+                # One prompt per command plus the one that opened the walk.
+                if prompts > len(STALL_COMMANDS):
+                    break
+                continue
+
             if (wake_byte_sent and migration_ready and peer_console_pending
                     and peer_tty_asleep and not break_sent):
                 with connect(args.qmp_port, deadline) as qmp:
@@ -245,6 +341,18 @@ def main() -> int:
                     peer_delivery_ready and peer_tty_done):
                 return 0
 
+    if stall_break_at is not None:
+        answered = max(0, min(received.count(b"ddb> ") - 1,
+                              len(STALL_COMMANDS)))
+        walked = " ".join(name.decode("ascii")
+                          for name in STALL_COMMANDS[:answered])
+        raise SystemExit(
+            "DDB BREAK/inspect/continue sequence did not complete: the "
+            f"scripted BREAK never fired (still missing: {stall_reason}). A "
+            f"postmortem BREAK walked {answered} of {len(STALL_COMMANDS)} "
+            f"read-only commands ({walked or 'none answered'}). Registers "
+            f"before the BREAK: {stall_registers} (full dump in "
+            f"{args.log}.cpus); transcript in {args.log}")
     raise SystemExit("DDB BREAK/inspect/continue sequence did not complete")
 
 
