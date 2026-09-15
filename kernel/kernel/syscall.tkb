@@ -2509,6 +2509,13 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) {
             kernel_syscall_fail_stop(frame_sp);
         }
     }
+    // The new image is committed, so this is execve's point of no return,
+    // and Linux closes every descriptor marked close-on-exec here. Only the
+    // kernel-driven exec that 73988b03 retired ever made this call, so from
+    // then on a descriptor set with F_SETFD or F_DUPFD_CLOEXEC survived
+    // execve. GitHub issue #540's unused-function check found the orphaned
+    // helper.
+    unified_fd_close_exec_descriptors(kernel_syscall_process_slot());
     // Default-false debugger test switch: stop after the real prepare+commit
     // path without affecting ordinary exec or adding a userspace interface.
     if (kernel_process_trace_fail_after_exec_requested()) {

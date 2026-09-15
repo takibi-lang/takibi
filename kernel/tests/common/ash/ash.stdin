@@ -36,6 +36,9 @@ mv /etc/mva /etc/mvc && mv /etc/mvc /etc/mvb && echo mv1
 mv /etc/mvb /etc/made && mv /etc/made /etc/moved && echo mv2
 mv /etc/mva /kept /etc/moved
 /bin/cat /etc/moved/mvb
+# GitHub issue #540: close-on-exec across execve. /bin/cloexec
+# flags fds 20 and 22, keeps 21, and execs /bin/cloexec-check.
+/bin/cloexec
 # GitHub issue #544: a write six times the console transmit queue. On the
 # board the wire cannot keep up, so cat's write fills the queue, returns
 # short, and the next one sleeps until the TX interrupt has drained it; the

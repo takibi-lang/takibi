@@ -1,0 +1,68 @@
+/* Close-on-exec across execve: two static-PIE EL0 programs linked from this
+ * one object, kept free of writable globals and compiled with --forbid-trap.
+ *
+ * /bin/cloexec opens /hello.txt and puts three copies of it at fixed
+ * numbers. Descriptor 20 comes from F_DUPFD_CLOEXEC and 22 is flagged with
+ * F_SETFD, so both must close at execve. Descriptor 21 is a plain F_DUPFD
+ * and must survive. It then execs /bin/cloexec-check. fcntl here has no
+ * F_GETFD, so the check asks F_SETFD of each number: EBADF means closed,
+ * zero means still open. The one line it prints is compared by the ash
+ * transcript.
+ *
+ * GitHub issue #540 found execve ignoring the flag. The helper that honors
+ * it was left without a caller when the kernel-driven exec it lived in was
+ * retired.
+ */
+
+const FCNTL_SYSCALL: usize = 25;
+const CLOSE_SYSCALL: usize = 57;
+const OPENAT_SYSCALL: usize = 56;
+const WRITE_SYSCALL: usize = 64;
+const EXIT_SYSCALL: usize = 93;
+const EXECVE_SYSCALL: usize = 221;
+const F_DUPFD: usize = 0;
+const F_SETFD: usize = 2;
+const F_DUPFD_CLOEXEC: usize = 1030;
+const LINUX_EBADF: usize = 0xFFFFFFFFFFFFFFF7;
+const CLOEXEC_DUPFD: usize = 20;
+const KEPT_DUPFD: usize = 21;
+const SETFD_FD: usize = 22;
+
+private fn cloexec_say(line: borrow []u8) {
+    svc5(WRITE_SYSCALL, 1, line as *u8 as usize, line.len, 0, 0);
+}
+
+fn cloexec_probe() {
+    let source: usize = svc5(OPENAT_SYSCALL, 0, "/hello.txt" as *u8 as usize,
+                             0, 0, 0);
+    let cloexec: usize = svc5(FCNTL_SYSCALL, source, F_DUPFD_CLOEXEC,
+                              CLOEXEC_DUPFD, 0, 0);
+    let kept: usize = svc5(FCNTL_SYSCALL, source, F_DUPFD, KEPT_DUPFD, 0, 0);
+    let flagged: usize = svc5(FCNTL_SYSCALL, source, F_DUPFD, SETFD_FD, 0, 0);
+    svc5(CLOSE_SYSCALL, source, 0, 0, 0, 0);
+    if (cloexec != CLOEXEC_DUPFD || kept != KEPT_DUPFD ||
+        flagged != SETFD_FD ||
+        svc5(FCNTL_SYSCALL, SETFD_FD, F_SETFD, 1, 0, 0) != 0) {
+        cloexec_say(bs"cloexec: could not place descriptors 20-22\n");
+        svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+    }
+    let mut argv: [usize; 2];
+    argv[0] = "/bin/cloexec-check" as *u8 as usize;
+    argv[1] = 0;
+    svc5(EXECVE_SYSCALL, "/bin/cloexec-check" as *u8 as usize,
+         argv as *usize as usize, 0, 0, 0);
+    cloexec_say(bs"cloexec: execve returned\n");
+    svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+}
+
+fn cloexec_check() {
+    let cloexec: usize = svc5(FCNTL_SYSCALL, CLOEXEC_DUPFD, F_SETFD, 0, 0, 0);
+    let kept: usize = svc5(FCNTL_SYSCALL, KEPT_DUPFD, F_SETFD, 0, 0, 0);
+    let flagged: usize = svc5(FCNTL_SYSCALL, SETFD_FD, F_SETFD, 0, 0, 0);
+    if (cloexec == LINUX_EBADF && flagged == LINUX_EBADF && kept == 0) {
+        cloexec_say(bs"cloexec: execve closed fds 20 and 22, kept fd 21\n");
+        svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+    }
+    cloexec_say(bs"cloexec: close-on-exec descriptors survived execve\n");
+    svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+}
