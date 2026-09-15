@@ -4205,13 +4205,19 @@ private fn kernel_process_exit_would_strand_on(cpu: usize) -> bool {
     if (cpu != 0) { return false; }
     let parent_admitted: bool =
         kernel_process_cpu_allows_slot(cpu, parent.pool_index);
-    // A parent already waiting for this exit is woken BY it, so it counts
-    // as somewhere to go even though it is blocked right now.
     if (parent_admitted && scheduled_process_state_of(parent) ==
             ProcessSlotState::Ready) {
         return false;
     }
-    if (parent_admitted && scheduled_process_state_of(parent) ==
+    // A parent already waiting for this exit is woken BY it, so it counts
+    // as somewhere to go even though it is blocked right now -- and even
+    // when this CPU may not run it (GitHub issue #9). Its affinity mask
+    // takes it to another CPU, and this core then waits inside the exit
+    // for a successor of its own (kernel_process_exit_await_successor).
+    // Requiring it to be admitted here deadlocked: /bin/affinity, pinned
+    // to CPU 1, waited in wait4 for a child exiting on core 0, and that
+    // exit waited for a successor only the parent's wake could produce.
+    if (scheduled_process_state_of(parent) ==
             ProcessSlotState::Blocked &&
         scheduled_process_wait_reason_of(parent) ==
             ProcessWaitReason::ChildExit) {
@@ -4222,7 +4228,7 @@ private fn kernel_process_exit_would_strand_on(cpu: usize) -> bool {
     // selecting its successor, so this parent is another exit-produced
     // runnable context even when every other live process runs on a peer.
     let sigchld_bit: usize = 1 << 16;
-    if (parent_admitted && scheduled_process_state_of(parent) ==
+    if (scheduled_process_state_of(parent) ==
             ProcessSlotState::Blocked &&
         scheduled_process_wait_reason_of(parent) ==
             ProcessWaitReason::Signal &&
