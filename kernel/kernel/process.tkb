@@ -4065,7 +4065,11 @@ fn kernel_process_current_exit_has_waiter() -> bool {
 // the next keystroke.
 //
 // Asked BEFORE the exit does anything, so the caller can wait for an
-// interrupt and ask again with nothing torn down in between. A secondary CPU
+// interrupt and ask again with nothing torn down in between. The answer is
+// read without the run lock, so a peer may still take the process it
+// counted; kernel_process_exit_await_successor covers that after the
+// teardown, and this check only spares the teardown when nothing at all is
+// runnable. A secondary CPU
 // has a third outcome: the exit tail switches to its architectural stack and
 // re-enters the idle loop, so absence of an admitted successor is not a
 // strand there.
@@ -6649,13 +6653,52 @@ fn kernel_process_child_exit(status: usize) -> usize {
             }
         }
     }
-    // No admitted successor remains. Publish this CPU as having no current
-    // EL0 context; the syscall tail switches to the per-CPU IRQ stack before
-    // the architectural secondary idle loop releases this zombie's stack.
+    // No admitted successor remains. Core 0 has no architectural idle loop,
+    // so it waits here, still on this zombie's stack, for one to appear.
+    if (cpu_id() == 0) {
+        process_run_unlock(exit_guard);
+        return kernel_process_exit_await_successor(child);
+    }
+    // A secondary publishes itself as having no current EL0 context; the
+    // syscall tail switches to the per-CPU IRQ stack before the
+    // architectural secondary idle loop releases this zombie's stack.
     execution_here().current_live = false;
     execution_here().scheduler_enabled = false;
     execution_here().reschedule_pending = false;
     process_run_unlock(exit_guard);
+    return 0;
+}
+
+// GitHub issue #9: kernel_process_exit_would_strand answered before the
+// exit tore anything down, without the run lock. It counted a Ready process
+// that the peer then took, so the search above found nothing and core 0
+// fail-stopped after a real exit. Nothing can be undone by now, so wait the
+// way .Lsyscall_wait_interrupt idles, standing on a process: an interrupt,
+// then the search again. The tick wakes deadline sleepers and the UART
+// wakes readers. This core still owns the zombie's stack, so its parent
+// cannot reap it until the handoff below moves off it.
+private fn kernel_process_exit_await_successor(child: ProcessHandle)
+        -> usize !{may_block} {
+    while (true) {
+        interrupt_wait();
+        let guard = process_run_lock();
+        match kernel_process_next_ready(child, cpu_id()) {
+            ProcessNextReadyResult::Missing => {}
+            ProcessNextReadyResult::Next(successor) => {
+                match scheduled_process_ready_take(guard, successor) {
+                    ScheduledProcessReadyTakeResult::Missing => {}
+                    ScheduledProcessReadyTakeResult::Ready(resources) => {
+                        let (owner, ready) = resources;
+                        let running = scheduled_process_start(owner, ready);
+                        process_run_unlock(guard);
+                        return kernel_process_exit_reserved(
+                            child, owner, running, false);
+                    }
+                }
+            }
+        }
+        process_run_unlock(guard);
+    }
     return 0;
 }
 
