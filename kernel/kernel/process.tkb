@@ -90,7 +90,9 @@ enum ProcessWaitReason: u8 {
 // after this one. The concepts already belonged next to
 // ProcessWaitReason: UartBlockDelivery is the delivery half of
 // ProcessWaitReason::UartRx (how the blocked read is resumed once the
-// byte arrives), and CloneFileState is fork bookkeeping for one child.
+// byte arrives: Read reruns the terminal read(2) or ppoll(2) that blocked,
+// Scalar hands the byte to the Takibi wait), and CloneFileState is fork
+// bookkeeping for one child.
 enum UartBlockDelivery: u8 { Scalar; Read; }
 
 // GitHub issue #264 fifth stage: nested clones need separate bookkeeping

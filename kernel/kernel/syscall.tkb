@@ -1859,6 +1859,28 @@ fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
                 if (syscall_test_evidence_record_ppoll_uart_wait()) {
                     kernel_boot_log("shell ppoll: uart blocked\n");
                 }
+                // The question syscall_read_uart asks: block when anything
+                // else can run. The Read delivery rewinds this ppoll, so the
+                // wake reruns it and it reports the byte. The block path's
+                // last look at the ring under the run lock (#547) covers a
+                // byte that arrives before it sleeps.
+                if (kernel_process_other_ready()) {
+                    let process_slot: usize = kernel_syscall_process_slot();
+                    if (scheduled_process_slot_valid(process_slot)) {
+                        scheduled_process_set_uart_block_delivery(
+                            process_slot, UartBlockDelivery::Read);
+                        kernel_process_current_set_pending_block(
+                            ProcessWaitReason::UartRx, 0);
+                        // The ash lane's /bin/ppoll-probe types its byte
+                        // only after this line, so a kernel that retried
+                        // the ppoll in EL1 instead leaves that probe waiting.
+                        if (syscall_test_evidence_record_ppoll_uart_block()) {
+                            kernel_boot_log(
+                                "ppoll: stdin wait blocked beside a runnable process\n");
+                        }
+                        return SyscallAction::Block;
+                    }
+                }
                 return SyscallAction::WaitInterrupt;
             }
             if (ready_count == 0 && timeout_address != 0) {
@@ -2146,8 +2168,9 @@ private fn syscall_syslog(action: usize, address: usize, requested: usize)
 
 must_use variant KernelUartDeliveryResult { Consumed; RetryRead; }
 
-// A blocked Linux read(0, buf, ...) must retry its SVC after the IRQ places
-// the byte in the kernel UART ring; only the Takibi scalar wait consumes the
+// A blocked Linux read(0, buf, ...), or a ppoll on fd 0, must retry its SVC
+// after the IRQ places the byte in the kernel UART ring; only the Takibi
+// scalar wait consumes the
 // byte directly into x0. Keeping the IRQ path away from user memory also
 // preserves its no-unsafe effect contract.
 fn kernel_syscall_uart_deliver(frame_sp: usize, process_slot: usize,

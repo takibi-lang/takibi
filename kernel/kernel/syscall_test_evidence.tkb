@@ -1,8 +1,8 @@
 // Part of #294 (consolidate kernel runtime state behind explicit owners),
 // same split as issue #303 applied to kernel/kernel/process.tkb. These
-// sixteen syscall.tkb counters/flags are read only by
+// seventeen syscall.tkb counters/flags are read only by
 // kernel_syscall_file_evidence()/kernel_syscall_socket_evidence()/
-// kernel_syscall_partial_write_evidence() and by two log-once UART-wait
+// kernel_syscall_partial_write_evidence() and by three log-once UART-wait
 // boot messages -- never by real syscall dispatch decisions, unlike
 // syscall_connection_open (per-connection open state, stays in
 // syscall.tkb) or the test-driver-bounded foreground-server/persistent-
@@ -20,6 +20,7 @@ struct SyscallTestEvidence {
     file_write_calls: usize;
     close_calls: usize;
     ppoll_uart_waits: usize;
+    ppoll_uart_blocks: usize;
     read_uart_waits: usize;
     socket_calls: usize;
     bind_calls: usize;
@@ -95,6 +96,14 @@ fn syscall_test_evidence_record_ppoll_uart_wait() -> bool {
     syscall_test_evidence.ppoll_uart_waits =
         syscall_test_evidence.ppoll_uart_waits + 1;
     return syscall_test_evidence.ppoll_uart_waits == 1;
+}
+
+// The same one-time pattern, for a stdin ppoll that blocked beside a Ready
+// process instead of retrying in the kernel (GitHub issue #9).
+fn syscall_test_evidence_record_ppoll_uart_block() -> bool {
+    syscall_test_evidence.ppoll_uart_blocks =
+        syscall_test_evidence.ppoll_uart_blocks + 1;
+    return syscall_test_evidence.ppoll_uart_blocks == 1;
 }
 
 fn syscall_test_evidence_record_read_uart_wait() -> bool {

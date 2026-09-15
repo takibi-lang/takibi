@@ -771,6 +771,9 @@ KERNEL_CLOEXEC_TKB       := $(KERNEL_DIR)/arch/arm64/kernel/cloexec_probe.tkb
 KERNEL_CLOEXEC_O         := $(KERNEL_BUILD_DIR)/cloexec_probe.o
 KERNEL_CLOEXEC_ELF       := $(KERNEL_BUILD_DIR)/cloexec.elf
 KERNEL_CLOEXEC_CHECK_ELF := $(KERNEL_BUILD_DIR)/cloexec_check.elf
+KERNEL_PPOLL_PROBE_TKB   := $(KERNEL_DIR)/arch/arm64/kernel/ppoll_probe.tkb
+KERNEL_PPOLL_PROBE_O     := $(KERNEL_BUILD_DIR)/ppoll_probe.o
+KERNEL_PPOLL_PROBE_ELF   := $(KERNEL_BUILD_DIR)/ppoll_probe.elf
 KERNEL_RPI5_MAIN_O      := $(KERNEL_BUILD_DIR)/main.o
 KERNEL_RPI5_MAIN_DEBUG_O := $(KERNEL_BUILD_DIR)/main.debug.o
 
@@ -805,7 +808,7 @@ $(KERNEL_MUSL_LOADER): $(KERNEL_MUSL_APK)
 	tar -xOzf $< lib/ld-musl-aarch64.so.1 > $@
 	chmod +x $@
 
-$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/about.html $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd-serve.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/inittab $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSY_LOOP_A_ELF) $(KERNEL_BUSY_LOOP_B_ELF) $(KERNEL_BUSY_LOOP_SPIN_ELF) $(KERNEL_PEER_READ_ELF) $(KERNEL_CORE_READ_ELF) $(KERNEL_PEER_CONSOLE_ELF) $(KERNEL_PEER_TTY_ELF) $(KERNEL_CLOEXEC_ELF) $(KERNEL_CLOEXEC_CHECK_ELF) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_BUSYBOX_EXTRAS) $(KERNEL_MUSL_LOADER) | $(KERNEL_USER_BUILD_DIR)
+$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/about.html $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd-serve.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/inittab $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSY_LOOP_A_ELF) $(KERNEL_BUSY_LOOP_B_ELF) $(KERNEL_BUSY_LOOP_SPIN_ELF) $(KERNEL_PEER_READ_ELF) $(KERNEL_CORE_READ_ELF) $(KERNEL_PEER_CONSOLE_ELF) $(KERNEL_PEER_TTY_ELF) $(KERNEL_CLOEXEC_ELF) $(KERNEL_CLOEXEC_CHECK_ELF) $(KERNEL_PPOLL_PROBE_ELF) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_BUSYBOX_EXTRAS) $(KERNEL_MUSL_LOADER) | $(KERNEL_USER_BUILD_DIR)
 	rm -f $@.tmp
 	truncate -s 2621440 $@.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 mke2fs -q -t ext2 -b 1024 -I 128 -N 1024 -O none -F -U 00000000-0000-0000-0000-000000000177 $@.tmp 2560
@@ -860,6 +863,7 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_TTY_ELF) $@.tmp:/bin/peer-tty
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_CLOEXEC_ELF) $@.tmp:/bin/cloexec
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_CLOEXEC_CHECK_ELF) $@.tmp:/bin/cloexec-check
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PPOLL_PROBE_ELF) $@.tmp:/bin/ppoll-probe
 	debugfs -w -R 'set_inode_field /bin/busybox.static mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/busybox-extras mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /lib/ld-musl-aarch64.so.1 mode 0100755' $@.tmp >/dev/null 2>&1
@@ -882,6 +886,7 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	debugfs -w -R 'set_inode_field /bin/peer-tty mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/cloexec mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/cloexec-check mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/ppoll-probe mode 0100755' $@.tmp >/dev/null 2>&1
 	E2FSPROGS_FAKE_TIME=1700000000 debugfs -w -R 'symlink /latest hello.txt' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /bin/busybox.static /bin/busybox' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /bin/busybox.static /bin/sh' $@.tmp >/dev/null 2>&1
@@ -994,6 +999,15 @@ $(KERNEL_CLOEXEC_ELF): $(KERNEL_CLOEXEC_O)
 
 $(KERNEL_CLOEXEC_CHECK_ELF): $(KERNEL_CLOEXEC_O)
 	$(LLD) -pie --no-dynamic-linker -e cloexec_check $< -o $@
+	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
+
+$(KERNEL_PPOLL_PROBE_O): $(KERNEL_PPOLL_PROBE_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
+	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry ppoll_probe --emit-depfile $@.d -o $@
+
+-include $(KERNEL_PPOLL_PROBE_O).d
+
+$(KERNEL_PPOLL_PROBE_ELF): $(KERNEL_PPOLL_PROBE_O)
+	$(LLD) -pie --no-dynamic-linker -e ppoll_probe $< -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
 $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_RPI5_MEMORY_TKB) $(KERNEL_FDT_TKB) \

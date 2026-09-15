@@ -383,6 +383,7 @@ def main() -> int:
     httpd_ready = False
     peer_tty_sent = False
     peer_tty_line_sent = False
+    ppoll_probe_byte_sent = False
     httpd_done_seen_at = None
     capture_started = time.monotonic()
     last_chunk_at = capture_started
@@ -472,6 +473,17 @@ def main() -> int:
                         args.payload_marker.encode("ascii") in output):
                     connection.write((args.payload + "\n").encode("ascii"))
                     payload_sent = True
+
+                # GitHub issue #9: /bin/ppoll-probe's child waits in ppoll on
+                # the terminal while its parent stays runnable. Its byte goes
+                # out only once the kernel says that ppoll blocked. A kernel
+                # that retried it in EL1 never says so, and the probe then
+                # waits for a byte this driver never sends.
+                if (not ppoll_probe_byte_sent and
+                        b"ppoll: stdin wait blocked beside a runnable process\n"
+                        in output):
+                    write_uart_line(connection, b"")
+                    ppoll_probe_byte_sent = True
 
                 # Publish the boot-time HTTP listener the moment the guest
                 # announces it. The host-side network peer talks to that

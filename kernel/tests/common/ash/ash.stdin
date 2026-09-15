@@ -39,6 +39,11 @@ mv /etc/mva /kept /etc/moved
 # GitHub issue #540: close-on-exec across execve. /bin/cloexec
 # flags fds 20 and 22, keeps 21, and execs /bin/cloexec-check.
 /bin/cloexec
+# GitHub issue #9: a ppoll on the terminal beside a runnable process. The
+# child of /bin/ppoll-probe waits in ppoll for fd 0 while its parent stays
+# runnable, so the wait has to block rather than retry in the kernel. The
+# driver types the byte it waits for once the kernel says it blocked.
+/bin/ppoll-probe
 # GitHub issue #544: a write six times the console transmit queue. On the
 # board the wire cannot keep up, so cat's write fills the queue, returns
 # short, and the next one sleeps until the TX interrupt has drained it; the
