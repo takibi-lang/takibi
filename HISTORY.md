@@ -15,6 +15,36 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-15: a kernel function nothing reads is a build error in 42 files (#540)
+
+`--reject-unused-functions` had checked one kernel file, `cpu.tkb`. The
+compiler half of #540 already stopped reporting assertion-only functions and
+exception hooks. The kernel half widens the check.
+
+First, entry points. Thirteen Takibi functions are reached only from kernel
+assembly (`bl kernel_syscall_dispatch` in user_entry.S and the like), and GDB
+calls one more by name (`kernel_process_trace_report`, from the oops lane).
+The Makefile declares all of them. The new `check_kernel_asm_entries.py`
+derives the assembly set from the `.S` branch, address and literal-pool
+operands, and fails if the Makefile's list differs in either direction. A
+missing name would make everything under it look dead, and a stale one would
+keep a dead function alive.
+
+Measured with every file in each target's unit checked: 90 reports on QEMU
+and 54 on RPi5, 47 of them on both. QEMU compiles `rpi5/pcie.tkb` and
+`usb_xhci.tkb` only so the link resolves, and 30 of its reports are those
+files. Forty-one files reported nothing on either target, and they are now
+checked, with `process.tkb` as the forty-second. Its four reports were two
+dead functions (deleted), the GDB entry, and the accessor the issue was filed
+about. That accessor reads a counter #448 kept because a reap handed a parent
+with no child was "observed but unexplained". Nothing had ever printed it. It
+is now an end-of-boot line, `process reap: unlinked=0` on both QEMU lanes, and
+a common view asserts it.
+
+The other files, and what each still reports, are recorded on #540.
+
+---
+
 ## 2026-09-14: terminal input across CPUs (#547)
 
 #546 closed the gap between a terminal read's look at the RX ring and its

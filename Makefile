@@ -246,9 +246,66 @@ slowcheck:
 LINUX_AMD64_TARGET      := x86_64-pc-linux-gnu
 LINUX_USER_DIR           := linux_user
 LINUX_UNUSED_CHECK       := --reject-unused-functions --external-entry main
+# GitHub issue #540: a function nothing reads is a build error in these
+# files. Assembly reaches the first list by name, which the compiler cannot
+# see; scripts/check_kernel_asm_entries.py keeps it equal to the set the
+# kernel .S files name. GDB calls the second list by name
+# (scripts/run_kernel_oops_qemutest.sh). A file joins KERNEL_UNUSED_CHECKED
+# once nothing in it is reported on either target.
+KERNEL_ASM_ENTRIES := main kernel_secondary_main \
+	el1_exception_evidence_from_frame kernel_mmu_init \
+	kernel_mmu_init_secondary kernel_secondary_idle_reenter \
+	kernel_syscall_block_return kernel_syscall_child_exec_return \
+	kernel_syscall_clone_child_return kernel_syscall_clone_parent_return \
+	kernel_syscall_dispatch kernel_syscall_resume_return \
+	process_image_handle_data_abort
+KERNEL_DEBUGGER_ENTRIES := kernel_process_trace_report
+KERNEL_UNUSED_CHECKED := \
+	kernel/arch/arm64/boot/cpu.tkb \
+	kernel/arch/arm64/kernel/exception_evidence.tkb \
+	kernel/arch/arm64/kernel/platform_uart_common.tkb \
+	kernel/arch/arm64/mm/mmu.tkb \
+	kernel/drivers/serial/pl011.tkb \
+	kernel/drivers/serial/uart_rx_ring.tkb \
+	kernel/fs/procfs.tkb \
+	kernel/init/boot_memory.tkb \
+	kernel/init/boot_prologue.tkb \
+	kernel/init/contention_probes.tkb \
+	kernel/init/ext2_fixture.tkb \
+	kernel/init/secondary_boot.tkb \
+	kernel/init/test_driver.tkb \
+	kernel/kernel/asid_contention_evidence.tkb \
+	kernel/kernel/freelist_contention_evidence.tkb \
+	kernel/kernel/init_once_contention_evidence.tkb \
+	kernel/kernel/occupancy_drain_evidence.tkb \
+	kernel/kernel/page_contention_evidence.tkb \
+	kernel/kernel/pid_contention_evidence.tkb \
+	kernel/kernel/pool_walk_contention_evidence.tkb \
+	kernel/kernel/process.tkb \
+	kernel/kernel/process_test_evidence.tkb \
+	kernel/kernel/profile_samples.tkb \
+	kernel/kernel/profile_timeline.tkb \
+	kernel/kernel/schedule_contention_evidence.tkb \
+	kernel/kernel/syscall_test_evidence.tkb \
+	kernel/kernel/tag_contention_evidence.tkb \
+	kernel/kernel/tcp_connection_contention_evidence.tkb \
+	kernel/lib/diagnostic_ring.tkb \
+	kernel/lib/init_once.tkb \
+	kernel/lib/intrusive_pool.tkb \
+	kernel/lib/locked_cell.tkb \
+	kernel/lib/occupancy.tkb \
+	kernel/lib/pool_lock.tkb \
+	kernel/lib/spinlock.tkb \
+	kernel/net/arp.tkb \
+	kernel/net/checksum.tkb \
+	kernel/net/icmp.tkb \
+	kernel/net/socket_capability.tkb \
+	kernel/printk/log.tkb \
+	kernel/printk/number.tkb \
+	kernel/printk/peer_console.tkb
 KERNEL_UNUSED_CHECK      := --reject-unused-functions \
-	--external-entry main --external-entry kernel_secondary_main \
-	--check-unused-file kernel/arch/arm64/boot/cpu.tkb
+	$(foreach entry,$(KERNEL_ASM_ENTRIES) $(KERNEL_DEBUGGER_ENTRIES),--external-entry $(entry)) \
+	$(foreach file,$(KERNEL_UNUSED_CHECKED),--check-unused-file $(file))
 LINUX_USER_BUILD_DIR     := $(LINUX_USER_DIR)/build
 COMMON_LINUX_DIR         := $(LINUX_USER_DIR)/common_linux
 COMMON_LINUX_STARTUP_S   := $(COMMON_LINUX_DIR)/startup.S

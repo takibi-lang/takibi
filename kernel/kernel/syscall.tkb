@@ -4483,8 +4483,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         let wait_options: usize = x2;
         // GitHub issue #244: x0's expected pid is the live child's own
         // pid if it hasn't exited yet, or the last reaped child's pid if
-        // it has -- kernel_process_current_child_pid() alone would wrongly
-        // read back 0 once reaped (has_child cleared), and a fixed
+        // it has -- the live child's pid alone would wrongly read back
+        // 0 once reaped (has_child cleared), and a fixed
         // literal (this used to be the literal 2, the only pid the old
         // two-process model could ever produce) is wrong for any process
         // other than the original root.
@@ -4500,7 +4500,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
              requested_pid == kernel_process_last_child_pid());
         // GitHub issue #248: no longer rejects a child-status caller here
         // (kernel_process_is_child() used to gate this to the tree root
-        // only) -- kernel_process_current_child_pid()/_last_child_pid()
+        // only) -- kernel_process_current_has_child_pid()/_last_child_pid()
         // above are already relative to whichever slot is calling, and
         // kernel/kernel/process.tkb's own child-exit/wait bookkeeping is
         // now per-slot too, so any live process may legitimately wait4()

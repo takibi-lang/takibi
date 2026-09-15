@@ -3203,19 +3203,6 @@ fn kernel_process_exec_failure_render() {
     }
 }
 
-fn kernel_process_trace_current(event: usize, peer: ProcessHandle,
-                                aux: usize) !{unsafe} {
-    if (execution_here().current_live == false) { return; }
-    let mut current: ProcessHandle = execution_here().current_handle;
-    let state: usize = kernel_process_crash_state();
-    let reason: usize = kernel_process_crash_wait_reason();
-    kernel_process_trace_record(
-        event, scheduled_process_pid_of_handle(current), current.generation,
-        scheduled_process_pid_of_handle(peer), peer.generation, state, reason,
-        current.pool_index, scheduled_process_peek_saved_sp(current.pool_index),
-        aux);
-}
-
 fn kernel_process_trace_address_space_activate(root: usize) !{unsafe} {
     if (execution_here().current_live == false) { return; }
     let mut current: ProcessHandle = execution_here().current_handle;
@@ -6382,23 +6369,6 @@ fn kernel_process_current_root() -> AddressSpaceRoot {
             execution_here().current_handle.pool_index);
     }
     return address_space_boot_root();
-}
-
-// GitHub issue #245: wait4's pid argument used to be checked against the
-// literal 2 (the only child pid the old two-process model could ever
-// produce). Current's own live child (if any) can now be any pool_index
-// + 1, so callers validating a specific wait4(pid, ...) request compare
-// against this instead of a fixed number. Returns 0 (never a valid pid --
-// pids start at 1) if current has no live child.
-fn kernel_process_current_child_pid() -> usize {
-    if (execution_here().current_live == false ||
-        scheduled_process_record_of(execution_here().current_handle)
-            .has_first_child ==
-            false) {
-        return 0;
-    }
-    return scheduled_process_pid_of_handle(
-        scheduled_process_record_of(execution_here().current_handle).first_child);
 }
 
 // Finish an exit handoff after the successor has been reserved as Running.
