@@ -2881,6 +2881,13 @@ fn kernel_process_stack_idle_complete() {
         process_run_unlock(guard);
         kernel_syscall_fail_stop(0);
     }
+    // Leave the exiting process's root before core 0 may reap it. The
+    // release there switches only ITS OWN core off a root it frees, and
+    // this core idles with no process to activate. It kept TTBR0 on a
+    // freed root, ran on cached global kernel entries, and at the first
+    // miss faulted fetching its own vector, forever, with IRQs masked:
+    // the DDB lane's peer that never answered a world stop.
+    address_space_activate_root(0);
     scheduled_process_record_of(outgoing).stack_owner_cpu =
         PROCESS_STACK_UNOWNED;
     execution_here().stack_live = false;

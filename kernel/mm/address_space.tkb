@@ -81,6 +81,12 @@ private let mut address_space_backing_missing_count:
 // freed is the one on the CPU. On two cores that read would answer about
 // the OTHER core's root, so a release could leave this core running on a
 // root it had just torn down, or skip switching a core off one it had.
+//
+// It still answers only for the releasing core. No other core can hold the
+// root by then: a process is released only after it is reaped, and a core
+// gives up an exiting process's root before the process can be reaped --
+// through its successor's activation, or, going idle, by activating root 0
+// in kernel_process_stack_idle_complete under the run lock.
 private let mut address_space_active_slot: [usize; KERNEL_MAX_CORES];
 
 private fn address_space_active_slot_here() -> usize {
