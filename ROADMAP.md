@@ -492,12 +492,10 @@ a compiler change that is already committed.
    them is the accessor the issue was filed about. The list is on #540.
    It also suggests deriving the entry list from the `.S` branch and
    address operands rather than writing it by hand.
-3. **#549: whether `scripts/check_stale_depfiles.py` stays.** Takibi's
+3. **#549: `scripts/check_stale_depfiles.py` retired, 2026-09-15.** Takibi's
    depfiles now carry `-MP`-style empty rules. A deleted prerequisite
-   therefore no longer stops make, and that is the failure the check exists
-   for. Its parser was changed, with the maintainer's approval, to read only
-   the first line. Keeping it or retiring it is its owner's call. If it
-   goes, its `docs/BUILD_CHECKS.md` row is this territory's to remove.
+   therefore no longer stops make, and that was the only failure the check
+   existed for, so it went, together with its `docs/BUILD_CHECKS.md` row.
 4. **Done: the stale #476 comment in `kernel/lib/diagnostic_ring.tkb`.**
    It now says a forgotten scalar field is a compile error at
    `publish_commit`. Once territories stopped being directories, Territory B

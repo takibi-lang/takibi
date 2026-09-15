@@ -83,7 +83,6 @@ suffix is description; dispatch reads only the prefix.
 | `check_run_kernel_shell_console_controls.py` | Regression controls for the interactive console's UART marker detection |
 | `check_run_kernel_uart_driver_controls.py` | Regression controls for the UART driver's timeout diagnosis |
 | `check_single_dune_invocation.py` | exactly one rule runs `dune build`, so no second make invocation races its lock |
-| `check_stale_depfiles.py` | generated kernel depfiles name live prerequisites |
 | `check_validate_kernel_dmesg_timestamps_controls.py` | Controls for the dmesg timestamp validator, which had none |
 
 ## `slowcheck_*` -- the slow lane
