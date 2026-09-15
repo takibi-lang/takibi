@@ -499,15 +499,6 @@ fn process_image_pte_read(index: usize) -> usize {
     return address_space_pte_read(process_image_target_root_here(), index);
 }
 
-fn process_image_pte_write(index: usize, value: usize)
-        -> AddressSpacePteWriteResult {
-    return address_space_pte_write(process_image_target_root_here(), index, value);
-}
-
-fn process_image_pte_clear(index: usize) {
-    address_space_pte_clear(process_image_target_root_here(), index);
-}
-
 // Do not transfer PageOwner until the lazy-L3 allocation and PTE write have
 // both succeeded. This is the mapping-side half of address_space.tkb's OOM
 // contract; the failure arm returns the still-owned physical page directly.
@@ -1939,25 +1930,6 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
     }
 }
 
-// Dynamic ELF exec needs the same root-scoped mapping path as static ELF
-// exec. The pair mapper deliberately preserves process_image_pair_probe's
-// stack/heap layout and only selects the child root before it runs.
-fn process_image_pair_map_in_root(primary: DistroElfLoadPlan,
-                                  interpreter: DistroElfLoadPlan,
-                                  interpreter_bias: usize,
-                                  argv: []u8,
-                                  argc: usize,
-                                  root: usize)
-        -> ProcessImagePairProbeResult {
-    if (scheduled_process_slot_valid(root) == false ||
-        address_space_is_live(root) == false) {
-        return ProcessImagePairProbeResult::Invalid;
-    }
-    process_image_set_target_root_here(root);
-    return process_image_pair_probe(
-        primary, interpreter, interpreter_bias, argv, argc);
-}
-
 // Map a dynamic application/interpreter pair whose two backing files both
 // reside on ext2. Metadata plans retain their separate header windows while
 // PT_LOAD bytes switch from primary_inode to interpreter_inode between the
@@ -2161,10 +2133,6 @@ fn process_image_stack_grew_pages(count: usize) -> bool {
 fn process_image_active_page_count(root: usize) -> usize !{unsafe} {
     if (scheduled_process_slot_valid(root) == false) { return 0; }
     return process_image_record_at(root).active_page_count;
-}
-
-fn process_image_stack_grew(pages: borrow ProcessImagePages[image]) -> bool {
-    return process_image_stack_grew_pages(pages.count);
 }
 
 fn process_image_heap_range(pages: borrow ProcessImagePages[image])

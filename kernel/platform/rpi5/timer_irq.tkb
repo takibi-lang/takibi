@@ -5,7 +5,7 @@
 // banked per-CPU by the GIC itself, so unlike UART0/USB0's SPIs this needs
 // no RP1/MIP0 routing and no GICD_ITARGETSR write.
 //
-// kernel/arch/arm64/kernel/timer.tkb's set_cntp_tval/enable_cntp/disable_cntp
+// kernel/arch/arm64/kernel/timer.tkb's set_cntp_tval/enable_cntp
 // (GitHub issue #226; originally hand-written timer.S stubs, staged ahead
 // of this work -- their own header comment already named "the RPi5
 // scheduler port" as the reason they exist) were never called from any

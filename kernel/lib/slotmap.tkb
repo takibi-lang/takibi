@@ -5,8 +5,8 @@
 // FreelistOwner has been handed off elsewhere.
 //
 // Why this exists, not just FreelistCore directly: several kernel/ call
-// sites (kernel/kernel/process.tkb's scheduled_process_matches(),
-// kernel/net/tcp.tkb's tcp_connection_matches()) need to re-validate a
+// sites (kernel/kernel/process.tkb's scheduled_process_matches()) need
+// to re-validate a
 // plain (index, generation) handle against the CURRENT occupant later,
 // without holding the linear FreelistOwner proof the whole time -- e.g. a
 // handle carried across a lock/stable_replace boundary, where the linear

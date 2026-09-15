@@ -192,11 +192,6 @@ fn virtio_blk_write_sector(sector: u32,
     return virtio_blk_submit(VIRTIO_BLK_T_OUT, sector, source, true);
 }
 
-fn virtio_blk_probe() -> bool {
-    let mut probe: [u8; 512];
-    return virtio_blk_read_sector(0, probe as []u8);
-}
-
 fn virtio_blk_capacity_sectors() -> usize !{unsafe} {
     if (virtio_blk_init() == false) { return 0; }
     let low: *io u32 = unsafe { (virtio_blk_base + 0x100) as *io u32 };

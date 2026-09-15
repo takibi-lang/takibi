@@ -133,13 +133,12 @@ The next multicore increment is phase B. Its order is now:
    under its waiting shell, and after `continue` sees it take its line. Only
    this one fixture reads the terminal on a peer; the shells stay on CPU 0.
    Admitting them is part of widening admission in entry 6.
-5. **#549's scripts half is decided (2026-09-15):** the stale-depfile check
-   is retired. **#540's Makefile half has its first increment:** the entries
-   kernel assembly reaches by name are declared and checked against the
-   `.S` files, and 42 files reject a function nothing reads. The remaining
-   files and their counts are on #540. Several are platform link artifacts,
-   and several are shared with linux_user tests, so each needs its own look
-   rather than a sweep.
+5. **#549 and #540 are complete (2026-09-15).** The stale-depfile check is
+   retired. A kernel function nothing reads is a build error in every file a
+   target compiles, except five exemptions whose reasons the Makefile states,
+   and a buildcheck refuses a compiled file that is in no list. The sweep
+   found one real regression: execve had stopped closing close-on-exec
+   descriptors, which is fixed.
 6. Widen admission one subsystem at a time. Each newly admitted workload owns
    the synchronization audit for every filesystem, network, console, and
    device path it reaches, plus QEMU and four-core RPi5 evidence. Do not turn
@@ -486,14 +485,14 @@ a compiler change that is already committed.
    Only `ProcessRunGuard` was marked. Other guards whose acquire masks IRQs
    can take the same word. #528 stays open until the kernel carries the
    annotations.
-2. **#540: the Makefile half, first increment landed 2026-09-15.** The
+2. **#540: the Makefile half, complete 2026-09-15.** The
    compiler no longer reports assertion-only functions or exception hooks
    (commit "keep assertion-only functions and every exception hook
    reachable"). The Makefile now declares the functions kernel assembly
    calls by name. A check derives that set from the `.S` operands and
-   compares it with the declaration. The Makefile also checks 42 files,
-   including `process.tkb`, whose accessor the issue was filed about now
-   feeds a view.
+   compares it with the declaration. Each target checks every file it
+   compiles, or names why not, and `process.tkb`'s accessor, the one the
+   issue was filed about, now feeds a view.
 3. **#549: `scripts/check_stale_depfiles.py` retired, 2026-09-15.** Takibi's
    depfiles now carry `-MP`-style empty rules. A deleted prerequisite
    therefore no longer stops make, and that was the only failure the check

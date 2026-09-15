@@ -569,61 +569,6 @@ private fn workload_profile_note_selected(pid: usize) {
     }
 }
 
-fn workload_busy_pair_reset() {
-    workload_profile_active = false;
-    workload_busy_pair.a_pid = 0;
-    workload_busy_pair.b_pid = 0;
-    workload_busy_pair.a_restarts = 0;
-    workload_busy_pair.b_restarts = 0;
-    workload_busy_pair.a_rounds = 0;
-    workload_busy_pair.b_rounds = 0;
-    workload_busy_pair.a_checksum = 0;
-    workload_busy_pair.b_checksum = 0;
-    workload_busy_pair.a_base = 0;
-    workload_busy_pair.b_base = 0;
-    workload_busy_pair.both_running = false;
-    workload_busy_pair.start_requested = false;
-    workload_busy_pair.max_skew = 0;
-    workload_busy_pair.a_slices = 0;
-    workload_busy_pair.b_slices = 0;
-    workload_busy_pair.a_ticks = 0;
-    workload_busy_pair.b_ticks = 0;
-    workload_busy_pair.last_pid = 0;
-    workload_busy_pair.last_tick = 0;
-    workload_busy_pair.start_ticks = 0;
-    workload_busy_pair.end_ticks = 0;
-    workload_busy_pair.profile_cpu = 0;
-    workload_busy_pair.reported = false;
-    workload_busy_pair.finish_ready = false;
-    workload_busy_pair.finish_requested = false;
-    workload_busy_pair.restart_requested = false;
-    workload_busy_pair.restart_a_pid_before = 0;
-    workload_busy_pair.restart_b_pid_before = 0;
-    workload_busy_pair.restart_b_rounds_before = 0;
-    workload_busy_pair.restart_report_state = WorkloadRestartReportState::Waiting;
-    workload_busy_pair.a_cpu_seen = false;
-    workload_busy_pair.b_cpu_seen = false;
-    workload_busy_pair.a_migrations = 0;
-    workload_busy_pair.b_migrations = 0;
-    workload_busy_pair.migration_reported = false;
-    workload_busy_pair.peer_exit_pid = 0;
-    workload_busy_pair.peer_exit_tag = 0;
-    workload_busy_pair.peer_exit_cpu = 0;
-    workload_busy_pair.peer_exit_stack_released = false;
-    workload_busy_pair.peer_exit_reported = false;
-    workload_busy_pair.peer_read_pid = 0;
-    workload_busy_pair.peer_read_reported = false;
-    workload_busy_pair.peer_console_pid = 0;
-    workload_busy_pair.peer_console_initial_reported = false;
-    workload_busy_pair.peer_console_holding = false;
-    workload_busy_pair.peer_console_pending = false;
-    workload_busy_pair.peer_console_reported = false;
-    workload_busy_pair.peer_tty_pid = 0;
-    workload_busy_pair.peer_tty_reading = false;
-    workload_busy_pair.peer_tty_reported = false;
-    workload_busy_pair.refused = 0;
-}
-
 // Every time the scheduler picks one of the pair, counted where the pick
 // happens. This is the fairness question asked of the SCHEDULER rather
 // than of the workload: two processes doing identical work should be
@@ -682,11 +627,6 @@ fn workload_busy_note_selected_locked(
 // console-owning core because it exits once to exercise init's SIGCHLD respawn;
 // moving that handoff to the peer would admit init and its I/O descendants to
 // subsystems whose non-pool state has not completed the multicore audit.
-fn workload_busy_secondary_candidate_locked(
-        guard: borrow ProcessRunGuard[lock], pid: usize) -> bool {
-    return workload_busy_secondary_candidate(pid);
-}
-
 fn workload_busy_secondary_candidate(pid: usize) -> bool {
     if (workload_busy_pair.a_pid == 0 || workload_busy_pair.b_pid == 0) {
         return false;

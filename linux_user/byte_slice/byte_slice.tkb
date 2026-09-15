@@ -53,18 +53,6 @@ fn app_main() {
     uart_puts(" empty=");
     uart_print(slice_eq(bs"", bs""));
 
-    uart_puts(" prefix=");
-    uart_print(byte_slice_starts_with(bs"proc/7/stat",
-                                      bs"proc/"));
-    uart_puts(" whole=");
-    uart_print(byte_slice_starts_with(bs"proc",
-                                      bs"proc"));
-    uart_puts(" long=");
-    uart_print(byte_slice_starts_with(bs"proc",
-                                      bs"proc/"));
-    uart_puts(" empty-prefix=");
-    uart_print(byte_slice_starts_with(bs"proc", bs""));
-
     uart_puts(" split-middle=");
     print_retained_split(bs"proc/7", 0x2F);
     uart_puts(" split-zero=");

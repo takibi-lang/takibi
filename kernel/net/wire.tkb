@@ -13,13 +13,13 @@
 // swapped numeric value, so a `u16be`/`u32be` type adds nothing for them
 // (the `packed be` sugar already leaves array-typed fields untouched).
 //
-// offsetof(...) constants and read_u16be/write_u16be/read_u32be/
-// write_u32be below remain in use for two things that stay pure
+// offsetof(...) constants and write_u16be below remain in use for two
+// things that stay pure
 // byte-offset/byte-slice operations even after the tcp.tkb migration:
 // tcp.tkb's IPv4-pseudo-header checksum scratch buffer (`pseudo:
 // [u8;12]`, never a real wire struct, so there is no field to type) and
-// arp.tkb/icmp.tkb's leftover IP-address-field offsets. Neither read nor
-// write_u16be/u32be ever names a field's type, so both are unaffected by
+// arp.tkb/icmp.tkb's leftover IP-address-field offsets. Neither ever
+// names a field's type, so both are unaffected by
 // struct field type changes: offsetof computes an identical byte offset
 // whether a field is `[u8; 2]` or `u16be` (same size).
 struct packed be EthHdr {
@@ -81,23 +81,7 @@ const TCP_FLAG_ACK: u8 = 0x10;
 const PROTO_TCP: u8 = 6;
 const TCP_INITIAL_SEQ: u32 = 0x00001000;
 
-fn read_u16be(bytes: borrow [u8; 2..]) -> i32 {
-    return ((bytes[0] as i32) << 8) | (bytes[1] as i32);
-}
-
 fn write_u16be(bytes: borrow [u8; 2..], value: i32) {
     bytes[0] = (value >> 8) as u8;
     bytes[1] = value as u8;
-}
-
-fn read_u32be(bytes: borrow [u8; 4..]) -> i32 {
-    return ((bytes[0] as i32) << 24) | ((bytes[1] as i32) << 16) |
-           ((bytes[2] as i32) << 8) | (bytes[3] as i32);
-}
-
-fn write_u32be(bytes: borrow [u8; 4..], value: i32) {
-    bytes[0] = (value >> 24) as u8;
-    bytes[1] = (value >> 16) as u8;
-    bytes[2] = (value >> 8) as u8;
-    bytes[3] = value as u8;
 }

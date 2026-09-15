@@ -165,7 +165,7 @@ fn page_ddb_physical_address_readable(
 // scrubbed on release by intrusive_pool itself (#356). Nothing here was a
 // disclosure control: it only ever cleared 128 bytes of 4096.
 // This file's struct-page equivalent. The occupancy bit is needed because
-// page_transferred_release() and page_transferred_release_physical() accept
+// page_transferred_release_physical() and page_mapping_release_physical() accept
 // plain integers after linear ownership has been intentionally erased. Add
 // future per-page fields (reference counts, COW/shared flags, and similar)
 // here, not as a new parallel array.
@@ -694,8 +694,8 @@ private fn page_run_release_indices(pool: borrow *BootPagePool, first: usize,
 // recursive, so the entry points below split into two layers: a public one
 // that takes the lock and a private `_locked` one that does the work. Two
 // of them are called both directly and from another entry point
-// (page_transferred_release from page_mapping_release_physical and from
-// page_transferred_release_physical), and locking those without the split
+// (the transferred-page release, from page_mapping_release_physical and
+// from page_transferred_release_physical), and locking those without the split
 // would deadlock on the second acquire.
 //
 // This assertion names the OTHER number, not the core count, and that is
@@ -1281,10 +1281,6 @@ fn page_physical_address(owner: borrow PageOwner[page]) -> usize {
     return owner.physical;
 }
 
-fn page_identity(owner: borrow PageOwner[page]) -> usize @ page {
-    return owner.generation;
-}
-
 fn page_bytes(owner: borrow PageOwner[page]) -> [u8; PAGE_SIZE..] @ page !{unsafe} {
     let address: usize = owner.physical;
     let base: *u8 = unsafe { address as *u8 };
@@ -1600,8 +1596,9 @@ fn page_mapping_release_physical(physical: usize) !{unsafe} {
 // bit. The coarser owner that called page_owner_transfer_index only kept the
 // index, so a fabricated generation is still used for the free-list link.
 // GitHub issue #479: the shared body. Callers that already hold the lock
-// use this; page_transferred_release below is the entry point that takes
-// it. Two other entry points call THIS, which is why the split exists.
+// use this. page_mapping_release_physical and
+// page_transferred_release_physical both call THIS, which is why the split
+// exists.
 private fn page_transferred_release_locked(pool: borrow *BootPagePool,
                                            index: usize) !{unsafe} {
     if (index >= page_capacity(pool)) { return; }
@@ -1614,13 +1611,6 @@ private fn page_transferred_release_locked(pool: borrow *BootPagePool,
     (*meta).owner = PageOwnerTag::Unowned;
     (*meta).map_refcount = 0;
     page_freelist_push(pool, index, 0);
-}
-
-fn page_transferred_release(index: usize) !{unsafe} {
-    let guard = locked_cell_take(&boot_page_pool_cell);
-    let pool = locked_cell_value(guard, &boot_page_pool_cell);
-    page_transferred_release_locked(pool, index);
-    locked_cell_give(&boot_page_pool_cell, guard);
 }
 
 fn page_transferred_release_physical(physical: usize) !{unsafe} {

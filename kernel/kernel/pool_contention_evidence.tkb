@@ -427,15 +427,3 @@ fn pool_contention_probe() -> bool !{unsafe} {
     return primary == CONTENTION_ROUNDS && secondary == CONTENTION_ROUNDS &&
            overlap > 0 && refused == 0 && live == 0;
 }
-
-fn pool_contention_primary_cycles() -> usize !{unsafe} {
-    return unsafe {
-        atomic_load_acquire(contention_primary_cycles_address())
-    };
-}
-
-fn pool_contention_secondary_cycles() -> usize !{unsafe} {
-    return unsafe {
-        atomic_load_acquire(contention_secondary_cycles_address())
-    };
-}

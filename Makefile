@@ -246,12 +246,33 @@ slowcheck:
 LINUX_AMD64_TARGET      := x86_64-pc-linux-gnu
 LINUX_USER_DIR           := linux_user
 LINUX_UNUSED_CHECK       := --reject-unused-functions --external-entry main
-# GitHub issue #540: a function nothing reads is a build error in these
-# files. Assembly reaches the first list by name, which the compiler cannot
-# see; scripts/check_kernel_asm_entries.py keeps it equal to the set the
-# kernel .S files name. GDB calls the second list by name
-# (scripts/run_kernel_oops_qemutest.sh). A file joins KERNEL_UNUSED_CHECKED
-# once nothing in it is reported on either target.
+# GitHub issue #540: a function nothing reads is a build error. Assembly
+# reaches KERNEL_ASM_ENTRIES by name, which the compiler cannot see;
+# scripts/check_kernel_asm_entries.py keeps that list equal to the set the
+# kernel .S files name. GDB calls KERNEL_DEBUGGER_ENTRIES by name: the oops
+# lane's trace report, and kernel/MEMORY_MAP.md's page-owner lookup.
+#
+# Every kernel file a target compiles is checked on that target, except the
+# files named below, and scripts/buildcheck_kernel_unused_coverage.py fails
+# the build when a compiled file is in neither kind of list. The files QEMU
+# links only so the program resolves -- rpi5/pcie.tkb, the USB drivers and
+# the block cache -- are checked on RPi5, and the page allocator's QEMU-only
+# discontiguous probe and virtio block capacity keep page.tkb and
+# virtio_blk.tkb on QEMU's list.
+#
+# KERNEL_UNUSED_EXEMPT, with the reason each is not checked:
+# - boot/fdt.tkb: each platform uses its own DTB lookups, and linux_user/fdt
+#   drives the whole parser;
+# - drivers/block/memory.tkb: each platform picks one of its two block
+#   devices;
+# - lib/freelist.tkb: generic API the slotmap generics call, driven whole by
+#   linux_user;
+# - lib/task_mutex.tkb: linux_user/spinlock drives init and is_held, which
+#   the kernel's static instances never need;
+# - platform/rpi5/usb_xhci.tkb: keeps the FatFs-shaped disk_* API its
+#   comments describe.
+# KERNEL_UNUSED_NO_FUNCTIONS holds files the flag rejects outright, because
+# they define no Takibi function (_extern.tkb files are skipped by name).
 KERNEL_ASM_ENTRIES := main kernel_secondary_main \
 	el1_exception_evidence_from_frame kernel_mmu_init \
 	kernel_mmu_init_secondary kernel_secondary_idle_reenter \
@@ -259,14 +280,31 @@ KERNEL_ASM_ENTRIES := main kernel_secondary_main \
 	kernel_syscall_clone_child_return kernel_syscall_clone_parent_return \
 	kernel_syscall_dispatch kernel_syscall_resume_return \
 	process_image_handle_data_abort
-KERNEL_DEBUGGER_ENTRIES := kernel_process_trace_report
+KERNEL_DEBUGGER_ENTRIES := kernel_process_trace_report page_owner_description
+KERNEL_UNUSED_EXEMPT := \
+	kernel/boot/fdt.tkb \
+	kernel/drivers/block/memory.tkb \
+	kernel/lib/freelist.tkb \
+	kernel/lib/task_mutex.tkb \
+	kernel/platform/rpi5/usb_xhci.tkb
+KERNEL_UNUSED_NO_FUNCTIONS := \
+	kernel/arch/arm64/kernel/exception_frame.tkb \
+	kernel/arch/arm64/kernel/vector_table.tkb \
+	kernel/lib/execution_model.tkb \
+	kernel/lib/slotmap.tkb \
+	kernel/net/netconfig.tkb
 KERNEL_UNUSED_CHECKED := \
 	kernel/arch/arm64/boot/cpu.tkb \
 	kernel/arch/arm64/kernel/exception_evidence.tkb \
 	kernel/arch/arm64/kernel/platform_uart_common.tkb \
+	kernel/arch/arm64/kernel/secondary.tkb \
+	kernel/arch/arm64/kernel/timer.tkb \
+	kernel/arch/arm64/mm/asid.tkb \
 	kernel/arch/arm64/mm/mmu.tkb \
 	kernel/drivers/serial/pl011.tkb \
 	kernel/drivers/serial/uart_rx_ring.tkb \
+	kernel/fs/elf64.tkb \
+	kernel/fs/ext2/ext2.tkb \
 	kernel/fs/procfs.tkb \
 	kernel/init/boot_memory.tkb \
 	kernel/init/boot_prologue.tkb \
@@ -275,37 +313,86 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/init/secondary_boot.tkb \
 	kernel/init/test_driver.tkb \
 	kernel/kernel/asid_contention_evidence.tkb \
+	kernel/kernel/fd_table.tkb \
 	kernel/kernel/freelist_contention_evidence.tkb \
 	kernel/kernel/init_once_contention_evidence.tkb \
 	kernel/kernel/occupancy_drain_evidence.tkb \
 	kernel/kernel/page_contention_evidence.tkb \
 	kernel/kernel/pid_contention_evidence.tkb \
+	kernel/kernel/pool_contention_evidence.tkb \
 	kernel/kernel/pool_walk_contention_evidence.tkb \
 	kernel/kernel/process.tkb \
 	kernel/kernel/process_test_evidence.tkb \
 	kernel/kernel/profile_samples.tkb \
 	kernel/kernel/profile_timeline.tkb \
 	kernel/kernel/schedule_contention_evidence.tkb \
+	kernel/kernel/syscall.tkb \
 	kernel/kernel/syscall_test_evidence.tkb \
+	kernel/kernel/syscall_test_lifecycle.tkb \
 	kernel/kernel/tag_contention_evidence.tkb \
 	kernel/kernel/tcp_connection_contention_evidence.tkb \
+	kernel/kernel/workload_evidence.tkb \
+	kernel/lib/byte_slice.tkb \
 	kernel/lib/diagnostic_ring.tkb \
 	kernel/lib/init_once.tkb \
 	kernel/lib/intrusive_pool.tkb \
 	kernel/lib/locked_cell.tkb \
+	kernel/lib/mutex.tkb \
 	kernel/lib/occupancy.tkb \
 	kernel/lib/pool_lock.tkb \
 	kernel/lib/spinlock.tkb \
+	kernel/mm/address_space.tkb \
+	kernel/mm/process_image.tkb \
+	kernel/mm/user_memory.tkb \
 	kernel/net/arp.tkb \
 	kernel/net/checksum.tkb \
 	kernel/net/icmp.tkb \
 	kernel/net/socket_capability.tkb \
+	kernel/net/tcp.tkb \
+	kernel/net/wire.tkb \
 	kernel/printk/log.tkb \
 	kernel/printk/number.tkb \
 	kernel/printk/peer_console.tkb
+KERNEL_UNUSED_CHECKED_QEMU := \
+	kernel/drivers/block/virtio_blk.tkb \
+	kernel/drivers/net/virtio_net.tkb \
+	kernel/mm/page.tkb \
+	kernel/platform/qemu/init.tkb \
+	kernel/platform/qemu/intc.tkb \
+	kernel/platform/qemu/memory.tkb \
+	kernel/platform/qemu/mmu_layout.tkb \
+	kernel/platform/qemu/timer_irq.tkb \
+	kernel/platform/qemu/uart.tkb
+KERNEL_UNUSED_CHECKED_RPI5 := \
+	kernel/drivers/block/block_cache.tkb \
+	kernel/drivers/net/rp1_gem.tkb \
+	kernel/drivers/usb/config_descriptor.tkb \
+	kernel/drivers/usb/init_report.tkb \
+	kernel/platform/rpi5/gic_dtb.tkb \
+	kernel/platform/rpi5/init.tkb \
+	kernel/platform/rpi5/intc.tkb \
+	kernel/platform/rpi5/memory.tkb \
+	kernel/platform/rpi5/mip_dtb.tkb \
+	kernel/platform/rpi5/mmu_layout.tkb \
+	kernel/platform/rpi5/pcie.tkb \
+	kernel/platform/rpi5/pcie_address_map_dtb.tkb \
+	kernel/platform/rpi5/pcie_dtb.tkb \
+	kernel/platform/rpi5/pcie_support_dtb.tkb \
+	kernel/platform/rpi5/psci_dtb.tkb \
+	kernel/platform/rpi5/rp1_dtb.tkb \
+	kernel/platform/rpi5/rp1_gem_dtb.tkb \
+	kernel/platform/rpi5/system_timer_dtb.tkb \
+	kernel/platform/rpi5/timer_irq.tkb \
+	kernel/platform/rpi5/uart.tkb \
+	kernel/platform/rpi5/usb_provision.tkb \
+	kernel/platform/rpi5/usb_xhci_dtb.tkb
 KERNEL_UNUSED_CHECK      := --reject-unused-functions \
 	$(foreach entry,$(KERNEL_ASM_ENTRIES) $(KERNEL_DEBUGGER_ENTRIES),--external-entry $(entry)) \
 	$(foreach file,$(KERNEL_UNUSED_CHECKED),--check-unused-file $(file))
+KERNEL_UNUSED_CHECK_QEMU := $(KERNEL_UNUSED_CHECK) \
+	$(foreach file,$(KERNEL_UNUSED_CHECKED_QEMU),--check-unused-file $(file))
+KERNEL_UNUSED_CHECK_RPI5 := $(KERNEL_UNUSED_CHECK) \
+	$(foreach file,$(KERNEL_UNUSED_CHECKED_RPI5),--check-unused-file $(file))
 LINUX_USER_BUILD_DIR     := $(LINUX_USER_DIR)/build
 COMMON_LINUX_DIR         := $(LINUX_USER_DIR)/common_linux
 COMMON_LINUX_STARTUP_S   := $(COMMON_LINUX_DIR)/startup.S
@@ -911,7 +998,8 @@ $(KERNEL_CLOEXEC_CHECK_ELF): $(KERNEL_CLOEXEC_O)
 
 $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_RPI5_MEMORY_TKB) $(KERNEL_FDT_TKB) \
     $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_INTC_TKB) $(KERNEL_RPI5_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --frame-pointers --forbid-trap $(KERNEL_UNUSED_CHECK) --emit-depfile $@.d -o $@
+	$(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --frame-pointers --forbid-trap $(KERNEL_UNUSED_CHECK_RPI5) --emit-depfile $@.d -o $@
+	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.d
 
 # GitHub issue #306: same depfile fix as $(KERNEL_QEMU_MAIN_O)'s own, for
 # this target's own hand-written prerequisite list above.
@@ -926,7 +1014,8 @@ $(KERNEL_RPI5_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_
 # ordinary image, with DWARF added only to the host ELF. Depending on main.o
 # gives this second compile its complete depfile-backed source boundary.
 $(KERNEL_RPI5_MAIN_DEBUG_O): $(KERNEL_RPI5_MAIN_O)
-	$(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $(KERNEL_RPI5_MAIN_TKB) --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --frame-pointers --forbid-trap $(KERNEL_UNUSED_CHECK) -g --emit-depfile $@.d -o $@
+	$(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $(KERNEL_RPI5_MAIN_TKB) --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --frame-pointers --forbid-trap $(KERNEL_UNUSED_CHECK_RPI5) -g --emit-depfile $@.d -o $@
+	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.d
 
 -include $(KERNEL_RPI5_MAIN_DEBUG_O).d
 
@@ -1002,7 +1091,8 @@ $(KERNEL_QEMU_PMU_O): $(KERNEL_PMU_S) | $(KERNEL_QEMU_BUILD_DIR)
 # duplicate top-level definition is a compile error by design.
 $(KERNEL_QEMU_MAIN_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_FDT_TKB) \
     $(KERNEL_QEMU_UART_TKB) $(KERNEL_QEMU_INTC_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile | $(KERNEL_QEMU_BUILD_DIR)
-	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap $(KERNEL_UNUSED_CHECK) --emit-depfile $@.d -o $@
+	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap $(KERNEL_UNUSED_CHECK_QEMU) --emit-depfile $@.d -o $@
+	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.d
 
 # GitHub issue #306: the hand-written prerequisite list on $(KERNEL_QEMU_MAIN_O)
 # above is a second, independently-maintained copy of exactly what the
@@ -1051,7 +1141,8 @@ KERNEL_QEMU_DEBUG_ELF    := $(KERNEL_QEMU_BUILD_DIR)/kernel-debug.elf
 
 $(KERNEL_QEMU_MAIN_DEBUG_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_FDT_TKB) \
     $(KERNEL_QEMU_UART_TKB) $(KERNEL_QEMU_INTC_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile | $(KERNEL_QEMU_BUILD_DIR)
-	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap $(KERNEL_UNUSED_CHECK) -g --emit-depfile $@.d -o $@
+	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap $(KERNEL_UNUSED_CHECK_QEMU) -g --emit-depfile $@.d -o $@
+	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.d
 
 # GitHub issue #306: same depfile fix as $(KERNEL_QEMU_MAIN_O)'s own, for
 # this target's own hand-written prerequisite list above.

@@ -112,7 +112,6 @@ struct AsidState {
     // the boot suite prints it.
     rollover_count: usize;
     // How many numbers have been handed out, for the contention probe.
-    assign_count: usize;
 }
 
 // Zeroed from .bss like every global, which is NOT the starting state
@@ -182,14 +181,6 @@ fn asid_next_value() -> usize {
     return next;
 }
 
-fn asid_assign_count_value() -> usize {
-    let guard = locked_cell_take(&asid_cell);
-    let state = locked_cell_value(guard, &asid_cell);
-    let count: usize = state.assign_count;
-    locked_cell_give(&asid_cell, guard);
-    return count;
-}
-
 // Does this recorded stamp still name the generation the hardware's TLB is
 // tagged for? A stamp of 0 is "never assigned" and is never current.
 fn asid_generation_is_current(generation: usize) -> bool {
@@ -228,7 +219,6 @@ fn asid_assign_attempt() -> AsidAssignAttempt {
     }
     let value: usize = state.next;
     state.next = state.next + 1;
-    state.assign_count = state.assign_count + 1;
     let generation: usize = state.generation;
     locked_cell_give(&asid_cell, guard);
     return AsidAssignAttempt::Assigned((value, generation));
@@ -300,6 +290,5 @@ private fn asid_assign_locked(state: borrow *AsidState) -> (usize, usize) {
     if (state.next > asid_last) { asid_rollover(state); }
     let value: usize = state.next;
     state.next = state.next + 1;
-    state.assign_count = state.assign_count + 1;
     return (value, state.generation);
 }

@@ -190,7 +190,7 @@ struct TcpConnection {
     inetd_response_length: usize;
     // GitHub issue #469: the accept handshake's own state.
     //
-    // These were locals of kernel_tcp_accept_once's loop, which was fine
+    // These were locals of the old blocking accept loop, which was fine
     // while that loop ran to completion inside one syscall. It cannot: the
     // wait is at EL1 and this kernel does not preempt kernel mode, so for
     // as long as it runs, every other process on the machine is stopped.
@@ -1076,13 +1076,6 @@ fn tcp_connection_identity(owner: borrow TcpConnectionOwner[connection])
     return owner.generation;
 }
 
-fn tcp_connection_matches(owner: borrow TcpConnectionOwner[connection],
-                          slot: usize, generation: usize) -> bool !{unsafe} {
-    return owner.slot == slot && owner.generation == generation &&
-           intrusive_pool_matches_untrusted(
-               &tcp_connection_pool, owner.slot, generation);
-}
-
 // What used to store the owner in a stable slot and describe the
 // impossible duplicate. With no parking lot there is nothing to store and
 // nothing to conflict with: an owner that has done its work is simply
@@ -1100,7 +1093,7 @@ fn tcp_connection_put(owner: sink TcpConnectionOwner[connection])
 // What used to pull an owner out of a stable slot and revalidate the pair
 // it was found under. Now it mints one from the pair directly, after the
 // same check -- intrusive_pool_matches, which is what the old
-// slotmap_matches call inside tcp_connection_matches was.
+// old slotmap_matches check was.
 fn tcp_connection_take(slot_value: usize, generation: usize)
         -> TcpConnectionTakeResult !{unsafe} {
     if (intrusive_pool_matches_untrusted(
@@ -1529,7 +1522,7 @@ fn retx_chain_reverse(link_in: RetxLink) -> RetxLink !{unsafe} {
 }
 
 // Frees every entry belonging to this connection and leaves the rest of
-// the queue alone. Called once per connection from kernel_tcp_accept_once
+// the queue alone. Called once per connection from kernel_tcp_accept_begin
 // (alongside its own state = Listen reset), so a new connection never
 // inherits a previous one's outstanding segments.
 fn pending_tcp_reset_all(connection_address: usize) !{unsafe} {
@@ -2253,7 +2246,7 @@ fn build_receive_ack(conn: *TcpConnection,
 // alone (LetMatch, GitHub issue #183) instead of by staying nested
 // inside the if that proved them -- same technique used to flatten
 // kernel/net/icmp.tkb's kernel_icmp_reply_once. kernel_tcp_echo_check
-// and kernel_tcp_accept_once parse and checksum-validate an inbound
+// and kernel_tcp_accept_step parse and checksum-validate an inbound
 // TCP-over-IPv4 segment addressed to OUR_IP with IDENTICAL thresholds,
 // so they share this one parse. kernel_tcp_receive_once keeps its own
 // inline parse below: it enforces a tighter total_len lower bound (it
@@ -2508,7 +2501,7 @@ must_use variant KernelTcpAcceptStep {
 
 // Start a handshake on this connection, on the requested listening port.
 // Everything the step below needs between calls is written here, so the
-// two together are the loop kernel_tcp_accept_once used to be.
+// two together are what the old blocking accept loop used to be.
 fn kernel_tcp_accept_begin(owner: borrow TcpConnectionOwner[connection],
                            port: u16) !{unsafe} {
     let conn: *TcpConnection = tcp_connection_of(owner);
@@ -2544,8 +2537,8 @@ fn kernel_tcp_accept_begin(owner: borrow TcpConnectionOwner[connection],
 // is why this is not `may_block`. It looks once, acts on whatever is
 // already there, services the SYN-ACK retransmission timer, and answers
 // with what the caller should do next. A caller that can afford to hold
-// the machine loops over it (kernel_tcp_accept_once below); a caller that
-// cannot returns to userspace between calls and comes back.
+// the machine may loop over it; a caller that cannot returns to userspace
+// between calls and comes back.
 fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection],
                           ready_in: sink NetRxCanAcquire)
         -> KernelTcpAcceptStep !{unsafe} {
@@ -2757,37 +2750,6 @@ fn kernel_tcp_accept_progress(owner: borrow TcpConnectionOwner[connection],
         }
     }
     return KernelTcpAcceptStep::GaveUp(ready);
-}
-
-// Blocks for one three-way handshake on the requested listening port. The
-// caller owns the returned RX capability in both outcomes; connected stream
-// I/O is added separately after accept establishes fd state.
-//
-// GitHub issue #469: the one caller left is the kernel's own inetd-mode
-// fixture, which runs inside the bounded boot suite with a peer already
-// connecting and nothing else alive to starve. accept(2) goes through
-// kernel_tcp_accept_progress instead.
-fn kernel_tcp_accept_once(owner: borrow TcpConnectionOwner[connection],
-                          ready_in: sink NetRxCanAcquire, port: u16)
-        -> KernelTcpAcceptResult !{may_block} {
-    let mut ready = ready_in;
-    kernel_tcp_accept_begin(owner, port);
-    match kernel_tcp_accept_progress(owner, ready, true) {
-        KernelTcpAcceptStep::Accepted(next) => {
-            return KernelTcpAcceptResult::Accepted(next);
-        }
-        KernelTcpAcceptStep::GaveUp(next) => {
-            return KernelTcpAcceptResult::TimedOut(next);
-        }
-        // GitHub issue #509: reachable now, and only in the one case this
-        // fixture's header says cannot happen -- another process became
-        // Ready while it waited. TimedOut is the honest answer for a caller
-        // that has no process context to block: it did not get a
-        // connection, and the machine is no longer its to hold.
-        KernelTcpAcceptStep::Pending(next) => {
-            return KernelTcpAcceptResult::TimedOut(next);
-        }
-    }
 }
 
 // GitHub issue #469: resume the handshake this listener already had in

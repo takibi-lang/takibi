@@ -76,10 +76,6 @@ fn kernel_syscall_foreground_server_children() -> usize {
     return syscall_foreground_server_completed_children;
 }
 
-fn kernel_syscall_foreground_server_reaped_pages() -> usize {
-    return syscall_foreground_server_reaped_pages;
-}
-
 // GitHub issue #289 (original comment, kernel/kernel/syscall.tkb): reaped
 // page count only ever grows within one foreground-server run, so a
 // smaller observation is stale rather than a real decrease.

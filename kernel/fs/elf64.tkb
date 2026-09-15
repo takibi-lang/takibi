@@ -122,7 +122,3 @@ fn distro_elf_validate_with_length(image: []u8,
     }
     return DistroElfResult::Invalid;
 }
-
-fn distro_elf_validate(image: []u8) -> DistroElfResult {
-    return distro_elf_validate_with_length(image, image.len);
-}

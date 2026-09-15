@@ -2007,22 +2007,10 @@ private fn ext2_linked_directory_new(block_owner: sink Ext2BlockOwner[block],
     return linked;
 }
 
-fn ext2_linked_directory_inode(linked: borrow Ext2LinkedDirectory[inode, block])
-        -> usize @ inode {
-    return linked.inode_number;
-}
-
 // A directory that stays. The tree names its inode and block from here on,
 // so the obligation ends without a release -- the directory counterpart of a
 // file that is never unlinked.
 fn ext2_directory_keep(linked: sink Ext2LinkedDirectory[inode, block]) {}
-
-fn ext2_inode_links(mount: Ext2Mount, inode_number: usize) -> usize {
-    match ext2_read_inode(mount, inode_number) {
-        Ext2InodeResult::Invalid => { return 0; }
-        Ext2InodeResult::Inode(inode) => { return inode.links; }
-    }
-}
 
 fn ext2_make_directory_in(mount: Ext2Mount, parent_inode: usize,
                           name: borrow []u8) -> Ext2MkdirResult {

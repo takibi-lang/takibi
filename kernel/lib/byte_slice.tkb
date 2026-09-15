@@ -30,20 +30,6 @@ must_use variant ByteSliceFindResult {
     Found(usize);
 }
 
-fn byte_slice_starts_with(value: borrow []u8, prefix: borrow []u8) -> bool {
-    if (prefix.len > value.len) { return false; }
-    let mut position: usize = 0;
-    for byte in prefix {
-        if (position < value.len) {
-            if (value[position] != byte) { return false; }
-        } else {
-            return false;
-        }
-        position = position + 1;
-    }
-    return true;
-}
-
 fn byte_slice_find_first(value: borrow []u8, delimiter: u8)
         -> ByteSliceFindResult {
     for position: usize in 0..<value.len {

@@ -425,7 +425,7 @@ def test_connected_large_response(client_mac: bytes) -> bool:
     second_fin_acked = False
     # Generous but bounded: the kernel's own retry budget for one dropped
     # segment is TCP_RETRY_LIMIT(3) * retry_ticks(~200ms) =~ 600ms (see
-    # kernel/net/tcp.tkb's kernel_tcp_accept_once comment) -- 10s covers
+    # kernel/net/tcp.tkb's accept retry comment) -- 10s covers
     # that many times over without masking a genuine hang as a slow pass.
     # kernel/platform/rpi5/init.tkb also arms kernel_tcp_inject_drop_next_fin, so
     # close()'s own FIN is silently unsent on its first attempt too and

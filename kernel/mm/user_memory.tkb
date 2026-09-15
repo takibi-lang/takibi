@@ -174,9 +174,6 @@ fn user_range_check_write(root: AddressSpaceRoot, address: usize, length: usize)
     return UserWriteRangeResult::Ok(range);
 }
 
-fn user_read_range_length(range: UserReadRange) -> usize { return range.length; }
-fn user_write_range_length(range: UserWriteRange) -> usize { return range.length; }
-
 // GitHub issue #199 follow-up: a write-validated range's underlying page
 // is always also readable on this architecture -- a writable user
 // mapping's AP bits already imply read access (USER_RW_XN_FLAGS is the
@@ -425,7 +422,7 @@ fn user_memory_boundary_probe_run(base: usize,
     let mut ok: bool = true;
 
     // This probe runs at boot, before any process is scheduled, and always
-    // maps its two throwaway pages into root 0 via user_pte_write above --
+    // maps its two throwaway pages into root 0 --
     // so every check below is explicitly against root 0, not derived from
     // kernel_process_current_root() (unlike the real syscall call sites in
     // kernel/kernel/syscall.tkb, GitHub issue #263).

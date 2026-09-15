@@ -17,7 +17,8 @@
 // both wrote value+1. Exact, not statistical.
 //
 // "Calls made" is this probe's OWN pair of atomic counters and NOT
-// asid_assign_count_value(), which was the first version and was unsound:
+// the assign counter asid.tkb used to keep, which was the first version
+// and was unsound:
 // that counter is an unlocked `+ 1` on the same racing path, so it loses
 // increments to the very race it was being used to detect. Measured
 // saying so -- calls=3978 against advanced=3984, a difference that can

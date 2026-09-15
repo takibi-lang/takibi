@@ -119,6 +119,7 @@ run them, and why they sit outside both globs above.
 | `buildcheck_elf_symbol_alignment.py` | Reject a linked ELF when a required symbol is under-aligned |
 | `buildcheck_kernel_asm_invariants.py` | TODO |
 | `buildcheck_kernel_memory_map.py` | Fail the build when kernel/MEMORY_MAP.md and the build disagree |
+| `buildcheck_kernel_unused_coverage.py` | every kernel file a target compiles is checked for unused functions or exempt for a stated reason |
 | `buildcheck_suite_output.py` | Split a batched UART stream and compare each case with its fixture |
 | `buildcheck_user_payload_no_rw_globals.py` | TODO |
 

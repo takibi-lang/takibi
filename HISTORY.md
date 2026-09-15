@@ -43,6 +43,30 @@ a common view asserts it.
 
 The other files, and what each still reports, are recorded on #540.
 
+The same day, the rest of the kernel joined, and #540 closed. One report was
+not dead code. `unified_fd_close_exec_descriptors` had lost its only caller
+when 73988b03 retired the kernel-driven exec, so execve had kept every
+close-on-exec descriptor since then. It is called again from the child exec
+commit, and a pair of static-PIE programs in the ash transcript proves it.
+About forty other functions had no reader and were deleted. Where a deleted
+function's comment was also the header or rationale for code that stays, the
+comment went back. The two empty `*_execution_model_assumption` functions,
+for example, lost their bodies but kept their #479 reasoning. Each target now
+checks every file it compiles (68 on QEMU, 81 on RPi5), unless one of these
+applies:
+- the other target checks it: files QEMU links only so the program resolves,
+  and the reverse;
+- it is one of five exemptions whose reasons the Makefile states (per-platform
+  DTB lookups, the platform's choice of block device, two library APIs that
+  linux_user drives whole, and the RPi5 USB driver's FatFs-shaped `disk_*`
+  interface);
+- it defines no function.
+`buildcheck_kernel_unused_coverage.py` reads each target's depfile and fails
+the build when a compiled file is in none of those lists, so a new kernel
+file is checked unless someone writes down why not. `page_owner_description`,
+the page-owner lookup kernel/MEMORY_MAP.md tells a debugger to call, is
+declared as a GDB entry beside the oops lane's trace report.
+
 ---
 
 ## 2026-09-14: terminal input across CPUs (#547)

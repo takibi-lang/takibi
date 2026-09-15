@@ -2940,5 +2940,3 @@ fn kernel_fd_table_crash_object(process: usize, fd: usize) -> usize !{unsafe} {
 // different chains without sharing their links or entries. Crash diagnostics
 // remain lockless under the separate world-stop execution-model blocker.
 // This file consequently has no KERNEL_ACTIVE_CORES dependency today.
-fn fd_table_execution_model_assumption() {
-}

@@ -1002,13 +1002,8 @@ fn kernel_mmu_init_secondary() !{mmu_off} {
                         address_space_backing_root0.asid);
 }
 
-// Root-0 compatibility helpers used by boot-only probes and the syscall
-// subset probe. The production root-qualified operations above are the
-// common path.
-fn user_pte_write(index: usize, value: usize) -> AddressSpacePteWriteResult {
-    return address_space_pte_write(0, index, value);
-}
-
+// Root-0 compatibility helper used by boot-only probes. The production
+// root-qualified operations above are the common path.
 fn user_pte_clear(index: usize) {
     address_space_pte_clear(0, index);
 }
@@ -1354,5 +1349,3 @@ fn address_space_asid_rollover_probe() -> bool {
 // reusing dynamic ASIDs from 2 onward. Concurrent fallback activation therefore
 // reads one permanent page-table/ASID tuple and writes only per-core state.
 // Consequently this file no longer requires a KERNEL_ACTIVE_CORES assertion.
-fn address_space_execution_model_assumption() {
-}

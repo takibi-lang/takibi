@@ -716,7 +716,6 @@ private fn syscall_exec_format(name: []u8, path_length: usize)
 }
 
 must_use variant KernelFdReapResult { Failed; Reaped; }
-must_use variant KernelDaemonTeardownResult { Invalid; Reclaimed; }
 // GitHub issue #257 step 5: the payload was
 // `{0..<TCP_CONNECTION_MAX as usize}` -- a proof that the value indexed a
 // real element of an array that no longer exists. It is a pool ADDRESS
@@ -845,25 +844,6 @@ fn kernel_syscall_procfs_open(node: ProcfsNode, fd: usize)
         }
         UnifiedOpenResult::Ok => { return SyscallAction::Resume(fd); }
     }
-}
-
-// GitHub issue #393: over the descriptors this process has, rather than
-// over every number below a constant.
-fn kernel_syscall_any_file_is_open() -> bool !{unsafe} {
-    let mut from: usize = 0;
-    let mut scanning: bool = true;
-    while (scanning) {
-        scanning = false;
-        match unified_fd_next_open(kernel_syscall_process_slot(), from) {
-            UnifiedFdScanResult::Done => {}
-            UnifiedFdScanResult::Found(fd) => {
-                if (kernel_syscall_file_is_open(fd)) { return true; }
-                from = fd + 1;
-                scanning = true;
-            }
-        }
-    }
-    return false;
 }
 
 // This process's own soft RLIMIT_NOFILE, for the exhaustion log lines that
@@ -1259,113 +1239,6 @@ fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
         return KernelFdReapResult::Reaped;
     }
     return KernelFdReapResult::Failed;
-}
-
-fn kernel_syscall_daemon_teardown() -> KernelDaemonTeardownResult {
-    if (kernel_listener_state(4) != UnifiedListenerState::Listening ||
-        kernel_syscall_any_file_is_open()) {
-        return KernelDaemonTeardownResult::Invalid;
-    }
-    if (tcp_any_connection_open()) {
-        return KernelDaemonTeardownResult::Invalid;
-    }
-    match unified_fd_close(kernel_syscall_process_slot(), 4) {
-        UnifiedFdResult::Invalid => {
-            return KernelDaemonTeardownResult::Invalid;
-        }
-        UnifiedFdResult::Ok => {}
-    }
-    syscall_test_evidence_record_socket_close();
-    return KernelDaemonTeardownResult::Reclaimed;
-}
-
-fn kernel_syscall_inetd_accept(port: u16)
-        -> KernelInetdAcceptResult !{may_block} {
-    match tcp_connection_alloc() {
-        TcpConnectionAllocResult::Full => {
-            kernel_boot_log_resource_exhausted(
-                "TCP connection pool" as *u8, 0);
-            return KernelInetdAcceptResult::TimedOut;
-        }
-        TcpConnectionAllocResult::Allocated(owner) => {
-            let slot: usize = tcp_connection_slot(owner);
-            let generation: usize = tcp_connection_identity(owner);
-            match network_capability_take() {
-                NetworkCapabilityTakeResult::Empty => {
-                    tcp_connection_free(owner);
-                    return KernelInetdAcceptResult::TimedOut;
-                }
-                NetworkCapabilityTakeResult::Ready(ready) => {
-                    match kernel_tcp_accept_once(owner, ready, port) {
-                        KernelTcpAcceptResult::TimedOut(next) => {
-                            match network_capability_put(next) {
-                                NetworkCapabilityPutResult::Stored => { }
-                                NetworkCapabilityPutResult::Conflict => { }
-                            }
-                            tcp_connection_free(owner);
-                            return KernelInetdAcceptResult::TimedOut;
-                        }
-                        KernelTcpAcceptResult::Accepted(next) => {
-                            match network_capability_put(next) {
-                                NetworkCapabilityPutResult::Conflict => {
-                                    tcp_connection_free(owner);
-                                    return KernelInetdAcceptResult::TimedOut;
-                                }
-                                NetworkCapabilityPutResult::Stored => {
-                                    // GitHub issue #257 step 5: the
-                                    // Conflict arm that stood here
-                                    // described the parking lot already
-                                    // holding an owner for this slot, and
-                                    // there is no parking lot. The
-                                    // `slot >= TCP_CONNECTION_MAX` guard
-                                    // it wrapped is gone too, and not
-                                    // silently: what bounded the slot was
-                                    // the array it indexed, and what
-                                    // validates the address that replaced
-                                    // it is the pool, on every use.
-                                    tcp_connection_put(owner);
-                                        kernel_syscall_set_inetd_mode(true);
-                                        tcp_connection_payload(slot).connection_open = true;
-                                        match unified_connection_create(
-                                                kernel_syscall_process_slot(),
-                                                0, slot, generation) {
-                                            UnifiedOpenResult::Invalid => {
-                                                return KernelInetdAcceptResult::TimedOut;
-                                            }
-                                            UnifiedOpenResult::Full => {
-                                                kernel_boot_log_resource_exhausted(
-                                                    "shared object pool" as *u8,
-                                                    unified_object_max_files());
-                                                return KernelInetdAcceptResult::TimedOut;
-                                            }
-                                            UnifiedOpenResult::Ok => {}
-                                        }
-                                        match unified_fd_duplicate(
-                                                kernel_syscall_process_slot(),
-                                                0, 1) {
-                                            UnifiedFdInstallResult::Invalid => {
-                                                return KernelInetdAcceptResult::TimedOut;
-                                            }
-                                            UnifiedFdInstallResult::RefOverflow => {
-                                                return KernelInetdAcceptResult::TimedOut;
-                                            }
-                                            UnifiedFdInstallResult::NoMemory => {
-                                                return KernelInetdAcceptResult::TimedOut;
-                                            }
-                                            UnifiedFdInstallResult::Ok => {}
-                                        }
-                                        tcp_connection_payload(slot).socket_buffer_length = 0;
-                                        tcp_connection_payload(slot).socket_buffer_offset = 0;
-                                        tcp_connection_payload(slot).inetd_response_length = 0;
-                                        return KernelInetdAcceptResult::Accepted;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 fn kernel_syscall_ext2_configure(mount: Ext2Mount) {
