@@ -44,6 +44,10 @@ mv /etc/mva /kept /etc/moved
 # runnable, so the wait has to block rather than retry in the kernel. The
 # driver types the byte it waits for once the kernel says it blocked.
 /bin/ppoll-probe
+# GitHub issue #9: the affinity ABI. /bin/affinity reads its default mask,
+# narrows itself to CPU 0, and checks what the kernel refuses and what a
+# child inherits. It prints only what holds on every platform.
+/bin/affinity
 # GitHub issue #544: a write six times the console transmit queue. On the
 # board the wire cannot keep up, so cat's write fills the queue, returns
 # short, and the next one sleeps until the TX interrupt has drained it; the

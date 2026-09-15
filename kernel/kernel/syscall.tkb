@@ -57,6 +57,8 @@ const AARCH64_NR_RT_SIGTIMEDWAIT: usize = 137;
 const AARCH64_NR_SYSLOG: usize = 116;
 const AARCH64_NR_UNAME: usize = 160;
 const AARCH64_NR_GETCPU: usize = 168;
+const AARCH64_NR_SCHED_SETAFFINITY: usize = 122;
+const AARCH64_NR_SCHED_GETAFFINITY: usize = 123;
 // GitHub issue #393: the only rlimit syscall this architecture has.
 // asm-generic (and therefore arm64) has no getrlimit/setrlimit numbers at
 // all, and musl 1.2.6's getrlimit()/setrlimit() go through SYS_prlimit64
@@ -4776,6 +4778,65 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
         }
         return SyscallAction::Resume(0);
+    }
+
+    // GitHub issue #9: the affinity ABI. The kernel's mask is one 64-bit
+    // word, so cpusetsize is measured against 8 bytes, as Linux measures it
+    // against cpumask_size(). Bits past the first word name no CPU here.
+    if (number == AARCH64_NR_SCHED_GETAFFINITY) {
+        if (x1 < 8 || (x1 & 7) != 0) {
+            return SyscallAction::Resume(LINUX_EINVAL);
+        }
+        match kernel_process_affinity_get(x0) {
+            ProcessAffinityResult::Missing => {
+                return SyscallAction::Resume(LINUX_ESRCH);
+            }
+            ProcessAffinityResult::Invalid => {
+                return SyscallAction::Resume(LINUX_EINVAL);
+            }
+            ProcessAffinityResult::Mask(mask) => {
+                match user_range_check_write(
+                        kernel_process_current_root(), x2, 8) {
+                    UserWriteRangeResult::Fault => {
+                        return SyscallAction::Resume(LINUX_EFAULT);
+                    }
+                    UserWriteRangeResult::Ok(mask_range) => {
+                        if (user_write_u64(mask_range, 0, mask as u64) ==
+                                false) {
+                            return SyscallAction::Resume(LINUX_EFAULT);
+                        }
+                    }
+                }
+                return SyscallAction::Resume(8);
+            }
+        }
+    }
+    if (number == AARCH64_NR_SCHED_SETAFFINITY) {
+        if (x1 < 8) { return SyscallAction::Resume(LINUX_EINVAL); }
+        let mut requested: usize = 0;
+        match user_range_check_read(kernel_process_current_root(), x2, 8) {
+            UserReadRangeResult::Fault => {
+                return SyscallAction::Resume(LINUX_EFAULT);
+            }
+            UserReadRangeResult::Ok(mask_range) => {
+                let (mask_ok, mask_raw) = user_read_u64(mask_range, 0);
+                if (mask_ok == false) {
+                    return SyscallAction::Resume(LINUX_EFAULT);
+                }
+                requested = mask_raw as usize;
+            }
+        }
+        match kernel_process_affinity_set(x0, requested) {
+            ProcessAffinityResult::Missing => {
+                return SyscallAction::Resume(LINUX_ESRCH);
+            }
+            ProcessAffinityResult::Invalid => {
+                return SyscallAction::Resume(LINUX_EINVAL);
+            }
+            ProcessAffinityResult::Mask(mask) => {
+                return SyscallAction::Resume(0);
+            }
+        }
     }
     if (number == 172 || number == 178) {
         return SyscallAction::Resume(kernel_process_current_pid());
