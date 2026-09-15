@@ -24,7 +24,7 @@ const PEER_READ_ATTEMPTS: usize = 64;
 const PEER_READ_CHECKSUM: usize = 8847360;
 const WRITE_SYSCALL: usize = 64;
 const PEER_CONSOLE_TAG: usize = 4;
-const PEER_CONSOLE_POLL_PAUSE: usize = 1024;
+const PEER_CONSOLE_POLL_PAUSE: usize = 1048576;
 const PEER_TTY_TAG: usize = 5;
 const PEER_TTY_LINE_MAX: usize = 64;
 
@@ -136,11 +136,15 @@ fn peer_console() {
     }
     // Only a UART-BREAK DDB lane answers anything but 2 here: it keeps this
     // process for one record held undrained across the debugger, which may
-    // wait out a whole hardware integration. getcpu takes no lock, so the
-    // pause between polls leaves core 0's process-run lock alone.
+    // wait out a whole hardware integration. The pause between polls is
+    // arithmetic at EL0, not syscalls: the late UART-BREAK DDB checks need
+    // some CPU to be in EL0 when the BREAK lands, and a pause made of
+    // getcpu calls kept this CPU in EL1 most of the time. The sum rides
+    // in the poll's unused argument so the loop is not optimized away.
     let ddb_record = bs"peer user console: queued before DDB, delivered after continue \n";
     let mut action: usize = svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG,
                                  first, total, 0, 0);
+    let mut spin: usize = 0x9E3779B97F4A7C15;
     while (action != 2) {
         if (action == 0) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
         if (action == 3) {
@@ -151,10 +155,12 @@ fn peer_console() {
                           ddb_written, ddb_written, 0, 0);
         } else {
             for pause: usize in 0..<PEER_CONSOLE_POLL_PAUSE {
-                peer_read_cpu(cpu_bytes as []u8);
+                spin = spin ^ (spin << 13);
+                spin = spin ^ (spin >> 7);
+                spin = spin ^ (spin << 17);
             }
             action = svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG,
-                          0, 0, 0, 0);
+                          0, 0, spin, 0);
         }
     }
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
