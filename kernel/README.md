@@ -209,6 +209,7 @@ make kernelcheck-oops-qemu  # verify parked QEMU oops records and the retained l
 make kernelcheck-ddb-qemu  # enter DDB through a real UART BREAK, inspect, and resume
 make kernelcheck-lifecycle-gap-qemu  # verify the interactive-HTTPd checkpoint diagnosis names a real gap
 make kernelcheck-uart-wake-qemu  # type into ash while gdb holds each read inside its way to sleep
+make kernelcheck-affinity-gdb-qemu  # gdb sees a peer's unaudited syscall handed to core 0
 make kernelbuild       # build every maintained kernel target
 make kernelcheck       # build and test every maintained kernel target
 make kernelsh-qemu     # boot QEMU and use the current terminal as the ash UART console

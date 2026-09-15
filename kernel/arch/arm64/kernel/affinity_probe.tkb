@@ -1,25 +1,33 @@
 /* sched_setaffinity and sched_getaffinity, the affinity ABI (GitHub issue
  * #9). A static-PIE EL0 program, kept free of writable globals and compiled
- * with --forbid-trap. The line it prints is compared by the ash transcript,
- * so it says only what holds on every platform: the online set differs
- * between two-vCPU QEMU and four-core RPi5.
+ * with --forbid-trap. The lines it prints are compared by the ash
+ * transcript, so they say only what holds on every platform: the online
+ * set differs between two-vCPU QEMU and four-core RPi5.
  *
- * The mask narrows placement within the CPUs the kernel admits a process
- * to and never widens it. This process is not an admitted workload, so a
- * mask naming only CPU 1 is refused.
+ * A mask is an admission request. This process pins itself to CPU 1 and
+ * calls uname, which is not in the kernel's peer-safety table, so the
+ * migration gate reruns it on core 0. Whether that happened on core 0 is
+ * not visible from EL0; the affinity gdb lane watches for it.
  */
 
 const WRITE_SYSCALL: usize = 64;
 const EXIT_SYSCALL: usize = 93;
 const SETAFFINITY_SYSCALL: usize = 122;
 const GETAFFINITY_SYSCALL: usize = 123;
+const KILL_SYSCALL: usize = 129;
+const UNAME_SYSCALL: usize = 160;
+const GETCPU_SYSCALL: usize = 168;
+const NANOSLEEP_SYSCALL: usize = 101;
 const CLONE_SYSCALL: usize = 220;
 const WAIT4_SYSCALL: usize = 260;
 const CLONE_FORK_SIGCHLD: usize = 0x11;
+const SIGTERM: usize = 15;
 const LINUX_EINVAL: usize = 0xFFFFFFFFFFFFFFEA;
 const LINUX_ESRCH: usize = 0xFFFFFFFFFFFFFFFD;
 const AFFINITY_ERROR_FLOOR: usize = 0xFFFFFFFFFFFFF000;
 const AFFINITY_ABSENT_PID: usize = 999999;
+const AFFINITY_PIN_ATTEMPTS: usize = 200000;
+const UTSNAME_BYTES: usize = 390;
 
 private fn affinity_say(line: borrow []u8) {
     svc5(WRITE_SYSCALL, 1, line as *u8 as usize, line.len, 0, 0);
@@ -43,6 +51,35 @@ private fn affinity_mask_is(mask: borrow [u8; 8..], low: u8) -> bool {
         if (mask[index] != 0) { return false; }
     }
     return true;
+}
+
+private fn affinity_cpu(cpu_bytes: borrow [u8; 4..]) -> usize {
+    if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize, 0, 0, 0, 0) != 0) {
+        return 99;
+    }
+    return cpu_bytes[0] as usize |
+           ((cpu_bytes[1] as usize) << 8) |
+           ((cpu_bytes[2] as usize) << 16) |
+           ((cpu_bytes[3] as usize) << 24);
+}
+
+// Core 0 has no idle loop, so a process leaving it needs something else
+// there to switch to. This child inherits the CPU-0-only mask and naps a
+// millisecond at a time. A nap blocks while another process is Ready, so
+// core 0 hands itself over without depending on preemption, which the
+// ash session this runs in does not have. SIGTERM lands when a nap is
+// asked for again.
+private fn affinity_spinner() {
+    let mut nap: [u8; 16];
+    for index: usize in 0..<16 { nap[index] = 0; }
+    // tv_sec = 0, tv_nsec = 1000000 (0x000F4240), little-endian.
+    nap[8] = 0x40;
+    nap[9] = 0x42;
+    nap[10] = 0x0F;
+    while (true) {
+        svc5(NANOSLEEP_SYSCALL, nap as *u8 as usize, 0, 0, 0, 0);
+    }
+    svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
 }
 
 fn affinity_probe() {
@@ -73,9 +110,10 @@ fn affinity_probe() {
     if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask_address, 0, 0) != LINUX_EINVAL) {
         affinity_fail(bs"affinity: a mask naming no online cpu was accepted\n");
     }
-    affinity_mask_fill(mask as []u8, 2, 0);
+    // CPU 2 is offline on QEMU and not yet one the scheduler uses on RPi5.
+    affinity_mask_fill(mask as []u8, 4, 0);
     if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask_address, 0, 0) != LINUX_EINVAL) {
-        affinity_fail(bs"affinity: a cpu this process is not admitted to was accepted\n");
+        affinity_fail(bs"affinity: a mask naming only cpu 2 was accepted\n");
     }
     affinity_mask_fill(mask as []u8, 1, 0);
     if (svc5(SETAFFINITY_SYSCALL, 0, 4, mask_address, 0, 0) != LINUX_EINVAL) {
@@ -90,6 +128,8 @@ fn affinity_probe() {
     }
 
     // A child inherits the mask its parent set.
+    let mut status: [u8; 4];
+    for index: usize in 0..<4 { status[index] = 0; }
     let child: usize = svc5(CLONE_SYSCALL, CLONE_FORK_SIGCHLD, 0, 0, 0, 0);
     if (child == 0) {
         affinity_mask_fill(mask as []u8, 0, 0);
@@ -102,12 +142,45 @@ fn affinity_probe() {
     if (child >= AFFINITY_ERROR_FLOOR) {
         affinity_fail(bs"affinity: fork failed\n");
     }
-    let mut status: [u8; 4];
-    for index: usize in 0..<4 { status[index] = 0; }
     if (svc5(WAIT4_SYSCALL, child, status as *u8 as usize, 0, 0, 0) != child ||
         status[0] != 0 || status[1] != 0) {
         affinity_fail(bs"affinity: the child did not inherit cpu 0 alone\n");
     }
-    affinity_say(bs"affinity: default covers cpu 0; cpu 0 alone reads back and is inherited; empty, offline-only and unadmitted masks, short and odd sizes refused; absent pid ESRCH\n");
+    affinity_say(bs"affinity: default covers cpu 0; cpu 0 alone reads back and is inherited; empty, offline-only and cpu-2-only masks, short and odd sizes refused; absent pid ESRCH\n");
+
+    // Pin to CPU 1, with the spinner keeping core 0 busy behind.
+    let spinner: usize = svc5(CLONE_SYSCALL, CLONE_FORK_SIGCHLD, 0, 0, 0, 0);
+    if (spinner == 0) { affinity_spinner(); }
+    if (spinner >= AFFINITY_ERROR_FLOOR) {
+        affinity_fail(bs"affinity: fork failed\n");
+    }
+    affinity_mask_fill(mask as []u8, 2, 0);
+    if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask_address, 0, 0) != 0) {
+        affinity_fail(bs"affinity: cpu 1 alone was refused\n");
+    }
+    let mut cpu_bytes: [u8; 4];
+    let mut on_peer: bool = false;
+    let mut attempts: usize = 0;
+    while (on_peer == false && attempts < AFFINITY_PIN_ATTEMPTS) {
+        attempts = attempts + 1;
+        if (affinity_cpu(cpu_bytes as []u8) == 1) { on_peer = true; }
+    }
+    if (on_peer == false) {
+        affinity_fail(bs"affinity: never ran on cpu 1\n");
+    }
+    // uname is outside the peer-safety table: asked from CPU 1, it is
+    // rerun on core 0 and must still answer.
+    let mut uts: [u8; UTSNAME_BYTES];
+    if (svc5(UNAME_SYSCALL, uts as *u8 as usize, 0, 0, 0, 0) != 0 ||
+        uts[0] != 76 || uts[1] != 105 || uts[2] != 110 || uts[3] != 117 ||
+        uts[4] != 120) {
+        affinity_fail(bs"affinity: uname asked from cpu 1 did not answer\n");
+    }
+    svc5(KILL_SYSCALL, spinner, SIGTERM, 0, 0, 0);
+    if (svc5(WAIT4_SYSCALL, spinner, status as *u8 as usize, 0, 0, 0) !=
+            spinner) {
+        affinity_fail(bs"affinity: the spinner was not reaped\n");
+    }
+    affinity_say(bs"affinity: pinned to cpu 1, where uname, outside the peer-safe table, still answered\n");
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
 }

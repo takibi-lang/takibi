@@ -129,6 +129,8 @@ el0_sync_entry:
     b.eq    .Lsyscall_exec
     cmp     x6, #8
     b.eq    .Lsyscall_child_exec
+    cmp     x6, #9
+    b.eq    .Lsyscall_migrate
     mov     x0, #8
     mov     x1, sp
     b       el1_exception_evidence_from_frame
@@ -173,6 +175,12 @@ el0_sync_entry:
     // primitives above instead of hand-rolling the restore-and-eret sequence.
     mov     x0, sp
     b       kernel_syscall_block_return
+
+.Lsyscall_migrate:
+    // GitHub issue #9: a syscall this peer may not run. The .tkb tail
+    // rewinds it and hands the process to core 0; it does not return.
+    mov     x0, sp
+    b       kernel_syscall_migrate_return
 
 .Lsyscall_wait_interrupt:
     /* Wait for an interrupt, then run this same syscall again --
@@ -399,10 +407,22 @@ crash_snapshot_copy_saved_frame:
  * reclaimable. Return to the same architectural secondary stack used at
  * boot; Current-EL interrupts still dispatch on the separate per-CPU IRQ
  * stack selected by generated exception entry. */
+/* GitHub issue #9: the same stack switch for a process that stays live. A
+ * peer handing a syscall to core 0 leaves the process's kernel stack here;
+ * only then may the process become Ready and its stack change hands. */
+    .global kernel_secondary_idle_yield_enter
+    .type kernel_secondary_idle_yield_enter, %function
+kernel_secondary_idle_yield_enter:
+    msr     DAIFSet, #0x2
+    adr     x5, kernel_secondary_idle_yield_reenter
+    b       .Lsecondary_idle_stack
+
     .global kernel_secondary_idle_enter
     .type kernel_secondary_idle_enter, %function
 kernel_secondary_idle_enter:
     msr     DAIFSet, #0x2
+    adr     x5, kernel_secondary_idle_reenter
+.Lsecondary_idle_stack:
     adrp    x1, secondary_stack_top
     add     x1, x1, :lo12:secondary_stack_top
     mrs     x2, tpidr_el1
@@ -421,4 +441,4 @@ kernel_secondary_idle_enter:
     madd    x1, x2, x3, x1
     mov     sp, x1
     mov     x29, xzr
-    b       kernel_secondary_idle_reenter
+    br      x5

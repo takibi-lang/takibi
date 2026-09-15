@@ -1993,6 +1993,7 @@ must_use variant SyscallAction {
     WaitInterrupt;             // 6: wfe, then run this syscall again
     Exec;                       // 7: parent-only execve pending
     ChildExec;                   // 8: child execve pending
+    Migrate;                      // 9: rerun this syscall on core 0
 }
 
 fn syscall_action_encode(action: SyscallAction) -> (usize, usize) {
@@ -2006,6 +2007,7 @@ fn syscall_action_encode(action: SyscallAction) -> (usize, usize) {
         SyscallAction::WaitInterrupt => { return (6, 0); }
         SyscallAction::Exec => { return (7, 7); }
         SyscallAction::ChildExec => { return (8, 8); }
+        SyscallAction::Migrate => { return (9, 0); }
     }
 }
 
@@ -2463,13 +2465,73 @@ fn kernel_syscall_clone_parent_return(parent_sp: usize) {
     el0_context_resume(parent_sp);
 }
 
+// GitHub issue #9: the peer-safety table. A syscall runs on a peer only
+// with a cited audit; the migration gate reruns every other one on core 0.
+// read and write are split by descriptor in the order their handlers use.
+// Files stay core 0 only: #533 found ext2 mutation unserialized against a
+// peer reader and its write epoch read without a barrier, gaps its one
+// fixture could ignore and an arbitrary process cannot.
+fn syscall_peer_safe(number: usize, fd: usize) -> bool {
+    // The caller's own record, or architectural state: getpid, getppid,
+    // the uid/gid family, gettid, clock_gettime, and getcpu (#533).
+    if (number == 172 || number == 173 || number == 178 ||
+        (number >= 174 && number <= 177) || number == 113 ||
+        number == AARCH64_NR_GETCPU) {
+        return true;
+    }
+    // The affinity ABI takes the run lock for everything it reads or writes.
+    if (number == AARCH64_NR_SCHED_SETAFFINITY ||
+        number == AARCH64_NR_SCHED_GETAFFINITY) {
+        return true;
+    }
+    // A per-process deadline that any CPU's tick wakes (86fb1cbd).
+    if (number == AARCH64_NR_NANOSLEEP ||
+        number == AARCH64_NR_CLOCK_NANOSLEEP) {
+        return true;
+    }
+    // A peer exit returns to architectural idle (#552, bcaf4419).
+    if (number == AARCH64_NR_EXIT || number == AARCH64_NR_EXIT_GROUP) {
+        return true;
+    }
+    // The terminal: a peer's output goes through its console ring (#534),
+    // and input is ordered by the run lock (#547). A connection duplicated
+    // onto a standard descriptor is not the terminal.
+    if (kernel_connected_fd_is_open(fd)) { return false; }
+    if (number == AARCH64_NR_WRITE) {
+        return kernel_syscall_terminal_is_open(fd);
+    }
+    if (number == 63) {
+        return fd == 0 && kernel_syscall_terminal_is_open(fd);
+    }
+    return false;
+}
+
+// Step 9/9: action 9 (.Lsyscall_migrate). The gate chose core 0 for this
+// syscall. Rewind it, mark the process core-0-only until the call
+// completes, and leave this CPU; the process becomes Ready only once this
+// core is off its stack (kernel_process_stack_idle_yield).
+fn kernel_syscall_migrate_return(frame_sp: usize) {
+    el0_context_retry_syscall(frame_sp);
+    if (kernel_process_migrate_current(frame_sp) == false) {
+        kernel_syscall_fail_stop(frame_sp);
+    }
+    kernel_secondary_idle_yield_enter();
+}
+
 fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                            x2: usize, x3: usize, x4: usize)
         -> (usize, usize) !{unsafe} {
     kernel_log_peer_drain();
     workload_profile_note_syscall(number);
+    let caller_slot: usize = kernel_syscall_process_slot();
     let (action_code, action_value) = syscall_action_encode(
         kernel_syscall_dispatch_action(esr, number, x0, x1, x2, x3, x4));
+    // A call that completed no longer needs core 0 (GitHub issue #9). A
+    // blocked or waiting one keeps the mark until it completes, and a
+    // migrated one has only just been given it.
+    if (action_code != 5 && action_code != 6 && action_code != 9) {
+        kernel_process_clear_core0_for_call(caller_slot);
+    }
     if (action_code == 6) {
         workload_profile_syscall_wait(number);
     } else {
@@ -2492,6 +2554,15 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         -> SyscallAction !{unsafe} {
     let exception_class: usize = (esr >> 26) & 0x3F;
     if (exception_class != 0x15) { return SyscallAction::Unreachable; }
+    // GitHub issue #9: the migration gate, before this syscall touches any
+    // kernel state. A process on a peer because its affinity mask put it
+    // there runs only what syscall_peer_safe allows; any other syscall is
+    // rerun on core 0. A fixture the per-pid rule admits keeps its own
+    // audit instead.
+    if (cpu_id() != 0 && kernel_process_current_admitted_by_rule() == false &&
+        syscall_peer_safe(number, x0) == false) {
+        return SyscallAction::Migrate;
+    }
     kernel_init_boot_fixture_poll();
     kernel_syscall_persistent_shell_checkpoint_selected();
     match kernel_process_current_termination_signal_take() {

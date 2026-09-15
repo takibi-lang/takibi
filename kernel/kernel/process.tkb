@@ -309,6 +309,9 @@ struct ProcessRecord {
     // GitHub issue #9: sched_setaffinity's mask, one bit per CPU. 0 means
     // the process never set one, which is every online CPU.
     affinity_mask: usize;
+    // GitHub issue #9: the migration gate sent this process's current
+    // syscall to core 0. It stays off every peer until that call completes.
+    core0_for_call: bool;
     // GitHub issue #392 stage 1: the run backing this slot's kernel
     // stack, as its base physical address (0 = never backed). It was a
     // parallel [usize; KERNEL_PROCESS_MAX] beside this array, indexed in
@@ -1035,6 +1038,14 @@ fn scheduled_process_set_affinity_mask(slot: usize, mask: usize) {
     scheduled_process_record_at(slot).affinity_mask = mask;
 }
 
+fn scheduled_process_core0_for_call(slot: usize) -> bool {
+    return scheduled_process_record_at(slot).core0_for_call;
+}
+
+fn scheduled_process_set_core0_for_call(slot: usize, value: bool) {
+    scheduled_process_record_at(slot).core0_for_call = value;
+}
+
 fn scheduled_process_init_signal_wait_logged(slot: usize) -> bool {
     return scheduled_process_record_at(slot).init_signal_wait_logged;
 }
@@ -1126,6 +1137,7 @@ private fn scheduled_process_record_reset_syscall_state(slot: usize)
     scheduled_process_set_inetd_mode(slot, false);
     scheduled_process_set_init_signal_wait_logged(slot, false);
     scheduled_process_set_affinity_mask(slot, 0);
+    scheduled_process_set_core0_for_call(slot, false);
     scheduled_process_set_exec_pending(slot, false);
     scheduled_process_set_exec_argc(slot, 0);
     scheduled_process_set_exec_path_is_dynamic_httpd(slot, false);
@@ -2918,6 +2930,38 @@ fn kernel_process_stack_idle_complete() {
     process_run_unlock(guard);
     workload_profile_idle_enter();
 }
+
+// GitHub issue #9: the migration gate's twin of the function above, called
+// after kernel_secondary_idle_yield_enter has moved SP_EL1 off the process's
+// stack. The process stays live. It becomes Ready, with its stack unowned,
+// in one critical section, so core 0 can take stack and rewound frame
+// together, and never while this core still stands on them.
+fn kernel_process_stack_idle_yield() {
+    let core: usize = cpu_id();
+    if (core == 0 || core >= KERNEL_MAX_CORES ||
+        execution_here().current_live || execution_here().stack_live == false) {
+        kernel_syscall_fail_stop(0);
+    }
+    let guard = process_run_lock();
+    let mut outgoing: ProcessHandle = execution_here().stack_handle;
+    if (scheduled_process_handle_matches(outgoing) == false ||
+        scheduled_process_state_of(outgoing) != ProcessSlotState::Running ||
+        scheduled_process_record_of(outgoing).stack_owner_cpu != core) {
+        process_run_unlock(guard);
+        kernel_syscall_fail_stop(0);
+    }
+    // Leave its root before it can run elsewhere, as an exit does.
+    address_space_activate_root(0);
+    scheduled_process_record_of(outgoing).stack_owner_cpu =
+        PROCESS_STACK_UNOWNED;
+    execution_here().stack_live = false;
+    if (kernel_process_yield_handle(guard, outgoing) == false) {
+        process_run_unlock(guard);
+        kernel_syscall_fail_stop(0);
+    }
+    process_run_unlock(guard);
+    workload_profile_idle_enter();
+}
 // GitHub issue #264 first stage keeps the #248 wait4 result fields and
 // #245 exec-image flag in the same ProcessRecord as their slot's state
 // and links. They remain indexed by the waiting/current process exactly
@@ -3646,10 +3690,11 @@ fn kernel_process_cpu_admits(cpu: usize, pid: usize) -> bool {
     return workload_busy_secondary_candidate(pid);
 }
 
-// GitHub issue #9: the affinity ABI, layered on the admission rule above.
-// The rule is this kernel's permitted set, what Linux would call the
-// task's cpuset; sched_setaffinity narrows placement within it and never
-// widens it.
+// GitHub issue #9: the affinity ABI. A process that never set a mask is
+// placed by the per-pid admission rule above, exactly as before. A mask is
+// an admission request of its own: the process may run on the CPUs it
+// names, and the migration gate in kernel_syscall_dispatch_action keeps
+// every syscall not known to be peer-safe on core 0.
 fn kernel_process_online_mask() -> usize {
     let online: usize = kernel_online_core_count();
     let mut mask: usize = 0;
@@ -3659,29 +3704,70 @@ fn kernel_process_online_mask() -> usize {
     return mask;
 }
 
-fn kernel_process_allowed_mask(pid: usize) -> usize {
+// Core 0 and the one secondary the scheduler runs processes on. RPi5's
+// cores 2 and 3 stay idle until a later step admits them.
+fn kernel_process_schedulable_mask() -> usize {
     let online: usize = kernel_online_core_count();
     let mut mask: usize = 0;
     for cpu: usize in 0..<KERNEL_MAX_CORES {
-        if (cpu < online && kernel_process_cpu_admits(cpu, pid)) {
+        if (cpu < online && (cpu == 0 || cpu == SECONDARY_CORE_ID)) {
             mask = mask | (1 << cpu);
         }
     }
     return mask;
 }
 
-// One placement answer for a real process: the admission rule, narrowed by
-// its affinity mask. A mask that shares no CPU with what the rule allows
-// falls back to the rule, as Linux falls back to a task's cpuset, so a mask
-// that has become impossible never leaves a process runnable nowhere.
+// One placement answer for a real process. A syscall the gate sent to core
+// 0 pins the process there until the call completes.
 fn kernel_process_cpu_allows_slot(cpu: usize, slot: usize) -> bool {
-    let pid: usize = scheduled_process_pid_of_slot(slot);
-    if (kernel_process_cpu_admits(cpu, pid) == false) { return false; }
     if (cpu >= KERNEL_MAX_CORES) { return false; }
     let bit: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    if (scheduled_process_core0_for_call(slot)) { return cpu == 0; }
     let mask: usize = scheduled_process_affinity_mask(slot);
-    if (mask == 0 || (mask & (1 << bit)) != 0) { return true; }
-    return (mask & kernel_process_allowed_mask(pid)) == 0;
+    if (mask == 0) {
+        return kernel_process_cpu_admits(
+            cpu, scheduled_process_pid_of_slot(slot));
+    }
+    return (mask & kernel_process_schedulable_mask() & (1 << bit)) != 0;
+}
+
+// Whether the current process is on this CPU because the per-pid rule put
+// it there. Those fixtures keep their own audits; the migration gate
+// applies to every other process on a peer.
+fn kernel_process_current_admitted_by_rule() -> bool {
+    if (execution_here().current_live == false) { return false; }
+    return kernel_process_cpu_admits(
+        cpu_id(), scheduled_process_pid_of_handle(
+            execution_here().current_handle));
+}
+
+// The migration gate chose core 0 for the current syscall, whose frame has
+// already been rewound. Publish this peer as having no current EL0 context,
+// as an exit to idle does; the process stays Running, and so unselectable,
+// until kernel_process_stack_idle_yield has moved this CPU off its stack.
+fn kernel_process_migrate_current(frame_sp: usize) -> bool {
+    if (cpu_id() == 0) { return false; }
+    let guard = process_run_lock();
+    if (execution_here().current_live == false) {
+        process_run_unlock(guard);
+        return false;
+    }
+    let slot: usize = execution_here().current_handle.pool_index;
+    scheduled_process_record_at(slot).saved_sp = frame_sp;
+    scheduled_process_set_core0_for_call(slot, true);
+    execution_here().current_live = false;
+    execution_here().scheduler_enabled = false;
+    execution_here().reschedule_pending = false;
+    process_run_unlock(guard);
+    return true;
+}
+
+// The syscall the gate sent to core 0 has completed there.
+fn kernel_process_clear_core0_for_call(slot: usize) {
+    if (scheduled_process_slot_valid(slot) == false) { return; }
+    let guard = process_run_lock();
+    scheduled_process_set_core0_for_call(slot, false);
+    process_run_unlock(guard);
 }
 
 must_use variant ProcessAffinityResult { Missing; Invalid; Mask(usize); }
@@ -3721,8 +3807,9 @@ fn kernel_process_affinity_get(pid: usize) -> ProcessAffinityResult
 
 // sched_setaffinity keeps the online CPUs of the requested mask. Linux
 // refuses a mask with no online CPU in it, or none the task's cpuset
-// permits; here the permitted set is the admission rule. The process moves
-// at the next scheduling decision on the CPU it is on, not at once.
+// permits; here the permitted set is the CPUs the scheduler runs processes
+// on. The process moves at the next scheduling decision on the CPU it is
+// on, not at once.
 fn kernel_process_affinity_set(pid: usize, requested: usize)
         -> ProcessAffinityResult !{unsafe} {
     let mask: usize = requested & kernel_process_online_mask();
@@ -3735,8 +3822,7 @@ fn kernel_process_affinity_set(pid: usize, requested: usize)
         }
         ProcessSlotForPidResult::Found(found) => { found }
     };
-    if ((mask & kernel_process_allowed_mask(
-            scheduled_process_pid_of_slot(slot))) == 0) {
+    if ((mask & kernel_process_schedulable_mask()) == 0) {
         process_run_unlock(guard);
         return ProcessAffinityResult::Invalid;
     }
@@ -6723,6 +6809,20 @@ fn kernel_process_child_exit(status: usize) -> usize {
                         let ready = scheduled_process_wake(parent_owner, blocked);
                         kernel_process_trace_handle(
                             ProcessTraceWake, parent, child, status);
+                        // GitHub issue #9: wait4 is outside the peer-safety
+                        // table, so a parent its own affinity mask placed on
+                        // a peer would have this wait4 rerun on core 0 in
+                        // any case. Finish it here instead. The continuation
+                        // below cannot start while this core still stands on
+                        // the child's stack, and core 0 may wait on that
+                        // stack for a successor: that parent was the only
+                        // one, and it was waiting for this core to leave.
+                        if (cpu_id() == 0 &&
+                            scheduled_process_affinity_mask(
+                                parent.pool_index) != 0) {
+                            scheduled_process_set_core0_for_call(
+                                parent.pool_index, true);
+                        }
                         if (kernel_process_cpu_allows_slot(
                                 cpu_id(), parent.pool_index)) {
                             scheduled_process_record_at(

@@ -270,6 +270,13 @@ fn kernel_secondary_idle_reenter() {
     kernel_secondary_main(0x290 + cpu_id());
 }
 
+// GitHub issue #9: the same re-entry after the migration gate handed a
+// live process to core 0.
+fn kernel_secondary_idle_yield_reenter() {
+    kernel_process_stack_idle_yield();
+    kernel_secondary_main(0x290 + cpu_id());
+}
+
 // Shared timer policy; each platform still acknowledges its own GIC source
 // after this returns. Only a lower-EL interrupt may replace the saved frame.
 fn kernel_secondary_timer_schedule(frame_sp: usize, lower_el: bool)
