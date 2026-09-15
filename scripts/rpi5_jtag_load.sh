@@ -378,11 +378,18 @@ if [ -n "$peer_console_ddb_test_address" ]; then
         -c "rbp $peer_console_ddb_checkpoint_address"
     )
 fi
+# The software-BRK checkpoint comes after the RPi5 network fixtures, and the
+# lane that loads it starts no host peer for them. Each fixture has its own
+# deadline -- ARP 15 s, ICMP 15 s, TCP 30 s -- and one that times out skips
+# the rest, but stray host traffic can answer ARP late in its window and
+# leave ICMP, or ICMP and TCP, to run out in full. From resume that is about
+# 4 s to the link, up to 60 s of fixtures, and under a second more to the
+# checkpoint. 30 s covered only the path where nothing answered at all.
 if [ -n "$ddb_breakpoint_test_address" ]; then
     LOAD_COMMANDS+=(
         -c "bp $ddb_breakpoint_checkpoint_address 4 hw"
         -c 'resume'
-        -c 'wait_halt 30000'
+        -c 'wait_halt 90000'
         -c "targets bcm2712.cpu$INJECT_CORE"
         -c "mwb $ddb_breakpoint_test_address 1"
         -c 'targets bcm2712.cpu0'
