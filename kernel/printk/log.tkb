@@ -48,7 +48,8 @@ private let mut kernel_log_boot_tick: i64;
 private let mut kernel_log_frequency: i64;
 private let mut kernel_log_snapshot: [u8; KERNEL_LOG_SNAPSHOT_CAPACITY];
 private let mut kernel_log_snapshot_length: usize;
-// Peer capture lasts through every numeric/string fragment until the newline;
+// Peer capture lasts through every numeric/string fragment until the fragment
+// that completes the line returns (kernel_log_end_fragment);
 // DDB writes directly to the device and terminal crash reporting explicitly
 // enters emergency mode before using the ordinary formatting helpers.
 const KERNEL_LOG_PEER_LINE_BYTES: usize = 192;
@@ -142,6 +143,18 @@ fn kernel_log_begin_fragment() {
         return;
     }
     kernel_log_capture_enabled = true;
+}
+
+// A peer's fragment ends here. Suppression lasts until the line is complete,
+// so a line built from several fragments (a label, uart_put_udec digits, then
+// "\n") is still one record. Only a fragment that leaves no partial line
+// behind lets the peer's later direct bytes through again.
+fn kernel_log_end_fragment() {
+    if (kernel_log_core_here().emergency) { return; }
+    if (cpu_id() == 0) { return; }
+    if (kernel_log_core_here().peer_length == 0) {
+        kernel_log_core_here().suppressed = false;
+    }
 }
 
 private fn kernel_log_peer_publish() !{unsafe} {
@@ -595,9 +608,13 @@ fn kernel_log_capture_uart_byte(value: u8) -> bool {
             kernel_log_core_here().peer_line[safe_length] = value;
             kernel_log_core_here().peer_length = length + 1;
         } else { kernel_log_core_here().peer_truncated = true; }
+        // A newline ends the record, not the fragment. The rest of the same
+        // kernel_boot_log string stays suppressed until the fragment returns
+        // (kernel_log_end_fragment). Lifting it here sent the tail of
+        // "\nworkload: ..." straight to the UART, while core 0 drained the
+        // lone newline record into the middle of it.
         if (value == 10) {
             kernel_log_peer_publish();
-            kernel_log_core_here().suppressed = false;
         }
         return false;
     }
@@ -644,17 +661,17 @@ fn kernel_log_capture_uart_byte(value: u8) -> bool {
 //
 // So this runs on every boot rather than behind a switch, for the same reason
 // the two-core contention probes do: evidence nobody turns on is evidence
-// nobody has. It costs four lines.
+// nobody has. It costs five lines.
 //
 // Bounded on purpose. It emits KERNEL_LOG_PEER_PROBE_LINES numbered lines and
 // then stops, so the count in the retained log is a fact a view can compare
 // rather than a stream whose length depends on how long the boot took.
 //
-// The shared `dmesg` view enumerates cpu1's four lines by name. A third core
-// would add four more and fail that view, which is the intended outcome: the
+// The shared `dmesg` view enumerates cpu1's five lines by name. A third core
+// would add five more and fail that view, which is the intended outcome: the
 // view is where somebody decides what a four-core boot's retained log should
 // look like, and failing there is cheaper than discovering it later.
-const KERNEL_LOG_PEER_PROBE_LINES: usize = 4;
+const KERNEL_LOG_PEER_PROBE_LINES: usize = 5;
 private let mut kernel_log_peer_probe_emitted: [usize; KERNEL_MAX_CORES];
 
 // Not an interrupt function, and the effect checker is what settled that: an
@@ -672,7 +689,15 @@ fn kernel_log_peer_probe_step() !{logs, unsafe} {
         return;
     }
     kernel_log_peer_probe_emitted[core] = emitted + 1;
-    kernel_boot_log("peer log probe: line=");
+    // GitHub issue #9: the last line starts with a newline inside the same
+    // fragment, the shape of the busy pair's migration line. Its text used
+    // to escape the record and reach the UART raw, so it never got into the
+    // retained log this view reads.
+    if (emitted + 1 == KERNEL_LOG_PEER_PROBE_LINES) {
+        kernel_boot_log("\npeer log probe: line=");
+    } else {
+        kernel_boot_log("peer log probe: line=");
+    }
     uart_put_udec(emitted + 1);
     kernel_boot_log("\n");
 }
@@ -1032,6 +1057,7 @@ fn uart_puts(s: *u8) {
 fn kernel_boot_log(message: *u8) {
     kernel_log_begin_fragment();
     uart_puts(message);
+    kernel_log_end_fragment();
 }
 
 fn kernel_boot_log_syscall_unreachable(number: usize) {
@@ -1048,9 +1074,10 @@ fn kernel_boot_log_resource_exhausted(resource: *u8, capacity: usize) {
     kernel_boot_log("\n" as *u8);
 }
 
-// Ordinary retained kernel text remains a core-0 stream. Other cores discard
-// a kernel_boot_log logical line at uart_putc until its newline, so fragments
-// cannot split core 0's view-sensitive text. The suppression bit is per-core;
+// Ordinary retained kernel text remains a core-0 stream. Other cores divert
+// a kernel_boot_log logical line at uart_putc into a peer record until the
+// fragment that completes it returns, so fragments cannot split core 0's
+// view-sensitive text. The suppression bit is per-core;
 // direct userspace UART and the lock-free crash/DDB reporters remain live.
 // Re-entry on one core would still alias that core's line state.
 fn kernel_log_execution_model_assumption() {
