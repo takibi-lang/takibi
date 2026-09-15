@@ -64,6 +64,7 @@ SHELL_READY = b"interactive shell: uart blocked\n"
 PAYLOAD_READY = b"concurrency: parent progressed while child uart-blocked"
 PAYLOAD = b"irqtest\n"
 PERSISTENT_READY = b"persistent shell: uart blocked\n"
+SPINNER = b"while :; do :; done &\n"
 
 MODE = os.environ.get("UART_WAKE_MODE", "shell")
 LABEL = "kernel/qemu peer-uart-wake" if MODE == "peer" else "kernel/qemu uart-wake"
@@ -305,6 +306,18 @@ def run() -> None:
     if MODE == "peer":
         run_peer(connection)
         return
+
+    # A read blocks only when something else is Ready. Beside this shell
+    # there is only the busy pair's survivor, and two CPUs hold both. The
+    # lane used to pass anyway because init's sleep retried in EL1 and kept
+    # a CPU, which left the survivor Ready; once a sleep gave the CPU up,
+    # only 1 of 17 reads blocked. So start a real third runnable context: a
+    # background EL0 spin that never makes a syscall. Paced, because the
+    # line is longer than the PL011 FIFO.
+    for value in SPINNER:
+        connection.sendall(bytes((value,)))
+        time.sleep(0.01)
+    time.sleep(1.5)
 
     gdb.execute("set pagination off")
     gdb.execute("set confirm off")

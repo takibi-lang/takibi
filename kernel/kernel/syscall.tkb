@@ -1666,6 +1666,14 @@ fn syscall_deadline_wait(timespec_address: usize, absolute: bool)
             kernel_process_current_clear_deadline();
             return SyscallDeadlineResult::Ready;
         }
+        // Ask again on every retry, as the first entry does. A process that
+        // found nobody else Ready when it armed keeps retrying here in EL1,
+        // and without this it held its CPU after others became Ready: the
+        // DDB lane's BREAK found init at this read_cntpct on core 0 while
+        // the workload it was waiting for got no time.
+        if (kernel_process_other_ready()) {
+            return SyscallDeadlineResult::Block;
+        }
         return SyscallDeadlineResult::WaitInterrupt;
     }
     let frequency: usize = read_cntfrq() as usize;
@@ -1718,6 +1726,8 @@ fn syscall_signal_wait(wait_set: usize, timeout_address: usize)
             kernel_process_current_clear_deadline();
             return SyscallAction::Resume(LINUX_EAGAIN);
         }
+        // The same retry question as syscall_deadline_wait's.
+        if (kernel_process_other_ready()) { return SyscallAction::Block; }
         return SyscallAction::WaitInterrupt;
     }
     if (timeout_address != 0) {
