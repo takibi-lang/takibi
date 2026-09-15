@@ -17,6 +17,15 @@ def connect(port: int, deadline: float) -> socket.socket:
     raise SystemExit(f"tcp/{port} did not accept a connection")
 
 
+def send_paced(serial, data: bytes) -> None:
+    # One byte at a time, like typed input: the kernel's RX interrupt takes
+    # one byte each, and a burst longer than the 16-byte PL011 FIFO would
+    # drop its tail.
+    for value in data:
+        serial.sendall(bytes((value,)))
+        time.sleep(0.01)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--serial-port", type=int, required=True)
@@ -59,6 +68,9 @@ def main() -> int:
     wake_byte_sent = args.break_source == "software"
     prompt_count = 0
     migration_context_sent = False
+    peer_tty_sent = False
+    peer_tty_reading_at = None
+    peer_tty_line_sent = False
     payload_sent = False
     commands = [
         b"oops\n", b"regs\n", b"intr\n", b"sched\n",
@@ -144,8 +156,29 @@ def main() -> int:
             peer_console_pending = (
                 b"workload: peer console record pending for DDB\n" in received
             )
+            # GitHub issue #547: the BREAK must also find the peer terminal
+            # reader asleep, so DDB can name it. The kernel admits the reader
+            # once the console writer's verdict is out. The shell then waits
+            # in wait4 for it, and it blocks on uart-rx on the secondary.
+            peer_console_viewed = (
+                b"workload: peer console short-wrote 1024 of 1088 bytes, "
+                b"then delivered the final record\n" in received
+            )
+            if (args.break_source == "uart" and migration_context_sent and
+                    peer_console_viewed and not peer_tty_sent):
+                send_paced(serial, b"/bin/peer-tty\n")
+                peer_tty_sent = True
+            if (peer_tty_reading_at is None and
+                    b"workload: peer tty reading the terminal on the "
+                    b"secondary cpu\n" in received):
+                peer_tty_reading_at = time.monotonic()
+            # Its read blocks right after that line; give it the time.
+            peer_tty_asleep = (
+                args.break_source != "uart" or
+                (peer_tty_reading_at is not None and
+                 time.monotonic() - peer_tty_reading_at >= 1.0))
             if (wake_byte_sent and migration_ready and peer_console_pending
-                    and not break_sent):
+                    and peer_tty_asleep and not break_sent):
                 with connect(args.qmp_port, deadline) as qmp:
                     qmp_file = qmp.makefile("rwb", buffering=0)
                     # Say what arrived instead of naming only what did
@@ -197,10 +230,19 @@ def main() -> int:
                 b"peer user console: queued before DDB, delivered after "
                 b"continue \n" in received
             )
+            # The reader DDB saw asleep takes its line once DDB has let go.
+            if (args.break_source == "uart" and peer_tty_sent and
+                    not peer_tty_line_sent and
+                    b"ddb: continuing\n" in received):
+                send_paced(serial, b"peer-tty-line-ok\n")
+                peer_tty_line_sent = True
+            peer_tty_done = (
+                args.break_source != "uart" or
+                b"workload: peer tty read its 17-byte line" in received)
             if (prompt_count >= len(commands) and
                     b"ddb: continuing\n" in received and
                     b"init: ash bootstrap\n" in received and
-                    peer_delivery_ready):
+                    peer_delivery_ready and peer_tty_done):
                 return 0
 
     raise SystemExit("DDB BREAK/inspect/continue sequence did not complete")

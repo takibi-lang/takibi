@@ -224,7 +224,10 @@ cannot hold off an interrupt taken on another CPU.
 `peer` mode of kernelcheck-uart-wake-qemu uses gdb to hold CPU1 after the
 reader's last lockless look. While it is held, CPU0 alone takes the RX
 interrupt and pushes the byte, and then both CPUs run. The reader has to come
-back for the next byte.
+back for the next byte. The UART-BREAK DDB lane breaks in while that reader
+is asleep on the secondary. DDB's live wait graph must then show exactly one
+uart-rx waiter, and `ps` must show it Blocked on UartRx under a shell that
+waits for a child. After `continue` the same reader takes its typed line.
 
 ## Stopping the other cores
 

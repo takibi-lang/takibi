@@ -47,6 +47,17 @@ Three things went wrong on the way:
   uart-wake boot gave the busy pair the third runnable context it waits for
   before migrating. It now backgrounds the same server the other drivers do.
 
+The last criterion landed on 2026-09-15. The UART-BREAK DDB lane runs
+`/bin/peer-tty` once the console writer's verdict is out, and breaks in a
+second after the reader announces its read. DDB's live wait graph shows
+exactly one uart-rx waiter. Its `ps` line reads Blocked/UartRx (`state=3
+wait=1`), and its parent, the shell, is waiting for a child (`wait=2`).
+After `continue` the reader takes its typed line on the secondary. The check
+was run offline against three edited copies of a passing capture: one with
+the reader not on UartRx, one without the verdict, and one where the shell is
+the reader, as it would be if peer-tty had never started. It refused all
+three.
+
 ---
 
 ## 2026-09-14: DDB breaks in while a peer console record is held (#534)

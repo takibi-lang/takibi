@@ -336,6 +336,42 @@ then
     exit 1
 fi
 
+# GitHub issue #547: the BREAK found the terminal reader on the secondary
+# asleep, and DDB names it. In the live wait graph -- the first one, before
+# waittest's synthetic graph -- exactly one process waits for uart-rx. Its ps
+# line says Blocked on UartRx (state=3 wait=1), and its parent waits for a
+# child (wait=2): the shell that ran /bin/peer-tty, not the shell reading
+# the terminal itself, whose parent is init. After continue, that reader
+# takes its line on the secondary.
+if [ "$BREAK_SOURCE" = uart ] && ! python3 - "$UART_LOG" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(errors="replace").replace("\r", "")
+start = text.find("ddb: wait current=")
+end = text.find("ddb: wait edges=", start)
+live = text[start:end] if 0 <= start < end else ""
+readers = re.findall(
+    r"^ddb: wait pid=([0-9]+) state=blocked waits-for event=uart-rx$",
+    live, re.M)
+ps = {pid: (ppid, state, wait) for pid, ppid, state, wait in re.findall(
+    r"^ddb: ps pid=([0-9]+) ppid=([0-9]+) state=([0-9]+) wait=([0-9]+) ",
+    text, re.M)}
+ok = len(readers) == 1 and readers[0] in ps
+if ok:
+    ppid, state, wait = ps[readers[0]]
+    ok = (state, wait) == ("3", "1") and ps.get(ppid, ("", "", ""))[2] == "2"
+continuing = text.find("ddb: continuing\n")
+ok = ok and continuing >= 0 and text.find(
+    "workload: peer tty read its 17-byte line", continuing) >= 0
+raise SystemExit(0 if ok else 1)
+PY
+then
+    echo "FAIL kernel/qemu ddb: DDB did not show the peer terminal reader blocked on uart-rx under its waiting shell, or the reader did not take its line after continue" >&2
+    exit 1
+fi
+
 if [ "$BREAK_SOURCE" = uart ]; then
     matched_stacks="$(grep -Ec '^ddb: stack cpu=[01] pid=[0-9]+ stack=0x[0-9a-f]+\.\.0x[0-9a-f]+ owner=(none|[01]) record=match$' "$UART_LOG" || true)"
     if { [ "$matched_stacks" -eq 2 ] &&
