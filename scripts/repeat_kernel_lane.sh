@@ -42,7 +42,7 @@
 #
 # Examples:
 #   scripts/repeat_kernel_lane.sh 20 make kernelcheck-qemu
-#   scripts/repeat_kernel_lane.sh --mode check --port-base 18720 5 \
+#   scripts/repeat_kernel_lane.sh --mode check --port-base 18724 5 \
 #       bash scripts/run_kernel_qemutest.sh
 set -uo pipefail
 

@@ -195,7 +195,7 @@ def rejects(what, ports, because):
 # break several of them at once and a bare rejection would pass for the wrong
 # reason.
 with_constants()
-accepts("the real lane geometry", [LOW, 18706])
+accepts("the real lane geometry", [LOW, 18720])
 rejects(
     "a lane span wider than one block",
     [LOW, LOW + stride],
@@ -206,16 +206,16 @@ rejects(
     [LOW, floor - stride * (blocks - 1)],
     "ephemeral floor",
 )
-with_constants(QEMU_SESSION_REPEAT_BASE=18706)
+with_constants(QEMU_SESSION_REPEAT_BASE=18720)
 rejects(
     "a repeat window overlapping a lane port",
-    [LOW, 18706],
+    [LOW, 18720],
     "at or below the highest lane port",
 )
 with_constants(QEMU_SESSION_REPEAT_MAX_SAMPLES=stride)
 rejects(
     "a repeat window reaching past the block",
-    [LOW, 18706],
+    [LOW, 18720],
     "past this block's last port",
 )
 

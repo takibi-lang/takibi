@@ -58,15 +58,31 @@ def problems(tree: dict[str, str]) -> list[str]:
     if "RPI5_ARM_PEER_CONSOLE_DDB=1" not in \
             tree["scripts/run_kernel_hwtest_rpi5.sh"]:
         result.append("RPi5 DDB half no longer holds a peer record")
-    if "pid == workload_busy_pair.peer_console_pid" not in evidence:
-        result.append("secondary admission no longer selects the writer")
-    primary_shape = (
-        "return workload_busy_pair.peer_console_pid == 0 ||\n"
-        "           workload_busy_pair.peer_console_reported ||\n"
-        "           pid != workload_busy_pair.peer_console_pid;"
-    )
-    if primary_shape not in evidence:
-        result.append("primary admission no longer excludes the writer")
+    # GitHub issue #9: the writer's placement is no longer an admission rule
+    # naming its pid. It asks its progress handler for a CPU and pins itself
+    # there with sched_setaffinity, so the property to guard is that handout
+    # and that pin -- the two halves that put this writer on the peer.
+    #
+    # The handout also carries the writer's TURN, which the rule used to
+    # carry: the CPU is named only once the filesystem reader has reported,
+    # and asking earlier is not counted as a refusal.
+    if "        workload_busy_pair.peer_console_pid = pid;\n" \
+       "        process_run_unlock(guard);\n" \
+       "        return SECONDARY_CORE_ID;" not in evidence:
+        result.append("registration no longer hands the writer its peer CPU")
+    if "if (workload_busy_pair.peer_read_reported == false) {" not in evidence:
+        result.append("writer is named a CPU before the reader's verdict")
+    if "return svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) == 0;" \
+            not in payload:
+        result.append("writer no longer pins itself to the CPU it was given")
+    # Both self-placing fixtures in this payload -- the console writer and
+    # the terminal reader -- must exit when their own pin fails, so this
+    # counts the sites rather than merely finding one: with two copies in the
+    # file, presence alone could never notice one of them going.
+    if payload.count(
+            "if (peer_pin(peer_cpu) == false) { "
+            "svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }") != 2:
+        result.append("a self-placing fixture proceeds when its pin failed")
     if "if (cpu != SECONDARY_CORE_ID) { return false; }" not in process:
         result.append("scheduler admits the writer to an unintended peer")
     if "if (x0 == 4)" not in tree["kernel/kernel/syscall.tkb"]:
@@ -125,9 +141,35 @@ def main() -> int:
         "rpi5 ddb hold": ("scripts/run_kernel_hwtest_rpi5.sh",
                           "RPI5_ARM_PEER_CONSOLE_DDB=1",
                           "RPI5_ARM_PEER_CONSOLE_DDB=0"),
-        "primary exclusion": ("kernel/kernel/workload_evidence.tkb",
-                              "           pid != workload_busy_pair.peer_console_pid;",
-                              "           pid == workload_busy_pair.peer_console_pid;"),
+        # Three handlers return SECONDARY_CORE_ID; this one is the writer's,
+        # so the mutation carries the registration line above it or it would
+        # rewrite a sibling fixture's handout and prove nothing.
+        "peer cpu handout": (
+            "kernel/kernel/workload_evidence.tkb",
+            "        workload_busy_pair.peer_console_pid = pid;\n"
+            "        process_run_unlock(guard);\n"
+            "        return SECONDARY_CORE_ID;",
+            "        workload_busy_pair.peer_console_pid = pid;\n"
+            "        process_run_unlock(guard);\n"
+            "        return 0;"),
+        "turn before the reader": ("kernel/kernel/workload_evidence.tkb",
+                                   "if (workload_busy_pair.peer_read_reported == false) {",
+                                   "if (workload_busy_pair.peer_read_reported) {"),
+        "self pin": ("kernel/arch/arm64/kernel/peer_read.tkb",
+                     "return svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) == 0;",
+                     "return true;"),
+        # Either site losing its exit must be caught, and the assertion above
+        # counts both, so mutating the first copy is enough here.
+        "pin failure ignored": (
+            "kernel/arch/arm64/kernel/peer_read.tkb",
+            "if (peer_pin(peer_cpu) == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }\n"
+            "    while (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {}\n"
+            "\n"
+            "    let first: usize = svc5(WRITE_SYSCALL, 1,",
+            "if (peer_pin(peer_cpu) == false) { }\n"
+            "    while (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {}\n"
+            "\n"
+            "    let first: usize = svc5(WRITE_SYSCALL, 1,"),
         "init entry": ("kernel/tests/ext2/inittab", "::once:/bin/peer-console",
                        "::once:/bin/old-console"),
         "qemu stop": ("scripts/run_kernel_qemutest.sh", "--stop-marker",

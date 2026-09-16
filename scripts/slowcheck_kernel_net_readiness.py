@@ -122,14 +122,20 @@ def main() -> int:
                   "wire readiness into kernel_net_test.py")
             return 1
         # The UART end is whatever reads this lane's guest: the ash driver,
-        # the DDB lane's driver, or the uart-wake lane's gdb script (GitHub
-        # issue #546), which takes the files from its environment. It is
-        # recognised by what it is handed rather than by name: an earlier
-        # version listed the programs, and refused the DDB lane the day that
-        # lane started the peer (CI run 34571244409). Some call other than
-        # the peer's must carry both files, and no call may carry only one.
+        # the DDB lane's driver, or a gdb script -- the uart-wake lane's
+        # (GitHub issue #546) and the affinity lane's (issue #9) -- which
+        # takes the files from its environment, because `gdb -batch -x`
+        # passes no argv to the script it runs. It is recognised by what it
+        # is handed rather than by name: an earlier version listed the
+        # programs, and refused the DDB lane the day that lane started the
+        # peer (CI run 34571244409). Some call other than the peer's must
+        # carry both files, and no call may carry only one -- which is the
+        # half that still bites, whatever the spelling: a lane that wires one
+        # file and forgets the other is refused here.
         pairs = (("--init-listener-file", "--network-ready-file"),
-                 ("UART_WAKE_INIT_LISTENER=", "UART_WAKE_NETWORK_READY="))
+                 ("UART_WAKE_INIT_LISTENER=", "UART_WAKE_NETWORK_READY="),
+                 ("AFFINITY_GDB_INIT_LISTENER=",
+                  "AFFINITY_GDB_NETWORK_READY="))
         others = [line for line in commands
                   if '"$REPO_ROOT/scripts/kernel_net_test.py"' not in line]
         whole = [line for line in others
