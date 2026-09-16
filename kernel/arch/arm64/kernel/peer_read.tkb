@@ -26,6 +26,8 @@ const WRITE_SYSCALL: usize = 64;
 const PEER_CONSOLE_TAG: usize = 4;
 const PEER_CONSOLE_POLL_PAUSE: usize = 1048576;
 const PEER_TTY_TAG: usize = 5;
+const SETAFFINITY_SYSCALL: usize = 122;
+const NANOSLEEP_SYSCALL: usize = 101;
 const PEER_TTY_LINE_MAX: usize = 64;
 
 private fn peer_read_cpu(cpu_bytes: borrow [u8; 4..]) -> usize {
@@ -112,6 +114,28 @@ fn core_read() {
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
 }
 
+// GitHub issue #9: a fixture places itself now. Its progress handler names
+// the CPU when its turn comes, and this asks the scheduler to keep it
+// there. One bit per CPU, and KERNEL_MAX_CORES is four, so four answers
+// cover every mask this can need; a runtime shift would need a bound the
+// compiler cannot see under --forbid-trap.
+private fn peer_cpu_bit(cpu: usize) -> u8 {
+    if (cpu == 0) { return 1; }
+    if (cpu == 1) { return 2; }
+    if (cpu == 2) { return 4; }
+    if (cpu == 3) { return 8; }
+    return 0;
+}
+
+private fn peer_pin(cpu: usize) -> bool {
+    let bit: u8 = peer_cpu_bit(cpu);
+    if (bit == 0) { return false; }
+    let mut mask: [u8; 8];
+    for index: usize in 0..<8 { mask[index] = 0; }
+    mask[0] = bit;
+    return svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) == 0;
+}
+
 // GitHub issue #534: a real EL0 writer on the admitted peer. Each line is
 // exactly one 64-byte publication record. The single first write asks for
 // seventeen records, one more than the ring can hold, and must therefore be
@@ -120,9 +144,32 @@ fn core_read() {
 fn peer_console() {
     let mut cpu_bytes: [u8; 4];
     let output = bs"peer user console: record=01/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=02/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=03/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=04/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=05/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=06/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=07/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=08/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=09/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=10/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=11/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=12/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=13/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=14/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=15/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=16/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=17/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n";
-    let peer_cpu: usize = svc5(
-        WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG, 0, 0, 0, 0);
-    if (peer_cpu == 0) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
+    // The kernel answers 0 while it is not this writer's turn: init starts
+    // it long before the filesystem reader's verdict. Wait by SLEEPING
+    // rather than by arithmetic. This wait happens on core 0, beside the
+    // busy pair, and a third runnable process there spoils the fairness
+    // that pair measures: spinning here took it to 27 slices against 1,
+    // skew 8 past its bound of 4. A nap blocks while anything else is
+    // Ready, so core 0 goes back to the pair. The poll after the writer's
+    // view keeps its arithmetic pause, which #534's late UART BREAK needs
+    // to find that CPU in EL0. Then pin to the CPU this answer names
+    // (GitHub issue #9).
+    let mut nap: [u8; 16];
+    for index: usize in 0..<16 { nap[index] = 0; }
+    // tv_sec = 0, tv_nsec = 1000000 (0x000F4240), little-endian.
+    nap[8] = 0x40;
+    nap[9] = 0x42;
+    nap[10] = 0x0F;
+    let mut spin: usize = 0x9E3779B97F4A7C15;
+    let mut peer_cpu: usize = 0;
+    while (peer_cpu == 0) {
+        peer_cpu = svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG,
+                        0, 0, 0, 0);
+        if (peer_cpu == 0) {
+            svc5(NANOSLEEP_SYSCALL, nap as *u8 as usize, 0, 0, 0, 0);
+        }
+    }
+    if (peer_pin(peer_cpu) == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
     while (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {}
 
     let first: usize = svc5(WRITE_SYSCALL, 1,
@@ -144,7 +191,6 @@ fn peer_console() {
     let ddb_record = bs"peer user console: queued before DDB, delivered after continue \n";
     let mut action: usize = svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG,
                                  first, total, 0, 0);
-    let mut spin: usize = 0x9E3779B97F4A7C15;
     while (action != 2) {
         if (action == 0) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
         if (action == 3) {
@@ -178,6 +224,10 @@ fn peer_tty() {
     let peer_cpu: usize = svc5(
         WORKLOAD_PROGRESS_SYSCALL, PEER_TTY_TAG, 0, 0, 0, 0);
     if (peer_cpu == 0) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
+    // The persistent shell starts this one only after the console writer's
+    // verdict, so its registration succeeds first try and names the CPU to
+    // pin to (GitHub issue #9).
+    if (peer_pin(peer_cpu) == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
     while (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {}
     if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_TTY_TAG, 0, 0, 0, 0) != 1) {
         svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);

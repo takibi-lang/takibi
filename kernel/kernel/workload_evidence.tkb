@@ -644,29 +644,11 @@ fn workload_busy_secondary_candidate(pid: usize) -> bool {
         workload_busy_pair.peer_read_reported == false) {
         return pid == workload_busy_pair.peer_read_pid;
     }
-    if (workload_busy_pair.peer_read_reported &&
-        workload_busy_pair.peer_console_pid != 0 &&
-        workload_busy_pair.peer_console_initial_reported == false) {
-        return pid == workload_busy_pair.peer_console_pid;
-    }
-    // After its view the console writer shares the secondary: a UART-BREAK
-    // DDB lane keeps it there until the debugger releases it. The terminal
-    // reader shares it too (GitHub issue #547). Neither needs the CPU to
-    // itself, and a reader with nothing else runnable beside it never
-    // blocks, so it would never reach the window #547 closes.
-    // Gated on its first report: it registers the moment init starts it,
-    // long before the filesystem reader, and admitted then it reports early
-    // and is refused.
-    if (workload_busy_pair.peer_console_initial_reported &&
-        workload_busy_pair.peer_console_reported == false &&
-        pid == workload_busy_pair.peer_console_pid) {
-        return true;
-    }
-    if (workload_busy_pair.peer_tty_pid != 0 &&
-        workload_busy_pair.peer_tty_reported == false &&
-        pid == workload_busy_pair.peer_tty_pid) {
-        return true;
-    }
+    // GitHub issue #9: the console writer and the terminal reader are not
+    // named here any more. Each asks its progress handler for the CPU when
+    // its turn comes and pins itself to it, so their admission is their own
+    // affinity mask. The filesystem reader above still needs a rule: its
+    // file reads are not in the kernel's peer-safety table yet.
     if (workload_busy_pair.restart_report_state ==
             WorkloadRestartReportState::Reported) {
         return pid == workload_busy_pair.a_pid ||
@@ -685,14 +667,10 @@ fn workload_busy_primary_candidate(pid: usize) -> bool {
         pid == workload_busy_pair.peer_read_pid) {
         return false;
     }
-    if (workload_busy_pair.peer_tty_pid != 0 &&
-        workload_busy_pair.peer_tty_reported == false &&
-        pid == workload_busy_pair.peer_tty_pid) {
-        return false;
-    }
-    return workload_busy_pair.peer_console_pid == 0 ||
-           workload_busy_pair.peer_console_reported ||
-           pid != workload_busy_pair.peer_console_pid;
+    // GitHub issue #9: the console writer and the terminal reader keep
+    // themselves off this core through their own affinity masks, so only
+    // the filesystem reader above is still excluded by name.
+    return true;
 }
 
 fn workload_busy_note_selected(pid: usize) {
@@ -927,6 +905,15 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
     if (workload_busy_pair.peer_console_pid == 0) {
         if (kernel_process_parent_is_root() == false) {
             workload_busy_pair.refused = workload_busy_pair.refused + 1;
+            process_run_unlock(guard);
+            return 0;
+        }
+        // GitHub issue #9: this answer carries the writer's TURN now, not
+        // its admission -- the fixture pins itself to the CPU named here.
+        // So hold the name back until the filesystem reader has its
+        // verdict, which the admission rule used to do. Not a refusal: init
+        // starts this writer long before that, and it asks again.
+        if (workload_busy_pair.peer_read_reported == false) {
             process_run_unlock(guard);
             return 0;
         }

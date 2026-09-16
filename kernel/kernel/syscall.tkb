@@ -2493,6 +2493,10 @@ fn syscall_peer_safe(number: usize, fd: usize) -> bool {
     if (number == AARCH64_NR_EXIT || number == AARCH64_NR_EXIT_GROUP) {
         return true;
     }
+    // The workload fixtures' own progress report. Every handler in
+    // kernel/kernel/workload_evidence.tkb takes the process run lock, and
+    // these fixtures have reported from a peer since #533, #534 and #547.
+    if (number == AARCH64_NR_TAKIBI_WORKLOAD_PROGRESS) { return true; }
     // The terminal: a peer's output goes through its console ring (#534),
     // and input is ordered by the run lock (#547). A connection duplicated
     // onto a standard descriptor is not the terminal.
