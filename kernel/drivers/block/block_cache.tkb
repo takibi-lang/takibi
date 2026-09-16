@@ -30,6 +30,14 @@
 // rare once the boot's fixtures are done, and the core that wrote refreshes
 // its own copy of the block it wrote.
 //
+// Each count is PUBLISHED with release ordering and summed with acquire
+// loads (GitHub issue #533). A compiler fence used to stand here, which
+// orders only what one core's compiler emits: it left the store of a block's
+// bytes free to become visible to another core AFTER the count that retires
+// that core's stale copy, so a peer could take a hit on a slot filled before
+// a write it could not yet see. Release/acquire is what makes the count the
+// later half of that pair on the hardware as well.
+//
 // Kept free of device access and logging, so linux_user/block_cache can
 // compile this file itself and drive two simulated cores against it.
 
@@ -49,11 +57,18 @@ private let mut block_cache_tick: [usize; KERNEL_MAX_CORES];
 private let mut block_cache_hits: [usize; KERNEL_MAX_CORES];
 private let mut block_cache_writes: [usize; KERNEL_MAX_CORES];
 
-private fn block_cache_write_epoch() -> usize {
-    signal_fence();
+private fn block_cache_writes_address(
+        core: {0..<KERNEL_MAX_CORES as usize}) -> usize {
+    let words: *usize = block_cache_writes;
+    return (words + (core as isize)) as usize;
+}
+
+private fn block_cache_write_epoch() -> usize !{unsafe} {
     let mut epoch: usize = 0;
     for core: usize in 0..<KERNEL_MAX_CORES {
-        epoch = epoch + block_cache_writes[core];
+        epoch = epoch + unsafe {
+            atomic_load_acquire(block_cache_writes_address(core))
+        };
     }
     return epoch;
 }
@@ -161,11 +176,13 @@ fn block_cache_fill(core: usize, backend: u8, block: usize,
 // matching. When the write succeeded, this core keeps the bytes it wrote.
 fn block_cache_note_write(core: usize, backend: u8, block: usize,
                           source: borrow [u8; BLOCK_CACHE_BYTES..],
-                          written: bool) {
+                          written: bool) !{unsafe} {
     if (core >= KERNEL_MAX_CORES) { return; }
     let here: {0..<KERNEL_MAX_CORES as usize} = core;
-    block_cache_writes[here] = block_cache_writes[here] + 1;
-    signal_fence();
+    let published: usize = block_cache_writes[here] + 1;
+    unsafe {
+        atomic_store_release(block_cache_writes_address(here), published);
+    }
     if (written) {
         block_cache_store(here, backend, block, source);
     }
@@ -174,11 +191,13 @@ fn block_cache_note_write(core: usize, backend: u8, block: usize,
 // A write that went around block_write -- usb_provision_rootfs's batched
 // USB path --
 // retires every copy the same way.
-fn block_cache_forget_all(core: usize) {
+fn block_cache_forget_all(core: usize) !{unsafe} {
     if (core >= KERNEL_MAX_CORES) { return; }
     let here: {0..<KERNEL_MAX_CORES as usize} = core;
-    block_cache_writes[here] = block_cache_writes[here] + 1;
-    signal_fence();
+    let published: usize = block_cache_writes[here] + 1;
+    unsafe {
+        atomic_store_release(block_cache_writes_address(here), published);
+    }
 }
 
 // The current write epoch, for a copy kept outside this file -- memory.tkb's

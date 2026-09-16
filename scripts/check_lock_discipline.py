@@ -115,6 +115,14 @@ ATOMIC_ALLOWED = {
         "ordinary peer lines are single-producer per CPU and consumed by "
         "core 0; release/acquire publishes complete bounded records without "
         "making terminal reporters wait on a console lock",
+    "drivers/block/block_cache.tkb":
+        "GitHub issue #533: the write epoch. Each core writes ONLY its own "
+        "count, so there is no read-modify-write and nothing to exclude -- "
+        "the atomics carry the ORDERING, which is the whole content of the "
+        "claim: a core's block bytes must not become visible after the count "
+        "that retires every other core's stale copy of that block. The "
+        "device mutex below this file cannot supply that ordering, because a "
+        "peer taking a cache HIT never reaches the device at all",
 }
 
 
