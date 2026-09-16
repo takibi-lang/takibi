@@ -126,9 +126,15 @@ def interrupt_after(seconds: float) -> threading.Timer:
     return timer
 
 
-def continue_bounded() -> None:
-    """Resume both vCPUs for at most STEP_TIMEOUT."""
-    timer = interrupt_after(STEP_TIMEOUT)
+def continue_bounded(budget: float = STEP_TIMEOUT) -> None:
+    """Resume both vCPUs for at most `budget` seconds.
+
+    The budget is an argument because the gate-selection loop below resumes
+    repeatedly: a fixed per-resume bound there would let one lap spend the
+    whole step timeout after the loop's own deadline had passed, which is lane
+    time spent learning nothing.
+    """
+    timer = interrupt_after(max(budget, 1.0))
     try:
         gdb.execute("continue")
     except (gdb.error, KeyboardInterrupt):
@@ -179,21 +185,45 @@ def run() -> None:
     # The probe's line fits the 16-byte PL011 FIFO, so it can go at once
     # while the guest is held.
     connection.sendall(COMMAND)
-    continue_bounded()
-    if gate.hit_count != 1:
+
+    # The gate is not the probe's alone. Every fixture that runs on a peer
+    # reaches it for any syscall outside the peer-safety table -- and
+    # /bin/peer-read's openat and close are outside it, so its reads take the
+    # gate throughout this session. An earlier version of this check assumed
+    # the first hit was the probe's uname; it read another process's frame
+    # instead and died with "Cannot access memory".
+    #
+    # So select rather than assume: keep resuming until a hit is the probe's
+    # own -- CPU 1, with uname in the rewound frame's saved x8. A hit whose
+    # frame cannot be read is somebody else's too, and is passed over the same
+    # way. A gdb breakpoint CONDITION cannot do this: reading the frame there
+    # would raise inside the condition on exactly the hits this has to skip.
+    deadline = time.monotonic() + STEP_TIMEOUT
+    ours = False
+    foreign = 0
+    while not ours and time.monotonic() < deadline:
+        continue_bounded(deadline - time.monotonic())
+        if gate.hit_count == 0:
+            break
+        thread = gdb.selected_thread()
+        if thread is None or thread.num != CPU1_THREAD:
+            foreign += 1
+            continue
+        try:
+            number = read_u64(register("x0") + FRAME_X8_OFFSET)
+        except (gdb.MemoryError, gdb.error):
+            foreign += 1
+            continue
+        if number == UNAME:
+            ours = True
+        else:
+            foreign += 1
+    if not ours:
         verdict(False, f"/bin/affinity ran without the migration gate firing "
-                f"(hits={gate.hit_count}): uname asked from CPU 1 was not "
-                f"handed to core 0. {where()}. "
+                f"for uname on CPU 1 (hits={gate.hit_count}, "
+                f"{foreign} of them other processes'): uname asked from CPU 1 "
+                f"was not handed to core 0. {where()}. "
                 f"UART tail: {uart_tail()!r}")
-        gdb.execute("detach")
-        return
-    gate_thread = gdb.selected_thread().num
-    frame_sp = register("x0")
-    number = read_u64(frame_sp + FRAME_X8_OFFSET)
-    if gate_thread != CPU1_THREAD or number != UNAME:
-        verdict(False, f"the gate fired on thread {gate_thread} for syscall "
-                f"{number}; expected thread {CPU1_THREAD} (CPU1) and uname "
-                f"({UNAME})")
         gdb.execute("detach")
         return
     gate.enabled = False

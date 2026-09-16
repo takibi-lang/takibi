@@ -176,11 +176,20 @@ fn affinity_probe() {
         uts[4] != 120) {
         affinity_fail(bs"affinity: uname asked from cpu 1 did not answer\n");
     }
+    // Say it BEFORE the spinner goes. This line is written from CPU 1, so it
+    // is published into this CPU's console ring, and the only thing that
+    // empties that ring is core 0's drain at the top of a syscall
+    // (kernel_log_peer_drain, kernel/kernel/syscall.tkb). Core 0 has no idle
+    // loop: with the spinner reaped and the shell blocked on its read, core 0
+    // has no syscall to take and the line can sit in the ring for the rest of
+    // the boot. The spinner's millisecond naps are what keep the drain
+    // running, which is the reason it exists -- so it has to outlive the
+    // output, not just the migration.
+    affinity_say(bs"affinity: pinned to cpu 1, where uname, outside the peer-safe table, still answered\n");
     svc5(KILL_SYSCALL, spinner, SIGTERM, 0, 0, 0);
     if (svc5(WAIT4_SYSCALL, spinner, status as *u8 as usize, 0, 0, 0) !=
             spinner) {
         affinity_fail(bs"affinity: the spinner was not reaped\n");
     }
-    affinity_say(bs"affinity: pinned to cpu 1, where uname, outside the peer-safe table, still answered\n");
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
 }
