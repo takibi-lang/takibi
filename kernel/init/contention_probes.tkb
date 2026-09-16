@@ -30,6 +30,7 @@ use "kernel/kernel/occupancy_drain_evidence.tkb";
 use "kernel/kernel/pool_walk_contention_evidence.tkb";
 use "kernel/kernel/init_once_contention_evidence.tkb";
 use "kernel/kernel/tcp_connection_contention_evidence.tkb";
+use "kernel/kernel/ext2_mutation_contention_evidence.tkb";
 
 fn contention_probes() !{unsafe} {
     // GitHub issue #445: the first evidence that this kernel's
@@ -117,5 +118,13 @@ fn contention_probes() !{unsafe} {
         kernel_boot_log("pool walk: a Live view holds the read lock through payload use, and a stale released-chunk cursor is refused ok\n");
     } else {
         kernel_boot_log("pool walk: failed\n");
+    }
+    // GitHub issue #533: the filesystem lock that replaced an admission
+    // claim. Its production reader asks rather than waits, so what a peer
+    // is TOLD is the property, measured with core 0 holding and not holding.
+    if (ext2_mutation_contention_probe()) {
+        kernel_boot_log("ext2 mutation contention: a peer is told no mutation is in flight while core 0 holds nothing, and told there is one while it holds the guard ok\n");
+    } else {
+        kernel_boot_log("ext2 mutation contention: failed\n");
     }
 }

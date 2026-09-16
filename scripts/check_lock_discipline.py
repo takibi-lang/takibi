@@ -81,6 +81,10 @@ ATOMIC_ALLOWED = {
     "kernel/pid_contention_evidence.tkb": "two-core contention probe",
     "kernel/tag_contention_evidence.tkb": "two-core contention probe",
     "kernel/schedule_contention_evidence.tkb": "two-core contention probe",
+    "kernel/ext2_mutation_contention_evidence.tkb":
+        "two-core contention probe; GitHub issue #533's filesystem lock, "
+        "whose production reader asks rather than waits, so the answer is "
+        "what this observes from the other core",
     "kernel/pool_walk_contention_evidence.tkb":
         "GitHub issue #482's two-core probe: the walk side of a pool takes "
         "no guard by design, and this measures what that costs",

@@ -246,6 +246,12 @@ fn kernel_secondary_main(context: usize) {
                 if (pool_walk_contention_is_armed()) {
                     pool_walk_contention_secondary_run();
                 }
+                // GitHub issue #533: ask what a peer reader asks of the
+                // filesystem lock -- whether a mutation is in flight -- with
+                // core 0 holding the guard and not holding it.
+                if (ext2_mutation_contention_is_armed()) {
+                    ext2_mutation_contention_secondary_run();
+                }
             }
             match kernel_process_secondary_start() {
                 ProcessSecondaryStart::Idle => {}

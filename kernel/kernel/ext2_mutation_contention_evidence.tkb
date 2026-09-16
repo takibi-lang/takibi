@@ -1,0 +1,184 @@
+// GitHub issue #533: does kernel/fs/ext2/mutation_lock.tkb actually exclude?
+//
+// The lock it measures replaced an ADMISSION claim -- "every process that
+// reaches the filesystem is admitted to core 0 only" -- which was a
+// statement about the scheduler that ext2 could not check. Replacing it with
+// a lock is only progress if a second core can be shown to observe the
+// exclusion, and kernel/CONCURRENCY.md is explicit about why this file has
+// to exist: a lock added correct-by-audit changed nothing any lane could
+// see, because the second core never reached the subsystem.
+//
+// WHAT THE PEER ACTUALLY DOES IN PRODUCTION
+//
+// It does not take this lock. Readers stay concurrent, because
+// peer_filesystem.expected asserts the BLOCK DEVICE mutex is contended on
+// both cpus and a lock held across reads would zero one side of that. What
+// a peer does instead is ASK -- ext2_mutation_in_flight(), one acquire-load,
+// no wait -- and the migration gate hands its syscall to core 0 when the
+// answer is yes. So the property to measure is exactly that answer, observed
+// from the other core.
+//
+// TWO PHASES, AND PHASE 1 IS THE ONE THAT MATTERS
+//
+// - Phase 1: core 0 holds NOTHING. The peer asks and must see `false`.
+// - Phase 2: core 0 holds the mutation guard across the whole phase. The
+//   peer asks and must see `true`.
+//
+// Phase 1 is not decoration. Without it a probe that always answered `true`
+// -- a lock left held by some earlier path, or an in_flight() that returned
+// a constant -- would pass, and `true` is the answer that costs a peer its
+// placement. CONCURRENCY.md's rule is that a probe with only the locked
+// phase goes quietly green the day the window stops reproducing; here it
+// would go green the day the answer stopped depending on the lock at all.
+//
+// NO RENDEZVOUS, AND NO ROUNDS
+//
+// This is the occupancy_drain shape rather than the statistical one. Core 0
+// HOLDS the lock for the duration of phase 2, so the peer's observation
+// cannot miss the window however slow either core is, and the counts come
+// out the same on QEMU and on the board. A probe that raced a mutation
+// against a read and hoped they overlapped would be a different spin count
+// on RPi5 than on QEMU, which is the load-dependent verdict issue #510 was
+// about.
+//
+// Current limitations (2026-09-16). Keep this list current as call sites
+// change; a limitation that goes stale here is worse than none, since it
+// invites relying on a guarantee that quietly stopped holding.
+//
+// - It observes the ANSWER, not a torn directory. Proving that a reader
+//   which ignored the answer would see two owners of one block needs ext2
+//   mutation and a peer lookup in the same instant, which is a rendezvous
+//   inside ext2 rather than around it. The lock is what makes that
+//   unreachable, so there is nothing left to observe once it holds.
+// - ONE peer. secondary.tkb admits only core 1 to the probes, and this one
+//   is written for exactly two participants like its siblings.
+// - It does not exercise the five mutating syscall arms. Those are covered
+//   by the ext2_mutation view; this covers the lock they share.
+use "kernel/fs/ext2/mutation_lock.tkb";
+use "kernel/lib/execution_model.tkb";
+
+private let mut ext2_mutation_probe_armed: usize;
+private let mut ext2_mutation_probe_phase: usize;
+// LATCHES, set by the peer and never cleared by it (GitHub issue #510): a
+// level the other core clears on its way out cannot answer "was it ever
+// there", which is the question a report telling a harness fault from a
+// kernel one has to ask.
+private let mut ext2_mutation_probe_clear_seen: usize;
+private let mut ext2_mutation_probe_held_seen: usize;
+private let mut ext2_mutation_probe_asked: usize;
+
+private fn ext2_mutation_probe_addr(value: *usize) -> usize {
+    return value as usize;
+}
+
+fn ext2_mutation_contention_is_armed() -> bool !{unsafe} {
+    return unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
+        &ext2_mutation_probe_armed)) } == 1;
+}
+
+// The peer's half: ask the same question the migration gate asks, and record
+// what this phase was told. Counted separately from what it saw, so a phase
+// the peer never reached is not a phase that saw the wrong thing.
+fn ext2_mutation_contention_secondary_run() !{unsafe} {
+    let phase: usize = unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
+        &ext2_mutation_probe_phase)) };
+    let in_flight: bool = ext2_mutation_in_flight();
+    unsafe {
+        atomic_fetch_add_relaxed(ext2_mutation_probe_addr(
+            &ext2_mutation_probe_asked), 1);
+    }
+    if (phase == 1 && in_flight == false) {
+        unsafe { atomic_store_release(ext2_mutation_probe_addr(
+            &ext2_mutation_probe_clear_seen), 1); }
+    }
+    if (phase == 2 && in_flight) {
+        unsafe { atomic_store_release(ext2_mutation_probe_addr(
+            &ext2_mutation_probe_held_seen), 1); }
+    }
+    unsafe { atomic_store_release(ext2_mutation_probe_addr(
+        &ext2_mutation_probe_armed), 0); }
+}
+
+// Arm one phase and wait for the peer to have finished it. Bounded by the
+// counter the peer clears, inside a window derived from read_cntfrq() so the
+// duration is the same on both boards and on an emulator -- never by a spin
+// count, which is a duration only if this core's speed is fixed.
+private fn ext2_mutation_probe_run_phase(phase: usize) -> bool !{unsafe} {
+    unsafe {
+        atomic_store_release(ext2_mutation_probe_addr(
+            &ext2_mutation_probe_phase), phase);
+        atomic_store_release(ext2_mutation_probe_addr(
+            &ext2_mutation_probe_armed), 1);
+    }
+    let start: i64 = read_cntpct();
+    let window: i64 = read_cntfrq() >> 1;
+    while (read_cntpct() - start < window) {
+        if (unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
+                &ext2_mutation_probe_armed)) } == 0) { return true; }
+    }
+    unsafe { atomic_store_release(ext2_mutation_probe_addr(
+        &ext2_mutation_probe_armed), 0); }
+    return false;
+}
+
+private fn ext2_mutation_probe_report(stage: *u8) !{unsafe} {
+    kernel_boot_log("ext2 mutation contention stage: ");
+    kernel_boot_log(stage);
+    kernel_boot_log("\n");
+    kernel_boot_log("ext2 mutation contention counts: asked=");
+    uart_put_udec(unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
+        &ext2_mutation_probe_asked)) });
+    kernel_boot_log(" clear=");
+    uart_put_udec(unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
+        &ext2_mutation_probe_clear_seen)) });
+    kernel_boot_log(" held=");
+    uart_put_udec(unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
+        &ext2_mutation_probe_held_seen)) });
+    kernel_boot_log("\n");
+}
+
+fn ext2_mutation_contention_probe() -> bool !{unsafe} {
+    static_assert(KERNEL_ACTIVE_CORES >= 2,
+                  "ext2 mutation contention evidence requires one peer");
+    unsafe {
+        atomic_store_release(ext2_mutation_probe_addr(
+            &ext2_mutation_probe_clear_seen), 0);
+        atomic_store_release(ext2_mutation_probe_addr(
+            &ext2_mutation_probe_held_seen), 0);
+        atomic_store_release(ext2_mutation_probe_addr(
+            &ext2_mutation_probe_asked), 0);
+    }
+
+    // Phase 1: nothing held here, so the peer must be told no mutation is in
+    // flight. This is the term that goes false if in_flight() ever stops
+    // depending on the lock.
+    let clear_phase: bool = ext2_mutation_probe_run_phase(1);
+    if (clear_phase == false) {
+        ext2_mutation_probe_report("peer-never-asked-unheld" as *u8);
+        return false;
+    }
+
+    // Phase 2: hold the guard across the whole phase, the way
+    // occupancy_drain's peer holds its region, so the peer cannot miss the
+    // window whatever either core's speed is. The guard is linear, so the
+    // release below is checked on every path out of this function.
+    let guard = ext2_mutation_take();
+    let held_phase: bool = ext2_mutation_probe_run_phase(2);
+    ext2_mutation_give(guard);
+    if (held_phase == false) {
+        ext2_mutation_probe_report("peer-never-asked-held" as *u8);
+        return false;
+    }
+
+    ext2_mutation_probe_report("complete" as *u8);
+    // asked == 2 is the term that is FALSE when the probe did no work: one
+    // ask per phase, counted by the peer. The two observations are what it
+    // found, and a probe that never looked must not report what it did not
+    // see.
+    return unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
+               &ext2_mutation_probe_asked)) } == 2 &&
+           unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
+               &ext2_mutation_probe_clear_seen)) } == 1 &&
+           unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
+               &ext2_mutation_probe_held_seen)) } == 1;
+}
