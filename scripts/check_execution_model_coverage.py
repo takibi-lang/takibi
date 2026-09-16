@@ -136,6 +136,10 @@ EXEMPT = {
     "fs/elf64.tkb":
         "ELF_IDENT_MAGIC is a lookup table that is never written; `let mut` "
         "is how this language declares an initialised array",
+    "fs/ext2/mutation_lock.tkb":
+        "GitHub issue #533: the file's only mutable state IS the lock word, "
+        "whose whole purpose is to hold whatever the core count becomes; an "
+        "assertion on that count would be backwards",
 
     # --- Test-only state, reached from the boot fixture on core 0.
     "init/test_driver.tkb":

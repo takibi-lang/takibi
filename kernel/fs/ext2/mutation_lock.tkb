@@ -1,0 +1,89 @@
+// GitHub issue #533: one core at a time inside an ext2 MUTATION.
+//
+// kernel/fs/ext2/ext2.tkb mints directory owners from the tree.
+// ext2_claim_directory says so in its own words: "minting from the tree is
+// sound only while one core at a time reaches ext2 mutation: two claims of
+// the same entry would be two owners of one block", and the thing it named
+// as holding that was an ADMISSION rule -- every process that reaches the
+// filesystem admitted to core 0 only. That is a claim about the scheduler,
+// which nothing in ext2 can check, and issue #9 is in the business of
+// removing it. So the claim has to become a lock.
+//
+// WHAT THIS EXCLUDES, AND WHAT IT DELIBERATELY DOES NOT
+//
+// Mutators exclude each other. Readers do NOT take this lock, and that is
+// the whole design rather than an omission:
+//
+// - kernel/tests/common/views/peer_filesystem.expected asserts the BLOCK
+//   DEVICE mutex is contended on both cpus. That verdict is produced by two
+//   readers reaching the device at the same time (memory.tkb counts a wait
+//   only when its trylock fails), so a lock held across reads would zero one
+//   side of the very evidence issue #533 built. Readers must stay
+//   concurrent.
+// - Reads are also the common case by orders of magnitude. Once the boot's
+//   fixtures are done, mutation is rare, and block_read's own fast paths --
+//   cache hit, read-ahead run -- return before any lock at all.
+//
+// So a reader instead ASKS whether a mutation is in flight, with one
+// acquire-load and no spin, and a peer reader that finds one is sent to core
+// 0 by the migration gate (SyscallAction::Migrate, which already exists for
+// exactly this: rerun this syscall on core 0). Declining is not an error
+// returned to userspace and not a wait on core 0 -- the first would fail
+// /bin/peer-read's chunk verdict, and the second is the shape that cost the
+// busy pair its fairness in this issue's third step.
+//
+// RANK 20, OUTSIDE THE DEVICE LOCK
+//
+// A mutator holds this across several block reads and writes, each of which
+// takes memory.tkb's block_device_lock at rank 30 underneath it. The
+// compiler checks that order (GitHub issue #466): acquiring a lower rank
+// while holding a higher one is a type error, so this being 20 and the
+// device being 30 is what makes "filesystem outside device" checked rather
+// than asserted. kernel/CONCURRENCY.md's lock order records it.
+//
+// A TaskMutex and not a Mutex for the reason memory.tkb gives for the lock
+// below this one: masking interrupts for the duration of a directory
+// rewrite would bound the whole kernel's interrupt latency by it, and
+// nothing reaches ext2 from an interrupt handler. `may_block` on the
+// acquire makes that a compile error rather than a rule.
+//
+// The lock lives in THIS file rather than beside syscall_ext2_mount, on
+// kernel/CONCURRENCY.md's rule that a guard type and the data it protects in
+// one file leave the data reachable from the rest of that file -- and
+// syscall.tkb is four thousand lines.
+use "kernel/lib/task_mutex.tkb";
+
+// No initialisation: a global's .bss zero is already SPIN_LOCK_FREE, and
+// task_mutex_init FORCE-FREES, which on two cores releases a lock the other
+// core holds. scripts/check_lock_discipline.py's RULE 1 is that defect.
+private let mut ext2_mutation_lock: TaskMutex;
+
+// `[lock: addr]` names the one lock it came from, and linear, so no path out
+// of a mutation -- and the mutating syscall arms have a dozen each -- can
+// leave it held.
+linear struct Ext2MutationGuard[lock: addr] {
+    private cpu: usize;
+}
+
+fn ext2_mutation_take() -> Ext2MutationGuard[ext2_mutation_lock]
+        !{acquires_lock_20_ext2_mutation, lock_guard_20_ext2_mutation} {
+    task_mutex_acquire(&ext2_mutation_lock);
+    let mut guard: Ext2MutationGuard[ext2_mutation_lock] = { cpu_id() };
+    return guard;
+}
+
+fn ext2_mutation_give(guard: sink Ext2MutationGuard[ext2_mutation_lock]) {
+    task_mutex_release(&ext2_mutation_lock);
+}
+
+// The reader's question. One acquire-load of the lock word, no spin, no
+// wait: true means some core is inside a mutation right now.
+//
+// A reader on core 0 does not ask at all. Mutation runs on core 0 too, and
+// this kernel is not preemptible (KERNEL_PREEMPTIBLE is 0), so a core 0
+// reader cannot be running while a core 0 mutation is mid-rewrite -- the
+// mutation returned before this syscall was dispatched. Only a peer can
+// observe a partial tree, which is why the gate asks only there.
+fn ext2_mutation_in_flight() -> bool !{unsafe} {
+    return task_mutex_is_held(&ext2_mutation_lock);
+}

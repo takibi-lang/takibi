@@ -2471,6 +2471,123 @@ fn kernel_syscall_clone_parent_return(parent_sp: usize) {
 // Files stay core 0 only: #533 found ext2 mutation unserialized against a
 // peer reader and its write epoch read without a barrier, gaps its one
 // fixture could ignore and an arbitrary process cannot.
+// GitHub issue #533: the five ext2 MUTATIONS, each under the filesystem
+// lock for exactly as long as its own linear tokens live.
+//
+// One helper per mutating syscall rather than a lock taken in the arms
+// themselves, because each arm has a dozen early returns and the guard is
+// linear: a `return` past it is a compile error, so the helper is what makes
+// "exactly one release on every path" checkable instead of reviewed. Each
+// answers an errno (0 on success) and leaves SyscallAction to its caller.
+//
+// A lookup that decides whether a mutation may proceed belongs INSIDE the
+// same guard as the mutation it gates -- mkdir's existence check is the
+// example: outside it, another core could create the name in between.
+private fn syscall_ext2_resize_locked(inode: usize, content: []u8) -> usize {
+    let guard = ext2_mutation_take();
+    let answer: usize = match ext2_resize_small_file(
+            syscall_ext2_mount, inode, content) {
+        Ext2ResizeResult::Invalid => { LINUX_EINVAL }
+        Ext2ResizeResult::Resized => { 0 }
+    };
+    ext2_mutation_give(guard);
+    return answer;
+}
+
+private fn syscall_ext2_mkdir_locked(parent_inode: usize, leaf: borrow []u8)
+        -> usize {
+    let guard = ext2_mutation_take();
+    let mut answer: usize = 0;
+    match ext2_lookup_directory(syscall_ext2_mount, parent_inode, leaf) {
+        Ext2LookupResult::Found(existing) => { answer = LINUX_EEXIST; }
+        Ext2LookupResult::Invalid => { answer = LINUX_EIO; }
+        Ext2LookupResult::NotFound => { }
+    }
+    if (answer == 0) {
+        // The directory stays, so its owner ends here: the tree names it
+        // from now on, and a later rmdir claims it back from the tree.
+        match ext2_make_directory_in(syscall_ext2_mount, parent_inode, leaf) {
+            Ext2MkdirResult::Invalid => { answer = LINUX_EIO; }
+            Ext2MkdirResult::Created(directory) => {
+                ext2_directory_keep(directory);
+            }
+        }
+    }
+    ext2_mutation_give(guard);
+    return answer;
+}
+
+// Unsupported is a symlink or a file reaching an indirect block, which the
+// ext2 layer does not release; EPERM is Linux's word for a filesystem that
+// does not allow the unlink.
+private fn syscall_ext2_unlink_locked(parent_inode: usize, leaf: borrow []u8)
+        -> usize {
+    let guard = ext2_mutation_take();
+    let answer: usize = match ext2_unlink_name(
+            syscall_ext2_mount, parent_inode, leaf) {
+        Ext2UnlinkNameResult::Unlinked => { 0 }
+        Ext2UnlinkNameResult::NotFound => { LINUX_ENOENT }
+        Ext2UnlinkNameResult::IsDirectory => { LINUX_EISDIR }
+        Ext2UnlinkNameResult::Unsupported => { LINUX_EPERM }
+        Ext2UnlinkNameResult::Invalid => { LINUX_EIO }
+    };
+    ext2_mutation_give(guard);
+    return answer;
+}
+
+// The claim and the removal are one section: the owner minted from the tree
+// lives across both, and handing it back is what ext2_directory_keep does on
+// every path that does not remove.
+private fn syscall_ext2_rmdir_locked(parent_inode: usize, leaf: borrow []u8)
+        -> usize {
+    let guard = ext2_mutation_take();
+    let mut answer: usize = 0;
+    match ext2_claim_directory(syscall_ext2_mount, parent_inode, leaf) {
+        Ext2ClaimResult::Invalid => { answer = LINUX_EIO; }
+        Ext2ClaimResult::NotFound => { answer = LINUX_ENOENT; }
+        Ext2ClaimResult::NotDirectory => { answer = LINUX_ENOTDIR; }
+        Ext2ClaimResult::Claimed(directory) => {
+            match ext2_remove_directory_in(syscall_ext2_mount,
+                                           parent_inode, directory, leaf) {
+                Ext2RmdirResult::Removed => { }
+                Ext2RmdirResult::Invalid => { answer = LINUX_EIO; }
+                Ext2RmdirResult::NotEmpty(kept) => {
+                    ext2_directory_keep(kept);
+                    answer = LINUX_ENOTEMPTY;
+                }
+                Ext2RmdirResult::Refused(kept) => {
+                    ext2_directory_keep(kept);
+                    answer = LINUX_EIO;
+                }
+            }
+        }
+    }
+    ext2_mutation_give(guard);
+    return answer;
+}
+
+// Unsupported is a directory moved to another parent, which the ext2 layer
+// does not do; EPERM is Linux's word for a filesystem that does not allow
+// the rename.
+private fn syscall_ext2_rename_locked(old_directory: usize,
+                                      old_name: borrow []u8,
+                                      new_parent_inode: usize,
+                                      new_leaf: borrow []u8) -> usize {
+    let guard = ext2_mutation_take();
+    let answer: usize = match ext2_rename_in(
+            syscall_ext2_mount, old_directory, old_name,
+            new_parent_inode, new_leaf) {
+        Ext2RenameResult::Renamed => { 0 }
+        Ext2RenameResult::NotFound => { LINUX_ENOENT }
+        Ext2RenameResult::IsDirectory => { LINUX_EISDIR }
+        Ext2RenameResult::NotDirectory => { LINUX_ENOTDIR }
+        Ext2RenameResult::Unsupported => { LINUX_EPERM }
+        Ext2RenameResult::Invalid => { LINUX_EIO }
+    };
+    ext2_mutation_give(guard);
+    return answer;
+}
+
 fn syscall_peer_safe(number: usize, fd: usize) -> bool {
     // The caller's own record, or architectural state: getpid, getppid,
     // the uid/gid family, gettid, clock_gettime, and getcpu (#533).
@@ -2565,6 +2682,20 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // audit instead.
     if (cpu_id() != 0 && kernel_process_current_admitted_by_rule() == false &&
         syscall_peer_safe(number, x0) == false) {
+        return SyscallAction::Migrate;
+    }
+    // GitHub issue #533: a peer must not read a tree that is being rewritten.
+    // The mutators above hold kernel/fs/ext2/mutation_lock.tkb; this asks,
+    // with one acquire-load and no wait, whether one is inside right now,
+    // and hands this syscall to core 0 if so. Core 0 never asks: mutation
+    // runs there too and this kernel is not preemptible, so a core 0 reader
+    // cannot be dispatched while a core 0 mutation is mid-rewrite.
+    //
+    // This is asked of a rule-admitted fixture as well. /bin/peer-read still
+    // holds a rule, and it is the only peer that reaches a file today, so
+    // excusing the rules here would excuse the one reader the exclusion is
+    // for.
+    if (cpu_id() != 0 && ext2_mutation_in_flight()) {
         return SyscallAction::Migrate;
     }
     kernel_init_boot_fixture_poll();
@@ -2757,16 +2888,13 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
             let content = content_buffer[0..<length];
-            match ext2_resize_small_file(
-                    syscall_ext2_mount, kernel_syscall_file_inode(fd), content) {
-                Ext2ResizeResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
-                Ext2ResizeResult::Resized => {
-                    if (kernel_syscall_file_set_offset(fd, length) == false) {
-                        return SyscallAction::Resume(LINUX_EBADF);
-                    }
-                    return SyscallAction::Resume(length);
-                }
+            let resized: usize = syscall_ext2_resize_locked(
+                    kernel_syscall_file_inode(fd), content);
+            if (resized != 0) { return SyscallAction::Resume(resized); }
+            if (kernel_syscall_file_set_offset(fd, length) == false) {
+                return SyscallAction::Resume(LINUX_EBADF);
             }
+            return SyscallAction::Resume(length);
         }
         if (kernel_syscall_terminal_is_open(fd) == false) {
             return SyscallAction::Resume(LINUX_EBADF);
@@ -2907,22 +3035,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             kernel_syscall_leaf_is_dot_dot(leaf)) {
             return SyscallAction::Resume(LINUX_EEXIST);
         }
-        match ext2_lookup_directory(syscall_ext2_mount, parent.inode, leaf) {
-            Ext2LookupResult::Found(existing) => {
-                return SyscallAction::Resume(LINUX_EEXIST);
-            }
-            Ext2LookupResult::Invalid => { return SyscallAction::Resume(LINUX_EIO); }
-            Ext2LookupResult::NotFound => { }
-        }
-        // The directory stays, so its owner ends here: the tree names it from
-        // now on, and a later rmdir claims it back from the tree.
-        match ext2_make_directory_in(syscall_ext2_mount, parent.inode, leaf) {
-            Ext2MkdirResult::Invalid => { return SyscallAction::Resume(LINUX_EIO); }
-            Ext2MkdirResult::Created(directory) => {
-                ext2_directory_keep(directory);
-                return SyscallAction::Resume(0);
-            }
-        }
+        return SyscallAction::Resume(
+            syscall_ext2_mkdir_locked(parent.inode, leaf));
     }
 
     if (number == 35) {
@@ -2951,26 +3065,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         let leaf: []u8 = kernel_syscall_leaf(path_name, parent);
         if (leaf.len == 0) { return SyscallAction::Resume(LINUX_ENOENT); }
         if (x2 == 0) {
-            // Unsupported is a symlink or a file reaching an indirect block,
-            // which the ext2 layer does not release; EPERM is Linux's word
-            // for a filesystem that does not allow the unlink.
-            match ext2_unlink_name(syscall_ext2_mount, parent.inode, leaf) {
-                Ext2UnlinkNameResult::Unlinked => {
-                    return SyscallAction::Resume(0);
-                }
-                Ext2UnlinkNameResult::NotFound => {
-                    return SyscallAction::Resume(LINUX_ENOENT);
-                }
-                Ext2UnlinkNameResult::IsDirectory => {
-                    return SyscallAction::Resume(LINUX_EISDIR);
-                }
-                Ext2UnlinkNameResult::Unsupported => {
-                    return SyscallAction::Resume(LINUX_EPERM);
-                }
-                Ext2UnlinkNameResult::Invalid => {
-                    return SyscallAction::Resume(LINUX_EIO);
-                }
-            }
+            return SyscallAction::Resume(
+                syscall_ext2_unlink_locked(parent.inode, leaf));
         }
         // Linux's own answers: rmdir(".") is EINVAL, rmdir("..") ENOTEMPTY.
         if (kernel_syscall_leaf_is_dot(leaf)) {
@@ -2979,30 +3075,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (kernel_syscall_leaf_is_dot_dot(leaf)) {
             return SyscallAction::Resume(LINUX_ENOTEMPTY);
         }
-        match ext2_claim_directory(syscall_ext2_mount, parent.inode, leaf) {
-            Ext2ClaimResult::Invalid => { return SyscallAction::Resume(LINUX_EIO); }
-            Ext2ClaimResult::NotFound => { return SyscallAction::Resume(LINUX_ENOENT); }
-            Ext2ClaimResult::NotDirectory => {
-                return SyscallAction::Resume(LINUX_ENOTDIR);
-            }
-            Ext2ClaimResult::Claimed(directory) => {
-                match ext2_remove_directory_in(syscall_ext2_mount,
-                                               parent.inode, directory, leaf) {
-                    Ext2RmdirResult::Removed => { return SyscallAction::Resume(0); }
-                    Ext2RmdirResult::Invalid => {
-                        return SyscallAction::Resume(LINUX_EIO);
-                    }
-                    Ext2RmdirResult::NotEmpty(kept) => {
-                        ext2_directory_keep(kept);
-                        return SyscallAction::Resume(LINUX_ENOTEMPTY);
-                    }
-                    Ext2RmdirResult::Refused(kept) => {
-                        ext2_directory_keep(kept);
-                        return SyscallAction::Resume(LINUX_EIO);
-                    }
-                }
-            }
-        }
+        return SyscallAction::Resume(
+            syscall_ext2_rmdir_locked(parent.inode, leaf));
     }
 
     if (number == 38) {
@@ -3064,28 +3138,9 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             kernel_syscall_leaf_is_dot_dot(new_leaf)) {
             return SyscallAction::Resume(LINUX_EBUSY);
         }
-        // Unsupported is a directory moved to another parent, which the
-        // ext2 layer does not do; EPERM is Linux's word for a filesystem that
-        // does not allow the rename.
-        match ext2_rename_in(syscall_ext2_mount, old_directory, old_name,
-                             new_parent.inode, new_leaf) {
-            Ext2RenameResult::Renamed => { return SyscallAction::Resume(0); }
-            Ext2RenameResult::NotFound => {
-                return SyscallAction::Resume(LINUX_ENOENT);
-            }
-            Ext2RenameResult::IsDirectory => {
-                return SyscallAction::Resume(LINUX_EISDIR);
-            }
-            Ext2RenameResult::NotDirectory => {
-                return SyscallAction::Resume(LINUX_ENOTDIR);
-            }
-            Ext2RenameResult::Unsupported => {
-                return SyscallAction::Resume(LINUX_EPERM);
-            }
-            Ext2RenameResult::Invalid => {
-                return SyscallAction::Resume(LINUX_EIO);
-            }
-        }
+        return SyscallAction::Resume(
+            syscall_ext2_rename_locked(old_directory, old_name,
+                                       new_parent.inode, new_leaf));
     }
 
     if (number == 61) {

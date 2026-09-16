@@ -13,8 +13,12 @@ state in this kernel is safe *because of* them:
 - `KERNEL_ACTIVE_CORES` -- cores that run kernel code. It is 2: core 1 takes
   timer interrupts, runs the persistent busy-pair B process, and enters the
   syscall and scheduler paths. Admission is deliberately narrower than CPU
-  affinity: all other processes remain on core 0 until their filesystem,
-  network, console, and physical stack-handoff boundaries are audited.
+  affinity: all other processes remain on core 0 until their network,
+  console, and physical stack-handoff boundaries are audited. The filesystem
+  boundary is now a LOCK rather than an admission claim -- ext2 mutation
+  excludes itself through `kernel/fs/ext2/mutation_lock.tkb`, and a peer
+  reader that finds a mutation in flight is rerun on core 0 (GitHub issues
+  #533 and #9).
 - `KERNEL_PREEMPTIBLE` -- 0. A timer interrupt taken at EL1 sets a flag and the
   switch happens at syscall return. That is `CONFIG_PREEMPT_NONE`, and it is
   why many field accesses need no lock.
@@ -65,6 +69,12 @@ also holds the allowlist of files permitted to use raw atomic intrinsics.
 
 `run -> fd -> pool -> page`, with `asid` a leaf. The scheduler's lock is the
 outermost. Nothing takes an outer lock while holding an inner one.
+
+Two locks carry a RANK the compiler checks, rather than an order held by
+convention (GitHub issue #466): `ext2_mutation` at 20 and `block_device` at
+30, so a filesystem mutation may take the device lock underneath it and the
+reverse is a type error. `kernel/fs/ext2/mutation_lock.tkb` is the outer one
+and states why readers do not take it at all.
 
 This order is held by how the functions happen to be written; no checker
 enforces it in the kernel. `linux_user/intrusive_pool/pool_lock_check.tkb`

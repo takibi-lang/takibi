@@ -1,4 +1,5 @@
 use "kernel/drivers/block/memory.tkb";
+use "kernel/fs/ext2/mutation_lock.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/byte_slice.tkb";
 
@@ -2136,9 +2137,14 @@ private fn ext2_linked_directory_mint(inode_bitmap_index: usize,
 //
 // Minting from the tree is sound only while one core at a time reaches ext2
 // mutation: two claims of the same entry would be two owners of one block.
-// kernel/CONCURRENCY.md's admission rule is what holds that today -- every
-// process that reaches the filesystem is admitted to core 0 only -- and it is
-// a claim about admission that nothing here can check.
+// kernel/fs/ext2/mutation_lock.tkb is what holds that (GitHub issue #533).
+// Every mutating syscall arm takes its guard, which is linear, so a path out
+// of a mutation that left the lock held would not compile. That replaces
+// what used to stand here: an ADMISSION claim -- every process reaching the
+// filesystem admitted to core 0 only -- which was a statement about the
+// scheduler that nothing in this file could check, and which issue #9
+// removes. A peer READER takes no lock; it asks whether a mutation is in
+// flight and is sent to core 0 if one is.
 fn ext2_claim_directory(mount: Ext2Mount, parent_inode: usize,
                         name: borrow []u8) -> Ext2ClaimResult !{unsafe} {
     if (name.len == 0) { return Ext2ClaimResult::Invalid; }
