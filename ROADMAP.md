@@ -172,6 +172,43 @@ assertion was overwritten and the next twelve focused plus four aggregate
 runs passed. The runner now archives the whole failing capture. Diagnose the
 next preserved occurrence before changing crash or console serialization.
 
+**The intermittent set is now three, and where each sits is a decision rather
+than an omission (2026-09-17).** #514 (a by-handle read can see a slot's
+free-chain link while the pool calls it Live), #516 (`process_image_root_index`
+answers root 0 for a missing target, and an exec install consults that root's
+own flags), and #563 (a napping process kept its CPU with a SIGTERM its parent
+had sent). All three were seen this week: #514 reproduced locally at the
+1-in-8 rate the tree already records for it, #516 has a CI fail-stop whose
+oops record fits its fallback, and #563 has a 202-second CI stall.
+
+- **Two of them gate the default-mask flip, not today's work.** Step 3's last
+  move widens which processes run on a peer, which is what raises exposure to
+  #514's window and #516's fallback. Decide both before the default mask
+  becomes {core 0}; fixing them mid-step, in the pool-insert and exec paths,
+  with no local reproduction for #516, trades a flake for an outage.
+- **The diagnosis work outranks them and is cheap.** #564 (report each
+  process's pending signals and mask, two words already in `ProcessRecord`)
+  would have decided #563 from a capture already on disk; #561 (a repeated
+  lane overwrites the failing sample's own artifacts) is why one diagnosis
+  needed a second reproduction; and #565 asks for the inventory that would
+  have told a triager in one minute that a `records MISSING` line is the
+  documented 1-in-8 rather than something new -- the fact that settled it this
+  week was a comment attached to the code that caused a different instance.
+  None of the three touches a kernel hot path. Do these first.
+- **A blanket "flakes before features" promotion would be wrong here.** These
+  flakes are products of the multicore work, so ordering them ahead of it
+  fixes symptoms of a design that is still being finished -- the same argument
+  that puts multicore first in the priority order above.
+
+Also open from this session and not otherwise queued: #559 (the ext2 mutation
+lock's reader question is asked at syscall entry only, so a mutation starting
+during an in-flight peer read still overlaps it -- this is the honest
+remainder of #533), #560 (the secondary boot handshake publishes across cores
+with a compiler fence only, the shape #533 found in the block cache epoch),
+and #562 (the trusted-base classifier has no category for an atomic used as
+cross-core ordering, so the one escape class with a written policy is the one
+the inventory cannot name).
+
 The numbered history below records the dependency chain that produced phase
 A. Its requirements through entry 11 are complete; explicitly noted residual
 work such as #432 remains separate. Entries 12 and 13 are represented by the
