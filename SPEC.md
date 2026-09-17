@@ -1504,7 +1504,7 @@ The operational call effects are `may_block`, `allocates`, `locks`, and
 effect-contracted indirect calls. An explicit annotation is therefore an API
 contract and a seed, not a required annotation on every caller.
 `interrupt` and `exception` mark roots whose complete reachable call graphs
-must contain `may_block`, `allocates` or `logs`; `interrupt_wait()` is
+must not contain `may_block`, `allocates` or `logs`; `interrupt_wait()` is
 intrinsically `may_block`. Diagnostics include one offending call path.
 
 **`locks` is the exception, and deliberately so** (GitHub issue #449). It

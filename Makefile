@@ -175,6 +175,16 @@ pool-liveness-control: build
 	*) echo "FAIL pool-liveness-control: expected diagnostic not found" >&2; echo "$$output" >&2; exit 1;; esac; \
 	echo "PASS pool-liveness-control: the payload pointer cannot outlive its liveness proof"
 
+## The defect catalog in docs/wont-compile/ transcribes a program and the
+## diagnostic it draws. Both are copies, and a regression that stopped
+## rejecting one of them would leave every entry rendering exactly as before
+## -- the catalog is what the project shows someone who does not yet believe
+## the claim, so a stale one is expensive. check_wont_compile_catalog.py
+## covers what can be read from tracked files; this runs the samples.
+.PHONY: wont-compile-control
+wont-compile-control: build
+	@python3 scripts/buildcheck_wont_compile_samples.py $(TAKIBI)
+
 .PHONY: effect-matrix-control
 effect-matrix-control: build
 	@tmp=`mktemp`; trap 'rm -f "$$tmp"' EXIT; \
@@ -198,7 +208,7 @@ CHECK_TIMEOUT_SECONDS    := 10
 # CHECK_TIMEOUT_SECONDS, which is what makes "the fast gate is for checks
 # that read tracked files" a mechanism instead of a sentence: a member that
 # waits is killed and this lane goes red.
-langcheck: unused-function-control effect-matrix-control pool-liveness-control
+langcheck: unused-function-control effect-matrix-control pool-liveness-control wont-compile-control
 	@bash scripts/lane_timing.sh begin langcheck
 	@bash scripts/run_check_lane.sh check $(CHECK_TIMEOUT_SECONDS)
 # -I skips binary files. Without it a build directory left in the worktree

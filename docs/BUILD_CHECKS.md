@@ -86,6 +86,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_run_kernel_uart_driver_controls.py` | Regression controls for the UART driver's timeout diagnosis |
 | `check_single_dune_invocation.py` | exactly one rule runs `dune build`, so no second make invocation races its lock |
 | `check_validate_kernel_dmesg_timestamps_controls.py` | Controls for the dmesg timestamp validator, which had none |
+| `check_wont_compile_catalog.py` | every defect-catalog entry names a test case that exists, shows its figure, and agrees with the index |
+| `check_wont_compile_catalog_controls.py` | Controls for the defect catalog's structure check and for the sample runner's verdicts |
 
 ## `slowcheck_*` -- the slow lane
 
@@ -123,6 +125,7 @@ run them, and why they sit outside both globs above.
 | `buildcheck_kernel_unused_coverage.py` | every kernel file a target compiles is checked for unused functions or exempt for a stated reason |
 | `buildcheck_suite_output.py` | Split a batched UART stream and compare each case with its fixture |
 | `buildcheck_user_payload_no_rw_globals.py` | TODO |
+| `buildcheck_wont_compile_samples.py` | every program the defect catalog prints is rejected with the diagnostic beside it, or accepted, by the built compiler |
 
 ## Reporting
 
