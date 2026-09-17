@@ -98,6 +98,31 @@ takes it throughout the same session, so the check read another process's
 frame and died. It now selects the hit that is its own instead of assuming the
 first one is.
 
+**And then a third round, from the same lane's fixture.** The drain fix above
+moved `/bin/affinity`'s last line before the kill of its core-0 spinner, which
+left that spinner napping while its parent blocked in `wait4` for it. On a CI
+runner the child then kept its CPU for 202 seconds with a SIGTERM already sent,
+and the ash session stopped one command later; the lifecycle-gap lane took the
+serial BREAK and its preserved DDB walk named both processes, with the archived
+debug ELF resolving the backtrace to `read_cntpct` inside
+`syscall_deadline_wait`. The spinner now ends on a bounded nap count, so the
+fixture no longer depends on a signal reaching a sleeping process at all.
+
+Why the child did not observe that signal is NOT settled, and the commit says
+so rather than claiming a defect it could not show: the tick is periodic and
+self-rearming, and `.Lsyscall_wait_interrupt` re-enters dispatch, which takes a
+pending termination signal before any syscall arm -- so by reading it should
+have died on its next lap. Either the bit was never set or it was masked, and
+`ps` shows neither field. #563 carries the question, #564 asks for the two
+words that would have answered it from the capture already on disk.
+
+The process lesson is sharper than any of the code ones. CI failed twice, on
+two different lanes, and both times `make allcheck` was green here. The target
+that reproduces a runner's constraints -- four cores, one lane at a time, the
+widened guest budget -- already existed as `make cicheck-as-ci`, and
+`AGENTS.md` already said what it is for. Using it costs one run; not using it
+cost two pushes and two rounds of diagnosis from artifacts.
+
 ## 2026-09-15: a kernel function nothing reads is a build error in 42 files (#540)
 
 `--reject-unused-functions` had checked one kernel file, `cpu.tkb`. The
