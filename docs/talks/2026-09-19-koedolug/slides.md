@@ -71,7 +71,7 @@ Generative AI is what makes this affordable. It is the method, not the point.
 
 # It boots, and it runs BusyBox
 
-<video src="assets/demo.mp4" poster="assets/demo.png" muted loop controls></video>
+<video src="assets/demo.mp4" poster="assets/demo.png" autoplay muted loop controls></video>
 
 ---
 
