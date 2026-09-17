@@ -44,6 +44,26 @@ struct CrashSnapshot {
     root_slot: usize;
     root_l1: usize;
     root_asid: usize;
+    // GitHub issue #468: the bootstrap root's own identity, captured beside
+    // the current process's, so a reader can tell the two apart WITHOUT a
+    // second transcript.
+    //
+    // address_space_activate_root cannot fail loudly: an invalid slot, or one
+    // whose backing is not live, makes it write root 0's l1_physical and asid
+    // into TTBR0_EL1 and return. A capture then shows ttbr0 naming a page
+    // table the process record does not, and nothing on screen says whether
+    // that table is root 0's -- which is the difference between the silent
+    // fallback and some other process's root, and so between two different
+    // fixes. Measured 2026-09-17: one allcheck fail-stop had
+    // ttbr0=0x0035000040490000 against a record saying l1=0x406af000, and the
+    // question could not be answered from the transcript at all.
+    //
+    // Root 0 is permanently retained and live, and its ASID is never
+    // refreshed (address_space_refresh_asid returns early for slot 0), so
+    // these two words are stable for the life of the boot and comparable
+    // against any later capture.
+    root0_l1: usize;
+    root0_asid: usize;
     image_kind: usize;
     saved_frame_available: usize;
     saved_sp_el0: usize;
@@ -2394,6 +2414,20 @@ private fn crash_snapshot_render_from(record: *CrashSnapshot,
     kernel_boot_log(" image=");
     if (record.image_kind == 1) { kernel_boot_log("exec\n"); }
     else { kernel_boot_log("bootstrap\n"); }
+    // A SEPARATE line, not fields appended above: the oops lane matches that
+    // one with `image=bootstrap$` anchored at the end, and no view filter
+    // selects `oops:` at all, so a new line costs nothing and an appended
+    // field would cost that lane.
+    //
+    // What it answers (GitHub issue #468): compare the live ttbr0's BADDR
+    // printed above against root0 l1 here. Equal means activation took its
+    // silent fallback to the bootstrap root; different from both that and the
+    // record's own l1 means TTBR0 held some third root.
+    kernel_boot_log("oops: root0 asid=");
+    uart_put_udec(record.root0_asid);
+    kernel_boot_log(" l1=");
+    uart_put_hex(record.root0_l1);
+    kernel_boot_log("\n");
     kernel_process_exec_failure_render();
     for fd: usize in 0..<CRASH_FD_SNAPSHOT_SLOTS {
         if (record.fd_kind[fd] != 0) {
@@ -2649,6 +2683,10 @@ fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
     crash_snapshot_here().root_slot = kernel_process_crash_root_slot();
     crash_snapshot_here().root_l1 = address_space_l1_physical(crash_snapshot_here().root_slot);
     crash_snapshot_here().root_asid = address_space_asid(crash_snapshot_here().root_slot);
+    // Slot 0 through the same two accessors the line above uses, so the pair
+    // is captured the same way and at the same moment (GitHub issue #468).
+    crash_snapshot_here().root0_l1 = address_space_l1_physical(0);
+    crash_snapshot_here().root0_asid = address_space_asid(0);
     crash_snapshot_here().image_kind = kernel_process_crash_image_kind();
     for fd: usize in 0..<CRASH_FD_SNAPSHOT_SLOTS {
         crash_snapshot_here().fd_kind[fd] =
