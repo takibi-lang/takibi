@@ -1,0 +1,50 @@
+// Figure for docs/wont-compile/0001-blocking-call-in-an-interrupt-handler.md
+//
+// The figure shows the accident, not the compiler. Diagnostic strings are
+// deliberately absent: those live in the entry, where they are compared
+// against test/test_takibi.ml. A picture of the hazard stays true even when
+// the wording of an error changes.
+//
+// Layout note: rankdir stays TB and the call path is held on one rank INSIDE
+// the cluster. Doing the reverse -- rankdir=LR with a shared rank spanning
+// the cluster boundary -- silently evicts the last hop from the dashed box,
+// which draws a rejected path that excludes the call being rejected.
+digraph blocking_call_in_an_interrupt_handler {
+  graph [bgcolor="#fffaf0", rankdir=TB, pad=0.35, nodesep=0.55, ranksep=0.9,
+         fontname="Helvetica", fontsize=15, fontcolor="#596078"];
+  node  [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",
+         fillcolor="#ffffff", color="#17213f", fontcolor="#17213f",
+         penwidth=2, margin="0.26,0.18"];
+  edge  [fontname="Helvetica", fontsize=13, color="#17213f", penwidth=2,
+         fontcolor="#596078", arrowsize=0.9];
+
+  subgraph cluster_rejected {
+    label="Takibi: rejected at compile time, whole path named";
+    labelloc="t";
+    fontname="Helvetica";
+    fontsize=16;
+    fontcolor="#c9360d";
+    color="#f05a24";
+    penwidth=2.5;
+    style="rounded,dashed";
+    margin=18;
+
+    handler [label="timer_irq_handler()\n!{interrupt}", fillcolor="#fff3df",
+             color="#f05a24"];
+    helper  [label="uart_put()\ndeclares no effect at all", color="#7a849c",
+             fontcolor="#596078"];
+    leaf    [label="uart_wait_ready()\n!{may_block}", fillcolor="#fff3df",
+             color="#f05a24"];
+
+    { rank=same; handler; helper; leaf; }
+
+    handler -> helper;
+    helper  -> leaf;
+  }
+
+  board [label="On the board\l\lThe handler runs with interrupts masked.\lThe wakeup it waits for is itself an interrupt.\lThe core never leaves the handler.\l",
+         fillcolor="#f1f2f6", color="#17213f", fontcolor="#17213f"];
+
+  leaf -> board [label="  C and Rust: compiles, ships", style=dashed,
+                 color="#c9360d", fontcolor="#c9360d", penwidth=2.5];
+}
