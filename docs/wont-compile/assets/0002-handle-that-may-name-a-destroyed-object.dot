@@ -1,0 +1,57 @@
+// Figure for docs/wont-compile/0002-handle-that-may-name-a-destroyed-object.md
+//
+// The accident, not the compiler. What the picture has to carry is that the
+// handle outlives the object while never being mentioned by the call that
+// destroys it -- so the call path runs down the left, the slot it lands in
+// runs down the right, and the two cross edges are the whole defect.
+//
+// Layout note: no ports and no flat edges between record shapes. Graphviz
+// refuses that combination ("lost handle before edge"), and the plain
+// multi-line boxes below read the same.
+digraph handle_that_may_name_a_destroyed_object {
+  graph [bgcolor="#fffaf0", rankdir=TB, pad=0.35, nodesep=0.6, ranksep=0.6,
+         fontname="Helvetica", fontsize=15, fontcolor="#596078"];
+  node  [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",
+         fillcolor="#ffffff", color="#17213f", fontcolor="#17213f",
+         penwidth=2, margin="0.24,0.16"];
+  edge  [fontname="Helvetica", fontsize=13, color="#17213f", penwidth=2,
+         fontcolor="#596078", arrowsize=0.9];
+
+  subgraph cluster_rejected {
+    label="Takibi: rejected at compile time";
+    labelloc="t";
+    fontname="Helvetica";
+    fontsize=16;
+    fontcolor="#c9360d";
+    color="#f05a24";
+    penwidth=2.5;
+    style="rounded,dashed";
+    margin=16;
+
+    hold [label="holds child: TaskHandle\lslot 7, generation 3\l",
+          fillcolor="#fff3df", color="#f05a24"];
+    call [label="deliver_signal(0)\lthe handle is not an argument\l",
+          color="#7a849c", fontcolor="#596078"];
+    reap [label="... -> task_reap()\l!{invalidates_TaskHandle}\l",
+          fillcolor="#fff3df", color="#f05a24"];
+    read [label="task_slot(child)", fillcolor="#fff3df", color="#f05a24"];
+
+    hold -> call;
+    call -> reap;
+    reap -> read [label="  returns  "];
+  }
+
+  before [label="slot 6   free\lslot 7   task A, generation 3\lslot 8   free\l",
+          fillcolor="#ffffff"];
+  after  [label="slot 6   free\lslot 7   task B, generation 4\lslot 8   free\l",
+          fillcolor="#f1f2f6"];
+
+  before -> after [label="  the slot is freed and\l  handed to a new task\l",
+                   style=dashed, color="#c9360d", fontcolor="#c9360d",
+                   penwidth=2.5];
+
+  hold  -> before [label="  names slot 7  ", style=dotted, constraint=false];
+  read  -> after  [label="  C and Rust: reads slot 7,\l  which is now task B\l",
+                   color="#c9360d", fontcolor="#c9360d", penwidth=2.5,
+                   constraint=false];
+}

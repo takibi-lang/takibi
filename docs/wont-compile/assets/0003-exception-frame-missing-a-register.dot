@@ -1,0 +1,41 @@
+// Figure for docs/wont-compile/0003-exception-frame-missing-a-register.md
+//
+// The accident, not the compiler. Two descriptions of the same bytes, one
+// written by the entry sequence and one declared by the struct, and the
+// figure's whole job is to show that a single missing field shifts every
+// name below it onto the wrong word.
+digraph exception_frame_missing_a_register {
+  graph [bgcolor="#fffaf0", rankdir=TB, pad=0.35, nodesep=0.8, ranksep=0.7,
+         fontname="Helvetica", fontsize=15, fontcolor="#596078"];
+  node  [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",
+         fillcolor="#ffffff", color="#17213f", fontcolor="#17213f",
+         penwidth=2, margin="0.24,0.16"];
+  edge  [fontname="Helvetica", fontsize=13, color="#17213f", penwidth=2,
+         fontcolor="#596078", arrowsize=0.9];
+
+  written [label="what the entry sequence stores\l\l+0x00    x0\l+0x08    x1\l+0x10    x2\l+0x18    x3\l"];
+
+  subgraph cluster_rejected {
+    label="Takibi: rejected at compile time";
+    labelloc="t";
+    fontname="Helvetica";
+    fontsize=16;
+    fontcolor="#c9360d";
+    color="#f05a24";
+    penwidth=2.5;
+    style="rounded,dashed";
+    margin=16;
+
+    declared [label="what IncompleteFrame declares\l\l+0x00    x0\l+0x08    x2      <- holds x1\l+0x10    x3      <- holds x2\l+0x18    (nothing declares it)\l",
+              fillcolor="#fff3df", color="#f05a24"];
+  }
+
+  board [label="On the board\l\lThe handler reads the interrupted x1 believing it is x2.\lOn return, eret restores the shifted words into the\lregisters the interrupted code was using.\l",
+         fillcolor="#f1f2f6"];
+
+  written -> declared [label="  the same bytes  ", style=dotted,
+                       constraint=false];
+  declared -> board [label="  C and Rust: the struct and the entry\l  sequence are separate hand-written artifacts\l",
+                     style=dashed, color="#c9360d", fontcolor="#c9360d",
+                     penwidth=2.5];
+}

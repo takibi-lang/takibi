@@ -54,6 +54,11 @@ INDEX_ROW = re.compile(
 REQUIRED_FIELDS = ("Status", "Check", "Test case", "Introduced")
 STATUS = re.compile(r"^(Enforced|Partial|Withdrawn|Superseded by \d{4})$")
 
+# Some defects are only defects under a compiler flag: an unproven index is a
+# runtime check until `--forbid-trap` refuses to ship one. An entry says so in
+# an optional `Compile with` row, and its samples are compiled that way.
+FLAGS_FIELD = "Compile with"
+
 REJECTED_HEADING = "## Code that does not compile"
 ACCEPTED_HEADING = "## Code that does compile"
 
@@ -138,6 +143,7 @@ class Entry:
         self.test_case = ""
         self.rejected: list[tuple[str, str]] = []
         self.accepted: list[str] = []
+        self.flags: list[str] = []
 
 
 def unbacktick(value: str) -> str | None:
@@ -189,6 +195,25 @@ def load_entries(catalog: pathlib.Path, errors: list[str]) -> list[Entry]:
                     "is compared against the suite is ambiguous")
             else:
                 entry.test_case = case
+
+        raw_flags = entry.fields.get(FLAGS_FIELD)
+        if raw_flags is not None:
+            flags = unbacktick(raw_flags)
+            if flags is None:
+                errors.append(
+                    f"{name}: the {FLAGS_FIELD} value is not backticked, so "
+                    "what is passed to the compiler is ambiguous")
+            elif not flags.split():
+                errors.append(f"{name}: the {FLAGS_FIELD} row is empty")
+            elif not all(token.startswith("-") for token in flags.split()):
+                # A sentence here would be read as a flag list and silently
+                # handed to the compiler, which is the difference between a
+                # row that configures a check and one that describes it.
+                errors.append(
+                    f"{name}: {FLAGS_FIELD} must be compiler flags, and "
+                    f"\"{flags}\" contains a token that is not one")
+            else:
+                entry.flags = flags.split()
 
         figures = FIGURE_REF.findall(entry.text)
         expected = f"{entry.number}-{entry.slug}.svg"

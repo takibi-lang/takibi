@@ -1,0 +1,45 @@
+// Figure for docs/wont-compile/0005-wire-endian-field-read-as-a-host-integer.md
+//
+// The accident, not the compiler. Two bytes, two readings, and an ordering
+// comparison that silently answers a question about byte order rather than
+// about value.
+digraph wire_endian_field_read_as_a_host_integer {
+  graph [bgcolor="#fffaf0", rankdir=TB, pad=0.35, nodesep=0.7, ranksep=0.65,
+         fontname="Helvetica", fontsize=15, fontcolor="#596078"];
+  node  [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",
+         fillcolor="#ffffff", color="#17213f", fontcolor="#17213f",
+         penwidth=2, margin="0.24,0.16"];
+  edge  [fontname="Helvetica", fontsize=13, color="#17213f", penwidth=2,
+         fontcolor="#596078", arrowsize=0.9];
+
+  wire [label="on the wire\l\lmagic   00 01\lflags   01 00\l",
+        fillcolor="#fff3df", color="#f05a24"];
+
+  meant [label="what the protocol says\l\lmagic = 1\lflags = 256\l\lmagic < flags is true\l"];
+  got   [label="what a little-endian core reads\l\lmagic = 256\lflags = 1\l\lmagic < flags is false\l",
+         fillcolor="#f1f2f6"];
+
+  subgraph cluster_rejected {
+    label="Takibi: rejected at compile time";
+    labelloc="t";
+    fontname="Helvetica";
+    fontsize=16;
+    fontcolor="#c9360d";
+    color="#f05a24";
+    penwidth=2.5;
+    style="rounded,dashed";
+    margin=16;
+
+    code [label="h.magic < h.flags\lboth fields are u16be\l",
+          fillcolor="#fff3df", color="#f05a24"];
+  }
+
+  { rank=same; meant; got; }
+
+  wire -> meant [label="  read as u16be  "];
+  wire -> got [label="  read as a host u16  ", color="#c9360d",
+               fontcolor="#c9360d", penwidth=2.5];
+  code -> got [label="  C without sparse, and Rust without a\l  wire-integer crate, compare the raw bytes\l",
+               style=dashed, color="#c9360d", fontcolor="#c9360d",
+               penwidth=2.5];
+}

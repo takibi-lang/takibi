@@ -115,6 +115,21 @@ print("the widget is not proven bad_widget -> widget", file=sys.stderr)
 sys.exit(1)
 """
 
+# Only rejects when the entry's `Compile with` flag actually reached it. If
+# the flag were dropped, the rejected sample would compile and the runner
+# would say so -- which is what makes this a test of the flag and not of the
+# stub.
+STUB_NEEDS_FLAG = """#!/usr/bin/env python3
+import pathlib, sys
+source = pathlib.Path(sys.argv[1]).read_text()
+if "bad_widget" in source and "--forbid-trap" in sys.argv:
+    print("the widget is not proven bad_widget -> widget", file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+"""
+
+FLAG_ROW = "| Compile with | `--forbid-trap` |\n"
+
 
 def build_root(tmp: pathlib.Path) -> pathlib.Path:
     """A complete, valid catalog, which every scenario starts from."""
@@ -275,6 +290,38 @@ def main() -> int:
                              run_catalog(root), "which does not exist")
         restore()
 
+        entry.write_text(original.replace(
+            "| Check | type error, widget checker |\n",
+            "| Check | type error, widget checker |\n" + FLAG_ROW))
+        controls.expect_pass("an entry that names compiler flags",
+                             run_catalog(root))
+        stub = write_stub(tmp, "stub_flag.py", STUB_NEEDS_FLAG)
+        controls.expect_pass("flags reaching the compiler",
+                             run_samples(root, stub))
+        restore()
+        # The same stub against the same entry with its flag row removed: the
+        # rejected program now compiles. That is what the flag was doing, and
+        # it is the only reading under which the scenario above means anything.
+        controls.expect_fail("the same stub once the flag row is gone",
+                             run_samples(root, stub),
+                             "shown as rejected compiled successfully")
+
+        entry.write_text(original.replace(
+            "| Check | type error, widget checker |\n",
+            "| Check | type error, widget checker |\n"
+            "| Compile with | --forbid-trap |\n"))
+        controls.expect_fail("an unbackticked flag list", run_catalog(root),
+                             "is not backticked")
+        restore()
+
+        entry.write_text(original.replace(
+            "| Check | type error, widget checker |\n",
+            "| Check | type error, widget checker |\n"
+            "| Compile with | `with the trap flag` |\n"))
+        controls.expect_fail("prose where flags belong", run_catalog(root),
+                             "contains a token that is not one")
+        restore()
+
         stub = write_stub(tmp, "stub_compiler.py", STUB)
         controls.expect_pass("samples against a faithful stub",
                              run_samples(root, stub))
@@ -310,8 +357,11 @@ def main() -> int:
         "pass; a renamed test case, an invented status, a missing field, a "
         "misnumbered heading, an unpinned sample, an entry that never shows "
         "acceptance, a missing figure, a figure without its source, an "
-        "unclaimed figure, and four ways the index and the entries can "
-        "disagree are each refused; and the sample runner notices a "
+        "unclaimed figure, four ways the index and the entries can "
+        "disagree, an unbackticked flag list and prose where flags belong "
+        "are each refused; compiler flags an entry names reach the "
+        "compiler, and dropping them is noticed; and the sample runner "
+        "notices a "
         "rejection that stopped happening, one with a different message, an "
         "accepted program that was refused, and a compiler that is not there",
         cases=controls.cases.ran,

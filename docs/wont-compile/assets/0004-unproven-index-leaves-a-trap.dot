@@ -1,0 +1,34 @@
+// Figure for docs/wont-compile/0004-unproven-index-leaves-a-trap.md
+//
+// The accident, not the compiler. One array access, three languages, three
+// different things in the shipped binary -- which is the only framing under
+// which "Rust bounds-checks too" and "this is still a defect Rust cannot
+// remove" are both true at once.
+digraph unproven_index_leaves_a_trap {
+  graph [bgcolor="#fffaf0", rankdir=TB, pad=0.35, nodesep=0.45, ranksep=0.7,
+         fontname="Helvetica", fontsize=15, fontcolor="#596078"];
+  node  [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",
+         fillcolor="#ffffff", color="#17213f", fontcolor="#17213f",
+         penwidth=2, margin="0.24,0.16"];
+  edge  [fontname="Helvetica", fontsize=13, color="#17213f", penwidth=2,
+         fontcolor="#596078", arrowsize=0.9];
+
+  access [label="table[index] = value\lindex is an ordinary usize: nothing bounds it\l",
+          fillcolor="#fff3df", color="#f05a24"];
+
+  c     [label="C\l\lNo check is emitted.\lThe write lands outside\lthe table, silently.\l"];
+  rust  [label="Rust\l\lA check is emitted.\lIt panics, and on bare\lmetal a panic is the\lend of the core.\l"];
+  tkb   [label="Takibi, --forbid-trap\l\lThe build stops, naming\lthe access that still\lneeds a check.\l",
+         fillcolor="#fff3df", color="#f05a24"];
+
+  proved [label="fn store(index: {0..<64 as usize}, value: u32)\l\lNo check is emitted, and there is nothing left to trap.\lThe caller carries the proof instead.\l",
+          fillcolor="#f1f2f6"];
+
+  { rank=same; c; rust; tkb; }
+
+  access -> c;
+  access -> rust;
+  access -> tkb [color="#c9360d", penwidth=2.5];
+  tkb -> proved [label="  the repair  ", color="#c9360d",
+                 fontcolor="#c9360d", penwidth=2.5];
+}

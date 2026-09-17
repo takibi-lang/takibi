@@ -56,13 +56,13 @@ def flatten(text: str) -> str:
     return WHITESPACE.sub(" ", text).strip()
 
 
-def compile_sample(takibi: pathlib.Path, source: str,
+def compile_sample(takibi: pathlib.Path, source: str, flags: list[str],
                    workdir: pathlib.Path, index: int) -> tuple[int, str]:
     path = workdir / f"sample{index}.tkb"
     path.write_text(source, encoding="utf-8")
     result = subprocess.run(
         [str(takibi), str(path), "--target", TARGET,
-         "-o", str(workdir / f"sample{index}.o")],
+         "-o", str(workdir / f"sample{index}.o")] + flags,
         capture_output=True, text=True, check=False)
     return result.returncode, result.stdout + result.stderr
 
@@ -94,7 +94,8 @@ def main(takibi: pathlib.Path, root: pathlib.Path) -> int:
         for entry in entries:
             for source, diagnostic in entry.rejected:
                 index += 1
-                status, output = compile_sample(takibi, source, workdir, index)
+                status, output = compile_sample(
+                    takibi, source, entry.flags, workdir, index)
                 if status == 0:
                     failures.append(
                         f"{entry.path.name}: a program shown as rejected "
@@ -112,7 +113,8 @@ def main(takibi: pathlib.Path, root: pathlib.Path) -> int:
 
             for source in entry.accepted:
                 index += 1
-                status, output = compile_sample(takibi, source, workdir, index)
+                status, output = compile_sample(
+                    takibi, source, entry.flags, workdir, index)
                 if status != 0:
                     failures.append(
                         f"{entry.path.name}: a program shown as accepted was "
