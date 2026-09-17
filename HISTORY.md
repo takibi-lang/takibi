@@ -15,6 +15,89 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-16: the filesystem boundary becomes a lock (#533, #9 phase B)
+
+#533 recorded two gaps and closed neither: the block cache's write epoch was
+read without a barrier, and ext2 mutation was unserialized against a peer
+reader. Both were closed here, and the second replaced a claim about the
+SCHEDULER with one the compiler can check.
+
+**The epoch.** The cache keeps one set of slots per core, and what one core
+writes reaches the others through the write epoch: the sum of every core's
+write count, each written only by its own core, with a slot valid only while
+the epoch it was filled at is still the epoch. A `signal_fence` carried that,
+and a compiler fence orders only what one core's compiler emits -- it left a
+core's store of a block's bytes free to become visible AFTER the count that
+retires another core's stale copy of the same block, so a peer could take a
+cache HIT on a slot filled before a write it could not yet see. The counts are
+now published with release stores and summed with acquire loads. `dsb_ish` was
+not an option: `linux_user/block_cache` compiles this file itself, against the
+kernel's own source, so it has to build for x86_64 too -- which is why a
+portable fence stood there in the first place.
+
+**The mutation.** `ext2_claim_directory` mints a directory owner from the
+tree, and its comment said what that needs: one core at a time. What it named
+as holding that was `CONCURRENCY.md`'s admission rule -- every process
+reaching the filesystem admitted to core 0 only -- which is a statement about
+the scheduler that nothing in ext2 can check, and which #9 exists to remove.
+`kernel/fs/ext2/mutation_lock.tkb` now holds a TaskMutex at lock rank 20 and
+hands out a linear guard. The device lock beneath it is rank 30, so #466's
+order check proves a mutation may take the device lock underneath it and that
+the reverse is a type error. The five mutating syscall arms each became one
+helper holding the guard: a helper rather than a lock in the arm itself,
+because each arm has a dozen early returns and a linear guard makes "exactly
+one release on every path" a compile error rather than a review item. mkdir's
+existence check moved inside its guard, since outside it another core could
+create the name in between; rmdir's claim, removal and keep are one section
+because the minted owner lives across all three.
+
+**Readers take no lock, and that is the design.**
+`peer_filesystem.expected` asserts the block device mutex is contended on both
+CPUs, and `memory.tkb` counts a wait only when its trylock fails, so a lock
+held across reads would zero one side of the evidence #533 built. The
+migration gate instead asks -- one acquire-load, no wait -- whether a mutation
+is in flight, and returns `SyscallAction::Migrate` if so. An errno would fail
+`/bin/peer-read`'s chunk verdict; waiting on core 0 is the shape that cost the
+busy pair its fairness earlier in phase B's third step. The question is asked
+only for calls outside the peer-safety table, because every workload progress
+handler refuses a report made anywhere but the secondary, so migrating a
+peer-safe call during a mutation would turn a fixture's report into a refusal.
+
+**The probe, because a lock without one is not done.** CONCURRENCY.md's rule
+is that a lock added correct-by-audit changes nothing any lane can see.
+`kernel/kernel/ext2_mutation_contention_evidence.tkb` takes the
+`occupancy_drain` shape rather than a statistical race: core 0 holds the guard
+for a whole phase, so the peer's observation cannot miss the window however
+slow either core is. Phase 1 with nothing held is not decoration -- without it
+an `in_flight()` that returned a constant would pass. The verdict's `asked`
+term is the one that is false when the probe never ran. Measured
+`asked=2 clear=1 held=1` on QEMU and on four-core RPi5.
+
+**What is not closed.** The reader's question is asked at syscall ENTRY only:
+a mutation starting during an in-flight peer read still overlaps it, since the
+gate cannot re-ask from inside ext2. Closing it needs a reader count the
+mutator waits for, or readers taking the lock -- and the second destroys the
+evidence above. Recorded in the lock's own limitations section, with
+`scripts/check_ext2_mutation_guard.py` keeping the mutator set closed.
+
+**Three controls had outgrown their subjects**, and no lane noticed because
+lanes exercise behaviour while these read source. The affinity gdb lane hands
+its readiness files through the environment, as `gdb -batch -x` passes no
+argv, under names no recognised pair matched. The peer-console control still
+asserted the two admission clauses that self-placement deleted. The lane-port
+geometry's repeat window started at exactly the affinity lane's top port. All
+three are the same lesson: run `make allcheck`, not the touched lanes.
+
+**Two defects in the affinity lane itself**, found by CI and by repeating it
+locally. `/bin/affinity`'s last line is written from CPU 1 into that CPU's
+console ring, and the only thing that empties the ring is core 0's drain at
+the top of a syscall; the probe was killing its core-0 spinner BEFORE
+printing, so with core 0 idle the line could sit in the ring for the rest of
+the boot. And the gate breakpoint is not this probe's alone -- `/bin/peer-read`
+takes it throughout the same session, so the check read another process's
+frame and died. It now selects the hit that is its own instead of assuming the
+first one is.
+
 ## 2026-09-15: a kernel function nothing reads is a build error in 42 files (#540)
 
 `--reject-unused-functions` had checked one kernel file, `cpu.tkb`. The

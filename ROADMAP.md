@@ -120,8 +120,30 @@ The next multicore increment is phase B. Its order is now:
    contended device reads verified on QEMU and RPi5. **#534 is complete**
    (2026-09-14): a real peer writer fills the ring, takes its short count and
    retries, and a UART BREAK lands while one peer record is held undrained and
-   delivers it after `continue`, on QEMU and four-core RPi5. Keep filesystem
-   mutation and terminal readers on core 0 at this boundary.
+   delivers it after `continue`, on QEMU and four-core RPi5.
+
+   **#533's two recorded gaps are now closed (2026-09-16), and the filesystem
+   boundary is a lock rather than an admission claim.** The block cache's
+   write epoch is published with release ordering and summed with acquire
+   loads, because a compiler fence left a core's block bytes free to become
+   visible after the count that retires another core's stale copy. ext2
+   mutation excludes itself through `kernel/fs/ext2/mutation_lock.tkb`, a
+   TaskMutex at lock rank 20 whose linear guard the five mutating syscall arms
+   take, so "filesystem outside device" is compiler-checked against the device
+   lock at rank 30. A peer reader takes no lock -- readers must stay
+   concurrent or `peer_filesystem.expected`'s both-CPU device contention
+   disappears -- and instead asks at syscall entry whether a mutation is in
+   flight, taking `SyscallAction::Migrate` if one is. A two-core probe
+   measures that answer from the other core with core 0 holding and not
+   holding the guard.
+
+   **What is not closed**: the reader's question is asked at syscall ENTRY
+   only, so a mutation starting during an in-flight peer read still overlaps
+   it. That window, and the fact that nothing proves a sixth mutator would
+   take the guard, are recorded in the lock's own limitations section;
+   `scripts/check_ext2_mutation_guard.py` now refuses a mutator call site that
+   does not hold the guard. Terminal readers stay on core 0 apart from
+   `/bin/peer-tty`.
 4. **#547 is complete (2026-09-15).** One lock now
    orders terminal input across CPUs: the process-run lock, held by the RX
    interrupt's wake and push, by a read's take, and by the last look before

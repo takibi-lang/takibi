@@ -51,6 +51,33 @@
 // kernel/CONCURRENCY.md's rule that a guard type and the data it protects in
 // one file leave the data reachable from the rest of that file -- and
 // syscall.tkb is four thousand lines.
+//
+// Current limitations (2026-09-16). Keep this list current as call sites
+// change; a limitation that goes stale here is worse than none, since it
+// invites relying on a guarantee that quietly stopped holding. Nothing
+// enforces this section's presence here: kernel/fs/ is not one of
+// scripts/check_kernel_lib_limitations_header.py's directories yet.
+//
+// - THE READER'S QUESTION IS ASKED AT SYSCALL ENTRY ONLY, so this closes
+//   one of the two windows. A peer read admitted because no mutation was in
+//   flight can still be inside ext2 when core 0 starts one. The kernel is
+//   not preemptible, so that read runs to completion rather than being
+//   interleaved on its own core, but the two genuinely overlap across cores.
+//   What is closed is a read STARTING during a mutation; what is not is a
+//   mutation starting during a read. Closing the second needs a reader count
+//   the mutator waits for, or readers taking this lock -- and the second
+//   destroys what peer_filesystem.expected measures, which is why it was not
+//   done here.
+// - NOTHING PROVES A MUTATOR TAKES IT. The five mutating syscall arms do,
+//   and the guard being linear makes a missed release a compile error on
+//   every path, but a sixth arm added later would compile and simply fail to
+//   exclude. The structural answer is a check that every ext2 mutator is
+//   reached only under this guard.
+// - THE BOOT FIXTURE MUTATES WITHOUT IT, in kernel/init/ext2_fixture.tkb.
+//   That is sound for the reason the old admission claim was: it runs on
+//   core 0 before any peer can reach a filesystem. It is also why the check
+//   above cannot simply demand the guard at every mutator call site without
+//   naming that path.
 use "kernel/lib/task_mutex.tkb";
 
 // No initialisation: a global's .bss zero is already SPIN_LOCK_FREE, and

@@ -2691,11 +2691,15 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // runs there too and this kernel is not preemptible, so a core 0 reader
     // cannot be dispatched while a core 0 mutation is mid-rewrite.
     //
-    // This is asked of a rule-admitted fixture as well. /bin/peer-read still
-    // holds a rule, and it is the only peer that reaches a file today, so
-    // excusing the rules here would excuse the one reader the exclusion is
-    // for.
-    if (cpu_id() != 0 && ext2_mutation_in_flight()) {
+    // Only for a call the table does NOT admit, which after the check above
+    // means a rule-admitted fixture: /bin/peer-read, whose openat and read
+    // reach ext2 and are outside the table. Asking it of a peer-safe call
+    // would be both pointless and harmful -- nothing in the table reaches the
+    // filesystem, and every workload progress handler refuses a report made
+    // anywhere but SECONDARY_CORE_ID, so migrating one during a mutation
+    // would turn a fixture's report into a refusal.
+    if (cpu_id() != 0 && syscall_peer_safe(number, x0) == false &&
+        ext2_mutation_in_flight()) {
         return SyscallAction::Migrate;
     }
     kernel_init_boot_fixture_poll();
