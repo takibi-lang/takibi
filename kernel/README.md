@@ -143,7 +143,7 @@ output interleaving with the prompt would arrive in an order no fixture
 could pin.
 Shell scripts are ordinary
 executables here: a script's first line names its interpreter and `execve`
-resolves it, so `/bin` also holds `httpd-serve.sh` (the browser demo as one
+resolves it, so `/bin` also holds `httpd.sh` (the browser demo as one
 command) and `script-interpreter-argument.sh` (a fixture pinning `#!` argv
 construction), both reachable by bare name through ash's `PATH` search.
 `/etc` keeps what is never typed as a bare command: BusyBox init's
@@ -154,7 +154,7 @@ is the name BusyBox re-executes itself through.
 
 The current HTTPd milestone runs the unmodified pinned BusyBox Extras binary
 through its `/bin/httpd` hard link as a persistent foreground daemon:
-`httpd -f -p 8080 -h /`, reached by running `httpd-serve.sh`, which carries
+`httpd -f -p 8080 -h /`, reached by running `httpd.sh`, which carries
 that command line so no prompt has to.
 HTTPd creates its own IPv6 wildcard listener, accepts each connection, and
 uses the observed `clone(SIGCHLD)` fork shape. Each child receives a private
@@ -281,14 +281,14 @@ the rootfs rather than as something to retype. Wait for the
 `interactive shell: uart blocked` marker and its `/ #` prompt, then run:
 
 ```sh
-httpd-serve.sh &
+httpd.sh &
 ```
 
 No pathname and no interpreter: the script lives in `/bin`, so ash's `PATH`
 search finds it, and its `#!/bin/sh` line is what `execve` resolves to decide
 what runs it. The trailing `&` is still needed -- `httpd -f` stays in the
 foreground for the life of the daemon. Its command line (port 8080, document
-root `/`) lives in `kernel/tests/ext2/httpd-serve.sh`.
+root `/`) lives in `kernel/tests/ext2/httpd.sh`.
 
 For QEMU, start the shell and open the forwarded loopback URL in a browser:
 

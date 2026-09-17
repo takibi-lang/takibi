@@ -37,7 +37,7 @@ Usage:
                                    [--interface enp5s0] [--json FILE]
 
 Expects a board already serving: `make kernelcheck-rpi5` has one up while its
-interactive HTTPd checks run, and `make kernelsh-rpi5` plus `httpd-serve.sh &`
+interactive HTTPd checks run, and `make kernelsh-rpi5` plus `httpd.sh &`
 gives one by hand. This does not manage the board, so it cannot leave one in a
 state somebody else has to clean up.
 """

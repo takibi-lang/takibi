@@ -826,7 +826,7 @@ $(KERNEL_MUSL_LOADER): $(KERNEL_MUSL_APK)
 	tar -xOzf $< lib/ld-musl-aarch64.so.1 > $@
 	chmod +x $@
 
-$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/about.html $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd-serve.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/inittab $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSY_LOOP_A_ELF) $(KERNEL_BUSY_LOOP_B_ELF) $(KERNEL_BUSY_LOOP_SPIN_ELF) $(KERNEL_PEER_READ_ELF) $(KERNEL_CORE_READ_ELF) $(KERNEL_PEER_CONSOLE_ELF) $(KERNEL_PEER_TTY_ELF) $(KERNEL_CLOEXEC_ELF) $(KERNEL_CLOEXEC_CHECK_ELF) $(KERNEL_PPOLL_PROBE_ELF) $(KERNEL_AFFINITY_ELF) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_BUSYBOX_EXTRAS) $(KERNEL_MUSL_LOADER) | $(KERNEL_USER_BUILD_DIR)
+$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/about.html $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/inittab $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSY_LOOP_A_ELF) $(KERNEL_BUSY_LOOP_B_ELF) $(KERNEL_BUSY_LOOP_SPIN_ELF) $(KERNEL_PEER_READ_ELF) $(KERNEL_CORE_READ_ELF) $(KERNEL_PEER_CONSOLE_ELF) $(KERNEL_PEER_TTY_ELF) $(KERNEL_CLOEXEC_ELF) $(KERNEL_CLOEXEC_CHECK_ELF) $(KERNEL_PPOLL_PROBE_ELF) $(KERNEL_AFFINITY_ELF) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_BUSYBOX_EXTRAS) $(KERNEL_MUSL_LOADER) | $(KERNEL_USER_BUILD_DIR)
 	rm -f $@.tmp
 	truncate -s 2621440 $@.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 mke2fs -q -t ext2 -b 1024 -I 128 -N 1024 -O none -F -U 00000000-0000-0000-0000-000000000177 $@.tmp 2560
@@ -840,7 +840,7 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/about.html $@.tmp:/about.html
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $@.tmp:/icon.png
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $@.tmp:/etc/init.sh
-	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/httpd-serve.sh $@.tmp:/bin/httpd-serve.sh
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/httpd.sh $@.tmp:/bin/httpd.sh
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $@.tmp:/etc/script-shebang.sh
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $@.tmp:/bin/script-interpreter-argument.sh
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $@.tmp:/etc/not-a-program
@@ -887,7 +887,7 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	debugfs -w -R 'set_inode_field /bin/busybox-extras mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /lib/ld-musl-aarch64.so.1 mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /etc/init.sh mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /bin/httpd-serve.sh mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/httpd.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /etc/script-shebang.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/script-interpreter-argument.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /etc/not-a-program mode 0100755' $@.tmp >/dev/null 2>&1
@@ -921,13 +921,15 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	debugfs -w -R 'link /bin/busybox.static /bin/rmdir' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /bin/busybox.static /bin/rm' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /bin/busybox.static /bin/mv' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/cal' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'link /bin/busybox.static /bin/nproc' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /bin/busybox-extras /bin/httpd' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'mkdir /many' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'expand /many' $@.tmp >/dev/null 2>&1
 	for index in $$(seq -w 0 19); do \
 		debugfs -w -R "link /bin/busybox.static /many/entry-$$index" $@.tmp >/dev/null 2>&1; \
 	done
-	debugfs -w -R 'set_inode_field /bin/busybox.static links_count 34' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/busybox.static links_count 36' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/busybox-extras links_count 2' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'link /hello.txt /etc/hlink' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /hello.txt links_count 2' $@.tmp >/dev/null 2>&1

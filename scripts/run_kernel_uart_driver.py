@@ -524,7 +524,7 @@ def main() -> int:
                            "httpd-shell-ready" for line in text.splitlines()):
                         write_uart_line(
                             connection,
-                            b"httpd-serve.sh &")
+                            b"httpd.sh &")
                         print("[kernel/uart] sent interactive HTTPd command",
                               flush=True)
                         httpd_sent = True

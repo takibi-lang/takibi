@@ -36,6 +36,7 @@ busy-b
 busybox
 busybox-extras
 busybox.static
+cal
 cat
 cloexec
 cloexec-check
@@ -43,10 +44,11 @@ core-read
 dmesg
 echo
 httpd
-httpd-serve.sh
+httpd.sh
 ls
 mkdir
 mv
+nproc
 od
 peer-console
 peer-read

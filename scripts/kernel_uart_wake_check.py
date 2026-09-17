@@ -193,7 +193,7 @@ def run_peer(connection: socket.socket) -> None:
     if not seen(lambda text: BUSY_PAIR_DONE in text, BOOT_TIMEOUT):
         verdict(False, "the busy pair never finished before the peer chain")
         return
-    connection.sendall(b"httpd-serve.sh &\n")
+    connection.sendall(b"httpd.sh &\n")
     if not seen(lambda text: PEER_CONSOLE_DONE in text, BOOT_TIMEOUT):
         verdict(False, "the peer console writer never delivered its last record")
         return

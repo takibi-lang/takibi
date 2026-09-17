@@ -204,7 +204,7 @@ def main() -> int:
             if (not migration_context_sent and
                     b"workload: busy pair done\n" in received and
                     b"persistent shell: uart blocked\n" in received):
-                serial.sendall(b"httpd-serve.sh &\n")
+                serial.sendall(b"httpd.sh &\n")
                 migration_context_sent = True
 
             migration_ready = (
