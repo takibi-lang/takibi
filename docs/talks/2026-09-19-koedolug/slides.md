@@ -2,7 +2,7 @@
 marp: true
 theme: takibi
 paginate: true
-footer: "Koedo Linux Users Group, 2026-09-19"
+footer: "Koedo LUG / TLUG Software Freedom Day, 2026-09-19"
 ---
 
 <!-- _class: lead -->
