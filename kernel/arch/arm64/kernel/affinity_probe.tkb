@@ -27,6 +27,9 @@ const LINUX_ESRCH: usize = 0xFFFFFFFFFFFFFFFD;
 const AFFINITY_ERROR_FLOOR: usize = 0xFFFFFFFFFFFFF000;
 const AFFINITY_ABSENT_PID: usize = 999999;
 const AFFINITY_PIN_ATTEMPTS: usize = 200000;
+// Naps of a millisecond each: enough to cover the parent's remaining work
+// many times over, and finite so nothing depends on the child being killed.
+const AFFINITY_SPINNER_NAPS: usize = 20000;
 const UTSNAME_BYTES: usize = 390;
 
 private fn affinity_say(line: borrow []u8) {
@@ -67,8 +70,18 @@ private fn affinity_cpu(cpu_bytes: borrow [u8; 4..]) -> usize {
 // there to switch to. This child inherits the CPU-0-only mask and naps a
 // millisecond at a time. A nap blocks while another process is Ready, so
 // core 0 hands itself over without depending on preemption, which the
-// ash session this runs in does not have. SIGTERM lands when a nap is
-// asked for again.
+// ash session this runs in does not have.
+//
+// BOUNDED, and that is load-bearing rather than tidiness. This used to nap
+// forever and rely on its parent's SIGTERM to end it, which asks two things
+// of the kernel that a fixture should not have to: that a pending signal
+// reaches a process which is asleep, and that an interrupt arrives to wake
+// a nap that found nobody else Ready. A CI run on 2026-09-16 got neither --
+// the parent sat in wait4 while this child stayed in its deadline retry, and
+// the whole ash session stopped one command after /bin/affinity's output.
+// The count is generous: at a millisecond a nap it outlives the parent's
+// remaining work by orders of magnitude, and it ends on its own whatever the
+// kernel does, so this fixture can no longer hang a lane.
 private fn affinity_spinner() {
     let mut nap: [u8; 16];
     for index: usize in 0..<16 { nap[index] = 0; }
@@ -76,10 +89,10 @@ private fn affinity_spinner() {
     nap[8] = 0x40;
     nap[9] = 0x42;
     nap[10] = 0x0F;
-    while (true) {
+    for round: usize in 0..<AFFINITY_SPINNER_NAPS {
         svc5(NANOSLEEP_SYSCALL, nap as *u8 as usize, 0, 0, 0, 0);
     }
-    svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+    svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
 }
 
 fn affinity_probe() {
@@ -186,6 +199,11 @@ fn affinity_probe() {
     // running, which is the reason it exists -- so it has to outlive the
     // output, not just the migration.
     affinity_say(bs"affinity: pinned to cpu 1, where uname, outside the peer-safe table, still answered\n");
+    // Ask it to stop, then reap it. The ask is best-effort on purpose: the
+    // child ends on its own nap count, so a SIGTERM that does not reach a
+    // sleeping process costs this fixture nothing but the wait. wait4 blocks
+    // until it is gone either way, which is also what keeps core 0 busy
+    // until the line above has been drained.
     svc5(KILL_SYSCALL, spinner, SIGTERM, 0, 0, 0);
     if (svc5(WAIT4_SYSCALL, spinner, status as *u8 as usize, 0, 0, 0) !=
             spinner) {
