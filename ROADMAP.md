@@ -74,27 +74,32 @@ the deepest dependency: it needs a language primitive this compiler does not
 have, and every week of single-core code written before that primitive exists
 is a week of code whose synchronization argument has to be reconstructed later.
 
-## Work split between two agents, re-cut 2026-09-13
+## Work split into two territories, re-cut 2026-09-13
 
-Two agents run in parallel, one per territory, with the territories and the
+Two streams run in parallel, one per territory, with the territories and the
 shared-file conventions defined in `AGENTS.md`. This section is the part that
 moves: when a new issue outranks what is queued below, edit it here.
 
-**Codex holds Territory A: multicore. That is #9 phase B and what it gates,
-with its QEMU, DDB and RPi5 evidence. Claude Code holds Territory B: first,
-the RPi5 network-boot exploration (#555); then the compiler and language
-issues.** A territory is a role, not a set of directories (`AGENTS.md`,
-since 2026-09-13). Either agent edits what its work needs. The roles keep
-the two streams apart in practice: multicore integration works in the
-scheduler, process and platform paths, while network-boot discovery works in
-the boot and transport path. A conflict in a shared file is expected to be
-incidental.
+**Territory A is multicore. That is #9 phase B and what it gates, with its
+QEMU, DDB and RPi5 evidence. Territory B is first the RPi5 network-boot
+exploration (#555), then the compiler and language issues.** A territory is a
+role, not a set of directories and not a particular agent (`AGENTS.md`).
+Either stream edits what its work needs. The roles keep the two apart in
+practice: multicore integration works in the scheduler, process and platform
+paths, while network-boot discovery works in the boot and transport path. A
+conflict in a shared file is expected to be incidental.
 
-Codex owns #9, #533, #534's remaining verification, #547, and their
+Which agent takes which territory is the maintainer's per-session decision
+and is deliberately not recorded here. It changes, one agent may hold both,
+and the set of agents is expected to grow; a queue that named its agent would
+be wrong the first time that happened. Agent names below appear only where
+they record what some agent actually did.
+
+Territory A owns #9, #533, #534's remaining verification, #547, and their
 end-to-end QEMU/RPi5 evidence. It also owns the kernel halves of #528, #493,
 #540 and #549, whose compiler halves have landed.
 
-### Territory A queue -- multicore integration, held by Codex
+### Territory A queue -- multicore integration
 
 **The first four-core increment is complete as of 2026-09-13.** #9 phase A
 starts all four RPi5 CPUs, derives the online set at runtime, stops every peer
@@ -186,15 +191,26 @@ oops record fits its fallback, and #563 has a 202-second CI stall.
   #514's window and #516's fallback. Decide both before the default mask
   becomes {core 0}; fixing them mid-step, in the pool-insert and exec paths,
   with no local reproduction for #516, trades a flake for an outage.
-- **The diagnosis work outranks them and is cheap.** #564 (report each
-  process's pending signals and mask, two words already in `ProcessRecord`)
-  would have decided #563 from a capture already on disk; #561 (a repeated
-  lane overwrites the failing sample's own artifacts) is why one diagnosis
-  needed a second reproduction; and #565 asks for the inventory that would
-  have told a triager in one minute that a `records MISSING` line is the
-  documented 1-in-8 rather than something new -- the fact that settled it this
-  week was a comment attached to the code that caused a different instance.
-  None of the three touches a kernel hot path. Do these first.
+- **The diagnosis work outranks them and is cheap.** None of the three
+  touches a kernel hot path. Do these first.
+  - **#564 is complete (2026-09-18).** `ps` and `proc PID` print each
+    process's pending-signal set and the set it blocks, both named from the
+    signals `kill(2)` accepts and checked against that guard. The uart-BREAK
+    capture now shows BusyBox init holding a mask that blocks SIGTERM, which
+    is the fact #563's walk could not read. It does not decide #563: a named
+    mask says the refusal is possible, not that it happened.
+  - **#561 next**, and first of the remaining two because it is the one that
+    can be reproduced on demand: a repeated lane overwrites the failing
+    sample's own artifacts every time, so no flake has to be waited for. It
+    is also why one diagnosis this week needed a second reproduction, and
+    until it lands the next low-probability CI failure loses its evidence the
+    same way.
+  - **#565** asks for the inventory that would have told a triager in one
+    minute that a `records MISSING` line is the documented 1-in-8 rather than
+    something new -- the fact that settled it this week was a comment
+    attached to the code that caused a different instance. After #561,
+    because a table that classifies a failure is worth less than the capture
+    it classifies.
 - **A blanket "flakes before features" promotion would be wrong here.** These
   flakes are products of the multicore work, so ordering them ahead of it
   fixes symptoms of a design that is still being finished -- the same argument
@@ -274,8 +290,8 @@ rest) moved to the Territory B queue with `lib/` on 2026-09-12.
 
 #### Territory A cold-start handoff, 2026-09-09
 
-The maintainer authorized Codex to cross both territories for the two-core
-blockers while Claude Code was unavailable.
+The maintainer authorized this territory's agent to cross into the other for
+the two-core blockers, while the agent holding that one was unavailable.
 
 **Status corrected 2026-09-10, by the other territory rather than this one:
 #479 and #448 are both closed**, and the paragraphs below were written while
@@ -838,7 +854,7 @@ of **#549, #540, #528 and #493 are also complete; every remaining action for
 those four is now listed and prioritized in Territory A rather than left as a
 "half done" item in Territory B.** #533, #534's remaining verification, #547,
 #550 and #551 moved to Territory A with the maintained kernel vertical, and so
-did #542 and the ext2 issues (#535-#539). Claude Code need not wait on or
+did #542 and the ext2 issues (#535-#539). Territory B need not wait on or
 modify kernel files for any of them.
 
 1. **Board lane complete on the combined tree.** `make kernelcheck-rpi5`
@@ -1286,7 +1302,7 @@ What each of those cost was one hour of reading and what it saved was a week
 of building the wrong thing. Do the same here.
 
 **#538 is this territory's, by the maintainer's decision on 2026-09-11:**
-Codex stays on multicore, so Claude Code crosses into
+Territory A stays on multicore, so Territory B crosses into
 `kernel/kernel/syscall.tkb` for `mkdirat`, `unlinkat` and `renameat`. It is
 additions beside `openat`, not a restructuring, which is the shape the
 territory rule tolerates.

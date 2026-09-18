@@ -112,9 +112,9 @@ considering a destructive git operation.
 
 Two agents work at a time, each on its own line of work, called Territory A
 and Territory B. **A territory is a role and a queue, not a set of
-directories. Either agent may edit any file its work needs.** `ROADMAP.md`
-says which agent holds which territory, what each role currently covers, and
-in what order.
+directories, and not a particular agent. Either agent may edit any file its
+work needs.** `ROADMAP.md` says what each territory currently covers and in
+what order.
 
 The maintainer decided this on 2026-09-13. Directory ownership had been the
 rule since 2026-09-05, and the split was re-cut three times. In practice most
@@ -122,6 +122,15 @@ work still crossed the line, and every crossing needed approval and a
 handoff. The coming work is disjoint by role (multicore in one territory,
 network-boot discovery and the compiler in the other). A conflict in a shared
 file is expected to be incidental, not structural.
+
+Which agent takes which territory is decided per session by the maintainer
+and is not written down here or in `ROADMAP.md`. It changes: one agent may
+hold both, a territory may change hands mid-week, and the set of agents
+itself is expected to grow. A queue that names its agent goes stale the
+first time that happens, and reads as an authorization boundary it was never
+meant to be -- the only such boundary in this repository is the push gate
+below. Say "Territory A" where you would have said an agent's name; use an
+agent's name only to record what that agent actually did.
 
 What keeps two concurrent streams from colliding without an exclusion:
 - **Rebase before and after every commit**, and keep commits small, so
