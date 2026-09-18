@@ -39,6 +39,14 @@ const PEER_IDENT_MACHINE_OFFSET: usize = 260;
 const PEER_IDENT_MACHINE_BYTES: usize = 7;
 const PEER_IDENT_SYSINFO_BYTES: usize = 112;
 const PEER_IDENT_SYSINFO_UPTIME_BYTES: usize = 8;
+const GETCWD_SYSCALL: usize = 17;
+const SET_TID_ADDRESS_SYSCALL: usize = 96;
+const GETPID_SYSCALL: usize = 172;
+const PRLIMIT64_SYSCALL: usize = 261;
+const PEER_IDENT_CWD_BYTES: usize = 8;
+// struct rlimit64 is two 8-byte words: the soft limit then the hard one.
+const PEER_IDENT_RLIMIT_BYTES: usize = 16;
+const PEER_IDENT_RLIMIT_NOFILE: usize = 7;
 
 private fn peer_read_cpu(cpu_bytes: borrow [u8; 4..]) -> usize {
     if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize, 0, 0, 0, 0) != 0) {
@@ -222,7 +230,8 @@ fn peer_console() {
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
 }
 
-// GitHub issue #9 phase B entry 6: the system-identity reads, on a peer.
+// GitHub issue #9 phase B entry 6: the calls admitted to a peer so far, run
+// on one.
 //
 // getcpu brackets both calls, so a migration invalidates the report rather
 // than letting a core-0 answer be attributed to the secondary. The content
@@ -256,6 +265,48 @@ private fn peer_identity(cpu_bytes: borrow [u8; 4..], peer_cpu: usize)
         }
     }
     if (tail_clean == false) { return 0; }
+    // GitHub issue #9 phase B entry 6, second increment: the per-process
+    // reads. Each is checked for CONTENT, not only for a return code, and
+    // each is followed by getcpu, so an answer that came from core 0 after a
+    // migration cannot be reported as the peer's.
+    //
+    // getcwd returns the byte count including the terminator, so 2 for `/`.
+    let mut cwd: [u8; PEER_IDENT_CWD_BYTES];
+    for index: usize in 0..<PEER_IDENT_CWD_BYTES { cwd[index] = 0xFF; }
+    if (svc5(GETCWD_SYSCALL, cwd as *u8 as usize, PEER_IDENT_CWD_BYTES,
+             0, 0, 0) != 2) {
+        return 0;
+    }
+    if (cwd[0] != 0x2F || cwd[1] != 0) { return 0; }
+    if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
+    // set_tid_address answers the current pid, so getpid -- which the table
+    // has admitted all along -- is what says whether it answered about this
+    // process. A peer reading another CPU's current would show up here.
+    let pid: usize = svc5(GETPID_SYSCALL, 0, 0, 0, 0, 0);
+    if (pid == 0) { return 0; }
+    if (svc5(SET_TID_ADDRESS_SYSCALL, 0, 0, 0, 0, 0) != pid) { return 0; }
+    if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
+    // prlimit64 as a pure read: new_limit null, old_limit written. The soft
+    // limit must be a real number and must not exceed the hard one, which is
+    // the invariant the fd context carries; a buffer left untouched would
+    // still hold 0xFF and fail both halves.
+    let mut rlimit: [u8; PEER_IDENT_RLIMIT_BYTES];
+    for index: usize in 0..<PEER_IDENT_RLIMIT_BYTES { rlimit[index] = 0xFF; }
+    if (svc5(PRLIMIT64_SYSCALL, 0, PEER_IDENT_RLIMIT_NOFILE, 0,
+             rlimit as *u8 as usize, 0) != 0) {
+        return 0;
+    }
+    let mut soft: usize = 0;
+    let mut hard: usize = 0;
+    for index: usize in 0..<PEER_IDENT_RLIMIT_BYTES {
+        if (index < 8) {
+            soft = soft | ((rlimit[index] as usize) << (index * 8));
+        } else {
+            hard = hard | ((rlimit[index] as usize) << ((index - 8) * 8));
+        }
+    }
+    if (soft == 0 || soft > hard) { return 0; }
+    if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
     // Walk the buffer's own length and filter, rather than index it at
     // offset + i: the bound the compiler can see is the array's.
     let mut digest: usize = 0;
@@ -291,7 +342,7 @@ fn peer_tty() {
     // nothing else is measuring here, so the two calls cost no sequencing of
     // their own.
     let identity: usize = peer_identity(cpu_bytes as []u8, peer_cpu);
-    if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_TTY_TAG, 2, identity, 0, 0) != 1) {
+    if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_TTY_TAG, 5, identity, 0, 0) != 1) {
         svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
     }
     let mut count: usize = 0;

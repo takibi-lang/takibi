@@ -180,15 +180,28 @@ The next multicore increment is phase B. Its order is now:
    what a peer process may DO, not which processes run on a peer, so the
    default-mask decision #514 and #516 gate is untouched.
 
-   **What it cost, and the check that repays it.** `/bin/affinity` used
-   `uname` as its example of a syscall the table refuses, so admitting uname
-   falsified the affinity gdb lane's premise -- found by a full QEMU boot
-   reporting a gate that stopped firing, which reads like a defect in the
-   gate. The probe uses `getcwd` now, and
-   `scripts/check_affinity_probe_migrates.py` holds the probe, its gdb
-   watcher and the table together in langcheck, so the NEXT widening fails
-   in seconds instead. Admitting `getcwd` later means moving that probe
-   again, and the check is what will say so.
+   **Second increment done 2026-09-18: `getcwd`, `set_tid_address`, and
+   `prlimit64` as a READ.** Each answers from the caller's own record and
+   takes no lock: getcwd keeps no kernel scratch, set_tid_address reads this
+   CPU's own current, and prlimit64 with a null `new_limit` reads its own
+   `ProcessFdContext` through the per-CPU rlimit buffer. `syscall_peer_safe`
+   grew a third argument for that last one, for the reason it already had
+   `fd`: one syscall number can be two questions. **The prlimit64 WRITE stays
+   on core 0** -- it would be the first time a peer mutates its own record
+   outside the process-run lock, which is the next increment's subject, not
+   this one's.
+
+   **What these cost, and the check that repays it.** `/bin/affinity` used
+   `uname` as its example of a syscall the table refuses, so the first
+   increment falsified the affinity gdb lane's premise -- found by a full
+   QEMU boot reporting a gate that stopped firing, which reads like a defect
+   in the gate. `scripts/check_affinity_probe_migrates.py` holds the probe,
+   its gdb watcher and the table together in langcheck now, and it earned
+   itself immediately: the second increment admitted `getcwd`, which the
+   probe had been moved to, and that failed in seconds instead of in a lane.
+   The probe uses `newfstatat` now -- a filesystem call, so it sits behind
+   the subsystem this sequence reaches last rather than behind the next
+   syscall in line.
 
 **#556 is evidence-gated, not a phase B blocker.** One parallel allcheck run
 failed the two-core oops lane with interleaved peer-fault text, but the exact

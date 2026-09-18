@@ -55,6 +55,8 @@ const AARCH64_NR_CLOCK_NANOSLEEP: usize = 115;
 const AARCH64_NR_KILL: usize = 129;
 const AARCH64_NR_RT_SIGTIMEDWAIT: usize = 137;
 const AARCH64_NR_SYSLOG: usize = 116;
+const AARCH64_NR_GETCWD: usize = 17;
+const AARCH64_NR_SET_TID_ADDRESS: usize = 96;
 const AARCH64_NR_UNAME: usize = 160;
 const AARCH64_NR_SYSINFO: usize = 179;
 const AARCH64_NR_GETCPU: usize = 168;
@@ -2589,7 +2591,12 @@ private fn syscall_ext2_rename_locked(old_directory: usize,
     return answer;
 }
 
-fn syscall_peer_safe(number: usize, fd: usize) -> bool {
+// `arg2` is the syscall's third argument, and it is here for the reason `fd`
+// is: one syscall number can be two different questions. prlimit64 is a pure
+// read when its new_limit pointer is null and a write when it is not, so the
+// number alone cannot decide, exactly as read and write cannot be decided
+// without their descriptor.
+fn syscall_peer_safe(number: usize, fd: usize, arg2: usize) -> bool {
     // The caller's own record, or architectural state: getpid, getppid,
     // the uid/gid family, gettid, clock_gettime, and getcpu (#533).
     if (number == 172 || number == 173 || number == 178 ||
@@ -2634,6 +2641,32 @@ fn syscall_peer_safe(number: usize, fd: usize) -> bool {
     // kernel/kernel/workload_evidence.tkb takes the process run lock, and
     // these fixtures have reported from a peer since #533, #534 and #547.
     if (number == AARCH64_NR_TAKIBI_WORKLOAD_PROGRESS) { return true; }
+    // GitHub issue #9 phase B entry 6, second increment: the per-process
+    // reads that answer from the caller's own record and take no lock.
+    //
+    // getcwd writes `/` and a NUL into the caller's own range and keeps no
+    // kernel scratch. This kernel has exactly one directory, so the answer
+    // is a constant; even if it stops being one, a process's cwd is its own
+    // and no other CPU writes it.
+    //
+    // set_tid_address returns the current pid, which is a read of
+    // `execution_here().current_handle` -- this CPU's own current process --
+    // and of that record's own pid word.
+    if (number == AARCH64_NR_GETCWD || number == AARCH64_NR_SET_TID_ADDRESS) {
+        return true;
+    }
+    // prlimit64 only as a READ: new_limit null, so nothing is stored. It
+    // reads this process's own ProcessFdContext -- `fd_context_at(slot)`,
+    // its own slot, not a walk of a shared structure -- and stages the
+    // answer in the per-CPU rlimit_buffer before copying it out. A pid
+    // argument that is not the caller's own is already ESRCH, so there is
+    // no cross-process read here either.
+    //
+    // The WRITE stays on core 0. It would be the first time a peer mutates
+    // its own record outside the process-run lock, which is a synchronization
+    // question rather than a short audit, and it belongs to the increment
+    // that answers it.
+    if (number == AARCH64_NR_PRLIMIT64 && arg2 == 0) { return true; }
     // The terminal: a peer's output goes through its console ring (#534),
     // and input is ordered by the run lock (#547). A connection duplicated
     // onto a standard descriptor is not the terminal.
@@ -2701,7 +2734,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // rerun on core 0. A fixture the per-pid rule admits keeps its own
     // audit instead.
     if (cpu_id() != 0 && kernel_process_current_admitted_by_rule() == false &&
-        syscall_peer_safe(number, x0) == false) {
+        syscall_peer_safe(number, x0, x2) == false) {
         return SyscallAction::Migrate;
     }
     // GitHub issue #533: a peer must not read a tree that is being rewritten.
@@ -2718,7 +2751,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // filesystem, and every workload progress handler refuses a report made
     // anywhere but SECONDARY_CORE_ID, so migrating one during a mutation
     // would turn a fixture's report into a refusal.
-    if (cpu_id() != 0 && syscall_peer_safe(number, x0) == false &&
+    if (cpu_id() != 0 && syscall_peer_safe(number, x0, x2) == false &&
         ext2_mutation_in_flight()) {
         return SyscallAction::Migrate;
     }
@@ -4672,7 +4705,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         kernel_init_boot_fixture_reaped(kernel_process_current_pid());
         return SyscallAction::Resume(kernel_process_last_child_pid());
     }
-    if (number == 17) {
+    if (number == AARCH64_NR_GETCWD) {
         // getcwd(): HTTPd immediately changes to its configured root; `/` is
         // the only current working directory exposed by this kernel slice.
         // The real syscall (unlike the POSIX library wrapper, which returns
@@ -4899,7 +4932,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
         return SyscallAction::Resume(0);
     }
-    if (number == 96) {
+    if (number == AARCH64_NR_SET_TID_ADDRESS) {
         return SyscallAction::Resume(kernel_process_current_pid());
     }
     if (number == AARCH64_NR_GETCPU) {

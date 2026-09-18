@@ -5,7 +5,7 @@
  * set differs between two-vCPU QEMU and four-core RPi5.
  *
  * A mask is an admission request. This process pins itself to CPU 1 and
- * calls getcwd, which is not in the kernel's peer-safety table, so the
+ * calls newfstatat, which is not in the kernel's peer-safety table, so the
  * migration gate reruns it on core 0. Whether that happened on core 0 is
  * not visible from EL0; the affinity gdb lane watches for it.
  */
@@ -16,12 +16,19 @@ const SETAFFINITY_SYSCALL: usize = 122;
 const GETAFFINITY_SYSCALL: usize = 123;
 const KILL_SYSCALL: usize = 129;
 // The probe's example of a syscall the peer-safety table does NOT admit.
-// It has to be one that stays outside: GitHub issue #9 phase B entry 6
-// admitted uname, which is what this used to be, and the falsified premise
-// was found by a full QEMU lane rather than by a check.
-// scripts/check_affinity_probe_migrates.py now holds this number against
-// `syscall_peer_safe` so the next widening fails in langcheck instead.
-const GETCWD_SYSCALL: usize = 17;
+// It has to be one that STAYS outside, and phase B entry 6 is a sequence of
+// widenings of exactly that table: this was uname until entry 6's first
+// increment admitted it, and getcwd until its second. Picking the next
+// syscall in line just moves the problem, so this is now a filesystem call
+// -- the subsystem the roadmap puts last, behind #559's honest remainder.
+// scripts/check_affinity_probe_migrates.py holds this number against
+// `syscall_peer_safe`, so a widening that reaches it fails in langcheck
+// rather than in a QEMU lane reporting a gate that stopped firing.
+const NEWFSTATAT_SYSCALL: usize = 79;
+// aarch64 struct stat is 128 bytes; st_mode is the u32 at offset 16, and
+// S_IFREG is 0x8000.
+const STAT_BYTES: usize = 128;
+const STAT_MODE_OFFSET: usize = 16;
 const GETCPU_SYSCALL: usize = 168;
 const NANOSLEEP_SYSCALL: usize = 101;
 const CLONE_SYSCALL: usize = 220;
@@ -36,7 +43,6 @@ const AFFINITY_PIN_ATTEMPTS: usize = 200000;
 // Naps of a millisecond each: enough to cover the parent's remaining work
 // many times over, and finite so nothing depends on the child being killed.
 const AFFINITY_SPINNER_NAPS: usize = 20000;
-const CWD_BYTES: usize = 8;
 
 private fn affinity_say(line: borrow []u8) {
     svc5(WRITE_SYSCALL, 1, line as *u8 as usize, line.len, 0, 0);
@@ -187,15 +193,28 @@ fn affinity_probe() {
     if (on_peer == false) {
         affinity_fail(bs"affinity: never ran on cpu 1\n");
     }
-    // getcwd is outside the peer-safety table: asked from CPU 1, it is
-    // rerun on core 0 and must still answer. It writes `/` and a NUL and
-    // returns 2, the byte count including the terminator, so a wrong answer
-    // is visible in the content and not only in the return.
-    let mut cwd: [u8; CWD_BYTES];
-    for index: usize in 0..<CWD_BYTES { cwd[index] = 0xFF; }
-    if (svc5(GETCWD_SYSCALL, cwd as *u8 as usize, CWD_BYTES, 0, 0, 0) != 2 ||
-        cwd[0] != 0x2F || cwd[1] != 0) {
-        affinity_fail(bs"affinity: getcwd asked from cpu 1 did not answer\n");
+    // newfstatat is outside the peer-safety table: asked from CPU 1, it is
+    // rerun on core 0 and must still answer. The buffer starts as 0xFF, so
+    // the regular-file bit in st_mode is a real content check rather than a
+    // return code that a zeroed struct would also satisfy.
+    let mut stat_buffer: [u8; STAT_BYTES];
+    for index: usize in 0..<STAT_BYTES { stat_buffer[index] = 0xFF; }
+    let mut mode: usize = 0;
+    if (svc5(NEWFSTATAT_SYSCALL, 0, "/hello.txt" as *u8 as usize,
+             stat_buffer as *u8 as usize, 0, 0) != 0) {
+        affinity_fail(
+            bs"affinity: newfstatat asked from cpu 1 did not answer\n");
+    }
+    for index: usize in 0..<STAT_BYTES {
+        if (index >= STAT_MODE_OFFSET && index < STAT_MODE_OFFSET + 4) {
+            mode = mode |
+                ((stat_buffer[index] as usize) <<
+                 ((index - STAT_MODE_OFFSET) * 8));
+        }
+    }
+    if ((mode & 0xF000) != 0x8000) {
+        affinity_fail(
+            bs"affinity: newfstatat asked from cpu 1 did not answer\n");
     }
     // Say it BEFORE the spinner goes. This line is written from CPU 1, so it
     // is published into this CPU's console ring, and the only thing that
@@ -206,7 +225,7 @@ fn affinity_probe() {
     // the boot. The spinner's millisecond naps are what keep the drain
     // running, which is the reason it exists -- so it has to outlive the
     // output, not just the migration.
-    affinity_say(bs"affinity: pinned to cpu 1, where getcwd, outside the peer-safe table, still answered\n");
+    affinity_say(bs"affinity: pinned to cpu 1, where newfstatat, outside the peer-safe table, still answered\n");
     // Ask it to stop, then reap it. The ask is best-effort on purpose: the
     // child ends on its own nap count, so a SIGTERM that does not reach a
     // sleeping process costs this fixture nothing but the wait. wait4 blocks
