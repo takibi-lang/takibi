@@ -18,9 +18,15 @@ exists anywhere, because a row that describes nothing is worse than no row.
 **Rate** says what was measured over what. "Unmeasured" is an allowed and
 honest answer; a borrowed rate is not.
 
+**Issue** must still be open. `scripts/slowcheck_known_intermittent_issues.py`
+refuses a row whose issue has closed, so closing an issue forces its row to be
+removed or re-attributed. It asks GitHub, which is why it is in `slowcheck`
+rather than `langcheck`, and why `make cicheck` needs `gh` authenticated --
+an empty table asks nothing at all.
+
 **Last seen** is what lets a quiet row be retired on evidence rather than on
-hope. `scripts/find_stale_issue_workarounds.py` refuses a row whose issue has
-closed -- it needs the network, so it is run on demand rather than in a build.
+hope. Nothing enforces it; it is the column a person reads when deciding
+whether a row has gone quiet or has merely stopped being looked for.
 
 | Symptom | Rate | Issue | Last seen |
 | --- | --- | --- | --- |

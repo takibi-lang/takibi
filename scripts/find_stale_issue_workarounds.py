@@ -164,6 +164,16 @@ def intermittent_rows():
         yield symptom, int(issue)
 
 
+class IssueStatesUnavailable(Exception):
+    """GitHub could not be asked, so nothing about issue state is known.
+
+    Raised rather than exited on, because the two callers of `issue_states`
+    owe different sentences about it. This worklist is excluded from every
+    build and says so; scripts/slowcheck_known_intermittent_issues.py runs
+    inside one and must not claim the opposite.
+    """
+
+
 def issue_states():
     """Every issue's state, in one request rather than one per reference."""
     try:
@@ -174,12 +184,7 @@ def issue_states():
     except (OSError, subprocess.CalledProcessError,
             subprocess.TimeoutExpired) as error:
         detail = getattr(error, "stderr", "") or str(error)
-        raise SystemExit(
-            "ERROR stale-issue-workarounds: could not read issue states from "
-            f"GitHub, so nothing can be judged: {detail.strip()[:400]}\n"
-            "This tool needs `gh` authenticated against the repository. It is "
-            "deliberately not part of any build, so this is not a build "
-            "failure.")
+        raise IssueStatesUnavailable(detail.strip()[:400] or str(error))
     return {item["number"]: item["state"]
             for item in json.loads(result.stdout)}
 
@@ -192,7 +197,15 @@ def main() -> int:
 
     candidates = list(findings(TREES))
     rows = list(intermittent_rows())
-    states = issue_states()
+    try:
+        states = issue_states()
+    except IssueStatesUnavailable as error:
+        raise SystemExit(
+            "ERROR stale-issue-workarounds: could not read issue states from "
+            f"GitHub, so nothing can be judged: {error}\n"
+            "This tool needs `gh` authenticated against the repository. It is "
+            "deliberately not part of any build, so this is not a build "
+            "failure.")
 
     stale, unknown = [], []
     for relative, number, issue, line in candidates:

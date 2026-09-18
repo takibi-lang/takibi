@@ -239,7 +239,9 @@ narrowest: attributing a symptom to the issue that owns its diagnosis is the
 whole content of a row, so an issue number there is the fact rather than a
 status note about one. It stays correct without GitHub -- a triager reads a
 symptom and gets a number -- and the one part that needs the network, whether
-that issue is still open, is checked on demand rather than in a build.
+that issue is still open, is a `slowcheck` member. That is the one place a
+build reaches GitHub, it is one request, an empty table makes none, and it is
+why `make cicheck` needs `gh` authenticated.
 
 A source comment may name a settled issue when it explains an enduring design
 rationale, and that is the common and correct case. The exception is a comment
@@ -250,7 +252,9 @@ occasionally, not in a build -- it needs the network, its matching is prose
 matching, and a hit is a question rather than a defect, since an issue closing
 does not prove that this particular workaround became unnecessary. The same
 run also reports a row of `docs/KNOWN_INTERMITTENTS.md` whose issue has
-closed, which is the same question about the same one network call.
+closed; that one is additionally a gate in `slowcheck`, because a table row
+names one issue in a fixed column rather than making a prose claim, so the
+answer is a verdict rather than a question.
 
 ## Takibi implementation summary
 

@@ -93,10 +93,17 @@ jobs:
       # silent coverage loss is a worse failure than a wasted half minute.
       # What it buys is the cross-tree compile proof: every examples/ target,
       # which nothing else in this job builds.
+      # GH_TOKEN, because slowcheck now asks GitHub one question: does every
+      # row of docs/KNOWN_INTERMITTENTS.md still name an OPEN issue (#565).
+      # It is one `gh issue list` call, skipped entirely when that table is
+      # empty. Scoped to the two steps that run slowcheck rather than set on
+      # the job, so a step that has no business reaching GitHub still cannot.
       - name: Build every tree
         run: |
           eval $(opam env)
           bash scripts/run_lane.sh ci-allbuild make allbuild
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       # One lane at a time. Every QEMU lane runs `-smp 2`, so N lanes ask for
       # 2N guest vCPUs, and GitHub issue #509 measured what starving them
@@ -125,6 +132,8 @@ jobs:
           # Boot performance is calibrated separately from the capture budget:
           # hosted 35s, local 25s. The validator documents the measurements.
           TAKIBI_JOBS=1 KERNEL_QEMU_TIMEOUT=240 KERNEL_QEMU_TIMING_PROFILE=hosted make cicheck
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       # Printed, never gated. The unsafe-block and assembly counts are
       # supposed to be moving right now -- multicore work adds atomics -- so a
