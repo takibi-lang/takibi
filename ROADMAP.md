@@ -2369,6 +2369,16 @@ exist and are reproducible from one `make` target.
    question and find collaborators. Treat international publication and its
    artifact as high-quality outreach, not as a substitute for maintainership.
 
+`docs/wont-compile/` now holds the narrow claims step 1 asks for, one per
+defect class, each traced to a maintained test and checked against the
+compiler on every build. It is also where step 3 first went wrong: an outside
+review on 2026-09-18 falsified one comparison outright -- Asterinas is a
+standalone kernel in safe Rust, so "the bare-metal Linux-compatible kernels
+are all C" was false. Asterinas, gVisor and starnix belong in the comparison
+set beside ATS/ATS2, Rust and SPARK. `HISTORY.md`'s entry for that date holds
+the reasoning, and #568 holds the repair; this paragraph is a pointer, because
+this file is rewritten and those are not.
+
 If M0 produces a lock discipline that the effect system actually checks (#449),
 that becomes a second candidate claim and a more distinctive one: lock
 discipline is on the same list -- sparse, lockdep, `might_sleep` -- that this

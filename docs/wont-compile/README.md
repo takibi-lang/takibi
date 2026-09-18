@@ -90,3 +90,28 @@ suite and with the compiler -- not that the defect it describes is the one the
 prose explains, that the figure draws the right accident, or that the entry is
 the clearest example of its class. Those are judgements, and this is
 deliberately only the mechanical floor under them.
+
+The part that is furthest from any check is each entry's comparison with C and
+Rust, which is also the part most worth reading. Nothing here can evaluate a
+sentence about `slotmap`, `might_sleep` or another kernel, and three such
+sentences were wrong at once on 2026-09-18 (`HISTORY.md`). Exhaustive
+prior-art search cannot be guaranteed -- a paper that misses related work is
+rejected, and no check can do better than a reviewer -- so what these three
+rules aim at is not completeness but making an incomplete survey visible.
+
+**Name what you compared against.** Write "among Asterinas, gVisor, starnix
+and the Linuxulator" rather than "the bare-metal ones". A claim scoped to a
+named set is either true of that set or plainly wrong, and a reader can see
+how far you looked. A universal claim hides the survey's extent from the
+reader and from you.
+
+**Write the sentence that would falsify the claim, and search for that.** The
+false claim here was "no Linux-compatible kernel on bare metal is written in a
+safe language", and the search that finds Asterinas in one query is its
+negation, not a survey of the field. Looking for supporting evidence returns
+supporting evidence.
+
+**Have the comparison read by something that did not write it.** The three
+wrong sentences were caught by handing the slides to a different model two
+days before the talk. That worked; it was also luck, because nothing arranged
+it. Arrange it.

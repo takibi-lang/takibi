@@ -15,6 +15,62 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-18: a comparison claim nothing in this tree could check (#568)
+
+`docs/wont-compile/` was assembled this week: one entry per defect class the
+compiler rejects, each naming the Alcotest case that pins it, with
+`check_wont_compile_catalog.py` and `buildcheck_wont_compile_samples.py`
+verifying that every printed program and diagnostic still comes out of the
+compiler this build produced. That machinery works and is not what this entry
+is about.
+
+Every entry also carries a section comparing the defect against C and Rust,
+and that section is the reason anyone would read the catalog rather than the
+test suite. Nothing in this repository can check a sentence about another
+project, and three of those sentences were wrong at the same time:
+
+- **"The memory-safe Linux-compatible kernels all run hosted, and the
+  bare-metal ones are all C."** Asterinas is a standalone kernel in safe Rust
+  over a small unsafe TCB (OSTD). The claim was the sharpest line in the talk
+  and it was false.
+- **"Rust for Linux carries the same problem as C here."** `klint` is a
+  MIR-based lint that runs while compiling. The defensible claim is about
+  where the property lives -- a separate analysis rather than a function's
+  type -- not whether anything checks it.
+- **"Rust offers a runtime check or an unchecked access."** rustc already
+  rejects a constant out-of-range index, and an optimizer removes a check it
+  can prove redundant. Neither reaches an index that arrives from a packet,
+  which is the case the entry is about, but omitting them described a Rust
+  that does nothing before run time.
+
+All three were caught by asking a different model to review the slides against
+the current state of those projects, two days before the talk. That worked,
+and it was luck rather than a mechanism: nothing scheduled that review and
+nothing would have noticed if it had not happened.
+
+**What the three had in common is the shape, not the subject.** Each was a
+universal claim over a population nobody had enumerated -- all the bare-metal
+ones, the same problem as C, the only two options Rust offers. A survey was
+presented as a fact, and the survey's extent was invisible, so a reader could
+not tell a thorough comparison from a hasty one and neither could the author.
+
+Exhaustive prior-art search cannot be guaranteed; a paper that misses related
+work is rejected, and no check here can do better. What can be fixed is the
+invisibility. #568 proposes recording what each entry was compared against and
+when, so the claim is scoped to a named set instead of to everything that
+exists, and a stale or narrow survey is visible as one.
+
+Two mechanical repairs did land, both for failures that were mechanical:
+`check_wont_compile_catalog.py` now refuses a `rank=same` set spanning a
+cluster boundary in a figure source, which graphviz resolves by silently
+evicting the node and drawing the cluster around the rest -- the same mistake
+was made twice in one sitting, the second time with a comment in the first
+figure warning about it. And `docs/talks/*/Makefile` gained `make review`,
+which renders every slide to PNG, because a slide whose content runs under the
+footer looks correct in the source and Marp reports nothing; three slides in
+the 2026-09-19 deck did that and all three were found that way.
+
+
 ## 2026-09-16: the filesystem boundary becomes a lock (#533, #9 phase B)
 
 #533 recorded two gaps and closed neither: the block cache's write epoch was
