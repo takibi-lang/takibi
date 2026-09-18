@@ -48,7 +48,20 @@ reference, so a run costs one request. A number GitHub does not return is
 reported separately and never assumed closed: it may be a pull request, or
 may not exist.
 
-Usage: find_stale_issue_workarounds.py [--all-trees] [--json]
+## The known-intermittent table
+
+GitHub issue #565 asks for the same question about docs/KNOWN_INTERMITTENTS.md:
+every row must cite an issue that is still OPEN, so closing the issue forces
+the row to be removed or re-attributed. That is the same fact, needing the
+same one network call, and it belongs here for the same reason -- a build
+that fails when GitHub is unreachable fails for a reason unrelated to the
+change under test.
+
+The table's other guard, that a row's symptom still exists in the tree, is a
+tracked-file fact and lives in scripts/check_known_intermittents.py, which
+`make langcheck` runs.
+
+Usage: find_stale_issue_workarounds.py [--json]
 Exit 0 when nothing needs review, 1 when something does, 2 when the issue
 states could not be fetched.
 """
@@ -137,6 +150,20 @@ def findings(trees):
                 yield relative, number, issue, stripped
 
 
+INTERMITTENTS = ROOT / "docs" / "KNOWN_INTERMITTENTS.md"
+INTERMITTENT_ROW = re.compile(
+    r"^\| `([^`]+)` \| [^|]* \| #(\d+) \| \d{4}-\d{2}-\d{2} \|$", re.M)
+
+
+def intermittent_rows():
+    """Yield (symptom, issue) for each row of the known-intermittent table."""
+    if not INTERMITTENTS.is_file():
+        return
+    text = INTERMITTENTS.read_text(encoding="ascii")
+    for symptom, issue in INTERMITTENT_ROW.findall(text):
+        yield symptom, int(issue)
+
+
 def issue_states():
     """Every issue's state, in one request rather than one per reference."""
     try:
@@ -164,6 +191,7 @@ def main() -> int:
     args = parser.parse_args()
 
     candidates = list(findings(TREES))
+    rows = list(intermittent_rows())
     states = issue_states()
 
     stale, unknown = [], []
@@ -174,10 +202,20 @@ def main() -> int:
         elif state == "CLOSED":
             stale.append((relative, number, issue, line))
 
+    table = str(INTERMITTENTS.relative_to(ROOT))
+    for symptom, issue in rows:
+        state = states.get(issue)
+        line = f"known intermittent `{symptom}`"
+        if state is None:
+            unknown.append((table, 0, issue, line))
+        elif state == "CLOSED":
+            stale.append((table, 0, issue, line))
+
     if args.json:
         print(json.dumps({
             "scanned_candidates": len(candidates),
             "declared": len(DECLARED),
+            "intermittent_rows": len(rows),
             "stale": [{"file": f, "line": n, "issue": i, "text": t}
                       for f, n, i, t in stale],
             "unknown": [{"file": f, "line": n, "issue": i}
@@ -194,18 +232,20 @@ def main() -> int:
               "treated as closed.", file=sys.stderr)
 
     if stale:
-        print(f"\n{len(stale)} comment(s) say something is unfinished and "
-              "name an issue that has since closed. Each is a question, not "
-              "a defect: read it, and either update the comment, remove the "
-              "workaround, or add the line to DECLARED in this script with "
-              "the reason it is not stale.")
+        print(f"\n{len(stale)} claim(s) about the present name an issue "
+              "that has since closed. Each is a question, not a defect: read "
+              "it, and either update the comment, remove the workaround, add "
+              "the line to DECLARED in this script with the reason it is not "
+              f"stale, or -- for a row of {table} -- remove the row or "
+              "re-attribute it to the issue that owns the symptom now.")
         return 1
 
     report_pass(
         "stale-issue-workarounds",
-        f"{len(candidates)} comment(s) claim present incompleteness and name "
-        f"an issue; none of those issues is closed",
-        candidates=len(candidates))
+        f"{len(candidates)} comment(s) claim present incompleteness and "
+        f"{len(rows)} known intermittent(s) name an owning issue; none of "
+        f"those issues is closed",
+        candidates=len(candidates) + len(rows))
     return 0
 
 

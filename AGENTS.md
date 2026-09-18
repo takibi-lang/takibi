@@ -234,7 +234,12 @@ single session. Use `github-workflow` for the allowed values and procedure.
 Do not put live status such as "tracked in" or "completed by" issue references
 in tracked files. `HISTORY.md` may record stable past events and `ROADMAP.md`
 may enumerate its dated plan; current documentation must be correct without
-GitHub access.
+GitHub access. `docs/KNOWN_INTERMITTENTS.md` is the third exception and the
+narrowest: attributing a symptom to the issue that owns its diagnosis is the
+whole content of a row, so an issue number there is the fact rather than a
+status note about one. It stays correct without GitHub -- a triager reads a
+symptom and gets a number -- and the one part that needs the network, whether
+that issue is still open, is checked on demand rather than in a build.
 
 A source comment may name a settled issue when it explains an enduring design
 rationale, and that is the common and correct case. The exception is a comment
@@ -243,7 +248,9 @@ issue closes, and nothing announces the moment.
 `scripts/find_stale_issue_workarounds.py` lists those, on demand. Run it
 occasionally, not in a build -- it needs the network, its matching is prose
 matching, and a hit is a question rather than a defect, since an issue closing
-does not prove that this particular workaround became unnecessary.
+does not prove that this particular workaround became unnecessary. The same
+run also reports a row of `docs/KNOWN_INTERMITTENTS.md` whose issue has
+closed, which is the same question about the same one network call.
 
 ## Takibi implementation summary
 
@@ -333,6 +340,7 @@ authoritative for the current target graph.
 - `img/`: project images.
 
 `docs/BUILD_CHECKS.md` is the complete build-check inventory.
+`docs/KNOWN_INTERMITTENTS.md` is what a red lane is looked up in before it is diagnosed.
 `scripts/check_agents_paths.py` verifies that paths named here exist and that
 the inventory names every check in `scripts/`, in either language.
 

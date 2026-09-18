@@ -59,6 +59,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_kernel_log_expectations.py` | test runners wait only for logs the kernel can emit |
 | `check_kernel_memory_map_controls.py` | Positive and faithful negative controls for allocator layout fixtures |
 | `check_kernel_views_controls.sh` | Controls for the shared view comparison (GitHub issue #530) |
+| `check_known_intermittents.py` | every row of the known-intermittent table names one issue and a symptom the tree still produces, and the roadmap points at the table rather than carrying the list |
+| `check_known_intermittents_controls.py` | Controls for the known-intermittent table's rules, in both directions |
 | `check_lane_artifact_root.py` | every kernel lane hangs its capture off one artifact root, so a repeated lane keeps each sample's evidence instead of overwriting it |
 | `check_lane_artifact_root_controls.py` | Controls for the lane artifact-root check, in both directions |
 | `check_liveness_proof_escapes.py` | every place that drops a pool's liveness proof is declared with a reason |
