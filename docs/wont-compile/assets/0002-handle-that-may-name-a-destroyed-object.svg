@@ -25,7 +25,7 @@
 <g id="node2" class="node">
 <title>call</title>
 <path fill="#ffffff" stroke="#7a849c" stroke-width="2" d="M275.5,-292.5C275.5,-292.5 36.5,-292.5 36.5,-292.5 30.5,-292.5 24.5,-286.5 24.5,-280.5 24.5,-280.5 24.5,-246.5 24.5,-246.5 24.5,-240.5 30.5,-234.5 36.5,-234.5 36.5,-234.5 275.5,-234.5 275.5,-234.5 281.5,-234.5 287.5,-240.5 287.5,-246.5 287.5,-246.5 287.5,-280.5 287.5,-280.5 287.5,-286.5 281.5,-292.5 275.5,-292.5"/>
-<text text-anchor="start" x="41.5" y="-268.5" font-family="Helvetica, Arial, Liberation Sans, sans-serif" font-size="15.00" fill="#596078">deliver_signal(0)</text>
+<text text-anchor="start" x="41.5" y="-268.5" font-family="Helvetica, Arial, Liberation Sans, sans-serif" font-size="15.00" fill="#596078">deliver_signal()</text>
 <text text-anchor="start" x="41.5" y="-251.5" font-family="Helvetica, Arial, Liberation Sans, sans-serif" font-size="15.00" fill="#596078">the handle is not an argument</text>
 </g>
 <!-- hold&#45;&gt;call -->

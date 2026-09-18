@@ -30,7 +30,7 @@ digraph handle_that_may_name_a_destroyed_object {
 
     hold [label="holds child: TaskHandle\lslot 7, generation 3\l",
           fillcolor="#fff3df", color="#f05a24"];
-    call [label="deliver_signal(0)\lthe handle is not an argument\l",
+    call [label="deliver_signal()\lthe handle is not an argument\l",
           color="#7a849c", fontcolor="#596078"];
     reap [label="... -> task_reap()\l!{invalidates_TaskHandle}\l",
           fillcolor="#fff3df", color="#f05a24"];

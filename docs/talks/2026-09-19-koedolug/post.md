@@ -74,11 +74,15 @@ fires if the path actually executes.
 
 **A handle that may name a destroyed object.** Kernels refer to objects by
 handle -- a slot index, usually with a generation counter. A handle is plain
-data, so it survives the destruction of the thing it names. The call that
-destroys the object typically does not take the handle as an argument, which
-is why reading the caller reveals nothing. Takibi marks the functions that can
-destroy a given handle type and kills the binding at the first call that
-reaches one, unless a live witness vouches for it.
+data, so it survives the destruction of the thing it names. The instance every
+Linux user has met is pid reuse: between looking up a pid and acting on it the
+process can exit, the number is handed to a new one, and the signal lands on a
+stranger. Linux answered that not with a language change but with a new kind
+of handle, `pidfd`. The general case is harder than the pid case, because the
+call that destroys the object usually does not take the handle as an argument
+at all, which is why reading the caller reveals nothing. Takibi marks the
+functions that can destroy a given handle type and kills the binding at the
+first call that reaches one, unless a live witness vouches for it.
 
 **An unproven index that leaves a trap in the kernel.** An index arrives from
 a packet or an MMIO read and addresses a table. There are exactly three
@@ -118,11 +122,14 @@ Rust has no effect system, which is why Rust for Linux built `klint`, an
 out-of-tree MIR lint, to track preemption count -- the property exists, but
 outside the language, so it is not part of any function's type. The borrow
 checker reasons about references, so a slot-plus-generation handle has no
-lifetime to attach and the practical answer is a generation compared at run
-time. And on the index: Rust genuinely prevents the memory error, and saying
-otherwise would be false -- what it cannot do is remove the check by proving
-the index, leaving a runtime check that panics or a `get_unchecked` that
-deletes the question rather than answering it.
+lifetime to attach. Crates fill that gap and fill it well -- `slotmap` and
+`generational-arena` compare a generation on every lookup -- but the check
+happens at run time, it is a property of the crate rather than the language
+(reach for `slab`, which hands out bare indices, and the defect is back), and
+no crate can lift it into the type. And on the index: Rust genuinely prevents
+the memory error, and saying otherwise would be false -- what it cannot do is
+remove the check by proving the index, leaving a runtime check that panics or
+a `get_unchecked` that deletes the question rather than answering it.
 
 My worry is not that Rust is insufficient. It is that "Rust exists, so let us
 improve kernel safety as far as Rust reaches" is a ceiling nobody notices they

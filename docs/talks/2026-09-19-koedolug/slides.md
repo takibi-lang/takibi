@@ -122,15 +122,16 @@ interrupt function 'timer_irq_handler' may block via
 /* a handle is a slot index and a generation, not a pointer */
 static int report(struct task_handle child)
 {
-        deliver_signal(0);        /* ... -> wait4() -> release_task() */
+        flush_pending_signals();  /* ... -> wait4() -> release_task() */
 
         return task_slot(child);  /* the slot may hold a new task now */
 }
 ```
 
-`deliver_signal()` never receives `child`.
+Nothing here is handed `child`, and nothing here looks wrong.
 
-Reading this function tells you nothing is wrong.
+**This is the pid reuse race.** Linux answered it with `pidfd`, a handle that
+pins the identity it names.
 
 ---
 
@@ -150,7 +151,7 @@ img { display: block; margin: 0 auto; }
 fn task_reap(z: sink TaskZombie[id]) !{invalidates_TaskHandle} {}
 
 fn signal_then_use(child: TaskHandle) -> usize {
-    deliver_signal(0);
+    deliver_signal();
     return task_slot(child);
 }
 ```
@@ -176,7 +177,7 @@ void store(size_t index, u32 value)
 }
 ```
 
-Two lines.
+No call graph this time. The bug is the one line in the middle.
 
 ---
 
@@ -204,9 +205,10 @@ It ships no bounds-check trap because no access needed one.
 built `klint`, an out-of-tree MIR lint, to track preemption count: the
 property exists, but outside the language, so it is not part of any type.
 
-**The stale handle.** The borrow checker reasons about references. A slot plus
-a generation is not a reference, so there is no lifetime to attach. Every
-arena crate's answer is a generation compared **at run time**.
+**The stale handle.** The borrow checker reasons about references, and a slot
+plus a generation is not one. Crates fill the gap and do it well -- `slotmap`
+and `generational-arena` do compare a generation -- but that comparison is
+**at run time**, on every lookup, and no crate can lift it into the type.
 
 **The unproven index.** Rust does prevent the memory error here, and saying
 otherwise would be false. What it cannot do is remove the check by *proving*

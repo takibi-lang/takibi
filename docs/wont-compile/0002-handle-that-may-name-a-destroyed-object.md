@@ -25,25 +25,33 @@ points at a different object than it did one call ago.
 
 What makes this hard is the distance and the direction. The call that
 destroys the object does not take the handle as an argument. In the figure,
-`deliver_signal(0)` does not mention `child` at all; the reap is two frames
+`deliver_signal()` does not take `child` at all; the reap is two frames
 further down. Nothing in the caller's text connects the two, and that is
 exactly why reading the caller does not reveal the defect.
 
 ## What C and Rust do about it
 
-**C: nothing.** A handle is a `u32`, and the language has no opinion about
-what it names. Linux's answer is a reference count on the object plus
-convention about who holds one, and the failures that survive that -- a path
-that forgot to take a reference, or took one after the window it needed --
-are the recurring use-after-free CVE shape.
+**C: nothing.** A handle is an integer, and the language has no opinion about
+what it names. The instance every Linux user has met is pid reuse: between
+looking up a pid and acting on it, the process can exit and the number can be
+handed to a new one, so the signal lands on a stranger. Linux's fix was not a
+language change but a new kind of handle -- `pidfd`, a file descriptor that
+pins the identity it names. Inside the kernel the general answer is a
+reference count plus convention about who holds one, and the paths that forget
+are the recurring use-after-free shape.
 
 **Rust: not this.** The borrow checker reasons about *references* and their
 lifetimes. A handle is not a reference: it is a `u32` pair with no lifetime,
-so nothing in the type system relates it to the slot's contents. Rust's
-practical answer, the one every slot-map and arena crate implements, is to
-store a generation counter and compare it on each lookup -- which is a real
-fix, and a **runtime** one. The lookup returns `None`, the caller handles it,
-and the cost is paid on every access.
+so nothing in the type system relates it to the slot's contents.
+
+Crates fill the gap and do it well: `slotmap` and `generational-arena` store a
+generation beside the slot and compare it on every lookup. Two things are
+still true. That comparison is a **runtime** one, paid on each access and
+answered with a `None` the caller must handle. And it is a property of the
+crate rather than of the language, so reaching for one without generations --
+`slab` hands out bare indices -- leaves the defect exactly as it was. What no
+crate can do is lift the check into the type, because the language has nowhere
+to put it.
 
 Both languages end up detecting this while the kernel runs, if at all. The
 difference is not that Takibi is safer at run time; it is that the question
@@ -89,10 +97,10 @@ fn wait_and_reap() {
     task_reap(z);
 }
 
-fn deliver_signal(parent_slot: usize) { wait_and_reap(); }
+fn deliver_signal() { wait_and_reap(); }
 
 fn signal_then_use(child: TaskHandle) -> usize {
-    deliver_signal(0);
+    deliver_signal();
     return task_slot(child);
 }
 ```
@@ -121,10 +129,10 @@ fn wait_and_reap() {
     task_reap(z);
 }
 
-fn deliver_signal(parent_slot: usize) { wait_and_reap(); }
+fn deliver_signal() { wait_and_reap(); }
 
 fn maybe_signal(child: TaskHandle, deliver: bool) -> usize {
-    if (deliver) { deliver_signal(0); }
+    if (deliver) { deliver_signal(); }
     return task_slot(child);
 }
 ```
@@ -164,12 +172,12 @@ fn wait_and_reap() {
     task_reap(z);
 }
 
-fn deliver_signal(parent_slot: usize) { wait_and_reap(); }
+fn deliver_signal() { wait_and_reap(); }
 
 fn signal_then_use() -> usize {
     let c = task_take();
     let mut child: TaskHandle = task_current(c);
-    deliver_signal(0);
+    deliver_signal();
     let slot: usize = task_slot(child);
     task_exit(c);
     return slot;
