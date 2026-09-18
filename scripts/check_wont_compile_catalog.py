@@ -259,6 +259,58 @@ def check_test_cases(entries: list[Entry], test_file: pathlib.Path,
                 "nothing")
 
 
+CLUSTER_OPEN = re.compile(r"subgraph\s+(cluster_\w+)\s*\{")
+NODE_DECL = re.compile(r"^\s*(\w+)\s*\[")
+RANK_SAME = re.compile(r"\{\s*rank=same;([^}]*)\}")
+GRAPHVIZ_DEFAULTS = ("graph", "node", "edge")
+
+
+def cluster_of(text: str) -> dict[str, str | None]:
+    """Which cluster each node was declared inside, or None for top level."""
+    owner: dict[str, str | None] = {}
+    stack: list[str | None] = [None]
+    for line in text.splitlines():
+        opened = CLUSTER_OPEN.search(line)
+        if opened:
+            stack.append(opened.group(1))
+            continue
+        if "}" in line and len(stack) > 1 and not RANK_SAME.search(line):
+            stack.pop()
+            continue
+        declared = NODE_DECL.match(line)
+        if declared and declared.group(1) not in GRAPHVIZ_DEFAULTS:
+            owner.setdefault(declared.group(1), stack[-1])
+    return owner
+
+
+def check_rank_constraints(dot: pathlib.Path, errors: list[str]) -> None:
+    """A shared rank must not span a cluster boundary.
+
+    Graphviz resolves the conflict by evicting the node from the cluster, and
+    it does so silently. The figure still renders: the box is simply drawn
+    around fewer nodes than its source says. In this catalog that box is the
+    claim -- 0001's is labelled "rejected at compile time" -- so a figure can
+    end up drawing a rejected path that excludes the call being rejected, and
+    nothing about the output looks broken.
+
+    Written after making the mistake twice in one sitting, in two different
+    figures, the second time with a comment in the first figure's source
+    warning about it.
+    """
+    text = dot.read_text(encoding="utf-8")
+    owner = cluster_of(text)
+    for constraint in RANK_SAME.finditer(text):
+        members = [name for name in re.findall(r"\w+", constraint.group(1))
+                   if name in owner]
+        scopes = {owner[name] for name in members}
+        if len(scopes) > 1:
+            named = ", ".join(sorted(s or "the top level" for s in scopes))
+            errors.append(
+                f"assets/{dot.name}: a rank=same set spans {named} "
+                f"({', '.join(members)}); graphviz will evict the clustered "
+                "node and draw the cluster around the rest")
+
+
 def check_figures(entries: list[Entry], catalog: pathlib.Path,
                   errors: list[str]) -> int:
     """Each figure has a source, and each source has an entry."""
@@ -279,6 +331,7 @@ def check_figures(entries: list[Entry], catalog: pathlib.Path,
                 "beside it; a figure whose source is gone can be looked at "
                 "but never corrected")
             continue
+        check_rank_constraints(dot, errors)
         counted += 1
 
     for path in sorted(assets.glob("*")):

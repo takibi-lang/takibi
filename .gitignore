@@ -14,6 +14,10 @@
 *.cpio
 *.apk
 
+# Per-slide PNGs from `make review` in a docs/talks/*/ directory: a
+# rendering used to find slides that overflow, not an artifact to keep.
+docs/talks/*/review/
+
 # Generated files (GitHub issue #286): offset constants only, `.include`d by
 # the ordinary, git-tracked kernel/arch/arm64/kernel/exception_context.inc,
 # which holds the hand-written SAVE/RESTORE macro bodies and is NOT gitignored.

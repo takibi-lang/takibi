@@ -261,6 +261,41 @@ def main() -> int:
                              run_catalog(root), "can be looked at but never")
         (assets / "0007-an-unproven-widget.dot").write_text("digraph w {}\n")
 
+        # The figure trap, planted the way it actually happened: a shared
+        # rank naming one node inside the cluster and one outside it.
+        dot = assets / "0007-an-unproven-widget.dot"
+        good = dot.read_text()
+        dot.write_text("""digraph w {
+  written [label="outside"];
+  subgraph cluster_rejected {
+    label="rejected at compile time";
+    declared [label="inside"];
+  }
+  board [label="below"];
+  { rank=same; written; declared; }
+  declared -> board;
+}
+""")
+        controls.expect_fail("a rank that spans a cluster boundary",
+                             run_catalog(root),
+                             "graphviz will evict the clustered node")
+        # The same figure with the rank set wholly inside the cluster is
+        # legal, and a check that refused it would ban the layout 0001 uses.
+        dot.write_text("""digraph w {
+  subgraph cluster_rejected {
+    label="rejected at compile time";
+    a [label="one"];
+    b [label="two"];
+    { rank=same; a; b; }
+  }
+  board [label="below"];
+  a -> board;
+}
+""")
+        controls.expect_pass("a rank wholly inside one cluster",
+                             run_catalog(root))
+        dot.write_text(good)
+
         (assets / "0009-orphan.dot").write_text("digraph o {}\n")
         controls.expect_fail("a figure no entry claims", run_catalog(root),
                              "no entry claims this figure")
@@ -357,7 +392,9 @@ def main() -> int:
         "pass; a renamed test case, an invented status, a missing field, a "
         "misnumbered heading, an unpinned sample, an entry that never shows "
         "acceptance, a missing figure, a figure without its source, an "
-        "unclaimed figure, four ways the index and the entries can "
+        "unclaimed figure, a rank constraint that would silently empty a "
+        "cluster (while one wholly inside it is allowed), four ways the "
+        "index and the entries can "
         "disagree, an unbackticked flag list and prose where flags belong "
         "are each refused; compiler flags an entry names reach the "
         "compiler, and dropping them is noticed; and the sample runner "
