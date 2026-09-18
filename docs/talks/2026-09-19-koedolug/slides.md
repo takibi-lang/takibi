@@ -29,27 +29,28 @@ C gives the kernel almost no proof
 one bad access can corrupt the whole system, silently
 ```
 
-A bad access in an application raises an exception something can catch.
+A bad application access is contained by the kernel.
 
-In a kernel there is nothing above you to catch it.
+A bad kernel access happens inside the component responsible for that containment.
 
 > Could more kernel failures be compile errors instead?
 
 ---
 
-# Linux-compatible kernels exist. The safe ones are all hosted.
+# Reimplementing the Linux interface is not new
 
-| Implementation | Language | How it runs |
-|---|---|---|
-| FreeBSD linuxulator | C | bare metal, inside another kernel |
-| WSL1 | C | bare metal, inside the NT kernel |
-| gVisor | Go | **hosted** on another kernel, with a GC |
-| Fuchsia starnix | Rust | **hosted** on Zircon |
+| Implementation      | Linux ABI layer                       | What is underneath?            |
+| ------------------- | ------------------------------------- | ------------------------------ |
+| FreeBSD Linuxulator | **C**, kernel mode                    | FreeBSD kernel -- C            |
+| gVisor Sentry       | **Go**, userspace                     | Linux kernel -- mostly C       |
+| Fuchsia starnix     | **Rust**, userspace                   | Zircon -- C/C++                |
+| Asterinas           | **safe Rust**, standalone kernel      | small `unsafe` Rust TCB (OSTD) |
 
-The Linux interface is replaceable, and these prove it.
+The Linux interface is replaceable. These systems prove it.
 
-But the memory-safe ones run on somebody else's kernel, and the bare-metal
-ones are all C. **That gap is still open.**
+Mature implementations were built in C, while newer memory-safe implementations
+often still rely on a memory-unsafe host kernel. Clean-slate Rust kernels are now emerging.
+Can we push safety further -- into the language and the kernel design itself?
 
 ---
 
@@ -81,7 +82,7 @@ Generative AI is what makes this affordable. It is the method, not the point.
 /* drivers/uart.c -- correct on its own */
 void uart_putc(char c)
 {
-        wait_for_tx_ready();      /* spins; may sleep */
+        wait_for_tx_ready();      /* may sleep */
         write_reg(UART_DR, c);
 }
 ```
@@ -130,8 +131,8 @@ static int report(struct task_handle child)
 
 Nothing here is handed `child`, and nothing here looks wrong.
 
-**A pid is this same handle without the generation**, which is why reusing one
-races -- and why Linux added `pidfd`.
+A PID is a recyclable numeric name. Linux added `pidfd` to keep a stable
+reference to a process identity and avoid PID-reuse races **at runtime**.
 
 ---
 
@@ -199,21 +200,19 @@ It ships no bounds-check trap because no access needed one.
 
 <!-- _class: invert -->
 
-# Rust reaches none of these three
+# Rust's type system does not express these three
 
-**The blocking call.** Rust has no effect system. That is why Rust for Linux
-built `klint`, an out-of-tree MIR lint, to track preemption count: the
-property exists, but outside the language, so it is not part of any type.
+**Blocking call**: Rust has no general type-level effect for atomic context.
+`klint` adds a MIR-based compile-time check outside the Rust type system.
 
-**The stale handle.** The borrow checker reasons about references, and a slot
-plus a generation is not one. Crates fill the gap and do it well -- `slotmap`
-and `generational-arena` do compare a generation -- but that comparison is
-**at run time**, on every lookup, and no crate can lift it into the type.
+**Stale handle**: `slotmap` and `generational-arena` encode a generation
+in the key, but validate it **at lookup time**. Their copyable keys do not
+encode per-object liveness in the type system.
 
-**The unproven index.** Rust does prevent the memory error here, and saying
-otherwise would be false. What it cannot do is remove the check by *proving*
-the index: a runtime check that panics -- on bare metal, the end of the core
--- or `get_unchecked`, which deletes the question instead of answering it.
+**Unproven index**: Safe Rust prevents the memory error. Constant out-of-range
+indexes can already be rejected at compile time; dynamic indexes are
+bounds-checked unless optimization proves the check redundant.
+`get_unchecked` instead moves the proof obligation into `unsafe`.
 
 ---
 
