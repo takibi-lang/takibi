@@ -59,6 +59,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_kernel_log_expectations.py` | test runners wait only for logs the kernel can emit |
 | `check_kernel_memory_map_controls.py` | Positive and faithful negative controls for allocator layout fixtures |
 | `check_kernel_views_controls.sh` | Controls for the shared view comparison (GitHub issue #530) |
+| `check_lane_artifact_root.py` | every kernel lane hangs its capture off one artifact root, so a repeated lane keeps each sample's evidence instead of overwriting it |
+| `check_lane_artifact_root_controls.py` | Controls for the lane artifact-root check, in both directions |
 | `check_liveness_proof_escapes.py` | every place that drops a pool's liveness proof is declared with a reason |
 | `check_lock_discipline.py` | global mutexes are not force-reset and raw atomics stay allowlisted |
 | `check_measure_kernel_tcp_throughput_controls.py` | Controls for the wire-throughput measurement, with a scripted curl |

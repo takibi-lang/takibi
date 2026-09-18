@@ -1097,6 +1097,16 @@ KERNEL_QEMU_MEMORY_TKB   := $(KERNEL_DIR)/platform/qemu/memory.tkb
 KERNEL_QEMU_MMU_LAYOUT_TKB := $(KERNEL_DIR)/platform/qemu/mmu_layout.tkb
 KERNEL_QEMU_VIRTIO_NET_TKB := $(KERNEL_DIR)/drivers/net/virtio_net.tkb
 KERNEL_VIRTIO_BLK_TKB     := $(KERNEL_DIR)/drivers/block/virtio_blk.tkb
+# GitHub issue #561: where every lane writes its capture. One name, so a
+# caller that must keep several runs apart -- scripts/repeat_kernel_lane.sh,
+# which takes an arbitrary command and cannot know which lanes it will reach
+# -- redirects all of them at once instead of naming each lane's own
+# variable. `?=` is what makes an environment value win: make already holds
+# one when the caller exported it, and defines this default only when nobody
+# did. A lane's own KERNEL_*_ARTIFACT_DIR still overrides it, which is how
+# the variant instances below get their separate directories.
+TAKIBI_LANE_ARTIFACT_ROOT ?= $(CURDIR)/_build
+
 # A shared relay lock for concurrent kernel integration runners. It is only
 # held while printing one complete line, never while a test itself runs.
 KERNEL_CHECK_OUTPUT_LOCK  := $(CURDIR)/_build/kernelcheck-output.lock
@@ -1434,7 +1444,7 @@ kernelcheck-qemu-debug-main: kernelbuild-check
 	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-qemu-debug-main
 
 _kernelcheck-qemu-debug-main:
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_ELF="$(KERNEL_QEMU_DEBUG_ELF)" KERNEL_QEMU_LABEL=qemu-debug KERNEL_QEMU_EXPECTED_VIEW_DIR="$(CURDIR)/kernel/tests/qemu-debug/views" KERNEL_QEMU_HWTEST_ARTIFACT_DIR="$(CURDIR)/_build/kernel-hwtest-qemu-debug" KERNEL_QEMU_SERIAL_PORT=18683 KERNEL_QEMU_QMP_PORT=18678 KERNEL_QEMU_NETDEV_LOCAL_PORT=18684 KERNEL_QEMU_NETDEV_REMOTE_PORT=18685 bash scripts/run_kernel_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_ELF="$(KERNEL_QEMU_DEBUG_ELF)" KERNEL_QEMU_LABEL=qemu-debug KERNEL_QEMU_EXPECTED_VIEW_DIR="$(CURDIR)/kernel/tests/qemu-debug/views" KERNEL_QEMU_HWTEST_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-hwtest-qemu-debug" KERNEL_QEMU_SERIAL_PORT=18683 KERNEL_QEMU_QMP_PORT=18678 KERNEL_QEMU_NETDEV_LOCAL_PORT=18684 KERNEL_QEMU_NETDEV_REMOTE_PORT=18685 bash scripts/run_kernel_qemutest.sh
 
 ## Preserve every boot separately when chasing a probabilistic failure.
 ## This is intentionally not part of allcheck: repetition is a diagnostic
@@ -1456,7 +1466,7 @@ kernelcheck-qemu-debug-ash: kernelbuild-check
 	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-qemu-debug-ash
 
 _kernelcheck-qemu-debug-ash:
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_ASH_ELF="$(KERNEL_QEMU_DEBUG_ELF)" KERNEL_QEMU_ASH_LABEL=qemu-debug KERNEL_QEMU_ASH_ARTIFACT_DIR="$(CURDIR)/_build/kernel-hwtest-qemu-debug-ash" KERNEL_QEMU_ASH_SERIAL_PORT=18686 KERNEL_QEMU_ASH_NETDEV_LOCAL_PORT=18687 KERNEL_QEMU_ASH_NETDEV_REMOTE_PORT=18688 bash scripts/run_kernel_ash_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_ASH_ELF="$(KERNEL_QEMU_DEBUG_ELF)" KERNEL_QEMU_ASH_LABEL=qemu-debug KERNEL_QEMU_ASH_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-hwtest-qemu-debug-ash" KERNEL_QEMU_ASH_SERIAL_PORT=18686 KERNEL_QEMU_ASH_NETDEV_LOCAL_PORT=18687 KERNEL_QEMU_ASH_NETDEV_REMOTE_PORT=18688 bash scripts/run_kernel_ash_qemutest.sh
 
 ## Focused terminal-path check.  This is deliberately separate from the
 ## ordinary QEMU suite because its expected result is a terminal fail-stop
@@ -1466,13 +1476,13 @@ kernelcheck-oops-qemu: kernelbuild-check
 
 _kernelcheck-oops-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_oops_qemutest.sh
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=data_abort_write KERNEL_QEMU_OOPS_GDB_PORT=18693 KERNEL_QEMU_OOPS_SERIAL_PORT=18694 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-data-abort" bash scripts/run_kernel_oops_qemutest.sh
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=child_exec KERNEL_QEMU_OOPS_GDB_PORT=18695 KERNEL_QEMU_OOPS_SERIAL_PORT=18696 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-child-exec" bash scripts/run_kernel_oops_qemutest.sh
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=child_exec_prepare_failure KERNEL_QEMU_OOPS_GDB_PORT=18691 KERNEL_QEMU_OOPS_SERIAL_PORT=18692 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-child-exec-prepare-failure" bash scripts/run_kernel_oops_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=data_abort_write KERNEL_QEMU_OOPS_GDB_PORT=18693 KERNEL_QEMU_OOPS_SERIAL_PORT=18694 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-oops-qemu-data-abort" bash scripts/run_kernel_oops_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=child_exec KERNEL_QEMU_OOPS_GDB_PORT=18695 KERNEL_QEMU_OOPS_SERIAL_PORT=18696 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-oops-qemu-child-exec" bash scripts/run_kernel_oops_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=child_exec_prepare_failure KERNEL_QEMU_OOPS_GDB_PORT=18691 KERNEL_QEMU_OOPS_SERIAL_PORT=18692 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-oops-qemu-child-exec-prepare-failure" bash scripts/run_kernel_oops_qemutest.sh
 	@# GitHub issue #486: two cores fault in one run. The peer's entry is
 	@# replaced before anything executes, so core 1 fail-stops during
 	@# bring-up and core 0 later at its own EL0 instruction.
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=peer_fault KERNEL_QEMU_OOPS_GDB_PORT=18707 KERNEL_QEMU_OOPS_SERIAL_PORT=18708 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(CURDIR)/_build/kernel-oops-qemu-peer-fault" bash scripts/run_kernel_oops_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_OOPS_MODE=peer_fault KERNEL_QEMU_OOPS_GDB_PORT=18707 KERNEL_QEMU_OOPS_SERIAL_PORT=18708 KERNEL_QEMU_OOPS_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-oops-qemu-peer-fault" bash scripts/run_kernel_oops_qemutest.sh
 
 ## A real PL011 BREAK enters the resumable, interrupt-safe DDB subset. The
 ## check inspects state and guarded kernel memory, then proves `continue`
@@ -1482,7 +1492,7 @@ kernelcheck-ddb-qemu: kernelbuild-check
 
 _kernelcheck-ddb-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_DDB_ELF="$(KERNEL_QEMU_DEBUG_ELF)" bash scripts/run_kernel_ddb_qemutest.sh
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_DDB_ELF="$(KERNEL_QEMU_DEBUG_ELF)" KERNEL_QEMU_DDB_BREAK_SOURCE=software KERNEL_QEMU_DDB_SERIAL_PORT=18704 KERNEL_QEMU_DDB_QMP_PORT=18705 KERNEL_QEMU_DDB_GDB_PORT=18706 KERNEL_QEMU_DDB_NETDEV_LOCAL_PORT=18709 KERNEL_QEMU_DDB_NETDEV_REMOTE_PORT=18710 KERNEL_QEMU_DDB_ARTIFACT_DIR="$(CURDIR)/_build/kernel-ddb-qemu-software" bash scripts/run_kernel_ddb_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_DDB_ELF="$(KERNEL_QEMU_DEBUG_ELF)" KERNEL_QEMU_DDB_BREAK_SOURCE=software KERNEL_QEMU_DDB_SERIAL_PORT=18704 KERNEL_QEMU_DDB_QMP_PORT=18705 KERNEL_QEMU_DDB_GDB_PORT=18706 KERNEL_QEMU_DDB_NETDEV_LOCAL_PORT=18709 KERNEL_QEMU_DDB_NETDEV_REMOTE_PORT=18710 KERNEL_QEMU_DDB_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-ddb-qemu-software" bash scripts/run_kernel_ddb_qemutest.sh
 
 ## Issue #377 regression: the exception-entry stack guard.  Deliberately
 ## separate from the ordinary QEMU suite for the same reason as
@@ -1505,7 +1515,7 @@ kernelcheck-uart-wake-qemu: kernelbuild-check
 
 _kernelcheck-uart-wake-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_uart_wake_qemutest.sh
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_UART_WAKE_MODE=peer KERNEL_QEMU_UART_WAKE_SERIAL_PORT=18713 KERNEL_QEMU_UART_WAKE_GDB_PORT=18714 KERNEL_QEMU_UART_WAKE_NETDEV_LOCAL_PORT=18715 KERNEL_QEMU_UART_WAKE_NETDEV_REMOTE_PORT=18716 KERNEL_QEMU_UART_WAKE_ARTIFACT_DIR="$(CURDIR)/_build/kernel-uart-wake-qemu-peer" bash scripts/run_kernel_uart_wake_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_UART_WAKE_MODE=peer KERNEL_QEMU_UART_WAKE_SERIAL_PORT=18713 KERNEL_QEMU_UART_WAKE_GDB_PORT=18714 KERNEL_QEMU_UART_WAKE_NETDEV_LOCAL_PORT=18715 KERNEL_QEMU_UART_WAKE_NETDEV_REMOTE_PORT=18716 KERNEL_QEMU_UART_WAKE_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-uart-wake-qemu-peer" bash scripts/run_kernel_uart_wake_qemutest.sh
 
 ## GitHub issue #9: the migration gate, watched with gdb rather than printed
 ## by the kernel. /bin/affinity pins itself to CPU 1 and asks for uname,

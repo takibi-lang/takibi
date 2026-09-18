@@ -19,6 +19,20 @@
 # timing-sensitive failure the useful comparison is a passing boot against a
 # failing one, and the lane's own directory is overwritten by the next run.
 #
+# That is done by moving the ROOT every lane hangs its directory off
+# (TAKIBI_LANE_ARTIFACT_ROOT), not by naming each lane's own
+# KERNEL_*_ARTIFACT_DIR. GitHub issue #561: this runner takes an arbitrary
+# command, so it cannot know which lanes that command will reach. It used to
+# redirect exactly one variable, and every other lane kept writing its fixed
+# `_build/kernel-<lane>/` path -- so a failing sample's UART log, gdb log and
+# verdict were replaced by the next sample's, and the diagnosis needed a
+# second reproduction to recover what the first had already printed.
+#
+# A sample therefore holds one directory per lane the command ran
+# (`sample-3/kernel-ddb-qemu/`, `sample-3/kernel-affinity-gdb-qemu/`),
+# which is also what keeps an aggregate target's several lanes from
+# overwriting each other inside one sample.
+#
 # PORTS. Each sample gets its own serial and netdev ports, so one sample cannot
 # inherit the previous one's lingering sockets. The QEMU lane already reads all
 # three from the environment.
@@ -106,7 +120,7 @@ for i in $(seq 1 "$count"); do
     rm -rf "$sample_dir"
     mkdir -p "$sample_dir"
     env_args=(
-        "KERNEL_QEMU_HWTEST_ARTIFACT_DIR=$sample_dir"
+        "TAKIBI_LANE_ARTIFACT_ROOT=$sample_dir"
         "KERNEL_QEMU_LABEL=$label-$i"
     )
     sample_port=$((port_base + (i - 1) * QEMU_SESSION_REPEAT_STEP))

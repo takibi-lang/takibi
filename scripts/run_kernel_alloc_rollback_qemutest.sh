@@ -47,7 +47,7 @@ ELF="$REPO_ROOT/kernel/build/qemu/kernel-debug.elf"
 kernel_elf_refuse_stale "$ELF" || exit 1
 DEBUG_METADATA="$REPO_ROOT/_build/kernel-debug-metadata.json"
 ASH_DIR="$REPO_ROOT/kernel/tests/common/ash"
-ARTIFACT_DIR="${KERNEL_QEMU_ALLOC_ROLLBACK_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-alloc-rollback-qemu}"
+ARTIFACT_DIR="${KERNEL_QEMU_ALLOC_ROLLBACK_ARTIFACT_DIR:-${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}/kernel-alloc-rollback-qemu}"
 UART_LOG="$ARTIFACT_DIR/uart.log"
 UART_DRIVER_LOG="$ARTIFACT_DIR/uart-driver.log"
 PEER_LOG="$ARTIFACT_DIR/net-peer.log"

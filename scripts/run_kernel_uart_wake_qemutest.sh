@@ -16,7 +16,7 @@ ELF="${KERNEL_QEMU_UART_WAKE_ELF:-$REPO_ROOT/kernel/build/qemu/kernel.elf}"
 . "$REPO_ROOT/scripts/kernel_elf_freshness.sh"
 kernel_elf_refuse_stale "$ELF" || exit 1
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
-ARTIFACT_DIR="${KERNEL_QEMU_UART_WAKE_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-uart-wake-qemu}"
+ARTIFACT_DIR="${KERNEL_QEMU_UART_WAKE_ARTIFACT_DIR:-${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}/kernel-uart-wake-qemu}"
 QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
 SERIAL_PORT="${KERNEL_QEMU_UART_WAKE_SERIAL_PORT:-18709}"
 GDB_PORT="${KERNEL_QEMU_UART_WAKE_GDB_PORT:-18710}"

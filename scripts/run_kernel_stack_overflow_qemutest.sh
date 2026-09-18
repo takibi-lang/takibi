@@ -27,7 +27,7 @@ ELF="$REPO_ROOT/kernel/build/qemu/kernel.elf"
 # shellcheck source=scripts/kernel_elf_freshness.sh
 . "$REPO_ROOT/scripts/kernel_elf_freshness.sh"
 kernel_elf_refuse_stale "$ELF" || exit 1
-ARTIFACT_DIR="${KERNEL_QEMU_STACK_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-stack-overflow-qemu}"
+ARTIFACT_DIR="${KERNEL_QEMU_STACK_ARTIFACT_DIR:-${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}/kernel-stack-overflow-qemu}"
 GDB_PORT="${KERNEL_QEMU_STACK_GDB_PORT:-18677}"
 UART_LOG="$ARTIFACT_DIR/uart.log"
 mkdir -p "$ARTIFACT_DIR"

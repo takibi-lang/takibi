@@ -19,7 +19,7 @@ kernel_elf_refuse_stale "$ELF" || exit 1
 VIEW_DIR="$REPO_ROOT/kernel/tests/rpi5/views"
 COMMON_VIEW_DIR="$REPO_ROOT/kernel/tests/common/views"
 ASH_DIR="$REPO_ROOT/kernel/tests/common/ash"
-ARTIFACT_DIR="${RPI5_KERNEL_HWTEST_ARTIFACT_DIR:-$REPO_ROOT/_build/kernel-hwtest-rpi5}"
+ARTIFACT_DIR="${RPI5_KERNEL_HWTEST_ARTIFACT_DIR:-${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}/kernel-hwtest-rpi5}"
 UART_LOG="$ARTIFACT_DIR/uart.log"
 UART_TIMING_LOG="$ARTIFACT_DIR/uart-timing.log"
 RESET_LOG="$ARTIFACT_DIR/reset.log"
