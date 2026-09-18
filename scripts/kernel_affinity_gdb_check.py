@@ -7,16 +7,16 @@ network peer and passes the ports and paths in the environment.
 A process on a peer because its affinity mask put it there may run only the
 syscalls the kernel's peer-safety table allows. Any other is rewound, and
 the process is handed to core 0, which runs the syscall from the start.
-Nothing at EL0 can tell where a syscall ran: /bin/affinity's uname answers
+Nothing at EL0 can tell where a syscall ran: /bin/affinity's getcwd answers
 the same either way. So this watches the kernel instead, without the kernel
 printing anything for it.
 
-The probe pins itself to CPU 1 and asks for uname, which is outside the
+The probe pins itself to CPU 1 and asks for getcwd, which is outside the
 table. The only breakpoint armed while it runs is the gate's own tail,
 kernel_syscall_migrate_return, so the probe's many other syscalls run at
 full speed. That breakpoint must be hit on CPU 1, and the rewound frame
-must hold syscall number 160 in its saved x8. Only then is core 0's rerun
-watched for: kernel_syscall_dispatch entered on CPU 0 with x1 = 160. A
+must hold that syscall's number in its saved x8. Only then is core 0's rerun
+watched for: kernel_syscall_dispatch entered on CPU 0 with the same number. A
 kernel without the gate never reaches the first breakpoint; one that
 rewound the frame but never gave the process to core 0 never reaches the
 second.
@@ -43,13 +43,17 @@ STEP_TIMEOUT = 60.0
 LABEL = "kernel/qemu affinity-gdb"
 SHELL_READY = b"interactive shell: uart blocked\n"
 COMMAND = b"/bin/affinity\n"
-PINNED = b"affinity: pinned to cpu 1, where uname, outside the peer-safe table, still answered"
+PINNED = b"affinity: pinned to cpu 1, where getcwd, outside the peer-safe table, still answered"
 # The entry addresses themselves, where x0 and x1 are still the call's
 # arguments. With a debug image (KERNEL_QEMU_AFFINITY_GDB_ELF), a function
 # breakpoint would land after the prologue, where they may be gone.
 GATE = "*kernel_syscall_migrate_return"
 DISPATCH = "*kernel_syscall_dispatch"
-UNAME = 160
+# The syscall /bin/affinity uses to make the gate fire. It must stay
+# OUTSIDE syscall_peer_safe: this was uname until phase B entry 6 admitted
+# it, and the falsified premise cost a full QEMU lane to find.
+# scripts/check_affinity_probe_migrates.py holds the two together now.
+MIGRATED_SYSCALL = 17
 # user_entry.S loads the syscall number for dispatch from the saved x8,
 # eight words into the exception frame.
 FRAME_X8_OFFSET = 64
@@ -190,11 +194,11 @@ def run() -> None:
     # reaches it for any syscall outside the peer-safety table -- and
     # /bin/peer-read's openat and close are outside it, so its reads take the
     # gate throughout this session. An earlier version of this check assumed
-    # the first hit was the probe's uname; it read another process's frame
+    # the first hit was the probe's getcwd; it read another process's frame
     # instead and died with "Cannot access memory".
     #
     # So select rather than assume: keep resuming until a hit is the probe's
-    # own -- CPU 1, with uname in the rewound frame's saved x8. A hit whose
+    # own -- CPU 1, with getcwd in the rewound frame's saved x8. A hit whose
     # frame cannot be read is somebody else's too, and is passed over the same
     # way. A gdb breakpoint CONDITION cannot do this: reading the frame there
     # would raise inside the condition on exactly the hits this has to skip.
@@ -214,14 +218,14 @@ def run() -> None:
         except (gdb.MemoryError, gdb.error):
             foreign += 1
             continue
-        if number == UNAME:
+        if number == MIGRATED_SYSCALL:
             ours = True
         else:
             foreign += 1
     if not ours:
         verdict(False, f"/bin/affinity ran without the migration gate firing "
-                f"for uname on CPU 1 (hits={gate.hit_count}, "
-                f"{foreign} of them other processes'): uname asked from CPU 1 "
+                f"for getcwd on CPU 1 (hits={gate.hit_count}, "
+                f"{foreign} of them other processes'): getcwd asked from CPU 1 "
                 f"was not handed to core 0. {where()}. "
                 f"UART tail: {uart_tail()!r}")
         gdb.execute("detach")
@@ -229,10 +233,10 @@ def run() -> None:
     gate.enabled = False
 
     rerun = gdb.Breakpoint(DISPATCH)
-    rerun.condition = f"$x1 == {UNAME} && $_thread == {CPU0_THREAD}"
+    rerun.condition = f"$x1 == {MIGRATED_SYSCALL} && $_thread == {CPU0_THREAD}"
     continue_bounded()
     if rerun.hit_count != 1:
-        verdict(False, "the gate handed uname off on CPU1, but core 0 never "
+        verdict(False, "the gate handed getcwd off on CPU1, but core 0 never "
                 f"dispatched it again. {where()}. "
                 f"UART tail: {uart_tail()!r}")
         gdb.execute("detach")
@@ -244,13 +248,13 @@ def run() -> None:
     if not seen(lambda text: PINNED in text, STEP_TIMEOUT):
         # Stop the machine again only to say where it is.
         gdb.execute(f"target remote 127.0.0.1:{GDB_PORT}")
-        verdict(False, "core 0 reran uname, but /bin/affinity never printed "
+        verdict(False, "core 0 reran getcwd, but /bin/affinity never printed "
                 f"its pinned line. {where()}. "
                 f"UART tail: {uart_tail()!r}")
         gdb.execute("detach")
         return
-    verdict(True, "uname asked from CPU1 took the migration gate there, with "
-            "syscall 160 in the rewound frame, and core 0 dispatched it again; "
+    verdict(True, "getcwd asked from CPU1 took the migration gate there, with "
+            "that syscall in the rewound frame, and core 0 dispatched it again; "
             "/bin/affinity then reported its answer")
 
 

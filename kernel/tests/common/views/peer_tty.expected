@@ -1,2 +1,3 @@
+workload: peer tty answered uname and sysinfo on the secondary cpu, machine intact and sysinfo tail zeroed
 workload: peer tty reading the terminal on the secondary cpu
 workload: peer tty read its 17-byte line on the secondary cpu, none lost, repeated or reordered

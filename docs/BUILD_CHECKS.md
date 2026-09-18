@@ -21,6 +21,8 @@ suffix is description; dispatch reads only the prefix.
 
 | Check | Enforced invariant |
 | --- | --- |
+| `check_affinity_probe_migrates.py` | the syscall /bin/affinity uses to make the migration gate fire is the one the gdb watcher waits for, and is still outside the peer-safety table |
+| `check_affinity_probe_migrates_controls.py` | Controls for the affinity-probe premise check |
 | `check_agents_paths.py` | paths named by root guidance resolve and this table names every check |
 | `check_archive_kernel_failure_controls.sh` | Regression controls for the failing-lane archive |
 | `check_ci_opam_deps.py` | every library the dune files name is installed by the CI workflow or provided by the compiler |

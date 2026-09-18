@@ -29,6 +29,16 @@ const PEER_TTY_TAG: usize = 5;
 const SETAFFINITY_SYSCALL: usize = 122;
 const NANOSLEEP_SYSCALL: usize = 101;
 const PEER_TTY_LINE_MAX: usize = 64;
+const UNAME_SYSCALL: usize = 160;
+const SYSINFO_SYSCALL: usize = 179;
+// struct utsname is six 65-byte fields; `machine` is the fifth, so it starts
+// at 4 * 65. struct sysinfo is 112 bytes on aarch64 and this kernel fills
+// only its first word, the uptime.
+const PEER_IDENT_UTSNAME_BYTES: usize = 390;
+const PEER_IDENT_MACHINE_OFFSET: usize = 260;
+const PEER_IDENT_MACHINE_BYTES: usize = 7;
+const PEER_IDENT_SYSINFO_BYTES: usize = 112;
+const PEER_IDENT_SYSINFO_UPTIME_BYTES: usize = 8;
 
 private fn peer_read_cpu(cpu_bytes: borrow [u8; 4..]) -> usize {
     if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize, 0, 0, 0, 0) != 0) {
@@ -212,6 +222,53 @@ fn peer_console() {
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
 }
 
+// GitHub issue #9 phase B entry 6: the system-identity reads, on a peer.
+//
+// getcpu brackets both calls, so a migration invalidates the report rather
+// than letting a core-0 answer be attributed to the secondary. The content
+// is checked as well as the placement, because placement alone would pass
+// on exactly the defect that would matter: uname answers out of a per-CPU
+// scratch buffer, and a buffer that turned out to be shared would show up
+// as a `machine` field holding another core's half-written fill. sysinfo's
+// tail is checked for the same reason -- it is the zero fill its own
+// handler wrote through the user-memory boundary from this CPU.
+//
+// Returns the position-weighted sum of `machine`, or 0 for any failure, so
+// one number carries the whole verdict to the kernel.
+private fn peer_identity(cpu_bytes: borrow [u8; 4..], peer_cpu: usize)
+        -> usize {
+    let mut uts: [u8; PEER_IDENT_UTSNAME_BYTES];
+    let mut info: [u8; PEER_IDENT_SYSINFO_BYTES];
+    for index: usize in 0..<PEER_IDENT_UTSNAME_BYTES { uts[index] = 0; }
+    for index: usize in 0..<PEER_IDENT_SYSINFO_BYTES { info[index] = 0; }
+    if (svc5(UNAME_SYSCALL, uts as *u8 as usize, 0, 0, 0, 0) != 0) {
+        return 0;
+    }
+    if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
+    if (svc5(SYSINFO_SYSCALL, info as *u8 as usize, 0, 0, 0, 0) != 0) {
+        return 0;
+    }
+    if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
+    let mut tail_clean: bool = true;
+    for index: usize in 0..<PEER_IDENT_SYSINFO_BYTES {
+        if (index >= PEER_IDENT_SYSINFO_UPTIME_BYTES && info[index] != 0) {
+            tail_clean = false;
+        }
+    }
+    if (tail_clean == false) { return 0; }
+    // Walk the buffer's own length and filter, rather than index it at
+    // offset + i: the bound the compiler can see is the array's.
+    let mut digest: usize = 0;
+    for index: usize in 0..<PEER_IDENT_UTSNAME_BYTES {
+        if (index >= PEER_IDENT_MACHINE_OFFSET &&
+                index < PEER_IDENT_MACHINE_OFFSET + PEER_IDENT_MACHINE_BYTES) {
+            digest = digest + (uts[index] as usize) *
+                (index - PEER_IDENT_MACHINE_OFFSET + 1);
+        }
+    }
+    return digest;
+}
+
 // GitHub issue #547: a terminal reader admitted to the secondary CPU. The
 // persistent shell starts it in the foreground, so the shell waits in wait4
 // and this is the terminal's only reader while it runs. It reads one line a
@@ -229,7 +286,12 @@ fn peer_tty() {
     // pin to (GitHub issue #9).
     if (peer_pin(peer_cpu) == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
     while (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {}
-    if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_TTY_TAG, 0, 0, 0, 0) != 1) {
+    // The identity reads go out on the same call that used to announce
+    // reading with two zeros: this process is already pinned to the peer and
+    // nothing else is measuring here, so the two calls cost no sequencing of
+    // their own.
+    let identity: usize = peer_identity(cpu_bytes as []u8, peer_cpu);
+    if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_TTY_TAG, 2, identity, 0, 0) != 1) {
         svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
     }
     let mut count: usize = 0;

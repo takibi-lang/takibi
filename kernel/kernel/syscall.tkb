@@ -56,6 +56,7 @@ const AARCH64_NR_KILL: usize = 129;
 const AARCH64_NR_RT_SIGTIMEDWAIT: usize = 137;
 const AARCH64_NR_SYSLOG: usize = 116;
 const AARCH64_NR_UNAME: usize = 160;
+const AARCH64_NR_SYSINFO: usize = 179;
 const AARCH64_NR_GETCPU: usize = 168;
 const AARCH64_NR_SCHED_SETAFFINITY: usize = 122;
 const AARCH64_NR_SCHED_GETAFFINITY: usize = 123;
@@ -2610,6 +2611,25 @@ fn syscall_peer_safe(number: usize, fd: usize) -> bool {
     if (number == AARCH64_NR_EXIT || number == AARCH64_NR_EXIT_GROUP) {
         return true;
     }
+    // GitHub issue #9 phase B entry 6: the system-identity reads.
+    //
+    // uname answers from fixed string literals into `syscall_scratch_here()`,
+    // and that scratch is `[SyscallScratch; KERNEL_MAX_CORES]` indexed by
+    // `cpu_id()` -- two cores never share the buffer, so a peer cannot see
+    // half of core 0's fill. sysinfo keeps no kernel scratch at all: it
+    // zero-fills the caller's own range and writes one word read from the
+    // architectural generic counter, which is system-wide on AArch64 and
+    // readable from any CPU.
+    //
+    // Neither reaches the filesystem, the network, the console, or a device.
+    // What they do reach is the user-memory boundary -- a range check against
+    // the caller's own root, then a copy -- and that is not new on a peer: a
+    // terminal write has crossed it from one since #534. Nothing here widens
+    // WHICH processes run on a peer, so the default-mask decision that #514
+    // and #516 gate is untouched.
+    if (number == AARCH64_NR_UNAME || number == AARCH64_NR_SYSINFO) {
+        return true;
+    }
     // The workload fixtures' own progress report. Every handler in
     // kernel/kernel/workload_evidence.tkb takes the process run lock, and
     // these fixtures have reported from a peer since #533, #534 and #547.
@@ -4730,7 +4750,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
         return SyscallAction::Resume(0);
     }
-    if (number == 179) {
+    if (number == AARCH64_NR_SYSINFO) {
         // Linux aarch64 struct sysinfo. BusyBox ps consumes uptime; keep the
         // rest zero until a concrete consumer needs accounted values.
         match user_range_check_write(kernel_process_current_root(), x0, 112) {

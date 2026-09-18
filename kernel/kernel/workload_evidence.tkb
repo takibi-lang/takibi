@@ -991,6 +991,14 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
 // The line scripts/run_kernel_uart_driver.py types, "peer-tty-line-ok\n":
 // its length, and the sum of each byte times its one-based position.
 const PEER_TTY_LINE_BYTES: usize = 17;
+// GitHub issue #9 phase B entry 6. Two calls -- uname and sysinfo -- and the
+// position-weighted sum of uname's `machine` field, "aarch64":
+// 97*1 + 97*2 + 114*3 + 99*4 + 104*5 + 54*6 + 52*7 = 2237. The fixture
+// answers 0 for any failure, so a wrong placement, a wrong return, a
+// mismatched machine string and a sysinfo tail that is not zero all arrive
+// as the same refusal rather than as a number close to the right one.
+const PEER_TTY_IDENTITY_CALLS: usize = 2;
+const PEER_TTY_MACHINE_CHECKSUM: usize = 2237;
 const PEER_TTY_LINE_CHECKSUM: usize = 13224;
 
 // Tag 5 belongs to /bin/peer-tty (GitHub issue #547), which the persistent
@@ -1023,12 +1031,15 @@ fn workload_peer_tty_progress(count: usize, checksum: usize) -> usize {
         return 0;
     }
     if (workload_busy_pair.peer_tty_reading == false) {
-        if (count != 0 || checksum != 0) {
+        if (count != PEER_TTY_IDENTITY_CALLS ||
+            checksum != PEER_TTY_MACHINE_CHECKSUM) {
             workload_busy_pair.refused = workload_busy_pair.refused + 1;
             process_run_unlock(guard);
             return 0;
         }
         workload_busy_pair.peer_tty_reading = true;
+        kernel_boot_log(
+            "workload: peer tty answered uname and sysinfo on the secondary cpu, machine intact and sysinfo tail zeroed\n");
         kernel_boot_log(
             "workload: peer tty reading the terminal on the secondary cpu\n");
         process_run_unlock(guard);

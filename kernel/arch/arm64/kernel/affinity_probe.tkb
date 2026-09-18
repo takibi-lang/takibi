@@ -5,7 +5,7 @@
  * set differs between two-vCPU QEMU and four-core RPi5.
  *
  * A mask is an admission request. This process pins itself to CPU 1 and
- * calls uname, which is not in the kernel's peer-safety table, so the
+ * calls getcwd, which is not in the kernel's peer-safety table, so the
  * migration gate reruns it on core 0. Whether that happened on core 0 is
  * not visible from EL0; the affinity gdb lane watches for it.
  */
@@ -15,7 +15,13 @@ const EXIT_SYSCALL: usize = 93;
 const SETAFFINITY_SYSCALL: usize = 122;
 const GETAFFINITY_SYSCALL: usize = 123;
 const KILL_SYSCALL: usize = 129;
-const UNAME_SYSCALL: usize = 160;
+// The probe's example of a syscall the peer-safety table does NOT admit.
+// It has to be one that stays outside: GitHub issue #9 phase B entry 6
+// admitted uname, which is what this used to be, and the falsified premise
+// was found by a full QEMU lane rather than by a check.
+// scripts/check_affinity_probe_migrates.py now holds this number against
+// `syscall_peer_safe` so the next widening fails in langcheck instead.
+const GETCWD_SYSCALL: usize = 17;
 const GETCPU_SYSCALL: usize = 168;
 const NANOSLEEP_SYSCALL: usize = 101;
 const CLONE_SYSCALL: usize = 220;
@@ -30,7 +36,7 @@ const AFFINITY_PIN_ATTEMPTS: usize = 200000;
 // Naps of a millisecond each: enough to cover the parent's remaining work
 // many times over, and finite so nothing depends on the child being killed.
 const AFFINITY_SPINNER_NAPS: usize = 20000;
-const UTSNAME_BYTES: usize = 390;
+const CWD_BYTES: usize = 8;
 
 private fn affinity_say(line: borrow []u8) {
     svc5(WRITE_SYSCALL, 1, line as *u8 as usize, line.len, 0, 0);
@@ -181,13 +187,15 @@ fn affinity_probe() {
     if (on_peer == false) {
         affinity_fail(bs"affinity: never ran on cpu 1\n");
     }
-    // uname is outside the peer-safety table: asked from CPU 1, it is
-    // rerun on core 0 and must still answer.
-    let mut uts: [u8; UTSNAME_BYTES];
-    if (svc5(UNAME_SYSCALL, uts as *u8 as usize, 0, 0, 0, 0) != 0 ||
-        uts[0] != 76 || uts[1] != 105 || uts[2] != 110 || uts[3] != 117 ||
-        uts[4] != 120) {
-        affinity_fail(bs"affinity: uname asked from cpu 1 did not answer\n");
+    // getcwd is outside the peer-safety table: asked from CPU 1, it is
+    // rerun on core 0 and must still answer. It writes `/` and a NUL and
+    // returns 2, the byte count including the terminator, so a wrong answer
+    // is visible in the content and not only in the return.
+    let mut cwd: [u8; CWD_BYTES];
+    for index: usize in 0..<CWD_BYTES { cwd[index] = 0xFF; }
+    if (svc5(GETCWD_SYSCALL, cwd as *u8 as usize, CWD_BYTES, 0, 0, 0) != 2 ||
+        cwd[0] != 0x2F || cwd[1] != 0) {
+        affinity_fail(bs"affinity: getcwd asked from cpu 1 did not answer\n");
     }
     // Say it BEFORE the spinner goes. This line is written from CPU 1, so it
     // is published into this CPU's console ring, and the only thing that
@@ -198,7 +206,7 @@ fn affinity_probe() {
     // the boot. The spinner's millisecond naps are what keep the drain
     // running, which is the reason it exists -- so it has to outlive the
     // output, not just the migration.
-    affinity_say(bs"affinity: pinned to cpu 1, where uname, outside the peer-safe table, still answered\n");
+    affinity_say(bs"affinity: pinned to cpu 1, where getcwd, outside the peer-safe table, still answered\n");
     // Ask it to stop, then reap it. The ask is best-effort on purpose: the
     // child ends on its own nap count, so a SIGTERM that does not reach a
     // sleeping process costs this fixture nothing but the wait. wait4 blocks
