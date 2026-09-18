@@ -239,6 +239,13 @@ if [ "$BREAK_SOURCE" = software ]; then
     expected_source=21579
 fi
 
+# GitHub issue #564: what one signal field may look like. Named where the
+# kernel can act on the signal, `none` where the word is zero, and a hex
+# remainder for mask bits rt_sigprocmask set that no accepted signal number
+# stands for. Written out rather than left as `.*` so a field that stops
+# being rendered, or starts being rendered as a raw word again, fails here.
+sigset='(none|(sigterm|sigchld|sigterm,sigchld)(\+0x[0-9a-f]{16})?|0x[0-9a-f]{16})'
+
 if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         ! grep -q '^ddb: world-stop complete mask=0x0000000000000002$' "$UART_LOG" ||
         ! grep -Eq '^ddb: break seq=[1-9][0-9]* cpu=[0-9]+ elr=0x[0-9a-f]+ sp_el0=0x[0-9a-f]+$' "$UART_LOG" ||
@@ -251,9 +258,9 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         ! grep -Eq '^ddb: vm pid=[0-9]+ root=[0-9]+ live=[01] asid=[0-9]+ l1=0x[0-9a-f]+$' "$UART_LOG" ||
         ! grep -Eq '^ddb: fds pid=[0-9]+ slots=[0-9]+$' "$UART_LOG" ||
         ! grep -Eq '^ddb: ps count=[1-9][0-9]* truncated=[01]$' "$UART_LOG" ||
-        ! grep -Eq '^ddb: ps pid=1 ppid=0 state=[0-9]+ wait=[0-9]+ root=0 sp=0x[0-9a-f]+$' "$UART_LOG" ||
+        ! grep -Eq "^ddb: ps pid=1 ppid=0 state=[0-9]+ wait=[0-9]+ root=0 sp=0x[0-9a-f]+ pending=$sigset masked=$sigset\$" "$UART_LOG" ||
         ! grep -q '^ddb: stacks cpus=2 processes=' "$UART_LOG" ||
-        ! grep -Eq '^ddb: proc pid=1 ppid=0 state=[0-9]+ wait=[0-9]+ root=0 sp=0x[0-9a-f]+$' "$UART_LOG" ||
+        ! grep -Eq "^ddb: proc pid=1 ppid=0 state=[0-9]+ wait=[0-9]+ root=0 sp=0x[0-9a-f]+ pending=$sigset masked=$sigset\$" "$UART_LOG" ||
         [ "$(grep -Ec '^ddb: bt source=(cpu cpu=[0-9]+|saved) pid=[0-9]+ stack=0x[0-9a-f]+\.\.0x[0-9a-f]+$' "$UART_LOG")" -lt 2 ] ||
         [ "$(grep -Ec '^ddb: bt frame=0 pc=0x[0-9a-f]+ boundary=(exception|user|assembly|assembly-bridge)$' "$UART_LOG")" -lt 2 ] ||
         ! grep -Eq '^ddb: bt (complete frames=[1-9][0-9]*|stop=(assembly-boundary|depth-limit|invalid-return-pc|nonmonotonic-frame|out-of-range) fp=0x[0-9a-f]+)$' "$UART_LOG" ||
@@ -333,6 +340,26 @@ raise SystemExit(0 if min(pending, ddb, continuing, delivered) >= 0 else 1)
 PY
 then
     echo "FAIL kernel/qemu ddb: peer console pending/resume order was not preserved" >&2
+    exit 1
+fi
+
+# GitHub issue #564: the fields above are only worth their width if they
+# render real state, and `pending=none masked=none` is what an unpopulated
+# field would print too. The UART BREAK stops the machine while BusyBox init
+# is PID 1, and init installs a signal mask with rt_sigprocmask, so this
+# capture carries a mask with an accepted signal named in it. That is the
+# fact issue #563's diagnosis could not read: SIGTERM is blocked on PID 1,
+# so `kernel_process_current_termination_signal_take` would refuse one even
+# though the bit was set.
+#
+# The named part is asserted and the hex remainder is not. The remainder is
+# whatever the pinned BusyBox asks for and would change under a version bump;
+# that a word appears at all is the durable claim, and it is the one that
+# fails if the naming path stops running on real state.
+if [ "$BREAK_SOURCE" = uart ] &&
+        ! grep -Eq '^ddb: ps pid=1 ppid=0 .* masked=(sigterm|sigchld)([,+]|$)' \
+            "$UART_LOG"; then
+    echo "FAIL kernel/qemu ddb: PID 1's process line did not name an accepted signal in its mask, so the signal rendering was never exercised against real state" >&2
     exit 1
 fi
 

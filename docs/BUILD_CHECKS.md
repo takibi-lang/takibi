@@ -28,6 +28,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_compiler_sync_rules.py` | declared compiler counterpart changes stay synchronized |
 | `check_ddb_command_inventory.py` | DDB dispatch, help, documentation, classification, and coverage agree |
 | `check_ddb_command_inventory_controls.py` | Positive and build-faithful negative controls for the DDB inventory check |
+| `check_ddb_signal_names.py` | DDB's process view names every signal kill(2) accepts, spelled from the ABI constant, and subtracts the named bits from its hex remainder |
+| `check_ddb_signal_names_controls.py` | Controls for the DDB signal-vocabulary check |
 | `check_ddb_wait_reason_names.py` | DDB's wait view names every process state and wait reason the kernel encodes for the debugger snapshot, spelled from the enum case |
 | `check_ddb_wait_reason_names_controls.py` | Controls for the DDB wait-vocabulary check |
 | `check_dead_slot_peek_not_retained.py` | the dead-slot-tolerant record peek is read on the spot, never bound |

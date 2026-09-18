@@ -75,6 +75,39 @@ def _tk_hex(value):
     return f"0x{value:016x}"
 
 
+def _tk_signal_set(value):
+    """Spell a signal set the way DDB's own process view spells it.
+
+    GitHub issue #564. The words are DERIVED from the kernel's DDB_SIGNAL_*
+    constants rather than written down again here, so this view cannot name a
+    signal the debugger does not, or miss one it does -- which is what lets
+    scripts/validate_kernel_gdb_state.py compare the two renderings field for
+    field. scripts/check_ddb_signal_names.py is what holds those constants to
+    the signals kill(2) accepts.
+    """
+    signals = sorted(
+        ((item["value"], item["name"][len("DDB_SIGNAL_"):].lower())
+         for item in _tk_metadata()["constants"]
+         if item["name"].startswith("DDB_SIGNAL_")),
+        key=lambda signal: signal[0])
+    if not signals:
+        raise gdb.GdbError("the kernel declares no DDB_SIGNAL_ constants")
+    if value == 0:
+        return "none"
+    named = 0
+    words = []
+    for number, word in signals:
+        bit = 1 << (number - 1)
+        named |= bit
+        if value & bit:
+            words.append(word)
+    remainder = value & ~named
+    text = ",".join(words)
+    if remainder:
+        text += ("+" if words else "") + _tk_hex(remainder)
+    return text
+
+
 def _tk_thread_cpus():
     threads = list(gdb.selected_inferior().threads())
     selected = gdb.selected_thread()
@@ -323,7 +356,7 @@ def _tk_collect_kernel(pid_argument):
             name: _tk_int(record[name])
             for name in (
                 "pid", "ppid", "state", "wait_reason", "saved_sp",
-                "root_slot",
+                "root_slot", "pending_signals", "signal_mask",
             )
         })
 
@@ -428,7 +461,9 @@ def _tk_collect_kernel(pid_argument):
             f"state={_tk_enum('ProcessSlotState', record['state'])} "
             f"wait={_tk_enum('ProcessWaitReason', record['wait_reason'])} "
             f"root={record['root_slot']} "
-            f"sp={_tk_hex(record['saved_sp'])}")
+            f"sp={_tk_hex(record['saved_sp'])} "
+            f"pending={_tk_signal_set(record['pending_signals'])} "
+            f"masked={_tk_signal_set(record['signal_mask'])}")
         if record["pid"] == selected_pid:
             selected = record
     if selected is None:

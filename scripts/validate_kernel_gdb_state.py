@@ -176,7 +176,8 @@ def main() -> int:
     for pid in uart_processes:
         compare_fields(
             f"process {pid}", uart_processes[pid], gdb_processes[pid],
-            ("pid", "ppid", "state", "wait", "root", "sp"),
+            ("pid", "ppid", "state", "wait", "root", "sp", "pending",
+             "masked"),
         )
     selected = fields(one(gdb, "takibi-kernel: selected pid=1 "))
     if selected.get("status") != "captured":

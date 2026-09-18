@@ -1560,6 +1560,48 @@ private fn ddb_render_fds() !{unsafe} {
     }
 }
 
+// GitHub issue #564: the signals kill(2) accepts, and the words the process
+// view prints for them. There is no single kernel constant to read here --
+// kernel/kernel/syscall.tkb owns the ABI numbers and kernel/kernel/process.tkb
+// owns the bit arithmetic -- so scripts/check_ddb_signal_names.py holds this
+// pair to the guard in that file's kill(2) arm. A signal the kernel starts
+// accepting and does not name here prints as a bare hex remainder, which is
+// the opacity this rendering exists to remove.
+const DDB_SIGNAL_SIGTERM: usize = 15;
+const DDB_SIGNAL_SIGCHLD: usize = 17;
+
+// One signal set: named where the kernel can act on the signal, and printed
+// as a hex remainder where it cannot. Nothing is dropped, because the named
+// bits and the remainder together are the whole word -- a mask arrives from
+// rt_sigprocmask and may carry bits no signal number here stands for.
+//
+// `none` is printed rather than the field omitted. "No signal is pending"
+// and "this view does not say" are exactly the two answers issue #564 exists
+// to separate, and a field that disappears when it is zero merges them again.
+private fn ddb_put_signal_set(set: usize) !{unsafe} {
+    if (set == 0) {
+        ddb_puts("none");
+        return;
+    }
+    let sigterm: usize = 1 << (DDB_SIGNAL_SIGTERM - 1);
+    let sigchld: usize = 1 << (DDB_SIGNAL_SIGCHLD - 1);
+    let mut printed: usize = 0;
+    if ((set & sigterm) != 0) {
+        ddb_puts("sigterm");
+        printed = printed + 1;
+    }
+    if ((set & sigchld) != 0) {
+        if (printed != 0) { ddb_puts(","); }
+        ddb_puts("sigchld");
+        printed = printed + 1;
+    }
+    let remainder: usize = set & ~(sigterm | sigchld);
+    if (remainder != 0) {
+        if (printed != 0) { ddb_puts("+"); }
+        ddb_put_hex(remainder);
+    }
+}
+
 private fn ddb_render_process(record: ProcessDdbRecord) !{unsafe} {
     ddb_puts(" pid="); ddb_put_udec(record.pid);
     ddb_puts(" ppid="); ddb_put_udec(record.ppid);
@@ -1567,6 +1609,8 @@ private fn ddb_render_process(record: ProcessDdbRecord) !{unsafe} {
     ddb_puts(" wait="); ddb_put_udec(record.wait_reason);
     ddb_puts(" root="); ddb_put_udec(record.root_slot);
     ddb_puts(" sp="); ddb_put_hex(record.saved_sp);
+    ddb_puts(" pending="); ddb_put_signal_set(record.pending_signals);
+    ddb_puts(" masked="); ddb_put_signal_set(record.signal_mask);
     ddb_puts("\n");
 }
 

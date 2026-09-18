@@ -764,8 +764,16 @@ backing. `ps` and `proc PID` use a separate bounded entry snapshot: at most 64
 physical pool slots are probed and at most 32 live process summaries retained.
 The header prints `truncated=1` when either budget prevents a complete view;
 `proc PID` then says that an absent PID was not captured rather than claiming
-it does not exist. The terminal crash console above intentionally has no
-`continue`.
+it does not exist. Each line also carries `pending=` and `masked=`: the
+process's pending-signal set and the set its `rt_sigprocmask` blocks, which is
+what separates a signal that was never sent from one that was sent and cannot
+be taken. Both are printed even when they are zero, because "no signal is
+pending" and "this view does not say" are two different answers and a field
+that disappears when it is zero merges them. Each set names the signals
+`kill(2)` accepts and prints whatever bits are left as one hex word, so a mask
+carrying bits no accepted signal number stands for is shown rather than
+dropped: `masked=sigterm,sigchld+0x0000000020000a07` is BusyBox init's own
+mask. The terminal crash console above intentionally has no `continue`.
 
 `stacks` cross-checks each stopped CPU's published process frame against that
 same process snapshot. It reports the CPU, PID, stack range, and scheduler

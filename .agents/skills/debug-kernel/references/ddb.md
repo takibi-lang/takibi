@@ -23,7 +23,13 @@ inspection, and resume.
 - `regs`, `intr`, `sched`, `current`: saved CPU, interrupt-entry, scheduler,
   and current-process state.
 - `ps`, `proc PID`: bounded process snapshots. A truncated snapshot saying
-  `not captured` does not prove that a PID does not exist.
+  `not captured` does not prove that a PID does not exist. `pending=` and
+  `masked=` are the process's pending-signal set and the set it blocks, which
+  is what separates a signal that was never sent from one that was sent and
+  is not takeable -- `kernel_process_current_termination_signal_take` refuses
+  a SIGTERM the mask blocks, so a process can nap holding one. Both are
+  always printed, name the signals `kill(2)` accepts, and show the remaining
+  bits as one hex word rather than dropping them.
 - `stacks`: process-to-CPU-to-stack attribution from two independent witnesses:
   stopped CPU roots and the scheduler's physical stack-owner ledger. Missing
   records, mismatched owners or ranges, and duplicate PID/stack attribution

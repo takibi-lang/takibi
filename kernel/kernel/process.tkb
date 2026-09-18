@@ -819,6 +819,14 @@ struct ProcessDdbRecord {
     // authoritative physical-ownership record.
     stack_owner_cpu: usize;
     root_slot: usize;
+    // GitHub issue #564: a napping process carrying a SIGTERM its parent had
+    // already sent looks exactly like one that was never signalled, because
+    // `kernel_process_current_termination_signal_take` refuses a SIGTERM the
+    // mask blocks and the snapshot carried neither word. Both are copied so
+    // the debugger can tell an unsent signal from a masked one from a capture
+    // already on disk.
+    pending_signals: usize;
+    signal_mask: usize;
 }
 
 struct ProcessDdbCopyResult {
@@ -873,6 +881,8 @@ private fn scheduled_process_ddb_copy_one(
     }
     output[index].stack_owner_cpu = record.stack_owner_cpu;
     output[index].root_slot = slot;
+    output[index].pending_signals = record.pending_signals;
+    output[index].signal_mask = record.signal_mask;
 }
 
 // Fixed work for interrupt-safe DDB entry: at most 64 physical pool slots
