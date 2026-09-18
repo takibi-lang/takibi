@@ -171,6 +171,25 @@ The next multicore increment is phase B. Its order is now:
    device path it reaches, plus QEMU and four-core RPi5 evidence. Do not turn
    phase B into one unrestricted switch.
 
+   **First increment done 2026-09-18: `uname` and `sysinfo`.** uname answers
+   from `syscall_scratch_here()`, which is per-CPU, and sysinfo keeps no
+   kernel scratch at all; neither reaches a filesystem, network, console or
+   device, and the user-memory boundary they do reach has been crossed from a
+   peer since #534. `/bin/peer-tty` proves both on the secondary with getcpu
+   brackets and a content check, on QEMU and four-core RPi5. This widened
+   what a peer process may DO, not which processes run on a peer, so the
+   default-mask decision #514 and #516 gate is untouched.
+
+   **What it cost, and the check that repays it.** `/bin/affinity` used
+   `uname` as its example of a syscall the table refuses, so admitting uname
+   falsified the affinity gdb lane's premise -- found by a full QEMU boot
+   reporting a gate that stopped firing, which reads like a defect in the
+   gate. The probe uses `getcwd` now, and
+   `scripts/check_affinity_probe_migrates.py` holds the probe, its gdb
+   watcher and the table together in langcheck, so the NEXT widening fails
+   in seconds instead. Admitting `getcwd` later means moving that probe
+   again, and the check is what will say so.
+
 **#556 is evidence-gated, not a phase B blocker.** One parallel allcheck run
 failed the two-core oops lane with interleaved peer-fault text, but the exact
 assertion was overwritten and the next twelve focused plus four aggregate
