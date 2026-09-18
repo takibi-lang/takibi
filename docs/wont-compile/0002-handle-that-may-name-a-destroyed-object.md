@@ -32,13 +32,19 @@ exactly why reading the caller does not reveal the defect.
 ## What C and Rust do about it
 
 **C: nothing.** A handle is an integer, and the language has no opinion about
-what it names. The instance every Linux user has met is pid reuse: between
+what it names. A pid is this same handle with the generation left out, which
+is why the reuse race is the instance every Linux user has met: between
 looking up a pid and acting on it, the process can exit and the number can be
 handed to a new one, so the signal lands on a stranger. Linux's fix was not a
 language change but a new kind of handle -- `pidfd`, a file descriptor that
-pins the identity it names. Inside the kernel the general answer is a
-reference count plus convention about who holds one, and the paths that forget
-are the recurring use-after-free shape.
+pins the identity it names.
+
+A generation is the cheaper repair, and the one this entry's handle already
+carries. It makes the reuse *detectable*, by comparing the generation on each
+lookup -- which is a check, at run time, that somebody has to remember to
+write. Inside the kernel the general answer is a reference count plus
+convention about who holds one, and the paths that forget are the recurring
+use-after-free shape.
 
 **Rust: not this.** The borrow checker reasons about *references* and their
 lifetimes. A handle is not a reference: it is a `u32` pair with no lifetime,

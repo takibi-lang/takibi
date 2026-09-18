@@ -122,7 +122,7 @@ interrupt function 'timer_irq_handler' may block via
 /* a handle is a slot index and a generation, not a pointer */
 static int report(struct task_handle child)
 {
-        flush_pending_signals();  /* ... -> wait4() -> release_task() */
+        deliver_signal();         /* ... -> wait4() -> release_task() */
 
         return task_slot(child);  /* the slot may hold a new task now */
 }
@@ -130,8 +130,8 @@ static int report(struct task_handle child)
 
 Nothing here is handed `child`, and nothing here looks wrong.
 
-**This is the pid reuse race.** Linux answered it with `pidfd`, a handle that
-pins the identity it names.
+**A pid is this same handle without the generation**, which is why reusing one
+races -- and why Linux added `pidfd`.
 
 ---
 

@@ -74,11 +74,14 @@ fires if the path actually executes.
 
 **A handle that may name a destroyed object.** Kernels refer to objects by
 handle -- a slot index, usually with a generation counter. A handle is plain
-data, so it survives the destruction of the thing it names. The instance every
-Linux user has met is pid reuse: between looking up a pid and acting on it the
+data, so it survives the destruction of the thing it names. A pid is this same
+handle with the generation left out, which is why the instance every Linux
+user has met is pid reuse: between looking up a pid and acting on it the
 process can exit, the number is handed to a new one, and the signal lands on a
 stranger. Linux answered that not with a language change but with a new kind
-of handle, `pidfd`. The general case is harder than the pid case, because the
+of handle, `pidfd`. A generation is the cheaper repair and makes the reuse
+detectable, but only by a comparison somebody remembered to write, on every
+lookup. The general case is harder than the pid case, because the
 call that destroys the object usually does not take the handle as an argument
 at all, which is why reading the caller reveals nothing. Takibi marks the
 functions that can destroy a given handle type and kills the binding at the
