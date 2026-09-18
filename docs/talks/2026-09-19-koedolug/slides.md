@@ -131,8 +131,8 @@ static int report(struct task_handle child)
 
 Nothing here is handed `child`, and nothing here looks wrong.
 
-A PID is a recyclable numeric name. Linux added `pidfd` to keep a stable
-reference to a process identity and avoid PID-reuse races **at runtime**.
+A PID is the same idea with no generation at all: a bare number that gets
+reused. Linux added `pidfd` to pin the identity instead -- **at runtime**.
 
 ---
 
@@ -209,10 +209,10 @@ It ships no bounds-check trap because no access needed one.
 in the key, but validate it **at lookup time**. Their copyable keys do not
 encode per-object liveness in the type system.
 
-**Unproven index**: Safe Rust prevents the memory error. Constant out-of-range
-indexes can already be rejected at compile time; dynamic indexes are
-bounds-checked unless optimization proves the check redundant.
-`get_unchecked` instead moves the proof obligation into `unsafe`.
+**Unproven index**: Safe Rust prevents the memory error. A constant
+out-of-range index is already a compile error; any other index is
+bounds-checked, and the failure is a panic. A panic is a runtime error, and a
+runtime error is the thing a kernel had no answer for in the first place.
 
 ---
 
@@ -226,9 +226,12 @@ a self-made language is a cheap scout:
 nothing depends on it, so it may be broken and rebuilt
 ```
 
+Every implementation on the earlier slide takes its language as given.
+Designing the language alongside the kernel may reach compile-time guarantees
+that applying an existing one cannot. That is the bet, and it is not settled.
+
 If something found here later turns up in Rust or Zig, that is the best
-ending this project could have. I would like to be ground someone else
-builds on, not a replacement for anything.
+ending this project could have.
 
 ---
 

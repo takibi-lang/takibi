@@ -41,16 +41,18 @@ and it is a convention maintained by hand, so a function that starts sleeping
 after a refactor does not automatically gain the annotation its callers relied
 on.
 
-**Rust: nothing in the language.** Rust's type system has no effect system,
-and `Send`/`Sync` model which thread may touch a value, not which context may
-run a function. A `&mut` reference says nothing about whether the callee
-sleeps. Rust for Linux carries the same problem as C here, and the evidence
-that it is a real problem rather than a theoretical one is that the project
-built an out-of-tree MIR linter, `klint`, specifically to track preemption
-count and reject sleeping calls in atomic context. That tool confirms the
-hazard is worth checking; it is also a separate analysis bolted onto a
-language that cannot express the property, so what it checks is not part of
-any function's published type.
+**Rust: not in the type system.** Rust has no general type-level effect for
+atomic context, and `Send`/`Sync` model which thread may touch a value rather
+than which context may run a function. A `&mut` reference says nothing about
+whether the callee sleeps.
+
+Rust for Linux does not simply live with that. It built `klint`, an
+out-of-tree MIR-based lint that tracks preemption count and rejects sleeping
+calls in atomic context -- and that is a **compile-time** check, so this is
+not a case of Rust being level with C. What it is not is part of the language:
+the property lives in a separate analysis rather than in any function's
+published type, so it does not travel with a signature, does not compose
+through a function-pointer row, and is only enforced where that tool is run.
 
 Takibi's claim here is narrow and worth stating precisely: the property is in
 the function type, the compiler that produces the kernel binary enforces it,

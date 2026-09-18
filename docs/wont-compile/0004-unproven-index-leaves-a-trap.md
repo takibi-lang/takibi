@@ -36,15 +36,23 @@ nothing to check and nothing to trap.
 
 **C: no check at all.** The index is an integer, the array is an address.
 
-**Rust: the second answer, and only the second.** `table[index]` is
-bounds-checked and panics. That genuinely prevents the memory corruption --
-this is not a case where Rust is level with C. What Rust cannot do is remove
-the check by *proving* the index, and that matters on bare metal for two
-reasons. The panic path is a real outcome in a place with nothing to catch
-it: `panic = "abort"` in a kernel means the core stops. And the only way to
-delete the check is `get_unchecked`, which is `unsafe` and removes the
-question rather than answering it -- it asserts the bound without recording
-why anyone believes it.
+**Rust: mostly the second answer.** Safe Rust prevents the memory corruption,
+and this is not a case where Rust is level with C.
+
+Two things happen before run time and are worth stating rather than glossing.
+A constant index known to be out of range is rejected while compiling, by a
+deny-by-default lint. And a check the optimizer can prove redundant is deleted
+from the binary. Neither covers the case this entry is about: an index that
+arrives from a packet or an MMIO read is neither constant nor provable by an
+optimizer that has never been told what bounds it.
+
+For that index the check is emitted, and on bare metal its failure path is the
+end of the core -- `panic = "abort"` has nothing above it to unwind into. The
+elision an optimizer might perform is a best effort, not a guarantee you can
+build a policy on: nothing fails the build when it does not happen. And the
+one way to delete the check on purpose is `get_unchecked`, which does not
+answer the question but moves it into `unsafe`, asserting the bound without
+recording why anyone believes it.
 
 So the honest comparison is not "Rust is unsafe here". It is that Rust offers
 a runtime check or an unchecked access, and a kernel that wants neither has

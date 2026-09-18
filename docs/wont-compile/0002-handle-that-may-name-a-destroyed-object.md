@@ -55,9 +55,9 @@ generation beside the slot and compare it on every lookup. Two things are
 still true. That comparison is a **runtime** one, paid on each access and
 answered with a `None` the caller must handle. And it is a property of the
 crate rather than of the language, so reaching for one without generations --
-`slab` hands out bare indices -- leaves the defect exactly as it was. What no
-crate can do is lift the check into the type, because the language has nowhere
-to put it.
+`slab` hands out bare indices -- leaves the defect exactly as it was. And what
+no crate can do is lift the check into the type: the key is `Copy`, so it can
+be duplicated and stored freely, and no per-object liveness travels with it.
 
 Both languages end up detecting this while the kernel runs, if at all. The
 difference is not that Takibi is safer at run time; it is that the question

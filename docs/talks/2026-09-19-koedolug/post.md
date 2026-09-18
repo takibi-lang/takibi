@@ -25,20 +25,31 @@ The obvious objection is that people already know this and are already doing
 something about it. They are. So before claiming a gap, I went looking for
 what fills it:
 
-| Implementation | Language | How it runs |
+| Implementation | Linux ABI layer | What is underneath |
 |---|---|---|
-| FreeBSD linuxulator | C | inside another kernel, on bare metal |
-| WSL1 | C | inside the NT kernel, on bare metal |
-| gVisor | Go | hosted on another kernel, with a garbage collector |
-| Fuchsia starnix | Rust | hosted on Zircon |
+| FreeBSD Linuxulator | C, kernel mode | FreeBSD kernel, C |
+| gVisor Sentry | Go, userspace | a Linux kernel, mostly C |
+| Fuchsia starnix | Rust, userspace | Zircon, C/C++ |
+| Asterinas | safe Rust, standalone kernel | a small `unsafe` Rust TCB (OSTD) |
 
 I find this table encouraging rather than discouraging. It proves the Linux
 interface is replaceable -- that reimplementing it is a thing people
-successfully do, not a fantasy. But look at the two columns together: the
-implementations written in memory-safe languages all run on top of somebody
-else's kernel, and the ones that run on bare metal are all written in C. A
-Linux-compatible kernel that is both on bare metal and written in a language
-that can check it is still an open position.
+successfully do, not a fantasy.
+
+An earlier draft of this post claimed the memory-safe implementations all run
+on somebody else's kernel and the bare-metal ones are all C. Asterinas
+falsifies that, and I am glad it does: a clean-slate kernel in safe Rust with
+a small audited unsafe core is exactly the direction this whole argument says
+is right.
+
+So the position I am actually standing in is narrower than "nobody is doing
+safe kernels". It is this: every one of these implementations takes its
+language as given. Asterinas is as safe as Rust can make a kernel, and when it
+meets a kernel invariant Rust cannot express -- a handler that must not reach
+a sleeping call, an index that must be proved rather than checked -- it has
+the same options everyone else has, which are a lint beside the compiler, a
+runtime check, or a comment. Changing the language is not on the menu. It is
+on mine, and that is the only thing here that is unusual.
 
 ## Why the language and the kernel have to be built together
 
@@ -121,18 +132,28 @@ This is the question I actually get asked, so let me answer it without being
 rude about Rust, which is a good language doing good work.
 
 Rust for Linux is right, and it is working. But it inherits Rust's ceiling.
-Rust has no effect system, which is why Rust for Linux built `klint`, an
-out-of-tree MIR lint, to track preemption count -- the property exists, but
-outside the language, so it is not part of any function's type. The borrow
+Rust has no type-level effect for atomic context, which is why Rust for Linux
+built `klint`, an out-of-tree MIR lint that tracks preemption count. Worth
+being precise about that one: `klint` is a **compile-time** check, so this is
+not Rust failing to catch the bug. It is the property living in a separate
+analysis rather than in a function's type, so it does not travel with a
+signature and is enforced only where that tool is run. The borrow
 checker reasons about references, so a slot-plus-generation handle has no
 lifetime to attach. Crates fill that gap and fill it well -- `slotmap` and
 `generational-arena` compare a generation on every lookup -- but the check
 happens at run time, it is a property of the crate rather than the language
 (reach for `slab`, which hands out bare indices, and the defect is back), and
-no crate can lift it into the type. And on the index: Rust genuinely prevents
-the memory error, and saying otherwise would be false -- what it cannot do is
-remove the check by proving the index, leaving a runtime check that panics or
-a `get_unchecked` that deletes the question rather than answering it.
+no crate can lift it into the type -- the key is `Copy`, so it duplicates
+freely and no liveness travels with it.
+
+And on the index: safe Rust genuinely prevents the memory error, and saying
+otherwise would be false. Two things even happen before run time -- a constant
+index out of range is rejected while compiling, and a check the optimizer can
+prove redundant is deleted -- but neither reaches an index that arrives from a
+packet. For that one the check is emitted, its failure on bare metal ends the
+core, the elision is a best effort that nothing fails the build over, and
+`get_unchecked` moves the proof obligation into `unsafe` rather than
+discharging it.
 
 My worry is not that Rust is insufficient. It is that "Rust exists, so let us
 improve kernel safety as far as Rust reaches" is a ceiling nobody notices they
