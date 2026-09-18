@@ -7070,11 +7070,17 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
     // they cannot get here without one. The fourth is the teardown sweep,
     // which finds Exited records by scanning ALL slots and asks
     // kernel_process_owner_slot_of for a parent -- and that returns the
-    // slot ITSELF for a record whose has_parent is false. Such a record
-    // exists (issue #448 records that it is not yet explained), and it
-    // has no children, so without this guard the walk below would read
+    // slot ITSELF for a record whose has_parent is false. Such a record has
+    // no children, so without this guard the walk below would read
     // record_at() at an index no one chose. Nothing to unlink is a
     // perfectly good outcome: the reap below is what actually matters.
+    //
+    // How often that happens is no longer a guess. The counter below is
+    // reported as `process reap: unlinked=` at the end of the boot suite
+    // and the shared `process_reap` view asserts it is 0, so on both
+    // platforms today the guard never fires. It is kept because the cost of
+    // being wrong is asymmetric: a recurrence becomes a number a view
+    // notices, instead of a read at an index no one chose.
     if (scheduled_process_record_of(parent).has_first_child == false) {
         kernel_process_reap_unlinked_count =
             kernel_process_reap_unlinked_count + 1;

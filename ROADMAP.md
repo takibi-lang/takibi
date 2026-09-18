@@ -739,20 +739,16 @@ Two findings this territory owns. Both were reported on #448, which is closed,
 so they are repeated here: a comment on a closed issue is not a place anyone
 looks.
 
-1. **A sentence #448 left behind, and a counter with no reader.**
-   `kernel/kernel/process.tkb:6326` still says a record with `has_parent`
-   false "exists (issue #448 records that it is not yet explained)". #448 is
-   closed, so that names a closed issue as the record of an open observation:
-   either it has since been explained and the comment should say so, or it has
-   not and wants a live issue. The guard itself is fine either way.
-
-   Beside it, `kernel_process_reap_unlinked_count` is incremented and
-   `kernel_process_reap_unlinked_count_value()` is called from nowhere -- no
-   view, no boot line, no validator. The number that would say whether the
-   record still occurs is accumulated and never asked, which is issue #410's
-   family, and `check_fallback_counters.py` does not reach it. **#540** is the
-   general repair: `--reject-unused-functions` already detects exactly this
-   and is scoped to one file.
+1. **A sentence #448 left behind, and a counter with no reader. Both closed,
+   2026-09-18.** The counter half went first: #540's
+   `--reject-unused-functions` sweep gave
+   `kernel_process_reap_unlinked_count_value()` a reader, which reports
+   `process reap: unlinked=` at the end of the boot suite, and the shared
+   `process_reap` view asserts it is 0. That answered the question the
+   comment was waiting on -- the guard does not fire on either platform
+   today -- so the comment no longer names a closed issue as the record of an
+   open observation; it says what the view measures and why the guard is kept
+   anyway.
 
 2. **One `process table: records MISSING uses=1 first_slot=0x403b37c0
    reason=2`**, on the qemu-debug lane under twelve concurrent lanes on
