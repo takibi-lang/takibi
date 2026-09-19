@@ -211,8 +211,8 @@ encode per-object liveness in the type system.
 
 **Unproven index**: Safe Rust prevents the memory error. A constant
 out-of-range index is already a compile error; any other index is
-bounds-checked, and the failure is a panic. A panic is a runtime error, and a
-runtime error is the thing a kernel had no answer for in the first place.
+bounds-checked, and the failure is a panic. A panic is **a runtime error**,
+and a runtime error is the thing a kernel had no answer for in the first place.
 
 ---
 
