@@ -186,6 +186,10 @@ uart_driver_pid=$!
 # aborting here would.
 echo "[$RUN_LABEL] driving host-side network peer (ARP/ICMP/TCP)"
 peer_status=0
+# Stay idle beyond kernel_tcp_accept_begin()'s 30-second handshake deadline
+# before the final request phase. A blocking accept must still be waiting:
+# exposing that internal deadline as EAGAIN used to terminate BusyBox HTTPd.
+KERNEL_HTTPD_IDLE_SECONDS=31 \
 timeout "$TIMEOUT_SECS" python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" \
     "$NETDEV_LOCAL_PORT" "$NETDEV_REMOTE_PORT" \
     --interactive-ready-file "$INTERACTIVE_HTTPD_LISTENER" \

@@ -62,23 +62,11 @@ const WORKLOAD_BUSY_TAG_B: usize = 2;
 // not waiting on it.
 const WORKLOAD_BUSY_ROUNDS: usize = 8;
 
-// The fairness diagnostic bound. One round is a busy chunk several timer slices long
-// (see busy_loop.tkb), so a rotating scheduler keeps the two within about
-// one round of each other; a starved process would run away to
-// WORKLOAD_BUSY_ROUNDS. This bound is wide enough not to be flaky and far
-// enough below that to catch the thing it exists to catch.
-//
-// Measured: 1 on QEMU, 2 on RPi5. RPi5 is the wider of the two, and its
-// generic timer is why -- it reads CNTFRQ_EL0 as 0, so `timer_tick_rearm`
-// programs a zero countdown and there is no real quantum to share out.
-// The bound is set above the worse of the two rather than at it: a fixture
-// that passes at exactly its own limit is one boot away from being a
-// flake, and the case this exists to catch (one process not being selected
-// at all) reaches WORKLOAD_BUSY_ROUNDS, not 5.
-//
-// Note which half of the report is the assertion. ROUND COUNTS are, and
-// they are counted by this file from syscalls, so they mean the same thing
-// on both targets. The tick numbers below are diagnostic only.
+// The completion assertion is intentionally topology-independent: both
+// processes must report WORKLOAD_BUSY_ROUNDS while the other is live, or the
+// lane times out. max_skew remains diagnostic. Starting the init-managed
+// HTTPd beside this pair changed it from 1-2 to 5-52 in measured boots, so
+// the old fixed <=4 fairness verdict no longer described this workload.
 //
 // They used to carry a warning that RPi5's were untrustworthy, because
 // `cpu_a + cpu_b` printed larger than the `elapsed` they were measured

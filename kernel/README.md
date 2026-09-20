@@ -168,7 +168,9 @@ terminates the server because a request count was reached. The document root
 also carries the SD-card demo's `about.html` and
 23,658-byte `icon.png`; interactive integration fetches `/`, all three named
 assets, checks their complete bodies, and verifies `text/html`/`image/png`
-content types.
+content types. The QEMU integration peer also leaves the listener idle for 31
+seconds before its final request, beyond the kernel's 30-second incomplete-
+handshake deadline, and requires that request to succeed.
 TCP fixtures also split a request across segments, inject bounded drops, and exercise short
 `read` plus a 1460+1 partial `write` sequence. The focused EL0 socket fixture
 also keeps connection A open while accepting connection B: a two-entry typed

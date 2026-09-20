@@ -330,7 +330,7 @@ fn affinity_probe() {
     // NAP between polls rather than spinning. The child starts on core 0 --
     // it inherits this process's mask -- so it needs core 0 to run its own
     // setaffinity, and a parent busy-polling here is the one thing standing
-    // in its way. Spinning cost the lifecycle-gap lane its 80-second budget,
+    // in its way. Spinning cost a concurrent QEMU lane its 80-second budget,
     // measured; sleeping makes the handoff immediate.
     let mut pin_nap: [u8; 16];
     for index: usize in 0..<16 { pin_nap[index] = 0; }

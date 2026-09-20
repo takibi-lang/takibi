@@ -53,6 +53,19 @@ def main() -> int:
     if "foreground_server_should_bound" in syscall:
         print("ERROR\taccept still contains request-count process termination")
         failed = True
+    deadline = re.search(
+        r"accept_deadline_ticks\s*=\s*counter_frequency\s*\*\s*(\d+)",
+        (ROOT / "kernel/net/tcp.tkb").read_text(encoding="ascii"),
+    )
+    qemu_runner = (ROOT / "scripts/run_kernel_qemutest.sh").read_text(
+        encoding="ascii")
+    idle = re.search(r"KERNEL_HTTPD_IDLE_SECONDS=(\d+)", qemu_runner)
+    peer = (ROOT / "scripts/kernel_net_test.py").read_text(encoding="ascii")
+    if (deadline is None or idle is None or
+            int(idle.group(1)) <= int(deadline.group(1)) or
+            "time.sleep(HTTPD_IDLE_SECONDS)" not in peer):
+        print("ERROR\tQEMU does not request HTTP after the accept deadline")
+        failed = True
     for runner in RUNNERS:
         text = (ROOT / runner).read_text(encoding="utf-8")
         listener_arg = position(

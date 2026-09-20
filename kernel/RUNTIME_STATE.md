@@ -237,15 +237,6 @@ than ported, along with `TcpConnectionValue`, `TcpConnectionGuard` and
 
 **Investigated and explicitly NOT split for #294:**
 
-- `tcp.tkb`'s fault-injection state (`tcp_drop_next_syn_ack`/
-  `tcp_injected_syn_*`/`tcp_drop_data_segment_index`/`tcp_injected_data_*`/
-  `tcp_drop_next_fin`/`tcp_injected_fin_*`/`tcp_ack_each_stream_segment`/
-  `tcp_split_request_segments`) looked like #303/#304 material from the
-  outside, but is read AND written throughout the real TCP retransmit/
-  drop state machine, not incremented-then-read-once. Extracting it would
-  require threading many call sites back and forth between two files for
-  no diagnosability gain -- this is delicate, load-bearing protocol logic
-  wearing test-injection clothing, not unowned state.
 - The `conn_*` parallel arrays initially looked like a duplicate of
   `tcp_connection_store`. They were not: `tcp_connection_store` held only
   linear ownership/locking bookkeeping (mutex + `TcpConnectionValue`),

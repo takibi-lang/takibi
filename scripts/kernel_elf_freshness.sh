@@ -2,7 +2,7 @@
 # Refuse to run a lane against a kernel older than its own sources.
 #
 # Found the hard way on 2026-09-10. `make kernelbuild` builds the ordinary and
-# RPi5 kernels; the oops, DDB, alloc-rollback and lifecycle-gap lanes run
+# RPi5 kernels; the oops, DDB and alloc-rollback lanes run
 # `kernel-debug.elf`, which only `kernelbuild-check` produces. Running one of
 # those lane scripts DIRECTLY -- which is what a person does while debugging
 # one -- therefore tests whatever debug kernel was last built.

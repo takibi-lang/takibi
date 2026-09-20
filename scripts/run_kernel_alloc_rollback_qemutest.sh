@@ -161,7 +161,7 @@ uart_driver_pid=$!
 # Arm the injection: three stops (arm after the baseline, select the process
 # allocation path, then force-return from its stack-run acquisition),
 # after which GDB's batch command list ends and it detaches -- which resumes
-# the guest, the same automatic behaviour the lifecycle-gap lane relies on.
+# the guest, the same automatic behaviour the other GDB lanes rely on.
 # The whole sequence is over before the boot suite's first fixture, so
 # nothing here holds the run.
 #

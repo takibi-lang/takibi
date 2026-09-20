@@ -59,6 +59,9 @@ INTERACTIVE_READY_FILE = path_argument("--interactive-ready-file")
 DAEMON_READY_FILE = path_argument("--daemon-ready-file")
 INIT_READY_FILE = path_argument("--init-ready-file")
 NETWORK_READY_FILE = path_argument("--network-ready-file")
+HTTPD_IDLE_SECONDS = float(os.environ.get("KERNEL_HTTPD_IDLE_SECONDS", "0"))
+if HTTPD_IDLE_SECONDS < 0:
+    raise SystemExit("KERNEL_HTTPD_IDLE_SECONDS must be nonnegative")
 # Every readiness wait below has to expire while this process is still alive
 # to say so. Each lane runs this script as `timeout "$TIMEOUT_SECS" python3
 # ...`, and a wait that outlasts that budget is killed with status 124 and
@@ -740,6 +743,10 @@ def main() -> int:
             print("  init-managed HTTPd never became ready")
             sock.close()
             return 1
+        if HTTPD_IDLE_SECONDS > 0:
+            print("  leaving HTTPd idle for %.0fs:              TEST" %
+                  HTTPD_IDLE_SECONDS)
+            time.sleep(HTTPD_IDLE_SECONDS)
         arp_ok = send_until_reply(
             sock, build_arp_request(SERVER_IP), check_arp_reply)
         print("  ARP while HTTPd is listening:       %s" %

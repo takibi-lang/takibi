@@ -584,8 +584,8 @@ def main() -> int:
     # check reports what it was still waiting for: a lifecycle diagnosis reads
     # as a protocol fault, and under a saturated host the real answer is that
     # the guest went quiet -- see GitHub issue #509, where that cost a day.
-    # Appended rather than substituted, because the lifecycle-gap lane asserts
-    # the diagnosis it induces.
+    # Append rather than substitute: the protocol diagnosis and the silence
+    # diagnosis answer different questions and are both useful in artifacts.
     silence = ""
     if time.monotonic() >= deadline:
         silence = silence_note(
