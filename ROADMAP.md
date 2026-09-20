@@ -247,9 +247,10 @@ by reporting it as a rate instead; two rounds of locking were tried first
 and neither helped, because the freeing side takes the pool lock and the
 walk holds the run lock. #514's own window -- `probe_slot` reporting Live
 for a payload not yet written -- is still open and still unobserved. The
-live intermittent set is now #563 alone: **#516 is closed** (2026-09-20), its
-root-0 fallback removed and every reader opening
-`ProcessImageTargetRootResult` instead.
+live intermittent set is now **#571** alone: #516 and #563 both closed
+2026-09-20, and #571 is what closing #563 found -- a peer-exited child whose
+reap intermittently answers the wrong thing. #570 carries #563's honest
+remainder, the signal words being read-modify-written from two CPUs.
 
 - **Two of them gate the default-mask flip, not today's work.** Step 3's last
   move widens which processes run on a peer, which is what raises exposure to

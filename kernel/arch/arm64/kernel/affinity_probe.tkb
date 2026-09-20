@@ -46,6 +46,10 @@ const AFFINITY_SPINNER_NAPS: usize = 20000;
 // 128 + SIGTERM, the status kernel_syscall_exit_current_process gives a
 // process the termination signal ends (GitHub issue #563).
 const AFFINITY_SIGTERM_STATUS: u8 = 143;
+const AFFINITY_PEER_SPINNER_NAPS: usize = 2000;
+const AFFINITY_REAP_ATTEMPTS: usize = 64;
+// A millisecond each, so the whole wait is bounded at a quarter second.
+const AFFINITY_PEER_PIN_POLLS: usize = 256;
 
 private fn affinity_say(line: borrow []u8) {
     svc5(WRITE_SYSCALL, 1, line as *u8 as usize, line.len, 0, 0);
@@ -97,6 +101,29 @@ private fn affinity_cpu(cpu_bytes: borrow [u8; 4..]) -> usize {
 // The count is generous: at a millisecond a nap it outlives the parent's
 // remaining work by orders of magnitude, and it ends on its own whatever the
 // kernel does, so this fixture can no longer hang a lane.
+// GitHub issue #563: the same nap loop, on the peer. It pins ITSELF, so the
+// parent can wait on sched_getaffinity rather than on a guess, and its nap
+// count is a tenth of the core-0 spinner's -- a lost signal here costs the
+// lane two seconds rather than twenty, and the count is not what this is
+// measuring.
+private fn affinity_peer_spinner() {
+    let mut mask: [u8; 8];
+    affinity_mask_fill(mask as []u8, 2, 0);
+    if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) != 0) {
+        svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+    }
+    let mut nap: [u8; 16];
+    for index: usize in 0..<16 { nap[index] = 0; }
+    // tv_sec = 0, tv_nsec = 1000000 (0x000F4240), little-endian.
+    nap[8] = 0x40;
+    nap[9] = 0x42;
+    nap[10] = 0x0F;
+    for round: usize in 0..<AFFINITY_PEER_SPINNER_NAPS {
+        svc5(NANOSLEEP_SYSCALL, nap as *u8 as usize, 0, 0, 0, 0);
+    }
+    svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+}
+
 private fn affinity_spinner() {
     let mut nap: [u8; 16];
     for index: usize in 0..<16 { nap[index] = 0; }
@@ -277,5 +304,85 @@ fn affinity_probe() {
             bs"affinity: the napping spinner exited for a third reason\n");
     }
     affinity_say(bs"affinity: the napping spinner took the SIGTERM\n");
+
+    // GitHub issue #563's remaining branch: the SENDER on core 0 and the
+    // TARGET napping on a peer. The pair above shares a core, so the bit is
+    // set and taken on the same CPU and the cross-core question is never
+    // asked. `pending_signals` is read-modify-written by
+    // kernel_process_signal_deliver_to on the sender's CPU and by
+    // kernel_process_current_termination_signal_take on the target's, under
+    // no lock and with no release/acquire ordering, so whether a peer sees a
+    // bit core 0 wrote is exactly what this arranges.
+    //
+    // This parent is back on core 0 by now, which is what makes it the
+    // sender side.
+    let peer_spinner: usize = svc5(CLONE_SYSCALL, CLONE_FORK_SIGCHLD,
+                                   0, 0, 0, 0);
+    if (peer_spinner == 0) { affinity_peer_spinner(); }
+    if (peer_spinner >= AFFINITY_ERROR_FLOOR) {
+        affinity_fail(bs"affinity: fork failed\n");
+    }
+    // Wait for the child to have PINNED itself, not for a guess at how long
+    // that takes: sched_getaffinity by pid reads the mask it set, so this
+    // is the child telling the parent it is committed to CPU 1. Whenever it
+    // next runs it runs there, which is the property the kill needs.
+    //
+    // NAP between polls rather than spinning. The child starts on core 0 --
+    // it inherits this process's mask -- so it needs core 0 to run its own
+    // setaffinity, and a parent busy-polling here is the one thing standing
+    // in its way. Spinning cost the lifecycle-gap lane its 80-second budget,
+    // measured; sleeping makes the handoff immediate.
+    let mut pin_nap: [u8; 16];
+    for index: usize in 0..<16 { pin_nap[index] = 0; }
+    // tv_sec = 0, tv_nsec = 1000000 (0x000F4240), little-endian.
+    pin_nap[8] = 0x40;
+    pin_nap[9] = 0x42;
+    pin_nap[10] = 0x0F;
+    let mut pinned: bool = false;
+    let mut pin_polls: usize = 0;
+    while (pinned == false && pin_polls < AFFINITY_PEER_PIN_POLLS) {
+        pin_polls = pin_polls + 1;
+        affinity_mask_fill(mask as []u8, 0, 0);
+        if (svc5(GETAFFINITY_SYSCALL, peer_spinner, 8, mask_address, 0, 0)
+                == 8 && affinity_mask_is(mask as []u8, 2)) {
+            pinned = true;
+        } else {
+            svc5(NANOSLEEP_SYSCALL, pin_nap as *u8 as usize, 0, 0, 0, 0);
+        }
+    }
+    if (pinned == false) {
+        affinity_fail(bs"affinity: the peer spinner never pinned to cpu 1\n");
+    }
+    for index: usize in 0..<4 { status[index] = 0; }
+    svc5(KILL_SYSCALL, peer_spinner, SIGTERM, 0, 0, 0);
+    // Bounded retry, and it is here under protest: wait4 answers something
+    // other than this pid about 3 times in 40 for a child that exited on a
+    // peer, which is a defect in the peer-exit collection path and NOT the
+    // question this fixture asks. It is filed separately with that rate and
+    // with "delete this loop and run the lane forty times" as its
+    // reproduction. Retrying keeps #563's property asserted on every run
+    // without making this lane red for somebody else's bug; when that one is
+    // fixed, the loop goes.
+    let mut reaped: usize = 0;
+    let mut reap_attempts: usize = 0;
+    while (reaped != peer_spinner &&
+           reap_attempts < AFFINITY_REAP_ATTEMPTS) {
+        reap_attempts = reap_attempts + 1;
+        reaped = svc5(WAIT4_SYSCALL, peer_spinner,
+                      status as *u8 as usize, 0, 0, 0);
+    }
+    if (reaped != peer_spinner) {
+        affinity_fail(bs"affinity: the peer spinner was not reaped\n");
+    }
+    if (status[1] == 0) {
+        affinity_fail(
+            bs"affinity: the peer spinner OUTLIVED a SIGTERM sent from core 0\n");
+    }
+    if (status[1] != AFFINITY_SIGTERM_STATUS) {
+        affinity_fail(
+            bs"affinity: the peer spinner exited for a third reason\n");
+    }
+    affinity_say(
+        bs"affinity: a spinner napping on cpu 1 took a SIGTERM sent from core 0\n");
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
 }

@@ -30,7 +30,7 @@ whether a row has gone quiet or has merely stopped being looked for.
 
 | Symptom | Rate | Issue | Last seen |
 | --- | --- | --- | --- |
-| `syscall_deadline_wait` | one CI stall of 202s in `kernelcheck-lifecycle-gap-qemu`; unmeasured, and the fixture that produced it now ends on a bounded nap count | #563 | 2026-09-17 |
+| `affinity: the peer spinner was not reaped` | 3 in 40 `kernelcheck-qemu-main` runs, measured 2026-09-20 | #571 | 2026-09-20 |
 
 ## Reading a row
 
@@ -71,10 +71,16 @@ through that fallback, after `process_image_unmap_pages` had already cleared
 the target -- so it was asking about no target and being answered about root
 0, which happened to be the root it had mapped into. It names that root now.
 
-`syscall_deadline_wait` is not a log line: it is the frame that appears on the
-RUNNING process when the preserved DDB backtrace is resolved against the
-archived debug ELF. The shape is a process that is Running with a Deadline
-wait (`state=2 wait=4` on its `ps` line) while its parent is Blocked on
-ChildExit. Since 2026-09-18 the `ps` line also carries `pending=` and
-`masked=`, which is what decides whether the SIGTERM its parent sent was never
-delivered or was delivered and blocked.
+**#563's row was replaced on 2026-09-20 by the defect that closing it found.**
+The napping-process stall is answered: `/bin/affinity` now checks the status
+`wait4` already wrote, and a SIGTERM reaches a napping child -- on the same
+core and, in a second arrangement, sent from core 0 to a child pinned to CPU
+1. That is asserted on both platforms every run, so the stall's shape fails a
+lane instead of holding one for 202 seconds.
+
+Building that second arrangement is what found **#571**: the REAP after the
+signal intermittently answers something other than the child's pid, which is
+the peer-exit collection path rather than anything about signals. It is
+retried in the fixture, under protest and with the reproduction written at
+the loop, so it does not redden a lane that is asking about something else.
+This row is what says the retry is standing on a live defect.
