@@ -744,6 +744,48 @@ private let mut scheduled_process_missing_reason: usize = 0;
 // context.
 private let mut scheduled_process_missing_cpu: usize = 0;
 private let mut scheduled_process_missing_current: usize = 0;
+// Which record walk this cpu was inside when the miss happened, per-CPU
+// because only the missing core's answer means anything. 0 is none of them,
+// which is itself an answer: the reader is not a walk at all.
+//   1 kernel_process_secondary_start   2 kernel_process_next_ready
+//   3 kernel_process_reap_own_zombies  4 scheduled_process_release_every_process
+private let mut scheduled_process_walk_site: [usize; KERNEL_MAX_CORES];
+private let mut scheduled_process_missing_site: usize = 0;
+
+private fn scheduled_process_walk_site_here() -> *usize {
+    let base: *usize = scheduled_process_walk_site;
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) { return base; }
+    return base + (core as isize);
+}
+
+fn scheduled_process_missing_site_value() -> usize {
+    return scheduled_process_missing_site;
+}
+
+// A slot a walk named and found free by the time it looked. Reported, not
+// asserted at zero: it is a race the walk handles, and its rate is a fact
+// about how often a reap lands inside a walk rather than a defect.
+private let mut scheduled_process_freed_slot_count: usize = 0;
+private let mut scheduled_process_freed_first_slot: usize = 0;
+private let mut scheduled_process_freed_cpu: usize = 0;
+private let mut scheduled_process_freed_site: usize = 0;
+
+fn scheduled_process_freed_slot_count_value() -> usize {
+    return scheduled_process_freed_slot_count;
+}
+
+fn scheduled_process_freed_first_slot_value() -> usize {
+    return scheduled_process_freed_first_slot;
+}
+
+fn scheduled_process_freed_cpu_value() -> usize {
+    return scheduled_process_freed_cpu;
+}
+
+fn scheduled_process_freed_site_value() -> usize {
+    return scheduled_process_freed_site;
+}
 
 fn scheduled_process_missing_first_slot_value() -> usize {
     return scheduled_process_missing_first_slot;
@@ -775,19 +817,55 @@ private fn scheduled_process_record_at(slot: usize) -> *ProcessRecord
     }
     match intrusive_pool_probe_slot(&scheduled_process_pool, slot) {
         IntrusiveSlotProbe::NoPayload => {
+            // GitHub issue #569: two different answers wore one counter,
+            // and only one of them is a defect.
+            //
+            // The pool owning this slot with generation 0 means the slot is
+            // FREE. Every slot walk here reaches its slots through
+            // scheduled_process_live_pool_slot_from, which probes under the
+            // pool lock, sees Live, DROPS the view, and returns a bare slot
+            // number; the caller then looks that number up again. Nothing is
+            // held between the two probes, so a free in the gap is a walk
+            // that raced -- and the walk handles it correctly already, since
+            // the absent record reads back Free and `== Ready` skips it.
+            //
+            // Counting that as a missing record made a benign, expected race
+            // fail the lane a view asserts the counter on, about three runs
+            // of `make cicheck` in eight. It also made the counter useless as
+            // a detector, which is the worse half: a number that fires when
+            // nothing is wrong stops being read.
+            //
+            // What stays in the counter is the other answer: an address the
+            // pool does not own at all. That is an invented or corrupted slot
+            // number and has no benign reading. A slot that was freed and
+            // REUSED is not either of these -- the lookup succeeds and the
+            // generation check catches it, on `process invariant: STALE
+            // HANDLE READS` and `RECYCLED HANDLE READS`.
+            if (intrusive_pool_slot_is_valid(&scheduled_process_pool, slot)) {
+                scheduled_process_freed_slot_count =
+                    scheduled_process_freed_slot_count + 1;
+                if (scheduled_process_freed_first_slot == 0) {
+                    scheduled_process_freed_first_slot = slot;
+                    scheduled_process_freed_cpu = cpu_id();
+                    scheduled_process_freed_site =
+                        *scheduled_process_walk_site_here();
+                }
+                return &scheduled_process_record_absent;
+            }
             scheduled_process_record_missing_count =
                 scheduled_process_record_missing_count + 1;
             if (scheduled_process_missing_first_slot == 0) {
                 scheduled_process_missing_first_slot = slot;
                 scheduled_process_missing_reason = 2;
-                if (intrusive_pool_slot_is_valid(&scheduled_process_pool,
-                                                 slot)) {
-                    scheduled_process_missing_reason = 3;
-                }
                 scheduled_process_missing_cpu = cpu_id();
+                scheduled_process_missing_site =
+                    *scheduled_process_walk_site_here();
+                // +1, so 0 means "no current process here" rather than
+                // "current is slot 0". The first version could not tell
+                // those apart and the difference is the idle path.
                 if (execution_here().current_live) {
                     scheduled_process_missing_current =
-                        execution_here().current_handle.pool_index;
+                        execution_here().current_handle.pool_index + 1;
                 }
             }
             return &scheduled_process_record_absent;
@@ -1805,6 +1883,7 @@ private fn scheduled_process_record_reset(slot: usize) !{unsafe} {
 // kernel_syscall_process_configure, an image record) can outlive the
 // process the way the static record itself does.
 private fn scheduled_process_release_every_process() !{unsafe} {
+    *scheduled_process_walk_site_here() = 4;
     scheduled_process_pool_init();
     let mut cursor = scheduled_process_first_pool_slot();
     let mut walking: bool = true;
@@ -3877,6 +3956,7 @@ fn kernel_process_affinity_set(pid: usize, requested: usize)
 
 private fn kernel_process_next_ready(from: ProcessHandle, cpu: usize)
         -> ProcessNextReadyResult {
+    *scheduled_process_walk_site_here() = 2;
     let mut root: ProcessHandle = kernel_process_chain_root(from);
     let mut cursor: ProcessHandle = from;
     let mut remaining: usize = scheduled_process_pool_live_count() + 1;
@@ -3886,9 +3966,11 @@ private fn kernel_process_next_ready(from: ProcessHandle, cpu: usize)
         if (scheduled_process_same_slot(cursor, from) == false &&
             scheduled_process_state_of(cursor) == ProcessSlotState::Ready &&
             kernel_process_cpu_allows_slot(cpu, cursor.pool_index)) {
+            *scheduled_process_walk_site_here() = 0;
             return ProcessNextReadyResult::Next(cursor);
         }
     }
+    *scheduled_process_walk_site_here() = 0;
     return ProcessNextReadyResult::Missing;
 }
 
@@ -4026,6 +4108,7 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
     }
     if (execution_here().current_live) { return ProcessSecondaryStart::Idle; }
     let guard = process_run_lock();
+    *scheduled_process_walk_site_here() = 1;
     let mut cursor = scheduled_process_first_slot();
     let mut walking: bool = true;
     while (walking) {
@@ -4042,6 +4125,7 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
                         ScheduledProcessReadyTakeResult::Ready(resources) => {
                             let (owner, ready) = resources;
                             let running = scheduled_process_start(owner, ready);
+                            *scheduled_process_walk_site_here() = 0;
                             process_run_unlock(guard);
                             return kernel_process_secondary_start_reserved(
                                 owner, running);
@@ -4052,6 +4136,7 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
             }
         }
     }
+    *scheduled_process_walk_site_here() = 0;
     process_run_unlock(guard);
     return ProcessSecondaryStart::Idle;
 }
@@ -7458,6 +7543,7 @@ fn process_execution_model_assumption() {
 // the walk cannot outlast the processes that exist.
 fn kernel_process_reap_own_zombies() !{unsafe} {
     if (execution_here().current_live == false) { return; }
+    *scheduled_process_walk_site_here() = 3;
     let mut sweeping: usize = scheduled_process_pool_live_count() + 1;
     while (sweeping != 0) {
         sweeping = sweeping - 1;
@@ -7515,6 +7601,7 @@ fn kernel_process_reap_own_zombies() !{unsafe} {
         }
         if (found == false) { sweeping = 0; }
     }
+    *scheduled_process_walk_site_here() = 0;
 }
 
 // Whose child list, if any, holds this slot.

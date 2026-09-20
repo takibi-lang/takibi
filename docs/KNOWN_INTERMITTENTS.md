@@ -30,43 +30,34 @@ whether a row has gone quiet or has merely stopped being looked for.
 
 | Symptom | Rate | Issue | Last seen |
 | --- | --- | --- | --- |
-| `process table: records MISSING uses=` | 2 in 16 `kernelcheck-qemu-main` runs, measured 2026-09-18 (1 in 8) | #514 | 2026-09-20 |
 | `process image: target root FELL BACK TO 0 uses=` | one CI fail-stop, never reproduced locally; unmeasured | #516 | 2026-09-17 |
 | `syscall_deadline_wait` | one CI stall of 202s in `kernelcheck-lifecycle-gap-qemu`; unmeasured, and the fixture that produced it now ends on a bounded nap count | #563 | 2026-09-17 |
 
 ## Reading a row
 
-`process table: records MISSING uses=` is printed by the boot fixture in
-`kernel/init/test_driver.tkb` when a pooled record did not resolve to the slot
-its handle named. The lane fails on the `process_lifecycle` view, and the diff
-has two halves, which is worth knowing before reading it: the positive line
-`resources: every pooled record resolved to the slot its handle named` is
-gated on the fallback count being zero and so DISAPPEARS, while the report
-line appears further down. A measured instance:
+`process image: target root FELL BACK TO 0 uses=` and the rest are below.
 
-    6d5
-    < resources: every pooled record resolved to the slot its handle named
-    9a9
-    > process table: records MISSING uses=1 first_slot=0x00000000401bb880 reason=2
+**A row was removed here on 2026-09-20, and how it ended is worth the space.**
+`process table: records MISSING` was this table's first row and its first
+re-attribution: from #514 to #569, once splitting the report showed every
+reproduction was a RELEASED slot rather than #514's not-yet-written one.
 
-CI run 35481707710 on 2026-09-20 is the same thing on the `qemu-debug` lane,
-which is what the last-seen date records: `uses=1 reason=2` again, with the
-positive line gone. A row whose symptom keeps arriving is why re-running the
-lane is not a fix and the date is not a reassurance.
+It turned out not to be a race that needed closing. Every slot walk reaches
+its slots through a cursor that probes under the pool lock, sees Live, DROPS
+the proof, and returns a bare slot number; the caller looks that number up
+again. A reap in the gap is a walk that raced -- and the walk already handles
+it, because the absent record reads back Free and the walk skips it. The
+defect was that the lookup counted it as a missing record, and a view
+asserted that counter at zero. An expected race was failing the lane about
+three `make cicheck` runs in eight.
 
-**The rate in this row is measured, not inherited, and that distinction
-survives the two numbers agreeing.** The 1-in-8 recorded in
-`kernel/lib/occupancy.tkb`'s header and in
-`kernel/kernel/schedule_contention_evidence.tkb` belongs to a DIFFERENT and
-FIXED defect: a probe cleared an `armed` flag and reaped a record while the
-other core was still inside the loop, which the occupancy protocol closed.
-Those comments say so -- "the fix was two atomic booleans and a comment".
-Citing that number for a live symptom would have been reading a fixed
-defect's rate as a live one -- a mistake that 16 runs on 2026-09-18 then
-happened to vindicate, producing 2 failures. A borrowed number that lands on
-the right answer is still not evidence, which is why the column says what was
-measured over what. Both failures were `reason=2` on the `process_lifecycle`
-view, one `uses=1` and one `uses=2`.
+The event still happens at the same rate and is now reported as one, on
+`process walk: slot freed under a walk`, under a prefix no view asserts. A
+counter that fires when nothing is wrong is not a detector, which is the
+half worth remembering: the fix was to stop calling it a defect, not to add
+a lock. Two rounds of locking were tried first and neither helped -- the
+freeing side takes the POOL lock and the walk holds the RUN lock, so they
+never excluded each other.
 
 `process image: target root FELL BACK TO 0 uses=` is the same fixture
 reporting that `process_image_root_index` answered root 0 for a target that

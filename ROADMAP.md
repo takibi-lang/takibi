@@ -232,15 +232,22 @@ wholesale and expected to go stale, and a triager reaching for the list under
 a red lane needs the current one. Today it holds #514, #516 and #563, and
 where each sits is a decision rather than an omission.
 
-**One thing the move corrected.** The sentence this paragraph replaced said
-#514 reproduces at "the 1-in-8 rate the tree already records for it". The
-tree's 1-in-8 belongs to a different and FIXED defect -- the `armed`-flag
-teardown race the occupancy protocol closed -- and the comments recording it
-say as much, so citing it was reading a fixed defect's rate as a live one.
-The table now carries a measured rate instead: 2 failures in 16
-`kernelcheck-qemu-main` runs on 2026-09-18, which is the same 1 in 8. The
-number was right and the reasoning was not, which is the more instructive
-half.
+**What the move corrected, twice.** The sentence this paragraph replaced
+said #514 reproduces at "the 1-in-8 rate the tree already records for it".
+The tree's 1-in-8 belongs to a different and FIXED defect -- the
+`armed`-flag teardown race the occupancy protocol closed -- so citing it was
+reading a fixed defect's rate as a live one.
+
+Then the symptom turned out not to be #514 at all, and then not to be a
+race worth closing. It was **#569**: a slot walk reaches its slots through a
+cursor that drops its liveness proof, so a reap in the gap is a walk that
+raced -- which the walk already skips correctly. The defect was counting
+that as a missing record and asserting the counter at zero. Fixed 2026-09-20
+by reporting it as a rate instead; two rounds of locking were tried first
+and neither helped, because the freeing side takes the pool lock and the
+walk holds the run lock. #514's own window -- `probe_slot` reporting Live
+for a payload not yet written -- is still open and still unobserved. The
+live intermittent set is now #516 and #563.
 
 - **Two of them gate the default-mask flip, not today's work.** Step 3's last
   move widens which processes run on a peer, which is what raises exposure to

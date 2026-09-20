@@ -449,6 +449,21 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
         uart_put_udec(unified_object_ref_bound_breaks_count());
         kernel_boot_log("\n");
     }
+    // GitHub issue #569: a walk that raced a reap, under a prefix no view
+    // filter matches. It is a rate, not a violation -- the walk skips the
+    // slot correctly -- so asserting it at zero is what turned an expected
+    // race into a red lane.
+    if (scheduled_process_freed_slot_count_value() != 0) {
+        kernel_boot_log("process walk: slot freed under a walk uses=");
+        uart_put_udec(scheduled_process_freed_slot_count_value());
+        kernel_boot_log(" first_slot=");
+        uart_put_hex(scheduled_process_freed_first_slot_value());
+        kernel_boot_log(" cpu=");
+        uart_put_udec(scheduled_process_freed_cpu_value());
+        kernel_boot_log(" site=");
+        uart_put_udec(scheduled_process_freed_site_value());
+        kernel_boot_log("\n");
+    }
     if (scheduled_process_record_missing_uses() != 0) {
         kernel_boot_log("process table: records MISSING uses=");
         uart_put_udec(scheduled_process_record_missing_uses());
@@ -460,6 +475,8 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
         uart_put_udec(scheduled_process_missing_cpu_value());
         kernel_boot_log(" current=");
         uart_put_udec(scheduled_process_missing_current_value());
+        kernel_boot_log(" site=");
+        uart_put_udec(scheduled_process_missing_site_value());
         kernel_boot_log("\n");
     }
     // GitHub issue #488: a reap that took the record execution_here() still
