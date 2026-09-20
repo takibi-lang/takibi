@@ -30,7 +30,6 @@ whether a row has gone quiet or has merely stopped being looked for.
 
 | Symptom | Rate | Issue | Last seen |
 | --- | --- | --- | --- |
-| `process image: target root FELL BACK TO 0 uses=` | one CI fail-stop, never reproduced locally; unmeasured | #516 | 2026-09-17 |
 | `syscall_deadline_wait` | one CI stall of 202s in `kernelcheck-lifecycle-gap-qemu`; unmeasured, and the fixture that produced it now ends on a bounded nap count | #563 | 2026-09-17 |
 
 ## Reading a row
@@ -59,10 +58,18 @@ a lock. Two rounds of locking were tried first and neither helped -- the
 freeing side takes the POOL lock and the walk holds the RUN lock, so they
 never excluded each other.
 
-`process image: target root FELL BACK TO 0 uses=` is the same fixture
-reporting that `process_image_root_index` answered root 0 for a target that
-was not a valid slot. Root 0 is BusyBox init's live image, so a reader that
-consumes it is inspecting PID 1's address space by accident.
+**A second row was removed on 2026-09-20.**
+`process image: target root FELL BACK TO 0 uses=` reported
+`process_image_root_index` answering root 0 for a target that was not a valid
+slot -- and root 0 is BusyBox init's live image, so a reader taking that
+answer was inspecting PID 1's address space by accident. The fallback is gone
+(#516): every reader opens `ProcessImageTargetRootResult` and refuses.
+
+Removing it found one reader that had been passing by luck. The httpd
+loader's `map: pie pages=157 clean` asserted the user window was clear
+through that fallback, after `process_image_unmap_pages` had already cleared
+the target -- so it was asking about no target and being answered about root
+0, which happened to be the root it had mapped into. It names that root now.
 
 `syscall_deadline_wait` is not a log line: it is the frame that appears on the
 RUNNING process when the preserved DDB backtrace is resolved against the

@@ -2412,6 +2412,13 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) {
             kernel_process_exec_failure_set(KernelChildExecPrepareResult::ImageAlreadyInstalled);
             kernel_syscall_fail_stop(frame_sp);
         }
+        // GitHub issue #516: an exec that reached the install with no target
+        // root chosen. Fail-stops beside its neighbours rather than being
+        // installed into root 0, which is what the old fallback did.
+        KernelChildExecPrepareResult::ImageNoTargetRoot => {
+            kernel_process_exec_failure_set(KernelChildExecPrepareResult::ImageNoTargetRoot);
+            kernel_syscall_fail_stop(frame_sp);
+        }
         KernelChildExecPrepareResult::NoImageResolved => {
             kernel_process_exec_failure_set(KernelChildExecPrepareResult::NoImageResolved);
             kernel_syscall_fail_stop(frame_sp);

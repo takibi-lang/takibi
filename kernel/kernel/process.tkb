@@ -3229,6 +3229,7 @@ enum KernelExecFailureReason: u8 {
     DynamicResolveInvalid;
     DynamicPairInvalid;
     ImageAlreadyInstalled;
+    ImageNoTargetRoot;
     NoImageResolved;
     StaticImageInvalid;
     StaticMapOutOfMemory;
@@ -3243,6 +3244,9 @@ must_use variant KernelChildExecPrepareResult {
     DynamicResolveInvalid;
     DynamicPairInvalid;
     ImageAlreadyInstalled;
+    // GitHub issue #516: an exec that reached the install with no target
+    // root chosen. It used to install into root 0.
+    ImageNoTargetRoot;
     NoImageResolved;
     StaticImageInvalid;
     StaticMapOutOfMemory;
@@ -3366,6 +3370,7 @@ fn kernel_process_exec_failure_set(result: KernelChildExecPrepareResult) {
         KernelChildExecPrepareResult::DynamicResolveInvalid => { kernel_process_exec_failure_reason = KernelExecFailureReason::DynamicResolveInvalid; }
         KernelChildExecPrepareResult::DynamicPairInvalid => { kernel_process_exec_failure_reason = KernelExecFailureReason::DynamicPairInvalid; }
         KernelChildExecPrepareResult::ImageAlreadyInstalled => { kernel_process_exec_failure_reason = KernelExecFailureReason::ImageAlreadyInstalled; }
+        KernelChildExecPrepareResult::ImageNoTargetRoot => { kernel_process_exec_failure_reason = KernelExecFailureReason::ImageNoTargetRoot; }
         KernelChildExecPrepareResult::NoImageResolved => { kernel_process_exec_failure_reason = KernelExecFailureReason::NoImageResolved; }
         KernelChildExecPrepareResult::StaticImageInvalid => { kernel_process_exec_failure_reason = KernelExecFailureReason::StaticImageInvalid; }
         KernelChildExecPrepareResult::StaticMapOutOfMemory => { kernel_process_exec_failure_reason = KernelExecFailureReason::StaticMapOutOfMemory; }
@@ -3388,6 +3393,7 @@ fn kernel_process_exec_failure_render() {
         KernelExecFailureReason::DynamicResolveInvalid => { kernel_boot_log("dynamic-resolve-invalid\n"); }
         KernelExecFailureReason::DynamicPairInvalid => { kernel_boot_log("dynamic-pair-invalid\n"); }
         KernelExecFailureReason::ImageAlreadyInstalled => { kernel_boot_log("image-already-installed\n"); }
+        KernelExecFailureReason::ImageNoTargetRoot => { kernel_boot_log("image-no-target-root\n"); }
         KernelExecFailureReason::NoImageResolved => { kernel_boot_log("no-image-resolved\n"); }
         KernelExecFailureReason::StaticImageInvalid => { kernel_boot_log("static-image-invalid\n"); }
         KernelExecFailureReason::StaticMapOutOfMemory => { kernel_boot_log("static-map-out-of-memory\n"); }
@@ -7161,10 +7167,25 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
     // So: capture the root the reaper is running on, reap, restore. The
     // same repair kernel_syscall_wait4_deliver already does for the same
     // reason, one call earlier in the same path.
-    let resume_root: usize = process_image_root_index();
+    // GitHub issue #516: an absent target is carried as absent rather than
+    // as root 0. Root 0 IS a valid slot, which is what made the old fallback
+    // invisible here -- it activated PID 1's live image and only the next
+    // COW fault said so. With no target there is nothing to move away from
+    // and nothing to recommit, so both activations below are skipped.
+    let mut resume_root: usize = 0;
+    let mut has_resume_root: bool = false;
+    match process_image_target_root_result() {
+        ProcessImageTargetRootResult::Missing => {}
+        ProcessImageTargetRootResult::Ready(target) => {
+            resume_root = target;
+            has_resume_root = true;
+        }
+    }
     // Move away from any root the reap may release before teardown starts.
     // The current process remains Running throughout this kernel-only span.
-    kernel_process_activate_stable_root(resume_root);
+    if (has_resume_root) {
+        kernel_process_activate_stable_root(resume_root);
+    }
     let status: usize =
         scheduled_process_record_of(child).exit_status;
     let pid: usize = scheduled_process_pid_of_handle(child);
@@ -7241,7 +7262,9 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
     // scheduled_process_reap may clear the per-CPU process-image target while
     // tearing down the child. Recommit the reaper's root so a later COW fault
     // consults the same address space that TTBR0 already names.
-    kernel_process_activate_stable_root(resume_root);
+    if (has_resume_root) {
+        kernel_process_activate_stable_root(resume_root);
+    }
     return status;
 }
 

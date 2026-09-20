@@ -469,7 +469,11 @@ must_use variant ProcessImageTargetRootResult {
     Ready(usize);
 }
 
-private fn process_image_target_root_result()
+// GitHub issue #516: public, because it is the API readers outside this file
+// are asked to open. It replaced a process_image_root_index() that answered
+// 0 for a missing target. It counts the two ways a target can be absent as it goes, which is why
+// asking it is not free and why callers ask once and carry the answer.
+fn process_image_target_root_result()
         -> ProcessImageTargetRootResult !{unsafe} {
     if (process_image_target_root_is_set_here() == false) {
         let unset_count: *usize =
@@ -486,13 +490,6 @@ private fn process_image_target_root_result()
     }
     return ProcessImageTargetRootResult::Ready(
         process_image_target_root_here());
-}
-
-fn process_image_root_index() -> usize !{unsafe} {
-    match process_image_target_root_result() {
-        ProcessImageTargetRootResult::Missing => { return 0; }
-        ProcessImageTargetRootResult::Ready(root) => { return root; }
-    }
 }
 
 fn process_image_pte_read(index: usize) -> usize {
@@ -857,6 +854,59 @@ fn process_image_clone_vm_reaped_pages() -> usize {
 // whole address space smaller than one growth-region page (never meant to
 // support stack growth at all), and the pinned Alpine BusyBox binary's
 // recursion depth is not something this test controls.
+// GitHub issue #516: with no target root chosen, no reader may answer about
+// root 0. By the time this runs root 0 is BusyBox init's live image, so
+// "answers about root 0" and "answers about PID 1" are the same sentence --
+// which is why the fallback was worth removing rather than counting.
+//
+// Nothing here writes root 0. The readers this replaces READ it: a window
+// cleanliness answer taken from its tables, a fault resolved against them.
+// So the proof is the refusal, plus root 0's own flags reading the same on
+// both sides of the calls -- a reader that consumed the state would have had
+// to go through the record this checks.
+//
+// The target is restored afterwards. This probe runs inside a boot whose
+// later steps have their own targets, and a fixture that left the per-CPU
+// target cleared would be testing everything after it as well.
+const PROCESS_IMAGE_PROBE_ABORT_ESR: usize = 0x92000007;
+const PROCESS_IMAGE_PROBE_ABORT_ADDRESS: usize = 0x0000FFFFFFFFE000;
+
+fn process_image_no_target_probe() -> bool !{unsafe} {
+    let mut restore_root: usize = 0;
+    let mut had_root: bool = false;
+    match process_image_target_root_result() {
+        ProcessImageTargetRootResult::Missing => {}
+        ProcessImageTargetRootResult::Ready(target) => {
+            restore_root = target;
+            had_root = true;
+        }
+    }
+    process_image_clear_target_root_here();
+    let installed_before: bool =
+        process_image_record_at(0).exec_image_installed;
+    let pages_before: usize =
+        process_image_record_at(0).exec_image_page_count;
+    let mut refused: bool = true;
+    // A cleared target cannot say the user window is clear. Before #516 this
+    // answered about root 0's window.
+    if (process_image_window_is_clear()) { refused = false; }
+    // Nor resolve an EL0 data abort. ESR 0x92000007 is a lower-EL data abort
+    // with a level-3 translation fault, the stack-growth shape; the address
+    // is never reached, because the refusal happens before it is read.
+    if (process_image_handle_data_abort(PROCESS_IMAGE_PROBE_ABORT_ESR,
+                                        PROCESS_IMAGE_PROBE_ABORT_ADDRESS)) {
+        refused = false;
+    }
+    if (process_image_record_at(0).exec_image_installed != installed_before) {
+        refused = false;
+    }
+    if (process_image_record_at(0).exec_image_page_count != pages_before) {
+        refused = false;
+    }
+    if (had_root) { process_image_set_target_root_here(restore_root); }
+    return refused;
+}
+
 fn process_image_clone_growth_probe() -> bool !{unsafe} {
     process_image_set_target_root_here(0);
     // GitHub issue #392: the child root is a live process's record now,
@@ -1081,12 +1131,29 @@ fn process_image_exec_image_installed(root: usize) -> bool !{unsafe} {
     return process_image_record_at(root).exec_image_installed;
 }
 
-must_use variant ProcessImageExecInstallResult { Installed; AlreadyInstalled; }
+// GitHub issue #516: NoTarget is the third outcome, and it is the one this
+// issue is about. Installing with no target chosen used to consult ROOT 0's
+// `exec_image_installed` flag and then write ROOT 0's page count -- PID 1's
+// live image, decided by a fallback rather than by a caller.
+must_use variant ProcessImageExecInstallResult {
+    Installed;
+    AlreadyInstalled;
+    NoTarget;
+}
 
 fn process_image_exec_install(
         pages: sink ProcessImagePages[image]) -> ProcessImageExecInstallResult {
-    let root: usize =
-        process_image_root_index();
+    let root: usize = match process_image_target_root_result() {
+        ProcessImageTargetRootResult::Missing => {
+            // The incoming image is this function's to dispose of on every
+            // path that does not install it, exactly as AlreadyInstalled
+            // below already does -- and `pages` being linear is what makes
+            // that a compile error to forget rather than a leak to find.
+            process_image_unmap(pages);
+            return ProcessImageExecInstallResult::NoTarget;
+        }
+        ProcessImageTargetRootResult::Ready(target) => { target }
+    };
     if (process_image_record_at(root).exec_image_installed) {
         // Unchanged: the INCOMING image is the one unmapped, and the
         // already-installed one is left alone.
@@ -1134,10 +1201,12 @@ fn process_image_exec_reap_evidence() -> (usize, usize, usize) {
 //
 // It clears the target on EVERY path, installed or not. Leaving it
 // pointing at the dead child's root is not a tidiness question: the next
-// EL0 COW permission fault resolves against process_image_root_index(),
-// and against the wrong root it cannot resolve at all. That was one
-// fail-stop in the busybox fixture, found the first time this release was
-// wired in.
+// EL0 COW permission fault resolves against whatever the target names, and
+// against the wrong root it cannot resolve at all. That was one fail-stop in
+// the busybox fixture, found the first time this release was wired in. Since
+// GitHub issue #516 a CLEARED target refuses the fault outright instead of
+// resolving it against root 0, which is the better of the two failures: it
+// names the fault rather than PID 1's next write.
 fn process_image_exec_teardown(root_index: usize) {
     process_image_set_target_root_here(root_index);
     match process_image_target_root_result() {
@@ -1155,9 +1224,12 @@ fn process_image_exec_teardown(root_index: usize) {
             process_image_record_at(root).exec_image_installed = false;
             process_image_record_at(root).exec_image_page_count = 0;
             if (installed) {
-                let reaped_root: usize =
-                    process_image_root_index();
-                if (process_image_stack_grew_pages(count)) {
+                // `root` is this arm's own proven target. This used to
+                // re-derive the same answer through the root-0 fallback
+                // GitHub issue #516 removed, and would have answered 0 if
+                // the target had gone missing between the two calls.
+                let reaped_root: usize = root;
+                if (process_image_stack_grew_pages(reaped_root, count)) {
                     process_image_exec_reap_stack_growth_count =
                         process_image_exec_reap_stack_growth_count + 1;
                 }
@@ -1589,7 +1661,16 @@ fn process_image_cleanup() {
 // gap handles an ABI that subtracts a large stack frame before its first
 // store, while the guard page below the reservation remains unmapped.
 fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
-    let root: usize = process_image_root_index();
+    // GitHub issue #516: refuse the fault when no target is chosen, rather
+    // than resolving it against root 0. kernel/kernel/process.tkb's reaper
+    // comment is what this is: a reaper that returned to EL0 with the COW
+    // handler aimed at root 0 -- PID 1's live image -- and fail-stopped on
+    // its next write. Returning false here fail-stops on the FAULT instead,
+    // which names the right thing.
+    let root: usize = match process_image_target_root_result() {
+        ProcessImageTargetRootResult::Missing => { return false; }
+        ProcessImageTargetRootResult::Ready(target) => { target }
+    };
     let exception_class: usize = (esr >> 26) & 0x3F;
     let fault_status: usize = esr & 0x3F;
     // A COW write is a level-3 permission fault (0x0f). It must be handled
@@ -1780,7 +1861,14 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
     // consumer reads it. Its stack floor is higher than the static path's
     // (this image's heap reaches further up) -- that difference used to be
     // two separate global constants, and is now just two seeds.
-    let root: usize = process_image_root_index();
+    // GitHub issue #516: no target root is a refusal, not root 0. Seeding a
+    // layout into root 0 here would write PID 1's live image record.
+    let root: usize = match process_image_target_root_result() {
+        ProcessImageTargetRootResult::Missing => {
+            return ProcessImagePairProbeResult::Invalid;
+        }
+        ProcessImageTargetRootResult::Ready(target) => { target }
+    };
     process_image_record_at(root).stack_top_page = process_stack_top_page();
     process_image_record_at(root).stack_low_page = PROCESS_STACK_LOW_DYNAMIC;
     process_image_record_at(root).heap_page_count = PROCESS_HEAP_PAGES_DEFAULT;
@@ -1966,7 +2054,14 @@ fn process_image_pair_map_ext2_in_root(
 fn process_image_map_current(plan: DistroElfLoadPlan,
                              argv: []u8,
                              argc: usize) -> ProcessImageMapResult {
-    let root: usize = process_image_root_index();
+    // GitHub issue #516: the same refusal, through this function's own
+    // "cannot map" case.
+    let root: usize = match process_image_target_root_result() {
+        ProcessImageTargetRootResult::Missing => {
+            return ProcessImageMapResult::InvalidImage;
+        }
+        ProcessImageTargetRootResult::Ready(target) => { target }
+    };
     process_image_record_at(root).stack_growth_active = false;
     process_image_record_at(root).active_page_count = 0;
     process_image_record_at(root).stack_lowest_l3 = process_stack_top_page();
@@ -2124,8 +2219,11 @@ fn process_image_stack_pointer(pages: borrow ProcessImagePages[image]) -> usize 
     return pages.stack_pointer;
 }
 
-fn process_image_stack_grew_pages(count: usize) -> bool {
-    let root: usize = process_image_root_index();
+// GitHub issue #516: takes the root rather than deriving one. Its only
+// caller already holds a proven target from its own
+// ProcessImageTargetRootResult, so deriving a second answer here could only
+// ever agree with it or silently disagree.
+fn process_image_stack_grew_pages(root: usize, count: usize) -> bool {
     return process_image_record_at(root).stack_growth_active &&
            process_image_record_at(root).active_page_count > count;
 }
@@ -2140,8 +2238,18 @@ fn process_image_heap_range(pages: borrow ProcessImagePages[image])
     return (pages.heap_start, pages.heap_limit);
 }
 
+// GitHub issue #516: false, not "clear", when there is no target. Both
+// callers are boot-fixture assertions of the form `== false -> fail`, so
+// answering `clear` for a root nobody chose would pass an assertion about
+// nothing -- which is the shape the fallback to root 0 had, one step further
+// on: it answered about PID 1's live image instead.
 fn process_image_window_is_clear() -> bool !{unsafe} {
-    return address_space_user_window_is_clear(process_image_root_index());
+    match process_image_target_root_result() {
+        ProcessImageTargetRootResult::Missing => { return false; }
+        ProcessImageTargetRootResult::Ready(root) => {
+            return address_space_user_window_is_clear(root);
+        }
+    }
 }
 
 fn process_image_gap_is_unmapped() -> bool {

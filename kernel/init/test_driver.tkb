@@ -245,6 +245,9 @@ fn kernel_process_child_exec_map_result(
                 ProcessImageExecInstallResult::AlreadyInstalled => {
                     return KernelChildExecPrepareResult::ImageAlreadyInstalled;
                 }
+                ProcessImageExecInstallResult::NoTarget => {
+                    return KernelChildExecPrepareResult::ImageNoTargetRoot;
+                }
                 ProcessImageExecInstallResult::Installed => {}
             }
             kernel_syscall_process_configure_current(heap_start, heap_limit);
@@ -355,11 +358,14 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
         kernel_boot_log("\n");
     }
     // The fourth fallback of this kind, and the only one that had a counter
-    // and no reader. process_image_root_index() answers 0 for a target root
-    // that is not a valid slot, which was harmless while root 0 was an image
-    // about to be replaced -- and is not now that root 0 is BusyBox init's
-    // live image, because every teardown that resolves through it unmaps
-    // PID 1. Issue #270 hit exactly that from a probe, and nothing in the
+    // and no reader. The fallback itself is gone (GitHub issue #516): a
+    // reader with no valid target root used to be answered with 0, which was
+    // harmless while root 0 was an image about to be replaced and is not now
+    // that root 0 is BusyBox init's live image. Every reader opens
+    // ProcessImageTargetRootResult now and refuses, so this counter is what
+    // says how often the refusal is reached rather than what stands between
+    // a miss and PID 1. Issue #270 hit exactly that from a probe, and
+    // nothing in the
     // boot would have said so.
     if (process_image_root_stale_fallback_uses() != 0) {
         kernel_boot_log("process image: target root FELL BACK TO 0 uses=");
@@ -737,6 +743,9 @@ fn kernel_process_child_exec_prepare() -> KernelChildExecPrepareResult {
                             ProcessImageExecInstallResult::AlreadyInstalled => {
                                 return KernelChildExecPrepareResult::ImageAlreadyInstalled;
                             }
+                            ProcessImageExecInstallResult::NoTarget => {
+                                return KernelChildExecPrepareResult::ImageNoTargetRoot;
+                            }
                             ProcessImageExecInstallResult::Installed => {}
                         }
                         kernel_syscall_process_configure_current(
@@ -899,6 +908,11 @@ fn kernel_init_script_success_evidence(include_file_evidence: bool) {
 
 must_use variant HttpdImageMapCheckResult { Invalid; Verified; }
 
+// The root process_image_map_ext2 maps into. Named rather than written as 0
+// at the two sites below, so it is visible that this is that function's
+// choice and not an arbitrary index (GitHub issue #516).
+const PROCESS_IMAGE_EXT2_CHECK_ROOT: usize = 0;
+
 fn httpd_image_mapping_check(httpd: Ext2ExecImage,
                              musl: Ext2ExecImage)
         -> HttpdImageMapCheckResult {
@@ -914,7 +928,16 @@ fn httpd_image_mapping_check(httpd: Ext2ExecImage,
         ProcessImageMapResult::Mapped(httpd_pages) => {
             let httpd_count: usize = process_image_page_count(httpd_pages);
             process_image_unmap(httpd_pages);
-            if (httpd_count != 157 || process_image_window_is_clear() == false) {
+            // GitHub issue #516: ask about the root this MAPPED into, by
+            // name. process_image_map_ext2 maps into root 0, and
+            // process_image_unmap_pages clears the per-CPU target on every
+            // path -- so `process_image_window_is_clear()` here was asking
+            // about no target at all and being answered about root 0 by the
+            // fallback. It agreed with the right answer by luck, which is
+            // the worst way for an assertion to pass.
+            if (httpd_count != 157 ||
+                process_image_root_window_is_clear(
+                    PROCESS_IMAGE_EXT2_CHECK_ROOT) == false) {
                 return HttpdImageMapCheckResult::Invalid;
             }
             kernel_boot_log("httpd map: pie pages=157 clean\n");
@@ -932,7 +955,10 @@ fn httpd_image_mapping_check(httpd: Ext2ExecImage,
         ProcessImageMapResult::Mapped(musl_pages) => {
             let musl_count: usize = process_image_page_count(musl_pages);
             process_image_unmap(musl_pages);
-            if (musl_count != 296 || process_image_window_is_clear() == false) {
+            // The same root, for the same reason as the pie check above.
+            if (musl_count != 296 ||
+                process_image_root_window_is_clear(
+                    PROCESS_IMAGE_EXT2_CHECK_ROOT) == false) {
                 return HttpdImageMapCheckResult::Invalid;
             }
             kernel_boot_log("httpd map: musl pages=296 clean\n");
@@ -1042,6 +1068,15 @@ fn kernel_test_common_probes() {
     // image exists, rather than from the end-of-fixture evidence -- where
     // it silently unmapped init's own stack page and disabled its growth,
     // and init then took a translation fault on its next push.
+    // GitHub issue #516: no reader answers about root 0 when no target is
+    // chosen. Reported as a `resources:` line so the process_lifecycle view
+    // asserts it on both platforms.
+    if (process_image_no_target_probe()) {
+        kernel_boot_log(
+            "resources: no image reader answers about root 0 with no target\n");
+    } else {
+        kernel_boot_log("resources: NO-TARGET IMAGE READER ANSWERED\n");
+    }
     clone_growth_probe_ok = process_image_clone_growth_probe();
     if (address_space_asid_rollover_probe()) {
         // The width is PRINTED, not asserted in the message: the view
