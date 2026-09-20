@@ -134,6 +134,33 @@ def unreadable_answers(finder):
                             f"answer")
         finally:
             finder.subprocess.run = saved
+
+    # And the other half of that measurement: the call must ASK for plain
+    # output, because a runner with CLICOLOR_FORCE set gets JSON wrapped in
+    # escape codes and `gh` reports no error about it.
+    CASES.note()
+    seen = {}
+
+    def capture(*args, **kwargs):
+        seen.update(kwargs.get("env") or {})
+        return Finished("[]")
+
+    finder.subprocess.run = capture
+    try:
+        finder.issue_states()
+    finally:
+        finder.subprocess.run = saved
+    if not seen:
+        failures.append("the gh call passes no environment, so a runner that "
+                        "forces colour would colour the JSON")
+    else:
+        for name, want in (("NO_COLOR", None), ("CLICOLOR_FORCE", "")):
+            if name not in seen:
+                failures.append(f"the gh call does not set {name}, so forced "
+                                f"colour can still reach the parser")
+            elif want is not None and seen[name] != want:
+                failures.append(f"the gh call sets {name}={seen[name]!r}, "
+                                f"which does not clear it")
     return failures
 
 
@@ -199,7 +226,8 @@ def main() -> int:
         "GitHub fails rather than passing about what it did not check, and "
         "an empty table passes without asking at all; a `gh` that exits 0 "
         "without answering -- empty output, HTML, or JSON that is not a "
-        "list -- is an outage rather than an answer",
+        "list -- is an outage rather than an answer, and the call asks for "
+        "plain output so forced colour never reaches the parser",
         cases=CASES.ran)
     return 0
 

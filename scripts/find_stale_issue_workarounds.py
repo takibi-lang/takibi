@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -174,13 +175,32 @@ class IssueStatesUnavailable(Exception):
     """
 
 
+# `gh --json` is not machine output by itself: it COLOURS the JSON when it
+# believes a terminal is watching, and `CLICOLOR_FORCE` makes it believe that
+# even with no terminal in sight. A GitHub Actions runner sets exactly that,
+# so the answer arrived as `\x1b[1;37m[\x1b[m ...` and parsed as nothing --
+# measured on 2026-09-20, one red CI run after the missing `issues: read`
+# permission was the cause of three others.
+#
+# NO_COLOR and CLICOLOR say "no colour"; CLICOLOR_FORCE outranks them, so it
+# is cleared rather than contradicted. GH_FORCE_TTY is emptied for the same
+# reason: gh treats any non-empty value as a terminal.
+PLAIN_OUTPUT = {
+    "NO_COLOR": "1",
+    "CLICOLOR": "0",
+    "CLICOLOR_FORCE": "",
+    "GH_FORCE_TTY": "",
+}
+
+
 def issue_states():
     """Every issue's state, in one request rather than one per reference."""
     try:
         result = subprocess.run(
             ["gh", "issue", "list", "--state", "all", "--limit", "2000",
              "--json", "number,state"],
-            capture_output=True, text=True, check=True, timeout=120)
+            capture_output=True, text=True, check=True, timeout=120,
+            env={**os.environ, **PLAIN_OUTPUT})
     except (OSError, subprocess.CalledProcessError,
             subprocess.TimeoutExpired) as error:
         detail = getattr(error, "stderr", "") or str(error)
@@ -195,11 +215,15 @@ def issue_states():
     try:
         answer = json.loads(result.stdout)
     except json.JSONDecodeError:
+        # Deliberately no guess at the cause. Two different ones have now
+        # produced this branch -- a token without `issues: read`, which
+        # answers with nothing at all, and forced colour, which answers with
+        # JSON wrapped in escape codes -- so what is printed is what came
+        # back, and the reader draws the conclusion.
         raise IssueStatesUnavailable(
             f"`gh issue list` exited 0 and did not answer with JSON "
-            f"(stdout {result.stdout.strip()[:120]!r}, stderr "
-            f"{result.stderr.strip()[:200]!r}); a token that cannot read "
-            f"issues answers exactly like this")
+            f"(stdout {result.stdout.strip()[:160]!r}, stderr "
+            f"{result.stderr.strip()[:200]!r})")
     if not isinstance(answer, list):
         raise IssueStatesUnavailable(
             f"`gh issue list` answered with {type(answer).__name__}, not a "
