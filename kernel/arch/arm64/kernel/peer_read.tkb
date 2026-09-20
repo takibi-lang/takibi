@@ -316,13 +316,17 @@ private fn peer_identity(cpu_bytes: borrow [u8; 4..], peer_cpu: usize)
     }
     if (soft == 0 || soft > hard) { return 0; }
     if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
-    // The same prlimit64, now as a WRITE: put the soft limit back where it
-    // already was. Writing the value it just read keeps the fixture from
-    // changing what any later scenario sees, while still taking the store
-    // path -- the one thing the previous increment left on core 0.
+    // The same prlimit64, now as a WRITE. Change the soft limit by one, read
+    // it back, then restore the original pair. A same-value write would take
+    // this arm but still pass if its store silently became a no-op; the
+    // distinct readback proves the mutation that peer admission relies on.
     let mut set_limit: [u8; PEER_IDENT_RLIMIT_BYTES];
     for index: usize in 0..<PEER_IDENT_RLIMIT_BYTES {
         set_limit[index] = rlimit[index];
+    }
+    let changed_soft: usize = soft - 1;
+    for index: usize in 0..<8 {
+        set_limit[index] = ((changed_soft >> (index * 8)) & 0xFF) as u8;
     }
     let mut readback: [u8; PEER_IDENT_RLIMIT_BYTES];
     for index: usize in 0..<PEER_IDENT_RLIMIT_BYTES { readback[index] = 0xFF; }
@@ -332,6 +336,23 @@ private fn peer_identity(cpu_bytes: borrow [u8; 4..], peer_cpu: usize)
     }
     for index: usize in 0..<PEER_IDENT_RLIMIT_BYTES {
         if (readback[index] != rlimit[index]) { return 0; }
+    }
+    if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
+    for index: usize in 0..<PEER_IDENT_RLIMIT_BYTES { readback[index] = 0xFF; }
+    if (svc5(PRLIMIT64_SYSCALL, 0, PEER_IDENT_RLIMIT_NOFILE, 0,
+             readback as *u8 as usize, 0) != 0) {
+        return 0;
+    }
+    for index: usize in 0..<8 {
+        if (readback[index] != set_limit[index]) { return 0; }
+    }
+    for index: usize in 8..<PEER_IDENT_RLIMIT_BYTES {
+        if (readback[index] != rlimit[index]) { return 0; }
+    }
+    if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
+    if (svc5(PRLIMIT64_SYSCALL, 0, PEER_IDENT_RLIMIT_NOFILE,
+             rlimit as *u8 as usize, 0, 0) != 0) {
+        return 0;
     }
     if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
     // chdir to the one directory this kernel has. It stores nothing, so the
