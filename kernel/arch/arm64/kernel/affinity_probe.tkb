@@ -43,6 +43,9 @@ const AFFINITY_PIN_ATTEMPTS: usize = 200000;
 // Naps of a millisecond each: enough to cover the parent's remaining work
 // many times over, and finite so nothing depends on the child being killed.
 const AFFINITY_SPINNER_NAPS: usize = 20000;
+// 128 + SIGTERM, the status kernel_syscall_exit_current_process gives a
+// process the termination signal ends (GitHub issue #563).
+const AFFINITY_SIGTERM_STATUS: u8 = 143;
 
 private fn affinity_say(line: borrow []u8) {
     svc5(WRITE_SYSCALL, 1, line as *u8 as usize, line.len, 0, 0);
@@ -231,10 +234,48 @@ fn affinity_probe() {
     // sleeping process costs this fixture nothing but the wait. wait4 blocks
     // until it is gone either way, which is also what keeps core 0 busy
     // until the line above has been drained.
+    for index: usize in 0..<4 { status[index] = 0; }
     svc5(KILL_SYSCALL, spinner, SIGTERM, 0, 0, 0);
     if (svc5(WAIT4_SYSCALL, spinner, status as *u8 as usize, 0, 0, 0) !=
             spinner) {
         affinity_fail(bs"affinity: the spinner was not reaped\n");
     }
+    // Back to core 0 before saying anything. This process is pinned to CPU
+    // 1, whose console ring is drained only by core 0 taking a syscall --
+    // and the spinner whose naps kept that drain running has just been
+    // reaped, so a line written here would sit in the ring for the rest of
+    // the boot. The comment above the pinned line says the same thing from
+    // the other side.
+    affinity_mask_fill(mask as []u8, 1, 0);
+    if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask_address, 0, 0) != 0) {
+        affinity_fail(bs"affinity: cpu 0 alone was refused\n");
+    }
+    let mut back: bool = false;
+    let mut back_attempts: usize = 0;
+    while (back == false && back_attempts < AFFINITY_PIN_ATTEMPTS) {
+        back_attempts = back_attempts + 1;
+        if (affinity_cpu(cpu_bytes as []u8) == 0) { back = true; }
+    }
+    if (back == false) {
+        affinity_fail(bs"affinity: never came back to cpu 0\n");
+    }
+    // GitHub issue #563: WHY it was reaped. The spinner exits 0 on its own
+    // nap count and the kernel exits it with 128 + SIGTERM when the signal
+    // is taken, so this one byte separates "the SIGTERM reached a napping
+    // process" from "it ran out the clock" -- which is the question that
+    // issue's stall could not answer. Measured before it is asserted.
+    if (status[1] == 0) {
+        // The shape GitHub issue #563 recorded: the child ran its whole nap
+        // count out with a SIGTERM its parent had already sent. Failing here
+        // turns that into a bounded, named lane failure instead of the
+        // 202-second stall the issue was filed from.
+        affinity_fail(
+            bs"affinity: the napping spinner OUTLIVED the SIGTERM\n");
+    }
+    if (status[1] != AFFINITY_SIGTERM_STATUS) {
+        affinity_fail(
+            bs"affinity: the napping spinner exited for a third reason\n");
+    }
+    affinity_say(bs"affinity: the napping spinner took the SIGTERM\n");
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
 }
