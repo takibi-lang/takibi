@@ -56,6 +56,9 @@ const AARCH64_NR_KILL: usize = 129;
 const AARCH64_NR_RT_SIGTIMEDWAIT: usize = 137;
 const AARCH64_NR_SYSLOG: usize = 116;
 const AARCH64_NR_GETCWD: usize = 17;
+const AARCH64_NR_CHDIR: usize = 49;
+const AARCH64_NR_SETITIMER: usize = 103;
+const AARCH64_NR_RT_SIGACTION: usize = 134;
 const AARCH64_NR_SET_TID_ADDRESS: usize = 96;
 const AARCH64_NR_UNAME: usize = 160;
 const AARCH64_NR_SYSINFO: usize = 179;
@@ -2591,12 +2594,7 @@ private fn syscall_ext2_rename_locked(old_directory: usize,
     return answer;
 }
 
-// `arg2` is the syscall's third argument, and it is here for the reason `fd`
-// is: one syscall number can be two different questions. prlimit64 is a pure
-// read when its new_limit pointer is null and a write when it is not, so the
-// number alone cannot decide, exactly as read and write cannot be decided
-// without their descriptor.
-fn syscall_peer_safe(number: usize, fd: usize, arg2: usize) -> bool {
+fn syscall_peer_safe(number: usize, fd: usize) -> bool {
     // The caller's own record, or architectural state: getpid, getppid,
     // the uid/gid family, gettid, clock_gettime, and getcpu (#533).
     if (number == 172 || number == 173 || number == 178 ||
@@ -2655,18 +2653,56 @@ fn syscall_peer_safe(number: usize, fd: usize, arg2: usize) -> bool {
     if (number == AARCH64_NR_GETCWD || number == AARCH64_NR_SET_TID_ADDRESS) {
         return true;
     }
-    // prlimit64 only as a READ: new_limit null, so nothing is stored. It
-    // reads this process's own ProcessFdContext -- `fd_context_at(slot)`,
-    // its own slot, not a walk of a shared structure -- and stages the
-    // answer in the per-CPU rlimit_buffer before copying it out. A pid
-    // argument that is not the caller's own is already ESRCH, so there is
-    // no cross-process read here either.
+    // GitHub issue #9 phase B entry 6, third increment: prlimit64 in both
+    // directions. The increment before admitted the read only and said the
+    // WRITE belonged to the increment that answered whether a peer may
+    // mutate its own record. This is that answer, and for THESE two words it
+    // is yes -- by enumeration rather than by analogy.
     //
-    // The WRITE stays on core 0. It would be the first time a peer mutates
-    // its own record outside the process-run lock, which is a synchronization
-    // question rather than a short audit, and it belongs to the increment
-    // that answers it.
-    if (number == AARCH64_NR_PRLIMIT64 && arg2 == 0) { return true; }
+    // `fd_limit_soft`/`fd_limit_hard` live in the process's own
+    // ProcessFdContext. Written: at creation, by its own prlimit64, and by
+    // its own clone copying them into a child that is still Constructing.
+    // Read: by `unified_fd_alloc`/`unified_fd_install` for the slot whose
+    // syscall is running, by that same clone as the parent, and by boot
+    // probes that use slot 0 -- the boot process, which is never admitted to
+    // a peer. A reaper reaches a child's fd table only once that child has
+    // Exited, and #552 put a peer's stack release before PID 1 collects it.
+    // So while a process runs on a peer, no other CPU touches the two words
+    // it is writing.
+    //
+    // No argument-dependent admission is left, so this takes the number and
+    // the descriptor again. One number being two questions did not stop
+    // being true -- read and write still turn on their descriptor -- only
+    // this instance of it did.
+    if (number == AARCH64_NR_PRLIMIT64) { return true; }
+    // Calls whose only WRITE is into the caller's own user memory, touching
+    // no kernel state at all:
+    //
+    //   chdir         copies two bytes into the per-CPU path buffer,
+    //                 compares them against `/` and `.`, and stores nothing.
+    //                 This kernel has one directory, so there is no cwd to
+    //                 move.
+    //   setitimer     zero-fills the caller's old-timer struct. No itimer is
+    //                 armed here, so there is nothing per-record to arm.
+    //   rt_sigaction  validates signum and zero-fills a non-null oldact.
+    //                 Handlers are never installed, so nothing is stored.
+    //
+    // Each crosses the user-memory boundary against its own root, which a
+    // peer terminal write has crossed since #534.
+    if (number == AARCH64_NR_CHDIR || number == AARCH64_NR_SETITIMER ||
+        number == AARCH64_NR_RT_SIGACTION) {
+        return true;
+    }
+    // NOT rt_sigprocmask, and a finding rather than a scope line decided it.
+    // `kernel_process_signal_deliver_to` reads the TARGET's `signal_mask`
+    // and read-modify-writes its `pending_signals` from whichever CPU the
+    // SENDER is on, under no lock: `kill` from another process and a child's
+    // exit both reach it. A peer writing its own mask would be a third
+    // unsynchronized party to those two words.
+    //
+    // The race those words are already in is not this increment's to fix,
+    // and admitting this call would deepen it. rt_sigprocmask stays on core
+    // 0, where a sender and its target cannot be on two CPUs at once.
     // The terminal: a peer's output goes through its console ring (#534),
     // and input is ordered by the run lock (#547). A connection duplicated
     // onto a standard descriptor is not the terminal.
@@ -2734,7 +2770,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // rerun on core 0. A fixture the per-pid rule admits keeps its own
     // audit instead.
     if (cpu_id() != 0 && kernel_process_current_admitted_by_rule() == false &&
-        syscall_peer_safe(number, x0, x2) == false) {
+        syscall_peer_safe(number, x0) == false) {
         return SyscallAction::Migrate;
     }
     // GitHub issue #533: a peer must not read a tree that is being rewritten.
@@ -2751,7 +2787,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // filesystem, and every workload progress handler refuses a report made
     // anywhere but SECONDARY_CORE_ID, so migrating one during a mutation
     // would turn a fixture's report into a refusal.
-    if (cpu_id() != 0 && syscall_peer_safe(number, x0, x2) == false &&
+    if (cpu_id() != 0 && syscall_peer_safe(number, x0) == false &&
         ext2_mutation_in_flight()) {
         return SyscallAction::Migrate;
     }
@@ -4726,7 +4762,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
         return SyscallAction::Resume(2);
     }
-    if (number == 49) {
+    if (number == AARCH64_NR_CHDIR) {
         match user_range_check_read(kernel_process_current_root(), x0, 2) {
             UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserReadRangeResult::Ok(range) => {
@@ -4740,7 +4776,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
         return SyscallAction::Resume(LINUX_ENOENT);
     }
-    if (number == 103) {
+    if (number == AARCH64_NR_SETITIMER) {
         // setitimer(): HTTPd's request timeout is unnecessary for the single
         // bounded integration request. Return an all-zero previous timer.
         if (x2 != 0) {
@@ -4802,7 +4838,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
         return SyscallAction::Resume(0);
     }
-    if (number == 134) {
+    if (number == AARCH64_NR_RT_SIGACTION) {
         // rt_sigaction(signum, act, oldact, sigsetsize): this kernel does
         // not deliver signals, but a libc signal() call may pass a non-null
         // oldact expecting

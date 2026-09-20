@@ -1,3 +1,3 @@
-workload: peer tty answered every peer-safe per-process read on the secondary cpu, each checked for content
+workload: peer tty answered every peer-safe per-process call on the secondary cpu, reads and writes, each checked for content
 workload: peer tty reading the terminal on the secondary cpu
 workload: peer tty read its 17-byte line on the secondary cpu, none lost, repeated or reordered

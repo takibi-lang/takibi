@@ -600,7 +600,19 @@ def main() -> int:
     if postmortem_at is not None:
         walk = bytes(output[postmortem_at:])
         if args.postmortem_log:
-            Path(args.postmortem_log).write_bytes(walk)
+            # Saving the transcript must never cost the diagnosis. Observed
+            # on 2026-09-18: a stalled lane's artifact directory was gone by
+            # the time this ran, and the FileNotFoundError replaced the
+            # postmortem note -- the one sentence saying the guest stopped
+            # talking -- with a traceback about a log file. The note is the
+            # product here; the file is a convenience.
+            try:
+                Path(args.postmortem_log).parent.mkdir(
+                    parents=True, exist_ok=True)
+                Path(args.postmortem_log).write_bytes(walk)
+            except OSError as error:
+                print(f"[kernel/uart] could not save the postmortem walk to "
+                      f"{args.postmortem_log}: {error}", flush=True)
         answered = max(0, walk.count(DDB_PROMPT) - 1)
         raise RuntimeError(postmortem_note(
             bytes(output[:postmortem_at]), min(answered, postmortem_sent),

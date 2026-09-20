@@ -191,6 +191,22 @@ The next multicore increment is phase B. Its order is now:
    outside the process-run lock, which is the next increment's subject, not
    this one's.
 
+   **Third increment done 2026-09-18: the per-process WRITES.** `prlimit64`
+   in both directions, plus `chdir`, `setitimer` and `rt_sigaction`, whose
+   only write is into the caller's own user memory. prlimit64's store was
+   admitted by enumerating every toucher of a `ProcessFdContext`: while a
+   process runs on a peer, no other CPU touches the two limit words it
+   writes. `syscall_peer_safe` gave back the third argument the previous
+   increment added for it.
+
+   **`rt_sigprocmask` is refused, and a finding decided it rather than a
+   scope line.** `kernel_process_signal_deliver_to` reads the TARGET's
+   `signal_mask` and read-modify-writes its `pending_signals` from whichever
+   CPU the SENDER is on, under no lock -- `kill` and a child's exit both
+   reach it. Those two words are therefore already touched from two CPUs
+   today, which is a branch #563's body does not list; it is recorded there.
+   Admitting rt_sigprocmask would make a peer a third party to that.
+
    **What these cost, and the check that repays it.** `/bin/affinity` used
    `uname` as its example of a syscall the table refuses, so the first
    increment falsified the affinity gdb lane's premise -- found by a full

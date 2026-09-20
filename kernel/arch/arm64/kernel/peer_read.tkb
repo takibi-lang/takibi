@@ -47,6 +47,15 @@ const PEER_IDENT_CWD_BYTES: usize = 8;
 // struct rlimit64 is two 8-byte words: the soft limit then the hard one.
 const PEER_IDENT_RLIMIT_BYTES: usize = 16;
 const PEER_IDENT_RLIMIT_NOFILE: usize = 7;
+const CHDIR_SYSCALL: usize = 49;
+const SETITIMER_SYSCALL: usize = 103;
+const RT_SIGACTION_SYSCALL: usize = 134;
+// struct itimerval is two timevals, and struct sigaction is 32 bytes on
+// aarch64. Both come back zero-filled, which is what makes an untouched
+// 0xFF buffer a failure rather than a pass.
+const PEER_IDENT_ITIMER_BYTES: usize = 32;
+const PEER_IDENT_SIGACTION_BYTES: usize = 32;
+const PEER_IDENT_SIGACTION_SIGNUM: usize = 15;
 
 private fn peer_read_cpu(cpu_bytes: borrow [u8; 4..]) -> usize {
     if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize, 0, 0, 0, 0) != 0) {
@@ -307,6 +316,59 @@ private fn peer_identity(cpu_bytes: borrow [u8; 4..], peer_cpu: usize)
     }
     if (soft == 0 || soft > hard) { return 0; }
     if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
+    // The same prlimit64, now as a WRITE: put the soft limit back where it
+    // already was. Writing the value it just read keeps the fixture from
+    // changing what any later scenario sees, while still taking the store
+    // path -- the one thing the previous increment left on core 0.
+    let mut set_limit: [u8; PEER_IDENT_RLIMIT_BYTES];
+    for index: usize in 0..<PEER_IDENT_RLIMIT_BYTES {
+        set_limit[index] = rlimit[index];
+    }
+    let mut readback: [u8; PEER_IDENT_RLIMIT_BYTES];
+    for index: usize in 0..<PEER_IDENT_RLIMIT_BYTES { readback[index] = 0xFF; }
+    if (svc5(PRLIMIT64_SYSCALL, 0, PEER_IDENT_RLIMIT_NOFILE,
+             set_limit as *u8 as usize, readback as *u8 as usize, 0) != 0) {
+        return 0;
+    }
+    for index: usize in 0..<PEER_IDENT_RLIMIT_BYTES {
+        if (readback[index] != rlimit[index]) { return 0; }
+    }
+    if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
+    // chdir to the one directory this kernel has. It stores nothing, so the
+    // answer is the whole evidence: 0 for `/`, and ENOENT is a negative
+    // number, which this returns as a large unsigned value.
+    if (svc5(CHDIR_SYSCALL, "/" as *u8 as usize, 0, 0, 0, 0) != 0) {
+        return 0;
+    }
+    if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
+    // setitimer and rt_sigaction both answer by zero-filling a struct in the
+    // caller's own memory. A buffer that comes back still holding 0xFF is a
+    // call that answered without writing.
+    let mut itimer: [u8; PEER_IDENT_ITIMER_BYTES];
+    for index: usize in 0..<PEER_IDENT_ITIMER_BYTES { itimer[index] = 0xFF; }
+    if (svc5(SETITIMER_SYSCALL, 0, 0, itimer as *u8 as usize, 0, 0) != 0) {
+        return 0;
+    }
+    let mut itimer_clean: bool = true;
+    for index: usize in 0..<PEER_IDENT_ITIMER_BYTES {
+        if (itimer[index] != 0) { itimer_clean = false; }
+    }
+    if (itimer_clean == false) { return 0; }
+    if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
+    let mut sigaction: [u8; PEER_IDENT_SIGACTION_BYTES];
+    for index: usize in 0..<PEER_IDENT_SIGACTION_BYTES {
+        sigaction[index] = 0xFF;
+    }
+    if (svc5(RT_SIGACTION_SYSCALL, PEER_IDENT_SIGACTION_SIGNUM, 0,
+             sigaction as *u8 as usize, 8, 0) != 0) {
+        return 0;
+    }
+    let mut sigaction_clean: bool = true;
+    for index: usize in 0..<PEER_IDENT_SIGACTION_BYTES {
+        if (sigaction[index] != 0) { sigaction_clean = false; }
+    }
+    if (sigaction_clean == false) { return 0; }
+    if (peer_read_cpu(cpu_bytes) != peer_cpu) { return 0; }
     // Walk the buffer's own length and filter, rather than index it at
     // offset + i: the bound the compiler can see is the array's.
     let mut digest: usize = 0;
@@ -342,7 +404,7 @@ fn peer_tty() {
     // nothing else is measuring here, so the two calls cost no sequencing of
     // their own.
     let identity: usize = peer_identity(cpu_bytes as []u8, peer_cpu);
-    if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_TTY_TAG, 5, identity, 0, 0) != 1) {
+    if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_TTY_TAG, 9, identity, 0, 0) != 1) {
         svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
     }
     let mut count: usize = 0;
