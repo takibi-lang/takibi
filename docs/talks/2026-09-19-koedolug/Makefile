@@ -10,6 +10,8 @@ IMAGES := ../../../img/takibi-icon-v3.png ../../../img/takibi-icon-back-v3.png
 # rewrite this deck years after it was given.
 FIGURES := assets/defect-0001.svg assets/defect-0002.svg \
 	assets/defect-0004.svg assets/human-on-the-loop.svg
+MEDIA := assets/demo.mp4 assets/demo.png
+ASSETS := $(FIGURES) $(MEDIA)
 # assets/demo.mp4 and assets/demo.png are recorded separately and dropped in
 # by hand, so they are deliberately NOT prerequisites: the deck has to build
 # before the capture exists. The theme gives `section.video-slide video` a
@@ -34,8 +36,10 @@ MARP   := npx -y @marp-team/marp-cli@latest $(SRC) --theme-set $(THEME) --allow-
 #     make review CHROME_PATH=$HOME/.cache/puppeteer/chrome/linux-*/chrome-linux64/chrome
 #
 REVIEW_DIR := review
+DIST := dist
+DIST_ASSETS := $(DIST)/assets
 
-.PHONY: all show html pdf review clean
+.PHONY: all show html pdf bundle review clean
 
 all: show
 
@@ -50,10 +54,31 @@ $(HTML): $(SRC) $(THEME) $(IMAGES) $(FIGURES)
 pdf: $(SRC) $(THEME) $(IMAGES) $(FIGURES)
 	$(MARP) --pdf
 
+# Create a portable, self-hosted copy for a web server or blog repository.
+# Marp inlines the shared CSS but preserves its repository-relative image
+# URLs, so retarget those images to copies inside the bundle. Talk-local
+# assets already use assets/... in both the source and bundle layouts.
+# Unlike the presentation-time targets, the bundle requires the recorded
+# video and its PDF poster because it is the complete published artifact.
+bundle: $(SRC) $(THEME) $(IMAGES) $(ASSETS)
+	mkdir -p $(DIST_ASSETS)
+	$(MARP) -o $(DIST)/index.html
+	$(MARP) --pdf -o $(DIST)/slides.pdf
+	cp $(ASSETS) $(DIST_ASSETS)/
+	cp $(IMAGES) $(DIST_ASSETS)/
+	sed -i \
+		-e 's#../../../img/takibi-icon-v3.png#assets/takibi-icon-v3.png#g' \
+		-e 's#../../../img/takibi-icon-back-v3.png#assets/takibi-icon-back-v3.png#g' \
+		$(DIST)/index.html
+	@if grep -q '../../../img/takibi-icon' $(DIST)/index.html; then \
+		echo "ERROR: bundle still contains repository-relative image URLs"; \
+		exit 1; \
+	fi
+
 review: $(SRC) $(THEME) $(IMAGES) $(FIGURES)
 	mkdir -p $(REVIEW_DIR)
 	$(MARP) --images png -o $(REVIEW_DIR)/slide.png
 
 clean:
 	rm -f $(PDF) $(HTML)
-	rm -rf $(REVIEW_DIR)
+	rm -rf $(REVIEW_DIR) $(DIST)
