@@ -3,7 +3,7 @@
 
 `scripts/kernel_net_test.py` waits for four markers the UART driver touches:
 the kernel network link, the init socket listener, the HTTP daemon's listener,
-and the interactive HTTPd. Each wait exists so the
+and the init-managed HTTPd. Each wait exists so the
 request phase after it establishes readiness instead of assuming it (GitHub
 issues #387, #515, #519). Each also has a give-up branch that prints what was
 missing -- and that branch is the one part a passing run never reaches, so

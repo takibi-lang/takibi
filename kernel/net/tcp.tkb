@@ -1290,17 +1290,6 @@ fn tcp_connection_pool_probe() -> bool !{unsafe} {
     return distinct && stale_refused && drained;
 }
 
-fn kernel_tcp_inject_drop_next_syn_ack() {
-    tcp_drop_next_syn_ack = true;
-    tcp_injected_syn_pending = false;
-    tcp_injected_syn_retransmitted = false;
-    tcp_injected_syn_accepted = false;
-}
-
-fn kernel_tcp_injected_syn_ack_recovered() -> bool {
-    return tcp_injected_syn_accepted;
-}
-
 // GitHub issue #180: drop the Nth data segment sent on this connection
 // (0-based; kernel/arch/arm64/kernel/user_entry.S's EL0 fixture sends
 // exactly 3: index 0 = the 19-byte header, 1 = the 1460-byte body, 2 =
@@ -1340,29 +1329,11 @@ fn kernel_tcp_inject_drop_data_segment(index: usize) !{unsafe} {
     tcp_injected_data_recovery_observed = false;
 }
 
-fn kernel_tcp_injected_data_recovered() -> bool {
-    return tcp_injected_data_recovery_observed;
-}
-
 fn kernel_tcp_inject_drop_next_fin() !{unsafe} {
     tcp_drop_next_fin = true;
     kernel_tcp_clear_injection_markers();
     tcp_injected_fin_retransmitted = false;
     tcp_injected_fin_recovery_observed = false;
-}
-
-fn kernel_tcp_injected_fin_recovered() -> bool {
-    return tcp_injected_fin_recovery_observed;
-}
-
-fn kernel_tcp_inject_split_request() {
-    tcp_advertised_window = 64;
-    tcp_ack_each_stream_segment = true;
-    tcp_split_request_segments = 0;
-}
-
-fn kernel_tcp_split_request_recovered() -> bool {
-    return tcp_split_request_segments >= 2;
 }
 
 fn kernel_tcp_restore_stream_policy() {

@@ -1,3 +1,0 @@
-httpd server: syn-ack drop retransmit ok
-httpd server: split request stream ok
-httpd server: second request ok

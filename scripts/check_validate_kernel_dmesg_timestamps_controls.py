@@ -36,7 +36,7 @@ HEALTHY = [
                "regions=1 reservations=2 allocator_pages=259696"),
     (3.100000, "virtio net: link ready mac=02:00:20:00:00:02"),
     (7.100000, "virtio net: tcp handshake echo close reconnect ok"),
-    (17.400000, "foreground server: listener ready port=8080"),
+    (17.400000, "linux socket: listener ready port=8080"),
 ]
 
 
@@ -136,25 +136,25 @@ def main() -> int:
         # The milestone the bound is measured from. Without it the check
         # would pass having bounded nothing.
         ("a boot with no milestone",
-         [r for r in HEALTHY if "foreground server" not in r[1]],
+         [r for r in HEALTHY if "linux socket" not in r[1]],
          False, "would have passed having bounded nothing"),
 
         # The regression this exists for: still boots, still passes every
         # view, just slower.
         ("a boot 11 seconds slower",
-         replace(HEALTHY, "foreground server: listener ready port=8080", 28.4),
+         replace(HEALTHY, "linux socket: listener ready port=8080", 28.4),
          False, "INVESTIGATE, do not raise"),
 
         # GitHub issue #541's acceptance: +7 s in the boot proper, outside
         # the ash session, still fails the recalibrated bound.
         ("a boot 7 seconds slower outside the ash session",
-         replace(HEALTHY, "foreground server: listener ready port=8080", 24.4),
+         replace(HEALTHY, "linux socket: listener ready port=8080", 24.4),
          False, "outside the 2.0 s interactive ash session"),
 
         # A boot just inside the bound stays green, so the bound is a bound
         # and not a coincidence.
         ("a boot just inside the bound",
-         replace(HEALTHY, "foreground server: listener ready port=8080", 23.9),
+         replace(HEALTHY, "linux socket: listener ready port=8080", 23.9),
          True, "bounded=21.9 s"),
 
         # The checks that were here before #411 and had no control either.
@@ -179,7 +179,7 @@ def main() -> int:
     # figure; a boot that would have failed the old whole-boot bound passes.
     if not expect("a long ash session",
                   replace(HEALTHY,
-                          "foreground server: listener ready port=8080", 30.0),
+                          "linux socket: listener ready port=8080", 30.0),
                   True, "ash-session=10.0 s, bounded=20.0 s",
                   session=(11.0, 21.0)):
         return 1
@@ -193,7 +193,7 @@ def main() -> int:
     # With HEALTHY_SESSION's 2 s subtracted: 25.9, 34.9 and 35.1 s separated.
     for duration, ok in ((27.869018, True), (36.9, True), (37.1, False)):
         status, output = run(replace(
-            HEALTHY, "foreground server: listener ready port=8080", duration),
+            HEALTHY, "linux socket: listener ready port=8080", duration),
             profile="hosted")
         needle = "boot-bound=35 s" if ok else "INVESTIGATE, do not raise"
         if (status == 0) != ok or needle not in output:
@@ -211,7 +211,7 @@ def main() -> int:
     rpi5 = [(10.1 if "reconnect ok" in t else s,
              t.replace("virtio net", "rp1 gem")) for s, t in HEALTHY]
     status, output = run(replace(
-        rpi5, "foreground server: listener ready port=8080", 27.2), "rpi5")
+        rpi5, "linux socket: listener ready port=8080", 27.2), "rpi5")
     # GitHub issue #545: a bound failure also says where the time went.
     if (status == 0 or "INVESTIGATE, do not raise" not in output or
             "The largest gaps in the host timing log: " not in output or
@@ -220,7 +220,7 @@ def main() -> int:
               f"its ash session was accepted or reported oddly\n{output}")
         return 1
     status, output = run(replace(
-        rpi5, "foreground server: listener ready port=8080", 26.9), "rpi5")
+        rpi5, "linux socket: listener ready port=8080", 26.9), "rpi5")
     if status != 0:
         print("FAIL dmesg-timestamps control: an RPi5 boot 24.9 s outside "
               f"its ash session was rejected by its 25 s bound\n{output}")

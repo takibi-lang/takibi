@@ -90,7 +90,7 @@ def main() -> int:
     status, report = run(REPO)
     if status != 0:
         failures.append(f"the repository itself does not pass: {report.strip()!r}")
-    elif "13 lane runner(s)" not in report:
+    elif "12 lane runner(s)" not in report:
         failures.append(f"the repository passed about an unexpected number of "
                         f"lanes: {report.strip()!r}")
 

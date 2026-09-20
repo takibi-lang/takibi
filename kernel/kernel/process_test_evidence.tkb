@@ -2,10 +2,8 @@
 // explicit owners). Split out of kernel/kernel/process.tkb's own
 // execution_* globals: these ten counters/flags are read only by
 // kernel_process_*_evidence()/kernel_process_*_acceptance_evidence()
-// predicate functions (process.tkb) and by the test-driver-bounded
-// foreground-server lifecycle (kernel/kernel/syscall.tkb's
-// kernel_syscall_foreground_server_start()) -- never by real
-// scheduling/dispatch decisions. That is what distinguishes this file's
+// predicate functions (process.tkb), never by real scheduling/dispatch
+// decisions. That is what distinguishes this file's
 // state from process.tkb's execution_scheduler_enabled/
 // execution_reschedule_pending, which stay there because
 // kernel_process_schedule()/kernel_process_syscall_return_schedule()
@@ -22,7 +20,6 @@
 
 struct ProcessTestEvidence {
     clone_calls: usize;
-    child_exit_count: usize;
     exit_42_seen: bool;
     uart_blocks: usize;
     uart_wakes: usize;
@@ -42,7 +39,6 @@ private let mut process_test_evidence: ProcessTestEvidence;
 
 fn process_test_evidence_reset() {
     process_test_evidence.clone_calls = 0;
-    process_test_evidence.child_exit_count = 0;
     process_test_evidence.exit_42_seen = false;
     process_test_evidence.timer_switches = 0;
     process_test_evidence.deferred_switches = 0;
@@ -70,13 +66,7 @@ fn process_test_evidence_clone_calls() -> usize {
 }
 
 fn process_test_evidence_record_child_exit(status: usize) {
-    process_test_evidence.child_exit_count =
-        process_test_evidence.child_exit_count + 1;
     if (status == 42) { process_test_evidence.exit_42_seen = true; }
-}
-
-fn process_test_evidence_child_exit_count() -> usize {
-    return process_test_evidence.child_exit_count;
 }
 
 fn process_test_evidence_exit_42_seen() -> bool {

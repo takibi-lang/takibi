@@ -720,12 +720,8 @@ def main() -> int:
                 del frame
             except socket.timeout:
                 break
-        # Then wait for the guest to say the listener exists, rather than
-        # assuming the drain above outlasted the boot. Waiting rather than
-        # retrying the request is deliberate: a completed connection makes
-        # the server fork, and `httpd server: foreground children=2` is an
-        # asserted view, so an extra attempt would change the verdict it
-        # reports.
+        # Then wait for the guest to say the persistent listener exists,
+        # rather than assuming the drain above outlasted the boot.
         if DAEMON_READY_FILE is not None:
             if not wait_for_marker(DAEMON_READY_FILE, "HTTP daemon listener"):
                 print("  the guest never announced its HTTP listener, so "
@@ -740,8 +736,8 @@ def main() -> int:
 
     normal_ok = ok_reconnect and http_ok
     if (normal_ok and INTERACTIVE_READY_FILE is not None):
-        if not wait_for_marker(INTERACTIVE_READY_FILE, "interactive HTTPd"):
-            print("  interactive HTTPd never became ready")
+        if not wait_for_marker(INTERACTIVE_READY_FILE, "init-managed HTTPd"):
+            print("  init-managed HTTPd never became ready")
             sock.close()
             return 1
         arp_ok = send_until_reply(

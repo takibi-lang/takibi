@@ -9,7 +9,7 @@
 # Reaching it honestly needs the discovered page allocator genuinely empty,
 # which no probe does. This lane forces ONE acquisition to return its
 # payload-free OutOfMemory variant from the debugger side, the way
-# scripts/run_kernel_qemutest_lifecycle_gap.sh and
+# the other focused QEMU GDB runners and
 # scripts/run_kernel_oops_qemutest.sh already poke kernel state without a
 # kernel-side test switch. See scripts/kernel_alloc_rollback.gdb for where it
 # arms and how compiler-emitted return ABI metadata makes the return safe.

@@ -6588,9 +6588,7 @@ fn kernel_process_is_child() -> bool {
                .has_parent;
 }
 
-// The boot-time HTTPd fixture is launched directly by PID 1.  A manually
-// started HTTPd from the interactive ash is one level deeper (ash -> httpd)
-// and must not inherit the fixture's bounded foreground-server lifecycle.
+// Whether the current process is a direct child of BusyBox init.
 fn kernel_process_parent_is_root() -> bool {
     if (execution_here().current_live == false ||
         scheduled_process_record_of(execution_here().current_handle)
@@ -7500,10 +7498,6 @@ fn kernel_process_scheduler_acceptance_evidence() -> bool {
            process_test_evidence_deferred_requests() != 0 &&
            process_test_evidence_exit_42_seen() &&
            kernel_process_schedulable_count() <= 1;
-}
-
-fn kernel_process_child_exit_count() -> usize {
-    return process_test_evidence_child_exit_count();
 }
 
 fn kernel_process_last_child_pid() -> usize {

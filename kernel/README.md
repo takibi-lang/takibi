@@ -153,17 +153,19 @@ refuses (`/etc/not-a-program`, `/etc/bad-interpreter.sh`). `/bin/busybox` exists
 is the name BusyBox re-executes itself through.
 
 The current HTTPd milestone runs the unmodified pinned BusyBox Extras binary
-through its `/bin/httpd` hard link as a persistent foreground daemon:
-`httpd -f -p 8080 -h /`, reached by running `httpd.sh`, which carries
-that command line so no prompt has to.
+through its `/bin/httpd` hard link as a persistent foreground daemon managed
+by BusyBox init: `httpd -f -p 8080 -h /`. Its `/etc/inittab` `respawn` entry
+starts it after sysinit and restarts it if it exits.
 HTTPd creates its own IPv6 wildcard listener, accepts each connection, and
 uses the observed `clone(SIGCHLD)` fork shape. Each child receives a private
 copy-on-write view of the parent's initial 331-page VM plus a distinct kernel
 stack; it gets private pages only when it writes. It aliases the accepted
 socket onto fd 0/fd 1, reads `index.html` from USB ext2, writes the response,
-and exits. The same parent accepts two sequential host `curl` requests before
-the bounded integration teardown reclaims every child mapping, fd, and socket
-reference. The document root also carries the SD-card demo's `about.html` and
+and exits. The same parent accepts every sequential host request while each
+completed worker releases its mapping, fd, and socket references. The host
+integration runner ends the machine after validation; the kernel never
+terminates the server because a request count was reached. The document root
+also carries the SD-card demo's `about.html` and
 23,658-byte `icon.png`; interactive integration fetches `/`, all three named
 assets, checks their complete bodies, and verifies `text/html`/`image/png`
 content types.
@@ -207,7 +209,6 @@ make kernelcheck-qemu-debug  # run the complete QEMU integration test against th
 make kernelcheck-qemu-debug-repeat  # repeat it 5 times, preserving each boot's artifacts
 make kernelcheck-oops-qemu  # verify parked QEMU oops records and the retained lifecycle trace
 make kernelcheck-ddb-qemu  # enter DDB through a real UART BREAK, inspect, and resume
-make kernelcheck-lifecycle-gap-qemu  # verify the interactive-HTTPd checkpoint diagnosis names a real gap
 make kernelcheck-uart-wake-qemu  # type into ash while gdb holds each read inside its way to sleep
 make kernelcheck-affinity-gdb-qemu  # gdb sees a peer's unaudited syscall handed to core 0
 make kernelbuild       # build every maintained kernel target
@@ -276,19 +277,10 @@ the QEMU process or UART socket exists.
 
 ### Publish a page from interactive ash
 
-Both shell targets provide the same BusyBox HTTPd command, as a script in
-the rootfs rather than as something to retype. Wait for the
-`interactive shell: uart blocked` marker and its `/ #` prompt, then run:
-
-```sh
-httpd.sh &
-```
-
-No pathname and no interpreter: the script lives in `/bin`, so ash's `PATH`
-search finds it, and its `#!/bin/sh` line is what `execve` resolves to decide
-what runs it. The trailing `&` is still needed -- `httpd -f` stays in the
-foreground for the life of the daemon. Its command line (port 8080, document
-root `/`) lives in `kernel/tests/ext2/httpd.sh`.
+Both shell targets boot the same init-managed BusyBox HTTPd automatically.
+Wait for `persistent server: listener ready port=8080`; no shell command is
+needed. `/bin/httpd.sh` remains available for experiments on a different port,
+but starting it unchanged would correctly conflict with the service on 8080.
 
 For QEMU, start the shell and open the forwarded loopback URL in a browser:
 
@@ -437,7 +429,7 @@ probe/board setup. A successful run includes:
 [kernel/rpi5] BusyBox httpd curl passed
 [kernel/rpi5] second BusyBox httpd curl passed
 [kernel/rpi5] userspace connected I/O passed
-PASS kernel/rpi5 (51 views, one boot)
+PASS kernel/rpi5 (47 views, one boot)
 ```
 
 It tests negative and positive ARP/ICMP behavior, TCP lifecycle, USB ext2
@@ -696,7 +688,7 @@ The focused QEMU runners are the executable reference for launching the full
 kernel device configuration under `-S -gdb`: notably
 `scripts/run_kernel_oops_qemutest.sh`,
 `scripts/run_kernel_ddb_qemutest.sh`, and
-`scripts/run_kernel_qemutest_lifecycle_gap.sh`. On RPi5, use the repository's
+the focused QEMU GDB runners. On RPi5, use the repository's
 `examples/common_rpi5/bcm2712.cfg` with a CMSIS-DAP probe; the maintained load
 and target-selection sequence is in `scripts/rpi5_jtag_load.sh`. Stock host
 GDB is not an AArch64 substitute in this environment; use `gdb-multiarch`.
@@ -880,36 +872,15 @@ oops report use one row formatter, so their field order cannot drift. Ordinary
 boots leave tracing and the report disabled. Both scheduler CPUs write their
 own ring and a global atomic sequence preserves the cross-CPU order.
 
-### Interactive HTTPd lifecycle checkpoints
+### Init-managed HTTPd lifecycle
 
 PID 1 is the pinned BusyBox `init` applet. It reads `/etc/inittab`, runs the
 bounded self-test suite as its `sysinit` action (`/etc/init.sh`), waits for
-it, and then keeps an interactive ash alive as a `respawn` entry. That ash
-forks and execs the background HTTPd the host harness drives. init stays PID
-1 for the life of the kernel: there is no `exec` self-replace and no wrapper
-shell between it and the interactive ash. Because
-that chain of boundaries used to collapse into one generic "interactive
-HTTPd did not become ready" timeout, the kernel now prints a
-`persistent shell: <name> pid=<n>` checkpoint at each of fork, child
-selected, exec prepare, and exec commit for that HTTPd child specifically
-(gated on `kernel_syscall_persistent_shell_active()`, not on any bounded
-self-test fork), plus a listener-ready line for the socket boundary.
-The view that compares those four lines normalizes the pid to `<child>`:
-a pid is minted in creation order rather than read off the process slot,
-so its value counts how many processes the boot created before this
-fixture, which is a fact about fixture order and not about the lifecycle.
-That all four checkpoints name the *same* child is enforced in the kernel
--- the last three log only on a match against the pid the fork checkpoint
-recorded -- so the view does not need the number to say it.
-`scripts/run_kernel_uart_driver.py` tracks these in order alongside its own
-host-observed boundaries (command submitted, parent resumed) and, on a
-stall, names the last completed checkpoint and the next expected one
-instead of a single opaque timeout. `kernelcheck-lifecycle-gap-qemu` proves
-that diagnosis is itself correct: GDB pokes only the exec-commit
-checkpoint's own one-shot guard variable (no dedicated test-only kernel
-switch), so HTTPd still starts and answers real HTTP requests while that
-one print is skipped, and the harness is expected to fail naming exactly
-that gap.
+it, then starts HTTPd and an interactive ash as separate `respawn` entries.
+init stays PID 1 for the life of the kernel: there is no `exec` self-replace
+and no wrapper shell. The UART driver publishes HTTP readiness from the
+service's own `listen(2)` marker and shell readiness from ash's UART block;
+neither one depends on the shell launching the other.
 
 ### What this verifies
 
@@ -919,7 +890,7 @@ each exactly against its `.expected` file -- the identical "one boot, many
 independent contracts" pattern `kernelcheck-rpi5` uses (see "Expected-file
 integration views" below), just without the SWD reset/load dance: QEMU's
 TCP-backed serial chardev is read by the shared pyserial driver.
-Forty-three views currently pass; the lane prints the live count on every
+Forty-seven views currently pass; the lane prints the live count on every
 run, which is the number to trust when this one has drifted. The target then
 runs a separate ash smoke lane using the same pyserial driver and the shared
 `kernel/tests/common/ash/ash.stdin` and `ash.expected` fixtures; the RPi5
@@ -936,11 +907,9 @@ runner drives those fixtures during its one boot as well. They cover:
 - real ARP, ICMP echo, and a full TCP handshake/data-echo/close/reconnect
   sequence against a host-side Python peer (`scripts/kernel_net_test.py`)
   over a private `-netdev dgram` transport.
-- the BusyBox HTTPd accept/serve loop, split requests, retransmission
-  recovery, repeated requests, and exact HTML/PNG bodies and content types;
-- the interactive HTTPd child's own fork/child-selected/exec-prepare/
-  exec-commit/listener-ready lifecycle checkpoints, in order (see
-  "Interactive HTTPd lifecycle checkpoints" above);
+- the init-managed BusyBox HTTPd accept/serve loop, split requests,
+  retransmission recovery, repeated requests, and exact HTML/PNG bodies and
+  content types;
 - the ext2-resident `init.sh` scenario, run as BusyBox init's `sysinit`
   action, including connected socket I/O,
   overlapping connections, partial writes, UART input, and process/VM

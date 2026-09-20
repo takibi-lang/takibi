@@ -839,10 +839,6 @@ fn process_image_clone_vm_reap(dest_root: usize) -> ProcessCloneVmReapResult {
     return ProcessCloneVmReapResult::Reaped;
 }
 
-fn process_image_clone_vm_reaped_pages() -> usize {
-    return *process_image_counter_here(clone_last_reaped_count);
-}
-
 // GitHub issue #219 verification: process_image_clone_vm_begin() must
 // initialize root 1's demand-stack metadata so process_image_handle_data_
 // abort() can grow the child's stack past whatever was mapped at fork

@@ -82,10 +82,6 @@ fi
 # way any other external command here is: ash forks and execve()s it.
 /bin/user_payload
 
-# This foreground daemon is an ordinary ash child. Its dynamic BusyBox/musl
-# image is selected by the command name, while the shell remains PID 1.
-/bin/httpd -f -p 8080 -h /
-
 # Read the retained, kernel-timestamped text ring through Linux syslog(2),
 # exactly as the packaged BusyBox dmesg applet does on Linux.
 /bin/dmesg
@@ -102,6 +98,6 @@ done
 
 echo "init: complete"
 
-# The persistent interactive shell is a BusyBox init respawn entry now
-# (/etc/inittab), not something this script hands off to. init keeps it
-# running and stays PID 1 itself.
+# The persistent HTTP server and interactive shell are BusyBox init respawn
+# entries now (/etc/inittab), not children this finite boot script launches.
+# init keeps both running and stays PID 1 itself.

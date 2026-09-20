@@ -5,9 +5,8 @@
 // kernel_syscall_partial_write_evidence() and by three log-once UART-wait
 // boot messages -- never by real syscall dispatch decisions, unlike
 // syscall_connection_open (per-connection open state, stays in
-// syscall.tkb) or the test-driver-bounded foreground-server/persistent-
-// shell lifecycle state (real control-flow branches on those; a separate,
-// later split out of #294).
+// syscall.tkb) or the persistent-service/shell lifecycle state (real
+// control-flow branches on those; a separate, later split out of #294).
 //
 // Current limitations: single-writer, matching kernel/kernel/syscall.tkb's
 // own "NOT SYNCHRONIZED, single-core dispatch only" limitation -- every

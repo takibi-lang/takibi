@@ -750,33 +750,14 @@ fn kernel_process_child_exec_prepare() -> KernelChildExecPrepareResult {
                         }
                         kernel_syscall_process_configure_current(
                             heap_start, heap_limit);
-                        // Only the init script's direct child is the
-                        // bounded integration fixture.  An HTTPd started
-                        // from the interactive ash is a grandchild of PID 1
-                        // and must retain a normal daemon lifetime; applying
-                        // the fixture state there made its accept loop stop
-                        // after the fixture's two requests.
-                        // GitHub issue #270: this used to also require the
-                        // launcher to be PID 1's own child, which was true
-                        // only while init.sh WAS PID 1. Under BusyBox init
-                        // the bounded HTTPd is a grandchild, and the
-                        // distinction the test actually needs is the phase,
-                        // not the depth: before the boot fixture reports,
-                        // an HTTPd is the bounded one; after, it is the
-                        // interactive shell's daemon.
-                        if (kernel_syscall_persistent_shell_active() ==
-                                false) {
-                            kernel_init_socket_evidence =
-                                kernel_syscall_socket_evidence();
-                            kernel_syscall_foreground_server_start();
-                            kernel_tcp_inject_drop_next_syn_ack();
-                            kernel_tcp_inject_split_request();
-                        } else {
-                            kernel_syscall_daemon_start();
-                            if (kernel_syscall_persistent_shell_active()) {
-                                kernel_syscall_persistent_shell_checkpoint_exec_commit(
-                                    kernel_process_current_pid());
-                            }
+                        // HTTPd is a normal init-managed service. The host
+                        // integration runner ends the boot, so the kernel
+                        // must never turn an accept() count into process
+                        // termination for this unmodified BusyBox binary.
+                        kernel_syscall_daemon_start();
+                        if (kernel_syscall_persistent_shell_active()) {
+                            kernel_syscall_persistent_shell_checkpoint_exec_commit(
+                                kernel_process_current_pid());
                         }
                         process_image_activate_root(child_root);
                         kernel_process_child_exec_mark();
@@ -878,23 +859,7 @@ fn kernel_init_script_success_evidence(include_file_evidence: bool) {
     if (clone_growth_probe_ok) {
         kernel_boot_log("vm fork: child stack growth ok\n");
     }
-    if (kernel_tcp_injected_syn_ack_recovered()) {
-        kernel_boot_log("httpd server: syn-ack drop retransmit ok\n");
-    }
-    if (kernel_tcp_split_request_recovered()) {
-        kernel_boot_log("httpd server: split request stream ok\n");
-    }
-    if (kernel_syscall_foreground_server_children() == 2) {
-        kernel_boot_log("httpd server: foreground children=2 vm-pages=331 reaped\n");
-        kernel_boot_log("httpd server: second request ok\n");
-    }
     kernel_tcp_restore_stream_policy();
-    if (kernel_tcp_injected_data_recovered()) {
-        kernel_boot_log("httpd server: data drop retransmit ok\n");
-    }
-    if (kernel_tcp_injected_fin_recovered()) {
-        kernel_boot_log("httpd server: fin drop retransmit ok\n");
-    }
     let (exec_reaps, exec_reaps_clean, exec_stack_growths) =
         process_image_exec_reap_evidence();
     if (exec_reaps >= 1 && exec_reaps_clean == exec_reaps) {
@@ -1106,7 +1071,6 @@ fn kernel_test_common_probes() {
 // network/storage fixtures. All common user-space scenarios and their order live
 // in this driver.
 let mut kernel_test_rpi5_extended: bool;
-let mut kernel_test_httpd_daemon: bool;
 let mut kernel_test_init_script: bool;
 
 fn kernel_test_driver_run() {

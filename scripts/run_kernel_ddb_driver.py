@@ -183,7 +183,7 @@ def main() -> int:
                     b"virtio net: link ready " in received):
                 network_ready_file.touch()
             if (not foreground_listener_file.exists() and
-                    b"foreground server: listener ready port=8080\n"
+                    b"persistent server: listener ready port=8080\n"
                     in received):
                 foreground_listener_file.touch()
             if (not init_listener_file.exists() and
@@ -196,15 +196,12 @@ def main() -> int:
                 serial.sendall(b"irqtest\n")
                 payload_sent = True
 
-            # The pair deliberately waits until its restart verdict before
-            # measuring migration. Match the maintained integration lane's
-            # third runnable context: its persistent shell starts a
-            # background HTTPd, allowing each busy process to become Ready
-            # and be selected by the other CPU.
+            # The init-managed HTTPd is the maintained lane's third runnable
+            # context; no shell command is needed to create another server.
             if (not migration_context_sent and
                     b"workload: busy pair done\n" in received and
-                    b"persistent shell: uart blocked\n" in received):
-                serial.sendall(b"httpd.sh &\n")
+                    b"persistent server: listener ready port=8080\n"
+                    in received):
                 migration_context_sent = True
 
             migration_ready = (

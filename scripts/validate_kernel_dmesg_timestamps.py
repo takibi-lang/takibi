@@ -141,10 +141,11 @@ def main() -> None:
 
     by_text = {text: timestamp for timestamp, text in records}
     first = b"takibi kernel: EL1"
-    # The whole bounded suite has run by the time the foreground server is
-    # listening: it is the LAST timestamped record on both platforms, so its
-    # timestamp is the boot duration (GitHub issue #411).
-    boot_done = b"foreground server: listener ready port=8080"
+    # This is the last deterministic service-readiness record before the
+    # finite sysinit script takes its dmesg snapshot. The init-managed HTTP
+    # service starts only after that script exits and therefore cannot appear
+    # in the snapshot whose timestamps this validator reads.
+    boot_done = b"linux socket: listener ready port=8080"
     #
     # The bounds below were measured rather than guessed, on 2026-09-06:
     #
@@ -243,9 +244,8 @@ def main() -> None:
         fail("bounded network retransmission markers are absent")
     if boot_done not in by_text:
         fail("the boot-duration milestone is absent, so this check would "
-             "have passed having bounded nothing. The same line is held by "
-             "kernel/tests/common/views/boot_milestone.expected so its "
-             "disappearance fails a view too; the reasoning is in this file.")
+             "have passed having bounded nothing; the reasoning is in this "
+             "file.")
     boot_us = by_text[boot_done]
     session_us = ash_session_us(args.timing_log)
     bounded_us = boot_us - session_us
@@ -279,8 +279,8 @@ def main() -> None:
     # shape this pattern no longer matches, would silently retire issue
     # #454's whole measurement while every lane stayed green -- the defect
     # scripts/check_documented_counts.py exists for, one level up. Every
-    # capture that gets this far reached `foreground server: listener ready`,
-    # and the line is printed before that on both platforms.
+    # capture that gets this far reached the final resource milestone, and
+    # the line is printed before that on both platforms.
     console = CONSOLE_SPIN.search(data)
     if not console:
         fail("the boot reached its last milestone without printing "

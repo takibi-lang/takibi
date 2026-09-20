@@ -319,25 +319,12 @@ if [ "$socket_accept_ok" -ne 1 ]; then
 fi
 echo "[kernel/rpi5] userspace connected I/O passed"
 
-# GitHub issue #187: the kernel injects a one-shot SYN-ACK drop right
-# before starting the real BusyBox HTTPd daemon (kernel_tcp_inject_drop_
-# next_syn_ack(), kernel/platform/rpi5/init.tkb), so its own bounded retransmit
-# budget (TCP_RETRY_LIMIT * retry_ticks, kernel/net/tcp.tkb) can race
-# against curl's connection timeout if the FIRST curl attempt's SYN
-# happens to arrive while the kernel is still busy with the earlier
-# USB-ext2 provisioning step (measured to vary by roughly 10x in wall-clock
-# time between otherwise-identical real-hardware runs). Waiting for the
-# kernel's actual userspace `listen(2)` marker here, instead of firing curl
-# at the image-map marker, means curl's first SYN can only arrive once the
-# daemon has published its listening socket -- decoupling this race from
-# userspace startup and USB provisioning time
-# entirely without touching tcp.tkb's own timing constants or weakening
-# what the drop-recovery check proves (still the real daemon's real
-# accept() path, still a real dropped packet).
-echo "[kernel/rpi5] waiting for the kernel to be ready to start the BusyBox httpd daemon"
+# BusyBox init owns one persistent HTTPd service. Wait for its real listen(2)
+# marker before the first request; the same process serves every later asset.
+echo "[kernel/rpi5] waiting for the init-managed BusyBox httpd listener"
 httpd_ready=0
 for _wait in $(seq 1 600); do
-    if LC_ALL=C grep -aFq 'foreground server: listener ready port=8080' "$UART_LOG"; then
+    if LC_ALL=C grep -aFq 'persistent server: listener ready port=8080' "$UART_LOG"; then
         httpd_ready=1
         break
     fi
@@ -450,17 +437,17 @@ for _wait in $(seq 1 600); do
     sleep 0.1
 done
 if [ "$interactive_listener" -ne 1 ]; then
-    echo "FAIL kernel/rpi5: interactive background HTTPd did not publish its listener" >&2
+    echo "FAIL kernel/rpi5: init-managed HTTPd did not publish its listener" >&2
     exit 1
 fi
 
-echo "[kernel/rpi5] checking ARP while interactive HTTPd is listening"
+echo "[kernel/rpi5] checking ARP while init-managed HTTPd is listening"
 if ! sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
         ARP_TEST_REQUESTER_IP="$ETH_TEST_HOST_IP" \
         ARP_TEST_OTHER_FIRST=1 \
         python3 "$REPO_ROOT/scripts/eth_arp_reply_test.py" \
         > >(tee "$INTERACTIVE_ARP_LOG") 2>&1; then
-    echo "FAIL kernel/rpi5: interactive HTTPd ARP check failed" >&2
+    echo "FAIL kernel/rpi5: init-managed HTTPd ARP check failed" >&2
     exit 1
 fi
 
@@ -474,7 +461,7 @@ for asset_spec in "${interactive_assets[@]}"; do
     IFS='|' read -r asset_name asset_path asset_file asset_type <<<"$asset_spec"
     interactive_body="$ARTIFACT_DIR/interactive-httpd-$asset_name.actual"
     interactive_log="$ARTIFACT_DIR/interactive-httpd-$asset_name.log"
-    echo "[kernel/rpi5] curling interactive background HTTPd $asset_path"
+    echo "[kernel/rpi5] curling init-managed HTTPd $asset_path"
     interactive_httpd_ok=0
     for _attempt in $(seq 1 20); do
         if interactive_type="$(curl --silent --show-error --fail \
@@ -497,7 +484,7 @@ for asset_spec in "${interactive_assets[@]}"; do
         sleep 0.25
     done
     if [ "$interactive_httpd_ok" -ne 1 ]; then
-        echo "FAIL kernel/rpi5: interactive HTTPd curl $asset_path failed (see $interactive_log)" >&2
+        echo "FAIL kernel/rpi5: init-managed HTTPd curl $asset_path failed (see $interactive_log)" >&2
         exit 1
     fi
 done
@@ -511,7 +498,7 @@ done
 # nobody has done yet; what a printed number buys is the difference between
 # two runs, and a baseline whose variance becomes known by accumulating rather
 # than by being guessed.
-echo "[kernel/rpi5] measuring TCP throughput over the interactive HTTPd"
+echo "[kernel/rpi5] measuring TCP throughput over the init-managed HTTPd"
 #
 # ONE modest file, not a size sweep. The rate was measured flat across two
 # orders of magnitude on 2026-09-06 -- 15-18 KiB/s from 133 KB to 1.09 MB --
@@ -545,10 +532,10 @@ uart_driver_status=0
 wait "$uart_driver_pid" || uart_driver_status=$?
 uart_driver_pid=""
 if [ "$uart_driver_status" -ne 0 ]; then
-    echo "FAIL kernel/rpi5: interactive HTTPd UART validation failed" >&2
+    echo "FAIL kernel/rpi5: init-managed HTTPd UART validation failed" >&2
     exit 1
 fi
-echo "[kernel/rpi5] interactive background HTTPd passed"
+echo "[kernel/rpi5] init-managed HTTPd passed"
 
 python3 "$REPO_ROOT/scripts/validate_kernel_dmesg_timestamps.py" \
     --platform rpi5 --timing-log "$UART_TIMING_LOG" "$UART_LOG"

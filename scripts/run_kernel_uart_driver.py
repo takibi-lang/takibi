@@ -9,28 +9,13 @@ import time
 
 import serial
 
-# Issue #289: ordered lifecycle boundaries for the interactive HTTPd
-# scenario, in the order they must complete. "command-submitted" and
-# "parent-resumed" are host-observed (this driver's own state); the rest
-# are kernel-printed checkpoints (see kernel/kernel/syscall.tkb's
-# `persistent shell: ...` prints, gated to the interactive HTTPd child's own
-# fork/exec, not the demo shell's own launch). ARP reply and the two HTTP
-# requests that follow "parent-resumed" are the host network peer's own
-# concern (scripts/kernel_net_test.py), not this driver's -- its own
-# PASS/FAIL output covers that boundary.
+# The init-managed HTTPd and interactive shell start independently after the
+# finite sysinit action. HTTP integration may begin at the listener marker;
+# terminal integration additionally waits for ash to block on UART.
 LIFECYCLE_CHECKPOINTS = (
-    ("command-submitted", lambda output, httpd_sent, httpd_ready: httpd_sent),
-    ("fork", lambda output, httpd_sent, httpd_ready:
-        b"persistent shell: fork child pid=" in output),
-    ("child-selected", lambda output, httpd_sent, httpd_ready:
-        b"persistent shell: child selected pid=" in output),
-    ("exec-prepare", lambda output, httpd_sent, httpd_ready:
-        b"persistent shell: exec prepare pid=" in output),
-    ("exec-commit", lambda output, httpd_sent, httpd_ready:
-        b"persistent shell: exec commit pid=" in output),
     ("listen", lambda output, httpd_sent, httpd_ready:
         b"persistent server: listener ready port=8080" in output),
-    ("parent-resumed", lambda output, httpd_sent, httpd_ready: httpd_ready),
+    ("shell-ready", lambda output, httpd_sent, httpd_ready: httpd_ready),
 )
 
 
@@ -268,7 +253,7 @@ def main() -> int:
     parser.add_argument("--stop-marker", default="resources: pages=0")
     # GitHub issue #448: the CPU-bound pair /etc/inittab starts runs
     # concurrently with this ash session and reports its verdict when both
-    # halves have run their rounds side by side. The interactive HTTPd
+    # halves have run their rounds side by side. The init-managed HTTPd
     # handshake finishes first, so without this the capture can end before
     # the workload has anything to say and its view fails on a line that
     # was only ever late.
@@ -310,9 +295,9 @@ def main() -> int:
 
     interactive_httpd = args.interactive_httpd_ready_file is not None
     if interactive_httpd != (args.interactive_httpd_done_file is not None):
-        raise RuntimeError("interactive HTTPd ready/done files must be paired")
+        raise RuntimeError("init-managed HTTPd ready/done files must be paired")
     if args.interactive_httpd_listener_file and not interactive_httpd:
-        raise RuntimeError("interactive HTTPd listener file requires ready/done files")
+        raise RuntimeError("init-managed HTTPd listener file requires ready/done files")
     httpd_ready_file = (Path(args.interactive_httpd_ready_file)
                         if interactive_httpd else None)
     httpd_listener_file = (Path(args.interactive_httpd_listener_file)
@@ -485,18 +470,20 @@ def main() -> int:
                     write_uart_line(connection, b"")
                     ppoll_probe_byte_sent = True
 
-                # Publish the boot-time HTTP listener the moment the guest
-                # announces it. The host-side network peer talks to that
-                # server and used to race the boot to it, with no way to tell
-                # "not up yet" from "broken" (GitHub issue #56's first CI
-                # runs, where the peer failed at 24s on a four-core runner
-                # while the guest was still short of this line).
+                # The one init-managed service satisfies both readiness
+                # consumers retained by the host runners. There is no second
+                # HTTPd launched from the interactive shell.
                 if (foreground_listener_file is not None
                         and not foreground_listener_published
-                        and b"foreground server: listener ready port=8080\n"
+                        and b"persistent server: listener ready port=8080\n"
                         in output):
                     foreground_listener_file.touch()
                     foreground_listener_published = True
+                if (httpd_listener_file is not None
+                        and b"persistent server: listener ready port=8080\n"
+                        in output):
+                    httpd_listener_file.touch()
+                    httpd_sent = True
 
                 if (init_listener_file is not None
                         and not init_listener_published
@@ -512,36 +499,10 @@ def main() -> int:
                     network_ready_published = True
 
                 workload_seen = workload_ready(output, args.workload_marker)
-                if (interactive_httpd and workload_seen and
-                        not httpd_shell_probe_sent and
+                if (interactive_httpd and httpd_sent and not httpd_ready and
                         b"persistent shell: uart blocked\n" in output):
-                    write_uart_line(connection, b"echo httpd-shell-ready")
-                    httpd_shell_probe_sent = True
-                if httpd_shell_probe_sent and not httpd_sent:
-                    text = output.decode(
-                        "utf-8", errors="replace").replace("\r", "")
-                    if any(line.removeprefix("/ # ") ==
-                           "httpd-shell-ready" for line in text.splitlines()):
-                        write_uart_line(
-                            connection,
-                            b"httpd.sh &")
-                        print("[kernel/uart] sent interactive HTTPd command",
-                              flush=True)
-                        httpd_sent = True
-                if (httpd_sent and not httpd_probe_sent and
-                        b"persistent server: listener ready port=8080\n"
-                        in output):
-                    if httpd_listener_file is not None:
-                        httpd_listener_file.touch()
-                    write_uart_line(connection, b"echo httpd-background-ok")
-                    httpd_probe_sent = True
-                if httpd_probe_sent and not httpd_ready:
-                    text = output.decode(
-                        "utf-8", errors="replace").replace("\r", "")
-                    if any(line.removeprefix("/ # ") ==
-                           "httpd-background-ok" for line in text.splitlines()):
-                        httpd_ready_file.touch()
-                        httpd_ready = True
+                    httpd_ready_file.touch()
+                    httpd_ready = True
 
                 # GitHub issue #547: a terminal reader on the secondary CPU.
                 # The shell runs it in the foreground and waits for it, so it
@@ -667,7 +628,7 @@ def main() -> int:
         for name, check in LIFECYCLE_CHECKPOINTS:
             if not check(output, httpd_sent, httpd_ready):
                 raise RuntimeError(
-                    "interactive HTTPd lifecycle stalled: "
+                    "init-managed HTTPd lifecycle stalled: "
                     + diagnose_lifecycle(output, httpd_sent, httpd_ready)
                     + silence)
         if not httpd_done_file.exists():
@@ -679,7 +640,7 @@ def main() -> int:
                           "exception: fail-stop"):
             if forbidden in text:
                 raise RuntimeError(
-                    f"interactive HTTPd emitted an error: {forbidden}")
+                    f"init-managed HTTPd emitted an error: {forbidden}")
     return 0
 
 

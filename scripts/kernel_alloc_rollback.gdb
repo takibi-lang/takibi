@@ -33,7 +33,7 @@
 # fails against this target with "Cannot execute this command while the
 # target is running", even though the target is stopped at a breakpoint.
 # The same read at the top level, after a top-level `continue`, works --
-# which is the shape scripts/run_kernel_qemutest_lifecycle_gap.sh already
+# which is the shape the focused QEMU GDB runners already
 # uses. Each breakpoint is deleted once it has done its job, so exactly one
 # allocation fails however many processes the boot goes on to create.
 #

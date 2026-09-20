@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Check the host/guest interactive HTTPd handshake wiring.
+"""Check the host/guest persistent HTTPd handshake and blocking accept.
 
 The HTTPd child publishes LISTENER before blocking in accept4().  The host
 must start its request from that state, then independently require READY to
 prove that the parent shell resumed, and only then publish DONE.  Waiting for
 READY before sending the request creates a circular wait hidden by accept4's
-deadline.  Keep this cheap structural check in langcheck so a copied runner
-cannot silently reintroduce that latency.
+deadline. The same deadline belongs only to an incomplete TCP handshake: a
+blocking accept must wait again rather than expose EAGAIN to HTTPd. Keep these
+cheap structural checks in langcheck so the production-shaped service cannot
+silently regain either lifecycle defect.
 """
 
 from pathlib import Path
@@ -19,7 +21,6 @@ from pass_line import report_pass
 ROOT = Path(__file__).resolve().parent.parent
 RUNNERS = (
     "scripts/run_kernel_qemutest.sh",
-    "scripts/run_kernel_qemutest_lifecycle_gap.sh",
     "scripts/run_kernel_alloc_rollback_qemutest.sh",
     "scripts/run_kernel_hwtest_rpi5.sh",
 )
@@ -28,13 +29,30 @@ RUNNERS = (
 def position(text: str, pattern: str, runner: str) -> int | None:
     match = re.search(pattern, text, re.MULTILINE)
     if match is None:
-        print(f"ERROR\t{runner}: missing interactive HTTPd protocol step: {pattern}")
+        print(f"ERROR\t{runner}: missing init-managed HTTPd protocol step: {pattern}")
         return None
     return match.start()
 
 
 def main() -> int:
     failed = False
+    inittab = (ROOT / "kernel/tests/ext2/inittab").read_text(encoding="ascii")
+    if "::respawn:/bin/httpd -f -p 8080 -h /\n" not in inittab:
+        print("ERROR\tinittab does not respawn the persistent HTTPd service")
+        failed = True
+    syscall = (ROOT / "kernel/kernel/syscall.tkb").read_text(encoding="ascii")
+    gave_up = re.search(
+        r"KernelTcpAcceptStep::GaveUp\(next\) => \{(?P<body>.*?)"
+        r"KernelTcpAcceptStep::Accepted",
+        syscall,
+        re.DOTALL,
+    )
+    if gave_up is None or "Resume(LINUX_EAGAIN)" in gave_up.group("body"):
+        print("ERROR\tblocking accept exposes handshake expiry as EAGAIN")
+        failed = True
+    if "foreground_server_should_bound" in syscall:
+        print("ERROR\taccept still contains request-count process termination")
+        failed = True
     for runner in RUNNERS:
         text = (ROOT / runner).read_text(encoding="utf-8")
         listener_arg = position(
@@ -90,7 +108,7 @@ def main() -> int:
         return 1
     report_pass(
         "kernel-interactive-httpd-protocol",
-        f"{len(RUNNERS)} runners use LISTENER -> request -> READY -> DONE",
+        f"persistent service plus {len(RUNNERS)} runners preserve blocking accept and LISTENER -> request -> READY -> DONE",
         runners=len(RUNNERS),
     )
     return 0

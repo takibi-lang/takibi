@@ -19,7 +19,7 @@ CONSOLE = REPO_ROOT / "scripts" / "run_kernel_shell_console.py"
 
 # Real lines, copied from a boot: the guest announces its listener mid-line,
 # and reports the interactive shell blocking on UART at the end of one.
-LISTENER_LINE = b"foreground server: listener ready port=8080\r\n"
+LISTENER_LINE = b"persistent server: listener ready port=8080\r\n"
 READY_LINE = b"interactive shell: uart blocked\n"
 UNRELATED = b"/ # ls /bin\r\nbusybox\r\nhttpd\r\n"
 

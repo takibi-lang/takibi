@@ -1,4 +1,5 @@
 ::sysinit:/etc/init.sh
+::respawn:/bin/httpd -f -p 8080 -h /
 ::respawn:/bin/busy-a
 ::respawn:/bin/busy-b
 ::once:/bin/peer-console

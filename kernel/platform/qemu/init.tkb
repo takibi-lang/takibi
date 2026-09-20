@@ -201,7 +201,6 @@ fn main() !{unsafe} {
     kernel_secondary_boot_report();
 
     kernel_test_rpi5_extended = false;
-    kernel_test_httpd_daemon = true;
     kernel_test_init_script = true;
     kernel_test_driver_run();
     // GitHub issue #454: the last flush point the issue names. Nothing after

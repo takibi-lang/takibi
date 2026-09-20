@@ -52,7 +52,7 @@ LLVM_OBJCOPY := llvm-objcopy-19
 # `kernelcheck`), which made it easy to run the wrong one by accident.
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: _kernelcheck-qemu-main _kernelcheck-qemu-fdt-multibank _kernelcheck-qemu-ash _kernelcheck-shell-qemu _kernelcheck-qemu-debug-main _kernelcheck-qemu-debug-repeat _kernelcheck-qemu-debug-ash _kernelcheck-oops-qemu _kernelcheck-ddb-qemu _kernelcheck-stack-overflow-qemu _kernelcheck-lifecycle-gap-qemu _kernelcheck-alloc-rollback-qemu _kernelcheck-uart-wake-qemu _kernelcheck-affinity-gdb-qemu _kernelcheck-rpi5 _kernelcheck-ddb-rpi5-software build test coverage kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-ddb-rpi5-software kernelcheck-qemu kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-qemu-ash kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-qemu-debug-main kernelcheck-qemu-debug-repeat kernelcheck-qemu-debug-ash kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-lifecycle-gap-qemu kernelcheck-alloc-rollback-qemu kernelcheck-uart-wake-qemu kernelcheck-affinity-gdb-qemu kernelcheck-repeat kernelsh-qemu kernelsh-rpi5 lease-status profile-kernel-workload-chart langcheck slowcheck linuxbuild linuxcheck clean FORCE
+.PHONY: _kernelcheck-qemu-main _kernelcheck-qemu-fdt-multibank _kernelcheck-qemu-ash _kernelcheck-shell-qemu _kernelcheck-qemu-debug-main _kernelcheck-qemu-debug-repeat _kernelcheck-qemu-debug-ash _kernelcheck-oops-qemu _kernelcheck-ddb-qemu _kernelcheck-stack-overflow-qemu _kernelcheck-alloc-rollback-qemu _kernelcheck-uart-wake-qemu _kernelcheck-affinity-gdb-qemu _kernelcheck-rpi5 _kernelcheck-ddb-rpi5-software build test coverage kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-ddb-rpi5-software kernelcheck-qemu kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-qemu-ash kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-qemu-debug-main kernelcheck-qemu-debug-repeat kernelcheck-qemu-debug-ash kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-alloc-rollback-qemu kernelcheck-uart-wake-qemu kernelcheck-affinity-gdb-qemu kernelcheck-repeat kernelsh-qemu kernelsh-rpi5 lease-status profile-kernel-workload-chart langcheck slowcheck linuxbuild linuxcheck clean FORCE
 
 .DEFAULT_GOAL := build
 
@@ -1527,18 +1527,6 @@ kernelcheck-affinity-gdb-qemu: kernelbuild-check
 _kernelcheck-affinity-gdb-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_affinity_gdb_qemutest.sh
 
-## Issue #289 negative-path regression: GDB pokes the exec-commit lifecycle
-## checkpoint's own one-shot guard so its print is skipped while the real
-## exec-commit logic runs untouched, proving the interactive-HTTPd harness's
-## own last-completed/next-expected diagnosis names the right gap -- see
-## scripts/run_kernel_qemutest_lifecycle_gap.sh for the full rationale. It
-## uses the DWARF-enabled ELF so GDB has Takibi source and type information.
-kernelcheck-lifecycle-gap-qemu: kernelbuild-check
-	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-lifecycle-gap-qemu
-
-_kernelcheck-lifecycle-gap-qemu:
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_qemutest_lifecycle_gap.sh
-
 ## Issue #414: the rollback chain inside scheduled_process_alloc has never
 ## run -- the arrays it replaced could not fail, so every "give back what
 ## was already acquired" path is a failure mode the pooling introduced and
@@ -1577,7 +1565,7 @@ lease-status:
 ## whose failures only a person sitting at this machine ever sees.
 KERNELCHECK_QEMU_LANES := kernelcheck-qemu kernelcheck-qemu-debug \
 	kernelcheck-oops-qemu kernelcheck-ddb-qemu \
-	kernelcheck-stack-overflow-qemu kernelcheck-lifecycle-gap-qemu \
+	kernelcheck-stack-overflow-qemu \
 	kernelcheck-alloc-rollback-qemu kernelcheck-uart-wake-qemu \
 	kernelcheck-affinity-gdb-qemu
 
@@ -1710,7 +1698,7 @@ cicheck-as-ci:
 # produces a final, unmistakable allcheck failure receipt after Make has
 # waited for the other scheduled jobs.
 ifneq (,$(filter allcheck,$(MAKECMDGOALS)))
-$(info [allcheck] includes: langcheck, slowcheck, compiler unit tests, linux_user, QEMU integration, QEMU debug integration, QEMU oops, QEMU DDB (UART BREAK and software BRK), QEMU stack overflow, QEMU lifecycle gap, QEMU allocation rollback, and RPi5 integration -- one board load, ending at the view line; the silicon-only software-BRK pass is make kernelcheck-ddb-rpi5-software)
+$(info [allcheck] includes: langcheck, slowcheck, compiler unit tests, linux_user, QEMU integration, QEMU debug integration, QEMU oops, QEMU DDB (UART BREAK and software BRK), QEMU stack overflow, QEMU allocation rollback, and RPi5 integration -- one board load, ending at the view line; the silicon-only software-BRK pass is make kernelcheck-ddb-rpi5-software)
 endif
 
 ## allbuild: a fast, no-execution/no-hardware smoke gate across all three

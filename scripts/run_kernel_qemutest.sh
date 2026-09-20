@@ -246,7 +246,7 @@ fi
 
 if [ "$interactive_peer_status" -ne 0 ] ||
         [ "$uart_driver_status" -ne 0 ]; then
-    echo "FAIL $RUN_LABEL: interactive HTTPd integration failed" >&2
+    echo "FAIL $RUN_LABEL: init-managed HTTPd integration failed" >&2
     echo "artifacts: $ARTIFACT_DIR" >&2
     exit 1
 fi

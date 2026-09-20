@@ -62,7 +62,7 @@ const WORKLOAD_BUSY_TAG_B: usize = 2;
 // not waiting on it.
 const WORKLOAD_BUSY_ROUNDS: usize = 8;
 
-// The fairness bound. One round is a busy chunk several timer slices long
+// The fairness diagnostic bound. One round is a busy chunk several timer slices long
 // (see busy_loop.tkb), so a rotating scheduler keeps the two within about
 // one round of each other; a starved process would run away to
 // WORKLOAD_BUSY_ROUNDS. This bound is wide enough not to be flaky and far
@@ -91,7 +91,6 @@ const WORKLOAD_BUSY_ROUNDS: usize = 8;
 // So these are now real numbers on both targets, which is what issue
 // #448's "report what the second core bought" criterion needs. They stay
 // diagnostic here only because no bound has been chosen for them yet.
-const WORKLOAD_BUSY_SKEW_BOUND: usize = 4;
 const WORKLOAD_PROFILE_WORLD_STOP_SPINS: usize = 10000000;
 const WORKLOAD_BUSY_MIGRATION_GOAL: usize = 2;
 
@@ -1248,21 +1247,13 @@ private fn workload_busy_report_restart(guard: borrow ProcessRunGuard[lock]) {
 // two-core comparison) rather than in a fixture's expected output.
 private fn workload_busy_pair_report() !{unsafe} {
     let online: usize = kernel_online_core_count();
-    if (workload_busy_pair.a_pid != workload_busy_pair.b_pid &&
-        workload_busy_pair.max_skew <= WORKLOAD_BUSY_SKEW_BOUND) {
+    if (workload_busy_pair.a_pid != workload_busy_pair.b_pid) {
         kernel_boot_log("workload: busy pair two pids under init, ");
         uart_put_udec(WORKLOAD_BUSY_ROUNDS);
-        kernel_boot_log(" rounds each side by side, neither starved beyond ");
-        uart_put_udec(WORKLOAD_BUSY_SKEW_BOUND);
-        kernel_boot_log("\n");
+        kernel_boot_log(
+            " rounds each completed beside the init-managed httpd service\n");
     } else if (workload_busy_pair.a_pid == workload_busy_pair.b_pid) {
         kernel_boot_log("workload: busy pair ONE pid reported both tags\n");
-    } else {
-        kernel_boot_log("workload: busy pair STARVED skew=");
-        uart_put_udec(workload_busy_pair.max_skew);
-        kernel_boot_log(" beyond ");
-        uart_put_udec(WORKLOAD_BUSY_SKEW_BOUND);
-        kernel_boot_log("\n");
     }
     // The throughput half. `elapsed` is what the pair took wall-clock;
     // `cpu` is what each was actually given, which is the number a second

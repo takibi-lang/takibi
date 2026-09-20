@@ -187,13 +187,11 @@ def thread_pc(thread: int) -> int:
 def run_peer(connection: socket.socket) -> None:
     # The kernel admits the reader only after the peer console writer's view,
     # which ends with its seventeenth record. That chain starts with the busy
-    # pair migrating, which waits for a third runnable context. The ordinary
-    # lanes' drivers provide one by backgrounding a server from this shell,
-    # and so does this lane (scripts/run_kernel_ddb_driver.py does the same).
+    # pair migrating, which waits for a third runnable context. BusyBox init's
+    # persistent HTTPd provides that context in every lane.
     if not seen(lambda text: BUSY_PAIR_DONE in text, BOOT_TIMEOUT):
         verdict(False, "the busy pair never finished before the peer chain")
         return
-    connection.sendall(b"httpd.sh &\n")
     if not seen(lambda text: PEER_CONSOLE_DONE in text, BOOT_TIMEOUT):
         verdict(False, "the peer console writer never delivered its last record")
         return

@@ -4,7 +4,7 @@
 A capture that hits its deadline has two very different causes, and until
 GitHub issue #509 the driver reported only what a downstream check was still
 waiting for. That reads as a protocol fault: three clones running the suite at
-once produced "interactive HTTPd lifecycle stalled", and the truth was that a
+once produced "init-managed HTTPd lifecycle stalled", and the truth was that a
 starved host had stopped the guest dead. The note these controls cover is what
 tells the two apart.
 """

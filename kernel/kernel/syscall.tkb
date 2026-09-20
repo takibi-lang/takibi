@@ -2017,10 +2017,9 @@ fn syscall_action_encode(action: SyscallAction) -> (usize, usize) {
     }
 }
 
-// A process may be ended either by exit(2) itself or by a bounded test
-// daemon's completed-work condition.  Both routes must preserve the same
-// clone-owned FD/VM teardown and return through the parent frame; returning
-// SyscallAction::Exit directly is valid only for the root EL0 process.
+// Preserve clone-owned FD/VM teardown before returning through the parent
+// frame; returning SyscallAction::Exit directly is valid only for the root
+// EL0 process.
 fn kernel_syscall_exit_current_process(status: usize) -> SyscallAction {
     if (kernel_process_is_child()) {
         // GitHub issue #448: nothing is torn down yet, so waiting for an
@@ -2050,8 +2049,6 @@ fn kernel_syscall_exit_current_process(status: usize) -> SyscallAction {
                 ProcessCloneVmReapResult::Reaped => { }
             }
         }
-        syscall_test_lifecycle_foreground_server_note_reaped_pages(
-            process_image_clone_vm_reaped_pages());
         return SyscallAction::CloneParent(kernel_process_child_exit(status));
     }
     return SyscallAction::Exit(status);
@@ -3984,9 +3981,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             return SyscallAction::Resume(LINUX_EINVAL);
         }
         match syscall_test_lifecycle_listener_ready_label() {
-            ListenerReadyLabel::ForegroundServer => {
-                kernel_boot_log("foreground server: listener ready port=8080\n");
-            }
             ListenerReadyLabel::ConnectedFixture => {
                 kernel_boot_log("linux socket: listener ready port=8080\n");
             }
@@ -4001,12 +3995,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // accept4(): hold the sole physical RX capability across the
         // blocking TCP handshake, then restore it before publishing the
         // new connection owner and returning its allocated descriptor.
-        // The test driver may bound its foreground server after two
-        // completed child sessions so the one-boot suite can continue.
-        if (syscall_test_lifecycle_foreground_server_should_bound(
-                kernel_process_child_exit_count())) {
-            return kernel_syscall_exit_current_process(0);
-        }
         let accept_listener_fd: usize =
             match kernel_listener_fd_lookup(x0) {
                 KernelListenerLookupResult::Missing => {
@@ -4019,7 +4007,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             (number == 242 && x3 != 0)) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
-        // A foreground server child owns the only RX capability while it
+        // An HTTP server child owns the only RX capability while it
         // reads and writes the accepted stream.  Do not let the listener
         // parent enter another blocking accept and monopolize that capability;
         // return the normal retryable result and schedule the worker instead.
@@ -4148,7 +4136,18 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                 tcp_connection_free(owner);
                                 let cleared: bool = kernel_listener_set_pending(
                                     accept_listener_fd, 0, 0);
-                                return SyscallAction::Resume(LINUX_EAGAIN);
+                                // The deadline expires one incomplete TCP
+                                // handshake, not this blocking accept(2).
+                                // Returning EAGAIN here made BusyBox httpd
+                                // terminate after an idle interval. Forget
+                                // the stale peer and keep waiting; the next
+                                // dispatch starts a fresh handshake.
+                                if (kernel_process_other_ready() == false) {
+                                    return SyscallAction::WaitInterrupt;
+                                }
+                                kernel_process_current_set_pending_block(
+                                    ProcessWaitReason::NetRx, 0);
+                                return SyscallAction::Block;
                             }
                         }
                     }

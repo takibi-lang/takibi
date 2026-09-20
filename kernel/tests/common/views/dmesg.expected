@@ -7,5 +7,4 @@
 [<time>] cpu1 peer log probe: line=5
 [<time>] distro stack: argc=2 argv auxv ready
 [<time>] linux socket: listener ready port=8080
-[<time>] foreground server: listener ready port=8080
 busybox dmesg exit: 0
