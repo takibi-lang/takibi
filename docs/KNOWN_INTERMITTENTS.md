@@ -30,7 +30,7 @@ whether a row has gone quiet or has merely stopped being looked for.
 
 | Symptom | Rate | Issue | Last seen |
 | --- | --- | --- | --- |
-| `process table: records MISSING uses=` | 2 in 16 `kernelcheck-qemu-main` runs, measured 2026-09-18 (1 in 8) | #514 | 2026-09-18 |
+| `process table: records MISSING uses=` | 2 in 16 `kernelcheck-qemu-main` runs, measured 2026-09-18 (1 in 8) | #514 | 2026-09-20 |
 | `process image: target root FELL BACK TO 0 uses=` | one CI fail-stop, never reproduced locally; unmeasured | #516 | 2026-09-17 |
 | `syscall_deadline_wait` | one CI stall of 202s in `kernelcheck-lifecycle-gap-qemu`; unmeasured, and the fixture that produced it now ends on a bounded nap count | #563 | 2026-09-17 |
 
@@ -48,6 +48,11 @@ line appears further down. A measured instance:
     < resources: every pooled record resolved to the slot its handle named
     9a9
     > process table: records MISSING uses=1 first_slot=0x00000000401bb880 reason=2
+
+CI run 35481707710 on 2026-09-20 is the same thing on the `qemu-debug` lane,
+which is what the last-seen date records: `uses=1 reason=2` again, with the
+positive line gone. A row whose symptom keeps arriving is why re-running the
+lane is not a fix and the date is not a reassurance.
 
 **The rate in this row is measured, not inherited, and that distinction
 survives the two numbers agreeing.** The 1-in-8 recorded in
