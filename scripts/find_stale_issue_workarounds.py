@@ -185,8 +185,26 @@ def issue_states():
             subprocess.TimeoutExpired) as error:
         detail = getattr(error, "stderr", "") or str(error)
         raise IssueStatesUnavailable(detail.strip()[:400] or str(error))
-    return {item["number"]: item["state"]
-            for item in json.loads(result.stdout)}
+    # Exit status is not the whole answer. A token that may not read issues
+    # makes `gh issue list --json` exit 0 with EMPTY stdout -- measured on
+    # GitHub Actions on 2026-09-18, where the workflow granted `contents` and
+    # `actions` but not `issues`, and the missing permission arrived here as
+    # a JSONDecodeError traceback rather than as a verdict. So the OUTPUT is
+    # what decides: anything that is not a list of issues means the question
+    # went unanswered.
+    try:
+        answer = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise IssueStatesUnavailable(
+            f"`gh issue list` exited 0 and did not answer with JSON "
+            f"(stdout {result.stdout.strip()[:120]!r}, stderr "
+            f"{result.stderr.strip()[:200]!r}); a token that cannot read "
+            f"issues answers exactly like this")
+    if not isinstance(answer, list):
+        raise IssueStatesUnavailable(
+            f"`gh issue list` answered with {type(answer).__name__}, not a "
+            f"list of issues")
+    return {item["number"]: item["state"] for item in answer}
 
 
 def main() -> int:

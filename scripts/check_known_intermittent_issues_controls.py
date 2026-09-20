@@ -98,9 +98,50 @@ def expect(name, got, want_status, want_text, want_asked):
     return failures
 
 
+def unreadable_answers(finder):
+    """`issue_states` itself, against a gh that exits 0 and says nothing.
+
+    This is the shape that cost two CI runs on 2026-09-18: the workflow
+    token could not read issues, `gh issue list --json` exited 0 with empty
+    stdout, and the missing permission arrived as a JSONDecodeError
+    traceback instead of a verdict. Exercised through the real function --
+    the point is precisely that it must not trust the exit status.
+    """
+    failures = []
+    saved = finder.subprocess.run
+
+    class Finished:
+        def __init__(self, stdout):
+            self.stdout = stdout
+            self.stderr = ""
+            self.returncode = 0
+
+    for name, stdout in (("empty output", ""),
+                         ("html instead of json", "<html>nope</html>"),
+                         ("json that is not a list", '{"number": 1}')):
+        CASES.note()
+        finder.subprocess.run = lambda *a, **k: Finished(stdout)
+        try:
+            finder.issue_states()
+        except finder.IssueStatesUnavailable:
+            pass
+        except Exception as error:
+            failures.append(
+                f"gh answering with {name} raised "
+                f"{type(error).__name__} instead of IssueStatesUnavailable")
+        else:
+            failures.append(f"gh answering with {name} was accepted as an "
+                            f"answer")
+        finally:
+            finder.subprocess.run = saved
+    return failures
+
+
 def main() -> int:
     pair = load()
     failures = []
+
+    failures += unreadable_answers(pair[1])
 
     # An open issue is the passing case, and the one that must not be
     # confused with "GitHub said nothing about it".
@@ -156,7 +197,9 @@ def main() -> int:
         "an open issue passes, a closed one fails, a number GitHub returns "
         "nothing about fails rather than reading as open, an unreachable "
         "GitHub fails rather than passing about what it did not check, and "
-        "an empty table passes without asking at all",
+        "an empty table passes without asking at all; a `gh` that exits 0 "
+        "without answering -- empty output, HTML, or JSON that is not a "
+        "list -- is an outage rather than an answer",
         cases=CASES.ran)
     return 0
 

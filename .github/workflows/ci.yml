@@ -28,6 +28,13 @@ on:
 permissions:
   contents: read
   actions: read
+  # GitHub issue #565's gate asks whether every row of
+  # docs/KNOWN_INTERMITTENTS.md still names an OPEN issue. Without this the
+  # job's token cannot see issues, and `gh issue list` answers with EXIT 0
+  # AND EMPTY OUTPUT rather than an error -- which is why the check now
+  # treats an unreadable answer as "could not ask" instead of trusting the
+  # exit status.
+  issues: read
 
 # A batch of pushes should not queue a run per commit; the newest is the one
 # whose answer anybody wants.
