@@ -456,6 +456,10 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
         uart_put_hex(scheduled_process_missing_first_slot_value());
         kernel_boot_log(" reason=");
         uart_put_udec(scheduled_process_missing_reason_value());
+        kernel_boot_log(" cpu=");
+        uart_put_udec(scheduled_process_missing_cpu_value());
+        kernel_boot_log(" current=");
+        uart_put_udec(scheduled_process_missing_current_value());
         kernel_boot_log("\n");
     }
     // GitHub issue #488: a reap that took the record execution_here() still

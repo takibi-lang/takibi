@@ -731,6 +731,19 @@ fn scheduled_process_recycled_handle_count() -> usize !{unsafe} {
 // pays nothing for them.
 private let mut scheduled_process_missing_first_slot: usize = 0;
 private let mut scheduled_process_missing_reason: usize = 0;
+// GitHub issue #514: reason 2 was one word for two different failures, and
+// the difference is the whole fork in the road. `intrusive_pool_probe_slot`
+// answers NoPayload either because the pool does not own the address at all
+// or because it owns a slot whose generation is 0 -- a record that has been
+// released. A bogus address is a corrupted or invented slot number; a freed
+// one is a live handle outliving its record. They want different fixes.
+//
+// The CPU and the slot running at the time come with it, because a lookup
+// that misses says nothing about WHO asked, and 102 call sites in this file
+// reach here. Stored, not printed: the miss path can run in interrupt
+// context.
+private let mut scheduled_process_missing_cpu: usize = 0;
+private let mut scheduled_process_missing_current: usize = 0;
 
 fn scheduled_process_missing_first_slot_value() -> usize {
     return scheduled_process_missing_first_slot;
@@ -738,6 +751,14 @@ fn scheduled_process_missing_first_slot_value() -> usize {
 
 fn scheduled_process_missing_reason_value() -> usize {
     return scheduled_process_missing_reason;
+}
+
+fn scheduled_process_missing_cpu_value() -> usize {
+    return scheduled_process_missing_cpu;
+}
+
+fn scheduled_process_missing_current_value() -> usize {
+    return scheduled_process_missing_current;
 }
 
 private fn scheduled_process_record_at(slot: usize) -> *ProcessRecord
@@ -759,6 +780,15 @@ private fn scheduled_process_record_at(slot: usize) -> *ProcessRecord
             if (scheduled_process_missing_first_slot == 0) {
                 scheduled_process_missing_first_slot = slot;
                 scheduled_process_missing_reason = 2;
+                if (intrusive_pool_slot_is_valid(&scheduled_process_pool,
+                                                 slot)) {
+                    scheduled_process_missing_reason = 3;
+                }
+                scheduled_process_missing_cpu = cpu_id();
+                if (execution_here().current_live) {
+                    scheduled_process_missing_current =
+                        execution_here().current_handle.pool_index;
+                }
             }
             return &scheduled_process_record_absent;
         }

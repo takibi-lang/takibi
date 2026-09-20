@@ -6,3 +6,4 @@
 ^resources:
 ^process invariant: REAPED THE CURRENT PROCESS
 ^process invariant: RECYCLED HANDLE READS
+^process invariant: STALE HANDLE READS
