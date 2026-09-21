@@ -15,6 +15,21 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-21: SIGCHLD getter read a handle without a process
+
+The ignored-SIGCHLD repair initially made allcheck fail the common
+`process_lifecycle` view on QEMU, debug QEMU, and RPi5. The unexpected line
+was one stale-handle read of slot 0, generation 0. A QEMU hardware watchpoint
+on the counter identified the caller: the boot-time syscall subset probe
+invoked `rt_sigaction(oldact)` with no current process, and the new getter
+used `current_live && scheduled_process_record_of(current_handle)`.
+
+Takibi's `&&` evaluates both operands, as SPEC.md states. The getter now
+returns before touching the handle when there is no current process. The
+existing syscall probe plus the common lifecycle view are the faithful
+regression: the same allcheck run that exposed the defect now rejects any
+recurrence without changing its expected output.
+
 ## 2026-09-21: ignored SIGCHLD must reap HTTPd workers
 
 Interactive QEMU and RPi5 boots kept one BusyBox HTTPd process per completed

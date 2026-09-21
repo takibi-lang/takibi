@@ -5367,9 +5367,12 @@ fn kernel_process_current_set_signal_mask(mask: usize) {
 }
 
 fn kernel_process_current_sigchld_ignored() -> bool {
-    return execution_here().current_live &&
-        scheduled_process_record_of(execution_here().current_handle)
-            .sigchld_ignored;
+    // The syscall subset probe calls rt_sigaction without a live process.
+    // Takibi evaluates both sides of &&, so a combined guard would still
+    // read the uninitialised current_handle and count a stale handle.
+    if (execution_here().current_live == false) { return false; }
+    return scheduled_process_record_of(execution_here().current_handle)
+        .sigchld_ignored;
 }
 
 fn kernel_process_current_set_sigchld_ignored(ignored: bool) {
