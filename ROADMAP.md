@@ -283,6 +283,42 @@ remainder, the signal words being read-modify-written from two CPUs.
   fixes symptoms of a design that is still being finished -- the same argument
   that puts multicore first in the priority order above.
 
+#### When to put the cores under load
+
+A load run is a MEASUREMENT and costs about an hour, so when one is worth
+that is written here rather than asked again each time. The instrument is
+`scripts/repeat_kernel_lane.sh`: `--mode measure N` reports a RATE and prints
+how many clean runs a claim of "fixed" would actually need, `--mode check N`
+is the verdict form for a suite, and `--watch-for REGEX` counts a symptom
+across every sample's capture even when no view asserts it. One
+`kernelcheck-qemu-main` sample is about 95 seconds on this 24-core host, so
+forty of them is an hour; QEMU lanes cost only that, while a hardware lane
+takes the board's lease and is the scarce half.
+
+Four moments earn it, and the order matters:
+
+1. **Not while `docs/KNOWN_INTERMITTENTS.md` has a row.** A load run against a
+   live intermittent spends its hour reproducing something already explained,
+   and anything else it turns up then has to be separated from that by hand.
+   Empty the table first. Today it holds #571, and closing that is what makes
+   the next load run mean something.
+2. **At the close of each entry 6 admission increment.** A newly admitted
+   workload owns the synchronization audit for every filesystem, network,
+   console and device path it reaches, and load is what tests an audit: the
+   interleaving one boot takes is not the forty a rate is made of.
+3. **Before the default mask becomes {core 0}.** That step widens WHICH
+   processes run on a peer rather than what one may do there, which is the
+   largest remaining increase in exposure in phase B, and #514's window --
+   open, unobserved, and in the pool-insert path every admitted process
+   crosses -- is exactly what a load run is for.
+4. **#572 IS the load workload**, not an occasion to run one. It asks for a
+   fairness bound that still holds with the init-managed services running
+   beside the busy pair, measured on both platforms with stated headroom,
+   and neither half of that can be answered by a single boot.
+
+A load run that finds nothing is a result too, and belongs on the issue it was
+run for rather than only in a terminal.
+
 Also open from this session and not otherwise queued: #559 (the ext2 mutation
 lock's reader question is asked at syscall entry only, so a mutation starting
 during an in-flight peer read still overlaps it -- this is the honest
