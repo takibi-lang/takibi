@@ -23,6 +23,7 @@ HTTP_URL_PATTERN = re.compile(
 )
 HTTP_BODY_MARKER = b"<h1>Takibi Kernel</h1>"
 COMMAND_RESULT = b"__KERNELSH_PTY_SMOKE__"
+HTTPD_REAP_RESULT = b"__KERNELSH_HTTPD_REAP__"
 ARTIFACT_DIR = os.path.join(REPO_ROOT, "_build", "kernelcheck-shell-qemu")
 TRANSCRIPT_PATH = os.path.join(ARTIFACT_DIR, "uart-transcript.log")
 START_TIMEOUT_SECONDS = 45
@@ -135,6 +136,8 @@ def main():
     break_sent = False
     ddb_prompt_count = 0
     command_sent = False
+    reap_check_sent = False
+    reap_check_done = False
     http_checked = False
     deadline = time.monotonic() + START_TIMEOUT_SECONDS
 
@@ -157,7 +160,29 @@ def main():
                             fail(pid, transcript, f"interactive HTTP check failed: {error}")
                         http_checked = True
                     ready = any(marker in normalized for marker in READY_MARKERS)
-                    if not break_sent and http_checked and ready and b"/ # " in normalized:
+                    if (not reap_check_sent and http_checked and ready and
+                            b"/ # " in normalized):
+                        os.write(terminal, b"ps; echo " + HTTPD_REAP_RESULT + b"\n")
+                        reap_check_sent = True
+                    reap_marker = b"\n" + HTTPD_REAP_RESULT + b"\n"
+                    if reap_check_sent and not reap_check_done and reap_marker in normalized:
+                        before_marker = normalized.split(reap_marker, 1)[0]
+                        process_lines = [
+                            line for line in before_marker.splitlines()
+                            if b"/bin/httpd -f -p 8080 -h" in line
+                        ]
+                        if len(process_lines) != 1:
+                            fail(
+                                pid, transcript,
+                                "completed HTTP requests left child httpd zombies "
+                                f"(ps showed {len(process_lines)} httpd processes)",
+                            )
+                        reap_check_done = True
+                    after_reap_marker = b""
+                    if reap_marker in normalized:
+                        after_reap_marker = normalized.split(reap_marker, 1)[1]
+                    if (not break_sent and reap_check_done and
+                            b"/ # " in after_reap_marker):
                         os.write(terminal, b"\x14b")  # Ctrl-T, then lowercase b
                         break_sent = True
                     prompts = normalized.count(b"ddb> ")

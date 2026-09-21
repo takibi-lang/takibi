@@ -15,6 +15,21 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-21: ignored SIGCHLD must reap HTTPd workers
+
+Interactive QEMU and RPi5 boots kept one BusyBox HTTPd process per completed
+request. DDB distinguished the listener from six workers: the listener was
+running and every worker was `Exited`, so this was zombie retention rather
+than an HTTP keep-alive wait. BusyBox had installed `SIGCHLD=SIG_IGN`, but the
+kernel's `rt_sigaction` returned success without reading or retaining `act`.
+
+The process record now retains that one supported disposition, clone inherits
+it, and exit defers reaping until generated return code has switched away from
+the child's physical kernel stack. The interactive QEMU smoke test makes two
+real requests and then requires `ps` to show only the listener. This is the
+cheapest faithful regression because it executes the pinned BusyBox HTTPd and
+the same init-managed interactive root filesystem that exposed the defect.
+
 ## 2026-09-18: a comparison claim nothing in this tree could check (#568)
 
 `docs/wont-compile/` was assembled this week: one entry per defect class the

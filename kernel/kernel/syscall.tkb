@@ -4846,12 +4846,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         return SyscallAction::Resume(0);
     }
     if (number == AARCH64_NR_RT_SIGACTION) {
-        // rt_sigaction(signum, act, oldact, sigsetsize): this kernel does
-        // not deliver signals, but a libc signal() call may pass a non-null
-        // oldact expecting
-        // the previous struct sigaction (32 bytes on aarch64: handler,
-        // flags, restorer, 2-word mask) to be filled, not left untouched.
+        // rt_sigaction(signum, act, oldact, sigsetsize). Asynchronous signal
+        // handlers are not implemented, but SIGCHLD=SIG_IGN is not merely a
+        // handler choice on Linux: children must not remain as zombies.
         let signum: usize = x0;
+        let act: usize = x1;
         let oldact: usize = x2;
         if (signum == 0 || signum == 9 || signum == 19) {
             return SyscallAction::Resume(LINUX_EINVAL);
@@ -4861,6 +4860,30 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
                 UserWriteRangeResult::Ok(range) => {
                     let zeroed: bool = user_zero_fill(range);
+                    if (signum == LINUX_SIGCHLD &&
+                        kernel_process_current_sigchld_ignored()) {
+                        let wrote_handler: bool = user_write_u64(range, 0, 1);
+                    }
+                }
+            }
+        }
+        if (act != 0) {
+            match user_range_check_read(kernel_process_current_root(), act, 32) {
+                UserReadRangeResult::Fault => {
+                    return SyscallAction::Resume(LINUX_EFAULT);
+                }
+                UserReadRangeResult::Ok(range) => {
+                    let (read_ok, handler) = user_read_u64(range, 0);
+                    if (read_ok == false) {
+                        return SyscallAction::Resume(LINUX_EFAULT);
+                    }
+                    if (signum == LINUX_SIGCHLD) {
+                        if (handler > 1) {
+                            return SyscallAction::Resume(LINUX_EINVAL);
+                        }
+                        kernel_process_current_set_sigchld_ignored(
+                            handler == 1);
+                    }
                 }
             }
         }

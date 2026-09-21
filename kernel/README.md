@@ -1141,6 +1141,9 @@ run, not a specification.
   its parent is off at its own prompt. An exit that would leave nothing at
   all runnable waits for an interrupt and asks again instead of proceeding.
 - **Signals.** Signal masks and pending SIGCHLD state are per-process.
+  The maintained `rt_sigaction` subset records `SIGCHLD=SIG_IGN`, inherits it
+  across clone, and discards exited children after leaving their kernel stack;
+  BusyBox HTTPd uses that Linux rule for its per-connection workers.
   A child exit queues SIGCHLD for a parent that blocked it, wakes a parent in
   `rt_sigtimedwait`, and lets BusyBox `init` reap and respawn the child without
   spinning. `rt_sigtimedwait` supports a null/infinite timeout, a zero poll,

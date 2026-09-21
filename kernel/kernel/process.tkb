@@ -259,6 +259,9 @@ struct ProcessRecord {
     signal_mask: usize;
     pending_signals: usize;
     sigwait_set: usize;
+    // Linux gives SIGCHLD=SIG_IGN special process-lifecycle semantics:
+    // children are discarded after exit instead of becoming waitable zombies.
+    sigchld_ignored: bool;
     deadline_result: usize;
     // GitHub issue #302: wait4()'s status pointer, owned per-slot so a
     // multi-level concurrent wait4() chain delivers each blocked parent's
@@ -1515,6 +1518,8 @@ private fn scheduled_process_copy_signal_mask(parent: ProcessHandle,
                                               child: usize) !{unsafe} {
     scheduled_process_record_at(child).signal_mask =
         scheduled_process_record_of(parent).signal_mask;
+    scheduled_process_record_at(child).sigchld_ignored =
+        scheduled_process_record_of(parent).sigchld_ignored;
 }
 
 // Linux: a child inherits its parent's affinity mask across fork, and
@@ -1866,6 +1871,7 @@ private fn scheduled_process_record_reset(slot: usize) !{unsafe} {
     record.signal_mask = 0;
     record.pending_signals = 0;
     record.sigwait_set = 0;
+    record.sigchld_ignored = false;
     record.deadline_result = 0;
     record.wait4_status_ptr = 0;
     record.has_parent = false;
@@ -2888,6 +2894,7 @@ struct ExecutionState {
     // A child whose blocked-parent wait4 completion must reap only after
     // generated return code has left that child's physical kernel stack.
     deferred_reap_handle: ProcessHandle;
+    deferred_reap_parent: ProcessHandle;
     deferred_reap_live: bool;
     reschedule_pending: bool;
     scheduler_enabled: bool;
@@ -3006,11 +3013,12 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
     execution_here().stack_live = true;
     let reap_live: bool = execution_here().deferred_reap_live;
     let mut reap_child: ProcessHandle = execution_here().deferred_reap_handle;
+    let mut reap_parent: ProcessHandle = execution_here().deferred_reap_parent;
     execution_here().deferred_reap_live = false;
     process_run_unlock(guard);
     if (reap_live) {
         let reaped_status: usize =
-            kernel_process_reap_zombie(incoming, reap_child);
+            kernel_process_reap_zombie(reap_parent, reap_child);
         incoming = execution_here().current_handle;
         kernel_init_boot_fixture_reaped(
             scheduled_process_pid_of_handle(incoming));
@@ -3046,7 +3054,15 @@ fn kernel_process_stack_idle_complete() {
     execution_here().stack_live = false;
     workload_busy_peer_exit_stack_released(
         scheduled_process_pid_of_handle(outgoing), core);
+    let reap_live: bool = execution_here().deferred_reap_live;
+    let mut reap_child: ProcessHandle = execution_here().deferred_reap_handle;
+    let mut reap_parent: ProcessHandle = execution_here().deferred_reap_parent;
+    execution_here().deferred_reap_live = false;
     process_run_unlock(guard);
+    if (reap_live) {
+        let reaped_status: usize =
+            kernel_process_reap_zombie(reap_parent, reap_child);
+    }
     workload_profile_idle_enter();
 }
 
@@ -5350,6 +5366,19 @@ fn kernel_process_current_set_signal_mask(mask: usize) {
     }
 }
 
+fn kernel_process_current_sigchld_ignored() -> bool {
+    return execution_here().current_live &&
+        scheduled_process_record_of(execution_here().current_handle)
+            .sigchld_ignored;
+}
+
+fn kernel_process_current_set_sigchld_ignored(ignored: bool) {
+    if (execution_here().current_live) {
+        scheduled_process_record_of(execution_here().current_handle)
+            .sigchld_ignored = ignored;
+    }
+}
+
 must_use variant ProcessSignalPendingResult {
     Missing;
     Pending(usize);
@@ -6734,9 +6763,10 @@ fn kernel_process_current_root() -> AddressSpaceRoot {
 // returns 0 to the existing syscall fail-stop path.
 private fn kernel_process_exit_reserved(
         child: ProcessHandle,
+        parent: ProcessHandle,
         owner: sink ScheduledProcessOwner[process],
         running: sink ScheduledProcessState[process, ProcessState::Running],
-        deliver_wait4: bool) -> usize {
+        deliver_wait4: bool, auto_reap: bool) -> usize {
     match process_image_prepare_activation(owner.pool_index) {
         AddressSpaceActivationPrepareResult::Invalid => {
             kernel_process_schedule_cancel_reserved(owner, running);
@@ -6758,7 +6788,8 @@ private fn kernel_process_exit_reserved(
                     if (asid_rollover_stopped(stopped)) {}
                     world_stop_release(stopped, &kernel_world_stop);
                     return kernel_process_exit_reserved(
-                        child, owner, running, deliver_wait4);
+                        child, parent, owner, running, deliver_wait4,
+                        auto_reap);
                 }
             }
         }
@@ -6790,12 +6821,13 @@ private fn kernel_process_exit_reserved(
             execution_here().current_handle = successor;
             let successor_sp: usize =
                 scheduled_process_record_of(successor).saved_sp;
-            if (deliver_wait4) {
+            if (deliver_wait4 || auto_reap) {
                 if (execution_here().deferred_reap_live) {
                     process_run_unlock(guard);
                     kernel_syscall_fail_stop(successor_sp);
                 }
                 execution_here().deferred_reap_handle = child;
+                execution_here().deferred_reap_parent = parent;
                 execution_here().deferred_reap_live = true;
             }
             let reaped_pid: usize =
@@ -6895,6 +6927,8 @@ fn kernel_process_child_exit(status: usize) -> usize {
         }
     }
     parent = scheduled_process_record_of(child).parent;
+    let auto_reap: bool =
+        scheduled_process_record_of(parent).sigchld_ignored;
     scheduled_process_record_of(child).exit_status = status;
     // Set here as well as in the reap, and both are needed. The blocked-
     // parent path below hands this value to kernel_syscall_wait4_deliver
@@ -6961,7 +6995,8 @@ fn kernel_process_child_exit(status: usize) -> usize {
                                 scheduled_process_start(parent_owner, ready);
                             process_run_unlock(exit_guard);
                             return kernel_process_exit_reserved(
-                                child, parent_owner, parent_running, true);
+                                child, parent, parent_owner, parent_running,
+                                true, false);
                         }
                         // Keep ChildExit on the Ready parent as its pending
                         // wait4 continuation. Rewind the saved frame so a CPU
@@ -6985,7 +7020,8 @@ fn kernel_process_child_exit(status: usize) -> usize {
                         scheduled_process_start(parent_owner, parent_ready);
                     process_run_unlock(exit_guard);
                     return kernel_process_exit_reserved(
-                        child, parent_owner, parent_running, false);
+                        child, parent, parent_owner, parent_running, false,
+                        auto_reap);
                 }
             }
             }
@@ -7003,8 +7039,8 @@ fn kernel_process_child_exit(status: usize) -> usize {
                                 successor_owner, successor_ready);
                             process_run_unlock(exit_guard);
                             return kernel_process_exit_reserved(
-                                child, successor_owner, successor_running,
-                                false);
+                                child, parent, successor_owner,
+                                successor_running, false, auto_reap);
                         }
                     }
                 }
@@ -7015,11 +7051,20 @@ fn kernel_process_child_exit(status: usize) -> usize {
     // so it waits here, still on this zombie's stack, for one to appear.
     if (cpu_id() == 0) {
         process_run_unlock(exit_guard);
-        return kernel_process_exit_await_successor(child);
+        return kernel_process_exit_await_successor(child, parent, auto_reap);
     }
     // A secondary publishes itself as having no current EL0 context; the
     // syscall tail switches to the per-CPU IRQ stack before the
     // architectural secondary idle loop releases this zombie's stack.
+    if (auto_reap) {
+        if (execution_here().deferred_reap_live) {
+            process_run_unlock(exit_guard);
+            kernel_syscall_fail_stop(0);
+        }
+        execution_here().deferred_reap_handle = child;
+        execution_here().deferred_reap_parent = parent;
+        execution_here().deferred_reap_live = true;
+    }
     execution_here().current_live = false;
     execution_here().scheduler_enabled = false;
     execution_here().reschedule_pending = false;
@@ -7035,7 +7080,9 @@ fn kernel_process_child_exit(status: usize) -> usize {
 // then the search again. The tick wakes deadline sleepers and the UART
 // wakes readers. This core still owns the zombie's stack, so its parent
 // cannot reap it until the handoff below moves off it.
-private fn kernel_process_exit_await_successor(child: ProcessHandle)
+private fn kernel_process_exit_await_successor(child: ProcessHandle,
+                                               parent: ProcessHandle,
+                                               auto_reap: bool)
         -> usize !{may_block} {
     while (true) {
         interrupt_wait();
@@ -7050,7 +7097,7 @@ private fn kernel_process_exit_await_successor(child: ProcessHandle)
                         let running = scheduled_process_start(owner, ready);
                         process_run_unlock(guard);
                         return kernel_process_exit_reserved(
-                            child, owner, running, false);
+                            child, parent, owner, running, false, auto_reap);
                     }
                 }
             }
@@ -7172,11 +7219,17 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
     // and nothing to recommit, so both activations below are skipped.
     let mut resume_root: usize = 0;
     let mut has_resume_root: bool = false;
-    match process_image_target_root_result() {
-        ProcessImageTargetRootResult::Missing => {}
-        ProcessImageTargetRootResult::Ready(target) => {
-            resume_root = target;
-            has_resume_root = true;
+    // A secondary may arrive here from stack_idle_complete after it moved to
+    // the IRQ stack and cleared current_live. It has already activated root
+    // 0, and has no userspace root to restore after the ignored child is
+    // reaped. Every ordinary syscall-context caller still preserves its root.
+    if (execution_here().current_live) {
+        match process_image_target_root_result() {
+            ProcessImageTargetRootResult::Missing => {}
+            ProcessImageTargetRootResult::Ready(target) => {
+                resume_root = target;
+                has_resume_root = true;
+            }
         }
     }
     // Move away from any root the reap may release before teardown starts.
