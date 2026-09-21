@@ -30,7 +30,6 @@ whether a row has gone quiet or has merely stopped being looked for.
 
 | Symptom | Rate | Issue | Last seen |
 | --- | --- | --- | --- |
-| `affinity: the peer spinner was not reaped` | 3 in 40 `kernelcheck-qemu-main` runs, measured 2026-09-20 | #571 | 2026-09-20 |
 
 ## Reading a row
 
@@ -79,8 +78,16 @@ core and, in a second arrangement, sent from core 0 to a child pinned to CPU
 lane instead of holding one for 202 seconds.
 
 Building that second arrangement is what found **#571**: the REAP after the
-signal intermittently answers something other than the child's pid, which is
-the peer-exit collection path rather than anything about signals. It is
-retried in the fixture, under protest and with the reproduction written at
-the loop, so it does not redden a lane that is asking about something else.
-This row is what says the retry is standing on a live defect.
+signal intermittently answered something other than the child's pid, which was
+the peer-exit collection path rather than anything about signals. Its row was
+removed on 2026-09-21 and the retry loop it stood on is gone.
+
+**The table is empty, and that is a state worth naming.** It does not mean no
+lane is ever red; it means every red lane is now a question rather than a
+lookup, which is what the file is for. #571 is also why the table can be
+trusted to empty rather than to be forgotten: the last thing it recorded was
+closed by making its interleaving happen on purpose --
+`kernelcheck-affinity-gdb-qemu`'s reap mode stops core 0 between wait4's two
+walks of its child list and lets only the peer run -- so the defect fails a
+lane on every run instead of three runs in forty. A rate got it filed; only a
+deterministic lane keeps it closed.

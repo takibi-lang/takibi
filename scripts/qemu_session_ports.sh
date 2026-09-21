@@ -42,15 +42,17 @@ QEMU_SESSION_EPHEMERAL_FLOOR=32768
 # defined here rather than typed on a command line.
 #
 # The base is boxed in from BOTH sides, and the box is narrow. It must stay
-# above the highest declared lane port -- 18720, the affinity gdb lane's
-# (GitHub issue #9), which is what moved this from 18720 to 18724 -- and the
-# window's top must stay inside the block, whose last port is measured from
-# the LOWEST declared port: 17774 + 1400 - 1 = 19173, so with 56 samples of
-# 8 the base cannot exceed 18726. Anything in 18721..18726 is legal today.
-# A lane added at either end of the range narrows this, and
+# above the highest declared lane port -- 18724, the affinity lane's reap mode
+# (GitHub issue #571), which is what moved this from 18724 to 18725, as the
+# gate mode's 18720 had moved it from 18720 to 18724 -- and the window's top
+# must stay inside the block, whose last port is measured from the LOWEST
+# declared port: 17774 + 1400 - 1 = 19173, so with 56 samples of 8 the base
+# cannot exceed 18726. Anything in 18725..18726 is legal today, which is two
+# numbers: the next lane added at this end does not narrow the box, it empties
+# it, and the fix will be to raise the block stride rather than the base.
 # check_qemu_lane_ports.py turns the build red rather than letting a repeated
 # sample bind a lane's own port at runtime.
-QEMU_SESSION_REPEAT_BASE=18724
+QEMU_SESSION_REPEAT_BASE=18725
 QEMU_SESSION_REPEAT_STEP=8
 QEMU_SESSION_REPEAT_MAX_SAMPLES=56
 

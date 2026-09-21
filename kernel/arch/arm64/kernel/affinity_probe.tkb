@@ -37,6 +37,7 @@ const CLONE_FORK_SIGCHLD: usize = 0x11;
 const SIGTERM: usize = 15;
 const LINUX_EINVAL: usize = 0xFFFFFFFFFFFFFFEA;
 const LINUX_ESRCH: usize = 0xFFFFFFFFFFFFFFFD;
+const LINUX_ECHILD: usize = 0xFFFFFFFFFFFFFFF6;
 const AFFINITY_ERROR_FLOOR: usize = 0xFFFFFFFFFFFFF000;
 const AFFINITY_ABSENT_PID: usize = 999999;
 const AFFINITY_PIN_ATTEMPTS: usize = 200000;
@@ -47,7 +48,6 @@ const AFFINITY_SPINNER_NAPS: usize = 20000;
 // process the termination signal ends (GitHub issue #563).
 const AFFINITY_SIGTERM_STATUS: u8 = 143;
 const AFFINITY_PEER_SPINNER_NAPS: usize = 2000;
-const AFFINITY_REAP_ATTEMPTS: usize = 64;
 // A millisecond each, so the whole wait is bounded at a quarter second.
 const AFFINITY_PEER_PIN_POLLS: usize = 256;
 
@@ -355,28 +355,30 @@ fn affinity_probe() {
     }
     for index: usize in 0..<4 { status[index] = 0; }
     svc5(KILL_SYSCALL, peer_spinner, SIGTERM, 0, 0, 0);
-    // A workaround for GitHub issue #571, to be removed once that is fixed:
-    // wait4 answers something other than this pid about 3 times in 40 for a
-    // child that exited on a peer, which is the peer-exit collection path
-    // and NOT the question this fixture asks. Retrying keeps #563's property
-    // asserted on every run without making this lane red for another
-    // defect. #571 carries the rate and names this loop as its
-    // reproduction: delete it and run the lane forty times.
-    //
-    // Phrased so scripts/find_stale_issue_workarounds.py reports it the day
-    // #571 closes. It was not, at first -- "when that one is fixed" matches
-    // nothing that tool looks for, so the loop would have outlived its
-    // reason in silence, which is the exact failure that tool exists for.
-    let mut reaped: usize = 0;
-    let mut reap_attempts: usize = 0;
-    while (reaped != peer_spinner &&
-           reap_attempts < AFFINITY_REAP_ATTEMPTS) {
-        reap_attempts = reap_attempts + 1;
-        reaped = svc5(WAIT4_SYSCALL, peer_spinner,
-                      status as *u8 as usize, 0, 0, 0);
+    // GitHub issue #571: WHICH answer, not merely that it was wrong. The
+    // first wait4 for a child that exited on a peer answers something other
+    // than its pid about 3 times in 40, and the three possible answers lead
+    // to different repairs -- 0 is a reap that found no zombie, ECHILD is a
+    // parent told it has no children at all, and another pid is the wrong
+    // child collected. Retrying until the answer agreed hid that, so the
+    // first answer is classified here instead.
+    let reaped: usize = svc5(WAIT4_SYSCALL, peer_spinner,
+                             status as *u8 as usize, 0, 0, 0);
+    if (reaped == 0) {
+        affinity_fail(
+            bs"affinity: the peer spinner was not reaped: answered 0\n");
+    }
+    if (reaped == LINUX_ECHILD) {
+        affinity_fail(
+            bs"affinity: the peer spinner was not reaped: answered ECHILD\n");
+    }
+    if (reaped >= AFFINITY_ERROR_FLOOR) {
+        affinity_fail(
+            bs"affinity: the peer spinner was not reaped: answered another error\n");
     }
     if (reaped != peer_spinner) {
-        affinity_fail(bs"affinity: the peer spinner was not reaped\n");
+        affinity_fail(
+            bs"affinity: the peer spinner was not reaped: answered another pid\n");
     }
     if (status[1] == 0) {
         affinity_fail(

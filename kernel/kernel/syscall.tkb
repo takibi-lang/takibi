@@ -4654,10 +4654,26 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             (wait_options != 0 && wait_options != LINUX_WNOHANG)) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
+        // GitHub issue #571: ONE decision, not two unlocked walks with a gap
+        // between them. "Is there a zombie to collect" and "is there a live
+        // child to wait for" are separate walks of the same child list, and
+        // kernel_process_child_exit moves a child from Running to Exited
+        // under this lock on another CPU. A child that crossed that
+        // transition between the two walks was a zombie to neither question
+        // -- the first walk saw it Running, so not collectable, and the
+        // second saw it Exited, so not live -- and this arm answered ECHILD
+        // for a child that a second wait4 collected a few instructions
+        // later. Under the lock the peer's exit lands wholly before both
+        // walks or wholly after them, so the "neither" answer does not
+        // exist: Running means block, exactly as before, and Exited means
+        // reap. No case that used to block answers differently.
+        let decision_guard = process_run_lock();
         let mut collectable: bool = kernel_process_child_waitable();
         if (selecting) {
             collectable = kernel_process_child_waitable_pid(requested_pid);
         }
+        let has_live_child: bool = kernel_process_current_has_live_child();
+        process_run_unlock(decision_guard);
         if (collectable == false) {
             if (wait_options == LINUX_WNOHANG) {
                 return SyscallAction::Resume(0);
@@ -4668,7 +4684,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             // before the child's own exit did so on its own. A parent
             // with no child at all (never forked, or already reaped and
             // not waited on again) still fails fast.
-            if (kernel_process_current_has_live_child()) {
+            if (has_live_child) {
                 // GitHub issue #244 bug fix: the block/wake trampoline
                 // (kernel_syscall_block_return) only injects a return
                 // value via el0_context_set_x0 -- there is no way back

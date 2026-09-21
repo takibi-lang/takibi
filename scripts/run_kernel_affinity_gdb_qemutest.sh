@@ -1,10 +1,21 @@
 #!/usr/bin/env bash
-# GitHub issue #9: the migration gate, watched from outside the kernel. The
-# boot and network peer are the ash lane's. A gdb script types /bin/affinity
-# into the first interactive shell. The probe pins itself to CPU 1 and asks
-# for uname, which is outside the peer-safety table. gdb must see the gate
-# fire on CPU 1 for that uname, then core 0 dispatch it again. The reasoning
-# is in scripts/kernel_affinity_gdb_check.py.
+# /bin/affinity, watched from outside the kernel. The boot and network peer
+# are the ash lane's. A gdb script types /bin/affinity into the first
+# interactive shell, and which script it is depends on the mode:
+#
+#   gate (default)  GitHub issue #9's migration gate. The probe pins itself
+#                   to CPU 1 and asks for a syscall outside the peer-safety
+#                   table; gdb must see the gate fire on CPU 1 for it, then
+#                   core 0 dispatch it again.
+#   reap            GitHub issue #571's wait4 window. gdb stops CPU0 between
+#                   wait4's two walks of its child list and lets only CPU1
+#                   run, which is the interleaving that used to answer ECHILD
+#                   for a collectable child.
+#
+# One runner because the scaffolding -- the boot, the network peer, the
+# command typed into the shell -- is the same for both, and only what gdb
+# does with the stopped machine differs. The reasoning for each lives in its
+# own check script.
 set -euo pipefail
 
 # `set -e` aborts with no context, and a lane's setup prints nothing on
@@ -22,6 +33,15 @@ SERIAL_PORT="${KERNEL_QEMU_AFFINITY_GDB_SERIAL_PORT:-18717}"
 GDB_PORT="${KERNEL_QEMU_AFFINITY_GDB_GDB_PORT:-18718}"
 NETDEV_LOCAL_PORT="${KERNEL_QEMU_AFFINITY_GDB_NETDEV_LOCAL_PORT:-18719}"
 NETDEV_REMOTE_PORT="${KERNEL_QEMU_AFFINITY_GDB_NETDEV_REMOTE_PORT:-18720}"
+MODE="${KERNEL_QEMU_AFFINITY_GDB_MODE:-gate}"
+case "$MODE" in
+    gate) CHECK_SCRIPT="$REPO_ROOT/scripts/kernel_affinity_gdb_check.py" ;;
+    reap) CHECK_SCRIPT="$REPO_ROOT/scripts/kernel_affinity_reap_check.py" ;;
+    *)
+        echo "error: KERNEL_QEMU_AFFINITY_GDB_MODE must be gate or reap, not '$MODE'" >&2
+        exit 1
+        ;;
+esac
 INIT_LISTENER="$ARTIFACT_DIR/init.listener"
 NETWORK_READY="$ARTIFACT_DIR/network.ready"
 VERDICT="$ARTIFACT_DIR/verdict"
@@ -41,7 +61,7 @@ cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
 
 . "$REPO_ROOT/scripts/qemu_session_ports.sh"
 qemu_session_shift_ports SERIAL_PORT GDB_PORT NETDEV_LOCAL_PORT NETDEV_REMOTE_PORT
-python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "kernel/qemu affinity-gdb" \
+python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "kernel/qemu affinity-$MODE" \
     "tcp:$SERIAL_PORT" "tcp:$GDB_PORT" "udp:$NETDEV_LOCAL_PORT" "udp:$NETDEV_REMOTE_PORT" || exit 1
 
 QEMU_PID=""
@@ -80,11 +100,11 @@ AFFINITY_GDB_SERIAL_PORT="$SERIAL_PORT" AFFINITY_GDB_GDB_PORT="$GDB_PORT" \
 AFFINITY_GDB_UART_LOG="$ARTIFACT_DIR/uart.log" AFFINITY_GDB_VERDICT="$VERDICT" \
 AFFINITY_GDB_INIT_LISTENER="$INIT_LISTENER" AFFINITY_GDB_NETWORK_READY="$NETWORK_READY" \
 AFFINITY_GDB_BOOT_TIMEOUT="${KERNEL_QEMU_TIMEOUT:-120}" \
-    gdb-multiarch -q -batch "$ELF" -x "$REPO_ROOT/scripts/kernel_affinity_gdb_check.py" \
+    gdb-multiarch -q -batch "$ELF" -x "$CHECK_SCRIPT" \
     >"$ARTIFACT_DIR/gdb.log" 2>&1 || true
 
 if [ ! -f "$VERDICT" ]; then
-    echo "FAIL kernel/qemu affinity-gdb: the gdb check wrote no verdict; see $ARTIFACT_DIR/gdb.log" >&2
+    echo "FAIL kernel/qemu affinity-$MODE: the gdb check wrote no verdict; see $ARTIFACT_DIR/gdb.log" >&2
     exit 1
 fi
 cat "$VERDICT"

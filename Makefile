@@ -1542,15 +1542,19 @@ _kernelcheck-uart-wake-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_uart_wake_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_UART_WAKE_MODE=peer KERNEL_QEMU_UART_WAKE_SERIAL_PORT=18713 KERNEL_QEMU_UART_WAKE_GDB_PORT=18714 KERNEL_QEMU_UART_WAKE_NETDEV_LOCAL_PORT=18715 KERNEL_QEMU_UART_WAKE_NETDEV_REMOTE_PORT=18716 KERNEL_QEMU_UART_WAKE_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-uart-wake-qemu-peer" bash scripts/run_kernel_uart_wake_qemutest.sh
 
-## GitHub issue #9: the migration gate, watched with gdb rather than printed
-## by the kernel. /bin/affinity pins itself to CPU 1 and asks for uname,
-## which is outside the peer-safety table; gdb must see the gate fire on
-## CPU 1 for syscall 160 and core 0 dispatch it again.
+## Two windows around /bin/affinity, watched with gdb rather than printed by
+## the kernel. GitHub issue #9's migration gate: the probe pins itself to
+## CPU 1 and asks for a syscall outside the peer-safety table, and gdb must
+## see the gate fire on CPU 1 for it and core 0 dispatch it again. GitHub
+## issue #571's wait4 window: gdb stops CPU0 between wait4's two walks of its
+## child list and lets only CPU1 run, which is the interleaving that answered
+## ECHILD for a child that was collectable.
 kernelcheck-affinity-gdb-qemu: kernelbuild-check
 	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-affinity-gdb-qemu
 
 _kernelcheck-affinity-gdb-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_affinity_gdb_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_AFFINITY_GDB_MODE=reap KERNEL_QEMU_AFFINITY_GDB_SERIAL_PORT=18721 KERNEL_QEMU_AFFINITY_GDB_GDB_PORT=18722 KERNEL_QEMU_AFFINITY_GDB_NETDEV_LOCAL_PORT=18723 KERNEL_QEMU_AFFINITY_GDB_NETDEV_REMOTE_PORT=18724 KERNEL_QEMU_AFFINITY_GDB_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-affinity-reap-qemu" bash scripts/run_kernel_affinity_gdb_qemutest.sh
 
 ## Issue #414: the rollback chain inside scheduled_process_alloc has never
 ## run -- the arrays it replaced could not fail, so every "give back what
