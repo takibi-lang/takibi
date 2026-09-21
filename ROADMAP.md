@@ -230,8 +230,9 @@ next preserved occurrence before changing crash or console serialization.
 each one's symptom string, measured rate, owning issue and last sighting
 (#565, 2026-09-18).** They are not enumerated here: this file is refreshed
 wholesale and expected to go stale, and a triager reaching for the list under
-a red lane needs the current one. Today it holds #514, #516 and #563, and
-where each sits is a decision rather than an omission.
+a red lane needs the current one. **On 2026-09-21 it is empty for the first
+time since it was written**, which is a state and not a claim that no lane
+goes red: it means every red lane is now a question rather than a lookup.
 
 **What the move corrected, twice.** The sentence this paragraph replaced
 said #514 reproduces at "the 1-in-8 rate the tree already records for it".
@@ -248,10 +249,21 @@ by reporting it as a rate instead; two rounds of locking were tried first
 and neither helped, because the freeing side takes the pool lock and the
 walk holds the run lock. #514's own window -- `probe_slot` reporting Live
 for a payload not yet written -- is still open and still unobserved. The
-live intermittent set is now **#571** alone: #516 and #563 both closed
-2026-09-20, and #571 is what closing #563 found -- a peer-exited child whose
-reap intermittently answers the wrong thing. #570 carries #563's honest
-remainder, the signal words being read-modify-written from two CPUs.
+live intermittent set is now **empty**: #516 and #563 closed 2026-09-20, and
+**#571 closed 2026-09-21**. #571 was what closing #563 found -- a peer-exited
+child whose reap intermittently answered the wrong thing -- and it ended in
+the wait4 arm deciding its answer from two unlocked walks of the child list,
+so a child that exited BETWEEN them was a zombie to neither question and
+ECHILD is what "neither" fell through to. Both walks take one hold of the
+process-run lock now. **The lane that keeps it closed is the one worth
+copying**: rather than trusting forty clean runs against a 3-in-40 event,
+`kernelcheck-affinity-gdb-qemu` grew a reap mode that makes the interleaving
+on purpose -- gdb freezes CPU1 at the kill, runs core 0 until it stands
+between the walks, then runs only CPU1 -- and it names WHERE the peer stopped
+rather than reporting that nothing happened. #570 carries #563's honest
+remainder, the signal words being read-modify-written from two CPUs, and #550
+now carries ChildExit's answer to the check-then-block question, which the
+same audit derived and which is read from the code rather than observed.
 
 - **Two of them gate the default-mask flip, not today's work.** Step 3's last
   move widens which processes run on a peer, which is what raises exposure to
@@ -266,18 +278,15 @@ remainder, the signal words being read-modify-written from two CPUs.
     capture now shows BusyBox init holding a mask that blocks SIGTERM, which
     is the fact #563's walk could not read. It does not decide #563: a named
     mask says the refusal is possible, not that it happened.
-  - **#561 next**, and first of the remaining two because it is the one that
-    can be reproduced on demand: a repeated lane overwrites the failing
-    sample's own artifacts every time, so no flake has to be waited for. It
-    is also why one diagnosis this week needed a second reproduction, and
-    until it lands the next low-probability CI failure loses its evidence the
-    same way.
-  - **#565** asks for the inventory that would have told a triager in one
-    minute that a `records MISSING` line is the documented 1-in-8 rather than
-    something new -- the fact that settled it this week was a comment
-    attached to the code that caused a different instance. After #561,
-    because a table that classifies a failure is worth less than the capture
-    it classifies.
+  - **#561 is complete.** A repeated lane no longer overwrites the failing
+    sample's own artifacts, so no flake has to be waited for. Its remaining
+    half was found on 2026-09-21 while measuring #571 and is fixed: the
+    runner moved the hwtest lane's three ports per sample and left the
+    interactive shell lane's four at their fixed defaults, so five of
+    eighteen samples failed on `tcp port 18080 is already in use` -- a
+    measurement spending its hour on the runner.
+  - **#565 is complete.** `docs/KNOWN_INTERMITTENTS.md` is that inventory,
+    and it is empty as of 2026-09-21.
 - **A blanket "flakes before features" promotion would be wrong here.** These
   flakes are products of the multicore work, so ordering them ahead of it
   fixes symptoms of a design that is still being finished -- the same argument
@@ -295,13 +304,19 @@ across every sample's capture even when no view asserts it. One
 forty of them is an hour; QEMU lanes cost only that, while a hardware lane
 takes the board's lease and is the scarce half.
 
+**Read what a clean run rules out, not the word "fixed".** The runner prints
+that arithmetic; quote it. Forty clean samples rule out a rate of 1 in 10 at
+98.5% and say nothing about 1 in 50, which is why a defect whose window can
+be held open with gdb gets a lane rather than a rate -- #571 did not
+reproduce in sixteen samples on the tree that still had it.
+
 Four moments earn it, and the order matters:
 
 1. **Not while `docs/KNOWN_INTERMITTENTS.md` has a row.** A load run against a
    live intermittent spends its hour reproducing something already explained,
    and anything else it turns up then has to be separated from that by hand.
-   Empty the table first. Today it holds #571, and closing that is what makes
-   the next load run mean something.
+   Empty the table first. As of 2026-09-21 it is empty, so this precondition
+   is met and the next load run means something.
 2. **At the close of each entry 6 admission increment.** A newly admitted
    workload owns the synchronization audit for every filesystem, network,
    console and device path it reaches, and load is what tests an audit: the
