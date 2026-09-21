@@ -75,6 +75,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_no_conflict_markers_controls.py` | Positive and faithful negative controls for the conflict-marker check |
 | `check_pass_line_counts.py` | every check reports PASS through `scripts/pass_line.py`, asserting a count that is zero when it examined nothing |
 | `check_pass_line_counts_controls.py` | Controls for the PASS-line guard, in both directions |
+| `check_patch_embedded_image_controls.py` | Controls for the exact embedded-rootfs replacement used by the interactive RPi5 image |
 | `check_pipefail_early_exit.py` | no `pipefail` script pipes a large producer into a consumer that leaves at the first match |
 | `check_pipefail_early_exit_controls.py` | Controls for the pipefail/SIGPIPE check, in both directions |
 | `check_platform_file_parity.py` | duplicated platform functions do not drift silently, and neither do identical inline runs of eight significant lines |

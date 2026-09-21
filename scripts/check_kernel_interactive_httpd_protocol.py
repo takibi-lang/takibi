@@ -62,6 +62,14 @@ def main() -> int:
     if expected_listener not in console:
         print("ERROR\tinteractive URL is not gated by exact listener readiness")
         failed = True
+    for runner, expected in (
+        ("scripts/run_kernel_shell_qemu.sh", 'ext2-shell.img"'),
+        ("scripts/run_kernel_shell_rpi5.sh", 'kernel-shell.elf"'),
+    ):
+        runner_text = (ROOT / runner).read_text(encoding="ascii")
+        if expected not in runner_text:
+            print(f"ERROR\t{runner} does not select the interactive rootfs")
+            failed = True
     syscall = (ROOT / "kernel/kernel/syscall.tkb").read_text(encoding="ascii")
     gave_up = re.search(
         r"KernelTcpAcceptStep::GaveUp\(next\) => \{(?P<body>.*?)"

@@ -11,8 +11,7 @@ trap 'takibi_status=$?; echo "[$(basename "$0")] aborted at line $LINENO with ex
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ELF="$REPO_ROOT/kernel/build/qemu/kernel.elf"
-EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
-SHELL_INITTAB="$REPO_ROOT/kernel/tests/ext2/inittab.shell"
+EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2-shell.img"
 ARTIFACT_DIR="${KERNEL_QEMU_SHELL_ARTIFACT_DIR:-${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}/kernel-shell-qemu}"
 SHELL_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
 QMP_SOCKET="$ARTIFACT_DIR/qmp.sock"
@@ -59,12 +58,6 @@ else
     rm -f "$TRANSCRIPT"
 fi
 cp "$EXT2_IMAGE" "$SHELL_EXT2_IMAGE"
-# The ordinary image deliberately boots the finite integration scenario before
-# its respawn services.  An interactive machine instead starts its long-lived
-# HTTPd and ash services immediately and leaves both under BusyBox init.
-debugfs -w -R 'rm /etc/inittab' "$SHELL_EXT2_IMAGE" >/dev/null 2>&1
-E2FSPROGS_FAKE_TIME=1700000000 \
-    e2cp "$SHELL_INITTAB" "$SHELL_EXT2_IMAGE":/etc/inittab
 rm -f "$QMP_SOCKET"
 
 QEMU_SERIAL_PORT="${KERNEL_QEMU_SHELL_SERIAL_PORT:-17773}"

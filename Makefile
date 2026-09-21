@@ -728,6 +728,7 @@ KERNEL_MUSL_APK          := $(KERNEL_USER_BUILD_DIR)/musl.apk
 KERNEL_MUSL_LOADER       := $(KERNEL_USER_BUILD_DIR)/ld-musl-aarch64.so.1
 KERNEL_EXT2_FIXTURE_DIR  := $(KERNEL_DIR)/tests/ext2
 KERNEL_EXT2_IMAGE        := $(KERNEL_USER_BUILD_DIR)/ext2.img
+KERNEL_SHELL_EXT2_IMAGE  := $(KERNEL_USER_BUILD_DIR)/ext2-shell.img
 KERNEL_RPI5_LINK_LD     := $(KERNEL_DIR)/arch/arm64/boot/link.ld
 KERNEL_INIT_TEST_DRIVER_TKB := $(KERNEL_DIR)/init/test_driver.tkb
 KERNEL_RPI5_MAIN_TKB    := $(KERNEL_DIR)/platform/rpi5/init.tkb
@@ -797,6 +798,7 @@ KERNEL_RPI5_MAIN_DEBUG_O := $(KERNEL_BUILD_DIR)/main.debug.o
 
 $(KERNEL_RPI5_MAIN_O): $(KERNEL_FD_TABLE_TKB)
 KERNEL_RPI5_ELF         := $(KERNEL_BUILD_DIR)/kernel.elf
+KERNEL_RPI5_SHELL_ELF   := $(KERNEL_BUILD_DIR)/kernel-shell.elf
 KERNEL_RPI5_DEBUG_ELF   := $(KERNEL_BUILD_DIR)/kernel-debug.elf
 
 $(KERNEL_BUILD_DIR):
@@ -936,6 +938,15 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	e2fsck -fn $@.tmp >/dev/null
 	mv $@.tmp $@
 
+$(KERNEL_SHELL_EXT2_IMAGE): $(KERNEL_EXT2_IMAGE) \
+	$(KERNEL_EXT2_FIXTURE_DIR)/inittab.shell
+	cp $(KERNEL_EXT2_IMAGE) $@.tmp
+	debugfs -w -R 'rm /etc/inittab' $@.tmp >/dev/null 2>&1
+	E2FSPROGS_FAKE_TIME=1700000000 \
+		e2cp $(KERNEL_EXT2_FIXTURE_DIR)/inittab.shell $@.tmp:/etc/inittab
+	e2fsck -fn $@.tmp >/dev/null
+	mv $@.tmp $@
+
 $(KERNEL_RPI5_ENTRY_O): $(KERNEL_RPI5_ENTRY_S) | $(KERNEL_BUILD_DIR)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
@@ -1052,6 +1063,13 @@ $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(
 
 $(KERNEL_RPI5_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_MAIN_O) $(KERNEL_RPI5_LINK_LD) $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld
 	$(LLD) -T $(KERNEL_RPI5_LINK_LD) $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(KERNEL_RPI5_FPSIMD_O) $(KERNEL_RPI5_PMU_O) $(KERNEL_RPI5_MAIN_O) -o $@
+	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 2
+	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
+
+$(KERNEL_RPI5_SHELL_ELF): $(KERNEL_RPI5_ELF) $(KERNEL_EXT2_IMAGE) \
+	$(KERNEL_SHELL_EXT2_IMAGE) scripts/patch_embedded_image.py
+	python3 scripts/patch_embedded_image.py $(KERNEL_RPI5_ELF) \
+		$(KERNEL_EXT2_IMAGE) $(KERNEL_SHELL_EXT2_IMAGE) $@
 	python3 scripts/buildcheck_kernel_asm_invariants.py $@ 2
 	python3 scripts/buildcheck_elf_symbol_alignment.py $@ boot_page_pool_cell 16
 
@@ -1280,7 +1298,8 @@ kernel-verify-exception-frame: $(KERNEL_EXC_CONTEXT_OFFSETS)
 	@python3 scripts/verify_exception_frame.py
 
 .PHONY: _kernelbuild-rpi5
-_kernelbuild-rpi5: kernel-lib-check kernel-verify-exception-frame $(KERNEL_RPI5_ELF)
+_kernelbuild-rpi5: kernel-lib-check kernel-verify-exception-frame \
+	$(KERNEL_RPI5_ELF) $(KERNEL_RPI5_SHELL_ELF)
 
 kernelbuild-rpi5: build
 	@$(KERNEL_BUILD_LOCK_RUN) $(MAKE) _kernelbuild-rpi5
@@ -1544,7 +1563,7 @@ _kernelcheck-alloc-rollback-qemu:
 ## kernelsh-qemu: boot the standalone kernel, attach the current terminal to
 ## its TCP-backed UART console, and forward localhost:18080 to guest httpd.
 ## Exit miniterm with Ctrl-].
-kernelsh-qemu: kernelbuild-qemu
+kernelsh-qemu: kernelbuild-qemu $(KERNEL_SHELL_EXT2_IMAGE)
 	@bash scripts/run_kernel_shell_qemu.sh
 
 ## kernelsh-rpi5: inject the standalone kernel over SWD and attach the current

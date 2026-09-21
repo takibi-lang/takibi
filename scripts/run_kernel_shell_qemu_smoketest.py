@@ -128,8 +128,6 @@ def main():
         os.chdir(REPO_ROOT)
         os.environ.pop("KERNEL_SHELL_TRANSCRIPT", None)
         os.environ["KERNEL_QEMU_SHELL_ARTIFACT_DIR"] = ARTIFACT_DIR
-        os.environ["KERNEL_QEMU_SHELL_SERIAL_PORT"] = "18707"
-        os.environ["KERNEL_QEMU_SHELL_HTTP_PORT"] = "18708"
         os.environ.pop("KERNEL_QEMU_SHELL_SKIP_NETWORK", None)
         os.execvp("make", ["make", "-j1", "kernelsh-qemu"])
 

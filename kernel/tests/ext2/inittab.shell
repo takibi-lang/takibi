@@ -1,4 +1,4 @@
-# Interactive QEMU boots skip the finite integration-test sysinit scenario.
+# Interactive boots skip the finite integration-test sysinit scenario.
 # BusyBox init keeps both services alive until the machine is powered off.
 ::respawn:/bin/httpd -f -p 8080 -h /
 ::respawn:/bin/sh -i

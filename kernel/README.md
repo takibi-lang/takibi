@@ -221,11 +221,12 @@ make kernelsh-rpi5     # load RPi5 over SWD and use the Debug Probe UART as the 
 
 The two `kernelsh-*` targets are deliberately interactive and do not run the
 automated view suite. RPi5 starts the physical-Ethernet peer needed to keep
-the kernel's normal network initialization path from timing out. QEMU uses a
-shell-specific inittab which skips the finite integration-test sysinit and
-immediately asks BusyBox init to respawn HTTPd and ash. A host bridge carries
-browser HTTP over the same UDP-framed Ethernet transport as the integration
-tests. Both use pyserial's
+the kernel's normal network initialization path from timing out. Both use a
+shell-specific root filesystem whose inittab skips the finite integration-test
+sysinit and immediately asks BusyBox init to respawn HTTPd and ash. QEMU mounts
+that image directly; the RPi5 shell ELF embeds and provisions it onto the USB
+test drive. A host bridge carries QEMU browser HTTP over the same UDP-framed
+Ethernet transport as the integration tests. Both use pyserial's
 `miniterm`; on Debian/Ubuntu install it with `sudo apt-get install
 python3-serial`. Press Ctrl-] to leave either console.
 Exiting this way also restores the host terminal settings.
@@ -319,6 +320,10 @@ kernel address is `192.168.20.2`.
 must have booted this project's `jtag_stub.img` at least once; subsequent
 shell/check runs may reset and replace an already resident Takibi payload
 without another power cycle. Power-cycle after changing the SD-card payload.
+The shell kernel overwrites the first 2.5 MiB of the attached USB Mass Storage
+device with its interactive root filesystem, just as `kernelcheck-rpi5`
+provisions the ordinary integration image. Attach only the dedicated
+sacrificial test drive.
 The RPi5 shell prints reset and SWD-load durations and reports the same ash
 readiness marker after the UART is attached. It also starts the existing
 physical-Ethernet ARP/ICMP/TCP peer after SWD load, so the kernel does not pay
