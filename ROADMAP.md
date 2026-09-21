@@ -8,8 +8,8 @@ the ordering below does not authorize speculative implementation.
 
 Written 2026-08-27 against the 99 open GitHub issues at that date. **The
 baseline below is that date's; the two territory queues were re-cut on
-2026-09-13** and carry their own dates, so read a queue's own heading rather
-than this one for what is current. The previous
+2026-09-13**, with Territory B reordered on 2026-09-21. Read a queue's own
+heading rather than this one for what is current. The previous
 snapshot was written 2026-08-20, and three of its eight milestones have since
 closed outright, along with the first half of a fourth: the trusted base is
 defined and measurable (#236), the known evidence-machinery defects are
@@ -74,19 +74,20 @@ the deepest dependency: it needs a language primitive this compiler does not
 have, and every week of single-core code written before that primitive exists
 is a week of code whose synchronization argument has to be reconstructed later.
 
-## Work split into two territories, re-cut 2026-09-13
+## Work split into two territories, re-cut 2026-09-21
 
 Two streams run in parallel, one per territory, with the territories and the
 shared-file conventions defined in `AGENTS.md`. This section is the part that
 moves: when a new issue outranks what is queued below, edit it here.
 
 **Territory A is multicore. That is #9 phase B and what it gates, with its
-QEMU, DDB and RPi5 evidence. Territory B is first the RPi5 network-boot
-exploration (#555), then the compiler and language issues.** A territory is a
+QEMU, DDB and RPi5 evidence. Territory B is compiler and language safety,
+semantics, native tests, and documentation; #555 network-boot discovery is
+deferred outside either active queue.** A territory is a
 role, not a set of directories and not a particular agent (`AGENTS.md`).
 Either stream edits what its work needs. The roles keep the two apart in
 practice: multicore integration works in the scheduler, process and platform
-paths, while network-boot discovery works in the boot and transport path. A
+paths, while Territory B starts with compiler-only audits and rules. A
 conflict in a shared file is expected to be incidental.
 
 Which agent takes which territory is the maintainer's per-session decision
@@ -879,35 +880,65 @@ None is queued above; they are recorded so they are not rediscovered.
    this territory converges the probes on one verdict shape, the check
    becomes possible and is worth revisiting.
 
-### Territory B queue -- network-boot discovery, compiler, native tests, and documentation
+### Territory B queue -- compiler safety, semantics, native tests, and documentation
 
-The active order was re-derived 2026-09-13 after the compiler boundaries below
-landed and four-core RPi5 phase A exposed the operational cost of warm SWD
-reloads. Entries are not confined to any directory. Some changes touch what
-Territory A's lanes depend on: a runner, the board lease, or the platform
-boot path. Land those as their own commits, and record on the issue what
-the other side needs to know.
+**Reordered 2026-09-21.** Multicore plus SWD is sufficiently stable for the
+current work, so #555 network-boot discovery is no longer Territory B's first
+job or part of either active queue. Keep it open but deferred; reconsider it
+if measured SWD failures, recovery cost, or load time impede the multicore
+loop. Do not start a boot-path or runner replacement merely to save the
+current roughly 16-second transfer. The order here favors work that can land
+without reshaping Territory A's scheduler, process, platform, or live board
+paths. A compiler rule that both roles use lands as its own commit, with the
+kernel adoption sequenced on the issue.
 
-1. **#555: make the network-boot decision concrete.** Treat this as both an
-   alternative to rewriting a live four-core machine through SWD and a way to
-   remove the roughly 16-second image-transfer tail from each hardware lane.
-   First choose the resident boundary, boot protocol, bad-image recovery, and
-   DDB/UART path, measuring rather than assuming. The current maintained TCP
-   path is only 15--18 KiB/s and is not the answer without a separately
-   measured improvement. This discovery work may conclude that firmware TFTP,
-   PXE-style boot, or a small resident loader is viable, and it may prototype
-   whatever the measurement needs. Before changing a runner, the board lease
-   or the platform boot path that Territory A's hardware lanes use, say so on
-   #555, and keep the existing SWD lane working until the replacement has
-   board evidence.
+Start in this order; each entry is a session-sized decision or independently
+testable change, not permission to implement its entire research horizon:
 
-Then, unordered, the compiler and language issues that moved here with
-`lib/`: #131, #132, #212, #216, #252, #267, #282, #297, #342, #343, #370,
-#374, #400, #417, #200, #201, #203, #109, #129, #155, #122, #123, #124, #28,
-#58, #13, #95, #8, #50, #51, #85, and two filed by the 2026-09-13 audit:
-#557 (a lock struct can be overwritten by whole-value assignment) and #558
-(#528's and #493's checks do not follow indirect calls; worth settling
-before Territory A relies on either).
+1. **#558: close the indirect-call holes in the IRQ-restore and
+   handle-invalidation checks.** Recount actual indirect calls against the
+   current kernel first. Prefer a conservative rejection if it covers the
+   actual uses without inventing effect-row syntax; prove both negative
+   cases and `make allbuild`. This is an existing compiler soundness gap in
+   rules Territory A already relies on, and can start in `lib/` and compiler
+   tests without editing A's implementation.
+2. **#575: audit operator grouping and evaluation semantics.** Produce the
+   parser/SPEC/type-checker/codegen/test matrix and the maintainer decision
+   before changing `&&`, `||`, or any precedence. Include source-level
+   guard and side-effect cases and inspect maintained callers. Split each
+   approved breaking change into a narrow follow-up issue; do not bundle a
+   language migration into the audit.
+3. **#212: decide the let-else-like variant shorthand.** Its repeated
+   cleanup-and-extract pattern has concrete kernel and native examples. Start
+   with syntax and ownership tests in `lib/` and `linux_user/`; update shared
+   kernel callers only after the syntax has its own landed interface.
+
+Next, in descending priority, are independent research/prototype choices,
+not a mandate to implement all of them: **#58** (a measured, conservative
+kernel-stack-depth proof), **#203** (definite initialization at user-copy
+boundaries), **#297** (runtime-cardinality retain/release obligations), then
+**#342** and **#343** (null and dangling-pointer safety). Prototype against
+the smallest faithful consumer: #58 needs linked-kernel frame evidence, while
+compiler tests or `linux_user/` can answer earlier language questions for the
+others. A kernel-wide migration is a separate decision. Their safety impact
+is high, but their current issues are
+open-ended and should not displace the three concrete entries above.
+
+**Needs a Territory A handoff before kernel adoption:** #557 (a declaration
+rule against whole-value lock copies; land the compiler interface separately
+before marking shared lock types), then #131, #132, #370, and #216 (stored
+ownership and cross-call proofs that need a concrete maintained consumer).
+Their design or negative compiler tests can proceed in B, but do not race A
+to rewrite a live lock, process, or pool call site.
+
+Remaining compiler research, ordered within each line by current relevance:
+
+- Bounds, arithmetic, and static relationships: #200, #201, #252, #417,
+  #267, #282, #129, #374. #282 and #129 explicitly lack an urgent missing
+  caller; keep their implementation gated on one.
+- Language policy and ergonomic options: #400, #155, #28, #8.
+- Toolchain and debugging: #124, #122, #123, #95.
+- Longer-horizon proof or new-target research: #109, #13, #50, #51, #85.
 
 #### Completed and transferred entries of the previous order
 
