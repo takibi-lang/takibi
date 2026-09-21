@@ -173,13 +173,21 @@ if [ "$mode" = check ]; then
 fi
 
 if [ -n "$watch_for" ]; then
-    # Every file under the sample, not only the lane's own UART log: which
-    # lane's capture carries the line is exactly what is not known in
+    # Every TEXT file under the sample, not only the lane's own UART log:
+    # which lane's capture carries the line is exactly what is not known in
     # advance, and is often the interesting half of the answer.
+    #
+    # -I, and it is the difference between a rate and a nonsense. A sample
+    # keeps the guest filesystem image it booted, and the strings a fixture
+    # can PRINT are in that image as program data -- so watching for
+    # `the peer spinner was not reaped` over #571's forty samples reported
+    # 40 of 40 while no UART log carried it at all. A symptom worth watching
+    # for is one the product can emit, which is exactly the class of string
+    # that also sits in the binary that would emit it.
     seen=0
     seen_samples=""
     for i in $(seq 1 "$count"); do
-        if grep -rqE "$watch_for" "$artifacts/sample-$i" 2>/dev/null; then
+        if grep -rIqE "$watch_for" "$artifacts/sample-$i" 2>/dev/null; then
             seen=$((seen + 1))
             seen_samples="$seen_samples $i"
         fi
@@ -188,7 +196,7 @@ if [ -n "$watch_for" ]; then
          "$watch_for"
     if [ "$seen" -ne 0 ]; then
         echo "repeat/$label: matching samples:$seen_samples"
-        grep -rlE "$watch_for" "$artifacts" 2>/dev/null |
+        grep -rIlE "$watch_for" "$artifacts" 2>/dev/null |
             sed "s|^$artifacts/|repeat/$label:   |" | sort | head -20
     fi
 fi
