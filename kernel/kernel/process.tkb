@@ -2605,10 +2605,11 @@ fn scheduled_process_reap(
         state: sink ScheduledProcessState[process, ProcessState::Exited])
         !{unsafe, invalidates_ProcessHandle} {
     // GitHub issue #488: see scheduled_process_reaped_current_count.
-    if (execution_here().current_live &&
-        execution_here().current_handle.pool_index == owner.pool_index) {
-        scheduled_process_reaped_current_count =
-            scheduled_process_reaped_current_count + 1;
+    if (execution_here().current_live) {
+        if (execution_here().current_handle.pool_index == owner.pool_index) {
+            scheduled_process_reaped_current_count =
+                scheduled_process_reaped_current_count + 1;
+        }
     }
     kernel_process_trace_record(
         ProcessTraceReap, scheduled_process_pid_of_slot(owner.pool_index),
@@ -3968,9 +3969,13 @@ fn kernel_process_affinity_set(pid: usize, requested: usize)
         return ProcessAffinityResult::Invalid;
     }
     scheduled_process_set_affinity_mask(slot, mask);
-    let leave_this_cpu: bool = execution_here().current_live &&
-        execution_here().current_handle.pool_index == slot &&
-        kernel_process_cpu_allows_slot(cpu_id(), slot) == false;
+    let mut leave_this_cpu: bool = false;
+    if (execution_here().current_live) {
+        if (execution_here().current_handle.pool_index == slot) {
+            leave_this_cpu =
+                kernel_process_cpu_allows_slot(cpu_id(), slot) == false;
+        }
+    }
     process_run_unlock(guard);
     if (leave_this_cpu) { kernel_process_request_reschedule(); }
     return ProcessAffinityResult::Mask(mask);
@@ -4207,9 +4212,12 @@ private fn kernel_process_schedule_reserved(
             let mut to: ProcessHandle = {
                 owner.pool_index, owner.generation
             };
-            if (execution_here().current_live == false ||
-                scheduled_process_same_slot(
-                    execution_here().current_handle, from) == false ||
+            let mut current_matches: bool = false;
+            if (execution_here().current_live) {
+                current_matches = scheduled_process_same_slot(
+                    execution_here().current_handle, from);
+            }
+            if (current_matches == false ||
                 scheduled_process_handle_matches(from) == false ||
                 scheduled_process_state_of(from) != ProcessSlotState::Running ||
                 scheduled_process_handle_matches(to) == false ||
@@ -4294,9 +4302,12 @@ fn kernel_process_activate_current_root() -> CurrentRootActivationResult {
         }
         AddressSpaceActivationPrepareResult::Prepared(prepared) => {
             let guard = process_run_lock();
-            if (execution_here().current_live == false ||
-                scheduled_process_same_slot(
-                    execution_here().current_handle, current) == false ||
+            let mut current_matches: bool = false;
+            if (execution_here().current_live) {
+                current_matches = scheduled_process_same_slot(
+                    execution_here().current_handle, current);
+            }
+            if (current_matches == false ||
                 scheduled_process_handle_matches(current) == false ||
                 scheduled_process_state_of(current) !=
                     ProcessSlotState::Running) {
@@ -4365,9 +4376,9 @@ fn kernel_process_current_has_live_child() -> bool {
     // -ECHILD versus blocking in wait4, and counting an exited-but-
     // unreaped child as live would block a parent that has one waiting to
     // be collected.
-    return execution_here().current_live &&
-           kernel_process_has_live_child_of(
-               execution_here().current_handle.pool_index);
+    if (execution_here().current_live == false) { return false; }
+    return kernel_process_has_live_child_of(
+        execution_here().current_handle.pool_index);
 }
 
 // Is there another process the scheduler could pick right now?
@@ -5225,9 +5236,12 @@ private fn kernel_process_block_reserved(
             let mut to: ProcessHandle = {
                 owner.pool_index, owner.generation
             };
-            if (execution_here().current_live == false ||
-                scheduled_process_same_slot(
-                    execution_here().current_handle, from) == false ||
+            let mut current_matches: bool = false;
+            if (execution_here().current_live) {
+                current_matches = scheduled_process_same_slot(
+                    execution_here().current_handle, from);
+            }
+            if (current_matches == false ||
                 scheduled_process_handle_matches(from) == false ||
                 scheduled_process_state_of(from) != ProcessSlotState::Running ||
                 scheduled_process_handle_matches(to) == false ||
@@ -5673,11 +5687,9 @@ fn kernel_process_block_uart(current_sp: usize) -> usize {
 // blocks current (the parent calling wait4()) so its own child can keep
 // running toward its exit.
 fn kernel_process_block_wait4(current_sp: usize) -> usize {
-    if (execution_here().current_live == false ||
-        scheduled_process_record_of(execution_here().current_handle)
-            .has_first_child == false) {
-        return 0;
-    }
+    if (execution_here().current_live == false) { return 0; }
+    if (scheduled_process_record_of(execution_here().current_handle)
+            .has_first_child == false) { return 0; }
     return kernel_process_block_current(
         current_sp, ProcessWaitReason::ChildExit, 2);
 }
@@ -5866,10 +5878,11 @@ fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[lock], value: usize)
 // replaces the old explicit execution_process != Parent check.
 fn kernel_process_uart_record_parent_progress()
         -> ProcessUartProgressResult {
-    if (execution_here().current_live == false ||
-        scheduled_process_record_of(execution_here().current_handle)
-            .has_first_child ==
-            false) {
+    if (execution_here().current_live == false) {
+        return ProcessUartProgressResult::Invalid;
+    }
+    if (scheduled_process_record_of(execution_here().current_handle)
+            .has_first_child == false) {
         return ProcessUartProgressResult::Invalid;
     }
     let mut parent: ProcessHandle = execution_here().current_handle;
@@ -6502,10 +6515,11 @@ fn kernel_process_clone_child_stack_top() -> usize {
 must_use variant ProcessCloneRollbackResult { Invalid; Restored; }
 
 fn kernel_process_clone_rollback() -> ProcessCloneRollbackResult {
-    if (execution_here().current_live == false ||
-        scheduled_process_record_of(execution_here().current_handle)
-            .has_parent ==
-            false) {
+    if (execution_here().current_live == false) {
+        return ProcessCloneRollbackResult::Invalid;
+    }
+    if (scheduled_process_record_of(execution_here().current_handle)
+            .has_parent == false) {
         return ProcessCloneRollbackResult::Invalid;
     }
     let mut child: ProcessHandle = execution_here().current_handle;
@@ -6579,12 +6593,10 @@ fn kernel_process_clone_rollback() -> ProcessCloneRollbackResult {
 // separate global execution_parent_handle.
 fn kernel_process_clone_context_install(parent_sp: usize, child_sp: usize)
         -> usize {
-    if (execution_here().current_live == false || parent_sp == 0 || child_sp == 0 ||
-        scheduled_process_record_of(execution_here().current_handle)
-            .has_parent ==
-            false) {
-        return 0;
-    }
+    if (execution_here().current_live == false || parent_sp == 0 ||
+        child_sp == 0) { return 0; }
+    if (scheduled_process_record_of(execution_here().current_handle)
+            .has_parent == false) { return 0; }
     let mut child: ProcessHandle = execution_here().current_handle;
     let mut parent: ProcessHandle =
         scheduled_process_record_of(child).parent;
@@ -6615,18 +6627,16 @@ fn kernel_process_clone_context_install(parent_sp: usize, child_sp: usize)
 }
 
 fn kernel_process_is_child() -> bool {
-    return execution_here().current_live &&
-           scheduled_process_record_of(execution_here().current_handle)
-               .has_parent;
+    if (execution_here().current_live == false) { return false; }
+    return scheduled_process_record_of(execution_here().current_handle)
+        .has_parent;
 }
 
 // Whether the current process is a direct child of BusyBox init.
 fn kernel_process_parent_is_root() -> bool {
-    if (execution_here().current_live == false ||
-        scheduled_process_record_of(execution_here().current_handle)
-            .has_parent == false) {
-        return false;
-    }
+    if (execution_here().current_live == false) { return false; }
+    if (scheduled_process_record_of(execution_here().current_handle)
+            .has_parent == false) { return false; }
     let mut parent: ProcessHandle =
         scheduled_process_record_of(execution_here().current_handle).parent;
     return parent.pool_index == 0;
@@ -6801,9 +6811,12 @@ private fn kernel_process_exit_reserved(
             let mut successor: ProcessHandle = {
                 owner.pool_index, owner.generation
             };
-            if (execution_here().current_live == false ||
-                scheduled_process_same_slot(
-                    execution_here().current_handle, child) == false ||
+            let mut current_matches: bool = false;
+            if (execution_here().current_live) {
+                current_matches = scheduled_process_same_slot(
+                    execution_here().current_handle, child);
+            }
+            if (current_matches == false ||
                 scheduled_process_handle_matches(child) == false ||
                 scheduled_process_state_of(child) != ProcessSlotState::Exited ||
                 scheduled_process_handle_matches(successor) == false ||
@@ -6868,12 +6881,9 @@ fn kernel_process_child_exit(status: usize) -> usize {
     // off a dying context. Leaving preemption on is also the prerequisite
     // for genuinely concurrent children (a shell backgrounding a job with
     // `&`), where a child exit must not stop the survivors from running.
-    if (execution_here().current_live == false ||
-        scheduled_process_record_of(execution_here().current_handle)
-            .has_parent ==
-            false) {
-        return 0;
-    }
+    if (execution_here().current_live == false) { return 0; }
+    if (scheduled_process_record_of(execution_here().current_handle)
+            .has_parent == false) { return 0; }
     let current = current_process_new(
         execution_here().current_handle.generation);
     let mut child: ProcessHandle = current_process_handle(current);
@@ -7571,8 +7581,8 @@ fn kernel_process_last_child_pid() -> usize {
 // checking for exactly 1 undercounts. >= 1 keeps the real assertion
 // (a clone genuinely happened) without assuming how many preceded it.
 fn kernel_process_clone_evidence() -> bool {
-    return execution_here().current_live &&
-           process_test_evidence_clone_calls() >= 1 &&
+    if (execution_here().current_live == false) { return false; }
+    return process_test_evidence_clone_calls() >= 1 &&
            process_test_evidence_exit_42_seen() &&
            scheduled_process_record_of(execution_here().current_handle)
                .has_first_child ==
