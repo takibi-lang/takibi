@@ -12,9 +12,11 @@ trap 'takibi_status=$?; echo "[$(basename "$0")] aborted at line $LINENO with ex
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ELF="$REPO_ROOT/kernel/build/qemu/kernel.elf"
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
+SHELL_INITTAB="$REPO_ROOT/kernel/tests/ext2/inittab.shell"
 ARTIFACT_DIR="${KERNEL_QEMU_SHELL_ARTIFACT_DIR:-${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}/kernel-shell-qemu}"
 SHELL_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
 QMP_SOCKET="$ARTIFACT_DIR/qmp.sock"
+HTTP_BRIDGE_LOG="$ARTIFACT_DIR/http-bridge.log"
 TRANSCRIPT_OVERRIDE="${KERNEL_SHELL_TRANSCRIPT:-}"
 
 # The top-level Makefile normally enables -Oline, which captures a recipe's
@@ -57,20 +59,28 @@ else
     rm -f "$TRANSCRIPT"
 fi
 cp "$EXT2_IMAGE" "$SHELL_EXT2_IMAGE"
+# The ordinary image deliberately boots the finite integration scenario before
+# its respawn services.  An interactive machine instead starts its long-lived
+# HTTPd and ash services immediately and leaves both under BusyBox init.
+debugfs -w -R 'rm /etc/inittab' "$SHELL_EXT2_IMAGE" >/dev/null 2>&1
+E2FSPROGS_FAKE_TIME=1700000000 \
+    e2cp "$SHELL_INITTAB" "$SHELL_EXT2_IMAGE":/etc/inittab
 rm -f "$QMP_SOCKET"
 
 QEMU_SERIAL_PORT="${KERNEL_QEMU_SHELL_SERIAL_PORT:-17773}"
 HTTP_PORT="${KERNEL_QEMU_SHELL_HTTP_PORT:-18080}"
+NETDEV_QEMU_PORT="${KERNEL_QEMU_SHELL_NETDEV_QEMU_PORT:-18081}"
+NETDEV_PEER_PORT="${KERNEL_QEMU_SHELL_NETDEV_PEER_PORT:-18082}"
 SKIP_NETWORK="${KERNEL_QEMU_SHELL_SKIP_NETWORK:-0}"
-# The human-facing default retains HTTP forwarding. The automated PTY smoke
-# sets this flag because its contract is the terminal/miniterm/DDB path; the
-# ordinary integration boot already exercises virtio-net and HTTP in the same
-# aggregate target.
+# The human-facing default and automated smoke both retain HTTP forwarding.
+# The smoke proves this exact interactive profile serves a real request.
 . "$REPO_ROOT/scripts/qemu_session_ports.sh"
-qemu_session_shift_ports QEMU_SERIAL_PORT HTTP_PORT
+qemu_session_shift_ports QEMU_SERIAL_PORT HTTP_PORT NETDEV_QEMU_PORT \
+    NETDEV_PEER_PORT
 guard_ports=("tcp:$QEMU_SERIAL_PORT")
 if [ "$SKIP_NETWORK" != 1 ]; then
-    guard_ports+=("tcp:$HTTP_PORT")
+    guard_ports+=("tcp:$HTTP_PORT" "udp:$NETDEV_QEMU_PORT" \
+        "udp:$NETDEV_PEER_PORT")
 fi
 python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "kernel/qemu shell" \
     "${guard_ports[@]}" || exit 1
@@ -78,10 +88,10 @@ echo "[kernel/qemu] interactive UART session (Ctrl-] exits miniterm)"
 if [ "$SKIP_NETWORK" = 1 ]; then
     echo "[kernel/qemu] network device omitted for terminal-path smoke"
 else
-    echo "[kernel/qemu] httpd forwarding: http://127.0.0.1:$HTTP_PORT/ -> 192.168.20.2:8080${TAKIBI_SESSION:+ (session $TAKIBI_SESSION)}"
-    # The console repeats this when a shell prompt appears and when the guest
-    # announces a listener: this line is printed before a boot log long enough
-    # to scroll it away, and the port differs per clone.
+    echo "[kernel/qemu] httpd bridge: http://127.0.0.1:$HTTP_PORT/ -> 192.168.20.2:8080${TAKIBI_SESSION:+ (session $TAKIBI_SESSION)}"
+    # The console repeats this only when the guest announces its persistent
+    # listener: this line is printed before a boot log long enough to scroll it
+    # away, and the port differs per clone.
     export KERNEL_SHELL_HTTP_URL="http://127.0.0.1:$HTTP_PORT/"
 fi
 QEMU_LAUNCH_NS="$(date +%s%N)"
@@ -101,7 +111,7 @@ QEMU_COMMAND=(
 )
 if [ "$SKIP_NETWORK" != 1 ]; then
     QEMU_COMMAND+=(
-        -netdev "user,id=net0,net=192.168.20.0/24,dhcpstart=192.168.20.15,host=192.168.20.1,hostfwd=tcp:127.0.0.1:$HTTP_PORT-192.168.20.2:8080"
+        -netdev "dgram,id=net0,local.type=inet,local.host=127.0.0.1,local.port=$NETDEV_QEMU_PORT,remote.type=inet,remote.host=127.0.0.1,remote.port=$NETDEV_PEER_PORT"
         -device "virtio-net-device,netdev=net0,mac=02:00:20:00:00:02,csum=off,guest_csum=off,gso=off,guest_tso4=off,guest_tso6=off,guest_ufo=off,guest_uso4=off,guest_uso6=off,mrg_rxbuf=off,ctrl_vq=off,mq=off,indirect_desc=off,event_idx=off"
     )
 fi
@@ -113,12 +123,23 @@ export KERNEL_SHELL_TRANSCRIPT="$TRANSCRIPT"
 if [ "${KERNEL_QEMU_SHELL_MEASURE_ONLY:-0}" = 1 ]; then
     export KERNEL_SHELL_MEASURE_ONLY=1
 fi
+HTTP_BRIDGE_PID=""
+if [ "$SKIP_NETWORK" != 1 ]; then
+    python3 -u "$REPO_ROOT/scripts/kernel_http_bridge.py" \
+        "$NETDEV_QEMU_PORT" "$NETDEV_PEER_PORT" "$HTTP_PORT" \
+        >"$HTTP_BRIDGE_LOG" 2>&1 &
+    HTTP_BRIDGE_PID=$!
+fi
 "${QEMU_COMMAND[@]}" &
 QEMU_PID=$!
 export KERNEL_SHELL_BACKEND_PID="$QEMU_PID"
 cleanup() {
     kill "$QEMU_PID" 2>/dev/null || true
     wait "$QEMU_PID" 2>/dev/null || true
+    if [ -n "$HTTP_BRIDGE_PID" ]; then
+        kill "$HTTP_BRIDGE_PID" 2>/dev/null || true
+        wait "$HTTP_BRIDGE_PID" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT INT TERM HUP
 

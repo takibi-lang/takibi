@@ -522,9 +522,8 @@ def init_script_fixture(sock: socket.socket) -> bool:
     return ok
 
 
-def http_request(sock: socket.socket, client_port: int, client_isn: int,
-                 path: str, expected_body: bytes,
-                 expected_content_type: str) -> bool:
+def raw_http_response(sock: socket.socket, client_port: int, client_isn: int,
+                      path: str) -> bytes | None:
     # The bounded boot fixture deliberately drops the first SYN-ACK; the
     # interactive daemon does not. The same retry loop correctly covers both
     # lifecycles without making the interactive test inherit fixture state.
@@ -533,14 +532,14 @@ def http_request(sock: socket.socket, client_port: int, client_isn: int,
     reply = send_and_wait(sock, syn)
     if reply is None:
         print("  no HTTP SYN-ACK reply")
-        return False
+        return None
     tcp = reply[34:]
     src_port, dst_port, server_seq, ack, _doff_res, flags = struct.unpack(
         "!HHIIBB", tcp[0:14])
     if (src_port != HTTP_SERVER_PORT or dst_port != client_port or
             flags != (FLAG_SYN | FLAG_ACK) or ack != client_isn + 1):
         print("  bad HTTP SYN-ACK")
-        return False
+        return None
 
     client_seq = client_isn + 1
     server_next = server_seq + 1
@@ -574,7 +573,7 @@ def http_request(sock: socket.socket, client_port: int, client_isn: int,
                 break
         else:
             print("  no HTTP request ACK")
-            return False
+            return None
         tcp_header_length = (ack_frame[46] >> 4) * 4
         if len(ack_frame) > 34 + tcp_header_length:
             early_response_frames.append(ack_frame)
@@ -613,8 +612,17 @@ def http_request(sock: socket.socket, client_port: int, client_isn: int,
                         (QEMU_HOST, QEMU_PORT))
     if not response_end:
         print("  HTTP response did not close")
-        return False
+        return None
     response = bytes(body)
+    return response
+
+
+def http_request(sock: socket.socket, client_port: int, client_isn: int,
+                 path: str, expected_body: bytes,
+                 expected_content_type: str) -> bool:
+    response = raw_http_response(sock, client_port, client_isn, path)
+    if response is None:
+        return False
     separator = response.find(b"\r\n\r\n")
     header = response[:separator].decode("iso-8859-1") if separator >= 0 else ""
     actual_body = response[separator + 4:] if separator >= 0 else b""

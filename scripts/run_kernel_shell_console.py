@@ -163,11 +163,11 @@ BOOT_PHASE_MARKERS = (
 
 
 # The forwarded URL is announced before the boot log, which is long enough to
-# scroll it out of reach, and its port now differs per clone. Repeat it at the
-# two moments it is wanted: when a prompt appears, and when the guest says a
-# server is listening.
+# scroll it out of reach, and its port now differs per clone. Repeat it only
+# after the guest says the persistent server is listening. Ash readiness alone
+# does not prove that init has started HTTPd.
 HTTP_URL = os.environ.get("KERNEL_SHELL_HTTP_URL", "")
-LISTENER_MARKERS = (b"listener ready port=",)
+LISTENER_MARKERS = (b"persistent server: listener ready port=8080",)
 LISTENER_CARRY = max(len(marker) for marker in LISTENER_MARKERS) - 1
 READY_CARRY = READY_MARKER_WINDOW - 1
 
@@ -253,13 +253,10 @@ class TimingMiniterm(miniterm.Miniterm):
                             file=sys.stderr,
                             flush=True,
                         )
-                        announce_url()
                         self.reported = True
                 fired, self.listener_pending = listener_seen(
                     self.listener_pending, data
                 )
-                if fired:
-                    announce_url()
                 if self.raw:
                     self.console.write_bytes(data)
                 else:
@@ -267,6 +264,8 @@ class TimingMiniterm(miniterm.Miniterm):
                     for transformation in self.rx_transformations:
                         text = transformation.rx(text)
                     self.console.write(text)
+                if fired:
+                    announce_url()
         except serial.SerialException:
             # socket:// transports do not implement cancel_read(). During
             # normal shutdown the main thread closes the socket to wake this
@@ -326,7 +325,6 @@ def main() -> int:
                             file=sys.stderr,
                             flush=True,
                         )
-                    announce_url()
                     transcript.flush()
                     transcript.close()
                     print(

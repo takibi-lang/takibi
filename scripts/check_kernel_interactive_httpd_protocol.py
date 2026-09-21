@@ -40,6 +40,28 @@ def main() -> int:
     if "::respawn:/bin/httpd -f -p 8080 -h /\n" not in inittab:
         print("ERROR\tinittab does not respawn the persistent HTTPd service")
         failed = True
+    shell_inittab = (ROOT / "kernel/tests/ext2/inittab.shell").read_text(
+        encoding="ascii"
+    )
+    if "::sysinit:" in shell_inittab:
+        print("ERROR\tinteractive inittab runs the finite integration sysinit")
+        failed = True
+    for service, description in (
+        ("::respawn:/bin/httpd -f -p 8080 -h /\n", "persistent HTTPd"),
+        ("::respawn:/bin/sh -i\n", "persistent ash"),
+    ):
+        if shell_inittab.count(service) != 1:
+            print(f"ERROR\tinteractive inittab must respawn one {description}")
+            failed = True
+    console = (ROOT / "scripts/run_kernel_shell_console.py").read_text(
+        encoding="ascii"
+    )
+    expected_listener = (
+        'LISTENER_MARKERS = (b"persistent server: listener ready port=8080",)'
+    )
+    if expected_listener not in console:
+        print("ERROR\tinteractive URL is not gated by exact listener readiness")
+        failed = True
     syscall = (ROOT / "kernel/kernel/syscall.tkb").read_text(encoding="ascii")
     gave_up = re.search(
         r"KernelTcpAcceptStep::GaveUp\(next\) => \{(?P<body>.*?)"
@@ -121,7 +143,7 @@ def main() -> int:
         return 1
     report_pass(
         "kernel-interactive-httpd-protocol",
-        f"persistent service plus {len(RUNNERS)} runners preserve blocking accept and LISTENER -> request -> READY -> DONE",
+        f"persistent services plus {len(RUNNERS)} runners preserve blocking accept and LISTENER -> request -> READY -> DONE",
         runners=len(RUNNERS),
     )
     return 0

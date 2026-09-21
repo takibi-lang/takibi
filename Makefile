@@ -1428,10 +1428,9 @@ _kernelcheck-qemu-ash:
 
 ## Exercise make -> /dev/tty -> miniterm -> ash in a pseudo-terminal.  This
 ## complements the UART protocol tests above by covering the interactive entry
-## point and its host-side terminal file descriptors.  Its runner omits the
-## NIC: the full boot immediately before it already covers virtio-net and HTTP,
-## while user-mode networking otherwise makes this terminal-only check spend
-## about 15 seconds in the kernel's network retry fixture.
+## point and its host-side terminal file descriptors.  It also makes two real
+## HTTP requests through the raw-Ethernet bridge, proving that the init-managed
+## service is ready and remains alive in this interactive boot profile.
 kernelcheck-shell-qemu: kernelbuild-check
 	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-shell-qemu
 

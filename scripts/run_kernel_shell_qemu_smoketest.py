@@ -3,14 +3,25 @@
 
 import os
 import pty
+import re
 import select
 import signal
 import sys
 import time
+import urllib.request
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-READY_MARKER = b"interactive shell: uart blocked"
+READY_MARKERS = (
+    b"persistent shell: uart blocked",
+    b"interactive shell: uart blocked",
+)
+LISTENER_MARKER = b"persistent server: listener ready port=8080"
+HTTP_URL_PATTERN = re.compile(
+    b"open in a host browser" + bytes((58, 32)) +
+    rb"(http://127\.0\.0\.1:[0-9]+/)"
+)
+HTTP_BODY_MARKER = b"<h1>Takibi Kernel</h1>"
 COMMAND_RESULT = b"__KERNELSH_PTY_SMOKE__"
 ARTIFACT_DIR = os.path.join(REPO_ROOT, "_build", "kernelcheck-shell-qemu")
 TRANSCRIPT_PATH = os.path.join(ARTIFACT_DIR, "uart-transcript.log")
@@ -85,7 +96,7 @@ def verify_uart_transcript(pid, terminal_transcript):
         fail(pid, terminal_transcript, f"UART transcript is not readable: {error}")
 
     required = (
-        (READY_MARKER, "pre-DDB ash readiness"),
+        (LISTENER_MARKER, "persistent HTTPd listener readiness"),
         (b"ddb: interrupt-safe UART debugger", "DDB entry"),
         (b"ddb: continuing", "DDB continue output"),
         (b"\n" + COMMAND_RESULT + b"\n", "post-resume shell output"),
@@ -97,6 +108,20 @@ def verify_uart_transcript(pid, terminal_transcript):
         fail(pid, terminal_transcript, "UART transcript missed oops command output")
 
 
+def verify_http(url):
+    for request_number in range(1, 3):
+        with urllib.request.urlopen(url, timeout=5) as response:
+            body = response.read()
+            if response.status != 200:
+                raise RuntimeError(
+                    f"HTTP request {request_number} returned {response.status}"
+                )
+            if HTTP_BODY_MARKER not in body:
+                raise RuntimeError(
+                    f"HTTP request {request_number} missed the index marker"
+                )
+
+
 def main():
     pid, terminal = pty.fork()
     if pid == 0:
@@ -105,13 +130,14 @@ def main():
         os.environ["KERNEL_QEMU_SHELL_ARTIFACT_DIR"] = ARTIFACT_DIR
         os.environ["KERNEL_QEMU_SHELL_SERIAL_PORT"] = "18707"
         os.environ["KERNEL_QEMU_SHELL_HTTP_PORT"] = "18708"
-        os.environ["KERNEL_QEMU_SHELL_SKIP_NETWORK"] = "1"
+        os.environ.pop("KERNEL_QEMU_SHELL_SKIP_NETWORK", None)
         os.execvp("make", ["make", "-j1", "kernelsh-qemu"])
 
     transcript = bytearray()
     break_sent = False
     ddb_prompt_count = 0
     command_sent = False
+    http_checked = False
     deadline = time.monotonic() + START_TIMEOUT_SECONDS
 
     try:
@@ -125,7 +151,15 @@ def main():
                 if data:
                     transcript.extend(data)
                     normalized = bytes(transcript).replace(b"\r", b"")
-                    if not break_sent and READY_MARKER in normalized and b"/ # " in normalized:
+                    url_match = HTTP_URL_PATTERN.search(normalized)
+                    if not http_checked and url_match is not None:
+                        try:
+                            verify_http(url_match.group(1).decode("ascii"))
+                        except (OSError, RuntimeError) as error:
+                            fail(pid, transcript, f"interactive HTTP check failed: {error}")
+                        http_checked = True
+                    ready = any(marker in normalized for marker in READY_MARKERS)
+                    if not break_sent and http_checked and ready and b"/ # " in normalized:
                         os.write(terminal, b"\x14b")  # Ctrl-T, then lowercase b
                         break_sent = True
                     prompts = normalized.count(b"ddb> ")

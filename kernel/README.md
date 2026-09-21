@@ -221,9 +221,11 @@ make kernelsh-rpi5     # load RPi5 over SWD and use the Debug Probe UART as the 
 
 The two `kernelsh-*` targets are deliberately interactive and do not run the
 automated view suite. RPi5 starts the physical-Ethernet peer needed to keep
-the kernel's normal network initialization path from timing out. QEMU instead
-uses its user-mode network so that BusyBox httpd started at the ash prompt can
-be opened from the host browser. Both use pyserial's
+the kernel's normal network initialization path from timing out. QEMU uses a
+shell-specific inittab which skips the finite integration-test sysinit and
+immediately asks BusyBox init to respawn HTTPd and ash. A host bridge carries
+browser HTTP over the same UDP-framed Ethernet transport as the integration
+tests. Both use pyserial's
 `miniterm`; on Debian/Ubuntu install it with `sudo apt-get install
 python3-serial`. Press Ctrl-] to leave either console.
 Exiting this way also restores the host terminal settings.
@@ -279,7 +281,7 @@ the QEMU process or UART socket exists.
 
 ### Publish a page from interactive ash
 
-Both shell targets boot the same init-managed BusyBox HTTPd automatically.
+Both shell targets boot an init-managed BusyBox HTTPd automatically.
 Wait for `persistent server: listener ready port=8080`; no shell command is
 needed. `/bin/httpd.sh` remains available for experiments on a different port,
 but starting it unchanged would correctly conflict with the service on 8080.
@@ -290,13 +292,17 @@ For QEMU, start the shell and open the forwarded loopback URL in a browser:
 make kernelsh-qemu
 ```
 
-Open `http://127.0.0.1:18080/` in Firefox. Its links exercise
-`/about.html` and `/icon.png`. QEMU user-mode networking forwards
-that host port to the kernel's fixed `192.168.20.2:8080`; set
-`KERNEL_QEMU_SHELL_HTTP_PORT` to choose another host port. When the browser is
-outside the development container, forward that container port first. The
-automated `kernelcheck-qemu` lane remains on its deterministic raw-Ethernet
-peer and continues to run the complete network fixture.
+Open the URL printed after `persistent server: listener ready port=8080` in
+Firefox (normally `http://127.0.0.1:18080/`; concurrent sessions use another
+port). Its links exercise
+`/about.html` and `/icon.png`. The host bridge forwards that port over raw
+Ethernet frames to the kernel's fixed `192.168.20.2:8080`; set
+`KERNEL_QEMU_SHELL_HTTP_PORT` to choose another host port. The repository's
+devcontainer uses host networking, so its printed loopback URL is the Linux
+host's loopback URL too. A differently configured container must publish or
+forward that port. The automated `kernelcheck-qemu` lane remains on its
+deterministic raw-Ethernet peer and continues to run the complete network
+fixture.
 
 For RPi5, connect the host Ethernet interface as described in [Host Ethernet
 setup](#host-ethernet-setup), then start the shell:
