@@ -33,9 +33,14 @@
 # which is also what keeps an aggregate target's several lanes from
 # overwriting each other inside one sample.
 #
-# PORTS. Each sample gets its own serial and netdev ports, so one sample cannot
-# inherit the previous one's lingering sockets. The QEMU lane already reads all
-# three from the environment.
+# PORTS. Each sample gets its own ports, so one sample cannot inherit the
+# previous one's lingering sockets. Both lanes read theirs from the
+# environment, and BOTH have to be given a sample's own set: this shifted the
+# hwtest lane's three and left the interactive shell lane on its fixed 18080,
+# so a sample whose predecessor's QEMU had not yet released that port failed
+# with `tcp port 18080 is already in use` -- five times in eighteen samples
+# while #571 was being measured, which is a measurement spending its hour on
+# the runner rather than on the defect.
 #
 # The base comes from scripts/qemu_session_ports.sh rather than a command line,
 # and the count is checked against the window it defines. Separating two agents
@@ -110,7 +115,7 @@ window_top=$((QEMU_SESSION_REPEAT_BASE \
 case "$port_base" in
     ''|*[!0-9]*) echo "--port-base must be a port number" >&2; exit 2;;
 esac
-sample_top=$((port_base + QEMU_SESSION_REPEAT_STEP * (count - 1) + 2))
+sample_top=$((port_base + QEMU_SESSION_REPEAT_STEP * (count - 1) + 6))
 if [ "$port_base" -lt "$QEMU_SESSION_REPEAT_BASE" ] ||
         [ "$sample_top" -gt "$window_top" ]; then
     echo "FAIL repeat: $count samples from base $port_base need ports" \
@@ -141,6 +146,10 @@ for i in $(seq 1 "$count"); do
         "KERNEL_QEMU_SERIAL_PORT=$sample_port"
         "KERNEL_QEMU_NETDEV_LOCAL_PORT=$((sample_port + 1))"
         "KERNEL_QEMU_NETDEV_REMOTE_PORT=$((sample_port + 2))"
+        "KERNEL_QEMU_SHELL_SERIAL_PORT=$((sample_port + 3))"
+        "KERNEL_QEMU_SHELL_HTTP_PORT=$((sample_port + 4))"
+        "KERNEL_QEMU_SHELL_NETDEV_QEMU_PORT=$((sample_port + 5))"
+        "KERNEL_QEMU_SHELL_NETDEV_PEER_PORT=$((sample_port + 6))"
     )
     if env "${env_args[@]}" "$@" >"$sample_dir/run.log" 2>&1; then
         pass=$((pass + 1)); printf '.'
