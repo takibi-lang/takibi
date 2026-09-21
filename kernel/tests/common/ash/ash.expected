@@ -52,6 +52,7 @@ nproc
 od
 peer-console
 peer-read
+peer-spin
 peer-tty
 ppoll-probe
 ps

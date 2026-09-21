@@ -32,6 +32,8 @@ const EXECVE_SYSCALL: usize = 221;
 const GETPID_SYSCALL: usize = 172;
 const KILL_SYSCALL: usize = 129;
 const LINUX_SIGTERM: usize = 15;
+const SETAFFINITY_SYSCALL: usize = 122;
+const WRITE_SYSCALL: usize = 64;
 const BUSY_LOOP_TAG_A: usize = 1;
 const BUSY_LOOP_TAG_B: usize = 2;
 
@@ -67,6 +69,25 @@ fn busy_loop_spin() {
         state = state ^ (state << 17);
     }
     svc5(WORKLOAD_EXIT_SYSCALL, state & 1, 0, 0, 0, 0);
+}
+
+/* The peer UART-wake lane needs a second runnable process on CPU 1 while
+ * /bin/peer-tty reads there. Neither a sleeping HTTPd nor an unpinned shell
+ * job guarantees that placement. This fixture is started only by that lane. */
+fn busy_loop_peer_spin() {
+    let mut mask: [u8; 8];
+    for index: usize in 0..<8 { mask[index] = 0; }
+    mask[0] = 2;
+    if (svc5(SETAFFINITY_SYSCALL, 0, 8,
+             mask as *u8 as usize, 0, 0) != 0) {
+        svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
+        return;
+    }
+    let ready: []u8 = bs"peer spin: pinned to cpu 1\n";
+    svc5(WRITE_SYSCALL, 1, ready as *u8 as usize, ready.len, 0, 0);
+    while (true) {
+        svc5(GETPID_SYSCALL, 0, 0, 0, 0, 0);
+    }
 }
 
 fn busy_loop_run(tag: usize) {

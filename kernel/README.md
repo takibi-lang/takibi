@@ -141,6 +141,9 @@ is how the session shows it holds more than one job at once, and it carries
 no pid, so it is the same text on every boot. `spin` prints nothing because
 output interleaving with the prompt would arrive in an order no fixture
 could pin.
+`/bin/peer-spin` is a separate UART-wake test fixture: it pins itself to
+CPU 1 and stays runnable while `/bin/peer-tty` reads there. The QEMU test
+driver starts it explicitly; normal boot does not.
 Shell scripts are ordinary
 executables here: a script's first line names its interpreter and `execve`
 resolves it, so `/bin` also holds `httpd.sh` (the browser demo as one

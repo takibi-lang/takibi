@@ -777,6 +777,7 @@ KERNEL_BUSY_LOOP_O       := $(KERNEL_BUILD_DIR)/busy_loop.o
 KERNEL_BUSY_LOOP_A_ELF   := $(KERNEL_BUILD_DIR)/busy_a.elf
 KERNEL_BUSY_LOOP_B_ELF   := $(KERNEL_BUILD_DIR)/busy_b.elf
 KERNEL_BUSY_LOOP_SPIN_ELF := $(KERNEL_BUILD_DIR)/busy_spin.elf
+KERNEL_BUSY_LOOP_PEER_SPIN_ELF := $(KERNEL_BUILD_DIR)/busy_peer_spin.elf
 KERNEL_PEER_READ_TKB     := $(KERNEL_DIR)/arch/arm64/kernel/peer_read.tkb
 KERNEL_PEER_READ_O       := $(KERNEL_BUILD_DIR)/peer_read.o
 KERNEL_PEER_READ_ELF     := $(KERNEL_BUILD_DIR)/peer_read.elf
@@ -828,7 +829,7 @@ $(KERNEL_MUSL_LOADER): $(KERNEL_MUSL_APK)
 	tar -xOzf $< lib/ld-musl-aarch64.so.1 > $@
 	chmod +x $@
 
-$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/about.html $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/inittab $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSY_LOOP_A_ELF) $(KERNEL_BUSY_LOOP_B_ELF) $(KERNEL_BUSY_LOOP_SPIN_ELF) $(KERNEL_PEER_READ_ELF) $(KERNEL_CORE_READ_ELF) $(KERNEL_PEER_CONSOLE_ELF) $(KERNEL_PEER_TTY_ELF) $(KERNEL_CLOEXEC_ELF) $(KERNEL_CLOEXEC_CHECK_ELF) $(KERNEL_PPOLL_PROBE_ELF) $(KERNEL_AFFINITY_ELF) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_BUSYBOX_EXTRAS) $(KERNEL_MUSL_LOADER) | $(KERNEL_USER_BUILD_DIR)
+$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/about.html $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/inittab $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSY_LOOP_A_ELF) $(KERNEL_BUSY_LOOP_B_ELF) $(KERNEL_BUSY_LOOP_SPIN_ELF) $(KERNEL_BUSY_LOOP_PEER_SPIN_ELF) $(KERNEL_PEER_READ_ELF) $(KERNEL_CORE_READ_ELF) $(KERNEL_PEER_CONSOLE_ELF) $(KERNEL_PEER_TTY_ELF) $(KERNEL_CLOEXEC_ELF) $(KERNEL_CLOEXEC_CHECK_ELF) $(KERNEL_PPOLL_PROBE_ELF) $(KERNEL_AFFINITY_ELF) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_BUSYBOX_EXTRAS) $(KERNEL_MUSL_LOADER) | $(KERNEL_USER_BUILD_DIR)
 	rm -f $@.tmp
 	truncate -s 2621440 $@.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 mke2fs -q -t ext2 -b 1024 -I 128 -N 1024 -O none -F -U 00000000-0000-0000-0000-000000000177 $@.tmp 2560
@@ -877,6 +878,7 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSY_LOOP_A_ELF) $@.tmp:/bin/busy-a
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSY_LOOP_B_ELF) $@.tmp:/bin/busy-b
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSY_LOOP_SPIN_ELF) $@.tmp:/bin/spin
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_BUSY_LOOP_PEER_SPIN_ELF) $@.tmp:/bin/peer-spin
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_READ_ELF) $@.tmp:/bin/peer-read
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_CORE_READ_ELF) $@.tmp:/bin/core-read
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_CONSOLE_ELF) $@.tmp:/bin/peer-console
@@ -901,6 +903,7 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	debugfs -w -R 'set_inode_field /bin/busy-a mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/busy-b mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/spin mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/peer-spin mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/peer-read mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/core-read mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/peer-console mode 0100755' $@.tmp >/dev/null 2>&1
@@ -984,7 +987,7 @@ $(KERNEL_RPI5_USER_PAYLOAD_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5
 # which of the two inittab entries they are. Same static-PIE shape and same
 # no-writable-globals rule as the payload above.
 $(KERNEL_BUSY_LOOP_O): $(KERNEL_BUSY_LOOP_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry busy_loop_a --external-entry busy_loop_b --external-entry busy_loop_spin --emit-depfile $@.d -o $@
+	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry busy_loop_a --external-entry busy_loop_b --external-entry busy_loop_spin --external-entry busy_loop_peer_spin --emit-depfile $@.d -o $@
 
 -include $(KERNEL_BUSY_LOOP_O).d
 
@@ -998,6 +1001,10 @@ $(KERNEL_BUSY_LOOP_B_ELF): $(KERNEL_BUSY_LOOP_O)
 
 $(KERNEL_BUSY_LOOP_SPIN_ELF): $(KERNEL_BUSY_LOOP_O)
 	$(LLD) -pie --no-dynamic-linker -e busy_loop_spin $< -o $@
+	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
+
+$(KERNEL_BUSY_LOOP_PEER_SPIN_ELF): $(KERNEL_BUSY_LOOP_O)
+	$(LLD) -pie --no-dynamic-linker -e busy_loop_peer_spin $< -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
 $(KERNEL_PEER_READ_O): $(KERNEL_PEER_READ_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)

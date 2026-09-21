@@ -232,7 +232,10 @@ with local interrupts masked stays as a cheap early exit, since a local mask
 cannot hold off an interrupt taken on another CPU.
 `/bin/peer-tty` is the admitted reader on the secondary. The deterministic
 `peer` mode of kernelcheck-uart-wake-qemu uses gdb to hold CPU1 after the
-reader's last lockless look. While it is held, CPU0 alone takes the RX
+reader's last lockless look. It starts `/bin/peer-spin` first, waits for its
+CPU-1 affinity confirmation, and requires the reader to revisit the blocking
+window; the init-managed HTTPd can sleep in `accept` and cannot supply this
+contention. While the reader is held, CPU0 alone takes the RX
 interrupt and pushes the byte, and then both CPUs run. The reader has to come
 back for the next byte. The UART-BREAK DDB lane breaks in while that reader
 is asleep on the secondary. DDB's live wait graph must then show exactly one

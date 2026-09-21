@@ -65,6 +65,8 @@ PAYLOAD_READY = b"concurrency: parent progressed while child uart-blocked"
 PAYLOAD = b"irqtest\n"
 PERSISTENT_READY = b"persistent shell: uart blocked\n"
 SPINNER = b"while :; do :; done &\n"
+PEER_SPINNER = b"/bin/peer-spin &\n"
+PEER_SPINNER_READY = b"peer spin: pinned to cpu 1\n"
 
 MODE = os.environ.get("UART_WAKE_MODE", "shell")
 LABEL = "kernel/qemu peer-uart-wake" if MODE == "peer" else "kernel/qemu uart-wake"
@@ -187,13 +189,23 @@ def thread_pc(thread: int) -> int:
 def run_peer(connection: socket.socket) -> None:
     # The kernel admits the reader only after the peer console writer's view,
     # which ends with its seventeenth record. That chain starts with the busy
-    # pair migrating, which waits for a third runnable context. BusyBox init's
-    # persistent HTTPd provides that context in every lane.
+    # pair migrating, which waits for a third runnable context. The persistent
+    # HTTPd may be asleep in accept, so it cannot provide that context.
     if not seen(lambda text: BUSY_PAIR_DONE in text, BOOT_TIMEOUT):
         verdict(False, "the busy pair never finished before the peer chain")
         return
     if not seen(lambda text: PEER_CONSOLE_DONE in text, BOOT_TIMEOUT):
         verdict(False, "the peer console writer never delivered its last record")
+        return
+    # The wake window is reached only when another Ready process competes
+    # with the reader on CPU 1. Neither a sleeping HTTPd nor an unpinned
+    # shell job guarantees that placement. Wait for the fixture's affinity
+    # syscall before starting the reader.
+    for value in PEER_SPINNER:
+        connection.sendall(bytes((value,)))
+        time.sleep(0.01)
+    if not seen(lambda text: PEER_SPINNER_READY in text, BOOT_TIMEOUT):
+        verdict(False, "/bin/peer-spin never pinned itself to CPU 1")
         return
     connection.sendall(PEER_COMMAND)
     if not seen(lambda text: PEER_READING in text, BOOT_TIMEOUT):
