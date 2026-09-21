@@ -355,14 +355,18 @@ fn affinity_probe() {
     }
     for index: usize in 0..<4 { status[index] = 0; }
     svc5(KILL_SYSCALL, peer_spinner, SIGTERM, 0, 0, 0);
-    // Bounded retry, and it is here under protest: wait4 answers something
-    // other than this pid about 3 times in 40 for a child that exited on a
-    // peer, which is a defect in the peer-exit collection path and NOT the
-    // question this fixture asks. It is filed separately with that rate and
-    // with "delete this loop and run the lane forty times" as its
-    // reproduction. Retrying keeps #563's property asserted on every run
-    // without making this lane red for somebody else's bug; when that one is
-    // fixed, the loop goes.
+    // A workaround for GitHub issue #571, to be removed once that is fixed:
+    // wait4 answers something other than this pid about 3 times in 40 for a
+    // child that exited on a peer, which is the peer-exit collection path
+    // and NOT the question this fixture asks. Retrying keeps #563's property
+    // asserted on every run without making this lane red for another
+    // defect. #571 carries the rate and names this loop as its
+    // reproduction: delete it and run the lane forty times.
+    //
+    // Phrased so scripts/find_stale_issue_workarounds.py reports it the day
+    // #571 closes. It was not, at first -- "when that one is fixed" matches
+    // nothing that tool looks for, so the loop would have outlived its
+    // reason in silence, which is the exact failure that tool exists for.
     let mut reaped: usize = 0;
     let mut reap_attempts: usize = 0;
     while (reaped != peer_spinner &&

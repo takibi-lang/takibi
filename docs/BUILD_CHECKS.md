@@ -98,6 +98,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_rpi5_set_kernel_byte_controls.py` | Controls for the live RPi5 kernel-byte writer without using the board |
 | `check_run_kernel_shell_console_controls.py` | Regression controls for the interactive console's UART marker detection |
 | `check_run_kernel_uart_driver_controls.py` | Regression controls for the UART driver's timeout diagnosis |
+| `check_slot_proof_dropped_to_index.py` | a slot liveness proof dropped to a bare index is declared with a reason, so #569's shape is a decision rather than a line |
+| `check_slot_proof_dropped_to_index_controls.py` | Controls for the slot-proof-to-index check, in both directions |
 | `check_single_dune_invocation.py` | exactly one rule runs `dune build`, so no second make invocation races its lock |
 | `check_validate_kernel_dmesg_timestamps_controls.py` | Controls for the dmesg timestamp validator, which had none |
 | `check_wont_compile_catalog.py` | every defect-catalog entry names a test case that exists, shows its figure, and agrees with the index |

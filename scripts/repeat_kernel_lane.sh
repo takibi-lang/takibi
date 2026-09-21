@@ -44,6 +44,15 @@
 # lands INSIDE that worktree's block instead. The window is above the declared
 # lane ports and inside one block, so a session's whole footprint moves as one.
 #
+# WATCHING FOR A LINE, rather than for a red lane. A lane goes red only if one
+# of ITS views asserts the thing that went wrong; a symptom can appear in the
+# capture of a lane that never looks at it, and then the run is green and the
+# evidence is on disk unread. That happened while measuring GitHub issue
+# #569: `process table: records MISSING` turned up in the alloc-rollback
+# lane's UART log during a passing `make cicheck`, and only a by-hand grep
+# over every sample found it. --watch-for makes that the runner's job, so a
+# rate is one command instead of a command and a habit.
+#
 # Usage:
 #   repeat_kernel_lane.sh [options] <count> <command...>
 #
@@ -53,6 +62,8 @@
 #   --port-base N          first port; sample i uses N + i*8. Defaults to the
 #                          session repeat window and must stay inside it.
 #   --artifacts DIR        parent of the per-sample directories
+#   --watch-for REGEX      count samples whose CAPTURES contain REGEX, and
+#                          report that beside the pass/fail rate
 #
 # Examples:
 #   scripts/repeat_kernel_lane.sh 20 make kernelcheck-qemu
@@ -64,12 +75,14 @@ mode=measure
 label=""
 port_base=""
 artifacts=""
+watch_for=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --mode) mode="$2"; shift 2;;
         --label) label="$2"; shift 2;;
         --port-base) port_base="$2"; shift 2;;
         --artifacts) artifacts="$2"; shift 2;;
+        --watch-for) watch_for="$2"; shift 2;;
         --) shift; break;;
         -*) echo "unknown option: $1" >&2; exit 2;;
         *) break;;
@@ -148,6 +161,27 @@ printf '\n'
 if [ "$mode" = check ]; then
     echo "PASS repeat/$label: $count independent runs"
     exit 0
+fi
+
+if [ -n "$watch_for" ]; then
+    # Every file under the sample, not only the lane's own UART log: which
+    # lane's capture carries the line is exactly what is not known in
+    # advance, and is often the interesting half of the answer.
+    seen=0
+    seen_samples=""
+    for i in $(seq 1 "$count"); do
+        if grep -rqE "$watch_for" "$artifacts/sample-$i" 2>/dev/null; then
+            seen=$((seen + 1))
+            seen_samples="$seen_samples $i"
+        fi
+    done
+    echo "repeat/$label: $seen of $count samples have a capture matching" \
+         "$watch_for"
+    if [ "$seen" -ne 0 ]; then
+        echo "repeat/$label: matching samples:$seen_samples"
+        grep -rlE "$watch_for" "$artifacts" 2>/dev/null |
+            sed "s|^$artifacts/|repeat/$label:   |" | sort | head -20
+    fi
 fi
 
 echo "repeat/$label: $count runs -> $pass pass, $fail fail"
