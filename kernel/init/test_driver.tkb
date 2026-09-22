@@ -1099,8 +1099,9 @@ fn kernel_test_driver_run() {
     // bootstrap legitimately holds both for the life of the kernel, and
     // "the bootstrap has them from boot" is what every entry point in
     // kernel/kernel/fd_table.tkb already assumes.
-    if (unified_fd_context_ensure(0) == false ||
-        process_image_record_ensure(0) == false) {
+    let fd_context_ready: bool = unified_fd_context_ensure(0);
+    let image_record_ready: bool = process_image_record_ensure(0);
+    if (fd_context_ready == false || image_record_ready == false) {
         kernel_boot_log("resources: bootstrap records unavailable at baseline\n");
     }
     process_pool_baseline = scheduled_process_pool_live_count();

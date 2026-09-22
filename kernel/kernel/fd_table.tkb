@@ -2822,20 +2822,22 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
         UnifiedFdAllocResult::Full => { scheduled_process_probe_slot_release(child);
  return false; }
         UnifiedFdAllocResult::Allocated(fd) => {
-            if (fd != 0 || unified_fd_probe_install(
-                    fd, unified_object_alloc_first(
-                        UnifiedFdKind::OpenFile)) == false) {
+            let installed: bool = unified_fd_probe_install(
+                fd, unified_object_alloc_first(UnifiedFdKind::OpenFile));
+            if (fd != 0 || installed == false) {
                 scheduled_process_probe_slot_release(child);
                 return false;
             }
         }
     }
-    if (unified_fd_probe_install(
-            3, unified_object_alloc_first(UnifiedFdKind::OpenFile)) == false ||
-        unified_fd_probe_install(
-            4, unified_object_alloc_first(UnifiedFdKind::Listener)) == false ||
-        unified_fd_probe_install(
-            5, unified_object_alloc_first(UnifiedFdKind::Connection)) == false) {
+    let file_installed: bool = unified_fd_probe_install(
+        3, unified_object_alloc_first(UnifiedFdKind::OpenFile));
+    let listener_installed: bool = unified_fd_probe_install(
+        4, unified_object_alloc_first(UnifiedFdKind::Listener));
+    let connection_installed: bool = unified_fd_probe_install(
+        5, unified_object_alloc_first(UnifiedFdKind::Connection));
+    if (file_installed == false || listener_installed == false ||
+        connection_installed == false) {
         scheduled_process_probe_slot_release(child);
         return false;
     }

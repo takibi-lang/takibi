@@ -71,15 +71,19 @@ fn app_main() {
     }
     check("the least recently used block goes, not the one read every step",
           hot_kept && read_is(0, 0, 100, 0x22));
+    let oldest_missing: bool = misses(0, 0, 200);
+    let newest_present: bool = read_is(0, 0, 219, 0x43);
     check("the oldest data block was the one given up",
-          misses(0, 0, 200) && read_is(0, 0, 219, 0x43));
+          oldest_missing && newest_present);
 
     // A write on core 1 retires core 0's copy of the block, and of every
     // other block; core 1 keeps the bytes it wrote.
     fill_pattern(0x55);
     block_cache_note_write(1, 0, 100, block_in as []u8, true);
+    let old_copy_missing: bool = misses(0, 0, 100);
+    let other_copy_missing: bool = misses(0, 0, 219);
     check("a write on another core retires this core's copies",
-          misses(0, 0, 100) && misses(0, 0, 219));
+          old_copy_missing && other_copy_missing);
     check("the core that wrote keeps what it wrote", read_is(1, 0, 100, 0x55));
 
     // A write the device refused keeps nothing: what the device holds is

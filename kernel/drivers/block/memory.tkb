@@ -335,11 +335,11 @@ private fn block_run_transfer_locked(
                 let low_base: usize = low * 512;
                 let high_base: usize = high * 512;
                 let sector: u32 = ((first + offset) * 2) as u32;
-                if (virtio_blk_read_sector(
-                        sector, block_run_data[low_base..<low_base + 512]) == false ||
-                    virtio_blk_read_sector(
-                        sector + 1,
-                        block_run_data[high_base..<high_base + 512]) == false) {
+                let first_ok: bool = virtio_blk_read_sector(
+                    sector, block_run_data[low_base..<low_base + 512]);
+                let second_ok: bool = virtio_blk_read_sector(
+                    sector + 1, block_run_data[high_base..<high_base + 512]);
+                if (first_ok == false || second_ok == false) {
                     return false;
                 }
             }
@@ -415,8 +415,11 @@ private fn block_read_device_locked(
     } else {
         let first_sector = destination[0..<512];
         let second_sector = destination[512..<KERNEL_BLOCK_SIZE];
-        if (virtio_blk_read_sector((block * 2) as u32, first_sector) == false ||
-            virtio_blk_read_sector((block * 2 + 1) as u32, second_sector) == false) {
+        let first_ok: bool = virtio_blk_read_sector((block * 2) as u32,
+                                                     first_sector);
+        let second_ok: bool = virtio_blk_read_sector((block * 2 + 1) as u32,
+                                                      second_sector);
+        if (first_ok == false || second_ok == false) {
             return BlockIoResult::Invalid;
         }
         return BlockIoResult::Ok;
@@ -446,8 +449,11 @@ private fn block_write_device_locked(
     } else {
         let first_sector = source[0..<512];
         let second_sector = source[512..<KERNEL_BLOCK_SIZE];
-        if (virtio_blk_write_sector((block * 2) as u32, first_sector) == false ||
-            virtio_blk_write_sector((block * 2 + 1) as u32, second_sector) == false) {
+        let first_ok: bool = virtio_blk_write_sector((block * 2) as u32,
+                                                      first_sector);
+        let second_ok: bool = virtio_blk_write_sector((block * 2 + 1) as u32,
+                                                       second_sector);
+        if (first_ok == false || second_ok == false) {
             return BlockIoResult::Invalid;
         }
         return BlockIoResult::Ok;

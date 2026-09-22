@@ -121,10 +121,11 @@ fn app_main() {
     // written out. This was the literal 2 while the maximum was two. When
     // 514768ee raised the maximum to four, CPU 2 got a ring of its own and
     // this check failed on a CPU that was valid.
+    let no_room: bool = peer_console_room(KERNEL_MAX_CORES) == 0;
+    let no_write: bool = publish_bytes(KERNEL_MAX_CORES, 5) == 0;
+    let no_drain: bool = drain(KERNEL_MAX_CORES) == 0;
     check("a CPU past the maximum has no ring",
-          peer_console_room(KERNEL_MAX_CORES) == 0 &&
-          publish_bytes(KERNEL_MAX_CORES, 5) == 0 &&
-          drain(KERNEL_MAX_CORES) == 0);
+          no_room && no_write && no_drain);
 }
 
 // One record only, for the step after the ring filled.
