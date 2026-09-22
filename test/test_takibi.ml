@@ -10390,29 +10390,54 @@ let codegen_tests = [
      stored. That test cannot run here (it needs QEMU and gdb), so this
      one holds the property directly: a struct that asks for no special
      alignment is lowered to exactly its declared fields. *)
-  (* The compile-time half of SPEC's "`&&` and `||` do not short-circuit".
-     linux_user/logical_eval pins that both operands RUN; this pins that
-     the checker knows it -- it must NOT narrow the right-hand side using
-     the left, because the generated code evaluates the right-hand side
-     either way. If it ever did, `i < 4 && arr[i]` would compile under
-     --forbid-trap with the bounds check elided and read out of bounds for
-     any i. The two halves agreeing is what keeps non-short-circuit a
-     readability hazard rather than a soundness one. *)
+  (* The RHS of && executes only when its LHS is true. The type checker
+     and code generator must both use that fact for bounds proofs. *)
   Alcotest.test_case
-    "the refinement checker does not narrow across `&&`, which is what \
-     keeps non-short-circuit evaluation sound" `Quick
-    (expect_trap_sites 1
+    "short-circuit RHS receives the guard's index proof" `Quick
+    (expect_trap_sites 0
        "let mut sc_guard_arr: [u8; 4];
         fn sc_guarded(i: usize) -> bool {
           return i < 4 && sc_guard_arr[i] == 7;
         }
         fn sc_guarded_if(i: usize) -> bool {
-          // The same guard as an enclosing `if` DOES narrow, and leaves
-          // no trap site -- so the one site above belongs to the `&&`
-          // form specifically, not to the shape of the access.
           if (i < 4) { return sc_guard_arr[i] == 7; }
           return false;
         }");
+
+  Alcotest.test_case
+    "short-circuit OR RHS receives the false-left index proof" `Quick
+    (expect_trap_sites 0
+       "let mut sc_or_arr: [u8; 4];
+        fn sc_or_guarded(i: usize) -> bool {
+          return i >= 4 || sc_or_arr[i] == 7;
+        }");
+
+  Alcotest.test_case
+    "static assertions skip an unreachable logical RHS" `Quick
+    (expect_codegen_ok
+       "fn sc_not_constant() -> bool { return false; }
+        fn sc_static() {
+          static_assert((false && sc_not_constant()) == false);
+          static_assert(true || sc_not_constant());
+        }");
+
+  Alcotest.test_case
+    "conditional logical RHS consumption is not unconditional" `Quick
+    (fun () ->
+       let base =
+         "affine view ScToken;
+          fn sc_consume(t: sink ScToken) -> bool { return true; }
+          " in
+       expect_type_error "already consumed" (base ^
+         "fn sc_bad_and(t: sink ScToken, run: bool) {
+            let result: bool = run && sc_consume(t);
+            sc_consume(t);
+          }") ();
+       expect_type_error "already consumed" (base ^
+         "fn sc_bad_or(t: sink ScToken, run: bool) {
+            let result: bool = run || sc_consume(t);
+            sc_consume(t);
+          }") ());
 
   Alcotest.test_case
     "a struct with no alignment demand is lowered to exactly its declared \

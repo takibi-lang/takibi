@@ -78,7 +78,9 @@ fn sd_worker() {
                     let mut read_br: u32 = 0;
                     let read_status: FatIoResult = fat_read(read_fp, read_buf, 80, &read_br);
                     let close_status: FatIoResult = fat_close(read_fp);
-                    if (fat_io_ok(read_status) && fat_io_ok(close_status)) {
+                    let read_ok: bool = fat_io_ok(read_status);
+                    let close_ok: bool = fat_io_ok(close_status);
+                    if (read_ok && close_ok) {
                         uart_puts("read-back HELLO.TXT: ");
                         uart_print_bytes(read_buf, read_br);
                     } else {

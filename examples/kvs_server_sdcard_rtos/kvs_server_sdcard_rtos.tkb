@@ -556,7 +556,8 @@ fn kvs_sd_load_records() -> KvsSdLoadResult {
                 }
             }
             let close_status: FatIoResult = fat_close(fp);
-            if ((read_ok == false) || (fat_io_ok(close_status) == false)) {
+            let close_ok: bool = fat_io_ok(close_status);
+            if ((read_ok == false) || (close_ok == false)) {
                 return KvsSdLoadResult::IoError;
             }
             if (total != fsize) {
@@ -607,7 +608,8 @@ fn kvs_sd_load_legacy() -> KvsSdStatus {
             if (fat_io_ok(fat_read(fp, kv_vals, 2048, &br)) == false) { read_ok = false; }
             total = total + br;
             let close_status: FatIoResult = fat_close(fp);
-            if ((read_ok == false) || (fat_io_ok(close_status) == false)) {
+            let close_ok: bool = fat_io_ok(close_status);
+            if ((read_ok == false) || (close_ok == false)) {
                 return KvsSdStatus::IoError;
             }
             if (total != 2608) {

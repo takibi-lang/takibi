@@ -2119,6 +2119,187 @@ let index_resolved_ty : (Lexing.position, Ast.type_expr) Hashtbl.t = Hashtbl.cre
    is what issues #296/#311 found real gaps in. Reset with it below. *)
 let slice_cast_len : (Lexing.position, int) Hashtbl.t = Hashtbl.create 64
 
+(* Collect per-variable bounds from a condition: v >= lo / v < hi / && chains.
+   Returns name -> (lo_opt, hi_opt). Commutative forms (lo < v) are also handled. *)
+(* Collect per-variable bounds from an if condition. A comparison
+   constrains `Var n` whenever the OTHER operand's static value range is
+   known: an integer literal k is {k..<k+1}, a Const_env constant likewise;
+   addition/subtraction of those constants is folded before narrowing;
+   and a variable whose binding is refined contributes its own range
+   (`total_len <= ip_len_in_frame` narrows total_len's upper bound to
+   ip_len_in_frame's static maximum -- the fact collapses to a CONSTANT at
+   collection time, so this is still interval reasoning, not a relational
+   domain, and no new kill obligations arise: the constant was true when
+   the condition executed and n's own kill is governed by written_names as
+   before). Equality (`ihl == 20`) narrows to the operand's exact range.
+   Sync rule: llvm_gen.ml's collect_bounds_cond is the same algorithm over
+   its own binding tables; change the two together. *)
+let collect_bounds tyenv (cond : Ast.expr) : (int option * int option) StringMap.t =
+  let take_lo a b = match a, b with
+    | Some x, Some y -> Some (max x y)
+    | Some _, None -> a | None, _ -> b in
+  let take_hi a b = match a, b with
+    | Some x, Some y -> Some (min x y)
+    | Some _, None -> a | None, _ -> b in
+  let update name lo_opt hi_opt acc =
+    let (pl, ph) = match StringMap.find_opt name acc with
+      | Some p -> p | None -> (None, None) in
+    StringMap.add name (take_lo lo_opt pl, take_hi hi_opt ph) acc
+  in
+  (* Static value range of a comparison operand, when known. *)
+  let range_of (e : Ast.expr) =
+    match Const_env.folded_value e with
+    | Some k -> Some (k, k + 1)
+    | None ->
+        (match e.desc with
+         | Var m ->
+             (match StringMap.find_opt m tyenv with
+              | Some (t, _) ->
+                  (match repr t with
+                   | TRefinedInt (a, b, _) -> Some (a, b)
+                   | _ -> None)
+              | None -> None)
+         | _ -> None)
+  in
+  (* n <op> rhs where rhs's range is {c..<d} (so c <= rhs <= d-1). *)
+  let constrain_left op n (c, d) acc =
+    match op with
+    | Ast.Ge -> update n (Some c)       None           acc
+    | Ast.Gt -> update n (Some (c + 1)) None           acc
+    | Ast.Le -> update n None           (Some d)       acc
+    | Ast.Lt -> update n None           (Some (d - 1)) acc
+    | Ast.Eq -> update n (Some c)       (Some d)       acc
+    | _ -> acc
+  in
+  (* lhs <op> n where lhs's range is {c..<d} -- the mirrored constraints. *)
+  let constrain_right op n (c, d) acc =
+    match op with
+    | Ast.Ge -> update n None           (Some d)       acc  (* n <= lhs *)
+    | Ast.Gt -> update n None           (Some (d - 1)) acc  (* n <  lhs *)
+    | Ast.Le -> update n (Some c)       None           acc  (* n >= lhs *)
+    | Ast.Lt -> update n (Some (c + 1)) None           acc  (* n >  lhs *)
+    | Ast.Eq -> update n (Some c)       (Some d)       acc
+    | _ -> acc
+  in
+  let rec go (e : Ast.expr) acc = match e.desc with
+    | BinOp (And, e1, e2) -> go e2 (go e1 acc)
+    | BinOp ((Ge | Gt | Le | Lt | Eq) as op, l, r) ->
+        let acc = match l.desc, range_of r with
+          | Var n, Some rng -> constrain_left op n rng acc
+          | _ -> acc
+        in
+        (match r.desc, range_of l with
+         | Var n, Some rng -> constrain_right op n rng acc
+         | _ -> acc)
+    | _ -> acc
+  in
+  go cond StringMap.empty
+
+(* Narrow the type environment for the then-branch of an if statement.
+   Narrows int bindings (both mutable and immutable) when both lo and hi bounds are proven
+   by the condition. Mutability is preserved so that assignment inside the branch still works.
+   Codegen-side narrowing for bounds-check elision goes through the same kill rule.
+
+   Invalidation (kill) rule: a variable the branch body may write to, alias
+   (&x), or rebind is NOT narrowed at all -- the condition only proves the
+   range at the moment it was evaluated, and any later write invalidates
+   that proof (`if (v >= 0 && v < 8) { v = 100; use(v); }`). The kill set
+   comes from Ast.written_names; llvm_gen.ml's apply_narrowing/_mut use the
+   same function on the same body (sync rule -- see written_names' comment). *)
+let narrow_from_cond senv tyenv (cond : Ast.expr) (then_body : Ast.stmt list) =
+  let killed = Ast.written_names then_body in
+  let bounds = collect_bounds tyenv cond in
+  let env =
+    StringMap.fold (fun name (lo_opt, hi_opt) env ->
+      if List.mem name killed then env
+      else match StringMap.find_opt name env with
+      (* Already refined (e.g. an immutable let whose initializer was
+         itself refined, kept via the "proofs survive weaker
+         annotations" rule -- see check_bound_shadowing/B-plan) --
+         INTERSECT rather than no-op. Without this, a variable that
+         arrives at the if already-refined (very common once P4a's
+         interval propagation is in play) would silently keep its
+         WIDER pre-existing range instead of the tighter one the
+         condition just proved, e.g. `icmp_len: {0..<1481}` at entry
+         plus `if (icmp_len >= 8 && icmp_len <= 1480)` must become
+         {8..<1481}, not stay {0..<1481}.
+         GitHub issue #99: a single-sided `hi`-only condition (lo_opt =
+         None) still narrows here, falling back to the variable's OWN
+         already-proven `elo` as the effective lower bound -- sound
+         unconditionally, since `elo` was already established as a valid
+         lower bound before this condition was even reached. *)
+      | Some (TRefinedInt (elo, ehi, base), is_mut) ->
+          (match lo_opt, hi_opt with
+           | Some lo, Some hi -> StringMap.add name (TRefinedInt (max lo elo, min hi ehi, base), is_mut) env
+           | None, Some hi    -> StringMap.add name (TRefinedInt (elo, min hi ehi, base), is_mut) env
+           | Some lo, None    -> StringMap.add name (TRefinedInt (max lo elo, ehi, base), is_mut) env
+           | None, None       -> env)
+      (* Any plain primitive integer type can be narrowed, not just
+         TI32 -- a u8/u16/u32/u64/usize/i8/i16/i64-typed variable
+         narrowed by an if-condition keeps ITS OWN type as the
+         refined range's base (see types.ml's TRefinedInt comment).
+         GitHub issue #99: for an UNSIGNED base with no lo_opt from the
+         condition (e.g. `if (off < 511)`, not `if (off >= 0 && off <
+         511)`), 0 is already a sound lower bound regardless of the
+         condition -- every unsigned value is trivially >= 0 -- so the
+         redundant explicit `>= 0` check is no longer required to trigger
+         narrowing. Signed bases still require an explicit lo (no implicit
+         floor exists for them). *)
+      | Some ((TI8|TI16|TI32|TI64|TU8|TU16|TU32|TU64|TIsize|TUsize) as base, is_mut) ->
+          let lo_opt = match lo_opt with
+            | Some _ -> lo_opt
+            | None -> if is_unsigned_ty base then Some 0 else None
+          in
+          (match lo_opt, hi_opt with
+           | Some lo, Some hi -> StringMap.add name (TRefinedInt (lo, hi, base), is_mut) env
+           | _ -> env)
+      | _ -> env
+    ) bounds tyenv
+  in
+  (* Slice minimum-length narrowing: `if (s.len >= K)` upgrades s's proven
+     minimum for the branch. Same kill rule; llvm_gen's apply_narrowing/_mut
+     consume the same Ast.slice_len_mins (sync rule). *)
+  List.fold_left (fun env (name, k) ->
+    if List.mem name killed then env
+    else match StringMap.find_opt name env with
+      | Some (t, is_mut) ->
+          (match repr t with
+           | TSlice (el, m) when k > m ->
+               StringMap.add name (TSlice (el, k), is_mut) env
+           | _ -> env)
+      | None -> env
+  ) env (Ast.slice_len_mins ~resolve_const:Const_env.find
+           ~resolve_bound:(static_slice_bound senv) cond)
+
+(* Logical negation of a condition expression, for narrowing the
+   fallthrough path after an early-return guard (`if (cond) { return
+   ...; }` with no else -- see stmt_list_always_returns/narrow_from_cond
+   below). De Morgan's laws for And/Or, flipped relational operators for
+   comparisons. Deliberately conservative: any condition shape not
+   listed (function calls, field/index access used as a bool, anything
+   this file's own `collect_bounds` would not have understood on the
+   POSITIVE side either) returns None rather than guessing, matching
+   collect_bounds' own "only known shapes contribute a bound" philosophy
+   just above. Only ever applied to a condition already accepted by
+   check_cond as boolean, so no further validation is needed here. *)
+let rec negate_cond (e : Ast.expr) : Ast.expr option =
+  match e.desc with
+  | BinOp (And, a, b) ->
+      (match negate_cond a, negate_cond b with
+       | Some na, Some nb -> Some { e with desc = BinOp (Or, na, nb) }
+       | _ -> None)
+  | BinOp (Or, a, b) ->
+      (match negate_cond a, negate_cond b with
+       | Some na, Some nb -> Some { e with desc = BinOp (And, na, nb) }
+       | _ -> None)
+  | BinOp (Lt, a, b) -> Some { e with desc = BinOp (Ge, a, b) }
+  | BinOp (Ge, a, b) -> Some { e with desc = BinOp (Lt, a, b) }
+  | BinOp (Le, a, b) -> Some { e with desc = BinOp (Gt, a, b) }
+  | BinOp (Gt, a, b) -> Some { e with desc = BinOp (Le, a, b) }
+  | BinOp (Eq, a, b) -> Some { e with desc = BinOp (Ne, a, b) }
+  | BinOp (Ne, a, b) -> Some { e with desc = BinOp (Eq, a, b) }
+  | _ -> None
+
 let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   match e.desc with
   | IntLit _    -> fresh ()  (* polymorphic: unifies with any integer type via context *)
@@ -2174,7 +2355,18 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  Printf.sprintf "Unbound variable: %s" name)))
   | BinOp (op, e1, e2) ->
       let t1 = infer_expr senv eenv tyenv fenv e1 in
-      let t2 = infer_expr senv eenv tyenv fenv e2 in
+      let t2 = match op with
+        | And | Or ->
+            let rhs_guard = if op = And then Some e1 else negate_cond e1 in
+            (match rhs_guard with
+             | None -> infer_expr senv eenv tyenv fenv e2
+             | Some guard ->
+                 let rhs_stmt = { Ast.desc = Ast.Expr e2; loc = e2.loc } in
+                 let rhs_env = narrow_from_cond senv tyenv guard [rhs_stmt] in
+                 with_exclusion_narrowing rhs_env guard
+                   (Ast.written_names [rhs_stmt])
+                   (fun () -> infer_expr senv eenv rhs_env fenv e2))
+        | _ -> infer_expr senv eenv tyenv fenv e2 in
       if contains_view_ty t1 || contains_view_ty t2 then
         raise (TypeError (e.loc,
           "erased views cannot be operands of runtime operators"));
@@ -4678,190 +4870,9 @@ and check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : ty =
 
 (* -- Flow-sensitive type narrowing ----------------------------------------- *)
 
-(* Collect per-variable bounds from a condition: v >= lo / v < hi / && chains.
-   Returns name -> (lo_opt, hi_opt). Commutative forms (lo < v) are also handled. *)
-(* Collect per-variable bounds from an if condition. A comparison
-   constrains `Var n` whenever the OTHER operand's static value range is
-   known: an integer literal k is {k..<k+1}, a Const_env constant likewise;
-   addition/subtraction of those constants is folded before narrowing;
-   and a variable whose binding is refined contributes its own range
-   (`total_len <= ip_len_in_frame` narrows total_len's upper bound to
-   ip_len_in_frame's static maximum -- the fact collapses to a CONSTANT at
-   collection time, so this is still interval reasoning, not a relational
-   domain, and no new kill obligations arise: the constant was true when
-   the condition executed and n's own kill is governed by written_names as
-   before). Equality (`ihl == 20`) narrows to the operand's exact range.
-   Sync rule: llvm_gen.ml's collect_bounds_cond is the same algorithm over
-   its own binding tables; change the two together. *)
-let collect_bounds tyenv (cond : Ast.expr) : (int option * int option) StringMap.t =
-  let take_lo a b = match a, b with
-    | Some x, Some y -> Some (max x y)
-    | Some _, None -> a | None, _ -> b in
-  let take_hi a b = match a, b with
-    | Some x, Some y -> Some (min x y)
-    | Some _, None -> a | None, _ -> b in
-  let update name lo_opt hi_opt acc =
-    let (pl, ph) = match StringMap.find_opt name acc with
-      | Some p -> p | None -> (None, None) in
-    StringMap.add name (take_lo lo_opt pl, take_hi hi_opt ph) acc
-  in
-  (* Static value range of a comparison operand, when known. *)
-  let range_of (e : Ast.expr) =
-    match Const_env.folded_value e with
-    | Some k -> Some (k, k + 1)
-    | None ->
-        (match e.desc with
-         | Var m ->
-             (match StringMap.find_opt m tyenv with
-              | Some (t, _) ->
-                  (match repr t with
-                   | TRefinedInt (a, b, _) -> Some (a, b)
-                   | _ -> None)
-              | None -> None)
-         | _ -> None)
-  in
-  (* n <op> rhs where rhs's range is {c..<d} (so c <= rhs <= d-1). *)
-  let constrain_left op n (c, d) acc =
-    match op with
-    | Ast.Ge -> update n (Some c)       None           acc
-    | Ast.Gt -> update n (Some (c + 1)) None           acc
-    | Ast.Le -> update n None           (Some d)       acc
-    | Ast.Lt -> update n None           (Some (d - 1)) acc
-    | Ast.Eq -> update n (Some c)       (Some d)       acc
-    | _ -> acc
-  in
-  (* lhs <op> n where lhs's range is {c..<d} -- the mirrored constraints. *)
-  let constrain_right op n (c, d) acc =
-    match op with
-    | Ast.Ge -> update n None           (Some d)       acc  (* n <= lhs *)
-    | Ast.Gt -> update n None           (Some (d - 1)) acc  (* n <  lhs *)
-    | Ast.Le -> update n (Some c)       None           acc  (* n >= lhs *)
-    | Ast.Lt -> update n (Some (c + 1)) None           acc  (* n >  lhs *)
-    | Ast.Eq -> update n (Some c)       (Some d)       acc
-    | _ -> acc
-  in
-  let rec go (e : Ast.expr) acc = match e.desc with
-    | BinOp (And, e1, e2) -> go e2 (go e1 acc)
-    | BinOp ((Ge | Gt | Le | Lt | Eq) as op, l, r) ->
-        let acc = match l.desc, range_of r with
-          | Var n, Some rng -> constrain_left op n rng acc
-          | _ -> acc
-        in
-        (match r.desc, range_of l with
-         | Var n, Some rng -> constrain_right op n rng acc
-         | _ -> acc)
-    | _ -> acc
-  in
-  go cond StringMap.empty
-
-(* Narrow the type environment for the then-branch of an if statement.
-   Narrows int bindings (both mutable and immutable) when both lo and hi bounds are proven
-   by the condition. Mutability is preserved so that assignment inside the branch still works.
-   Codegen-side narrowing for bounds-check elision goes through the same kill rule.
-
-   Invalidation (kill) rule: a variable the branch body may write to, alias
-   (&x), or rebind is NOT narrowed at all -- the condition only proves the
-   range at the moment it was evaluated, and any later write invalidates
-   that proof (`if (v >= 0 && v < 8) { v = 100; use(v); }`). The kill set
-   comes from Ast.written_names; llvm_gen.ml's apply_narrowing/_mut use the
-   same function on the same body (sync rule -- see written_names' comment). *)
-let narrow_from_cond senv tyenv (cond : Ast.expr) (then_body : Ast.stmt list) =
-  let killed = Ast.written_names then_body in
-  let bounds = collect_bounds tyenv cond in
-  let env =
-    StringMap.fold (fun name (lo_opt, hi_opt) env ->
-      if List.mem name killed then env
-      else match StringMap.find_opt name env with
-      (* Already refined (e.g. an immutable let whose initializer was
-         itself refined, kept via the "proofs survive weaker
-         annotations" rule -- see check_bound_shadowing/B-plan) --
-         INTERSECT rather than no-op. Without this, a variable that
-         arrives at the if already-refined (very common once P4a's
-         interval propagation is in play) would silently keep its
-         WIDER pre-existing range instead of the tighter one the
-         condition just proved, e.g. `icmp_len: {0..<1481}` at entry
-         plus `if (icmp_len >= 8 && icmp_len <= 1480)` must become
-         {8..<1481}, not stay {0..<1481}.
-         GitHub issue #99: a single-sided `hi`-only condition (lo_opt =
-         None) still narrows here, falling back to the variable's OWN
-         already-proven `elo` as the effective lower bound -- sound
-         unconditionally, since `elo` was already established as a valid
-         lower bound before this condition was even reached. *)
-      | Some (TRefinedInt (elo, ehi, base), is_mut) ->
-          (match lo_opt, hi_opt with
-           | Some lo, Some hi -> StringMap.add name (TRefinedInt (max lo elo, min hi ehi, base), is_mut) env
-           | None, Some hi    -> StringMap.add name (TRefinedInt (elo, min hi ehi, base), is_mut) env
-           | Some lo, None    -> StringMap.add name (TRefinedInt (max lo elo, ehi, base), is_mut) env
-           | None, None       -> env)
-      (* Any plain primitive integer type can be narrowed, not just
-         TI32 -- a u8/u16/u32/u64/usize/i8/i16/i64-typed variable
-         narrowed by an if-condition keeps ITS OWN type as the
-         refined range's base (see types.ml's TRefinedInt comment).
-         GitHub issue #99: for an UNSIGNED base with no lo_opt from the
-         condition (e.g. `if (off < 511)`, not `if (off >= 0 && off <
-         511)`), 0 is already a sound lower bound regardless of the
-         condition -- every unsigned value is trivially >= 0 -- so the
-         redundant explicit `>= 0` check is no longer required to trigger
-         narrowing. Signed bases still require an explicit lo (no implicit
-         floor exists for them). *)
-      | Some ((TI8|TI16|TI32|TI64|TU8|TU16|TU32|TU64|TIsize|TUsize) as base, is_mut) ->
-          let lo_opt = match lo_opt with
-            | Some _ -> lo_opt
-            | None -> if is_unsigned_ty base then Some 0 else None
-          in
-          (match lo_opt, hi_opt with
-           | Some lo, Some hi -> StringMap.add name (TRefinedInt (lo, hi, base), is_mut) env
-           | _ -> env)
-      | _ -> env
-    ) bounds tyenv
-  in
-  (* Slice minimum-length narrowing: `if (s.len >= K)` upgrades s's proven
-     minimum for the branch. Same kill rule; llvm_gen's apply_narrowing/_mut
-     consume the same Ast.slice_len_mins (sync rule). *)
-  List.fold_left (fun env (name, k) ->
-    if List.mem name killed then env
-    else match StringMap.find_opt name env with
-      | Some (t, is_mut) ->
-          (match repr t with
-           | TSlice (el, m) when k > m ->
-               StringMap.add name (TSlice (el, k), is_mut) env
-           | _ -> env)
-      | None -> env
-  ) env (Ast.slice_len_mins ~resolve_const:Const_env.find
-           ~resolve_bound:(static_slice_bound senv) cond)
-
-(* Logical negation of a condition expression, for narrowing the
-   fallthrough path after an early-return guard (`if (cond) { return
-   ...; }` with no else -- see stmt_list_always_returns/narrow_from_cond
-   below). De Morgan's laws for And/Or, flipped relational operators for
-   comparisons. Deliberately conservative: any condition shape not
-   listed (function calls, field/index access used as a bool, anything
-   this file's own `collect_bounds` would not have understood on the
-   POSITIVE side either) returns None rather than guessing, matching
-   collect_bounds' own "only known shapes contribute a bound" philosophy
-   just above. Only ever applied to a condition already accepted by
-   check_cond as boolean, so no further validation is needed here. *)
-let rec negate_cond (e : Ast.expr) : Ast.expr option =
-  match e.desc with
-  | BinOp (And, a, b) ->
-      (match negate_cond a, negate_cond b with
-       | Some na, Some nb -> Some { e with desc = BinOp (Or, na, nb) }
-       | _ -> None)
-  | BinOp (Or, a, b) ->
-      (match negate_cond a, negate_cond b with
-       | Some na, Some nb -> Some { e with desc = BinOp (And, na, nb) }
-       | _ -> None)
-  | BinOp (Lt, a, b) -> Some { e with desc = BinOp (Ge, a, b) }
-  | BinOp (Ge, a, b) -> Some { e with desc = BinOp (Lt, a, b) }
-  | BinOp (Le, a, b) -> Some { e with desc = BinOp (Gt, a, b) }
-  | BinOp (Gt, a, b) -> Some { e with desc = BinOp (Le, a, b) }
-  | BinOp (Eq, a, b) -> Some { e with desc = BinOp (Ne, a, b) }
-  | BinOp (Ne, a, b) -> Some { e with desc = BinOp (Eq, a, b) }
-  | _ -> None
-
 (* GitHub issue #310: populates guard_narrow_hints (declared near the top
    of this file, before check_expr, so check_expr's fallback -- defined
-   earlier than negate_cond in this file's own dependency order -- can
+   later than negate_cond in this file's dependency order -- can
    read it without a forward reference). When an early-return guard's
    negation can't narrow the fallthrough -- negate_cond returns None (an
    unrecognized shape), or returns Some but the negated shape is an Or at
@@ -9406,6 +9417,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             raise (TypeError (e.loc, msg))
           end;
           check_expr taints moved consume payload
+      | Ast.BinOp ((Ast.And | Ast.Or), a, b) ->
+          let after_left = check_expr taints moved false a in
+          let after_right = check_expr taints after_left false b in
+          mv_merge after_left after_right
       | Ast.BinOp (_, a, b) ->
           check_expr taints (check_expr taints moved false a) false b
       | Ast.AddrOf a ->

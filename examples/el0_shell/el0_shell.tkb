@@ -1994,8 +1994,9 @@ fn el0_svc_dispatch(esr: usize, syscall_num: usize, x0: usize, x1: usize,
                     let mut br: u32 = 0;
                     let result: FatIoResult = fat_read(file, staging, file_size, &br);
                     let close_result: FatIoResult = fat_close(file);
-                    if (fat_io_result_ok(result) == false
-                            || fat_io_result_ok(close_result) == false) {
+                    let read_ok: bool = fat_io_result_ok(result);
+                    let close_ok: bool = fat_io_result_ok(close_result);
+                    if (read_ok == false || close_ok == false) {
                         return (elr, SYSCALL_ERROR);
                     }
                     // Crosses the EL1->EL2 hvc boundary the same way
@@ -2154,7 +2155,9 @@ fn app_main() !{unsafe} {
                     let write_result: FatIoResult =
                         fat_write(prog_fp, prog_src, prog_len as u32, &prog_bw);
                     let close_result: FatIoResult = fat_close(prog_fp);
-                    if (fat_io_ok(write_result) == false || fat_io_ok(close_result) == false) {
+                    let write_ok: bool = fat_io_ok(write_result);
+                    let close_ok: bool = fat_io_ok(close_result);
+                    if (write_ok == false || close_ok == false) {
                         uart_puts("fat12 setup failed\n");
                     }
                 }

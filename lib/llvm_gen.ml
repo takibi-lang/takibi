@@ -3082,6 +3082,39 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            raise (Error
              "& requires a variable, struct field, or array/slice element"))
 
+  | BinOp ((And | Or) as op, e1, e2) ->
+      let (_, left) = gen_expr locals e1 in
+      let left_end = insertion_block builder in
+      let fn = block_parent left_end in
+      let rhs_bb = append_block context "logical.rhs" fn in
+      let done_bb = append_block context "logical.done" fn in
+      let left = as_cond left in
+      let skipped = const_int (i1_type context) (if op = And then 0 else 1) in
+      (if op = And then
+         ignore (build_cond_br left rhs_bb done_bb builder)
+       else
+         ignore (build_cond_br left done_bb rhs_bb builder));
+      position_at_end rhs_bb builder;
+      let rhs_guard = if op = And then Some e1 else negate_cond e1 in
+      let (_, right) = match rhs_guard with
+        | None -> gen_expr locals e2
+        | Some guard ->
+            let rhs_stmt = { Ast.desc = Ast.Expr e2; loc = e2.loc } in
+            let killed = Ast.written_names [rhs_stmt] in
+            let saved = apply_narrowing locals guard killed in
+            let saved_mut = apply_narrowing_mut locals guard killed in
+            Fun.protect
+              ~finally:(fun () ->
+                restore_narrowing locals saved;
+                restore_narrowing_mut saved_mut)
+              (fun () -> gen_expr locals e2) in
+      let right = as_cond right in
+      let rhs_end = insertion_block builder in
+      ignore (build_br done_bb builder);
+      position_at_end done_bb builder;
+      (TypeBool,
+       build_phi [(skipped, left_end); (right, rhs_end)] "logical.result" builder)
+
   | BinOp (op, e1, e2) ->
       (* GitHub issue #232: IntLit's own codegen (see its case above) already
          picks the exact right width when it is given a concrete scalar
@@ -6578,6 +6611,12 @@ let rec eval_static_int (e : Ast.expr) : Int64.t =
   | BinOp (Sub, { desc = IntLit 0L; _ }, _) ->
       (* Unary minus: eval_const_int recognizes this exact shape already. *)
       eval_const_int e
+  | BinOp (And, a, b) ->
+      if eval_static_int a = 0L then 0L
+      else if eval_static_int b = 0L then 0L else 1L
+  | BinOp (Or, a, b) ->
+      if eval_static_int a <> 0L then 1L
+      else if eval_static_int b <> 0L then 1L else 0L
   | BinOp (op, a, b) ->
       let x = eval_static_int a in
       let y = eval_static_int b in
@@ -6596,8 +6635,7 @@ let rec eval_static_int (e : Ast.expr) : Int64.t =
        | Ge   -> bool_of (Int64.compare x y >= 0)
        | Eq   -> bool_of (x = y)
        | Ne   -> bool_of (x <> y)
-       | And  -> bool_of (x <> 0L && y <> 0L)
-       | Or   -> bool_of (x <> 0L || y <> 0L)
+       | And | Or -> assert false
        | Band -> Int64.logand x y
        | Bor  -> Int64.logor x y
        | Bxor -> Int64.logxor x y

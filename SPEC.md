@@ -570,23 +570,18 @@ linear struct Name[n: usize] { field: T; }   // indexed runtime obligation
   identically (a bare pointer) at the LLVM level -- opaque handles are
   nominally typed, not structurally.
 
-**`&&` and `||` do NOT short-circuit.** Both operands of a logical
-operator are always evaluated, in an unspecified order. This is checked by
-`linux_user/logical_eval`, which counts calls to a side-effecting operand.
+**`&&` and `||` short-circuit in left-to-right order.** `a && b` evaluates
+`b` only when `a` is true; `a || b` evaluates `b` only when `a` is false.
+The result is always a `bool`. `linux_user/logical_eval` counts calls in
+all four left-operand cases. Use separate statements when both operations
+must run regardless of the first result.
 
-Two consequences worth stating, because both are reflexes from other
-languages:
-
-- **A guard does not protect its right-hand side.** `p != 0 && p.field`
-  dereferences `p` regardless, and `i < N && arr[i]` evaluates `arr[i]`
-  regardless. Write the guard as an enclosing `if` when the second
-  operand is only valid under the first.
-- **The refinement checker agrees with the code generator about this.** It
-  does NOT narrow the right-hand side using the left: `i < 4 && arr[i]`
-  fails under `--forbid-trap` with "index type usize cannot prove range",
-  rather than proving a bound that the generated code would not honour.
-  The two halves being consistent is what keeps this a readability
-  hazard rather than a soundness one.
+The refinement checker uses the left operand's established condition while
+checking a right operand that can run. For example, `i < 4 && arr[i] == 7`
+proves the index is in range on the right-hand path, as does
+`i >= 4 || arr[i] == 7` when the left operand is false. A conditional
+right operand's affine or linear effects are joined with the path that
+skips it; they do not count as effects on every path.
 
 - **`packed`** removes inter-field padding: use for protocol headers and
   MMIO register maps where layout must match hardware/wire format

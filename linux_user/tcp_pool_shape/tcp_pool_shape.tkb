@@ -664,8 +664,9 @@ fn app_main() !{unsafe} {
             // "on the generation rather than on the address" was
             // previously inferred from one counter moving while another
             // did not. removal_was_stale says it (issue #371).
+            let stale_was_refused: bool = removal_was_stale(stale_result);
             uart_print(matched == false &&
-                            removal_was_stale(stale_result) &&
+                            stale_was_refused &&
                             intrusive_pool_double_remove_count(&conns)
                                 == before_stale + 1 &&
                             intrusive_pool_foreign_handle_count(&conns) == 0 &&
