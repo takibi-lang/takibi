@@ -2109,13 +2109,44 @@ fn scheduled_process_table_clear() !{unsafe} {
 // "Full" no longer means "the sixteenth slot was taken" -- it means the
 // page allocator is empty. The rollback chain is unchanged in shape: every
 // resource acquired below is given back on every later failure.
+// GitHub issue #580: every caller of this is a probe -- the schedule
+// contention race, the slot-acquire helper and the table probe -- and none
+// of them installs an EL0 frame. They do want the record READY, because
+// Ready is what their own ready_take consumes and, for the contention
+// probe, the state under test.
+//
+// So the record says both things itself: Ready, and an affinity mask no CPU
+// satisfies. That is exactly the pair the old per-pid placement rule used to
+// produce by accident, and having the record carry it is what lets the
+// default placement change without a probe's private process becoming
+// something a peer will try to resume.
 fn scheduled_process_alloc() -> ScheduledPooledProcessAllocResult !{unsafe} {
-    return scheduled_process_alloc_pending(false);
+    match scheduled_process_alloc_pending(false) {
+        ScheduledPooledProcessAllocResult::Full => {
+            return ScheduledPooledProcessAllocResult::Full;
+        }
+        ScheduledPooledProcessAllocResult::Allocated(pooled) => {
+            let mut handle: ProcessHandle =
+                scheduled_pooled_process_handle(pooled);
+            scheduled_process_probe_publish_ready(handle);
+            let mut published: PooledProcessHandle = { handle };
+            return ScheduledPooledProcessAllocResult::Allocated(published);
+        }
+    }
 }
 
-// A clone is not schedulable until its copied frame, VM and descriptors are
-// installed. It must never pass through Ready while another CPU can select it.
-private fn scheduled_process_alloc_pending(clone_pending: bool)
+// A process is not schedulable until its frame, VM and descriptors are
+// installed. It must never pass through Ready while another CPU can select
+// it.
+//
+// GitHub issue #580: the flag says whether this record is RUNNABLE on
+// return, and it used to say `clone_pending` -- which named the one caller
+// that answered no rather than the property every caller has to answer.
+// The bootstrap is the only entry point that hands back a record something
+// is about to run; a clone's frame is installed later, and every other
+// caller is a probe that never runs its record at all. Those two were
+// indistinguishable while the question was "is this a clone".
+private fn scheduled_process_alloc_pending(runnable_now: bool)
         -> ScheduledPooledProcessAllocResult !{unsafe} {
     scheduled_process_pool_init();
     let mut slot: usize = 0;
@@ -2138,7 +2169,7 @@ private fn scheduled_process_alloc_pending(clone_pending: bool)
             intrusive_owner_drop(pool_owner);
         }
     }
-    match scheduled_process_alloc_finish(slot, generation, clone_pending) {
+    match scheduled_process_alloc_finish(slot, generation, runnable_now) {
         ScheduledProcessAllocResult::Full => {
             return ScheduledPooledProcessAllocResult::Full;
         }
@@ -2166,7 +2197,7 @@ fn scheduled_process_alloc_bootstrap() -> ScheduledBootstrapProcessAllocResult
     scheduled_process_boot_generation = scheduled_process_boot_generation + 1;
     scheduled_process_boot_live = true;
     match scheduled_process_alloc_finish(
-            0, scheduled_process_boot_generation, false) {
+            0, scheduled_process_boot_generation, true) {
         ScheduledProcessAllocResult::Full => {
             return ScheduledBootstrapProcessAllocResult::Full;
         }
@@ -2181,7 +2212,7 @@ fn scheduled_process_alloc_bootstrap() -> ScheduledBootstrapProcessAllocResult
 // chain for both entry points above, so a bootstrap and an ordinary
 // process cannot drift apart in what they are given.
 private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
-                                         clone_pending: bool)
+                                         runnable_now: bool)
         -> ScheduledProcessAllocResult !{unsafe} {
     // A run the last reaped process left behind, before asking the page
     // allocator for another one. This is also what preserves the old
@@ -2313,10 +2344,30 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
         stack.bytes[i] = KERNEL_STACK_POISON;
         below.bytes[i] = KERNEL_STACK_POISON;
     }
-    if (clone_pending) {
-        scheduled_process_record_at(slot).state = ProcessSlotState::Constructing;
-    } else {
+    // GitHub issue #580: Constructing unless the caller says this record is
+    // runnable now, which only the bootstrap does. The invariant above was
+    // already written down and the clone path was the only one keeping it.
+    //
+    // A probe's fresh allocation published Ready with no EL0 frame anywhere.
+    // What stopped a CPU running it was not that invariant but the placement
+    // rule: `kernel_process_next_ready` walks the CALLER's process chain, so
+    // core 0 never reached a record with no parent, and the secondary walks
+    // every slot but refused any pid no fixture had registered. Flipping the
+    // default placement removes the second half, and the first thing the
+    // secondary did with its new freedom was resume the schedule-contention
+    // probe's private process, which has no frame: `oops: fail-stop seq=1
+    // cpu=1` twelve lines into the boot.
+    //
+    // Making this Constructing for every non-clone caller was the first
+    // attempt and it is wrong in a way worth recording: the bootstrap comes
+    // through the same branch, and it IS a real process about to run init.
+    // The boot then died at the first execve instead. The flag has to name
+    // the property rather than the caller.
+    if (runnable_now) {
         scheduled_process_record_at(slot).state = ProcessSlotState::Ready;
+    } else {
+        scheduled_process_record_at(slot).state =
+            ProcessSlotState::Constructing;
     }
     let mut handle: ProcessHandle = { slot, generation };
     return ScheduledProcessAllocResult::Allocated(handle);
@@ -2681,6 +2732,41 @@ fn scheduled_process_reap(
 //
 // The address space allocated for the slot is given straight back: these
 // probes are about creating one, and want a slot that has none.
+// Publish a probe's private record as Ready and selectable by nobody, in one
+// place, because the two halves are one statement: "a Ready process that no
+// scheduler may run."
+//
+// The schedule-contention probe races two cores for one Ready process, so
+// Ready is the state under test and cannot be avoided; the table probe and
+// the slot-acquire helper consume Ready through their own ready_take. What
+// can be said explicitly is that no CPU may take it: an affinity mask naming
+// only a core that does not exist answers false in
+// kernel_process_cpu_allows_slot for every cpu, which is what the old
+// per-pid placement rule used to do by accident. A probe's own ready_take
+// does not consult the mask, so what it measures is unaffected.
+//
+// KERNEL_MAX_CORES is out of range of every online set by construction, and
+// kernel_process_affinity_set could not be used to write it: it intersects
+// with the online mask and refuses an empty result, which is exactly right
+// for a syscall and exactly wrong here.
+private fn scheduled_process_probe_publish_ready(handle: ProcessHandle)
+        !{unsafe} {
+    if (scheduled_process_handle_matches(handle) == false) { return; }
+    scheduled_process_set_affinity_mask(handle.pool_index,
+                                        1 << KERNEL_MAX_CORES);
+    scheduled_process_record_at(handle.pool_index).state =
+        ProcessSlotState::Ready;
+}
+
+// The other half of the same statement, asked rather than asserted by the
+// probe reaching into a slot: may THIS cpu take this record? The probe wants
+// "no" from every cpu while the record sits Ready with no frame.
+fn scheduled_process_probe_cpu_allows(cpu: usize, handle: ProcessHandle)
+        -> bool {
+    if (scheduled_process_handle_matches(handle) == false) { return false; }
+    return kernel_process_cpu_allows_slot(cpu, handle.pool_index);
+}
+
 fn scheduled_process_probe_slot_acquire() -> usize !{unsafe} {
     let mut slot: usize = 0;
     match scheduled_process_alloc() {
@@ -3875,6 +3961,20 @@ fn kernel_process_cpu_allows_slot(cpu: usize, slot: usize) -> bool {
     if (scheduled_process_core0_for_call(slot)) { return cpu == 0; }
     let mask: usize = scheduled_process_affinity_mask(slot);
     if (mask == 0) {
+        // GitHub issue #580: no mask means every schedulable core, which is
+        // what an ordinary process gets. It used to mean "ask the per-pid
+        // fixture rule", and that rule answers core 0 for every pid no
+        // fixture has registered -- so an ordinary process never ran on a
+        // peer, whatever the affinity ABI said, and four `yes` processes all
+        // landed on core 0.
+        //
+        // A fixture that asked for a particular core still gets it. Those
+        // arrangements are not placement preferences: /bin/peer-read is
+        // REFUSED on core 0 so that its reads contend with core 0's, and the
+        // peer-exit fixture narrows the secondary to the exiting process
+        // until its physical stack is released (#552). Both are evidence
+        // that would stop being produced if the general policy overrode
+        // them.
         return kernel_process_cpu_admits(
             cpu, scheduled_process_pid_of_slot(slot));
     }
@@ -6486,7 +6586,9 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
         return ProcessCloneResult::Invalid;
     }
     let mut parent: ProcessHandle = execution_here().current_handle;
-    match scheduled_process_alloc_pending(true) {
+    // Not runnable yet: the copied frame, VM and descriptors are installed
+    // below, and kernel_syscall_clone_child_return publishes Ready.
+    match scheduled_process_alloc_pending(false) {
         ScheduledPooledProcessAllocResult::Full => {
             return ProcessCloneResult::Invalid;
         }

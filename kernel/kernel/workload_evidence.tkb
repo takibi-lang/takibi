@@ -116,8 +116,16 @@ struct WorkloadBusyPair {
     b_slices: usize;
     a_ticks: usize;
     b_ticks: usize;
-    last_pid: usize;
-    last_tick: usize;
+    // GitHub issue #580: PER CPU, because the interval between two
+    // selections belongs to the core that made them. These were one pair
+    // shared by every core, so the time since the last selection ANYWHERE
+    // was charged to whichever pid was selected last ANYWHERE. It read
+    // plausibly while the secondary kept re-selecting its worker between
+    // idle wakeups, and stopped the moment an ordinary process gave that
+    // core something else to do: `cpu_a=26048999 cpu_b=0` for a worker that
+    // had completed nine rounds.
+    last_pid: [usize; KERNEL_MAX_CORES];
+    last_tick: [usize; KERNEL_MAX_CORES];
     start_ticks: usize;
     end_ticks: usize;
     profile_cpu: usize;
@@ -570,19 +578,23 @@ fn workload_busy_note_selected_locked(
         return;
     }
     workload_profile_note_selected(pid);
+    let raw_cpu: usize = cpu_id();
+    if (raw_cpu >= KERNEL_MAX_CORES) { return; }
+    let core: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
     let now: usize = read_cntpct() as usize;
-    if (workload_busy_pair.last_tick != 0) {
-        let spent: usize = now - workload_busy_pair.last_tick;
+    if (workload_busy_pair.last_tick[core] != 0) {
+        let spent: usize = now - workload_busy_pair.last_tick[core];
         if (workload_busy_pair.a_pid != 0 &&
-            workload_busy_pair.last_pid == workload_busy_pair.a_pid) {
+            workload_busy_pair.last_pid[core] == workload_busy_pair.a_pid) {
             workload_busy_pair.a_ticks = workload_busy_pair.a_ticks + spent;
         } else if (workload_busy_pair.b_pid != 0 &&
-                   workload_busy_pair.last_pid == workload_busy_pair.b_pid) {
+                   workload_busy_pair.last_pid[core] ==
+                       workload_busy_pair.b_pid) {
             workload_busy_pair.b_ticks = workload_busy_pair.b_ticks + spent;
         }
     }
-    workload_busy_pair.last_pid = pid;
-    workload_busy_pair.last_tick = now;
+    workload_busy_pair.last_pid[core] = pid;
+    workload_busy_pair.last_tick[core] = now;
     if (workload_busy_pair.a_pid != 0 && pid == workload_busy_pair.a_pid) {
         workload_busy_pair.a_slices = workload_busy_pair.a_slices + 1;
         if (workload_busy_pair.restart_report_state ==
@@ -1079,8 +1091,10 @@ private fn workload_busy_start_profile(pid: usize, input_steps: usize)
                     stopped, start_guard, workload_busy_pair.start_ticks, pid);
                 workload_busy_pair.a_ticks = 0;
                 workload_busy_pair.b_ticks = 0;
-                workload_busy_pair.last_pid = 0;
-                workload_busy_pair.last_tick = 0;
+                for reset_cpu: usize in 0..<KERNEL_MAX_CORES {
+                    workload_busy_pair.last_pid[reset_cpu] = 0;
+                    workload_busy_pair.last_tick[reset_cpu] = 0;
+                }
                 kernel_boot_log("profile: begin name=busy-pair input_steps=");
                 uart_put_udec(input_steps);
                 kernel_boot_log(" cpu_count=");

@@ -405,20 +405,34 @@ fn schedule_contention_probe() -> bool !{unsafe} {
                 let mut handle: ProcessHandle =
                     scheduled_pooled_process_handle(pooled);
                 schedule_probe_handle = handle;
+                // GitHub issue #580: Ready is the state under test here --
+                // the race is two cores both claiming one Ready process --
+                // and scheduled_process_alloc publishes exactly that, with
+                // an affinity mask no CPU satisfies so that no scheduler
+                // resumes a record which has no EL0 frame. That pair used
+                // to come from the per-pid placement rule refusing this pid
+                // on the secondary, which is why flipping the default
+                // placement fail-stopped core 1 here.
                 schedule_probe_ready = true;
             }
         }
     }
 
-    // Exercise the production admission policy with an explicit CPU. This
-    // probe runs on core 0, so consulting cpu_id() here would only prove the
-    // unrestricted answer and leave the peer policy untested. Its private
-    // process is not one of the admitted busy-pair PIDs.
-    let schedule_probe_pid: usize =
-        scheduled_process_pid_of_handle(schedule_probe_handle);
+    // The placement policy, asked with an explicit CPU. This probe runs on
+    // core 0, so consulting cpu_id() here would only prove the answer for
+    // the core asking and leave the peer untested.
+    //
+    // GitHub issue #580: what is asserted changed with what is true. It used
+    // to be that the per-pid rule admitted this process on core 0 and
+    // refused it on core 1, which is how a record with no EL0 frame stayed
+    // unrun -- an accident of the fixture rule rather than anything this
+    // probe asked for. The default placement is every schedulable core now,
+    // so the separation this probe depends on is its own: the mask
+    // scheduled_process_probe_publish_racable wrote names no CPU, and the
+    // assertion is that NEITHER core will take it while it sits Ready.
     let admission_separated: bool =
-        kernel_process_cpu_admits(0, schedule_probe_pid) &&
-        kernel_process_cpu_admits(1, schedule_probe_pid) == false;
+        scheduled_process_probe_cpu_allows(0, schedule_probe_handle) == false &&
+        scheduled_process_probe_cpu_allows(1, schedule_probe_handle) == false;
 
     // Phase 1: no lock. The race is the expected result, and a run with no
     // duplicates at all means the window closed rather than that the
