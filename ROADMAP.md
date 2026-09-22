@@ -96,9 +96,10 @@ and the set of agents is expected to grow; a queue that named its agent would
 be wrong the first time that happened. Agent names below appear only where
 they record what some agent actually did.
 
-Territory A owns #9, #533, #534's remaining verification, #547, and their
-end-to-end QEMU/RPi5 evidence. It also owns the kernel halves of #528, #493,
-#540 and #549, whose compiler halves have landed.
+Territory A owns #9 and its end-to-end QEMU/RPi5 evidence, and since
+2026-09-22 the five issues that carry the rest of it in order: #579, #580,
+#581, #582, #583, with #584 -- the multicore workload -- last and dependent
+on all five.
 
 ### Territory A queue -- multicore integration
 
@@ -220,6 +221,57 @@ The next multicore increment is phase B. Its order is now:
    the subsystem this sequence reaches last rather than behind the next
    syscall in line.
 
+   **The rest of entry 6 is #581** (2026-09-22): the three subsystems that
+   carry real load -- filesystem, network, console -- rather than more
+   per-process words. It is entry 8 below, behind the two placement issues,
+   because admitting a syscall on a peer is pointless while no ordinary
+   process is placed on one.
+
+7. **#579 and #580, together.** What a review on 2026-09-22 measured, before
+   designing a workload: `kernel_process_schedulable_mask()` names core 0 and
+   `SECONDARY_CORE_ID` only, so **two** cores run processes on the four-core
+   board; and a process whose affinity mask is 0 -- every process, since PID 1
+   starts at 0 and every child inherits it -- reaches a peer only if
+   `workload_busy_secondary_candidate` names its pid. **So an ordinary process
+   never runs on a peer today.** #579 makes every online core schedulable and
+   has to decide what a QEMU lane does, since maintained lanes are `-smp 2`
+   for CI capacity. #580 replaces the named-pid rule with a policy and retires
+   `workload_busy_*_candidate`. Neither is worth landing without the other.
+   **#514 is #580's gate and is still unobserved**: slot turnover is slow and
+   single-cored today, which is exactly what #580 changes.
+
+8. **#581.** Entry 6's remaining half: a peer reaches the filesystem and the
+   network. #559 is the filesystem's honest remainder; #274 and #386 are the
+   network's two named obstacles; the console is the smallest, because
+   `/bin/peer-tty` already reads a typed line on the secondary under the
+   process-run lock. Each newly admitted path owns its audit, and each is the
+   moment to put load on the cores (see below).
+
+9. **#582.** A running process moves between cores on the scheduler's
+   initiative. Today the only migration is one-directional and for
+   correctness: a syscall outside the peer-safe table is rewound and
+   `core0_for_call` pins the process to core 0 until it completes. Nothing
+   moves a process because a core is busy.
+
+10. **#583.** The peer-safe table retires, or inverts into a refusal list so
+    that a syscall added later is peer-callable unless somebody says
+    otherwise. The tail after entry 8 is `rt_sigprocmask` (blocked on #570's
+    signal words), `clone`/`execve`/`wait4` from a peer, and the terminal
+    control family that does not exist yet (#435).
+
+11. **#584: the multicore workload.** Last, and filed with the reasoning for
+    why it cannot be written first: four `yes` processes all run on core 0
+    today, and four parallel HTTP requests all serialise there. Two things
+    from that issue belong in this queue because they change how entries 7 to
+    10 are verified. **The workload is process CHURN, not throughput** -- fork,
+    exec, exit, wait, signal and slot reuse across cores -- because every
+    multicore defect this project has closed lived in process lifecycle or a
+    shared table (#571, #569, #552, #547, #546, #533, #563, #514) and not one
+    lived in throughput. And **load finds, determinism closes**: #571
+    reproduced at 3 in 40 when filed and not once in 16 samples on the tree
+    that still had it, so a soak never becomes the evidence that something is
+    fixed. Anything it finds gets a lane that fails when the fix is removed.
+
 **#556 is evidence-gated, not a phase B blocker.** One parallel allcheck run
 failed the two-core oops lane with interleaved peer-fault text, but the exact
 assertion was overwritten and the next twelve focused plus four aggregate
@@ -265,13 +317,17 @@ remainder, the signal words being read-modify-written from two CPUs, and #550
 now carries ChildExit's answer to the check-then-block question, which the
 same audit derived and which is read from the code rather than observed.
 
-- **Two of them gate the default-mask flip, not today's work.** Step 3's last
-  move widens which processes run on a peer, which is what raises exposure to
-  #514's window and #516's fallback. Decide both before the default mask
-  becomes {core 0}; fixing them mid-step, in the pool-insert and exec paths,
-  with no local reproduction for #516, trades a flake for an outage.
-- **The diagnosis work outranks them and is cheap.** None of the three
-  touches a kernel hot path. Do these first.
+- **#514 gates #580, and this bullet used to say so in words the code does
+  not use.** It spoke of "the default mask becoming {core 0}", which reads
+  backwards against `kernel_process_cpu_allows_slot`: a mask of 0 means "ask
+  the per-pid rule", and the rule already answers core 0 for everything not
+  named by a fixture. The flip is the opposite direction -- a mask of 0 coming
+  to mean every schedulable core -- and it is #580's subject now. #516 closed
+  2026-09-20. What survives is the reason: fixing #514 mid-step, in the
+  pool-insert path, with slot turnover about to become fast and multi-cored,
+  trades a flake for an outage.
+- **The diagnosis work that used to be ordered here is complete**, and is
+  kept below as the record of what each one bought rather than as a queue.
   - **#564 is complete (2026-09-18).** `ps` and `proc PID` print each
     process's pending-signal set and the set it blocks, both named from the
     signals `kill(2)` accepts and checked against that guard. The uart-BREAK
@@ -321,15 +377,18 @@ Four moments earn it, and the order matters:
    workload owns the synchronization audit for every filesystem, network,
    console and device path it reaches, and load is what tests an audit: the
    interleaving one boot takes is not the forty a rate is made of.
-3. **Before the default mask becomes {core 0}.** That step widens WHICH
-   processes run on a peer rather than what one may do there, which is the
-   largest remaining increase in exposure in phase B, and #514's window --
-   open, unobserved, and in the pool-insert path every admitted process
-   crosses -- is exactly what a load run is for.
-4. **#572 IS the load workload**, not an occasion to run one. It asks for a
-   fairness bound that still holds with the init-managed services running
-   beside the busy pair, measured on both platforms with stated headroom,
-   and neither half of that can be answered by a single boot.
+3. **Around #580**, the change that makes a mask of 0 mean every schedulable
+   core rather than "ask the per-pid rule". It widens WHICH processes run on
+   a peer rather than what one may do there, which is the largest remaining
+   increase in exposure in phase B, and #514's window -- open, unobserved,
+   and in the pool-insert path every placed process crosses -- is exactly
+   what a load run is for. Run one before the flip and again after it: the
+   pair is what says whether a new failure is the flip's.
+4. **#572 and #584 ARE load workloads**, not occasions to run one. #572 asks
+   for a fairness bound that still holds with the init-managed services
+   running beside the busy pair, measured on both platforms with stated
+   headroom. #584 is the churn soak, and is last in this queue because four
+   `yes` processes all run on core 0 until #579 and #580 land.
 
 A load run that finds nothing is a result too, and belongs on the issue it was
 run for rather than only in a terminal.
@@ -401,8 +460,10 @@ active order above.
     invariant. The compiler mechanism is complete; marking the kernel's guards
     and converting its call sites is Territory A's active entry 2.
 
-Then, in this territory and unordered: #518, #468, #464, #516, #308, #414,
-#514, #202, #386, #274, #422, and the kernel side of #553. The compiler and
+Then, in this territory and unordered: #518, #468, #464, #308, #414, #202,
+#422, and the kernel side of #553. #514 is no longer unordered -- it gates
+#580 -- and #386 and #274 are named by #581 as the network's two obstacles.
+#516 closed. The compiler and
 language issues this list used to carry (#476, #131, #132, #212 and the
 rest) moved to the Territory B queue with `lib/` on 2026-09-12.
 
