@@ -464,9 +464,23 @@ fn process_image_recycled_handle_count() -> usize !{unsafe} {
     return intrusive_pool_recycled_handle_count(&process_image_pool);
 }
 
+// A live process-image root is a domain value, not an arbitrary usize. A
+// non-exhaustive enum retains the full usize representation while requiring
+// an explicit cast at every domain boundary. Root 0 remains valid; absence is
+// represented only by ProcessImageTargetRootResult::Missing.
+enum ProcessImageRoot : usize { _; }
+
+private fn process_image_root(index: usize) -> ProcessImageRoot {
+    return index as ProcessImageRoot;
+}
+
+fn process_image_root_index(root: ProcessImageRoot) -> usize {
+    return root as usize;
+}
+
 must_use variant ProcessImageTargetRootResult {
     Missing;
-    Ready(usize);
+    Ready(ProcessImageRoot);
 }
 
 // GitHub issue #516: public, because it is the API readers outside this file
@@ -489,7 +503,7 @@ fn process_image_target_root_result()
         return ProcessImageTargetRootResult::Missing;
     }
     return ProcessImageTargetRootResult::Ready(
-        process_image_target_root_here());
+        process_image_root(process_image_target_root_here()));
 }
 
 fn process_image_pte_read(index: usize) -> usize {
@@ -873,7 +887,7 @@ fn process_image_no_target_probe() -> bool !{unsafe} {
     match process_image_target_root_result() {
         ProcessImageTargetRootResult::Missing => {}
         ProcessImageTargetRootResult::Ready(target) => {
-            restore_root = target;
+            restore_root = process_image_root_index(target);
             had_root = true;
         }
     }
@@ -1148,7 +1162,9 @@ fn process_image_exec_install(
             process_image_unmap(pages);
             return ProcessImageExecInstallResult::NoTarget;
         }
-        ProcessImageTargetRootResult::Ready(target) => { target }
+        ProcessImageTargetRootResult::Ready(target) => {
+            process_image_root_index(target)
+        }
     };
     if (process_image_record_at(root).exec_image_installed) {
         // Unchanged: the INCOMING image is the one unmapped, and the
@@ -1211,20 +1227,21 @@ fn process_image_exec_teardown(root_index: usize) {
             return;
         }
         ProcessImageTargetRootResult::Ready(root) => {
+            let root_index: usize = process_image_root_index(root);
             // Take before acting, so an image is reaped once even though what
             // says it exists is now a bool rather than a linear value.
             let installed: bool =
-                process_image_record_at(root).exec_image_installed;
+                process_image_record_at(root_index).exec_image_installed;
             let count: usize =
-                process_image_record_at(root).exec_image_page_count;
-            process_image_record_at(root).exec_image_installed = false;
-            process_image_record_at(root).exec_image_page_count = 0;
+                process_image_record_at(root_index).exec_image_page_count;
+            process_image_record_at(root_index).exec_image_installed = false;
+            process_image_record_at(root_index).exec_image_page_count = 0;
             if (installed) {
                 // `root` is this arm's own proven target. This used to
                 // re-derive the same answer through the root-0 fallback
                 // GitHub issue #516 removed, and would have answered 0 if
                 // the target had gone missing between the two calls.
-                let reaped_root: usize = root;
+                let reaped_root: usize = root_index;
                 if (process_image_stack_grew_pages(reaped_root, count)) {
                     process_image_exec_reap_stack_growth_count =
                         process_image_exec_reap_stack_growth_count + 1;
@@ -1646,7 +1663,7 @@ fn process_image_cleanup() {
     match process_image_target_root_result() {
         ProcessImageTargetRootResult::Missing => { return; }
         ProcessImageTargetRootResult::Ready(root) => {
-            process_image_cleanup_root(root);
+            process_image_cleanup_root(process_image_root_index(root));
         }
     }
 }
@@ -1665,7 +1682,9 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
     // which names the right thing.
     let root: usize = match process_image_target_root_result() {
         ProcessImageTargetRootResult::Missing => { return false; }
-        ProcessImageTargetRootResult::Ready(target) => { target }
+        ProcessImageTargetRootResult::Ready(target) => {
+            process_image_root_index(target)
+        }
     };
     let exception_class: usize = (esr >> 26) & 0x3F;
     let fault_status: usize = esr & 0x3F;
@@ -1736,14 +1755,15 @@ fn process_image_unmap_pages(count: usize) {
             return;
         }
         ProcessImageTargetRootResult::Ready(root) => {
-            if (process_image_record_at(root).stack_growth_active ||
-                process_image_record_at(root).active_page_count > count) {
-                process_image_record_at(root).stack_growth_active = false;
-                process_image_record_at(root).active_page_count = 0;
-                process_image_record_at(root).stack_lowest_l3 =
+            let root_index: usize = process_image_root_index(root);
+            if (process_image_record_at(root_index).stack_growth_active ||
+                process_image_record_at(root_index).active_page_count > count) {
+                process_image_record_at(root_index).stack_growth_active = false;
+                process_image_record_at(root_index).active_page_count = 0;
+                process_image_record_at(root_index).stack_lowest_l3 =
                     process_stack_top_page();
             }
-            process_image_cleanup_root(root);
+            process_image_cleanup_root(root_index);
         }
     }
     process_image_clear_target_root_here();
@@ -1863,7 +1883,9 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
         ProcessImageTargetRootResult::Missing => {
             return ProcessImagePairProbeResult::Invalid;
         }
-        ProcessImageTargetRootResult::Ready(target) => { target }
+        ProcessImageTargetRootResult::Ready(target) => {
+            process_image_root_index(target)
+        }
     };
     process_image_record_at(root).stack_top_page = process_stack_top_page();
     process_image_record_at(root).stack_low_page = PROCESS_STACK_LOW_DYNAMIC;
@@ -2056,7 +2078,9 @@ fn process_image_map_current(plan: DistroElfLoadPlan,
         ProcessImageTargetRootResult::Missing => {
             return ProcessImageMapResult::InvalidImage;
         }
-        ProcessImageTargetRootResult::Ready(target) => { target }
+        ProcessImageTargetRootResult::Ready(target) => {
+            process_image_root_index(target)
+        }
     };
     process_image_record_at(root).stack_growth_active = false;
     process_image_record_at(root).active_page_count = 0;
@@ -2243,7 +2267,8 @@ fn process_image_window_is_clear() -> bool !{unsafe} {
     match process_image_target_root_result() {
         ProcessImageTargetRootResult::Missing => { return false; }
         ProcessImageTargetRootResult::Ready(root) => {
-            return address_space_user_window_is_clear(root);
+            return address_space_user_window_is_clear(
+                process_image_root_index(root));
         }
     }
 }

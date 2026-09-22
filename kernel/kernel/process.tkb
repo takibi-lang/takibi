@@ -7415,7 +7415,7 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
         match process_image_target_root_result() {
             ProcessImageTargetRootResult::Missing => {}
             ProcessImageTargetRootResult::Ready(target) => {
-                resume_root = target;
+                resume_root = process_image_root_index(target);
                 has_resume_root = true;
             }
         }
