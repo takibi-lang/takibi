@@ -656,16 +656,13 @@ fn workload_busy_secondary_candidate(pid: usize) -> bool {
         workload_busy_pair.peer_exit_stack_released == false) {
         return pid == workload_busy_pair.peer_exit_pid;
     }
-    if (workload_busy_pair.peer_exit_reported &&
-        workload_busy_pair.peer_read_pid != 0 &&
-        workload_busy_pair.peer_read_reported == false) {
-        return pid == workload_busy_pair.peer_read_pid;
-    }
     // GitHub issue #9: the console writer and the terminal reader are not
-    // named here any more. Each asks its progress handler for the CPU when
-    // its turn comes and pins itself to it, so their admission is their own
-    // affinity mask. The filesystem reader above still needs a rule: its
-    // file reads are not in the kernel's peer-safety table yet.
+    // named here, and GitHub issue #581 removed the last one that was. Each
+    // asks its progress handler for the CPU when its turn comes and pins
+    // itself to it, so their admission is their own affinity mask. The
+    // filesystem reader needed a rule only while its file reads were
+    // outside the kernel's peer-safety table; they are in it now, so it
+    // pins like the other two.
     if (workload_busy_pair.restart_report_state ==
             WorkloadRestartReportState::Reported) {
         return pid == workload_busy_pair.a_pid ||
@@ -674,19 +671,14 @@ fn workload_busy_secondary_candidate(pid: usize) -> bool {
     return pid == workload_busy_pair.b_pid;
 }
 
-// The peer reader registers before opening the fixture. From that point it
-// belongs exclusively to CPU 1: excluding it from core 0 is the other half
-// of secondary admission and makes every accepted read's placement stable
-// across a blocking wakeup.
+// GitHub issue #581: nothing is excluded from core 0 by name any more. The
+// peer reader used to be: it registers before opening the fixture and then
+// belongs exclusively to CPU 1, and excluding it here was the other half of
+// secondary admission. It pins itself now, like the console writer and the
+// terminal reader, so a mask says where it runs and this rule says nothing
+// about it -- which is what keeps its reads contending with core 0's
+// whatever the placement policy becomes.
 fn workload_busy_primary_candidate(pid: usize) -> bool {
-    if (workload_busy_pair.peer_read_pid != 0 &&
-        workload_busy_pair.peer_read_reported == false &&
-        pid == workload_busy_pair.peer_read_pid) {
-        return false;
-    }
-    // GitHub issue #9: the console writer and the terminal reader keep
-    // themselves off this core through their own affinity masks, so only
-    // the filesystem reader above is still excluded by name.
     return true;
 }
 

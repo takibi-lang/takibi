@@ -46,10 +46,20 @@ def problems(tree: dict[str, str]) -> list[str]:
     ):
         if condition not in evidence:
             result.append(f"verdict no longer rejects missing {condition}")
-    if "pid != workload_busy_pair.peer_read_pid" not in evidence:
-        result.append("primary admission no longer excludes the peer reader")
-    if "return pid == workload_busy_pair.peer_read_pid;" not in evidence:
-        result.append("secondary admission no longer selects the peer reader")
+    # GitHub issue #581: the reader's placement is its own affinity mask now,
+    # not a pair of per-pid branches in the kernel's admission rule. It used
+    # to need those because its openat and read were outside the peer-safety
+    # table and the table could not admit it; they are in the table, so what
+    # holds it on CPU 1 -- and therefore off core 0, which is what makes the
+    # device contention two-sided -- is the pin below.
+    # The literal pin appears in the console writer too, so the reader's is
+    # named by the line that follows only it.
+    reader_pin = ("if (peer_pin(peer_cpu) == false) "
+                  "{ svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }\n"
+                  "    // Do not spend the bounded read attempts")
+    if reader_pin not in payload:
+        result.append("the peer reader no longer pins itself to the cpu its "
+                      "progress handler names")
     if "return workload_busy_primary_candidate(pid);" not in process:
         result.append("core-0 scheduler no longer applies primary admission")
     if "if (cpu != SECONDARY_CORE_ID) { return false; }" not in process:
@@ -102,6 +112,7 @@ def main() -> int:
         "cpu0 wait": ("kernel/kernel/workload_evidence.tkb", "block_device_wait_count(0)", "removed_cpu0_wait"),
         "secondary id": ("kernel/kernel/workload_evidence.tkb", "block_read_call_count(SECONDARY_CORE_ID)", "block_read_call_count(1)"),
         "primary admission": ("kernel/kernel/process.tkb", "workload_busy_primary_candidate(pid)", "removed_primary_candidate(pid)"),
+        "reader pin": ("kernel/arch/arm64/kernel/peer_read.tkb", "if (peer_pin(peer_cpu) == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }\n    // Do not spend the bounded read attempts", "// Do not spend the bounded read attempts"),
         "single peer": ("kernel/kernel/process.tkb", "cpu != SECONDARY_CORE_ID", "cpu == SECONDARY_CORE_ID"),
         "qemu stop": ("scripts/run_kernel_qemutest.sh", "--stop-marker", "--old-stop-marker"),
     }

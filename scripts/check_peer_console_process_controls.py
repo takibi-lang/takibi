@@ -75,13 +75,18 @@ def problems(tree: dict[str, str]) -> list[str]:
     if "return svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) == 0;" \
             not in payload:
         result.append("writer no longer pins itself to the CPU it was given")
-    # Both self-placing fixtures in this payload -- the console writer and
-    # the terminal reader -- must exit when their own pin fails, so this
-    # counts the sites rather than merely finding one: with two copies in the
-    # file, presence alone could never notice one of them going.
+    # Every self-placing fixture in this payload must exit when its own pin
+    # fails, so this counts the sites rather than merely finding one:
+    # presence alone could never notice one of several going.
+    #
+    # Three since GitHub issue #581: the console writer, the terminal reader,
+    # and now the filesystem reader, which placed itself through a per-pid
+    # rule in the kernel until its openat and read were admitted to the
+    # peer-safety table. This count is what noticed the third arriving, which
+    # is what it is for.
     if payload.count(
             "if (peer_pin(peer_cpu) == false) { "
-            "svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }") != 2:
+            "svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }") != 3:
         result.append("a self-placing fixture proceeds when its pin failed")
     if "if (cpu != SECONDARY_CORE_ID) { return false; }" not in process:
         result.append("scheduler admits the writer to an unintended peer")

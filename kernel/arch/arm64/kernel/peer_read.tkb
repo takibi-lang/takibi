@@ -76,8 +76,15 @@ fn peer_read() {
     let peer_cpu: usize = svc5(
         WORKLOAD_PROGRESS_SYSCALL, PEER_READ_TAG, 0, 0, 0, 0);
     if (peer_cpu == 0) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
-    // Registration excludes this pid from CPU 0 at the next scheduler
-    // selection. Do not spend the bounded read attempts before that handoff.
+    // GitHub issue #581: PIN to the CPU that answer names, the way the
+    // console writer and the terminal reader already do. Registration used
+    // to be the placement too -- it excluded this pid from core 0 through a
+    // per-pid rule in the kernel, because this fixture's openat and read
+    // were outside the peer-safety table and needed an admission the table
+    // could not give. They are in the table now, so where this runs is its
+    // own mask rather than a rule that had to know its pid.
+    if (peer_pin(peer_cpu) == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
+    // Do not spend the bounded read attempts before the handoff lands.
     while (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {}
 
     for attempt: usize in 0..<PEER_READ_ATTEMPTS {
