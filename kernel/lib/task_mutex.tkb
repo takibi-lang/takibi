@@ -45,7 +45,7 @@ use "kernel/lib/spinlock.tkb";
 
 // One field, at offset 0, for the same reason Mutex has one: `m as usize`
 // is the address the atomic operates on only because the word is first.
-struct TaskMutex { private word: usize; }
+struct no_whole_store TaskMutex { private word: usize; }
 
 // Free. Call once, before it is reachable by anything else.
 fn task_mutex_init(m: *TaskMutex @ id) {

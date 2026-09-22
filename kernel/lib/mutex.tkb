@@ -51,7 +51,7 @@ use "kernel/lib/spinlock.tkb";
 
 // One field, at offset 0, which is what makes `m as usize` the address of
 // the word the atomic operates on. `--emit-struct-layout Mutex` says so.
-struct Mutex { private word: usize; }
+struct no_whole_store Mutex { private word: usize; }
 
 // mutex_irq_save/mutex_irq_restore are supplied by the FILE LIST, the same
 // way pool_lock_acquire is (GitHub issue #364). The kernel gives them
