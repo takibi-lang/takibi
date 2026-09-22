@@ -1074,6 +1074,10 @@ testable change, not permission to implement its entire research horizon:
    linear ownership checks. The native freelist fixture exercises successive
    allocations with cleanup on failure. Kernel adoption follows the landed
    compiler interface as a separate change.
+4. **#574 is complete (2026-09-22).** The process-image target result carries
+   a nominal `ProcessImageRoot` rather than a bare `usize`. Root 0 remains a
+   valid value, while absence remains only the `Missing` case; returning bare
+   `0` in the old fallback shape is a compile error.
 
 Next, in descending priority, are independent research/prototype choices,
 not a mandate to implement all of them: **#58** (a measured, conservative
@@ -1085,6 +1089,8 @@ compiler tests or `linux_user/` can answer earlier language questions for the
 others. A kernel-wide migration is a separate decision. Their safety impact
 is high, but their current issues are
 open-ended and should not displace the three concrete entries above.
+The maintainer deferred #58 until later and #203 until the safe-memory model
+is settled; neither is the next active item solely because of this ordering.
 
 **#557 is complete (2026-09-22).** `struct no_copy` rejects whole-value
 stores and copies through initializers, arguments, returns, and aggregates.
