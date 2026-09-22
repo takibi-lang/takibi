@@ -1880,6 +1880,16 @@ enum Name: u16 { V1 = n1; ...; _; }             // non-exhaustive (trailing `_;`
   that assumption cannot be made). Round-trip is guaranteed:
   `(raw as Enum) as u16 == raw` for any `raw: u16`, including values
   that only match the `_` arm.
+- An empty non-exhaustive enum is a nominal scalar domain over its complete
+  underlying representation: `enum GicIntid: i32 { _; }`. Two such domains
+  with the same underlying type do not implicitly assign, compare, or perform
+  arithmetic with each other. Cross a domain boundary with an explicit cast,
+  preferably inside a named conversion function. These casts have no runtime
+  representation or validation. A refined integer may be narrowed before it
+  is cast into the domain, but refinements themselves still require a
+  primitive integer base; there is no `{lo..<hi as GicIntid}` type. Convert
+  back to the underlying integer for arithmetic, then validate or narrow the
+  result as needed before casting it into a domain.
 - `Name::Variant` -- enum variant literal, valid as a compile-time
   constant global initializer.
 - `EnumVariant as underlying_type` -- cast to the enum's declared

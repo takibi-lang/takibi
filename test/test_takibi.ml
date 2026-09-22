@@ -5611,6 +5611,41 @@ let infer_tests = [
       "enum Color: u8 { Red = 0; Green = 1; Blue = 2; }
        fn f() { for i: i32 in 0..<3 { let c: Color = i as Color; } }");
 
+  (* GitHub issue #267: an empty open enum is the existing minimum distinct
+     scalar. The representation stays i32, while domain crossings must be
+     explicit and named conversion functions can contain the intended
+     arithmetic. *)
+  Alcotest.test_case "distinct scalar domains convert explicitly" `Quick
+    (expect_codegen_ok
+      "enum GicIntid: i32 { _; }
+       enum SpiNumber: i32 { _; }
+       fn gic_intid_from_spi(spi: SpiNumber) -> GicIntid {
+         return ((spi as i32) + 32) as GicIntid;
+       }
+       fn gic_intid_raw(intid: GicIntid) -> i32 { return intid as i32; }");
+
+  Alcotest.test_case "distinct scalar assignment is rejected" `Quick
+    (expect_type_error "struct type mismatch: SpiNumber vs GicIntid"
+      "enum GicIntid: i32 { _; }
+       enum SpiNumber: i32 { _; }
+       fn bad(spi: SpiNumber) -> GicIntid { return spi; }");
+
+  Alcotest.test_case "distinct scalar arithmetic is rejected" `Quick
+    (expect_type_error "struct type mismatch: GicIntid vs SpiNumber"
+      "enum GicIntid: i32 { _; }
+       enum SpiNumber: i32 { _; }
+       fn bad(intid: GicIntid, spi: SpiNumber) -> GicIntid {
+         return intid + spi;
+       }");
+
+  Alcotest.test_case "distinct scalar comparison is rejected" `Quick
+    (expect_type_error "struct type mismatch: GicIntid vs SpiNumber"
+      "enum GicIntid: i32 { _; }
+       enum SpiNumber: i32 { _; }
+       fn bad(intid: GicIntid, spi: SpiNumber) -> bool {
+         return intid == spi;
+       }");
+
   Alcotest.test_case "packed struct field access type-checks" `Quick
     (expect_ok "struct packed Hdr { a: u8; b: u16; }
      fn f(h: *Hdr) -> u8 { return h.a; }");

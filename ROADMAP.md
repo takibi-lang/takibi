@@ -1080,8 +1080,8 @@ testable change, not permission to implement its entire research horizon:
    `0` in the old fallback shape is a compile error.
 
 Next, in descending priority, are independent research/prototype choices,
-not a mandate to implement all of them: **#267** (relationships among function
-arguments), then **#297** (runtime-cardinality retain/release obligations).
+not a mandate to implement all of them: **#297** (runtime-cardinality
+retain/release obligations).
 After those, **#58** (a measured, conservative kernel-stack-depth proof),
 **#203** (definite initialization at user-copy boundaries), then **#342** and
 **#343** (null and dangling-pointer safety) remain deferred. Prototype against
@@ -1093,6 +1093,12 @@ open-ended and should not displace the three concrete entries above.
 The maintainer deferred #58 until later, #203 until the safe-memory model is
 settled, and pointer safety until stable multicore support supplies its
 consumer. None is the next active item solely because of this ordering.
+
+**#267 is complete (2026-09-22).** Empty non-exhaustive enums already provide
+zero-cost nominal scalar domains over a primitive representation. Explicit
+casts mark domain boundaries; distinct domains cannot be assigned, compared,
+or used in arithmetic together. Refinement remains on the primitive side of
+the conversion, so no general units-of-measure or new syntax was added.
 
 **#557 is complete (2026-09-22).** `struct no_copy` rejects whole-value
 stores and copies through initializers, arguments, returns, and aggregates.
