@@ -248,17 +248,27 @@ The next multicore increment is phase B. Its order is now:
    carve-out is one fixture smaller. #559 is still the filesystem's honest
    remainder.
 
-   **The network waits on #586, not on #274 or #386.** Both of those are
-   real and neither is about missing cross-core exclusion: the sole RX
-   capability store is behind a Mutex whose guard the compiler checks, the
-   retransmit chain has its own, and the pools take theirs.
-   `tcp_connection_payload` is the blocker -- it probes under the pool lock
-   and returns a bare `*TcpConnection`, so ten callers read and write a
-   connection's sequence state through a pointer whose lock has been
-   released, and `TcpConnection` has no lock of its own. Sound while "there
-   is no real concurrent packet processing across connections", which is
-   that file's own sentence, and not after a peer may make socket calls.
-   Same shape as #569 and #571.
+   **The network waits on #587, not on #274 or #386.** Both of those are
+   real and neither is about missing cross-core exclusion. The audit that
+   looked found the stack already excludes at every layer it has: the sole
+   RX capability store behind a Mutex whose guard the compiler checks, the
+   retransmit chain with its own, the frame links under `frames_mutex`, the
+   pools with their locks and generations, and the connection itself under
+   #462's connection-wide TaskMutex, held for as long as an owner exists.
+
+   The layer that does not is the wake. `kernel_process_net_wake_all` takes
+   no process-run lock while it moves a process from Blocked to Ready from
+   an interrupt handler, and it walks only the chain rooted at whatever is
+   current on the INTERRUPTED cpu -- so a waiter outside that chain is never
+   reached. Both hold while every socket waiter is on core 0. It is #547's
+   shape one subsystem over, and #547 is the worked answer.
+
+   **#586 was this entry's first answer and was wrong**, filed from a grep
+   of the first eighteen lines of `TcpConnection` where the lock is not; it
+   is about a hundred lines further down. Recorded because the queue's
+   entries are read as premises: re-derive one against the tree before
+   building on it, which is what `github-workflow` says and what this
+   skipped.
 
 8. **#580.** **#579 is complete (2026-09-22)**: the schedulable set is the
    online set, and the four-core board reports `smp bringup: an EL0 process
