@@ -515,7 +515,7 @@ struct packed Name align(N) { ... }          // both
 struct packed be Name { field: u16; ... }    // packed + auto-promote u16/u32 fields to u16be/u32be
 struct packed be Name align(N) { ... }       // packed + be + align, all three
 struct publish Name { seq: usize; ... }      // fixed-layout record with an atomic commit field (see "Publication Records")
-struct no_whole_store Name { private state: usize; }  // whole-value assignment is forbidden after initialization
+struct no_copy Name { private state: usize; }  // whole-value stores and copies are forbidden
 opaque struct Name;                          // incomplete type, pointer-only
 affine opaque struct Name;                   // opaque + ownership-handle semantics, see below
 affine struct Name[n: usize] { field: T; }   // indexed runtime owner
@@ -535,11 +535,12 @@ linear struct Name[n: usize] { field: T; }   // indexed runtime obligation
   particular object (`let mut c: Cell[&pool];` does not parse). Static
   identity therefore travels through signatures and cannot yet be
   anchored in durable storage (GitHub issue #368).
-- `struct no_whole_store Name` declares a struct whose storage identity matters, such
-  as a lock. Whole-value assignment to that type, or to a struct or array
-  containing it, is a compile error. Initialization and field operations
-  remain available. Ordinary structs, including private-field value handles,
-  retain whole-value assignment.
+- `struct no_copy Name` declares a struct whose storage identity matters, such
+  as a lock. Whole-value assignment and copying an existing value through an
+  initializer, argument, return, or containing aggregate are compile errors.
+  Fresh storage may be left zero-initialized or initialized with a literal,
+  subject to ordinary field privacy. Address-taking and field operations remain available.
+  Ordinary structs, including private-field value handles, remain copyable.
 - `let mut s: Name;` -- struct variable (local or global; a struct
   variable is always mutable storage regardless of the `let`/`let mut`
   keyword used to declare it, matching how array variables work).

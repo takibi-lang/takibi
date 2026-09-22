@@ -32,7 +32,7 @@ let parse src =
   Const_env.reset ();
   Type_layout.reset ();
   Publish_registry.reset ();
-  No_whole_store_registry.reset ();
+  No_copy_registry.reset ();
   Generic_scope.reset ();
   Ast.reset_precedence_errors ();
   let lexbuf = Lexing.from_string src in
@@ -64,7 +64,7 @@ let infer_files files =
   Const_env.reset ();
   Type_layout.reset ();
   Publish_registry.reset ();
-  No_whole_store_registry.reset ();
+  No_copy_registry.reset ();
   Generic_scope.reset ();
   Ast.reset_precedence_errors ();
   let prog = List.concat_map (fun (filename, src) ->
@@ -12035,7 +12035,7 @@ let codegen_tests = [
         }");
 
   (* GitHub issue #372: the length evidence a slice cast needs is the
-     SOURCE NO_WHOLE_STORE's declared array type, and a struct field has one just as
+     SOURCE NO_COPY's declared array type, and a struct field has one just as
      a binding does. Motivated by issue #257's NetFrame: a pooled payload is
      only ever reached as `*T`, so a field is the only place its buffer can
      live, and without this the whole pool-of-buffers shape needs `unsafe`
@@ -13898,11 +13898,11 @@ let codegen_tests = [
           }") ());
 
   Alcotest.test_case
-    "issue #557: a place struct cannot be assigned as a whole across files"
+    "issue #557: a no-copy struct cannot be assigned as a whole across files"
     `Quick
     (fun () ->
        match infer_files [
-         "lock.tkb", "struct no_whole_store Mutex { private word: usize; }
+         "lock.tkb", "struct no_copy Mutex { private word: usize; }
                       let mut lock_a: Mutex; let mut lock_b: Mutex;
                       fn mutex_init(m: *Mutex) { m.word = 0; }";
          "user.tkb", "fn overwrite() { lock_a = lock_b; }";
@@ -13910,20 +13910,20 @@ let codegen_tests = [
        | _ -> Alcotest.fail "expected the whole lock store to be rejected"
        | exception Types.TypeError (_, msg) ->
            Alcotest.(check bool) "names the protected type" true
-             (contains_substring msg "struct no_whole_store 'Mutex' cannot be assigned as a whole"));
+             (contains_substring msg "struct no_copy 'Mutex' cannot be assigned as a whole"));
 
   Alcotest.test_case
-    "issue #557: embedded places and indirect stores are protected"
+    "issue #557: embedded no-copy values and indirect stores are protected"
     `Quick
     (fun () ->
-       let lock = "struct no_whole_store Mutex557 { private word: usize; }
+       let lock = "struct no_copy Mutex557 { private word: usize; }
                    let mut first: Mutex557; let mut second: Mutex557; " in
-       expect_type_error "struct no_whole_store 'Mutex557'" (lock ^
+       expect_type_error "struct no_copy 'Mutex557'" (lock ^
          "fn through_pointer(p: *Mutex557) { *p = second; }") ();
-       expect_type_error "struct no_whole_store 'Mutex557'" (lock ^
+       expect_type_error "struct no_copy 'Mutex557'" (lock ^
          "let mut slots: [Mutex557; 2];
           fn through_index() { slots[0] = second; }") ();
-       expect_type_error "struct no_whole_store 'Mutex557'" (lock ^
+       expect_type_error "struct no_copy 'Mutex557'" (lock ^
          "struct Holder557 { lock: Mutex557; tag: usize; }
           let mut a: Holder557; let mut b: Holder557;
           fn through_holder() { a = b; }") ());
@@ -13936,6 +13936,59 @@ let codegen_tests = [
         let mut a: ProcessHandle557;
         let mut b: ProcessHandle557;
         fn copy_handle() { a = b; }");
+
+  Alcotest.test_case
+    "issue #557: initialization, argument, and return cannot copy a lock"
+    `Quick
+    (fun () ->
+       let lock = "struct no_copy Lock557 { private word: usize; }
+                   let mut source: Lock557; " in
+       expect_type_error "struct no_copy 'Lock557' cannot be copied by value"
+         (lock ^ "fn local_copy() { let mut copied: Lock557 = source; }") ();
+       expect_type_error "struct no_copy 'Lock557' cannot be copied by value"
+         (lock ^ "fn inferred_copy() { let mut copied = source; }") ();
+       expect_type_error "struct no_copy 'Lock557' cannot be copied by value"
+         (lock ^ "extern fn receive(value: Lock557);
+                  fn argument_copy() { receive(source); }") ();
+       expect_type_error "struct no_copy 'Lock557' cannot be copied by value"
+         (lock ^ "fn unreachable_value_parameter(value: Lock557) { }") ();
+       expect_type_error "struct no_copy 'Lock557' cannot be copied by value"
+         (lock ^ "fn return_copy() -> Lock557 { return source; }") ();
+       expect_type_error "struct no_copy 'Lock557' cannot be copied by value"
+         (lock ^ "let mut global_copy: Lock557 = source;") ());
+
+  Alcotest.test_case
+    "issue #557: aggregate copies cannot duplicate an embedded lock"
+    `Quick
+    (fun () ->
+       let lock = "struct no_copy Lock557 { private word: usize; }
+                   struct Holder557 { lock: Lock557; tag: usize; }
+                   let mut source: Holder557; " in
+       expect_type_error "struct no_copy 'Lock557' cannot be copied by value"
+         (lock ^ "fn holder_copy() { let mut copied: Holder557 = source; }") ();
+       expect_type_error "struct no_copy 'Lock557' cannot be copied by value"
+         (lock ^ "extern fn receive(value: Holder557);
+                  fn argument_copy() { receive(source); }") ();
+       expect_type_error "struct no_copy 'Lock557' cannot be assigned as a whole"
+         ("struct no_copy Lock557 { private word: usize; }
+           generic struct Box557(T: type) { value: T; }
+           let mut a: Box557(Lock557);
+           let mut b: Box557(Lock557);
+           fn generic_copy() { b = a; }") ());
+
+  Alcotest.test_case
+    "issue #557: fresh lock storage and pointer operations remain valid"
+    `Quick
+    (expect_codegen_ok
+       "struct no_copy Lock557 { private word: usize; }
+        let mut global_lock: Lock557;
+        fn init_lock(lock: *Lock557) { lock.word = 0; }
+        fn fresh_lock() {
+          let mut local_lock: Lock557;
+          init_lock(&local_lock);
+          let mut literal_lock: Lock557 = {0};
+          init_lock(&literal_lock);
+        }");
 
   Alcotest.test_case
     "issue #476: a commit requires every scalar payload field on every path"
