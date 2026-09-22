@@ -5665,7 +5665,11 @@ fn kernel_process_block_deadline(current_sp: usize) -> usize {
 
 // Complete timed syscalls directly from their saved frame when the generic
 // counter reaches the per-process deadline.
-fn kernel_process_deadline_wake_all() !{interrupt, unsafe} {
+// GitHub issue #587: the caller's process-run lock, for the reason the net
+// wake above needs it. This one already walked every slot; what it did not
+// do is hold the lock a waiter publishes Blocked under.
+fn kernel_process_deadline_wake_all(guard: borrow ProcessRunGuard[lock])
+        !{interrupt, unsafe} {
     let now: usize = read_cntpct() as usize;
     let mut cursor = scheduled_process_first_slot();
     let mut walking: bool = true;
@@ -5726,30 +5730,50 @@ fn kernel_process_deadline_wake_all() !{interrupt, unsafe} {
 // never be woken by it -- every tick would land at EL1 and the two would
 // wait for each other. Waking is not a scheduling decision and does not
 // belong behind one.
-fn kernel_process_net_wake_all() !{interrupt, unsafe} {
-    if (execution_here().current_live == false) { return; }
-    let mut root: ProcessHandle =
-        kernel_process_chain_root(execution_here().current_handle);
-    let mut cursor: ProcessHandle = root;
-    let mut steps: usize = scheduled_process_pool_live_count() + 1;
-    while (steps != 0) {
-        steps = steps - 1;
-        if (scheduled_process_state_of(cursor) ==
-                ProcessSlotState::Blocked &&
-            scheduled_process_wait_reason_of(cursor) ==
-                ProcessWaitReason::NetRx) {
-            match scheduled_process_blocked_take(cursor) {
-                ScheduledProcessBlockedTakeResult::Missing => {}
-                ScheduledProcessBlockedTakeResult::Blocked(resources) => {
-                    let (owner, blocked) = resources;
-                    let ready = scheduled_process_wake(owner, blocked);
-                    scheduled_process_record_at(owner.pool_index).wait_reason =
-                        ProcessWaitReason::None;
-                    scheduled_process_release(owner, ready);
+// GitHub issue #587: under the caller's process-run lock, and over every
+// slot rather than one process chain.
+//
+// It used to take no lock and walk only the chain rooted at whatever was
+// current on the INTERRUPTED cpu. Both are sound exactly while every socket
+// waiter is on core 0, which is what #581's network subsystem ends.
+//
+// The lock is the one a waiter publishes Blocked under, so either this
+// finds it Blocked or it finds the frame afterwards -- #547's argument for
+// the terminal, one subsystem over, and the reason that issue's fix could
+// not be a local interrupt mask.
+//
+// The walk is the one kernel_process_deadline_wake_all already does from
+// this same handler, so the cost is established rather than new: a chain
+// walk was already O(processes), and this one reaches the waiters that are
+// not the interrupted cpu's relatives.
+fn kernel_process_net_wake_all(guard: borrow ProcessRunGuard[lock])
+        !{interrupt, unsafe} {
+    let mut cursor = scheduled_process_first_slot();
+    let mut walking: bool = true;
+    while (walking) {
+        match cursor {
+            ProcessSlotCursor::Done => { walking = false; }
+            ProcessSlotCursor::At(slot) => {
+                let next = scheduled_process_next_slot(slot);
+                if (scheduled_process_record_state(slot) ==
+                        ProcessSlotState::Blocked &&
+                    scheduled_process_record_wait_reason(slot) ==
+                        ProcessWaitReason::NetRx) {
+                    match scheduled_process_blocked_take(
+                            scheduled_process_handle_of_slot(slot)) {
+                        ScheduledProcessBlockedTakeResult::Missing => {}
+                        ScheduledProcessBlockedTakeResult::Blocked(resources) => {
+                            let (owner, blocked) = resources;
+                            let ready = scheduled_process_wake(owner, blocked);
+                            scheduled_process_record_at(owner.pool_index)
+                                .wait_reason = ProcessWaitReason::None;
+                            scheduled_process_release(owner, ready);
+                        }
+                    }
                 }
+                cursor = next;
             }
         }
-        cursor = kernel_process_next_successor(cursor, root);
     }
 }
 
@@ -5765,30 +5789,38 @@ fn kernel_process_block_uart_tx(current_sp: usize) -> usize {
 // Every process waiting for room in the UART transmit queue becomes runnable.
 // Called from the PL011 interrupt once the TX drain has brought the queue to
 // its low-water mark, the counterpart of kernel_process_net_wake_all.
-fn kernel_process_uart_tx_wake_all() !{interrupt, unsafe} {
-    if (execution_here().current_live == false) { return; }
-    let mut root: ProcessHandle =
-        kernel_process_chain_root(execution_here().current_handle);
-    let mut cursor: ProcessHandle = root;
-    let mut steps: usize = scheduled_process_pool_live_count() + 1;
-    while (steps != 0) {
-        steps = steps - 1;
-        if (scheduled_process_state_of(cursor) ==
-                ProcessSlotState::Blocked &&
-            scheduled_process_wait_reason_of(cursor) ==
-                ProcessWaitReason::UartTx) {
-            match scheduled_process_blocked_take(cursor) {
-                ScheduledProcessBlockedTakeResult::Missing => {}
-                ScheduledProcessBlockedTakeResult::Blocked(resources) => {
-                    let (owner, blocked) = resources;
-                    let ready = scheduled_process_wake(owner, blocked);
-                    scheduled_process_record_at(owner.pool_index).wait_reason =
-                        ProcessWaitReason::None;
-                    scheduled_process_release(owner, ready);
+// GitHub issue #587: the third instance of one shape. The net wake, this
+// one and the deadline wake all read process state and move a process from
+// Blocked to Ready out of an interrupt handler; two of the three took no
+// lock and walked one chain, and this is the other of those two.
+fn kernel_process_uart_tx_wake_all(guard: borrow ProcessRunGuard[lock])
+        !{interrupt, unsafe} {
+    let mut cursor = scheduled_process_first_slot();
+    let mut walking: bool = true;
+    while (walking) {
+        match cursor {
+            ProcessSlotCursor::Done => { walking = false; }
+            ProcessSlotCursor::At(slot) => {
+                let next = scheduled_process_next_slot(slot);
+                if (scheduled_process_record_state(slot) ==
+                        ProcessSlotState::Blocked &&
+                    scheduled_process_record_wait_reason(slot) ==
+                        ProcessWaitReason::UartTx) {
+                    match scheduled_process_blocked_take(
+                            scheduled_process_handle_of_slot(slot)) {
+                        ScheduledProcessBlockedTakeResult::Missing => {}
+                        ScheduledProcessBlockedTakeResult::Blocked(resources) => {
+                            let (owner, blocked) = resources;
+                            let ready = scheduled_process_wake(owner, blocked);
+                            scheduled_process_record_at(owner.pool_index)
+                                .wait_reason = ProcessWaitReason::None;
+                            scheduled_process_release(owner, ready);
+                        }
+                    }
                 }
+                cursor = next;
             }
         }
-        cursor = kernel_process_next_successor(cursor, root);
     }
 }
 

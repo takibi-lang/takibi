@@ -30,7 +30,14 @@ fn uart_irq_service() -> bool !{interrupt, unsafe} {
         // GitHub issue #544: a userspace writer that found the transmit
         // queue above its low-water mark is asleep; once this drain brings
         // the queue down to the mark, it runs its write again.
-        if (kernel_log_tx_writer_room()) { kernel_process_uart_tx_wake_all(); }
+        if (kernel_log_tx_writer_room()) {
+            // GitHub issue #587: under the lock a writer publishes Blocked
+            // under, so the drain either finds it asleep or it finds the
+            // room afterwards.
+            let tx_guard = process_run_lock();
+            kernel_process_uart_tx_wake_all(tx_guard);
+            process_run_unlock(tx_guard);
+        }
     }
     if (uart_rx_ready()) {
         let received: u32 = uart_rx_word();

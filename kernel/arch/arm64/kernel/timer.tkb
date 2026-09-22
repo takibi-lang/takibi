@@ -50,7 +50,15 @@ fn timer_irq_handler() !{interrupt} {
     timer_tick_rearm();
     // Every tick wakes network waiters, regardless of which EL it
     // interrupted. This is separate from the EL0-only scheduling half.
-    kernel_process_net_wake_all();
-    kernel_process_deadline_wake_all();
+    //
+    // GitHub issue #587: one acquisition for both. They read process state
+    // and publish Ready, and the lock they need is the one a waiter
+    // publishes Blocked under -- so taking it twice would cost twice and
+    // prove the same thing. The lock masks interrupts, so this core cannot
+    // interrupt its own holder.
+    let guard = process_run_lock();
+    kernel_process_net_wake_all(guard);
+    kernel_process_deadline_wake_all(guard);
+    process_run_unlock(guard);
     interrupt_notify();
 }
