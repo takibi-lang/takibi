@@ -496,9 +496,17 @@ private fn workload_profile_start(
     workload_profile_active = true;
     profile_timeline_start(
         workload_busy_pair.a_pid, workload_busy_pair.b_pid);
+    // GitHub issue #572: the per-worker totals belong to THIS window, and
+    // each core's interval opens here against whatever it is running. They
+    // used to be derived at the end instead, which is the premise #580
+    // breaks -- see workload_profile_finish.
+    workload_busy_pair.a_ticks = 0;
+    workload_busy_pair.b_ticks = 0;
     for cpu: usize in 0..<KERNEL_MAX_CORES {
         if (cpu < online) {
             let selected: usize = workload_profile_selected_pid(cpu);
+            workload_busy_pair.last_pid[cpu] = selected;
+            workload_busy_pair.last_tick[cpu] = now;
             profile_timeline_interval_start_cpu(stopped, cpu, selected, now);
         }
     }
@@ -519,29 +527,39 @@ private fn workload_profile_finish(
                 stopped, cpu, workload_profile_selected_pid(cpu), now);
         }
     }
-    // The original one-core counters charge at scheduler selections. With
-    // one permanently selected process on each CPU there is deliberately no
-    // switch at which to close either charge, so derive each process's CPU
-    // time from the already-closed per-CPU interval. This is valid for the
-    // admitted two-core workload because its scheduler boundary pins A to
-    // core 0 and B to core 1 for the entire measured interval.
-    if (online > 1) {
-        workload_busy_pair.a_ticks = 0;
-        workload_busy_pair.b_ticks = 0;
-        for cpu: usize in 0..<KERNEL_MAX_CORES {
-            if (cpu < online) {
-                let running: usize = workload_profile_cores[cpu].el0_ticks +
-                    workload_profile_cores[cpu].el1_ticks +
-                    workload_profile_cores[cpu].irq_ticks;
-                let selected: usize = workload_profile_selected_pid(cpu);
-                if (selected == workload_busy_pair.a_pid) {
-                    workload_busy_pair.a_ticks =
-                        workload_busy_pair.a_ticks + running;
-                } else if (selected == workload_busy_pair.b_pid) {
-                    workload_busy_pair.b_ticks =
-                        workload_busy_pair.b_ticks + running;
-                }
+    // GitHub issue #572: close each core's in-flight interval against the
+    // pid that core was actually running, which is the step the selection-
+    // driven charge cannot make on its own -- a core that never switches
+    // again never closes its last interval.
+    //
+    // This replaces a derivation that summed each CPU's whole busy time and
+    // attributed it to whichever pid was SELECTED when the window shut. That
+    // was valid only while the scheduler boundary pinned A to core 0 and B
+    // to core 1 for the entire interval, and it said so. GitHub issue #580's
+    // default placement is exactly what ends that premise: with an ordinary
+    // process able to reach a peer, the measurement reported
+    // `cpu_a=26048999 cpu_b=0` for a worker that had completed nine rounds,
+    // because B was not what core 1 had selected last.
+    //
+    // The charge below is the same one workload_busy_note_selected_locked
+    // makes at every selection, applied once more at the boundary, so the
+    // two halves now have one rule between them instead of two that
+    // disagree above one core.
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if (cpu < online && workload_busy_pair.last_tick[cpu] != 0) {
+            let spent: usize = now - workload_busy_pair.last_tick[cpu];
+            if (workload_busy_pair.a_pid != 0 &&
+                workload_busy_pair.last_pid[cpu] ==
+                    workload_busy_pair.a_pid) {
+                workload_busy_pair.a_ticks =
+                    workload_busy_pair.a_ticks + spent;
+            } else if (workload_busy_pair.b_pid != 0 &&
+                       workload_busy_pair.last_pid[cpu] ==
+                           workload_busy_pair.b_pid) {
+                workload_busy_pair.b_ticks =
+                    workload_busy_pair.b_ticks + spent;
             }
+            workload_busy_pair.last_tick[cpu] = now;
         }
     }
     profile_timeline_finish();
