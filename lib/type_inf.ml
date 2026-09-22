@@ -5798,11 +5798,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
          BEFORE the arms are checked below, so Assign's own `unify_at`
          call (reached through the same Yield -> `name = e;` rewrite)
          resolves/links it in place as each arm is checked -- no new
-         unification logic needed. Every arm stays fully, explicitly
-         named (never a wildcard), so this cannot hide a linear payload
-         obligation the way the still-paused GitHub issue #212 "let-else"
-         idea could -- see Ast.LetMatch's own comment for that
-         distinction. *)
+         unification logic needed. The let-else form also reaches this case
+         through parser-built arms; ordinary Match checking retains its
+         linear wildcard restriction. *)
       value_static_identities := StringMap.remove name !value_static_identities;
       invalidate_place_binding name;
       locally_bound_names := StringSet.add name !locally_bound_names;  (* issue #214 *)

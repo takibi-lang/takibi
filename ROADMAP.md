@@ -1044,10 +1044,11 @@ testable change, not permission to implement its entire research horizon:
    virtio paths. **#578** belongs to Territory B after that migration:
    change compiler semantics, proofs, constant evaluation, and native tests
    together. The other precedence ranks remain as they are.
-3. **#212: decide the let-else-like variant shorthand.** Its repeated
-   cleanup-and-extract pattern has concrete kernel and native examples. Start
-   with syntax and ownership tests in `lib/` and `linux_user/`; update shared
-   kernel callers only after the syntax has its own landed interface.
+3. **#212 is complete (2026-09-22).** `let Name::Case(value) = expr else {
+   explicit arms };` reuses LetMatch and the existing exhaustive match and
+   linear ownership checks. The native freelist fixture exercises successive
+   allocations with cleanup on failure. Kernel adoption follows the landed
+   compiler interface as a separate change.
 
 Next, in descending priority, are independent research/prototype choices,
 not a mandate to implement all of them: **#58** (a measured, conservative

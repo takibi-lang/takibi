@@ -1081,6 +1081,22 @@ without a whole-arm `_` must cover every case; duplicate cases are rejected.
 A whole-arm wildcard is allowed for unrestricted or affine variants, but not
 for a linear variant because it could hide a mandatory payload obligation.
 
+To bind one payload and handle the other cases without repeating its type,
+write `let Name::Case(value) = expression else { arms };`. The successful
+case binds `value` in the enclosing scope. Every arm in `else` must end in
+`return`, `break`, or `continue`; the ordinary match exhaustiveness and
+payload-consumption rules still apply. `let mut` also works. For example:
+
+```takibi
+let PageAllocResult::Allocated(page) = page_alloc() else {
+    PageAllocResult::OutOfMemory => { return CreateResult::OutOfMemory; }
+};
+```
+
+An `else` wildcard follows the ordinary match rule above, so it cannot hide
+a linear payload. Name every remaining case of a linear variant explicitly.
+The payload's existential identity is inferred from its variant case.
+
 A function returning a variant must explicitly return one on every
 control-flow path; there is no implicit zero/default package.
 

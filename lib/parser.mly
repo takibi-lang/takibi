@@ -124,6 +124,27 @@ let validate_arm_bodies pos arms =
   ) arms;
   arms
 
+let let_else_arms pos variant case failures =
+  let diverges arm =
+    let body = match arm with
+      | Ast.ArmVariant (_, _, _, body) | Ast.ArmWild body
+      | Ast.ArmIntLit (_, body) | Ast.ArmByteSliceLit (_, body) -> body
+    in
+    match List.rev body with
+    | { Ast.desc = (Ast.Return _ | Ast.Break | Ast.Continue); _ } :: _ -> true
+    | _ -> false
+  in
+  List.iter (fun arm ->
+    if not (diverges arm) then
+      raise (Types.TypeError (pos,
+        "a let-else failure arm must end in return, break, or continue"))
+  ) failures;
+  let hidden = "$let_else_payload_" ^ string_of_int pos.Lexing.pos_cnum in
+  let payload = { Ast.desc = Ast.Var hidden; loc = pos } in
+  let yield = { Ast.desc = Ast.Yield payload; loc = pos } in
+  Ast.ArmVariant (variant, case, Some (Ast.PayloadBind (hidden, false)),
+                  [yield]) :: failures
+
 (* Display name for an explicit {lo..<hi as base} base, error messages only. *)
 let base_type_name = function
   | TypeI8 -> "i8" | TypeI16 -> "i16" | TypeI32 -> "i32" | TypeI64 -> "i64"
@@ -684,6 +705,16 @@ stmt:
        spelling of the annotation-omitted form just above. *)
     { { desc = LetMatch (false, id, None, disc,
                           validate_arm_bodies $symbolstartpos arms);
+        loc = $symbolstartpos } }
+  | LET variant = IDENT COLONCOLON case = IDENT LPAREN id = IDENT RPAREN
+    ASSIGN disc = expr ELSE LBRACE failures = match_arms RBRACE SEMI
+    { { desc = LetMatch (false, id, None, disc,
+          let_else_arms $symbolstartpos variant case failures);
+        loc = $symbolstartpos } }
+  | LET MUT variant = IDENT COLONCOLON case = IDENT LPAREN id = IDENT RPAREN
+    ASSIGN disc = expr ELSE LBRACE failures = match_arms RBRACE SEMI
+    { { desc = LetMatch (true, id, None, disc,
+          let_else_arms $symbolstartpos variant case failures);
         loc = $symbolstartpos } }
   | LBRACE first = stmt rest = stmts RBRACE
     (* GitHub issue #184: requires at least one statement (unlike every

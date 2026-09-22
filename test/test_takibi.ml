@@ -15833,14 +15833,82 @@ let codegen_tests = [
             return text;
         }");
 
+  Alcotest.test_case
+    "let-else extracts a payload while naming every failure case" `Quick
+    (expect_codegen_ok
+       "must_use variant LeResult { Empty; Denied; Value(usize); }
+        fn le_get() -> LeResult { return LeResult::Value(42); }
+        fn le_use() -> usize {
+            let LeResult::Value(value) = le_get() else {
+                LeResult::Empty => { return 0; }
+                LeResult::Denied => { return 1; }
+            };
+            return value;
+        }");
+
+  Alcotest.test_case
+    "let-else requires failure arms to diverge" `Quick
+    (expect_type_error "let-else failure arm must end"
+       "variant LeDiverge { Empty; Value(usize); }
+        fn le_diverge_get() -> LeDiverge { return LeDiverge::Empty; }
+        fn le_diverge() -> usize {
+            let LeDiverge::Value(value) = le_diverge_get() else {
+                LeDiverge::Empty => { let ignored: usize = 0; }
+            };
+            return value;
+        }");
+
+  Alcotest.test_case
+    "let mut variant payload remains assignable after let-else" `Quick
+    (expect_codegen_ok
+       "variant LeMutable { Empty; Value(usize); }
+        fn le_mut_get() -> LeMutable { return LeMutable::Value(2); }
+        fn le_mut_use() -> usize {
+            let mut LeMutable::Value(value) = le_mut_get() else {
+                LeMutable::Empty => { return 0; }
+            };
+            value = value + 1;
+            return value;
+        }");
+
+  Alcotest.test_case
+    "let-else still checks every case of a linear variant" `Quick
+    (expect_type_error "non-exhaustive match"
+       "linear view LeToken;
+        must_use variant LeLinear { Empty; Got(LeToken); Other(LeToken); }
+        fn le_linear_get() -> LeLinear {
+            return LeLinear::Got(view LeToken);
+        }
+        fn le_linear_consume(token: sink LeToken) { }
+        fn le_linear_use() {
+            let LeLinear::Got(token) = le_linear_get() else {
+                LeLinear::Empty => { return; }
+            };
+            le_linear_consume(token);
+        }");
+
+  Alcotest.test_case
+    "let-else cannot hide a linear failure payload behind wildcard" `Quick
+    (expect_type_error "cannot use a wildcard arm"
+       "linear view LeWildToken;
+        must_use variant LeWild { Empty; Got(LeWildToken); Other(LeWildToken); }
+        fn le_wild_get() -> LeWild {
+            return LeWild::Got(view LeWildToken);
+        }
+        fn le_wild_consume(token: sink LeWildToken) { }
+        fn le_wild_use() {
+            let LeWild::Got(token) = le_wild_get() else {
+                _ => { return; }
+            };
+            le_wild_consume(token);
+        }");
+
   (* GitHub issue #207 follow-up: `let [mut] id = match disc { arms };`
      (the type annotation itself omitted, not just its content) infers
      id's type from what the arms' Yield expressions produce, via the
      same TVar/of_ast_opt machinery an ordinary untyped `let` already
      uses -- reuses lm_nomut-style variants above rather than introducing
-     new ones. Deliberately narrower than the still-paused GitHub issue
-     #212 "let-else" idea: every arm below stays fully, explicitly named,
-     so no wildcard is ever introduced. *)
+     new ones. This existing form still spells every arm explicitly. *)
   Alcotest.test_case
     "issue #207: `let id = match disc { arms };` with the type annotation \
      itself omitted infers id's type from the arms' Yield expressions" `Quick

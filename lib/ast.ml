@@ -485,17 +485,16 @@ and stmt_desc =
          its own arms have been checked -- see type_inf.ml's LetMatch
          case. GitHub issue #207 follow-up: `ty` is now `type_expr
          option`, mirroring Ast.Let's own optional annotation -- `None`
-         means infer id's type from what the (fully explicit, no
-         wildcard) arms `Yield`, via the same TVar/unification machinery
+         means infer id's type from what the arms `Yield`, via the same
+         TVar/unification machinery
          an ordinary untyped `let` already uses (type_inf.ml's LetMatch
          case seeds a fresh unification variable via Types.of_ast_opt
          instead of the old mandatory Types.of_ast, and Assign's existing
          rule -- reached via rewrite_letmatch_arm_bodies's Yield ->
          `id = e;` rewrite -- unifies it against each arm's yielded
-         value). This is deliberately narrower than the still-paused
-         GitHub issue #212 "let-else" idea: every arm here stays fully,
-         explicitly named, so no wildcard is ever introduced and the
-         linear-payload-hiding concern that paused #212 does not apply.
+         value). The let-else syntax uses this node too: its parser-built
+         success arm yields the payload, while its failure arms are explicit.
+         Match's existing wildcard rule still protects linear payloads.
 
          `arms` are ordinary match_arm bodies (each one's last statement
          checked structurally by the parser, not via full flow analysis

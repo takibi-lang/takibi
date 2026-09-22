@@ -72,29 +72,26 @@ fn app_main() {
     freelist_core_init(&pool);
     uart_puts("freelist_pool\n");
 
-    let a: exists sa: usize. FreelistOwner[sa] = match freelist_core_insert(&pool) {
+    let FreelistPopResult::Popped(a) = freelist_core_insert(&pool) else {
         FreelistPopResult::Empty => {
             uart_puts("alloc a failed\n");
             return;
         }
-        FreelistPopResult::Popped(o) => { o }
     };
-    let b: exists sb: usize. FreelistOwner[sb] = match freelist_core_insert(&pool) {
+    let FreelistPopResult::Popped(b) = freelist_core_insert(&pool) else {
         FreelistPopResult::Empty => {
             uart_puts("alloc b failed\n");
             freelist_core_remove(&pool, a);
             return;
         }
-        FreelistPopResult::Popped(o) => { o }
     };
-    let c: exists sc: usize. FreelistOwner[sc] = match freelist_core_insert(&pool) {
+    let FreelistPopResult::Popped(c) = freelist_core_insert(&pool) else {
         FreelistPopResult::Empty => {
             uart_puts("alloc c failed\n");
             freelist_core_remove(&pool, a);
             freelist_core_remove(&pool, b);
             return;
         }
-        FreelistPopResult::Popped(o) => { o }
     };
 
     uart_puts("allocated: ");
