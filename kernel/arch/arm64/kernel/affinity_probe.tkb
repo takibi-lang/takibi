@@ -112,27 +112,17 @@ private fn affinity_peer_spinner() {
     if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) != 0) {
         svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
     }
-    let mut nap: [u8; 16];
-    for index: usize in 0..<16 { nap[index] = 0; }
-    // tv_sec = 0, tv_nsec = 1000000 (0x000F4240), little-endian.
-    nap[8] = 0x40;
-    nap[9] = 0x42;
-    nap[10] = 0x0F;
+    let mut probe_mask: [u8; 8];
     for round: usize in 0..<AFFINITY_PEER_SPINNER_NAPS {
-        svc5(NANOSLEEP_SYSCALL, nap as *u8 as usize, 0, 0, 0, 0);
+        svc5(GETAFFINITY_SYSCALL, 0, 8, probe_mask as *u8 as usize, 0, 0);
     }
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
 }
 
 private fn affinity_spinner() {
-    let mut nap: [u8; 16];
-    for index: usize in 0..<16 { nap[index] = 0; }
-    // tv_sec = 0, tv_nsec = 1000000 (0x000F4240), little-endian.
-    nap[8] = 0x40;
-    nap[9] = 0x42;
-    nap[10] = 0x0F;
+    let mut probe_mask: [u8; 8];
     for round: usize in 0..<AFFINITY_SPINNER_NAPS {
-        svc5(NANOSLEEP_SYSCALL, nap as *u8 as usize, 0, 0, 0, 0);
+        svc5(GETAFFINITY_SYSCALL, 0, 8, probe_mask as *u8 as usize, 0, 0);
     }
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
 }
