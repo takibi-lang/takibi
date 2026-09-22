@@ -28,6 +28,11 @@ BUSY_MEASUREMENT_RE = re.compile(
     r"cpu_b=([0-9]+)\b")
 
 
+def uart_lines(path):
+    return [line.removeprefix("/ # ") for line in
+            Path(path).read_text(encoding="ascii", errors="strict").splitlines()]
+
+
 def parse_fields(text):
     fields = {}
     for item in text.split():
@@ -77,7 +82,7 @@ def integer(fields, key):
 def collect(args):
     if not args.target or not args.commit:
         raise ValueError("target and commit are required")
-    lines = Path(args.uart_log).read_text(encoding="ascii", errors="strict").splitlines()
+    lines = uart_lines(args.uart_log)
     begin = one_record(lines, "begin", args.name)
     end = one_record(lines, "end", args.name)
     begin_line = next(index for index, line in enumerate(lines)
@@ -201,8 +206,7 @@ def timeline_records(lines, kind, name):
 def timeline(args):
     if not args.target or not args.commit:
         raise ValueError("target and commit are required")
-    lines = Path(args.uart_log).read_text(
-        encoding="ascii", errors="strict").splitlines()
+    lines = uart_lines(args.uart_log)
     begin = one_record(lines, "begin", args.name)
     end = one_record(lines, "end", args.name)
     headers = timeline_records(lines, "timeline", args.name)

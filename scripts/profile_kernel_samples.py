@@ -89,7 +89,8 @@ def pid_elf(value):
 
 
 def collect(args):
-    lines = Path(args.uart_log).read_text(encoding="ascii").splitlines()
+    lines = [line.removeprefix("/ # ") for line in
+             Path(args.uart_log).read_text(encoding="ascii").splitlines()]
     records = []
     positions = []
     for position, line in enumerate(lines):

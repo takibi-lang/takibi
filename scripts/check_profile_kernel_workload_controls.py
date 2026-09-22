@@ -82,6 +82,22 @@ def main():
                 parsed["results"]["reported_cpu_cycles"] != [9, 1]):
             raise RuntimeError("positive per-CPU artifact was not preserved")
 
+        uart.write_text("/ # " + good_text, encoding="ascii")
+        result = run(
+            "collect", "--uart-log", str(uart), "--output", str(artifact),
+            "--target", "qemu", "--commit", "test")
+        if result.returncode != 0:
+            raise RuntimeError(
+                "shell prompt before profile begin was not normalized: " +
+                result.stderr)
+        result = run(*[
+            "timeline", "--uart-log", str(uart), "--output", str(timeline),
+            "--target", "qemu", "--commit", "test",
+        ])
+        if result.returncode != 0:
+            raise RuntimeError(
+                "timeline did not normalize the shell prompt: " + result.stderr)
+
         uart.write_text(good_text.replace("cpu_b=1", "cpu_b=0", 1),
                         encoding="ascii")
         result = run(

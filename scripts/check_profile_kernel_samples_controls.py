@@ -40,7 +40,7 @@ def main():
             stdout=subprocess.PIPE).stdout.split(" sampled", 1)[0].splitlines()[-1].split()[0]
         uart = root / "uart.log"
         good = (
-            "profile: begin name=busy-pair input_steps=1 cpu_count=1 iterations_goal=1 pid_a=7 pid_b=8\n"
+            "/ # profile: begin name=busy-pair input_steps=1 cpu_count=1 iterations_goal=1 pid_a=7 pid_b=8\n"
             "profile: end name=busy-pair elapsed_cycles=10 tick_frequency=1 iterations_a=1 iterations_b=1 result_count=2 checksum_a=1 checksum_b=2\n"
             f"profile: sample name=busy-pair sequence=0 timestamp=2 cpu=0 pid=7 level=el0 pc=0x{address} period=100\n"
             f"profile: sample name=busy-pair sequence=1 timestamp=3 cpu=0 pid=0 level=el1 pc=0x{address} period=100\n"
