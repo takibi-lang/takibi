@@ -227,36 +227,50 @@ The next multicore increment is phase B. Its order is now:
    because admitting a syscall on a peer is pointless while no ordinary
    process is placed on one.
 
-7. **#580.** **#579 is complete (2026-09-22)**: the schedulable set is the
+7. **#581, which was entry 8 until 2026-09-22.** The order swapped on
+   evidence, not preference. The flip #580 asks for was applied, measured and
+   backed out; what it found is on that issue, and the part that decides the
+   order is this: under the flip an ordinary process placed on a peer
+   migrates to core 0 for nearly every syscall it makes, because `read`,
+   `write`, `openat` and the socket calls are not in `syscall_peer_safe`. So
+   #580 before #581 buys migration traffic rather than concurrency, and
+   #581 makes #580 smaller -- each subsystem admitted to the table lets a
+   fixture drop its rule exemption, and `/bin/peer-read` is the largest
+   entry left in the carve-out #580 has to keep.
+
+   Entry 6's remaining half: a peer reaches the filesystem and the network.
+   #559 is the filesystem's honest remainder; #274 and #386 are the
+   network's two named obstacles; the console is the smallest, because
+   `/bin/peer-tty` already reads a typed line on the secondary under the
+   process-run lock. Each newly admitted path owns its audit, and each is
+   the moment to put load on the cores (see below).
+
+8. **#580.** **#579 is complete (2026-09-22)**: the schedulable set is the
    online set, and the four-core board reports `smp bringup: an EL0 process
    ran on cpus=0,1,2,3` where QEMU reports `cpus=0,1`. No lane gained vCPUs
    -- every assertion is written against the set the kernel reports online,
    so one ash transcript is true on both platforms and the per-platform
-   difference is asserted in the per-platform view. **What it cost is the
-   part worth carrying forward**: widening the mask was one line, QEMU passed
-   it, and the board refused it, because no scheduling path could give up a
-   process a CPU may no longer run. `kernel_process_schedule` returns the
-   current frame when nothing else is Ready, and the only transition anybody
-   had exercised was core 0 to CPU 1 -- where `/bin/affinity` keeps a spinner
-   Ready on core 0, standing in for a kernel mechanism that did not exist.
-   Expect more of that shape here: a fixture's scaffolding is load-bearing
-   until a second arrangement asks for the same thing.
+   difference is asserted in the per-platform view.
 
-   **#580 is what remains of the pair.** A process whose affinity mask is 0 --
-   every process, since PID 1 starts at 0 and every child inherits it --
-   reaches a peer only if `workload_busy_secondary_candidate` names its pid,
-   so an ordinary process still never runs on a peer. #580 replaces that
-   named-pid rule with a policy and retires `workload_busy_*_candidate`.
-   Four cores are available to a mask now and to nothing else.
-   **#514 is #580's gate and is still unobserved**: slot turnover is slow and
-   single-cored today, which is exactly what #580 changes.
+   **Two of #580's three obstacles are already cleared**, both found by
+   applying the flip rather than by reading: a probe's private process was
+   Ready with no EL0 frame and only the placement rule kept it unrun
+   (5a71132d), and the busy pair's CPU time was charged to whichever pid a
+   core had selected when the measurement window shut (ac6bc2a7). The third
+   is the secondary's idle loop, which is where the two-core contention
+   probes run and which a secondary carrying ordinary processes stops
+   returning to. Nothing measures that yet.
 
-8. **#581.** Entry 6's remaining half: a peer reaches the filesystem and the
-   network. #559 is the filesystem's honest remainder; #274 and #386 are the
-   network's two named obstacles; the console is the smallest, because
-   `/bin/peer-tty` already reads a typed line on the secondary under the
-   process-run lock. Each newly admitted path owns its audit, and each is the
-   moment to put load on the cores (see below).
+   A process whose affinity mask is 0 -- every process, since PID 1 starts
+   at 0 and every child inherits it -- reaches a peer only if
+   `workload_busy_secondary_candidate` names its pid, so an ordinary process
+   still never runs on a peer. #580 replaces that named-pid rule with a
+   policy and retires `workload_busy_*_candidate`. Four cores are available
+   to a mask now and to nothing else.
+   **#514 was #580's gate and is closed (2026-09-22)**: a pool slot's
+   storage is cleared before the generation that makes it answer Live is
+   stamped, so a lockless walker cannot read the free-chain link as a
+   payload however fast slot turnover becomes.
 
 9. **#582.** A running process moves between cores on the scheduler's
    initiative. Today the only migration is one-directional and for
