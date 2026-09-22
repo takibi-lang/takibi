@@ -239,11 +239,26 @@ The next multicore increment is phase B. Its order is now:
    entry left in the carve-out #580 has to keep.
 
    Entry 6's remaining half: a peer reaches the filesystem and the network.
-   #559 is the filesystem's honest remainder; #274 and #386 are the
-   network's two named obstacles; the console is the smallest, because
-   `/bin/peer-tty` already reads a typed line on the secondary under the
-   process-run lock. Each newly admitted path owns its audit, and each is
-   the moment to put load on the cores (see below).
+   **Two of its three subsystems are done (2026-09-22).** The console needed
+   nothing -- `write` to a terminal and `read` on fd 0 have been in the
+   table since #534 and #547. The filesystem read path is in it now, the
+   ext2 mutation gate moved with it rather than silently ceasing to apply,
+   and `/bin/peer-read` pins itself instead of being placed by a per-pid
+   rule, so `workload_busy_primary_candidate` names nobody and entry 8's
+   carve-out is one fixture smaller. #559 is still the filesystem's honest
+   remainder.
+
+   **The network waits on #586, not on #274 or #386.** Both of those are
+   real and neither is about missing cross-core exclusion: the sole RX
+   capability store is behind a Mutex whose guard the compiler checks, the
+   retransmit chain has its own, and the pools take theirs.
+   `tcp_connection_payload` is the blocker -- it probes under the pool lock
+   and returns a bare `*TcpConnection`, so ten callers read and write a
+   connection's sequence state through a pointer whose lock has been
+   released, and `TcpConnection` has no lock of its own. Sound while "there
+   is no real concurrent packet processing across connections", which is
+   that file's own sentence, and not after a peer may make socket calls.
+   Same shape as #569 and #571.
 
 8. **#580.** **#579 is complete (2026-09-22)**: the schedulable set is the
    online set, and the four-core board reports `smp bringup: an EL0 process
