@@ -1080,17 +1080,19 @@ testable change, not permission to implement its entire research horizon:
    `0` in the old fallback shape is a compile error.
 
 Next, in descending priority, are independent research/prototype choices,
-not a mandate to implement all of them: **#58** (a measured, conservative
-kernel-stack-depth proof), **#203** (definite initialization at user-copy
-boundaries), **#297** (runtime-cardinality retain/release obligations), then
-**#342** and **#343** (null and dangling-pointer safety). Prototype against
+not a mandate to implement all of them: **#267** (relationships among function
+arguments), then **#297** (runtime-cardinality retain/release obligations).
+After those, **#58** (a measured, conservative kernel-stack-depth proof),
+**#203** (definite initialization at user-copy boundaries), then **#342** and
+**#343** (null and dangling-pointer safety) remain deferred. Prototype against
 the smallest faithful consumer: #58 needs linked-kernel frame evidence, while
 compiler tests or `linux_user/` can answer earlier language questions for the
 others. A kernel-wide migration is a separate decision. Their safety impact
 is high, but their current issues are
 open-ended and should not displace the three concrete entries above.
-The maintainer deferred #58 until later and #203 until the safe-memory model
-is settled; neither is the next active item solely because of this ordering.
+The maintainer deferred #58 until later, #203 until the safe-memory model is
+settled, and pointer safety until stable multicore support supplies its
+consumer. None is the next active item solely because of this ordering.
 
 **#557 is complete (2026-09-22).** `struct no_copy` rejects whole-value
 stores and copies through initializers, arguments, returns, and aggregates.
@@ -1105,12 +1107,14 @@ to rewrite a live lock, process, or pool call site.
 
 Remaining compiler research, ordered within each line by current relevance:
 
-- Bounds, arithmetic, and static relationships: #200, #201, #252, #417,
-  #267, #282, #129, #374. #282 and #129 explicitly lack an urgent missing
+- Bounds, arithmetic, and static relationships: #200, #201, #252, #282,
+  #129, #374. #282 and #129 explicitly lack an urgent missing
   caller; keep their implementation gated on one.
 - Language policy and ergonomic options: #400, #155, #28, #8.
 - Toolchain and debugging: #124, #122, #123, #95.
-- Longer-horizon proof or new-target research: #109, #13, #50, #51, #85.
+- Longer-horizon proof or new-target research: #417, #109, #13, #50, #51,
+  #85. Treat #417 as a deliberate long-term design: changing ordinary
+  arithmetic overflow behavior can impose pervasive proof obligations.
 
 #### Completed and transferred entries of the previous order
 
