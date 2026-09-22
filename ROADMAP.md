@@ -1086,10 +1086,14 @@ others. A kernel-wide migration is a separate decision. Their safety impact
 is high, but their current issues are
 open-ended and should not displace the three concrete entries above.
 
-**Needs a Territory A handoff before kernel adoption:** #557 (a declaration
-rule against whole-value lock copies; land the compiler interface separately
-before marking shared lock types), then #131, #132, #370, and #216 (stored
-ownership and cross-call proofs that need a concrete maintained consumer).
+**#557 is complete (2026-09-22).** `struct no_copy` rejects whole-value
+stores and copies through initializers, arguments, returns, and aggregates.
+`Mutex` and `TaskMutex` carry the marker; both kernel targets and native
+users build without a lock-copy migration.
+
+**Needs a Territory A handoff before kernel adoption:** #131, #132, #370,
+and #216 (stored ownership and cross-call proofs that need a concrete
+maintained consumer).
 Their design or negative compiler tests can proceed in B, but do not race A
 to rewrite a live lock, process, or pool call site.
 
