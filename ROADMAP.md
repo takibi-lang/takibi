@@ -946,19 +946,18 @@ kernel adoption sequenced on the issue.
 Start in this order; each entry is a session-sized decision or independently
 testable change, not permission to implement its entire research horizon:
 
-1. **#558: close the indirect-call holes in the IRQ-restore and
-   handle-invalidation checks.** Recount actual indirect calls against the
-   current kernel first. Prefer a conservative rejection if it covers the
-   actual uses without inventing effect-row syntax; prove both negative
-   cases and `make allbuild`. This is an existing compiler soundness gap in
-   rules Territory A already relies on, and can start in `lib/` and compiler
-   tests without editing A's implementation.
-2. **#575: audit operator grouping and evaluation semantics.** Produce the
-   parser/SPEC/type-checker/codegen/test matrix and the maintainer decision
-   before changing `&&`, `||`, or any precedence. Include source-level
-   guard and side-effect cases and inspect maintained callers. Split each
-   approved breaking change into a narrow follow-up issue; do not bundle a
-   language migration into the audit.
+1. **#558 is complete.** Unknown indirect calls now conservatively reach the
+   IRQ-restore and handle-invalidation checks, including through direct
+   callers. The current kernel's sole function-pointer call needed no new
+   effect-row syntax; negative compiler tests and `make allbuild` passed.
+2. **#575's audit is complete (2026-09-22).** The parser/SPEC/type-checker/
+   codegen/test matrix and caller findings are on the issue. The maintainer
+   chose short-circuit `&&` and `||` to remove a guarded-RHS expectation
+   mismatch. **#577** belongs to Territory A: decide and preserve intentional
+   eager effects in maintained kernel callers, including the two-sector
+   virtio paths. **#578** belongs to Territory B after that migration:
+   change compiler semantics, proofs, constant evaluation, and native tests
+   together. The other precedence ranks remain as they are.
 3. **#212: decide the let-else-like variant shorthand.** Its repeated
    cleanup-and-extract pattern has concrete kernel and native examples. Start
    with syntax and ownership tests in `lib/` and `linux_user/`; update shared
