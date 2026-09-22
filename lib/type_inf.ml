@@ -1684,6 +1684,36 @@ let publish_whole_store_message =
    Write the payload through publish_begin's token, and copy a record out \
    with publish_copy"
 
+(* A `struct no_whole_store` owns its storage location. Check the entire destination
+   type so a containing struct or array cannot overwrite it indirectly. A
+   pointer to a place is only an address and does not store the place. *)
+let rec place_in_ast_type (senv : senv) (t : Ast.type_expr) = match t with
+  | Ast.TypeNamed name ->
+      if No_whole_store_registry.is_place name then Some name
+      else (match StringMap.find_opt name senv with
+        | Some (fields, _, _) ->
+            List.find_map (fun (_, field_ty) -> place_in_ast_type senv field_ty)
+                fields
+        | None -> None)
+  | Ast.TypeArray (t, _) | Ast.TypeRefined (_, _, t) | Ast.TypeIo t
+  | Ast.TypeSingleton (t, _) -> place_in_ast_type senv t
+  | Ast.TypeTuple ts -> List.find_map (place_in_ast_type senv) ts
+  | _ -> None
+
+let rec place_in_value_ty (senv : senv) t = match repr t with
+  | TStruct name -> place_in_ast_type senv (Ast.TypeNamed name)
+  | TIo t | TArray (t, _) | TSingleton (t, _) | TExists (_, _, _, t) ->
+      place_in_value_ty senv t
+  | TTuple ts -> List.find_map (place_in_value_ty senv) ts
+  | _ -> None
+
+let reject_place_whole_store senv loc ty =
+  match place_in_value_ty senv ty with
+  | None -> ()
+  | Some name -> raise (TypeError (loc, Printf.sprintf
+      "struct no_whole_store '%s' cannot be assigned as a whole; use its field API"
+      name))
+
 (* struct name -> declaring file, present iff the struct has at least one
    private field: constructing such a struct via a struct literal writes
    every field, private ones included, so the literal itself is
@@ -2800,7 +2830,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            (match target_ty with
             | Ast.TypeSlice (el_ast, want_min) ->
                 (* Slice creation cast. Sources:
-                   - an array-typed PLACE: a variable, or (issue #372) a
+                   - an array-typed NO_WHOLE_STORE: a variable, or (issue #372) a
                      struct field, through a pointer or a value struct. Its
                      declared [T; N] carries the static length; note both
                      infer_expr's Var case and its FieldGet case decay arrays
@@ -2822,7 +2852,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                      (match e.desc with
                       | Ast.Var _ | Ast.FieldGet _ ->
                           (* GitHub issue #372: the length evidence is the
-                             SOURCE PLACE's un-decayed declared type, which a
+                             SOURCE NO_WHOLE_STORE's un-decayed declared type, which a
                              struct field of array type carries exactly as a
                              variable binding does -- `p.bytes as []u8` for a
                              pooled payload has as much static length as
@@ -4251,6 +4281,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                "cannot assign to borrowed value '%s'; use `borrow mut` for scoped mutation"
                name));
            let (vty, is_mut) = lookup_binding e.loc name tyenv in
+           reject_place_whole_store senv e.loc vty;
            if contains_stable_owner_value_ty vty then
              raise (TypeError (e.loc,
                "stable owner container storage cannot be assigned or copied as a whole"));
@@ -4288,6 +4319,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  unify_at ptr_expr.loc pt (TPtr inner);
                  inner
            in
+           reject_place_whole_store senv e.loc inner;
            if contains_stable_owner_value_ty inner then
              raise (TypeError (e.loc,
                "stable owner container storage cannot be overwritten or copied through a pointer"));
@@ -4353,6 +4385,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
              | _ -> raise (TypeError (e.loc,
                  Printf.sprintf "index operator on non-array/pointer type '%s'" (to_string vt)))
            in
+           reject_place_whole_store senv e.loc elem_ty;
            if contains_stable_owner_value_ty elem_ty then
              raise (TypeError (e.loc,
                "stable owner container storage cannot be overwritten or copied through an index"));
@@ -4467,6 +4500,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  raise (TypeError (e.loc,
                    Printf.sprintf "no field '%s' in struct '%s'" fname sname))
            in
+           reject_place_whole_store senv e.loc field_ty;
            if contains_publish_value_ty senv field_ty then
              raise (TypeError (e.loc, publish_whole_store_message));
            let vt = check_expr senv eenv tyenv fenv rhs (strip_io field_ty) in

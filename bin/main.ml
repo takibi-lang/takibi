@@ -195,6 +195,7 @@ let () =
     Const_env.reset ();
     Type_layout.reset ();
     Publish_registry.reset ();
+    No_whole_store_registry.reset ();
     Generic_scope.reset ();
     Ast.reset_precedence_errors ();
     (* GitHub issue #55: every file named on the command line is an entry

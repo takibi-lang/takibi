@@ -32,6 +32,7 @@ let parse src =
   Const_env.reset ();
   Type_layout.reset ();
   Publish_registry.reset ();
+  No_whole_store_registry.reset ();
   Generic_scope.reset ();
   Ast.reset_precedence_errors ();
   let lexbuf = Lexing.from_string src in
@@ -63,6 +64,7 @@ let infer_files files =
   Const_env.reset ();
   Type_layout.reset ();
   Publish_registry.reset ();
+  No_whole_store_registry.reset ();
   Generic_scope.reset ();
   Ast.reset_precedence_errors ();
   let prog = List.concat_map (fun (filename, src) ->
@@ -12033,7 +12035,7 @@ let codegen_tests = [
         }");
 
   (* GitHub issue #372: the length evidence a slice cast needs is the
-     SOURCE PLACE's declared array type, and a struct field has one just as
+     SOURCE NO_WHOLE_STORE's declared array type, and a struct field has one just as
      a binding does. Motivated by issue #257's NetFrame: a pooled payload is
      only ever reached as `*T`, so a field is the only place its buffer can
      live, and without this the whole pool-of-buffers shape needs `unsafe`
@@ -13894,6 +13896,46 @@ let codegen_tests = [
             if (publish_copy(&slot, &out) == 0) { return 0; }
             return out.cpu;
           }") ());
+
+  Alcotest.test_case
+    "issue #557: a place struct cannot be assigned as a whole across files"
+    `Quick
+    (fun () ->
+       match infer_files [
+         "lock.tkb", "struct no_whole_store Mutex { private word: usize; }
+                      let mut lock_a: Mutex; let mut lock_b: Mutex;
+                      fn mutex_init(m: *Mutex) { m.word = 0; }";
+         "user.tkb", "fn overwrite() { lock_a = lock_b; }";
+       ] with
+       | _ -> Alcotest.fail "expected the whole lock store to be rejected"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "names the protected type" true
+             (contains_substring msg "struct no_whole_store 'Mutex' cannot be assigned as a whole"));
+
+  Alcotest.test_case
+    "issue #557: embedded places and indirect stores are protected"
+    `Quick
+    (fun () ->
+       let lock = "struct no_whole_store Mutex557 { private word: usize; }
+                   let mut first: Mutex557; let mut second: Mutex557; " in
+       expect_type_error "struct no_whole_store 'Mutex557'" (lock ^
+         "fn through_pointer(p: *Mutex557) { *p = second; }") ();
+       expect_type_error "struct no_whole_store 'Mutex557'" (lock ^
+         "let mut slots: [Mutex557; 2];
+          fn through_index() { slots[0] = second; }") ();
+       expect_type_error "struct no_whole_store 'Mutex557'" (lock ^
+         "struct Holder557 { lock: Mutex557; tag: usize; }
+          let mut a: Holder557; let mut b: Holder557;
+          fn through_holder() { a = b; }") ());
+
+  Alcotest.test_case
+    "issue #557: ordinary private handles remain copyable"
+    `Quick
+    (expect_codegen_ok
+       "struct ProcessHandle557 { private slot: usize; }
+        let mut a: ProcessHandle557;
+        let mut b: ProcessHandle557;
+        fn copy_handle() { a = b; }");
 
   Alcotest.test_case
     "issue #476: a commit requires every scalar payload field on every path"
