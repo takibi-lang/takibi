@@ -8335,9 +8335,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       match e.desc with
       | Ast.Call (name, args) ->
           let callees = List.fold_left expr callees args in
-          let target = Option.value
-            (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)
-            ~default:name in
+          let target = if StringMap.mem (loc_key e.loc)
+              !resolved_indirect_call_effects then "<indirect call>"
+            else Option.value
+              (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)
+              ~default:name in
           StringSet.add target callees
       | Ast.VariantCtor (_, _, x) | Ast.Bnot x | Ast.Deref x | Ast.AddrOf x
       | Ast.Cast (_, x) | Ast.FieldGet (x, _) | Ast.Unsafe x -> sub x
@@ -8372,6 +8374,22 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           (List.fold_left stmt StringSet.empty f.body) result
       | _ -> result) StringMap.empty prog
   in
+  let may_call_indirect =
+    let reach = ref StringSet.empty in
+    let changed = ref true in
+    while !changed do
+      changed := false;
+      StringMap.iter (fun caller callees ->
+        if not (StringSet.mem caller !reach)
+           && (StringSet.mem "<indirect call>" callees
+               || not (StringSet.is_empty (StringSet.inter callees !reach)))
+        then begin
+          reach := StringSet.add caller !reach;
+          changed := true
+        end) lock_callees
+    done;
+    !reach
+  in
   (* On equal ranks retain the caller's own annotation.  It names the API
      class (for example pool) more precisely than its raw Mutex callee. *)
   let lower_lock a b = if a.Effect_rules.rank < b.Effect_rules.rank then a else b in
@@ -8405,7 +8423,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        held;
      - irq_restorers: every function from which `msr_daifclr_irq` is
        reachable through resolved direct calls without crossing a discharged
-       function.
+       function. An indirect call is conservatively treated as a possible
+       restorer, including through its direct callers.
 
      The check itself is in check_affine_func, beside the lock-order one: a
      call to a restorer while a marked guard is live and not being handed to
@@ -8480,7 +8499,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      - witness_accessors: accessor -> (<Type>, index of the witness
        parameter);
      - invalidators: <Type> -> every function from which a seed is reachable
-       through resolved direct calls.
+       through resolved direct calls. An indirect call may invalidate every
+       marked kind, including through its direct callers.
 
      The check is in check_affine_func. With nothing marked, nothing is
      checked. *)
@@ -8781,18 +8801,24 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                 chain_text (call_chain target
                   (fun callee -> StringSet.mem callee seeds) (fun _ -> false))
             | _ -> "" in
+          let cause = if target = "<indirect call>"
+              || StringSet.mem target may_call_indirect
+            then "may reach an unknown indirect call"
+            else "reaches a function marked invalidates_" ^ kind in
           raise (TypeError (loc, Printf.sprintf
             "'%s' (%s) may name a destroyed object: '%s' at line %d%s \
-             reaches a function marked invalidates_%s, and no live witness \
-             vouches for this handle. Re-derive it after that call, or take \
-             it from a handle_of_witness accessor and keep the witness live \
-             across the call"
-            (path_to_string p) kind killer at.Lexing.pos_lnum via kind))
+             %s, and no live witness vouches for this handle. Re-derive it \
+             after that call, or take it from a handle_of_witness accessor \
+             and keep the witness live across the call"
+            (path_to_string p) kind killer at.Lexing.pos_lnum via cause))
       | _ -> ()
     in
     let invalidate_handles loc name target moved =
       let kinds = StringMap.fold (fun kind reach acc ->
-        if StringSet.mem target reach then kind :: acc else acc)
+        if StringSet.mem target reach
+           || StringSet.mem target may_call_indirect
+           || target = "<indirect call>"
+        then kind :: acc else acc)
         invalidators [] in
       if kinds = [] then moved
       else Hashtbl.fold (fun visible_name id moved ->
@@ -9271,6 +9297,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              call is being handed over -- released, usually -- rather than
              held across it. *)
           if target = "msr_daifclr_irq" || StringSet.mem target irq_restorers
+             || (StringSet.mem target may_call_indirect
+                 && not (StringSet.mem target irq_restore_discharged))
+             || StringMap.mem (loc_key e.loc) !resolved_indirect_call_effects
           then begin
             let passed = List.filter_map (fun (a : Ast.expr) -> match a.desc with
               | Ast.Var v -> Some v | _ -> None) args in
@@ -9288,17 +9317,20 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               | Some guard_name
                 when not (List.mem visible_name passed)
                      && not (ResourceFlow.is_consumed_on_all_paths path moved) ->
+                  let cause = if StringSet.mem target may_call_indirect
+                      || StringMap.mem (loc_key e.loc) !resolved_indirect_call_effects
+                    then " may reach an unknown indirect call"
+                    else " reaches msr_daifclr_irq" ^
+                      chain_text (call_chain target
+                        (fun callee -> callee = "msr_daifclr_irq")
+                        (fun callee ->
+                           StringSet.mem callee irq_restore_discharged)) in
                   raise (TypeError (e.loc, Printf.sprintf
                     "cannot restore IRQs while '%s' (%s) is live: its acquire \
                      masked IRQs and it still owns the interrupt state it \
-                     saved, and '%s' reaches msr_daifclr_irq%s. Release the \
-                     guard first, or restore through a function marked \
-                     restores_saved_irq"
-                    visible_name guard_name name
-                    (chain_text (call_chain target
-                       (fun callee -> callee = "msr_daifclr_irq")
-                       (fun callee ->
-                          StringSet.mem callee irq_restore_discharged)))))
+                     saved, and '%s'%s. Release the guard first, or restore \
+                     through a function marked restores_saved_irq"
+                    visible_name guard_name name cause))
               | _ -> ()) visible_bindings
           end;
           let params = Option.value (StringMap.find_opt target call_params) ~default:[] in
@@ -9335,8 +9367,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             let moved = check_expr taints moved consume_arg arg in
             check_args moved rest (match params with _ :: ps -> ps | [] -> [])
           in
-          let moved =
-            invalidate_handles e.loc name target (check_args moved args params) in
+          let invalidation_target =
+            if StringMap.mem (loc_key e.loc) !resolved_indirect_call_effects
+            then "<indirect call>" else target in
+          let moved = invalidate_handles e.loc name invalidation_target
+            (check_args moved args params) in
           let returns_obligation = match StringMap.find_opt target call_returns with
             | Some ty -> is_linear_type ty || is_must_use_type ty
             | None -> false

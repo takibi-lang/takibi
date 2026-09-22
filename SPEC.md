@@ -1580,7 +1580,9 @@ function that restores exactly a state its caller saved -- the kernel's
 trusts that claim. While a marked guard is live, calling a function from
 which `msr_daifclr_irq` is reachable through resolved direct calls, without
 passing through a `restores_saved_irq` function, is a compile error naming
-the guard. So is calling `msr_daifclr_irq` directly. A guard passed to the
+the guard. So is calling `msr_daifclr_irq` directly or calling through a
+function pointer whose target may be unknown. This also applies when a direct
+callee contains an indirect call. A guard passed to the
 call is being released rather than held across it, and is not counted. With
 no guard marked, nothing is checked: a local save and conditional restore
 with no outer guard is unaffected. Both words are checker-only.
@@ -1589,7 +1591,9 @@ Effect-indexed invalidation (GitHub issue #493) covers plain handles: the
 copyable structs that name a pooled object by slot and generation.
 - A function after which a handle of struct type `T` may name a destroyed
   object declares `invalidates_T`. The checker extends that to every function
-  from which it is reachable through resolved direct calls.
+  from which it is reachable through resolved direct calls. An indirect call
+  may invalidate every marked handle kind, including when a direct callee
+  contains the indirect call.
 - After a call to any of them, every local binding of type `T` is dead.
   Reading one is a compile error naming the call.
 - A use on any path that may follow the call counts, including the next

@@ -13264,6 +13264,48 @@ let codegen_tests = [
          "fn issue528_not_guard() -> usize !{irq_masking_guard} { return 0; }" ());
 
   Alcotest.test_case
+    "issue #558: indirect calls cannot bypass IRQ and handle checks"
+    `Quick
+    (fun () ->
+       let irq =
+         "linear view Guard558[id: usize];
+          fn enable558() { msr_daifclr_irq(); }
+          fn take558() -> Guard558[1] !{irq_masking_guard} {
+            return view Guard558[1];
+          }
+          fn put558(g: sink Guard558[id]) !{restores_saved_irq} {}
+          fn invoke558(f: fn() -> void) { f(); }
+          " in
+       expect_type_error "cannot restore IRQs while" (irq ^
+         "fn bad558(f: fn() -> void) {
+            let g = take558();
+            f();
+            put558(g);
+          }") ();
+       expect_type_error "cannot restore IRQs while" (irq ^
+         "fn transitive558(f: fn() -> void) {
+            let g = take558();
+            invoke558(f);
+            put558(g);
+          }") ();
+       let handles =
+         "struct Handle558 { slot: usize; }
+          fn reap558() !{invalidates_Handle558} {}
+          fn use558(h: Handle558) -> usize { return h.slot; }
+          fn call558(f: fn() -> void) { f(); }
+          " in
+       expect_type_error "may name a destroyed object" (handles ^
+         "fn stale558(h: Handle558, f: fn() -> void) -> usize {
+            f();
+            return use558(h);
+          }") ();
+       expect_type_error "may name a destroyed object" (handles ^
+         "fn transitive_stale558(h: Handle558, f: fn() -> void) -> usize {
+            call558(f);
+            return use558(h);
+          }") ());
+
+  Alcotest.test_case
     "issue #466: live lock guards enforce transitive rank order"
     `Quick
     (fun () ->
