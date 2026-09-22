@@ -626,6 +626,25 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
     kernel_boot_log("process reap: unlinked=");
     uart_put_udec(kernel_process_reap_unlinked_count_value());
     kernel_boot_log("\n");
+    // GitHub issue #579: which cores carried an EL0 process this boot, under
+    // the `smp bringup:` prefix its per-platform view already captures. That
+    // view says which cores STARTED; a core that starts and runs nothing
+    // reads identically there, which is exactly the state cores 2 and 3 were
+    // in. Printed here because this point is reached after the interactive
+    // shell has exited, so a fixture that pinned itself to a core during the
+    // session is already counted.
+    kernel_boot_log("smp bringup: an EL0 process ran on cpus=");
+    let mut ran: usize = kernel_process_cpus_that_ran_value();
+    let mut listed: bool = false;
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if ((ran & (1 << cpu)) != 0) {
+            if (listed) { kernel_boot_log(","); }
+            uart_put_udec(cpu);
+            listed = true;
+        }
+    }
+    if (listed == false) { kernel_boot_log("none"); }
+    kernel_boot_log("\n");
     if (page_allocator_live_count() == page_baseline) {
         kernel_boot_log("resources: pages=0\n");
         // GitHub issue #376: reported beside the other

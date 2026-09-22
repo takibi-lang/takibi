@@ -636,6 +636,21 @@ fn scheduled_process_pid_counter_restore(value: usize) {
 // teardown or something that happens while the system runs.
 private let mut kernel_process_reap_unlinked_count: usize = 0;
 
+// GitHub issue #579: which CPUs have ever carried an EL0 process, as a bit
+// per core. `smp bringup:` already says which cores STARTED, and a core that
+// starts, takes SGIs, stops in DDB and runs nothing reads exactly the same
+// in that view as one carrying half the machine's work. This is the other
+// half of that sentence, and it is what makes "cores 2 and 3 are idle" a
+// line a lane compares rather than something a reader has to know.
+//
+// Written under the process-run lock at the one place a CPU takes a process
+// for itself, and read once at the end of the boot suite.
+private let mut kernel_process_cpus_that_ran: usize = 0;
+
+fn kernel_process_cpus_that_ran_value() -> usize {
+    return kernel_process_cpus_that_ran;
+}
+
 fn kernel_process_reap_unlinked_count_value() -> usize { 
     return kernel_process_reap_unlinked_count;
 }
@@ -2540,6 +2555,12 @@ fn scheduled_process_start(
         state: sink ScheduledProcessState[process, ProcessState::Ready])
         -> ScheduledProcessState[process, ProcessState::Running] {
     scheduled_process_state_drop(state);
+    // GitHub issue #579: this is the one place a CPU takes a Ready process
+    // for itself -- every scheduling path reaches Running through here, and
+    // every caller holds the process-run lock -- so it is where "this core
+    // has run something" is recorded.
+    kernel_process_cpus_that_ran =
+        kernel_process_cpus_that_ran | (1 << cpu_id());
     scheduled_process_record_at(owner.pool_index).state =
         ProcessSlotState::Running;
     let mut running:
@@ -3846,19 +3867,6 @@ fn kernel_process_online_mask() -> usize {
     return mask;
 }
 
-// Core 0 and the one secondary the scheduler runs processes on. RPi5's
-// cores 2 and 3 stay idle until a later step admits them.
-fn kernel_process_schedulable_mask() -> usize {
-    let online: usize = kernel_online_core_count();
-    let mut mask: usize = 0;
-    for cpu: usize in 0..<KERNEL_MAX_CORES {
-        if (cpu < online && (cpu == 0 || cpu == SECONDARY_CORE_ID)) {
-            mask = mask | (1 << cpu);
-        }
-    }
-    return mask;
-}
-
 // One placement answer for a real process. A syscall the gate sent to core
 // 0 pins the process there until the call completes.
 fn kernel_process_cpu_allows_slot(cpu: usize, slot: usize) -> bool {
@@ -3870,7 +3878,14 @@ fn kernel_process_cpu_allows_slot(cpu: usize, slot: usize) -> bool {
         return kernel_process_cpu_admits(
             cpu, scheduled_process_pid_of_slot(slot));
     }
-    return (mask & kernel_process_schedulable_mask() & (1 << bit)) != 0;
+    // GitHub issue #579: every core that came up, not core 0 and one
+    // secondary. `kernel_process_schedulable_mask` used to name
+    // `SECONDARY_CORE_ID` here and was the only thing keeping cores 2 and 3
+    // from carrying a process -- `kernel_process_secondary_start` already
+    // asks this question with its own `cpu_id()`, and the idle loop every
+    // started core sits in already calls it. The set is the online set now,
+    // so the second name is gone rather than left as a synonym.
+    return (mask & kernel_process_online_mask() & (1 << bit)) != 0;
 }
 
 // Whether the current process is on this CPU because the per-pid rule put
@@ -3883,10 +3898,29 @@ fn kernel_process_current_admitted_by_rule() -> bool {
             execution_here().current_handle));
 }
 
-// The migration gate chose core 0 for the current syscall, whose frame has
+// Whether this CPU may still run the process it is running. False means the
+// process's own affinity mask has stopped naming this CPU, which is what
+// `sched_setaffinity` does to a process that re-pins itself.
+fn kernel_process_current_cpu_allows() -> bool {
+    if (execution_here().current_live == false) { return true; }
+    return kernel_process_cpu_allows_slot(
+        cpu_id(), execution_here().current_handle.pool_index);
+}
+
+// The gate handed this peer's current syscall away, and its frame has
 // already been rewound. Publish this peer as having no current EL0 context,
 // as an exit to idle does; the process stays Running, and so unselectable,
 // until kernel_process_stack_idle_yield has moved this CPU off its stack.
+//
+// GitHub issue #579: WHERE it goes depends on why it was handed away, and
+// asking that here is what lets one action serve both reasons.
+//
+// If this CPU may still run the process, the reason is the syscall -- it is
+// outside the peer-safety table and core 0 is the only place it may run --
+// so the process is pinned there for the duration of the call. If this CPU
+// may NOT run it, the reason is the process's own affinity mask, which
+// already names where it may go; pinning it to core 0 would override the
+// mask the process just set and send it to a CPU it excluded.
 fn kernel_process_migrate_current(frame_sp: usize) -> bool {
     if (cpu_id() == 0) { return false; }
     let guard = process_run_lock();
@@ -3895,8 +3929,12 @@ fn kernel_process_migrate_current(frame_sp: usize) -> bool {
         return false;
     }
     let slot: usize = execution_here().current_handle.pool_index;
+    let syscall_needs_core0: bool =
+        kernel_process_cpu_allows_slot(cpu_id(), slot);
     scheduled_process_record_at(slot).saved_sp = frame_sp;
-    scheduled_process_set_core0_for_call(slot, true);
+    if (syscall_needs_core0) {
+        scheduled_process_set_core0_for_call(slot, true);
+    }
     execution_here().current_live = false;
     execution_here().scheduler_enabled = false;
     execution_here().reschedule_pending = false;
@@ -3964,7 +4002,10 @@ fn kernel_process_affinity_set(pid: usize, requested: usize)
         }
         ProcessSlotForPidResult::Found(found) => { found }
     };
-    if ((mask & kernel_process_schedulable_mask()) == 0) {
+    // `mask` is already the requested set intersected with the online one,
+    // and a request naming no online CPU was refused above, so this can only
+    // fail if the two sets ever stop agreeing again.
+    if ((mask & kernel_process_online_mask()) == 0) {
         process_run_unlock(guard);
         return ProcessAffinityResult::Invalid;
     }

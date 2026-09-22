@@ -1,3 +1,4 @@
 smp bringup: core1 psci+el1+takibi+own-timer ok
 smp bringup: core2 not present
 smp bringup: core3 not present
+smp bringup: an EL0 process ran on cpus=0,1

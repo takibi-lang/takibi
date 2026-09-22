@@ -2774,6 +2774,27 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // there runs only what syscall_peer_safe allows; any other syscall is
     // rerun on core 0. A fixture the per-pid rule admits keeps its own
     // audit instead.
+    // GitHub issue #579: this CPU may no longer run this process AT ALL --
+    // its affinity mask has stopped naming this CPU, which is what happens
+    // the moment a process re-pins itself with sched_setaffinity. Hand it
+    // back before asking anything else about the syscall.
+    //
+    // Nothing else could do this. `kernel_process_affinity_set` asks for a
+    // reschedule, and `kernel_process_schedule` returns the current frame
+    // unchanged when no OTHER process is Ready on this CPU -- so a peer with
+    // nothing else to run kept a process its mask had already excluded. That
+    // was invisible while the only transition anybody exercised was core 0
+    // to CPU 1, where the fixture keeps a spinner Ready on core 0 for
+    // exactly this reason, and it is what stopped a process reaching cores 2
+    // and 3.
+    //
+    // A peer that hands a process back has somewhere to go: the architectural
+    // idle loop it booted into. Core 0 has no such loop, which is why this is
+    // a peer-only question and why a process leaving core 0 still needs a
+    // successor there.
+    if (cpu_id() != 0 && kernel_process_current_cpu_allows() == false) {
+        return SyscallAction::Migrate;
+    }
     if (cpu_id() != 0 && kernel_process_current_admitted_by_rule() == false &&
         syscall_peer_safe(number, x0) == false) {
         return SyscallAction::Migrate;

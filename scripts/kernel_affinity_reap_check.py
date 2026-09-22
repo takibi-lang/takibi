@@ -79,6 +79,14 @@ FIRST_WALK = "kernel_process_child_waitable_pid"
 # The secondary publishing that it no longer stands on the exiting child's
 # kernel stack: the exit is complete by the time this is reached.
 PEER_IDLE = "kernel_process_stack_idle_complete"
+# Where CPU1 is parked before it is frozen, and it has to be a place holding
+# NO lock. Freezing a core wherever it happens to be freezes whatever it is
+# holding, and this check then deadlocks the core it wants to watch: CPU0
+# takes the process-run lock inside wait4 and spins on a core gdb has
+# stopped. Seen as `Thread 1 received signal SIGINT ... in spin_lock` with a
+# verdict blaming the fixture. This is the idle loop's entry to the
+# scheduler, reached once per idle wakeup and before it takes anything.
+PEER_PARK = "kernel_process_secondary_start"
 # Step 3/8 of the syscall return, whose second argument is the value the
 # dispatcher decided on.
 RESUME = "kernel_syscall_resume_return"
@@ -226,9 +234,27 @@ def run() -> None:
         gdb.execute("detach")
         return
 
-    # CPU0 is selected, so this freezes CPU1 with the child still alive.
-    gdb.execute("set scheduler-locking on")
     kill.delete()
+    # Park CPU1 somewhere it holds no lock BEFORE freezing it, by freezing
+    # CPU0 first and letting only CPU1 run. CPU0 is stopped at the entry of
+    # kernel_process_signal_send and holds nothing itself, so nothing of
+    # CPU1's can be waiting on it.
+    gdb.execute(f"thread {CPU1_THREAD}", to_string=True)
+    gdb.execute("set scheduler-locking on")
+    park = gdb.Breakpoint(PEER_PARK)
+    park.condition = f"$_thread == {CPU1_THREAD}"
+    parked = run_bounded("continue", PEER_BUDGET) and park.hit_count > 0
+    park.delete()
+    if not parked:
+        gdb.execute("set scheduler-locking off")
+        verdict(False, "CPU1 never reached the scheduler entry it is parked "
+                f"at, so it could not be frozen without whatever lock it "
+                f"holds. UART tail: {uart_tail()!r}")
+        gdb.execute("detach")
+        return
+    # CPU1 is now stopped holding nothing; selecting CPU0 freezes it there.
+    gdb.execute(f"thread {CPU0_THREAD}", to_string=True)
+    gdb.execute("set scheduler-locking on")
     walk = gdb.Breakpoint(FIRST_WALK)
     walk.condition = f"$_thread == {CPU0_THREAD}"
 

@@ -136,6 +136,25 @@ fn affinity_probe() {
         (mask[0] & 1) == 0) {
         affinity_fail(bs"affinity: the default mask did not cover cpu 0\n");
     }
+    // GitHub issue #579: the online set, read once before anything narrows
+    // it. A process that has set no mask reads back every online CPU, and
+    // that is the only thing in this fixture that differs between
+    // two-vCPU QEMU and the four-core board. Every assertion below is
+    // written against this value rather than against a literal, so the one
+    // ash transcript both platforms compare says the same true thing on
+    // each -- which is what the header of this file promises and what
+    // naming cpu 2 as "offline" stopped being able to keep.
+    let online: usize = mask[0] as usize;
+    let mut offline_cpu: usize = 8;
+    for cpu: usize in 0..<8 {
+        if (offline_cpu == 8 && (online & (1 << cpu)) == 0) {
+            offline_cpu = cpu;
+        }
+    }
+    if (offline_cpu == 8) {
+        affinity_fail(
+            bs"affinity: all eight cpus of the low byte are online, so this fixture has no offline cpu to refuse\n");
+    }
 
     affinity_mask_fill(mask as []u8, 1, 0);
     if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask_address, 0, 0) != 0) {
@@ -155,10 +174,14 @@ fn affinity_probe() {
     if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask_address, 0, 0) != LINUX_EINVAL) {
         affinity_fail(bs"affinity: a mask naming no online cpu was accepted\n");
     }
-    // CPU 2 is offline on QEMU and not yet one the scheduler uses on RPi5.
-    affinity_mask_fill(mask as []u8, 4, 0);
+    // The lowest cpu this kernel did NOT bring up. Two vCPUs make that cpu 2
+    // and four cores make it cpu 4, so the literal 4 that used to be here
+    // said "offline" on one platform and "online and now schedulable" on the
+    // other once #579 widened the set.
+    affinity_mask_fill(mask as []u8, (1 << offline_cpu) as u8, 0);
     if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask_address, 0, 0) != LINUX_EINVAL) {
-        affinity_fail(bs"affinity: a mask naming only cpu 2 was accepted\n");
+        affinity_fail(
+            bs"affinity: a mask naming only an offline cpu was accepted\n");
     }
     affinity_mask_fill(mask as []u8, 1, 0);
     if (svc5(SETAFFINITY_SYSCALL, 0, 4, mask_address, 0, 0) != LINUX_EINVAL) {
@@ -191,7 +214,7 @@ fn affinity_probe() {
         status[0] != 0 || status[1] != 0) {
         affinity_fail(bs"affinity: the child did not inherit cpu 0 alone\n");
     }
-    affinity_say(bs"affinity: default covers cpu 0; cpu 0 alone reads back and is inherited; empty, offline-only and cpu-2-only masks, short and odd sizes refused; absent pid ESRCH\n");
+    affinity_say(bs"affinity: default covers cpu 0; cpu 0 alone reads back and is inherited; empty and offline-only masks, short and odd sizes refused; absent pid ESRCH\n");
 
     // Pin to CPU 1, with the spinner keeping core 0 busy behind.
     let spinner: usize = svc5(CLONE_SYSCALL, CLONE_FORK_SIGCHLD, 0, 0, 0, 0);
@@ -246,6 +269,47 @@ fn affinity_probe() {
     // running, which is the reason it exists -- so it has to outlive the
     // output, not just the migration.
     affinity_say(bs"affinity: pinned to cpu 1, where newfstatat, outside the peer-safe table, still answered\n");
+    // GitHub issue #579: every OTHER online cpu, while the same spinner is
+    // still keeping core 0 occupied. Cpu 1 is proved above; this walks the
+    // rest of the reported online set, which is empty on two-vCPU QEMU and
+    // is cpus 2 and 3 on the four-core board.
+    //
+    // Nothing is printed from inside this loop. A line written here would be
+    // published into THAT cpu's console ring, and the only thing that empties
+    // a peer ring is core 0's drain at the top of a syscall -- the reason the
+    // line above had to be written before the spinner was reaped. The verdict
+    // is carried back to core 0 in a variable and said there.
+    //
+    // Leaving a peer needs no successor the way leaving core 0 does: a
+    // secondary has an architectural idle loop to fall back to, which is
+    // why one spinner covers the whole walk.
+    // Cpu 0 and cpu 1 are already proved when this starts: cpu 0 by the
+    // return poll below that this fixture has always done, cpu 1 by the
+    // block above. The loop adds the rest, and the count is compared against
+    // the online set rather than against a floor -- a floor of two passes on
+    // QEMU whatever happens to cpus 2 and 3, which is the assertion this
+    // needs NOT to make.
+    let mut walked: usize = 2;
+    for cpu: usize in 2..<8 {
+        if ((online & (1 << cpu)) != 0) {
+            affinity_mask_fill(mask as []u8, (1 << cpu) as u8, 0);
+            if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask_address, 0, 0) != 0) {
+                affinity_fail(
+                    bs"affinity: an online cpu was refused its own mask\n");
+            }
+            let mut arrived: bool = false;
+            let mut attempts: usize = 0;
+            while (arrived == false && attempts < AFFINITY_PIN_ATTEMPTS) {
+                attempts = attempts + 1;
+                if (affinity_cpu(cpu_bytes as []u8) == cpu) { arrived = true; }
+            }
+            if (arrived == false) {
+                affinity_fail(
+                    bs"affinity: an online cpu never ran this process\n");
+            }
+            walked = walked + 1;
+        }
+    }
     // Ask it to stop, then reap it. The ask is best-effort on purpose: the
     // child ends on its own nap count, so a SIGTERM that does not reach a
     // sleeping process costs this fixture nothing but the wait. wait4 blocks
@@ -294,6 +358,21 @@ fn affinity_probe() {
             bs"affinity: the napping spinner exited for a third reason\n");
     }
     affinity_say(bs"affinity: the napping spinner took the SIGTERM\n");
+    // GitHub issue #579, said from core 0 for the console-ring reason above.
+    // Deliberately free of a count: the number differs per platform and this
+    // transcript is compared against both. What the number was is in the
+    // kernel's own `smp bringup: an EL0 process ran on cpus=` line, which
+    // each platform's view compares separately.
+    let mut online_count: usize = 0;
+    for cpu: usize in 0..<8 {
+        if ((online & (1 << cpu)) != 0) { online_count = online_count + 1; }
+    }
+    if (walked != online_count) {
+        affinity_fail(
+            bs"affinity: some cpu the kernel reports online never ran this process\n");
+    }
+    affinity_say(
+        bs"affinity: every cpu the kernel reports online ran this process, each confirmed by getcpu\n");
 
     // GitHub issue #563's remaining branch: the SENDER on core 0 and the
     // TARGET napping on a peer. The pair above shares a core, so the bit is
