@@ -1566,6 +1566,27 @@ let parser_tests = [
     | _ -> Alcotest.fail "unexpected structure"
   );
 
+  Alcotest.test_case "shifts bind tighter than addition" `Quick (fun () ->
+    match parse "fn f(a: i32, b: i32, c: i32) -> i32 { return a + b << c; }" with
+    | [Ast.FuncDef { body = [{ desc = Ast.Return (Some
+          { desc = Ast.BinOp (Ast.Add, { desc = Ast.Var "a"; _ },
+              { desc = Ast.BinOp (Ast.Shl,
+                  { desc = Ast.Var "b"; _ },
+                  { desc = Ast.Var "c"; _ }); _ }); _ }); _ }]; _ }] -> ()
+    | _ -> Alcotest.fail "expected a + (b << c)"
+  );
+
+  Alcotest.test_case "same-rank arithmetic groups left" `Quick (fun () ->
+    match parse "fn f(a: i32, b: i32, c: i32) -> i32 { return a - b + c; }" with
+    | [Ast.FuncDef { body = [{ desc = Ast.Return (Some
+          { desc = Ast.BinOp (Ast.Add,
+              { desc = Ast.BinOp (Ast.Sub,
+                  { desc = Ast.Var "a"; _ },
+                  { desc = Ast.Var "b"; _ }); _ },
+              { desc = Ast.Var "c"; _ }); _ }); _ }]; _ }] -> ()
+    | _ -> Alcotest.fail "expected (a - b) + c"
+  );
+
   (* -- Bitwise operations ------------------------------------------------ *)
 
   Alcotest.test_case "bitwise AND expression" `Quick (fun () ->

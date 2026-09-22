@@ -491,8 +491,10 @@ parameter value, or top-level declaration name.
 
 ### Operator Precedence
 
-Low to high: `||` < `|` < `^` < comparison < `&` < `as` < `+`/`-` < `>>`
-`<<` < `*` `/` `%` < unary (`~` `-` `*` `&`).
+Low to high: `||` < `&&` < `|` < `^` < comparison < `&` < `as` <
+`+`/`-` < `>>`/`<<` < `*`/`/`/`%` < unary (`~` `-` `*` `&`) <
+postfix field access and indexing. Assignment (`=`, `+=`, `-=`, `|=`,
+`&=`, `^=`, `<<=`, `>>=`) binds below `||`.
 
 Notably different from C: `&` (bitwise AND) binds **tighter** than
 comparison, so `n & mask == 0` means `(n & mask) == 0` (this avoids a
