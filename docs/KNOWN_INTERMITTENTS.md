@@ -30,6 +30,7 @@ whether a row has gone quiet or has merely stopped being looked for.
 
 | Symptom | Rate | Issue | Last seen |
 | --- | --- | --- | --- |
+| `ran without the migration gate firing ` | 2 in 8 `kernelcheck-affinity-gdb-qemu` runs, measured 2026-09-22 | #585 | 2026-09-22 |
 
 ## Reading a row
 
@@ -82,12 +83,18 @@ signal intermittently answered something other than the child's pid, which was
 the peer-exit collection path rather than anything about signals. Its row was
 removed on 2026-09-21 and the retry loop it stood on is gone.
 
-**The table is empty, and that is a state worth naming.** It does not mean no
-lane is ever red; it means every red lane is now a question rather than a
-lookup, which is what the file is for. #571 is also why the table can be
-trusted to empty rather than to be forgotten: the last thing it recorded was
-closed by making its interleaving happen on purpose --
+**The table was empty for a day**, between #571 closing on 2026-09-21 and
+#585 being filed on 2026-09-22, and the way it filled again is the part
+worth keeping. #571 was closed by making its interleaving happen on purpose:
 `kernelcheck-affinity-gdb-qemu`'s reap mode stops core 0 between wait4's two
-walks of its child list and lets only the peer run -- so the defect fails a
+walks of its child list and lets only the peer run, so the defect fails a
 lane on every run instead of three runs in forty. A rate got it filed; only a
 deterministic lane keeps it closed.
+
+**#585 is the GATE mode of that same lane, and it is a regression from #579
+rather than an old flake.** #579 gave `kernel_syscall_migrate_return` a
+second reason to be reached -- "this CPU may no longer run this process"
+beside "this syscall must run on core 0" -- and the gate check watches that
+address. The rate was measured by re-running the lane four times on the
+unmodified HEAD after a `make cicheck` failure, which is what separated it
+from the working tree it first appeared in.
