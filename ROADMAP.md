@@ -1080,9 +1080,8 @@ testable change, not permission to implement its entire research horizon:
    `0` in the old fallback shape is a compile error.
 
 Next, in descending priority, are independent research/prototype choices,
-not a mandate to implement all of them: **#297** (runtime-cardinality
-retain/release obligations).
-After those, **#58** (a measured, conservative kernel-stack-depth proof),
+not a mandate to implement all of them: **#58** (a measured, conservative
+kernel-stack-depth proof),
 **#203** (definite initialization at user-copy boundaries), then **#342** and
 **#343** (null and dangling-pointer safety) remain deferred. Prototype against
 the smallest faithful consumer: #58 needs linked-kernel frame evidence, while
@@ -1099,6 +1098,14 @@ zero-cost nominal scalar domains over a primitive representation. Explicit
 casts mark domain boundaries; distinct domains cannot be assigned, compared,
 or used in arithmetic together. Refinement remains on the primitive side of
 the conversion, so no general units-of-measure or new syntax was added.
+
+**#297 is complete (2026-09-22).** `unified_fd_clone` carries one linear
+transaction whose runtime prefix names every descriptor installed so far.
+Each install consumes and replaces it; failure must roll it back and success
+must commit it. This proves the motivating cleanup obligation without storing
+linear values in the runtime-length descriptor chain or adding compiler
+syntax. The transaction implementation is the small trusted boundary that
+keeps its prefix synchronized with installation.
 
 **#557 is complete (2026-09-22).** `struct no_copy` rejects whole-value
 stores and copies through initializers, arguments, returns, and aggregates.

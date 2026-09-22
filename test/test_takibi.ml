@@ -4224,6 +4224,78 @@ let infer_tests = [
                     release(g);
                 }");
 
+  (* GitHub issue #297: dynamic cardinality does not require an array of
+     linear values when rollback operates on a runtime prefix. One linear
+     transaction is consumed and replaced on every iteration. *)
+  Alcotest.test_case
+    "linear transaction carries a runtime acquisition prefix through a loop"
+    `Quick
+    (expect_codegen_ok
+       "linear struct CloneTxn297[child: usize] {
+          child_value: usize @ child;
+          limit: usize;
+        }
+        fn begin297(child_value: usize @ child) -> CloneTxn297[child] {
+          let mut transaction: CloneTxn297[child] = { child_value, 0 };
+          return transaction;
+        }
+        fn step297(transaction: sink CloneTxn297[child], fd: usize,
+                   ok: bool) -> (bool, CloneTxn297[child]) {
+          let child_value: usize @ child = transaction.child_value;
+          if (ok) {
+            let mut next: CloneTxn297[child] = { child_value, fd + 1 };
+            return (true, next);
+          }
+          return (false, transaction);
+        }
+        fn rollback297(transaction: sink CloneTxn297[child]) {}
+        fn commit297(transaction: sink CloneTxn297[child]) {}
+        fn clone297(child_value: usize, count: usize, fail: usize) -> bool {
+          let mut transaction = begin297(child_value);
+          let mut fd: usize = 0;
+          while (fd < count) {
+            let (ok, next) = step297(transaction, fd, fd != fail);
+            transaction = next;
+            if (ok == false) { rollback297(transaction); return false; }
+            fd = fd + 1;
+          }
+          commit297(transaction);
+          return true;
+        }");
+
+  Alcotest.test_case
+    "linear transaction rejects a failure return without rollback" `Quick
+    (expect_type_error "linear value 'transaction' is still pending at this return"
+       "linear struct CloneTxn297b[child: usize] {
+          child_value: usize @ child;
+          limit: usize;
+        }
+        fn begin297b(child_value: usize @ child) -> CloneTxn297b[child] {
+          let mut transaction: CloneTxn297b[child] = { child_value, 0 };
+          return transaction;
+        }
+        fn bad297b(child_value: usize, failed: bool) -> bool {
+          let transaction = begin297b(child_value);
+          if (failed) { return false; }
+          return transaction.limit == 0;
+        }");
+
+  Alcotest.test_case
+    "linear transaction rejects success without commit" `Quick
+    (expect_type_error "linear value 'transaction' is still pending at this return"
+       "linear struct CloneTxn297c[child: usize] {
+          child_value: usize @ child;
+          limit: usize;
+        }
+        fn begin297c(child_value: usize @ child) -> CloneTxn297c[child] {
+          let mut transaction: CloneTxn297c[child] = { child_value, 0 };
+          return transaction;
+        }
+        fn bad297c(child_value: usize) -> bool {
+          let transaction = begin297c(child_value);
+          return true;
+        }");
+
   (* GitHub issue #89 comment thread's "return-terminated branch" gap:
      an `if` branch that always `return`s never reaches the code after
      the `if`, so whatever it consumed must not be unioned into what

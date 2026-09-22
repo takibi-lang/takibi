@@ -807,6 +807,16 @@ allowing deliberate abandonment.
   `while`) is also fine: reassignment clears the variable's consumed
   status, so the loop-restriction check never sees it as "consumed
   inside the loop" in the first place.
+- **Runtime-cardinality transactions**: a loop that acquires an unknown
+  number of homogeneous resources can keep one linear transaction value
+  whose ordinary runtime fields describe the acquired prefix. A step consumes
+  that value and returns `(status, replacement_transaction)`; tuple
+  destructuring followed by reassignment carries the one obligation through
+  the next iteration. Every failure path must consume it with rollback, and
+  the successful exit must consume it with commit. This proves that cleanup
+  cannot be omitted without placing one linear value in an array or field.
+  The transaction implementation remains responsible for making its runtime
+  prefix agree with the resources it acquired.
 - **`if`/`else` and `match`**: moving an affine handle in only one branch
   is allowed because the other branch may weaken it. After the branch, the
   value is conservatively treated as "possibly consumed", so a later use is

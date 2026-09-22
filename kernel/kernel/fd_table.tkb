@@ -917,6 +917,16 @@ must_use variant UnifiedOpenResult { Invalid; Full; Ok; }
 // argument nor a reference-count invariant break. The handlers map it to
 // LINUX_ENOMEM, which is what Linux's own expand_files() returns.
 must_use variant UnifiedFdInstallResult { Invalid; RefOverflow; NoMemory; Ok; }
+
+// GitHub issue #297: one linear obligation represents the runtime-length
+// prefix installed while cloning a descriptor table. The successful prefix
+// belongs to `child`; every exit after begin must either roll that prefix back
+// or commit it. Individual reference tokens therefore never need storage in
+// the dynamically grown FdBlock chain.
+private linear struct UnifiedFdCloneTxn[child: usize] {
+    private child_value: usize @ child;
+    private limit: usize;
+}
 // GitHub issue #391: `slot` is the pool ADDRESS of the object now, not an
 // index into an array, so there is no range for a refinement to state --
 // the same trade issue #257 made for TcpConnection, and for the same
@@ -1943,7 +1953,8 @@ fn unified_fd_close(process: usize, fd: usize) -> UnifiedFdResult !{unsafe} {
 // rather than always there. unified_fd_close is the release and the reset
 // in one, and it is the same function the successful path would have used
 // later, so there is no second copy of that logic to get wrong.
-fn unified_fd_clone_rollback(child: usize, limit: usize) !{unsafe} {
+private fn unified_fd_clone_rollback_prefix(child: usize, limit: usize)
+        !{unsafe} {
     let mut from: usize = 0;
     let mut scanning: bool = true;
     while (scanning) {
@@ -1963,6 +1974,57 @@ fn unified_fd_clone_rollback(child: usize, limit: usize) !{unsafe} {
         }
     }
 }
+
+private fn unified_fd_clone_begin(child_value: usize @ child)
+        -> UnifiedFdCloneTxn[child] {
+    let mut transaction: UnifiedFdCloneTxn[child] = { child_value, 0 };
+    return transaction;
+}
+
+// The install result and the replacement transaction leave together. On
+// success the prefix includes fd; on failure it remains the prefix that was
+// already installed. A caller cannot inspect the result and lose the cleanup
+// obligation because the tuple also carries the replacement linear value.
+private fn unified_fd_clone_install(
+        transaction: sink UnifiedFdCloneTxn[child], fd: usize,
+        object_value: usize, generation: usize)
+        -> (UnifiedFdInstallResult, UnifiedFdCloneTxn[child]) !{unsafe} {
+    let child_value: usize @ child = transaction.child_value;
+    let previous_limit: usize = transaction.limit;
+    match unified_fd_install(child_value, fd, object_value, generation) {
+        UnifiedFdInstallResult::Ok => {
+            let mut next: UnifiedFdCloneTxn[child] = { child_value, fd + 1 };
+            return (UnifiedFdInstallResult::Ok, next);
+        }
+        UnifiedFdInstallResult::Invalid => {
+            let mut next: UnifiedFdCloneTxn[child] = {
+                child_value, previous_limit
+            };
+            return (UnifiedFdInstallResult::Invalid, next);
+        }
+        UnifiedFdInstallResult::RefOverflow => {
+            let mut next: UnifiedFdCloneTxn[child] = {
+                child_value, previous_limit
+            };
+            return (UnifiedFdInstallResult::RefOverflow, next);
+        }
+        UnifiedFdInstallResult::NoMemory => {
+            let mut next: UnifiedFdCloneTxn[child] = {
+                child_value, previous_limit
+            };
+            return (UnifiedFdInstallResult::NoMemory, next);
+        }
+    }
+}
+
+private fn unified_fd_clone_rollback(
+        transaction: sink UnifiedFdCloneTxn[child]) !{unsafe} {
+    unified_fd_clone_rollback_prefix(transaction.child_value,
+                                     transaction.limit);
+}
+
+private fn unified_fd_clone_commit(
+        transaction: sink UnifiedFdCloneTxn[child]) {}
 
 fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult !{unsafe} {
     if (parent == child) { return UnifiedFdResult::Invalid; }
@@ -2025,6 +2087,7 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult !{unsafe} {
     // routing through it is what keeps the retain and the descriptor it
     // belongs to from ever being written separately -- the exact split
     // issue #295's leak lived in.
+    let mut transaction = unified_fd_clone_begin(child);
     from = 0;
     scanning = true;
     while (scanning) {
@@ -2034,27 +2097,31 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult !{unsafe} {
             UnifiedFdScanResult::Found(fd) => {
                 let (block, block_generation) = fd_block_lookup(parent_ctx, fd);
                 if (block == 0) {
-                    unified_fd_clone_rollback(child, fd);
+                    unified_fd_clone_rollback(transaction);
                     return UnifiedFdResult::Invalid;
                 }
                 let entries: *FdBlock = fd_block_at(block, block_generation);
                 let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
                 let inherited: bool = entries.slot[index].close_on_exec;
-                match unified_fd_install(child, fd, entries.slot[index].object,
-                                         entries.slot[index].generation) {
+                let (install_result, next_transaction) =
+                    unified_fd_clone_install(
+                        transaction, fd, entries.slot[index].object,
+                        entries.slot[index].generation);
+                transaction = next_transaction;
+                match install_result {
                     UnifiedFdInstallResult::Ok => {}
                     UnifiedFdInstallResult::Invalid => {
-                        unified_fd_clone_rollback(child, fd);
+                        unified_fd_clone_rollback(transaction);
                         return UnifiedFdResult::Invalid;
                     }
                     // install already logged the bound break; this only
                     // has to undo the descriptors that came before.
                     UnifiedFdInstallResult::RefOverflow => {
-                        unified_fd_clone_rollback(child, fd);
+                        unified_fd_clone_rollback(transaction);
                         return UnifiedFdResult::Invalid;
                     }
                     UnifiedFdInstallResult::NoMemory => {
-                        unified_fd_clone_rollback(child, fd);
+                        unified_fd_clone_rollback(transaction);
                         return UnifiedFdResult::Invalid;
                     }
                 }
@@ -2063,7 +2130,7 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult !{unsafe} {
                 if (inherited) {
                     match unified_fd_set_close_on_exec(child, fd, true) {
                         UnifiedFdResult::Invalid => {
-                            unified_fd_clone_rollback(child, fd + 1);
+                            unified_fd_clone_rollback(transaction);
                             return UnifiedFdResult::Invalid;
                         }
                         UnifiedFdResult::Ok => {}
@@ -2074,6 +2141,7 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult !{unsafe} {
             }
         }
     }
+    unified_fd_clone_commit(transaction);
     return UnifiedFdResult::Ok;
 }
 
