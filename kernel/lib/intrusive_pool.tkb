@@ -59,6 +59,25 @@ use "kernel/lib/locked_cell.tkb";
 //   normal view before returning its bare pointer; those eleven caller-owned
 //   lifetime exceptions remain named and checked by
 //   scripts/check_liveness_proof_escapes.py rather than weakening every view.
+// - LIVE SAYS THE SLOT IS THE CALLER'S, NOT THAT ITS PAYLOAD IS WRITTEN.
+//   The two entry points promise different things about the bytes, and a
+//   walker that reads a payload field needs to know which (issue #514).
+//   intrusive_pool_insert_zeroed clears the storage under the caller's
+//   guard BEFORE stamping the generation, so any reader that finds the slot
+//   Live -- locked or not -- sees zeroes until the caller writes. Whether
+//   zero is a state a consumer can tell from a real one is the consumer's
+//   business: ProcessSlotState's Free is 0, so a scheduler walk skips such
+//   a slot, and a consumer whose zero means something live owes itself a
+//   separate "constructed" flag.
+//   intrusive_pool_insert promises nothing about the bytes at all. Its
+//   storage still holds the previous occupant's free-chain link at the
+//   moment the slot starts answering Live, and a link is a well-formed slot
+//   address -- a plausible pointer, not an obviously wrong one. That is
+//   safe only for a reader holding the pool lock, which insert also holds
+//   throughout; intrusive_pool_probe_slot_unproven takes nothing and can
+//   read the link. Every kernel pool uses the zeroing entry point; plain
+//   insert survives for the shape tests, which allocate and write with no
+//   second core looking.
 // - The guard is not re-entrant, and taking one twice on a path would
 //   deadlock under a real lock. It is not a compile error -- both
 //   acquires are individually correct, so nothing in the type ties the
@@ -1434,22 +1453,23 @@ fn intrusive_pool_grow_one_chunk(T: type, pool: &mut IntrusivePool(T) @ pool_id)
 fn intrusive_pool_insert_zeroed(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                                 guard: borrow IntrusivePoolGuard[pool_id])
         -> IntrusivePoolInsertResult[pool_id] !{unsafe} {
-    match intrusive_pool_insert_unchecked(pool, guard) {
-        IntrusivePoolInsertResult::OutOfMemory => {
-            return IntrusivePoolInsertResult::OutOfMemory;
-        }
-        IntrusivePoolInsertResult::Allocated(owner) => {
-            let bytes: *u8 = unsafe {
-                (intrusive_owner_slot(owner).raw
-                 + offsetof(IntrusiveSlot(T), storage)) as *u8
-            };
-            let span: isize = sizeof(T) as isize;
-            for i: isize in 0..<span {
-                bytes[i] = 0;
-            }
-            return IntrusivePoolInsertResult::Allocated(owner);
-        }
-    }
+    // GitHub issue #514: the zeroing happens INSIDE, before the generation
+    // is stamped. It used to be this loop, here, after the allocation had
+    // returned -- and stamping the generation is exactly the moment the slot
+    // starts answering Live, so between the stamp and this loop the storage
+    // was still the previous occupant's free-chain link while the pool said
+    // the slot was occupied. Measured twice: a walker read `0x403b07e0` and
+    // `0x403b0000` as a payload's first word, both slot addresses one
+    // IntrusiveSlot(T) stride apart, which is what a chain link is.
+    //
+    // A LOCKED probe never saw it -- the whole insert runs under the
+    // caller's guard, and intrusive_pool_probe_slot takes that same lock --
+    // but intrusive_pool_probe_slot_unproven takes nothing, and that is the
+    // reader the window was observed from.
+    //
+    // Reordering costs nothing: the same bytes are cleared under the same
+    // guard, one step earlier.
+    return intrusive_pool_insert_unchecked(pool, guard, true);
 }
 
 fn intrusive_pool_insert(T: type, pool: &mut IntrusivePool(T) @ pool_id,
@@ -1468,7 +1488,7 @@ fn intrusive_pool_insert(T: type, pool: &mut IntrusivePool(T) @ pool_id,
     // types that owe it.
     static_assert(contains_stable_owner(T) == 0,
                   "IntrusivePool(T): a T holding stable owner storage must be allocated with intrusive_pool_insert_zeroed, whose zeroing is what its empty state depends on");
-    return intrusive_pool_insert_unchecked(pool, guard);
+    return intrusive_pool_insert_unchecked(pool, guard, false);
 }
 
 // The allocation itself. Private, and without the assertion above,
@@ -1476,7 +1496,8 @@ fn intrusive_pool_insert(T: type, pool: &mut IntrusivePool(T) @ pool_id,
 // would fail it -- routing that through the checked entry point would
 // reject the one caller that is allowed.
 private fn intrusive_pool_insert_unchecked(T: type, pool: &mut IntrusivePool(T) @ pool_id,
-                                           guard: borrow IntrusivePoolGuard[pool_id])
+                                           guard: borrow IntrusivePoolGuard[pool_id],
+                                           zero_payload: bool)
         -> IntrusivePoolInsertResult[pool_id] !{unsafe} {
     if (pool.partial_head == 0) {
         match intrusive_pool_grow_one_chunk(pool) {
@@ -1545,13 +1566,29 @@ private fn intrusive_pool_insert_unchecked(T: type, pool: &mut IntrusivePool(T) 
     header.free_head = *intrusive_slot_link_at(pool, slot_address);
     let generation: usize = pool.next_generation;
     pool.next_generation = generation + 1;
-    slot.generation = generation;
-    // Nothing zeroes the storage here. It used to be a separate word
-    // worth clearing; now it is the payload's own bytes, and writing to
-    // them would be this pool inventing a value for a T it knows nothing
-    // about. The contract is uniform instead: a freshly allocated
-    // payload is uninitialized, write it before reading it. See "Current
+    // GitHub issue #514: clear the storage BEFORE the stamp, not after it.
+    // The stamp is what makes this slot answer Live, and the link read one
+    // line above is still sitting in the payload's own first word until
+    // something overwrites it. Stamping first published a slot whose
+    // payload was the free chain's; a lockless walker read that link as a
+    // payload field, which is a plausible-looking pointer rather than an
+    // obviously wrong one.
+    //
+    // intrusive_pool_insert does NOT ask for this, and that is the whole
+    // difference between the two entry points: its contract stays "a
+    // freshly allocated payload is uninitialized, write it before reading
+    // it", and a lockless walker may still see the link there. See "Current
     // limitations".
+    if (zero_payload) {
+        let bytes: *u8 = unsafe {
+            (slot_address + offsetof(IntrusiveSlot(T), storage)) as *u8
+        };
+        let span: isize = sizeof(T) as isize;
+        for i: isize in 0..<span {
+            bytes[i] = 0;
+        }
+    }
+    slot.generation = generation;
     pool.live_count = pool.live_count + 1;
     // Read BEFORE the increment: allocating out of a chunk that was empty
     // spends one of the held-back reserve, and after `+ 1` there is no
