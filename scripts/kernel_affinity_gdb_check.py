@@ -54,9 +54,6 @@ DISPATCH = "*kernel_syscall_dispatch"
 # getcwd until the increment after that; it is a filesystem call now,
 # the subsystem that widening reaches last. The check holds the two together.
 MIGRATED_SYSCALL = 79
-# user_entry.S loads the syscall number for dispatch from the saved x8,
-# eight words into the exception frame.
-FRAME_X8_OFFSET = 64
 # QEMU's gdbstub numbers vCPUs from 1: thread 1 is CPU0, thread 2 is CPU1.
 CPU0_THREAD = 1
 CPU1_THREAD = 2
@@ -151,11 +148,6 @@ def register(name: str) -> int:
     return int(gdb.parse_and_eval(f"${name}")) & 0xFFFFFFFFFFFFFFFF
 
 
-def read_u64(address: int) -> int:
-    data = gdb.selected_inferior().read_memory(address, 8)
-    return int.from_bytes(bytes(data), "little")
-
-
 def uart_tail() -> str:
     with output_lock:
         return bytes(output[-200:]).decode("ascii", errors="replace")
@@ -185,52 +177,57 @@ def run() -> None:
     gdb.execute("set pagination off")
     gdb.execute("set confirm off")
     gdb.execute(f"target remote 127.0.0.1:{GDB_PORT}")
-    gate = gdb.Breakpoint(GATE)
+    # GitHub issue #585: registers only, no frame read.
+    #
+    # This used to select the probe's gate hit by reading the rewound frame's
+    # saved x8 at `$x0 + 64` and skipping any hit whose frame it could not
+    # read, on the reasoning that such a hit was another process's. That
+    # reasoning was wrong, and about one boot in ten proved it: gdb reads
+    # guest memory through the translation the stopped CPU has active, which
+    # at the gate is the PROCESS's root -- and a process root maps the kernel
+    # image's identity block, not every page the page allocator hands out for
+    # a kernel stack. Whether a given boot's stack run lands inside that block
+    # is luck, so the probe's OWN hit came back `Cannot access memory at
+    # address 0x406afd10` and was counted as somebody else's.
+    #
+    # The syscall number does not have to come out of memory. The dispatcher
+    # takes it as its second argument, which the rerun breakpoint below
+    # already matches on, so the same condition identifies the CALL on CPU 1
+    # before the gate fires for it. Three register-only conditions, in the
+    # order they must happen:
+    #
+    #   1. kernel_syscall_dispatch entered on CPU 1 with this syscall,
+    #   2. kernel_syscall_migrate_return reached on CPU 1 after that,
+    #   3. kernel_syscall_dispatch entered on CPU 0 with the same syscall.
+    #
+    # Other fixtures still take the gate throughout the session -- that has
+    # not changed -- but (1) is what says the next (2) belongs to the probe.
+    asked = gdb.Breakpoint(DISPATCH)
+    asked.condition = (f"$x1 == {MIGRATED_SYSCALL} && "
+                       f"$_thread == {CPU1_THREAD}")
     # The probe's line fits the 16-byte PL011 FIFO, so it can go at once
     # while the guest is held.
     connection.sendall(COMMAND)
-
-    # The gate is not the probe's alone. Every fixture that runs on a peer
-    # reaches it for any syscall outside the peer-safety table -- and
-    # /bin/peer-read's openat and close are outside it, so its reads take the
-    # gate throughout this session. An earlier version of this check assumed
-    # the first hit was the probe's newfstatat; it read another process's frame
-    # instead and died with "Cannot access memory".
-    #
-    # So select rather than assume: keep resuming until a hit is the probe's
-    # own -- CPU 1, with newfstatat in the rewound frame's saved x8. A hit whose
-    # frame cannot be read is somebody else's too, and is passed over the same
-    # way. A gdb breakpoint CONDITION cannot do this: reading the frame there
-    # would raise inside the condition on exactly the hits this has to skip.
-    deadline = time.monotonic() + STEP_TIMEOUT
-    ours = False
-    foreign = 0
-    while not ours and time.monotonic() < deadline:
-        continue_bounded(deadline - time.monotonic())
-        if gate.hit_count == 0:
-            break
-        thread = gdb.selected_thread()
-        if thread is None or thread.num != CPU1_THREAD:
-            foreign += 1
-            continue
-        try:
-            number = read_u64(register("x0") + FRAME_X8_OFFSET)
-        except (gdb.MemoryError, gdb.error):
-            foreign += 1
-            continue
-        if number == MIGRATED_SYSCALL:
-            ours = True
-        else:
-            foreign += 1
-    if not ours:
-        verdict(False, f"/bin/affinity ran without the migration gate firing "
-                f"for newfstatat on CPU 1 (hits={gate.hit_count}, "
-                f"{foreign} of them other processes'): newfstatat asked from CPU 1 "
-                f"was not handed to core 0. {where()}. "
+    continue_bounded()
+    if asked.hit_count == 0:
+        verdict(False, "/bin/affinity never asked newfstatat from CPU 1, so "
+                f"the migration gate had nothing to fire for. {where()}. "
                 f"UART tail: {uart_tail()!r}")
         gdb.execute("detach")
         return
-    gate.enabled = False
+    asked.delete()
+
+    gate = gdb.Breakpoint(GATE)
+    gate.condition = f"$_thread == {CPU1_THREAD}"
+    continue_bounded()
+    if gate.hit_count == 0:
+        verdict(False, "/bin/affinity asked newfstatat from CPU 1 and the "
+                "migration gate did not fire for it: that syscall was not "
+                f"handed to core 0. {where()}. "
+                f"UART tail: {uart_tail()!r}")
+        gdb.execute("detach")
+        return
+    gate.delete()
 
     rerun = gdb.Breakpoint(DISPATCH)
     rerun.condition = f"$x1 == {MIGRATED_SYSCALL} && $_thread == {CPU0_THREAD}"
@@ -241,7 +238,6 @@ def run() -> None:
                 f"UART tail: {uart_tail()!r}")
         gdb.execute("detach")
         return
-    gate.delete()
     rerun.delete()
     gdb.execute("detach")
 
@@ -253,8 +249,9 @@ def run() -> None:
                 f"UART tail: {uart_tail()!r}")
         gdb.execute("detach")
         return
-    verdict(True, "newfstatat asked from CPU1 took the migration gate there, with "
-            "that syscall in the rewound frame, and core 0 dispatched it again; "
+    verdict(True, "newfstatat asked from CPU1 took the migration gate there, "
+            "watched as three register-only steps in order, and core 0 "
+            "dispatched it again; "
             "/bin/affinity then reported its answer")
 
 

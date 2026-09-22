@@ -30,7 +30,6 @@ whether a row has gone quiet or has merely stopped being looked for.
 
 | Symptom | Rate | Issue | Last seen |
 | --- | --- | --- | --- |
-| `ran without the migration gate firing ` | 2 in 8 `kernelcheck-affinity-gdb-qemu` runs, measured 2026-09-22 | #585 | 2026-09-22 |
 
 ## Reading a row
 
@@ -91,10 +90,20 @@ walks of its child list and lets only the peer run, so the defect fails a
 lane on every run instead of three runs in forty. A rate got it filed; only a
 deterministic lane keeps it closed.
 
-**#585 is the GATE mode of that same lane, and it is a regression from #579
-rather than an old flake.** #579 gave `kernel_syscall_migrate_return` a
-second reason to be reached -- "this CPU may no longer run this process"
-beside "this syscall must run on core 0" -- and the gate check watches that
-address. The rate was measured by re-running the lane four times on the
-unmodified HEAD after a `make cicheck` failure, which is what separated it
-from the working tree it first appeared in.
+**#585 was the GATE mode of that same lane, filed and closed on 2026-09-22,
+and it was never the kernel.** The check identified the probe's gate hit by
+reading the rewound exception frame's saved syscall number, and skipped any
+hit whose frame it could not read on the reasoning that such a hit belonged
+to another process. gdb reads guest memory through the translation the
+stopped CPU has active, which at the gate is the PROCESS's root -- and a
+process root maps the kernel image's identity block, not every page the page
+allocator hands out for a kernel stack. Whether a boot's stack run landed
+inside that block was luck, so the probe's own hit came back `Cannot access
+memory at address 0x406afd10` about one boot in ten and was counted as
+somebody else's.
+
+The check is register-only now: the dispatcher takes the syscall number as an
+argument, so the same condition that already matched core 0's rerun
+identifies the call on CPU 1 before the gate fires for it. Worth keeping
+because the shape generalises -- **a gdb check that reads kernel memory is
+reading it through whatever address space the guest happens to be in.**
