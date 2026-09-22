@@ -218,13 +218,13 @@ let mut msc_scratch_buf: [u8; 512] align(64);
 //
 // Bouncing through a buffer that is 64-byte aligned AND a whole number
 // of cache lines long removes the caller-alignment requirement entirely,
-// which is why disk_read/disk_write below take a plain `*u8`.
+// which is why disk_read/disk_write below accept ordinary byte slices.
 // Empirical RPi5 limit for this driver: 128 sectors (64 KiB) succeeds
 // through rootfs provisioning and the complete kernelcheck-rpi5 suite.
 // 192 and 256 sectors stalled during the first rootfs WRITE(10), before
 // the userspace readiness marker. Keep the bounded command below that
-// observed XHCI/device boundary; disk_write_sectors() still falls back to
-// single-sector commands when a completed multi-sector command reports an
+// observed XHCI/device boundary; the provisioning caller still falls back
+// to smaller commands when a completed multi-sector command reports an
 // ordinary transport/device error.
 const MSC_MAX_TRANSFER_SECTORS: usize = 128;
 const MSC_SECTOR_SIZE: usize = 512;
@@ -1396,14 +1396,18 @@ fn msc_scsi_lba_cdb(op: u8, sector: u32, sectors: usize) {
 // retry of the same, side-effect-free-to-repeat command. Not attempted
 // more than once -- a transport that fails twice in a row needs a caller
 // decision, not a longer retry loop.
-fn disk_read_sectors(sector: u32, buf: *u8, sectors: usize) -> DiskIoResult {
+fn disk_read_sectors(sector: u32, buf: []u8) -> DiskIoResult {
     if (disk_io_ok(disk_status()) == false) {
         return DiskIoResult::Err(-1);
     }
-    if (sectors == 0 || sectors > MSC_MAX_TRANSFER_SECTORS) {
+    if (buf.len == 0 || buf.len % MSC_SECTOR_SIZE != 0) {
         return DiskIoResult::Err(-1);
     }
-    let length: usize = sectors * MSC_SECTOR_SIZE;
+    let sectors: usize = buf.len / MSC_SECTOR_SIZE;
+    if (sectors > MSC_MAX_TRANSFER_SECTORS) {
+        return DiskIoResult::Err(-1);
+    }
+    let length: usize = buf.len;
     msc_cbw_header(length as u32, true, 10);
     msc_scsi_lba_cdb(0x28, sector, sectors);
     let mut rc: u32 = msc_run_command(length as u32, true,
@@ -1419,18 +1423,19 @@ fn disk_read_sectors(sector: u32, buf: *u8, sectors: usize) -> DiskIoResult {
         return DiskIoResult::Err(-1);
     }
     for i: usize in 0..<MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE {
-        if (i >= length) { break; }
-        buf[i as isize] = msc_bounce_buf[i];
+        if (i < buf.len) {
+            buf[i] = msc_bounce_buf[i];
+        }
     }
     return DiskIoResult::Ok;
 }
 
-fn disk_read(sector: u32, buf: *u8) -> DiskIoResult {
-    return disk_read_sectors(sector, buf, 1);
+fn disk_read(sector: u32, buf: [u8; MSC_SECTOR_SIZE..]) -> DiskIoResult {
+    return disk_read_sectors(sector, buf[0..<MSC_SECTOR_SIZE]);
 }
 
-fn disk_write(sector: u32, buf: *u8) -> DiskIoResult {
-    return disk_write_sectors(sector, buf, 1);
+fn disk_write(sector: u32, buf: [u8; MSC_SECTOR_SIZE..]) -> DiskIoResult {
+    return disk_write_sectors(sector, buf[0..<MSC_SECTOR_SIZE]);
 }
 
 // Write a bounded contiguous run with one WRITE(10). The bounce buffer is
@@ -1438,17 +1443,22 @@ fn disk_write(sector: u32, buf: *u8) -> DiskIoResult {
 // provide ordinary, unaligned byte storage. A failed write is replayed once
 // with the same bytes and LBA range, preserving the existing single-sector
 // recovery policy.
-fn disk_write_sectors(sector: u32, buf: *u8, sectors: usize) -> DiskIoResult {
+fn disk_write_sectors(sector: u32, buf: []u8) -> DiskIoResult {
     if (disk_io_ok(disk_status()) == false) {
         return DiskIoResult::Err(-1);
     }
-    if (sectors == 0 || sectors > MSC_MAX_TRANSFER_SECTORS) {
+    if (buf.len == 0 || buf.len % MSC_SECTOR_SIZE != 0) {
         return DiskIoResult::Err(-1);
     }
-    let length: usize = sectors * MSC_SECTOR_SIZE;
+    let sectors: usize = buf.len / MSC_SECTOR_SIZE;
+    if (sectors > MSC_MAX_TRANSFER_SECTORS) {
+        return DiskIoResult::Err(-1);
+    }
+    let length: usize = buf.len;
     for i: usize in 0..<MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE {
-        if (i >= length) { break; }
-        msc_bounce_buf[i] = buf[i as isize];
+        if (i < buf.len) {
+            msc_bounce_buf[i] = buf[i];
+        }
     }
     msc_cbw_header(length as u32, false, 10);
     msc_scsi_lba_cdb(0x2A, sector, sectors);

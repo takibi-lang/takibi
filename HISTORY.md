@@ -15,6 +15,28 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-22: USB block transfer size comes from the byte slice
+
+The RPi5 USB mass-storage API formerly accepted a raw byte pointer and an
+independent sector count. Every caller had to argue that the pointed-to
+storage covered `sector_count * 512` bytes, while the callee could not verify
+that relationship. Multi-block read-ahead and root filesystem provisioning
+made this a routine source of duplicated, unchecked arithmetic.
+
+`disk_read_sectors` and `disk_write_sectors` now accept one byte slice and
+derive the READ(10)/WRITE(10) sector count from its runtime length. A zero
+length, a length that is not a multiple of 512, and a length beyond the
+128-sector bounce buffer are rejected before I/O. There is no sibling count
+argument to disagree with the buffer and no multiplication used to recover
+the transfer byte length. The aligned internal bounce buffer remains the DMA
+object, so callers need no alignment type.
+
+Array-backed callers construct checked slices. The read-ahead buffer is the
+sole raw boundary: it selects one core's segment from a shared backing array,
+checks the block count against that segment's fixed capacity, and then uses
+one explicit unsafe pointer-to-slice assertion. All USB command construction
+and byte copying after that boundary are governed by the slice length.
+
 ## 2026-09-21: SIGCHLD getter read a handle without a process
 
 The ignored-SIGCHLD repair initially made allcheck fail the common

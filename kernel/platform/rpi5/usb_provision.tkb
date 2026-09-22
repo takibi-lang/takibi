@@ -21,8 +21,11 @@ must_use variant UsbProvisionResult { Invalid; Copied; }
 must_use variant UsbProvisionVerifyResult { Invalid; Different; Equal; }
 
 private let mut usb_provision_block: [u8; KERNEL_BLOCK_SIZE];
+// Exclusive bound for the 64 * 1024-byte batch. A literal const is usable
+// in the refined type that proves the dynamic prefix below.
+const USB_PROVISION_BATCH_BOUND: usize = 65537;
 private let mut usb_provision_batch:
-    [u8; KERNEL_BLOCK_SIZE * KERNEL_BLOCK_BATCH];
+    [u8; USB_PROVISION_BATCH_BOUND - 1];
 
 private fn usb_provision_image_block(block: usize) -> bool {
     let offset: usize = block * KERNEL_BLOCK_SIZE;
@@ -68,9 +71,21 @@ fn usb_provision_rootfs(destination: KernelBlockDevice) -> UsbProvisionResult {
                     usb_provision_block as []u8);
             }
         }
-        let bytes: *u8 = usb_provision_batch as *u8;
-        match disk_write_sectors((first_block * 2) as u32,
-                                 bytes, batch * 2) {
+        let bytes = usb_provision_batch as []u8;
+        let transfer_length: usize = batch * KERNEL_BLOCK_SIZE;
+        if (transfer_length > bytes.len) {
+            return UsbProvisionResult::Invalid;
+        }
+        let mut transfer: []u8;
+        if (transfer_length >= 0 && transfer_length <
+            USB_PROVISION_BATCH_BOUND) {
+            let bounded_length:
+                {0..<USB_PROVISION_BATCH_BOUND as usize} = transfer_length;
+            transfer = bytes[0..<bounded_length];
+        } else {
+            return UsbProvisionResult::Invalid;
+        }
+        match disk_write_sectors((first_block * 2) as u32, transfer) {
             DiskIoResult::Err(error) => {
                 let mut fallback_offset: usize = 0;
                 let mut fallback_blocks: usize = batch / 2;
@@ -82,13 +97,25 @@ fn usb_provision_rootfs(destination: KernelBlockDevice) -> UsbProvisionResult {
                     if (transfer_blocks > batch - fallback_offset) {
                         transfer_blocks = batch - fallback_offset;
                     }
-                    let block_offset: isize =
-                        (fallback_offset * KERNEL_BLOCK_SIZE) as isize;
-                    let block_bytes: *u8 = bytes + block_offset;
+                    let block_offset: usize =
+                        fallback_offset * KERNEL_BLOCK_SIZE;
+                    let transfer_length: usize =
+                        transfer_blocks * KERNEL_BLOCK_SIZE;
+                    if (block_offset > bytes.len) {
+                        return UsbProvisionResult::Invalid;
+                    }
+                    let remaining = bytes[block_offset..<bytes.len];
+                    if (transfer_length > remaining.len) {
+                        return UsbProvisionResult::Invalid;
+                    }
+                    let block_bytes = remaining[0..<transfer_length];
                     if (transfer_blocks == 1) {
+                        if (block_bytes.len < KERNEL_BLOCK_SIZE) {
+                            return UsbProvisionResult::Invalid;
+                        }
                         match disk_write(
                                 ((first_block + fallback_offset) * 2) as u32,
-                                block_bytes) {
+                                block_bytes[0..<512]) {
                             DiskIoResult::Err(single_error) => {
                                 return UsbProvisionResult::Invalid;
                             }
@@ -96,7 +123,7 @@ fn usb_provision_rootfs(destination: KernelBlockDevice) -> UsbProvisionResult {
                         }
                         match disk_write(
                                 ((first_block + fallback_offset) * 2 + 1) as u32,
-                                block_bytes + 512) {
+                                block_bytes[512..<KERNEL_BLOCK_SIZE]) {
                             DiskIoResult::Err(single_error) => {
                                 return UsbProvisionResult::Invalid;
                             }
@@ -106,7 +133,7 @@ fn usb_provision_rootfs(destination: KernelBlockDevice) -> UsbProvisionResult {
                     } else {
                         match disk_write_sectors(
                                 ((first_block + fallback_offset) * 2) as u32,
-                                block_bytes, transfer_blocks * 2) {
+                                block_bytes) {
                             DiskIoResult::Err(smaller_error) => {
                                 fallback_blocks = transfer_blocks / 2;
                                 if (fallback_blocks == 0) {
@@ -143,9 +170,21 @@ fn usb_provision_rootfs_verify(destination: KernelBlockDevice)
         if (batch > KERNEL_BLOCK_BATCH) {
             batch = KERNEL_BLOCK_BATCH;
         }
-        let bytes: *u8 = usb_provision_batch as *u8;
-        match disk_read_sectors((first_block * 2) as u32,
-                                bytes, batch * 2) {
+        let bytes = usb_provision_batch as []u8;
+        let transfer_length: usize = batch * KERNEL_BLOCK_SIZE;
+        if (transfer_length > bytes.len) {
+            return UsbProvisionVerifyResult::Invalid;
+        }
+        let mut transfer: []u8;
+        if (transfer_length >= 0 && transfer_length <
+            USB_PROVISION_BATCH_BOUND) {
+            let bounded_length:
+                {0..<USB_PROVISION_BATCH_BOUND as usize} = transfer_length;
+            transfer = bytes[0..<bounded_length];
+        } else {
+            return UsbProvisionVerifyResult::Invalid;
+        }
+        match disk_read_sectors((first_block * 2) as u32, transfer) {
             DiskIoResult::Err(error) => {
                 return UsbProvisionVerifyResult::Invalid;
             }

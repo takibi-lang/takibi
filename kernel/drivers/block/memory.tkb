@@ -317,9 +317,14 @@ private fn block_run_transfer_locked(
         here: {0..<KERNEL_MAX_CORES as usize}, device: KernelBlockDevice,
         first: usize, count: usize) -> bool !{unsafe} {
     if (device.backend == 1) {
+        if (count > BLOCK_RUN_BLOCKS) { return false; }
         let target: *u8 = (block_run_data as *u8) +
             ((here * BLOCK_RUN_BLOCKS * KERNEL_BLOCK_SIZE) as isize);
-        match disk_read_sectors((first * 2) as u32, target, count * 2) {
+        let length: usize = count * KERNEL_BLOCK_SIZE;
+        // This is the one raw storage boundary: the core and count checks
+        // above prove that the asserted slice stays inside this core's run.
+        let run = unsafe { target[0..<length as isize] };
+        match disk_read_sectors((first * 2) as u32, run) {
             DiskIoResult::Err(error) => { return false; }
             DiskIoResult::Ok => { return true; }
         }
@@ -407,8 +412,8 @@ private fn block_read_device_locked(
     if (device.backend == 1) {
         // Both sectors of the block in one READ(10): a command costs the
         // same however few sectors it moves (GitHub issue #545).
-        let target: *u8 = destination as *u8;
-        match disk_read_sectors((block * 2) as u32, target, 2) {
+        match disk_read_sectors((block * 2) as u32,
+                                destination[0..<KERNEL_BLOCK_SIZE]) {
             DiskIoResult::Err(error) => { return BlockIoResult::Invalid; }
             DiskIoResult::Ok => { return BlockIoResult::Ok; }
         }
@@ -441,8 +446,8 @@ private fn block_write_device_locked(
         // A boot's writes are single metadata blocks -- 188 of them over 18
         // distinct blocks on 2026-09-12 -- so there is no run across blocks
         // to coalesce; the command per sector was the whole of the waste.
-        let bytes: *u8 = source as *u8;
-        match disk_write_sectors((block * 2) as u32, bytes, 2) {
+        match disk_write_sectors((block * 2) as u32,
+                                 source[0..<KERNEL_BLOCK_SIZE]) {
             DiskIoResult::Err(error) => { return BlockIoResult::Invalid; }
             DiskIoResult::Ok => { return BlockIoResult::Ok; }
         }
