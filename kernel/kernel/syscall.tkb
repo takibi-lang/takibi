@@ -56,6 +56,11 @@ const AARCH64_NR_KILL: usize = 129;
 const AARCH64_NR_RT_SIGTIMEDWAIT: usize = 137;
 const AARCH64_NR_SYSLOG: usize = 116;
 const AARCH64_NR_GETCWD: usize = 17;
+// GitHub issue #581: the filesystem read path, named where the rest of this
+// table's numbers are rather than as literals inside syscall_peer_safe.
+const AARCH64_NR_OPENAT: usize = 56;
+const AARCH64_NR_CLOSE: usize = 57;
+const AARCH64_NR_NEWFSTATAT: usize = 79;
 const AARCH64_NR_CHDIR: usize = 49;
 const AARCH64_NR_SETITIMER: usize = 103;
 const AARCH64_NR_RT_SIGACTION: usize = 134;
@@ -2715,9 +2720,53 @@ fn syscall_peer_safe(number: usize, fd: usize) -> bool {
     if (number == AARCH64_NR_WRITE) {
         return kernel_syscall_terminal_is_open(fd);
     }
-    if (number == 63) {
-        return fd == 0 && kernel_syscall_terminal_is_open(fd);
+    // GitHub issue #581: the filesystem READ path, which is the first
+    // subsystem in this table rather than another per-process word.
+    //
+    // What makes it admissible is already built and already exercised from a
+    // peer, by /bin/peer-read under the per-pid rule: ext2 mutation excludes
+    // itself through kernel/fs/ext2/mutation_lock.tkb at lock rank 20, the
+    // block cache publishes its write epoch with release ordering and sums
+    // it with acquire loads (#533), and the per-CPU ext2 scratch means two
+    // cores never share a staging buffer. A reader still takes no lock --
+    // readers have to stay concurrent or `peer_filesystem.expected`'s
+    // both-CPU device contention disappears -- and instead asks at syscall
+    // entry whether a mutation is in flight. `syscall_reaches_filesystem`
+    // below is what keeps that question being asked now that the table
+    // admits these calls rather than refusing them.
+    //
+    // NOT the write path. The five mutating arms take the guard, and
+    // admitting them here would make a peer the sixth caller of a boundary
+    // whose own limitations section says nothing proves a sixth would take
+    // it.
+    //
+    // #559 is the honest remainder and is unchanged by this: the reader's
+    // question is asked at syscall ENTRY only, so a mutation that starts
+    // during an in-flight peer read still overlaps it.
+    if (number == AARCH64_NR_OPENAT || number == AARCH64_NR_CLOSE ||
+        number == AARCH64_NR_NEWFSTATAT) {
+        return true;
     }
+    if (number == 63) {
+        if (fd == 0 && kernel_syscall_terminal_is_open(fd)) { return true; }
+        return kernel_syscall_file_readable(fd);
+    }
+    return false;
+}
+
+// Does this call reach ext2, and therefore owe the mutation question?
+//
+// GitHub issue #581: this used to be answered by `syscall_peer_safe` saying
+// no -- the only filesystem calls a peer could make were /bin/peer-read's,
+// which the table refused and the per-pid rule admitted anyway. The table
+// admits the read path itself now, so "the table does not admit it" has
+// stopped being the same question and the two are asked separately.
+fn syscall_reaches_filesystem(number: usize, fd: usize) -> bool {
+    if (number == AARCH64_NR_OPENAT || number == AARCH64_NR_CLOSE ||
+        number == AARCH64_NR_NEWFSTATAT) {
+        return true;
+    }
+    if (number == 63) { return kernel_syscall_file_readable(fd); }
     return false;
 }
 
@@ -2813,7 +2862,15 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // filesystem, and every workload progress handler refuses a report made
     // anywhere but SECONDARY_CORE_ID, so migrating one during a mutation
     // would turn a fixture's report into a refusal.
-    if (cpu_id() != 0 && syscall_peer_safe(number, x0) == false &&
+    // GitHub issue #581: asked of anything that reaches ext2, whether the
+    // table admits it or a per-pid rule does. It used to be asked only of a
+    // call the table refused, because nothing the table admitted reached the
+    // filesystem -- that sentence stopped being true when the read path was
+    // admitted, and the check would have silently stopped applying to the
+    // very calls it was written for.
+    if (cpu_id() != 0 &&
+        (syscall_peer_safe(number, x0) == false ||
+         syscall_reaches_filesystem(number, x0)) &&
         ext2_mutation_in_flight()) {
         return SyscallAction::Migrate;
     }

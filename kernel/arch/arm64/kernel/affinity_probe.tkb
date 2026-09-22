@@ -18,17 +18,26 @@ const KILL_SYSCALL: usize = 129;
 // The probe's example of a syscall the peer-safety table does NOT admit.
 // It has to be one that STAYS outside, and phase B entry 6 is a sequence of
 // widenings of exactly that table: this was uname until entry 6's first
-// increment admitted it, and getcwd until its second. Picking the next
-// syscall in line just moves the problem, so this is now a filesystem call
-// -- the subsystem the roadmap puts last, behind #559's honest remainder.
+// increment admitted it, getcwd until its second, and newfstatat until
+// GitHub issue #581 admitted the filesystem read path.
+//
+// rt_sigprocmask is the one with a REASON to stay, rather than the next in
+// line: `kernel_process_signal_deliver_to` reads the target's signal_mask
+// and read-modify-writes its pending_signals from whichever CPU the sender
+// is on, under no lock, so admitting a peer's own mask write would make it
+// a third party to two words already touched from two CPUs. That is #570,
+// and until it closes this syscall does not move.
+//
 // scripts/check_affinity_probe_migrates.py holds this number against
 // `syscall_peer_safe`, so a widening that reaches it fails in langcheck
-// rather than in a QEMU lane reporting a gate that stopped firing.
-const NEWFSTATAT_SYSCALL: usize = 79;
-// aarch64 struct stat is 128 bytes; st_mode is the u32 at offset 16, and
-// S_IFREG is 0x8000.
-const STAT_BYTES: usize = 128;
-const STAT_MODE_OFFSET: usize = 16;
+// rather than in a QEMU lane reporting a gate that stopped firing. It has
+// now earned itself three times.
+const RT_SIGPROCMASK_SYSCALL: usize = 135;
+// rt_sigprocmask(how, set, oldset, sigsetsize): a null `set` changes
+// nothing and fills `oldset` with the current mask, so the probe reads
+// without disturbing a process whose SIGTERM handling it goes on to test.
+const SIGSET_BYTES: usize = 8;
+const SIG_BLOCK: usize = 0;
 const GETCPU_SYSCALL: usize = 168;
 const NANOSLEEP_SYSCALL: usize = 101;
 const CLONE_SYSCALL: usize = 220;
@@ -240,24 +249,19 @@ fn affinity_probe() {
     // rerun on core 0 and must still answer. The buffer starts as 0xFF, so
     // the regular-file bit in st_mode is a real content check rather than a
     // return code that a zeroed struct would also satisfy.
-    let mut stat_buffer: [u8; STAT_BYTES];
-    for index: usize in 0..<STAT_BYTES { stat_buffer[index] = 0xFF; }
-    let mut mode: usize = 0;
-    if (svc5(NEWFSTATAT_SYSCALL, 0, "/hello.txt" as *u8 as usize,
-             stat_buffer as *u8 as usize, 0, 0) != 0) {
+    let mut sigset_buffer: [u8; SIGSET_BYTES];
+    for index: usize in 0..<SIGSET_BYTES { sigset_buffer[index] = 0xFF; }
+    if (svc5(RT_SIGPROCMASK_SYSCALL, SIG_BLOCK, 0,
+             sigset_buffer as *u8 as usize, SIGSET_BYTES, 0) != 0) {
         affinity_fail(
-            bs"affinity: newfstatat asked from cpu 1 did not answer\n");
+            bs"affinity: rt_sigprocmask asked from cpu 1 did not answer\n");
     }
-    for index: usize in 0..<STAT_BYTES {
-        if (index >= STAT_MODE_OFFSET && index < STAT_MODE_OFFSET + 4) {
-            mode = mode |
-                ((stat_buffer[index] as usize) <<
-                 ((index - STAT_MODE_OFFSET) * 8));
-        }
-    }
-    if ((mode & 0xF000) != 0x8000) {
+    // The buffer starts as 0xFF, so this is a real content check rather than
+    // a return code a zeroed struct would also satisfy: the kernel wrote the
+    // mask, and no signal this kernel accepts lives in the top byte.
+    if (sigset_buffer[SIGSET_BYTES - 1] != 0) {
         affinity_fail(
-            bs"affinity: newfstatat asked from cpu 1 did not answer\n");
+            bs"affinity: rt_sigprocmask asked from cpu 1 did not answer\n");
     }
     // Say it BEFORE the spinner goes. This line is written from CPU 1, so it
     // is published into this CPU's console ring, and the only thing that
@@ -268,7 +272,7 @@ fn affinity_probe() {
     // the boot. The spinner's millisecond naps are what keep the drain
     // running, which is the reason it exists -- so it has to outlive the
     // output, not just the migration.
-    affinity_say(bs"affinity: pinned to cpu 1, where newfstatat, outside the peer-safe table, still answered\n");
+    affinity_say(bs"affinity: pinned to cpu 1, where rt_sigprocmask, outside the peer-safe table, still answered\n");
     // GitHub issue #579: every OTHER online cpu, while the same spinner is
     // still keeping core 0 occupied. Cpu 1 is proved above; this walks the
     // rest of the reported online set, which is empty on two-vCPU QEMU and
