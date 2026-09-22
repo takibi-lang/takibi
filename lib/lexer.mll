@@ -41,7 +41,6 @@ let hard_keyword_token = function
   | "sink" -> SINK | "private" -> PRIVATE | "packed" -> PACKED | "be" -> BE
   | "publish" -> PUBLISH
   | "no_copy" -> NO_COPY
-  | "no_whole_store" -> NO_COPY
   | "io" -> IO | "enum" -> ENUM | "match" -> MATCH | "align" -> ALIGN
   | "sizeof" -> SIZEOF | "alignof" -> ALIGNOF
   | "contains_stable_owner" -> CONTAINS_STABLE_OWNER | "use" -> USE
