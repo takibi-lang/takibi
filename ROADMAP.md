@@ -227,16 +227,27 @@ The next multicore increment is phase B. Its order is now:
    because admitting a syscall on a peer is pointless while no ordinary
    process is placed on one.
 
-7. **#579 and #580, together.** What a review on 2026-09-22 measured, before
-   designing a workload: `kernel_process_schedulable_mask()` names core 0 and
-   `SECONDARY_CORE_ID` only, so **two** cores run processes on the four-core
-   board; and a process whose affinity mask is 0 -- every process, since PID 1
-   starts at 0 and every child inherits it -- reaches a peer only if
-   `workload_busy_secondary_candidate` names its pid. **So an ordinary process
-   never runs on a peer today.** #579 makes every online core schedulable and
-   has to decide what a QEMU lane does, since maintained lanes are `-smp 2`
-   for CI capacity. #580 replaces the named-pid rule with a policy and retires
-   `workload_busy_*_candidate`. Neither is worth landing without the other.
+7. **#580.** **#579 is complete (2026-09-22)**: the schedulable set is the
+   online set, and the four-core board reports `smp bringup: an EL0 process
+   ran on cpus=0,1,2,3` where QEMU reports `cpus=0,1`. No lane gained vCPUs
+   -- every assertion is written against the set the kernel reports online,
+   so one ash transcript is true on both platforms and the per-platform
+   difference is asserted in the per-platform view. **What it cost is the
+   part worth carrying forward**: widening the mask was one line, QEMU passed
+   it, and the board refused it, because no scheduling path could give up a
+   process a CPU may no longer run. `kernel_process_schedule` returns the
+   current frame when nothing else is Ready, and the only transition anybody
+   had exercised was core 0 to CPU 1 -- where `/bin/affinity` keeps a spinner
+   Ready on core 0, standing in for a kernel mechanism that did not exist.
+   Expect more of that shape here: a fixture's scaffolding is load-bearing
+   until a second arrangement asks for the same thing.
+
+   **#580 is what remains of the pair.** A process whose affinity mask is 0 --
+   every process, since PID 1 starts at 0 and every child inherits it --
+   reaches a peer only if `workload_busy_secondary_candidate` names its pid,
+   so an ordinary process still never runs on a peer. #580 replaces that
+   named-pid rule with a policy and retires `workload_busy_*_candidate`.
+   Four cores are available to a mask now and to nothing else.
    **#514 is #580's gate and is still unobserved**: slot turnover is slow and
    single-cored today, which is exactly what #580 changes.
 
