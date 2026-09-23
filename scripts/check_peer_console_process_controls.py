@@ -135,7 +135,9 @@ def main() -> int:
         "short count": ("kernel/kernel/workload_evidence.tkb",
                         "first != 1024", "first != 1088"),
         "placement": ("kernel/kernel/workload_evidence.tkb",
+                      "        workload_busy_pair.peer_console_reported ||\n"
                       "        cpu_id() != SECONDARY_CORE_ID",
+                      "        workload_busy_pair.peer_console_reported ||\n"
                       "        cpu_id() == SECONDARY_CORE_ID"),
         "ddb gate": ("kernel/kernel/workload_evidence.tkb",
                      "kernel_ddb_peer_console_test_enabled == false",

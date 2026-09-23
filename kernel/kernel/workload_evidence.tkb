@@ -88,6 +88,13 @@ must_use variant WorkloadBusyProgressResult {
     FinishRequested;
 }
 
+must_use variant WorkloadPeerNetWakeResult {
+    Cpu(usize);
+    Block;
+    Resumed;
+    Refused;
+}
+
 // Observing the result on B's CPU is distinct from emitting it on the
 // ordinary console's owner. Pending freezes the verdict until core 0 prints.
 enum WorkloadRestartReportState { Waiting; Pending; Reported; }
@@ -185,6 +192,12 @@ struct WorkloadBusyPair {
 }
 
 private let mut workload_busy_pair: WorkloadBusyPair;
+
+// One peer process owns this one-shot NetRx publication test. The tag-6
+// syscall registers it on CPU0, then asks the ordinary scheduler path to
+// publish it Blocked before the CPU0 timer wake scans all slots.
+private let mut workload_peer_net_wake_pid: usize;
+private let mut workload_peer_net_wake_block_requested: bool;
 
 enum WorkloadCpuMode { Idle; El0; El1; Irq; }
 
@@ -897,6 +910,40 @@ fn workload_peer_read_progress(bytes: usize, checksum: usize) -> usize {
         "workload: peer read 98304 pattern bytes; block device mutex contended on both cpus\n");
     process_run_unlock(guard);
     return 2;
+}
+
+// GitHub issue #587: the peer waiter fixture runs the real scheduler block
+// and timer wake paths without admitting socket calls on a peer. Re-entry of
+// the same test syscall proves the Blocked record was woken and selected.
+fn workload_peer_net_wake_progress(step: usize)
+        -> WorkloadPeerNetWakeResult !{unsafe} {
+    let guard = process_run_lock();
+    let pid: usize = kernel_process_current_pid();
+    if (step == 0 && workload_peer_net_wake_pid == 0) {
+        workload_peer_net_wake_pid = pid;
+        process_run_unlock(guard);
+        return WorkloadPeerNetWakeResult::Cpu(SECONDARY_CORE_ID);
+    }
+    if (pid != workload_peer_net_wake_pid ||
+        cpu_id() != SECONDARY_CORE_ID) {
+        workload_busy_pair.refused = workload_busy_pair.refused + 1;
+        process_run_unlock(guard);
+        return WorkloadPeerNetWakeResult::Refused;
+    }
+    if (step == 1 && workload_peer_net_wake_block_requested == false) {
+        workload_peer_net_wake_block_requested = true;
+        process_run_unlock(guard);
+        return WorkloadPeerNetWakeResult::Block;
+    }
+    if (step == 1 && workload_peer_net_wake_block_requested &&
+        kernel_process_current_pending_block_reason() ==
+            ProcessWaitReason::None) {
+        process_run_unlock(guard);
+        return WorkloadPeerNetWakeResult::Resumed;
+    }
+    workload_busy_pair.refused = workload_busy_pair.refused + 1;
+    process_run_unlock(guard);
+    return WorkloadPeerNetWakeResult::Refused;
 }
 
 // Tag 4 belongs to /bin/peer-console. Registration happens before its first

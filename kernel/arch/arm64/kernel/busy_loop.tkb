@@ -36,6 +36,8 @@ const SETAFFINITY_SYSCALL: usize = 122;
 const WRITE_SYSCALL: usize = 64;
 const BUSY_LOOP_TAG_A: usize = 1;
 const BUSY_LOOP_TAG_B: usize = 2;
+const PEER_NET_WAKE_TAG: usize = 6;
+const GETCPU_SYSCALL: usize = 168;
 
 /* One round of work. Sized so a round spans several scheduler timer slices
  * (the tick is cntfrq/64, about a millisecond on both maintained targets),
@@ -88,6 +90,55 @@ fn busy_loop_peer_spin() {
     while (true) {
         svc5(GETPID_SYSCALL, 0, 0, 0, 0, 0);
     }
+}
+
+/* /bin/peer-net-wake exercises the real process Blocked/NetRx transition
+ * and timer wake on CPU 1. Tag 6 is a test-only syscall action: its first
+ * call names CPU 1, then this process pins itself there before asking to
+ * block. */
+fn busy_loop_peer_net_wake() {
+    let peer_cpu: usize = svc5(
+        WORKLOAD_PROGRESS_SYSCALL, PEER_NET_WAKE_TAG, 0, 0, 0, 0);
+    if (peer_cpu == 0 || peer_cpu >= 8) {
+        svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
+        return;
+    }
+    let mut mask: [u8; 8];
+    for index: usize in 0..<8 { mask[index] = 0; }
+    mask[0] = (1 << peer_cpu) as u8;
+    if (svc5(SETAFFINITY_SYSCALL, 0, 8,
+             mask as *u8 as usize, 0, 0) != 0) {
+        svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
+        return;
+    }
+    let mut cpu_bytes: [u8; 4];
+    while (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize,
+                0, 0, 0, 0) != 0 ||
+           (cpu_bytes[0] as usize |
+            ((cpu_bytes[1] as usize) << 8) |
+            ((cpu_bytes[2] as usize) << 16) |
+            ((cpu_bytes[3] as usize) << 24)) != peer_cpu) {}
+
+    let waiting: []u8 = bs"peer NetRx fixture: pinned to cpu 1\n";
+    if (svc5(WRITE_SYSCALL, 1, waiting as *u8 as usize,
+             waiting.len, 0, 0) != waiting.len) {
+        svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
+        return;
+    }
+
+    let resumed: usize = svc5(
+        WORKLOAD_PROGRESS_SYSCALL, PEER_NET_WAKE_TAG, 1, 0, 0, 0);
+    if (resumed != 1) {
+        svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
+        return;
+    }
+    let line: []u8 = bs"workload: peer NetRx waiter resumed on cpu 1\n";
+    if (svc5(WRITE_SYSCALL, 1, line as *u8 as usize,
+             line.len, 0, 0) != line.len) {
+        svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
+        return;
+    }
+    svc5(WORKLOAD_EXIT_SYSCALL, 0, 0, 0, 0, 0);
 }
 
 fn busy_loop_run(tag: usize) {

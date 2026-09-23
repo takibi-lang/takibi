@@ -51,6 +51,7 @@ mv
 nproc
 od
 peer-console
+peer-net-wake
 peer-read
 peer-spin
 peer-tty

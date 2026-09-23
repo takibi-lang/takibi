@@ -69,13 +69,16 @@ PEER_SPINNER = b"/bin/peer-spin &\n"
 PEER_SPINNER_READY = b"peer spin: pinned to cpu 1\n"
 
 MODE = os.environ.get("UART_WAKE_MODE", "shell")
-LABEL = "kernel/qemu peer-uart-wake" if MODE == "peer" else "kernel/qemu uart-wake"
+LABEL = "kernel/qemu peer-uart-and-net-wake" if MODE == "peer" else "kernel/qemu uart-wake"
 PEER_COMMAND = b"/bin/peer-tty\n"
 PEER_CONSOLE_DONE = b"peer user console: record=17/17 "
 BUSY_PAIR_DONE = b"workload: busy pair done\n"
 PEER_READING = b"workload: peer tty reading the terminal on the secondary cpu\n"
 PEER_LINE = b"peer-tty-line-ok\n"
 PEER_VERDICT = b"workload: peer tty read its 17-byte line"
+PEER_NET_WAKE_COMMAND = b"/bin/peer-net-wake\n"
+PEER_NET_WAKE_READY = b"peer NetRx fixture: pinned to cpu 1\n"
+PEER_NET_WAKE_VERDICT = b"workload: peer NetRx waiter resumed on cpu 1"
 PEER_WINDOW = "kernel_process_block_uart"
 RING_PUSH = "kernel_uart_rx_push"
 # QEMU's gdbstub numbers vCPUs from 1: thread 1 is CPU0, thread 2 is CPU1.
@@ -284,9 +287,29 @@ def run_peer(connection: socket.socket) -> None:
         verdict(False, f"every byte of {PEER_LINE!r} was delivered, but the "
                 "kernel never accepted the line /bin/peer-tty read")
         return
-    verdict(True, f"bytes 1-{last} of {PEER_LINE!r} each reached the ring from "
-            "CPU0 while the reader was held on CPU1 between its last lockless "
-            "look and the lock, and each was read on the secondary cpu")
+    peer_result = (f"bytes 1-{last} of {PEER_LINE!r} each reached the ring from "
+                   "CPU0 while the reader was held on CPU1 between its last "
+                   "lockless look and the lock, and each was read on the "
+                   "secondary cpu")
+    if MODE == "peer":
+        print(f"PASS kernel/qemu peer-uart: {peer_result}", flush=True)
+    else:
+        verdict(True, peer_result)
+
+
+def run_peer_net_wake(connection: socket.socket) -> None:
+    # The fixture pins itself to CPU1, enters the scheduler's real Blocked /
+    # NetRx path, and reports only after CPU0's timer wake resumes it there.
+    connection.sendall(PEER_NET_WAKE_COMMAND)
+    if not seen(lambda text: PEER_NET_WAKE_READY in text, STEP_TIMEOUT):
+        verdict(False, "the peer NetRx fixture did not pin itself to CPU1")
+        return
+    if not seen(lambda text: PEER_NET_WAKE_VERDICT in text, 5.0):
+        verdict(False, "the CPU0 timer did not resume the peer's NetRx waiter "
+                "on CPU1")
+        return
+    verdict(True, "CPU0's timer wake resumed the peer's Blocked/NetRx waiter "
+            "on CPU1")
 
 
 def run() -> None:
@@ -315,6 +338,8 @@ def run() -> None:
     time.sleep(1.0)
     if MODE == "peer":
         run_peer(connection)
+        if seen(lambda text: PEER_VERDICT in text, 1.0):
+            run_peer_net_wake(connection)
         return
 
     # A read blocks only when something else is Ready. Beside this shell

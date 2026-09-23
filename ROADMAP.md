@@ -261,14 +261,17 @@ The next multicore increment is phase B. Its order is now:
    that the net wake walked only one process chain was wrong: the successor
    walk was already a pre-order walk of the whole process tree.
 
-   **What remains is a deterministic peer NetRx wake lane.** The tempting
-   UART-window reproduction cannot be reused directly: holding a peer in
-   `scheduled_process_block` holds the same process-run lock that the CPU0
-   UART RX interrupt needs before it can make progress. A dedicated fixture
-   must create a peer NetRx waiter, race publication of its Blocked state
-   against the CPU0 timer wake, and prove the same case goes red with the lock
-   removed.
-   Until that exists, #581 must not admit socket calls on peers.
+   **A peer NetRx end-to-end wake lane now passes on QEMU (2026-09-23).** Its
+   test-only fixture pins an ordinary process to CPU1, publishes a real
+   Blocked/NetRx wait, and reports only after CPU0's timer wake resumes it on
+   CPU1. This proves the peer waiter reaches and leaves the scheduler state,
+   but it does not yet hold the precise publication window against CPU0, nor
+   does a lockless control build demonstrate that the race goes red. Those are
+   still #587's acceptance bar; the earlier UART-window technique cannot be
+   reused directly because holding a peer in `scheduled_process_block` also
+   holds the process-run lock the CPU0 UART RX interrupt needs. Until the
+   deterministic race and its control are added, #581 must not admit socket
+   calls on peers.
 
    **#586 was this entry's first answer and was wrong**, filed from a grep
    of the first eighteen lines of `TcpConnection` where the lock is not; it
