@@ -1121,6 +1121,9 @@ KERNEL_QEMU_FPSIMD_O     := $(KERNEL_QEMU_BUILD_DIR)/fpsimd_probe.o
 KERNEL_QEMU_PMU_O        := $(KERNEL_QEMU_BUILD_DIR)/pmu.o
 KERNEL_QEMU_MAIN_TKB     := $(KERNEL_DIR)/platform/qemu/init.tkb
 KERNEL_QEMU_MAIN_O       := $(KERNEL_QEMU_BUILD_DIR)/main.o
+KERNEL_QEMU_NET_WAKE_CONTROL_DIR := _build/qemu-net-wake-control-overlay
+KERNEL_QEMU_NET_WAKE_CONTROL_O := $(KERNEL_QEMU_BUILD_DIR)/net-wake-control-main.o
+KERNEL_QEMU_NET_WAKE_CONTROL_ELF := $(KERNEL_QEMU_BUILD_DIR)/kernel-net-wake-control.elf
 KERNEL_QEMU_LINK_LD      := $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld
 KERNEL_QEMU_ELF          := $(KERNEL_QEMU_BUILD_DIR)/kernel.elf
 KERNEL_QEMU_UART_TKB     := $(KERNEL_DIR)/platform/qemu/uart.tkb
@@ -1181,6 +1184,15 @@ $(KERNEL_QEMU_MAIN_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(
     $(KERNEL_QEMU_UART_TKB) $(KERNEL_QEMU_INTC_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile | $(KERNEL_QEMU_BUILD_DIR)
 	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap $(KERNEL_UNUSED_CHECK_QEMU) --emit-depfile $@.d -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.d
+
+# Issue #587 negative control: the same QEMU source closure, with only the
+# NetRx scan moved before its process-run lock in the generated overlay.
+$(KERNEL_QEMU_NET_WAKE_CONTROL_O): $(KERNEL_QEMU_MAIN_O) $(KERNEL_PROCESS_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) scripts/build_qemu_net_wake_control.py | $(KERNEL_QEMU_BUILD_DIR)
+	python3 scripts/build_qemu_net_wake_control.py . $(KERNEL_QEMU_NET_WAKE_CONTROL_DIR)
+	cd $(KERNEL_QEMU_NET_WAKE_CONTROL_DIR) && $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/rpi5/usb_xhci.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap $(KERNEL_UNUSED_CHECK_QEMU) --emit-depfile $(abspath $@).d -o $(abspath $@)
+
+$(KERNEL_QEMU_NET_WAKE_CONTROL_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_NET_WAKE_CONTROL_O) $(KERNEL_QEMU_LINK_LD) $(KERNEL_RPI5_LINK_LD)
+	$(LLD) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_NET_WAKE_CONTROL_O) -o $@
 
 # GitHub issue #306: the hand-written prerequisite list on $(KERNEL_QEMU_MAIN_O)
 # above is a second, independently-maintained copy of exactly what the
@@ -1539,16 +1551,15 @@ kernelcheck-stack-overflow-qemu: kernelbuild-check
 _kernelcheck-stack-overflow-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_stack_overflow_qemutest.sh
 
-## GitHub issue #546: a byte that arrives while a terminal read is on its way
-## to sleep still reaches the reader. A gdb breakpoint holds the guest inside
-## that window while each byte of a command is sent, so the lost wakeup that
-## stalled two qemu-debug runs happens on every byte instead of once a day.
-kernelcheck-uart-wake-qemu: kernelbuild-check
+## Issues #546/#547/#587: deterministic UART and NetRx publication windows.
+## GDB holds the guest at each cross-core race point; the peer suite also
+## reboots a generated lockless NetRx control sequentially on the same ports.
+kernelcheck-uart-wake-qemu: kernelbuild-check $(KERNEL_QEMU_NET_WAKE_CONTROL_ELF)
 	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-uart-wake-qemu
 
 _kernelcheck-uart-wake-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_uart_wake_qemutest.sh
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_UART_WAKE_MODE=peer KERNEL_QEMU_UART_WAKE_SERIAL_PORT=18713 KERNEL_QEMU_UART_WAKE_GDB_PORT=18714 KERNEL_QEMU_UART_WAKE_NETDEV_LOCAL_PORT=18715 KERNEL_QEMU_UART_WAKE_NETDEV_REMOTE_PORT=18716 KERNEL_QEMU_UART_WAKE_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-uart-wake-qemu-peer" bash scripts/run_kernel_uart_wake_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_UART_WAKE_MODE=peer-suite KERNEL_QEMU_UART_WAKE_CONTROL_ELF="$(KERNEL_QEMU_NET_WAKE_CONTROL_ELF)" KERNEL_QEMU_UART_WAKE_SERIAL_PORT=18713 KERNEL_QEMU_UART_WAKE_GDB_PORT=18714 KERNEL_QEMU_UART_WAKE_NETDEV_LOCAL_PORT=18715 KERNEL_QEMU_UART_WAKE_NETDEV_REMOTE_PORT=18716 KERNEL_QEMU_UART_WAKE_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-uart-wake-qemu-peer-suite" bash scripts/run_kernel_uart_wake_qemutest.sh
 
 ## Two windows around /bin/affinity, watched with gdb rather than printed by
 ## the kernel. GitHub issue #9's migration gate: the probe pins itself to

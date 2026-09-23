@@ -5745,8 +5745,11 @@ fn kernel_process_deadline_wake_all(guard: borrow ProcessRunGuard[lock])
 //
 // The walk is the one kernel_process_deadline_wake_all already does from
 // this same handler, so the cost is established rather than new.
-fn kernel_process_net_wake_all(guard: borrow ProcessRunGuard[lock])
-        !{interrupt, unsafe} {
+// The timer's normal path calls this while holding the process-run lock.
+// Keeping the scan separate also lets the QEMU negative control compile the
+// identical scan without that lock, so the test changes only the protection
+// around the real production operation.
+fn kernel_process_net_wake_scan() !{interrupt, unsafe} {
     let mut cursor = scheduled_process_first_slot();
     let mut walking: bool = true;
     while (walking) {
@@ -5774,6 +5777,11 @@ fn kernel_process_net_wake_all(guard: borrow ProcessRunGuard[lock])
             }
         }
     }
+}
+
+fn kernel_process_net_wake_all(guard: borrow ProcessRunGuard[lock])
+        !{interrupt, unsafe} {
+    kernel_process_net_wake_scan();
 }
 
 // GitHub issue #544: a userspace write to the UART found the transmit queue

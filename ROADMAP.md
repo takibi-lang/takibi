@@ -248,9 +248,9 @@ The next multicore increment is phase B. Its order is now:
    carve-out is one fixture smaller. #559 is still the filesystem's honest
    remainder.
 
-   **The network wake lock is fixed; its end-to-end peer case is still open
-   (#587).** The stack audit found cross-core exclusion at every stateful
-   layer: the sole RX capability store behind a Mutex whose guard the
+   **The network wake lock and peer publication race are verified
+   (2026-09-23, #587).** The stack audit found cross-core exclusion at every
+   stateful layer: the sole RX capability store behind a Mutex whose guard the
    compiler checks, the retransmit chain with its own, the frame links under
    `frames_mutex`, the pools with their locks and generations, and the
    connection itself under #462's connection-wide TaskMutex, held for as long
@@ -261,17 +261,19 @@ The next multicore increment is phase B. Its order is now:
    that the net wake walked only one process chain was wrong: the successor
    walk was already a pre-order walk of the whole process tree.
 
-   **A peer NetRx end-to-end wake lane now passes on QEMU (2026-09-23).** Its
-   test-only fixture pins an ordinary process to CPU1, publishes a real
-   Blocked/NetRx wait, and reports only after CPU0's timer wake resumes it on
-   CPU1. This proves the peer waiter reaches and leaves the scheduler state,
-   but it does not yet hold the precise publication window against CPU0, nor
-   does a lockless control build demonstrate that the race goes red. Those are
-   still #587's acceptance bar; the earlier UART-window technique cannot be
-   reused directly because holding a peer in `scheduled_process_block` also
-   holds the process-run lock the CPU0 UART RX interrupt needs. Until the
-   deterministic race and its control are added, #581 must not admit socket
-   calls on peers.
+   **`kernelcheck-uart-wake-qemu` now proves the publication ordering on both
+   sides.** Its test-only fixture enters the actual CPU1 Blocked/NetRx path.
+   GDB holds CPU1 before publication while CPU0 handles its timer interrupt:
+   the fixed build takes the process-run lock before scanning and wakes only
+   after publication. A generated control kernel changes only that timer
+   ordering; it scans while the waiter is still Running, misses it, then waits
+   for CPU1 to publish and recovers on the next tick. The control is built
+   from the same source tree in an ignored overlay and runs sequentially in
+   the existing lane, adding one QEMU boot without another lane or port block.
+   `make cicheck` and four-core `make kernelcheck-rpi5` both pass. This closes
+   #587's race evidence, not network admission: #581 must still keep socket
+   calls on core 0 until its own synchronization and end-to-end acceptance
+   conditions are met.
 
    **#586 was this entry's first answer and was wrong**, filed from a grep
    of the first eighteen lines of `TcpConnection` where the lock is not; it

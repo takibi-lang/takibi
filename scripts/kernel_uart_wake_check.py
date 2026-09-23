@@ -36,6 +36,16 @@ Then both run. The reader must come back to the window for the next byte.
 Without the look under that lock, it publishes Blocked beside the byte and
 sleeps. A local interrupt mask cannot close this window, because the
 interrupt is taken on the other CPU.
+
+The same peer suite exercises GitHub issue #587 with /bin/peer-net-wake. It
+uses the real Blocked/NetRx scheduler path, not a synthetic lock probe. The
+fixed kernel holds CPU0 at timer entry while CPU1 takes the process-run lock
+and stops before publishing Blocked; CPU0 then contends for that lock and
+enters the NetRx scan only after publication. A generated control kernel runs
+one real scan while CPU1 is still at kernel_process_block_net, before it takes
+the lock, and must miss the Running waiter. CPU1 then publishes Blocked while
+holding the lock; the interrupted timer waits for it, and the next control
+tick recovers the waiter. The pair runs sequentially on the existing lane.
 """
 
 import os
@@ -69,7 +79,10 @@ PEER_SPINNER = b"/bin/peer-spin &\n"
 PEER_SPINNER_READY = b"peer spin: pinned to cpu 1\n"
 
 MODE = os.environ.get("UART_WAKE_MODE", "shell")
-LABEL = "kernel/qemu peer-uart-and-net-wake" if MODE == "peer" else "kernel/qemu uart-wake"
+LABEL = ("kernel/qemu peer-uart-and-net-wake-control"
+         if MODE == "peer-net-control" else
+         "kernel/qemu peer-uart-and-net-wake" if MODE == "peer" else
+         "kernel/qemu uart-wake")
 PEER_COMMAND = b"/bin/peer-tty\n"
 PEER_CONSOLE_DONE = b"peer user console: record=17/17 "
 BUSY_PAIR_DONE = b"workload: busy pair done\n"
@@ -298,9 +311,98 @@ def run_peer(connection: socket.socket) -> None:
 
 
 def run_peer_net_wake(connection: socket.socket) -> None:
-    # The fixture pins itself to CPU1, enters the scheduler's real Blocked /
-    # NetRx path, and reports only after CPU0's timer wake resumes it there.
+    # Stop CPU0 at timer entry and CPU1 before it takes the block lock. The
+    # control scan therefore runs while the waiter is Running; CPU1 then takes
+    # the lock and stops immediately before publishing Blocked.
+    gdb.execute("set pagination off")
+    gdb.execute("set confirm off")
+    gdb.execute(f"target remote 127.0.0.1:{GDB_PORT}")
+    control = MODE == "peer-net-control"
+    net_block = gdb.Breakpoint("kernel_process_block_net")
+    net_block.condition = f"$_thread == {CPU1_THREAD}"
     connection.sendall(PEER_NET_WAKE_COMMAND)
+    continue_bounded(False)
+    if net_block.hit_count != 1:
+        verdict(False, "the peer fixture did not enter kernel_process_block_net")
+        gdb.execute("detach")
+        return
+    net_block.delete()
+
+    if control:
+        # CPU1 is still at kernel_process_block_net and has not acquired the
+        # process-run lock. Execute one real timer scan on CPU0 now.
+        wake = gdb.Breakpoint("kernel_process_net_wake_scan")
+        wake.condition = f"$_thread == {CPU0_THREAD}"
+        gdb.execute(f"thread {CPU0_THREAD}", to_string=True)
+        continue_bounded(True)
+        if wake.hit_count != 1:
+            verdict(False, "lockless control did not scan NetRx before the "
+                    "peer acquired the Blocked-publication lock")
+            gdb.execute("set scheduler-locking off")
+            gdb.execute("detach")
+            return
+    else:
+        wake = None
+        timer_entry = gdb.Breakpoint("timer_irq_handler")
+        timer_entry.condition = f"$_thread == {CPU0_THREAD}"
+        gdb.execute(f"thread {CPU0_THREAD}", to_string=True)
+        continue_bounded(True)
+        if timer_entry.hit_count != 1:
+            verdict(False, "CPU0 did not reach the timer handler while the "
+                    "peer was poised to publish Blocked/NetRx")
+            gdb.execute("set scheduler-locking off")
+            gdb.execute("detach")
+            return
+        timer_entry.delete()
+
+    block = gdb.Breakpoint("scheduled_process_block")
+    block.condition = f"$_thread == {CPU1_THREAD}"
+    gdb.execute(f"thread {CPU1_THREAD}", to_string=True)
+    continue_bounded(True)
+    if block.hit_count != 1:
+        verdict(False, "the peer NetRx fixture did not reach the locked "
+                "Blocked-publication point")
+        gdb.execute("set scheduler-locking off")
+        gdb.execute("detach")
+        return
+    block.delete()
+
+    lock_entry = gdb.Breakpoint("process_run_lock")
+    lock_entry.condition = f"$_thread == {CPU0_THREAD}"
+    gdb.execute(f"thread {CPU0_THREAD}", to_string=True)
+    continue_bounded(True)
+    if lock_entry.hit_count != 1:
+        verdict(False, "CPU0 timer did not acquire the process-run lock")
+        gdb.execute("set scheduler-locking off")
+        gdb.execute("detach")
+        return
+    lock_entry.delete()
+    lock_spin = gdb.Breakpoint("spin_lock")
+    lock_spin.condition = f"$_thread == {CPU0_THREAD}"
+    continue_bounded(True)
+    if lock_spin.hit_count != 1:
+        verdict(False, "CPU0 did not contend on the process-run lock while "
+                "CPU1 held it before Blocked publication")
+        gdb.execute("set scheduler-locking off")
+        gdb.execute("detach")
+        return
+
+    lock_spin.delete()
+    if control:
+        wake.delete()
+    else:
+        wake = gdb.Breakpoint("kernel_process_net_wake_all")
+        wake.condition = f"$_thread == {CPU0_THREAD}"
+        continue_bounded(False)
+        if wake.hit_count != 1:
+            verdict(False, "the fixed timer did not enter the locked NetRx "
+                    "wake scan after Blocked publication")
+            gdb.execute("set scheduler-locking off")
+            gdb.execute("detach")
+            return
+        wake.delete()
+    gdb.execute("set scheduler-locking off")
+    gdb.execute("detach")
     if not seen(lambda text: PEER_NET_WAKE_READY in text, STEP_TIMEOUT):
         verdict(False, "the peer NetRx fixture did not pin itself to CPU1")
         return
@@ -308,8 +410,13 @@ def run_peer_net_wake(connection: socket.socket) -> None:
         verdict(False, "the CPU0 timer did not resume the peer's NetRx waiter "
                 "on CPU1")
         return
-    verdict(True, "CPU0's timer wake resumed the peer's Blocked/NetRx waiter "
-            "on CPU1")
+    if control:
+        verdict(True, "control scan ran without the process-run lock before "
+                "Blocked/NetRx publication and missed the waiter; the next "
+                "timer tick recovered it")
+    else:
+        verdict(True, "CPU0's timer wake waited on the process-run lock until "
+                "the peer published Blocked/NetRx, then resumed it on CPU1")
 
 
 def run() -> None:
@@ -336,7 +443,7 @@ def run() -> None:
         return
     # The marker is printed on the read's way to sleep; let it get there.
     time.sleep(1.0)
-    if MODE == "peer":
+    if MODE.startswith("peer"):
         run_peer(connection)
         if seen(lambda text: PEER_VERDICT in text, 1.0):
             run_peer_net_wake(connection)

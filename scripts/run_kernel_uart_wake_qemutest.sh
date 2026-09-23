@@ -5,6 +5,8 @@
 # script types one command into the shell a byte at a time, each byte sent
 # while a breakpoint holds the guest inside the read's window. The reasoning
 # is in scripts/kernel_uart_wake_check.py.
+# Its peer suite reboots with a generated lockless NetRx control for issue
+# #587, using the same ports sequentially.
 set -euo pipefail
 
 # `set -e` aborts with no context, and a lane's setup prints nothing on
@@ -14,7 +16,7 @@ trap 'takibi_status=$?; echo "[$(basename "$0")] aborted at line $LINENO with ex
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ELF="${KERNEL_QEMU_UART_WAKE_ELF:-$REPO_ROOT/kernel/build/qemu/kernel.elf}"
 . "$REPO_ROOT/scripts/kernel_elf_freshness.sh"
-kernel_elf_refuse_stale "$ELF" || exit 1
+kernel_elf_refuse_stale "$ELF" "uart-wake kernel" || exit 1
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
 ARTIFACT_DIR="${KERNEL_QEMU_UART_WAKE_ARTIFACT_DIR:-${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}/kernel-uart-wake-qemu}"
 QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
@@ -25,6 +27,22 @@ NETDEV_REMOTE_PORT="${KERNEL_QEMU_UART_WAKE_NETDEV_REMOTE_PORT:-18712}"
 # shell: the #546 window on the reader's own CPU. peer: the #547 window with
 # the reader on the secondary CPU and the RX interrupt on CPU0.
 MODE="${KERNEL_QEMU_UART_WAKE_MODE:-shell}"
+if [ "$MODE" = peer-suite ]; then
+    CONTROL_ELF="${KERNEL_QEMU_UART_WAKE_CONTROL_ELF:-}"
+    if [ -z "$CONTROL_ELF" ]; then
+        echo "error: peer-suite requires KERNEL_QEMU_UART_WAKE_CONTROL_ELF" >&2
+        exit 1
+    fi
+    KERNEL_QEMU_UART_WAKE_ARTIFACT_DIR="$ARTIFACT_DIR/locked" \
+    KERNEL_QEMU_UART_WAKE_MODE=peer \
+    KERNEL_QEMU_UART_WAKE_ELF="$REPO_ROOT/kernel/build/qemu/kernel.elf" \
+        "$REPO_ROOT/scripts/run_kernel_uart_wake_qemutest.sh"
+    KERNEL_QEMU_UART_WAKE_ARTIFACT_DIR="$ARTIFACT_DIR/lockless-control" \
+    KERNEL_QEMU_UART_WAKE_MODE=peer-net-control \
+    KERNEL_QEMU_UART_WAKE_ELF="$CONTROL_ELF" \
+        "$REPO_ROOT/scripts/run_kernel_uart_wake_qemutest.sh"
+    exit 0
+fi
 INIT_LISTENER="$ARTIFACT_DIR/init.listener"
 NETWORK_READY="$ARTIFACT_DIR/network.ready"
 VERDICT="$ARTIFACT_DIR/verdict"
