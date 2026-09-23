@@ -3990,8 +3990,11 @@ fn kernel_process_cpu_allows_slot(cpu: usize, slot: usize) -> bool {
 
 // Whether this CPU may still run the process it is running. False means the
 // process's own affinity mask has stopped naming this CPU, which is what
-// `sched_setaffinity` does to a process that re-pins itself.
-fn kernel_process_current_cpu_allows() -> bool {
+// `sched_setaffinity` does to a process that re-pins itself. The mask is
+// shared process state and is written under this same guard, so require it
+// for the snapshot used at the syscall boundary.
+fn kernel_process_current_cpu_allows(
+        guard: borrow ProcessRunGuard[scheduled_process_run_lock]) -> bool {
     if (execution_here().current_live == false) { return true; }
     return kernel_process_cpu_allows_slot(
         cpu_id(), execution_here().current_handle.pool_index);
@@ -6849,7 +6852,8 @@ fn kernel_process_parent_is_root() -> bool {
 // The current process's parent pid, sampled under ProcessRunGuard when the
 // caller compares two fixture children. Unlike parent_is_root(), this keeps
 // a process created by an interactive shell tied to that exact shell.
-fn kernel_process_current_parent_pid() -> usize {
+fn kernel_process_current_parent_pid(
+        guard: borrow ProcessRunGuard[scheduled_process_run_lock]) -> usize {
     if (execution_here().current_live == false) { return 0; }
     let mut current: ProcessHandle = execution_here().current_handle;
     let record: *ProcessRecord = scheduled_process_record_of(current);
@@ -6868,7 +6872,8 @@ fn kernel_process_current_pid() -> usize {
 
 // The caller holds ProcessRunGuard when it uses this snapshot to make a
 // cross-core placement decision or publish placement evidence.
-fn kernel_process_current_affinity_mask() -> usize {
+fn kernel_process_current_affinity_mask(
+        guard: borrow ProcessRunGuard[scheduled_process_run_lock]) -> usize {
     if (execution_here().current_live == false) { return 0; }
     return scheduled_process_affinity_mask(
         execution_here().current_handle.pool_index);

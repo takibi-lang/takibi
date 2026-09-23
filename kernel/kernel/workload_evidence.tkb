@@ -712,7 +712,7 @@ private fn workload_busy_record_progress_locked(
              pid == workload_busy_pair.a_pid) ||
             (tag == WORKLOAD_BUSY_TAG_B &&
              pid == workload_busy_pair.b_pid)) {
-            let mask: usize = kernel_process_current_affinity_mask();
+            let mask: usize = kernel_process_current_affinity_mask(guard);
             if (mask != kernel_process_online_mask()) {
                 // The workers pinned themselves while earlier staged boot
                 // fixtures depended on CPU 1 returning to its idle loop.
@@ -1231,9 +1231,9 @@ fn workload_ordinary_placement_note_syscall(number: usize) {
         scheduled_process_command_line(kernel_syscall_process_slot());
     let is_busybox_sleep: bool =
         slice_eq(command_line[0..<11], bs"/bin/sleep\0");
-    let parent_pid: usize = kernel_process_current_parent_pid();
+    let parent_pid: usize = kernel_process_current_parent_pid(guard);
     if (is_busybox_sleep && parent_pid != 0 &&
-        kernel_process_current_affinity_mask() == 0 &&
+        kernel_process_current_affinity_mask(guard) == 0 &&
         (kernel_process_online_mask() & (1 << cpu)) != 0) {
         workload_busy_pair.ordinary_busybox_peer_reported = true;
         workload_busy_pair.ordinary_busybox_peer_parent_pid = parent_pid;
@@ -1245,9 +1245,9 @@ private fn workload_ordinary_placement_report() -> usize {
     let guard = process_run_lock();
     let reported: bool =
         kernel_process_parent_is_root() == false &&
-        kernel_process_current_affinity_mask() == 0 &&
+        kernel_process_current_affinity_mask(guard) == 0 &&
         workload_busy_pair.ordinary_busybox_peer_reported &&
-        kernel_process_current_parent_pid() ==
+        kernel_process_current_parent_pid(guard) ==
             workload_busy_pair.ordinary_busybox_peer_parent_pid;
     process_run_unlock(guard);
     if (reported) { return 1; }
@@ -1257,9 +1257,9 @@ private fn workload_ordinary_placement_report() -> usize {
 private fn workload_ordinary_placement_guard_complete() -> usize {
     let guard = process_run_lock();
     let complete: bool =
-        kernel_process_current_affinity_mask() == 1 &&
+        kernel_process_current_affinity_mask(guard) == 1 &&
         workload_busy_pair.ordinary_busybox_peer_reported &&
-        kernel_process_current_parent_pid() ==
+        kernel_process_current_parent_pid(guard) ==
             workload_busy_pair.ordinary_busybox_peer_parent_pid;
     process_run_unlock(guard);
     if (complete) { return 1; }

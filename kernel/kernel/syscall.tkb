@@ -2844,8 +2844,15 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // idle loop it booted into. Core 0 has no such loop, which is why this is
     // a peer-only question and why a process leaving core 0 still needs a
     // successor there.
-    if (cpu_id() != 0 && kernel_process_current_cpu_allows() == false) {
-        return SyscallAction::Migrate;
+    if (cpu_id() != 0) {
+        // Affinity may have been changed by another CPU. Take the process
+        // run lock for this scheduling-boundary snapshot, then release it
+        // before the migration path acquires the same lock.
+        let guard = process_run_lock();
+        let current_cpu_allows: bool =
+            kernel_process_current_cpu_allows(guard);
+        process_run_unlock(guard);
+        if (current_cpu_allows == false) { return SyscallAction::Migrate; }
     }
     if (cpu_id() != 0 && syscall_peer_safe(number, x0) == false) {
         return SyscallAction::Migrate;

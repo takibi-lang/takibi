@@ -17,6 +17,26 @@ FIRST_COMMANDS = (
 )
 
 
+def peer_affinity_gate_is_guarded(syscall: str, process: str) -> bool:
+    dispatch = syscall.find("fn kernel_syscall_dispatch_action(")
+    gate_start = syscall.find("if (cpu_id() != 0) {", dispatch)
+    peer_safe = syscall.find(
+        "if (cpu_id() != 0 && syscall_peer_safe(number, x0) == false)",
+        gate_start)
+    gate = (syscall[gate_start:peer_safe]
+            if dispatch >= 0 and gate_start >= dispatch and
+            peer_safe > gate_start else "")
+    return (
+        re.search(
+            r"fn kernel_process_current_cpu_allows\(\s*"
+            r"guard: borrow ProcessRunGuard\[scheduled_process_run_lock\]\)"
+            r" -> bool", process) is not None
+        and "let guard = process_run_lock();" in gate
+        and "kernel_process_current_cpu_allows(guard)" in gate
+        and "process_run_unlock(guard);" in gate
+    )
+
+
 def image_bin_names(makefile: str) -> list[str]:
     start = makefile.index("$(KERNEL_EXT2_IMAGE):")
     end = makefile.index("$(KERNEL_SHELL_EXT2_IMAGE):", start)
@@ -37,7 +57,8 @@ def image_bin_names(makefile: str) -> list[str]:
 
 
 def busybox_sleep_probe_is_real(makefile: str, stdin: str,
-                                workload: str, syscall: str) -> bool:
+                                workload: str, syscall: str,
+                                process: str) -> bool:
     sleep_alias = re.compile(
         r"\blink /bin/busybox\.static /bin/sleep'\s+\$@\.tmp")
     commands = tuple(line for line in stdin.splitlines()
@@ -45,6 +66,12 @@ def busybox_sleep_probe_is_real(makefile: str, stdin: str,
     observer = syscall.find(
         "workload_ordinary_placement_note_syscall(number);")
     dispatcher = syscall.find("kernel_syscall_dispatch_action(", observer)
+    sample_start = workload.find(
+        "fn workload_ordinary_placement_note_syscall(number: usize) {")
+    sample_end = workload.find(
+        "\nprivate fn workload_ordinary_placement_report", sample_start)
+    sample = (workload[sample_start:sample_end]
+              if sample_start >= 0 and sample_end > sample_start else "")
     return (
         sum(bool(sleep_alias.search(line)) for line in makefile.splitlines()) == 1
         and "/etc/placement-guard >/dev/null &" in commands
@@ -56,12 +83,27 @@ def busybox_sleep_probe_is_real(makefile: str, stdin: str,
         and "/etc/placement-report" in commands
         and 'slice_eq(command_line[0..<11], bs"/bin/sleep\\0")' in workload
         and "kernel_process_parent_is_root()" in workload
-        and "kernel_process_current_affinity_mask() == 0" in workload
-        and "kernel_process_online_mask() & (1 << cpu)" in workload
-        and "kernel_process_current_parent_pid()" in workload
+        and "kernel_process_current_affinity_mask(guard) == 0" in sample
+        and "kernel_process_online_mask() & (1 << cpu)" in sample
+        and "kernel_process_current_parent_pid(guard)" in sample
         and "ordinary_busybox_peer_parent_pid" in workload
+        and "let raw_cpu: usize = cpu_id();" in sample
+        and "if (raw_cpu == 0 || raw_cpu >= KERNEL_MAX_CORES) { return; }"
+            in sample
+        and "let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;" in sample
         and "number != AARCH64_NR_NANOSLEEP" in workload
         and "number != AARCH64_NR_CLOCK_NANOSLEEP" in workload
+        and re.search(
+            r"fn kernel_process_current_parent_pid\(\s*"
+            r"guard: borrow ProcessRunGuard\[scheduled_process_run_lock\]\)"
+            r" -> usize", process)
+            is not None
+        and re.search(
+            r"fn kernel_process_current_affinity_mask\(\s*"
+            r"guard: borrow ProcessRunGuard\[scheduled_process_run_lock\]\)"
+            r" -> usize", process)
+            is not None
+        and peer_affinity_gate_is_guarded(syscall, process)
         and observer >= 0 and dispatcher > observer
     )
 
@@ -94,6 +136,8 @@ def main() -> int:
         encoding="ascii")
     syscall = (ROOT / "kernel/kernel/syscall.tkb").read_text(
         encoding="ascii")
+    process = (ROOT / "kernel/kernel/process.tkb").read_text(
+        encoding="ascii")
     try:
         actual = image_bin_names(makefile)
         listed = expected_bin_names(stdin, expected)
@@ -106,7 +150,8 @@ def main() -> int:
         print("FAIL ash-bin-inventory: /bin listing differs from image recipe; "
               f"missing={missing} stale={stale}")
         return 1
-    if not busybox_sleep_probe_is_real(makefile, stdin, workload, syscall):
+    if not busybox_sleep_probe_is_real(
+            makefile, stdin, workload, syscall, process):
         print("FAIL ash-bin-inventory: ordinary placement no longer observes "
               "the real BusyBox sleep child from ash")
         return 1
