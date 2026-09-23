@@ -50,6 +50,11 @@ def run_case(case: str) -> tuple[subprocess.CompletedProcess[str], int, list[str
         fake = temp / "openocd"
         fake.write_text(FAKE_OPENOCD, encoding="ascii")
         fake.chmod(0o755)
+        fake_nm = temp / "llvm-nm-19"
+        fake_nm.write_text(
+            "#!/bin/sh\nprintf '%s\\n' '0000000000200800 T el1_vectors'\n",
+            encoding="ascii")
+        fake_nm.chmod(0o755)
         count_file = temp / "count"
         env = os.environ.copy()
         env.update({
