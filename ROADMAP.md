@@ -248,20 +248,27 @@ The next multicore increment is phase B. Its order is now:
    carve-out is one fixture smaller. #559 is still the filesystem's honest
    remainder.
 
-   **The network waits on #587, not on #274 or #386.** Both of those are
-   real and neither is about missing cross-core exclusion. The audit that
-   looked found the stack already excludes at every layer it has: the sole
-   RX capability store behind a Mutex whose guard the compiler checks, the
-   retransmit chain with its own, the frame links under `frames_mutex`, the
-   pools with their locks and generations, and the connection itself under
-   #462's connection-wide TaskMutex, held for as long as an owner exists.
+   **The network wake lock is fixed; its end-to-end peer case is still open
+   (#587).** The stack audit found cross-core exclusion at every stateful
+   layer: the sole RX capability store behind a Mutex whose guard the
+   compiler checks, the retransmit chain with its own, the frame links under
+   `frames_mutex`, the pools with their locks and generations, and the
+   connection itself under #462's connection-wide TaskMutex, held for as long
+   as an owner exists. Commit 211a19d0 put all three interrupt-side
+   Blocked-to-Ready paths under the process-run lock and changed the net wake
+   to an all-slot walk. It also removed the `current_live` early return, which
+   had left an idle secondary unable to wake anyone. The issue's old claim
+   that the net wake walked only one process chain was wrong: the successor
+   walk was already a pre-order walk of the whole process tree.
 
-   The layer that does not is the wake. `kernel_process_net_wake_all` takes
-   no process-run lock while it moves a process from Blocked to Ready from
-   an interrupt handler, and it walks only the chain rooted at whatever is
-   current on the INTERRUPTED cpu -- so a waiter outside that chain is never
-   reached. Both hold while every socket waiter is on core 0. It is #547's
-   shape one subsystem over, and #547 is the worked answer.
+   **What remains is a deterministic peer NetRx wake lane.** The tempting
+   UART-window reproduction cannot be reused directly: holding a peer in
+   `scheduled_process_block` holds the same process-run lock that the CPU0
+   UART RX interrupt needs before it can make progress. A dedicated fixture
+   must create a peer NetRx waiter, race publication of its Blocked state
+   against the CPU0 timer wake, and prove the same case goes red with the lock
+   removed.
+   Until that exists, #581 must not admit socket calls on peers.
 
    **#586 was this entry's first answer and was wrong**, filed from a grep
    of the first eighteen lines of `TcpConnection` where the lock is not; it
@@ -277,21 +284,25 @@ The next multicore increment is phase B. Its order is now:
    so one ash transcript is true on both platforms and the per-platform
    difference is asserted in the per-platform view.
 
-   **Two of #580's three obstacles are already cleared**, both found by
-   applying the flip rather than by reading: a probe's private process was
-   Ready with no EL0 frame and only the placement rule kept it unrun
-   (5a71132d), and the busy pair's CPU time was charged to whichever pid a
-   core had selected when the measurement window shut (ac6bc2a7). The third
-   is the secondary's idle loop, which is where the two-core contention
-   probes run and which a secondary carrying ordinary processes stops
-   returning to. Nothing measures that yet.
+   **The flip is still blocked by fixture progress, not by the accounting
+   reader.** The profile now closes each core's in-flight interval at the end
+   of the window. A third QEMU attempt after the filesystem part of #581
+   positively observed an unnamed, mask-zero process start on CPU1, then
+   stalled after the busy-pair migration report and before peer-exit
+   completion. The capture showed CPU1 had zero context switches during the
+   busy-pair window; DDB later found no Ready process and the peer filesystem,
+   console and tty stages had not started. The flip therefore removes an
+   idle-loop progress opportunity that the staged fixtures currently rely on.
 
    A process whose affinity mask is 0 -- every process, since PID 1 starts
-   at 0 and every child inherits it -- reaches a peer only if
-   `workload_busy_secondary_candidate` names its pid, so an ordinary process
-   still never runs on a peer. #580 replaces that named-pid rule with a
-   policy and retires `workload_busy_*_candidate`. Four cores are available
-   to a mask now and to nothing else.
+   at 0 and every child inherits it -- currently reaches a peer only through
+   the fixture placement rule. #580 still requires ordinary placement and
+   retirement of both `workload_*_candidate` functions. A growing list of
+   fixture exceptions does not meet that acceptance condition. Replace the
+   staged fixtures' placement protocol or define a scheduler progress
+   invariant before applying the flip again. The private-probe Ready record
+   fix (5a71132d), per-core accounting (ac6bc2a7), and #514's slot publication
+   fix are already landed.
    **#514 was #580's gate and is closed (2026-09-22)**: a pool slot's
    storage is cleared before the generation that makes it answer Live is
    stamped, so a lockless walker cannot read the free-chain link as a
@@ -427,13 +438,13 @@ Four moments earn it, and the order matters:
    workload owns the synchronization audit for every filesystem, network,
    console and device path it reaches, and load is what tests an audit: the
    interleaving one boot takes is not the forty a rate is made of.
-3. **Around #580**, the change that makes a mask of 0 mean every schedulable
-   core rather than "ask the per-pid rule". It widens WHICH processes run on
-   a peer rather than what one may do there, which is the largest remaining
-   increase in exposure in phase B, and #514's window -- open, unobserved,
-   and in the pool-insert path every placed process crosses -- is exactly
-   what a load run is for. Run one before the flip and again after it: the
-   pair is what says whether a new failure is the flip's.
+3. **After the #580 placement/progress design has a deterministic lane.**
+   The latest flip proved an unnamed process can start on CPU1, then stopped
+   the staged busy-pair/peer-exit sequence before its downstream fixtures.
+   First make that sequence progress under the intended policy and prove it
+   on QEMU. Then run the bounded QEMU repeat set and four-core RPi5 evidence
+   together at the completed implementation boundary. Do not spend an hour
+   repeating a known boot that stalls before its acceptance evidence.
 4. **#572 and #584 ARE load workloads**, not occasions to run one. #572 asks
    for a fairness bound that still holds with the init-managed services
    running beside the busy pair, measured on both platforms with stated

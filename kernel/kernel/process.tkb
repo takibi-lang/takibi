@@ -5733,9 +5733,10 @@ fn kernel_process_deadline_wake_all(guard: borrow ProcessRunGuard[lock])
 // GitHub issue #587: under the caller's process-run lock, and over every
 // slot rather than one process chain.
 //
-// It used to take no lock and walk only the chain rooted at whatever was
-// current on the INTERRUPTED cpu. Both are sound exactly while every socket
-// waiter is on core 0, which is what #581's network subsystem ends.
+// The process-run lock closes the check-then-block race with a waiter
+// publishing Blocked, and the all-slot walk reaches waiters regardless of
+// which core or process family was interrupted. #581 must still keep socket
+// calls on core 0 until peer NetRx waiting has an end-to-end test.
 //
 // The lock is the one a waiter publishes Blocked under, so either this
 // finds it Blocked or it finds the frame afterwards -- #547's argument for
@@ -5743,9 +5744,7 @@ fn kernel_process_deadline_wake_all(guard: borrow ProcessRunGuard[lock])
 // not be a local interrupt mask.
 //
 // The walk is the one kernel_process_deadline_wake_all already does from
-// this same handler, so the cost is established rather than new: a chain
-// walk was already O(processes), and this one reaches the waiters that are
-// not the interrupted cpu's relatives.
+// this same handler, so the cost is established rather than new.
 fn kernel_process_net_wake_all(guard: borrow ProcessRunGuard[lock])
         !{interrupt, unsafe} {
     let mut cursor = scheduled_process_first_slot();
