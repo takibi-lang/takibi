@@ -1358,7 +1358,7 @@ kernelbuild: build
 # while preventing another Make process from interleaving object writes.
 .PHONY: _kernelbuild-check kernelbuild-check
 _kernelbuild-check: _kernelbuild _kernelbuild-qemu-debug _kernelbuild-rpi5-debug \
-	kernel-debug-layout-check \
+	$(KERNEL_QEMU_NET_WAKE_CONTROL_ELF) kernel-debug-layout-check \
 	$(KERNEL_CRASH_SNAPSHOT_LAYOUT)
 
 kernelbuild-check: build
@@ -1554,7 +1554,7 @@ _kernelcheck-stack-overflow-qemu:
 ## Issues #546/#547/#587: deterministic UART and NetRx publication windows.
 ## GDB holds the guest at each cross-core race point; the peer suite also
 ## reboots a generated lockless NetRx control sequentially on the same ports.
-kernelcheck-uart-wake-qemu: kernelbuild-check $(KERNEL_QEMU_NET_WAKE_CONTROL_ELF)
+kernelcheck-uart-wake-qemu: kernelbuild-check
 	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-uart-wake-qemu
 
 _kernelcheck-uart-wake-qemu:
