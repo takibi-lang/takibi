@@ -49,6 +49,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_expected_line_endings_controls.py` | Positive and failure-specific controls for expected-line-ending checks |
 | `check_fallback_counters.py` | every dead-slot fallback counter is summed into one positively reported line a view expects, so a fallback that fires loses a line rather than adding one |
 | `check_fallback_counters_controls.py` | Controls for the dead-slot fallback report check |
+| `check_fd_clone_transaction.py` | the linear fd-clone transaction begins empty, advances exactly through a successful install, preserves failures, and rolls back its recorded prefix |
+| `check_fd_clone_transaction_controls.py` | Negative controls for the fd-clone transaction implementation boundary |
 | `check_find_stale_issue_workarounds_controls.py` | Controls for the stale-workaround worklist's matching |
 | `check_flag_guarded_fields.py` | optional fields are read only after their presence flags |
 | `check_invariant_lines_unviewed.py` | invariant reports are either diagnostic-only or enforced by absence, never asserted as correct |
