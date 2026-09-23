@@ -38,14 +38,20 @@ step, landed as its own commit.
    invariants, partial TLA+. First consumers #308 and #109; proof-side entry
    #13. An evaluation, not a decision to adopt.
 
-### Territory B: everything else
+### Territory B: everything else, ordered by current priority
 
-- Filesystem capability: #535, #536, #537, #539, #553.
-- Network capability and performance: #274, #386, #520, #204, #220.
-- Syscalls and userspace surface: #432, #433, #434, #435, #436, #430.
-- Kernel tests, DDB and tooling: #588, #576, #414, #388, #551, #444, #429,
-  #149, #542, #567, #523, #568, #562.
-- Boot, platform and memory: #555 (deferred), #250, #422, #389, #171.
-- Profiling: #497, #502, #503.
-- Compiler research and language policy: #58, #203, #200, #201, #252, #282,
-  #129, #374, #417, #155, #28, #8, #95, #124, #122, #123, #51, #50, #85, #268.
+1. **Concrete correctness and evidence gaps:** #588, #414, #562, #274,
+   #523, #551, #542, #388.
+2. **Kernel and userspace capability:** #432, #436, #535, #537, #539, #536,
+   #171, #204, #433, #430, #434, #435, #220.
+3. **Resource use and measured performance:** #389, #422, #497, #520, #553,
+   #386, #502, #503.
+4. **Compiler safety and language research:** #58, #203, #252, #200, #201,
+   #282, #129, #374, #417, #155, #28, #8.
+5. **Toolchain, portability and hardware-lane support:** #576, #568, #123,
+   #124, #122, #95, #51, #50, #85, #268.
+6. **Deferred or not a scheduled work item:** #555, #250, #444, #429, #149,
+   #567.
+
+Items are ordered within each band as well as between bands. The deferred
+items stay listed so a changed premise can bring them back into the queue.
