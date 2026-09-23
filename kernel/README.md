@@ -1199,8 +1199,8 @@ executable workload requires them.
 Planned and in-progress work is tracked on the
 [project board](https://github.com/orgs/takibi-lang/projects/2) rather than
 enumerated here, so this file stays a description of what the kernel does
-today. [`../ROADMAP.md`](../ROADMAP.md) carries the mid-term plan and the
-dependency reasoning behind it; [`../HISTORY.md`](../HISTORY.md) carries the
+today. [`../ROADMAP.md`](../ROADMAP.md) carries the current work split;
+[`../HISTORY.md`](../HISTORY.md) carries the reasoning behind it and the
 per-milestone engineering record.
 
 ## Future kernel targets

@@ -166,7 +166,7 @@ MMIO mappings, address construction, DMA setup, and the remaining handwritten
 assembly use explicit `unsafe` boundaries where necessary. The project does
 not claim that a successful build proves the compiler, target lowering,
 hardware, or every unsafe boundary correct. Defining and shrinking that trusted
-base is active work; see [`ROADMAP.md`](ROADMAP.md).
+base is active work; see [`TRUSTED_BASE.md`](TRUSTED_BASE.md).
 
 ## Current kernel
 
@@ -306,7 +306,7 @@ and debugging tools all have hardware-independent paths.
 - [`kernel/README.md`](kernel/README.md) -- current kernel architecture, QEMU,
   RPi5, and hardware procedures;
 - [`kernel/SYSCALLS.md`](kernel/SYSCALLS.md) -- exact syscall support matrix;
-- [`ROADMAP.md`](ROADMAP.md) -- current priorities and dependency order;
+- [`ROADMAP.md`](ROADMAP.md) -- the current work split between territories;
 - [`HISTORY.md`](HISTORY.md) -- chronological engineering record;
 - [`examples/README.md`](examples/README.md) -- frozen historical milestones.
 

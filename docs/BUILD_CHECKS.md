@@ -53,6 +53,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_fd_clone_transaction_controls.py` | Negative controls for the fd-clone transaction implementation boundary |
 | `check_find_stale_issue_workarounds_controls.py` | Controls for the stale-workaround worklist's matching |
 | `check_flag_guarded_fields.py` | optional fields are read only after their presence flags |
+| `check_gdb_no_guest_memory_read.py` | a gdb check script decides from registers, not guest memory read through whatever translation the stopped CPU has active (#585) |
+| `check_gdb_no_guest_memory_read_controls.py` | Controls for the gdb guest-memory-read check, in both directions |
 | `check_invariant_lines_unviewed.py` | invariant reports are either diagnostic-only or enforced by absence, never asserted as correct |
 | `check_irq_restore_sites.py` | no `enable_irq()` restores interrupts without consulting the state it overwrites |
 | `check_irq_restore_sites_controls.py` | Controls for the IRQ-restore site check |
@@ -97,6 +99,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_qemu_lane_ports.py` | QEMU lanes do not claim conflicting protocol ports, and every lane fits the per-session port block |
 | `check_raw_pos_fname.py` | source identity uses the canonical path helpers |
 | `check_repeat_kernel_lane_controls.sh` | Regression controls for the repeat runner's two modes |
+| `check_roadmap_size.py` | ROADMAP.md stays the current work split rather than regrowing into a knowledge base |
 | `check_rpi5_set_kernel_byte_controls.py` | Controls for the live RPi5 kernel-byte writer without using the board |
 | `check_run_kernel_shell_console_controls.py` | Regression controls for the interactive console's UART marker detection |
 | `check_run_kernel_uart_driver_controls.py` | Regression controls for the UART driver's timeout diagnosis |
