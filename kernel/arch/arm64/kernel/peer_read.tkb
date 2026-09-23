@@ -18,9 +18,12 @@ const EXIT_SYSCALL: usize = 93;
 const GETCPU_SYSCALL: usize = 168;
 const WORKLOAD_PROGRESS_SYSCALL: usize = 453;
 const PEER_READ_TAG: usize = 3;
+const PEER_CORE_READY_TAG: usize = 10;
+const PEER_READ_READY_TAG: usize = 11;
 const PEER_READ_CHUNK: usize = 1024;
 const PEER_READ_CHUNKS: usize = 96;
 const PEER_READ_ATTEMPTS: usize = 64;
+const PEER_READ_START_POLLS: usize = 1000;
 const PEER_READ_CHECKSUM: usize = 8847360;
 const WRITE_SYSCALL: usize = 64;
 const PEER_CONSOLE_TAG: usize = 4;
@@ -87,6 +90,27 @@ fn peer_read() {
     // Do not spend the bounded read attempts before the handoff lands.
     while (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {}
 
+    // The competing reader pins to core 0 before either side begins its
+    // block reads. Both report arrival only after their own affinity handoff
+    // has landed, so device-lock contention is caused by readers that
+    // actually overlap on opposite CPUs, not by scheduler start order.
+    let mut nap: [u8; 16];
+    for index: usize in 0..<16 { nap[index] = 0; }
+    // tv_sec = 0, tv_nsec = 1000000 (0x000F4240).
+    nap[8] = 0x40;
+    nap[9] = 0x42;
+    nap[10] = 0x0F;
+    let mut peers_ready: bool = false;
+    for poll: usize in 0..<PEER_READ_START_POLLS {
+        if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_READ_READY_TAG,
+                0, 0, 0, 0) == 1) {
+            peers_ready = true;
+            break;
+        }
+        svc5(NANOSLEEP_SYSCALL, nap as *u8 as usize, 0, 0, 0, 0);
+    }
+    if (peers_ready == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
+
     for attempt: usize in 0..<PEER_READ_ATTEMPTS {
         let mut valid: bool = peer_read_cpu(cpu_bytes as []u8) == peer_cpu;
         let mut bytes: usize = 0;
@@ -132,9 +156,27 @@ fn peer_read() {
 fn core_read() {
     let mut cpu_bytes: [u8; 4];
     let mut buffer: [u8; PEER_READ_CHUNK];
-    // The competing reader is the core-0 half of the evidence. It may have
-    // been dispatched just before peer registration narrows CPU 1.
+    // The competing reader is the core-0 half of the evidence. With an unset
+    // affinity mask now admitting every online CPU, ask for core 0 instead
+    // of waiting on a CPU identity that scheduling does not promise.
+    if (peer_pin(0) == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
     while (peer_read_cpu(cpu_bytes as []u8) != 0) {}
+    let mut nap: [u8; 16];
+    for index: usize in 0..<16 { nap[index] = 0; }
+    // tv_sec = 0, tv_nsec = 1000000 (0x000F4240).
+    nap[8] = 0x40;
+    nap[9] = 0x42;
+    nap[10] = 0x0F;
+    let mut peer_ready: bool = false;
+    for poll: usize in 0..<PEER_READ_START_POLLS {
+        if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CORE_READY_TAG,
+                0, 0, 0, 0) == 1) {
+            peer_ready = true;
+            break;
+        }
+        svc5(NANOSLEEP_SYSCALL, nap as *u8 as usize, 0, 0, 0, 0);
+    }
+    if (peer_ready == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
     for attempt: usize in 0..<64 {
         let fd: usize = svc5(OPENAT_SYSCALL, 0,
                               "/peer-read.bin" as *u8 as usize,

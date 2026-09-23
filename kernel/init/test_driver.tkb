@@ -1347,6 +1347,10 @@ irq_uart_rx_unmask();
                     process_image_heap_range(script_pages);
                 kernel_syscall_process_configure(
                     script_heap_start, script_heap_limit);
+                // The boot driver's scheduler probes reset the shared table
+                // while the peer idle loop is already running. Open ordinary
+                // peer dispatch only after PID 1 has a complete image.
+                kernel_process_peer_dispatch_enable();
                 let script_status: usize = run_initial_user(
                     process_image_entry(script_pages),
                     process_image_stack_pointer(script_pages));

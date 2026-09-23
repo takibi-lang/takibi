@@ -268,7 +268,7 @@ fn kernel_secondary_main(context: usize) {
 }
 
 // Re-enter the established architectural idle loop after an EL0 process
-// exits without another process admitted on this CPU. The assembly boundary
+// exits without another eligible process on this CPU. The assembly boundary
 // has already selected this CPU's IRQ stack before releasing ownership of
 // the exiting process stack.
 fn kernel_secondary_idle_reenter() {

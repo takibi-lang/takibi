@@ -28,16 +28,24 @@ const WORKLOAD_ANSWER_EXIT: usize = 2;
 const WORKLOAD_ANSWER_SIGTERM: usize = 3;
 const WORKLOAD_ANSWER_PEER_READ: usize = 4;
 const WORKLOAD_ANSWER_CORE_READ: usize = 5;
+const WORKLOAD_ANSWER_WIDEN_AFFINITY: usize = 6;
+const WORKLOAD_ANSWER_PIN_CPU0: usize = 7;
+const WORKLOAD_ANSWER_PIN_CPU1: usize = 8;
 const EXECVE_SYSCALL: usize = 221;
 const GETPID_SYSCALL: usize = 172;
+const GETCPU_SYSCALL: usize = 168;
+const CLOCK_GETTIME_SYSCALL: usize = 113;
+const CLOCK_MONOTONIC: usize = 1;
 const KILL_SYSCALL: usize = 129;
+const GETAFFINITY_SYSCALL: usize = 123;
 const LINUX_SIGTERM: usize = 15;
 const SETAFFINITY_SYSCALL: usize = 122;
 const WRITE_SYSCALL: usize = 64;
 const BUSY_LOOP_TAG_A: usize = 1;
 const BUSY_LOOP_TAG_B: usize = 2;
+const ORDINARY_PLACEMENT_REPORT_TAG: usize = 8;
+const ORDINARY_PLACEMENT_GUARD_TAG: usize = 9;
 const PEER_NET_WAKE_TAG: usize = 6;
-const GETCPU_SYSCALL: usize = 168;
 
 /* One round of work. Sized so a round spans several scheduler timer slices
  * (the tick is cntfrq/64, about a millisecond on both maintained targets),
@@ -46,6 +54,9 @@ const GETCPU_SYSCALL: usize = 168;
  * would let whichever process holds the CPU finish many of them at once and
  * make the skew a property of the slice length rather than of fairness. */
 const BUSY_LOOP_ROUND_STEPS: usize = 16000000;
+const PLACEMENT_GUARD_MAX_ROUNDS: usize = 256;
+const PLACEMENT_GUARD_ROUND_STEPS: usize = 1000000;
+const PLACEMENT_GUARD_TIMEOUT_NS: usize = 5000000000;
 
 /* xorshift64 seeded per tag, so the two processes do the same amount of
  * work along different value sequences. */
@@ -53,24 +64,72 @@ fn busy_loop_a() { busy_loop_run(BUSY_LOOP_TAG_A); }
 
 fn busy_loop_b() { busy_loop_run(BUSY_LOOP_TAG_B); }
 
-/* /bin/spin: one round of the same work, then exit. It reports nothing and
- * prints nothing.
- *
- * This exists so an interactive shell can background two jobs that are
- * demonstrably alive at the same time. `/bin/true &` twice was tried first
- * and is a race: it holds under QEMU and loses on RPi5, where the first job
- * has exited before the shell forks the second, and a fixture that depends
- * on which board it runs on is worse than none. One round outlasts a fork
- * and an exec by a wide margin on either target. Silent because its output
- * would interleave with the prompt in an order nothing can pin. */
-fn busy_loop_spin() {
-    let mut state: usize = 0x9E3779B97F4A7C15;
-    for step: usize in 0..<BUSY_LOOP_ROUND_STEPS {
-        state = state ^ (state << 13);
-        state = state ^ (state >> 7);
-        state = state ^ (state << 17);
+/* The placement test's only control: keep CPU 0 busy until the kernel records
+ * an unpinned child's peer sample. The bound makes a missing peer selection
+ * a test failure rather than an unending shell wait. */
+fn busy_loop_placement_guard() {
+    let mut mask: [u8; 8];
+    for index: usize in 0..<8 { mask[index] = 0; }
+    mask[0] = 1;
+    if (svc5(SETAFFINITY_SYSCALL, 0, 8,
+             mask as *u8 as usize, 0, 0) != 0) {
+        svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
+        return;
     }
-    svc5(WORKLOAD_EXIT_SYSCALL, state & 1, 0, 0, 0, 0);
+    let mut state: usize = 0xD1B54A32D192ED03;
+    let mut start_time: [u64; 2];
+    let start_ns: usize = busy_loop_clock_monotonic_ns(
+        start_time as []u64);
+    if (start_ns == 0xFFFFFFFFFFFFFFFF) {
+        svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
+        return;
+    }
+    for round: usize in 0..<PLACEMENT_GUARD_MAX_ROUNDS {
+        for step: usize in 0..<PLACEMENT_GUARD_ROUND_STEPS {
+            state = state ^ (state << 13);
+            state = state ^ (state >> 7);
+            state = state ^ (state << 17);
+        }
+        if (svc5(WORKLOAD_PROGRESS_SYSCALL,
+                 ORDINARY_PLACEMENT_GUARD_TAG, 0, 0, 0, 0) == 1) {
+            svc5(WORKLOAD_EXIT_SYSCALL, state & 1, 0, 0, 0, 0);
+            return;
+        }
+        let mut now_time: [u64; 2];
+        let now_ns: usize = busy_loop_clock_monotonic_ns(
+            now_time as []u64);
+        if (now_ns == 0xFFFFFFFFFFFFFFFF ||
+            (now_ns >= start_ns && now_ns - start_ns >=
+             PLACEMENT_GUARD_TIMEOUT_NS)) {
+            break;
+        }
+    }
+    svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
+}
+
+private fn busy_loop_clock_monotonic_ns(bytes: borrow [u64; 2..]) -> usize {
+    if (svc5(CLOCK_GETTIME_SYSCALL, CLOCK_MONOTONIC,
+             bytes as *u64 as usize, 0, 0, 0) != 0) {
+        return 0xFFFFFFFFFFFFFFFF;
+    }
+    return (bytes[0] * 1000000000 + bytes[1]) as usize;
+}
+
+/* Report the placement recorded while the foreground pipeline ran. */
+fn busy_loop_placement_report() {
+    if (svc5(WORKLOAD_PROGRESS_SYSCALL,
+             ORDINARY_PLACEMENT_REPORT_TAG, 0, 0, 0, 0) != 1) {
+        svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
+        return;
+    }
+    let line: []u8 =
+        bs"smp placement: BusyBox sleep applet ran on a peer without affinity\n";
+    if (svc5(WRITE_SYSCALL, 1, line as *u8 as usize,
+             line.len, 0, 0) != line.len) {
+        svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
+        return;
+    }
+    svc5(WORKLOAD_EXIT_SYSCALL, 0, 0, 0, 0, 0);
 }
 
 /* The peer UART-wake lane needs a second runnable process on CPU 1 while
@@ -142,6 +201,32 @@ fn busy_loop_peer_net_wake() {
 }
 
 fn busy_loop_run(tag: usize) {
+    let mut online_mask: [u8; 8];
+    if (svc5(GETAFFINITY_SYSCALL, 0, 8,
+             online_mask as *u8 as usize, 0, 0) != 8) {
+        svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
+        return;
+    }
+    // The busy-pair fixture pins its two persistent workers while the staged
+    // boot checks need the secondary idle loop. This is fixture-owned
+    // affinity, not a scheduler exception; the migration phase below first
+    // restores the full online mask, then requests CPU 0/1 in turn so this
+    // local scheduler must perform the measured crossings.
+    let mut worker_mask: [u8; 8];
+    for index: usize in 0..<8 { worker_mask[index] = 0; }
+    if (tag == BUSY_LOOP_TAG_A) {
+        worker_mask[0] = 1;
+    } else if (tag == BUSY_LOOP_TAG_B) {
+        worker_mask[0] = 2;
+    } else {
+        svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
+        return;
+    }
+    if (svc5(SETAFFINITY_SYSCALL, 0, 8,
+             worker_mask as *u8 as usize, 0, 0) != 0) {
+        svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
+        return;
+    }
     let mut state: usize = 0x9E3779B97F4A7C15 ^ tag;
     let mut done: usize = 0;
     /* Runs until the kernel says there is nothing left to report, then
@@ -170,7 +255,29 @@ fn busy_loop_run(tag: usize) {
                 let pid: usize = svc5(GETPID_SYSCALL, 0, 0, 0, 0, 0);
                 svc5(KILL_SYSCALL, pid, LINUX_SIGTERM, 0, 0, 0);
             }
-            if (answer == WORKLOAD_ANSWER_PEER_READ ||
+            if (answer == WORKLOAD_ANSWER_WIDEN_AFFINITY) {
+                if (svc5(SETAFFINITY_SYSCALL, 0, 8,
+                         online_mask as *u8 as usize, 0, 0) != 0) {
+                    svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
+                    return;
+                }
+                done = 0;
+            } else if (answer == WORKLOAD_ANSWER_PIN_CPU0 ||
+                       answer == WORKLOAD_ANSWER_PIN_CPU1) {
+                let mut target_mask: [u8; 8];
+                for index: usize in 0..<8 { target_mask[index] = 0; }
+                if (answer == WORKLOAD_ANSWER_PIN_CPU0) {
+                    target_mask[0] = 1;
+                } else {
+                    target_mask[0] = 2;
+                }
+                if (svc5(SETAFFINITY_SYSCALL, 0, 8,
+                         target_mask as *u8 as usize, 0, 0) != 0) {
+                    svc5(WORKLOAD_EXIT_SYSCALL, 1, 0, 0, 0, 0);
+                    return;
+                }
+                done = 0;
+            } else if (answer == WORKLOAD_ANSWER_PEER_READ ||
                 answer == WORKLOAD_ANSWER_CORE_READ) {
                 let mut path: *u8 = "/bin/peer-read" as *u8;
                 if (answer == WORKLOAD_ANSWER_CORE_READ) {

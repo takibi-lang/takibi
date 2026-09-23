@@ -17,8 +17,14 @@ def main() -> int:
         encoding="ascii")
     expected = (ROOT / "kernel/tests/common/ash/ash.expected").read_text(
         encoding="ascii")
+    workload = (ROOT / "kernel/kernel/workload_evidence.tkb").read_text(
+        encoding="ascii")
+    syscall = (ROOT / "kernel/kernel/syscall.tkb").read_text(
+        encoding="ascii")
     names = check.image_bin_names(makefile)
     assert names == check.expected_bin_names(stdin, expected)
+    assert check.busybox_sleep_probe_is_real(makefile, stdin, workload,
+                                             syscall)
     controls.append("current tree")
     injected = makefile.replace(
         "$(KERNEL_SHELL_EXT2_IMAGE):",
@@ -47,9 +53,31 @@ def main() -> int:
     else:
         raise AssertionError("unrecognized /bin recipe syntax was accepted")
     controls.append("unrecognized recipe")
+    wrong_applet = makefile.replace(
+        "link /bin/busybox.static /bin/sleep",
+        "link /bin/busybox-extras /bin/sleep", 1)
+    assert not check.busybox_sleep_probe_is_real(
+        wrong_applet, stdin, workload, syscall)
+    no_applet = stdin.replace("/bin/sleep 1 >/dev/null", "/bin/spin", 1)
+    assert not check.busybox_sleep_probe_is_real(
+        makefile, no_applet, workload, syscall)
+    no_guard_reap = stdin.replace('wait "$placement_guard_pid"\n', "", 1)
+    assert not check.busybox_sleep_probe_is_real(
+        makefile, no_guard_reap, workload, syscall)
+    no_identity = workload.replace('bs"/bin/sleep\\0"',
+                                   'bs"/bin/spin\\0"', 1)
+    assert not check.busybox_sleep_probe_is_real(
+        makefile, stdin, no_identity, syscall)
+    truncated_identity = workload.replace(
+        "command_line[0..<11]", "command_line[0..<9]", 1)
+    assert not check.busybox_sleep_probe_is_real(
+        makefile, stdin, truncated_identity, syscall)
+    controls.append("BusyBox target and same-process placement evidence")
     report_pass("ash-bin-inventory controls",
                 "current inventory passes; additions, omissions, and "
-                "unrecognized image commands are refused",
+                "unrecognized image commands, a non-BusyBox sleep target, "
+                "a wait-PID fixture, a truncated sleep identity, and lost "
+                "same-process placement evidence are refused",
                 controls=len(controls))
     return 0
 

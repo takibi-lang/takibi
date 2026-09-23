@@ -36,6 +36,36 @@ def image_bin_names(makefile: str) -> list[str]:
     return sorted(names)
 
 
+def busybox_sleep_probe_is_real(makefile: str, stdin: str,
+                                workload: str, syscall: str) -> bool:
+    sleep_alias = re.compile(
+        r"\blink /bin/busybox\.static /bin/sleep'\s+\$@\.tmp")
+    commands = tuple(line for line in stdin.splitlines()
+                     if line and not line.startswith("#"))
+    observer = syscall.find(
+        "workload_ordinary_placement_note_syscall(number);")
+    dispatcher = syscall.find("kernel_syscall_dispatch_action(", observer)
+    return (
+        sum(bool(sleep_alias.search(line)) for line in makefile.splitlines()) == 1
+        and "/etc/placement-guard >/dev/null &" in commands
+        and "/bin/sleep 1 >/dev/null" in commands
+        and commands.index("/etc/placement-guard >/dev/null &") <
+            commands.index("/bin/sleep 1 >/dev/null")
+        and "placement_guard_pid=$!" in commands
+        and 'wait "$placement_guard_pid"' in commands
+        and "/etc/placement-report" in commands
+        and 'slice_eq(command_line[0..<11], bs"/bin/sleep\\0")' in workload
+        and "kernel_process_parent_is_root()" in workload
+        and "kernel_process_current_affinity_mask() == 0" in workload
+        and "kernel_process_online_mask() & (1 << cpu)" in workload
+        and "kernel_process_current_parent_pid()" in workload
+        and "ordinary_busybox_peer_parent_pid" in workload
+        and "number != AARCH64_NR_NANOSLEEP" in workload
+        and "number != AARCH64_NR_CLOCK_NANOSLEEP" in workload
+        and observer >= 0 and dispatcher > observer
+    )
+
+
 def expected_bin_names(stdin: str, expected: str) -> list[str]:
     commands = tuple(line for line in stdin.splitlines()
                      if line and not line.startswith("#"))
@@ -60,6 +90,10 @@ def main() -> int:
         encoding="ascii")
     expected = (ROOT / "kernel/tests/common/ash/ash.expected").read_text(
         encoding="ascii")
+    workload = (ROOT / "kernel/kernel/workload_evidence.tkb").read_text(
+        encoding="ascii")
+    syscall = (ROOT / "kernel/kernel/syscall.tkb").read_text(
+        encoding="ascii")
     try:
         actual = image_bin_names(makefile)
         listed = expected_bin_names(stdin, expected)
@@ -72,8 +106,13 @@ def main() -> int:
         print("FAIL ash-bin-inventory: /bin listing differs from image recipe; "
               f"missing={missing} stale={stale}")
         return 1
+    if not busybox_sleep_probe_is_real(makefile, stdin, workload, syscall):
+        print("FAIL ash-bin-inventory: ordinary placement no longer observes "
+              "the real BusyBox sleep child from ash")
+        return 1
     report_pass("ash-bin-inventory",
-                f"ash lists all {len(actual)} /bin image entries in order",
+                f"ash lists all {len(actual)} /bin image entries in order; "
+                "the peer-placement job is the real BusyBox sleep applet",
                 entries=len(actual))
     return 0
 

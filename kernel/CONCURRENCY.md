@@ -10,15 +10,18 @@ current behavior and must be correct without reading it.
 `kernel/lib/execution_model.tkb` holds two numbers, and most unsynchronized
 state in this kernel is safe *because of* them:
 
-- `KERNEL_ACTIVE_CORES` -- cores that run kernel code. It is 2: core 1 takes
-  timer interrupts, runs the persistent busy-pair B process, and enters the
-  syscall and scheduler paths. Admission is deliberately narrower than CPU
-  affinity: all other processes remain on core 0 until their network,
-  console, and physical stack-handoff boundaries are audited. The filesystem
-  boundary is now a LOCK rather than an admission claim -- ext2 mutation
-  excludes itself through `kernel/fs/ext2/mutation_lock.tkb`, and a peer
-  reader that finds a mutation in flight is rerun on core 0 (GitHub issues
-  #533 and #9).
+- `KERNEL_ACTIVE_CORES` -- maximum cores the scheduler admits; it is 4. The
+  runtime online prefix is 2 in maintained QEMU lanes and 4 on RPi5. Every
+  online core takes timer interrupts and enters the syscall and scheduler
+  paths. A process with no affinity mask is eligible on every online core;
+  `syscall_peer_safe` still sends unreviewed
+  peer syscalls to core 0. The busy-pair fixture pins its workers during the
+  staged boot checks, then widens them for the measured phase and alternates
+  explicit CPU 0/1 affinity requests to observe actual migrations. The
+  filesystem boundary is now a LOCK rather than an
+  admission claim -- ext2 mutation excludes itself through
+  `kernel/fs/ext2/mutation_lock.tkb`, and a peer reader that finds a mutation
+  in flight is rerun on core 0 (GitHub issues #533 and #9).
 - `KERNEL_PREEMPTIBLE` -- 0. A timer interrupt taken at EL1 sets a flag and the
   switch happens at syscall return. That is `CONFIG_PREEMPT_NONE`, and it is
   why many field accesses need no lock.

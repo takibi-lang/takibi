@@ -93,8 +93,8 @@ def main() -> int:
     # the workload marker that starts it, and the caller's final stop marker.
     # The last one used to be ignored in this mode, so a new recurrence view
     # could be truncated even though the runner explicitly named its line.
-    stop_marker = ("workload: peer exit returned to idle, init collected on "
-                   "core 0 after stack release")
+    stop_marker = ("workload: peer exit stack released before init collected "
+                   "on core 0")
     before_stop = after_workload + b"httpd-background-ok\n"
     CASES.note()
     if driver.interactive_capture_complete(

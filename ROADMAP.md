@@ -227,26 +227,16 @@ The next multicore increment is phase B. Its order is now:
    because admitting a syscall on a peer is pointless while no ordinary
    process is placed on one.
 
-7. **#581, which was entry 8 until 2026-09-22.** The order swapped on
-   evidence, not preference. The flip #580 asks for was applied, measured and
-   backed out; what it found is on that issue, and the part that decides the
-   order is this: under the flip an ordinary process placed on a peer
-   migrates to core 0 for nearly every syscall it makes, because `read`,
-   `write`, `openat` and the socket calls are not in `syscall_peer_safe`. So
-   #580 before #581 buys migration traffic rather than concurrency, and
-   #581 makes #580 smaller -- each subsystem admitted to the table lets a
-   fixture drop its rule exemption, and `/bin/peer-read` is the largest
-   entry left in the carve-out #580 has to keep.
-
-   Entry 6's remaining half: a peer reaches the filesystem and the network.
-   **Two of its three subsystems are done (2026-09-22).** The console needed
-   nothing -- `write` to a terminal and `read` on fd 0 have been in the
-   table since #534 and #547. The filesystem read path is in it now, the
-   ext2 mutation gate moved with it rather than silently ceasing to apply,
-   and `/bin/peer-read` pins itself instead of being placed by a per-pid
-   rule, so `workload_busy_primary_candidate` names nobody and entry 8's
-   carve-out is one fixture smaller. #559 is still the filesystem's honest
-   remainder.
+7. **#581, still open for its network portion.** Its filesystem and console
+   work was advanced ahead of #580 so an ordinary process placed on a peer
+   could make progress instead of migrating back to core 0 for every I/O.
+   The console needed no new admission: terminal `write` and fd-0 `read` have
+   been in the table since #534 and #547. The filesystem read path is admitted
+   and the ext2 mutation gate applies to every peer syscall that reaches it.
+   `/bin/peer-read` and `/bin/core-read` now pin themselves to opposite CPUs
+   and rendezvous there before device I/O, so measured contention proves both
+   readers overlap rather than merely being scheduled at different times.
+   #559 remains the filesystem's separate in-flight-read question.
 
    **The network wake lock and peer publication race are verified
    (2026-09-23, #587).** The stack audit found cross-core exclusion at every
@@ -282,36 +272,32 @@ The next multicore increment is phase B. Its order is now:
    building on it, which is what `github-workflow` says and what this
    skipped.
 
-8. **#580.** **#579 is complete (2026-09-22)**: the schedulable set is the
-   online set, and the four-core board reports `smp bringup: an EL0 process
-   ran on cpus=0,1,2,3` where QEMU reports `cpus=0,1`. No lane gained vCPUs
-   -- every assertion is written against the set the kernel reports online,
-   so one ash transcript is true on both platforms and the per-platform
-   difference is asserted in the per-platform view.
+8. **#580 is complete (2026-09-23).** **#579 completed (2026-09-22)**:
+   the schedulable set is the online set, and the four-core board reports
+   `smp bringup: an EL0 process ran on cpus=0,1,2,3` where QEMU reports
+   `cpus=0,1`. No lane gained vCPUs; assertions use the runtime online set.
 
-   **The flip is still blocked by fixture progress, not by the accounting
-   reader.** The profile now closes each core's in-flight interval at the end
-   of the window. A third QEMU attempt after the filesystem part of #581
-   positively observed an unnamed, mask-zero process start on CPU1, then
-   stalled after the busy-pair migration report and before peer-exit
-   completion. The capture showed CPU1 had zero context switches during the
-   busy-pair window; DDB later found no Ready process and the peer filesystem,
-   console and tty stages had not started. The flip therefore removes an
-   idle-loop progress opportunity that the staged fixtures currently rely on.
+   After the boot driver's destructive scheduler probes, peer dispatch opens
+   once PID 1's image is ready. An unset affinity mask now admits any online
+   core, and both `workload_*_candidate` functions are gone. Staged fixtures
+   that need a particular CPU request it through their own affinity mask.
+   The closing test runs the pinned BusyBox binary's real `/bin/sleep` hard
+   link as an ordinary foreground ash child while a bounded CPU-0 guard runs.
+   At that applet's actual nanosleep syscall entry, before the peer-safety
+   gate can reroute it, the kernel records the executing CPU and verifies the
+   exact BusyBox command line, zero affinity, online peer, and shared parent
+   identity. Ash reports the evidence and waits for the guard to be reaped.
+   This observes the real applet directly rather than substituting a probe
+   ELF that brackets its own `getcpu` calls. It adds no QEMU lane or VM boot:
+   the assertion is in the existing ash integration boot on QEMU and RPi5.
 
-   A process whose affinity mask is 0 -- every process, since PID 1 starts
-   at 0 and every child inherits it -- currently reaches a peer only through
-   the fixture placement rule. #580 still requires ordinary placement and
-   retirement of both `workload_*_candidate` functions. A growing list of
-   fixture exceptions does not meet that acceptance condition. Replace the
-   staged fixtures' placement protocol or define a scheduler progress
-   invariant before applying the flip again. The private-probe Ready record
-   fix (5a71132d), per-core accounting (ac6bc2a7), and #514's slot publication
-   fix are already landed.
-   **#514 was #580's gate and is closed (2026-09-22)**: a pool slot's
-   storage is cleared before the generation that makes it answer Live is
-   stamped, so a lockless walker cannot read the free-chain link as a
-   payload however fast slot turnover becomes.
+   General peer dispatch also exposed a stale CPU-0 assumption in the older
+   `/bin/user_payload` `getcpu` ABI fixture. It now checks the reported CPU
+   against that process's `sched_getaffinity` mask. `make allcheck` passed,
+   including both QEMU DDB BREAK modes and four-core RPi5; the aggregate span
+   in that run was 90.2 seconds. **#514 was this issue's gate and is closed
+   (2026-09-22)**: slot storage is cleared before its generation is stamped,
+   so a lockless walker cannot read the free-chain link as a Live payload.
 
 9. **#582.** A running process moves between cores on the scheduler's
    initiative. Today the only migration is one-directional and for

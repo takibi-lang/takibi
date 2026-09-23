@@ -80,16 +80,15 @@ def problems(tree: dict[str, str]) -> list[str]:
     # presence alone could never notice one of several going.
     #
     # Three since GitHub issue #581: the console writer, the terminal reader,
-    # and now the filesystem reader, which placed itself through a per-pid
-    # rule in the kernel until its openat and read were admitted to the
-    # peer-safety table. This count is what noticed the third arriving, which
-    # is what it is for.
+    # and the filesystem reader. Each asks for its CPU through the progress
+    # handler and pins itself; none needs a named-pid placement exception.
     if payload.count(
             "if (peer_pin(peer_cpu) == false) { "
             "svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }") != 3:
         result.append("a self-placing fixture proceeds when its pin failed")
-    if "if (cpu != SECONDARY_CORE_ID) { return false; }" not in process:
-        result.append("scheduler admits the writer to an unintended peer")
+    if ("return (mask & kernel_process_online_mask() & (1 << bit)) != 0;"
+            not in process):
+        result.append("scheduler no longer honors the writer's explicit peer mask")
     if "if (x0 == 4)" not in tree["kernel/kernel/syscall.tkb"]:
         result.append("workload syscall no longer routes the writer tag")
     if "::once:/bin/peer-console" not in tree["kernel/tests/ext2/inittab"]:
@@ -165,6 +164,10 @@ def main() -> int:
         "self pin": ("kernel/arch/arm64/kernel/peer_read.tkb",
                      "return svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) == 0;",
                      "return true;"),
+        "explicit cpu mask": (
+            "kernel/kernel/process.tkb",
+            "return (mask & kernel_process_online_mask() & (1 << bit)) != 0;",
+            "return cpu == SECONDARY_CORE_ID;"),
         # Either site losing its exit must be caught, and the assertion above
         # counts both, so mutating the first copy is enough here.
         "pin failure ignored": (

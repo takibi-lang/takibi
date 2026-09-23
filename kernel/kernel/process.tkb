@@ -16,11 +16,11 @@ use "kernel/lib/locked_cell.tkb";
 // Current limitations (2026-08-13, issue #295). Keep this list current as
 // call sites change; a limitation that goes stale here is worse than
 // none.
-// - Core 1 does not schedule yet. Since GitHub issue #447 it takes its own
-//   timer interrupt and idles in wfi, but its dispatch returns before every
-//   path that reaches process state. The scheduler state and crash trace are
-//   already per-core, and the run lock serializes shared tree walks and state
-//   transitions in preparation for enabling it.
+// - Peer process dispatch stays closed while the boot driver's destructive
+//   scheduler probes reset the shared process table. The peer still starts,
+//   runs its contention probes, and handles its timer; the gate opens once
+//   PID 1's image is ready to enter userspace. From there, an unset affinity
+//   mask admits every online core.
 // - PARTLY SYNCHRONIZED as of GitHub issue #479. The pid counter is minted
 //   inside a LockedCell whose guard is the only way to reach the count
 //   (issue #452), and execution_state is per-core,
@@ -400,6 +400,11 @@ private let mut scheduled_process_pool_ready: bool = false;
 private let mut scheduled_process_boot_record: ProcessRecord;
 private let mut scheduled_process_boot_live: bool = false;
 private let mut scheduled_process_boot_generation: usize = 0;
+// Boot-time process probes reset the shared table while CPU 1 is already in
+// its idle loop. Keep that loop from starting an EL0 context until the
+// initial userspace image is ready; after the one-way publication, normal
+// affinity policy applies to every pooled process.
+private let mut scheduled_process_peer_dispatch_enabled: bool = false;
 
 // Reached only when a slot address names no live record. A real struct
 // rather than a null pointer so the impossible case is harmless instead of
@@ -3102,6 +3107,11 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
         scheduled_process_record_of(outgoing).stack_owner_cpu =
             PROCESS_STACK_UNOWNED;
         execution_here().stack_live = false;
+        if (scheduled_process_state_of(outgoing) ==
+                ProcessSlotState::Exited) {
+            workload_busy_peer_exit_stack_released(
+                scheduled_process_pid_of_handle(outgoing), core);
+        }
     }
     if (execution_here().current_live == false) {
         process_run_unlock(guard);
@@ -3133,9 +3143,11 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
     }
 }
 
-// Called only after kernel_secondary_idle_enter has moved SP_EL1 onto this
-// CPU's IRQ stack. The exiting process remains a zombie for its parent, but
-// its kernel stack is now physically free and may be reaped safely.
+// Called after kernel_secondary_idle_enter has moved SP_EL1 onto this CPU's
+// IRQ stack. This is the no-successor exit path; a switch to another process
+// publishes the same physical release in kernel_process_stack_switch_complete.
+// The exiting process remains a zombie for its parent, but its kernel stack
+// is now physically free and may be reaped safely.
 fn kernel_process_stack_idle_complete() {
     let core: usize = cpu_id();
     if (core == 0 || core >= KERNEL_MAX_CORES ||
@@ -3928,22 +3940,11 @@ private fn kernel_process_next_successor(from: ProcessHandle,
     return root;
 }
 
-// One policy for every scheduler selection point. Core 0 owns the unrestricted
-// compatibility path; a peer may run only the deliberately admitted workload.
-// Taking the CPU as a value is load-bearing: the scheduler probe runs on core
-// 0 but must exercise the answer for core 1.
-fn kernel_process_cpu_admits(cpu: usize, pid: usize) -> bool {
-    if (cpu == 0) { return workload_busy_primary_candidate(pid); }
-    if (cpu >= KERNEL_ACTIVE_CORES) { return false; }
-    if (cpu != SECONDARY_CORE_ID) { return false; }
-    return workload_busy_secondary_candidate(pid);
-}
-
 // GitHub issue #9: the affinity ABI. A process that never set a mask is
-// placed by the per-pid admission rule above, exactly as before. A mask is
-// an admission request of its own: the process may run on the CPUs it
-// names, and the migration gate in kernel_syscall_dispatch_action keeps
-// every syscall not known to be peer-safe on core 0.
+// placed on every online CPU. A nonzero mask is an admission request of its
+// own: the process may run on the CPUs it names, and the migration gate in
+// kernel_syscall_dispatch_action keeps every syscall not known to be peer-safe
+// on core 0.
 fn kernel_process_online_mask() -> usize {
     let online: usize = kernel_online_core_count();
     let mut mask: usize = 0;
@@ -3953,30 +3954,29 @@ fn kernel_process_online_mask() -> usize {
     return mask;
 }
 
+// The boot driver's scheduler probes deliberately dismantle and rebuild the
+// process table. Once PID 1 has a complete image and is about to enter EL0,
+// every Ready pooled process may be dispatched on every online core.
+fn kernel_process_peer_dispatch_enable() {
+    let guard = process_run_lock();
+    scheduled_process_peer_dispatch_enabled = true;
+    process_run_unlock(guard);
+}
+
 // One placement answer for a real process. A syscall the gate sent to core
 // 0 pins the process there until the call completes.
 fn kernel_process_cpu_allows_slot(cpu: usize, slot: usize) -> bool {
     if (cpu >= KERNEL_MAX_CORES) { return false; }
     let bit: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    // Slot 0 is the permanent bootstrap record. Unlike an ordinary task, it
+    // can be Ready before it has a resumable EL0 frame; keep it on the core
+    // that owns the bootstrap execution context. Unset affinity on every
+    // pooled process still means every online CPU.
+    if (slot == 0) { return cpu == 0; }
     if (scheduled_process_core0_for_call(slot)) { return cpu == 0; }
     let mask: usize = scheduled_process_affinity_mask(slot);
     if (mask == 0) {
-        // GitHub issue #580: no mask means every schedulable core, which is
-        // what an ordinary process gets. It used to mean "ask the per-pid
-        // fixture rule", and that rule answers core 0 for every pid no
-        // fixture has registered -- so an ordinary process never ran on a
-        // peer, whatever the affinity ABI said, and four `yes` processes all
-        // landed on core 0.
-        //
-        // A fixture that asked for a particular core still gets it. Those
-        // arrangements are not placement preferences: /bin/peer-read is
-        // REFUSED on core 0 so that its reads contend with core 0's, and the
-        // peer-exit fixture narrows the secondary to the exiting process
-        // until its physical stack is released (#552). Both are evidence
-        // that would stop being produced if the general policy overrode
-        // them.
-        return kernel_process_cpu_admits(
-            cpu, scheduled_process_pid_of_slot(slot));
+        return (kernel_process_online_mask() & (1 << bit)) != 0;
     }
     // GitHub issue #579: every core that came up, not core 0 and one
     // secondary. `kernel_process_schedulable_mask` used to name
@@ -3986,16 +3986,6 @@ fn kernel_process_cpu_allows_slot(cpu: usize, slot: usize) -> bool {
     // started core sits in already calls it. The set is the online set now,
     // so the second name is gone rather than left as a synonym.
     return (mask & kernel_process_online_mask() & (1 << bit)) != 0;
-}
-
-// Whether the current process is on this CPU because the per-pid rule put
-// it there. Those fixtures keep their own audits; the migration gate
-// applies to every other process on a peer.
-fn kernel_process_current_admitted_by_rule() -> bool {
-    if (execution_here().current_live == false) { return false; }
-    return kernel_process_cpu_admits(
-        cpu_id(), scheduled_process_pid_of_handle(
-            execution_here().current_handle));
 }
 
 // Whether this CPU may still run the process it is running. False means the
@@ -4276,6 +4266,10 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
     }
     if (execution_here().current_live) { return ProcessSecondaryStart::Idle; }
     let guard = process_run_lock();
+    if (scheduled_process_peer_dispatch_enabled == false) {
+        process_run_unlock(guard);
+        return ProcessSecondaryStart::Idle;
+    }
     *scheduled_process_walk_site_here() = 1;
     let mut cursor = scheduled_process_first_slot();
     let mut walking: bool = true;
@@ -6315,12 +6309,12 @@ private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
         kernel_process_current_exit_has_waiter() == false) {
         return false;
     }
-    // The synthetic parent is deliberately not a secondary workload
-    // candidate. Exit may wake it on core 0, but that must not make it an
-    // admissible successor for core 1.
+    // The synthetic parent is explicitly pinned to core 0. Exit may wake it
+    // there, but its affinity must keep it from becoming a successor on core
+    // 1 now that an unset mask means every online CPU.
+    scheduled_process_set_affinity_mask(parent.pool_index, 1);
     let peer_wait_parent_rejected: bool =
-        kernel_process_cpu_admits(
-            1, scheduled_process_pid_of_handle(parent)) == false;
+        kernel_process_cpu_allows_slot(1, parent.pool_index) == false;
     let peer_idle_available: bool =
         kernel_process_exit_would_strand_on(1) == false;
     // With only this child running, SIGCHLD is also an exit-produced
@@ -6422,12 +6416,40 @@ private fn kernel_process_scheduler_probe_stack_arrive() -> bool {
 fn kernel_process_scheduler_probe() -> bool {
     kernel_process_execution_reset();
     kernel_process_trace_enable();
+    if (scheduled_process_peer_dispatch_enabled) { return false; }
     let root_pid: usize = kernel_process_current_pid();
     let mut root_handle: ProcessHandle = execution_here().current_handle;
+    // The bootstrap is architectural state, not an ordinary affinity-zero
+    // process: its saved frame may be absent while the boot probes run.
+    // Prove no peer selector can take slot 0 before exercising normal tasks.
+    let mut bootstrap_peer_refused: bool =
+        root_handle.pool_index == 0 &&
+        kernel_process_cpu_allows_slot(0, root_handle.pool_index);
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        if (kernel_process_cpu_allows_slot(cpu, root_handle.pool_index)) {
+            bootstrap_peer_refused = false;
+        }
+    }
+    if (bootstrap_peer_refused == false) { return false; }
     match kernel_process_clone_begin(0x11, 0) {
         ProcessCloneResult::Invalid => { return false; }
         ProcessCloneResult::ChildConstructing(child_pid) => {
+            // This probe later installs synthetic saved stack pointers and
+            // drives the scheduler by direct calls. Keep that test-only
+            // Ready frame away from the live peer idle loop.
+            let child_guard = process_run_lock();
+            scheduled_process_set_affinity_mask(
+                execution_here().current_handle.pool_index, 1);
+            process_run_unlock(child_guard);
+            let mut synthetic_child_peer_refused: bool = true;
+            for cpu: usize in 1..<KERNEL_MAX_CORES {
+                if (kernel_process_cpu_allows_slot(
+                        cpu, execution_here().current_handle.pool_index)) {
+                    synthetic_child_peer_refused = false;
+                }
+            }
             if (kernel_process_clone_unselectable_probe(root_handle) == false ||
+                synthetic_child_peer_refused == false ||
                 child_pid != root_pid + 1 ||
                 kernel_process_clone_context_install(0x1000, 0x2000) !=
                     0x2000) {
@@ -6824,11 +6846,32 @@ fn kernel_process_parent_is_root() -> bool {
     return parent.pool_index == 0;
 }
 
+// The current process's parent pid, sampled under ProcessRunGuard when the
+// caller compares two fixture children. Unlike parent_is_root(), this keeps
+// a process created by an interactive shell tied to that exact shell.
+fn kernel_process_current_parent_pid() -> usize {
+    if (execution_here().current_live == false) { return 0; }
+    let mut current: ProcessHandle = execution_here().current_handle;
+    let record: *ProcessRecord = scheduled_process_record_of(current);
+    if (record.has_parent == false) { return 0; }
+    let mut parent: ProcessHandle = record.parent;
+    if (scheduled_process_handle_matches(parent) == false) { return 0; }
+    return scheduled_process_pid_of_handle(parent);
+}
+
 fn kernel_process_current_pid() -> usize {
     if (execution_here().current_live) {
         return scheduled_process_pid_of_handle(execution_here().current_handle);
     }
     return 1;
+}
+
+// The caller holds ProcessRunGuard when it uses this snapshot to make a
+// cross-core placement decision or publish placement evidence.
+fn kernel_process_current_affinity_mask() -> usize {
+    if (execution_here().current_live == false) { return 0; }
+    return scheduled_process_affinity_mask(
+        execution_here().current_handle.pool_index);
 }
 
 // DDB attributes an exception to the process whose physical stack holds its

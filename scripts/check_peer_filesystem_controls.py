@@ -12,6 +12,7 @@ def sources() -> dict[str, str]:
     names = [
         "kernel/drivers/block/memory.tkb",
         "kernel/kernel/workload_evidence.tkb",
+        "kernel/kernel/syscall.tkb",
         "kernel/kernel/process.tkb",
         "kernel/arch/arm64/kernel/peer_read.tkb",
         "kernel/tests/common/views/peer_filesystem.expected",
@@ -25,6 +26,7 @@ def sources() -> dict[str, str]:
 def problems(tree: dict[str, str]) -> list[str]:
     memory = tree["kernel/drivers/block/memory.tkb"]
     evidence = tree["kernel/kernel/workload_evidence.tkb"]
+    syscall = tree["kernel/kernel/syscall.tkb"]
     process = tree["kernel/kernel/process.tkb"]
     payload = tree["kernel/arch/arm64/kernel/peer_read.tkb"]
     expected = tree["kernel/tests/common/views/peer_filesystem.expected"]
@@ -60,10 +62,39 @@ def problems(tree: dict[str, str]) -> list[str]:
     if reader_pin not in payload:
         result.append("the peer reader no longer pins itself to the cpu its "
                       "progress handler names")
-    if "return workload_busy_primary_candidate(pid);" not in process:
-        result.append("core-0 scheduler no longer applies primary admission")
-    if "if (cpu != SECONDARY_CORE_ID) { return false; }" not in process:
-        result.append("scheduler admits the workload to an unintended peer")
+    core_reader_pin = (
+        "if (peer_pin(0) == false) "
+        "{ svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }\n"
+        "    while (peer_read_cpu(cpu_bytes as []u8) != 0) {}")
+    if core_reader_pin not in payload:
+        result.append("the competing reader still assumes an unset affinity "
+                      "mask keeps it on core 0")
+    core_ready_call = (
+        "if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CORE_READY_TAG,")
+    peer_ready_call = (
+        "if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_READ_READY_TAG,")
+    if core_ready_call not in payload:
+        result.append("the core reader no longer waits for the peer's pinned "
+                      "arrival")
+    if peer_ready_call not in payload:
+        result.append("the peer reader no longer waits for the core reader's "
+                      "pinned arrival")
+    if ("fn workload_peer_core_read_ready() -> usize" not in evidence or
+            "fn workload_peer_read_peer_ready() -> usize" not in evidence):
+        result.append("the kernel no longer records both pinned arrivals")
+    for route in (
+        "if (x0 == 10) {\n            return SyscallAction::Resume(\n                workload_peer_core_read_ready());",
+        "if (x0 == 11) {\n            return SyscallAction::Resume(\n                workload_peer_read_peer_ready());",
+    ):
+        if route not in syscall:
+            result.append("a reader-arrival tag no longer reaches its "
+                          "kernel rendezvous")
+    if ("return (kernel_process_online_mask() & (1 << bit)) != 0;"
+            not in process):
+        result.append("an unset affinity mask no longer admits every online cpu")
+    if "workload_busy_secondary_candidate" in process or \
+            "workload_busy_primary_candidate" in process:
+        result.append("scheduler still carries a per-pid placement policy")
     for operation in ("OPENAT_SYSCALL", "READ_SYSCALL", "CLOSE_SYSCALL"):
         if operation not in payload:
             result.append(f"peer payload no longer performs {operation}")
@@ -111,9 +142,23 @@ def main() -> int:
         "exclusion": ("kernel/drivers/block/memory.tkb", "task_mutex_trylock", "removed_trylock"),
         "cpu0 wait": ("kernel/kernel/workload_evidence.tkb", "block_device_wait_count(0)", "removed_cpu0_wait"),
         "secondary id": ("kernel/kernel/workload_evidence.tkb", "block_read_call_count(SECONDARY_CORE_ID)", "block_read_call_count(1)"),
-        "primary admission": ("kernel/kernel/process.tkb", "workload_busy_primary_candidate(pid)", "removed_primary_candidate(pid)"),
+        "default placement": (
+            "kernel/kernel/process.tkb",
+            "return (kernel_process_online_mask() & (1 << bit)) != 0;",
+            "return cpu == 0;"),
         "reader pin": ("kernel/arch/arm64/kernel/peer_read.tkb", "if (peer_pin(peer_cpu) == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }\n    // Do not spend the bounded read attempts", "// Do not spend the bounded read attempts"),
-        "single peer": ("kernel/kernel/process.tkb", "cpu != SECONDARY_CORE_ID", "cpu == SECONDARY_CORE_ID"),
+        "core reader pin": (
+            "kernel/arch/arm64/kernel/peer_read.tkb",
+            "if (peer_pin(0) == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }\n    while (peer_read_cpu(cpu_bytes as []u8) != 0) {}",
+            "while (peer_read_cpu(cpu_bytes as []u8) != 0) {}"),
+        "core reader start gate": (
+            "kernel/arch/arm64/kernel/peer_read.tkb",
+            "if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CORE_READY_TAG,",
+            "if (false) {"),
+        "peer reader start gate": (
+            "kernel/arch/arm64/kernel/peer_read.tkb",
+            "if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_READ_READY_TAG,",
+            "if (false) {"),
         "qemu stop": ("scripts/run_kernel_qemutest.sh", "--stop-marker", "--old-stop-marker"),
     }
     for name, (path, old, new) in mutations.items():

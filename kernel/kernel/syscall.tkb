@@ -2787,6 +2787,9 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         -> (usize, usize) !{unsafe} {
     kernel_log_peer_drain();
     workload_profile_note_syscall(number);
+    // GitHub issue #580: sample the real BusyBox sleep applet at syscall
+    // entry, before peer-safety policy can migrate its frame to core 0.
+    workload_ordinary_placement_note_syscall(number);
     let caller_slot: usize = kernel_syscall_process_slot();
     let (action_code, action_value) = syscall_action_encode(
         kernel_syscall_dispatch_action(esr, number, x0, x1, x2, x3, x4));
@@ -2844,8 +2847,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     if (cpu_id() != 0 && kernel_process_current_cpu_allows() == false) {
         return SyscallAction::Migrate;
     }
-    if (cpu_id() != 0 && kernel_process_current_admitted_by_rule() == false &&
-        syscall_peer_safe(number, x0) == false) {
+    if (cpu_id() != 0 && syscall_peer_safe(number, x0) == false) {
         return SyscallAction::Migrate;
     }
     // GitHub issue #533: a peer must not read a tree that is being rewritten.
@@ -2855,19 +2857,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // runs there too and this kernel is not preemptible, so a core 0 reader
     // cannot be dispatched while a core 0 mutation is mid-rewrite.
     //
-    // Only for a call the table does NOT admit, which after the check above
-    // means a rule-admitted fixture: /bin/peer-read, whose openat and read
-    // reach ext2 and are outside the table. Asking it of a peer-safe call
-    // would be both pointless and harmful -- nothing in the table reaches the
-    // filesystem, and every workload progress handler refuses a report made
-    // anywhere but SECONDARY_CORE_ID, so migrating one during a mutation
-    // would turn a fixture's report into a refusal.
-    // GitHub issue #581: asked of anything that reaches ext2, whether the
-    // table admits it or a per-pid rule does. It used to be asked only of a
-    // call the table refused, because nothing the table admitted reached the
-    // filesystem -- that sentence stopped being true when the read path was
-    // admitted, and the check would have silently stopped applying to the
-    // very calls it was written for.
+    // GitHub issue #533: asked of anything that reaches ext2, independently
+    // of whether the peer-safe table admits it. A normal process can now run
+    // on any online core without being named by a fixture; this mutation
+    // check must therefore remain attached to the operation, not to how the
+    // process was placed.
     if (cpu_id() != 0 &&
         (syscall_peer_safe(number, x0) == false ||
          syscall_reaches_filesystem(number, x0)) &&
@@ -2928,6 +2922,14 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     return SyscallAction::Resume(LINUX_EINVAL);
                 }
             }
+        }
+        if (x0 == 10) {
+            return SyscallAction::Resume(
+                workload_peer_core_read_ready());
+        }
+        if (x0 == 11) {
+            return SyscallAction::Resume(
+                workload_peer_read_peer_ready());
         }
         return SyscallAction::Resume(workload_busy_record_progress(x0, x1, x2));
     }

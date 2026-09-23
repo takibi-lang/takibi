@@ -26,6 +26,7 @@ const EFAULT_RC: usize = 0xFFFFFFFFFFFFFFF2;
 const EINVAL_RC: usize = 0xFFFFFFFFFFFFFFEA;
 const EAGAIN_RC: usize = 0xFFFFFFFFFFFFFFF5;
 const ESRCH_RC: usize = 0xFFFFFFFFFFFFFFFD;
+const GETAFFINITY_SYSCALL: usize = 123;
 const LARGE_LEN: usize = 1461;
 const SCHEDULER_CHILD_BUSY: usize = 0x0BEBC200;
 const SCHEDULER_PARENT_BUSY: usize = 0x17D78400;
@@ -51,13 +52,30 @@ fn initial_user_payload() {
      * of the literal 2 it used to be. */
     let my_pid: usize = svc5(172, 0, 0, 0, 0, 0);
 
-    /* getcpu(2): both outputs are optional, CPU 0 is where this unrestricted
-     * ABI payload runs, and this non-NUMA kernel reports node 0. */
+    /* getcpu(2): both outputs are optional. The process may run on any online
+     * CPU now, so compare the reported CPU with its allowed affinity mask
+     * instead of assuming core 0. This non-NUMA kernel reports node 0. */
     let mut cpu_node: [u8; 8];
     let cpu_node_base: *u8 = cpu_node as *u8;
     fail_if(svc5(168, ptr_of(cpu_node_base, 0), ptr_of(cpu_node_base, 4),
                  0, 0, 0) != 0);
-    fail_if(payload_read_u64(cpu_node_base, 0) != 0);
+    let cpu_and_node: usize = payload_read_u64(cpu_node_base, 0);
+    let reported_cpu: usize = cpu_and_node & 0xFFFFFFFF;
+    fail_if((cpu_and_node >> 32) != 0);
+    let mut allowed_cpus: [u8; 8];
+    fail_if(svc5(GETAFFINITY_SYSCALL, 0, 8,
+                 allowed_cpus as *u8 as usize, 0, 0) != 8);
+    let mut reported_cpu_is_allowed: bool = false;
+    for byte_index: usize in 0..<8 {
+        for bit_index: usize in 0..<8 {
+            let bit: u8 = (1 << bit_index) as u8;
+            if (reported_cpu == byte_index * 8 + bit_index &&
+                (allowed_cpus[byte_index] & bit) != 0) {
+                reported_cpu_is_allowed = true;
+            }
+        }
+    }
+    fail_if(reported_cpu_is_allowed == false);
     fail_if(svc5(168, 0, 0, 0, 0, 0) != 0);
     fail_if(svc5(168, 1, 0, 0, 0, 0) != EFAULT_RC);
 

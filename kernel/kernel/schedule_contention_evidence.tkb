@@ -411,8 +411,8 @@ fn schedule_contention_probe() -> bool !{unsafe} {
                 // an affinity mask no CPU satisfies so that no scheduler
                 // resumes a record which has no EL0 frame. That pair used
                 // to come from the per-pid placement rule refusing this pid
-                // on the secondary, which is why flipping the default
-                // placement fail-stopped core 1 here.
+                // on every peer, which is why flipping the default placement
+                // fail-stopped a core with no EL0 frame here.
                 schedule_probe_ready = true;
             }
         }
@@ -422,17 +422,17 @@ fn schedule_contention_probe() -> bool !{unsafe} {
     // core 0, so consulting cpu_id() here would only prove the answer for
     // the core asking and leave the peer untested.
     //
-    // GitHub issue #580: what is asserted changed with what is true. It used
-    // to be that the per-pid rule admitted this process on core 0 and
-    // refused it on core 1, which is how a record with no EL0 frame stayed
-    // unrun -- an accident of the fixture rule rather than anything this
-    // probe asked for. The default placement is every schedulable core now,
-    // so the separation this probe depends on is its own: the mask
-    // scheduled_process_probe_publish_racable wrote names no CPU, and the
-    // assertion is that NEITHER core will take it while it sits Ready.
-    let admission_separated: bool =
-        scheduled_process_probe_cpu_allows(0, schedule_probe_handle) == false &&
-        scheduled_process_probe_cpu_allows(1, schedule_probe_handle) == false;
+    // GitHub issue #580: the probe's mask names no CPU, so every online core
+    // must refuse this Ready record even though an unset mask admits all of
+    // them. Check the full compile-time ceiling, not only QEMU's two online
+    // CPUs, so the four-core board exercises the same invariant.
+    let mut admission_separated: bool = true;
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if (scheduled_process_probe_cpu_allows(
+                cpu, schedule_probe_handle)) {
+            admission_separated = false;
+        }
+    }
 
     // Phase 1: no lock. The race is the expected result, and a run with no
     // duplicates at all means the window closed rather than that the

@@ -125,22 +125,22 @@ The current RPi5 kernel includes:
 
 The rootfs keeps executable files under `/bin`: Alpine's original
 `busybox.static` and `busybox-extras` names identify the two real binaries;
-`sh`, `cat`, `echo`, `ls`, `od`, `ps`, `dmesg`, `mkdir`, `rmdir`, and
-`uname` are hard links to the static
-binary, while `httpd` is a hard link to BusyBox Extras. The independent
+`sh`, `cat`, `echo`, `ls`, `od`, `ps`, `dmesg`, `mkdir`, `rmdir`, `sleep`,
+and `uname` are hard links to the static binary, while `httpd` is a hard link
+to BusyBox Extras. The independent
 Takibi test programs are `/bin/user_payload` (the EL0 syscall-ABI fixture),
 `/bin/peer-read` and `/bin/core-read` (the read-only block contention
 fixture), `/bin/peer-console` (the secondary-CPU console writer),
 `/bin/peer-tty` (the secondary-CPU terminal reader), and the pair
 `/bin/busy-a`/`/bin/busy-b`, which are the same object linked
 twice with different ELF entry points so each knows which `respawn` entry it
-is without parsing `argv`. `/bin/spin` is a third link of the same object: one
-round of that work and then exit. The ash session backgrounds two of them
-and then asks `jobs`, which answers with both still Running -- that listing
-is how the session shows it holds more than one job at once, and it carries
-no pid, so it is the same text on every boot. `spin` prints nothing because
-output interleaving with the prompt would arrive in an order no fixture
-could pin.
+is without parsing `argv`. The ash session backgrounds a bounded placement
+guard pinned to CPU 0, then runs the real `/bin/sleep` BusyBox applet as a
+foreground child. Before sleep's nanosleep can be redirected by the
+peer-safety gate, the kernel records its actual CPU, exact command line,
+unset affinity, and parent. After the shell reports that evidence, it waits
+for and reaps the guard. This verifies ordinary placement of the real applet
+without teaching a test ELF to imitate one.
 `/bin/peer-spin` is a separate UART-wake test fixture: it pins itself to
 CPU 1 and stays runnable while `/bin/peer-tty` reads there. The QEMU test
 driver starts it explicitly; normal boot does not.

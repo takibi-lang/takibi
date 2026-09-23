@@ -81,6 +81,11 @@ const WORKLOAD_BUSY_ROUNDS: usize = 8;
 // diagnostic here only because no bound has been chosen for them yet.
 const WORKLOAD_PROFILE_WORLD_STOP_SPINS: usize = 10000000;
 const WORKLOAD_BUSY_MIGRATION_GOAL: usize = 2;
+const WORKLOAD_ORDINARY_PLACEMENT_REPORT_TAG: usize = 8;
+const WORKLOAD_ORDINARY_PLACEMENT_GUARD_TAG: usize = 9;
+const WORKLOAD_BUSY_ANSWER_WIDEN_AFFINITY: usize = 6;
+const WORKLOAD_BUSY_ANSWER_PIN_CPU0: usize = 7;
+const WORKLOAD_BUSY_ANSWER_PIN_CPU1: usize = 8;
 
 must_use variant WorkloadBusyProgressResult {
     Value(usize);
@@ -155,23 +160,30 @@ struct WorkloadBusyPair {
     a_migrations: usize;
     b_migrations: usize;
     migration_reported: bool;
+    ordinary_busybox_peer_reported: bool;
+    ordinary_busybox_peer_parent_pid: usize;
     // The one post-migration exit that proves a peer can give up its
-    // process stack, return to architectural idle, and leave init to reap
-    // the zombie on core 0. The pid identifies that one lifetime only; init
+    // process stack before init reaps the zombie on core 0. The pid identifies
+    // that one lifetime only; init
     // may reuse its number for the replacement, so post-reap routing uses tag.
     peer_exit_pid: usize;
     peer_exit_tag: usize;
     peer_exit_cpu: usize;
     peer_exit_stack_released: bool;
     peer_exit_reported: bool;
-    // The read-only filesystem fixture is admitted to a peer only after the
-    // exit fixture above has completed. Its pid is fixed by its first tag-3
-    // report, before it opens the fixture file.
+    // The read-only filesystem fixture asks for the peer in its own affinity
+    // mask only after the exit fixture above has completed. Its pid is fixed
+    // by its first tag-3 report, before it opens the fixture file.
     peer_read_pid: usize;
     peer_read_reported: bool;
+    // The two filesystem readers rendezvous after pinning themselves to
+    // opposite CPUs. This makes device-lock contention evidence a real
+    // overlap rather than a race between when the init workers get scheduled.
+    peer_read_core_ready: bool;
+    peer_read_peer_ready: bool;
     // The output-only process follows the filesystem reader. It registers
-    // before writing, then belongs exclusively to the admitted peer until
-    // one deliberately over-capacity write and its retry have completed.
+    // before writing, then pins itself to the peer until one deliberately
+    // over-capacity write and its retry have completed.
     // A UART-BREAK DDB lane keeps it for one more record: held, pending,
     // then released by the debugger's entry.
     peer_console_pid: usize;
@@ -358,6 +370,19 @@ private fn workload_profile_selected_pid(
         return workload_profile_cores[cpu].selected_pid;
     }
     return 0;
+}
+
+// A process can become the first occupant of an idle peer without a scheduler
+// switch being recorded after the busy-pair PIDs are known. Its first progress
+// syscall is the direct witness for that CPU; retain it so a later world-stop
+// profile boundary does not attribute the whole interval to nobody.
+private fn workload_profile_capture_current_pid(pid: usize) {
+    if (workload_profile_active) { return; }
+    let raw_cpu: usize = cpu_id();
+    if (raw_cpu >= KERNEL_MAX_CORES) { return; }
+    let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
+    workload_profile_cores[cpu].selected_pid = pid;
+    workload_profile_cores[cpu].has_selected_pid = true;
 }
 
 fn workload_profile_note_syscall(number: usize) {
@@ -653,48 +678,6 @@ fn workload_busy_note_selected_locked(
     }
 }
 
-// B is the persistent secondary participant. A deliberately remains on the
-// console-owning core because it exits once to exercise init's SIGCHLD respawn;
-// moving that handoff to the peer would admit init and its I/O descendants to
-// subsystems whose non-pool state has not completed the multicore audit.
-fn workload_busy_secondary_candidate(pid: usize) -> bool {
-    if (workload_busy_pair.a_pid == 0 || workload_busy_pair.b_pid == 0) {
-        return false;
-    }
-    // Once a peer exit is armed, keep only that currently-running process
-    // admitted until the physical idle-stack boundary publishes its release.
-    // The idle loop immediately asks this policy again, so widening here lets
-    // it select the next workload without waiting for a second idle wakeup.
-    if (workload_busy_pair.peer_exit_pid != 0 &&
-        workload_busy_pair.peer_exit_stack_released == false) {
-        return pid == workload_busy_pair.peer_exit_pid;
-    }
-    // GitHub issue #9: the console writer and the terminal reader are not
-    // named here, and GitHub issue #581 removed the last one that was. Each
-    // asks its progress handler for the CPU when its turn comes and pins
-    // itself to it, so their admission is their own affinity mask. The
-    // filesystem reader needed a rule only while its file reads were
-    // outside the kernel's peer-safety table; they are in it now, so it
-    // pins like the other two.
-    if (workload_busy_pair.restart_report_state ==
-            WorkloadRestartReportState::Reported) {
-        return pid == workload_busy_pair.a_pid ||
-               pid == workload_busy_pair.b_pid;
-    }
-    return pid == workload_busy_pair.b_pid;
-}
-
-// GitHub issue #581: nothing is excluded from core 0 by name any more. The
-// peer reader used to be: it registers before opening the fixture and then
-// belongs exclusively to CPU 1, and excluding it here was the other half of
-// secondary admission. It pins itself now, like the console writer and the
-// terminal reader, so a mask says where it runs and this rule says nothing
-// about it -- which is what keeps its reads contending with core 0's
-// whatever the placement policy becomes.
-fn workload_busy_primary_candidate(pid: usize) -> bool {
-    return true;
-}
-
 fn workload_busy_note_selected(pid: usize) {
     let guard = process_run_lock();
     workload_busy_note_selected_locked(guard, pid);
@@ -724,9 +707,32 @@ private fn workload_busy_record_progress_locked(
         input_steps: usize) -> WorkloadBusyProgressResult !{unsafe} {
     if (workload_busy_pair.restart_report_state ==
             WorkloadRestartReportState::Reported) {
-        if (workload_busy_pair.migration_reported == false && cpu_id() != 0 &&
+        let pid: usize = kernel_process_current_pid();
+        if ((tag == WORKLOAD_BUSY_TAG_A &&
+             pid == workload_busy_pair.a_pid) ||
+            (tag == WORKLOAD_BUSY_TAG_B &&
+             pid == workload_busy_pair.b_pid)) {
+            let mask: usize = kernel_process_current_affinity_mask();
+            if (mask != kernel_process_online_mask()) {
+                // The workers pinned themselves while earlier staged boot
+                // fixtures depended on CPU 1 returning to its idle loop.
+                // Widen only after those fixtures finish. The fixture then
+                // alternates explicit CPU 0/1 requests, because eligibility
+                // on a wider set alone does not make this local scheduler
+                // migrate an already-running CPU-bound process.
+                return WorkloadBusyProgressResult::Value(
+                    WORKLOAD_BUSY_ANSWER_WIDEN_AFFINITY);
+            }
+        }
+        let pid: usize = kernel_process_current_pid();
+        let is_pair_worker: bool =
+            (tag == WORKLOAD_BUSY_TAG_A && pid == workload_busy_pair.a_pid) ||
+            (tag == WORKLOAD_BUSY_TAG_B && pid == workload_busy_pair.b_pid);
+        let migration_goal_met: bool =
             workload_busy_pair.a_migrations >= WORKLOAD_BUSY_MIGRATION_GOAL &&
-            workload_busy_pair.b_migrations >= WORKLOAD_BUSY_MIGRATION_GOAL) {
+            workload_busy_pair.b_migrations >= WORKLOAD_BUSY_MIGRATION_GOAL;
+        if (workload_busy_pair.migration_reported == false &&
+            migration_goal_met && cpu_id() != 0) {
             kernel_boot_log(
                 "\nworkload: busy pair migrated across both cpus with stack handoff intact\n");
             workload_busy_pair.migration_reported = true;
@@ -751,6 +757,14 @@ private fn workload_busy_record_progress_locked(
             }
             return WorkloadBusyProgressResult::Value(5);
         }
+        if (is_pair_worker) {
+            if (cpu_id() == 0) {
+                return WorkloadBusyProgressResult::Value(
+                    WORKLOAD_BUSY_ANSWER_PIN_CPU1);
+            }
+            return WorkloadBusyProgressResult::Value(
+                WORKLOAD_BUSY_ANSWER_PIN_CPU0);
+        }
         return WorkloadBusyProgressResult::Value(0);
     }
     if (workload_busy_pair.restart_report_state ==
@@ -771,6 +785,7 @@ private fn workload_busy_record_progress_locked(
         workload_busy_pair.refused = workload_busy_pair.refused + 1;
         return WorkloadBusyProgressResult::Value(0);
     }
+    workload_profile_capture_current_pid(pid);
     // Once both tags reached the exact round goal, freeze their counters and
     // let only the CPU that armed the local PMU request the close. Both busy
     // processes keep reporting, so the owner reaches this path without
@@ -849,9 +864,10 @@ private fn workload_busy_record_progress_locked(
     return WorkloadBusyProgressResult::FinishRequested;
 }
 
-// Called at the physical boundary after the peer has moved from the exiting
-// process stack to its architectural IRQ/idle stack. ProcessRunGuard orders
-// this publication before core 0 can take and reap the zombie.
+// Called at the physical boundary after the peer has moved off the exiting
+// process stack, either to its architectural idle stack or to a successor's
+// stack. ProcessRunGuard orders this publication before core 0 can reap the
+// zombie.
 fn workload_busy_peer_exit_stack_released(pid: usize, cpu: usize) {
     if (workload_busy_pair.peer_exit_pid == pid &&
         workload_busy_pair.peer_exit_cpu == cpu && cpu != 0) {
@@ -869,7 +885,7 @@ fn workload_busy_peer_exit_reaped(pid: usize, parent_pid: usize,
         workload_busy_pair.peer_exit_stack_released && stack_unowned &&
         cpu_id() == 0 && parent_pid == 1) {
         kernel_boot_log(
-            "workload: peer exit returned to idle, init collected on core 0 after stack release\n");
+        "workload: peer exit stack released before init collected on core 0\n");
         workload_busy_pair.peer_exit_reported = true;
     }
 }
@@ -910,6 +926,42 @@ fn workload_peer_read_progress(bytes: usize, checksum: usize) -> usize {
         "workload: peer read 98304 pattern bytes; block device mutex contended on both cpus\n");
     process_run_unlock(guard);
     return 2;
+}
+
+// Tag 10 belongs to /bin/core-read. Record that the core-0 reader has
+// completed its affinity handoff, then wait until the peer reader has done
+// the same on CPU 1 before either starts block I/O.
+fn workload_peer_core_read_ready() -> usize {
+    let guard = process_run_lock();
+    if (kernel_process_parent_is_root() == false || cpu_id() != 0) {
+        workload_busy_pair.refused = workload_busy_pair.refused + 1;
+        process_run_unlock(guard);
+        return 0;
+    }
+    workload_busy_pair.peer_read_core_ready = true;
+    let ready: bool = workload_busy_pair.peer_read_peer_ready;
+    process_run_unlock(guard);
+    if (ready) { return 1; }
+    return 0;
+}
+
+// Tag 11 belongs to /bin/peer-read. Its first tag-3 call fixes its pid; this
+// second call proves it reached CPU 1 after sched_setaffinity before the
+// core-0 reader is released.
+fn workload_peer_read_peer_ready() -> usize {
+    let guard = process_run_lock();
+    if (kernel_process_parent_is_root() == false ||
+        kernel_process_current_pid() != workload_busy_pair.peer_read_pid ||
+        cpu_id() != SECONDARY_CORE_ID) {
+        workload_busy_pair.refused = workload_busy_pair.refused + 1;
+        process_run_unlock(guard);
+        return 0;
+    }
+    workload_busy_pair.peer_read_peer_ready = true;
+    let ready: bool = workload_busy_pair.peer_read_core_ready;
+    process_run_unlock(guard);
+    if (ready) { return 1; }
+    return 0;
 }
 
 // GitHub issue #587: the peer waiter fixture runs the real scheduler block
@@ -1146,12 +1198,6 @@ private fn workload_busy_start_profile(pid: usize, input_steps: usize)
                 workload_busy_pair.profile_cpu = cpu_id();
                 workload_profile_start(
                     stopped, start_guard, workload_busy_pair.start_ticks, pid);
-                workload_busy_pair.a_ticks = 0;
-                workload_busy_pair.b_ticks = 0;
-                for reset_cpu: usize in 0..<KERNEL_MAX_CORES {
-                    workload_busy_pair.last_pid[reset_cpu] = 0;
-                    workload_busy_pair.last_tick[reset_cpu] = 0;
-                }
                 kernel_boot_log("profile: begin name=busy-pair input_steps=");
                 uart_put_udec(input_steps);
                 kernel_boot_log(" cpu_count=");
@@ -1170,8 +1216,64 @@ private fn workload_busy_start_profile(pid: usize, input_steps: usize)
     }
 }
 
+// The ash fixture launches /bin/sleep, a hard link to the pinned BusyBox
+// multi-call image. Observe its real nanosleep entry before the syscall gate
+// can hand it elsewhere. cpu_id() here is the CPU actually executing that
+// EL0 thread, not an approximate helper ELF's view of its own CPU.
+fn workload_ordinary_placement_note_syscall(number: usize) {
+    if (number != AARCH64_NR_NANOSLEEP &&
+        number != AARCH64_NR_CLOCK_NANOSLEEP) { return; }
+    let raw_cpu: usize = cpu_id();
+    if (raw_cpu == 0 || raw_cpu >= KERNEL_MAX_CORES) { return; }
+    let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
+    let guard = process_run_lock();
+    let command_line: [u8; 512..] =
+        scheduled_process_command_line(kernel_syscall_process_slot());
+    let is_busybox_sleep: bool =
+        slice_eq(command_line[0..<11], bs"/bin/sleep\0");
+    let parent_pid: usize = kernel_process_current_parent_pid();
+    if (is_busybox_sleep && parent_pid != 0 &&
+        kernel_process_current_affinity_mask() == 0 &&
+        (kernel_process_online_mask() & (1 << cpu)) != 0) {
+        workload_busy_pair.ordinary_busybox_peer_reported = true;
+        workload_busy_pair.ordinary_busybox_peer_parent_pid = parent_pid;
+    }
+    process_run_unlock(guard);
+}
+
+private fn workload_ordinary_placement_report() -> usize {
+    let guard = process_run_lock();
+    let reported: bool =
+        kernel_process_parent_is_root() == false &&
+        kernel_process_current_affinity_mask() == 0 &&
+        workload_busy_pair.ordinary_busybox_peer_reported &&
+        kernel_process_current_parent_pid() ==
+            workload_busy_pair.ordinary_busybox_peer_parent_pid;
+    process_run_unlock(guard);
+    if (reported) { return 1; }
+    return 0;
+}
+
+private fn workload_ordinary_placement_guard_complete() -> usize {
+    let guard = process_run_lock();
+    let complete: bool =
+        kernel_process_current_affinity_mask() == 1 &&
+        workload_busy_pair.ordinary_busybox_peer_reported &&
+        kernel_process_current_parent_pid() ==
+            workload_busy_pair.ordinary_busybox_peer_parent_pid;
+    process_run_unlock(guard);
+    if (complete) { return 1; }
+    return 0;
+}
+
 fn workload_busy_record_progress(tag: usize, checksum: usize,
                                  input_steps: usize) -> usize !{unsafe} {
+    if (tag == WORKLOAD_ORDINARY_PLACEMENT_REPORT_TAG) {
+        return workload_ordinary_placement_report();
+    }
+    if (tag == WORKLOAD_ORDINARY_PLACEMENT_GUARD_TAG) {
+        return workload_ordinary_placement_guard_complete();
+    }
     let guard = process_run_lock();
     match workload_busy_record_progress_locked(
             guard, tag, checksum, input_steps) {

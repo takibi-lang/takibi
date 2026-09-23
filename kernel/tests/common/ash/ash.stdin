@@ -59,16 +59,15 @@ mv /etc/mva /kept /etc/moved
 # line like this one, newline included, and the shell waited for it until the
 # lane's budget ran out. echo is a shell builtin, so this costs no exec.
 echo uart-rx-ring-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-# Two background jobs at once, and ash's own account of them. /bin/spin is
-# one round of the busy loop and then exit: silent, because output that
-# interleaved with the prompt would arrive in an order nothing here can
-# pin, and long enough that both are still Running when `jobs` asks. That
-# listing is the evidence -- two jobs, neither finished -- and it carries no
-# pid, so it is the same text on every boot. Two output-less commands leave
-# two bare prompts, which is why the line after them carries them.
-/bin/spin &
-/bin/spin &
-jobs
+# Pin one background child to CPU 0 before the actual BusyBox sleep applet
+# runs in the foreground. The kernel records the applet's nanosleep entry on
+# the peer before applying the peer-safety table. Ash's normal foreground
+# completion reaps sleep; after the verdict, wait reaps the completed guard.
+/etc/placement-guard >/dev/null &
+placement_guard_pid=$!
+/bin/sleep 1 >/dev/null
+/etc/placement-report
+wait "$placement_guard_pid"
 echo two-jobs-ok
 echo repl-ok
 exit
