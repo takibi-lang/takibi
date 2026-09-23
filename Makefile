@@ -312,6 +312,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/arch/arm64/kernel/timer.tkb \
 	kernel/arch/arm64/mm/asid.tkb \
 	kernel/arch/arm64/mm/mmu.tkb \
+	kernel/drivers/virtio_ring.tkb \
 	kernel/drivers/serial/pl011.tkb \
 	kernel/drivers/serial/uart_rx_ring.tkb \
 	kernel/fs/elf64.tkb \

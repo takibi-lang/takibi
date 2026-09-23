@@ -5718,6 +5718,30 @@ let infer_tests = [
          return intid == spi;
        }");
 
+  (* GitHub issue #275: a protocol counter's nominal u16 domain makes a
+     wider shadow counter fail at the comparison, before the first wrap.
+     Crossing through the declared representation and then widening is the
+     explicit escape hatch for code that intentionally wants a number. *)
+  Alcotest.test_case "protocol counter rejects wider shadow comparison" `Quick
+    (expect_type_error "cannot unify isize with VirtioRingIndex"
+      "enum VirtioRingIndex: u16 { Zero = 0; _; }
+       struct packed VirtqUsed { flags: u16; idx: VirtioRingIndex; }
+       let mut seen: isize = 0;
+       fn pending(used: *VirtqUsed) -> bool { return seen != used.idx; }");
+
+  Alcotest.test_case "protocol counter rejects direct widening cast" `Quick
+    (expect_type_error
+      "cannot cast enum 'VirtioRingIndex' (underlying u16) to 'isize'"
+      "enum VirtioRingIndex: u16 { Zero = 0; _; }
+       fn raw(index: VirtioRingIndex) -> isize { return index as isize; }");
+
+  Alcotest.test_case "protocol counter permits explicit numeric widening" `Quick
+    (expect_codegen_ok
+      "enum VirtioRingIndex: u16 { Zero = 0; _; }
+       fn raw(index: VirtioRingIndex) -> isize {
+         return (index as u16) as isize;
+       }");
+
   Alcotest.test_case "packed struct field access type-checks" `Quick
     (expect_ok "struct packed Hdr { a: u8; b: u16; }
      fn f(h: *Hdr) -> u8 { return h.a; }");

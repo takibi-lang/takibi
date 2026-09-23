@@ -1899,7 +1899,11 @@ enum Name: u16 { V1 = n1; ...; _; }             // non-exhaustive (trailing `_;`
   is cast into the domain, but refinements themselves still require a
   primitive integer base; there is no `{lo..<hi as GicIntid}` type. Convert
   back to the underlying integer for arithmetic, then validate or narrow the
-  result as needed before casting it into a domain.
+  result as needed before casting it into a domain. This also models modular
+  protocol counters: keep both the wire field and its software shadow in one
+  domain, and put wrap arithmetic in a named helper. A comparison with a wider
+  shadow is then a type error. Intentional numeric widening crosses two explicit
+  boundaries, for example `(index as u16) as isize`.
 - `Name::Variant` -- enum variant literal, valid as a compile-time
   constant global initializer.
 - `EnumVariant as underlying_type` -- cast to the enum's declared

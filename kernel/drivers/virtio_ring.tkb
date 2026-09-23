@@ -1,0 +1,13 @@
+// Shared nominal type for virtio's modulo-2^16 queue indices.
+
+enum VirtioRingIndex: u16 { Zero = 0; _; }
+
+fn virtio_ring_index_zero() -> VirtioRingIndex {
+    return VirtioRingIndex::Zero;
+}
+
+fn virtio_ring_index_next(index: VirtioRingIndex) -> VirtioRingIndex {
+    let raw: u16 = index as u16;
+    if (raw == 0xFFFF) { return virtio_ring_index_zero(); }
+    return (raw + 1) as VirtioRingIndex;
+}

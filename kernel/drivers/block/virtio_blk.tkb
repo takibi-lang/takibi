@@ -2,6 +2,8 @@
 // the boot DTB before this driver runs. The queue deliberately follows the
 // descriptor/avail/used layout used by kernel/drivers/net/virtio_net.tkb.
 
+use "kernel/drivers/virtio_ring.tkb";
+
 const VIRTIO_BLK_GUEST_FEATURES: i32 = 0x20;
 const VIRTIO_BLK_GUEST_PAGE_SIZE: i32 = 0x28;
 const VIRTIO_BLK_QUEUE_SEL: i32 = 0x30;
@@ -29,7 +31,7 @@ struct packed VirtioBlkDesc {
 }
 struct packed VirtioBlkAvail {
     flags: u16;
-    idx: u16;
+    idx: VirtioRingIndex;
     ring: [u16; VIRTIO_QNUM];
 }
 struct packed VirtioBlkUsedElem {
@@ -38,7 +40,7 @@ struct packed VirtioBlkUsedElem {
 }
 struct packed VirtioBlkUsed {
     flags: u16;
-    idx: u16;
+    idx: VirtioRingIndex;
     ring: [VirtioBlkUsedElem; VIRTIO_QNUM];
 }
 struct packed VirtioBlkRequest {
@@ -60,25 +62,22 @@ let mut virtio_blk_queue: [u8; 2 * VIRTIO_BLK_PAGE_SIZE] align(4096);
 let mut virtio_blk_data_buf: [u8; 512] align(64);
 let mut virtio_blk_request_buf: [u8; 16] align(64);
 let mut virtio_blk_status_buf: [u8; 1] align(64);
-// Virtio's avail/used idx fields are free-running u16 counters. Keep the
-// driver shadow at the same width so equality remains valid across the
-// mandatory 65535 -> 0 wrap after long streams of synchronous requests.
-let mut virtio_blk_used_seen: u16;
-
-fn virtio_blk_index_next(index: u16) -> u16 {
-    if (index == 0xFFFF) { return 0; }
-    return index + 1;
-}
+// Virtio's avail/used idx fields are free-running u16 counters. The nominal
+// domain keeps the driver shadow at that width and makes comparison with a
+// widened counter a type error before the mandatory 65535 -> 0 wrap.
+let mut virtio_blk_used_seen: VirtioRingIndex;
 
 // Keep the 16-bit ring-counter boundary independently testable: a normal
 // BusyBox rootfs boot crosses it through real block I/O, while this small
 // probe makes that coverage explicit even if a future fixture becomes smaller.
 fn virtio_blk_index_wrap_probe() -> bool {
-    let mut index: u16 = 0;
+    let mut index: VirtioRingIndex = virtio_ring_index_zero();
     for step: usize in 0..<65536 {
-        index = virtio_blk_index_next(index);
+        index = virtio_ring_index_next(index);
     }
-    return index == 0 && virtio_blk_index_next(0xFFFF) == 0;
+    let last: VirtioRingIndex = (0xFFFF as u16) as VirtioRingIndex;
+    return index == virtio_ring_index_zero() &&
+           virtio_ring_index_next(last) == virtio_ring_index_zero();
 }
 
 fn virtio_blk_reg(offset: i32) -> *io i32 !{unsafe} {
@@ -105,7 +104,7 @@ fn virtio_blk_init() -> bool !{unsafe} {
         VIRTIO_BLK_PAGE_SIZE as i32;
     virtio_blk_setup_queue();
     *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 7;
-    virtio_blk_used_seen = 0;
+    virtio_blk_used_seen = virtio_ring_index_zero();
     virtio_blk_ready = true;
     return true;
 }
@@ -150,13 +149,13 @@ fn virtio_blk_submit(request_type: u32, sector: u32,
     let avail: *VirtioBlkAvail =
         (queue + VIRTIO_QNUM * (sizeof(VirtioBlkDesc) as isize))
         as *VirtioBlkAvail;
-    let slot: isize = (avail.idx as isize) % VIRTIO_QNUM;
+    let slot: isize = ((avail.idx as u16) as isize) % VIRTIO_QNUM;
     let ring: *u16 = (queue + VIRTIO_QNUM *
         (sizeof(VirtioBlkDesc) as isize) +
         (offsetof(VirtioBlkAvail, ring) as isize))
         as *u16;
     ring[slot] = 0;
-    avail.idx = virtio_blk_index_next(avail.idx);
+    avail.idx = virtio_ring_index_next(avail.idx);
     dma_publish();
     *(virtio_blk_reg(VIRTIO_BLK_QUEUE_NOTIFY)) = 0;
 
@@ -172,7 +171,7 @@ fn virtio_blk_submit(request_type: u32, sector: u32,
         return false;
     }
     dma_consume();
-    virtio_blk_used_seen = virtio_blk_index_next(virtio_blk_used_seen);
+    virtio_blk_used_seen = virtio_ring_index_next(virtio_blk_used_seen);
     dma_finish_rx(virtio_blk_status_buf, 1);
     if (virtio_blk_status_buf[0] != 0) { return false; }
     if (write == false) {

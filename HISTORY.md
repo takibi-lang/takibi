@@ -15,6 +15,22 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-23: virtio ring counters have a nominal modular domain
+
+Virtio `avail.idx` and `used.idx` are free-running 16-bit counters. The kernel
+had already repaired its original widened `isize` shadows by changing them to
+`u16`, but that represented the invariant only as matching primitive types: a
+later widening could silently restore the failure after the device wrapped at
+65536.
+
+The shared `VirtioRingIndex` domain now types the packed ring fields and every
+block and network shadow. Equality therefore requires the protocol domain on
+both sides, while the named increment helper performs the deliberate
+65535-to-zero transition. Code that needs an ordinary number, such as ring
+slot selection, must cross through the declared `u16` representation before
+widening. Compiler tests reject both a wider shadow comparison and a direct
+domain-to-`isize` cast, and accept that two-step escape hatch.
+
 ## 2026-09-22: USB block transfer size comes from the byte slice
 
 The RPi5 USB mass-storage API formerly accepted a raw byte pointer and an
