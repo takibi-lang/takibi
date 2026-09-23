@@ -35,7 +35,7 @@ step, landed as its own commit.
    with multicore as a premise.** #343, #342, #202, #518, #131, #132, #370,
    #216.
 4. **Begin evaluating recent research**: typestate, the K framework,
-   invariants, partial TLA+. First consumers #308 and #109; proof-side entry
+   invariants, partial TLA+. First consumers #590, #308 and #109; proof-side entry
    #13. An evaluation, not a decision to adopt.
 
 ### Territory B: everything else, ordered by current priority
