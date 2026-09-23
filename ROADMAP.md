@@ -227,9 +227,10 @@ The next multicore increment is phase B. Its order is now:
    because admitting a syscall on a peer is pointless while no ordinary
    process is placed on one.
 
-7. **#581, still open for its network portion.** Its filesystem and console
-   work was advanced ahead of #580 so an ordinary process placed on a peer
-   could make progress instead of migrating back to core 0 for every I/O.
+7. **#581, paused with network admission still open (2026-09-23).** Its
+   filesystem and console work was advanced ahead of #580 so an ordinary
+   process placed on a peer could make progress instead of migrating back to
+   core 0 for every I/O.
    The console needed no new admission: terminal `write` and fd-0 `read` have
    been in the table since #534 and #547. The filesystem read path is admitted
    and the ext2 mutation gate applies to every peer syscall that reaches it.
@@ -261,16 +262,36 @@ The next multicore increment is phase B. Its order is now:
    from the same source tree in an ignored overlay and runs sequentially in
    the existing lane, adding one QEMU boot without another lane or port block.
    `make cicheck` and four-core `make kernelcheck-rpi5` both pass. This closes
-   #587's race evidence, not network admission: #581 must still keep socket
-   calls on core 0 until its own synchronization and end-to-end acceptance
-   conditions are met.
+   #587's race evidence, not network admission.
 
-   **#586 was this entry's first answer and was wrong**, filed from a grep
-   of the first eighteen lines of `TcpConnection` where the lock is not; it
-   is about a hundred lines further down. Recorded because the queue's
-   entries are read as premises: re-derive one against the tree before
-   building on it, which is what `github-workflow` says and what this
-   skipped.
+   **The #586 diagnosis was false, not the remaining blocker.** Re-reading
+   `TcpConnection` found #462's connection-wide `TaskMutex`, held by a
+   `TcpConnectionOwner`; `tcp_connection_take(slot, generation)` acquires it
+   and revalidates the pool generation before returning the owner. The RX
+   capability, retransmit chain, frame links and pools also have their own
+   synchronization. #586 is closed as not a defect, and #274/#386 have not
+   been re-established as missing cross-core locks.
+
+   **The remaining risk is at the syscall call sites.** `syscall_peer_safe`
+   still refuses connected socket descriptors, so connected `read`/`write`
+   remain on core 0. Before `write` takes a connection owner it reads
+   `socket_buffer_length`; before `read` takes one it checks `connection_open`
+   and reads, copies from, then advances `socket_buffer_offset` against
+   `socket_buffer_length`. The pool probe in `tcp_connection_open_at` proves
+   slot liveness, not exclusion against a concurrent owner. Re-audit all
+   direct `TcpConnection` accesses and move every shared-state operation for
+   admitted paths under the owner; also check close/reset/poll paths rather
+   than fixing only these two handlers.
+
+   **End-to-end proof remains to be designed and run.** Acceptance requires a
+   guest process without a per-pid admission exception to execute socket
+   reads and writes on a peer against the resident BusyBox HTTPd, on QEMU and
+   four-core RPi5. Existing QEMU HTTPd/network tests use a host-side network
+   peer; they do not prove a guest peer process executed those socket
+   syscalls. Find an integration point after the resident listener is ready
+   (existing shell/QEMU runners are candidates), and prove the syscall ran on
+   the peer and returned the HTTP response. No #581 implementation or test
+   changes have started, and no #581-specific tests were run at this pause.
 
 8. **#580 is complete (2026-09-23).** **#579 completed (2026-09-22)**:
    the schedulable set is the online set, and the four-core board reports
