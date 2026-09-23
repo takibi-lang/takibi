@@ -74,32 +74,70 @@ the deepest dependency: it needs a language primitive this compiler does not
 have, and every week of single-core code written before that primitive exists
 is a week of code whose synchronization argument has to be reconstructed later.
 
-## Work split into two territories, re-cut 2026-09-21
+## Work split into two territories, re-cut 2026-09-23
 
 Two streams run in parallel, one per territory, with the territories and the
 shared-file conventions defined in `AGENTS.md`. This section is the part that
 moves: when a new issue outranks what is queued below, edit it here.
 
-**Territory A is multicore. That is #9 phase B and what it gates, with its
-QEMU, DDB and RPi5 evidence. Territory B is compiler and language safety,
-semantics, native tests, and documentation; #555 network-boot discovery is
-deferred outside either active queue.** A territory is a
-role, not a set of directories and not a particular agent (`AGENTS.md`).
-Either stream edits what its work needs. The roles keep the two apart in
-practice: multicore integration works in the scheduler, process and platform
-paths, while Territory B starts with compiler-only audits and rules. A
-conflict in a shared file is expected to be incidental.
+A territory is a role, not a set of directories and not a particular agent
+(`AGENTS.md`). Which agent takes which territory is the maintainer's
+per-session decision and is deliberately not recorded here.
 
-Which agent takes which territory is the maintainer's per-session decision
-and is deliberately not recorded here. It changes, one agent may hold both,
-and the set of agents is expected to grow; a queue that named its agent would
-be wrong the first time that happened. Agent names below appear only where
-they record what some agent actually did.
+**Why the split was re-cut.** Territory A's route is inherently single-task:
+each step needs the previous one's four-core RPi5 evidence, and two streams on
+it would contend for the same scheduler, process and board paths. So Territory
+A takes that route alone, and **every issue that is not on it moves to
+Territory B, even where that risks a merge conflict.** The maintainer rebases
+and merges often, which is what keeps two streams from implementing the same
+thing twice; a conflict in a shared file is an accepted cost, not a reason to
+keep an issue in A.
 
-Territory A owns #9 and its end-to-end QEMU/RPi5 evidence, and since
-2026-09-22 the five issues that carry the rest of it in order: #579, #580,
-#581, #582, #583, with #584 -- the multicore workload -- last and dependent
-on all five.
+### Territory A: the multicore route, in this order
+
+1. **True multicore support, so a real multicore workload can run.** Every
+   online core runs ordinary processes, any core can issue any syscall, and a
+   process can continue on another core. Issues: #9, #581 (network
+   admission), #582, #583, #570, #559, #550, #560, #482, #464, #468, #556,
+   #573.
+2. **Run that workload mainly on RPi5 and fix what it finds.** #584 is the
+   workload (process churn first, then filesystem and network load), #572 its
+   fairness verdict. The workload finds; each defect it finds gets a
+   deterministic lane before its issue closes.
+3. **Takibi's provisional answer to safe pointers and safe memory access,
+   designed with multicore as a premise.** #343 (use-after-free), #342 (null),
+   #202 (UserRange TOCTOU), #518 (typed slot addresses), #131, #132, #370,
+   #216 (stored ownership and cross-call proofs). These were deferred "until
+   stable multicore support supplies its consumer"; step 1 is that consumer.
+4. **Begin evaluating recent research**: typestate, the K framework,
+   invariants, partial use of TLA+. #308 (ProcessRecord invariants) and #109
+   (cross-slot initialization invariants) are the first concrete consumers;
+   #13 (Z3) and #400's successor questions are the proof-side entry points.
+   An evaluation first, not a mandate to adopt.
+
+Compiler work that one of these steps needs is done inside Territory A as
+part of that step, landed as its own commit per `AGENTS.md`.
+
+### Territory B: everything else
+
+Everything not on the route above, reassigned 2026-09-23:
+
+- **Filesystem capability**: #535, #536, #537, #539, #553.
+- **Network capability and performance**: #274, #386, #520, #204, #220.
+- **Syscalls and userspace surface**: #432, #433, #434, #435, #436, #430.
+- **Kernel tests, DDB and tooling**: #588, #576, #414, #388, #551, #444, #429,
+  #149, #542, #567, #523, #568, #562.
+- **Boot, platform and memory**: #555 (deferred), #250, #422, #389, #171.
+- **Profiling**: #497, #502, #503.
+- **Compiler research and language policy**: #58, #203, #200, #201, #252,
+  #282, #129, #374, #417, #155, #28, #8, #95, #124, #122, #123, #51, #50,
+  #85, #268.
+
+If a B issue turns out to block a step of A's route, A pulls it rather than
+waiting, and says so on the issue.
+
+The detailed queues and their histories follow. Where an entry below names
+an issue that this section has moved, this section wins.
 
 ### Territory A queue -- multicore integration
 
