@@ -1123,7 +1123,7 @@ Remaining compiler research, ordered within each line by current relevance:
 - Bounds, arithmetic, and static relationships: #200, #201, #252, #282,
   #129, #374. #282 and #129 explicitly lack an urgent missing
   caller; keep their implementation gated on one.
-- Language policy and ergonomic options: #400, #155, #28, #8.
+- Language policy and ergonomic options: #155, #28, #8.
 - Toolchain and debugging: #124, #122, #123, #95.
 - Longer-horizon proof or new-target research: #417, #109, #13, #50, #51,
   #85. Treat #417 as a deliberate long-term design: changing ordinary

@@ -15,6 +15,45 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-23: Gradual-verification audit adds no new trap category
+
+Issue #400 asked whether another unconditional compiler error should gain the
+same two-mode treatment as bounds, refined casts, enum casts, and division:
+a deterministic runtime guard in permissive builds and a compile error under
+`--forbid-trap`. The audit found no qualifying category in current bring-up
+work, so the language is deliberately unchanged.
+
+The default changed to strict-first development on 2026-07-23 after three
+successive hardening passes found progressively fewer sites and the last found
+zero. Since then, every maintained kernel build has continued to use
+`--forbid-trap` while adding RPi5 USB storage, device-tree discovery, and
+multicore support. The proof friction recorded during that work belongs to
+categories already handled gradually: bounds and refined casts, zero divisors,
+and signed `MIN / -1`. The other failures were ordinary type errors, ownership
+or effect violations, alignment contracts, or hardware and protocol mistakes.
+Those either have no sound local runtime fallback or are explicitly required
+to remain unconditional errors.
+
+Three apparent candidates do not justify an expansion:
+
+- An unproven value passed to a refined parameter is an ordinary type
+  mismatch. An explicit checked refined cast already provides the gradual
+  route when a runtime range check is intended.
+- Ownership, alignment, initialization, and raw-pointer obligations cannot be
+  made safe by trapping at one local operation without weakening the invariant
+  they express.
+- Ordinary arithmetic overflow can be guarded, but issue #417 measured 2,391
+  maintained sites: only 883 were proven and 1,508 needed review, including
+  1,427 whose known operand intervals still allowed an out-of-range result.
+  The narrow signed-division hazard already joined trap accounting; broad
+  overflow enforcement remains long-term work because it would impose a
+  pervasive source burden rather than solve observed bring-up friction.
+
+Future categories still use issue #400's admission test, but need a concrete
+maintained bring-up failure before implementation. This audit satisfies the
+issue's evidence-backed no-expansion outcome rather than adding speculative
+compiler behavior.
+
 ## 2026-09-23: virtio ring counters have a nominal modular domain
 
 Virtio `avail.idx` and `used.idx` are free-running 16-bit counters. The kernel
