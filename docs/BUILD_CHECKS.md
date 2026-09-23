@@ -43,8 +43,6 @@ suffix is description; dispatch reads only the prefix.
 | `check_documented_counts.py` | a count transcribed into documentation still matches the tree it counts |
 | `check_documented_counts_controls.py` | Controls for the documented-count check |
 | `check_elf_symbol_alignment_controls.py` | Positive and faithful negative controls for the ELF alignment guard |
-| `check_eager_current_handle_guards.py` | a current_live boolean expression cannot read current_handle as though && or || short-circuited |
-| `check_eager_current_handle_guards_controls.py` | Controls for both eager operators and explicit early-return guards |
 | `check_execution_model_coverage.py` | mutable kernel state declares its execution model |
 | `check_ext2_mutation_guard.py` | every ext2 mutation is reached under the filesystem lock's guard, or its file is named with the reason it cannot race a peer |
 | `check_expected_line_endings.py` | stdout fixtures use one newline convention |

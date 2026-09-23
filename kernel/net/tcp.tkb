@@ -941,12 +941,10 @@ fn tcp_connection_open_at(address: usize) -> bool !{unsafe} {
     }
 }
 
-// Has this connection buffered data userspace has not drained? One probe,
-// where the caller would otherwise need two payload lookups joined by
-// `&&` -- and `&&` does not short-circuit here, so the second ran even
-// when the first said the connection was gone. That was six spurious
-// "names no live slot" lines per boot, from a poll on a closed
-// connection, which is a normal thing to do.
+// Has this connection buffered data userspace has not drained? One probe
+// keeps the slot's liveness proof across both field reads. A poll on a closed
+// connection is a normal false result and must not use the diagnostic
+// missing-payload fallback.
 fn tcp_connection_has_pending_read(address: usize) -> bool !{unsafe} {
     match intrusive_pool_probe_slot(&tcp_connection_pool, address) {
         IntrusiveSlotProbe::NoPayload => { return false; }
