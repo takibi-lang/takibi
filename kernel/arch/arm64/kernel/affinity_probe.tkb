@@ -16,6 +16,14 @@ const SETAFFINITY_SYSCALL: usize = 122;
 const GETAFFINITY_SYSCALL: usize = 123;
 const KILL_SYSCALL: usize = 129;
 const EXECVE_SYSCALL: usize = 221;
+const DUP3_SYSCALL: usize = 24;
+const FCNTL_SYSCALL: usize = 25;
+const FACCESSAT_SYSCALL: usize = 48;
+const CLOSE_SYSCALL: usize = 57;
+const LINUX_F_DUPFD: usize = 0;
+const LINUX_AT_FDCWD: usize = 0xFFFFFFFFFFFFFF9C;
+const LINUX_R_OK: usize = 4;
+const AFFINITY_DUP_FLOOR: usize = 20;
 const LINUX_ENOENT: usize = 0xFFFFFFFFFFFFFFFE;
 // The probe's example of a syscall the peer-safety table does NOT admit.
 // It has to be one that STAYS outside, and phase B entry 6 is a sequence of
@@ -265,6 +273,24 @@ fn affinity_probe() {
     if (svc5(KILL_SYSCALL, AFFINITY_ABSENT_PID, 0, 0, 0, 0) != LINUX_ESRCH) {
         affinity_fail(bs"affinity: kill asked from cpu 1 did not answer\n");
     }
+    // GitHub issue #583's second increment: the descriptor table and a
+    // path's mode, from CPU 1. Each answer is one only a working call gives:
+    // faccessat of a file the image has is 0, F_DUPFD returns a descriptor
+    // at or above the floor it was asked for, and dup3 returns the target.
+    if (svc5(FACCESSAT_SYSCALL, LINUX_AT_FDCWD, bs"/hello.txt\0" as *u8 as usize,
+             LINUX_R_OK, 0, 0) != 0) {
+        affinity_fail(bs"affinity: faccessat asked from cpu 1 did not answer\n");
+    }
+    let duplicate: usize = svc5(FCNTL_SYSCALL, 1, LINUX_F_DUPFD,
+                                AFFINITY_DUP_FLOOR, 0, 0);
+    if (duplicate < AFFINITY_DUP_FLOOR || duplicate >= AFFINITY_ERROR_FLOOR) {
+        affinity_fail(bs"affinity: fcntl F_DUPFD asked from cpu 1 did not answer\n");
+    }
+    if (svc5(DUP3_SYSCALL, duplicate, duplicate + 1, 0, 0, 0) != duplicate + 1) {
+        affinity_fail(bs"affinity: dup3 asked from cpu 1 did not answer\n");
+    }
+    svc5(CLOSE_SYSCALL, duplicate + 1, 0, 0, 0, 0);
+    svc5(CLOSE_SYSCALL, duplicate, 0, 0, 0, 0);
     // execve is outside the peer-safety table -- the process lifecycle is
     // the last thing it will admit -- so asked from CPU 1 it is rerun on
     // core 0 and must still answer. A pathname that names nothing is

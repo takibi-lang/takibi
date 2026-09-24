@@ -21,7 +21,7 @@ def peer_affinity_gate_is_guarded(syscall: str, process: str) -> bool:
     dispatch = syscall.find("fn kernel_syscall_dispatch_action(")
     gate_start = syscall.find("if (cpu_id() != 0) {", dispatch)
     peer_safe = syscall.find(
-        "if (cpu_id() != 0 && syscall_peer_safe(number, x0) == false)",
+        "if (cpu_id() != 0 && syscall_peer_safe(number, x0, x1) == false)",
         gate_start)
     gate = (syscall[gate_start:peer_safe]
             if dispatch >= 0 and gate_start >= dispatch and

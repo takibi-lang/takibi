@@ -2709,7 +2709,7 @@ private fn syscall_ext2_rename_locked(old_directory: usize,
     return answer;
 }
 
-fn syscall_peer_safe(number: usize, fd: usize) -> bool {
+fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     // The caller's own record, or architectural state: getpid, getppid,
     // the uid/gid family, gettid, clock_gettime, and getcpu (#533).
     if (number == 172 || number == 173 || number == 178 ||
@@ -2878,6 +2878,33 @@ fn syscall_peer_safe(number: usize, fd: usize) -> bool {
     // write are admitted for above, so they carry the same argument and the
     // same mutation question.
     if (number == AARCH64_NR_READV) { return kernel_syscall_file_readable(fd); }
+    // GitHub issue #583, second increment: the descriptor table.
+    //
+    // fcntl (F_SETFD, F_DUPFD, F_DUPFD_CLOEXEC) and dup3 edit the CALLER's
+    // own table through unified_fd_*, keyed by its own slot, and the only
+    // shared state they touch is an open object's reference count -- which
+    // close, admitted since #581, already drops from a peer through the same
+    // functions. Both are admitted only between terminal, file and directory
+    // descriptors: dup3 onto a connected socket runs
+    // kernel_connected_descriptor_release, whose close is core 0's, and a
+    // listener is accept's state.
+    if (number == AARCH64_NR_FCNTL) {
+        return syscall_fd_is_plain(fd);
+    }
+    if (number == 24) {
+        return syscall_fd_is_plain(fd) && syscall_fd_is_socket(second) == false;
+    }
+    // getdents64 over an ext2 directory is a read like read's, and owes the
+    // same mutation question. NOT the procfs root: listing it walks the
+    // process pool with no guard, which is GitHub issue #482's open walk,
+    // and a peer would be one more walker of it.
+    if (number == 61) {
+        return kernel_syscall_directory_is_open(fd) &&
+            kernel_syscall_directory_inode(fd) != PROCFS_ROOT_INODE;
+    }
+    // access, faccessat and faccessat2 look a path up and read one inode's
+    // mode, the same read newfstatat is admitted for.
+    if (number == 21 || number == 48 || number == 439) { return true; }
     if (number == AARCH64_NR_WRITEV) {
         return kernel_syscall_terminal_is_open(fd);
     }
@@ -2899,7 +2926,26 @@ fn syscall_reaches_filesystem(number: usize, fd: usize) -> bool {
     if (number == 63 || number == AARCH64_NR_READV) {
         return kernel_syscall_file_readable(fd);
     }
+    if (number == 61 || number == 21 || number == 48 || number == 439) {
+        return true;
+    }
     return false;
+}
+
+// A terminal, ext2 file or directory descriptor: the kinds whose table
+// entries fcntl and dup3 edit without reaching a socket's state.
+fn syscall_fd_is_plain(fd: usize) -> bool {
+    return kernel_syscall_terminal_is_open(fd) ||
+        kernel_syscall_file_is_open(fd) ||
+        kernel_syscall_directory_is_open(fd);
+}
+
+fn syscall_fd_is_socket(fd: usize) -> bool {
+    if (kernel_connected_fd_is_open(fd)) { return true; }
+    match kernel_listener_fd_lookup(fd) {
+        KernelListenerLookupResult::Missing => { return false; }
+        KernelListenerLookupResult::Found(found) => { return true; }
+    }
 }
 
 // Step 9/9: action 9 (.Lsyscall_migrate). The gate chose core 0 for this
@@ -2995,7 +3041,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // return parks this one Ready and idles core 0 (#592).
         kernel_process_reschedule_if_excluded_here();
     }
-    if (cpu_id() != 0 && syscall_peer_safe(number, x0) == false) {
+    if (cpu_id() != 0 && syscall_peer_safe(number, x0, x1) == false) {
         return SyscallAction::Migrate;
     }
     // GitHub issue #533: a peer must not read a tree that is being rewritten.
@@ -3011,7 +3057,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // check must therefore remain attached to the operation, not to how the
     // process was placed.
     if (cpu_id() != 0 &&
-        (syscall_peer_safe(number, x0) == false ||
+        (syscall_peer_safe(number, x0, x1) == false ||
          syscall_reaches_filesystem(number, x0)) &&
         ext2_mutation_in_flight()) {
         return SyscallAction::Migrate;
