@@ -1,6 +1,7 @@
 const ELF_ET_DYN: u16 = 3;
 const ELF_EM_AARCH64: u16 = 183;
 const ELF_PT_LOAD: u32 = 1;
+const ELF_PT_INTERP: u32 = 3;
 
 struct packed KernelElf64Header {
     ident: [u8; 16];
@@ -43,6 +44,10 @@ struct DistroElfLoadPlan {
     entry: usize;
     extent: usize;
     load_segments: usize;
+    // GitHub issue #591: the PT_INTERP string's file offset and length,
+    // including its NUL. Zero length means a static image.
+    interpreter_offset: usize;
+    interpreter_length: usize;
 }
 
 must_use variant DistroElfResult { Invalid; Valid(DistroElfLoadPlan); }
@@ -85,6 +90,8 @@ fn distro_elf_validate_with_length(image: []u8,
 
         let mut maximum: usize = 0;
         let mut load_count: usize = 0;
+        let mut interpreter_offset: usize = 0;
+        let mut interpreter_length: usize = 0;
         for i: usize in 0..<program_count {
             let item_offset: usize = program_offset + i * ELF_PROGRAM_HEADER_SIZE;
             if (item_offset > image.len) { return DistroElfResult::Invalid; }
@@ -109,6 +116,16 @@ fn distro_elf_validate_with_length(image: []u8,
                 if (end_address > maximum) { maximum = end_address; }
                 load_count = load_count + 1;
             }
+            if (item.segment_type == ELF_PT_INTERP) {
+                let offset: usize = item.offset as usize;
+                let file_size: usize = item.file_size as usize;
+                if (interpreter_length != 0 || file_size == 0 ||
+                    offset > length || file_size > length - offset) {
+                    return DistroElfResult::Invalid;
+                }
+                interpreter_offset = offset;
+                interpreter_length = file_size;
+            }
         }
         let entry: usize = header.entry as usize;
         if (load_count == 0 || entry >= maximum || maximum > 0x1FFFFF) {
@@ -116,7 +133,8 @@ fn distro_elf_validate_with_length(image: []u8,
         }
         let mut plan: DistroElfLoadPlan = {
             image, length, program_offset, program_count,
-            entry, maximum, load_count
+            entry, maximum, load_count,
+            interpreter_offset, interpreter_length
         };
         return DistroElfResult::Valid(plan);
     }

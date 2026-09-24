@@ -1202,7 +1202,10 @@ const PROCESS_COMMAND_LENGTH_MASK: usize = 0x3FF;
 const PROCESS_EXEC_ARGC_SHIFT: usize = 10;
 const PROCESS_EXEC_ARGC_MASK: usize = 0x3C00;
 const PROCESS_EXEC_PENDING: usize = 0x4000;
-const PROCESS_EXEC_DYNAMIC_HTTPD: usize = 0x8000;
+// GitHub issue #591: the ext2 inode execve named, in the top 32 bits (ext2
+// inode numbers are 32-bit). Zero means none was resolved.
+const PROCESS_EXEC_INODE_SHIFT: usize = 32;
+const PROCESS_EXEC_INODE_MASK: usize = 0xFFFFFFFF00000000;
 
 fn scheduled_process_exec_pending(slot: usize) -> bool {
     return (scheduled_process_record_at(slot).command_line_length &
@@ -1233,20 +1236,17 @@ fn scheduled_process_set_exec_argc(
         ((argc << PROCESS_EXEC_ARGC_SHIFT) & PROCESS_EXEC_ARGC_MASK);
 }
 
-fn scheduled_process_exec_path_is_dynamic_httpd(slot: usize) -> bool {
+fn scheduled_process_exec_inode(slot: usize) -> usize {
     return (scheduled_process_record_at(slot).command_line_length &
-            PROCESS_EXEC_DYNAMIC_HTTPD) != 0;
+            PROCESS_EXEC_INODE_MASK) >> PROCESS_EXEC_INODE_SHIFT;
 }
 
-fn scheduled_process_set_exec_path_is_dynamic_httpd(slot: usize,
-                                                     matches: bool) {
+fn scheduled_process_set_exec_inode(slot: usize, inode: usize) {
     let record: *ProcessRecord = scheduled_process_record_at(slot);
     record.command_line_length = record.command_line_length &
-                                 ~PROCESS_EXEC_DYNAMIC_HTTPD;
-    if (matches) {
-        record.command_line_length = record.command_line_length |
-                                     PROCESS_EXEC_DYNAMIC_HTTPD;
-    }
+                                 ~PROCESS_EXEC_INODE_MASK;
+    record.command_line_length = record.command_line_length |
+        ((inode << PROCESS_EXEC_INODE_SHIFT) & PROCESS_EXEC_INODE_MASK);
 }
 
 // The same reset applied to every live process, for
@@ -1281,7 +1281,7 @@ private fn scheduled_process_record_reset_syscall_state(slot: usize)
     scheduled_process_set_core0_for_call(slot, false);
     scheduled_process_set_exec_pending(slot, false);
     scheduled_process_set_exec_argc(slot, 0);
-    scheduled_process_set_exec_path_is_dynamic_httpd(slot, false);
+    scheduled_process_set_exec_inode(slot, 0);
 }
 
 // GitHub issue #392: both directions between a pid and a slot, asked

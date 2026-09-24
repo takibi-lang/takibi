@@ -14,6 +14,11 @@ script-interpreter-argument.sh three
 /etc/crlf.sh
 /etc/no-newline.sh
 /etc/long-shebang.sh
+# GitHub issue #591: a stock musl binary from the shell, and two copies of
+# it whose PT_INTERP names a missing file and a non-musl one.
+/bin/taskset -c 0 /bin/echo taskset-ok
+/etc/interp-absent
+/etc/interp-other
 /bin/sh -c 'exec /bin/echo re-exec-ok'
 # GitHub issues #538 and #541: mkdir, rmdir and rm through mkdirat and
 # unlinkat, one exec each. mkdir and rmdir carry on past a failing argument,

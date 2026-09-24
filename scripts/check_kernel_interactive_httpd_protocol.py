@@ -37,7 +37,10 @@ def position(text: str, pattern: str, runner: str) -> int | None:
 def main() -> int:
     failed = False
     inittab = (ROOT / "kernel/tests/ext2/inittab").read_text(encoding="ascii")
-    if "::respawn:/bin/httpd -f -p 8080 -h /\n" not in inittab:
+    # The integration image pins the service to CPU 1 through util-linux
+    # taskset (GitHub issues #581 and #591); the interactive image does not.
+    if ("::respawn:/bin/taskset -c 1 /bin/httpd -f -p 8080 -h /\n"
+            not in inittab):
         print("ERROR\tinittab does not respawn the persistent HTTPd service")
         failed = True
     shell_inittab = (ROOT / "kernel/tests/ext2/inittab.shell").read_text(

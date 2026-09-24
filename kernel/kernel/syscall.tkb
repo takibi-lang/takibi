@@ -120,6 +120,8 @@ const LINUX_ESRCH: usize = 0xFFFFFFFFFFFFFFFD;
 // declined; guessing an executable format on its behalf is what this errno
 // exists to avoid.
 const LINUX_ENOEXEC: usize = 0xFFFFFFFFFFFFFFF8;
+// Linux's answer for an ELF interpreter that exists but cannot be used.
+const LINUX_ELIBBAD: usize = 0xFFFFFFFFFFFFFFB0;
 // A regular file whose bytes cannot be read. Linux answers execve(2) with
 // this when the header read itself fails, rather than with a verdict about a
 // format it never saw.
@@ -241,6 +243,8 @@ struct SyscallScratch {
     uname_buffer: [u8; 512];
     // Two struct rlimit64 values. User memory is never accessed in place.
     rlimit_buffer: [u8; 16];
+    // GitHub issue #591: an ELF's PT_INTERP name, for the ext2 lookup.
+    interpreter_buffer: [u8; 64];
 }
 
 private let mut syscall_scratch: [SyscallScratch; KERNEL_MAX_CORES];
@@ -365,26 +369,12 @@ private fn kernel_syscall_set_inetd_mode(enabled: bool) {
     scheduled_process_set_inetd_mode(kernel_syscall_process_slot(), enabled);
 }
 
-// execve's pathname is distinct from argv[0]. The only current image choice
-// that needs that distinction is the dynamic /bin/httpd fixture, so retain
-// that exact process-owned fact instead of 256 bytes on every process record.
-fn kernel_syscall_exec_path_matches(name: []u8) -> bool !{unsafe} {
-    if (name.len != 10) { return false; }
-    let expected: [u8; 10..] = bs"/bin/httpd" as [u8; 10..];
-    for index: usize in 0..<10 {
-        if (name[index] != expected[index]) { return false; }
-    }
-    return scheduled_process_exec_path_is_dynamic_httpd(
-        kernel_syscall_process_slot());
-}
-
-private fn syscall_exec_path_is_dynamic_httpd() -> bool {
-    let path: [u8; 256..] = syscall_exec_path_here();
-    let expected: [u8; 10..] = bs"/bin/httpd" as [u8; 10..];
-    for index: usize in 0..<10 {
-        if (path[index] != expected[index]) { return false; }
-    }
-    return path[10] == 0;
+// GitHub issue #591: the inode execve resolved its pathname to, which is
+// what decides a dynamic image. argv[0] cannot: a shell passes `httpd` for
+// `/bin/httpd`. Zero when no ELF inode was resolved (no filesystem yet, or
+// a `#!` script, whose image is the interpreter argv[0] names).
+fn kernel_syscall_exec_inode() -> usize {
+    return scheduled_process_exec_inode(kernel_syscall_process_slot());
 }
 
 // A `#!` script is executed by naming an interpreter, so the image execve(2)
@@ -411,8 +401,13 @@ must_use variant SyscallExecFormatResult {
     Absent;
     NotPermitted;
     Unreadable;
-    Executable;
+    Executable(usize);
     NotExecutable;
+    // GitHub issue #591: an ELF whose PT_INTERP names a file that is not
+    // there -- ENOENT, as on Linux -- and one naming a file that is, but is
+    // not the musl loader, the only interpreter this kernel maps (ELIBBAD).
+    InterpreterAbsent;
+    InterpreterUnsupported;
     Invalid;
     Script(SyscallScriptPrefix);
 }
@@ -684,6 +679,93 @@ private fn syscall_exec_script_prefix(line_length: usize, path_length: usize)
 // on purpose: the image is not mapped until the syscall's action tail, which
 // has no way left to report an error to userspace, so every refusal a shell
 // can act on has to be decided here.
+// GitHub issue #591: decide an ELF's interpreter at syscall time, where a
+// refusal can still be an errno. Past this point the exec is committed and
+// a failure to map fail-stops the caller. An ELF this validator rejects is
+// left to the mapping path exactly as before; only a valid PT_INTERP is
+// judged here.
+const SYSCALL_EXEC_INTERPRETER_MAX: usize = 64;
+
+private fn syscall_exec_elf_interpreter(inode: usize)
+        -> SyscallExecFormatResult !{unsafe} {
+    let window: [u8; KERNEL_BLOCK_SIZE..] =
+        syscall_scratch_here().file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+    let file_length: usize = ext2_regular_file_size(syscall_ext2_mount, inode);
+    let length: usize = match ext2_read_file_chunk(
+            syscall_ext2_mount, inode, 0, window) {
+        Ext2ReadResult::Invalid => {
+            return SyscallExecFormatResult::Unreadable;
+        }
+        Ext2ReadResult::Read(read) => { read }
+    };
+    if (length > KERNEL_BLOCK_SIZE) {
+        return SyscallExecFormatResult::Unreadable;
+    }
+    let bounded: {0..<KERNEL_BLOCK_SIZE + 1 as usize} = length;
+    let plan: DistroElfLoadPlan =
+        match distro_elf_validate_with_length(window[0..<bounded],
+                                              file_length) {
+            DistroElfResult::Invalid => {
+                return SyscallExecFormatResult::Executable(inode);
+            }
+            DistroElfResult::Valid(valid) => { valid }
+        };
+    let named: usize = plan.interpreter_length;
+    if (named == 0) {
+        return SyscallExecFormatResult::Executable(inode);
+    }
+    // The string less its leading slash and its NUL is the relative name
+    // ext2_lookup_path takes. Copied out of the window by walking the
+    // window's own fixed size, so every index is bounded by the array.
+    let offset: usize = plan.interpreter_offset;
+    if (named < 3 || named - 2 > SYSCALL_EXEC_INTERPRETER_MAX ||
+        offset >= length || named > length - offset ||
+        window[offset] != 0x2F) {
+        return SyscallExecFormatResult::InterpreterUnsupported;
+    }
+    let name: [u8; SYSCALL_EXEC_INTERPRETER_MAX..] =
+        syscall_scratch_here().interpreter_buffer as
+            [u8; SYSCALL_EXEC_INTERPRETER_MAX..];
+    // The name ends at its first NUL, as Linux reads it, not at the end of
+    // the segment.
+    let mut target: usize = 0;
+    let mut ended: bool = false;
+    for position: usize in 0..<KERNEL_BLOCK_SIZE {
+        if (position > offset && position < offset + named - 1 &&
+            ended == false) {
+            let byte: u8 = window[position];
+            if (byte == 0) {
+                ended = true;
+            } else {
+                if (target < SYSCALL_EXEC_INTERPRETER_MAX) {
+                    name[target] = byte;
+                }
+                target = target + 1;
+            }
+        }
+    }
+    let name_length: usize = target;
+    if (name_length > SYSCALL_EXEC_INTERPRETER_MAX) {
+        return SyscallExecFormatResult::InterpreterUnsupported;
+    }
+    let bounded_name: {0..<SYSCALL_EXEC_INTERPRETER_MAX + 1 as usize} =
+        name_length;
+    let relative: []u8 = name[0..<bounded_name];
+    match ext2_lookup_path(syscall_ext2_mount, relative) {
+        Ext2LookupResult::Invalid => {
+            return SyscallExecFormatResult::InterpreterAbsent;
+        }
+        Ext2LookupResult::NotFound => {
+            return SyscallExecFormatResult::InterpreterAbsent;
+        }
+        Ext2LookupResult::Found(found) => {}
+    }
+    if (slice_eq(relative, bs"lib/ld-musl-aarch64.so.1")) {
+        return SyscallExecFormatResult::Executable(inode);
+    }
+    return SyscallExecFormatResult::InterpreterUnsupported;
+}
+
 private fn syscall_exec_format(name: []u8, path_length: usize)
         -> SyscallExecFormatResult !{unsafe} {
     if (syscall_ext2_ready == false) {
@@ -716,7 +798,7 @@ private fn syscall_exec_format(name: []u8, path_length: usize)
                     }
                     if (line[0] == 0x7F && line[1] == 0x45 &&
                         line[2] == 0x4C && line[3] == 0x46) {
-                        return SyscallExecFormatResult::Executable;
+                        return syscall_exec_elf_interpreter(inode);
                     }
                     if (line[0] != 0x23 || line[1] != 0x21) {
                         return SyscallExecFormatResult::NotExecutable;
@@ -4562,10 +4644,13 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // caller's argv[0] still belongs in the result.
         let mut script_argc: usize = 0;
         let mut script_offset: usize = 0;
+        let mut exec_inode: usize = 0;
         if (exec_path_absolute) {
             match syscall_exec_format(exec_lookup_name, path_length) {
                 SyscallExecFormatResult::NotMounted => {}
-                SyscallExecFormatResult::Executable => {}
+                SyscallExecFormatResult::Executable(inode) => {
+                    exec_inode = inode;
+                }
                 SyscallExecFormatResult::Absent => {
                     return SyscallAction::Resume(LINUX_ENOENT);
                 }
@@ -4577,6 +4662,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 }
                 SyscallExecFormatResult::NotExecutable => {
                     return SyscallAction::Resume(LINUX_ENOEXEC);
+                }
+                SyscallExecFormatResult::InterpreterAbsent => {
+                    return SyscallAction::Resume(LINUX_ENOENT);
+                }
+                SyscallExecFormatResult::InterpreterUnsupported => {
+                    return SyscallAction::Resume(LINUX_ELIBBAD);
                 }
                 SyscallExecFormatResult::Invalid => {
                     return SyscallAction::Resume(LINUX_EINVAL);
@@ -4590,7 +4681,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         let mut output_offset: usize = script_offset;
         let mut argc: usize = script_argc;
         let mut vector_terminated: bool = false;
-        for index: usize in 0..<8 {
+        // GitHub issue #591: fifteen arguments plus the terminating NULL,
+        // which is what the process record's four-bit argc field holds.
+        // Eight was one short of `taskset -c 1 /bin/httpd -f -p 8080 -h /`.
+        for index: usize in 0..<16 {
             let entry_offset: usize = index * 8;
             let entry_address: usize = match checked_add_usize(
                     argv_address, entry_offset) {
@@ -4632,7 +4726,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                 return SyscallAction::Resume(LINUX_EINVAL);
                             }
                             CheckedUsize::Value(end) => {
-                                if (end > 512 || argc >= 8) {
+                                if (end > 512 || argc >= 15) {
                                     return SyscallAction::Resume(LINUX_EINVAL);
                                 }
                                 let copy_length: usize = string_length + 1;
@@ -4683,9 +4777,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             diagnostic_argv, output_offset);
         scheduled_process_set_exec_argc(
             kernel_syscall_process_slot(), packed_argc);
-        scheduled_process_set_exec_path_is_dynamic_httpd(
-            kernel_syscall_process_slot(),
-            syscall_exec_path_is_dynamic_httpd());
+        scheduled_process_set_exec_inode(
+            kernel_syscall_process_slot(), exec_inode);
         scheduled_process_set_exec_pending(kernel_syscall_process_slot(), true);
         if (kernel_process_is_child()) { return SyscallAction::ChildExec; }
         return SyscallAction::Exec;

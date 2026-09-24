@@ -62,6 +62,7 @@ rmdir
 script-interpreter-argument.sh
 sh
 sleep
+taskset
 uname
 user_payload
 entry-00
@@ -100,6 +101,9 @@ interpreter-argument /bin/script-interpreter-argument.sh three
 /bin/sh: /etc/crlf.sh: not found
 no-trailing-newline /etc/no-newline.sh
 LONG-SHEBANG-FELL-BACK
+taskset-ok
+/bin/sh: /etc/interp-absent: not found
+/bin/sh: /etc/interp-other: No error information
 re-exec-ok
 mkdir: can't create directory '/etc/made': File exists
 mkdir: can't create directory '/hello.txt/x': Not a directory

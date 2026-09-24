@@ -143,38 +143,45 @@ fn kernel_exec_resolve_ext2_name_at(mount: Ext2Mount, name: []u8,
                                     metadata: [u8; EXEC_METADATA_SIZE..])
         -> ExecResolveResult !{unsafe} {
     match ext2_lookup_path(mount, name) {
-                Ext2LookupResult::Invalid => { return ExecResolveResult::NotFound; }
-                Ext2LookupResult::NotFound => { return ExecResolveResult::NotFound; }
-                Ext2LookupResult::Found(inode) => {
-                    let file_length: usize =
-                        ext2_regular_file_size(mount, inode);
-                    if (file_length == 0 ||
-                        file_length > ext2_max_regular_file_size()) {
-                        return ExecResolveResult::NotFound;
-                    }
-                    match ext2_read_file_chunk(mount, inode, 0, metadata) {
-                        Ext2ReadResult::Invalid => {
-                            return ExecResolveResult::NotFound;
-                        }
-                        Ext2ReadResult::Read(length) => {
-                            match distro_elf_validate_with_length(
-                                    exec_metadata_prefix(metadata, length),
-                                    file_length) {
-                                DistroElfResult::Invalid => {
-                                    return ExecResolveResult::NotFound;
-                                }
-                                DistroElfResult::Valid(mut plan) => {
-                                    plan.image_length = file_length;
-                                    let mut image: Ext2ExecImage = {
-                                        plan, inode, file_length
-                                    };
-                                    return ExecResolveResult::Resolved(image);
-                                }
-                            }
-                        }
-                    }
+        Ext2LookupResult::Invalid => { return ExecResolveResult::NotFound; }
+        Ext2LookupResult::NotFound => { return ExecResolveResult::NotFound; }
+        Ext2LookupResult::Found(inode) => {
+            return kernel_exec_resolve_ext2_inode_at(mount, inode, metadata);
+        }
+    }
+}
+
+// The same resolution from an inode execve already looked up (#591).
+fn kernel_exec_resolve_ext2_inode_at(mount: Ext2Mount, inode: usize,
+                                     metadata: [u8; EXEC_METADATA_SIZE..])
+        -> ExecResolveResult !{unsafe} {
+    let file_length: usize =
+        ext2_regular_file_size(mount, inode);
+    if (file_length == 0 ||
+        file_length > ext2_max_regular_file_size()) {
+        return ExecResolveResult::NotFound;
+    }
+    match ext2_read_file_chunk(mount, inode, 0, metadata) {
+        Ext2ReadResult::Invalid => {
+            return ExecResolveResult::NotFound;
+        }
+        Ext2ReadResult::Read(length) => {
+            match distro_elf_validate_with_length(
+                    exec_metadata_prefix(metadata, length),
+                    file_length) {
+                DistroElfResult::Invalid => {
+                    return ExecResolveResult::NotFound;
+                }
+                DistroElfResult::Valid(mut plan) => {
+                    plan.image_length = file_length;
+                    let mut image: Ext2ExecImage = {
+                        plan, inode, file_length
+                    };
+                    return ExecResolveResult::Resolved(image);
                 }
             }
+        }
+    }
 }
 
 fn kernel_exec_resolve_ext2_name(mount: Ext2Mount, name: []u8)
@@ -183,6 +190,51 @@ fn kernel_exec_resolve_ext2_name(mount: Ext2Mount, name: []u8)
         mount, name, exec_resolve_image as []u8);
 }
 
+// The one interpreter this kernel maps: the musl loader. Its PT_INTERP
+// string, NUL included, is what a musl-linked Alpine binary carries.
+const EXEC_MUSL_INTERPRETER_LENGTH: usize = 26;
+
+fn kernel_exec_interpreter_is_musl(plan: DistroElfLoadPlan) -> bool {
+    if (plan.interpreter_length != EXEC_MUSL_INTERPRETER_LENGTH) {
+        return false;
+    }
+    let image: []u8 = plan.image;
+    let offset: usize = plan.interpreter_offset;
+    if (offset > image.len ||
+        EXEC_MUSL_INTERPRETER_LENGTH > image.len - offset) {
+        return false;
+    }
+    let expected: [u8; 26..] = bs"/lib/ld-musl-aarch64.so.1\0" as [u8; 26..];
+    let actual: []u8 = image[offset..<image.len];
+    for index: usize in 0..<EXEC_MUSL_INTERPRETER_LENGTH {
+        if (index < actual.len) {
+            if (actual[index] != expected[index]) { return false; }
+        }
+    }
+    return true;
+}
+
+fn kernel_exec_resolve_musl_pair(primary: Ext2ExecImage, mount: Ext2Mount)
+        -> DynamicExecResolveResult !{unsafe} {
+    if (kernel_exec_interpreter_is_musl(primary.plan) == false) {
+        return DynamicExecResolveResult::Invalid;
+    }
+    match kernel_exec_resolve_ext2_name_at(
+            mount, bs"lib/ld-musl-aarch64.so.1",
+            dynamic_interpreter_metadata as []u8) {
+        ExecResolveResult::NotFound => {
+            return DynamicExecResolveResult::Invalid;
+        }
+        ExecResolveResult::Resolved(interpreter) => {
+            let mut images: DynamicExt2ExecImages = {
+                primary, interpreter
+            };
+            return DynamicExecResolveResult::Resolved(images);
+        }
+    }
+}
+
+// The boot-time loader check: the resident HTTPd's pair, by name.
 fn kernel_exec_resolve_dynamic_ext2_images(mount: Ext2Mount)
         -> DynamicExecResolveResult !{unsafe} {
     match kernel_exec_resolve_ext2_name_at(
@@ -192,30 +244,46 @@ fn kernel_exec_resolve_dynamic_ext2_images(mount: Ext2Mount)
             return DynamicExecResolveResult::Invalid;
         }
         ExecResolveResult::Resolved(primary) => {
-            match kernel_exec_resolve_ext2_name_at(
-                    mount, bs"lib/ld-musl-aarch64.so.1",
-                    dynamic_interpreter_metadata as []u8) {
-                ExecResolveResult::NotFound => {
-                    return DynamicExecResolveResult::Invalid;
-                }
-                ExecResolveResult::Resolved(interpreter) => {
-                    let mut images: DynamicExt2ExecImages = {
-                        primary, interpreter
-                    };
-                    return DynamicExecResolveResult::Resolved(images);
-                }
-            }
+            return kernel_exec_resolve_musl_pair(primary, mount);
         }
     }
 }
 
+// GitHub issue #591: an exec is dynamic when the ELF execve named carries a
+// PT_INTERP, whatever its path. One that does not is left to the argv[0] and
+// static path below; one naming an interpreter other than musl's is refused
+// rather than mapped as if it were static.
 fn kernel_exec_resolve_dynamic_ext2(mount: Ext2Mount)
         -> DynamicExecResolveResult !{unsafe} {
-    if (kernel_syscall_exec_path_matches(
-            bs"/bin/httpd") == false) {
-        return DynamicExecResolveResult::NotRequested;
+    let inode: usize = kernel_syscall_exec_inode();
+    if (inode == 0) { return DynamicExecResolveResult::NotRequested; }
+    match kernel_exec_resolve_ext2_inode_at(
+            mount, inode, dynamic_primary_metadata as []u8) {
+        ExecResolveResult::NotFound => {
+            return DynamicExecResolveResult::NotRequested;
+        }
+        ExecResolveResult::Resolved(primary) => {
+            if (primary.plan.interpreter_length == 0) {
+                return DynamicExecResolveResult::NotRequested;
+            }
+            return kernel_exec_resolve_musl_pair(primary, mount);
+        }
     }
-    return kernel_exec_resolve_dynamic_ext2_images(mount);
+}
+
+fn kernel_exec_primary_is_busybox_extras(inode: usize) -> bool !{unsafe} {
+    match ext2_lookup_path(saved_ext2_mount, bs"bin/busybox-extras") {
+        Ext2LookupResult::Invalid => { return false; }
+        Ext2LookupResult::NotFound => { return false; }
+        Ext2LookupResult::Found(found) => { return found == inode; }
+    }
+}
+
+// Where the interpreter goes: past the primary's extent, on the 64 KiB
+// boundary both images' PT_LOAD alignment asks for. busybox-extras'
+// extent 0x304b8 gives the 0x40000 the boot check measures.
+fn kernel_exec_interpreter_bias(primary: DistroElfLoadPlan) -> usize {
+    return (primary.extent + 0xFFFF) & ~0xFFFF;
 }
 
 fn kernel_exec_resolve_argv0(mount: Ext2Mount) -> ExecResolveResult !{unsafe} {
@@ -745,7 +813,7 @@ fn kernel_process_child_exec_prepare() -> KernelChildExecPrepareResult {
                         saved_ext2_mount,
                         images.interpreter.inode,
                         images.interpreter.file_length,
-                        0x40000,
+                        kernel_exec_interpreter_bias(images.primary.plan),
                         kernel_syscall_exec_argv(),
                         kernel_syscall_exec_argc(),
                         child_root) {
@@ -773,7 +841,15 @@ fn kernel_process_child_exec_prepare() -> KernelChildExecPrepareResult {
                         // integration runner ends the boot, so the kernel
                         // must never turn an accept() count into process
                         // termination for this unmodified BusyBox binary.
-                        kernel_syscall_daemon_start();
+                        //
+                        // Only for BusyBox Extras (#591): the handoff drains
+                        // the TCP connection pool and ends the bounded socket
+                        // fixture, which any other musl binary -- taskset run
+                        // from the shell before that fixture -- must not do.
+                        if (kernel_exec_primary_is_busybox_extras(
+                                images.primary.inode)) {
+                            kernel_syscall_daemon_start();
+                        }
                         if (kernel_syscall_persistent_shell_active()) {
                             kernel_syscall_persistent_shell_checkpoint_exec_commit(
                                 kernel_process_current_pid());
@@ -1254,12 +1330,21 @@ irq_uart_rx_unmask();
                             saved_ext2_mount,
                             images.interpreter.inode,
                             images.interpreter.file_length,
-                            0x40000, bs"check\0", 1, 0) {
+                            kernel_exec_interpreter_bias(images.primary.plan),
+                            bs"check\0", 1, 0) {
                         ProcessImagePairProbeResult::Invalid => {
                             kernel_boot_log("httpd map: combined invalid\n");
                         }
                         ProcessImagePairProbeResult::Ready(dynamic_pages) => {
-                            kernel_boot_log("httpd map: combined pages=331 musl-bias=0x40000 auxv ready clean\n");
+                            // The mapper no longer asserts these numbers
+                            // (#591), so the line claims only what it checks.
+                            if (process_image_page_count(dynamic_pages) == 331 &&
+                                kernel_exec_interpreter_bias(
+                                    images.primary.plan) == 0x40000) {
+                                kernel_boot_log("httpd map: combined pages=331 musl-bias=0x40000 auxv ready clean\n");
+                            } else {
+                                kernel_boot_log("httpd map: combined layout changed\n");
+                            }
                             let (dynamic_heap_start, dynamic_heap_limit) =
                                 process_image_heap_range(dynamic_pages);
                             kernel_syscall_process_configure(

@@ -1887,6 +1887,11 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
             process_image_root_index(target)
         }
     };
+    // GitHub issue #591: the caller chooses the bias per primary now, so the
+    // two images not overlapping is checked here rather than assumed.
+    if (interpreter_bias < primary.extent) {
+        return ProcessImagePairProbeResult::Invalid;
+    }
     process_image_record_at(root).stack_top_page = process_stack_top_page();
     process_image_record_at(root).stack_low_page = PROCESS_STACK_LOW_DYNAMIC;
     process_image_record_at(root).heap_page_count = PROCESS_HEAP_PAGES_DEFAULT;
@@ -1922,8 +1927,12 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                     let heap_last_page: usize =
                         heap_first_page +
                         process_image_record_at(root).heap_page_count;
-                    if (total != 195 ||
-                        heap_last_page >=
+                    // The exact page counts that used to be asserted here
+                    // were busybox-extras + musl's; any musl binary maps
+                    // through this path since #591, so the layout is what
+                    // is checked, and the boot's httpd_loader view keeps
+                    // the measured numbers for that pair.
+                    if (heap_last_page >=
                         process_image_record_at(root).stack_low_page) {
                         process_image_cleanup();
                         return ProcessImagePairProbeResult::Invalid;
@@ -2009,7 +2018,9 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                             }
                         }
                     }
-                    if (mapped == 331) {
+                    if (mapped == total +
+                            process_image_record_at(root).heap_page_count +
+                            PROCESS_DYNAMIC_STACK_INITIAL_PAGES) {
                         let image: usize @ 1 = 1;
                         let entry: usize = USER_TEXT_VA + interpreter_bias +
                                            interpreter.entry;
