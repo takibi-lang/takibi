@@ -2972,7 +2972,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     KernelConnectionLookupResult::Found(found) => { found }
                 };
             let write_generation: usize = kernel_connection_fd_identity(fd);
-            if (tcp_connection_open_at(write_slot) == false || length == 0) {
+            if (length == 0) {
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
             let mut amount: usize = length;
@@ -2980,12 +2980,21 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             if (amount < length) {
                 syscall_test_evidence_record_partial_write();
             }
-            let received_length: usize = tcp_connection_payload(write_slot).socket_buffer_length;
+            // GitHub issue #581: the open check and the received-length
+            // snapshot are taken under the connection's owner, not before
+            // it, so a peer's write cannot act on a state the owning core
+            // is changing.
             match tcp_connection_take(write_slot, write_generation) {
                 TcpConnectionTakeResult::Missing => {
-                    return SyscallAction::Resume(LINUX_EAGAIN);
+                    return SyscallAction::Resume(LINUX_EINVAL);
                 }
                 TcpConnectionTakeResult::Ready(owner) => {
+                  if (tcp_connection_of(owner).connection_open == false) {
+                      tcp_connection_put(owner);
+                      return SyscallAction::Resume(LINUX_EINVAL);
+                  }
+                  let received_length: usize =
+                      tcp_connection_of(owner).socket_buffer_length;
                   match network_capability_take() {
                     NetworkCapabilityTakeResult::Empty => {
                         tcp_connection_put(owner);
@@ -3667,34 +3676,45 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     KernelConnectionLookupResult::Found(found) => { found }
                 };
             let read_generation: usize = kernel_connection_fd_identity(fd);
-            if (tcp_connection_open_at(read_slot) == false || requested == 0) {
+            if (requested == 0) {
                 return SyscallAction::Resume(LINUX_EBADF);
             }
-            if (tcp_connection_payload(read_slot).socket_buffer_offset <
-                    tcp_connection_payload(read_slot).socket_buffer_length) {
-                let available: usize = tcp_connection_payload(read_slot).socket_buffer_length -
-                    tcp_connection_payload(read_slot).socket_buffer_offset;
-                let mut amount: usize = requested;
-                if (amount > available) { amount = available; }
-                let source_base: *u8 =
-                    (tcp_connection_rx_slice(tcp_connection_payload(read_slot)) as *u8) +
-                    (tcp_connection_payload(read_slot).socket_buffer_offset as isize);
-                match user_range_check_write(kernel_process_current_root(), address, amount) {
-                    UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
-                    UserWriteRangeResult::Ok(range) => {
-                        let copied: bool =
-                            copy_to_user_raw(range, source_base, amount);
-                    }
-                }
-                tcp_connection_payload(read_slot).socket_buffer_offset =
-                    tcp_connection_payload(read_slot).socket_buffer_offset + amount;
-                return SyscallAction::Resume(amount);
-            }
+            // GitHub issue #581: every connection field below is read and
+            // written under the connection's owner. A peer may make this
+            // call, so an open check or a buffered-copy cursor update taken
+            // before the owner would race the core that holds it.
             match tcp_connection_take(read_slot, read_generation) {
               TcpConnectionTakeResult::Missing => {
-                return SyscallAction::Resume(LINUX_EAGAIN);
+                return SyscallAction::Resume(LINUX_EBADF);
               }
               TcpConnectionTakeResult::Ready(owner) => {
+               let conn: *TcpConnection = tcp_connection_of(owner);
+               if (conn.connection_open == false) {
+                   tcp_connection_put(owner);
+                   return SyscallAction::Resume(LINUX_EBADF);
+               }
+               if (conn.socket_buffer_offset < conn.socket_buffer_length) {
+                   let available: usize =
+                       conn.socket_buffer_length - conn.socket_buffer_offset;
+                   let mut buffered: usize = requested;
+                   if (buffered > available) { buffered = available; }
+                   let buffered_base: *u8 =
+                       (tcp_connection_rx_slice(conn) as *u8) +
+                       (conn.socket_buffer_offset as isize);
+                   match user_range_check_write(kernel_process_current_root(), address, buffered) {
+                       UserWriteRangeResult::Fault => {
+                           tcp_connection_put(owner);
+                           return SyscallAction::Resume(LINUX_EFAULT);
+                       }
+                       UserWriteRangeResult::Ok(range) => {
+                           let copied: bool =
+                               copy_to_user_raw(range, buffered_base, buffered);
+                       }
+                   }
+                   conn.socket_buffer_offset = conn.socket_buffer_offset + buffered;
+                   tcp_connection_put(owner);
+                   return SyscallAction::Resume(buffered);
+               }
                let ready: NetRxCanAcquire = match network_capability_take() {
                  NetworkCapabilityTakeResult::Empty => {
                     tcp_connection_put(owner);
