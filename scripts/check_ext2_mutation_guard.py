@@ -37,6 +37,10 @@ KERNEL = ROOT / "kernel"
 # and a lock across reads would zero one side of that.
 MUTATORS = (
     "ext2_resize_small_file",
+    "ext2_create_root_file",
+    "ext2_unlink_root_file",
+    "ext2_create_file_in",
+    "ext2_unlink_file_in",
     "ext2_make_directory_in",
     "ext2_claim_directory",
     "ext2_unlink_name",
@@ -56,9 +60,8 @@ DEFINING = {
 # Files permitted to mutate without the guard, and why.
 UNGUARDED_ALLOWED = {
     "init/ext2_fixture.tkb":
-        "the boot fixture, which runs on core 0 before any process exists, "
-        "so before any other core can reach a filesystem -- the same "
-        "argument the old admission claim made for the whole kernel",
+        "the remaining file-creation fixture exercises O_CREAT-unreachable "
+        "ext2 APIs before userspace can reach the filesystem",
 }
 
 FUNCTION_RE = re.compile(r"^(?:private )?fn ([A-Za-z_0-9]+)")

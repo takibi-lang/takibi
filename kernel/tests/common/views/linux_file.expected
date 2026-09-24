@@ -1,2 +1,1 @@
-linux file syscalls: open+read+close called
-linux file syscalls: open read write close ok
+userspace file syscalls: open/write/read/close and truncate+extend ok

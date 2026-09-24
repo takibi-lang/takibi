@@ -1049,12 +1049,13 @@ diagnostics from another core.
 
 The passing HTTPd test is a concrete Linux compatibility milestone, not a
 claim of general Linux compatibility. `SYSCALLS.md` is the per-syscall
-authority, `RESOURCE_LIMITS.md` is the per-resource-pool authority (every
-resource pool -- process slots, descriptors, shared objects, connections,
-pages, and more -- with its exhaustion behavior, and its boundary test
-where it still has a boundary), `RUNTIME_STATE.md` is the per-global-state-ownership authority
-(every retained runtime `let mut` global, grouped by owner and why it
-stays global instead of moving behind a per-slot record),
+authority, `TEST_MACHINERY.md` inventories the remaining kernel-side test
+hooks and their reasons, and `RESOURCE_LIMITS.md` is the per-resource-pool
+authority (every resource pool -- process slots, descriptors, shared objects,
+connections, pages, and more -- with its exhaustion behavior and its boundary
+test where it still has a boundary), `RUNTIME_STATE.md` is the per-global-
+state-ownership authority (every retained runtime `let mut` global, grouped by
+owner and why it stays global instead of moving behind a per-slot record),
 `MEMORY_MAP.md` is the where-is-this-address authority (both platforms'
 physical and virtual layouts, with the rows a build check verifies marked
 apart from the ones nobody verifies), and the

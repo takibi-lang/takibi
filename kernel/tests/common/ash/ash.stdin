@@ -8,6 +8,7 @@ ps
 echo "shebang: status $?"
 script-interpreter-argument.sh three
 /hello.txt
+/bin/cat /hello.txt
 /etc
 /etc/not-a-program
 /etc/bad-interpreter.sh
@@ -26,18 +27,26 @@ script-interpreter-argument.sh three
 # the second EEXIST or ENOENT is what shows the first call worked. /etc/made
 # and /kept stay, so the lane's e2fsck judges directories made through the
 # syscall; /etc/gone is the image's one-link file and /etc/hlink a second
-# link to /hello.txt. Every line fits the kernel's 63-byte UART receive ring
-# (#543), which drops what does not.
+# link to /hello.txt. Each command fits completely in the current 4096-byte
+# UART receive ring.
 mkdir /etc/made /etc/made/sub /etc/made /hello.txt/x /kept
 rmdir /etc/made /etc/made/sub /etc/made/sub /hello.txt
 rm /etc/gone /etc/gone /etc/hlink /etc/hlink
+# GitHub issues #537 and #542: grow /etc itself through mkdirat,
+# enumerate the long names from /etc with ls, remove an entry
+# from its new block, then reuse that dead record without shrinking.
+# BusyBox stat observes st_size=2048 throughout.
+long_name=nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn; for suffix in a b c d e; do mkdir "/etc/$long_name$suffix"; done; /bin/ls -1 /etc; /bin/busybox stat -c %s /etc
+rmdir "/etc/${long_name}e"; /bin/ls -1 /etc; /bin/busybox stat -c %s /etc
+mkdir "/etc/${long_name}e"; /bin/ls -1 /etc; /bin/busybox stat -c %s /etc
+rmdir "/etc/${long_name}e"; for suffix in a b c d; do rmdir "/etc/$long_name$suffix"; done; /bin/busybox stat -c %s /etc; mv /etc/mva /etc/mvc && mv /etc/mvc /etc/mvb && echo mv1
+# Leave /etc grown on disk after removing every probe directory.
 # GitHub issue #538: mv through renameat. The first line renames within a
 # directory and then over an existing file; the second moves a file into
 # another directory and renames a directory within its parent. The third
 # asks for a name the first line moved away (ENOENT) and a directory move to
 # another parent, which the ext2 layer refuses (EPERM). The cat shows the
 # chain arrived: /etc/mva's bytes, now under /etc/moved/mvb.
-mv /etc/mva /etc/mvc && mv /etc/mvc /etc/mvb && echo mv1
 mv /etc/mvb /etc/made && mv /etc/made /etc/moved && echo mv2
 mv /etc/mva /kept /etc/moved
 /bin/cat /etc/moved/mvb

@@ -31,10 +31,6 @@ use "kernel/arch/arm64/kernel/vector_table.tkb";
 
 let mut ext2_read_fixture: [u8; 32];
 let mut ext2_symlink_fixture: [u8; 64];
-// GitHub issue #243: /large.txt is 3200 bytes (4 direct blocks: 3 full,
-// one partial), well past the single-block cap ext2_read_small_file used
-// to enforce -- proves multi-direct-block reads work on real hardware.
-let mut ext2_large_fixture: [u8; 3200];
 // GitHub issue #249: the mounted ext2 filesystem, saved once at boot
 // (wherever fn main() already successfully mounts it) so
 // kernel_exec_resolve_argv0() below -- which runs later, on a syscall's
@@ -387,8 +383,8 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
     if (kernel_process_current_pid() != 1) { return; }
     init_boot_fixture_pending = false;
     init_boot_fixture_reported = true;
-    kernel_init_script_pre_exec_evidence();
-    kernel_init_script_success_evidence(false);
+    kernel_init_script_socket_evidence();
+    kernel_init_script_success_evidence();
     // GitHub issue #207: every page released across this
     // whole boot must have been live at the time. Checked
     // here, now that init.sh's own image is fully torn
@@ -905,37 +901,15 @@ fn kernel_process_child_exec_reap() {
     }
 }
 
-fn kernel_init_script_pre_exec_evidence() {
-    let (open_calls, read_calls, file_write_calls,
-         close_calls) =
-        kernel_syscall_file_evidence();
-    if (open_calls == 0) {
-        kernel_boot_log("linux file syscalls: open not called\n");
-    } else if (read_calls == 0) {
-        kernel_boot_log("linux file syscalls: read not called\n");
-    } else if (close_calls == 0) {
-        kernel_boot_log("linux file syscalls: close not called\n");
-    } else {
-        kernel_boot_log("linux file syscalls: open+read+close called\n");
-    }
-    if (open_calls >= 2 && read_calls >= 1 &&
-        file_write_calls >= 1 && close_calls >= 2) {
-        kernel_boot_log("linux file syscalls: open read write close ok\n");
-    }
+fn kernel_init_script_socket_evidence() {
     if (kernel_init_socket_evidence || kernel_syscall_socket_evidence()) {
         kernel_boot_log("linux socket syscalls: two overlapping connections fd=5,6 independent ok port=8080\n");
     }
-    if (kernel_syscall_partial_write_evidence()) {
-        kernel_boot_log("linux socket partial write: 1460+1 ok\n");
-    }
 }
 
-fn kernel_init_script_success_evidence(include_file_evidence: bool) {
+fn kernel_init_script_success_evidence() {
     kernel_boot_log("init script exit: 0\n");
     kernel_boot_log("syscall write errors: ebadf efault\n");
-    if (include_file_evidence) {
-        kernel_init_script_pre_exec_evidence();
-    }
     if (kernel_process_clone_evidence()) {
         kernel_boot_log("process clone: parent+child exit=42 reaped\n");
     }

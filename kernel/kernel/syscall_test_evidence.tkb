@@ -1,9 +1,8 @@
 // Part of #294 (consolidate kernel runtime state behind explicit owners),
 // same split as issue #303 applied to kernel/kernel/process.tkb. These
-// seventeen syscall.tkb counters/flags are read only by
-// kernel_syscall_file_evidence()/kernel_syscall_socket_evidence()/
-// kernel_syscall_partial_write_evidence() and by three log-once UART-wait
-// boot messages -- never by real syscall dispatch decisions, unlike
+// twelve syscall.tkb counters are read only by
+// kernel_syscall_socket_evidence() and by three log-once UART-wait boot
+// messages -- never by real syscall dispatch decisions, unlike
 // syscall_connection_open (per-connection open state, stays in
 // syscall.tkb) or the persistent-service/shell lifecycle state (real
 // control-flow branches on those; a separate, later split out of #294).
@@ -23,10 +22,6 @@
 // these counts racy.
 
 struct SyscallTestEvidence {
-    open_calls: usize;
-    read_calls: usize;
-    file_write_calls: usize;
-    close_calls: usize;
     ppoll_uart_waits: usize;
     ppoll_uart_blocks: usize;
     read_uart_waits: usize;
@@ -39,21 +34,9 @@ struct SyscallTestEvidence {
     connected_close_calls: usize;
     connected_read_calls: usize;
     connected_write_calls: usize;
-    partial_write_observed: bool;
 }
 
 private let mut syscall_test_evidence: SyscallTestEvidence;
-
-// Matches kernel_syscall_process_configure()'s and
-// kernel_syscall_ext2_configure()'s shared subset (open/read/write/close),
-// kept separate from reset_socket_counters() because ext2_configure()
-// resets only these four.
-fn syscall_test_evidence_reset_file_counters() {
-    syscall_test_evidence.open_calls = 0;
-    syscall_test_evidence.read_calls = 0;
-    syscall_test_evidence.file_write_calls = 0;
-    syscall_test_evidence.close_calls = 0;
-}
 
 fn syscall_test_evidence_reset_read_uart_waits() {
     syscall_test_evidence.read_uart_waits = 0;
@@ -69,31 +52,6 @@ fn syscall_test_evidence_reset_socket_counters() {
     syscall_test_evidence.connected_close_calls = 0;
     syscall_test_evidence.connected_read_calls = 0;
     syscall_test_evidence.connected_write_calls = 0;
-    syscall_test_evidence.partial_write_observed = false;
-}
-
-fn syscall_test_evidence_record_open() {
-    syscall_test_evidence.open_calls = syscall_test_evidence.open_calls + 1;
-}
-
-fn syscall_test_evidence_record_read() {
-    syscall_test_evidence.read_calls = syscall_test_evidence.read_calls + 1;
-}
-
-fn syscall_test_evidence_record_file_write() {
-    syscall_test_evidence.file_write_calls =
-        syscall_test_evidence.file_write_calls + 1;
-}
-
-fn syscall_test_evidence_record_close() {
-    syscall_test_evidence.close_calls = syscall_test_evidence.close_calls + 1;
-}
-
-fn syscall_test_evidence_file_counts() -> (usize, usize, usize, usize) {
-    return (syscall_test_evidence.open_calls,
-            syscall_test_evidence.read_calls,
-            syscall_test_evidence.file_write_calls,
-            syscall_test_evidence.close_calls);
 }
 
 // Returns true only the first time since the last
@@ -198,12 +156,4 @@ fn syscall_test_evidence_record_connected_write() {
 
 fn syscall_test_evidence_connected_write_calls() -> usize {
     return syscall_test_evidence.connected_write_calls;
-}
-
-fn syscall_test_evidence_record_partial_write() {
-    syscall_test_evidence.partial_write_observed = true;
-}
-
-fn syscall_test_evidence_partial_write_observed() -> bool {
-    return syscall_test_evidence.partial_write_observed;
 }

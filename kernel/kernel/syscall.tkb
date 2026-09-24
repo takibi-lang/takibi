@@ -1025,7 +1025,6 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize)
         UnifiedFdResult::Invalid => {}
         UnifiedFdResult::Ok => {}
     }
-    syscall_test_evidence_reset_file_counters();
     syscall_test_evidence_reset_read_uart_waits();
     syscall_test_lifecycle_persistent_shell_clear();
     scheduled_process_reset_syscall_state_everywhere();
@@ -1355,12 +1354,6 @@ fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
 fn kernel_syscall_ext2_configure(mount: Ext2Mount) {
     syscall_ext2_mount = mount;
     syscall_ext2_ready = true;
-    syscall_test_evidence_reset_file_counters();
-}
-
-fn kernel_syscall_file_evidence()
-        -> (usize, usize, usize, usize) {
-    return syscall_test_evidence_file_counts();
 }
 
 // GitHub issue #257 step 5: this used to assert on connection slots 0 and
@@ -1390,10 +1383,6 @@ fn kernel_syscall_socket_evidence() -> bool !{unsafe} {
            syscall_test_evidence_connected_write_calls() == 4 &&
            syscall_test_evidence_socket_close_calls() == 1 &&
            kernel_listener_state(4) == UnifiedListenerState::Closed;
-}
-
-fn kernel_syscall_partial_write_evidence() -> bool {
-    return syscall_test_evidence_partial_write_observed();
 }
 
 // Copy one NUL-terminated pathname through the user-memory boundary. Only a
@@ -3129,9 +3118,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
             let mut amount: usize = length;
             if (amount > 1460) { amount = 1460; }
-            if (amount < length) {
-                syscall_test_evidence_record_partial_write();
-            }
             // GitHub issue #581: the open check and the received-length
             // snapshot are taken under the connection's owner, not before
             // it, so a peer's write cannot act on a state the owning core
@@ -3246,7 +3232,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
         }
         if (kernel_syscall_file_is_open(fd)) {
-            syscall_test_evidence_record_file_write();
             if (kernel_syscall_file_writable(fd) == false) {
                 return SyscallAction::Resume(LINUX_EBADF);
             }
@@ -3292,7 +3277,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
 
     if (number == 56) {
-        syscall_test_evidence_record_open();
         // openat(dirfd, pathname, flags): absolute paths start at the ext2
         // root; relative paths use an open directory fd (or AT_FDCWD, whose
         // unsigned value lies outside the descriptor namespace).
@@ -3782,6 +3766,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                             user_write_u64(range, 8, inode_number as u64);
                             user_write_u32(range, 16, inode_mode as u32);
                             user_write_u32(range, 20, 2);
+                            user_write_u64(
+                                range,
+                                48,
+                                ext2_inode_size(
+                                    syscall_ext2_mount,
+                                    inode_number) as u64);
                             return SyscallAction::Resume(0);
                         }
                     }
@@ -3826,7 +3816,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
 
     if (number == 63) {
-        syscall_test_evidence_record_read();
         let fd: usize = x0;
         let address: usize = x1;
         let requested: usize = x2;
@@ -4171,7 +4160,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             return SyscallAction::Resume(0);
           }
         }
-        syscall_test_evidence_record_close();
         if (kernel_syscall_terminal_is_open(x0) == false &&
             kernel_syscall_file_is_open(x0) == false &&
             kernel_syscall_directory_is_open(x0) == false) {
@@ -4560,7 +4548,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 }
             }
         }
-        syscall_test_evidence_record_read();
         return SyscallAction::Resume(copied);
     }
 

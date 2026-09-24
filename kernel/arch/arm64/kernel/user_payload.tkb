@@ -90,13 +90,47 @@ fn initial_user_payload() {
     /* write(1, null, 1) must return -EFAULT. */
     fail_if(svc5(64, 1, 0, 1, 0, 0) != EFAULT_RC);
 
-    /* openat/write/close /mutable.txt through the Linux file ABI. */
+    /* GitHub issue #542: keep the truncate/extend regression on the real
+     * openat/write/read ABI. Each write reopens the file because this
+     * kernel accepts writes only at offset zero; the first shrinks it, the
+     * second grows it, and readback proves no old suffix survived. */
     let mutable_path: *u8 = "/mutable.txt" as *u8;
-    let mutable_content: []u8 = bs"el0-ok\n";
+    let short_content: []u8 = bs"tiny\n";
     let fd3: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);
     fail_if(fd3 != 3);
-    fail_if(svc5(64, 3, (mutable_content as *u8) as usize, mutable_content.len, 0, 0) != 7);
+    fail_if(svc5(64, fd3, (short_content as *u8) as usize,
+                 short_content.len, 0, 0) != short_content.len);
     fail_if(svc5(57, 3, 0, 0, 0, 0) != 0);
+    let fd4: usize = svc5(56, 0, mutable_path as usize, 0, 0, 0);
+    fail_if(fd4 != 3);
+    let mut short_readback: [u8; 5];
+    fail_if(svc5(63, fd4, short_readback as *u8 as usize,
+                 short_content.len, 0, 0) != short_content.len);
+    for i: usize in 0..<5 {
+        fail_if(short_readback[i] != short_content[i]);
+    }
+    fail_if(svc5(63, fd4, short_readback as *u8 as usize, 1, 0, 0) != 0);
+    fail_if(svc5(57, fd4, 0, 0, 0, 0) != 0);
+
+    let long_content: []u8 = bs"extended ext2\n";
+    let fd5: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);
+    fail_if(fd5 != 3);
+    fail_if(svc5(64, fd5, (long_content as *u8) as usize,
+                 long_content.len, 0, 0) != long_content.len);
+    fail_if(svc5(57, fd5, 0, 0, 0, 0) != 0);
+    let fd6: usize = svc5(56, 0, mutable_path as usize, 0, 0, 0);
+    fail_if(fd6 != 3);
+    let mut long_readback: [u8; 14];
+    fail_if(svc5(63, fd6, long_readback as *u8 as usize,
+                 long_content.len, 0, 0) != long_content.len);
+    for i: usize in 0..<14 {
+        fail_if(long_readback[i] != long_content[i]);
+    }
+    fail_if(svc5(63, fd6, long_readback as *u8 as usize, 1, 0, 0) != 0);
+    fail_if(svc5(57, fd6, 0, 0, 0, 0) != 0);
+    let write_success: []u8 = bs"userspace file syscalls: open/write/read/close and truncate+extend ok\n";
+    fail_if(svc5(64, 1, (write_success as *u8) as usize,
+                 write_success.len, 0, 0) != write_success.len);
 
     /* GitHub issue #393: RLIMIT_NOFILE is a per-process pair this process
      * can read and change, so prlimit64(2) is exercised for real here --
@@ -254,6 +288,11 @@ fn initial_user_payload() {
     let large_base: *u8 = user_payload_large_buf as *u8;
     fail_if(svc5(64, 5, ptr_of(large_base, 0), LARGE_LEN, 0, 0) != 1460);
     fail_if(svc5(64, 5, ptr_of(large_base, 1460), 1, 0, 0) != 1);
+    let socket_write_success: []u8 =
+        bs"userspace socket partial write: 1460+1 ok\n";
+    fail_if(svc5(64, 1, (socket_write_success as *u8) as usize,
+                 socket_write_success.len, 0, 0) !=
+            socket_write_success.len);
 
     fail_if(svc5(57, 6, 0, 0, 0, 0) != 0);
     fail_if(svc5(57, 5, 0, 0, 0, 0) != 0);
