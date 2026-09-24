@@ -294,6 +294,17 @@ fn kernel_secondary_idle_yield_reenter() {
 // (core 0's tick, the UART, the network), and each wake re-asks.
 fn kernel_core0_idle_yield_reenter() {
     kernel_process_stack_idle_yield();
+    kernel_core0_idle_loop();
+}
+
+// The exit twin: core 0 has left an exited process's stack, which is
+// released here before idling, as kernel_secondary_idle_reenter does.
+fn kernel_core0_idle_reenter() {
+    kernel_process_stack_idle_complete();
+    kernel_core0_idle_loop();
+}
+
+fn kernel_core0_idle_loop() {
     enable_irq();
     while (true) {
         match kernel_process_secondary_start() {

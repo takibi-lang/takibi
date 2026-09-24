@@ -2580,7 +2580,9 @@ fn kernel_syscall_clone_parent_return(parent_sp: usize) {
         if (cpu_id() != 0) {
             kernel_secondary_idle_enter();
         }
-        kernel_syscall_fail_stop(parent_sp);
+        // GitHub issue #592: core 0 idles after an exit with no successor
+        // too, on its own idle stack.
+        kernel_core0_idle_enter();
     }
     workload_profile_el0_enter();
     el0_context_resume(parent_sp);

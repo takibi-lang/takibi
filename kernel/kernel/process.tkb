@@ -3152,7 +3152,9 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
 // is now physically free and may be reaped safely.
 fn kernel_process_stack_idle_complete() {
     let core: usize = cpu_id();
-    if (core == 0 || core >= KERNEL_MAX_CORES ||
+    // Core 0 arrives here too since GitHub issue #592's exit follow-up, from
+    // kernel_core0_idle_enter.
+    if (core >= KERNEL_MAX_CORES ||
         execution_here().current_live || execution_here().stack_live == false) {
         kernel_syscall_fail_stop(0);
     }
@@ -4644,9 +4646,9 @@ fn kernel_process_current_exit_has_waiter() -> bool {
 // Asked BEFORE the exit does anything, so the caller can wait for an
 // interrupt and ask again with nothing torn down in between. The answer is
 // read without the run lock, so a peer may still take the process it
-// counted; kernel_process_exit_await_successor covers that after the
-// teardown, and this check only spares the teardown when nothing at all is
-// runnable. A secondary CPU
+// counted; the exit then idles after the teardown (core 0 has an idle
+// context since GitHub issue #592), and this check only spares the teardown
+// when nothing at all is runnable. A secondary CPU
 // has a third outcome: the exit tail switches to its architectural stack and
 // re-enters the idle loop, so absence of an admitted successor is not a
 // strand there.
@@ -4666,8 +4668,7 @@ private fn kernel_process_exit_would_strand_on(cpu: usize) -> bool {
     // A parent already waiting for this exit is woken BY it, so it counts
     // as somewhere to go even though it is blocked right now -- and even
     // when this CPU may not run it (GitHub issue #9). Its affinity mask
-    // takes it to another CPU, and this core then waits inside the exit
-    // for a successor of its own (kernel_process_exit_await_successor).
+    // takes it to another CPU, and this core then idles after the exit.
     // Requiring it to be admitted here deadlocked: /bin/affinity, pinned
     // to CPU 1, waited in wait4 for a child exiting on core 0, and that
     // exit waited for a successor only the parent's wake could produce.
@@ -7472,15 +7473,18 @@ fn kernel_process_child_exit(status: usize) -> usize {
             }
         }
     }
-    // No admitted successor remains. Core 0 has no architectural idle loop,
-    // so it waits here, still on this zombie's stack, for one to appear.
-    if (cpu_id() == 0) {
-        process_run_unlock(exit_guard);
-        return kernel_process_exit_await_successor(child, parent, auto_reap);
-    }
-    // A secondary publishes itself as having no current EL0 context; the
-    // syscall tail switches to the per-CPU IRQ stack before the
-    // architectural secondary idle loop releases this zombie's stack.
+    // No admitted successor remains. The CPU publishes itself as having no
+    // current EL0 context; the syscall tail switches off this zombie's stack
+    // -- to a secondary's architectural stack, or to core 0's idle stack
+    // (GitHub issue #592) -- before the idle loop releases it.
+    //
+    // Core 0 used to wait HERE instead, still on the zombie's stack, for a
+    // successor to appear (kernel_process_exit_await_successor). That
+    // deadlocked once a parent could be Ready with a pending wait4
+    // continuation: scheduled_process_ready_take will not start such a
+    // parent while its child's stack is owned, and core 0 owned it while
+    // waiting for that parent. The QEMU lane stalled in ash's script tests,
+    // exiting child on core 0, ash Ready with wait=ChildExit.
     if (auto_reap) {
         if (execution_here().deferred_reap_live) {
             process_run_unlock(exit_guard);
@@ -7494,41 +7498,6 @@ fn kernel_process_child_exit(status: usize) -> usize {
     execution_here().scheduler_enabled = false;
     execution_here().reschedule_pending = false;
     process_run_unlock(exit_guard);
-    return 0;
-}
-
-// GitHub issue #9: kernel_process_exit_would_strand answered before the
-// exit tore anything down, without the run lock. It counted a Ready process
-// that the peer then took, so the search above found nothing and core 0
-// fail-stopped after a real exit. Nothing can be undone by now, so wait the
-// way .Lsyscall_wait_interrupt idles, standing on a process: an interrupt,
-// then the search again. The tick wakes deadline sleepers and the UART
-// wakes readers. This core still owns the zombie's stack, so its parent
-// cannot reap it until the handoff below moves off it.
-private fn kernel_process_exit_await_successor(child: ProcessHandle,
-                                               parent: ProcessHandle,
-                                               auto_reap: bool)
-        -> usize !{may_block} {
-    while (true) {
-        interrupt_wait();
-        let guard = process_run_lock();
-        match kernel_process_next_ready(child, cpu_id()) {
-            ProcessNextReadyResult::Missing => {}
-            ProcessNextReadyResult::Next(successor) => {
-                match scheduled_process_ready_take(guard, successor) {
-                    ScheduledProcessReadyTakeResult::Missing => {}
-                    ScheduledProcessReadyTakeResult::Ready(resources) => {
-                        let (owner, ready) = resources;
-                        let running = scheduled_process_start(owner, ready);
-                        process_run_unlock(guard);
-                        return kernel_process_exit_reserved(
-                            child, parent, owner, running, false, auto_reap);
-                    }
-                }
-            }
-        }
-        process_run_unlock(guard);
-    }
     return 0;
 }
 

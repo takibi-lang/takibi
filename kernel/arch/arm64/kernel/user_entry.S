@@ -429,6 +429,18 @@ kernel_core0_idle_yield_enter:
     mov     x29, xzr
     b       kernel_core0_idle_yield_reenter
 
+/* The exit twin of the above: leave an exited process's stack for core 0's
+ * idle stack, then release it (kernel_process_stack_idle_complete). */
+    .global kernel_core0_idle_enter
+    .type kernel_core0_idle_enter, %function
+kernel_core0_idle_enter:
+    msr     DAIFSet, #0x2
+    adrp    x1, core0_idle_stack_top
+    add     x1, x1, :lo12:core0_idle_stack_top
+    mov     sp, x1
+    mov     x29, xzr
+    b       kernel_core0_idle_reenter
+
     .global kernel_secondary_idle_enter
     .type kernel_secondary_idle_enter, %function
 kernel_secondary_idle_enter:
