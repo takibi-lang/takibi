@@ -2905,6 +2905,19 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     // access, faccessat and faccessat2 look a path up and read one inode's
     // mode, the same read newfstatat is admitted for.
     if (number == 21 || number == 48 || number == 439) { return true; }
+    // GitHub issue #583, third increment: the caller's own memory.
+    //
+    // brk and mmap move the heap break, a word in the caller's own fd
+    // context that the process alone writes after exec -- prlimit64's
+    // argument for its limit words. The arena is mapped at exec, so neither
+    // allocates. munmap does nothing. mprotect rewrites the caller's own
+    // page-table entries through address_space_pte_write, whose
+    // mmu_pte_update invalidates with `tlbi vae1is`, broadcast to every
+    // core, so a core the process ran on before keeps no stale entry. Data
+    // aborts already rewrite the same tables from a peer since #580.
+    if (number == 214 || number == 215 || number == 222 || number == 226) {
+        return true;
+    }
     if (number == AARCH64_NR_WRITEV) {
         return kernel_syscall_terminal_is_open(fd);
     }

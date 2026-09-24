@@ -24,6 +24,11 @@ const LINUX_F_DUPFD: usize = 0;
 const LINUX_AT_FDCWD: usize = 0xFFFFFFFFFFFFFF9C;
 const LINUX_R_OK: usize = 4;
 const AFFINITY_DUP_FLOOR: usize = 20;
+const BRK_SYSCALL: usize = 214;
+const MMAP_SYSCALL: usize = 222;
+const LINUX_PROT_READ_WRITE: usize = 3;
+const LINUX_MAP_PRIVATE_ANONYMOUS: usize = 0x22;
+const LINUX_NO_FD: usize = 0xFFFFFFFFFFFFFFFF;
 const LINUX_ENOENT: usize = 0xFFFFFFFFFFFFFFFE;
 // The probe's example of a syscall the peer-safety table does NOT admit.
 // It has to be one that STAYS outside, and phase B entry 6 is a sequence of
@@ -291,6 +296,15 @@ fn affinity_probe() {
     }
     svc5(CLOSE_SYSCALL, duplicate + 1, 0, 0, 0, 0);
     svc5(CLOSE_SYSCALL, duplicate, 0, 0, 0, 0);
+    // The third increment: this process's own memory, from CPU 1. An
+    // anonymous page comes from the heap break, so the address mmap returns
+    // is the break brk reported.
+    let heap_break: usize = svc5(BRK_SYSCALL, 0, 0, 0, 0, 0);
+    let page: usize = svc5(MMAP_SYSCALL, 0, 4096, LINUX_PROT_READ_WRITE,
+                           LINUX_MAP_PRIVATE_ANONYMOUS, LINUX_NO_FD);
+    if (heap_break == 0 || page != heap_break) {
+        affinity_fail(bs"affinity: brk and mmap asked from cpu 1 did not answer\n");
+    }
     // execve is outside the peer-safety table -- the process lifecycle is
     // the last thing it will admit -- so asked from CPU 1 it is rerun on
     // core 0 and must still answer. A pathname that names nothing is
