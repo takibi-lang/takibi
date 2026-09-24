@@ -919,37 +919,20 @@ fn tcp_connection_free_first_live() -> bool !{unsafe} {
     return false;
 }
 
-// Is the connection at this address open? An fd can outlive the connection
-// it names -- close() frees the connection while the descriptor is still
-// installed -- so "the address names nothing live" is a NORMAL answer
-// here, not a fault, and it is exactly what the caller wants to hear:
-// not open. tcp_connection_payload's own missing case is the one that
-// should never happen and says so; this one must not borrow its voice.
-fn tcp_connection_open_at(address: usize) -> bool !{unsafe} {
-    match intrusive_pool_probe_slot(&tcp_connection_pool, address) {
-        IntrusiveSlotProbe::NoPayload => { return false; }
-        IntrusiveSlotProbe::Live(slot_view) => {
-            // GitHub issue #488: the VALUE leaves this function, not the
-            // pointer, so the proof can be held across the read and given
-            // back -- no escape needed.
-            let conn: *TcpConnection =
-                intrusive_pool_payload_of(&tcp_connection_pool, slot_view);
-            let open: bool = conn.connection_open;
-            intrusive_view_release(slot_view);
-            return open;
-        }
-    }
-}
-
 // Has this connection buffered data userspace has not drained? One probe
 // keeps the slot's liveness proof across both field reads. A poll on a closed
 // connection is a normal false result and must not use the diagnostic
 // missing-payload fallback.
+//
+// It takes no connection lock, deliberately: poll must not wait behind a
+// receive that holds the owner, and its answer is only a readiness hint.
+// Each field is one aligned word, and the read that follows re-decides
+// open and available bytes under the owner (GitHub issue #581).
 fn tcp_connection_has_pending_read(address: usize) -> bool !{unsafe} {
     match intrusive_pool_probe_slot(&tcp_connection_pool, address) {
         IntrusiveSlotProbe::NoPayload => { return false; }
         IntrusiveSlotProbe::Live(slot_view) => {
-            // As tcp_connection_open_at: only the answer escapes.
+            // Only the answer escapes, so the proof is released here.
             let conn: *TcpConnection =
                 intrusive_pool_payload_of(&tcp_connection_pool, slot_view);
             let pending: bool = conn.connection_open &&

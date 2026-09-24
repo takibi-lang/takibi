@@ -1151,15 +1151,27 @@ fn kernel_connection_fd_identity(fd: usize) -> usize {
     return 0;
 }
 
+// GitHub issue #581: whether the connection is still open is decided under
+// its owner, not by a probe before taking it, so a close or shutdown on one
+// core cannot act on a state another core's call is changing. A connection
+// already freed is NotOpen, exactly as the pre-take probe used to answer.
+must_use variant KernelTransportReleaseResult { Released; NotOpen; Failed; }
+
 fn kernel_connected_transport_release(slot: usize, generation: usize)
-        -> bool {
+        -> KernelTransportReleaseResult {
     match tcp_connection_take(slot, generation) {
-        TcpConnectionTakeResult::Missing => { return false; }
+        TcpConnectionTakeResult::Missing => {
+            return KernelTransportReleaseResult::NotOpen;
+        }
         TcpConnectionTakeResult::Ready(owner) => {
+            if (tcp_connection_of(owner).connection_open == false) {
+                tcp_connection_put(owner);
+                return KernelTransportReleaseResult::NotOpen;
+            }
             match network_capability_take() {
                 NetworkCapabilityTakeResult::Empty => {
                     tcp_connection_put(owner);
-                    return false;
+                    return KernelTransportReleaseResult::Failed;
                 }
                 NetworkCapabilityTakeResult::Ready(ready) => {
                     match kernel_tcp_close_stream(owner, ready) {
@@ -1167,11 +1179,11 @@ fn kernel_connected_transport_release(slot: usize, generation: usize)
                             match network_capability_put(after_close) {
                                 NetworkCapabilityPutResult::Conflict => {
                                     tcp_connection_free(owner);
-                                    return false;
+                                    return KernelTransportReleaseResult::Failed;
                                 }
                                 NetworkCapabilityPutResult::Stored => {
                                     tcp_connection_free(owner);
-                                    return true;
+                                    return KernelTransportReleaseResult::Released;
                                 }
                             }
                         }
@@ -1192,7 +1204,7 @@ fn kernel_connected_descriptor_release(fd: usize) -> bool {
           let references: usize = unified_object_references(handle);
           {
               if (references == 0) { return false; }
-              if (references == 1 && tcp_connection_open_at(slot)) {
+              if (references == 1) {
                   // GitHub issue #257 step 5: `connection_open = false`
                   // used to be written here, into an array element that
                   // outlived the connection. It cannot be written now,
@@ -1201,7 +1213,11 @@ fn kernel_connected_descriptor_release(fd: usize) -> bool {
                   // frees it, and tcp_connection_free clears the flag on
                   // its way out for exactly the readers that used to need
                   // this line.
-                  return kernel_connected_transport_release(slot, generation);
+                  match kernel_connected_transport_release(slot, generation) {
+                      KernelTransportReleaseResult::Released => { return true; }
+                      KernelTransportReleaseResult::NotOpen => { return true; }
+                      KernelTransportReleaseResult::Failed => { return false; }
+                  }
               }
               return true;
           }
@@ -3059,24 +3075,38 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     }
                     KernelConnectionLookupResult::Found(found) => { found }
                 };
-            if (tcp_connection_open_at(inetd_write_slot) == false ||
-                length > 1460 -
-                    tcp_connection_payload(inetd_write_slot).inetd_response_length) {
-                return SyscallAction::Resume(LINUX_EINVAL);
-            }
-            let response_base: *u8 =
-                (tcp_connection_inetd_slice(tcp_connection_payload(inetd_write_slot)) as *u8) +
-                (tcp_connection_payload(inetd_write_slot).inetd_response_length as isize);
-            match user_range_check_read(kernel_process_current_root(), address, length) {
-                UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
-                UserReadRangeResult::Ok(range) => {
-                    let copied: bool =
-                        copy_from_user_raw(range, response_base, length);
+            let inetd_write_generation: usize = kernel_connection_fd_identity(fd);
+            // GitHub issue #581: the response buffer and its length are the
+            // connection's, so they are appended to under its owner.
+            match tcp_connection_take(inetd_write_slot, inetd_write_generation) {
+                TcpConnectionTakeResult::Missing => {
+                    return SyscallAction::Resume(LINUX_EINVAL);
+                }
+                TcpConnectionTakeResult::Ready(owner) => {
+                    let conn: *TcpConnection = tcp_connection_of(owner);
+                    if (conn.connection_open == false ||
+                        length > 1460 - conn.inetd_response_length) {
+                        tcp_connection_put(owner);
+                        return SyscallAction::Resume(LINUX_EINVAL);
+                    }
+                    let response_base: *u8 =
+                        (tcp_connection_inetd_slice(conn) as *u8) +
+                        (conn.inetd_response_length as isize);
+                    match user_range_check_read(kernel_process_current_root(), address, length) {
+                        UserReadRangeResult::Fault => {
+                            tcp_connection_put(owner);
+                            return SyscallAction::Resume(LINUX_EFAULT);
+                        }
+                        UserReadRangeResult::Ok(range) => {
+                            let copied: bool =
+                                copy_from_user_raw(range, response_base, length);
+                        }
+                    }
+                    conn.inetd_response_length = conn.inetd_response_length + length;
+                    tcp_connection_put(owner);
+                    return SyscallAction::Resume(length);
                 }
             }
-            tcp_connection_payload(inetd_write_slot).inetd_response_length =
-                tcp_connection_payload(inetd_write_slot).inetd_response_length + length;
-            return SyscallAction::Resume(length);
         }
         if (kernel_syscall_file_is_open(fd)) {
             syscall_test_evidence_record_file_write();
@@ -4409,10 +4439,15 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 };
             let direct_shutdown_generation: usize =
                 kernel_connection_fd_identity(1);
-            if (tcp_connection_open_at(direct_shutdown_slot) == false ||
-                kernel_connected_transport_release(
-                    direct_shutdown_slot, direct_shutdown_generation) == false) {
-                return SyscallAction::Resume(LINUX_EAGAIN);
+            match kernel_connected_transport_release(
+                    direct_shutdown_slot, direct_shutdown_generation) {
+                KernelTransportReleaseResult::NotOpen => {
+                    return SyscallAction::Resume(LINUX_EAGAIN);
+                }
+                KernelTransportReleaseResult::Failed => {
+                    return SyscallAction::Resume(LINUX_EAGAIN);
+                }
+                KernelTransportReleaseResult::Released => {}
             }
             // The release above freed the connection; the flag it used to
             // clear here goes out with it (see the identical site in
@@ -4427,17 +4462,22 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 KernelConnectionLookupResult::Found(found) => { found }
             };
         let inetd_shutdown_generation: usize = kernel_connection_fd_identity(1);
-        if (x0 != 1 || kernel_syscall_inetd_mode() == false ||
-            tcp_connection_open_at(inetd_shutdown_slot) == false ||
-            tcp_connection_payload(inetd_shutdown_slot).inetd_response_length == 0) {
+        if (x0 != 1 || kernel_syscall_inetd_mode() == false) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
-        let received_length: usize =
-            tcp_connection_payload(inetd_shutdown_slot).socket_buffer_length;
+        // GitHub issue #581: open, response length and received length are
+        // read under the owner, as in the connected write above.
         match tcp_connection_take(
                 inetd_shutdown_slot, inetd_shutdown_generation) {
-          TcpConnectionTakeResult::Missing => { return SyscallAction::Resume(LINUX_EAGAIN); }
+          TcpConnectionTakeResult::Missing => { return SyscallAction::Resume(LINUX_EINVAL); }
           TcpConnectionTakeResult::Ready(owner) => {
+           if (tcp_connection_of(owner).connection_open == false ||
+               tcp_connection_of(owner).inetd_response_length == 0) {
+               tcp_connection_put(owner);
+               return SyscallAction::Resume(LINUX_EINVAL);
+           }
+           let received_length: usize =
+               tcp_connection_of(owner).socket_buffer_length;
            match network_capability_take() {
             NetworkCapabilityTakeResult::Empty => {
                 tcp_connection_put(owner);
