@@ -6023,13 +6023,48 @@ must_use variant ProcessUartWakeResult { Missing; Consumed; RetryRead; }
 // Blocked, or the reader finds this byte in the ring.
 fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[lock], value: usize)
         -> ProcessUartWakeResult !{interrupt, unsafe} {
-    if (execution_here().current_live == false) {
-        diagnostic_trace_record(
-            DiagnosticEventProcessUartWake, value, 0, 0, 0);
-        return ProcessUartWakeResult::Missing;
-    }
+    // GitHub issue #592 made this reachable with no current process: core 0
+    // idles now, and a reader pinned to a peer blocks on the terminal while
+    // it does. The relative walks below start from core 0's current process,
+    // so with none this used to answer Missing, the byte went into the ring,
+    // and the Blocked reader was never woken -- /bin/peer-tty on RPi5 read
+    // nothing in about one run in four once fcntl and dup3 stopped sending
+    // ash to core 0. With no current process, walk every slot instead, the
+    // walk kernel_process_net_wake_scan already makes from this context.
+    let live: bool = execution_here().current_live;
     let mut waiter: ProcessHandle = execution_here().current_handle;
     let mut found: bool = false;
+    // The diagnostic traces below name core 0's current process; with none,
+    // they name pid 0 rather than peeking a record that may be gone.
+    let mut current_pid: usize = 0;
+    if (live) {
+        current_pid = scheduled_process_pid_of_handle(
+            execution_here().current_handle);
+    }
+    if (live == false) {
+        let mut cursor = scheduled_process_first_slot();
+        let mut walking: bool = true;
+        while (walking && found == false) {
+            match cursor {
+                ProcessSlotCursor::Done => { walking = false; }
+                ProcessSlotCursor::At(slot) => {
+                    if (scheduled_process_record_state(slot) ==
+                            ProcessSlotState::Blocked &&
+                        scheduled_process_record_wait_reason(slot) ==
+                            ProcessWaitReason::UartRx) {
+                        waiter = scheduled_process_handle_of_slot(slot);
+                        found = true;
+                    }
+                    cursor = scheduled_process_next_slot(slot);
+                }
+            }
+        }
+        if (found == false) {
+            diagnostic_trace_record(
+                DiagnosticEventProcessUartWake, value, 0, 0, 0);
+            return ProcessUartWakeResult::Missing;
+        }
+    }
     // GitHub issue #437: EVERY child, not just the first.
     //
     // This read first_child alone, which was every child there could be.
@@ -6040,8 +6075,14 @@ fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[lock], value: usize)
     // A walk of the sibling list rather than of the process table: this is
     // `!{interrupt}`, and the table cursor goes through the pool, whose
     // accessors take the pool lock. Reading records is free.
-    if (scheduled_process_record_of(execution_here().current_handle)
-            .has_first_child) {
+    // Nested, not `live && ...`: both sides of && are evaluated, and the
+    // right one reads the current record.
+    let mut has_child: bool = false;
+    if (live) {
+        has_child = scheduled_process_record_of(
+            execution_here().current_handle).has_first_child;
+    }
+    if (has_child) {
         let mut candidate: ProcessHandle = scheduled_process_record_of(
             execution_here().current_handle).first_child;
         let mut scanning: usize = scheduled_process_pool_live_count() + 1;
@@ -6081,7 +6122,7 @@ fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[lock], value: usize)
     // out rather than spinning inside an interrupt.
     let mut remaining_hops: usize = scheduled_process_pool_live_count() + 1;
     let mut ancestor: ProcessHandle = execution_here().current_handle;
-    let mut climbing: bool = true;
+    let mut climbing: bool = live;
     while (climbing && found == false && remaining_hops != 0) {
         remaining_hops = remaining_hops - 1;
         if (scheduled_process_record_of(ancestor).has_parent ==
@@ -6120,7 +6161,7 @@ fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[lock], value: usize)
     // rather than a replacement: with two waiters the child-then-ancestor
     // order above is the behaviour every existing fixture was recorded
     // against, and this only decides cases that used to drop the byte.
-    if (found == false) {
+    if (found == false && live) {
         let mut root: ProcessHandle =
             kernel_process_chain_root(execution_here().current_handle);
         let mut cursor: ProcessHandle = root;
@@ -6141,7 +6182,7 @@ fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[lock], value: usize)
     if (found == false) {
         diagnostic_trace_record(
             DiagnosticEventProcessUartWake, value,
-            scheduled_process_pid_of_handle(execution_here().current_handle), 0, 1);
+            current_pid, 0, 1);
         return ProcessUartWakeResult::Missing;
     }
     let mut retry_read: bool = false;
@@ -6149,7 +6190,7 @@ fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[lock], value: usize)
         ScheduledProcessBlockedTakeResult::Missing => {
             diagnostic_trace_record(
                 DiagnosticEventProcessUartWake, value,
-                scheduled_process_pid_of_handle(execution_here().current_handle),
+                current_pid,
                 scheduled_process_pid_of_handle(waiter), 2);
             return ProcessUartWakeResult::Missing;
         }
@@ -6165,21 +6206,22 @@ fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[lock], value: usize)
             scheduled_process_record_at(owner.pool_index).wait_reason =
                 ProcessWaitReason::None;
             scheduled_process_release(owner, ready);
-            kernel_process_trace_handle(ProcessTraceWake, waiter,
-                                        execution_here().current_handle, value);
+            let mut waker: ProcessHandle = waiter;
+            if (live) { waker = execution_here().current_handle; }
+            kernel_process_trace_handle(ProcessTraceWake, waiter, waker, value);
         }
     }
     process_test_evidence_record_uart_wake();
     if (retry_read) {
         diagnostic_trace_record(
             DiagnosticEventProcessUartWake, value,
-            scheduled_process_pid_of_handle(execution_here().current_handle),
+            current_pid,
             scheduled_process_pid_of_handle(waiter), 4);
         return ProcessUartWakeResult::RetryRead;
     }
     diagnostic_trace_record(
         DiagnosticEventProcessUartWake, value,
-        scheduled_process_pid_of_handle(execution_here().current_handle),
+        current_pid,
         scheduled_process_pid_of_handle(waiter), 3);
     return ProcessUartWakeResult::Consumed;
 }
