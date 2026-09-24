@@ -48,6 +48,20 @@ Rollback validates the still-Running parent and its child-list head under the
 run lock, restores that head to the cancelled child's next sibling, and only
 then reaps the cancelled record. Older live children and zombies remain linked.
 
+## Core 0's idle context
+
+Core 0 idles on `core0_idle_stack_*` (GitHub issue #592), not on its boot
+stack, which still holds `main()`'s suspended frames. It goes there only
+from a syscall return that found no other process core 0 may run while the
+returning process's affinity excludes core 0, and only when core 0 stands
+on that process's own kernel stack -- a clone child's first return still
+stands on its parent's. The hand-off is the peers' ordering: publish no
+current process, move SP off the process stack, then make the process
+Ready with its stack unowned under the run lock. The idle loop takes a Ready
+process core 0 may run, never slot 0's bootstrap record. Every other case in
+which core 0 has nothing to run -- all processes blocked, or an exit with no
+successor -- still waits in EL1 and reruns the syscall.
+
 ## Connected sockets on a peer
 
 `read` and `write` on a connected TCP descriptor are admitted on any CPU

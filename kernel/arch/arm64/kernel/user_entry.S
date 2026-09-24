@@ -417,6 +417,19 @@ kernel_secondary_idle_yield_enter:
     adr     x5, kernel_secondary_idle_yield_reenter
     b       .Lsecondary_idle_stack
 
+/* GitHub issue #592: core 0's version of the yield above. Core 0's boot
+ * stack still holds main()'s suspended frames, so it idles on a stack of its
+ * own; everything else matches the secondary path. */
+    .global kernel_core0_idle_yield_enter
+    .type kernel_core0_idle_yield_enter, %function
+kernel_core0_idle_yield_enter:
+    msr     DAIFSet, #0x2
+    adrp    x1, core0_idle_stack_top
+    add     x1, x1, :lo12:core0_idle_stack_top
+    mov     sp, x1
+    mov     x29, xzr
+    b       kernel_core0_idle_yield_reenter
+
     .global kernel_secondary_idle_enter
     .type kernel_secondary_idle_enter, %function
 kernel_secondary_idle_enter:

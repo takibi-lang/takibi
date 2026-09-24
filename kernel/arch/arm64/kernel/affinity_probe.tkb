@@ -94,8 +94,8 @@ private fn affinity_cpu(cpu_bytes: borrow [u8; 4..]) -> usize {
            ((cpu_bytes[3] as usize) << 24);
 }
 
-// Core 0 has no idle loop, so a process leaving it needs something else
-// there to switch to. This child inherits the CPU-0-only mask and naps a
+// Written when core 0 had no idle loop (it has one since GitHub issue #592),
+// so a process leaving it needed something else there to switch to. This child inherits the CPU-0-only mask and naps a
 // millisecond at a time. A nap blocks while another process is Ready, so
 // core 0 hands itself over without depending on preemption, which the
 // ash session this runs in does not have.

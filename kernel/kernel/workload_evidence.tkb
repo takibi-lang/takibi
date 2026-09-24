@@ -1193,6 +1193,12 @@ fn workload_peer_socket_served(is_write: bool) {
         workload_busy_pair.peer_socket_reported = true;
         kernel_boot_log(
             "workload: pinned httpd read and wrote a connected socket on the secondary cpu\n");
+        // GitHub issue #592: the handler reaches the secondary only because
+        // core 0 can idle; say so where the line cannot interleave.
+        if (kernel_process_core0_idle_was_seen(guard)) {
+            kernel_boot_log(
+                "smp: core 0 handed away a process its affinity excludes and idled\n");
+        }
     }
     process_run_unlock(guard);
 }

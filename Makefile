@@ -286,7 +286,8 @@ LINUX_UNUSED_CHECK       := --reject-unused-functions --external-entry main
 KERNEL_ASM_ENTRIES := main kernel_secondary_main \
 	el1_exception_evidence_from_frame kernel_mmu_init \
 	kernel_mmu_init_secondary kernel_secondary_idle_reenter \
-	kernel_secondary_idle_yield_reenter kernel_syscall_migrate_return \
+	kernel_secondary_idle_yield_reenter kernel_core0_idle_yield_reenter \
+	kernel_syscall_migrate_return \
 	kernel_syscall_block_return kernel_syscall_child_exec_return \
 	kernel_syscall_clone_child_return kernel_syscall_clone_parent_return \
 	kernel_syscall_dispatch kernel_syscall_resume_return \

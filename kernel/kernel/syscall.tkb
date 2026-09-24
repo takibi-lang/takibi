@@ -2434,6 +2434,11 @@ fn kernel_syscall_resume_return(frame_sp: usize, value: usize) {
     el0_context_set_x0(frame_sp, value);
     kernel_stack_guard_check(frame_sp);  // issue #375
     let resume_sp: usize = kernel_process_syscall_return_schedule(frame_sp);
+    // GitHub issue #592: no successor, and core 0 may not keep this one.
+    if (resume_sp == frame_sp &&
+        kernel_process_core0_leave_excluded(frame_sp)) {
+        kernel_core0_idle_yield_enter();
+    }
     workload_profile_el0_enter();
     el0_context_resume(resume_sp);
 }
@@ -2953,9 +2958,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // and 3.
     //
     // A peer that hands a process back has somewhere to go: the architectural
-    // idle loop it booted into. Core 0 has no such loop, which is why this is
-    // a peer-only question and why a process leaving core 0 still needs a
-    // successor there.
+    // idle loop it booted into. Core 0 does not rewind the call; it lets it
+    // finish and hands the process away at the return (below).
     if (cpu_id() != 0) {
         // Affinity may have been changed by another CPU. Take the process
         // run lock for this scheduling-boundary snapshot, then release it
@@ -2966,15 +2970,14 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         process_run_unlock(guard);
         if (current_cpu_allows == false) { return SyscallAction::Migrate; }
     } else {
-        // GitHub issue #581: the same question on core 0, where the answer
-        // cannot be to leave -- core 0 has no idle loop to return to. A
-        // process whose mask excludes core 0 is here only because it was
-        // born here (clone runs on core 0) or because the gate above sent it
-        // one syscall that has now finished. Without this it stayed until
-        // the next timer tick, which a short-lived process such as an HTTPd
-        // connection handler never reaches, so its peer-safe calls all ran
-        // on core 0. Asking for a reschedule lets the syscall-return path
-        // hand it back to the ready set, where a CPU its mask names takes it.
+        // GitHub issue #581: the same question on core 0. A process whose
+        // mask excludes core 0 is here only because it was born here (clone
+        // runs on core 0) or because the gate above sent it one syscall that
+        // has now finished. Without this it stayed until the next timer
+        // tick, which a short-lived process such as an HTTPd connection
+        // handler never reaches. The reschedule lets the syscall return
+        // switch to another process core 0 may run; with none Ready, that
+        // return parks this one Ready and idles core 0 (#592).
         kernel_process_reschedule_if_excluded_here();
     }
     if (cpu_id() != 0 && syscall_peer_safe(number, x0) == false) {
@@ -3003,7 +3006,33 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     match kernel_process_current_termination_signal_take() {
         ProcessSignalPendingResult::Missing => {}
         ProcessSignalPendingResult::Pending(signum) => {
-            return kernel_syscall_exit_current_process(128 + signum);
+            // A core-0 exit with nowhere to hand the CPU waits and reruns
+            // this syscall. The rerun must still see the signal it was for.
+            match kernel_syscall_exit_current_process(128 + signum) {
+                SyscallAction::WaitInterrupt => {
+                    kernel_process_current_termination_signal_restore();
+                    return SyscallAction::WaitInterrupt;
+                }
+                SyscallAction::Unreachable => {
+                    return SyscallAction::Unreachable;
+                }
+                SyscallAction::Resume(value) => {
+                    return SyscallAction::Resume(value);
+                }
+                SyscallAction::Exit(value) => {
+                    return SyscallAction::Exit(value);
+                }
+                SyscallAction::CloneChild(value) => {
+                    return SyscallAction::CloneChild(value);
+                }
+                SyscallAction::CloneParent(value) => {
+                    return SyscallAction::CloneParent(value);
+                }
+                SyscallAction::Block => { return SyscallAction::Block; }
+                SyscallAction::Exec => { return SyscallAction::Exec; }
+                SyscallAction::ChildExec => { return SyscallAction::ChildExec; }
+                SyscallAction::Migrate => { return SyscallAction::Migrate; }
+            }
         }
     }
     if (number == AARCH64_NR_TAKIBI_UART_RX_WAIT) {

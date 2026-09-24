@@ -283,6 +283,25 @@ fn kernel_secondary_idle_yield_reenter() {
     kernel_secondary_main(0x290 + cpu_id());
 }
 
+// GitHub issue #592: core 0's idle loop. Core 0 comes here only after
+// handing away a process its affinity excludes with nothing else Ready that
+// core 0 may run -- before this it kept running such a process. It leaves
+// as soon as a process it may run is Ready: every IRQ still arrives here
+// (core 0's tick, the UART, the network), and each wake re-asks.
+fn kernel_core0_idle_yield_reenter() {
+    kernel_process_stack_idle_yield();
+    enable_irq();
+    while (true) {
+        match kernel_process_secondary_start() {
+            ProcessSecondaryStart::Idle => {}
+            ProcessSecondaryStart::Frame(next_sp) => {
+                el0_context_resume(next_sp);
+            }
+        }
+        wfi();
+    }
+}
+
 // Shared timer policy; each platform still acknowledges its own GIC source
 // after this returns. Only a lower-EL interrupt may replace the saved frame.
 fn kernel_secondary_timer_schedule(frame_sp: usize, lower_el: bool)

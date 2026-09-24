@@ -126,6 +126,16 @@ SECTIONS {
         secondary_percpu_stack_base = .;
         . += 3 * (percpu_stack_group_end - percpu_stack_base);
         percpu_stack_end = .;
+        /* GitHub issue #592: core 0's idle stack, the counterpart of a
+           secondary's boot stack. Core 0's own boot stack still holds
+           main()'s suspended frames, so core 0 cannot idle on it the way a
+           secondary idles on its. Same shape as every stack above; the
+           region stays 0x8000-aligned because every run above is. */
+        core0_idle_stack_run_bottom = .;
+        . += 0x4000;
+        core0_idle_stack_bottom = .;
+        . += 0x4000;
+        core0_idle_stack_top = .;
     }
 
     /* Same rationale as link.ld: the first PAGE_SIZE-aligned physical

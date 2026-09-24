@@ -142,7 +142,10 @@ kernels.
 | `percpu_stack_group_end` | `+0x30000` | linker script `.stack` | CHECKED (ELF offset) |
 | `secondary_percpu_stack_base` | `+0x30000` | linker script `.stack` | CHECKED (ELF offset) |
 | `percpu_stack_end` | `+0x60000` | linker script `.stack` | CHECKED (ELF offset) |
-| `usable_ram_start` | `+0x60000` | linker script, `ALIGN(4096)` | CHECKED (ELF offset) |
+| `core0_idle_stack_run_bottom` | `+0x60000` | linker script `.stack` | CHECKED (ELF offset) |
+| `core0_idle_stack_bottom` | `+0x64000` | linker script `.stack` | CHECKED (ELF offset) |
+| `core0_idle_stack_top` | `+0x68000` | linker script `.stack` | CHECKED (ELF offset) |
+| `usable_ram_start` | `+0x68000` | linker script, `ALIGN(4096)` | CHECKED (ELF offset) |
 
 ### The image ceiling
 
@@ -188,8 +191,13 @@ on every `make kernelbuild`:
   address say which half of a stack region it is in, which the generated
   exception entries depend on -- see "Kernel stacks" below.
 
+`core0_idle_stack_run_bottom` to `core0_idle_stack_top` is core 0's idle
+stack (GitHub issue #592). Core 0 idles there after handing away a process
+its affinity excludes; its boot stack cannot serve, because it still holds
+`main()`'s suspended frames.
+
 `stack_top` is an alias of `boot_stack_top`, kept because `entry.S` names
-it. `percpu_stack_end` and `usable_ram_start` are the same address:
+it. `core0_idle_stack_top` and `usable_ram_start` are the same address:
 `.stack` ends where the page pool begins, and it is already page-aligned.
 
 The rows from `percpu_stack_base` to `percpu_stack_group_end` are core 0's

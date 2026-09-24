@@ -3193,7 +3193,9 @@ fn kernel_process_stack_idle_complete() {
 // together, and never while this core still stands on them.
 fn kernel_process_stack_idle_yield() {
     let core: usize = cpu_id();
-    if (core == 0 || core >= KERNEL_MAX_CORES ||
+    // Core 0 arrives here too since GitHub issue #592, from
+    // kernel_core0_idle_yield_enter.
+    if (core >= KERNEL_MAX_CORES ||
         execution_here().current_live || execution_here().stack_live == false) {
         kernel_syscall_fail_stop(0);
     }
@@ -4000,6 +4002,53 @@ fn kernel_process_current_cpu_allows(
         cpu_id(), execution_here().current_handle.pool_index);
 }
 
+// Written under the run lock, by core 0 only. Reported by the workload
+// evidence at a fixed point rather than here, where a line would land in the
+// middle of whatever the console is showing.
+private let mut kernel_process_core0_idle_seen: bool;
+
+fn kernel_process_core0_idle_was_seen(
+        guard: borrow ProcessRunGuard[scheduled_process_run_lock]) -> bool {
+    return kernel_process_core0_idle_seen;
+}
+
+// GitHub issue #592: core 0's counterpart of kernel_process_migrate_current,
+// asked at a syscall return that found no successor. If the returning
+// process may not run on core 0, publish core 0 as having no current process
+// and keep the frame; kernel_process_stack_idle_yield makes it Ready once
+// core 0 is off its stack.
+fn kernel_process_core0_leave_excluded(frame_sp: usize) -> bool {
+    if (cpu_id() != 0) { return false; }
+    let guard = process_run_lock();
+    if (execution_here().current_live == false) {
+        process_run_unlock(guard);
+        return false;
+    }
+    let slot: usize = execution_here().current_handle.pool_index;
+    if (slot == 0 || kernel_process_cpu_allows_slot(0, slot)) {
+        process_run_unlock(guard);
+        return false;
+    }
+    // Only from the process's own stack. A clone child's first return still
+    // stands on its parent's stack until el0_context_resume completes the
+    // physical switch, and the yield below releases whatever stack this CPU
+    // stands on; the child leaves at its next syscall return instead.
+    if (execution_here().stack_live == false ||
+        execution_here().stack_handle.pool_index != slot ||
+        execution_here().stack_handle.generation !=
+            execution_here().current_handle.generation) {
+        process_run_unlock(guard);
+        return false;
+    }
+    scheduled_process_record_at(slot).saved_sp = frame_sp;
+    execution_here().current_live = false;
+    execution_here().scheduler_enabled = false;
+    execution_here().reschedule_pending = false;
+    kernel_process_core0_idle_seen = true;
+    process_run_unlock(guard);
+    return true;
+}
+
 // Core 0's half of the affinity gate (GitHub issue #581): ask for a
 // reschedule at this syscall's return when the running process's mask no
 // longer names this CPU. The run lock covers the snapshot, since another CPU
@@ -4291,7 +4340,11 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
         match cursor {
             ProcessSlotCursor::Done => { walking = false; }
             ProcessSlotCursor::At(slot) => {
-                if (scheduled_process_record_state(slot) ==
+                // Slot 0 is the bootstrap record, which may be Ready with no
+                // resumable EL0 frame. Only core 0 is ever allowed it, and
+                // core 0's idle loop (#592) must not pick it either.
+                if (slot != 0 &&
+                    scheduled_process_record_state(slot) ==
                         ProcessSlotState::Ready &&
                     kernel_process_cpu_allows_slot(cpu_id(), slot)) {
                     let mut handle: ProcessHandle =
@@ -5585,6 +5638,17 @@ fn kernel_process_current_termination_signal_take()
     }
     record.pending_signals = record.pending_signals & ~sigterm_bit;
     return ProcessSignalPendingResult::Pending(15);
+}
+
+// Put back a SIGTERM that kernel_process_current_termination_signal_take
+// took for an exit that did not happen: the exit asked to wait and rerun the
+// syscall, and the rerun has to find the signal still pending or the process
+// outlives it.
+fn kernel_process_current_termination_signal_restore() {
+    if (execution_here().current_live == false) { return; }
+    let record: *ProcessRecord =
+        scheduled_process_record_of(execution_here().current_handle);
+    record.pending_signals = record.pending_signals | (1 << 14);
 }
 
 fn kernel_process_current_prepare_signal_wait(wait_set: usize) {
