@@ -8,6 +8,10 @@ const EXT2_MAGIC: u16 = 0xEF53;
 // i_block[0..11] are direct pointers; i_block[12] and i_block[13] are
 // singly/doubly indirect. Regular-file capacity is derived from geometry.
 const EXT2_MAX_DIRECT_BLOCKS: usize = 12;
+const EXT2_MAX_SINGLE_FILE_BLOCKS: usize =
+    EXT2_MAX_DIRECT_BLOCKS + KERNEL_BLOCK_SIZE / 4;
+const EXT2_MAX_WRITE_ALLOCATIONS: usize =
+    EXT2_MAX_SINGLE_FILE_BLOCKS + 1;
 
 fn ext2_pointer_count() -> usize { return KERNEL_BLOCK_SIZE / 4; }
 fn ext2_direct_file_size() -> usize {
@@ -28,6 +32,8 @@ struct Ext2Scratch {
 }
 
 private let mut ext2_scratch: [Ext2Scratch; KERNEL_MAX_CORES];
+private let mut ext2_write_blocks:
+    [usize; KERNEL_MAX_CORES * EXT2_MAX_WRITE_ALLOCATIONS];
 
 private fn ext2_scratch_here() -> *Ext2Scratch {
     let base: *Ext2Scratch = ext2_scratch;
@@ -100,6 +106,21 @@ must_use variant Ext2InodeAllocResult {
 
 must_use variant Ext2OwnerReleaseResult { Invalid; Released; }
 must_use variant Ext2DirectoryResult { Invalid; Updated; }
+
+// A write keeps every new data block (and, when needed, the indirect block)
+// here until its inode has been published. One linear obligation owns the
+// runtime-sized prefix; its plain block numbers are never owners by themselves.
+private linear struct Ext2WriteAllocations[unit: usize] {
+    private core: usize;
+    private count: usize;
+}
+
+must_use variant Ext2WriteRecordResult {
+    Full(Ext2WriteAllocations[0]);
+    Recorded(Ext2WriteAllocations[0]);
+}
+
+must_use variant Ext2WriteFinishResult { Invalid; Finished; }
 
 linear struct Ext2LinkedFile[inode: usize, block: usize] {
     private inode_bitmap_index: usize;
@@ -295,7 +316,7 @@ fn ext2_read_inode(mount: Ext2Mount, inode_number: usize)
     if (file_type == 0x4000) { max_size = ext2_direct_file_size(); }
     if (mode == 0 || size > max_size ||
         (file_type != 0x8000 && file_type != 0x4000 && file_type != 0xA000) ||
-        ((file_type == 0x8000 || file_type == 0x4000) &&
+        ((file_type == 0x4000 || (file_type == 0x8000 && size > 0)) &&
          (direct_block0 == 0 || direct_block0 >= mount.filesystem_blocks)) ||
         (file_type == 0x8000 && size > ext2_direct_file_size() &&
          (indirect_block == 0 || indirect_block >= mount.filesystem_blocks)) ||
@@ -718,44 +739,8 @@ fn ext2_inode_size(mount: Ext2Mount, inode_number: usize) -> usize {
 fn ext2_resize_small_file(mount: Ext2Mount, inode_number: usize,
                           source: []u8)
         -> Ext2ResizeResult !{unsafe} {
-    if (source.len == 0 || source.len > KERNEL_BLOCK_SIZE) {
-        return Ext2ResizeResult::Invalid;
-    }
-    match ext2_read_inode(mount, inode_number) {
-        Ext2InodeResult::Invalid => { return Ext2ResizeResult::Invalid; }
-        Ext2InodeResult::Inode(inode) => {
-            if ((inode.mode & 0xF000) != 0x8000) {
-                return Ext2ResizeResult::Invalid;
-            }
-
-            // Publish data first. Until the inode table write succeeds, the
-            // old i_size remains the only visible extent.
-            for i: usize in 0..<KERNEL_BLOCK_SIZE { ext2_scratch_here().file[i] = 0; }
-            let file_bytes = ext2_scratch_here().file as []u8;
-            slice_copy(file_bytes, source);
-            match block_write(mount.device, inode.direct_block0,
-                              ext2_scratch_here().file as []u8) {
-                BlockIoResult::Invalid => { return Ext2ResizeResult::Invalid; }
-                BlockIoResult::Ok => { }
-            }
-
-            match block_read(mount.device, inode.table_block,
-                             ext2_scratch_here().metadata as []u8) {
-                BlockIoResult::Invalid => { return Ext2ResizeResult::Invalid; }
-                BlockIoResult::Ok => { }
-            }
-            let inode_pointer: *u8 =
-                (ext2_scratch_here().metadata as *u8) + (inode.table_offset as isize);
-            if (ext2_put_u32(inode_pointer, 4, source.len as u32) == false) {
-                return Ext2ResizeResult::Invalid;
-            }
-            match block_write(mount.device, inode.table_block,
-                              ext2_scratch_here().metadata as []u8) {
-                BlockIoResult::Invalid => { return Ext2ResizeResult::Invalid; }
-                BlockIoResult::Ok => { return Ext2ResizeResult::Resized; }
-            }
-        }
-    }
+    return ext2_replace_regular_file(mount, inode_number, source,
+                                     EXT2_MAX_WRITE_ALLOCATIONS);
 }
 
 fn ext2_read_fast_symlink(mount: Ext2Mount, inode_number: usize,
@@ -871,6 +856,15 @@ fn ext2_free_counts(mount: Ext2Mount) -> Ext2FreeCountsResult {
         return Ext2FreeCountsResult::Invalid;
     }
     return Ext2FreeCountsResult::Counts((free_blocks, free_inodes));
+}
+
+fn ext2_block_bitmap_snapshot(mount: Ext2Mount,
+                              destination: [u8; KERNEL_BLOCK_SIZE..])
+        -> Ext2ReadResult {
+    match block_read(mount.device, mount.block_bitmap_block, destination) {
+        BlockIoResult::Invalid => { return Ext2ReadResult::Invalid; }
+        BlockIoResult::Ok => { return Ext2ReadResult::Read(KERNEL_BLOCK_SIZE); }
+    }
 }
 
 fn ext2_bitmap_claim(mount: Ext2Mount, inode_bitmap: bool,
@@ -1159,6 +1153,407 @@ fn ext2_release_block(mount: Ext2Mount,
             return Ext2OwnerReleaseResult::Released;
         }
     }
+}
+
+private fn ext2_write_allocations_begin() -> Ext2WriteAllocations[0] {
+    let mut allocations: Ext2WriteAllocations[0] = { cpu_id(), 0 };
+    return allocations;
+}
+
+// The owner moves into the transaction's recorded prefix. The transaction
+// must later either release that prefix or publish every block in an inode.
+private fn ext2_block_owner_staged(owner: sink Ext2BlockOwner[block]) {}
+
+private fn ext2_write_allocations_record(
+        mount: Ext2Mount, allocations: sink Ext2WriteAllocations[0],
+        owner: sink Ext2BlockOwner[block]) -> Ext2WriteRecordResult {
+    let index: usize = allocations.count;
+    if (index >= EXT2_MAX_WRITE_ALLOCATIONS ||
+        allocations.core >= KERNEL_MAX_CORES) {
+        match ext2_release_block(mount, owner) {
+            Ext2OwnerReleaseResult::Invalid => { }
+            Ext2OwnerReleaseResult::Released => { }
+        }
+        return Ext2WriteRecordResult::Full(allocations);
+    }
+    let slot: usize = allocations.core * EXT2_MAX_WRITE_ALLOCATIONS + index;
+    if (slot >= KERNEL_MAX_CORES * EXT2_MAX_WRITE_ALLOCATIONS) {
+        match ext2_release_block(mount, owner) {
+            Ext2OwnerReleaseResult::Invalid => { }
+            Ext2OwnerReleaseResult::Released => { }
+        }
+        return Ext2WriteRecordResult::Full(allocations);
+    }
+    ext2_write_blocks[slot] = owner.block_number;
+    allocations.count = index + 1;
+    ext2_block_owner_staged(owner);
+    return Ext2WriteRecordResult::Recorded(allocations);
+}
+
+private fn ext2_write_allocations_block(
+        allocations: borrow Ext2WriteAllocations[0], index: usize) -> usize {
+    if (index >= allocations.count || index >= EXT2_MAX_WRITE_ALLOCATIONS) {
+        return 0;
+    }
+    if (allocations.core >= KERNEL_MAX_CORES) { return 0; }
+    let slot: usize = allocations.core * EXT2_MAX_WRITE_ALLOCATIONS + index;
+    if (slot >= KERNEL_MAX_CORES * EXT2_MAX_WRITE_ALLOCATIONS) { return 0; }
+    return ext2_write_blocks[slot];
+}
+
+private fn ext2_write_allocations_rollback(
+        mount: Ext2Mount, allocations: sink Ext2WriteAllocations[0])
+        -> Ext2WriteFinishResult {
+    let mut released: bool = true;
+    for index: usize in 0..<EXT2_MAX_WRITE_ALLOCATIONS {
+        if (index < allocations.count) {
+            let block: usize = ext2_write_allocations_block(allocations, index);
+            if (block == 0 || block >= mount.filesystem_blocks) {
+                released = false;
+            } else {
+                match ext2_release_block(
+                        mount, ext2_block_owner_new(block - 1, block, block)) {
+                    Ext2OwnerReleaseResult::Invalid => { released = false; }
+                    Ext2OwnerReleaseResult::Released => { }
+                }
+            }
+        }
+    }
+    if (released) { return Ext2WriteFinishResult::Finished; }
+    return Ext2WriteFinishResult::Invalid;
+}
+
+private fn ext2_write_abort(mount: Ext2Mount,
+                            allocations: sink Ext2WriteAllocations[0])
+        -> Ext2ResizeResult {
+    match ext2_write_allocations_rollback(mount, allocations) {
+        Ext2WriteFinishResult::Invalid => { }
+        Ext2WriteFinishResult::Finished => { }
+    }
+    return Ext2ResizeResult::Invalid;
+}
+
+private fn ext2_write_allocations_published(
+        allocations: sink Ext2WriteAllocations[0]) {}
+
+// Replace a regular file through one indirect level. Every new block is
+// filled before the inode names any of them. A failed claim or data write
+// rolls back the entire new set and leaves the old inode/data untouched.
+fn ext2_replace_regular_file(mount: Ext2Mount, inode_number: usize,
+                             source: []u8, allocation_budget: usize)
+        -> Ext2ResizeResult !{unsafe} {
+    if (source.len > EXT2_MAX_SINGLE_FILE_BLOCKS * KERNEL_BLOCK_SIZE) {
+        return Ext2ResizeResult::Invalid;
+    }
+    match ext2_read_inode(mount, inode_number) {
+        Ext2InodeResult::Invalid => { return Ext2ResizeResult::Invalid; }
+        Ext2InodeResult::Inode(inode) => {
+            if ((inode.mode & 0xF000) != 0x8000 ||
+                inode.size > EXT2_MAX_SINGLE_FILE_BLOCKS * KERNEL_BLOCK_SIZE) {
+                return Ext2ResizeResult::Invalid;
+            }
+            let old_count: usize =
+                (inode.size + KERNEL_BLOCK_SIZE - 1) / KERNEL_BLOCK_SIZE;
+            let new_count: usize =
+                (source.len + KERNEL_BLOCK_SIZE - 1) / KERNEL_BLOCK_SIZE;
+            let mut old_blocks: [usize; EXT2_MAX_SINGLE_FILE_BLOCKS];
+            for index: usize in 0..<EXT2_MAX_SINGLE_FILE_BLOCKS {
+                old_blocks[index] = 0;
+                if (index < old_count) {
+                    let block: usize =
+                        ext2_inode_block_pointer(mount, inode, index);
+                    if (block < 2 || block >= mount.filesystem_blocks) {
+                        return Ext2ResizeResult::Invalid;
+                    }
+                    for earlier: usize in 0..<EXT2_MAX_SINGLE_FILE_BLOCKS {
+                        if (earlier < index && old_blocks[earlier] == block) {
+                            return Ext2ResizeResult::Invalid;
+                        }
+                    }
+                    old_blocks[index] = block;
+                }
+            }
+            match block_read(mount.device, inode.table_block,
+                             ext2_scratch_here().metadata as []u8) {
+                BlockIoResult::Invalid => { return Ext2ResizeResult::Invalid; }
+                BlockIoResult::Ok => { }
+            }
+            let inode_pointer: *u8 =
+                (ext2_scratch_here().metadata as *u8) +
+                (inode.table_offset as isize);
+            let old_indirect: usize = ext2_u32(inode_pointer, 88) as usize;
+            let old_double: usize = ext2_u32(inode_pointer, 92) as usize;
+            let old_sectors: usize = ext2_u32(inode_pointer, 28) as usize;
+            let mut old_pointer_blocks: usize = 0;
+            if (old_count > EXT2_MAX_DIRECT_BLOCKS) {
+                old_pointer_blocks = 1;
+            }
+            if (old_double != 0 ||
+                (old_pointer_blocks == 0 && old_indirect != 0) ||
+                (old_pointer_blocks == 1 &&
+                 (old_indirect < 2 ||
+                  old_indirect >= mount.filesystem_blocks)) ||
+                old_sectors != (old_count + old_pointer_blocks) * 2) {
+                return Ext2ResizeResult::Invalid;
+            }
+            for index: usize in 0..<EXT2_MAX_SINGLE_FILE_BLOCKS {
+                if (index < old_count && old_blocks[index] == old_indirect) {
+                    return Ext2ResizeResult::Invalid;
+                }
+            }
+
+            let mut allocations: Ext2WriteAllocations[0] =
+                ext2_write_allocations_begin();
+            for index: usize in 0..<EXT2_MAX_SINGLE_FILE_BLOCKS {
+                if (index < new_count) {
+                    if (allocations.count >= allocation_budget) {
+                        return ext2_write_abort(mount, allocations);
+                    }
+                    match ext2_allocate_block(mount) {
+                        Ext2BlockAllocResult::Failed => {
+                            return ext2_write_abort(mount, allocations);
+                        }
+                        Ext2BlockAllocResult::Allocated(owner) => {
+                            let block: usize = ext2_block_number(owner);
+                            if (block < 2 || block >= mount.filesystem_blocks) {
+                                match ext2_release_block(mount, owner) {
+                                    Ext2OwnerReleaseResult::Invalid => { }
+                                    Ext2OwnerReleaseResult::Released => { }
+                                }
+                                return ext2_write_abort(mount, allocations);
+                            }
+                            for byte: usize in 0..<KERNEL_BLOCK_SIZE {
+                                ext2_scratch_here().file[byte] = 0;
+                            }
+                            let start: usize = index * KERNEL_BLOCK_SIZE;
+                            for byte: usize in 0..<KERNEL_BLOCK_SIZE {
+                                let source_index: usize = start + byte;
+                                if (source_index < source.len) {
+                                    ext2_scratch_here().file[byte] =
+                                        source[source_index];
+                                }
+                            }
+                            match block_write(mount.device, block,
+                                              ext2_scratch_here().file as []u8) {
+                                BlockIoResult::Invalid => {
+                                    match ext2_release_block(mount, owner) {
+                                        Ext2OwnerReleaseResult::Invalid => { }
+                                        Ext2OwnerReleaseResult::Released => { }
+                                    }
+                                    return ext2_write_abort(mount, allocations);
+                                }
+                                BlockIoResult::Ok => { }
+                            }
+                            match ext2_write_allocations_record(
+                                    mount, allocations, owner) {
+                                Ext2WriteRecordResult::Full(restored) => {
+                                    return ext2_write_abort(mount, restored);
+                                }
+                                Ext2WriteRecordResult::Recorded(updated) => {
+                                    allocations = updated;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let mut new_indirect: usize = 0;
+            if (new_count > EXT2_MAX_DIRECT_BLOCKS) {
+                if (allocations.count >= allocation_budget) {
+                    return ext2_write_abort(mount, allocations);
+                }
+                match ext2_allocate_block(mount) {
+                    Ext2BlockAllocResult::Failed => {
+                        return ext2_write_abort(mount, allocations);
+                    }
+                    Ext2BlockAllocResult::Allocated(owner) => {
+                        new_indirect = ext2_block_number(owner);
+                        if (new_indirect < 2 ||
+                            new_indirect >= mount.filesystem_blocks) {
+                            match ext2_release_block(mount, owner) {
+                                Ext2OwnerReleaseResult::Invalid => { }
+                                Ext2OwnerReleaseResult::Released => { }
+                            }
+                            return ext2_write_abort(mount, allocations);
+                        }
+                        match ext2_write_allocations_record(
+                                mount, allocations, owner) {
+                            Ext2WriteRecordResult::Full(restored) => {
+                                return ext2_write_abort(mount, restored);
+                            }
+                            Ext2WriteRecordResult::Recorded(updated) => {
+                                allocations = updated;
+                            }
+                        }
+                    }
+                }
+                for byte: usize in 0..<KERNEL_BLOCK_SIZE {
+                    ext2_scratch_here().file[byte] = 0;
+                }
+                for single_index: usize in 0..<KERNEL_BLOCK_SIZE / 4 {
+                    let index: usize = EXT2_MAX_DIRECT_BLOCKS + single_index;
+                    if (index < new_count) {
+                        let block: usize =
+                            ext2_write_allocations_block(allocations, index);
+                        if (block < 2 || block >= mount.filesystem_blocks ||
+                            ext2_put_u32(ext2_scratch_here().file as *u8,
+                                single_index * 4,
+                                block as u32) == false) {
+                            return ext2_write_abort(mount, allocations);
+                        }
+                    }
+                }
+                match block_write(mount.device, new_indirect,
+                                  ext2_scratch_here().file as []u8) {
+                    BlockIoResult::Invalid => {
+                        return ext2_write_abort(mount, allocations);
+                    }
+                    BlockIoResult::Ok => { }
+                }
+            }
+            match block_read(mount.device, inode.table_block,
+                             ext2_scratch_here().metadata as []u8) {
+                BlockIoResult::Invalid => {
+                    return ext2_write_abort(mount, allocations);
+                }
+                BlockIoResult::Ok => { }
+            }
+            let inode_bytes: *u8 =
+                (ext2_scratch_here().metadata as *u8) +
+                (inode.table_offset as isize);
+            if (ext2_u32(inode_bytes, 4) as usize != inode.size ||
+                ext2_u32(inode_bytes, 28) as usize != old_sectors ||
+                ext2_u32(inode_bytes, 88) as usize != old_indirect) {
+                return ext2_write_abort(mount, allocations);
+            }
+            for index: usize in 0..<EXT2_MAX_DIRECT_BLOCKS {
+                let mut block: usize = 0;
+                if (index < new_count) {
+                    block = ext2_write_allocations_block(allocations, index);
+                    if (block < 2 || block >= mount.filesystem_blocks) {
+                        return ext2_write_abort(mount, allocations);
+                    }
+                }
+                if (ext2_put_u32(inode_bytes, 40 + index * 4,
+                                 block as u32) == false) {
+                    return ext2_write_abort(mount, allocations);
+                }
+            }
+            let mut new_pointer_blocks: usize = 0;
+            if (new_indirect != 0) { new_pointer_blocks = 1; }
+            if (ext2_put_u32(inode_bytes, 4, source.len as u32) == false ||
+                ext2_put_u32(inode_bytes, 28,
+                             ((new_count + new_pointer_blocks) * 2) as u32) == false ||
+                ext2_put_u32(inode_bytes, 88, new_indirect as u32) == false) {
+                return ext2_write_abort(mount, allocations);
+            }
+            match block_write(mount.device, inode.table_block,
+                              ext2_scratch_here().metadata as []u8) {
+                BlockIoResult::Invalid => {
+                    return ext2_write_abort(mount, allocations);
+                }
+                BlockIoResult::Ok => { }
+            }
+            ext2_write_allocations_published(allocations);
+            let mut released: bool = true;
+            for index: usize in 0..<EXT2_MAX_SINGLE_FILE_BLOCKS {
+                if (index < old_count) {
+                    let block: usize = old_blocks[index];
+                    match ext2_release_block(
+                            mount, ext2_block_owner_new(block - 1, block, block)) {
+                        Ext2OwnerReleaseResult::Invalid => { released = false; }
+                        Ext2OwnerReleaseResult::Released => { }
+                    }
+                }
+            }
+            if (old_indirect != 0) {
+                match ext2_release_block(
+                        mount, ext2_block_owner_new(
+                            old_indirect - 1, old_indirect, old_indirect)) {
+                    Ext2OwnerReleaseResult::Invalid => { released = false; }
+                    Ext2OwnerReleaseResult::Released => { }
+                }
+            }
+            if (released) { return Ext2ResizeResult::Resized; }
+            return Ext2ResizeResult::Invalid;
+        }
+    }
+}
+
+
+// A small exercise of the same runtime-sized owner that file replacement
+// uses: two claims must be released by one rollback obligation.
+fn ext2_write_allocations_roundtrip_check(mount: Ext2Mount)
+        -> Ext2BitmapProbeResult {
+    let mut before_blocks: usize = 0;
+    let mut before_inodes: usize = 0;
+    match ext2_free_counts(mount) {
+        Ext2FreeCountsResult::Invalid => {
+            return Ext2BitmapProbeResult::Invalid;
+        }
+        Ext2FreeCountsResult::Counts(counts) => {
+            let (blocks, inodes) = counts;
+            before_blocks = blocks;
+            before_inodes = inodes;
+        }
+    }
+    let mut allocations: Ext2WriteAllocations[0] =
+        ext2_write_allocations_begin();
+    for step: usize in 0..<2 {
+        match ext2_allocate_block(mount) {
+            Ext2BlockAllocResult::Failed => {
+                match ext2_write_allocations_rollback(mount, allocations) {
+                    Ext2WriteFinishResult::Invalid => { }
+                    Ext2WriteFinishResult::Finished => { }
+                }
+                return Ext2BitmapProbeResult::Invalid;
+            }
+            Ext2BlockAllocResult::Allocated(owner) => {
+                match ext2_write_allocations_record(mount, allocations, owner) {
+                    Ext2WriteRecordResult::Full(restored) => {
+                        match ext2_write_allocations_rollback(mount, restored) {
+                            Ext2WriteFinishResult::Invalid => { }
+                            Ext2WriteFinishResult::Finished => { }
+                        }
+                        return Ext2BitmapProbeResult::Invalid;
+                    }
+                    Ext2WriteRecordResult::Recorded(updated) => {
+                        allocations = updated;
+                    }
+                }
+            }
+        }
+    }
+    let first: usize = ext2_write_allocations_block(allocations, 0);
+    let second: usize = ext2_write_allocations_block(allocations, 1);
+    let mut claimed: bool = false;
+    match ext2_free_counts(mount) {
+        Ext2FreeCountsResult::Invalid => { }
+        Ext2FreeCountsResult::Counts(counts) => {
+            let (blocks, inodes) = counts;
+            claimed = first > 0 && second > 0 && first != second &&
+                      blocks + 2 == before_blocks && inodes == before_inodes;
+        }
+    }
+    match ext2_write_allocations_rollback(mount, allocations) {
+        Ext2WriteFinishResult::Invalid => {
+            return Ext2BitmapProbeResult::Invalid;
+        }
+        Ext2WriteFinishResult::Finished => { }
+    }
+    if (claimed == false) { return Ext2BitmapProbeResult::Invalid; }
+    match ext2_free_counts(mount) {
+        Ext2FreeCountsResult::Invalid => {
+            return Ext2BitmapProbeResult::Invalid;
+        }
+        Ext2FreeCountsResult::Counts(counts) => {
+            let (blocks, inodes) = counts;
+            if (blocks == before_blocks && inodes == before_inodes) {
+                return Ext2BitmapProbeResult::Verified;
+            }
+        }
+    }
+    return Ext2BitmapProbeResult::Invalid;
 }
 
 fn ext2_release_inode(mount: Ext2Mount,

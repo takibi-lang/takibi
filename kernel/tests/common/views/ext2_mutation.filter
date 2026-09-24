@@ -1,1 +1,1 @@
-^ext2 (bitmap:|owners:|create:|nested:)
+^ext2 (bitmap:|owners:|write rollback:|create:|nested:|write indirect:)

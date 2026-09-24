@@ -21,6 +21,165 @@
 use "kernel/fs/ext2/ext2.tkb";
 use "kernel/printk/log.tkb";
 
+const EXT2_WRITE_FIXTURE_BYTES: usize = 13 * KERNEL_BLOCK_SIZE;
+// This fixture runs once in boot on core 0, before userspace or peers can
+// reach the rootfs. Its buffers are shared only across its own calls.
+private let mut ext2_write_fixture_source: [u8; EXT2_WRITE_FIXTURE_BYTES];
+private let mut ext2_write_fixture_readback: [u8; KERNEL_BLOCK_SIZE];
+private let mut ext2_write_fixture_bitmap: [u8; KERNEL_BLOCK_SIZE];
+
+private fn ext2_write_fixture_execution_model_assumption() {
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+                  "the ext2 boot fixture assumes non-preemptible execution");
+}
+
+private fn ext2_write_fixture_counts_match(mount: Ext2Mount,
+                                           blocks: usize, inodes: usize)
+        -> bool {
+    match ext2_free_counts(mount) {
+        Ext2FreeCountsResult::Invalid => { return false; }
+        Ext2FreeCountsResult::Counts(counts) => {
+            let (now_blocks, now_inodes) = counts;
+            return now_blocks == blocks && now_inodes == inodes;
+        }
+    }
+}
+
+private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
+    ext2_write_fixture_execution_model_assumption();
+    let mut before_blocks: usize = 0;
+    let mut before_inodes: usize = 0;
+    match ext2_free_counts(mount) {
+        Ext2FreeCountsResult::Invalid => { return false; }
+        Ext2FreeCountsResult::Counts(counts) => {
+            let (blocks, inodes) = counts;
+            before_blocks = blocks;
+            before_inodes = inodes;
+        }
+    }
+    match ext2_block_bitmap_snapshot(
+            mount, ext2_write_fixture_bitmap as [u8; KERNEL_BLOCK_SIZE..]) {
+        Ext2ReadResult::Invalid => { return false; }
+        Ext2ReadResult::Read(length) => {
+            if (length != KERNEL_BLOCK_SIZE) { return false; }
+        }
+    }
+    let mut inode_number: usize = 0;
+    match ext2_lookup_root(mount, bs"mutable.txt") {
+        Ext2LookupResult::Invalid => { return false; }
+        Ext2LookupResult::NotFound => { return false; }
+        Ext2LookupResult::Found(found) => { inode_number = found; }
+    }
+    match ext2_read_small_file(mount, inode_number,
+                               ext2_read_fixture as []u8) {
+        Ext2ReadResult::Invalid => { return false; }
+        Ext2ReadResult::Read(length) => {
+            if (length != 7 ||
+                slice_eq(ext2_read_fixture[0..<7], bs"before\n") == false) {
+                return false;
+            }
+        }
+    }
+    for index: usize in 0..<EXT2_WRITE_FIXTURE_BYTES {
+        ext2_write_fixture_source[index] =
+            ((index * 37 + 11) % 251) as u8;
+    }
+    // Three blocks are allocated and filled; the fourth claim is refused.
+    // The unchanged file and free counts prove that the prefix was rolled
+    // back before the inode could name any of it.
+    match ext2_replace_regular_file(
+            mount, inode_number, ext2_write_fixture_source as []u8, 3) {
+        Ext2ResizeResult::Resized => { return false; }
+        Ext2ResizeResult::Invalid => { }
+    }
+    if (ext2_write_fixture_counts_match(
+            mount, before_blocks, before_inodes) == false) {
+        return false;
+    }
+    match ext2_block_bitmap_snapshot(
+            mount, ext2_write_fixture_readback as [u8; KERNEL_BLOCK_SIZE..]) {
+        Ext2ReadResult::Invalid => { return false; }
+        Ext2ReadResult::Read(length) => {
+            if (length != KERNEL_BLOCK_SIZE) { return false; }
+        }
+    }
+    for index: usize in 0..<KERNEL_BLOCK_SIZE {
+        if (ext2_write_fixture_bitmap[index] !=
+            ext2_write_fixture_readback[index]) {
+            return false;
+        }
+    }
+    match ext2_read_small_file(mount, inode_number,
+                               ext2_read_fixture as []u8) {
+        Ext2ReadResult::Invalid => { return false; }
+        Ext2ReadResult::Read(length) => {
+            if (length != 7 ||
+                slice_eq(ext2_read_fixture[0..<7], bs"before\n") == false) {
+                return false;
+            }
+        }
+    }
+    match ext2_resize_small_file(
+            mount, inode_number, ext2_write_fixture_source as []u8) {
+        Ext2ResizeResult::Invalid => { return false; }
+        Ext2ResizeResult::Resized => { }
+    }
+    if (ext2_regular_file_size(mount, inode_number) !=
+        EXT2_WRITE_FIXTURE_BYTES ||
+        ext2_write_fixture_counts_match(
+            mount, before_blocks - 13, before_inodes) == false) {
+        return false;
+    }
+    match ext2_lookup_root(mount, bs"mutable.txt") {
+        Ext2LookupResult::Invalid => { return false; }
+        Ext2LookupResult::NotFound => { return false; }
+        Ext2LookupResult::Found(reopened) => {
+            if (reopened != inode_number) { return false; }
+            for block: usize in 0..<13 {
+                match ext2_read_file_chunk(
+                        mount, reopened, block * KERNEL_BLOCK_SIZE,
+                        ext2_write_fixture_readback as []u8) {
+                    Ext2ReadResult::Invalid => { return false; }
+                    Ext2ReadResult::Read(length) => {
+                        if (length != KERNEL_BLOCK_SIZE) { return false; }
+                    }
+                }
+                for byte: usize in 0..<KERNEL_BLOCK_SIZE {
+                    if (ext2_write_fixture_readback[byte] !=
+                        ext2_write_fixture_source[
+                            block * KERNEL_BLOCK_SIZE + byte]) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    match ext2_resize_small_file(mount, inode_number, bs"") {
+        Ext2ResizeResult::Invalid => { return false; }
+        Ext2ResizeResult::Resized => { }
+    }
+    if (ext2_regular_file_size(mount, inode_number) != 0 ||
+        ext2_write_fixture_counts_match(
+            mount, before_blocks + 1, before_inodes) == false) {
+        return false;
+    }
+    match ext2_resize_small_file(
+            mount, inode_number, ext2_write_fixture_source as []u8) {
+        Ext2ResizeResult::Invalid => { return false; }
+        Ext2ResizeResult::Resized => { }
+    }
+    if (ext2_write_fixture_counts_match(
+            mount, before_blocks - 13, before_inodes) == false) {
+        return false;
+    }
+    match ext2_resize_small_file(mount, inode_number, bs"before\n") {
+        Ext2ResizeResult::Invalid => { return false; }
+        Ext2ResizeResult::Resized => { }
+    }
+    return ext2_write_fixture_counts_match(
+        mount, before_blocks, before_inodes);
+}
+
 // The ext2 mutation helpers. They were reachable only from the QEMU fixture
 // until this file existed; both platforms run them now, and `ext2_mutation`
 // is a common view.
@@ -160,6 +319,14 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
             kernel_boot_log("ext2 owners: failed\n");
         }
     }
+    match ext2_write_allocations_roundtrip_check(mount) {
+        Ext2BitmapProbeResult::Verified => {
+            kernel_boot_log("ext2 write rollback: two blocks released\n");
+        }
+        Ext2BitmapProbeResult::Invalid => {
+            kernel_boot_log("ext2 write rollback: failed\n");
+        }
+    }
     if (ext2_create_check(mount)) {
         kernel_boot_log("ext2 create: create+lookup+unlink ok\n");
     } else {
@@ -201,6 +368,11 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
                 }
             }
         }
+    }
+    if (ext2_write_indirect_check(mount)) {
+        kernel_boot_log("ext2 write indirect: rollback+grow+zero+restore ok\n");
+    } else {
+        kernel_boot_log("ext2 write indirect: failed\n");
     }
 }
 

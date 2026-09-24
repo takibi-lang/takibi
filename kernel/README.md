@@ -1080,10 +1080,12 @@ run, not a specification.
   and removal in any directory, allocation bitmaps, and fast symlinks.
   Regular-file reads cover twelve direct blocks plus single- and
   double-indirect blocks; the maximum is derived from the 1-KiB block
-  geometry rather than a file-size literal. Writes and truncates remain
-  limited to one direct block. A directory grows a block at a time when none
-  of its blocks has room, up to its twelve direct blocks; removing the first
-  entry of a block leaves a dead record there, as Linux's ext2 does, and a
+  geometry rather than a file-size literal. Kernel ext2 replacement and
+  truncation cover direct and single-indirect blocks; the regular-file
+  `write(2)` path still accepts at most one block at offset zero. A directory
+  grows a block at a time when none of its blocks has room, up to its twelve
+  direct blocks; removing the first entry of a block leaves a dead record
+  there, as Linux's ext2 does, and a
   later add reuses it. A directory can be made in any directory, with `.`,
   `..`, the parent's link count and the group's used-directories count, and
   removed once it holds only `.` and `..`; a non-empty one is refused and its
