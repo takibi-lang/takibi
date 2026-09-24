@@ -10,12 +10,22 @@
 #   1. the overflow is REPORTED, naming which stack it fell out of, and
 #   2. the report does not run on the stack that just overflowed.
 #
-# Injection is one GDB write.  At the next timer IRQ entry, SP is moved to
-# just above the boot stack's bottom and PC is sent back to the entry
-# symbol, so the entry sequence runs again with a stack pointer that cannot
-# hold its own frame.  Nothing about the kernel is modified; the path taken
-# is the ordinary one.
+# Each case injects one GDB write at its exception entry: a timer IRQ or an
+# EL0 synchronous exception. SP is moved just above the boot stack's bottom
+# and PC is sent back to the entry symbol, so the guard sees a stack pointer
+# that cannot hold its frame. Nothing about the kernel image is modified.
 set -euo pipefail
+
+if [ "$#" -eq 0 ]; then
+    "$0" irq
+    "$0" sync
+    exit 0
+fi
+case "$1" in
+    irq) ENTRY=el1_current_irq_entry ;;
+    sync) ENTRY=el0_sync_entry ;;
+    *) echo "error: unknown stack-overflow case: $1" >&2; exit 2 ;;
+esac
 
 # `set -e` aborts with no context, and a lane's setup prints nothing on
 # success -- a CI failure once reported exit 74 and not one line saying
@@ -28,6 +38,7 @@ ELF="$REPO_ROOT/kernel/build/qemu/kernel.elf"
 . "$REPO_ROOT/scripts/kernel_elf_freshness.sh"
 kernel_elf_refuse_stale "$ELF" || exit 1
 ARTIFACT_DIR="${KERNEL_QEMU_STACK_ARTIFACT_DIR:-${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}/kernel-stack-overflow-qemu}"
+if [ "$1" = sync ]; then ARTIFACT_DIR="$ARTIFACT_DIR/sync"; fi
 GDB_PORT="${KERNEL_QEMU_STACK_GDB_PORT:-18677}"
 UART_LOG="$ARTIFACT_DIR/uart.log"
 mkdir -p "$ARTIFACT_DIR"
@@ -65,10 +76,10 @@ armed=false
 for _ in $(seq 1 50); do
     if gdb-multiarch -q -batch "$ELF" \
             -ex "target remote :$GDB_PORT" \
-            -ex "break *el1_current_irq_entry" \
+            -ex "break *$ENTRY" \
             -ex "continue" \
             -ex "set \$sp = (unsigned long)&boot_stack_bottom + 16" \
-            -ex "set \$pc = el1_current_irq_entry" \
+            -ex "set \$pc = $ENTRY" \
             -ex "delete 1" \
             -ex "detach" >"$ARTIFACT_DIR/arm-gdb.log" 2>&1; then
         armed=true
@@ -116,4 +127,4 @@ if [ "$parked_sp" -le "$overflow_bottom" ] || [ "$parked_sp" -gt "$overflow_top"
     exit 1
 fi
 
-echo "PASS kernel/qemu stack-overflow: entry guard reported the overflowed stack, from a stack of its own"
+echo "PASS kernel/qemu stack-overflow ($1): entry guard reported the overflowed stack, from a stack of its own"

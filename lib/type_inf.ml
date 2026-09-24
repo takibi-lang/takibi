@@ -7627,17 +7627,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               slot slot_count))
         done
     | Ast.ExceptionEntryDef (name, fields, loc) ->
-        (* GitHub issue #227 item 1 (prototype slice): frame/dispatch/before
-           are the only recognized keys. dispatch/before are only checked
-           for EXISTENCE here (not signature) -- this prototype trusts the
-           caller to match the real dispatch shape (`fn(usize) -> usize`)
-           and before shape (`fn()`); fenv (which could check that) is not
-           built until a later pass. Revisit if this graduates past
-           prototype. *)
+        (* The declaration owns one generated entry symbol. A dispatch form
+           saves and resumes; a tail form checks the stack and branches to
+           a terminal assembly body, which saves its already-allocated
+           frame. Function signatures are checked in the later fenv pass. *)
         let frame_name = ref None and dispatch_name = ref None
         and before_name = ref None and guard_shift = ref None
         and guard_stack = ref None and guard_handler = ref None
-        and dispatch_stack = ref None and after_switch = ref None in
+        and dispatch_stack = ref None and after_switch = ref None
+        and tail = ref None in
         List.iter (fun (key, value) -> match key with
           | "frame" -> frame_name := Some value
           | "dispatch" -> dispatch_name := Some value
@@ -7647,10 +7645,24 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           | "stack_guard_handler" -> guard_handler := Some value
           | "dispatch_stack" -> dispatch_stack := Some value
           | "after_switch" -> after_switch := Some value
+          | "tail" -> tail := Some value
           | other -> raise (TypeError (loc, Printf.sprintf
-              "exception_entry '%s' has unknown key '%s' (expected frame, dispatch, before, after_switch, dispatch_stack, stack_guard_shift, stack_guard_stack, or stack_guard_handler)"
+              "exception_entry '%s' has unknown key '%s' (expected frame, dispatch, tail, before, after_switch, dispatch_stack, stack_guard_shift, stack_guard_stack, or stack_guard_handler)"
               name other))
         ) fields;
+        (match (!dispatch_name, !tail) with
+         | (Some _, None) | (None, Some _) -> ()
+         | _ -> raise (TypeError (loc, Printf.sprintf
+             "exception_entry '%s' requires exactly one of dispatch or tail"
+             name)));
+        (match !tail with
+         | None -> ()
+         | Some _ ->
+             if !before_name <> None || !after_switch <> None ||
+                !dispatch_stack <> None then
+               raise (TypeError (loc, Printf.sprintf
+                   "exception_entry '%s' tail cannot use before, after_switch, or dispatch_stack"
+                   name)));
         (* GitHub issue #377: the three stack_guard keys describe ONE
            mechanism -- test a bit of SP, and if it is wrong, land on a
            stack that is not the one being reported. Two of the three
@@ -7661,15 +7673,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          | _ -> raise (TypeError (loc, Printf.sprintf
              "exception_entry '%s' must give all three of stack_guard_shift, stack_guard_stack and stack_guard_handler, or none of them"
              name)));
+        if !tail <> None && !guard_shift = None then
+          raise (TypeError (loc, Printf.sprintf
+              "exception_entry '%s' tail requires a stack guard" name));
         let frame = match !frame_name with
           | Some f -> f
           | None -> raise (TypeError (loc, Printf.sprintf
               "exception_entry '%s' is missing required key 'frame'" name))
-        in
-        let dispatch = match !dispatch_name with
-          | Some d -> d
-          | None -> raise (TypeError (loc, Printf.sprintf
-              "exception_entry '%s' is missing required key 'dispatch'" name))
         in
         let check_fn_target key target = match Hashtbl.find_opt toplevel_names target with
           | Some "function" -> ()
@@ -7679,7 +7689,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           | None -> raise (TypeError (loc, Printf.sprintf
               "exception_entry '%s' %s target '%s' is not defined" name key target))
         in
-        check_fn_target "dispatch" dispatch;
+        Option.iter (check_fn_target "dispatch") !dispatch_name;
         Option.iter (check_fn_target "before") !before_name;
         Option.iter (check_fn_target "after_switch") !after_switch;
         Option.iter (check_fn_target "stack_guard_handler") !guard_handler;
@@ -7707,6 +7717,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               "exception_entry '%s' %s '%s' is not defined" name key sym))
         in
         Option.iter (check_symbol_target "stack_guard_stack") !guard_stack;
+        Option.iter (check_symbol_target "tail") !tail;
         (* GitHub issue #378: the stack `dispatch` runs on. The FRAME stays
            where it was saved -- it is the interrupted context, and a
            preempted process's context cannot live on a stack the next

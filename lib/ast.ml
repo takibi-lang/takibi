@@ -633,7 +633,9 @@ type toplevel =
      `set_module_inline_asm` technique as VectorTableDef, and for the same
      reason: this runs before any calling convention is established, so it
      cannot be an ordinary .tkb function body). Only covers the uniform
-     SAVE -> optional before -> dispatch -> RESTORE -> eret shape; the
+     SAVE -> optional before -> dispatch -> RESTORE -> eret shape, or a
+     guarded `tail: extern_symbol` that branches to a terminal assembly
+     body with the frame allocated but registers still intact. The
      several places that call EXC_CONTEXT_RESTORE standalone (process
      resume without a preceding save, e.g. `el0_context_resume`/
      `run_initial_user`/`.Ldata_abort` in kernel/arch/arm64/kernel/

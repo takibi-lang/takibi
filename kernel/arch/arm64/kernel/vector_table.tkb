@@ -14,13 +14,10 @@
 // assembly -- vector_table's target resolution accepts either kind
 // (anything claiming the "function" name kind in the flat top-level
 // namespace), so this needed no change beyond dropping their now-stale
-// `extern symbol` declarations. el0_sync_entry remains hand-written
-// assembly (kernel/arch/arm64/kernel/user_entry.S): its own syscall
-// dispatch body is still out of item 1's scope.
+// `extern symbol` declarations. el0_sync_entry now gets a generated guard
+// and branches to its hand-written syscall/fault body in user_entry.S.
 use "kernel/arch/arm64/kernel/exception_evidence.tkb";
 use "kernel/arch/arm64/kernel/exception_frame.tkb";
-
-extern symbol el0_sync_entry;
 
 vector_table {
     0 => el1_exception_evidence;

@@ -234,6 +234,10 @@ The generated exception entry tests exactly that bit
 (`kernel/arch/arm64/kernel/exception_frame.tkb`'s `stack_guard_shift`), so
 a stack of some other size or alignment would be reported as an overflow
 on every exception taken while standing on it.
+The IRQ entries, Current-EL-SPx synchronous entry, and Lower-EL-AArch64
+synchronous entry run this check before saving their exception frame. A
+failure switches to this core's overflow-report stack before reporting and
+parking.
 
 | Stack | Where | Held to the shape by |
 |---|---|---|

@@ -7199,7 +7199,7 @@ let emit_exception_restore off total =
    instruction-count increase for not depending on declaration order,
    correctness over micro-optimization for what is an interrupt/fail-stop
    path, not a hot loop). *)
-let gen_exception_entry name frame dispatch before after_switch guard dispatch_stack =
+let gen_exception_entry name frame dispatch tail before after_switch guard dispatch_stack =
   let triple = target_triple !the_module in
   if not (starts_with triple "aarch64") then
     raise (Error
@@ -7230,6 +7230,9 @@ let gen_exception_entry name frame dispatch before after_switch guard dispatch_s
     a "\tadd\tsp, sp, x0\n\tsub\tx0, sp, x0\n";
     a "\ttbz\tx0, #%d, .L%s_stack_overflow\n" shift name;
     a "\tsub\tx0, sp, x0\n\tsub\tsp, sp, x0\n") guard;
+  (match tail with
+   | Some symbol -> a "\tb\t%s\n" symbol
+   | None ->
   for i = 0 to 30 do
     a "\tstr\tx%d, [sp, #%d]\n" i (off (Printf.sprintf "x%d" i))
   done;
@@ -7292,7 +7295,7 @@ let gen_exception_entry name frame dispatch before after_switch guard dispatch_s
   a "\tmsr\tDAIFSet, #0x2\n";
   Option.iter (fun hook ->
     a "\tmov\tx0, sp\n\tbl\t%s\n" hook) after_switch;
-  emit_exception_restore off total;
+  emit_exception_restore off total);
   (* Placed after the eret so the good path falls straight through the
      entry sequence and never branches over this. DAIF is masked before
      the handler runs: it reports and parks, and an interrupt arriving on
@@ -7745,13 +7748,15 @@ let gen_program ?prog_types prog =
     | UseDef _        -> ()
     | VectorTableDef (entries, _) -> gen_vector_table entries
     | ExceptionEntryDef (name, fields, _) ->
-        let frame = ref "" and dispatch = ref "" and before = ref None
+        let frame = ref "" and dispatch = ref "" and tail = ref None
+        and before = ref None
         and after_switch = ref None in
         let guard_shift = ref None and guard_stack = ref None
         and guard_handler = ref None and dispatch_stack = ref None in
         List.iter (function
           | ("frame", v) -> frame := v
           | ("dispatch", v) -> dispatch := v
+          | ("tail", v) -> tail := Some v
           | ("before", v) -> before := Some v
           | ("after_switch", v) -> after_switch := Some v
           | ("dispatch_stack", v) -> dispatch_stack := Some v
@@ -7763,7 +7768,7 @@ let gen_program ?prog_types prog =
           | (Some sh, Some st, Some h) -> Some (sh, st, h)
           | _ -> None
         in
-        gen_exception_entry name !frame !dispatch !before !after_switch guard !dispatch_stack
+        gen_exception_entry name !frame !dispatch !tail !before !after_switch guard !dispatch_stack
     | ExceptionRestoreDef (name, fields, _) ->
         let frame = ref "" and after_switch = ref None in
         List.iter (function

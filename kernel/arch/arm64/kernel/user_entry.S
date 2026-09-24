@@ -65,10 +65,9 @@ run_initial_user:
     msr     elr_el1, x0
     eret
 
-    .global el0_sync_entry
-    .type el0_sync_entry, %function
-el0_sync_entry:
-    sub     sp, sp, #EXC_CONTEXT_SIZE
+    .global el0_sync_body
+    .type el0_sync_body, %function
+el0_sync_body:
     EXC_CONTEXT_SAVE
     /* The user x29 is saved above and restored on return. Kernel callees
      * start at an explicit frame-chain boundary rather than inheriting a

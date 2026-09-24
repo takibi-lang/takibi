@@ -12710,6 +12710,45 @@ let codegen_tests = [
          (contains_substring asm "bl\tmy_overflow");
        Target_info.configure "thumbv7em-none-eabi");
 
+  Alcotest.test_case "exception_entry tail guards a terminal assembly body without saving twice" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       ignore (gen_codegen
+         (exc_frame_src ^
+          "const STACK_SHIFT: usize = 14;
+           extern symbol guard_stack_top;
+           extern symbol sync_body;
+           fn my_overflow(sp: usize) {}
+           exception_entry el0_sync_entry {
+             frame: ExcFrame;
+             tail: sync_body;
+             stack_guard_shift: STACK_SHIFT;
+             stack_guard_stack: guard_stack_top;
+             stack_guard_handler: my_overflow;
+           }"));
+       let asm = Buffer.contents Llvm_gen.raw_asm_buf in
+       Alcotest.(check bool) "allocation and guard precede tail" true
+         (contains_substring asm
+            "sub\tsp, sp, #816\n\tadd\tsp, sp, x0");
+       Alcotest.(check bool) "good path branches with the frame allocated" true
+         (contains_substring asm
+            "sub\tx0, sp, x0\n\tsub\tsp, sp, x0\n\tb\tsync_body");
+       Alcotest.(check bool) "no generated register save" false
+         (contains_substring asm "str\tx0, [sp,");
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case "exception_entry tail rejects a missing guard" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_type_error "tail requires a stack guard"
+         (exc_frame_src ^
+          "extern symbol sync_body;
+           exception_entry el0_sync_entry {
+             frame: ExcFrame;
+             tail: sync_body;
+           }") ();
+       Target_info.configure "thumbv7em-none-eabi");
+
   (* GitHub issue #540: the code generated for an exception entry calls every
      hook it names, not only `dispatch` and `before`. The unused-function
      check read those two, and reported the stack-guard handler -- which is

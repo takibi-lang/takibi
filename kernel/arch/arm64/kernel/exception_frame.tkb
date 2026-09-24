@@ -91,6 +91,18 @@ exception_entry el1_current_sync_entry {
     stack_guard_handler: kernel_stack_overflow_fail_stop;
 }
 
+// The EL0 synchronous vector has a nonuniform syscall and fault body. The
+// generated entry allocates and checks its frame, then branches to the
+// hand-written body without touching any interrupted register on success.
+extern symbol el0_sync_body;
+exception_entry el0_sync_entry {
+    frame: ExceptionFrame;
+    tail: el0_sync_body;
+    stack_guard_shift: KERNEL_STACK_SHIFT;
+    stack_guard_stack: overflow_stack_top;
+    stack_guard_handler: kernel_stack_overflow_fail_stop;
+}
+
 // Lower-EL AArch64 IRQ entry: the same frame, no fixture hook.
 exception_entry el0_irq_entry {
     frame: ExceptionFrame;

@@ -2784,7 +2784,14 @@ record readable; per-CPU rings stay independently written.
   `before` is optional; both `dispatch` and `before` are checked against
   their real signature (`fn(usize) -> usize` / `fn()`), not just existence.
   `exception_entry` only covers the uniform save -> dispatch -> restore ->
-  `eret` shape.
+  `eret` shape when `dispatch` is present. A terminal exception with a
+  hand-written body may use `tail: extern_symbol;` in place of `dispatch`.
+  This form allocates and checks the frame, then branches to the named
+  assembly body with the frame still allocated and all interrupted registers
+  intact. The body saves the frame and does not return to the generated
+  entry. `tail` requires all three stack-guard keys and cannot be combined
+  with `before`, `after_switch`, or `dispatch_stack`. Exactly one of
+  `dispatch` and `tail` is required.
 
   The optional `after_switch: fn_name;` hook runs after `dispatch` has selected
   the frame and SP has changed to that frame, with interrupts masked and the
