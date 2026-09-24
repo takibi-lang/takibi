@@ -41,7 +41,7 @@ step, landed as its own commit.
 
 ### Territory B: everything else, ordered by current priority
 
-1. **Concrete correctness and evidence gaps:** #274, #542, #388.
+1. **Concrete correctness and evidence gaps:** #274, #388.
 2. **Kernel and userspace capability:** #432, #436, #535, #537, #539, #536,
    #171, #204, #433, #430, #434, #435, #220.
 3. **Resource use and measured performance:** #389, #422, #497, #520, #553,
