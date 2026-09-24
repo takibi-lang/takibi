@@ -5477,6 +5477,29 @@ private fn kernel_process_block_reserved(
                 process_run_unlock(guard);
                 return 0;
             }
+            // GitHub issue #583's fourth increment, the same look for a
+            // signal wait. rt_sigtimedwait took nothing under this lock a
+            // moment ago and released it; a sender on another CPU raises the
+            // bit under it and wakes the target only if it is Blocked by
+            // then. So the decision is made here: a bit the wait accepts,
+            // or an unmasked SIGTERM, is pending now and the syscall runs
+            // again (next_sp == 0 rewinds it) and takes it -- or it arrives
+            // after this publishes Blocked, and delivery finds it.
+            if (reason == ProcessWaitReason::Signal) {
+                let waiting: *ProcessRecord = scheduled_process_record_of(from);
+                let sigterm_bit: usize = 1 << 14;
+                let mut wanted: usize = waiting.sigwait_set;
+                if ((waiting.signal_mask & sigterm_bit) == 0) {
+                    wanted = wanted | sigterm_bit;
+                }
+                if ((waiting.pending_signals & wanted) != 0) {
+                    process_image_cancel_activation(prepared);
+                    let ready = scheduled_process_yield(owner, running);
+                    scheduled_process_release(owner, ready);
+                    process_run_unlock(guard);
+                    return 0;
+                }
+            }
             scheduled_process_record_of(from).saved_sp = current_sp;
             match scheduled_process_running_take(guard, from) {
                 ScheduledProcessRunningTakeResult::Missing => {

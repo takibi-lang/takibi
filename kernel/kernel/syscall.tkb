@@ -2920,6 +2920,12 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     if (number == 214 || number == 215 || number == 222 || number == 226) {
         return true;
     }
+    // Fourth increment: rt_sigtimedwait. Its take runs under the process-run
+    // lock (#570), and its block re-checks the pending set inside the
+    // critical section that publishes Blocked (kernel_process_block_reserved),
+    // so a signal raised from any CPU between the take and the block is
+    // either seen there or delivered to a Blocked waiter.
+    if (number == AARCH64_NR_RT_SIGTIMEDWAIT) { return true; }
     if (number == AARCH64_NR_WRITEV) {
         return kernel_syscall_terminal_is_open(fd);
     }
