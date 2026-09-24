@@ -62,6 +62,21 @@ process core 0 may run, never slot 0's bootstrap record. Every other case in
 which core 0 has nothing to run -- all processes blocked, or an exit with no
 successor -- still waits in EL1 and reruns the syscall.
 
+## State transitions and the run guard
+
+Every take that mints a process's linear state -- Ready, Running,
+Blocked, Exited -- borrows the process-run guard (GitHub issue #589), so a
+transition out of any of them without the lock is a compile error. The
+Blocked take was the gap #587's three unlocked interrupt-side wakes went
+through. Code that must run the real transition without the lock does so
+only by forging a guard with `process_run_guard_forge_unlocked`, which is
+`unsafe` and counted in the trusted base: the two-core probes, and the
+`#587` negative control that `scripts/build_qemu_net_wake_control.py`
+builds. `kernel_process_reap_zombie` takes the lock for the child-list
+unlink and the Exited take only; the teardown after it runs outside,
+because a world stop reached from there needs peers able to acknowledge
+it.
+
 ## Signal words
 
 `pending_signals` and `signal_mask` are read-modify-written by a sender on

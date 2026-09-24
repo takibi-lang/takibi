@@ -56,9 +56,20 @@ def main() -> None:
         "    let guard = process_run_lock();\n"
         "    kernel_process_net_wake_all(guard);\n"
         "    kernel_process_deadline_wake_all(guard);",
-        "    kernel_process_net_wake_scan();\n"
+        # GitHub issue #589: the scan requires the run guard now, so the
+        # control has to FORGE one -- the only way to drop the lock, and a
+        # visible one.
+        "    let forged = process_run_guard_forge_unlocked();\n"
+        "    kernel_process_net_wake_scan(forged);\n"
+        "    process_run_guard_discard_unlocked(forged);\n"
         "    let guard = process_run_lock();\n"
         "    kernel_process_deadline_wake_all(guard);",
+    )
+    # Forging is unsafe, so the handler that does it has to say so.
+    replace_once(
+        timer_path,
+        "fn timer_irq_handler() !{interrupt} {",
+        "fn timer_irq_handler() !{interrupt, unsafe} {",
     )
 
 

@@ -2308,6 +2308,22 @@ let authority_pointer_fixture =
    }
    "
 
+(* GitHub issue #589: the kernel's Blocked-to-Ready take in miniature.
+   scheduled_process_blocked_take borrows the process-run guard, so a wake
+   that does not hold the lock -- no guard in scope, or one already given
+   back -- is a compile error rather than a cross-core lost wakeup. *)
+let run_guard_fixture =
+  "linear view RunGuard[lock: addr];
+   let mut run_lock_word: i32;
+   fn run_lock(m: *i32 @ lock) -> RunGuard[lock] {
+     return view RunGuard[lock];
+   }
+   fn run_unlock(g: sink RunGuard[lock], m: *i32 @ lock) {}
+   fn blocked_take(g: borrow RunGuard[lock], slot: usize) -> bool {
+     return slot != 0;
+   }
+   "
+
 (* The real network backends use this shape for asynchronous in-place TX:
    starting DMA consumes the RX owner and returns a distinct linear owner.
    Only the completion transition restores the erased acquisition permit. *)
@@ -2820,6 +2836,32 @@ let infer_tests = [
            authority_unlock(guard, &authority_lock_word);
            return result;
          }")));
+
+  Alcotest.test_case "run guard: a take under the lock is accepted" `Quick
+    (fun () ->
+      ignore (infer (run_guard_fixture ^
+        "fn wake_locked() -> bool {
+           let guard = run_lock(&run_lock_word);
+           let taken: bool = blocked_take(guard, 1);
+           run_unlock(guard, &run_lock_word);
+           return taken;
+         }")));
+
+  Alcotest.test_case "run guard: a take with no lock held is rejected" `Quick
+    (expect_type_error "blocked_take expects 2 argument(s), got 1"
+      (run_guard_fixture ^
+        "fn wake_unlocked() -> bool {
+           return blocked_take(1);
+         }"));
+
+  Alcotest.test_case "run guard: a take after the unlock is rejected" `Quick
+    (expect_type_error "linear value 'guard' was already consumed"
+      (run_guard_fixture ^
+        "fn wake_after_unlock() -> bool {
+           let guard = run_lock(&run_lock_word);
+           run_unlock(guard, &run_lock_word);
+           return blocked_take(guard, 1);
+         }"));
 
   Alcotest.test_case
     "authority pointer: field access after unlock is rejected" `Quick

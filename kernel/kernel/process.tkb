@@ -2560,7 +2560,8 @@ private fn scheduled_process_cancel_clone(
     return scheduled_process_exited_state(owner);
 }
 
-fn scheduled_process_exited_take(handle: ProcessHandle)
+fn scheduled_process_exited_take(guard: borrow ProcessRunGuard[lock],
+                                 handle: ProcessHandle)
         -> ScheduledProcessExitedTakeResult {
     if (scheduled_process_state_of(handle) !=
             ProcessSlotState::Exited) {
@@ -2591,7 +2592,8 @@ fn scheduled_process_running_take(guard: borrow ProcessRunGuard[lock],
     return ScheduledProcessRunningTakeResult::Running((owner, state));
 }
 
-fn scheduled_process_blocked_take(handle: ProcessHandle)
+fn scheduled_process_blocked_take(guard: borrow ProcessRunGuard[lock],
+                                  handle: ProcessHandle)
         -> ScheduledProcessBlockedTakeResult {
     if (scheduled_process_state_of(handle) !=
             ProcessSlotState::Blocked) {
@@ -2839,7 +2841,7 @@ private fn scheduled_process_probe_cycle_locked(
             scheduled_process_release(owner, exited);
         }
     }
-    match scheduled_process_exited_take(handle) {
+    match scheduled_process_exited_take(guard, handle) {
         ScheduledProcessExitedTakeResult::Missing => { return false; }
         ScheduledProcessExitedTakeResult::Exited(resources) => {
             let (owner, exited) = resources;
@@ -5495,7 +5497,7 @@ private fn kernel_process_block_reserved(
             kernel_process_trace_handle(
                 ProcessTraceBlock, from, to, trace_aux);
             if (process_image_commit_activation(prepared) == false) {
-                match scheduled_process_blocked_take(from) {
+                match scheduled_process_blocked_take(guard, from) {
                     ScheduledProcessBlockedTakeResult::Missing => {}
                     ScheduledProcessBlockedTakeResult::Blocked(resources) => {
                         let (from_owner, blocked) = resources;
@@ -5744,7 +5746,7 @@ private fn kernel_process_signal_deliver_to(
         scheduled_process_wait_reason_of(target) ==
             ProcessWaitReason::Signal &&
         (record.sigwait_set & bit) != 0) {
-        match scheduled_process_blocked_take(target) {
+        match scheduled_process_blocked_take(guard, target) {
             ScheduledProcessBlockedTakeResult::Missing => {}
             ScheduledProcessBlockedTakeResult::Blocked(resources) => {
                 let (owner, blocked) = resources;
@@ -5816,7 +5818,7 @@ fn kernel_process_deadline_wake_all(guard: borrow ProcessRunGuard[lock])
                      reason == ProcessWaitReason::Signal) &&
                     scheduled_process_record_at(slot).deadline_ticks != 0 &&
                     now >= scheduled_process_record_at(slot).deadline_ticks) {
-                    match scheduled_process_blocked_take(
+                    match scheduled_process_blocked_take(guard,
                             scheduled_process_handle_of_slot(slot)) {
                         ScheduledProcessBlockedTakeResult::Missing => {}
                         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
@@ -5879,7 +5881,8 @@ fn kernel_process_deadline_wake_all(guard: borrow ProcessRunGuard[lock])
 // Keeping the scan separate also lets the QEMU negative control compile the
 // identical scan without that lock, so the test changes only the protection
 // around the real production operation.
-fn kernel_process_net_wake_scan() !{interrupt, unsafe} {
+fn kernel_process_net_wake_scan(guard: borrow ProcessRunGuard[lock])
+        !{interrupt, unsafe} {
     let mut cursor = scheduled_process_first_slot();
     let mut walking: bool = true;
     while (walking) {
@@ -5891,7 +5894,7 @@ fn kernel_process_net_wake_scan() !{interrupt, unsafe} {
                         ProcessSlotState::Blocked &&
                     scheduled_process_record_wait_reason(slot) ==
                         ProcessWaitReason::NetRx) {
-                    match scheduled_process_blocked_take(
+                    match scheduled_process_blocked_take(guard,
                             scheduled_process_handle_of_slot(slot)) {
                         ScheduledProcessBlockedTakeResult::Missing => {}
                         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
@@ -5911,7 +5914,7 @@ fn kernel_process_net_wake_scan() !{interrupt, unsafe} {
 
 fn kernel_process_net_wake_all(guard: borrow ProcessRunGuard[lock])
         !{interrupt, unsafe} {
-    kernel_process_net_wake_scan();
+    kernel_process_net_wake_scan(guard);
 }
 
 // GitHub issue #544: a userspace write to the UART found the transmit queue
@@ -5943,7 +5946,7 @@ fn kernel_process_uart_tx_wake_all(guard: borrow ProcessRunGuard[lock])
                         ProcessSlotState::Blocked &&
                     scheduled_process_record_wait_reason(slot) ==
                         ProcessWaitReason::UartTx) {
-                    match scheduled_process_blocked_take(
+                    match scheduled_process_blocked_take(guard,
                             scheduled_process_handle_of_slot(slot)) {
                         ScheduledProcessBlockedTakeResult::Missing => {}
                         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
@@ -6142,7 +6145,7 @@ fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[lock], value: usize)
         return ProcessUartWakeResult::Missing;
     }
     let mut retry_read: bool = false;
-    match scheduled_process_blocked_take(waiter) {
+    match scheduled_process_blocked_take(guard, waiter) {
         ScheduledProcessBlockedTakeResult::Missing => {
             diagnostic_trace_record(
                 DiagnosticEventProcessUartWake, value,
@@ -6474,7 +6477,7 @@ private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
     scheduled_process_record_of(parent).sigwait_set = old_wait_set;
     let restore_guard = process_run_lock();
     let mut restored: bool = false;
-    match scheduled_process_blocked_take(parent) {
+    match scheduled_process_blocked_take(restore_guard, parent) {
         ScheduledProcessBlockedTakeResult::Missing => {}
         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
             let (owner, blocked) = resources;
@@ -6905,7 +6908,7 @@ fn kernel_process_clone_rollback() -> ProcessCloneRollbackResult {
             execution_here().current_handle = parent;
             let exited = scheduled_process_cancel_clone(owner, constructing);
             scheduled_process_release(owner, exited);
-            match scheduled_process_exited_take(child) {
+            match scheduled_process_exited_take(guard, child) {
                 ScheduledProcessExitedTakeResult::Missing => {}
                 ScheduledProcessExitedTakeResult::Exited(done) => {
                     let (exited_owner, exited_state) = done;
@@ -7345,7 +7348,7 @@ fn kernel_process_child_exit(status: usize) -> usize {
                     ProcessSlotState::Blocked &&
                 scheduled_process_wait_reason_of(parent) ==
                     ProcessWaitReason::ChildExit) {
-                match scheduled_process_blocked_take(parent) {
+                match scheduled_process_blocked_take(exit_guard, parent) {
                     ScheduledProcessBlockedTakeResult::Missing => {}
                     ScheduledProcessBlockedTakeResult::Blocked(parent_resources) => {
                         let (parent_owner, blocked) = parent_resources;
@@ -7624,6 +7627,13 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
         pid, scheduled_process_pid_of_handle(parent),
         scheduled_process_record_of(child).stack_owner_cpu ==
             PROCESS_STACK_UNOWNED);
+    // GitHub issue #589: the unlink and the Exited take under the
+    // process-run lock. Peer schedulers walk these same sibling links under
+    // it, and the take now requires its guard. The teardown itself
+    // (scheduled_process_reap) stays outside: it frees roots and pages, and
+    // a world stop reached from there needs every peer free to acknowledge
+    // its SGI, which a peer spinning on this IRQ-masking lock is not.
+    let unlink_guard = process_run_lock();
     // Unlink first: the record is about to be handed back, and its
     // next_sibling has to be read while it is still ours to read.
     let mut following: ProcessHandle =
@@ -7678,7 +7688,9 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
         }
     }
     }
-    match scheduled_process_exited_take(child) {
+    let taken = scheduled_process_exited_take(unlink_guard, child);
+    process_run_unlock(unlink_guard);
+    match taken {
         ScheduledProcessExitedTakeResult::Missing => {}
         ScheduledProcessExitedTakeResult::Exited(done) => {
             let (exited_owner, exited_state) = done;
