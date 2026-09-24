@@ -42,6 +42,16 @@ fn kernel_uart_rx_pending() -> bool {
     return kernel_uart_rx_tail != kernel_uart_rx_head;
 }
 
+// Read-only DDB observation. The stopped-world snapshot keeps the two
+// single-writer indices stable while it computes the same occupancy the
+// consumer would see, without advancing the read side.
+fn kernel_uart_rx_queued() -> usize {
+    let head: usize = kernel_uart_rx_head;
+    let tail: usize = kernel_uart_rx_tail;
+    if (head >= tail) { return head - tail; }
+    return KERNEL_UART_RX_CAPACITY - tail + head;
+}
+
 private fn kernel_uart_rx_count_drop() -> UartRxPushResult {
     let dropped: usize = kernel_uart_rx_dropped;
     if (dropped < 0xFFFFFFFFFFFFFFFF) {

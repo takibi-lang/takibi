@@ -310,6 +310,45 @@ must_use variant TcpConnectionProbeStep {
 private let mut tcp_connection_pool: IntrusivePool(TcpConnection);
 private let mut tcp_connection_pool_ready: bool = false;
 
+const TCP_DDB_CONNECTION_PROBE_BUDGET: usize = 64;
+
+// Read the receive-buffer side of net-rx waits without taking a connection
+// lock in interrupt context. WorldStopped makes the pool topology stable;
+// an already-held pool or connection lock means its payload may be midway
+// through a write, so the snapshot reports Unknown. The slot walk is bounded
+// because this function runs on the interrupted stack.
+fn kernel_tcp_ddb_connection_pending() -> NetPendingState !{unsafe} {
+    if (tcp_connection_pool_ready == false) { return NetPendingState::No; }
+    if (intrusive_pool_lock_is_held_for_probe(&tcp_connection_pool)) {
+        return NetPendingState::Unknown;
+    }
+    let mut cursor: usize = intrusive_pool_first_slot(&tcp_connection_pool);
+    let mut probes: usize = 0;
+    let mut busy: bool = false;
+    while (cursor != 0 && probes < TCP_DDB_CONNECTION_PROBE_BUDGET) {
+        let next: usize = intrusive_pool_next_slot(&tcp_connection_pool, cursor);
+        match intrusive_pool_probe_slot_unproven(&tcp_connection_pool, cursor) {
+            IntrusiveSlotProbe::NoPayload => {}
+            IntrusiveSlotProbe::Live(slot_view) => {
+                let conn: *TcpConnection = intrusive_pool_payload_of(
+                    &tcp_connection_pool, slot_view);
+                if (task_mutex_is_held(&conn.lock)) {
+                    busy = true;
+                } else if (conn.connection_open &&
+                        conn.socket_buffer_offset < conn.socket_buffer_length) {
+                    intrusive_view_release(slot_view);
+                    return NetPendingState::Yes;
+                }
+                intrusive_view_release(slot_view);
+            }
+        }
+        probes = probes + 1;
+        cursor = next;
+    }
+    if (cursor != 0 || busy) { return NetPendingState::Unknown; }
+    return NetPendingState::No;
+}
+
 // Reached only when an address that should name a live connection does
 // not. A real struct rather than a null pointer so the impossible case is
 // harmless instead of undefined, exactly as tcp_frame_absent_fallback is

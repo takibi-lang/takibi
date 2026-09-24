@@ -64,6 +64,19 @@ with tempfile.TemporaryDirectory() as temporary:
     )
     negative = run("--source", str(changed))
 
+    qemu_test = ROOT / "scripts/run_kernel_ddb_qemutest.sh"
+    qemu_source = qemu_test.read_text(encoding="ascii")
+    qemu_changed = Path(temporary) / "run_kernel_ddb_qemutest.sh"
+    qemu_changed.write_text(
+        qemu_source.replace(
+            "^ddb: wait pid=10 state=blocked waits-for event=uart-rx queued=1$",
+            "^ddb: wait pid=10 state=blocked waits-for event=uart-rx$",
+            1,
+        ),
+        encoding="ascii",
+    )
+    qemu_negative = run("--qemu_test", str(qemu_changed))
+
 if negative.returncode == 0:
     raise SystemExit("negative DDB inventory control unexpectedly succeeded")
 expected = "DDB command drift in dispatcher: extra staleprobe"
@@ -73,7 +86,16 @@ if expected not in negative.stdout:
         + negative.stdout
     )
 
+if qemu_negative.returncode == 0:
+    raise SystemExit("negative DDB waker fixture control unexpectedly succeeded")
+expected_waker = "DDB waker fixture drift: missing"
+if expected_waker not in qemu_negative.stdout:
+    raise SystemExit(
+        "negative DDB waker fixture control missed the expected diagnostic:\n"
+        + qemu_negative.stdout
+    )
+
 report_pass(
     "ddb-command-inventory controls",
-    "positive succeeded and stale dispatcher failed",
+    "positive succeeded; stale dispatcher and missing waker assertion failed",
     cases=CASES.ran)

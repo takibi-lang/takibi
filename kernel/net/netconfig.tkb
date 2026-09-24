@@ -4,5 +4,16 @@
 // integration-test link topology below.
 //
 // Dedicated point-to-point RPi5 kernel integration link.
+variant NetPendingState { Unknown; No; Yes; }
+
+// DDB snapshots keep this status in fixed-width scalar fields.
+fn net_pending_state_code(state: NetPendingState) -> usize {
+    match state {
+        NetPendingState::Unknown => { return 2; }
+        NetPendingState::No => { return 0; }
+        NetPendingState::Yes => { return 1; }
+    }
+}
+
 let OUR_MAC: [u8; 6] = {0x02, 0x00, 0x20, 0x00, 0x00, 0x02};
 let OUR_IP: [u8; 4] = {192, 168, 20, 2};

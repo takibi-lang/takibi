@@ -496,13 +496,11 @@ def check_allocator_expectations(problems, include_debug) -> int:
                            "QEMU debug managed RAM")
         # The debug lane reads kernel/tests/qemu-debug/views/boot.expected
         # when that overlay exists and the ordinary QEMU view when it does
-        # not, exactly as scripts/run_kernel_qemutest.sh resolves it. The
-        # overlay exists BECAUSE the larger DWARF-bearing image lands in a
-        # different 32 KiB granule -- when it does not, an overlay holding
-        # the same bytes is a duplicate, which
-        # scripts/check_platform_view_parity.py refuses. So its absence is a
-        # claim too: the two builds agree, and this comparison is what says
-        # whether they still do.
+        # not, exactly as scripts/run_kernel_qemutest.sh resolves it. Keep
+        # an overlay only when the larger DWARF-bearing image lands in a
+        # different 32 KiB granule; an identical overlay is a duplicate,
+        # which scripts/check_platform_view_parity.py refuses. So absence
+        # also claims the two builds agree, and this comparison checks it.
         relative = "kernel/tests/qemu-debug/views/boot.expected"
         if not (REPO / relative).exists():
             relative = "kernel/tests/qemu/views/boot.expected"

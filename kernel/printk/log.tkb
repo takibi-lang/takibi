@@ -491,6 +491,16 @@ fn uart_putc(c: u8) !{logs, unsafe} {
 // would sit on (#435), and it needs a policy for merging two streams without
 // splitting a line; nothing calls for that yet.
 const KERNEL_LOG_TX_WRITER_LOW_WATER: usize = 256;
+
+// DDB captures these before the console queue is stood down and flushed.
+fn kernel_log_tx_queue_count() -> usize {
+    return kernel_log_tx_count;
+}
+
+fn kernel_log_tx_writer_low_water() -> usize {
+    return KERNEL_LOG_TX_WRITER_LOW_WATER;
+}
+
 // Every write that found no room waited, and those that had something else
 // to run slept. The waits are the deterministic count: on the board a
 // write larger than the queue must wait. Whether it sleeps depends on

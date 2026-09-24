@@ -272,8 +272,11 @@ def main() -> int:
     # this lane can say is that the derivation runs on the board's own
     # snapshot and decodes it the same way -- same header, same trailer, no
     # platform-specific numbers.
-    if re.search(r"^ddb: wait current=\d+ state=[a-z-]+ reason=[a-z-]+ "
-                 r"awaited=[01]$", text, re.MULTILINE) is None:
+    if re.search(r"^ddb: wait current=\d+ state=[a-z-]+ reason=[a-z-]+"
+                 r"( queued=\d+( low-water=\d+)?|"
+                 r" frame-pending=(yes|no|unknown) "
+                 r"connection-pending=(yes|no|unknown))? awaited=[01]$",
+                 text, re.MULTILINE) is None:
         raise timeline.bail("RPi5 DDB did not render the wait header")
     if re.search(r"^ddb: wait edges=\d+ blocked=\d+ unknown=\d+ "
                  r"truncated=[01]$", text, re.MULTILINE) is None:

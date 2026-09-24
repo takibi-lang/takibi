@@ -16,6 +16,7 @@ DEFAULTS = {
     "readme": ROOT / "kernel/README.md",
     "debug_skill": ROOT / ".agents/skills/debug-kernel/references/ddb.md",
     "driver": ROOT / "scripts/run_kernel_ddb_driver.py",
+    "qemu_test": ROOT / "scripts/run_kernel_ddb_qemutest.sh",
 }
 
 
@@ -140,6 +141,21 @@ def driver_commands(text: str) -> list[str]:
     return list(dict.fromkeys(names))
 
 
+def check_waker_fixture(text: str) -> None:
+    """Keep the synthetic DDB waker output asserted by its QEMU lane."""
+    expected = [
+        "^ddb: wait pid=10 state=blocked waits-for event=uart-rx queued=1$",
+        "^ddb: wait pid=14 state=blocked waits-for event=uart-tx queued=320 low-water=256$",
+        "^ddb: wait pid=15 state=blocked waits-for event=net-rx frame-pending=no connection-pending=unknown$",
+        "^ddb: waittest ps pid=10 ppid=0 state=3 wait=1 waker=uart-rx queued=1 root=0 sp=0x0000000000000000 pending=none masked=none$",
+    ]
+    missing = [line for line in expected if line not in text]
+    if missing:
+        raise ValueError(
+            "DDB waker fixture drift: missing " + "; ".join(missing)
+        )
+
+
 def check(paths: dict[str, Path]) -> int:
     """Verify every surface agrees, and return the number of commands."""
     public, hidden = load_inventory(paths["inventory"])
@@ -171,6 +187,7 @@ def check(paths: dict[str, Path]) -> int:
     covered = driver_commands(paths["driver"].read_text(encoding="ascii"))
     if set(covered) != set(all_names):
         fail("QEMU integration driver", all_names, covered)
+    check_waker_fixture(paths["qemu_test"].read_text(encoding="ascii"))
     return len(all_names)
 
 
@@ -186,7 +203,7 @@ def main() -> int:
         return 1
     report_pass("ddb-command-inventory",
                 f"dispatcher, help, docs, and coverage agree on "
-                f"{commands} commands",
+                f"{commands} commands; DDB waker fixture is asserted",
                 commands=commands)
     return 0
 
