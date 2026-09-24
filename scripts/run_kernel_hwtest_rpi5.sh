@@ -29,6 +29,7 @@ ICMP_LOG="$ARTIFACT_DIR/icmp.log"
 TCP_LOG="$ARTIFACT_DIR/tcp.log"
 HTTPD_LOG="$ARTIFACT_DIR/httpd-curl.log"
 HTTPD_BODY="$ARTIFACT_DIR/httpd-body.actual"
+HTTPD_CONCURRENT_LOG="$ARTIFACT_DIR/httpd-concurrent.log"
 SECOND_HTTPD_LOG="$ARTIFACT_DIR/httpd-curl-second.log"
 SECOND_HTTPD_BODY="$ARTIFACT_DIR/httpd-body-second.actual"
 INTERACTIVE_ARP_LOG="$ARTIFACT_DIR/interactive-httpd-arp.log"
@@ -334,6 +335,18 @@ if [ "$httpd_ready" -ne 1 ]; then
     echo "FAIL kernel/rpi5: kernel never reached the pre-daemon readiness marker (see $UART_LOG)" >&2
     exit 1
 fi
+
+echo "[kernel/rpi5] checking HTTPd concurrent accept/read routing"
+if ! sudo ETH_TEST_IFACE="$ETH_TEST_IFACE" \
+        ETH_TEST_SUBNET="$ETH_TEST_SUBNET" \
+        ETH_TEST_MAC="$ETH_TEST_MAC" TCP_TEST_HTTPD_CONCURRENCY=1 \
+        python3 "$REPO_ROOT/scripts/eth_tcp_echo_test.py" \
+        >"$HTTPD_CONCURRENT_LOG" 2>&1; then
+    cat "$HTTPD_CONCURRENT_LOG"
+    echo "FAIL kernel/rpi5: HTTPd concurrent accept/read routing failed" >&2
+    exit 1
+fi
+cat "$HTTPD_CONCURRENT_LOG"
 
 echo "[kernel/rpi5] curling BusyBox httpd index.html on port 8080"
 httpd_ok=0

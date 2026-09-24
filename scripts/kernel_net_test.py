@@ -463,11 +463,12 @@ def init_script_fixture(sock: socket.socket) -> bool:
     second = init_handshake(sock, INIT_CLIENT_PORTS[1], INIT_CLIENT_ISNS[1])
     if first is None or second is None:
         return False
-    # Match the proven RPi5 exchange: A's read is delivered first, then B's
-    # read after a short gap so the one-entry virtio RX path is not overrun.
-    init_send(sock, first, DATA_ECHO_PAYLOAD)
-    time.sleep(0.05)
+    # The fixture reads A before B. Deliver B first so A's receive syscall
+    # must route the nonmatching frame into fd 6's connection buffer, then
+    # let A's request arrive and unblock the fixture's first read.
     init_send(sock, second, INIT_SOCKET_B_INPUT)
+    time.sleep(0.05)
+    init_send(sock, first, DATA_ECHO_PAYLOAD)
 
     expected_b = INIT_SOCKET_B_RESPONSE
     expected_a = INIT_SOCKET_A_RESPONSE + INIT_LARGE_RESPONSE
@@ -603,9 +604,9 @@ def raw_http_response(sock: socket.socket, client_port: int, client_isn: int,
             body.extend(payload)
             server_next += len(payload)
         if flags & FLAG_FIN:
-            if sequence == server_next:
+            if sequence + len(payload) == server_next:
                 server_next += 1
-            response_end = True
+                response_end = True
         if payload or (flags & FLAG_FIN):
             sock.sendto(build_tcp_frame(client_port, client_seq, server_next,
                                         FLAG_ACK, server_port=HTTP_SERVER_PORT),
@@ -615,6 +616,111 @@ def raw_http_response(sock: socket.socket, client_port: int, client_isn: int,
         return None
     response = bytes(body)
     return response
+
+
+def concurrent_http_requests(sock: socket.socket, expected_body: bytes,
+                             expected_content_type: str) -> bool:
+    """Keep one HTTP worker reading while the listener accepts another."""
+    peers = {}
+    for index, (client_port, client_isn) in enumerate(
+            zip(HTTP_CLIENT_PORTS[:2], HTTP_CLIENT_ISNS[:2])):
+        syn = build_tcp_frame(client_port, client_isn, 0, FLAG_SYN,
+                              server_port=HTTP_SERVER_PORT)
+        reply = send_and_wait(sock, syn)
+        if reply is None or len(reply) < 54:
+            print("  no concurrent HTTP SYN-ACK on port %d" % client_port)
+            return False
+        src_port, dst_port, server_seq, acknowledgment, _doff_res, flags = \
+            struct.unpack("!HHIIBB", reply[34:48])
+        if (src_port != HTTP_SERVER_PORT or dst_port != client_port or
+                flags != (FLAG_SYN | FLAG_ACK) or
+                acknowledgment != client_isn + 1):
+            print("  bad concurrent HTTP SYN-ACK on port %d" % client_port)
+            return False
+        peers[client_port] = {
+            "client_seq": client_isn + 1,
+            "server_next": server_seq + 1,
+            "body": bytearray(),
+            "fin": False,
+        }
+        sock.sendto(build_tcp_frame(
+            client_port, client_isn + 1, server_seq + 1, FLAG_ACK,
+            server_port=HTTP_SERVER_PORT), (QEMU_HOST, QEMU_PORT))
+        # Let A's accepted child enter read() before opening B. After B's
+        # handshake the listener returns to accept() while both workers wait.
+        time.sleep(0.25)
+
+    request_a = b"GET / HTTP/1.0\r\nHost: 192.168.20.2\r\n\r\n"
+    request_b = request_a
+    for client_port, request in ((HTTP_CLIENT_PORTS[1], request_b),
+                                 (HTTP_CLIENT_PORTS[0], request_a)):
+        state = peers[client_port]
+        sock.sendto(build_tcp_frame(
+            client_port, state["client_seq"], state["server_next"],
+            FLAG_ACK | FLAG_PSH, data=request,
+            server_port=HTTP_SERVER_PORT), (QEMU_HOST, QEMU_PORT))
+        state["client_seq"] += len(request)
+        if client_port == HTTP_CLIENT_PORTS[1]:
+            # B arrives while A's child is already waiting in read() and the
+            # parent has returned to accept() after B's handshake.
+            time.sleep(0.05)
+
+    deadline = time.monotonic() + 10.0
+    def is_http_peer_frame(candidate: bytes) -> bool:
+        source_port, client_port = struct.unpack("!HH", candidate[34:38])
+        return source_port == HTTP_SERVER_PORT and client_port in peers
+
+    while (not all(state["fin"] for state in peers.values()) and
+           time.monotonic() < deadline):
+        remaining = max(0.05, min(0.5, deadline - time.monotonic()))
+        frame = recv_matching(sock, is_http_peer_frame, timeout=remaining)
+        if frame is None:
+            continue
+        source_port, client_port, sequence, _ack, _doff_res, flags = \
+            struct.unpack("!HHIIBB", frame[34:48])
+        if source_port != HTTP_SERVER_PORT or client_port not in peers:
+            continue
+        state = peers[client_port]
+        total_len = struct.unpack("!H", frame[16:18])[0]
+        tcp_header_len = (frame[46] >> 4) * 4
+        tcp_end = 14 + total_len
+        payload = frame[34 + tcp_header_len:tcp_end]
+        in_order = sequence == state["server_next"]
+        if in_order:
+            state["body"].extend(payload)
+            state["server_next"] += len(payload)
+        if (flags & FLAG_FIN) != 0:
+            if in_order:
+                state["server_next"] += 1
+                state["fin"] = True
+        if payload or (flags & FLAG_FIN):
+            sock.sendto(build_tcp_frame(
+                client_port, state["client_seq"], state["server_next"],
+                FLAG_ACK, server_port=HTTP_SERVER_PORT),
+                (QEMU_HOST, QEMU_PORT))
+
+    ok = True
+    for client_port, state in peers.items():
+        response = bytes(state["body"])
+        separator = response.find(b"\r\n\r\n")
+        header = response[:separator].decode("iso-8859-1") if separator >= 0 else ""
+        body = response[separator + 4:] if separator >= 0 else b""
+        content_type = ""
+        for line in header.split("\r\n"):
+            if line.lower().startswith("content-type:"):
+                content_type = line.split(":", 1)[1].strip().lower()
+                break
+        passed = (state["fin"] and header.startswith("HTTP/1.") and
+                  " 200 " in header.split("\r\n", 1)[0] and
+                  body == expected_body and
+                  content_type == expected_content_type)
+        print("  concurrent HTTP fd for port %-5d: %s" %
+              (client_port, "PASS" if passed else "FAIL"))
+        if not passed:
+            print("    response bytes=%d fin=%s type=%s" %
+                  (len(response), state["fin"], content_type))
+        ok = ok and passed
+    return ok
 
 
 def http_request(sock: socket.socket, client_port: int, client_isn: int,
@@ -740,7 +846,9 @@ def main() -> int:
                 sock.close()
                 return 1
         root_body = HTTP_ASSETS[0][1].read_bytes()
-        http_ok = init_ok and all(
+        concurrent_http_ok = init_ok and concurrent_http_requests(
+            sock, root_body, "text/html")
+        http_ok = concurrent_http_ok and all(
             http_request(sock, port, isn, "/", root_body, "text/html")
             for port, isn in zip(HTTP_CLIENT_PORTS[:2], HTTP_CLIENT_ISNS[:2])
         )

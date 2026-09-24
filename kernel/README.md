@@ -1180,18 +1180,15 @@ run, not a specification.
   `linux_user/number` fails if it stops doing so. Any RPi5 boot-log number
   above 99999 recorded before this is truncated, whatever it says.
 
-- **Waiting for the network happens inside the kernel, except in
-  `accept`.** The TCP receive path still waits for a frame in a bounded
-  in-kernel loop, and since kernel mode does not preempt, every other
-  process stops for the duration. `accept(2)` asks first whether anything
-  else could run. When nothing can, it waits in the kernel as before, which
-  costs nothing. When something can, it takes the handshake one step, parks
-  the half-finished handshake on the listener, and BLOCKS the calling
-  process -- off the run queue, holding neither the receive capability nor
-  a descriptor -- to be woken on the next scheduler tick and run the same
-  syscall again. It does not answer `EAGAIN`: a blocking `accept` that said
-  "try again" would not be `accept`, and this kernel's own EL0 fixture
-  calls it once and checks the descriptor it gets back.
+- **Network receive and accept wait outside the kernel.** Each `read(2)` or
+  `accept(2)` entry takes one bounded receive step and returns the physical RX
+  capability before blocking on `NetRx`. The timer wakes the process to retry
+  the same syscall. This lets a worker on another CPU read or write while the
+  HTTPd parent waits in `accept`, even when no process is Ready on the
+  parent's CPU. A blocking `accept` does not answer `EAGAIN` merely because
+  its handshake is incomplete; the EL0 fixture calls it once and checks the
+  descriptor it gets back. Connected `write(2)` also blocks and retries when
+  another connection temporarily holds the RX capability.
 - Unrecognized Linux calls return `-ENOSYS`.
 
 Filesystem, TCP, process, and VM features continue to be added only when an

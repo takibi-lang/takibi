@@ -7,19 +7,11 @@
 // syscall.tkb) or the persistent-service/shell lifecycle state (real
 // control-flow branches on those; a separate, later split out of #294).
 //
-// Current limitations: single-writer, matching kernel/kernel/syscall.tkb's
-// own "NOT SYNCHRONIZED, single-core dispatch only" limitation -- every
-// record_*() call here assumes it runs to completion on core 0 with no
-// concurrent syscall dispatch from another core.
-//
-// One exception (2026-09-24): connected_read_calls, connected_write_calls
-// and partial_write_observed are also recorded from a peer since GitHub
-// issue #581 admitted connected read/write there. They still have one
-// writer at a time only because one process uses a connected descriptor at
-// a time: the resident HTTPd's listener refuses to accept while its
-// connection child is alive, and the inetd and boot socket fixtures run on
-// core 0 before it starts. A second concurrent connection user would make
-// these counts racy.
+// Current limitations (2026-09-24): the UART one-shot counters are used by
+// the core-0 boot and shell fixture. The socket counters are enabled only
+// during the core-0 connected-I/O fixture and frozen before HTTPd starts.
+// HTTPd workers can now run concurrently on separate CPUs; recording their
+// calls in these ordinary usize fields would race.
 
 struct SyscallTestEvidence {
     ppoll_uart_waits: usize;
@@ -34,6 +26,7 @@ struct SyscallTestEvidence {
     connected_close_calls: usize;
     connected_read_calls: usize;
     connected_write_calls: usize;
+    socket_fixture_active: bool;
 }
 
 private let mut syscall_test_evidence: SyscallTestEvidence;
@@ -43,6 +36,7 @@ fn syscall_test_evidence_reset_read_uart_waits() {
 }
 
 fn syscall_test_evidence_reset_socket_counters() {
+    syscall_test_evidence.socket_fixture_active = true;
     syscall_test_evidence.socket_calls = 0;
     syscall_test_evidence.bind_calls = 0;
     syscall_test_evidence.listen_calls = 0;
@@ -52,6 +46,10 @@ fn syscall_test_evidence_reset_socket_counters() {
     syscall_test_evidence.connected_close_calls = 0;
     syscall_test_evidence.connected_read_calls = 0;
     syscall_test_evidence.connected_write_calls = 0;
+}
+
+fn syscall_test_evidence_finish_socket_fixture() {
+    syscall_test_evidence.socket_fixture_active = false;
 }
 
 // Returns true only the first time since the last
@@ -79,6 +77,7 @@ fn syscall_test_evidence_record_read_uart_wait() -> bool {
 }
 
 fn syscall_test_evidence_record_socket() {
+    if (syscall_test_evidence.socket_fixture_active == false) { return; }
     syscall_test_evidence.socket_calls =
         syscall_test_evidence.socket_calls + 1;
 }
@@ -88,6 +87,7 @@ fn syscall_test_evidence_socket_calls() -> usize {
 }
 
 fn syscall_test_evidence_record_bind() {
+    if (syscall_test_evidence.socket_fixture_active == false) { return; }
     syscall_test_evidence.bind_calls = syscall_test_evidence.bind_calls + 1;
 }
 
@@ -96,6 +96,7 @@ fn syscall_test_evidence_bind_calls() -> usize {
 }
 
 fn syscall_test_evidence_record_listen() {
+    if (syscall_test_evidence.socket_fixture_active == false) { return; }
     syscall_test_evidence.listen_calls =
         syscall_test_evidence.listen_calls + 1;
 }
@@ -105,6 +106,7 @@ fn syscall_test_evidence_listen_calls() -> usize {
 }
 
 fn syscall_test_evidence_record_socket_close() {
+    if (syscall_test_evidence.socket_fixture_active == false) { return; }
     syscall_test_evidence.socket_close_calls =
         syscall_test_evidence.socket_close_calls + 1;
 }
@@ -114,6 +116,7 @@ fn syscall_test_evidence_socket_close_calls() -> usize {
 }
 
 fn syscall_test_evidence_record_accept() {
+    if (syscall_test_evidence.socket_fixture_active == false) { return; }
     syscall_test_evidence.accept_calls =
         syscall_test_evidence.accept_calls + 1;
 }
@@ -123,6 +126,7 @@ fn syscall_test_evidence_accept_calls() -> usize {
 }
 
 fn syscall_test_evidence_record_accept_capability_roundtrip() {
+    if (syscall_test_evidence.socket_fixture_active == false) { return; }
     syscall_test_evidence.accept_capability_roundtrips =
         syscall_test_evidence.accept_capability_roundtrips + 1;
 }
@@ -132,6 +136,7 @@ fn syscall_test_evidence_accept_capability_roundtrips() -> usize {
 }
 
 fn syscall_test_evidence_record_connected_close() {
+    if (syscall_test_evidence.socket_fixture_active == false) { return; }
     syscall_test_evidence.connected_close_calls =
         syscall_test_evidence.connected_close_calls + 1;
 }
@@ -141,6 +146,7 @@ fn syscall_test_evidence_connected_close_calls() -> usize {
 }
 
 fn syscall_test_evidence_record_connected_read() {
+    if (syscall_test_evidence.socket_fixture_active == false) { return; }
     syscall_test_evidence.connected_read_calls =
         syscall_test_evidence.connected_read_calls + 1;
 }
@@ -150,6 +156,7 @@ fn syscall_test_evidence_connected_read_calls() -> usize {
 }
 
 fn syscall_test_evidence_record_connected_write() {
+    if (syscall_test_evidence.socket_fixture_active == false) { return; }
     syscall_test_evidence.connected_write_calls =
         syscall_test_evidence.connected_write_calls + 1;
 }

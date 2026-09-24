@@ -10,7 +10,7 @@
 // prototype implementation needed to mark unsafe, keeping this path free
 // of unsafe blocks and clean under the kernel's --forbid-trap build.
 //
-// Current limitations (2026-08-20, issues #295 and #257). Keep this list
+// Current limitations (2026-09-24, issues #295, #257 and #274). Keep this list
 // current as call sites change; a limitation that goes stale here is
 // worse than none.
 // - CONNECTION STATE IS SERIALIZED across cores. Every
@@ -55,9 +55,12 @@
 //   The distinction is worth keeping straight: nothing here elides a
 //   check of its own.
 // - Exactly one physical RX capability (NetRxCanAcquire,
-//   kernel/net/socket_capability.tkb) exists for the whole kernel; every
-//   connection's send/receive path borrows and returns it sequentially --
-//   there is no real concurrent packet processing across connections.
+//   kernel/net/socket_capability.tkb) exists for the whole kernel, so the
+//   driver exposes one serialized receive stream. TCP receive syscalls do
+//   not hold that capability while blocked. A validated payload for another
+//   established connection is routed into its empty per-connection receive
+//   buffer; if that buffer is still occupied, the current cumulative ACK
+//   makes the peer retry instead of advancing the stream.
 // - No congestion control or window scaling; retransmission is a fixed,
 //   bounded retry count (TCP_RETRY_LIMIT), not RTT-adaptive.
 // - This subsystem's retry/retransmit timing has been a recurring source
@@ -156,6 +159,10 @@ struct TcpConnection {
     snd_nxt: u32;               // next unacknowledged seq
     rcv_nxt: u32;               // next expected seq
     received_length: usize;
+    // The blocked read's bounded retry window survives syscall re-entry
+    // after the receive capability has been returned to the shared store.
+    receive_waiting: bool;
+    receive_started_at: i64;
     data_segment_counter: usize;
     // GitHub issue #257: the syscall layer's own per-connection state,
     // which was four more [T; TCP_CONNECTION_MAX] arrays (private ones)
@@ -281,6 +288,12 @@ must_use variant TcpConnectionAllocResult {
 
 must_use variant TcpConnectionTakeResult {
     Missing;
+    Ready(exists connection: usize. TcpConnectionOwner[connection]);
+}
+
+must_use variant TcpConnectionTryTakeResult {
+    Missing;
+    Busy;
     Ready(exists connection: usize. TcpConnectionOwner[connection]);
 }
 
@@ -525,6 +538,8 @@ must_use variant KernelTcpAcceptResult {
 }
 
 must_use variant KernelTcpReceiveResult {
+    Pending(NetRxCanAcquire);
+    Routed(NetRxCanAcquire);
     TimedOut(NetRxCanAcquire);
     Received(NetRxCanAcquire);
 }
@@ -535,13 +550,15 @@ must_use variant KernelTcpSendResult {
 }
 
 variant TcpReceiveDisposition {
-    Ignore;
+    ProtocolDrop;
     AckOnly;
     Payload(usize);
+    Routed;
+    RoutedAck;
 }
 
 variant TcpRxPlan {
-    Release;
+    ProtocolDrop;
     Send(i32);
 }
 
@@ -1142,6 +1159,30 @@ fn tcp_connection_take(slot_value: usize, generation: usize)
         return TcpConnectionTakeResult::Ready(owner);
     }
     return TcpConnectionTakeResult::Missing;
+}
+
+// Try to own a scanned connection without holding the pool proof across its
+// per-connection lock. A receiver already owns another connection while it
+// routes a frame; waiting on this lock would hold the sole RX token behind a
+// long user copy on the target socket.
+fn tcp_connection_try_take(slot_value: usize, generation: usize)
+        -> TcpConnectionTryTakeResult !{unsafe} {
+    if (intrusive_pool_matches_untrusted(
+            &tcp_connection_pool, slot_value, generation) == false) {
+        return TcpConnectionTryTakeResult::Missing;
+    }
+    let conn: *TcpConnection = tcp_connection_payload(slot_value);
+    if (task_mutex_trylock(&conn.lock) == false) {
+        return TcpConnectionTryTakeResult::Busy;
+    }
+    let owner = tcp_connection_owner_new(slot_value, generation);
+    if (intrusive_pool_matches_untrusted(
+            &tcp_connection_pool, slot_value, generation) == false) {
+        tcp_connection_owner_drop(owner);
+        task_mutex_release(&conn.lock);
+        return TcpConnectionTryTakeResult::Missing;
+    }
+    return TcpConnectionTryTakeResult::Ready(owner);
 }
 
 // Test-only nonblocking entry through the same connection lock and
@@ -1838,11 +1879,13 @@ fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32,
 // same-direction sequential segments), then separately retransmits any
 // entry still outstanding past its own retry_ticks deadline (bumping its
 // retry count, giving up and freeing it silently at TCP_RETRY_LIMIT --
-// same exhaustion behavior this file always had). A frame that matches
-// no entry is simply released: TCP's own retry semantics already assume
-// any frame can be safely dropped, so an opportunistic caller
-// (kernel_tcp_send_received) stealing an unrelated frame here is no
-// worse than that frame never having arrived at all.
+// same exhaustion behavior this file always had). A validated payload for
+// another established connection is copied into that connection's receive
+// buffer before the descriptor is released. A payload that cannot be
+// matched to a live connection, or a non-payload frame, is an explicit
+// protocol drop here; the sender's normal TCP retry is responsible for
+// recovery where one applies. ACK frames for another connection do not
+// alter its retransmit queue from this opportunistic path.
 //
 // GitHub issue #257: the queue is one chain for the whole stack now, so
 // both passes below skip entries belonging to another connection. That
@@ -1932,7 +1975,26 @@ fn pending_tcp_service_once(conn: *TcpConnection,
             if (retx_chain_put(retx_chain_reverse(kept)) == false) {
                 kernel_boot_log("tcp retx: queue was not empty on reinstall\n");
             }
-            ready = net_rx_release(acquired);
+            match tcp_parse_segment(frame, len) {
+                TcpSegmentParseResult::Reject => {
+                    ready = net_rx_release(acquired);
+                }
+                TcpSegmentParseResult::Parsed(header) => {
+                    match tcp_route_received_segment(
+                            conn.self_address, frame, header) {
+                        TcpReceiveRouteResult::NoReceiver => {
+                            ready = net_rx_release(acquired);
+                        }
+                        TcpReceiveRouteResult::Routed => {
+                            ready = net_rx_release(acquired);
+                        }
+                        TcpReceiveRouteResult::Ack => {
+                            ready = net_rx_send_reply(
+                                net_rx_reply_ready(acquired, 54));
+                        }
+                    }
+                }
+            }
         }
     }
     let now: i64 = read_cntpct();
@@ -2351,7 +2413,7 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                         // should_tx/tx_len integer flag pair: a reply and
                         // its length are now one value, so "flagged but no
                         // length" is unrepresentable.
-                        let mut plan: TcpRxPlan = TcpRxPlan::Release;
+                        let mut plan: TcpRxPlan = TcpRxPlan::ProtocolDrop;
                         let frame = net_rx_frame(acquired);   // only read when len proves acquisition
 
                         match tcp_parse_segment(frame, len) {
@@ -2463,7 +2525,7 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
                         }
 
                         match plan {
-                            TcpRxPlan::Release => {
+                            TcpRxPlan::ProtocolDrop => {
                                 ready = net_rx_release(acquired);
                             }
                             TcpRxPlan::Send(reply_len) => {
@@ -2535,6 +2597,12 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection],
         -> KernelTcpAcceptStep !{unsafe} {
     let mut ready = ready_in;
     let conn: *TcpConnection = tcp_connection_of(owner);
+    // Another receive waiter can acquire the final ACK first and complete
+    // this half-open connection through tcp_route_received_segment(). The
+    // parked accept must finish when it resumes, even though no frame is left.
+    if (conn.state == ConnState::Established) {
+        return KernelTcpAcceptStep::Accepted(ready);
+    }
     let remote_ip_bytes =
         conn.remote_ip as []u8;
     let remote_mac_bytes =
@@ -2552,8 +2620,9 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection],
             NetRxAcquire::None(next) => { ready = next; }
             NetRxAcquire::Acquired(acquired) => {
                 let len: i32 = net_rx_len(acquired);
-                let mut plan: TcpRxPlan = TcpRxPlan::Release;
+                let mut plan: TcpRxPlan = TcpRxPlan::ProtocolDrop;
                 let mut accepted: bool = false;
+                let mut routed: bool = false;
                 if (len >= 42) {
                     let arp_frame = net_rx_frame(acquired);
                     if (arp_prepare_reply(arp_frame)) {
@@ -2566,9 +2635,11 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection],
                         TcpSegmentParseResult::Reject => { }
                         TcpSegmentParseResult::Parsed(header) => {
                             let ip = frame[14..<34];
+                            let mut handled_current: bool = false;
                             if (header.dst_port == port) {
                                 if (conn.state == ConnState::Listen &&
                                     (header.flags & TCP_FLAG_SYN) != 0) {
+                                    handled_current = true;
                                     slice_copy(remote_ip_bytes[0..<4],
                                         ip[IP_SRC..<IP_DST]);
                                     slice_copy(remote_mac_bytes[0..<6],
@@ -2583,7 +2654,7 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection],
                                     if (tcp_drop_next_syn_ack) {
                                         tcp_drop_next_syn_ack = false;
                                         tcp_injected_syn_pending = true;
-                                        plan = TcpRxPlan::Release;
+                                        plan = TcpRxPlan::ProtocolDrop;
                                     } else {
                                         tcp_injected_syn_pending = false;
                                         plan = TcpRxPlan::Send(
@@ -2600,6 +2671,7 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection],
                                     slice_eq(ip[IP_SRC..<IP_DST],
                                         remote_ip_bytes[0..<4]) &&
                                     (header.flags & TCP_FLAG_RST) != 0) {
+                                    handled_current = true;
                                     conn.state = ConnState::Listen;
                                     tcp_injected_syn_pending = false;
                                 } else if (
@@ -2611,8 +2683,30 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection],
                                     (header.flags & TCP_FLAG_SYN) == 0 &&
                                     header.ack == conn.snd_nxt &&
                                     header.seq == conn.rcv_nxt) {
+                                    handled_current = true;
                                     conn.state =
                                         ConnState::Established;
+                                    if (header.tcp_hdr_len == 20 &&
+                                        header.tcp_len > 20) {
+                                        let payload_length: usize =
+                                            (header.tcp_len - 20) as usize;
+                                        if (payload_length >= 1 &&
+                                            payload_length <= 1460) {
+                                            let source_payload_end: usize =
+                                                54 + payload_length;
+                                            let receive_buffer =
+                                                tcp_connection_rx_slice(conn);
+                                            slice_copy(
+                                                receive_buffer[0..<payload_length],
+                                                frame[54..<source_payload_end]);
+                                            conn.rcv_nxt = conn.rcv_nxt +
+                                                (payload_length as u32);
+                                            conn.received_length = payload_length;
+                                            conn.socket_buffer_length =
+                                                payload_length;
+                                            conn.socket_buffer_offset = 0;
+                                        }
+                                    }
                                     if (tcp_injected_syn_pending &&
                                         tcp_injected_syn_retransmitted) {
                                         tcp_injected_syn_accepted = true;
@@ -2620,11 +2714,25 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection],
                                     accepted = true;
                                 }
                             }
+                            if (handled_current == false) {
+                                match tcp_route_received_segment(
+                                        tcp_connection_slot(owner),
+                                        frame, header) {
+                                    TcpReceiveRouteResult::NoReceiver => {}
+                                    TcpReceiveRouteResult::Routed => {
+                                        routed = true;
+                                    }
+                                    TcpReceiveRouteResult::Ack => {
+                                        routed = true;
+                                        plan = TcpRxPlan::Send(54);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
                 match plan {
-                    TcpRxPlan::Release => {
+                    TcpRxPlan::ProtocolDrop => {
                         ready = net_rx_release(acquired);
                     }
                     TcpRxPlan::Send(reply_len) => {
@@ -2634,6 +2742,9 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection],
                 }
                 if (accepted) {
                     return KernelTcpAcceptStep::Accepted(ready);
+                }
+                if (routed) {
+                    return KernelTcpAcceptStep::Pending(ready);
                 }
             }
         }
@@ -2683,66 +2794,6 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection],
     return KernelTcpAcceptStep::Pending(ready);
 }
 
-// Take the handshake as far as it will go right now.
-//
-// GitHub issue #469: `may_hold_machine` is the caller answering one
-// question -- is there another process that could run instead of me? The
-// wait below is at EL1 and this kernel does not preempt kernel mode, so
-// while it runs, nothing else on the machine does. When the answer is no,
-// waiting here costs nothing. The answer can change while the loop runs,
-// so every iteration asks again and hands Pending back as soon as another
-// process becomes runnable.
-//
-// The same shape as the UART read path's own answer to the same question,
-// and for the same reason: "may I wait here" is a question about the rest
-// of the machine, not about this connection.
-fn kernel_tcp_accept_progress(owner: borrow TcpConnectionOwner[connection],
-                              ready_in: sink NetRxCanAcquire,
-                              may_hold_machine: bool)
-        -> KernelTcpAcceptStep !{may_block} {
-    let mut ready = ready_in;
-    if (may_hold_machine == false) {
-        return kernel_tcp_accept_step(owner, ready);
-    }
-    let conn: *TcpConnection = tcp_connection_of(owner);
-    while ((read_cntpct() - conn.accept_start_at) < conn.accept_deadline_ticks) {
-        // What "again" buys, since the loop already existed: the answer
-        // can only change in one direction here, and it is the direction
-        // that starves somebody. A process that becomes Ready after entry
-        // could not run until this loop ended, because kernel mode does not
-        // preempt -- captured under host CPU starvation as a DDB backtrace
-        // inside this loop with `pending=1 ready=1`, a reschedule requested
-        // and a runnable child that never ran. Issue #524 adds the other
-        // direction: the current child may itself be the event a blocked
-        // parent needs, even when nobody else is Ready yet.
-        //
-        // Pending is already the answer the caller wants and already
-        // handled at kernel/kernel/syscall.tkb: it gives the receive
-        // capability back, parks the handshake on the listener, and blocks
-        // this process on ProcessWaitReason::NetRx to run the syscall again
-        // when it is woken. Nothing new is built; what is new is asking.
-        // The wake cannot be lost either -- kernel_process_net_wake_all runs
-        // from the timer HANDLER and makes every NetRx waiter runnable once
-        // per tick, and the deadline above lives on the connection, so it
-        // still bounds the whole accept across the block.
-        if (kernel_process_other_ready() ||
-            kernel_process_current_exit_has_waiter()) {
-            return KernelTcpAcceptStep::Pending(ready);
-        }
-        net_rx_wait();
-        match kernel_tcp_accept_step(owner, ready) {
-            KernelTcpAcceptStep::Accepted(next) => {
-                return KernelTcpAcceptStep::Accepted(next);
-            }
-            KernelTcpAcceptStep::GaveUp(next) => {
-                return KernelTcpAcceptStep::GaveUp(next);
-            }
-            KernelTcpAcceptStep::Pending(next) => { ready = next; }
-        }
-    }
-    return KernelTcpAcceptStep::GaveUp(ready);
-}
-
 // GitHub issue #469: resume the handshake this listener already had in
 // progress, or start a new one. The caller has only an address and a
 // generation to name it by -- the pool validates both, and a slot that no
@@ -2769,137 +2820,250 @@ fn kernel_tcp_accept_resume_or_begin(slot_value: usize, generation: usize,
     }
 }
 
-fn kernel_tcp_receive_once(owner: borrow TcpConnectionOwner[connection],
-                           ready_in: sink NetRxCanAcquire,
-                           destination: borrow [u8; 1460..])
-        -> KernelTcpReceiveResult !{may_block} {
-    let mut ready = ready_in;
-    let conn: *TcpConnection = tcp_connection_of(owner);
-    let remote_ip_bytes =
-        conn.remote_ip as []u8;
-    let start: i64 = read_cntpct();
-    let deadline_ticks: i64 = read_cntfrq() * 30;
-    while ((read_cntpct() - start) < deadline_ticks) {
-        net_rx_wait();
-        match net_rx_acquire(ready) {
-            NetRxAcquire::None(next) => { ready = next; }
-            NetRxAcquire::Acquired(acquired) => {
-                let len: i32 = net_rx_len(acquired);
-                let mut disposition: TcpReceiveDisposition =
-                    TcpReceiveDisposition::Ignore;
-                if (len >= 55 && len <= 1514) {
-                    let len_n: i32 = len;
-                    let frame = net_rx_frame(acquired);
-                    let eth: *EthHdr = frame as *EthHdr;
-                    if (eth.ethertype == ETHERTYPE_IPV4) {
-                        let ip = frame[14..<34];
-                        let ip_hdr: *Ipv4Hdr = ip as *Ipv4Hdr;
-                        let ihl: u16 = (ip_hdr.version_ihl & 0x0F) * 4;
-                        let len16: u16 = len_n as u16;
-                        let total_len: u16 = ip_hdr.total_len as u16;
-                        let ip_len_in_frame: u16 = len16 - 14;
-                        if ((ip_hdr.version_ihl >> 4) == 4 && ihl == 20 &&
-                            total_len <= ip_len_in_frame &&
-                            total_len >= 41 && ip_hdr.protocol == PROTO_TCP &&
-                            inet_checksum(ip[0..<20]) == 0 &&
-                            slice_eq(ip[IP_DST..<20], OUR_IP as []u8) &&
-                            slice_eq(ip[IP_SRC..<IP_DST],
-                                remote_ip_bytes[0..<4])) {
-                            let tcp = frame[34..<54];
-                            let tcp_hdr: *TcpHdr = tcp as *TcpHdr;
-                            let tcp_len: u16 = total_len - 20;
-                            let doff: u8 = tcp_hdr.data_offset >> 4;
-                            if (doff == 5 && tcp_len >= 21) {
-                                let mut pseudo: [u8; 12];
-                                slice_copy(pseudo[0..<4], ip[IP_SRC..<IP_DST]);
-                                slice_copy(pseudo[4..<8], ip[IP_DST..<20]);
-                                pseudo[8] = 0;
-                                pseudo[9] = PROTO_TCP;
-                                write_u16be(pseudo[10..<12], tcp_len);
-                                let tcp_len_index: usize = tcp_len as usize;
-                                let tcp_segment =
-                                    frame[34..<34 + tcp_len_index];
-                                let source_port: u16 = tcp_hdr.src_port as u16;
-                                let destination_port: u16 = tcp_hdr.dst_port as u16;
-                                let sequence: u32 = tcp_hdr.seq as u32;
-                                if (source_port == conn.remote_port &&
-                                    destination_port == conn.local_port &&
-                                    (tcp_hdr.flags & TCP_FLAG_ACK) != 0 &&
-                                    checksum_fold(checksum_add(
-                                        tcp_segment,
-                                        checksum_add(pseudo as []u8, 0))) == 0) {
-                                    if (sequence != conn.rcv_nxt) {
-                                        // Duplicate (sequence behind rcv_nxt) and
-                                        // out-of-order (ahead) data both elicit the
-                                        // same cumulative ACK. Neither advances the
-                                        // stream or reaches userspace.
-                                        disposition =
-                                            TcpReceiveDisposition::AckOnly;
-                                    } else {
-                                        let data_length: u16 = tcp_len - 20;
-                                        if (data_length >= 1 &&
-                                            data_length <= TCP_MAX_PAYLOAD) {
-                                            let data_length_index: usize =
-                                                data_length as usize;
-                                            if (data_length_index <= 1460) {
-                                                let mut copy_index: usize = 0;
-                                                while (copy_index < data_length_index) {
-                                                    let destination_index: usize =
-                                                        copy_index;
-                                                    let source_index: usize =
-                                                        54 as usize + copy_index;
-                                                    if (destination_index < 1460 &&
-                                                        source_index < 1514) {
-                                                        destination[destination_index] =
-                                                            frame[source_index];
-                                                    }
-                                                    copy_index = copy_index + 1;
-                                                }
-                                                disposition =
-                                                    TcpReceiveDisposition::Payload(
-                                                        data_length_index);
-                                            }
-                                        }
-                                    }
+must_use variant TcpReceiveRouteResult { NoReceiver; Routed; Ack; }
+
+// The physical receiver may not own the socket named by a valid data frame.
+// Route only after checksum and IP/TCP shape validation, then take the target
+// connection's owner before touching its sequence or read-buffer state. The
+// RX token serializes hardware acquisition; it is returned by the caller
+// after this function has either delivered the payload or built a cumulative
+// ACK that leaves it for TCP retransmission.
+fn tcp_route_received_segment(current_address: usize,
+                              frame: borrow [u8; 1514..],
+                              header: TcpSegmentHeader)
+        -> TcpReceiveRouteResult !{unsafe} {
+    if (header.tcp_hdr_len != 20 ||
+        (header.flags & TCP_FLAG_ACK) == 0) {
+        return TcpReceiveRouteResult::NoReceiver;
+    }
+    let payload_length: usize =
+        (header.tcp_len - header.tcp_hdr_len) as usize;
+    if (payload_length > 1460) {
+        return TcpReceiveRouteResult::NoReceiver;
+    }
+    let ip = frame[14..<34];
+    let source_payload_end: usize = 54 + payload_length;
+    let mut cursor: usize = intrusive_pool_first_slot(&tcp_connection_pool);
+    while (cursor != 0) {
+        match intrusive_pool_probe_slot(&tcp_connection_pool, cursor) {
+            IntrusiveSlotProbe::NoPayload => {}
+            IntrusiveSlotProbe::Live(slot_view) => {
+                let generation: usize = intrusive_view_generation(slot_view);
+                let address: usize = intrusive_slot_address_identity(
+                    intrusive_view_slot(slot_view));
+                intrusive_view_drop(slot_view);
+                if (address != current_address) {
+                    match tcp_connection_try_take(address, generation) {
+                        TcpConnectionTryTakeResult::Missing => {}
+                        TcpConnectionTryTakeResult::Busy => {
+                            // The tuple cannot be inspected while its owner
+                            // is busy. Leave the frame unacknowledged: the
+                            // sender's TCP retry will present it again.
+                        }
+                        TcpConnectionTryTakeResult::Ready(target_owner) => {
+                            let target: *TcpConnection =
+                                tcp_connection_of(target_owner);
+                            let remote_ip: []u8 = target.remote_ip as []u8;
+                            let tuple_matches: bool =
+                                target.remote_port == header.src_port &&
+                                target.local_port == header.dst_port &&
+                                slice_eq(ip[IP_SRC..<IP_DST],
+                                         remote_ip[0..<4]);
+                            if (tuple_matches &&
+                                target.state == ConnState::SynRcvd &&
+                                (header.flags & TCP_FLAG_SYN) == 0 &&
+                                (header.flags & TCP_FLAG_RST) == 0 &&
+                                header.ack == target.snd_nxt &&
+                                header.seq == target.rcv_nxt) {
+                                // The accept waiter may not be the first
+                                // process to acquire RX. Complete its
+                                // pending handshake under the slot owner so
+                                // the parked accept can observe Established
+                                // when it resumes. TCP permits data on this
+                                // final ACK; preserve it for the new worker.
+                                target.state = ConnState::Established;
+                                if (payload_length > 0) {
+                                    let target_buffer =
+                                        tcp_connection_rx_slice(target);
+                                    let source_payload_end: usize =
+                                        54 + payload_length;
+                                    slice_copy(
+                                        target_buffer[0..<payload_length],
+                                        frame[54..<source_payload_end]);
+                                    target.rcv_nxt = target.rcv_nxt +
+                                        (payload_length as u32);
+                                    target.received_length = payload_length;
+                                    target.socket_buffer_length = payload_length;
+                                    target.socket_buffer_offset = 0;
                                 }
+                                if (tcp_injected_syn_pending &&
+                                    tcp_injected_syn_retransmitted) {
+                                    tcp_injected_syn_accepted = true;
+                                }
+                                if (payload_length > 0) {
+                                    build_receive_ack(
+                                        target, frame, header.ihl);
+                                    tcp_connection_put(target_owner);
+                                    return TcpReceiveRouteResult::Ack;
+                                }
+                                tcp_connection_put(target_owner);
+                                return TcpReceiveRouteResult::Routed;
                             }
+                            if (tuple_matches &&
+                                target.state == ConnState::Established &&
+                                target.connection_open &&
+                                payload_length > 0) {
+                                let source_payload_end: usize =
+                                    54 + payload_length;
+                                let occupied: bool =
+                                    target.socket_buffer_offset <
+                                        target.socket_buffer_length;
+                                if (header.seq != target.rcv_nxt || occupied) {
+                                    build_receive_ack(
+                                        target, frame, header.ihl);
+                                    tcp_connection_put(target_owner);
+                                    return TcpReceiveRouteResult::Ack;
+                                }
+                                let target_buffer =
+                                    tcp_connection_rx_slice(target);
+                                slice_copy(
+                                    target_buffer[0..<payload_length],
+                                    frame[54..<source_payload_end]);
+                                target.rcv_nxt = target.rcv_nxt +
+                                    (payload_length as u32);
+                                target.received_length = payload_length;
+                                target.socket_buffer_length = payload_length;
+                                target.socket_buffer_offset = 0;
+                                if (tcp_ack_each_stream_segment) {
+                                    tcp_split_request_segments =
+                                        tcp_split_request_segments + 1;
+                                    build_receive_ack(
+                                        target, frame, header.ihl);
+                                    tcp_connection_put(target_owner);
+                                    return TcpReceiveRouteResult::Ack;
+                                }
+                                tcp_connection_put(target_owner);
+                                return TcpReceiveRouteResult::Routed;
+                            }
+                            tcp_connection_put(target_owner);
                         }
-                    }
-                }
-                match disposition {
-                    TcpReceiveDisposition::Ignore => {
-                        ready = net_rx_release(acquired);
-                    }
-                    TcpReceiveDisposition::AckOnly => {
-                        build_receive_ack(
-                            conn, net_rx_frame(acquired), 20);
-                        ready = net_rx_send_reply(
-                            net_rx_reply_ready(acquired, 54));
-                    }
-                    TcpReceiveDisposition::Payload(payload_length) => {
-                        conn.rcv_nxt =
-                            conn.rcv_nxt + (payload_length as u32);
-                        conn.received_length = payload_length;
-                        if (tcp_ack_each_stream_segment) {
-                            tcp_split_request_segments =
-                                tcp_split_request_segments + 1;
-                            build_receive_ack(
-                                conn, net_rx_frame(acquired), 20);
-                            return KernelTcpReceiveResult::Received(
-                                net_rx_send_reply(
-                                    net_rx_reply_ready(acquired, 54)));
-                        }
-                        // Delayed ACK: release RX immediately so another
-                        // in-order segment can reach the next read, then
-                        // piggyback the cumulative ACK on userspace output.
-                        return KernelTcpReceiveResult::Received(
-                            net_rx_release(acquired));
                     }
                 }
             }
         }
+        cursor = intrusive_pool_next_slot(&tcp_connection_pool, cursor);
     }
-    return KernelTcpReceiveResult::TimedOut(ready);
+    return TcpReceiveRouteResult::NoReceiver;
+}
+
+fn kernel_tcp_receive_once(owner: borrow TcpConnectionOwner[connection],
+                           ready_in: sink NetRxCanAcquire,
+                           destination: borrow [u8; 1460..])
+        -> KernelTcpReceiveResult !{unsafe} {
+    let mut ready = ready_in;
+    let conn: *TcpConnection = tcp_connection_of(owner);
+    if (conn.receive_waiting == false) {
+        conn.receive_started_at = read_cntpct();
+        conn.receive_waiting = true;
+    }
+    if (read_cntpct() - conn.receive_started_at >= read_cntfrq() * 30) {
+        conn.receive_waiting = false;
+        return KernelTcpReceiveResult::TimedOut(ready);
+    }
+    match net_rx_acquire(ready) {
+        NetRxAcquire::None(next) => {
+            return KernelTcpReceiveResult::Pending(next);
+        }
+        NetRxAcquire::Acquired(acquired) => {
+            let len: i32 = net_rx_len(acquired);
+            let frame = net_rx_frame(acquired);
+            let mut disposition: TcpReceiveDisposition =
+                TcpReceiveDisposition::ProtocolDrop;
+            match tcp_parse_segment(frame, len) {
+                TcpSegmentParseResult::Reject => {}
+                TcpSegmentParseResult::Parsed(header) => {
+                    let ip = frame[14..<34];
+                    let remote_ip_bytes = conn.remote_ip as []u8;
+                    let matches_current: bool =
+                        header.src_port == conn.remote_port &&
+                        header.dst_port == conn.local_port &&
+                        slice_eq(ip[IP_SRC..<IP_DST],
+                                 remote_ip_bytes[0..<4]);
+                    if (matches_current &&
+                        (header.flags & TCP_FLAG_ACK) != 0 &&
+                        header.tcp_hdr_len == 20 &&
+                        header.tcp_len > 20) {
+                        let payload_length: usize =
+                            (header.tcp_len - 20) as usize;
+                        if (header.seq != conn.rcv_nxt) {
+                            // Duplicate (sequence behind rcv_nxt) and
+                            // out-of-order (ahead) data both elicit the
+                            // same cumulative ACK.
+                            disposition = TcpReceiveDisposition::AckOnly;
+                        } else if (payload_length >= 1 &&
+                                   payload_length <= 1460) {
+                            let source_payload_end: usize =
+                                54 + payload_length;
+                            slice_copy(destination[0..<payload_length],
+                                       frame[54..<source_payload_end]);
+                            disposition = TcpReceiveDisposition::Payload(
+                                payload_length);
+                        }
+                    } else {
+                        match tcp_route_received_segment(
+                                tcp_connection_slot(owner), frame, header) {
+                            TcpReceiveRouteResult::NoReceiver => {}
+                            TcpReceiveRouteResult::Routed => {
+                                disposition = TcpReceiveDisposition::Routed;
+                            }
+                            TcpReceiveRouteResult::Ack => {
+                                disposition = TcpReceiveDisposition::RoutedAck;
+                            }
+                        }
+                    }
+                }
+            }
+            match disposition {
+                TcpReceiveDisposition::ProtocolDrop => {
+                    return KernelTcpReceiveResult::Pending(
+                        net_rx_release(acquired));
+                }
+                TcpReceiveDisposition::AckOnly => {
+                    build_receive_ack(conn, frame, 20);
+                    return KernelTcpReceiveResult::Pending(
+                        net_rx_send_reply(
+                            net_rx_reply_ready(acquired, 54)));
+                }
+                TcpReceiveDisposition::Payload(payload_length) => {
+                    conn.rcv_nxt = conn.rcv_nxt + (payload_length as u32);
+                    conn.received_length = payload_length;
+                    conn.receive_waiting = false;
+                    if (tcp_ack_each_stream_segment) {
+                        tcp_split_request_segments =
+                            tcp_split_request_segments + 1;
+                        build_receive_ack(conn, frame, 20);
+                        return KernelTcpReceiveResult::Received(
+                            net_rx_send_reply(
+                                net_rx_reply_ready(acquired, 54)));
+                    }
+                    // Delayed ACK: release RX immediately so the next
+                    // in-order segment can be accepted and the cumulative
+                    // ACK can ride on userspace output.
+                    return KernelTcpReceiveResult::Received(
+                        net_rx_release(acquired));
+                }
+                TcpReceiveDisposition::Routed => {
+                    return KernelTcpReceiveResult::Routed(
+                        net_rx_release(acquired));
+                }
+                TcpReceiveDisposition::RoutedAck => {
+                    return KernelTcpReceiveResult::Routed(
+                        net_rx_send_reply(
+                            net_rx_reply_ready(acquired, 54)));
+                }
+            }
+        }
+    }
 }
 
 fn kernel_tcp_received_length(owner: borrow TcpConnectionOwner[connection])

@@ -1368,7 +1368,7 @@ fn kernel_syscall_socket_evidence() -> bool !{unsafe} {
     // count is a floor now. bind/listen/accept stay exact: a syslog socket
     // that never connects never reaches any of them, so the shape being
     // asserted here is unchanged in strength.
-    return syscall_test_evidence_socket_calls() >= 1 &&
+    let valid: bool = syscall_test_evidence_socket_calls() >= 1 &&
            syscall_test_evidence_bind_calls() == 1 &&
            syscall_test_evidence_listen_calls() == 1 &&
            syscall_test_evidence_accept_calls() == 2 &&
@@ -1383,6 +1383,8 @@ fn kernel_syscall_socket_evidence() -> bool !{unsafe} {
            syscall_test_evidence_connected_write_calls() == 4 &&
            syscall_test_evidence_socket_close_calls() == 1 &&
            kernel_listener_state(4) == UnifiedListenerState::Closed;
+    syscall_test_evidence_finish_socket_fixture();
+    return valid;
 }
 
 // Copy one NUL-terminated pathname through the user-memory boundary. Only a
@@ -2329,8 +2331,7 @@ fn kernel_syscall_block_return(frame_sp: usize) {
             // taken a few instructions earlier and an interrupt can have
             // changed the answer in between. Resume the frame instead: the
             // rewind above already points it back at the syscall, so the
-            // process re-enters accept, finds itself alone, and waits in
-            // the kernel, which is what being alone means.
+            // process re-enters accept and takes another bounded step.
             workload_profile_el0_enter();
             el0_context_resume(frame_sp);
         }
@@ -3136,7 +3137,9 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                   match network_capability_take() {
                     NetworkCapabilityTakeResult::Empty => {
                         tcp_connection_put(owner);
-                        return SyscallAction::Resume(LINUX_EAGAIN);
+                        kernel_process_current_set_pending_block(
+                            ProcessWaitReason::NetRx, 0);
+                        return SyscallAction::Block;
                     }
                     NetworkCapabilityTakeResult::Ready(ready) => {
                     let socket_buffers = tcp_connection_rx_slice(tcp_connection_payload(write_slot));
@@ -3823,7 +3826,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // not the kernel console. Resolve unified fd ownership before the
         // UART fallback.
         if (kernel_connected_fd_is_open(fd)) {
-            syscall_test_evidence_record_connected_read();
             let read_slot: usize =
                 match kernel_connection_fd_lookup(fd) {
                     KernelConnectionLookupResult::Missing => {
@@ -3832,9 +3834,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     KernelConnectionLookupResult::Found(found) => { found }
                 };
             let read_generation: usize = kernel_connection_fd_identity(fd);
-            if (requested == 0) {
-                return SyscallAction::Resume(LINUX_EBADF);
-            }
             // GitHub issue #581: every connection field below is read and
             // written under the connection's owner. A peer may make this
             // call, so an open check or a buffered-copy cursor update taken
@@ -3849,7 +3848,21 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                    tcp_connection_put(owner);
                    return SyscallAction::Resume(LINUX_EBADF);
                }
+               if (requested == 0) {
+                   tcp_connection_put(owner);
+                   return SyscallAction::Resume(LINUX_EBADF);
+               }
+               // A NetRx wake retries this same EL0 read syscall. Keep the
+               // evidence count and timeout window attached to that logical
+               // read rather than counting each handler re-entry as a new
+               // userspace operation.
+               if (conn.receive_waiting == false) {
+                   syscall_test_evidence_record_connected_read();
+                   conn.receive_started_at = read_cntpct();
+                   conn.receive_waiting = true;
+               }
                if (conn.socket_buffer_offset < conn.socket_buffer_length) {
+                   conn.receive_waiting = false;
                    let available: usize =
                        conn.socket_buffer_length - conn.socket_buffer_offset;
                    let mut buffered: usize = requested;
@@ -3875,13 +3888,43 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                let ready: NetRxCanAcquire = match network_capability_take() {
                  NetworkCapabilityTakeResult::Empty => {
                     tcp_connection_put(owner);
-                    return SyscallAction::Resume(LINUX_EAGAIN);
+                    kernel_process_current_set_pending_block(
+                        ProcessWaitReason::NetRx, 0);
+                    return SyscallAction::Block;
                  }
                  NetworkCapabilityTakeResult::Ready(r) => { r }
                };
                let socket_buffers = tcp_connection_rx_slice(tcp_connection_payload(read_slot));
                match kernel_tcp_receive_once(
                     owner, ready, socket_buffers[0..<1460]) {
+                KernelTcpReceiveResult::Pending(next) => {
+                    match network_capability_put(next) {
+                        NetworkCapabilityPutResult::Stored => {
+                            tcp_connection_put(owner);
+                            kernel_process_current_set_pending_block(
+                                ProcessWaitReason::NetRx, 0);
+                            return SyscallAction::Block;
+                        }
+                        NetworkCapabilityPutResult::Conflict => {
+                            tcp_connection_free(owner);
+                            return SyscallAction::Resume(LINUX_EINVAL);
+                        }
+                    }
+                }
+                KernelTcpReceiveResult::Routed(next) => {
+                    match network_capability_put(next) {
+                        NetworkCapabilityPutResult::Stored => {
+                            tcp_connection_put(owner);
+                            kernel_process_current_set_pending_block(
+                                ProcessWaitReason::NetRx, 0);
+                            return SyscallAction::Block;
+                        }
+                        NetworkCapabilityPutResult::Conflict => {
+                            tcp_connection_free(owner);
+                            return SyscallAction::Resume(LINUX_EINVAL);
+                        }
+                    }
+                }
                 KernelTcpReceiveResult::TimedOut(next) => {
                     match network_capability_put(next) {
                         NetworkCapabilityPutResult::Stored => {
@@ -4289,14 +4332,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             (number == 242 && x3 != 0)) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
-        // An HTTP server child owns the only RX capability while it
-        // reads and writes the accepted stream.  Do not let the listener
-        // parent enter another blocking accept and monopolize that capability;
-        // return the normal retryable result and schedule the worker instead.
-        if (kernel_process_current_has_live_child()) {
-            kernel_process_request_reschedule();
-            return SyscallAction::Resume(LINUX_EAGAIN);
-        }
         // GitHub issue #469: whichever handshake this listener already has
         // in progress, or a fresh one. accept(2) may return before the
         // three-way handshake finishes now, so the connection carrying it
@@ -4312,17 +4347,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (pending_slot == 0) {
             syscall_test_evidence_record_accept();
         }
-        // Whether this call may wait inside the kernel at all. The wait is
-        // at EL1 and kernel mode does not preempt, so it stops every other
-        // process for its duration. GitHub issue #524: a blocked parent is
-        // not Ready, but it may be waiting for THIS process to exit. Holding
-        // the child in accept then prevents the event that would wake the
-        // parent, so that dependency forbids the EL1 wait too.
+        // One accept step owns the RX capability briefly, then parks the
+        // handshake and returns it. A child or peer process may be running
+        // on another CPU even when no process is Ready on this one. An EL1
+        // wait would hold the sole capability away from that process.
         let accept_exit_waiter: bool =
             kernel_process_current_exit_has_waiter();
-        let accept_may_wait: bool =
-            kernel_process_other_ready() == false &&
-            accept_exit_waiter == false;
         match kernel_tcp_accept_resume_or_begin(
                 pending_slot, pending_generation,
                 kernel_listener_port(accept_listener_fd)) {
@@ -4342,9 +4372,6 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 let parked: bool = kernel_listener_set_pending(
                     accept_listener_fd, slot, generation);
                 tcp_connection_put(owner);
-                if (accept_may_wait) {
-                    return SyscallAction::Resume(LINUX_EAGAIN);
-                }
                 // There is no Ready successor to take a Block action, but
                 // the parent cannot become Ready until this process exits.
                 // Sleep interruptibly in this syscall instead: an RX or
@@ -4361,7 +4388,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 return SyscallAction::Block;
             }
             NetworkCapabilityTakeResult::Ready(ready) => {
-                match kernel_tcp_accept_progress(owner, ready, accept_may_wait) {
+                match kernel_tcp_accept_step(owner, ready) {
                     KernelTcpAcceptStep::Pending(next) => {
                         // Not finished, and not failed. Give the machine
                         // back and leave the handshake where the next

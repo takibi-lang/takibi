@@ -75,9 +75,9 @@ transmit additionally hold the sole network capability, which is behind a
 no connection lock on purpose -- it must not wait behind a receive -- and the
 read that follows re-decides open and available bytes under the owner.
 
-The connected-socket counters in `kernel/kernel/syscall_test_evidence.tkb`
-have one writer at a time only because one process uses a connected
-descriptor at a time; its limitations section says what would break that.
+The socket evidence counters in `kernel/kernel/syscall_test_evidence.tkb`
+are active only during the core-0 connected-I/O fixture. They are frozen
+before HTTPd starts, so concurrent workers do not write the plain fields.
 
 ## Lock classes
 

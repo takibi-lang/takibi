@@ -31,6 +31,7 @@ import socket
 import struct
 import sys
 import time
+from pathlib import Path
 
 IFACE = os.environ.get("ETH_TEST_IFACE", "enp4s0")
 
@@ -381,6 +382,8 @@ def test_reconnect_after_close(client_mac: bytes) -> bool:
 # check only read the first reply frame and only verified the 19-byte
 # header; this reconstructs and byte-compares the complete response.
 CONNECTED_LARGE_RESPONSE = CONNECTED_RESPONSE_PAYLOAD + (b"\x5a" * 1460) + b"\x5a"
+HTTPD_CLIENT_PORTS = (43320, 43321)
+HTTPD_CLIENT_ISNS = (5000, 6000)
 
 
 def test_connected_large_response(client_mac: bytes) -> bool:
@@ -404,19 +407,18 @@ def test_connected_large_response(client_mac: bytes) -> bool:
     second_client_seq = RECONNECT_CLIENT_ISN + 1 + len(second_payload)
     second_server_seq = SERVER_ISN + 1
 
-    req = build_frame(client_mac, HANDSHAKE_CLIENT_PORT,
-                       HANDSHAKE_CLIENT_ISN + 1, server_seq,
-                       FLAG_ACK | FLAG_PSH, data=DATA_ECHO_PAYLOAD)
-    sock.send(req)
-    # A's first read rearms the sole physical GEM RX descriptor before the
-    # fixture asks for B. This small delay avoids intentionally overrunning
-    # that one-entry hardware ring; #189 tests connection state, not RX-ring
-    # depth or concurrent packet arrival.
-    time.sleep(0.05)
     second_req = build_frame(
         client_mac, RECONNECT_CLIENT_PORT, RECONNECT_CLIENT_ISN + 1,
         second_server_seq, FLAG_ACK | FLAG_PSH, data=second_payload)
     sock.send(second_req)
+    # The fixture reads A before B. Deliver B first so A's receive syscall
+    # must route the nonmatching frame into fd 6's connection buffer, then
+    # let A's request arrive and unblock the fixture's first read.
+    time.sleep(0.05)
+    req = build_frame(client_mac, HANDSHAKE_CLIENT_PORT,
+                      HANDSHAKE_CLIENT_ISN + 1, server_seq,
+                      FLAG_ACK | FLAG_PSH, data=DATA_ECHO_PAYLOAD)
+    sock.send(req)
 
     collected = b""
     want = len(CONNECTED_LARGE_RESPONSE)
@@ -524,11 +526,127 @@ def test_connected_large_response(client_mac: bytes) -> bool:
     return True
 
 
+def test_httpd_concurrent_accept_read(client_mac: bytes) -> bool:
+    """Send B while the HTTPd parent accepts and worker A waits in read."""
+    global SERVER_PORT
+    saved_server_port = SERVER_PORT
+    SERVER_PORT = 8080
+    sock = new_sock()
+    peers = {}
+    try:
+        for index, (client_port, client_isn) in enumerate(
+                zip(HTTPD_CLIENT_PORTS, HTTPD_CLIENT_ISNS)):
+            syn = build_frame(client_mac, client_port, client_isn, 0,
+                              FLAG_SYN)
+            reply = send_and_wait(sock, syn)
+            if reply is None or len(reply) < 54:
+                print("  no HTTPd SYN-ACK on client port %d" % client_port)
+                return False
+            src_port, dst_port, server_seq, acknowledgment, _doff_res, flags = \
+                struct.unpack("!HHIIBB", reply[34:48])
+            if (src_port != SERVER_PORT or dst_port != client_port or
+                    flags != (FLAG_SYN | FLAG_ACK) or
+                    acknowledgment != client_isn + 1):
+                print("  bad HTTPd SYN-ACK on client port %d" % client_port)
+                return False
+            peers[client_port] = {
+                "client_seq": client_isn + 1,
+                "server_next": server_seq + 1,
+                "body": bytearray(),
+                "fin": False,
+                "syn": syn,
+            }
+            sock.send(build_frame(
+                client_mac, client_port, client_isn + 1, server_seq + 1,
+                FLAG_ACK))
+            # Let A's worker enter read() before the parent accepts B.
+            time.sleep(0.25)
+
+        request = b"GET / HTTP/1.0\r\nHost: 192.168.20.2\r\n\r\n"
+        for client_port in (HTTPD_CLIENT_PORTS[1], HTTPD_CLIENT_PORTS[0]):
+            state = peers[client_port]
+            sock.send(build_frame(
+                client_mac, client_port, state["client_seq"],
+                state["server_next"], FLAG_ACK | FLAG_PSH, data=request))
+            state["client_seq"] += len(request)
+            if client_port == HTTPD_CLIENT_PORTS[1]:
+                # B's request arrives after its accept while A's child is
+                # still waiting and the parent has returned to accept().
+                time.sleep(0.05)
+
+        deadline = time.monotonic() + 10.0
+        while (not all(state["fin"] for state in peers.values()) and
+                time.monotonic() < deadline):
+            frame = recv_reply(
+                sock, peers[HTTPD_CLIENT_PORTS[0]]["syn"],
+                min(0.5, max(0.001, deadline - time.monotonic())))
+            if frame is None or len(frame) < 54:
+                continue
+            total_len = struct.unpack("!H", frame[16:18])[0]
+            tcp_end = 14 + total_len
+            if total_len < 40 or len(frame) < tcp_end:
+                continue
+            tcp = frame[34:tcp_end]
+            src_port, client_port, sequence, _ack, _doff_res, flags = \
+                struct.unpack("!HHIIBB", tcp[:14])
+            if src_port != SERVER_PORT or client_port not in peers:
+                continue
+            state = peers[client_port]
+            header_len = (tcp[12] >> 4) * 4
+            payload = tcp[header_len:]
+            in_order = sequence == state["server_next"]
+            if in_order:
+                state["body"].extend(payload)
+                state["server_next"] += len(payload)
+            if (flags & FLAG_FIN) != 0 and in_order:
+                state["server_next"] += 1
+                state["fin"] = True
+            if payload or (flags & FLAG_FIN):
+                sock.send(build_frame(
+                    client_mac, client_port, state["client_seq"],
+                    state["server_next"], FLAG_ACK))
+
+        expected_body = Path(__file__).resolve().parents[1].joinpath(
+            "kernel/tests/ext2/index.html").read_bytes()
+        ok = True
+        for client_port, state in peers.items():
+            response = bytes(state["body"])
+            separator = response.find(b"\r\n\r\n")
+            header = (response[:separator].decode("iso-8859-1")
+                      if separator >= 0 else "")
+            body = response[separator + 4:] if separator >= 0 else b""
+            content_type = ""
+            for line in header.split("\r\n"):
+                if line.lower().startswith("content-type:"):
+                    content_type = line.split(":", 1)[1].strip().lower()
+                    break
+            passed = (state["fin"] and
+                      header.startswith("HTTP/1.") and
+                      " 200 " in header.split("\r\n", 1)[0] and
+                      body == expected_body and content_type == "text/html")
+            print("  concurrent HTTPd client %-5d: %s" %
+                  (client_port, "PASS" if passed else "FAIL"))
+            if not passed:
+                print("    response bytes=%d fin=%s type=%s" %
+                      (len(response), state["fin"], content_type))
+            ok = ok and passed
+        return ok
+    finally:
+        sock.close()
+        SERVER_PORT = saved_server_port
+
+
 def main() -> int:
     if not os.path.exists(f"/sys/class/net/{IFACE}"):
         print(f"error: interface {IFACE!r} not found -- set ETH_TEST_IFACE?", file=sys.stderr)
         return 1
     client_mac = read_iface_mac(IFACE)
+
+    if os.environ.get("TCP_TEST_HTTPD_CONCURRENCY") == "1":
+        ok = test_httpd_concurrent_accept_read(client_mac)
+        print("  HTTPd concurrent accept/read routing: %s" %
+              ("PASS" if ok else "FAIL"))
+        return 0 if ok else 1
 
     if os.environ.get("TCP_TEST_CONNECTED_IO") == "1":
         io_ok = test_connected_large_response(client_mac)

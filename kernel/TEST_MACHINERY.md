@@ -64,8 +64,9 @@ The private AArch64 syscall numbers are 451 through 453 in
 
 ## Syscall evidence counters
 
-`kernel/kernel/syscall_test_evidence.tkb` has twelve fields, and
-`kernel/kernel/syscall.tkb` has 24 calls to their record, read, or reset helpers.
+`kernel/kernel/syscall_test_evidence.tkb` has twelve counters and one socket
+fixture phase flag. The socket counters stop recording after the core-0
+fixture, before concurrent HTTPd workers start.
 They only feed test messages or one-shot wait markers; syscall behavior does
 not branch on these counters.
 
@@ -104,7 +105,7 @@ syscall.
 ## Build-check decision
 
 The source audit measured three private syscall numbers, twelve evidence
-fields, 24 references to their helpers in `syscall.tkb`, and four lifecycle
+counters, one phase flag, and four lifecycle
 checkpoint functions. A name-based check could catch additions that follow
 those exact naming patterns, but it would miss a new hook named differently,
 a test-only branch added to an existing function, or a stale reason in this
