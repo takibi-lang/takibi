@@ -2811,10 +2811,24 @@ fn syscall_peer_safe(number: usize, fd: usize) -> bool {
     // and admitting this call would deepen it. Keeping rt_sigprocmask on
     // core 0 avoids adding the peer's own mask write; it does not repair the
     // existing cross-CPU delivery/take race tracked by GitHub issue #563.
+    // GitHub issue #581: read and write on a connected TCP descriptor. Every
+    // field of the connection is read and written under its owner
+    // (tcp_connection_take's TaskMutex, revalidated by generation after the
+    // acquire), and the receive and transmit paths hold the sole network
+    // capability, which is itself behind a Mutex. So a peer's call and core
+    // 0's call on the same connection serialize on the owner, and two
+    // connections serialize on the capability. The inetd response mode is
+    // not admitted: it is a boot fixture that never runs on a peer.
+    //
+    // Nothing else on a connected descriptor is: close, shutdown, poll and
+    // accept stay on core 0. A connection duplicated onto a standard
+    // descriptor is not the terminal.
+    if (kernel_connected_fd_is_open(fd)) {
+        if (kernel_syscall_inetd_mode()) { return false; }
+        return number == 63 || number == AARCH64_NR_WRITE;
+    }
     // The terminal: a peer's output goes through its console ring (#534),
-    // and input is ordered by the run lock (#547). A connection duplicated
-    // onto a standard descriptor is not the terminal.
-    if (kernel_connected_fd_is_open(fd)) { return false; }
+    // and input is ordered by the run lock (#547).
     if (number == AARCH64_NR_WRITE) {
         return kernel_syscall_terminal_is_open(fd);
     }
@@ -2951,6 +2965,17 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             kernel_process_current_cpu_allows(guard);
         process_run_unlock(guard);
         if (current_cpu_allows == false) { return SyscallAction::Migrate; }
+    } else {
+        // GitHub issue #581: the same question on core 0, where the answer
+        // cannot be to leave -- core 0 has no idle loop to return to. A
+        // process whose mask excludes core 0 is here only because it was
+        // born here (clone runs on core 0) or because the gate above sent it
+        // one syscall that has now finished. Without this it stayed until
+        // the next timer tick, which a short-lived process such as an HTTPd
+        // connection handler never reaches, so its peer-safe calls all ran
+        // on core 0. Asking for a reschedule lets the syscall-return path
+        // hand it back to the ready set, where a CPU its mask names takes it.
+        kernel_process_reschedule_if_excluded_here();
     }
     if (cpu_id() != 0 && syscall_peer_safe(number, x0) == false) {
         return SyscallAction::Migrate;
@@ -3139,6 +3164,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                 }
                                 NetworkCapabilityPutResult::Stored => {
                                     tcp_connection_put(owner);
+                                    workload_peer_socket_served(true);
                                     return SyscallAction::Resume(amount);
                                 }
                             }
@@ -3825,6 +3851,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                    }
                    conn.socket_buffer_offset = conn.socket_buffer_offset + buffered;
                    tcp_connection_put(owner);
+                   workload_peer_socket_served(false);
                    return SyscallAction::Resume(buffered);
                }
                let ready: NetRxCanAcquire = match network_capability_take() {
@@ -3875,6 +3902,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     match network_capability_put(next) {
                         NetworkCapabilityPutResult::Stored => {
                             tcp_connection_put(owner);
+                            workload_peer_socket_served(false);
                             return SyscallAction::Resume(amount);
                         }
                         NetworkCapabilityPutResult::Conflict => {

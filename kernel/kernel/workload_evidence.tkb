@@ -197,6 +197,12 @@ struct WorkloadBusyPair {
     peer_tty_pid: usize;
     peer_tty_reading: bool;
     peer_tty_reported: bool;
+    // GitHub issue #581: the inittab pins the resident HTTPd to the
+    // secondary with taskset, so its forked connection handler makes its
+    // connected read and write there. Latched once both have succeeded.
+    peer_socket_read: bool;
+    peer_socket_write: bool;
+    peer_socket_reported: bool;
     // A report this file refused: an unknown tag, or a caller that is not
     // a child of init. Zero on a healthy boot, and printed only when it
     // is not.
@@ -1165,6 +1171,30 @@ fn workload_peer_tty_progress(count: usize, checksum: usize) -> usize {
         "workload: peer tty read its 17-byte line on the secondary cpu, none lost, repeated or reordered\n");
     process_run_unlock(guard);
     return 2;
+}
+
+// A connected read or write returned its bytes on this CPU. Only a peer
+// counts; the line is printed once, when both directions have been seen
+// there. The caller is an ordinary BusyBox HTTPd child, not a fixture that
+// registers itself, so there is no pid to check -- the evidence is that
+// the syscall completed on the secondary at all, which the peer-safety
+// table refused before GitHub issue #581.
+fn workload_peer_socket_served(is_write: bool) {
+    if (cpu_id() != SECONDARY_CORE_ID) { return; }
+    let guard = process_run_lock();
+    if (is_write) {
+        workload_busy_pair.peer_socket_write = true;
+    } else {
+        workload_busy_pair.peer_socket_read = true;
+    }
+    if (workload_busy_pair.peer_socket_reported == false &&
+        workload_busy_pair.peer_socket_read &&
+        workload_busy_pair.peer_socket_write) {
+        workload_busy_pair.peer_socket_reported = true;
+        kernel_boot_log(
+            "workload: pinned httpd read and wrote a connected socket on the secondary cpu\n");
+    }
+    process_run_unlock(guard);
 }
 
 private fn workload_busy_start_profile(pid: usize, input_steps: usize)

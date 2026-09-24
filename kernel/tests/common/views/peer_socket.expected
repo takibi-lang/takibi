@@ -1,0 +1,1 @@
+workload: pinned httpd read and wrote a connected socket on the secondary cpu

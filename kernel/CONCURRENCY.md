@@ -48,6 +48,23 @@ Rollback validates the still-Running parent and its child-list head under the
 run lock, restores that head to the cancelled child's next sibling, and only
 then reaps the cancelled record. Older live children and zombies remain linked.
 
+## Connected sockets on a peer
+
+`read` and `write` on a connected TCP descriptor are admitted on any CPU
+(GitHub issue #581); close, shutdown, poll and accept are not, and the inetd
+response mode is not. Every `TcpConnection` field those two calls read or
+write is accessed under the connection's owner: `tcp_connection_take` takes
+the connection's `TaskMutex` and revalidates the pool generation after the
+acquire, and the open check happens after that, not before. Receive and
+transmit additionally hold the sole network capability, which is behind a
+`Mutex`, so two connections serialize there. Poll's pending-read probe takes
+no connection lock on purpose -- it must not wait behind a receive -- and the
+read that follows re-decides open and available bytes under the owner.
+
+The connected-socket counters in `kernel/kernel/syscall_test_evidence.tkb`
+have one writer at a time only because one process uses a connected
+descriptor at a time; its limitations section says what would break that.
+
 ## Lock classes
 
 Two, and the distinction is which contexts may take them.

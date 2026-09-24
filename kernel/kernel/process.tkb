@@ -4000,6 +4000,17 @@ fn kernel_process_current_cpu_allows(
         cpu_id(), execution_here().current_handle.pool_index);
 }
 
+// Core 0's half of the affinity gate (GitHub issue #581): ask for a
+// reschedule at this syscall's return when the running process's mask no
+// longer names this CPU. The run lock covers the snapshot, since another CPU
+// may be changing the mask.
+fn kernel_process_reschedule_if_excluded_here() {
+    let guard = process_run_lock();
+    let allowed: bool = kernel_process_current_cpu_allows(guard);
+    process_run_unlock(guard);
+    if (allowed == false) { kernel_process_request_reschedule(); }
+}
+
 // The gate handed this peer's current syscall away, and its frame has
 // already been rewound. Publish this peer as having no current EL0 context,
 // as an exit to idle does; the process stays Running, and so unselectable,

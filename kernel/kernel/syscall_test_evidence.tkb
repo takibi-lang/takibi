@@ -12,6 +12,15 @@
 // own "NOT SYNCHRONIZED, single-core dispatch only" limitation -- every
 // record_*() call here assumes it runs to completion on core 0 with no
 // concurrent syscall dispatch from another core.
+//
+// One exception (2026-09-24): connected_read_calls, connected_write_calls
+// and partial_write_observed are also recorded from a peer since GitHub
+// issue #581 admitted connected read/write there. They still have one
+// writer at a time only because one process uses a connected descriptor at
+// a time: the resident HTTPd's listener refuses to accept while its
+// connection child is alive, and the inetd and boot socket fixtures run on
+// core 0 before it starts. A second concurrent connection user would make
+// these counts racy.
 
 struct SyscallTestEvidence {
     open_calls: usize;
