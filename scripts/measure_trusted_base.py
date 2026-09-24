@@ -12,8 +12,11 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+from check_lock_discipline import ATOMIC_ALLOWED, ATOMIC_RE
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 KERNEL_DIR = REPO_ROOT / "kernel"
+ATOMIC_CATEGORY = "raw atomic operation"
 
 
 def read_depfile_sources(depfile: Path) -> list[str]:
@@ -96,6 +99,8 @@ def unsafe_blocks(path: Path) -> list[tuple[int, str]]:
 
 
 def classify_unsafe(body: str) -> str:
+    if ATOMIC_RE.search(body):
+        return ATOMIC_CATEGORY
     if re.search(r"\bas\s+\*io\b", body):
         return "MMIO pointer construction/access"
     if re.search(r"\bas\s+\*", body):
@@ -171,6 +176,12 @@ def main() -> None:
             category = classify_unsafe(body)
             sites[category].append((path, line))
             body_lines[category] += body.count("\n") + 1
+    atomic_files = {
+        path.relative_to(KERNEL_DIR).as_posix()
+        for path, _ in sites[ATOMIC_CATEGORY]
+    }
+    missing_allowlist = sorted(atomic_files - ATOMIC_ALLOWED.keys())
+    unused_allowlist = sorted(ATOMIC_ALLOWED.keys() - atomic_files)
     raw_casts = classify_raw_pointer_casts(source_paths)
     assembly = classify_assembly()
 
@@ -184,12 +195,24 @@ def main() -> None:
 
     print("Explicit unsafe blocks (primary syntactic rationale)")
     categories = (
-        "MMIO pointer construction/access", "raw memory pointer/cast",
-        "unchecked indexing/slice operation", "unclassified",
+        ATOMIC_CATEGORY, "MMIO pointer construction/access",
+        "raw memory pointer/cast", "unchecked indexing/slice operation",
+        "unclassified",
     )
     for category in categories:
         print(f"  {category:36}: {len(sites[category]):4} blocks, "
               f"{body_lines[category]:5} lines")
+    if missing_allowlist or unused_allowlist:
+        print("  atomic ordering / RULE 2 allowlist: MISMATCH")
+        for name in missing_allowlist:
+            print(f"    classified atomic use is not allowlisted: {name}")
+        for name in unused_allowlist:
+            print(f"    allowlisted file has no classified atomic block: {name}")
+    else:
+        print(
+            f"  atomic ordering / RULE 2 allowlist: agree "
+            f"({len(atomic_files)} files)"
+        )
     print(f"  {'total':36}: "
           f"{sum(len(sites[c]) for c in categories):4} blocks, "
           f"{sum(body_lines[c] for c in categories):5} lines")
@@ -217,6 +240,9 @@ def main() -> None:
         for category in sorted(sites):
             for path, line in sites[category]:
                 print(f"  {category}: {path.relative_to(REPO_ROOT)}:{line}")
+
+    if missing_allowlist or unused_allowlist:
+        sys.exit("error: atomic trusted-base inventory disagrees with RULE 2 allowlist")
 
 
 if __name__ == "__main__":

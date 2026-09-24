@@ -95,6 +95,13 @@ rules globally.
 - `*io T` supplies volatile access semantics. The register address, width,
   permitted access direction, ordering requirements, and device state still
   come from the platform specification and driver reasoning.
+- Raw atomic intrinsics (`atomic_load_acquire`, `atomic_store_release`,
+  `atomic_swap_acquire`, `atomic_fetch_add_relaxed`, and
+  `atomic_compare_exchange_acquire`) make a cross-core ordering or atomicity
+  claim. The inventory reports these blocks as `raw atomic operation` and
+  checks that their source files agree with RULE 2's allowlist in
+  `scripts/check_lock_discipline.py`. This identifies the review question; it
+  does not prove the protocol correct.
 - DMA/cache builtins provide target-specific cache and ordering operations.
   Buffer ownership, descriptor validity, device completion, cache topology,
   and the chosen protocol remain trusted unless represented by separate
@@ -161,5 +168,8 @@ The classifier is deliberately mechanical. A block containing several kinds
 of operation receives one primary category, so the detailed list is a review
 queue rather than a semantic proof. A new explicit escape surface must either
 fit a documented category or make the inventory report it as unclassified.
+When one block contains a raw atomic intrinsic and another recognized pattern,
+the atomic rationale is its primary category. The inventory also fails if its
+classified atomic source files and the RULE 2 allowlist disagree.
 Language guarantee changes belong in `SPEC.md` and must also be reflected here
 when they change the meaning of a trusted boundary.
