@@ -25,7 +25,8 @@ step, landed as its own commit.
 
 1. **True multicore support**: every online core runs ordinary processes,
    any core can issue any syscall, and a process can continue on another
-   core. #9, #581 (network admission remains), #582, #583, #589; and the
+   core. #9, #591 (dynamic exec, which #581's test needs), #581 (network
+   admission remains), #582, #583, #589; and the
    multicore-correctness issues #570, #559, #550, #560, #482, #464, #468,
    #556, #573.
 2. **Run the multicore workload mainly on RPi5 and fix what it finds.** #584
