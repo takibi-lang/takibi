@@ -2,7 +2,7 @@
 (using menhir 3.0)
 (name takibi)
 
-(generate_opam_files false)
+(generate_opam_files true)
 
 (source
  (github takibi-lang/takibi))
@@ -20,7 +20,14 @@
  (version 0.1.0)
  (synopsis "Takibi Language")
  (description "Takibi Language")
- (depends ocaml llvm bisect_ppx_ng)
+ (depends
+  (ocaml (>= 5.4.0))
+  (llvm (= 19-static))
+  dune-build-info
+  menhir
+  ppx_deriving
+  (alcotest :with-test)
+  (bisect_ppx_ng :dev))
  (tags
   ("language" "compiler")))
 

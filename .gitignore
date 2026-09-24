@@ -51,7 +51,6 @@ setup.log
 
 # Dune generated files
 *.install
-takibi.opam
 
 # Local OPAM switch
 _opam/

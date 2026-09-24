@@ -84,13 +84,8 @@ jobs:
       - name: OCaml dependencies
         run: |
           bash scripts/run_lane.sh ci-opam bash -euo pipefail -c '
-            # llvm is pinned because it must match the LLVM installed above;
-            # the rest float, because pinning a version that later leaves the
-            # opam repository breaks a build for a reason unrelated to the
-            # change under test.
-            opam install -y dune dune-build-info menhir ppx_deriving \
-                            alcotest bisect_ppx_ng
-            opam install -y llvm.19-static
+            # dune-project is the dependency source; Dune generates takibi.opam.
+            opam install -y --deps-only --with-test .
           '
 
       # Runs langcheck, slowcheck and the unit tests a second time, since cicheck below

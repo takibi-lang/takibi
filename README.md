@@ -323,6 +323,16 @@ e2fsprogs and e2tools
 The `.devcontainer/` configuration installs the maintained versions and the
 additional real-hardware tools.
 
+From the repository root, install the OCaml packages declared by the project
+with:
+
+```sh
+opam install --deps-only --with-test .
+```
+
+Install the system LLVM 19 libraries and tools first; the project pins its
+OCaml bindings to the matching `llvm.19-static` package.
+
 ## Prior art
 
 Takibi is not an implementation of a single existing language. Its direction

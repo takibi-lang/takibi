@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
-"""Controls for the CI dependency link, including what it is allowed to read.
-
-This check shipped without controls and broke CI within one run: it used
-`rglob("dune")`, which on a runner matched `_opam/bin/dune` -- the dune
-executable, since `ocaml/setup-ocaml` puts a local switch in the workspace --
-and crashed decoding an ELF as UTF-8. The tree here has no `_opam`, so
-nothing local disagreed.
-
-The case that would have caught it is the last one below, and it is the reason
-these exist: a check's SCAN SET is as much a part of it as its rule, and a
-scan set is only pinned down by something that plants what must not be in it.
-"""
+"""Controls for the link between dune files and Dune package metadata."""
 
 import contextlib
 import importlib.util
@@ -36,8 +25,36 @@ def load():
     return module
 
 
-# GitHub issue #526: a control asserts the number of scenarios it ran.
 CASES = CaseCount()
+
+DUNE_OK = """
+(library
+ (name core)
+ (libraries takibi llvm.target llvm.analysis))
+(instrumentation (backend bisect_ppx_ng))
+(executable
+ (name main)
+ (libraries takibi dune-build-info))
+(test
+ (name test_core)
+ (preprocess (pps ppx_deriving.show))
+ (libraries takibi alcotest unix))
+"""
+
+PROJECT_OK = """
+(lang dune 3.17)
+(name takibi)
+(package
+ (name takibi)
+ (depends
+  (ocaml (>= 5.4.0))
+  (llvm (= 19-static))
+  dune-build-info
+  menhir
+  ppx_deriving
+  (alcotest :with-test)
+  (bisect_ppx_ng :dev)))
+"""
 
 
 def run(checker):
@@ -48,28 +65,19 @@ def run(checker):
     return status, output.getvalue()
 
 
-def planted(checker, workspace, dune_text, workflow_text):
-    """Point the checker at one planted dune file and one planted workflow."""
+def planted(checker, workspace, dune_text, project_text):
+    """Point the checker at one planted dune file and project metadata."""
     dune = workspace / "dune"
     dune.write_text(dune_text, encoding="ascii")
-    workflow = workspace / "ci.yml"
-    workflow.write_text(workflow_text, encoding="ascii")
-    checker.WORKFLOW = workflow
+    project = workspace / "dune-project"
+    project.write_text(project_text, encoding="ascii")
+    checker.DUNE_PROJECT = project
     checker.tracked_dune_files = lambda: [dune]
-
-
-WORKFLOW_OK = """
-      - run: |
-          opam install -y dune dune-build-info menhir ppx_deriving \\
-                          alcotest bisect_ppx_ng
-          opam install -y llvm.19-static
-"""
 
 
 def main() -> int:
     checker = load()
 
-    # The repository itself passes, or nothing below means anything.
     status, output = run(checker)
     if status != 0:
         print(f"FAIL ci-opam-deps control: the repository failed\n{output}")
@@ -80,38 +88,35 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory() as name:
         workspace = Path(name)
-
         cases = [
-            ("a complete workflow",
-             "(executable (name main) (libraries takibi dune-build-info))",
-             WORKFLOW_OK, 0, "PASS ci-opam-deps"),
-            # The failure that actually happened.
-            ("a library the workflow does not install",
-             "(executable (name main) (libraries takibi dune-build-info))",
-             WORKFLOW_OK.replace("dune dune-build-info", "dune"),
-             1, "does not install"),
-            ("a library nobody mapped to a package",
+            ("all library packages are declared", DUNE_OK, PROJECT_OK, 0,
+             "PASS ci-opam-deps"),
+            ("a findlib library package is missing", DUNE_OK,
+             PROJECT_OK.replace("  dune-build-info\n", ""), 1,
+             "dune-build-info"),
+            ("the coverage backend package is missing", DUNE_OK,
+             PROJECT_OK.replace("(bisect_ppx_ng :dev)", ""), 1,
+             "bisect_ppx_ng"),
+            ("a findlib library has no package mapping",
              "(executable (name main) (libraries takibi yojson))",
-             WORKFLOW_OK, 1, "neither in PACKAGE_OF nor in PROVIDED"),
-            # Compiler-provided names need no package, and a versioned pin
-            # still names its package.
-            ("only compiler-provided libraries",
+             PROJECT_OK, 1, "neither in PACKAGE_OF nor in PROVIDED"),
+            ("only compiler and project libraries are used",
              "(executable (name main) (libraries takibi unix))",
-             WORKFLOW_OK, 0, "PASS ci-opam-deps"),
-            ("a ppx dependency",
-             "(library (name t) (preprocess (pps ppx_deriving.show)))",
-             WORKFLOW_OK, 0, "PASS ci-opam-deps"),
-            # Both directions of "this check examined nothing".
-            ("no dune file names a library",
-             "(executable (name main))", WORKFLOW_OK, 1,
-             "no dune file names a library"),
-            ("a workflow that installs nothing",
-             "(executable (name main) (libraries takibi dune-build-info))",
-             "      - run: make\n", 1, "names no opam packages"),
+             "(package (name takibi) (depends ocaml))", 0,
+             "PASS ci-opam-deps"),
+            ("a ppx findlib package is mapped", DUNE_OK,
+             PROJECT_OK, 0, "PASS ci-opam-deps"),
+            ("no dune file names a library", "(executable (name main))",
+             PROJECT_OK, 1, "no dune file names a library"),
+            ("no takibi package stanza exists", DUNE_OK,
+             "(lang dune 3.17) (name another)", 1,
+             "no package stanza named `takibi`"),
+            ("the package has no depends field", DUNE_OK,
+             "(package (name takibi))", 1, "has no `(depends ...)` stanza"),
         ]
 
-        for label, dune_text, workflow_text, expected, needle in cases:
-            planted(checker, workspace, dune_text, workflow_text)
+        for label, dune_text, project_text, expected, needle in cases:
+            planted(checker, workspace, dune_text, project_text)
             status, output = run(checker)
             if status != expected:
                 print(f"FAIL ci-opam-deps control: {label} exited {status}, "
@@ -126,13 +131,6 @@ def main() -> int:
     # switch puts in the workspace, and reading it is what broke CI. The
     # checker must not see it at all -- not decode it leniently, not skip it
     # after a failed decode, but never open it.
-    #
-    # Deliberately NOT under _build. The version that broke CI already
-    # excluded _build by name, so a probe there is protected by the very
-    # filter whose insufficiency is the bug, and the control passes against
-    # the broken code. It goes in a uniquely named directory at the top of
-    # the workspace instead -- untracked, removed below, and never the real
-    # `_opam`, which may be somebody's live switch.
     probe = ROOT / f"_ci-opam-deps-control-{os.getpid()}"
     probe.mkdir(parents=True, exist_ok=True)
     try:
@@ -148,11 +146,10 @@ def main() -> int:
 
     report_pass(
         "ci-opam-deps controls",
-        "the repository passes, a missing package and an unmapped "
-        "library are reported, compiler-provided names and ppx "
-        "dependencies are accepted, an empty dune file and an empty "
-        "workflow are refused, and an untracked binary named `dune` in "
-        "the workspace is never opened",
+        "Dune package metadata covers tracked findlib dependencies, missing "
+        "and unmapped packages are reported, compiler-provided libraries "
+        "are accepted, malformed package metadata is refused, and an "
+        "untracked binary named `dune` is never opened",
         cases=CASES.ran)
     return 0
 
