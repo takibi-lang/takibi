@@ -84,9 +84,18 @@ PEER_IDLE = "kernel_process_stack_idle_complete"
 # holding, and this check then deadlocks the core it wants to watch: CPU0
 # takes the process-run lock inside wait4 and spins on a core gdb has
 # stopped. Seen as `Thread 1 received signal SIGINT ... in spin_lock` with a
-# verdict blaming the fixture. This is the idle loop's entry to the
-# scheduler, reached once per idle wakeup and before it takes anything.
-PEER_PARK = "kernel_process_secondary_start"
+# verdict blaming the fixture. Two places qualify: the idle loop's entry to
+# the scheduler, reached once per idle wakeup and before it takes anything,
+# and the syscall dispatcher's entry, reached before a syscall takes
+# anything. The second is the one that matters since GitHub issue #592: a
+# child that pins itself to CPU 1 now moves there at once, so CPU 1 is
+# usually RUNNING the spinner when core 0 sends its kill. Parking only at
+# the idle entry then let CPU 1 run the spinner until it exited on its own,
+# and the child was a zombie before the walk this check exists to hold open
+# -- the failure was the fixture ending its own subject, about 1 run in 4.
+# The spinner makes a syscall on every iteration, so it stops at the
+# dispatcher, alive.
+PEER_PARKS = ("kernel_process_secondary_start", "kernel_syscall_dispatch")
 # Step 3/8 of the syscall return, whose second argument is the value the
 # dispatcher decided on.
 RESUME = "kernel_syscall_resume_return"
@@ -241,13 +250,16 @@ def run() -> None:
     # CPU1's can be waiting on it.
     gdb.execute(f"thread {CPU1_THREAD}", to_string=True)
     gdb.execute("set scheduler-locking on")
-    park = gdb.Breakpoint(PEER_PARK)
-    park.condition = f"$_thread == {CPU1_THREAD}"
-    parked = run_bounded("continue", PEER_BUDGET) and park.hit_count > 0
-    park.delete()
+    parks = [gdb.Breakpoint(name) for name in PEER_PARKS]
+    for park in parks:
+        park.condition = f"$_thread == {CPU1_THREAD}"
+    parked = (run_bounded("continue", PEER_BUDGET) and
+              any(park.hit_count > 0 for park in parks))
+    for park in parks:
+        park.delete()
     if not parked:
         gdb.execute("set scheduler-locking off")
-        verdict(False, "CPU1 never reached the scheduler entry it is parked "
+        verdict(False, "CPU1 never reached a lock-free entry it is parked "
                 f"at, so it could not be frozen without whatever lock it "
                 f"holds. UART tail: {uart_tail()!r}")
         gdb.execute("detach")
