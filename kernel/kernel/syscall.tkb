@@ -2795,17 +2795,13 @@ fn syscall_peer_safe(number: usize, fd: usize) -> bool {
         number == AARCH64_NR_RT_SIGACTION) {
         return true;
     }
-    // NOT rt_sigprocmask, and a finding rather than a scope line decided it.
-    // `kernel_process_signal_deliver_to` reads the TARGET's `signal_mask`
-    // and read-modify-writes its `pending_signals` from whichever CPU the
-    // SENDER is on, under no lock: `kill` from another process and a child's
-    // exit both reach it. A peer writing its own mask would be a third
-    // unsynchronized party to those two words.
-    //
-    // The race those words are already in is not this increment's to fix,
-    // and admitting this call would deepen it. Keeping rt_sigprocmask on
-    // core 0 avoids adding the peer's own mask write; it does not repair the
-    // existing cross-CPU delivery/take race tracked by GitHub issue #563.
+    // rt_sigprocmask (GitHub issue #570). The process's own signal_mask is
+    // read by a sender on any CPU and written only by the process itself,
+    // and pending_signals is read-modify-written by both; every such access
+    // is under the process-run lock now (process_signal_pending_raise and
+    // _clear take its guard), so a peer writing its own mask is one more
+    // locked party rather than an unsynchronized one.
+    if (number == 135) { return true; }
     // GitHub issue #581: read and write on a connected TCP descriptor. Every
     // field of the connection is read and written under its owner
     // (tcp_connection_take's TaskMutex, revalidated by generation after the

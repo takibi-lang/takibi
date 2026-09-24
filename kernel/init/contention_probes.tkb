@@ -31,6 +31,7 @@ use "kernel/kernel/pool_walk_contention_evidence.tkb";
 use "kernel/kernel/init_once_contention_evidence.tkb";
 use "kernel/kernel/tcp_connection_contention_evidence.tkb";
 use "kernel/kernel/ext2_mutation_contention_evidence.tkb";
+use "kernel/kernel/signal_contention_evidence.tkb";
 
 fn contention_probes() !{unsafe} {
     // GitHub issue #445: the first evidence that this kernel's
@@ -126,5 +127,12 @@ fn contention_probes() !{unsafe} {
         kernel_boot_log("ext2 mutation contention: a peer is told no mutation is in flight while core 0 holds nothing, and told there is one while it holds the guard ok\n");
     } else {
         kernel_boot_log("ext2 mutation contention: failed\n");
+    }
+    // GitHub issue #570: the signal words, which a sender on one CPU and
+    // the target on another both read-modify-write.
+    if (signal_contention_probe()) {
+        kernel_boot_log("signal contention: two cores setting and clearing pending signal bits lost updates with a forged guard and none under the process-run lock ok\n");
+    } else {
+        kernel_boot_log("signal contention: failed\n");
     }
 }

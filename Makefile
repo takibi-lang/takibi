@@ -341,6 +341,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/kernel/profile_samples.tkb \
 	kernel/kernel/profile_timeline.tkb \
 	kernel/kernel/schedule_contention_evidence.tkb \
+	kernel/kernel/signal_contention_evidence.tkb \
 	kernel/kernel/syscall.tkb \
 	kernel/kernel/syscall_test_evidence.tkb \
 	kernel/kernel/syscall_test_lifecycle.tkb \

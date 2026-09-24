@@ -62,6 +62,19 @@ process core 0 may run, never slot 0's bootstrap record. Every other case in
 which core 0 has nothing to run -- all processes blocked, or an exit with no
 successor -- still waits in EL1 and reruns the syscall.
 
+## Signal words
+
+`pending_signals` and `signal_mask` are read-modify-written by a sender on
+whichever CPU it runs on and by the target on its own (GitHub issue #570).
+Outside a record's construction and teardown every access holds the
+process-run lock: raising and clearing go through
+`process_signal_pending_raise` and `process_signal_pending_clear`, which
+take its guard, and delivery takes the guard its caller holds -- the exit
+path's own, or `kill`'s, taken around the delivery only. Nothing delivery
+calls takes that lock again. `kernel/kernel/signal_contention_evidence.tkb`
+shows the lost update with a forged guard and none under the lock.
+Reporters (DDB, the oops) read the words without it, as reporters do.
+
 ## Connected sockets on a peer
 
 `read` and `write` on a connected TCP descriptor are admitted on any CPU

@@ -252,6 +252,10 @@ fn kernel_secondary_main(context: usize) {
                 if (ext2_mutation_contention_is_armed()) {
                     ext2_mutation_contention_secondary_run();
                 }
+                // GitHub issue #570: the signal words' read-modify-write.
+                if (signal_contention_is_armed()) {
+                    signal_contention_secondary_run();
+                }
             }
             match kernel_process_secondary_start() {
                 ProcessSecondaryStart::Idle => {}

@@ -30,3 +30,4 @@ pool walk: a Live view holds the read lock through payload use, and a stale rele
 ext2 mutation contention stage: complete
 ext2 mutation contention counts: asked=2 clear=1 held=1
 ext2 mutation contention: a peer is told no mutation is in flight while core 0 holds nothing, and told there is one while it holds the guard ok
+signal contention: two cores setting and clearing pending signal bits lost updates with a forged guard and none under the process-run lock ok

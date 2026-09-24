@@ -245,23 +245,25 @@ fn affinity_probe() {
     if (on_peer == false) {
         affinity_fail(bs"affinity: never ran on cpu 1\n");
     }
-    // newfstatat is outside the peer-safety table: asked from CPU 1, it is
-    // rerun on core 0 and must still answer. The buffer starts as 0xFF, so
-    // the regular-file bit in st_mode is a real content check rather than a
-    // return code that a zeroed struct would also satisfy.
+    // rt_sigprocmask is admitted on a peer since GitHub issue #570 put the
+    // signal words under the process-run lock. The buffer starts as 0xFF,
+    // so this is a real content check rather than a return code a zeroed
+    // struct would also satisfy: the kernel wrote the mask, and no signal
+    // this kernel accepts lives in the top byte.
     let mut sigset_buffer: [u8; SIGSET_BYTES];
     for index: usize in 0..<SIGSET_BYTES { sigset_buffer[index] = 0xFF; }
     if (svc5(RT_SIGPROCMASK_SYSCALL, SIG_BLOCK, 0,
-             sigset_buffer as *u8 as usize, SIGSET_BYTES, 0) != 0) {
+             sigset_buffer as *u8 as usize, SIGSET_BYTES, 0) != 0 ||
+        sigset_buffer[SIGSET_BYTES - 1] != 0) {
         affinity_fail(
             bs"affinity: rt_sigprocmask asked from cpu 1 did not answer\n");
     }
-    // The buffer starts as 0xFF, so this is a real content check rather than
-    // a return code a zeroed struct would also satisfy: the kernel wrote the
-    // mask, and no signal this kernel accepts lives in the top byte.
-    if (sigset_buffer[SIGSET_BYTES - 1] != 0) {
-        affinity_fail(
-            bs"affinity: rt_sigprocmask asked from cpu 1 did not answer\n");
+    // kill is outside the peer-safety table: asked from CPU 1, it is rerun
+    // on core 0 and must still answer. Signal 0 to an absent pid is ESRCH,
+    // an answer that only a lookup produces, so a call that went nowhere
+    // cannot pass for one that ran.
+    if (svc5(KILL_SYSCALL, AFFINITY_ABSENT_PID, 0, 0, 0, 0) != LINUX_ESRCH) {
+        affinity_fail(bs"affinity: kill asked from cpu 1 did not answer\n");
     }
     // Say it BEFORE the spinner goes. This line is written from CPU 1, so it
     // is published into this CPU's console ring, and the only thing that
@@ -272,7 +274,7 @@ fn affinity_probe() {
     // the boot. The spinner's millisecond naps are what keep the drain
     // running, which is the reason it exists -- so it has to outlive the
     // output, not just the migration.
-    affinity_say(bs"affinity: pinned to cpu 1, where rt_sigprocmask, outside the peer-safe table, still answered\n");
+    affinity_say(bs"affinity: pinned to cpu 1, where kill, outside the peer-safe table, still answered\n");
     // GitHub issue #579: every OTHER online cpu, while the same spinner is
     // still keeping core 0 occupied. Cpu 1 is proved above; this walks the
     // rest of the reported online set, which is empty on two-vCPU QEMU and

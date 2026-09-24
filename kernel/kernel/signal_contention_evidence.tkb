@@ -1,0 +1,174 @@
+// GitHub issue #570: do two cores really lose a signal bit when they
+// read-modify-write pending_signals together, and does the process-run lock
+// really stop it?
+//
+// A sender sets a target's bit from whichever CPU it runs on, and the
+// target clears its own from another. Each is a load, an operation and a
+// store. A core that stores a word built from a load taken before another
+// core's store erases that core's bit -- a SIGTERM that never arrives.
+//
+// Two-sided, and deterministic rather than hoped for. Core 0 computes its
+// raise with process_signal_pending_raised, then releases core 1 to raise
+// its own bit with process_signal_pending_raise, waits a bounded window, and
+// only then stores with process_signal_pending_store. These are the real
+// functions the kernel's signal paths call; the split is theirs, not a copy.
+//
+//   phase 1, FORGED guard: core 1 completes inside the window, core 0's
+//     stale store erases its bit. Every round must lose it.
+//   phase 2, the process-run lock: core 0 holds the lock across its load and
+//     store, so core 1's raise waits for the lock, runs after the store, and
+//     no round loses it.
+//
+// The first version of this probe let both cores loop and waited for the
+// windows to meet. QEMU lost 716 updates; four-core RPi5 lost none in eight
+// attempts, and the probe failed for want of a race it could not provoke.
+// kernel/kernel/freelist_contention_evidence.tkb reached the same answer
+// earlier: split the operation and rendezvous between the halves.
+//
+// Current limitations (2026-09-24):
+// - A RECORD OF ITS OWN, not a live process's. The functions take the
+//   record, so this passes one that no scheduler walk reaches; what is
+//   measured is the read-modify-write and its lock, not delivery's wake of a
+//   blocked target (that is scheduled_process_blocked_take's, GitHub issue
+//   #589).
+// - ONE PEER. secondary.tkb runs this from core 1 only.
+// - The window is time, so a core 1 that could not raise inside it in the
+//   forged phase reads as a missed round rather than a lost update; the
+//   phase then fails, which is the honest verdict for a race not shown.
+
+use "kernel/kernel/process.tkb";
+use "kernel/lib/execution_model.tkb";
+
+const SIGNAL_CONTENTION_ROUNDS: usize = 16;
+const SIGNAL_PRIMARY_BIT: usize = 1;
+const SIGNAL_SECONDARY_BIT: usize = 2;
+
+private let mut signal_probe_record: ProcessRecord;
+
+// 0 = phase 1, forged guard. 1 = phase 2, locked.
+private let mut signal_probe_phase: usize;
+private let mut signal_probe_armed: usize;
+// Round core 1 may raise for, and the last round it finished raising.
+private let mut signal_probe_go: usize;
+private let mut signal_probe_done: usize;
+
+private fn signal_probe_addr(value: *usize) -> usize { return value as usize; }
+
+fn signal_contention_is_armed() -> bool !{unsafe} {
+    return unsafe { atomic_load_acquire(signal_probe_addr(
+        &signal_probe_armed)) } == 1;
+}
+
+fn signal_contention_secondary_run() !{unsafe} {
+    let record: *ProcessRecord = &signal_probe_record;
+    let mut served: usize = 0;
+    while (unsafe { atomic_load_acquire(signal_probe_addr(
+               &signal_probe_armed)) } == 1) {
+        let go: usize = unsafe { atomic_load_acquire(signal_probe_addr(
+            &signal_probe_go)) };
+        if (go != served) {
+            if (unsafe { atomic_load_acquire(signal_probe_addr(
+                    &signal_probe_phase)) } == 1) {
+                let guard = process_run_lock();
+                process_signal_pending_raise(guard, record,
+                                             SIGNAL_SECONDARY_BIT);
+                process_run_unlock(guard);
+            } else {
+                let forged = process_run_guard_forge_unlocked();
+                process_signal_pending_raise(forged, record,
+                                             SIGNAL_SECONDARY_BIT);
+                process_run_guard_discard_unlocked(forged);
+            }
+            served = go;
+            unsafe { atomic_store_release(signal_probe_addr(
+                &signal_probe_done), go); }
+        }
+    }
+}
+
+private fn signal_probe_wait_done(round: usize, window: i64) -> bool
+        !{unsafe} {
+    let start: i64 = read_cntpct();
+    while (read_cntpct() - start < window) {
+        if (unsafe { atomic_load_acquire(signal_probe_addr(
+                &signal_probe_done)) } == round) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// One round. Returns 1 when core 1's bit was lost, 0 when it survived, and
+// 2 when core 1 never raised at all.
+private fn signal_probe_round(round: usize, locked: bool) -> usize
+        !{unsafe} {
+    let record: *ProcessRecord = &signal_probe_record;
+    record.pending_signals = 0;
+    // Unlocked, core 1 can finish, so wait until it has (bounded at a
+    // second). Locked, it cannot until the store below, so the window only
+    // gives it time to reach the lock; it is short because core 0 spends it
+    // with IRQs masked.
+    let mut window: i64 = read_cntfrq();
+    if (locked) { window = read_cntfrq() >> 10; }
+    if (locked) {
+        let guard = process_run_lock();
+        let value: usize = process_signal_pending_raised(
+            guard, record, SIGNAL_PRIMARY_BIT);
+        unsafe { atomic_store_release(signal_probe_addr(&signal_probe_go),
+                                      round); }
+        let early: bool = signal_probe_wait_done(round, window);
+        process_signal_pending_store(guard, record, value);
+        process_run_unlock(guard);
+    } else {
+        let forged = process_run_guard_forge_unlocked();
+        let value: usize = process_signal_pending_raised(
+            forged, record, SIGNAL_PRIMARY_BIT);
+        unsafe { atomic_store_release(signal_probe_addr(&signal_probe_go),
+                                      round); }
+        let early: bool = signal_probe_wait_done(round, window);
+        process_signal_pending_store(forged, record, value);
+        process_run_guard_discard_unlocked(forged);
+    }
+    if (signal_probe_wait_done(round, read_cntfrq()) == false) { return 2; }
+    if ((record.pending_signals & SIGNAL_SECONDARY_BIT) == 0) { return 1; }
+    return 0;
+}
+
+// Rounds that lost core 1's bit, or SIGNAL_CONTENTION_ROUNDS + 1 when core 1
+// missed a round and the phase says nothing.
+private fn signal_contention_run_phase(locked: usize) -> usize !{unsafe} {
+    unsafe {
+        atomic_store_release(signal_probe_addr(&signal_probe_phase), locked);
+        atomic_store_release(signal_probe_addr(&signal_probe_go), 0);
+        atomic_store_release(signal_probe_addr(&signal_probe_done), 0);
+        atomic_store_release(signal_probe_addr(&signal_probe_armed), 1);
+    }
+    let mut lost: usize = 0;
+    let mut missed: bool = false;
+    for index: usize in 0..<SIGNAL_CONTENTION_ROUNDS {
+        match signal_probe_round(index + 1, locked == 1) {
+            0 => {}
+            1 => { lost = lost + 1; }
+            _ => { missed = true; }
+        }
+    }
+    unsafe { atomic_store_release(signal_probe_addr(&signal_probe_armed), 0); }
+    signal_probe_record.pending_signals = 0;
+    if (missed) { return SIGNAL_CONTENTION_ROUNDS + 1; }
+    return lost;
+}
+
+fn signal_contention_probe() -> bool !{unsafe} {
+    static_assert(KERNEL_ACTIVE_CORES >= 2,
+                  "signal contention evidence requires one peer");
+    let unlocked_lost: usize = signal_contention_run_phase(0);
+    let locked_lost: usize = signal_contention_run_phase(1);
+    kernel_boot_log("signal contention counts: unlocked-lost=");
+    uart_put_udec(unlocked_lost);
+    kernel_boot_log(" locked-lost=");
+    uart_put_udec(locked_lost);
+    kernel_boot_log(" rounds=");
+    uart_put_udec(SIGNAL_CONTENTION_ROUNDS);
+    kernel_boot_log("\n");
+    return unlocked_lost == SIGNAL_CONTENTION_ROUNDS && locked_lost == 0;
+}

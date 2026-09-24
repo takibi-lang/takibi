@@ -5571,21 +5571,59 @@ fn kernel_process_current_clear_deadline() {
     }
 }
 
+// GitHub issue #570: pending_signals and signal_mask are read-modify-written
+// by a sender on whichever CPU it runs on and by the target on its own, so
+// every access outside a record's construction and teardown goes through the
+// process-run lock. The guard parameter makes holding it a compile-time
+// requirement rather than a comment, and the record is passed rather than a
+// handle so kernel/kernel/signal_contention_evidence.tkb can drive these
+// exact functions on a record of its own that no scheduler walk reaches.
+fn process_signal_pending_raise(guard: borrow ProcessRunGuard[lock],
+                                record: *ProcessRecord, bits: usize) {
+    process_signal_pending_store(
+        guard, record, process_signal_pending_raised(guard, record, bits));
+}
+
+// The raise's two halves, the load-and-or and the store, named separately so
+// the contention probe can hold one core between them while the other
+// raises. That split is what makes the unlocked lost update happen every
+// round rather than when two three-instruction windows happen to meet.
+fn process_signal_pending_raised(guard: borrow ProcessRunGuard[lock],
+                                 record: *ProcessRecord, bits: usize)
+        -> usize {
+    return record.pending_signals | bits;
+}
+
+fn process_signal_pending_store(guard: borrow ProcessRunGuard[lock],
+                                record: *ProcessRecord, value: usize) {
+    record.pending_signals = value;
+}
+
+fn process_signal_pending_clear(guard: borrow ProcessRunGuard[lock],
+                                record: *ProcessRecord, bits: usize) {
+    record.pending_signals = record.pending_signals & ~bits;
+}
+
 fn kernel_process_current_signal_mask() -> usize {
+    let guard = process_run_lock();
+    let mut mask: usize = 0;
     if (execution_here().current_live) {
-        return scheduled_process_record_of(execution_here().current_handle)
+        mask = scheduled_process_record_of(execution_here().current_handle)
             .signal_mask;
     }
-    return 0;
+    process_run_unlock(guard);
+    return mask;
 }
 
 fn kernel_process_current_set_signal_mask(mask: usize) {
+    let guard = process_run_lock();
     if (execution_here().current_live) {
         // SIGKILL (9) and SIGSTOP (19) cannot be blocked.
         let unmaskable: usize = (1 << 8) | (1 << 18);
         scheduled_process_record_of(execution_here().current_handle)
             .signal_mask = mask & ~unmaskable;
     }
+    process_run_unlock(guard);
 }
 
 fn kernel_process_current_sigchld_ignored() -> bool {
@@ -5614,16 +5652,19 @@ fn kernel_process_current_signal_take(wait_set: usize)
     if (execution_here().current_live == false) {
         return ProcessSignalPendingResult::Missing;
     }
+    let guard = process_run_lock();
     let record: *ProcessRecord =
         scheduled_process_record_of(execution_here().current_handle);
     let available: usize = record.pending_signals & wait_set;
     for bit: usize in 0..<64 {
         let bit_mask: usize = 1 << bit;
         if ((available & bit_mask) != 0) {
-            record.pending_signals = record.pending_signals & ~bit_mask;
+            process_signal_pending_clear(guard, record, bit_mask);
+            process_run_unlock(guard);
             return ProcessSignalPendingResult::Pending(bit + 1);
         }
     }
+    process_run_unlock(guard);
     return ProcessSignalPendingResult::Missing;
 }
 
@@ -5635,14 +5676,17 @@ fn kernel_process_current_termination_signal_take()
     if (execution_here().current_live == false) {
         return ProcessSignalPendingResult::Missing;
     }
+    let guard = process_run_lock();
     let record: *ProcessRecord =
         scheduled_process_record_of(execution_here().current_handle);
     let sigterm_bit: usize = 1 << 14;
     if ((record.pending_signals & sigterm_bit) == 0 ||
         (record.signal_mask & sigterm_bit) != 0) {
+        process_run_unlock(guard);
         return ProcessSignalPendingResult::Missing;
     }
-    record.pending_signals = record.pending_signals & ~sigterm_bit;
+    process_signal_pending_clear(guard, record, sigterm_bit);
+    process_run_unlock(guard);
     return ProcessSignalPendingResult::Pending(15);
 }
 
@@ -5652,9 +5696,11 @@ fn kernel_process_current_termination_signal_take()
 // outlives it.
 fn kernel_process_current_termination_signal_restore() {
     if (execution_here().current_live == false) { return; }
+    let guard = process_run_lock();
     let record: *ProcessRecord =
         scheduled_process_record_of(execution_here().current_handle);
-    record.pending_signals = record.pending_signals | (1 << 14);
+    process_signal_pending_raise(guard, record, 1 << 14);
+    process_run_unlock(guard);
 }
 
 fn kernel_process_current_prepare_signal_wait(wait_set: usize) {
@@ -5676,8 +5722,9 @@ must_use variant ProcessSignalSendResult {
     Delivered;
 }
 
-private fn kernel_process_signal_deliver_to(target: ProcessHandle,
-                                            signum: usize)
+private fn kernel_process_signal_deliver_to(
+        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+        target: ProcessHandle, signum: usize)
         -> ProcessSignalSendResult !{unsafe} {
     if (signum == 0 || signum > 64 ||
         scheduled_process_handle_matches(target) == false ||
@@ -5692,7 +5739,7 @@ private fn kernel_process_signal_deliver_to(target: ProcessHandle,
     if ((record.signal_mask & bit) == 0 && signum != 15) {
         return ProcessSignalSendResult::Delivered;
     }
-    record.pending_signals = record.pending_signals | bit;
+    process_signal_pending_raise(guard, record, bit);
     if (scheduled_process_state_of(target) == ProcessSlotState::Blocked &&
         scheduled_process_wait_reason_of(target) ==
             ProcessWaitReason::Signal &&
@@ -5702,7 +5749,7 @@ private fn kernel_process_signal_deliver_to(target: ProcessHandle,
             ScheduledProcessBlockedTakeResult::Blocked(resources) => {
                 let (owner, blocked) = resources;
                 el0_context_set_x0(record.saved_sp, signum);
-                record.pending_signals = record.pending_signals & ~bit;
+                process_signal_pending_clear(guard, record, bit);
                 record.sigwait_set = 0;
                 record.deadline_ticks = 0;
                 record.deadline_result = 0;
@@ -5715,8 +5762,10 @@ private fn kernel_process_signal_deliver_to(target: ProcessHandle,
     return ProcessSignalSendResult::Delivered;
 }
 
-fn kernel_process_signal_child_exit(parent: ProcessHandle) {
-    let result = kernel_process_signal_deliver_to(parent, 17);
+fn kernel_process_signal_child_exit(
+        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+        parent: ProcessHandle) {
+    let result = kernel_process_signal_deliver_to(guard, parent, 17);
     match result {
         ProcessSignalSendResult::Missing => {}
         ProcessSignalSendResult::Delivered => {}
@@ -5732,8 +5781,11 @@ fn kernel_process_signal_send(pid: usize, signum: usize)
         ProcessSlotForPidResult::Found(found) => { found }
     };
     if (signum == 0) { return ProcessSignalSendResult::Delivered; }
-    return kernel_process_signal_deliver_to(
-        scheduled_process_handle_of_slot(slot), signum);
+    let guard = process_run_lock();
+    let result = kernel_process_signal_deliver_to(
+        guard, scheduled_process_handle_of_slot(slot), signum);
+    process_run_unlock(guard);
+    return result;
 }
 
 fn kernel_process_block_deadline(current_sp: usize) -> usize {
@@ -7275,7 +7327,7 @@ fn kernel_process_child_exit(status: usize) -> usize {
     // the same exit scheduling decision. In particular, a peer scheduler
     // must not observe the parent wake before this CPU has stopped exposing
     // the child as Running.
-    kernel_process_signal_child_exit(parent);
+    kernel_process_signal_child_exit(exit_guard, parent);
     match scheduled_process_running_take(exit_guard, child) {
         ScheduledProcessRunningTakeResult::Missing => {
             current_process_exit(current);
