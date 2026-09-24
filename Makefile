@@ -917,7 +917,8 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	debugfs -w -R 'set_inode_field /bin/busybox-extras mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /lib/ld-musl-aarch64.so.1 mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/taskset mode 0100755' $@.tmp >/dev/null 2>&1
-	debugfs -w -R 'set_inode_field /etc/interp-absent mode 0100755' $@.tmp >/dev/null 2>&1
+	# Execute-only file for the maintained access/faccessat R_OK and W_OK checks.
+	debugfs -w -R 'set_inode_field /etc/interp-absent mode 0100111' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /etc/interp-other mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /etc/init.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/httpd.sh mode 0100755' $@.tmp >/dev/null 2>&1

@@ -152,6 +152,7 @@ const LINUX_SYSLOG_ACTION_SIZE_BUFFER: usize = 10;
 // what Linux does -- any OTHER value really is a descriptor, and an
 // unopened one really is EBADF.
 const LINUX_AT_FDCWD: usize = 0xFFFFFFFFFFFFFF9C;
+const LINUX_AT_EACCESS: usize = 0x200;
 const LINUX_F_DUPFD: usize = 0;
 const LINUX_F_SETFD: usize = 2;
 const LINUX_F_DUPFD_CLOEXEC: usize = 1030;
@@ -418,6 +419,18 @@ must_use variant SyscallExecTargetResult {
     Inode(usize);
 }
 
+// The kernel has no user/group identity model yet. A requested operation is
+// permitted when any corresponding owner, group, or other mode bit is set.
+// Both faccessat X_OK and execve use this same execute-bit rule; execve also
+// requires a regular file before it asks the question.
+private fn syscall_inode_mode_allows(inode_mode: usize, requested: usize)
+        -> bool {
+    if ((requested & 4) != 0 && (inode_mode & 0x124) == 0) { return false; }
+    if ((requested & 2) != 0 && (inode_mode & 0x92) == 0) { return false; }
+    if ((requested & 1) != 0 && (inode_mode & 0x49) == 0) { return false; }
+    return true;
+}
+
 // Does this pathname name something this kernel may execute at all? Asked
 // before any byte of the file is read, in the order Linux asks it: a
 // directory or a device node is refused for being the wrong kind of object,
@@ -440,7 +453,7 @@ private fn syscall_exec_target(name: []u8) -> SyscallExecTargetResult
             // bypass exec permission -- so a uid-0 process sees this same
             // refusal, which is what makes it the right answer for a kernel
             // that has no uid model of its own yet.
-            if ((mode & 0x49) == 0) {
+            if (syscall_inode_mode_allows(mode, 1) == false) {
                 return SyscallExecTargetResult::NotPermitted;
             }
             return SyscallExecTargetResult::Inode(inode);
@@ -3669,16 +3682,26 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
 
     if (number == 21 || number == 48 || number == 439) {
-        // faccessat(dirfd, pathname, mode): ash probes an external command
-        // before fork/exec. The ext2 fixture deliberately permits the
-        // ext2-resident BusyBox applet links; permission bits are enforced by
-        // the image recipe, while this first syscall slice only needs the
-        // root-directory lookup result.
+        // access(path, mode), faccessat(dirfd, path, mode), and faccessat2
+        // with its fourth flags argument share the inode-mode verdict.
+        // Real and effective identities are identical in this kernel, so
+        // AT_EACCESS selects the same mode check. Other flags require path
+        // behavior (such as no-follow or empty-path) that is not supported.
         if (syscall_ext2_ready == false) {
             return SyscallAction::Resume(LINUX_EBADF);
         }
         let mut path_address: usize = x1;
-        if (number == 21) { path_address = x0; }
+        let mut requested_mode: usize = x2;
+        let mut dirfd: usize = x0;
+        if (number == 21) {
+            path_address = x0;
+            requested_mode = x1;
+            dirfd = LINUX_AT_FDCWD;
+        }
+        if (requested_mode > 7 ||
+            (number == 439 && x3 != 0 && x3 != LINUX_AT_EACCESS)) {
+            return SyscallAction::Resume(LINUX_EINVAL);
+        }
         let path_name: []u8 = match kernel_syscall_path_name(path_address) {
             SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
@@ -3686,11 +3709,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         };
         let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
         let mut lookup_inode: usize = 2;
-        if (path_view[0] != 0x2F && x0 != LINUX_AT_FDCWD) {
-            if (kernel_syscall_directory_is_open(x0) == false) {
+        if (path_view[0] != 0x2F && dirfd != LINUX_AT_FDCWD) {
+            if (kernel_syscall_directory_is_open(dirfd) == false) {
                 return SyscallAction::Resume(LINUX_EBADF);
             }
-            lookup_inode = kernel_syscall_directory_inode(x0);
+            lookup_inode = kernel_syscall_directory_inode(dirfd);
         }
         match ext2_lookup_path_from(
                 syscall_ext2_mount,
@@ -3698,7 +3721,14 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 path_name) {
             Ext2LookupResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
             Ext2LookupResult::NotFound => { return SyscallAction::Resume(LINUX_ENOENT); }
-            Ext2LookupResult::Found(inode_number) => { return SyscallAction::Resume(0); }
+            Ext2LookupResult::Found(inode_number) => {
+                let inode_mode: usize =
+                    ext2_inode_mode(syscall_ext2_mount, inode_number);
+                if (syscall_inode_mode_allows(inode_mode, requested_mode)) {
+                    return SyscallAction::Resume(0);
+                }
+                return SyscallAction::Resume(LINUX_EACCES);
+            }
         }
     }
 
