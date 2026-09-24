@@ -1,1 +1,1 @@
-syscall subset: mmap prot+fd reject, sigaction signum+oldact ok
+syscall subset: mmap prot+fd reject, clone invalid=EINVAL/exhausted=EAGAIN, sigaction signum+oldact ok

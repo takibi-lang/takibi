@@ -1606,20 +1606,21 @@ _kernelcheck-affinity-gdb-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_affinity_gdb_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_AFFINITY_GDB_MODE=reap KERNEL_QEMU_AFFINITY_GDB_SERIAL_PORT=18721 KERNEL_QEMU_AFFINITY_GDB_GDB_PORT=18722 KERNEL_QEMU_AFFINITY_GDB_NETDEV_LOCAL_PORT=18723 KERNEL_QEMU_AFFINITY_GDB_NETDEV_REMOTE_PORT=18724 KERNEL_QEMU_AFFINITY_GDB_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-affinity-reap-qemu" bash scripts/run_kernel_affinity_gdb_qemutest.sh
 
-## Issue #414: the rollback chain inside scheduled_process_alloc has never
-## run -- the arrays it replaced could not fail, so every "give back what
-## was already acquired" path is a failure mode the pooling introduced and
-## nothing exercised. GDB empties the page allocator's free list for the
-## duration of ONE acquisition (address_space_allocate_root, past the
-## record and the stack run) and puts it back at the exhaustion log call
-## the failing arm makes before it rolls anything back. The verdict is the
-## kernel's own end-of-run accounting: the refusal was reported, and every
-## pooled record and page came back. Uses the DWARF-enabled ELF.
+## Issue #414: fail each of the five scheduled_process_alloc acquisitions
+## once, one QEMU boot per point. GDB returns the allocator's OutOfMemory
+## variant directly, including the second root-page request after the first
+## root page has been acquired. The kernel's own end-of-run counters prove
+## the refusal was reported and every pooled record and page came back.
+## Uses the DWARF-enabled ELF.
 kernelcheck-alloc-rollback-qemu: kernelbuild-check
 	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-alloc-rollback-qemu
 
 _kernelcheck-alloc-rollback-qemu:
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_alloc_rollback_qemutest.sh
+	@for point in process-record stack-run address-space-root image-record fd-context; do \
+		bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env \
+			KERNEL_QEMU_ALLOC_ROLLBACK_POINT="$$point" \
+			bash scripts/run_kernel_alloc_rollback_qemutest.sh || exit $$?; \
+	done
 
 ## kernelsh-qemu: boot the standalone kernel, attach the current terminal to
 ## its TCP-backed UART console, and forward localhost:18080 to guest httpd.

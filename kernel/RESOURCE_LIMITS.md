@@ -165,52 +165,45 @@ counted fallbacks -- the process record's, the image record's and the
 address-space backing's -- are printed at the end of the boot suite and are
 0.
 
-Covered since 2026-08-24 (issue #414) for ONE of its five failure points,
-and worth knowing how -- and why the other four are still open: the
-ROLLBACK path when one of those allocations fails inside
-`scheduled_process_alloc`.
-The arrays they replaced could not fail, so the whole chain is a failure
-mode the pooling introduced, and reaching it honestly needs the page
-allocator genuinely empty, which no probe does.
-`make kernelcheck-alloc-rollback-qemu` empties the free list from the
-debugger side for the duration of ONE acquisition
-(`address_space_allocate_root`, past the process record and the kernel
-stack run) and puts it back at the exhaustion log call the failing arm
-makes before it rolls anything back, so the lane injects one failure rather
-than poisoning the run. The verdict is this kernel's own end-of-run
-accounting: `resources: pooled per-process records back to the baseline`
-(the record, the address-space backing, the image record and the fd
-context all came back), `resources: pages=0` (the stack run was parked and
-the root's tables freed), and `resources: no double free`.
+The rollback chain inside `scheduled_process_alloc` has five acquisitions,
+and each can fail after the preceding ones succeeded. The arrays they
+replaced could not fail, so pooling introduced these failure paths; reaching
+them honestly would require exhausting the page allocator's 800 MiB.
+`make kernelcheck-alloc-rollback-qemu` instead runs five QEMU boots and uses
+GDB to return the compiler-described `OutOfMemory` variant at one acquisition
+per boot, without changing allocator state:
 
-**Two things that lane found, both of which it exists to find.** The
-address-space BACKING record was never released at all -- "Nothing
-releases", `address_space.tkb` said, inherited from the array it replaced
-in #392 -- so one record leaked per process ever created, invisible to the
-page check because a pool keeps its chunk page either way. And
-`page_mapping_ref_ceiling_probe` had been depending on that leak: it needs
-two live address spaces to have a below-the-ceiling case, and was reading
-35 where the real number was 1.
+- Process record: `IntrusivePoolInsertResult::OutOfMemory` before the first
+  resource is acquired.
+- Kernel stack run: `PageRunAllocResult::OutOfMemory` after the process record
+  is acquired.
+- Address-space root: the second `page_alloc` in `address_space_allocate_root`
+  returns `PageAllocResult::OutOfMemory`, after the first root page was
+  allocated; the function frees that first page before the outer rollback
+  removes the stack run, backing record, and process record. An ASID is not
+  assigned until process activation, so this chain has no ASID to release.
+- Image record: `IntrusivePoolInsertResult::OutOfMemory` after the process,
+  stack run, and root are acquired.
+- File-descriptor context: the same pool result after the image record is
+  also acquired.
 
-**What is still not covered**: the other four acquisitions in the chain --
-the process record, the kernel stack run, the image record and the fd
-context. Not for want of a breakpoint: emptying the free-list head is a
-clean injection only for single-page `page_alloc`, which is what the
-address-space root uses. Every other one reaches `page_alloc_contiguous`,
-which finds pages by scanning `meta[].occupied` rather than through the
-free list -- so an emptied list sends it down its QUARANTINE path, which
-reports `OutOfMemory` as wanted but deliberately leaks up to `count` pages
-on the way, and the lane would then report a rollback bug that is really
-the injection's own damage. Issue #414 records the options for a poke that
-does not do that.
+Every run fails `scheduled_process_table_probe`, which reports the refusal
+and carries on to the final accounting. The lane requires
+`resources: pooled per-process records back to the baseline`, proving the
+process, address-space backing, image, and fd records came back;
+`resources: pages=0`, proving acquired pages were returned or parked; and
+`resources: no double free`. The syscall subset probe also checks that clone
+allocation exhaustion maps to `-EAGAIN` while invalid clone arguments remain
+`-EINVAL`.
 
-The pooled-record baseline that catches this is taken BEFORE the probes
-(the page baseline is taken after them, for the parked-run reason its own
-comment gives), because the probes are where this boot allocates and
-releases processes in bulk -- a baseline after them would put the most
-interesting acquisitions of the run outside the measured window. That is
-not a hypothetical: armed at the first process creation of the boot, the
-lane passed with a rollback step deliberately deleted.
+The pooled-record baseline is taken BEFORE the probes (the page baseline is
+taken after them for the parked-run reason its own comment gives), because
+the probes allocate and release processes in bulk. A baseline taken after
+them would put the most interesting acquisitions outside the measured
+window. Armed at the first process creation of the boot, deleting a rollback
+step still passed this lane, so the injection is armed only after the pooled
+baseline and on the process-table probe that reports and continues.
+
 - `unified_object_ref_ceiling_probe` (the computed reference bound -- a
   real 256-iteration retain loop, not a shortcut)
 - `page_mapping_ref_ceiling_probe` (the computed mapping bound -- writes the

@@ -4869,7 +4869,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // asking process.tkb for the slot it actually allocated.
         match kernel_process_clone_begin(clone_flags, clone_stack) {
             ProcessCloneResult::Invalid => {
-                return SyscallAction::Resume(LINUX_EINVAL);
+                return kernel_syscall_clone_failure_action(
+                    ProcessCloneFailure::Invalid);
+            }
+            ProcessCloneResult::ResourceExhausted => {
+                return kernel_syscall_clone_failure_action(
+                    ProcessCloneFailure::ResourceExhausted);
             }
             ProcessCloneResult::ChildConstructing(child_pid) => {
                 // Guard against PID 1's own fork of the interactive ash
@@ -5793,6 +5798,18 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
 
 const SYSCALL_TRAP_ESR: usize = 0x54000000;
 
+private fn kernel_syscall_clone_failure_action(
+        failure: ProcessCloneFailure) -> SyscallAction {
+    match failure {
+        ProcessCloneFailure::Invalid => {
+            return SyscallAction::Resume(LINUX_EINVAL);
+        }
+        ProcessCloneFailure::ResourceExhausted => {
+            return SyscallAction::Resume(LINUX_EAGAIN);
+        }
+    }
+}
+
 // Boot-time negative-test coverage for issue #175: the real BusyBox/musl
 // binary never requests PROT_EXEC/a real fd for mmap, an invalid rt_sigaction
 // signum, or a non-null rt_sigaction oldact it then checks byte-for-byte, so
@@ -5829,6 +5846,21 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
             let oldact_va: usize = USER_TEXT_VA + probe_index * PAGE_SIZE;
 
             let mut ok: bool = true;
+
+            // A scheduled_process_alloc failure during clone is distinct
+            // from invalid clone arguments at the Linux syscall boundary.
+            let (invalid_clone_action, invalid_clone_value) =
+                syscall_action_encode(kernel_syscall_clone_failure_action(
+                    ProcessCloneFailure::Invalid));
+            let (exhausted_clone_action, exhausted_clone_value) =
+                syscall_action_encode(kernel_syscall_clone_failure_action(
+                    ProcessCloneFailure::ResourceExhausted));
+            if (invalid_clone_action != 1 ||
+                invalid_clone_value != LINUX_EINVAL ||
+                exhausted_clone_action != 1 ||
+                exhausted_clone_value != LINUX_EAGAIN) {
+                ok = false;
+            }
 
             // mmap: PROT_EXEC is always rejected.
             let (action1, value1) = kernel_syscall_dispatch(

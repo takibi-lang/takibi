@@ -11,8 +11,9 @@
 # payload-free OutOfMemory variant from the debugger side, the way
 # the other focused QEMU GDB runners and
 # scripts/run_kernel_oops_qemutest.sh already poke kernel state without a
-# kernel-side test switch. See scripts/kernel_alloc_rollback.gdb for where it
-# arms and how compiler-emitted return ABI metadata makes the return safe.
+# kernel-side test switch. The Makefile runs it once per acquisition point;
+# see scripts/kernel_alloc_rollback.gdb for where each point arms and how
+# compiler-emitted return ABI metadata makes the return safe.
 #
 # The verdict is the kernel's own end-of-run accounting, not the injection:
 #
@@ -23,16 +24,16 @@
 #     the image record and the fd context. A pool keeps its chunk page
 #     whether or not the record inside it came back, so this is the line
 #     that can see a leaked RECORD; the page line below cannot.
-#   - `resources: pages=0` proves the stack run was parked and the root's
-#     tables were freed rather than leaked.
+#   - `resources: pages=0` proves the stack run was parked and any acquired
+#     root pages were freed rather than leaked.
 #   - `resources: no double free` proves the rollback did not give anything
 #     back twice, which is the other way a rollback chain fails.
 #
 # The boot itself is expected to survive: one process creation is refused,
 # its caller reports, and the run continues. A view of that boot may
-# legitimately differ from the normal lane's (whichever fixture lost its
-# process says so), which is why this lane checks the four accounting lines
-# rather than the view fixtures.
+# legitimately differ from the normal lane's, which is why this lane checks
+# the refused-process report and accounting lines rather than the view
+# fixtures.
 set -euo pipefail
 
 # `set -e` aborts with no context, and a lane's setup prints nothing on
@@ -41,6 +42,34 @@ set -euo pipefail
 trap 'takibi_status=$?; echo "[$(basename "$0")] aborted at line $LINENO with exit $takibi_status: $BASH_COMMAND" >&2' ERR
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ALLOC_ROLLBACK_POINT="${KERNEL_QEMU_ALLOC_ROLLBACK_POINT:-stack-run}"
+case "$ALLOC_ROLLBACK_POINT" in
+    process-record)
+        ALLOC_ROLLBACK_POINT_ID=1
+        ALLOC_ROLLBACK_VARIANT='IntrusivePoolInsertResult::OutOfMemory'
+        ;;
+    stack-run)
+        ALLOC_ROLLBACK_POINT_ID=2
+        ALLOC_ROLLBACK_VARIANT='PageRunAllocResult::OutOfMemory'
+        ;;
+    address-space-root)
+        ALLOC_ROLLBACK_POINT_ID=3
+        ALLOC_ROLLBACK_VARIANT='PageAllocResult::OutOfMemory'
+        ;;
+    image-record)
+        ALLOC_ROLLBACK_POINT_ID=4
+        ALLOC_ROLLBACK_VARIANT='IntrusivePoolInsertResult::OutOfMemory'
+        ;;
+    fd-context)
+        ALLOC_ROLLBACK_POINT_ID=5
+        ALLOC_ROLLBACK_VARIANT='IntrusivePoolInsertResult::OutOfMemory'
+        ;;
+    *)
+        echo "error: unknown allocation rollback point '$ALLOC_ROLLBACK_POINT'" >&2
+        echo 'expected process-record, stack-run, address-space-root, image-record, or fd-context' >&2
+        exit 2
+        ;;
+esac
 ELF="$REPO_ROOT/kernel/build/qemu/kernel-debug.elf"
 # shellcheck source=scripts/kernel_elf_freshness.sh
 . "$REPO_ROOT/scripts/kernel_elf_freshness.sh"
@@ -48,19 +77,20 @@ kernel_elf_refuse_stale "$ELF" || exit 1
 DEBUG_METADATA="$REPO_ROOT/_build/kernel-debug-metadata.json"
 ASH_DIR="$REPO_ROOT/kernel/tests/common/ash"
 ARTIFACT_DIR="${KERNEL_QEMU_ALLOC_ROLLBACK_ARTIFACT_DIR:-${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}/kernel-alloc-rollback-qemu}"
-UART_LOG="$ARTIFACT_DIR/uart.log"
-UART_DRIVER_LOG="$ARTIFACT_DIR/uart-driver.log"
-PEER_LOG="$ARTIFACT_DIR/net-peer.log"
-INTERACTIVE_HTTPD_LISTENER="$ARTIFACT_DIR/interactive-httpd.listener"
+ARTIFACT_POINT_DIR="$ARTIFACT_DIR/$ALLOC_ROLLBACK_POINT"
+UART_LOG="$ARTIFACT_POINT_DIR/uart.log"
+UART_DRIVER_LOG="$ARTIFACT_POINT_DIR/uart-driver.log"
+PEER_LOG="$ARTIFACT_POINT_DIR/net-peer.log"
+INTERACTIVE_HTTPD_LISTENER="$ARTIFACT_POINT_DIR/interactive-httpd.listener"
 # The boot-time HTTP listener, so the network peer waits for the server
 # it is about to request from instead of racing the boot to it.
-FOREGROUND_HTTPD_LISTENER="$ARTIFACT_DIR/foreground-httpd.listener"
-INIT_LISTENER="$ARTIFACT_DIR/init.listener"
-NETWORK_READY="$ARTIFACT_DIR/network.ready"
-INTERACTIVE_HTTPD_READY="$ARTIFACT_DIR/interactive-httpd.ready"
-INTERACTIVE_HTTPD_DONE="$ARTIFACT_DIR/interactive-httpd.done"
+FOREGROUND_HTTPD_LISTENER="$ARTIFACT_POINT_DIR/foreground-httpd.listener"
+INIT_LISTENER="$ARTIFACT_POINT_DIR/init.listener"
+NETWORK_READY="$ARTIFACT_POINT_DIR/network.ready"
+INTERACTIVE_HTTPD_READY="$ARTIFACT_POINT_DIR/interactive-httpd.ready"
+INTERACTIVE_HTTPD_DONE="$ARTIFACT_POINT_DIR/interactive-httpd.done"
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
-QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
+QEMU_EXT2_IMAGE="$ARTIFACT_POINT_DIR/ext2.img"
 # Every kernelcheck-*-qemu lane can run CONCURRENTLY (`make kernelcheck`
 # builds with -j by default, see AGENTS.md), so these four numbers must not
 # collide with any other lane's. The claims are spread across two places --
@@ -78,13 +108,13 @@ TIMEOUT_SECS="${KERNEL_QEMU_ALLOC_ROLLBACK_TIMEOUT:-${KERNEL_QEMU_TIMEOUT:-90}}"
 export KERNEL_QEMU_TIMEOUT="$TIMEOUT_SECS"
 NETDEV_LOCAL_PORT="${KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_LOCAL_PORT:-18691}"
 NETDEV_REMOTE_PORT="${KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_REMOTE_PORT:-18692}"
-mkdir -p "$ARTIFACT_DIR"
+mkdir -p "$ARTIFACT_POINT_DIR"
 rm -f "$INTERACTIVE_HTTPD_LISTENER" "$INTERACTIVE_HTTPD_READY" \
     "$INTERACTIVE_HTTPD_DONE" "$INIT_LISTENER" "$NETWORK_READY" "$FOREGROUND_HTTPD_LISTENER"
 cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
-exec 9>"$ARTIFACT_DIR/runner.lock"
+exec 9>"$ARTIFACT_POINT_DIR/runner.lock"
 if ! flock -n 9; then
-    echo "FAIL kernel/qemu alloc-rollback: another runner already owns $ARTIFACT_DIR" >&2
+    echo "FAIL kernel/qemu alloc-rollback: another runner already owns $ARTIFACT_POINT_DIR" >&2
     exit 1
 fi
 # GitHub issue #407: see scripts/qemu_port_guard.py. Refuse to start if
@@ -118,7 +148,7 @@ qemu-system-aarch64 \
     -netdev "dgram,id=net0,local.type=inet,local.host=127.0.0.1,local.port=$NETDEV_LOCAL_PORT,remote.type=inet,remote.host=127.0.0.1,remote.port=$NETDEV_REMOTE_PORT" \
     -device virtio-net-device,netdev=net0,mac=02:00:20:00:00:02,csum=off,guest_csum=off,gso=off,guest_tso4=off,guest_tso6=off,guest_ufo=off,guest_uso4=off,guest_uso6=off,mrg_rxbuf=off,ctrl_vq=off,mq=off,indirect_desc=off,event_idx=off \
     -S -gdb "tcp::$GDB_PORT" \
-    -kernel "$ELF" >"$ARTIFACT_DIR/qemu.log" 2>&1 &
+    -kernel "$ELF" >"$ARTIFACT_POINT_DIR/qemu.log" 2>&1 &
 QEMU_PID=$!
 stop_qemu() {
     if [ -n "${QEMU_PID:-}" ]; then
@@ -146,7 +176,7 @@ trap 'stop_qemu; exit 130' INT TERM HUP
 # while the vCPU is still halted, then sit idle until GDB unhalts it.
 python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --port "socket://127.0.0.1:$SERIAL_PORT" --log "$UART_LOG" \
-    --postmortem-log "$ARTIFACT_DIR/ddb-postmortem.log" \
+    --postmortem-log "$ARTIFACT_POINT_DIR/ddb-postmortem.log" \
     --stdin "$ASH_DIR/ash.stdin" --expected "$ASH_DIR/ash.expected" \
     --timeout "$TIMEOUT_SECS" --stop-marker 'resources: pages=0' \
     --interactive-httpd-listener-file "$INTERACTIVE_HTTPD_LISTENER" \
@@ -158,9 +188,9 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     >"$UART_DRIVER_LOG" 2>&1 &
 uart_driver_pid=$!
 
-# Arm the injection: three stops (arm after the baseline, select the process
-# allocation path, then force-return from its stack-run acquisition),
-# after which GDB's batch command list ends and it detaches -- which resumes
+# Arm the injection after the pooled-record baseline, select one acquisition
+# point, then force-return its failure variant. GDB's batch command list ends
+# and it detaches -- which resumes
 # the guest, the same automatic behaviour the other GDB lanes rely on.
 # The whole sequence is over before the boot suite's first fixture, so
 # nothing here holds the run.
@@ -170,21 +200,22 @@ uart_driver_pid=$!
 # race against its own startup. A connected session that did not reach both
 # the helper and lane markers is a real failure of this lane, not a race, so
 # it is not retried.
-gdb_log="$ARTIFACT_DIR/arm-gdb.log"
+gdb_log="$ARTIFACT_POINT_DIR/arm-gdb.log"
 armed=false
 for _ in $(seq 1 50); do
     timeout "$TIMEOUT_SECS" gdb-multiarch -q -batch "$ELF" \
         -ex "target remote :$GDB_PORT" \
         -ex "source $REPO_ROOT/scripts/kernel_debug_metadata.gdb" \
         -ex "takibi-debug-metadata $DEBUG_METADATA" \
+        -ex "set \$alloc_rollback_point = $ALLOC_ROLLBACK_POINT_ID" \
         -x "$REPO_ROOT/scripts/kernel_alloc_rollback.gdb" \
         >"$gdb_log" 2>&1 || true
     if grep -q 'could not connect\|Connection refused' "$gdb_log"; then
         sleep 0.1
         continue
     fi
-    if grep -q 'takibi-force-variant-return: PageRunAllocResult::OutOfMemory via registers' "$gdb_log" &&
-       grep -q 'alloc-rollback: forced PageRunAllocResult::OutOfMemory' "$gdb_log"; then
+    if grep -q "takibi-force-variant-return: $ALLOC_ROLLBACK_VARIANT via registers" "$gdb_log" &&
+       grep -q "alloc-rollback: forced point=$ALLOC_ROLLBACK_POINT" "$gdb_log"; then
         armed=true
     fi
     break
@@ -216,7 +247,17 @@ sed 's/^/  /' "$UART_DRIVER_LOG"
 
 if ! grep -q '^resource exhausted: physical page allocator capacity=[0-9][0-9]*' "$UART_LOG"; then
     echo "FAIL kernel/qemu alloc-rollback: the kernel never reported the injected exhaustion" >&2
-    echo "artifacts: $ARTIFACT_DIR" >&2
+    echo "artifacts: $ARTIFACT_POINT_DIR" >&2
+    exit 1
+fi
+if ! grep -q '^process table: failed$' "$UART_LOG"; then
+    echo "FAIL kernel/qemu alloc-rollback: process-table caller did not report the refused allocation at $ALLOC_ROLLBACK_POINT" >&2
+    echo "artifacts: $ARTIFACT_POINT_DIR" >&2
+    exit 1
+fi
+if ! grep -qF 'syscall subset: mmap prot+fd reject, clone invalid=EINVAL/exhausted=EAGAIN, sigaction signum+oldact ok' "$UART_LOG"; then
+    echo "FAIL kernel/qemu alloc-rollback: clone exhaustion did not map to -EAGAIN" >&2
+    echo "artifacts: $ARTIFACT_POINT_DIR" >&2
     exit 1
 fi
 missing=""
@@ -233,8 +274,8 @@ if [ -n "$missing" ]; then
     echo "FAIL kernel/qemu alloc-rollback: the rollback did not give everything back" >&2
     echo "missing from the end-of-run accounting:$missing" >&2
     grep -E '^resources:|^resource exhausted:|^process table: records MISSING' "$UART_LOG" >&2 || true
-    echo "artifacts: $ARTIFACT_DIR" >&2
+    echo "artifacts: $ARTIFACT_POINT_DIR" >&2
     exit 1
 fi
 
-echo "PASS kernel/qemu alloc-rollback: one acquisition refused mid-chain, every record and page given back"
+echo "PASS kernel/qemu alloc-rollback ($ALLOC_ROLLBACK_POINT): the caller reported the refusal and every record and page came back"

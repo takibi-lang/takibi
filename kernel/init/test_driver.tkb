@@ -1058,7 +1058,7 @@ fn kernel_test_common_probes() {
         kernel_boot_log("user memory root isolation: failed\n");
     }
     if (kernel_syscall_subset_probe()) {
-        kernel_boot_log("syscall subset: mmap prot+fd reject, sigaction signum+oldact ok\n");
+        kernel_boot_log("syscall subset: mmap prot+fd reject, clone invalid=EINVAL/exhausted=EAGAIN, sigaction signum+oldact ok\n");
     } else {
         kernel_boot_log("syscall subset: failed\n");
     }

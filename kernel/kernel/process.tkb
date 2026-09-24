@@ -3740,8 +3740,14 @@ fn kernel_process_yield_handle(guard: borrow ProcessRunGuard[lock],
     }
 }
 
+must_use variant ProcessCloneFailure {
+    Invalid;
+    ResourceExhausted;
+}
+
 must_use variant ProcessCloneResult {
     Invalid;
+    ResourceExhausted;
     ChildConstructing(usize);
 }
 
@@ -6175,6 +6181,7 @@ fn kernel_process_trace_block_wake_probe() -> bool !{unsafe} {
     let mut setup_ok: bool = false;
     match kernel_process_clone_begin(0x11, 0) {
         ProcessCloneResult::Invalid => {}
+        ProcessCloneResult::ResourceExhausted => {}
         ProcessCloneResult::ChildConstructing(child_pid) => {
             if (child_pid == 2 &&
                 kernel_process_clone_context_install(parent_frame, child_frame) ==
@@ -6286,6 +6293,7 @@ fn kernel_process_fanout_probe() -> bool !{unsafe} {
     for i: usize in 0..<3 {
         match kernel_process_clone_begin(0x11, 0) {
             ProcessCloneResult::Invalid => { return false; }
+            ProcessCloneResult::ResourceExhausted => { return false; }
             ProcessCloneResult::ChildConstructing(child_pid) => { pids[i] = child_pid; }
         }
         execution_here().current_handle = parent_handle;
@@ -6309,6 +6317,7 @@ fn kernel_process_fanout_probe() -> bool !{unsafe} {
     let mut cancelled_pid: usize = 0;
     match kernel_process_clone_begin(0x11, 0) {
         ProcessCloneResult::Invalid => { return false; }
+        ProcessCloneResult::ResourceExhausted => { return false; }
         ProcessCloneResult::ChildConstructing(pid) => { cancelled_pid = pid; }
     }
     match kernel_process_clone_rollback() {
@@ -6511,6 +6520,7 @@ fn kernel_process_scheduler_probe() -> bool {
     if (bootstrap_peer_refused == false) { return false; }
     match kernel_process_clone_begin(0x11, 0) {
         ProcessCloneResult::Invalid => { return false; }
+        ProcessCloneResult::ResourceExhausted => { return false; }
         ProcessCloneResult::ChildConstructing(child_pid) => {
             // This probe later installs synthetic saved stack pointers and
             // drives the scheduler by direct calls. Keep that test-only
@@ -6729,7 +6739,7 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
     // below, and kernel_syscall_clone_child_return publishes Ready.
     match scheduled_process_alloc_pending(false) {
         ScheduledPooledProcessAllocResult::Full => {
-            return ProcessCloneResult::Invalid;
+            return ProcessCloneResult::ResourceExhausted;
         }
         ScheduledPooledProcessAllocResult::Allocated(pooled) => {
             let mut child: ProcessHandle =
