@@ -39,17 +39,16 @@ step, landed as its own commit.
 
 ### Territory B: everything else, ordered by current priority
 
-1. **Concrete correctness and evidence gaps:** #388.
-2. **Kernel and userspace capability:** #432, #436, #535, #537, #539, #536,
+1. **Kernel and userspace capability:** #436, #535, #537, #539, #536,
    #171, #204, #433, #430, #434, #435, #220.
-3. **Resource use and measured performance:** #389, #422, #497, #520, #553,
+2. **Resource use and measured performance:** #389, #422, #497, #520, #553,
    #386, #502, #503.
-4. **Compiler safety and language research:** #58, #203, #252, #200, #201,
+3. **Compiler safety and language research:** #58, #203, #252, #200, #201,
    #282, #129, #374, #417, #155, #28, #8.
-5. **Toolchain, portability and hardware-lane support:** #576, #568, #123,
+4. **Toolchain, portability and hardware-lane support:** #576, #568, #123,
    #124, #122, #95, #51, #50, #85, #268.
-6. **Deferred or not a scheduled work item:** #555, #250, #444, #429, #149,
-   #567.
+5. **Deferred or not a scheduled work item:** #432, #555, #250, #444, #429,
+   #149, #567.
 
 Items are ordered within each band as well as between bands. The deferred
 items stay listed so a changed premise can bring them back into the queue.
