@@ -15,6 +15,8 @@ const EXIT_SYSCALL: usize = 93;
 const SETAFFINITY_SYSCALL: usize = 122;
 const GETAFFINITY_SYSCALL: usize = 123;
 const KILL_SYSCALL: usize = 129;
+const EXECVE_SYSCALL: usize = 221;
+const LINUX_ENOENT: usize = 0xFFFFFFFFFFFFFFFE;
 // The probe's example of a syscall the peer-safety table does NOT admit.
 // It has to be one that STAYS outside, and phase B entry 6 is a sequence of
 // widenings of exactly that table: this was uname until entry 6's first
@@ -258,12 +260,21 @@ fn affinity_probe() {
         affinity_fail(
             bs"affinity: rt_sigprocmask asked from cpu 1 did not answer\n");
     }
-    // kill is outside the peer-safety table: asked from CPU 1, it is rerun
-    // on core 0 and must still answer. Signal 0 to an absent pid is ESRCH,
-    // an answer that only a lookup produces, so a call that went nowhere
-    // cannot pass for one that ran.
+    // kill is admitted on a peer since GitHub issue #583's first increment;
+    // signal 0 to an absent pid is ESRCH, an answer only a lookup produces.
     if (svc5(KILL_SYSCALL, AFFINITY_ABSENT_PID, 0, 0, 0, 0) != LINUX_ESRCH) {
         affinity_fail(bs"affinity: kill asked from cpu 1 did not answer\n");
+    }
+    // execve is outside the peer-safety table -- the process lifecycle is
+    // the last thing it will admit -- so asked from CPU 1 it is rerun on
+    // core 0 and must still answer. A pathname that names nothing is
+    // ENOENT, decided by an ext2 lookup before any image is chosen, so a
+    // call that went nowhere cannot pass for one that ran.
+    let mut exec_argv: [usize; 1];
+    exec_argv[0] = 0;
+    if (svc5(EXECVE_SYSCALL, bs"/affinity-absent\0" as *u8 as usize,
+             exec_argv as *usize as usize, 0, 0, 0) != LINUX_ENOENT) {
+        affinity_fail(bs"affinity: execve asked from cpu 1 did not answer\n");
     }
     // Say it BEFORE the spinner goes. This line is written from CPU 1, so it
     // is published into this CPU's console ring, and the only thing that
@@ -274,7 +285,7 @@ fn affinity_probe() {
     // the boot. The spinner's millisecond naps are what keep the drain
     // running, which is the reason it exists -- so it has to outlive the
     // output, not just the migration.
-    affinity_say(bs"affinity: pinned to cpu 1, where kill, outside the peer-safe table, still answered\n");
+    affinity_say(bs"affinity: pinned to cpu 1, where execve, outside the peer-safe table, still answered\n");
     // GitHub issue #579: every OTHER online cpu, while the same spinner is
     // still keeping core 0 occupied. Cpu 1 is proved above; this walks the
     // rest of the reported online set, which is empty on two-vCPU QEMU and

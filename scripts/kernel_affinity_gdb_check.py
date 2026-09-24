@@ -7,11 +7,11 @@ network peer and passes the ports and paths in the environment.
 A process on a peer because its affinity mask put it there may run only the
 syscalls the kernel's peer-safety table allows. Any other is rewound, and
 the process is handed to core 0, which runs the syscall from the start.
-Nothing at EL0 can tell where a syscall ran: /bin/affinity's kill answers
+Nothing at EL0 can tell where a syscall ran: /bin/affinity's execve answers
 the same either way. So this watches the kernel instead, without the kernel
 printing anything for it.
 
-The probe pins itself to CPU 1 and asks for kill, which is outside the
+The probe pins itself to CPU 1 and asks for execve, which is outside the
 table. The only breakpoint armed while it runs is the gate's own tail,
 kernel_syscall_migrate_return, so the probe's many other syscalls run at
 full speed. That breakpoint must be hit on CPU 1, and the rewound frame
@@ -43,7 +43,7 @@ STEP_TIMEOUT = 60.0
 LABEL = "kernel/qemu affinity-gdb"
 SHELL_READY = b"interactive shell: uart blocked\n"
 COMMAND = b"/bin/affinity\n"
-PINNED = b"affinity: pinned to cpu 1, where kill, outside the peer-safe table, still answered"
+PINNED = b"affinity: pinned to cpu 1, where execve, outside the peer-safe table, still answered"
 # The entry addresses themselves, where x0 and x1 are still the call's
 # arguments. With a debug image (KERNEL_QEMU_AFFINITY_GDB_ELF), a function
 # breakpoint would land after the prologue, where they may be gone.
@@ -51,9 +51,9 @@ GATE = "*kernel_syscall_migrate_return"
 DISPATCH = "*kernel_syscall_dispatch"
 # The syscall /bin/affinity uses to make the gate fire. It must stay
 # OUTSIDE syscall_peer_safe: this was uname until entry 6 admitted it, and
-# getcwd until the increment after that, and rt_sigprocmask until #570
-# admitted it. The check holds the two together.
-MIGRATED_SYSCALL = 129
+# getcwd until the increment after that, rt_sigprocmask until #570 admitted
+# it, and kill until #583's first increment. The check holds the two together.
+MIGRATED_SYSCALL = 221
 # QEMU's gdbstub numbers vCPUs from 1: thread 1 is CPU0, thread 2 is CPU1.
 CPU0_THREAD = 1
 CPU1_THREAD = 2
@@ -210,7 +210,7 @@ def run() -> None:
     connection.sendall(COMMAND)
     continue_bounded()
     if asked.hit_count == 0:
-        verdict(False, "/bin/affinity never asked kill from CPU 1, so "
+        verdict(False, "/bin/affinity never asked execve from CPU 1, so "
                 f"the migration gate had nothing to fire for. {where()}. "
                 f"UART tail: {uart_tail()!r}")
         gdb.execute("detach")
@@ -221,7 +221,7 @@ def run() -> None:
     gate.condition = f"$_thread == {CPU1_THREAD}"
     continue_bounded()
     if gate.hit_count == 0:
-        verdict(False, "/bin/affinity asked kill from CPU 1 and the "
+        verdict(False, "/bin/affinity asked execve from CPU 1 and the "
                 "migration gate did not fire for it: that syscall was not "
                 f"handed to core 0. {where()}. "
                 f"UART tail: {uart_tail()!r}")
@@ -233,7 +233,7 @@ def run() -> None:
     rerun.condition = f"$x1 == {MIGRATED_SYSCALL} && $_thread == {CPU0_THREAD}"
     continue_bounded()
     if rerun.hit_count != 1:
-        verdict(False, "the gate handed kill off on CPU1, but core 0 never "
+        verdict(False, "the gate handed execve off on CPU1, but core 0 never "
                 f"dispatched it again. {where()}. "
                 f"UART tail: {uart_tail()!r}")
         gdb.execute("detach")
@@ -244,12 +244,12 @@ def run() -> None:
     if not seen(lambda text: PINNED in text, STEP_TIMEOUT):
         # Stop the machine again only to say where it is.
         gdb.execute(f"target remote 127.0.0.1:{GDB_PORT}")
-        verdict(False, "core 0 reran kill, but /bin/affinity never printed "
+        verdict(False, "core 0 reran execve, but /bin/affinity never printed "
                 f"its pinned line. {where()}. "
                 f"UART tail: {uart_tail()!r}")
         gdb.execute("detach")
         return
-    verdict(True, "kill asked from CPU1 took the migration gate there, "
+    verdict(True, "execve asked from CPU1 took the migration gate there, "
             "watched as three register-only steps in order, and core 0 "
             "dispatched it again; "
             "/bin/affinity then reported its answer")

@@ -186,7 +186,7 @@ shell ppoll: uart blocked
 ppoll: stdin wait blocked beside a runnable process
 ppoll-probe: fd 0 became readable and the child read its byte
 affinity: default covers cpu 0; cpu 0 alone reads back and is inherited; empty and offline-only masks, short and odd sizes refused; absent pid ESRCH
-affinity: pinned to cpu 1, where kill, outside the peer-safe table, still answered
+affinity: pinned to cpu 1, where execve, outside the peer-safe table, still answered
 affinity: the napping spinner took the SIGTERM
 affinity: every cpu the kernel reports online ran this process, each confirmed by getcpu
 affinity: a spinner napping on cpu 1 took a SIGTERM sent from core 0

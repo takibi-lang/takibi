@@ -2814,7 +2814,12 @@ fn syscall_peer_safe(number: usize, fd: usize) -> bool {
     // is under the process-run lock now (process_signal_pending_raise and
     // _clear take its guard), so a peer writing its own mask is one more
     // locked party rather than an unsynchronized one.
-    if (number == 135) { return true; }
+    //
+    // kill joined in GitHub issue #583's first increment. Delivery runs
+    // under the same lock and a wake publishes through the guarded Blocked
+    // take (#589), so the sender's CPU is not part of the argument. A
+    // self-directed SIGTERM exits, and a peer exit is admitted already.
+    if (number == 135 || number == AARCH64_NR_KILL) { return true; }
     // GitHub issue #581: read and write on a connected TCP descriptor. Every
     // field of the connection is read and written under its owner
     // (tcp_connection_take's TaskMutex, revalidated by generation after the
@@ -2867,6 +2872,15 @@ fn syscall_peer_safe(number: usize, fd: usize) -> bool {
         if (fd == 0 && kernel_syscall_terminal_is_open(fd)) { return true; }
         return kernel_syscall_file_readable(fd);
     }
+    // GitHub issue #583, first increment: the vectored forms. readv reads
+    // only a readable ext2 file (syscall_readv_segment) and writev writes
+    // only the terminal (syscall_writev_segment), the same paths read and
+    // write are admitted for above, so they carry the same argument and the
+    // same mutation question.
+    if (number == AARCH64_NR_READV) { return kernel_syscall_file_readable(fd); }
+    if (number == AARCH64_NR_WRITEV) {
+        return kernel_syscall_terminal_is_open(fd);
+    }
     return false;
 }
 
@@ -2882,7 +2896,9 @@ fn syscall_reaches_filesystem(number: usize, fd: usize) -> bool {
         number == AARCH64_NR_NEWFSTATAT) {
         return true;
     }
-    if (number == 63) { return kernel_syscall_file_readable(fd); }
+    if (number == 63 || number == AARCH64_NR_READV) {
+        return kernel_syscall_file_readable(fd);
+    }
     return false;
 }
 
