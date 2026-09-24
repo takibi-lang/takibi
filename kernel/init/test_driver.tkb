@@ -991,7 +991,7 @@ fn kernel_test_common_probes() {
         // longer exists. What this probe proves is what it says now: two
         // processes, one of each descriptor kind installed, an offset
         // shared across a clone, and every reference given back.
-        kernel_boot_log("fd table: processes=2 kinds=terminal+file+listener+connection, offset shared across clone, refs clean\n");
+        kernel_boot_log("fd table: processes=2 kinds=terminal+file+listener+connection, rollback after 1 install leaves child empty and refs restored, clone retry+offset sharing ok, refs clean\n");
     } else {
         kernel_boot_log("fd table: failed\n");
     }

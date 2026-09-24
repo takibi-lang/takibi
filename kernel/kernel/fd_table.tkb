@@ -927,6 +927,17 @@ private linear struct UnifiedFdCloneTxn[child: usize] {
     private child_value: usize @ child;
     private limit: usize;
 }
+
+variant UnifiedFdCloneFault {
+    Disabled;
+    AfterSuccessfulInstalls(usize);
+}
+
+must_use variant UnifiedFdCloneRunResult {
+    Invalid;
+    Ok;
+    InjectedAfter(usize);
+}
 // GitHub issue #391: `slot` is the pool ADDRESS of the object now, not an
 // index into an array, so there is no range for a refinement to state --
 // the same trade issue #257 made for TcpConnection, and for the same
@@ -1987,10 +1998,16 @@ private fn unified_fd_clone_begin(child_value: usize @ child)
 // obligation because the tuple also carries the replacement linear value.
 private fn unified_fd_clone_install(
         transaction: sink UnifiedFdCloneTxn[child], fd: usize,
-        object_value: usize, generation: usize)
+        object_value: usize, generation: usize, inject_failure: bool)
         -> (UnifiedFdInstallResult, UnifiedFdCloneTxn[child]) !{unsafe} {
     let child_value: usize @ child = transaction.child_value;
     let previous_limit: usize = transaction.limit;
+    if (inject_failure) {
+        let mut next: UnifiedFdCloneTxn[child] = {
+            child_value, previous_limit
+        };
+        return (UnifiedFdInstallResult::NoMemory, next);
+    }
     match unified_fd_install(child_value, fd, object_value, generation) {
         UnifiedFdInstallResult::Ok => {
             let mut next: UnifiedFdCloneTxn[child] = { child_value, fd + 1 };
@@ -2026,19 +2043,29 @@ private fn unified_fd_clone_rollback(
 private fn unified_fd_clone_commit(
         transaction: sink UnifiedFdCloneTxn[child]) {}
 
-fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult !{unsafe} {
-    if (parent == child) { return UnifiedFdResult::Invalid; }
+private fn unified_fd_clone_run(parent: usize, child: usize,
+                                fault: UnifiedFdCloneFault)
+        -> UnifiedFdCloneRunResult !{unsafe} {
+    if (parent == child) {
+        return UnifiedFdCloneRunResult::Invalid;
+    }
     let parent_ctx_address: usize = fd_context_address(parent);
-    if (parent_ctx_address == 0) { return UnifiedFdResult::Invalid; }
+    if (parent_ctx_address == 0) {
+        return UnifiedFdCloneRunResult::Invalid;
+    }
     let parent_ctx: *ProcessFdContext = fd_context_at(parent);
     let child_ctx_address: usize = fd_context_address(child);
-    if (child_ctx_address == 0) { return UnifiedFdResult::Invalid; }
+    if (child_ctx_address == 0) {
+        return UnifiedFdCloneRunResult::Invalid;
+    }
     let child_ctx: *ProcessFdContext = fd_context_at(child);
     // The child must be starting empty. That used to be checked fd by fd
     // against a constant; asking for its lowest open descriptor is the
     // same question over a table that no longer has a fixed width.
     match unified_fd_next_open(child, 0) {
-        UnifiedFdScanResult::Found(taken) => { return UnifiedFdResult::Invalid; }
+        UnifiedFdScanResult::Found(taken) => {
+            return UnifiedFdCloneRunResult::Invalid;
+        }
         UnifiedFdScanResult::Done => {}
     }
     // GitHub issue #295's read-only validation pass, unchanged in purpose:
@@ -2053,19 +2080,21 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult !{unsafe} {
             UnifiedFdScanResult::Done => {}
             UnifiedFdScanResult::Found(fd) => {
                 let (block, block_generation) = fd_block_lookup(parent_ctx, fd);
-                if (block == 0) { return UnifiedFdResult::Invalid; }
+                if (block == 0) {
+                    return UnifiedFdCloneRunResult::Invalid;
+                }
                 let entries: *FdBlock = fd_block_at(block, block_generation);
                 let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
                 let mut parent_handle: UnifiedObjectHandle = {
                     entries.slot[index].object, entries.slot[index].generation
                 };
                 if (unified_object_matches(parent_handle) == false) {
-                    return UnifiedFdResult::Invalid;
+                    return UnifiedFdCloneRunResult::Invalid;
                 }
                 if (unified_object_at(parent_handle).kind !=
                         entries.slot[index].kind ||
                     unified_object_references(parent_handle) == 0) {
-                    return UnifiedFdResult::Invalid;
+                    return UnifiedFdCloneRunResult::Invalid;
                 }
                 from = fd + 1;
                 scanning = true;
@@ -2088,6 +2117,7 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult !{unsafe} {
     // belongs to from ever being written separately -- the exact split
     // issue #295's leak lived in.
     let mut transaction = unified_fd_clone_begin(child);
+    let mut successful_installs: usize = 0;
     from = 0;
     scanning = true;
     while (scanning) {
@@ -2098,31 +2128,43 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult !{unsafe} {
                 let (block, block_generation) = fd_block_lookup(parent_ctx, fd);
                 if (block == 0) {
                     unified_fd_clone_rollback(transaction);
-                    return UnifiedFdResult::Invalid;
+                    return UnifiedFdCloneRunResult::Invalid;
                 }
                 let entries: *FdBlock = fd_block_at(block, block_generation);
                 let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
                 let inherited: bool = entries.slot[index].close_on_exec;
+                let inject_failure: bool = match fault {
+                    UnifiedFdCloneFault::Disabled => { false }
+                    UnifiedFdCloneFault::AfterSuccessfulInstalls(count) => {
+                        successful_installs == count
+                    }
+                };
                 let (install_result, next_transaction) =
                     unified_fd_clone_install(
                         transaction, fd, entries.slot[index].object,
-                        entries.slot[index].generation);
+                        entries.slot[index].generation, inject_failure);
                 transaction = next_transaction;
                 match install_result {
-                    UnifiedFdInstallResult::Ok => {}
+                    UnifiedFdInstallResult::Ok => {
+                        successful_installs = successful_installs + 1;
+                    }
                     UnifiedFdInstallResult::Invalid => {
                         unified_fd_clone_rollback(transaction);
-                        return UnifiedFdResult::Invalid;
+                        return UnifiedFdCloneRunResult::Invalid;
                     }
                     // install already logged the bound break; this only
                     // has to undo the descriptors that came before.
                     UnifiedFdInstallResult::RefOverflow => {
                         unified_fd_clone_rollback(transaction);
-                        return UnifiedFdResult::Invalid;
+                        return UnifiedFdCloneRunResult::Invalid;
                     }
                     UnifiedFdInstallResult::NoMemory => {
                         unified_fd_clone_rollback(transaction);
-                        return UnifiedFdResult::Invalid;
+                        if (inject_failure) {
+                            return UnifiedFdCloneRunResult::InjectedAfter(
+                                successful_installs);
+                        }
+                        return UnifiedFdCloneRunResult::Invalid;
                     }
                 }
                 // install clears close-on-exec because a fresh descriptor
@@ -2131,7 +2173,7 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult !{unsafe} {
                     match unified_fd_set_close_on_exec(child, fd, true) {
                         UnifiedFdResult::Invalid => {
                             unified_fd_clone_rollback(transaction);
-                            return UnifiedFdResult::Invalid;
+                            return UnifiedFdCloneRunResult::Invalid;
                         }
                         UnifiedFdResult::Ok => {}
                     }
@@ -2142,7 +2184,25 @@ fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult !{unsafe} {
         }
     }
     unified_fd_clone_commit(transaction);
-    return UnifiedFdResult::Ok;
+    return UnifiedFdCloneRunResult::Ok;
+}
+
+fn unified_fd_clone(parent: usize, child: usize) -> UnifiedFdResult !{unsafe} {
+    match unified_fd_clone_run(parent, child, UnifiedFdCloneFault::Disabled) {
+        UnifiedFdCloneRunResult::Invalid => { return UnifiedFdResult::Invalid; }
+        UnifiedFdCloneRunResult::Ok => { return UnifiedFdResult::Ok; }
+        UnifiedFdCloneRunResult::InjectedAfter(count) => {
+            return UnifiedFdResult::Invalid;
+        }
+    }
+}
+
+private fn unified_fd_clone_test_fail_after(
+        parent: usize, child: usize, successful_installs: usize)
+        -> UnifiedFdCloneRunResult !{unsafe} {
+    return unified_fd_clone_run(
+        parent, child,
+        UnifiedFdCloneFault::AfterSuccessfulInstalls(successful_installs));
 }
 
 fn unified_fd_set_offset(process: usize, fd: usize, offset: usize)
@@ -2843,6 +2903,22 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
            overlap > 0;
 }
 
+private fn unified_fd_probe_object_references(process: usize, fd: usize)
+        -> usize !{unsafe} {
+    let ctx_address: usize = fd_context_address(process);
+    if (ctx_address == 0) { return 0; }
+    let ctx: *ProcessFdContext = fd_context_at(process);
+    let (block, block_generation) = fd_block_lookup(ctx, fd);
+    if (block == 0) { return 0; }
+    let entries: *FdBlock = fd_block_at(block, block_generation);
+    let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
+    if (entries.slot[index].kind == UnifiedFdKind::Empty) { return 0; }
+    let mut handle: UnifiedObjectHandle = {
+        entries.slot[index].object, entries.slot[index].generation
+    };
+    return unified_object_references(handle);
+}
+
 fn unified_fd_table_probe() -> bool !{unsafe} {
     unified_fd_table_init();
     // GitHub issue #392: process 0's context has to exist before its heap
@@ -2906,6 +2982,57 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
         5, unified_object_alloc_first(UnifiedFdKind::Connection));
     if (file_installed == false || listener_installed == false ||
         connection_installed == false) {
+        scheduled_process_probe_slot_release(child);
+        return false;
+    }
+    // The parent has four distinct shared objects across six descriptors.
+    // Snapshot every descriptor's object count so a partial clone cannot
+    // hide a leak in one object behind a correct count in another.
+    let refs0_before: usize = unified_fd_probe_object_references(0, 0);
+    let refs1_before: usize = unified_fd_probe_object_references(0, 1);
+    let refs2_before: usize = unified_fd_probe_object_references(0, 2);
+    let refs3_before: usize = unified_fd_probe_object_references(0, 3);
+    let refs4_before: usize = unified_fd_probe_object_references(0, 4);
+    let refs5_before: usize = unified_fd_probe_object_references(0, 5);
+    let doubles_before: usize = unified_object_double_release_count();
+    let bound_breaks_before: usize = unified_object_ref_bound_breaks_count();
+    if (refs0_before == 0 || refs1_before == 0 || refs2_before == 0 ||
+        refs3_before == 0 || refs4_before == 0 || refs5_before == 0 ||
+        doubles_before != 0 || bound_breaks_before != 0) {
+        scheduled_process_probe_slot_release(child);
+        return false;
+    }
+    match unified_fd_clone_test_fail_after(0, child, 1) {
+        UnifiedFdCloneRunResult::Invalid => {
+            scheduled_process_probe_slot_release(child);
+            return false;
+        }
+        UnifiedFdCloneRunResult::Ok => {
+            scheduled_process_probe_slot_release(child);
+            return false;
+        }
+        UnifiedFdCloneRunResult::InjectedAfter(successful_installs) => {
+            if (successful_installs != 1) {
+                scheduled_process_probe_slot_release(child);
+                return false;
+            }
+        }
+    }
+    match unified_fd_next_open(child, 0) {
+        UnifiedFdScanResult::Found(fd) => {
+            scheduled_process_probe_slot_release(child);
+            return false;
+        }
+        UnifiedFdScanResult::Done => {}
+    }
+    if (unified_fd_probe_object_references(0, 0) != refs0_before ||
+        unified_fd_probe_object_references(0, 1) != refs1_before ||
+        unified_fd_probe_object_references(0, 2) != refs2_before ||
+        unified_fd_probe_object_references(0, 3) != refs3_before ||
+        unified_fd_probe_object_references(0, 4) != refs4_before ||
+        unified_fd_probe_object_references(0, 5) != refs5_before ||
+        unified_object_double_release_count() != 0 ||
+        unified_object_ref_bound_breaks_count() != 0) {
         scheduled_process_probe_slot_release(child);
         return false;
     }
