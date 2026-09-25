@@ -30,7 +30,6 @@ whether a row has gone quiet or has merely stopped being looked for.
 
 | Symptom | Rate | Issue | Last seen |
 | --- | --- | --- | --- |
-| `concurrent HTTP fd for port %-5d: %s` | 1 FAIL (port 43300, response bytes=0 fin=False) in the maintainer's make allcheck runs; 0 in 3 cicheck, 20 kernelcheck-qemu lane runs and 3 allcheck since | #593 | 2026-09-24 |
 
 ## Reading a row
 

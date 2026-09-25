@@ -683,6 +683,16 @@ def concurrent_http_requests(sock: socket.socket, expected_body: bytes,
     for client_port, request in ((HTTP_CLIENT_PORTS[1], request_b),
                                  (HTTP_CLIENT_PORTS[0], request_a)):
         state = peers[client_port]
+        # GitHub issue #593: kept for retransmission. The guest leaves a
+        # segment unacknowledged when the connection it belongs to is busy
+        # on another CPU (tcp_route_received_segment's Busy case) and relies
+        # on the sender's TCP to present it again. This peer sent each
+        # request exactly once, so one such collision lost the connection's
+        # whole response.
+        state["request"] = request
+        state["request_seq"] = state["client_seq"]
+        state["acked"] = False
+        state["sent_at"] = time.monotonic()
         sock.sendto(build_tcp_frame(
             client_port, state["client_seq"], state["server_next"],
             FLAG_ACK | FLAG_PSH, data=request,
@@ -698,17 +708,30 @@ def concurrent_http_requests(sock: socket.socket, expected_body: bytes,
         source_port, client_port = struct.unpack("!HH", candidate[34:38])
         return source_port == HTTP_SERVER_PORT and client_port in peers
 
+    retransmit_after = 0.5
     while (not all(state["fin"] for state in peers.values()) and
            time.monotonic() < deadline):
-        remaining = max(0.05, min(0.5, deadline - time.monotonic()))
+        now = time.monotonic()
+        for client_port, state in peers.items():
+            if (not state["acked"] and not state["fin"] and
+                    now - state["sent_at"] >= retransmit_after):
+                state["sent_at"] = now
+                state["retransmits"] = state.get("retransmits", 0) + 1
+                sock.sendto(build_tcp_frame(
+                    client_port, state["request_seq"], state["server_next"],
+                    FLAG_ACK | FLAG_PSH, data=state["request"],
+                    server_port=HTTP_SERVER_PORT), (QEMU_HOST, QEMU_PORT))
+        remaining = max(0.05, min(0.25, deadline - time.monotonic()))
         frame = recv_matching(sock, is_http_peer_frame, timeout=remaining)
         if frame is None:
             continue
-        source_port, client_port, sequence, _ack, _doff_res, flags = \
+        source_port, client_port, sequence, acknowledged, _doff_res, flags = \
             struct.unpack("!HHIIBB", frame[34:48])
         if source_port != HTTP_SERVER_PORT or client_port not in peers:
             continue
         state = peers[client_port]
+        if (flags & FLAG_ACK) != 0 and acknowledged == state["client_seq"]:
+            state["acked"] = True
         total_len = struct.unpack("!H", frame[16:18])[0]
         tcp_header_len = (frame[46] >> 4) * 4
         tcp_end = 14 + total_len
@@ -745,8 +768,9 @@ def concurrent_http_requests(sock: socket.socket, expected_body: bytes,
         print("  concurrent HTTP fd for port %-5d: %s" %
               (client_port, "PASS" if passed else "FAIL"))
         if not passed:
-            print("    response bytes=%d fin=%s type=%s" %
-                  (len(response), state["fin"], content_type))
+            print("    response bytes=%d fin=%s type=%s retransmits=%d" %
+                  (len(response), state["fin"], content_type,
+                   state.get("retransmits", 0)))
         ok = ok and passed
     if not ok:
         request_postmortem("concurrent HTTP step failed")
