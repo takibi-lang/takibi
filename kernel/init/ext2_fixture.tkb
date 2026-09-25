@@ -45,6 +45,17 @@ private fn ext2_write_fixture_counts_match(mount: Ext2Mount,
     }
 }
 
+private fn ext2_write_fixture_sectors_match(mount: Ext2Mount,
+                                            inode_number: usize,
+                                            expected: usize) -> bool {
+    match ext2_regular_file_allocated_sectors(mount, inode_number) {
+        Ext2CountResult::Invalid => { return false; }
+        Ext2CountResult::Counted(sectors) => {
+            return sectors == expected;
+        }
+    }
+}
+
 private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
     ext2_write_fixture_execution_model_assumption();
     let mut before_blocks: usize = 0;
@@ -80,6 +91,9 @@ private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
             }
         }
     }
+    if (ext2_write_fixture_sectors_match(mount, inode_number, 2) == false) {
+        return false;
+    }
     for index: usize in 0..<EXT2_WRITE_FIXTURE_BYTES {
         ext2_write_fixture_source[index] =
             ((index * 37 + 11) % 251) as u8;
@@ -94,6 +108,9 @@ private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
     }
     if (ext2_write_fixture_counts_match(
             mount, before_blocks, before_inodes) == false) {
+        return false;
+    }
+    if (ext2_write_fixture_sectors_match(mount, inode_number, 2) == false) {
         return false;
     }
     match ext2_block_bitmap_snapshot(
@@ -126,6 +143,7 @@ private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
     }
     if (ext2_regular_file_size(mount, inode_number) !=
         EXT2_WRITE_FIXTURE_BYTES ||
+        ext2_write_fixture_sectors_match(mount, inode_number, 28) == false ||
         ext2_write_fixture_counts_match(
             mount, before_blocks - 13, before_inodes) == false) {
         return false;
@@ -159,6 +177,7 @@ private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
         Ext2ResizeResult::Resized => { }
     }
     if (ext2_regular_file_size(mount, inode_number) != 0 ||
+        ext2_write_fixture_sectors_match(mount, inode_number, 0) == false ||
         ext2_write_fixture_counts_match(
             mount, before_blocks + 1, before_inodes) == false) {
         return false;
@@ -172,12 +191,16 @@ private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
             mount, before_blocks - 13, before_inodes) == false) {
         return false;
     }
+    if (ext2_write_fixture_sectors_match(mount, inode_number, 28) == false) {
+        return false;
+    }
     match ext2_resize_small_file(mount, inode_number, bs"before\n") {
         Ext2ResizeResult::Invalid => { return false; }
         Ext2ResizeResult::Resized => { }
     }
     return ext2_write_fixture_counts_match(
-        mount, before_blocks, before_inodes);
+        mount, before_blocks, before_inodes) &&
+        ext2_write_fixture_sectors_match(mount, inode_number, 2);
 }
 
 // The ext2 mutation helpers. They were reachable only from the QEMU fixture

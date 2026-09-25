@@ -596,9 +596,9 @@ fn ext2_read_small_file(mount: Ext2Mount, inode_number: usize,
 // The USB backend supports bounded multi-sector transfers, but this API
 // intentionally remains one-block-at-a-time: a larger read would need to
 // prove contiguous physical ext2 block pointers and retain a correspondingly
-// large scratch buffer. The current ext2 write paths likewise update single
-// metadata/data blocks, so they do not yet have a safe contiguous range to
-// coalesce.
+// large scratch buffer. The ext2 write paths publish one inode after staging
+// data and pointer blocks; their allocations are not generally contiguous,
+// so there is no safe block-device range to coalesce.
 //
 // The supported range is derived from the 12 direct pointers and the
 // single- and double-indirect pointer fanout of this filesystem's block size.
@@ -733,6 +733,29 @@ fn ext2_inode_size(mount: Ext2Mount, inode_number: usize) -> usize {
     match ext2_read_inode(mount, inode_number) {
         Ext2InodeResult::Invalid => { return 0; }
         Ext2InodeResult::Inode(inode) => { return inode.size; }
+    }
+}
+
+fn ext2_regular_file_allocated_sectors(mount: Ext2Mount,
+                                       inode_number: usize)
+        -> Ext2CountResult {
+    match ext2_read_inode(mount, inode_number) {
+        Ext2InodeResult::Invalid => { return Ext2CountResult::Invalid; }
+        Ext2InodeResult::Inode(inode) => {
+            if ((inode.mode & 0xF000) != 0x8000) {
+                return Ext2CountResult::Invalid;
+            }
+            match block_read(mount.device, inode.table_block,
+                             ext2_scratch_here().metadata as []u8) {
+                BlockIoResult::Invalid => { return Ext2CountResult::Invalid; }
+                BlockIoResult::Ok => { }
+            }
+            let inode_bytes: *u8 =
+                (ext2_scratch_here().metadata as *u8) +
+                (inode.table_offset as isize);
+            return Ext2CountResult::Counted(
+                ext2_u32(inode_bytes, 28) as usize);
+        }
     }
 }
 
@@ -1242,6 +1265,23 @@ private fn ext2_write_allocations_published(
 fn ext2_replace_regular_file(mount: Ext2Mount, inode_number: usize,
                              source: []u8, allocation_budget: usize)
         -> Ext2ResizeResult !{unsafe} {
+    return ext2_update_regular_file(mount, inode_number, 0, source,
+                                    false, allocation_budget);
+}
+
+fn ext2_write_regular_file_range(mount: Ext2Mount, inode_number: usize,
+                                 offset: usize, source: []u8)
+        -> Ext2ResizeResult !{unsafe} {
+    if (source.len == 0) { return Ext2ResizeResult::Invalid; }
+    return ext2_update_regular_file(mount, inode_number, offset, source,
+                                    true, EXT2_MAX_WRITE_ALLOCATIONS);
+}
+
+private fn ext2_update_regular_file(mount: Ext2Mount, inode_number: usize,
+                                    offset: usize, source: []u8,
+                                    preserve_existing: bool,
+                                    allocation_budget: usize)
+        -> Ext2ResizeResult !{unsafe} {
     if (source.len > EXT2_MAX_SINGLE_FILE_BLOCKS * KERNEL_BLOCK_SIZE) {
         return Ext2ResizeResult::Invalid;
     }
@@ -1254,8 +1294,17 @@ fn ext2_replace_regular_file(mount: Ext2Mount, inode_number: usize,
             }
             let old_count: usize =
                 (inode.size + KERNEL_BLOCK_SIZE - 1) / KERNEL_BLOCK_SIZE;
+            let mut new_size: usize = source.len;
+            if (preserve_existing) {
+                if (offset > EXT2_MAX_SINGLE_FILE_BLOCKS * KERNEL_BLOCK_SIZE -
+                             source.len) {
+                    return Ext2ResizeResult::Invalid;
+                }
+                new_size = offset + source.len;
+                if (new_size < inode.size) { new_size = inode.size; }
+            }
             let new_count: usize =
-                (source.len + KERNEL_BLOCK_SIZE - 1) / KERNEL_BLOCK_SIZE;
+                (new_size + KERNEL_BLOCK_SIZE - 1) / KERNEL_BLOCK_SIZE;
             let mut old_blocks: [usize; EXT2_MAX_SINGLE_FILE_BLOCKS];
             for index: usize in 0..<EXT2_MAX_SINGLE_FILE_BLOCKS {
                 old_blocks[index] = 0;
@@ -1322,15 +1371,35 @@ fn ext2_replace_regular_file(mount: Ext2Mount, inode_number: usize,
                                 }
                                 return ext2_write_abort(mount, allocations);
                             }
-                            for byte: usize in 0..<KERNEL_BLOCK_SIZE {
-                                ext2_scratch_here().file[byte] = 0;
+                            if (preserve_existing && index < old_count) {
+                                match block_read(
+                                        mount.device, old_blocks[index],
+                                        ext2_scratch_here().file as []u8) {
+                                    BlockIoResult::Invalid => {
+                                        match ext2_release_block(mount, owner) {
+                                            Ext2OwnerReleaseResult::Invalid => { }
+                                            Ext2OwnerReleaseResult::Released => { }
+                                        }
+                                        return ext2_write_abort(mount, allocations);
+                                    }
+                                    BlockIoResult::Ok => { }
+                                }
+                            } else {
+                                for byte: usize in 0..<KERNEL_BLOCK_SIZE {
+                                    ext2_scratch_here().file[byte] = 0;
+                                }
                             }
                             let start: usize = index * KERNEL_BLOCK_SIZE;
                             for byte: usize in 0..<KERNEL_BLOCK_SIZE {
-                                let source_index: usize = start + byte;
-                                if (source_index < source.len) {
-                                    ext2_scratch_here().file[byte] =
-                                        source[source_index];
+                                let file_position: usize = start + byte;
+                                if (file_position >= offset) {
+                                    let source_index: usize =
+                                        ((file_position as isize) -
+                                         (offset as isize)) as usize;
+                                    if (source_index < source.len) {
+                                        ext2_scratch_here().file[byte] =
+                                            source[source_index];
+                                    }
                                 }
                             }
                             match block_write(mount.device, block,
@@ -1441,7 +1510,7 @@ fn ext2_replace_regular_file(mount: Ext2Mount, inode_number: usize,
             }
             let mut new_pointer_blocks: usize = 0;
             if (new_indirect != 0) { new_pointer_blocks = 1; }
-            if (ext2_put_u32(inode_bytes, 4, source.len as u32) == false ||
+            if (ext2_put_u32(inode_bytes, 4, new_size as u32) == false ||
                 ext2_put_u32(inode_bytes, 28,
                              ((new_count + new_pointer_blocks) * 2) as u32) == false ||
                 ext2_put_u32(inode_bytes, 88, new_indirect as u32) == false) {

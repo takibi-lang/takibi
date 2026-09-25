@@ -1081,8 +1081,9 @@ run, not a specification.
   Regular-file reads cover twelve direct blocks plus single- and
   double-indirect blocks; the maximum is derived from the 1-KiB block
   geometry rather than a file-size literal. Kernel ext2 replacement and
-  truncation cover direct and single-indirect blocks; the regular-file
-  `write(2)` path still accepts at most one block at offset zero. A directory
+  truncation cover direct and single-indirect blocks; each regular-file
+  `write(2)` call accepts at most one block, advancing its file offset. The
+  first write at offset zero replaces the old contents. A directory
   grows a block at a time when none of its blocks has room, up to its twelve
   direct blocks; removing the first entry of a block leaves a dead record
   there, as Linux's ext2 does, and a

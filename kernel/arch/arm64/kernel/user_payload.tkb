@@ -405,6 +405,42 @@ fn initial_user_payload() {
          * file. */
         let user_message2: *u8 = "hello from userspace\n" as *u8;
         fail_if(svc5(64, 1, user_message2 as usize, 21, 0, 0) != 21);
+
+        /* The final process-image scenario: sequential write(2) calls cross
+         * all direct ext2 pointers and the first indirect entry. Reopening
+         * uses the ordinary read(2) offset path to compare every byte. */
+        let mut write_block: [u8; 1024];
+        let mut read_block: [u8; 1024];
+        let write_fd: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);
+        fail_if(write_fd >= 64);
+        for block: usize in 0..<13 {
+            for byte: usize in 0..<1024 {
+                write_block[byte] =
+                    (((block * 1024 + byte) * 37 + 11) % 251) as u8;
+            }
+            fail_if(svc5(64, write_fd, write_block as *u8 as usize,
+                         1024, 0, 0) != 1024);
+        }
+        fail_if(svc5(57, write_fd, 0, 0, 0, 0) != 0);
+        let read_fd: usize = svc5(56, 0, mutable_path as usize, 0, 0, 0);
+        fail_if(read_fd >= 64);
+        for block: usize in 0..<13 {
+            fail_if(svc5(63, read_fd, read_block as *u8 as usize,
+                         1024, 0, 0) != 1024);
+            for byte: usize in 0..<1024 {
+                fail_if(read_block[byte] !=
+                    (((block * 1024 + byte) * 37 + 11) % 251) as u8);
+            }
+        }
+        fail_if(svc5(63, read_fd, read_block as *u8 as usize,
+                     1, 0, 0) != 0);
+        fail_if(svc5(57, read_fd, 0, 0, 0, 0) != 0);
+        let restore_fd: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);
+        fail_if(restore_fd >= 64);
+        let restore_content: []u8 = bs"before\n";
+        fail_if(svc5(64, restore_fd, restore_content as *u8 as usize,
+                     restore_content.len, 0, 0) != restore_content.len);
+        fail_if(svc5(57, restore_fd, 0, 0, 0, 0) != 0);
         svc5(93, 0, 0, 0, 0, 0);
     }
 }

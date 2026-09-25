@@ -2621,13 +2621,22 @@ fn kernel_syscall_clone_parent_return(parent_sp: usize) {
 // A lookup that decides whether a mutation may proceed belongs INSIDE the
 // same guard as the mutation it gates -- mkdir's existence check is the
 // example: outside it, another core could create the name in between.
-private fn syscall_ext2_resize_locked(inode: usize, content: []u8) -> usize {
+private fn syscall_ext2_write_locked(inode: usize, offset: usize,
+                                     content: []u8) -> usize {
     let guard = ext2_mutation_take();
-    let answer: usize = match ext2_resize_small_file(
-            syscall_ext2_mount, inode, content) {
-        Ext2ResizeResult::Invalid => { LINUX_EINVAL }
-        Ext2ResizeResult::Resized => { 0 }
-    };
+    let mut answer: usize = LINUX_EINVAL;
+    if (offset == 0) {
+        match ext2_resize_small_file(syscall_ext2_mount, inode, content) {
+            Ext2ResizeResult::Invalid => { }
+            Ext2ResizeResult::Resized => { answer = 0; }
+        }
+    } else {
+        match ext2_write_regular_file_range(
+                syscall_ext2_mount, inode, offset, content) {
+            Ext2ResizeResult::Invalid => { }
+            Ext2ResizeResult::Resized => { answer = 0; }
+        }
+    }
     ext2_mutation_give(guard);
     return answer;
 }
@@ -3369,8 +3378,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             if (kernel_syscall_file_writable(fd) == false) {
                 return SyscallAction::Resume(LINUX_EBADF);
             }
-            if (kernel_syscall_file_offset(fd) != 0 || length == 0 ||
-                length > KERNEL_BLOCK_SIZE) {
+            let file_offset: usize = kernel_syscall_file_offset(fd);
+            if (length == 0 || length > KERNEL_BLOCK_SIZE ||
+                file_offset > EXT2_MAX_SINGLE_FILE_BLOCKS *
+                              KERNEL_BLOCK_SIZE - length) {
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
             let destination_base: *u8 = syscall_scratch_here().file_buffer as *u8;
@@ -3386,10 +3397,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
             let content = content_buffer[0..<length];
-            let resized: usize = syscall_ext2_resize_locked(
-                    kernel_syscall_file_inode(fd), content);
+            let resized: usize = syscall_ext2_write_locked(
+                    kernel_syscall_file_inode(fd), file_offset, content);
             if (resized != 0) { return SyscallAction::Resume(resized); }
-            if (kernel_syscall_file_set_offset(fd, length) == false) {
+            if (kernel_syscall_file_set_offset(fd, file_offset + length) == false) {
                 return SyscallAction::Resume(LINUX_EBADF);
             }
             return SyscallAction::Resume(length);
