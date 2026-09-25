@@ -12,7 +12,7 @@ const VIRTIO_BLK_QUEUE_ALIGN: i32 = 0x3c;
 const VIRTIO_BLK_QUEUE_PFN: i32 = 0x40;
 const VIRTIO_BLK_QUEUE_NOTIFY: i32 = 0x50;
 const VIRTIO_BLK_STATUS: i32 = 0x70;
-const VIRTIO_BLK_PAGE_SIZE: isize = 4096;
+const VIRTIO_BLK_PAGE_SIZE: usize = 4096;
 const VIRTIO_QNUM: isize = 8;
 const VIRTIO_BLK_DESC_F_NEXT: i32 = 1;
 const VIRTIO_BLK_DESC_F_WRITE: i32 = 2;
@@ -51,6 +51,9 @@ struct packed VirtioBlkRequest {
 
 let mut virtio_blk_base: i32 = 0;
 let mut virtio_blk_ready: bool;
+// A reset that never completes leaves the submitted RX ranges device-owned.
+// Do not reinitialize the queue or reuse those buffers in that case.
+let mut virtio_blk_disabled: bool;
 let mut virtio_blk_queue: [u8; 2 * VIRTIO_BLK_PAGE_SIZE] align(4096);
 // Every sector DMA goes through one driver-owned cache-line-aligned buffer.
 // dma_prepare_rx/dma_finish_rx operate on whole cache lines; on the RPi5
@@ -93,13 +96,36 @@ fn virtio_blk_setup_queue() {
     *(virtio_blk_reg(VIRTIO_BLK_QUEUE_ALIGN)) = VIRTIO_BLK_PAGE_SIZE as i32;
     let address: usize = (virtio_blk_queue as *u8) as usize;
     *(virtio_blk_reg(VIRTIO_BLK_QUEUE_PFN)) =
-        (address / (VIRTIO_BLK_PAGE_SIZE as usize)) as i32;
+        (address / VIRTIO_BLK_PAGE_SIZE) as i32;
+}
+
+fn virtio_blk_reset() -> bool !{unsafe} {
+    virtio_blk_ready = false;
+    *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 0;
+    // A zero readback is the virtio reset completion point: the device must
+    // stop interacting with the queue before it reports that status.
+    let reset_start: i64 = read_cntpct();
+    let reset_ticks: i64 = read_cntfrq() * VIRTIO_BLK_COMPLETION_SECONDS;
+    while (read_cntpct() - reset_start < reset_ticks &&
+           *(virtio_blk_reg(VIRTIO_BLK_STATUS)) != 0) {
+    }
+    if (*(virtio_blk_reg(VIRTIO_BLK_STATUS)) != 0) {
+        virtio_blk_disabled = true;
+        return false;
+    }
+    return true;
 }
 
 fn virtio_blk_init() -> bool !{unsafe} {
+    if (virtio_blk_disabled) { return false; }
     if (virtio_blk_ready) { return true; }
     if (virtio_blk_base == 0) { return false; }
-    *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 0;
+    if (virtio_blk_reset() == false) { return false; }
+    // A previous timed-out request may have left ring indices and descriptors
+    // behind. Reset returns queue ownership before the next initialization.
+    for i: usize in 0..<2 * VIRTIO_BLK_PAGE_SIZE {
+        virtio_blk_queue[i] = 0;
+    }
     *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 1;
     *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 3;
     *(virtio_blk_reg(VIRTIO_BLK_GUEST_FEATURES)) = 0;
@@ -166,11 +192,18 @@ fn virtio_blk_submit(request_type: u32, sector: u32,
     let completion_ticks: i64 =
         read_cntfrq() * VIRTIO_BLK_COMPLETION_SECONDS;
     while (read_cntpct() - completion_start < completion_ticks &&
-           virtio_blk_used_seen == unsafe { ((queue + VIRTIO_BLK_PAGE_SIZE)
+           virtio_blk_used_seen == unsafe { ((queue + (VIRTIO_BLK_PAGE_SIZE as isize))
                                     as *io VirtioBlkUsed) }.idx) {
     }
-    if (virtio_blk_used_seen == unsafe { ((queue + VIRTIO_BLK_PAGE_SIZE)
+    if (virtio_blk_used_seen == unsafe { ((queue + (VIRTIO_BLK_PAGE_SIZE as isize))
                                  as *io VirtioBlkUsed) }.idx) {
+        // No used entry was observed. A completed reset, unlike a timeout
+        // alone, justifies returning both receive ranges to the CPU.
+        if (virtio_blk_reset() == false) { return false; }
+        dma_finish_rx(virtio_blk_status_buf, DMA_CACHE_LINE);
+        if (write == false) {
+            dma_finish_rx(virtio_blk_data_buf, 512);
+        }
         return false;
     }
     dma_consume();
