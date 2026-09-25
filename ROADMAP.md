@@ -26,7 +26,7 @@ step, landed as its own commit.
 1. **True multicore support**: every online core runs ordinary processes,
    any core can issue any syscall, and a process can continue on another
    core. #9, #582, #583; and the multicore-correctness issues
-   #559, #550, #560, #482, #464, #468, #556, #573.
+   #550, #560, #482, #464, #468, #556, #573.
 2. **Run the multicore workload mainly on RPi5 and fix what it finds.** #584
    is the workload, #572 its fairness verdict. Each defect it finds gets a
    deterministic lane before its issue closes.
