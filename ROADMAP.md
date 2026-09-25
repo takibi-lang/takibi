@@ -40,7 +40,7 @@ step, landed as its own commit.
 ### Territory B: everything else, ordered by current priority
 
 1. **Kernel and userspace capability:** #535, #537, #539, #536,
-   #171, #204, #433, #430, #434, #435, #220.
+   #171, #204, #433, #430, #434, #435, #220, #595.
 2. **Resource use and measured performance:** #389, #422, #497, #520, #553,
    #386, #502, #503.
 3. **Compiler safety and language research:** #58, #203, #252, #200, #201,
