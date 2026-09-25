@@ -19,6 +19,11 @@ set -euo pipefail
 
 VALUES='type-error|compiler-lint|runtime-check|test|qemu|hardware|review|design'
 FOUND_BY_RE="Found-by:[ \t]*($VALUES)(?![\w-])"
+# `Protocol:` records whether the defect broke a multicore protocol property
+# (blocking, waking, migration, lock hand-off, stack ownership), the evidence
+# base for deciding what to model in PlusCal. `yes` carries the broken
+# property in one line so it can be restated as a model property later.
+PROTOCOL_FIELD_RE='Protocol:[ \t]*(no(?![\w-])|yes[ \t]+--[ \t]+\S)'
 CLOSES_RE='(?i)(^|[\s(])(fix|fixes|fixed|close|closes|closed|resolve|resolves|resolved)\s+#[0-9]+'
 
 vocabulary_help() {
@@ -40,6 +45,22 @@ cost:
   Found-by: hardware -- RPi5 SWD register read after a two-hour boot-log bisect
   Found-by: type-error
   Found-by: design
+HELP
+}
+
+protocol_help() {
+  cat <<'HELP'
+Add exactly one `Protocol:` trailer line:
+
+  Protocol: no
+  Protocol: yes -- <the protocol property the defect broke, one line>
+
+Say yes when the defect broke a multicore protocol property: blocking and
+waking, migration or call restart, lock hand-off, stack ownership, idle entry
+and leave. Use `no` for design work and for single-core logic errors.
+Example:
+
+  Protocol: yes -- a value taken before a call restart is delivered or restored
 HELP
 }
 
@@ -80,6 +101,13 @@ case "$mode" in
         }
         exit 10
       fi
+      if printf '%s' "$cmd" | LC_ALL=C grep -qP "$CLOSES_RE" && ! printf '%s' "$cmd" | LC_ALL=C grep -qP "$PROTOCOL_FIELD_RE"; then
+        {
+          printf '%s\n\n' 'This commit closes a GitHub issue and has no valid `Protocol:` trailer.'
+          protocol_help
+        }
+        exit 10
+      fi
     fi
     ;;
 
@@ -94,6 +122,13 @@ case "$mode" in
         {
           printf '%s\n\n' 'This commit message closes a GitHub issue but carries no valid `Found-by:` trailer. The trailer must be a line of its own in the message body.'
           vocabulary_help
+        }
+        exit 10
+      fi
+      if ! printf '%s' "$message" | LC_ALL=C grep -qP "^$PROTOCOL_FIELD_RE"; then
+        {
+          printf '%s\n\n' 'This commit message closes a GitHub issue but carries no valid `Protocol:` trailer. The trailer must be a line of its own in the message body.'
+          protocol_help
         }
         exit 10
       fi

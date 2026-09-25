@@ -228,8 +228,9 @@ Use the identity of the agent making the commit, applied only to the individual
 - GitHub Copilot CLI: `GitHub Copilot CLI <copilot-cli-agent@takibi.invalid>`
 
 Every GitHub issue has a `Found-by:` field. A commit that closes an issue has a
-`Found-by:` trailer. Also record one for a defect found and fixed within a
-single session. Use `github-workflow` for the allowed values and procedure.
+`Found-by:` trailer and a `Protocol:` trailer (`no`, or `yes -- <broken
+property>` when a multicore protocol property broke). Also record one for a
+defect found and fixed within a single session. Use `github-workflow` for the allowed values and procedure.
 
 Do not put live status such as "tracked in" or "completed by" issue references
 in tracked files. `HISTORY.md` may record stable past events and `ROADMAP.md`

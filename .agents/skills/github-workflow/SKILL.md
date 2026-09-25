@@ -49,6 +49,24 @@ Choose the discovery channel, optionally followed by concise free text:
 An issue-closing commit requires a `Found-by:` trailer. Also add the trailer
 for a defect found and fixed within one session even when no issue exists.
 
+## Protocol
+
+An issue-closing commit also requires one `Protocol:` trailer:
+
+- `Protocol: no` for design work and for logic errors that do not depend on
+  how cores interleave.
+- `Protocol: yes -- <property>` when the defect broke a multicore protocol
+  property: blocking and waking, migration or call restart, lock hand-off,
+  stack ownership, idle entry and leave. The property is one line, phrased so
+  it can be restated as a model-checking property, for example
+  `a value taken before a call restart is delivered or restored`.
+
+These trailers are the evidence base for choosing what to model in PlusCal.
+After committing a `yes`, run `scripts/label_protocol_issues.sh` to apply the
+`protocol` label to the closed issues; the trailer is the source of truth and
+the label its index. In a session-end audit, recheck each `no` against the
+root cause.
+
 ## Shape an issue so it can close
 
 Split work that decomposes into pieces with different dependency chains or
