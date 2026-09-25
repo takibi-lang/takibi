@@ -4190,7 +4190,7 @@ fn kernel_process_affinity_get(pid: usize) -> ProcessAffinityResult
 // refuses a mask with no online CPU in it, or none the task's cpuset
 // permits; here the permitted set is the CPUs the scheduler runs processes
 // on. The process moves at the next scheduling decision on the CPU it is
-// on, not at once.
+// on -- a syscall return, or a tick taken from EL0 -- not at once.
 fn kernel_process_affinity_set(pid: usize, requested: usize)
         -> ProcessAffinityResult !{unsafe} {
     let mask: usize = requested & kernel_process_online_mask();
@@ -5376,12 +5376,65 @@ fn kernel_stack_watermark_report() !{unsafe} {
 fn kernel_process_timer_schedule(current_sp: usize) -> usize !{interrupt} {
     if (execution_here().scheduler_enabled == false) { return current_sp; }
     execution_here().reschedule_pending = false;
-    if (kernel_process_current_has_relative() == false) { return current_sp; }
-    let next_sp: usize = kernel_process_schedule(current_sp);
-    if (next_sp != current_sp) {
-        process_test_evidence_record_timer_switch();
+    if (kernel_process_current_has_relative()) {
+        let next_sp: usize = kernel_process_schedule(current_sp);
+        if (next_sp != current_sp) {
+            process_test_evidence_record_timer_switch();
+            return next_sp;
+        }
     }
-    return next_sp;
+    if (kernel_process_tick_leave_excluded(current_sp)) {
+        return PROCESS_TICK_TO_IDLE;
+    }
+    return current_sp;
+}
+
+// What kernel_process_timer_schedule returns when the tick gave the
+// interrupted process back with nothing to run in its place: the platform's
+// handler acknowledges the interrupt and then leaves for this CPU's idle
+// loop (kernel_timer_tick_leave) instead of returning to EL0. Never a valid
+// frame address.
+const PROCESS_TICK_TO_IDLE: usize = 1;
+
+// GitHub issue #582: the tick's half of the affinity gate. A process whose
+// own mask stopped naming this CPU used to keep it until its next syscall,
+// because the scheduler returned the current frame whenever nothing else
+// was Ready here -- and a compute-bound process may never make one. With no
+// successor, give the process back as Ready and let this CPU idle; a CPU
+// the mask names takes it from its own idle loop.
+//
+// No stack question is left to answer here. The lower-EL entry's depart
+// hook (kernel_process_stack_interrupt_depart) already moved this CPU onto
+// its IRQ stack and released the process's stack before dispatch ran, so
+// the Ready published below is immediately takeable, and the frame the
+// taker resumes is the one this entry saved.
+private fn kernel_process_tick_leave_excluded(frame_sp: usize) -> bool
+        !{interrupt} {
+    let guard = process_run_lock();
+    if (execution_here().current_live == false ||
+        execution_here().stack_live) {
+        process_run_unlock(guard);
+        return false;
+    }
+    let mut outgoing: ProcessHandle = execution_here().current_handle;
+    let slot: usize = outgoing.pool_index;
+    if (slot == 0 || kernel_process_cpu_allows_slot(cpu_id(), slot) ||
+        kernel_process_frame_belongs_to(outgoing, frame_sp) == false) {
+        process_run_unlock(guard);
+        return false;
+    }
+    scheduled_process_record_at(slot).saved_sp = frame_sp;
+    // Leave its root before it can run elsewhere, as every idle entry does.
+    address_space_activate_root(0);
+    execution_here().current_live = false;
+    execution_here().scheduler_enabled = false;
+    execution_here().reschedule_pending = false;
+    if (kernel_process_yield_handle(guard, outgoing) == false) {
+        process_run_unlock(guard);
+        kernel_syscall_fail_stop(frame_sp);
+    }
+    process_run_unlock(guard);
+    return true;
 }
 
 fn kernel_process_syscall_return_schedule(current_sp: usize) -> usize {

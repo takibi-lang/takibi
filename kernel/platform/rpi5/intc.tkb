@@ -404,7 +404,7 @@ fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
         }
         *gicc_eoir = id;
         workload_profile_irq_exit();
-        return next_sp;
+        return kernel_timer_tick_leave(next_sp);
     }
 
     let mut debug_break: bool = false;
@@ -454,7 +454,7 @@ fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
             let next_sp: usize = kernel_process_timer_schedule(frame_sp);
             *gicc_eoir = id;
             workload_profile_irq_exit();
-            return next_sp;
+            return kernel_timer_tick_leave(next_sp);
         }
         kernel_process_request_reschedule();
     }

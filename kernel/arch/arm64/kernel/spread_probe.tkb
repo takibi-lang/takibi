@@ -12,9 +12,22 @@
  * shared one CPU for the whole run, those two answers are equal. They
  * differ only if some CPU took one of them off the other's CPU while both
  * were runnable.
+ *
+ * The second scenario is the tick's leave. A child is started on CPU 0 and
+ * spins with no syscall at all; while it does, its parent moves the child's
+ * mask to CPU 1 and waits. Nothing but the timer can then take the child
+ * off CPU 0, and it has no successor there, so it ends on CPU 1 only if the
+ * tick gives a Running process back with nothing in its place.
+ *
+ * The parent must not call wait4 while the child spins. wait4 is on the
+ * peer refusal list, so it reruns on core 0, and a parent Ready there lets
+ * core 0's ordinary tick switch the child out -- which moves it without
+ * the path under test. The parent naps past the child's spin first.
  */
 
 const WRITE_SYSCALL: usize = 64;
+const NANOSLEEP_SYSCALL: usize = 101;
+const SETAFFINITY_SYSCALL: usize = 122;
 const EXIT_SYSCALL: usize = 93;
 const GETCPU_SYSCALL: usize = 168;
 const CLONE_SYSCALL: usize = 220;
@@ -28,6 +41,16 @@ const SPREAD_ERROR_FLOOR: usize = 0xFFFFFFFFFFFFF000;
 const SPREAD_CHUNK: usize = 1048576;
 const SPREAD_CHILD_CHUNKS: usize = 256;
 const SPREAD_PARENT_CHUNKS: usize = 512;
+// The leave scenario's child spins this many chunks with no syscall; long
+// enough that its parent's first nap and mask change land inside it, short
+// enough that it ends inside the parent's second nap.
+const SPREAD_LEAVE_CHUNKS: usize = 512;
+// Naps of 100 ms: one before the parent moves the child, then enough to
+// outlast the child's spin before the parent's wait4.
+const SPREAD_LEAVE_NAP_NS: usize = 100000000;
+const SPREAD_LEAVE_TAIL_NAPS: usize = 40;
+// getcpu polls the child makes, waiting to be on CPU 0 before it spins.
+const SPREAD_LEAVE_ARRIVAL_POLLS: usize = 1000000;
 // An exit status no CPU number reaches, for a getcpu that failed.
 const SPREAD_NO_CPU: usize = 250;
 
@@ -67,6 +90,77 @@ private fn spread_spin(chunks: usize) -> usize {
     return cpu;
 }
 
+private fn spread_set_mask(pid: usize, low: u8) -> bool {
+    let mut mask: [u8; 8];
+    for index: usize in 0..<8 { mask[index] = 0; }
+    mask[0] = low;
+    return svc5(SETAFFINITY_SYSCALL, pid, 8, mask as *u8 as usize, 0, 0) == 0;
+}
+
+// The child's exit status: the CPU it started on in the high nibble, the
+// one it ended on in the low nibble.
+private fn spread_leave_child() {
+    let mut cpu_bytes: [u8; 4];
+    // Born where fork ran, and possibly started on CPU 1 before its parent
+    // narrowed its mask; each getcpu is a syscall boundary where the gate
+    // sends it on.
+    let mut first: usize = spread_cpu(cpu_bytes as []u8);
+    for poll: usize in 0..<SPREAD_LEAVE_ARRIVAL_POLLS {
+        if (first != 0) { first = spread_cpu(cpu_bytes as []u8); }
+    }
+    let mut acc: usize = 1;
+    for round: usize in 0..<SPREAD_LEAVE_CHUNKS {
+        for step: usize in 0..<SPREAD_CHUNK {
+            acc = acc * 6364136223846793005 + 1442695040888963407;
+        }
+    }
+    let last: usize = spread_cpu(cpu_bytes as []u8);
+    if (acc == 0 || first > 15 || last > 15) {
+        svc5(EXIT_SYSCALL, SPREAD_NO_CPU, 0, 0, 0, 0);
+    }
+    svc5(EXIT_SYSCALL, (first << 4) | last, 0, 0, 0, 0);
+}
+
+private fn spread_leave() {
+    // Pinned to CPU 1 first, so the child inherits CPU 1 and nothing can
+    // take it while this process runs there; the next mask is what decides
+    // where it starts.
+    if (spread_set_mask(0, 2) == false) {
+        spread_fail(bs"spread: cpu 1 alone was refused\n");
+    }
+    let child: usize = svc5(CLONE_SYSCALL, CLONE_FORK_SIGCHLD, 0, 0, 0, 0);
+    if (child == 0) { spread_leave_child(); }
+    if (child >= SPREAD_ERROR_FLOOR) {
+        spread_fail(bs"spread: fork failed\n");
+    }
+    if (spread_set_mask(child, 1) == false) {
+        spread_fail(bs"spread: the child could not be moved to cpu 0\n");
+    }
+    let mut nap: [usize; 2];
+    nap[0] = 0;
+    nap[1] = SPREAD_LEAVE_NAP_NS;
+    svc5(NANOSLEEP_SYSCALL, nap as *usize as usize, 0, 0, 0, 0);
+    if (spread_set_mask(child, 2) == false) {
+        spread_fail(bs"spread: the child could not be moved to cpu 1\n");
+    }
+    for round: usize in 0..<SPREAD_LEAVE_TAIL_NAPS {
+        svc5(NANOSLEEP_SYSCALL, nap as *usize as usize, 0, 0, 0, 0);
+    }
+    let mut status: [u8; 4];
+    for index: usize in 0..<4 { status[index] = 0; }
+    if (svc5(WAIT4_SYSCALL, child, status as *u8 as usize, 0, 0, 0) != child ||
+        status[0] != 0) {
+        spread_fail(bs"spread: the spinning child was not reaped as an exit\n");
+    }
+    if ((status[1] >> 4) != 0) {
+        spread_fail(bs"spread: the spinning child did not start on cpu 0\n");
+    }
+    if ((status[1] & 15) != 1) {
+        spread_fail(bs"spread: a child spinning without a syscall kept the cpu its mask stopped naming\n");
+    }
+    spread_say(bs"spread: a child spinning without a syscall left the cpu its mask stopped naming\n");
+}
+
 fn spread_probe() {
     let child: usize = svc5(CLONE_SYSCALL, CLONE_FORK_SIGCHLD, 0, 0, 0, 0);
     if (child == 0) {
@@ -91,5 +185,6 @@ fn spread_probe() {
         spread_fail(bs"spread: two unpinned compute-bound processes ended on the same cpu\n");
     }
     spread_say(bs"spread: two unpinned compute-bound processes ended on different cpus\n");
+    spread_leave();
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
 }

@@ -12,6 +12,8 @@ extern fn kernel_core0_idle_yield_enter() !{noreturn};
 extern fn kernel_core0_idle_enter() !{noreturn};
 extern fn kernel_core0_idle_block_enter() !{noreturn};
 extern fn kernel_secondary_idle_block_enter() !{noreturn};
+extern fn kernel_core0_idle_tick_enter() !{noreturn};
+extern fn kernel_secondary_idle_tick_enter() !{noreturn};
 // Every .tkb-reachable terminal path already owns the EL0 ExceptionFrame it
 // was about to resume.  Preserve that pointer so the oops can compare live
 // architectural state against the saved context instead of reporting only

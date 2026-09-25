@@ -72,6 +72,16 @@ even if a wake has made it Ready (GitHub issue #583). wait4's ChildExit is
 the exception: it still reruns, because its walk and the Blocked
 publication are not one critical section against a peer's exit (#550).
 
+A timer tick taken from EL0 idles a CPU too, on any core, when the
+interrupted process's mask no longer names that CPU and nothing else Ready
+may run there (GitHub issue #582). The ordering is the same, but the entry
+has already done its first two steps: the lower-EL IRQ entry runs its
+handler on the IRQ stack and has released the process's stack
+(`kernel_process_stack_interrupt_depart`). The handler therefore publishes
+no current process and makes the process Ready under the run lock. It
+acknowledges the interrupt, and only then leaves the IRQ stack for the
+idle loop (`kernel_timer_tick_leave`).
+
 ## State transitions and the run guard
 
 Every take that mints a process's linear state -- Ready, Running,

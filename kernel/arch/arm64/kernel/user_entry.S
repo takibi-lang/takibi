@@ -461,6 +461,27 @@ kernel_secondary_idle_block_enter:
     adr     x5, kernel_secondary_idle_block_reenter
     b       .Lsecondary_idle_stack
 
+/* GitHub issue #582: the tick's leave. Entered from a lower-EL timer
+ * interrupt's handler on this CPU's IRQ stack, after the EOI, once the
+ * interrupted process was published Ready. Its stack was released at IRQ
+ * entry, so the reenter only idles. */
+    .global kernel_core0_idle_tick_enter
+    .type kernel_core0_idle_tick_enter, %function
+kernel_core0_idle_tick_enter:
+    msr     DAIFSet, #0x2
+    adrp    x1, core0_idle_stack_top
+    add     x1, x1, :lo12:core0_idle_stack_top
+    mov     sp, x1
+    mov     x29, xzr
+    b       kernel_core0_idle_tick_reenter
+
+    .global kernel_secondary_idle_tick_enter
+    .type kernel_secondary_idle_tick_enter, %function
+kernel_secondary_idle_tick_enter:
+    msr     DAIFSet, #0x2
+    adr     x5, kernel_secondary_idle_tick_reenter
+    b       .Lsecondary_idle_stack
+
     .global kernel_secondary_idle_enter
     .type kernel_secondary_idle_enter, %function
 kernel_secondary_idle_enter:

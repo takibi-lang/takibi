@@ -337,6 +337,30 @@ fn kernel_core0_idle_loop() {
     }
 }
 
+// Called by each platform's timer branch after it has acknowledged the
+// interrupt, with the value kernel_process_timer_schedule returned. The
+// tick gave the process back (GitHub issue #582), so leave the IRQ stack
+// for this CPU's idle loop rather than returning to a frame no longer ours.
+fn kernel_timer_tick_leave(next_sp: usize) -> usize !{interrupt} {
+    if (next_sp != PROCESS_TICK_TO_IDLE) { return next_sp; }
+    if (cpu_id() != 0) { kernel_secondary_idle_tick_enter(); }
+    kernel_core0_idle_tick_enter();
+    return next_sp;
+}
+
+// Where the two enters above land, on the CPU's idle stack. The process's
+// stack was released at IRQ entry and its state published Ready before the
+// interrupt was acknowledged, so there is nothing left to hand over.
+fn kernel_secondary_idle_tick_reenter() {
+    workload_profile_idle_enter();
+    kernel_secondary_main(0x290 + cpu_id());
+}
+
+fn kernel_core0_idle_tick_reenter() {
+    workload_profile_idle_enter();
+    kernel_core0_idle_loop();
+}
+
 // Shared timer policy; each platform still acknowledges its own GIC source
 // after this returns. Only a lower-EL interrupt may replace the saved frame.
 fn kernel_secondary_timer_schedule(frame_sp: usize, lower_el: bool)
