@@ -38,7 +38,7 @@ RAW_ARGS = sys.argv[1:]
 FAST_MODE = "--fast" in RAW_ARGS
 FILE_FLAGS = ("--interactive-ready-file", "--daemon-ready-file",
               "--init-ready-file", "--network-ready-file",
-              "--httpd-peer-guard-file")
+              "--httpd-peer-guard-file", "--postmortem-request-file")
 
 
 def path_argument(flag):
@@ -61,6 +61,21 @@ DAEMON_READY_FILE = path_argument("--daemon-ready-file")
 INIT_READY_FILE = path_argument("--init-ready-file")
 NETWORK_READY_FILE = path_argument("--network-ready-file")
 HTTPD_GUARD_FILE = path_argument("--httpd-peer-guard-file")
+# GitHub issue #593: a step that fails while the guest is still running
+# leaves no evidence of where the guest was -- the lane takes a DDB walk only
+# when the guest goes silent. Touching this asks the UART driver to BREAK in
+# and walk now, while the processes the step talked to are still where they
+# stopped.
+POSTMORTEM_REQUEST_FILE = path_argument("--postmortem-request-file")
+
+
+def request_postmortem(reason: str) -> None:
+    if POSTMORTEM_REQUEST_FILE is None:
+        return
+    POSTMORTEM_REQUEST_FILE.write_text(reason + "\n", encoding="ascii")
+    # Give the driver time to stop the guest before later steps talk to it,
+    # so the walk shows this failure's state rather than theirs.
+    time.sleep(5.0)
 HTTPD_IDLE_SECONDS = float(os.environ.get("KERNEL_HTTPD_IDLE_SECONDS", "0"))
 if HTTPD_IDLE_SECONDS < 0:
     raise SystemExit("KERNEL_HTTPD_IDLE_SECONDS must be nonnegative")
@@ -733,6 +748,8 @@ def concurrent_http_requests(sock: socket.socket, expected_body: bytes,
             print("    response bytes=%d fin=%s type=%s" %
                   (len(response), state["fin"], content_type))
         ok = ok and passed
+    if not ok:
+        request_postmortem("concurrent HTTP step failed")
     return ok
 
 

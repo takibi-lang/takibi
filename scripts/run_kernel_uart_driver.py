@@ -295,6 +295,9 @@ def main() -> int:
     parser.add_argument("--interactive-httpd-ready-file")
     parser.add_argument("--interactive-httpd-done-file")
     parser.add_argument("--httpd-peer-guard-file", dest="httpd_guard_file")
+    # GitHub issue #593: a host-side step that failed with the guest still
+    # talking asks for the DDB walk the silence watchdog would take.
+    parser.add_argument("--postmortem-request-file")
     # GitHub issue #547: after the background server, run /bin/peer-tty in
     # the persistent shell and type it one line; the capture then also waits
     # for the kernel's verdict on that line.
@@ -424,6 +427,19 @@ def main() -> int:
                             float(httpd_guard_file.read_text(encoding="ascii")))
                     except (OSError, ValueError):
                         pass
+                if (args.qmp_port and not break_asked and
+                        postmortem_at is None and
+                        args.postmortem_request_file and
+                        Path(args.postmortem_request_file).exists()):
+                    break_asked = True
+                    print("[kernel/uart] the host peer asked for a postmortem ("
+                          + Path(args.postmortem_request_file).read_text(
+                              encoding="ascii", errors="replace").strip()
+                          + "); asking QEMU for a serial BREAK", flush=True)
+                    break_failure = send_serial_break(
+                        args.qmp_port, QMP_CHARDEV, 5.0)
+                    deadline = (time.monotonic()
+                                + postmortem_budget(args.timeout))
                 if (args.qmp_port and not break_asked and
                         postmortem_at is None and
                         postmortem_break_due(
@@ -599,9 +615,19 @@ def main() -> int:
                 print(f"[kernel/uart] could not save the postmortem walk to "
                       f"{args.postmortem_log}: {error}", flush=True)
         answered = max(0, walk.count(DDB_PROMPT) - 1)
-        raise RuntimeError(postmortem_note(
+        note = postmortem_note(
             bytes(output[:postmortem_at]), min(answered, postmortem_sent),
-            args.postmortem_log))
+            args.postmortem_log)
+        # A walk the host peer asked for is not a stall: the guest was still
+        # talking, and the failure is the peer's step, reported above it.
+        if (args.postmortem_request_file and
+                Path(args.postmortem_request_file).exists()):
+            reason = Path(args.postmortem_request_file).read_text(
+                encoding="ascii", errors="replace").strip()
+            note = ("the host peer asked for a DDB walk after a failed step "
+                    f"({reason}); the walk is the evidence, not a stall. "
+                    + note)
+        raise RuntimeError(note)
 
     # Every path out of the loop above breaks on a marker, so reaching the
     # deadline means the guest stopped sending. Say so wherever a downstream

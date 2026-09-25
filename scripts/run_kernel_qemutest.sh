@@ -63,6 +63,7 @@ NETWORK_READY="$ARTIFACT_DIR/network.ready"
 INTERACTIVE_HTTPD_READY="$ARTIFACT_DIR/interactive-httpd.ready"
 INTERACTIVE_HTTPD_DONE="$ARTIFACT_DIR/interactive-httpd.done"
 HTTPD_GUARD_FILE="$ARTIFACT_DIR/httpd-peer-guard.until"
+POSTMORTEM_REQUEST="$ARTIFACT_DIR/postmortem.request"
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
 QEMU_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
 SERIAL_PORT="${KERNEL_QEMU_SERIAL_PORT:-18673}"
@@ -83,7 +84,7 @@ NETDEV_LOCAL_PORT="${KERNEL_QEMU_NETDEV_LOCAL_PORT:-18671}"
 NETDEV_REMOTE_PORT="${KERNEL_QEMU_NETDEV_REMOTE_PORT:-18672}"
 mkdir -p "$ARTIFACT_DIR"
 rm -f "$INTERACTIVE_HTTPD_LISTENER" "$INTERACTIVE_HTTPD_READY" \
-    "$INTERACTIVE_HTTPD_DONE" "$HTTPD_GUARD_FILE" \
+    "$INTERACTIVE_HTTPD_DONE" "$HTTPD_GUARD_FILE" "$POSTMORTEM_REQUEST" \
     "$FOREGROUND_HTTPD_LISTENER" "$INIT_LISTENER" \
     "$NETWORK_READY"
 cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
@@ -175,6 +176,7 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --interactive-httpd-ready-file "$INTERACTIVE_HTTPD_READY" \
     --interactive-httpd-done-file "$INTERACTIVE_HTTPD_DONE" \
     --httpd-peer-guard-file "$HTTPD_GUARD_FILE" \
+    --postmortem-request-file "$POSTMORTEM_REQUEST" \
     --peer-tty \
     --workload-marker 'workload: busy pair done' \
     --validate-ash &
@@ -197,6 +199,7 @@ timeout "$TIMEOUT_SECS" python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" \
     "$NETDEV_LOCAL_PORT" "$NETDEV_REMOTE_PORT" \
     --interactive-ready-file "$INTERACTIVE_HTTPD_LISTENER" \
     --httpd-peer-guard-file "$HTTPD_GUARD_FILE" \
+    --postmortem-request-file "$POSTMORTEM_REQUEST" \
     --daemon-ready-file "$FOREGROUND_HTTPD_LISTENER" \
     --init-ready-file "$INIT_LISTENER" \
     --network-ready-file "$NETWORK_READY" \
