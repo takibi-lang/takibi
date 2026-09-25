@@ -30,6 +30,8 @@
 //   ABCDEFGH\r\n  (approach 1)
 //   ABCDEFGH\r\n  (approach 2)
 //   ABCDEFGH\r\n  (approach 3)
+//   0x00000080\r\n  (128 is a 64-byte multiple)
+//   0x00000007\r\n  (every usize is a multiple of one)
 
 let mut buf: [u8; 8];
 
@@ -86,6 +88,17 @@ fn test_refined() -> i32 {
     return 0;
 }
 
+// Divisibility is a value proof; it keeps the ordinary usize runtime value.
+fn round_down_to_line(n: usize) -> multiple(64) usize {
+    return (n / 64) * 64;
+}
+
+fn any_usize(n: usize) -> multiple(1) usize {
+    return n;
+}
+
 fn app_main() {
     test_refined();
+    uart_println_hex(round_down_to_line(130) as i32);
+    uart_println_hex(any_usize(7) as i32);
 }

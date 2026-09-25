@@ -12630,6 +12630,10 @@ let codegen_tests = [
           }" ();
        expect_type_error "positive power-of-two"
          "fn bad(n: multiple(3) usize) {}" ();
+       expect_codegen_ok
+         "fn any_usize_is_multiple_of_one(n: usize) -> multiple(1) usize {
+            return n;
+          }" ();
        Target_info.configure "thumbv7em-none-eabi");
 
   Alcotest.test_case "dma_finish_rx rejects an unproven pointer, dma_prepare_tx accepts it" `Quick

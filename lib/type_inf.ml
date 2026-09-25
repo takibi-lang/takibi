@@ -4854,7 +4854,7 @@ and check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : ty =
         | _ ->
             provable_multiple_of expr
       in
-      let proven = match repr actual with
+      let proven = n = 1 || match repr actual with
         | TMultiple (factor, _) -> factor mod n = 0
         | _ -> (match factor e with
                 | Some k -> k mod n = 0
