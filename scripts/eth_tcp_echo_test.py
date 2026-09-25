@@ -538,7 +538,33 @@ def test_httpd_concurrent_accept_read(client_mac: bytes) -> bool:
                 zip(HTTPD_CLIENT_PORTS, HTTPD_CLIENT_ISNS)):
             syn = build_frame(client_mac, client_port, client_isn, 0,
                               FLAG_SYN)
-            reply = send_and_wait(sock, syn)
+            # GitHub issue #593: the guest may retransmit an EARLIER peer's
+            # SYN-ACK while this one's is awaited -- its final ACK can meet a
+            # connection busy on another CPU, which the guest leaves
+            # unacknowledged for the sender to present again. Answer such a
+            # retransmission with that peer's ACK, as a TCP client would, and
+            # keep waiting for this port's own SYN-ACK.
+            reply = None
+            for _attempt in range(RETRIES):
+                sock.send(syn)
+                attempt_deadline = time.monotonic() + RETRY_TIMEOUT_SECS
+                while reply is None and time.monotonic() < attempt_deadline:
+                    candidate = recv_reply(
+                        sock, syn, max(0.001,
+                                       attempt_deadline - time.monotonic()))
+                    if candidate is None or len(candidate) < 54:
+                        break
+                    other_src, other_dst = struct.unpack(
+                        "!HH", candidate[34:38])
+                    if other_src == SERVER_PORT and other_dst == client_port:
+                        reply = candidate
+                    elif other_src == SERVER_PORT and other_dst in peers:
+                        earlier = peers[other_dst]
+                        sock.send(build_frame(
+                            client_mac, other_dst, earlier["client_seq"],
+                            earlier["server_next"], FLAG_ACK))
+                if reply is not None:
+                    break
             if reply is None or len(reply) < 54:
                 print("  no HTTPd SYN-ACK on client port %d" % client_port)
                 return False
@@ -565,6 +591,11 @@ def test_httpd_concurrent_accept_read(client_mac: bytes) -> bool:
         request = b"GET / HTTP/1.0\r\nHost: 192.168.20.2\r\n\r\n"
         for client_port in (HTTPD_CLIENT_PORTS[1], HTTPD_CLIENT_PORTS[0]):
             state = peers[client_port]
+            # Kept for retransmission (GitHub issue #593): the guest leaves a
+            # segment for a busy connection unacknowledged.
+            state["request_seq"] = state["client_seq"]
+            state["acked"] = False
+            state["sent_at"] = time.monotonic()
             sock.send(build_frame(
                 client_mac, client_port, state["client_seq"],
                 state["server_next"], FLAG_ACK | FLAG_PSH, data=request))
@@ -577,9 +608,20 @@ def test_httpd_concurrent_accept_read(client_mac: bytes) -> bool:
         deadline = time.monotonic() + 10.0
         while (not all(state["fin"] for state in peers.values()) and
                 time.monotonic() < deadline):
+            now = time.monotonic()
+            for retry_port, retry_state in peers.items():
+                if (not retry_state["acked"] and not retry_state["fin"] and
+                        now - retry_state["sent_at"] >= 0.5):
+                    retry_state["sent_at"] = now
+                    retry_state["retransmits"] = (
+                        retry_state.get("retransmits", 0) + 1)
+                    sock.send(build_frame(
+                        client_mac, retry_port, retry_state["request_seq"],
+                        retry_state["server_next"], FLAG_ACK | FLAG_PSH,
+                        data=request))
             frame = recv_reply(
                 sock, peers[HTTPD_CLIENT_PORTS[0]]["syn"],
-                min(0.5, max(0.001, deadline - time.monotonic())))
+                min(0.25, max(0.001, deadline - time.monotonic())))
             if frame is None or len(frame) < 54:
                 continue
             total_len = struct.unpack("!H", frame[16:18])[0]
@@ -587,11 +629,13 @@ def test_httpd_concurrent_accept_read(client_mac: bytes) -> bool:
             if total_len < 40 or len(frame) < tcp_end:
                 continue
             tcp = frame[34:tcp_end]
-            src_port, client_port, sequence, _ack, _doff_res, flags = \
+            src_port, client_port, sequence, acknowledged, _doff_res, flags = \
                 struct.unpack("!HHIIBB", tcp[:14])
             if src_port != SERVER_PORT or client_port not in peers:
                 continue
             state = peers[client_port]
+            if (flags & FLAG_ACK) != 0 and acknowledged == state["client_seq"]:
+                state["acked"] = True
             header_len = (tcp[12] >> 4) * 4
             payload = tcp[header_len:]
             in_order = sequence == state["server_next"]
@@ -627,8 +671,9 @@ def test_httpd_concurrent_accept_read(client_mac: bytes) -> bool:
             print("  concurrent HTTPd client %-5d: %s" %
                   (client_port, "PASS" if passed else "FAIL"))
             if not passed:
-                print("    response bytes=%d fin=%s type=%s" %
-                      (len(response), state["fin"], content_type))
+                print("    response bytes=%d fin=%s type=%s retransmits=%d" %
+                      (len(response), state["fin"], content_type,
+                       state.get("retransmits", 0)))
             ok = ok and passed
         return ok
     finally:
