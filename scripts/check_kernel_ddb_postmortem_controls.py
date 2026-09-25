@@ -65,6 +65,8 @@ ANSWERS = {
     b"sched": b"ddb: sched enabled=1 pending=1 current=27 ready=0 running=1 blocked=2\r\n",
     b"current": b"ddb: current pid=27 parent=1 state=2 wait=0\r\n",
     b"ps": b"ddb: ps count=3\r\n",
+    b"stacks": b"ddb: stacks cpus=2\r\n",
+    b"events": b"ddb: events cpu=0 count=0 damaged=0 overwritten=0\r\n",
 }
 
 

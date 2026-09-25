@@ -118,7 +118,8 @@ DDB_PROMPT = b"ddb> "
 # `xk`/`xp`/`xu`/`xkfault`/`bttest` are excluded as not read-only in intent,
 # and `continue` because resuming a guest that stopped for a reason destroys
 # the state the next question would have asked about.
-POSTMORTEM_COMMANDS = (b"oops", b"intr", b"bt", b"sched", b"current", b"ps")
+POSTMORTEM_COMMANDS = (b"oops", b"intr", b"bt", b"sched", b"current", b"ps",
+                       b"stacks", b"events")
 
 # What the walk may spend, granted on top of whatever remains of the capture
 # budget rather than taken out of it: a stall found at second 89 of 90 still
