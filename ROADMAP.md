@@ -39,7 +39,7 @@ step, landed as its own commit.
 
 ### Territory B: everything else, ordered by current priority
 
-1. **Kernel and userspace capability:** #536, #171, #204, #433,
+1. **Kernel and userspace capability:** #171, #204, #433,
    #430, #434, #435, #220, #595.
 2. **Resource use and measured performance:** #389, #422, #497, #520, #553,
    #386, #502, #503.
@@ -48,7 +48,7 @@ step, landed as its own commit.
 4. **Toolchain, portability and hardware-lane support:** #576, #568, #123,
    #124, #122, #95, #51, #50, #85, #268.
 5. **Deferred or not a scheduled work item:** #432, #555, #250, #444, #429,
-   #149, #567, #539.
+   #149, #567, #539, #536.
 
 Items are ordered within each band as well as between bands. The deferred
 items stay listed so a changed premise can bring them back into the queue.
