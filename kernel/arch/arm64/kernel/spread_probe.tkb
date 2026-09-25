@@ -1,0 +1,95 @@
+/* Two compute-bound processes with no affinity mask end up on different
+ * CPUs (GitHub issue #582). A static-PIE EL0 program, kept free of writable
+ * globals and compiled with --forbid-trap. Its one line is compared by the
+ * ash transcript, so it says only what holds on every platform with a
+ * second online CPU.
+ *
+ * Neither process calls sched_setaffinity. The parent forks, and both spin
+ * on arithmetic with a getcpu between chunks; nothing either does blocks.
+ * The child's spin is half the parent's, so its last getcpu is taken while
+ * the parent is still spinning, and the parent's last getcpu is taken after
+ * the child exited -- when nothing Ready is left to move it. If the two
+ * shared one CPU for the whole run, those two answers are equal. They
+ * differ only if some CPU took one of them off the other's CPU while both
+ * were runnable.
+ */
+
+const WRITE_SYSCALL: usize = 64;
+const EXIT_SYSCALL: usize = 93;
+const GETCPU_SYSCALL: usize = 168;
+const CLONE_SYSCALL: usize = 220;
+const WAIT4_SYSCALL: usize = 260;
+const CLONE_FORK_SIGCHLD: usize = 0x11;
+const SPREAD_ERROR_FLOOR: usize = 0xFFFFFFFFFFFFF000;
+// Iterations between two getcpu calls, and how many such chunks each
+// process runs. The child's count is what matters: it has to span many
+// timer ticks on the faster platform (RPi5), since an idle CPU looks for
+// work when its tick wakes it.
+const SPREAD_CHUNK: usize = 1048576;
+const SPREAD_CHILD_CHUNKS: usize = 256;
+const SPREAD_PARENT_CHUNKS: usize = 512;
+// An exit status no CPU number reaches, for a getcpu that failed.
+const SPREAD_NO_CPU: usize = 250;
+
+private fn spread_say(line: borrow []u8) {
+    svc5(WRITE_SYSCALL, 1, line as *u8 as usize, line.len, 0, 0);
+}
+
+private fn spread_fail(line: borrow []u8) {
+    spread_say(line);
+    svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+}
+
+private fn spread_cpu(cpu_bytes: borrow [u8; 4..]) -> usize {
+    if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize, 0, 0, 0, 0) != 0) {
+        return SPREAD_NO_CPU;
+    }
+    return cpu_bytes[0] as usize |
+           ((cpu_bytes[1] as usize) << 8) |
+           ((cpu_bytes[2] as usize) << 16) |
+           ((cpu_bytes[3] as usize) << 24);
+}
+
+// Spin `chunks` chunks and return the CPU the last getcpu named. The
+// accumulator is folded into the answer so the arithmetic cannot be
+// discarded; it never reaches SPREAD_NO_CPU's bit.
+private fn spread_spin(chunks: usize) -> usize {
+    let mut cpu_bytes: [u8; 4];
+    let mut cpu: usize = SPREAD_NO_CPU;
+    let mut acc: usize = 1;
+    for round: usize in 0..<chunks {
+        for step: usize in 0..<SPREAD_CHUNK {
+            acc = acc * 6364136223846793005 + 1442695040888963407;
+        }
+        cpu = spread_cpu(cpu_bytes as []u8);
+    }
+    if (acc == 0) { return SPREAD_NO_CPU; }
+    return cpu;
+}
+
+fn spread_probe() {
+    let child: usize = svc5(CLONE_SYSCALL, CLONE_FORK_SIGCHLD, 0, 0, 0, 0);
+    if (child == 0) {
+        let child_cpu: usize = spread_spin(SPREAD_CHILD_CHUNKS);
+        svc5(EXIT_SYSCALL, child_cpu, 0, 0, 0, 0);
+    }
+    if (child >= SPREAD_ERROR_FLOOR) {
+        spread_fail(bs"spread: fork failed\n");
+    }
+    let parent_cpu: usize = spread_spin(SPREAD_PARENT_CHUNKS);
+    let mut status: [u8; 4];
+    for index: usize in 0..<4 { status[index] = 0; }
+    if (svc5(WAIT4_SYSCALL, child, status as *u8 as usize, 0, 0, 0) != child ||
+        status[0] != 0) {
+        spread_fail(bs"spread: the child was not reaped as an exit\n");
+    }
+    let child_cpu: usize = status[1] as usize;
+    if (child_cpu == SPREAD_NO_CPU || parent_cpu == SPREAD_NO_CPU) {
+        spread_fail(bs"spread: getcpu failed\n");
+    }
+    if (child_cpu == parent_cpu) {
+        spread_fail(bs"spread: two unpinned compute-bound processes ended on the same cpu\n");
+    }
+    spread_say(bs"spread: two unpinned compute-bound processes ended on different cpus\n");
+    svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+}

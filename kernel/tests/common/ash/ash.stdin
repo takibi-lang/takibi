@@ -62,6 +62,9 @@ mv /etc/mva /kept /etc/moved
 # narrows itself to CPU 0, and checks what the kernel refuses and what a
 # child inherits. It prints only what holds on every platform.
 /bin/affinity
+# GitHub issue #582: two compute-bound processes that set no mask end up on
+# different CPUs, with nothing but an idle CPU looking for work to move one.
+/bin/spread
 # GitHub issue #544: a write six times the console transmit queue. On the
 # board the wire cannot keep up, so cat's write fills the queue, returns
 # short, and the next one sleeps until the TX interrupt has drained it; the
