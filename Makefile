@@ -56,6 +56,17 @@ LLVM_OBJCOPY := llvm-objcopy-19
 
 .DEFAULT_GOAL := build
 
+## Per-clone Git settings (scripts/setup_clone.sh) are applied on every make
+## invocation, at parse time so no target can skip them. CI runners set CI and
+## neither need nor keep them. `make setup` runs the same script explicitly.
+ifeq ($(CI),)
+$(shell ./scripts/setup_clone.sh)
+endif
+
+.PHONY: setup
+setup:
+	./scripts/setup_clone.sh
+
 ## build: build only the OCaml compiler (dune)
 build: $(TAKIBI)
 

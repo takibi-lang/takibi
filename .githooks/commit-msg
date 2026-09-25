@@ -3,7 +3,7 @@
 # runs for every committer -- the human maintainer, and any agent whose tooling
 # this repository does not wire a PreToolUse hook into.
 #
-# Activate once per clone:
+# Every `make` outside CI activates it (scripts/setup_clone.sh); by hand:
 #
 #   git config core.hooksPath .githooks
 #
