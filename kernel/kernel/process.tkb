@@ -4166,6 +4166,63 @@ private fn kernel_process_affinity_slot(pid: usize) -> ProcessSlotForPidResult
     return scheduled_process_slot_for_pid(pid);
 }
 
+// GitHub issue #582: every move of a process between CPUs -- an idle CPU's
+// pull, a switch, a start after a wake -- takes it through
+// scheduled_process_ready_take, and that refuses a process whose stack
+// another CPU still stands on. This asks the real function about a real
+// Ready process: with a CPU other than this one named as the stack's owner
+// it must refuse, and with the owner cleared it must accept. The run lock
+// is held across both questions, so no other CPU sees the owner this names,
+// and each accepted take is dropped without starting anything.
+//
+// The caller arranges that `pid` is Ready with an unowned stack.
+// Answers: 1 refused then accepted; 0 the process was not in that state;
+// 2 taken while another CPU owned its stack; 3 refused with none owning it.
+fn kernel_process_stack_owner_probe(pid: usize) -> usize !{unsafe} {
+    let guard = process_run_lock();
+    let slot: usize = match scheduled_process_slot_for_pid(pid) {
+        ProcessSlotForPidResult::Missing => {
+            process_run_unlock(guard);
+            return 0;
+        }
+        ProcessSlotForPidResult::Found(found) => { found }
+    };
+    let mut handle: ProcessHandle = scheduled_process_handle_of_slot(slot);
+    if (slot == 0 ||
+        scheduled_process_record_state(slot) != ProcessSlotState::Ready ||
+        scheduled_process_record_at(slot).stack_owner_cpu !=
+            PROCESS_STACK_UNOWNED) {
+        process_run_unlock(guard);
+        return 0;
+    }
+    let mut other_cpu: usize = 0;
+    if (cpu_id() == 0) { other_cpu = 1; }
+    scheduled_process_record_at(slot).stack_owner_cpu = other_cpu;
+    let mut refused: bool = true;
+    match scheduled_process_ready_take(guard, handle) {
+        ScheduledProcessReadyTakeResult::Missing => {}
+        ScheduledProcessReadyTakeResult::Ready(resources) => {
+            let (owner, ready) = resources;
+            scheduled_process_release(owner, ready);
+            refused = false;
+        }
+    }
+    scheduled_process_record_at(slot).stack_owner_cpu = PROCESS_STACK_UNOWNED;
+    let mut accepted: bool = false;
+    match scheduled_process_ready_take(guard, handle) {
+        ScheduledProcessReadyTakeResult::Missing => {}
+        ScheduledProcessReadyTakeResult::Ready(resources) => {
+            let (owner, ready) = resources;
+            scheduled_process_release(owner, ready);
+            accepted = true;
+        }
+    }
+    process_run_unlock(guard);
+    if (refused == false) { return 2; }
+    if (accepted == false) { return 3; }
+    return 1;
+}
+
 // sched_getaffinity: the mask the process set, or every online CPU when it
 // set none.
 fn kernel_process_affinity_get(pid: usize) -> ProcessAffinityResult

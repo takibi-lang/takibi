@@ -19,6 +19,12 @@
  * off CPU 0, and it has no successor there, so it ends on CPU 1 only if the
  * tick gives a Running process back with nothing in its place.
  *
+ * Before it moves the child, the parent asks the kernel's stack-owner probe
+ * about it. Both are pinned to CPU 1 and the parent is the one running
+ * there, so the child is Ready and off every CPU: the probe names another
+ * CPU as its stack's owner and the real ready take must refuse it, then
+ * clears the owner and the take must accept it.
+ *
  * The parent must not call wait4 while the child spins. wait4 is on the
  * peer refusal list, so it reruns on core 0, and a parent Ready there lets
  * core 0's ordinary tick switch the child out -- which moves it without
@@ -31,6 +37,8 @@ const SETAFFINITY_SYSCALL: usize = 122;
 const EXIT_SYSCALL: usize = 93;
 const GETCPU_SYSCALL: usize = 168;
 const CLONE_SYSCALL: usize = 220;
+const WORKLOAD_PROGRESS_SYSCALL: usize = 453;
+const STACK_OWNER_PROBE_TAG: usize = 12;
 const WAIT4_SYSCALL: usize = 260;
 const CLONE_FORK_SIGCHLD: usize = 0x11;
 const SPREAD_ERROR_FLOOR: usize = 0xFFFFFFFFFFFFF000;
@@ -133,6 +141,28 @@ private fn spread_leave() {
     if (child >= SPREAD_ERROR_FLOOR) {
         spread_fail(bs"spread: fork failed\n");
     }
+    // fork ran on core 0; wait to be back on CPU 1, where the child can
+    // only be Ready while this process runs.
+    let mut cpu_bytes: [u8; 4];
+    let mut here: usize = spread_cpu(cpu_bytes as []u8);
+    for poll: usize in 0..<SPREAD_LEAVE_ARRIVAL_POLLS {
+        if (here != 1) { here = spread_cpu(cpu_bytes as []u8); }
+    }
+    if (here != 1) {
+        spread_fail(bs"spread: the parent never returned to cpu 1\n");
+    }
+    let probe: usize = svc5(WORKLOAD_PROGRESS_SYSCALL, STACK_OWNER_PROBE_TAG,
+                            child, 0, 0, 0);
+    if (probe == 0) {
+        spread_fail(bs"spread: the child was not Ready with an unowned stack\n");
+    }
+    if (probe == 2) {
+        spread_fail(bs"spread: a Ready process was taken while another cpu owned its stack\n");
+    }
+    if (probe != 1) {
+        spread_fail(bs"spread: a Ready process with an unowned stack was refused\n");
+    }
+    spread_say(bs"spread: a Ready process was refused while another cpu owned its stack, and taken once it was released\n");
     if (spread_set_mask(child, 1) == false) {
         spread_fail(bs"spread: the child could not be moved to cpu 0\n");
     }

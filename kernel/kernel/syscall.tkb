@@ -3266,6 +3266,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             return SyscallAction::Resume(
                 workload_peer_read_peer_ready());
         }
+        // /bin/spread (GitHub issue #582): x1 is its Ready child.
+        if (x0 == 12) {
+            return SyscallAction::Resume(kernel_process_stack_owner_probe(x1));
+        }
         return SyscallAction::Resume(workload_busy_record_progress(x0, x1, x2));
     }
 
