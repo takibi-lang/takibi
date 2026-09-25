@@ -25,7 +25,8 @@ step, landed as its own commit.
 
 1. **True multicore support**: every online core runs ordinary processes,
    any core can issue any syscall, and a process can continue on another
-   core. #9, #582, #597 (ext2 mutation), #598 (socket setup and
+   core. #9, #582, #600 (linear token for values taken before a call
+   restart; before #597 and #598), #597 (ext2 mutation), #598 (socket setup and
    teardown); and the multicore-correctness issues
    #550, #560, #482, #464, #468, #556, #573.
 2. **Run the multicore workload mainly on RPi5 and fix what it finds.** #584
