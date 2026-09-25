@@ -55,6 +55,8 @@ let rec resolve_type names = function
         (List.map (resolve_type names) args, resolve_type names ret, effects)
   | TypeRefined (lo, hi, base) ->
       TypeRefined (lo, hi, resolve_type names base)
+  | TypeMultiple (n, base) ->
+      TypeMultiple (n, resolve_type names base)
   | TypeBorrow t -> TypeBorrow (resolve_type names t)
   | TypeBorrowMut t -> TypeBorrowMut (resolve_type names t)
   | TypeSink t -> TypeSink (resolve_type names t)
@@ -241,7 +243,8 @@ let validate prog =
         noncanonical "variant" name "TypeIndexed"
     | TypePtr t | TypeIo t | TypeArray (t, _) | TypeSlice (t, _)
     | TypeBorrow t | TypeBorrowMut t | TypeSink t | TypeRef t | TypeRefMut t
-    | TypeRefined (_, _, t) | TypeAlignedPtr (_, t) | TypeSingleton (t, _) ->
+    | TypeRefined (_, _, t) | TypeMultiple (_, t)
+    | TypeAlignedPtr (_, t) | TypeSingleton (t, _) ->
         check_type t
     | TypeFn (args, ret, _) -> List.iter check_type args; check_type ret
     | TypeTuple ts | TypeGenericInst (_, ts) -> List.iter check_type ts

@@ -102,6 +102,8 @@ let rec resolve_special_type = function
               resolve_special_type ret, effects)
   | TypeRefined (lo, hi, base) ->
       TypeRefined (lo, hi, resolve_special_type base)
+  | TypeMultiple (n, base) ->
+      TypeMultiple (n, resolve_special_type base)
   | TypeSlice (t, n) -> TypeSlice (resolve_special_type t, n)
   | TypeBorrow t -> TypeBorrow (resolve_special_type t)
   | TypeBorrowMut t -> TypeBorrowMut (resolve_special_type t)
@@ -707,6 +709,8 @@ let rec ty_str = function
       in
       Printf.sprintf "%s @ %s" (ty_str t) n
   | TypeRefined (lo, hi, _) -> Printf.sprintf "{%d..<%d}" lo hi
+  | TypeMultiple (n, base) ->
+      Printf.sprintf "multiple(%d) %s" n (ty_str base)
   | TypeSlice (t, 0) -> Printf.sprintf "[]%s" (ty_str t)
   | TypeSlice (t, n) -> Printf.sprintf "[%s; %d..]" (ty_str t) n
   | TypeBorrow t -> "borrow " ^ ty_str t
@@ -1084,7 +1088,8 @@ let collect_bounds_cond (locals : local_env)
    mirrors type_inf.ml's is_unsigned_ty (same primitive set, Ast.type_expr
    form instead of Types.ty). *)
 let is_unsigned_ast_ty = function
-  | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU32 | Ast.TypeU64 | Ast.TypeUsize -> true
+  | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU32 | Ast.TypeU64 | Ast.TypeUsize
+  | Ast.TypeMultiple (_, Ast.TypeUsize) -> true
   | _ -> false
 
 (* Temporarily narrow Imm locals based on condition bounds.
@@ -1695,6 +1700,7 @@ let rec ltype_of_ast = function
   | TypeArray (t, n) -> array_type (ltype_of_ast t) n
   | TypeFn _        -> pointer_type context   (* function pointers are also opaque ptr *)
   | TypeRefined (_, _, base) -> ltype_of_ast base
+  | TypeMultiple (_, base) -> ltype_of_ast base
     (* Representation follows the refined range's own base (see
        types.ml's TRefinedInt comment) -- was unconditionally i32_type
        before "Refinement Numerical Type" generalized TRefinedInt to carry
@@ -1806,7 +1812,7 @@ let di_struct_placeholder dib file sname =
 
 let rec di_is_unsigned = function
   | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeUsize | TypeU16Be | TypeU32Be -> true
-  | TypeRefined (_, _, base) -> di_is_unsigned base
+  | TypeRefined (_, _, base) | TypeMultiple (_, base) -> di_is_unsigned base
   | _ -> false
 
 (* DIType for a variable's declared type (parameters / `let mut` locals /
@@ -1846,6 +1852,7 @@ let rec ditype_of_ast (dib : Llvm_debuginfo.lldibuilder) (file : llmetadata) (ty
     (* v1: no DWARF type for tuples (function-local values; -g builds work,
        tuple-typed variables just carry no type info in gdb) *)
   | TypeBorrow t | TypeSink t -> ditype_of_ast dib file t
+  | TypeMultiple (_, base) -> ditype_of_ast dib file base
   | TypeBorrowMut t -> ditype_of_ast dib file (TypePtr t)
   | TypeAlignedPtr (_, t) -> ditype_of_ast dib file (TypePtr t)
       (* alignment is a compile-time-only proof (see ltype_of_ast); gdb
@@ -2013,6 +2020,7 @@ let rec ditype_for_local dib file = function
   | TypeView _ | TypeVariant _ | TypeTuple _ | TypeVoid -> None
   | TypeExists (_, _, body) -> ditype_for_local dib file body
   | TypeSingleton (base, _) | TypeRefined (_, _, base)
+  | TypeMultiple (_, base)
   | TypeBorrow base | TypeSink base | TypeIo base ->
       ditype_for_local dib file base
   | TypeIndexed (name, _) -> ditype_for_local dib file (TypeNamed name)
@@ -2032,7 +2040,7 @@ let rec ditype_for_local dib file = function
    produced a refined value with the sign bit set. *)
 let rec is_unsigned = function
   | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeUsize -> true
-  | TypeRefined (_, _, base) -> is_unsigned base
+  | TypeRefined (_, _, base) | TypeMultiple (_, base) -> is_unsigned base
   | TypeSingleton (base, _) -> is_unsigned base
   | _ -> false
 
@@ -2064,7 +2072,7 @@ let min_max_sentinel base =
    llvalue just computed. *)
 let rec canon_ty = function
   | TypeSingleton (base, _) -> canon_ty base
-  | TypeRefined (_, _, base) -> base
+  | TypeRefined (_, _, base) | TypeMultiple (_, base) -> base
   | t -> t
 
 (* A singleton adds an equality fact without discarding the range carried by
@@ -2103,7 +2111,7 @@ let intlit_opt (e : Ast.expr) : int option =
 let rec widen_load (ast_ty : Ast.type_expr) v =
   match ast_ty with
   | TypeSingleton (base, _) -> widen_load base v
-  | TypeRefined (_, _, base) -> widen_load base v
+  | TypeRefined (_, _, base) | TypeMultiple (_, base) -> widen_load base v
   | TypeI64 | TypeU64 | TypeIsize | TypeUsize -> v
   | TypeBool -> v
   | TypeI8 | TypeI16 | TypeI32 ->
@@ -2241,7 +2249,7 @@ let rec coerce v (dst : Ast.type_expr) =
       else v
   | TypeIndexed _ -> v
   | TypeSingleton (base, _) -> coerce v base
-  | TypeRefined (_, _, base) -> coerce v base
+  | TypeRefined (_, _, base) | TypeMultiple (_, base) -> coerce v base
   | TypeSlice _ -> v   (* fat values are never numerically coerced *)
   | TypeBorrow t | TypeSink t -> coerce v t
   | TypeBorrowMut _ -> v
@@ -3035,6 +3043,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
                       | Some r -> r | None -> TypeVoid
                     in
                     (TypeFn (param_asts, ret_ast, None), f)
+                | None when Language_words.is_predeclared_name name ->
+                    (match Target_info.dma_cache_line () with
+                     | Some n ->
+                         (TypeUsize, const_int (usize_lltype ()) n)
+                     | None -> raise (Error (Printf.sprintf
+                         "target constant '%s' is unavailable on this target" name)))
                 | None ->
                     (* GitHub issue #225: `extern symbol name;` -- the bare
                        name is always its own address, never a load. *)
@@ -5569,7 +5583,8 @@ let gen_func ?prog_types fdef =
     | TypeNamed sname -> not (Hashtbl.mem enum_underlying sname)
     | TypeIndexed _ -> true
     | TypeExists (_, _, body) -> is_debug_aggregate_ty body
-    | TypeRefined (_, _, base)
+  | TypeRefined (_, _, base)
+    | TypeMultiple (_, base)
     | TypeSingleton (base, _)
     | TypeBorrow base
     | TypeBorrowMut base

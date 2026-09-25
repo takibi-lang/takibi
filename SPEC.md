@@ -140,7 +140,8 @@ turn as many potential traps as possible into compile-time errors instead:
 `bool`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `isize`,
 `usize`, `void`, `*T`, `io T`, `*io T`, `[T; N]`, `[]T` / `[T; N..]`
 (slice), `fn(T...) -> R`, `Name` (struct or enum), `{lo..<hi as base}`
-(refined integer subtype), `T @ n` (runtime integer or pointer singleton), and
+(refined integer subtype), `multiple(N) usize` (divisible value),
+`T @ n` (runtime integer or pointer singleton), and
 `Name[n]` (indexed affine/linear runtime struct or erased view).
 
 `addr` is a reserved checker-only static sort, not a runtime type. It may
@@ -179,6 +180,16 @@ parameter value, or top-level declaration name.
   rejected -- the base must always be spelled out. Refined ranges follow
   interval containment: `{a..<b as T}` is a subtype of `{c..<d as T}`
   when `[a,b)` is contained by `[c,d)`.
+- **`multiple(N) usize`** is a `usize` value proven divisible by the
+  positive power-of-two compile-time constant `N`. It has the same runtime
+  representation as `usize`, widens to `usize`, and can satisfy
+  `multiple(K) usize` when `K` divides `N`. The compiler proves literals,
+  named constants, multiplication by a known factor, sums or differences
+  of proven multiples, and values already carrying this type. An unproven
+  value, including an explicit cast, is rejected at the destination; no
+  runtime check is inserted. The power-of-two restriction keeps these
+  proofs valid under fixed-width integer wraparound. `align(N)` describes
+  storage addresses and does not prove this value property.
 
 ## Literals
 
@@ -2470,7 +2481,10 @@ len)`, `dma_finish_rx(ptr, len)` (Cortex-M7 rounds to 32-byte cache
 lines and issues SCB DCCMVAC/DCIMVAC plus barriers). On cache-maintained
 targets, `dma_prepare_rx` and `dma_finish_rx` require a pointer proven as
 `*align(DMA_CACHE_LINE) T`; AArch64 therefore rejects a merely
-`*align(32) T` RX buffer while STM32F7 accepts it. `dma_prepare_tx` remains
+`*align(32) T` RX buffer while STM32F7 accepts it. Their length must also
+be a `multiple(DMA_CACHE_LINE) usize` on cache-maintained targets. The
+device's own transfer length may be shorter if cache maintenance uses a
+separate, isolated full-line buffer range. `dma_prepare_tx` remains
 valid for a plain `*T`, because cleaning rounded endpoint lines does not
 discard adjacent dirty data. Targets without either a cache-maintenance
 contract or coherent DMA reject these builtins during type checking.

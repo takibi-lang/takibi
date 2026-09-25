@@ -120,6 +120,7 @@ let rec transform ~(subst : string -> type_expr option)
   | TypeSingleton (t, arg) -> TypeSingleton (go t, arg)
   | TypeExists (n, sort, body) -> TypeExists (n, sort, go body)
   | TypeRefined (lo, hi, base) -> TypeRefined (lo, hi, go base)
+  | TypeMultiple (n, base) -> TypeMultiple (n, go base)
   (* TypeIndexed's arguments are static_arg (erased values), not types --
      nothing under it can ever be a type parameter or a generic
      instantiation. TypeBool/int primitives/TypeVoid/TypeView/TypeVariant/
@@ -572,7 +573,7 @@ let discover_value_generic_params
     | TypeTuple ts -> List.iter scan_ty ts
     | TypeSingleton (t, _) -> scan_ty t
     | TypeExists (_, _, body) -> scan_ty body
-    | TypeRefined (_, _, base) -> scan_ty base
+    | TypeRefined (_, _, base) | TypeMultiple (_, base) -> scan_ty base
     | TypeNamed _ | TypeIndexed _ | TypeBool | TypeIntLit _
     | TypeI8 | TypeI16 | TypeI32 | TypeI64
     | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeU16Be | TypeU32Be
@@ -624,6 +625,7 @@ let type_expr_constructor = function
   | TypeIntLit _ -> "TypeIntLit" | TypeSingleton _ -> "TypeSingleton"
   | TypeFn _ -> "TypeFn" | TypeTuple _ -> "TypeTuple"
   | TypeExists _ -> "TypeExists" | TypeRefined _ -> "TypeRefined"
+  | TypeMultiple _ -> "TypeMultiple"
   | TypeIndexed _ -> "TypeIndexed" | TypeBool -> "TypeBool"
   | TypeI8 -> "TypeI8" | TypeI16 -> "TypeI16" | TypeI32 -> "TypeI32"
   | TypeI64 -> "TypeI64" | TypeU8 -> "TypeU8" | TypeU16 -> "TypeU16"
@@ -734,7 +736,7 @@ let rec unify_arg ?(trace = fun _ -> ())
            List.iter2 u args1 args2
        | _ -> mismatch template_ty concrete_ty)
   | TypeArraySym _ | TypeSliceSym _ | TypeIntLit _ | TypeSingleton _
-  | TypeFn _ | TypeTuple _ | TypeExists _ | TypeRefined _
+  | TypeFn _ | TypeTuple _ | TypeExists _ | TypeRefined _ | TypeMultiple _
   | TypeIndexed _ | TypeBool
   | TypeI8 | TypeI16 | TypeI32 | TypeI64
   | TypeU8 | TypeU16 | TypeU32 | TypeU64 | TypeU16Be | TypeU32Be
@@ -922,7 +924,7 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
                   | TypeIntLit _ | TypeArraySym _ | TypeSliceSym _
                   | TypeSlice _ | TypeTuple _ | TypeBorrow _ | TypeBorrowMut _
                   | TypeSink _ | TypeRef _ | TypeRefMut _ | TypeAlignedPtr _
-                  | TypeSingleton _ | TypeRefined _) -> None
+                  | TypeSingleton _ | TypeRefined _ | TypeMultiple _) -> None
            | None -> None)
       | _ -> None
     in
@@ -1283,7 +1285,8 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
           type_needs_layout t || size_expr_needs_layout sz
       | TypePtr t | TypeIo t | TypeArray (t, _) | TypeSlice (t, _)
       | TypeBorrow t | TypeBorrowMut t | TypeSink t | TypeRef t | TypeRefMut t
-      | TypeAlignedPtr (_, t) | TypeSingleton (t, _) | TypeRefined (_, _, t) ->
+      | TypeAlignedPtr (_, t) | TypeSingleton (t, _)
+      | TypeRefined (_, _, t) | TypeMultiple (_, t) ->
           type_needs_layout t
       | TypeFn (ps, r, _) ->
           List.exists type_needs_layout ps || type_needs_layout r

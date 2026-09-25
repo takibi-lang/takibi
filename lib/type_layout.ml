@@ -83,7 +83,8 @@ let rec size_align_of_type pos seen ty =
   | TypePtr _ | TypeFn _ -> ptr_size_align ()
   | TypeRef _ | TypeRefMut _ -> ptr_size_align ()
   | TypeIo t -> size_align_of_type pos seen t
-  | TypeRefined (_, _, base) -> size_align_of_type pos seen base
+  | TypeRefined (_, _, base) | TypeMultiple (_, base) ->
+      size_align_of_type pos seen base
   | TypeArray (elem, n) ->
       let (esz, ealign) = size_align_of_type pos seen elem in
       (esz * n, ealign)

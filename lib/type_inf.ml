@@ -390,7 +390,7 @@ let rec type_size_proven_nonzero senv eenv ty =
   | Ast.TypeArray (elem, count) ->
       count > 0 && type_size_proven_nonzero senv eenv elem
   | Ast.TypeIo inner | Ast.TypeSingleton (inner, _)
-  | Ast.TypeRefined (_, _, inner) | Ast.TypeBorrow inner
+  | Ast.TypeRefined (_, _, inner) | Ast.TypeMultiple (_, inner) | Ast.TypeBorrow inner
   | Ast.TypeBorrowMut inner | Ast.TypeSink inner ->
       type_size_proven_nonzero senv eenv inner
   | Ast.TypeTuple items ->
@@ -649,7 +649,7 @@ let adapt_actual_to_expected (tyenv : tyenv) (e : Ast.expr)
 
 (* True for all unsigned integer types (including usize) *)
 let is_unsigned_ty = function
-  | TU8 | TU16 | TU32 | TU64 | TUsize -> true
+  | TU8 | TU16 | TU32 | TU64 | TUsize | TMultiple (_, TUsize) -> true
   | _ -> false
 
 (* min/max's "unknown bound" placeholder (see the Call case below) must
@@ -724,7 +724,9 @@ let check_cond loc ct =
    would either lose information or produce a bogus unify error against
    the other, genuinely-u64-typed operand. *)
 let canon_ty t =
-  match strip_singleton t with TRefinedInt (_, _, base) -> base | t -> t
+  match strip_singleton t with
+  | TRefinedInt (_, _, base) | TMultiple (_, base) -> base
+  | t -> t
 
 (* Require an integer type, WITHOUT defaulting a genuinely-unconstrained
    type variable -- only reject it if it's already resolved to something
@@ -798,6 +800,7 @@ let require_usize_index loc t =
   in
   match strip_singleton t with
   | TUsize -> ()
+  | TMultiple (_, TUsize) -> ()
   | TVar { contents = Unbound _ } -> unify_at loc t TUsize
   | TRefinedInt (_, _, base) ->
       (match repr base with
@@ -1313,7 +1316,7 @@ let publish_begin_record : (Ast.loc, string) Hashtbl.t = Hashtbl.create 16
 let publish_required_fields record =
   let rec is_array = function
     | Ast.TypeArray _ -> true
-    | Ast.TypeRefined (_, _, t) -> is_array t
+    | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) -> is_array t
     | _ -> false
   in
   List.filter_map (fun (fname, fty) ->
@@ -1476,7 +1479,7 @@ let type_has_explicit_function_effect senv ty =
         Option.is_some effects
         || List.exists (visit seen) args || visit seen ret
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
-    | Ast.TypeSink t | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
+    | Ast.TypeSink t | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeSingleton (t, _)
     | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
     | Ast.TypeSlice (t, _) -> visit seen t
     | Ast.TypeTuple ts -> List.exists (visit seen) ts
@@ -1630,7 +1633,7 @@ let rec type_contains_stable_owner (ty : Ast.type_expr) : bool =
       Hashtbl.mem stable_owner_structs name
   | Ast.TypeIo t | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _)
   | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
-  | Ast.TypeSingleton (t, _) | Ast.TypeRefined (_, _, t)
+  | Ast.TypeSingleton (t, _) | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t)
   | Ast.TypeExists (_, _, t) | Ast.TypeArraySym (t, _)
   | Ast.TypeSliceSym (t, _) -> type_contains_stable_owner t
   | Ast.TypeTuple ts -> List.exists type_contains_stable_owner ts
@@ -1667,7 +1670,7 @@ let rec type_contains_publish (senv : senv) (t : Ast.type_expr) = match t with
           | Some (fields, _, _) ->
               List.exists (fun (_, ft) -> type_contains_publish senv ft) fields
           | None -> false)
-  | Ast.TypeArray (t, _) | Ast.TypeRefined (_, _, t) | Ast.TypeIo t
+  | Ast.TypeArray (t, _) | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeIo t
   | Ast.TypeSingleton (t, _) -> type_contains_publish senv t
   | _ -> false
 
@@ -1699,7 +1702,7 @@ let rec no_copy_in_ast_type (senv : senv) (t : Ast.type_expr) = match t with
                 Option.bind payload (no_copy_in_ast_type senv)) cases
             | None -> None))
   | Ast.TypeVariant (name, _) -> no_copy_in_ast_type senv (Ast.TypeNamed name)
-  | Ast.TypeArray (t, _) | Ast.TypeRefined (_, _, t) | Ast.TypeIo t
+  | Ast.TypeArray (t, _) | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeIo t
   | Ast.TypeSingleton (t, _) | Ast.TypeExists (_, _, t) ->
       no_copy_in_ast_type senv t
   | Ast.TypeTuple ts -> List.find_map (no_copy_in_ast_type senv) ts
@@ -1767,7 +1770,7 @@ let check_private_type_construction (loc : Ast.loc) (target : Ast.type_expr) =
          | _ -> ())
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
     | Ast.TypeSink t
-    | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t)
+    | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeSingleton (t, _)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> walk t
     | Ast.TypeIndexed (n, _) ->
@@ -2394,6 +2397,11 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            | Some _ ->
                raise (TypeError (e.loc, Printf.sprintf
                  "overloaded function '%s' needs an expected function type; use an explicit wrapper" name))
+           | None when Language_words.is_predeclared_name name ->
+               (match Const_env.find name with
+                | Some _ -> TUsize
+                | None -> raise (TypeError (e.loc, Printf.sprintf
+                    "target constant '%s' is unavailable on this target" name)))
            | None ->
                raise (TypeError (e.loc,
                  Printf.sprintf "Unbound variable: %s" name)))
@@ -2743,6 +2751,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       (match target_ty with
        | Ast.TypeRefined (lo, hi, base) ->
            record_refined_cast_proof lo hi src_ty (of_ast base) e e.loc
+       | Ast.TypeMultiple (_, _) ->
+           ignore (check_expr senv eenv tyenv fenv e tgt_ty)
        (* A bare integer cast has no checked range obligation. Codegen may
           preserve a proven source interval in its result type, but that is
           still the same unchecked base conversion rather than an explicit
@@ -3964,7 +3974,6 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       (match args with
        | [ptr; len] ->
            let pt = infer_expr senv eenv tyenv fenv ptr in
-           let lt = infer_expr senv eenv tyenv fenv len in
            (match fname, repr pt with
             (* GitHub issue #102 Stage 2 and #171 Stage 1:
                dma_prepare_rx/dma_finish_rx are
@@ -3989,7 +3998,11 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
             | _, (TPtr _ | TAlignedPtr _) -> ()
             | _, _ -> raise (TypeError (ptr.loc, Printf.sprintf
                 "%s expects a raw pointer as its first argument" fname)));
-           unify_at len.loc lt TUsize;
+           let length_contract = match fname, required_alignment with
+             | ("dma_prepare_rx" | "dma_finish_rx"), Some n ->
+                 TMultiple (n, TUsize)
+             | _ -> TUsize in
+           ignore (check_expr senv eenv tyenv fenv len length_contract);
            TVoid
        | _ -> raise (TypeError (e.loc, Printf.sprintf
            "%s expects two arguments: %s(ptr, len)" fname fname)))
@@ -4803,6 +4816,54 @@ and place_undecayed_type senv eenv tyenv fenv (e : Ast.expr) : ty =
    infer_expr/unify_at directly instead of through here. *)
 and check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : ty =
   match e.desc, repr expected with
+  | _, TMultiple (n, TUsize) ->
+      let actual = infer_expr senv eenv tyenv fenv e in
+      unify_at e.loc actual TUsize;
+      let rec factor expr =
+        match Const_env.folded_value expr with
+        | Some value -> Some value
+        | None ->
+        match expr.Ast.desc with
+        | Ast.Var name ->
+            (match StringMap.find_opt name tyenv with
+             | Some (t, _) ->
+                 (match repr t with
+                  | TMultiple (k, TUsize) -> Some k
+                  | _ -> Const_env.bound_value expr)
+             | None -> Const_env.bound_value expr)
+        | Ast.BinOp ((Ast.Add | Ast.Sub), a, b) ->
+            (match factor a, factor b with
+             | Some ka, Some kb -> Some (gcd ka kb)
+             | _ -> None)
+        | Ast.BinOp (Ast.Mul, a, b) ->
+            (match factor a, factor b with
+             | Some 0, _ | _, Some 0 -> Some 0
+             | Some ka, Some kb ->
+                 Some (if abs ka >= abs kb then ka else kb)
+             | Some ka, _ -> Some ka
+             | _, Some kb -> Some kb
+             | _ -> None)
+        | Ast.Cast (Ast.TypeUsize, inner) -> factor inner
+        | Ast.SizeOf ty ->
+            (match ty with
+             | Ast.TypeNamed name ->
+                 (match StringMap.find_opt name senv with
+                  | Some (_, _, Some alignment) -> Some alignment
+                  | _ -> const_type_size senv ty)
+             | _ -> const_type_size senv ty)
+        | _ ->
+            provable_multiple_of expr
+      in
+      let proven = match repr actual with
+        | TMultiple (factor, _) -> factor mod n = 0
+        | _ -> (match factor e with
+                | Some k -> k mod n = 0
+                | None -> false)
+      in
+      if not proven then
+        raise (TypeError (e.loc, Printf.sprintf
+          "cannot prove this usize value is a multiple of %d" n));
+      expected
   | StructLit exprs, TArray (elem_ty, n) ->
       if List.length exprs <> n then
         raise (TypeError (e.loc, Printf.sprintf
@@ -5092,6 +5153,9 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
             if not is_mut then
               raise (TypeError (s.loc,
                 Printf.sprintf "immutable variable '%s' must have an initializer" name));
+            if Types.contains_multiple ty then
+              raise (TypeError (s.loc,
+                "a multiple(N) value needs an initializer to establish its proof"));
             None
         | Some { desc = StructLit exprs; loc } ->
             (* Struct literal: look up struct name from the type annotation and check each field *)
@@ -6393,7 +6457,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         else if StringSet.mem name affine_names then Ast.KindAffine
         else Ast.KindPlain
     | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t | Ast.TypeIo t
-    | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
+    | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeSingleton (t, _)
     | Ast.TypeAlignedPtr (_, t) | Ast.TypePtr t
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> payload_kind t
     | Ast.TypeTuple ts ->
@@ -6512,7 +6576,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeNamed name -> Hashtbl.mem stable_owner_structs name
     | Ast.TypeIo t | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _)
     | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
-    | Ast.TypeSingleton (t, _) | Ast.TypeRefined (_, _, t)
+    | Ast.TypeSingleton (t, _) | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t)
     | Ast.TypeExists (_, _, t) -> ast_contains_stable_owner_value t
     | Ast.TypeTuple ts -> List.exists ast_contains_stable_owner_value ts
     | Ast.TypeFn (args, ret, _) ->
@@ -6547,7 +6611,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         (Types.to_string (Types.of_ast sort))))
   in
   let static_sort_of_value loc = function
-    | Ast.TypeRefined (_, _, base) -> base
+    | Ast.TypeRefined (_, _, base) | Ast.TypeMultiple (_, base) -> base
     | (Ast.TypeI8 | Ast.TypeI16 | Ast.TypeI32 | Ast.TypeI64
       | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU32 | Ast.TypeU64
       | Ast.TypeIsize | Ast.TypeUsize) as t -> t
@@ -6711,7 +6775,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         check_static_arg loc (static_sort_of_value loc base) arg
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
     | Ast.TypeSink t
-    | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t)
+    | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> validate_static_type loc t
     | Ast.TypeFn (args, ret, effects) ->
         Option.iter
@@ -6736,7 +6800,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeFn (args, ret, _) ->
         List.iter (validate_complete_type loc false) args;
         validate_complete_type loc false ret
-    | Ast.TypeRefined (_, _, base) -> validate_complete_type loc false base
+    | Ast.TypeRefined (_, _, base) | Ast.TypeMultiple (_, base) -> validate_complete_type loc false base
     | Ast.TypeBorrow inner | Ast.TypeBorrowMut inner | Ast.TypeSink inner
     | Ast.TypeSingleton (inner, _) -> validate_complete_type loc behind_ptr inner
     | Ast.TypeRef inner | Ast.TypeRefMut inner -> validate_complete_type loc true inner
@@ -6751,7 +6815,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> contains_borrow t
     | Ast.TypeFn (args, ret, _) ->
         List.exists contains_borrow args || contains_borrow ret
-    | Ast.TypeRefined (_, _, base) | Ast.TypeSingleton (base, _) -> contains_borrow base
+    | Ast.TypeRefined (_, _, base) | Ast.TypeMultiple (_, base) | Ast.TypeSingleton (base, _) -> contains_borrow base
     | Ast.TypeExists (_, _, body) -> contains_borrow body
     | _ -> false
   in
@@ -6768,7 +6832,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> contains_ref t
     | Ast.TypeFn (args, ret, _) ->
         List.exists contains_ref args || contains_ref ret
-    | Ast.TypeRefined (_, _, base) | Ast.TypeSingleton (base, _) -> contains_ref base
+    | Ast.TypeRefined (_, _, base) | Ast.TypeMultiple (_, base) | Ast.TypeSingleton (base, _) -> contains_ref base
     | Ast.TypeExists (_, _, body) -> contains_ref body
     | _ -> false
   in
@@ -6795,7 +6859,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeIndexed (n, _) -> StringSet.mem n linear_names
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
     | Ast.TypeSink t
-    | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
+    | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeSingleton (t, _)
     | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> type_mentions_linear t
     | Ast.TypeTuple ts -> List.exists type_mentions_linear ts
@@ -6810,7 +6874,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeView _ -> true
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
     | Ast.TypeSink t
-    | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
+    | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeSingleton (t, _)
     | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
     | Ast.TypeSlice (t, _) -> type_mentions_view t
     | Ast.TypeTuple ts -> List.exists type_mentions_view ts
@@ -6827,7 +6891,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeVariant _ -> true
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
     | Ast.TypeSink t
-    | Ast.TypeRefined (_, _, t)
+    | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t)
     | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
     | Ast.TypeSlice (t, _) -> type_mentions_variant t
     | Ast.TypeTuple ts -> List.exists type_mentions_variant ts
@@ -6840,7 +6904,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeVariant (name, _) -> Hashtbl.mem variant_kinds name
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
     | Ast.TypeSink t
-    | Ast.TypeRefined (_, _, t)
+    | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t)
     | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
     | Ast.TypeSlice (t, _) -> type_mentions_kinded_variant t
     | Ast.TypeTuple ts -> List.exists type_mentions_kinded_variant ts
@@ -6866,7 +6930,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeExists _ -> true
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
     | Ast.TypeSink t
-    | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
+    | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeSingleton (t, _)
     | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
     | Ast.TypeSlice (t, _) -> type_mentions_exists t
     | Ast.TypeTuple ts -> List.exists type_mentions_exists ts
@@ -6878,7 +6942,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeIndexed (name, _) -> Hashtbl.mem indexed_struct_kinds name
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
     | Ast.TypeSink t
-    | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
+    | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeSingleton (t, _)
     | Ast.TypeAlignedPtr (_, t) | Ast.TypeArray (t, _)
     | Ast.TypeSlice (t, _) -> type_mentions_indexed_owner t
     | Ast.TypeTuple ts -> List.exists type_mentions_indexed_owner ts
@@ -6891,7 +6955,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeSingleton _ -> true
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
     | Ast.TypeSink t
-    | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t)
+    | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> type_mentions_singleton t
     | Ast.TypeTuple ts -> List.exists type_mentions_singleton ts
     | Ast.TypeFn (args, ret, _) ->
@@ -6905,7 +6969,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) ->
         singleton_under_storage true t
     | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
-    | Ast.TypeRefined (_, _, t) ->
+    | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) ->
         singleton_under_storage inside t
     | Ast.TypeTuple ts -> List.exists (singleton_under_storage inside) ts
     | Ast.TypeFn (args, ret, _) ->
@@ -6922,7 +6986,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         List.exists (indexed_owner_under_indirection true) args
         || indexed_owner_under_indirection true ret
     | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
-    | Ast.TypeRefined (_, _, t)
+    | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t)
     | Ast.TypeSingleton (t, _) -> indexed_owner_under_indirection inside t
     | Ast.TypeTuple ts -> List.exists (indexed_owner_under_indirection inside) ts
     | _ -> false
@@ -6938,7 +7002,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) ->
         tuple_under_indirection true t
     | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
-    | Ast.TypeRefined (_, _, t) ->
+    | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) ->
         tuple_under_indirection inside t
     | Ast.TypeSingleton (t, _) -> tuple_under_indirection inside t
     | _ -> false
@@ -6947,7 +7011,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeTuple _ -> true
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
     | Ast.TypeSink t
-    | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t)
+    | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeSingleton (t, _)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> type_mentions_tuple t
     | Ast.TypeExists (_, _, body) -> type_mentions_tuple body
@@ -7010,7 +7074,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> type_mentions_linear t
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
     | Ast.TypeSink t
-    | Ast.TypeRefined (_, _, t) | Ast.TypeAlignedPtr (_, t) ->
+    | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeAlignedPtr (_, t) ->
         linear_inside_container t
     | Ast.TypeSingleton (t, _) -> linear_inside_container t
     | Ast.TypeTuple ts -> List.exists linear_inside_container ts
@@ -9010,7 +9074,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       let rec visit seen = function
         | Ast.TypePtr _ | Ast.TypeAlignedPtr _ | Ast.TypeSlice _ -> true
         | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
-        | Ast.TypeRefined (_, _, t) | Ast.TypeSingleton (t, _)
+        | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeSingleton (t, _)
         | Ast.TypeIo t | Ast.TypeArray (t, _) -> visit seen t
         | Ast.TypeTuple ts -> List.exists (visit seen) ts
         | Ast.TypeExists (_, sort, body) -> visit seen sort || visit seen body

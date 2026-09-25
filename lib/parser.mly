@@ -221,7 +221,7 @@ let promote_be_field_type = function
 %token <string> IDENT
 %token <string> STRING
 %token <string> BS_STRING
-%token FN INLINE NOINLINE RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE PUBLISH NO_COPY IO ENUM MATCH ALIGN SIZEOF ALIGNOF CONTAINS_STABLE_OWNER OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
+%token FN INLINE NOINLINE RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE PUBLISH NO_COPY IO ENUM MATCH ALIGN MULTIPLE SIZEOF ALIGNOF CONTAINS_STABLE_OWNER OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
 %token TYPE GENERIC
 %token DARROW COLONCOLON UNDERSCORE BANG
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT AT
@@ -1020,6 +1020,11 @@ base_type_expr:
   | ISIZE_TYPE { TypeIsize }
   | USIZE_TYPE { TypeUsize }
   | TYPE       { TypeKind }
+  | MULTIPLE LPAREN n = alignment_value RPAREN USIZE_TYPE
+    { if n <= 0 || n land (n - 1) <> 0 then
+        raise (Types.TypeError ($symbolstartpos,
+          "multiple(N) requires a positive power-of-two divisor"));
+      TypeMultiple (n, TypeUsize) }
     (* GitHub issue #207: the pseudo-type of a compile-time type value,
        e.g. `fn freelist_init(T: type, ...)`. No runtime representation. *)
   | IO         type_expr { lift_singleton (fun t -> TypeIo t) $2 }

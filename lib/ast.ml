@@ -130,6 +130,9 @@ type type_expr =
        future contextual inference and currently rejected. Inference and
        range propagation can construct refined types that preserve an
        operand's existing base. *)
+  | TypeMultiple of int * type_expr
+    (* multiple(N) usize -- a value divisible by N, with the ordinary
+       usize runtime representation. Distinct from align(N) storage. *)
   | TypeSlice of type_expr * int   (* []T / [T; N..] -- fat pointer (ptr + usize len);
                                      int = compile-time MINIMUM length (0 = unknown).
                                       The runtime length is always >= the minimum; index

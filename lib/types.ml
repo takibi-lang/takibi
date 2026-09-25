@@ -54,6 +54,8 @@ type ty =
        counter follows its bounds/annotation base. Array and slice indices
        therefore use TUsize-based refinements, while raw-pointer offsets use
        TIsize-based refinements. *)
+  | TMultiple of int * ty
+    (* Value divisibility refinement, currently only for usize. *)
   | TTuple of ty list     (* (T1, T2, ...) -- function-local product value
                              (OWNERSHIP_KERNEL.md 5.9, GitHub issue #120):
                              exists in returns/params/locals/literals only,
@@ -241,6 +243,8 @@ let rec to_string t =
   | TTuple ts ->
       Printf.sprintf "(%s)" (String.concat ", " (List.map to_string ts))
   | TRefinedInt (lo, hi, _) -> Printf.sprintf "{%d..<%d}" lo hi
+  | TMultiple (n, base) ->
+      Printf.sprintf "multiple(%d) %s" n (to_string base)
   | TVar { contents = Unbound id } -> Printf.sprintf "'t%d" id
   | TVar { contents = Link _ }     -> assert false
 
@@ -262,6 +266,7 @@ let rec occurs rv = function
   | TExists (_, _, _, t)       -> occurs rv t
   | TIndexedStruct _           -> false
   | TSingleton (t, _)          -> occurs rv t
+  | TMultiple (_, t)           -> occurs rv t
   | TStruct _ | TView _ | TVariant _ -> false
   | _                          -> false
 
@@ -310,6 +315,7 @@ and subst_in_ty old replacement t =
   | TTuple ts -> TTuple (List.map (subst_in_ty old replacement) ts)
   | TSlice (t, n) -> TSlice (subst_in_ty old replacement t, n)
   | TAlignedPtr (n, t) -> TAlignedPtr (n, subst_in_ty old replacement t)
+  | TMultiple (n, t) -> TMultiple (n, subst_in_ty old replacement t)
   | TRef t -> TRef (subst_in_ty old replacement t)
   | TRefMut t -> TRefMut (subst_in_ty old replacement t)
   | TIndexedStruct (name, args) ->
@@ -351,6 +357,17 @@ let instantiate_exists_ty ~witness t =
 let pack_exists_ty t = instantiate_exists_ty ~witness:(fresh_static ()) t
 let open_exists_ty t = instantiate_exists_ty ~witness:(rigid_static "_") t
 
+let rec contains_multiple t =
+  match repr t with
+  | TMultiple _ -> true
+  | TPtr t | TIo t | TArray (t, _) | TSlice (t, _)
+  | TAlignedPtr (_, t) | TRef t | TRefMut t | TSingleton (t, _)
+  | TRefinedInt (_, _, t) -> contains_multiple t
+  | TTuple ts -> List.exists contains_multiple ts
+  | TFun (params, ret, _) ->
+      List.exists contains_multiple params || contains_multiple ret
+  | _ -> false
+
 let rec unify t1 t2 =
   match repr t1, repr t2 with
   | TBool, TBool | TVoid, TVoid -> ()
@@ -362,16 +379,16 @@ let rec unify t1 t2 =
   | TUsize, TUsize -> ()
   | TPtr t1, TPtr t2 ->
       require_writable_pointer_effect_invariance t1 t2;
-      unify t1 t2
+      unify_mutable_pointee t1 t2
   | TIo  t1, TIo  t2 -> unify t1 t2
   | TArray (t1, n1), TArray (t2, n2) ->
       if n1 <> n2 then
         raise (Unify_error (Printf.sprintf "array size mismatch: %d vs %d" n1 n2));
-      unify t1 t2
+      unify_mutable_pointee t1 t2
   | TFun (ps1, r1, effects1), TFun (ps2, r2, effects2) ->
       if List.length ps1 <> List.length ps2 then
         raise (Unify_error "argument count mismatch");
-      List.iter2 unify ps1 ps2;
+      List.iter2 unify_mutable_pointee ps1 ps2;
       unify r1 r2;
       (match effects1, effects2 with
        | _, None -> ()
@@ -396,6 +413,18 @@ let rec unify t1 t2 =
         raise (Unify_error (Printf.sprintf
           "refined int range mismatch: {%d..<%d} vs {%d..<%d}" lo1 hi1 lo2 hi2));
       unify base1 base2
+  | TMultiple (actual, base1), TMultiple (required, base2) ->
+      if actual mod required <> 0 then
+        raise (Unify_error (Printf.sprintf
+          "multiple(%d) does not prove multiple(%d)" actual required));
+      unify base1 base2
+  | TMultiple (_, base), TUsize -> unify base TUsize
+  | TUsize, TMultiple (n, _) ->
+      raise (Unify_error (Printf.sprintf
+        "unproven usize is not a multiple of %d" n))
+  | TVar _, TMultiple (n, _) ->
+      raise (Unify_error (Printf.sprintf
+        "unproven integer is not a multiple of %d" n))
   (* Slice subtyping mirrors TRefinedInt's: a slice whose proven minimum
      length is LARGER can be used where a smaller minimum is expected
      (actual guarantee is stronger). unify's call sites pass (actual,
@@ -408,7 +437,7 @@ let rec unify t1 t2 =
           "cannot pass %s where %s is required; \
            narrow with if (s.len >= %d) { ... } or a constant subslice"
           (to_string (TSlice (e1, m1))) (to_string (TSlice (e2, m2))) m2));
-      unify e1 e2
+      unify_mutable_pointee e1 e2
   (* GitHub issue #186: TU16Be is deliberately NOT one of the ordinary
      integer bases the generic range-fit rules just below apply to. Those
      rules are base-BLIND (they only check whether the numeric range fits,
@@ -471,10 +500,10 @@ let rec unify t1 t2 =
            (%d is not a multiple of %d)"
           n1 (to_string t1) n2 (to_string t2) n1 n2));
       require_writable_pointer_effect_invariance t1 t2;
-      unify t1 t2
+      unify_mutable_pointee t1 t2
   | TAlignedPtr (_, t1), TPtr t2 ->
       require_writable_pointer_effect_invariance t1 t2;
-      unify t1 t2  (* widening to a plain pointer is always OK *)
+      unify_mutable_pointee t1 t2
   | TPtr t1, TAlignedPtr (n, t2) when t1 = repr t2 ->
       raise (Unify_error (Printf.sprintf
         "cannot pass unproven %s where *align(%d) %s is required; use `&x` \
@@ -496,7 +525,7 @@ let rec unify t1 t2 =
       unify t1 t2
   | TRefMut t1, TRefMut t2 ->
       require_writable_pointer_effect_invariance t1 t2;
-      unify t1 t2
+      unify_mutable_pointee t1 t2
   | TRefMut t1, TRef t2 ->
       require_writable_pointer_effect_invariance t1 t2;
       unify t1 t2
@@ -589,6 +618,11 @@ let rec unify t1 t2 =
       raise (Unify_error (Printf.sprintf "cannot unify %s with %s"
         (to_string t1) (to_string t2)))
 
+and unify_mutable_pointee actual expected =
+  unify actual expected;
+  if contains_multiple actual || contains_multiple expected then
+    unify expected actual
+
 and unify_static s1 s2 =
   match static_repr s1, static_repr s2 with
   | SConst a, SConst b when a = b -> ()
@@ -661,6 +695,8 @@ let rec of_ast_in_scope scope = function
       TSingleton (of_ast_in_scope scope base, static_of_ast scope n)
   | Ast.TypeRefined (lo, hi, base) ->
       TRefinedInt (lo, hi, of_ast_in_scope scope base)
+  | Ast.TypeMultiple (n, base) ->
+      TMultiple (n, of_ast_in_scope scope base)
   | Ast.TypeSlice (t, n) -> TSlice (of_ast_in_scope scope t, n)
   | Ast.TypeTuple ts -> TTuple (List.map (of_ast_in_scope scope) ts)
   | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t ->
@@ -729,6 +765,7 @@ let instantiate_static_params ty =
     | TIo t -> TIo (inst t)
     | TArray (t, n) -> TArray (inst t, n)
     | TRefinedInt (lo, hi, base) -> TRefinedInt (lo, hi, inst base)
+    | TMultiple (n, base) -> TMultiple (n, inst base)
     | TTuple ts -> TTuple (List.map inst ts)
     | TSlice (t, n) -> TSlice (inst t, n)
     | TAlignedPtr (n, t) -> TAlignedPtr (n, inst t)
@@ -769,6 +806,7 @@ let rec to_ast t =
       Ast.TypeIndexed (s, List.map static_to_ast args)
   | TSingleton (base, n) -> Ast.TypeSingleton (to_ast base, static_to_ast n)
   | TRefinedInt (lo, hi, base) -> Ast.TypeRefined (lo, hi, to_ast base)
+  | TMultiple (n, base) -> Ast.TypeMultiple (n, to_ast base)
   | TSlice (t, n) -> Ast.TypeSlice (to_ast t, n)
   | TAlignedPtr (n, t) -> Ast.TypeAlignedPtr (n, to_ast t)
   | TRef t -> Ast.TypeRef (to_ast t)

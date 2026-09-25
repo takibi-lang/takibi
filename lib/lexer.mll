@@ -42,6 +42,7 @@ let hard_keyword_token = function
   | "publish" -> PUBLISH
   | "no_copy" -> NO_COPY
   | "io" -> IO | "enum" -> ENUM | "match" -> MATCH | "align" -> ALIGN
+  | "multiple" -> MULTIPLE
   | "sizeof" -> SIZEOF | "alignof" -> ALIGNOF
   | "contains_stable_owner" -> CONTAINS_STABLE_OWNER | "use" -> USE
   | "offsetof" -> OFFSETOF | "static_assert" -> STATIC_ASSERT | "type" -> TYPE

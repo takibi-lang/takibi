@@ -654,8 +654,9 @@ fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
     // buffer. Sector transfers use the larger dedicated bounce buffer.
     // Invalidate complete lines from those isolated allocations while the
     // USB transfer itself keeps its exact protocol length.
-    let cache_length: usize =
-        ((data_len as usize + 63) / 64) * 64;
+    let cache_length: multiple(DMA_CACHE_LINE) usize =
+        ((data_len as usize + DMA_CACHE_LINE - 1) / DMA_CACHE_LINE)
+        * DMA_CACHE_LINE;
     let cbw_base: usize = (msc_cbw_buf as *u8) as usize;
     let cbw_dma: usize = cbw_base + rp1_dma_pci_offset;
     let csw_base: usize = (msc_csw_buf as *u8) as usize;

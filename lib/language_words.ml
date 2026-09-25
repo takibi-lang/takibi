@@ -11,7 +11,7 @@ let hard_keywords = [
   "exception_restore"; "embed_file"; "struct"; "opaque"; "affine";
   "linear"; "view"; "variant"; "must_use"; "exists"; "borrow";
   "sink"; "private"; "packed"; "be"; "publish"; "no_copy"; "io"; "enum"; "match";
-  "align"; "sizeof"; "alignof"; "contains_stable_owner"; "use";
+  "align"; "multiple"; "sizeof"; "alignof"; "contains_stable_owner"; "use";
   "offsetof"; "static_assert"; "type"; "generic"; "bool"; "unsafe";
   "true"; "false"; "i8"; "i16"; "i32"; "i64"; "u8"; "u16";
   "u32"; "u64"; "u16be"; "u32be"; "isize"; "usize";

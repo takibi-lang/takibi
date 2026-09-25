@@ -306,6 +306,8 @@ let rec show_type = function
       in
       Printf.sprintf "%s @ %s" (show_type t) n
   | Ast.TypeRefined (lo, hi, _) -> Printf.sprintf "{%d..<%d}" lo hi
+  | Ast.TypeMultiple (n, base) ->
+      Printf.sprintf "multiple(%d) %s" n (show_type base)
   | Ast.TypeSlice (t, 0) -> Printf.sprintf "[]%s" (show_type t)
   | Ast.TypeSlice (t, n) -> Printf.sprintf "[%s; %d..]" (show_type t) n
   | Ast.TypeBorrow t -> "borrow " ^ show_type t
@@ -12559,7 +12561,8 @@ let codegen_tests = [
           require one. See the dedicated test group below for the
           negative/positive alignment cases in isolation. *)
        expect_ok
-         "fn cache_ops(p: *align(DMA_CACHE_LINE) u8, n: usize) {
+         "fn cache_ops(p: *align(DMA_CACHE_LINE) u8,
+                       n: multiple(DMA_CACHE_LINE) usize) {
             dma_prepare_tx(p, n);
             dma_prepare_rx(p, n);
             dma_finish_rx(p, n);
@@ -12584,6 +12587,49 @@ let codegen_tests = [
           fn g() { f(buf); }" ();
        expect_type_error "cannot be redefined"
          "const DMA_CACHE_LINE: usize = 32; fn f() {}" ();
+       Target_info.configure "thumbv7em-none-eabi");
+
+  Alcotest.test_case
+    "DMA RX length requires a proven cache-line multiple" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_codegen_ok
+         "fn receive(p: *align(DMA_CACHE_LINE) u8, sectors: usize) {
+            let length: multiple(DMA_CACHE_LINE) usize =
+                sectors * 512;
+            dma_prepare_rx(p, length);
+            dma_finish_rx(p, length + DMA_CACHE_LINE);
+            dma_prepare_tx(p, 8);
+          }
+          fn line_size() -> usize { return DMA_CACHE_LINE; }" ();
+       expect_type_error "cannot prove this usize value is a multiple of 64"
+         "fn bad(p: *align(64) u8, n: usize) { dma_prepare_rx(p, n); }" ();
+       expect_type_error "cannot prove this usize value is a multiple of 64"
+         "fn bad(p: *align(64) u8) { dma_finish_rx(p, 8); }" ();
+       expect_type_error "cannot prove this usize value is a multiple of 64"
+         "fn bad(n: usize) -> multiple(64) usize {
+            return n as multiple(64) usize;
+          }" ();
+       expect_type_error "cannot prove this usize value is a multiple of 64"
+         "fn bad() {
+            let mut n: multiple(64) usize = 64;
+            n = 8;
+          }" ();
+       expect_type_error "needs an initializer"
+         "fn bad() { let mut n: multiple(64) usize; }" ();
+       expect_type_error "unproven usize is not a multiple of 64"
+         "fn only(n: multiple(64) usize) {}
+          fn invoke(f: fn(usize) -> void) { f(8); }
+          fn bad() { invoke(only); }" ();
+       expect_type_error "unproven usize is not a multiple of 64"
+         "fn bad(p: *multiple(64) usize) -> *usize { return p; }" ();
+       expect_codegen_ok
+         "struct Desc align(64) { flags: u32; }
+          fn receive(p: *align(64) u8) {
+            dma_finish_rx(p, sizeof(Desc));
+          }" ();
+       expect_type_error "positive power-of-two"
+         "fn bad(n: multiple(3) usize) {}" ();
        Target_info.configure "thumbv7em-none-eabi");
 
   Alcotest.test_case "dma_finish_rx rejects an unproven pointer, dma_prepare_tx accepts it" `Quick
@@ -15738,7 +15784,7 @@ let codegen_tests = [
        let (_ : Llvm_target.TargetMachine.t) =
          Llvm_gen.setup_target ~triple:"thumbv7em-none-eabi" ~cpu:"cortex-m7" () in
        let _ = gen_codegen
-         "fn codegen_dma_cache(p: *align(32) u8, n: usize) {
+         "fn codegen_dma_cache(p: *align(32) u8, n: multiple(32) usize) {
             dma_prepare_tx(p, n);
             dma_prepare_rx(p, n);
             dma_finish_rx(p, n);
@@ -16896,7 +16942,8 @@ let codegen_tests = [
          Llvm_gen.setup_target ~triple:"aarch64-none-elf" ()
        in
        let _ = gen_codegen
-         "fn codegen_dma_cache_aarch64(p: *align(64) u8, n: usize) {
+         "fn codegen_dma_cache_aarch64(p: *align(64) u8,
+                                       n: multiple(64) usize) {
             dma_prepare_tx(p, n);
             dma_prepare_rx(p, n);
             dma_finish_rx(p, n);
