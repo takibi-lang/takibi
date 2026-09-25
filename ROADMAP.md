@@ -25,7 +25,8 @@ step, landed as its own commit.
 
 1. **True multicore support**: every online core runs ordinary processes,
    any core can issue any syscall, and a process can continue on another
-   core. #9, #582; and the multicore-correctness issues
+   core. #9, #582, #597 (ext2 mutation), #598 (socket setup and
+   teardown); and the multicore-correctness issues
    #550, #560, #482, #464, #468, #556, #573.
 2. **Run the multicore workload mainly on RPi5 and fix what it finds.** #584
    is the workload, #572 its fairness verdict. Each defect it finds gets a
@@ -45,7 +46,7 @@ step, landed as its own commit.
    #386, #502, #503.
 3. **Compiler safety and language research:** #58, #203, #252, #200, #201,
    #282, #129, #374, #417, #155, #28, #8.
-4. **Toolchain, portability and hardware-lane support:** #576, #568, #123,
+4. **Toolchain, portability and hardware-lane support:** #599, #576, #568, #123,
    #124, #122, #95, #51, #50, #85, #268.
 5. **Deferred or not a scheduled work item:** #432, #555, #250, #444, #429,
    #149, #567, #539, #536.
