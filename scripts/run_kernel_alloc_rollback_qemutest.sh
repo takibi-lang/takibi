@@ -104,13 +104,17 @@ QEMU_EXT2_IMAGE="$ARTIFACT_POINT_DIR/ext2.img"
 # keeping them apart.
 SERIAL_PORT="${KERNEL_QEMU_ALLOC_ROLLBACK_SERIAL_PORT:-18689}"
 GDB_PORT="${KERNEL_QEMU_ALLOC_ROLLBACK_GDB_PORT:-18690}"
+# GitHub issue #593: QMP, for the serial BREAK a requested DDB walk sends.
+QMP_PORT="${KERNEL_QEMU_ALLOC_ROLLBACK_QMP_PORT:-18699}"
 TIMEOUT_SECS="${KERNEL_QEMU_ALLOC_ROLLBACK_TIMEOUT:-${KERNEL_QEMU_TIMEOUT:-90}}"
 export KERNEL_QEMU_TIMEOUT="$TIMEOUT_SECS"
 NETDEV_LOCAL_PORT="${KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_LOCAL_PORT:-18691}"
 NETDEV_REMOTE_PORT="${KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_REMOTE_PORT:-18692}"
 mkdir -p "$ARTIFACT_POINT_DIR"
+POSTMORTEM_REQUEST="$ARTIFACT_POINT_DIR/postmortem.request"
 rm -f "$INTERACTIVE_HTTPD_LISTENER" "$INTERACTIVE_HTTPD_READY" \
-    "$INTERACTIVE_HTTPD_DONE" "$INIT_LISTENER" "$NETWORK_READY" "$FOREGROUND_HTTPD_LISTENER"
+    "$INTERACTIVE_HTTPD_DONE" "$INIT_LISTENER" "$NETWORK_READY" "$FOREGROUND_HTTPD_LISTENER" \
+    "$POSTMORTEM_REQUEST"
 cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
 exec 9>"$ARTIFACT_POINT_DIR/runner.lock"
 if ! flock -n 9; then
@@ -121,9 +125,10 @@ fi
 # somebody already owns this lane's ports, and say that rather than
 # reporting a kernel that was never asked anything.
 . "$REPO_ROOT/scripts/qemu_session_ports.sh"
-qemu_session_shift_ports SERIAL_PORT GDB_PORT NETDEV_LOCAL_PORT NETDEV_REMOTE_PORT
+qemu_session_shift_ports SERIAL_PORT GDB_PORT QMP_PORT NETDEV_LOCAL_PORT \
+    NETDEV_REMOTE_PORT
 python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "kernel/qemu alloc-rollback" \
-    "tcp:$SERIAL_PORT" "tcp:$GDB_PORT" \
+    "tcp:$SERIAL_PORT" "tcp:$GDB_PORT" "tcp:$QMP_PORT" \
     "udp:$NETDEV_LOCAL_PORT" "udp:$NETDEV_REMOTE_PORT" || exit 1
 if [ ! -f "$ELF" ]; then
     echo "error: kernel ELF not found: $ELF (run 'make kernelbuild-qemu-debug' first)" >&2
@@ -141,7 +146,9 @@ fi
 echo "[kernel/qemu alloc-rollback] booting kernel-debug.elf under QEMU+GDB"
 qemu-system-aarch64 \
     -machine virt -cpu cortex-a53 -smp 2 -m 1024 -display none -monitor none \
-    -serial "tcp:127.0.0.1:$SERIAL_PORT,server=on,wait=on" \
+    -qmp "tcp:127.0.0.1:$QMP_PORT,server=on,wait=off" \
+    -chardev "socket,id=debug_uart,host=127.0.0.1,port=$SERIAL_PORT,server=on,wait=on" \
+    -serial chardev:debug_uart \
     -global virtio-mmio.force-legacy=on \
     -drive "file=$QEMU_EXT2_IMAGE,if=none,format=raw,id=vd0" \
     -device virtio-blk-device,drive=vd0 \
@@ -185,6 +192,8 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --network-ready-file "$NETWORK_READY" \
     --interactive-httpd-ready-file "$INTERACTIVE_HTTPD_READY" \
     --interactive-httpd-done-file "$INTERACTIVE_HTTPD_DONE" \
+    --qmp-port "$QMP_PORT" \
+    --postmortem-request-file "$POSTMORTEM_REQUEST" \
     >"$UART_DRIVER_LOG" 2>&1 &
 uart_driver_pid=$!
 
@@ -234,6 +243,7 @@ timeout "$TIMEOUT_SECS" python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" \
     --daemon-ready-file "$FOREGROUND_HTTPD_LISTENER" \
     --init-ready-file "$INIT_LISTENER" \
     --network-ready-file "$NETWORK_READY" \
+    --postmortem-request-file "$POSTMORTEM_REQUEST" \
     >"$PEER_LOG" 2>&1 || peer_status=$?
 sed 's/^/  /' "$PEER_LOG"
 
