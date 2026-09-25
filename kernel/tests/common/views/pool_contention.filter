@@ -26,5 +26,6 @@
 ^pool walk: 
 ^ext2 mutation contention stage: 
 ^ext2 mutation contention counts:
+^ext2 mutation contention reader:
 ^ext2 mutation contention:
 ^signal contention: 

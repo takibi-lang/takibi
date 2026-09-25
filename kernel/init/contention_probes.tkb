@@ -124,7 +124,7 @@ fn contention_probes() !{unsafe} {
     // claim. Its production reader asks rather than waits, so what a peer
     // is TOLD is the property, measured with core 0 holding and not holding.
     if (ext2_mutation_contention_probe()) {
-        kernel_boot_log("ext2 mutation contention: a peer is told no mutation is in flight while core 0 holds nothing, and told there is one while it holds the guard ok\n");
+        kernel_boot_log("ext2 mutation contention: a peer is told no mutation is in flight while core 0 holds nothing, told there is one while it holds the guard, and a mutation waits for a peer reader already inside ok\n");
     } else {
         kernel_boot_log("ext2 mutation contention: failed\n");
     }

@@ -66,6 +66,16 @@ private let mut ext2_mutation_probe_phase: usize;
 private let mut ext2_mutation_probe_clear_seen: usize;
 private let mut ext2_mutation_probe_held_seen: usize;
 private let mut ext2_mutation_probe_asked: usize;
+// GitHub issue #559's phases. The peer registers as a reader (inside), waits
+// for core 0 to say it is taking the lock (trying), holds on a moment
+// longer, and records whether core 0's take had already RETURNED before it
+// left (overlapped) -- which with the reader wait must never happen, and
+// without it (phase 4, the control) must.
+private let mut ext2_mutation_probe_inside: usize;
+private let mut ext2_mutation_probe_trying: usize;
+private let mut ext2_mutation_probe_taken: usize;
+private let mut ext2_mutation_probe_overlapped: usize;
+private let mut ext2_mutation_probe_left: usize;
 
 private fn ext2_mutation_probe_addr(value: *usize) -> usize {
     return value as usize;
@@ -82,6 +92,10 @@ fn ext2_mutation_contention_is_armed() -> bool !{unsafe} {
 fn ext2_mutation_contention_secondary_run() !{unsafe} {
     let phase: usize = unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
         &ext2_mutation_probe_phase)) };
+    if (phase == 3 || phase == 4) {
+        ext2_mutation_probe_reader();
+        return;
+    }
     let in_flight: bool = ext2_mutation_in_flight();
     unsafe {
         atomic_fetch_add_relaxed(ext2_mutation_probe_addr(
@@ -97,6 +111,85 @@ fn ext2_mutation_contention_secondary_run() !{unsafe} {
     }
     unsafe { atomic_store_release(ext2_mutation_probe_addr(
         &ext2_mutation_probe_armed), 0); }
+}
+
+// The peer as a reader: the same registration the migration gate makes.
+private fn ext2_mutation_probe_reader() !{unsafe} {
+    if (ext2_read_enter()) {
+        unsafe { atomic_store_release(ext2_mutation_probe_addr(
+            &ext2_mutation_probe_inside), 1); }
+        // Stay inside until core 0 has started taking the lock, then a
+        // little longer, so a take that did not wait has time to return.
+        let start: i64 = read_cntpct();
+        let window: i64 = read_cntfrq() >> 2;
+        while (unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
+                   &ext2_mutation_probe_trying)) } == 0 &&
+               read_cntpct() - start < window) { }
+        let linger: i64 = read_cntpct();
+        while (read_cntpct() - linger < (read_cntfrq() >> 6)) { }
+        if (unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
+                &ext2_mutation_probe_taken)) } == 1) {
+            unsafe { atomic_store_release(ext2_mutation_probe_addr(
+                &ext2_mutation_probe_overlapped), 1); }
+        }
+        unsafe { atomic_store_release(ext2_mutation_probe_addr(
+            &ext2_mutation_probe_left), 1); }
+        ext2_read_leave();
+    }
+    unsafe { atomic_store_release(ext2_mutation_probe_addr(
+        &ext2_mutation_probe_armed), 0); }
+}
+
+// Core 0's half of phases 3 and 4: arm the peer, wait for it to be inside,
+// announce the take, take (with or without the reader wait), note that the
+// take returned, and let the peer finish. Returns whether the peer's stay
+// overlapped the mutation.
+private fn ext2_mutation_probe_overlap(phase: usize) -> usize !{unsafe} {
+    unsafe {
+        atomic_store_release(ext2_mutation_probe_addr(&ext2_mutation_probe_inside), 0);
+        atomic_store_release(ext2_mutation_probe_addr(&ext2_mutation_probe_trying), 0);
+        atomic_store_release(ext2_mutation_probe_addr(&ext2_mutation_probe_taken), 0);
+        atomic_store_release(ext2_mutation_probe_addr(&ext2_mutation_probe_overlapped), 0);
+        atomic_store_release(ext2_mutation_probe_addr(&ext2_mutation_probe_left), 0);
+        atomic_store_release(ext2_mutation_probe_addr(&ext2_mutation_probe_phase), phase);
+        atomic_store_release(ext2_mutation_probe_addr(&ext2_mutation_probe_armed), 1);
+    }
+    let start: i64 = read_cntpct();
+    let window: i64 = read_cntfrq() >> 1;
+    while (unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
+               &ext2_mutation_probe_inside)) } == 0 &&
+           read_cntpct() - start < window) { }
+    if (unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
+            &ext2_mutation_probe_inside)) } == 0) {
+        unsafe { atomic_store_release(ext2_mutation_probe_addr(
+            &ext2_mutation_probe_armed), 0); }
+        return 2;
+    }
+    unsafe { atomic_store_release(ext2_mutation_probe_addr(
+        &ext2_mutation_probe_trying), 1); }
+    if (phase == 3) {
+        let guard = ext2_mutation_take();
+        unsafe { atomic_store_release(ext2_mutation_probe_addr(
+            &ext2_mutation_probe_taken), 1); }
+        ext2_mutation_give(guard);
+    } else {
+        let guard = ext2_mutation_take_without_readers_unchecked();
+        unsafe { atomic_store_release(ext2_mutation_probe_addr(
+            &ext2_mutation_probe_taken), 1); }
+        // Keep the lock until the peer has left, as a real mutation would
+        // still be running.
+        let hold: i64 = read_cntpct();
+        while (unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
+                   &ext2_mutation_probe_left)) } == 0 &&
+               read_cntpct() - hold < window) { }
+        ext2_mutation_give(guard);
+    }
+    let finish: i64 = read_cntpct();
+    while (unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
+               &ext2_mutation_probe_armed)) } == 1 &&
+           read_cntpct() - finish < window) { }
+    return unsafe { atomic_load_acquire(ext2_mutation_probe_addr(
+        &ext2_mutation_probe_overlapped)) };
 }
 
 // Arm one phase and wait for the peer to have finished it. Bounded by the
@@ -167,6 +260,21 @@ fn ext2_mutation_contention_probe() -> bool !{unsafe} {
     ext2_mutation_give(guard);
     if (held_phase == false) {
         ext2_mutation_probe_report("peer-never-asked-held" as *u8);
+        return false;
+    }
+
+    // GitHub issue #559. Phase 4 first, the control: the lock without the
+    // reader wait returns while the peer reader is still inside, which is
+    // the window. Phase 3: the real take waits it out.
+    let control: usize = ext2_mutation_probe_overlap(4);
+    let waited: usize = ext2_mutation_probe_overlap(3);
+    kernel_boot_log("ext2 mutation contention reader: control-overlap=");
+    uart_put_udec(control);
+    kernel_boot_log(" waited-overlap=");
+    uart_put_udec(waited);
+    kernel_boot_log("\n");
+    if (control != 1 || waited != 0) {
+        ext2_mutation_probe_report("reader-wait-not-shown" as *u8);
         return false;
     }
 

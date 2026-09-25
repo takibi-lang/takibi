@@ -58,16 +58,12 @@
 // enforces this section's presence here: kernel/fs/ is not one of
 // scripts/check_kernel_lib_limitations_header.py's directories yet.
 //
-// - THE READER'S QUESTION IS ASKED AT SYSCALL ENTRY ONLY, so this closes
-//   one of the two windows. A peer read admitted because no mutation was in
-//   flight can still be inside ext2 when core 0 starts one. The kernel is
-//   not preemptible, so that read runs to completion rather than being
-//   interleaved on its own core, but the two genuinely overlap across cores.
-//   What is closed is a read STARTING during a mutation; what is not is a
-//   mutation starting during a read. Closing the second needs a reader count
-//   the mutator waits for, or readers taking this lock -- and the second
-//   destroys what peer_filesystem.expected measures, which is why it was not
-//   done here.
+// - BOTH WINDOWS ARE CLOSED FOR PEER READERS (GitHub issue #559). A read
+//   starting during a mutation is sent to core 0 by the entry question; a
+//   mutation starting during a peer read waits for the reader count
+//   (ext2_read_enter / ext2_read_leave) to drain. Core 0's readers are not
+//   counted, which is sound only while mutations run on core 0 alone --
+//   admitting a mutating syscall on a peer (#583) has to revisit that.
 // - NOTHING PROVES A MUTATOR TAKES IT. The five mutating syscall arms do,
 //   and the guard being linear makes a missed release a compile error on
 //   every path, but a sixth arm added later would compile and simply fail to
@@ -92,11 +88,74 @@ linear struct Ext2MutationGuard[lock: addr] {
     private cpu: usize;
 }
 
+// GitHub issue #559: peer readers inside ext2 right now. A reader on a
+// peer adds one at syscall entry (ext2_read_enter) and takes it away when
+// the syscall is done (ext2_read_leave); a mutator, holding the lock, waits
+// for it to reach zero. So a mutation starting while a peer read is in
+// flight waits for that read, which the entry question alone did not do.
+// Readers stay concurrent with each other and with the device: they never
+// take the lock, so peer_filesystem.expected's contention is untouched.
+//
+// Core 0's readers are not counted. Mutation runs on core 0 too and this
+// kernel is not preemptible, so a core 0 reader and a core 0 mutation never
+// overlap; and a mutator waiting on core 0 for a core 0 reader would wait
+// forever.
+private let mut ext2_peer_readers: usize;
+
+private fn ext2_peer_readers_address() -> usize {
+    return (&ext2_peer_readers) as usize;
+}
+
 fn ext2_mutation_take() -> Ext2MutationGuard[ext2_mutation_lock]
-        !{acquires_lock_20_ext2_mutation, lock_guard_20_ext2_mutation} {
+        !{acquires_lock_20_ext2_mutation, lock_guard_20_ext2_mutation,
+          unsafe} {
+    task_mutex_acquire(&ext2_mutation_lock);
+    // The Dekker half: the lock is visibly held before the count is read,
+    // and ext2_read_enter publishes its count before it reads the lock, so
+    // at least one side sees the other. A reader that saw the lock free is
+    // counted here and waited for; one that saw it held has undone its
+    // count and gone to core 0.
+    dsb_ish();
+    while (unsafe { atomic_load_acquire(ext2_peer_readers_address()) } != 0) { }
+    let mut guard: Ext2MutationGuard[ext2_mutation_lock] = { cpu_id() };
+    return guard;
+}
+
+// For kernel/kernel/ext2_mutation_contention_evidence.tkb's control phase
+// only: the lock without the wait, which is what ext2_mutation_take was
+// before #559. `unsafe` so any other use is visible in the trusted base.
+fn ext2_mutation_take_without_readers_unchecked()
+        -> Ext2MutationGuard[ext2_mutation_lock]
+        !{acquires_lock_20_ext2_mutation, lock_guard_20_ext2_mutation,
+          unsafe} {
     task_mutex_acquire(&ext2_mutation_lock);
     let mut guard: Ext2MutationGuard[ext2_mutation_lock] = { cpu_id() };
     return guard;
+}
+
+// A peer reader's arrival. True: counted and admitted, and ext2_read_leave
+// is owed. False: a mutation is in flight, nothing is owed, and the caller
+// sends the syscall to core 0 as the entry question always has.
+fn ext2_read_enter() -> bool !{unsafe} {
+    unsafe { atomic_fetch_add_relaxed(ext2_peer_readers_address(), 1); }
+    dsb_ish();
+    if (task_mutex_is_held(&ext2_mutation_lock)) {
+        unsafe {
+            atomic_fetch_add_relaxed(ext2_peer_readers_address(),
+                                     0xFFFFFFFFFFFFFFFF);
+        }
+        return false;
+    }
+    return true;
+}
+
+// Every ext2 access of the syscall is complete before the count drops.
+fn ext2_read_leave() !{unsafe} {
+    dsb_ish();
+    unsafe {
+        atomic_fetch_add_relaxed(ext2_peer_readers_address(),
+                                 0xFFFFFFFFFFFFFFFF);
+    }
 }
 
 fn ext2_mutation_give(guard: sink Ext2MutationGuard[ext2_mutation_lock]) {

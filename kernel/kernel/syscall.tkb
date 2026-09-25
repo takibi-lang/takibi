@@ -246,6 +246,9 @@ struct SyscallScratch {
     rlimit_buffer: [u8; 16];
     // GitHub issue #591: an ELF's PT_INTERP name, for the ext2 lookup.
     interpreter_buffer: [u8; 64];
+    // GitHub issue #559: this CPU's current syscall is a counted ext2
+    // reader and owes ext2_read_leave.
+    ext2_reader: bool;
 }
 
 private let mut syscall_scratch: [SyscallScratch; KERNEL_MAX_CORES];
@@ -3016,6 +3019,13 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     let caller_slot: usize = kernel_syscall_process_slot();
     let (action_code, action_value) = syscall_action_encode(
         kernel_syscall_dispatch_action(esr, number, x0, x1, x2, x3, x4));
+    // GitHub issue #559: the ext2 reader registered at entry is done with
+    // ext2 by the time the handler has chosen what happens next, whatever
+    // that is -- Block and Migrate included.
+    if (syscall_scratch_here().ext2_reader) {
+        syscall_scratch_here().ext2_reader = false;
+        ext2_read_leave();
+    }
     // A call that completed no longer needs core 0 (GitHub issue #9). A
     // blocked or waiting one keeps the mark until it completes, and a
     // migrated one has only just been given it.
@@ -3101,11 +3111,16 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // on any online core without being named by a fixture; this mutation
     // check must therefore remain attached to the operation, not to how the
     // process was placed.
-    if (cpu_id() != 0 &&
-        (syscall_peer_safe(number, x0, x1) == false ||
-         syscall_reaches_filesystem(number, x0)) &&
-        ext2_mutation_in_flight()) {
-        return SyscallAction::Migrate;
+    //
+    // GitHub issue #559: and the answer is now also a registration. A peer
+    // reader that finds no mutation in flight is counted until this syscall
+    // is done (kernel_syscall_dispatch releases it), and a mutation that
+    // starts meanwhile waits for it -- the entry question alone let a
+    // mutation start during an admitted read. A call the peer-safety table
+    // refuses has been sent to core 0 above already.
+    if (cpu_id() != 0 && syscall_reaches_filesystem(number, x0)) {
+        if (ext2_read_enter() == false) { return SyscallAction::Migrate; }
+        syscall_scratch_here().ext2_reader = true;
     }
     kernel_init_boot_fixture_poll();
     kernel_syscall_persistent_shell_checkpoint_selected();

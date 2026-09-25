@@ -83,6 +83,10 @@ ATOMIC_ALLOWED = {
     "kernel/tag_contention_evidence.tkb": "two-core contention probe",
     "kernel/schedule_contention_evidence.tkb": "two-core contention probe",
     "kernel/signal_contention_evidence.tkb": "two-core contention probe",
+    "fs/ext2/mutation_lock.tkb":
+        "the peer reader count a mutator waits for (GitHub issue #559): "
+        "readers must not take a lock, so arrival and departure are one "
+        "atomic add each, ordered against the lock word by dsb ish",
     "kernel/ext2_mutation_contention_evidence.tkb":
         "two-core contention probe; GitHub issue #533's filesystem lock, "
         "whose production reader asks rather than waits, so the answer is "
