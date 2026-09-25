@@ -99,6 +99,17 @@ def main() -> int:
             "time.sleep(HTTPD_IDLE_SECONDS)" not in peer):
         print("ERROR\tQEMU does not request HTTP after the accept deadline")
         failed = True
+    uart_driver = (ROOT / "scripts/run_kernel_uart_driver.py").read_text(
+        encoding="ascii")
+    guard_arg = '--httpd-peer-guard-file "$HTTPD_GUARD_FILE"'
+    if (qemu_runner.count(guard_arg) != 2 or
+            'HTTPD_GUARD_FILE="$ARTIFACT_DIR/httpd-peer-guard.until"' not in qemu_runner or
+            '"$HTTPD_GUARD_FILE"' not in qemu_runner.split("rm -f", 1)[1] or
+            "guard_httpd_peer(HTTPD_IDLE_SECONDS + 2.0)" not in peer or
+            peer.count("guard_httpd_peer(12.0)") != 2 or
+            "now >= peer_guard_until" not in uart_driver):
+        print("ERROR\tQEMU HTTPd peer deadlines are not shared with the UART watchdog")
+        failed = True
     for runner in RUNNERS:
         text = (ROOT / runner).read_text(encoding="utf-8")
         listener_arg = position(

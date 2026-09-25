@@ -37,7 +37,8 @@ MODE_FLAGS = {"--fast"}
 RAW_ARGS = sys.argv[1:]
 FAST_MODE = "--fast" in RAW_ARGS
 FILE_FLAGS = ("--interactive-ready-file", "--daemon-ready-file",
-              "--init-ready-file", "--network-ready-file")
+              "--init-ready-file", "--network-ready-file",
+              "--httpd-peer-guard-file")
 
 
 def path_argument(flag):
@@ -59,9 +60,21 @@ INTERACTIVE_READY_FILE = path_argument("--interactive-ready-file")
 DAEMON_READY_FILE = path_argument("--daemon-ready-file")
 INIT_READY_FILE = path_argument("--init-ready-file")
 NETWORK_READY_FILE = path_argument("--network-ready-file")
+HTTPD_GUARD_FILE = path_argument("--httpd-peer-guard-file")
 HTTPD_IDLE_SECONDS = float(os.environ.get("KERNEL_HTTPD_IDLE_SECONDS", "0"))
 if HTTPD_IDLE_SECONDS < 0:
     raise SystemExit("KERNEL_HTTPD_IDLE_SECONDS must be nonnegative")
+
+
+def guard_httpd_peer(seconds: float) -> None:
+    """Publish when the current planned silence or request must finish."""
+    if HTTPD_GUARD_FILE is None:
+        return
+    staged = HTTPD_GUARD_FILE.with_name(HTTPD_GUARD_FILE.name + ".tmp")
+    staged.write_text(str(time.monotonic() + seconds), encoding="ascii")
+    staged.replace(HTTPD_GUARD_FILE)
+
+
 # Every readiness wait below has to expire while this process is still alive
 # to say so. Each lane runs this script as `timeout "$TIMEOUT_SECS" python3
 # ...`, and a wait that outlasts that budget is killed with status 124 and
@@ -862,15 +875,22 @@ def main() -> int:
         if HTTPD_IDLE_SECONDS > 0:
             print("  leaving HTTPd idle for %.0fs:              TEST" %
                   HTTPD_IDLE_SECONDS)
+            guard_httpd_peer(HTTPD_IDLE_SECONDS + 2.0)
             time.sleep(HTTPD_IDLE_SECONDS)
+        guard_httpd_peer(12.0)
         arp_ok = send_until_reply(
             sock, build_arp_request(SERVER_IP), check_arp_reply)
         print("  ARP while HTTPd is listening:       %s" %
               ("PASS" if arp_ok else "FAIL"))
-        interactive_ok = arp_ok and all(
-            http_request(sock, port, isn, path, source.read_bytes(), mime)
-            for (path, source, mime), port, isn in
-            zip(HTTP_ASSETS, HTTP_CLIENT_PORTS, HTTP_CLIENT_ISNS))
+        interactive_ok = arp_ok
+        if interactive_ok:
+            for (path, source, mime), port, isn in zip(
+                    HTTP_ASSETS, HTTP_CLIENT_PORTS, HTTP_CLIENT_ISNS):
+                guard_httpd_peer(12.0)
+                if not http_request(
+                        sock, port, isn, path, source.read_bytes(), mime):
+                    interactive_ok = False
+                    break
         sock.close()
         return 0 if interactive_ok else 1
 

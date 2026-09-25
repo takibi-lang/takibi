@@ -327,6 +327,25 @@ def check_silence_break(driver) -> list[str]:
     return failures
 
 
+def check_planned_httpd_idle(driver) -> list[str]:
+    """Bounded host peer activity cannot trigger a diagnostic BREAK."""
+    failures = []
+    due = driver.postmortem_break_due
+    if not due(1070.0, 1090.0, 1040.0, 90.0, 1000.0):
+        failures.append("an unguarded 30s stall did not request a BREAK")
+    if due(1070.0, 1090.0, 1040.0, 90.0, 1073.0):
+        failures.append("the planned HTTPd idle was mistaken for a stall")
+    if not due(1073.0, 1090.0, 1040.0, 90.0, 1073.0):
+        failures.append("an expired idle marker still suppressed a stall")
+    if due(1080.0, 1090.0, 1040.0, 90.0, 1084.0):
+        failures.append("a progressing HTTP request was interrupted")
+    if not due(1084.0, 1090.0, 1040.0, 90.0, 1084.0):
+        failures.append("an expired request guard still suppressed a stall")
+    if due(1073.0, 1090.0, 1072.0, 90.0, 1073.0):
+        failures.append("fresh UART output was ignored after HTTPd idle")
+    return failures
+
+
 def check_unanswered_break(driver) -> list[str]:
     """A BREAK that produces no prompt is the finding #509 could not name."""
     failures = []
@@ -570,6 +589,7 @@ CHECKS = (
     ("walk", check_walk),
     ("ordinary-output", check_ordinary_output),
     ("silence-break", check_silence_break),
+    ("planned-httpd-idle", check_planned_httpd_idle),
     ("unanswered-break", check_unanswered_break),
     ("unreachable-monitor", check_unreachable_monitor),
     ("talking-guest", check_talking_guest),

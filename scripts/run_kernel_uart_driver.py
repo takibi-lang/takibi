@@ -180,6 +180,13 @@ QMP_CHARDEV = "debug_uart"
 STOPPED_FRACTION = 0.25
 
 
+def postmortem_break_due(now: float, deadline: float, last_chunk_at: float,
+                         timeout: float, peer_guard_until: float) -> bool:
+    return (now >= deadline - postmortem_budget(timeout) and
+            now >= peer_guard_until and
+            now - last_chunk_at >= timeout * STOPPED_FRACTION)
+
+
 def send_serial_break(port: int, chardev: str, budget: float) -> str:
     """Ask QEMU for a real serial BREAK; return what went wrong, or "".
 
@@ -287,6 +294,7 @@ def main() -> int:
     parser.add_argument("--network-ready-file")
     parser.add_argument("--interactive-httpd-ready-file")
     parser.add_argument("--interactive-httpd-done-file")
+    parser.add_argument("--httpd-peer-guard-file", dest="httpd_guard_file")
     # GitHub issue #547: after the background server, run /bin/peer-tty in
     # the persistent shell and type it one line; the capture then also waits
     # for the kernel's verdict on that line.
@@ -298,12 +306,16 @@ def main() -> int:
         raise RuntimeError("init-managed HTTPd ready/done files must be paired")
     if args.interactive_httpd_listener_file and not interactive_httpd:
         raise RuntimeError("init-managed HTTPd listener file requires ready/done files")
+    if args.httpd_guard_file and not interactive_httpd:
+        raise RuntimeError("HTTPd idle file requires ready/done files")
     httpd_ready_file = (Path(args.interactive_httpd_ready_file)
                         if interactive_httpd else None)
     httpd_listener_file = (Path(args.interactive_httpd_listener_file)
                            if args.interactive_httpd_listener_file else None)
     httpd_done_file = (Path(args.interactive_httpd_done_file)
                        if interactive_httpd else None)
+    httpd_guard_file = (Path(args.httpd_guard_file)
+                       if args.httpd_guard_file else None)
     if httpd_ready_file is not None:
         httpd_ready_file.unlink(missing_ok=True)
     if httpd_listener_file is not None:
@@ -372,6 +384,7 @@ def main() -> int:
     httpd_done_seen_at = None
     capture_started = time.monotonic()
     last_chunk_at = capture_started
+    peer_guard_until = capture_started
     timing_pending = bytearray()
     timing_capture = (open(args.timing_log, "w", encoding="ascii")
                       if args.timing_log else None)
@@ -399,12 +412,23 @@ def main() -> int:
                 # has stopped talking: it will be reported as a timeout in a
                 # few seconds whatever happens now, so this is the moment to
                 # spend on asking the debugger rather than on waiting.
+                # The host peer deliberately leaves HTTPd idle for 31s and
+                # then drives requests whose individual retry windows last
+                # up to 10s. Its bounded monotonic expiry keeps a BREAK from
+                # interrupting that work; a stalled peer eventually lets the
+                # expiry pass so DDB can still inspect the guest.
+                if httpd_guard_file is not None and httpd_guard_file.exists():
+                    try:
+                        peer_guard_until = max(
+                            peer_guard_until,
+                            float(httpd_guard_file.read_text(encoding="ascii")))
+                    except (OSError, ValueError):
+                        pass
                 if (args.qmp_port and not break_asked and
                         postmortem_at is None and
-                        time.monotonic()
-                        >= deadline - postmortem_budget(args.timeout) and
-                        (time.monotonic() - last_chunk_at)
-                        >= args.timeout * STOPPED_FRACTION):
+                        postmortem_break_due(
+                            time.monotonic(), deadline, last_chunk_at,
+                            args.timeout, peer_guard_until)):
                     break_asked = True
                     print("[kernel/uart] guest silent for "
                           f"{time.monotonic() - last_chunk_at:.0f}s with its "
