@@ -783,7 +783,11 @@ that disappears when it is zero merges them. Each set names the signals
 `kill(2)` accepts and prints whatever bits are left as one hex word, so a mask
 carrying bits no accepted signal number stands for is shown rather than
 dropped: `masked=sigterm,sigchld+0x0000000020000a07` is BusyBox init's own
-mask. The terminal crash console above intentionally has no `continue`.
+mask. Each line ends with `owner=`, the CPU that holds the process's kernel
+stack (`none` when no CPU does), `mask=`, its affinity mask (0 is every
+online CPU), and `core0=1` while a syscall the refusal list keeps on core 0
+is pending: a Ready process that no idle CPU starts is explained by one of
+the three. The terminal crash console above intentionally has no `continue`.
 
 `stacks` cross-checks each stopped CPU's published process frame against that
 same process snapshot. It reports the CPU, PID, stack range, and scheduler

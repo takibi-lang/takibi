@@ -5,8 +5,8 @@
  * set differs between two-vCPU QEMU and four-core RPi5.
  *
  * A mask is an admission request. This process pins itself to CPU 1 and
- * calls newfstatat, which is not in the kernel's peer-safety table, so the
- * migration gate reruns it on core 0. Whether that happened on core 0 is
+ * calls execve, which the kernel's refusal list (syscall_peer_refused)
+ * keeps on core 0, so the migration gate reruns it there. Whether that happened on core 0 is
  * not visible from EL0; the affinity gdb lane watches for it.
  */
 
@@ -30,7 +30,9 @@ const LINUX_PROT_READ_WRITE: usize = 3;
 const LINUX_MAP_PRIVATE_ANONYMOUS: usize = 0x22;
 const LINUX_NO_FD: usize = 0xFFFFFFFFFFFFFFFF;
 const LINUX_ENOENT: usize = 0xFFFFFFFFFFFFFFFE;
-// The probe's example of a syscall the peer-safety table does NOT admit.
+// The probe's example of a syscall the refusal list keeps on core 0 (the
+// allow-list it replaced, GitHub issue #583, is what the history below is
+// about).
 // It has to be one that STAYS outside, and phase B entry 6 is a sequence of
 // widenings of exactly that table: this was uname until entry 6's first
 // increment admitted it, getcwd until its second, and newfstatat until
@@ -319,12 +321,10 @@ fn affinity_probe() {
     // Say it BEFORE the spinner goes. This line is written from CPU 1, so it
     // is published into this CPU's console ring, and the only thing that
     // empties that ring is core 0's drain at the top of a syscall
-    // (kernel_log_peer_drain, kernel/kernel/syscall.tkb). Core 0 has no idle
-    // loop: with the spinner reaped and the shell blocked on its read, core 0
-    // has no syscall to take and the line can sit in the ring for the rest of
-    // the boot. The spinner's millisecond naps are what keep the drain
-    // running, which is the reason it exists -- so it has to outlive the
-    // output, not just the migration.
+    // (kernel_log_peer_drain, kernel/kernel/syscall.tkb), and, since core 0
+    // gained an idle loop (#592), each wake of that loop. Written when only
+    // the syscall drain existed: the spinner's naps were what kept it
+    // running, which is why the spinner has to outlive this output.
     affinity_say(bs"affinity: pinned to cpu 1, where execve, outside the peer-safe table, still answered\n");
     // GitHub issue #579: every OTHER online cpu, while the same spinner is
     // still keeping core 0 occupied. Cpu 1 is proved above; this walks the

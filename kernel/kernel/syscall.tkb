@@ -2603,12 +2603,12 @@ fn kernel_syscall_clone_parent_return(parent_sp: usize) {
     el0_context_resume(parent_sp);
 }
 
-// GitHub issue #9: the peer-safety table. A syscall runs on a peer only
-// with a cited audit; the migration gate reruns every other one on core 0.
-// read and write are split by descriptor in the order their handlers use.
-// Files stay core 0 only: #533 found ext2 mutation unserialized against a
-// peer reader and its write epoch read without a barrier, gaps its one
-// fixture could ignore and an arbitrary process cannot.
+// GitHub issue #9: peer-safety. Since #583 a syscall runs where it is
+// called unless syscall_peer_refused names it or syscall_peer_safe narrows
+// it by descriptor; the migration gate reruns those on core 0. read and
+// write are split by descriptor in the order their handlers use. ext2
+// MUTATION stays core 0's: #533 found it unserialized against a peer reader,
+// and #559's reader count covers peer readers only.
 // GitHub issue #533: the five ext2 MUTATIONS, each under the filesystem
 // lock for exactly as long as its own linear tokens live.
 //

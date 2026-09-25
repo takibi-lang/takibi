@@ -1649,6 +1649,17 @@ private fn ddb_render_process(
     ddb_puts(" sp="); ddb_put_hex(record.saved_sp);
     ddb_puts(" pending="); ddb_put_signal_set(record.pending_signals);
     ddb_puts(" masked="); ddb_put_signal_set(record.signal_mask);
+    // GitHub issue #593: who holds its stack and where it may run -- the
+    // three facts that told a Ready process nobody started from one no CPU
+    // was allowed to start.
+    ddb_puts(" owner=");
+    if (record.stack_owner_cpu >= KERNEL_MAX_CORES) {
+        ddb_puts("none");
+    } else {
+        ddb_put_udec(record.stack_owner_cpu);
+    }
+    ddb_puts(" mask="); ddb_put_hex(record.affinity_mask);
+    if (record.core0_for_call) { ddb_puts(" core0=1"); } else { ddb_puts(" core0=0"); }
     ddb_puts("\n");
 }
 
@@ -2054,6 +2065,9 @@ private fn ddb_wait_test_record(index: {0..<DDB_PROCESS_RECORDS as usize},
     ddb_wait_test_records[index].stack_bottom = 0;
     ddb_wait_test_records[index].stack_top = 0;
     ddb_wait_test_records[index].root_slot = 0;
+    ddb_wait_test_records[index].stack_owner_cpu = KERNEL_MAX_CORES;
+    ddb_wait_test_records[index].affinity_mask = 0;
+    ddb_wait_test_records[index].core0_for_call = false;
 }
 
 private fn ddb_render_wait_test() !{unsafe} {

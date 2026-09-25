@@ -6,8 +6,9 @@ nothing. Each rule is exercised against a synthetic tree, built here rather
 than copied: what is under test is the rules, and a minimal tree makes each
 planted defect the only difference between a pass and a fail.
 
-The case that matters is the second: the peer-safety table admitting the very
-syscall the probe uses to make the migration gate fire. That is what phase B
+The case that matters is the second: the refusal list (the peer-safety table
+before #583) no longer keeping the very syscall the probe uses to make the
+migration gate fire. That is what phase B
 entry 6 did to `uname`, and until this check existed the only thing that
 noticed was a full QEMU lane reporting it as a gate that stopped working.
 """

@@ -147,7 +147,7 @@ def check_waker_fixture(text: str) -> None:
         "^ddb: wait pid=10 state=blocked waits-for event=uart-rx queued=1$",
         "^ddb: wait pid=14 state=blocked waits-for event=uart-tx queued=320 low-water=256$",
         "^ddb: wait pid=15 state=blocked waits-for event=net-rx frame-pending=no connection-pending=unknown$",
-        "^ddb: waittest ps pid=10 ppid=0 state=3 wait=1 waker=uart-rx queued=1 root=0 sp=0x0000000000000000 pending=none masked=none$",
+        "^ddb: waittest ps pid=10 ppid=0 state=3 wait=1 waker=uart-rx queued=1 root=0 sp=0x0000000000000000 pending=none masked=none owner=none mask=0x0000000000000000 core0=0$",
     ]
     missing = [line for line in expected if line not in text]
     if missing:

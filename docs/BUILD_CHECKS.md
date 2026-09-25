@@ -21,7 +21,7 @@ suffix is description; dispatch reads only the prefix.
 
 | Check | Enforced invariant |
 | --- | --- |
-| `check_affinity_probe_migrates.py` | the syscall /bin/affinity uses to make the migration gate fire is the one the gdb watcher waits for, and is still outside the peer-safety table |
+| `check_affinity_probe_migrates.py` | the syscall /bin/affinity uses to make the migration gate fire is the one the gdb watcher waits for, and is still on the refusal list (`syscall_peer_refused`) |
 | `check_affinity_probe_migrates_controls.py` | Controls for the affinity-probe premise check |
 | `check_agents_paths.py` | paths named by root guidance resolve and this table names every check |
 | `check_ash_bin_inventory.py` | ash's expected /bin listing matches every image-recipe entry in order |

@@ -4,8 +4,8 @@
 # interactive shell, and which script it is depends on the mode:
 #
 #   gate (default)  GitHub issue #9's migration gate. The probe pins itself
-#                   to CPU 1 and asks for a syscall outside the peer-safety
-#                   table; gdb must see the gate fire on CPU 1 for it, then
+#                   to CPU 1 and asks for a syscall on the refusal list
+#                   (#583); gdb must see the gate fire on CPU 1 for it, then
 #                   core 0 dispatch it again.
 #   reap            GitHub issue #571's wait4 window. gdb stops CPU0 between
 #                   wait4's two walks of its child list and lets only CPU1

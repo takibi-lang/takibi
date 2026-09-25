@@ -958,6 +958,11 @@ struct ProcessDdbRecord {
     // already on disk.
     pending_signals: usize;
     signal_mask: usize;
+    // GitHub issue #593: where the process may run. A Ready process no CPU
+    // starts is placement -- a mask naming one CPU, or a syscall waiting for
+    // core 0 -- and neither was visible until these were copied.
+    affinity_mask: usize;
+    core0_for_call: bool;
 }
 
 struct ProcessDdbCopyResult {
@@ -1014,6 +1019,8 @@ private fn scheduled_process_ddb_copy_one(
     output[index].root_slot = slot;
     output[index].pending_signals = record.pending_signals;
     output[index].signal_mask = record.signal_mask;
+    output[index].affinity_mask = record.affinity_mask;
+    output[index].core0_for_call = record.core0_for_call;
 }
 
 // Fixed work for interrupt-safe DDB entry: at most 64 physical pool slots

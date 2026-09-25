@@ -4,9 +4,10 @@ Runs inside gdb-multiarch (`gdb -batch -x`), started by
 scripts/run_kernel_affinity_gdb_qemutest.sh, which launches QEMU and the
 network peer and passes the ports and paths in the environment.
 
-A process on a peer because its affinity mask put it there may run only the
-syscalls the kernel's peer-safety table allows. Any other is rewound, and
-the process is handed to core 0, which runs the syscall from the start.
+A process on a peer because its affinity mask put it there runs every
+syscall there except those the kernel's refusal list (syscall_peer_refused,
+GitHub issue #583) keeps on core 0. Those are rewound, and the process is
+handed to core 0, which runs the syscall from the start.
 Nothing at EL0 can tell where a syscall ran: /bin/affinity's execve answers
 the same either way. So this watches the kernel instead, without the kernel
 printing anything for it.

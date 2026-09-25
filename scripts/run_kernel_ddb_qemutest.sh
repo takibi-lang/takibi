@@ -258,9 +258,9 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         ! grep -Eq '^ddb: vm pid=[0-9]+ root=[0-9]+ live=[01] asid=[0-9]+ l1=0x[0-9a-f]+$' "$UART_LOG" ||
         ! grep -Eq '^ddb: fds pid=[0-9]+ slots=[0-9]+$' "$UART_LOG" ||
         ! grep -Eq '^ddb: ps count=[1-9][0-9]* truncated=[01]$' "$UART_LOG" ||
-        ! grep -Eq "^ddb: ps pid=1 ppid=0 state=[0-9]+ wait=[0-9]+( waker=[a-z-]+( queued=[0-9]+( low-water=[0-9]+)?| frame-pending=(yes|no|unknown) connection-pending=(yes|no|unknown))?)? root=0 sp=0x[0-9a-f]+ pending=$sigset masked=$sigset\$" "$UART_LOG" ||
+        ! grep -Eq "^ddb: ps pid=1 ppid=0 state=[0-9]+ wait=[0-9]+( waker=[a-z-]+( queued=[0-9]+( low-water=[0-9]+)?| frame-pending=(yes|no|unknown) connection-pending=(yes|no|unknown))?)? root=0 sp=0x[0-9a-f]+ pending=$sigset masked=$sigset owner=(none|[0-9]+) mask=0x[0-9a-f]+ core0=[01]\$" "$UART_LOG" ||
         ! grep -q '^ddb: stacks cpus=2 processes=' "$UART_LOG" ||
-        ! grep -Eq "^ddb: proc pid=1 ppid=0 state=[0-9]+ wait=[0-9]+( waker=[a-z-]+( queued=[0-9]+( low-water=[0-9]+)?| frame-pending=(yes|no|unknown) connection-pending=(yes|no|unknown))?)? root=0 sp=0x[0-9a-f]+ pending=$sigset masked=$sigset\$" "$UART_LOG" ||
+        ! grep -Eq "^ddb: proc pid=1 ppid=0 state=[0-9]+ wait=[0-9]+( waker=[a-z-]+( queued=[0-9]+( low-water=[0-9]+)?| frame-pending=(yes|no|unknown) connection-pending=(yes|no|unknown))?)? root=0 sp=0x[0-9a-f]+ pending=$sigset masked=$sigset owner=(none|[0-9]+) mask=0x[0-9a-f]+ core0=[01]\$" "$UART_LOG" ||
         [ "$(grep -Ec '^ddb: bt source=(cpu cpu=[0-9]+|saved) pid=[0-9]+ stack=0x[0-9a-f]+\.\.0x[0-9a-f]+$' "$UART_LOG")" -lt 2 ] ||
         [ "$(grep -Ec '^ddb: bt frame=0 pc=0x[0-9a-f]+ boundary=(exception|user|assembly|assembly-bridge)$' "$UART_LOG")" -lt 2 ] ||
         ! grep -Eq '^ddb: bt (complete frames=[1-9][0-9]*|stop=(assembly-boundary|depth-limit|invalid-return-pc|nonmonotonic-frame|out-of-range) fp=0x[0-9a-f]+)$' "$UART_LOG" ||
@@ -316,7 +316,7 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         ! grep -q '^ddb: wait pid=14 state=blocked waits-for event=uart-tx queued=320 low-water=256$' "$UART_LOG" ||
         ! grep -q '^ddb: wait pid=15 state=blocked waits-for event=net-rx frame-pending=no connection-pending=unknown$' "$UART_LOG" ||
         ! grep -q '^ddb: wait edges=8 blocked=9 unknown=2 truncated=1$' "$UART_LOG" ||
-        ! grep -q '^ddb: waittest ps pid=10 ppid=0 state=3 wait=1 waker=uart-rx queued=1 root=0 sp=0x0000000000000000 pending=none masked=none$' "$UART_LOG" ||
+        ! grep -q '^ddb: waittest ps pid=10 ppid=0 state=3 wait=1 waker=uart-rx queued=1 root=0 sp=0x0000000000000000 pending=none masked=none owner=none mask=0x0000000000000000 core0=0$' "$UART_LOG" ||
         ! grep -q '^ddb: continuing$' "$UART_LOG" ||
         ! grep -q '^ddb: console tx=queued$' "$UART_LOG" ||
         { [ "$BREAK_SOURCE" = uart ] && ! grep -q '^ddb: peer console=pending$' "$UART_LOG"; } ||
