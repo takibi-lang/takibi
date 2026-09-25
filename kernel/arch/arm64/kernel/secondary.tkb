@@ -319,6 +319,14 @@ fn kernel_core0_idle_block_reenter() {
 fn kernel_core0_idle_loop() {
     enable_irq();
     while (true) {
+        // Peer output -- a peer's kernel lines and its processes' terminal
+        // writes -- reaches the UART only through core 0's drain, which ran
+        // at the top of every core 0 syscall and nowhere else. An idle core 0
+        // takes no syscalls, so a shell on a peer printed its prompt into a
+        // ring nothing emptied, and the terminal went silent: the QEMU debug
+        // lane stalled once #583's refusal list stopped sending ash's ioctl
+        // to core 0. Drain on every wake; the tick bounds the latency.
+        kernel_log_peer_drain();
         match kernel_process_secondary_start() {
             ProcessSecondaryStart::Idle => {}
             ProcessSecondaryStart::Frame(next_sp) => {
