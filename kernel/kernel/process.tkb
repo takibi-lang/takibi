@@ -3223,6 +3223,37 @@ fn kernel_process_stack_idle_yield() {
     process_run_unlock(guard);
     workload_profile_idle_enter();
 }
+// GitHub issue #583: the blocked twin of kernel_process_stack_idle_yield,
+// after the CPU's idle entry has moved SP_EL1 off the stack of a process
+// kernel_process_block_to_idle published Blocked. The process keeps its
+// state -- Blocked, or Ready if a wake already landed -- and only its stack
+// changes hands, so a wake from here on can start it on any CPU it may run.
+fn kernel_process_stack_idle_blocked() {
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES ||
+        execution_here().current_live || execution_here().stack_live == false) {
+        kernel_syscall_fail_stop(0);
+    }
+    let guard = process_run_lock();
+    let mut outgoing: ProcessHandle = execution_here().stack_handle;
+    if (scheduled_process_handle_matches(outgoing) == false ||
+        (scheduled_process_state_of(outgoing) != ProcessSlotState::Blocked &&
+         scheduled_process_state_of(outgoing) != ProcessSlotState::Ready) ||
+        scheduled_process_record_of(outgoing).stack_owner_cpu != core) {
+        process_run_unlock(guard);
+        kernel_syscall_fail_stop(0);
+    }
+    address_space_activate_root(0);
+    scheduled_process_record_of(outgoing).stack_owner_cpu =
+        PROCESS_STACK_UNOWNED;
+    execution_here().stack_live = false;
+    process_run_unlock(guard);
+    // A wake that landed while this core stood on the stack left the
+    // process Ready and unselectable; it is selectable now.
+    interrupt_notify();
+    workload_profile_idle_enter();
+}
+
 // GitHub issue #264 first stage keeps the #248 wait4 result fields and
 // #245 exec-image flag in the same ProcessRecord as their slot's state
 // and links. They remain indexed by the waiting/current process exactly
@@ -5380,6 +5411,89 @@ fn kernel_process_syscall_return_schedule(current_sp: usize) -> usize {
 // one critical section. The target's linear Running token then survives while
 // the lock is dropped for ASID preparation; commit revalidates both processes
 // under a fresh section before publishing Blocked and changing TTBR0.
+// The last looks before a wait publishes Blocked, taken inside the
+// critical section that publishes it. True means the event the wait is for
+// has already happened, so blocking would sleep beside it: the caller
+// does not block, and the syscall is rerun.
+//
+// GitHub issue #547, the terminal: the RX interrupt pushes a byte only while
+// holding this lock, after finding no Blocked reader. So a byte is either in
+// the ring now, or its interrupt finds this process Blocked. That holds
+// whichever CPU the reader is on, which a local interrupt mask cannot
+// promise.
+//
+// GitHub issue #583's fourth increment, a signal wait: rt_sigtimedwait took
+// nothing under this lock a moment ago and released it; a sender on another
+// CPU raises the bit under it and wakes the target only if it is Blocked by
+// then. So a bit the wait accepts, or an unmasked SIGTERM, pending now
+// means the rerun takes it (or exits at entry), and one raised after this
+// publishes Blocked is delivered to a Blocked waiter.
+private fn kernel_process_block_would_miss(
+        guard: borrow ProcessRunGuard[lock], from: ProcessHandle,
+        reason: ProcessWaitReason) -> bool {
+    if (reason == ProcessWaitReason::UartRx && kernel_uart_rx_pending()) {
+        return true;
+    }
+    if (reason == ProcessWaitReason::Signal) {
+        let waiting: *ProcessRecord = scheduled_process_record_of(from);
+        let sigterm_bit: usize = 1 << 14;
+        let mut wanted: usize = waiting.sigwait_set;
+        if ((waiting.signal_mask & sigterm_bit) == 0) {
+            wanted = wanted | sigterm_bit;
+        }
+        if ((waiting.pending_signals & wanted) != 0) { return true; }
+    }
+    return false;
+}
+
+// What kernel_process_block_current returns when the wait was published
+// Blocked with no successor to switch to: the caller leaves this process's
+// stack for the CPU's idle context instead of resuming anything. Never a
+// valid frame address.
+const PROCESS_BLOCK_TO_IDLE: usize = 1;
+
+// GitHub issue #583: a wait with no Ready successor used to decline to
+// block and rerun its syscall, which is all a CPU with nowhere to idle can
+// do. Every CPU can idle now -- the secondaries always could, core 0 since
+// #592 -- so publish Blocked here and let the caller idle. The process stays
+// unselectable until its stack is released: scheduled_process_ready_take
+// refuses a Ready process whose stack is still owned, so a wake that lands
+// before this CPU leaves the stack cannot start it elsewhere.
+//
+// NOT for wait4's ChildExit: its walk and this publication are not yet one
+// critical section against a peer's exit (#550), so it keeps rerunning.
+private fn kernel_process_block_to_idle(
+        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+        from: ProcessHandle, current_sp: usize, reason: ProcessWaitReason,
+        trace_aux: usize) -> bool {
+    if (reason == ProcessWaitReason::ChildExit) { return false; }
+    if (execution_here().current_live == false ||
+        scheduled_process_same_slot(execution_here().current_handle, from)
+            == false ||
+        execution_here().stack_live == false ||
+        execution_here().stack_handle.pool_index != from.pool_index ||
+        execution_here().stack_handle.generation != from.generation) {
+        return false;
+    }
+    if (kernel_process_block_would_miss(guard, from, reason)) { return false; }
+    scheduled_process_record_of(from).saved_sp = current_sp;
+    match scheduled_process_running_take(guard, from) {
+        ScheduledProcessRunningTakeResult::Missing => { return false; }
+        ScheduledProcessRunningTakeResult::Running(from_resources) => {
+            let (from_owner, from_running) = from_resources;
+            let blocked = scheduled_process_block(from_owner, from_running);
+            scheduled_process_record_at(from_owner.pool_index).wait_reason =
+                reason;
+            scheduled_process_release(from_owner, blocked);
+        }
+    }
+    kernel_process_trace_handle(ProcessTraceBlock, from, from, trace_aux);
+    execution_here().current_live = false;
+    execution_here().scheduler_enabled = false;
+    execution_here().reschedule_pending = false;
+    return true;
+}
+
 private fn kernel_process_block_current(current_sp: usize,
                                         reason: ProcessWaitReason,
                                         trace_aux: usize) -> usize {
@@ -5390,7 +5504,10 @@ private fn kernel_process_block_current(current_sp: usize,
     let guard = process_run_lock();
     match kernel_process_next_ready(from, cpu_id()) {
         ProcessNextReadyResult::Missing => {
+            let idle: bool = kernel_process_block_to_idle(
+                guard, from, current_sp, reason, trace_aux);
             process_run_unlock(guard);
+            if (idle) { return PROCESS_BLOCK_TO_IDLE; }
             return 0;
         }
         ProcessNextReadyResult::Next(to) => {
@@ -5470,35 +5587,12 @@ private fn kernel_process_block_reserved(
             // read runs again and takes it, or its interrupt finds this
             // process Blocked. That holds whichever CPU the reader is on,
             // which a local interrupt mask cannot promise.
-            if (reason == ProcessWaitReason::UartRx && kernel_uart_rx_pending()) {
+            if (kernel_process_block_would_miss(guard, from, reason)) {
                 process_image_cancel_activation(prepared);
                 let ready = scheduled_process_yield(owner, running);
                 scheduled_process_release(owner, ready);
                 process_run_unlock(guard);
                 return 0;
-            }
-            // GitHub issue #583's fourth increment, the same look for a
-            // signal wait. rt_sigtimedwait took nothing under this lock a
-            // moment ago and released it; a sender on another CPU raises the
-            // bit under it and wakes the target only if it is Blocked by
-            // then. So the decision is made here: a bit the wait accepts,
-            // or an unmasked SIGTERM, is pending now and the syscall runs
-            // again (next_sp == 0 rewinds it) and takes it -- or it arrives
-            // after this publishes Blocked, and delivery finds it.
-            if (reason == ProcessWaitReason::Signal) {
-                let waiting: *ProcessRecord = scheduled_process_record_of(from);
-                let sigterm_bit: usize = 1 << 14;
-                let mut wanted: usize = waiting.sigwait_set;
-                if ((waiting.signal_mask & sigterm_bit) == 0) {
-                    wanted = wanted | sigterm_bit;
-                }
-                if ((waiting.pending_signals & wanted) != 0) {
-                    process_image_cancel_activation(prepared);
-                    let ready = scheduled_process_yield(owner, running);
-                    scheduled_process_release(owner, ready);
-                    process_run_unlock(guard);
-                    return 0;
-                }
             }
             scheduled_process_record_of(from).saved_sp = current_sp;
             match scheduled_process_running_take(guard, from) {

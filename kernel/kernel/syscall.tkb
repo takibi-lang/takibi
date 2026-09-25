@@ -1974,12 +1974,13 @@ fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
                 if (syscall_test_evidence_record_ppoll_uart_wait()) {
                     kernel_boot_log("shell ppoll: uart blocked\n");
                 }
-                // The question syscall_read_uart asks: block when anything
-                // else can run. The Read delivery rewinds this ppoll, so the
-                // wake reruns it and it reports the byte. The block path's
-                // last look at the ring under the run lock (#547) covers a
-                // byte that arrives before it sleeps.
-                if (kernel_process_other_ready()) {
+                // The answer syscall_read_uart gives: block, idling the CPU
+                // when nothing else can run here (#583). The Read delivery
+                // rewinds this ppoll, so the wake reruns it and it reports
+                // the byte. The block path's last look at the ring under the
+                // run lock (#547) covers a byte that arrives before it
+                // sleeps.
+                {
                     let process_slot: usize = kernel_syscall_process_slot();
                     if (scheduled_process_slot_valid(process_slot)) {
                         scheduled_process_set_uart_block_delivery(
@@ -2053,17 +2054,22 @@ fn syscall_read_uart(address: usize, requested: usize) -> SyscallAction {
                 // runnable siblings, and answering "no" here left the
                 // kernel spinning at EL1 for the whole wait -- which, in a
                 // kernel that does not preempt kernel mode, stops every
-                // other process too. WaitInterrupt below stays for the case
-                // that question was really about: nobody else to run.
-                if (kernel_process_other_ready()) {
-                    let process_slot: usize = kernel_syscall_process_slot();
-                    if (scheduled_process_slot_valid(process_slot)) {
-                        scheduled_process_set_uart_block_delivery(
-                            process_slot, UartBlockDelivery::Read);
-                        kernel_process_current_set_pending_block(
-                            ProcessWaitReason::UartRx, 0);
-                        return SyscallAction::Block;
-                    }
+                // other process too.
+                //
+                // GitHub issue #583: and with nobody else to run it blocks
+                // too now. The block path publishes Blocked and idles the
+                // CPU when there is no successor (kernel_process_block_to_
+                // idle), which every CPU can do since #592; a reader on a
+                // peer whose only relatives run on core 0 has no Ready
+                // successor HERE, and an EL1 wait there held a CPU for
+                // nothing.
+                let process_slot: usize = kernel_syscall_process_slot();
+                if (scheduled_process_slot_valid(process_slot)) {
+                    scheduled_process_set_uart_block_delivery(
+                        process_slot, UartBlockDelivery::Read);
+                    kernel_process_current_set_pending_block(
+                        ProcessWaitReason::UartRx, 0);
+                    return SyscallAction::Block;
                 }
                 return SyscallAction::WaitInterrupt;
             }
@@ -2404,6 +2410,12 @@ fn kernel_syscall_block_return(frame_sp: usize) {
         }
         kernel_syscall_uart_block_prepare(frame_sp);
         next_sp = kernel_process_block_uart(frame_sp);
+    }
+    // GitHub issue #583: published Blocked with no successor; leave its
+    // stack for this CPU's idle context.
+    if (next_sp == PROCESS_BLOCK_TO_IDLE) {
+        if (cpu_id() != 0) { kernel_secondary_idle_block_enter(); }
+        kernel_core0_idle_block_enter();
     }
     if (next_sp == 0) {
         // Another CPU may reserve the last Ready successor after dispatch
@@ -2926,6 +2938,18 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     // so a signal raised from any CPU between the take and the block is
     // either seen there or delivered to a Blocked waiter.
     if (number == AARCH64_NR_RT_SIGTIMEDWAIT) { return true; }
+    // Fifth increment: the terminal waits. ppoll combines paths a peer is
+    // admitted for already -- the RX ring's pending check, the UartRx block
+    // whose decisive look is inside the critical section that publishes
+    // Blocked (#547), the deadline wait nanosleep uses, and the connected
+    // socket's deliberately lockless readiness hint. It blocks whether or
+    // not a successor is Ready on this CPU, because a block with none now
+    // idles the CPU instead of declining. The fixture wait blocks on UartRx
+    // the same way, taking its byte under the run lock.
+    if (number == AARCH64_NR_PPOLL ||
+        number == AARCH64_NR_TAKIBI_UART_RX_WAIT) {
+        return true;
+    }
     if (number == AARCH64_NR_WRITEV) {
         return kernel_syscall_terminal_is_open(fd);
     }

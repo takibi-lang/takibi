@@ -280,6 +280,13 @@ fn kernel_secondary_idle_reenter() {
     kernel_secondary_main(0x290 + cpu_id());
 }
 
+// GitHub issue #583: the same re-entry after a wait was published Blocked
+// with no successor on this CPU.
+fn kernel_secondary_idle_block_reenter() {
+    kernel_process_stack_idle_blocked();
+    kernel_secondary_main(0x290 + cpu_id());
+}
+
 // GitHub issue #9: the same re-entry after the migration gate handed a
 // live process to core 0.
 fn kernel_secondary_idle_yield_reenter() {
@@ -301,6 +308,11 @@ fn kernel_core0_idle_yield_reenter() {
 // released here before idling, as kernel_secondary_idle_reenter does.
 fn kernel_core0_idle_reenter() {
     kernel_process_stack_idle_complete();
+    kernel_core0_idle_loop();
+}
+
+fn kernel_core0_idle_block_reenter() {
+    kernel_process_stack_idle_blocked();
     kernel_core0_idle_loop();
 }
 

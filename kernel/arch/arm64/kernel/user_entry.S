@@ -441,6 +441,26 @@ kernel_core0_idle_enter:
     mov     x29, xzr
     b       kernel_core0_idle_reenter
 
+/* GitHub issue #583: the same stack switches for a process just published
+ * Blocked with no successor; the reenter releases its stack without
+ * changing its state. */
+    .global kernel_core0_idle_block_enter
+    .type kernel_core0_idle_block_enter, %function
+kernel_core0_idle_block_enter:
+    msr     DAIFSet, #0x2
+    adrp    x1, core0_idle_stack_top
+    add     x1, x1, :lo12:core0_idle_stack_top
+    mov     sp, x1
+    mov     x29, xzr
+    b       kernel_core0_idle_block_reenter
+
+    .global kernel_secondary_idle_block_enter
+    .type kernel_secondary_idle_block_enter, %function
+kernel_secondary_idle_block_enter:
+    msr     DAIFSet, #0x2
+    adr     x5, kernel_secondary_idle_block_reenter
+    b       .Lsecondary_idle_stack
+
     .global kernel_secondary_idle_enter
     .type kernel_secondary_idle_enter, %function
 kernel_secondary_idle_enter:

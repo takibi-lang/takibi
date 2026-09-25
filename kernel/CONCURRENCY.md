@@ -58,9 +58,16 @@ on that process's own kernel stack -- a clone child's first return still
 stands on its parent's. The hand-off is the peers' ordering: publish no
 current process, move SP off the process stack, then make the process
 Ready with its stack unowned under the run lock. The idle loop takes a Ready
-process core 0 may run, never slot 0's bootstrap record. Every other case in
-which core 0 has nothing to run -- all processes blocked, or an exit with no
-successor -- still waits in EL1 and reruns the syscall.
+process core 0 may run, never slot 0's bootstrap record. An exit with no
+successor idles the same way (the exited process's stack is released by
+`kernel_process_stack_idle_complete`), and so does a wait: a block with no
+Ready successor publishes Blocked under the run lock, after the same last
+looks a switching block takes (`kernel_process_block_would_miss`), and the
+CPU idles; the stack is released by `kernel_process_stack_idle_blocked`,
+and until then `scheduled_process_ready_take` will not start the process
+even if a wake has made it Ready (GitHub issue #583). wait4's ChildExit is
+the exception: it still reruns, because its walk and the Blocked
+publication are not one critical section against a peer's exit (#550).
 
 ## State transitions and the run guard
 
