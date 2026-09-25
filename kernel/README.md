@@ -25,8 +25,10 @@ and the development container verifies the response with real `curl`.
 - Linux-compatible processes run at EL0 with RX text and RW+XN data, heap, and
   stack mappings.
 - Ordinary kernel services do not use EL2 HVC as an internal service layer.
-- Page, mapping, process, file, socket, frame, and DMA lifetimes retain
-  explicit affine or linear ownership.
+- Page, mapping, process, file, socket, and frame lifetimes retain explicit
+  affine or linear ownership. On cache-maintained targets, DMA builtins prove
+  RX buffer alignment and whole-line lengths, but do not enforce the buffer's
+  CPU/DMA ownership interval.
 - A pooled scheduler table (`ProcessRecord`) gives each live process a
   dedicated address-space root, ASID, and unified descriptor table. There is
   no process-count constant: a record is a pool allocation, so the page
