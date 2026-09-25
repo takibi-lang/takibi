@@ -9,7 +9,7 @@ history, is archived in `HISTORY.md`.
 
 Live intermittents are listed in `docs/KNOWN_INTERMITTENTS.md`, not here.
 
-## Territories, re-cut 2026-09-24
+## Territories, re-cut 2026-09-25
 
 A territory is a role, not a set of directories and not a particular agent
 (`AGENTS.md`); which agent holds which is the maintainer's per-session
@@ -39,7 +39,7 @@ step, landed as its own commit.
 
 ### Territory B: everything else, ordered by current priority
 
-1. **Kernel and userspace capability:** #171, #204, #433,
+1. **Kernel and userspace capability:** #596, #204, #433,
    #430, #434, #435, #220, #595.
 2. **Resource use and measured performance:** #389, #422, #497, #520, #553,
    #386, #502, #503.
