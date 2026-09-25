@@ -61,7 +61,10 @@ let mut virtio_blk_queue: [u8; 2 * VIRTIO_BLK_PAGE_SIZE] align(4096);
 // is sufficient.
 let mut virtio_blk_data_buf: [u8; 512] align(64);
 let mut virtio_blk_request_buf: [u8; 16] align(64);
-let mut virtio_blk_status_buf: [u8; 1] align(64);
+// The device writes one status byte, but cache maintenance owns a full,
+// isolated line. Keep the descriptor length at one below.
+let mut virtio_blk_status_buf: [u8; DMA_CACHE_LINE]
+    align(DMA_CACHE_LINE);
 // Virtio's avail/used idx fields are free-running u16 counters. The nominal
 // domain keeps the driver shadow at that width and makes comparison with a
 // widened counter a type error before the mandatory 65535 -> 0 wrap.
@@ -140,7 +143,7 @@ fn virtio_blk_submit(request_type: u32, sector: u32,
     descs[2].next = 0;
     dma_prepare_tx(virtio_blk_request_buf as *u8,
                    sizeof(VirtioBlkRequest));
-    dma_prepare_rx(virtio_blk_status_buf, 1);
+    dma_prepare_rx(virtio_blk_status_buf, 64);
     if (write) {
         dma_prepare_tx(virtio_blk_data_buf as *u8, 512);
     } else {
@@ -172,7 +175,7 @@ fn virtio_blk_submit(request_type: u32, sector: u32,
     }
     dma_consume();
     virtio_blk_used_seen = virtio_ring_index_next(virtio_blk_used_seen);
-    dma_finish_rx(virtio_blk_status_buf, 1);
+    dma_finish_rx(virtio_blk_status_buf, 64);
     if (virtio_blk_status_buf[0] != 0) { return false; }
     if (write == false) {
         dma_finish_rx(virtio_blk_data_buf, 512);

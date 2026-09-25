@@ -650,6 +650,12 @@ fn msc_cbw_header(data_len: u32, dir_in: bool, cb_len: u32) {
 // a small nonzero code identifying which stage failed.
 fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
     let data_base: usize = data as usize;
+    // READ CAPACITY returns only eight bytes into the 512-byte scratch
+    // buffer. Sector transfers use the larger dedicated bounce buffer.
+    // Invalidate complete lines from those isolated allocations while the
+    // USB transfer itself keeps its exact protocol length.
+    let cache_length: usize =
+        ((data_len as usize + 63) / 64) * 64;
     let cbw_base: usize = (msc_cbw_buf as *u8) as usize;
     let cbw_dma: usize = cbw_base + rp1_dma_pci_offset;
     let csw_base: usize = (msc_csw_buf as *u8) as usize;
@@ -664,7 +670,7 @@ fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
 
     if (data_len > 0) {
         if (dir_in) {
-            dma_prepare_rx(data, data_len as usize);
+            dma_prepare_rx(data, cache_length);
         } else {
             dma_prepare_tx(data as *u8, data_len as usize);
         }
@@ -681,7 +687,7 @@ fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
             return 2;
         }
         if (dir_in) {
-            dma_finish_rx(data, data_len as usize);
+            dma_finish_rx(data, cache_length);
         }
     }
 
