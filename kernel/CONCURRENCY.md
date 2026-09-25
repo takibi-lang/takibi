@@ -14,8 +14,11 @@ state in this kernel is safe *because of* them:
   runtime online prefix is 2 in maintained QEMU lanes and 4 on RPi5. Every
   online core takes timer interrupts and enters the syscall and scheduler
   paths. A process with no affinity mask is eligible on every online core;
-  `syscall_peer_safe` still sends unreviewed
-  peer syscalls to core 0. The busy-pair fixture pins its workers during the
+  a peer syscall runs where it was called unless `syscall_peer_refused`
+  names it (GitHub issue #583: the process lifecycle, ext2 mutation, the
+  socket calls other than connected read and write, and syslog, each with
+  its reason) or `syscall_peer_safe` narrows it by descriptor; those are
+  rerun on core 0. The busy-pair fixture pins its workers during the
   staged boot checks, then widens them for the measured phase and alternates
   explicit CPU 0/1 affinity requests to observe actual migrations. The
   filesystem boundary is now a LOCK rather than an

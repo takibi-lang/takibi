@@ -39,11 +39,8 @@ WATCHER_TEXT = "MIGRATED_SYSCALL = 17\n"
 
 SYSCALL_TEXT = '''const AARCH64_NR_UNAME: usize = 160;
 
-fn syscall_peer_safe(number: usize, fd: usize) -> bool {
-    if (number == 172 || number == 173 || (number >= 174 && number <= 177)) {
-        return true;
-    }
-    if (number == AARCH64_NR_UNAME) { return true; }
+fn syscall_peer_refused(number: usize) -> bool {
+    if (number == 220 || number == 17) { return true; }
     return false;
 }
 '''
@@ -106,26 +103,23 @@ def main() -> int:
     failures += case("a well-formed tree", "GETCWD_SYSCALL (17) migrates",
                      should_fail=False)
 
-    # Entry 6's own failure mode: the table admits the probe's syscall.
+    # The refusal list stops naming the probe's syscall (it was admitted).
     failures += case(
-        "the table admits the syscall the probe migrates",
+        "the refusal list stops naming the syscall the probe migrates",
         "the lane's premise is false",
-        syscall=SYSCALL_TEXT.replace(
-            "if (number == AARCH64_NR_UNAME) { return true; }",
-            "if (number == AARCH64_NR_UNAME || number == 17) { return true; }"))
+        syscall=SYSCALL_TEXT.replace("number == 220 || number == 17",
+                                     "number == 220"))
 
-    # The same, reached through a named constant rather than a literal,
-    # because that is how the table is actually written.
+    # Named through a constant, as the real list writes most of them.
     failures += case(
-        "the table admits it through a named constant",
-        "the lane's premise is false",
+        "the refusal list names it through a constant",
+        "GETCWD_SYSCALL (17) migrates", should_fail=False,
         syscall=SYSCALL_TEXT.replace(
             "const AARCH64_NR_UNAME: usize = 160;",
             "const AARCH64_NR_UNAME: usize = 160;\n"
             "const AARCH64_NR_GETCWD: usize = 17;").replace(
-            "if (number == AARCH64_NR_UNAME) { return true; }",
-            "if (number == AARCH64_NR_UNAME ||\n"
-            "        number == AARCH64_NR_GETCWD) { return true; }"))
+            "number == 220 || number == 17",
+            "number == 220 || number == AARCH64_NR_GETCWD"))
 
     # A watcher waiting for a syscall the probe does not issue would let the
     # lane pass only if something else happened to migrate.
@@ -159,10 +153,8 @@ def main() -> int:
     failures += case(
         "the peer-safety table is reshaped",
         "missing or reshaped",
-        syscall=SYSCALL_TEXT.replace("fn syscall_peer_safe(number: usize, "
-                                     "fd: usize) -> bool {",
-                                     "fn syscall_peer_allows(number: usize, "
-                                     "fd: usize) -> bool {"))
+        syscall=SYSCALL_TEXT.replace("fn syscall_peer_refused(number: usize)",
+                                     "fn syscall_peer_denies(number: usize)"))
 
     for failure in failures:
         print(f"ERROR\taffinity-probe-migrates-controls: {failure}")
@@ -172,8 +164,8 @@ def main() -> int:
         return 1
     report_pass(
         "affinity-probe-migrates controls",
-        "the repository and a well-formed tree pass, and a table that admits "
-        "the probe's syscall (by literal or by constant), a watcher waiting "
+        "the repository and a well-formed tree pass (the probe's syscall named "
+        "by literal or by constant), and a refusal list that stops naming it, a watcher waiting "
         "for a different one, a renamed printed line, a constant never "
         "issued, a probe that stops saying what it migrated, a watcher that "
         "stops naming it, and a reshaped table are each refused",

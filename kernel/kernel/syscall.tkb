@@ -2735,7 +2735,51 @@ private fn syscall_ext2_rename_locked(old_directory: usize,
     return answer;
 }
 
+// GitHub issue #583: the REFUSAL LIST. Every syscall this kernel implements
+// is callable from any CPU unless it is named here with the reason it stays
+// core 0's, so a syscall added later is peer-callable by default rather than
+// silently core-0-only. syscall_peer_safe below still narrows some admitted
+// calls by descriptor kind; that is a statement about a path, not a refusal
+// of the call. What each group needs before it can leave the list is on
+// issue #583.
+fn syscall_peer_refused(number: usize) -> bool {
+    // The process lifecycle: clone and its forms, exec, wait4, and the
+    // payload fixture's parent report. Every multicore defect this project
+    // has closed lived here (#532, #552, #569, #571), each found with these
+    // operations on core 0, and wait4's walk and its Blocked publication
+    // are not yet one critical section against a peer exit (#550).
+    if (number == AARCH64_NR_CLONE || number == AARCH64_NR_CLONE3 ||
+        number == AARCH64_NR_FORK || number == AARCH64_NR_VFORK ||
+        number == AARCH64_NR_EXECVE || number == AARCH64_NR_EXECVEAT ||
+        number == AARCH64_NR_WAIT4 ||
+        number == AARCH64_NR_TAKIBI_PARENT_PROGRESS) {
+        return true;
+    }
+    // ext2 mutation: mkdirat, unlinkat, renameat. A mutator waits for PEER
+    // readers (#559); core 0's readers are not counted, which is sound only
+    // while every mutation runs on core 0 -- and exec reads the image from
+    // ext2 after its syscall has returned, outside any count.
+    if (number == 34 || number == 35 || number == 38) { return true; }
+    // The socket calls other than a connected read and write: socket, bind,
+    // listen, accept, accept4, getpeername, setsockopt, shutdown, sendfile.
+    // They record into syscall_test_evidence's core-0-only counters, listen
+    // publishes the test lifecycle's listener marker, and accept and
+    // shutdown reach the connection release that close keeps on core 0.
+    if (number == 198 || number == 200 || number == 201 || number == 202 ||
+        number == 242 || number == 205 || number == 208 || number == 210 ||
+        number == 71) {
+        return true;
+    }
+    // syslog: the retained log's only writer is core 0 (#465), appending a
+    // byte at a time with no lock, and the snapshot buffer is one global. A
+    // reader elsewhere would race both, and dmesg is not worth a lock on
+    // every logged byte.
+    if (number == AARCH64_NR_SYSLOG) { return true; }
+    return false;
+}
+
 fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
+    if (syscall_peer_refused(number)) { return false; }
     // The caller's own record, or architectural state: getpid, getppid,
     // the uid/gid family, gettid, clock_gettime, and getcpu (#533).
     if (number == 172 || number == 173 || number == 178 ||
@@ -2965,7 +3009,9 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     if (number == AARCH64_NR_WRITEV) {
         return kernel_syscall_terminal_is_open(fd);
     }
-    return false;
+    // Everything the refusal list above does not name, and the descriptor
+    // rules above do not narrow, runs where it was called (#583).
+    return true;
 }
 
 // Does this call reach ext2, and therefore owe the mutation question?

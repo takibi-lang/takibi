@@ -28,6 +28,7 @@ const EACCES_RC: usize = 0xFFFFFFFFFFFFFFF3;
 const EAGAIN_RC: usize = 0xFFFFFFFFFFFFFFF5;
 const ESRCH_RC: usize = 0xFFFFFFFFFFFFFFFD;
 const GETAFFINITY_SYSCALL: usize = 123;
+const SETAFFINITY_SYSCALL: usize = 122;
 const LARGE_LEN: usize = 1461;
 const SCHEDULER_CHILD_BUSY: usize = 0x0BEBC200;
 const SCHEDULER_PARENT_BUSY: usize = 0x17D78400;
@@ -78,6 +79,20 @@ fn initial_user_payload() {
     }
     fail_if(reported_cpu_is_allowed == false);
     fail_if(svc5(168, 0, 0, 0, 0, 0) != 0);
+
+    /* The scheduler-preemption probe below needs this process and its child
+     * time-sliced on ONE CPU: it asserts at least two timer switches between
+     * them. With ordinary placement they can land on different CPUs, where
+     * no tick ever switches one for the other -- which became likely once
+     * GitHub issue #583's refusal list stopped sending every unimplemented
+     * syscall to core 0 and so stopped gathering the pair there. Pin to core
+     * 0 here, after the getcpu check above has run under the inherited
+     * mask; the child inherits this mask across clone. */
+    let mut core0_only: [u8; 8];
+    for byte_index: usize in 0..<8 { core0_only[byte_index] = 0; }
+    core0_only[0] = 1;
+    fail_if(svc5(SETAFFINITY_SYSCALL, 0, 8,
+                 core0_only as *u8 as usize, 0, 0) != 0);
     fail_if(svc5(168, 1, 0, 0, 0, 0) != EFAULT_RC);
 
     /* write(9, ..., 1) must return -EBADF. The length `1` is deliberately

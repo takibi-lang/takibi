@@ -20,7 +20,9 @@ files and finishes instantly:
     issues, and prints a line naming the syscall;
   - `scripts/kernel_affinity_gdb_check.py` watches for that same number in
     the rewound frame;
-  - `kernel/kernel/syscall.tkb`'s `syscall_peer_safe` must not admit it.
+  - `kernel/kernel/syscall.tkb`'s refusal list, `syscall_peer_refused`,
+    must name it. Since GitHub issue #583 the table is a refusal list: a
+    syscall it does not name runs wherever it is called.
 
 The third is the point; the first two are what makes the third meaningful,
 since a probe and a watcher that disagreed would make the lane pass for the
@@ -75,11 +77,11 @@ def watched_syscall(text):
     return int(found.group(1))
 
 
-def peer_safe_numbers(text):
-    """Every literal number `syscall_peer_safe` compares `number` against."""
-    body = re.search(r"fn syscall_peer_safe\(.*?\n\}", text, re.DOTALL)
+def refused_numbers(text):
+    """Every number `syscall_peer_refused` compares `number` against."""
+    body = re.search(r"fn syscall_peer_refused\(.*?\n\}", text, re.DOTALL)
     if body is None:
-        raise ValueError("syscall_peer_safe is missing or reshaped")
+        raise ValueError("syscall_peer_refused is missing or reshaped")
     literals = {int(n) for n in re.findall(r"number == (\d+)", body.group(0))}
     for low, high in re.findall(r"number >= (\d+) && number <= (\d+)",
                                 body.group(0)):
@@ -97,7 +99,7 @@ def main() -> int:
     try:
         number, name = probe_syscall(PROBE.read_text(encoding="ascii"))
         watched = watched_syscall(WATCHER.read_text(encoding="ascii"))
-        admitted = peer_safe_numbers(SYSCALL.read_text(encoding="ascii"))
+        refused = refused_numbers(SYSCALL.read_text(encoding="ascii"))
     except (OSError, ValueError) as error:
         print(f"FAIL affinity-probe-migrates: {error}")
         return 1
@@ -108,12 +110,12 @@ def main() -> int:
             f"the probe issues {name}_SYSCALL ({number}) and the gdb watcher "
             f"waits for {watched}: the lane would pass only if some other "
             f"syscall happened to migrate")
-    if number in admitted:
+    if number not in refused:
         problems.append(
-            f"syscall_peer_safe admits {number}, which is the syscall "
-            f"/bin/affinity issues to make the migration gate fire "
+            f"syscall_peer_refused does not name {number}, which is the "
+            f"syscall /bin/affinity issues to make the migration gate fire "
             f"({name}_SYSCALL): the lane's premise is false, so pick a "
-            f"syscall the table still refuses")
+            f"syscall the refusal list still names")
 
     if problems:
         for problem in problems:
@@ -122,10 +124,10 @@ def main() -> int:
               f"affinity gdb lane rests on are no longer true")
         return 1
     report_pass("affinity-probe-migrates",
-                f"the affinity probe, its gdb watcher and the peer-safety "
-                f"table agree that {name}_SYSCALL ({number}) migrates, out "
-                f"of {len(admitted)} syscall(s) the table admits",
-                admitted=len(admitted))
+                f"the affinity probe, its gdb watcher and the refusal list "
+                f"agree that {name}_SYSCALL ({number}) migrates, one of "
+                f"{len(refused)} syscall(s) the list keeps on core 0",
+                refused=len(refused))
     return 0
 
 
