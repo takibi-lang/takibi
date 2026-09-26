@@ -25,8 +25,12 @@ TIMELINE_KINDS = {
 }
 MOVE_COST_RE = re.compile(r"^profile: (move-cost|move-cost-summary) (.+)$")
 # RPi5 only: how far a cold pass's retired instructions may stray from the
-# warm pass beside it. The two run the same code; a timer interrupt landing
-# in one of them is the expected difference, and it is small.
+# warm pass beside it. The two run the same code, so a larger difference
+# means other work -- an interrupt, counted because the counters include EL1
+# -- landed inside the interval. Such a round is DISTURBED: it is kept in the
+# artifact and left out of the medians. Seen 2026-09-26: three of four cold
+# passes on one CPU carried ~10,400 extra instructions in one boot and none
+# in the next.
 MOVE_COST_INSTRUCTION_TOLERANCE = 0.10
 BUSY_MEASUREMENT_RE = re.compile(
     r"^workload: busy pair measured .*\bcpu_a=([0-9]+) "
@@ -273,21 +277,28 @@ def move_cost(args):
             if warm_instructions == 0 or entry["cold_instructions"] == 0:
                 raise ValueError(
                     f"move-cost round {round_number} retired no instructions")
-            if (abs(entry["cold_instructions"] - warm_instructions) >
-                    warm_instructions * MOVE_COST_INSTRUCTION_TOLERANCE):
-                raise ValueError(
-                    f"move-cost round {round_number}: cold and warm passes "
-                    f"retired different work")
+        entry["disturbed"] = (
+            args.target == "rpi5" and
+            abs(entry["cold_instructions"] - entry["warm_instructions"]) >
+            entry["warm_instructions"] * MOVE_COST_INSTRUCTION_TOLERANCE)
         entry["move_cycles"] = entry["cold_cycles"] - entry["warm_cycles"]
         rounds.append(entry)
+    clean = [r for r in rounds if not r["disturbed"]]
+    # A measurement most of whose rounds were disturbed measures the
+    # disturbance, not a move.
+    if len(clean) * 2 <= len(rounds):
+        raise ValueError(
+            f"move-cost: {len(rounds) - len(clean)} of {len(rounds)} rounds "
+            f"retired different work in their cold and warm passes")
     artifact = {
         "schema": "takibi.kernel.move-cost/v1",
         "environment": {"target": args.target, "commit": args.commit},
         "working_set_bytes": args.working_set_bytes,
         "rounds": rounds,
-        "median_cold_cycles": median([r["cold_cycles"] for r in rounds]),
-        "median_warm_cycles": median([r["warm_cycles"] for r in rounds]),
-        "median_move_cycles": median([r["move_cycles"] for r in rounds]),
+        "disturbed_rounds": len(rounds) - len(clean),
+        "median_cold_cycles": median([r["cold_cycles"] for r in clean]),
+        "median_warm_cycles": median([r["warm_cycles"] for r in clean]),
+        "median_move_cycles": median([r["move_cycles"] for r in clean]),
         "authoritative": args.target == "rpi5",
     }
     Path(args.output).write_text(json.dumps(artifact, indent=2) + "\n",
@@ -295,7 +306,8 @@ def move_cost(args):
     print(f"move-cost ({args.target}): median cold "
           f"{artifact['median_cold_cycles']} cycles, warm "
           f"{artifact['median_warm_cycles']}, one move "
-          f"{artifact['median_move_cycles']} over {len(rounds)} rounds")
+          f"{artifact['median_move_cycles']} over {len(clean)} clean rounds "
+          f"of {len(rounds)}")
 
 
 def timeline_records(lines, kind, name):

@@ -556,8 +556,10 @@ PMCCNTR_EL0 (`pmu_count_*` in `kernel/arch/arm64/kernel/pmu.S`).
 The kernel keeps a pass only when both reads ran on one CPU for one process.
 It counts any other pass as lost, and prints `profile: move-cost` records
 from core 0. The collector refuses the artifact if a pass was lost or a
-round did not move. On RPi5 it also refuses a cold pass that retired
-different work from its warm pass. It then reports the median cold-minus-warm
+round did not move. On RPi5 a round whose cold pass retired different
+work from its warm pass -- an interrupt inside the interval -- is marked
+disturbed and left out of the medians, and the collector refuses the
+artifact only when most rounds are disturbed. It then reports the median cold-minus-warm
 difference. The counters are not multiplexed, so enabled and running time
 are the same interval. QEMU's cycles come from virtual time and its
 INST_RETIRED reads zero without icount, so there only the collection path is

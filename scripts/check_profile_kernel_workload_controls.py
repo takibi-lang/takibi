@@ -222,11 +222,27 @@ def main():
                 move_cost.read_text(encoding="ascii"))["median_move_cycles"]
                 != 50):
             raise RuntimeError("move-cost positive control failed")
+        # One disturbed round of three is left out of the medians, not a
+        # failure: its cold pass retired extra work (an interrupt).
+        disturbed = move_cost_text(3).replace(
+            "round=1 kind=cold cpu=1 cycles=150 instructions=900",
+            "round=1 kind=cold cpu=1 cycles=990 instructions=2000")
+        uart.write_text(disturbed, encoding="ascii")
+        result = run("move-cost", "--uart-log", str(uart), "--output",
+                     str(move_cost), "--target", "rpi5", "--commit", "test")
+        if result.returncode != 0:
+            raise RuntimeError("move-cost disturbed-round control failed: "
+                               + result.stderr)
+        summary = json.loads(move_cost.read_text(encoding="ascii"))
+        if (summary["disturbed_rounds"] != 1 or
+                summary["median_move_cycles"] != 50):
+            raise RuntimeError("move-cost did not leave the disturbed round "
+                               "out of the medians")
         for text, target, message in (
                 (move_cost_text(2, lost=1), "rpi5", "lost 1 passes"),
                 (move_cost_text(2, same_cpu=True), "rpi5", "did not move"),
                 (move_cost_text(2, instructions=2000), "rpi5",
-                 "retired different work"),
+                 "2 of 2 rounds retired different work"),
                 (move_cost_text(0), "qemu", "stored no records")):
             uart.write_text(text, encoding="ascii")
             result = run("move-cost", "--uart-log", str(uart), "--output",
