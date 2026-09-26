@@ -30,6 +30,7 @@ whether a row has gone quiet or has merely stopped being looked for.
 
 | Symptom | Rate | Issue | Last seen |
 | --- | --- | --- | --- |
+| `the scripted BREAK never fired` | 1 CI run of the DDB lane since e824b030 (run 36207501077); 0 of 10 locally | #603 | 2026-09-26 |
 
 ## Reading a row
 

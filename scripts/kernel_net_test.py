@@ -558,7 +558,22 @@ def raw_http_response(sock: socket.socket, client_port: int, client_isn: int,
     # lifecycles without making the interactive test inherit fixture state.
     syn = build_tcp_frame(client_port, client_isn, 0, FLAG_SYN,
                           server_port=HTTP_SERVER_PORT)
-    reply = send_and_wait(sock, syn)
+    # Only a frame of THIS connection answers the SYN. The concurrent step
+    # before this one ends when both of its connections have sent FIN, and
+    # the guest may still retransmit a segment of one of them after that --
+    # on a slow CI runner it did, and taking that frame as this SYN's reply
+    # failed the lane with "bad HTTP SYN-ACK" although the kernel had done
+    # nothing wrong. This connection's own reply is still checked in full.
+    reply = None
+    for _attempt in range(RETRIES):
+        sock.sendto(syn, (QEMU_HOST, QEMU_PORT))
+        reply = recv_matching(
+            sock,
+            lambda candidate: struct.unpack("!HH", candidate[34:38]) ==
+            (HTTP_SERVER_PORT, client_port),
+            timeout=RETRY_TIMEOUT_SECS)
+        if reply is not None:
+            break
     if reply is None:
         print("  no HTTP SYN-ACK reply")
         return None
@@ -567,7 +582,8 @@ def raw_http_response(sock: socket.socket, client_port: int, client_isn: int,
         "!HHIIBB", tcp[0:14])
     if (src_port != HTTP_SERVER_PORT or dst_port != client_port or
             flags != (FLAG_SYN | FLAG_ACK) or ack != client_isn + 1):
-        print("  bad HTTP SYN-ACK")
+        print("  bad HTTP SYN-ACK: flags=0x%02x ack=%d expected=%d" %
+              (flags, ack, client_isn + 1))
         return None
 
     client_seq = client_isn + 1
