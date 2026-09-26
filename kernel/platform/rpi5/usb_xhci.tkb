@@ -1156,11 +1156,14 @@ fn xhci_configure() -> XhciConfigureOutcome {
     let ctrl_buf_dma: usize = ctrl_buf_base + rp1_dma_pci_offset;
     let control_bytes = xhci_ctrl_buf as []u8;
 
+    dma_prepare_rx(xhci_ctrl_buf, 256);
     let cfg9_cc: u32 = usb_ctrl_xfer(0x80, 6, 0x0200, 0, 9, ctrl_buf_dma, true);
+    if (cfg9_cc != 0) {
+        dma_finish_rx(xhci_ctrl_buf, 256);
+    }
     if (cfg9_cc != 1) {
         return XhciConfigureOutcome::Transfer(cfg9_cc);
     }
-    dma_finish_rx(xhci_ctrl_buf, 256);
     let total_len: usize = (control_bytes[2] as usize) |
                            ((control_bytes[3] as usize) << 8);
     // A configuration descriptor is indivisible input. Silently truncating
@@ -1170,12 +1173,15 @@ fn xhci_configure() -> XhciConfigureOutcome {
         return XhciConfigureOutcome::Malformed;
     }
 
+    dma_prepare_rx(xhci_ctrl_buf, 256);
     let cfg_cc: u32 = usb_ctrl_xfer(0x80, 6, 0x0200, 0, total_len as u32,
                                     ctrl_buf_dma, true);
+    if (cfg_cc != 0) {
+        dma_finish_rx(xhci_ctrl_buf, 256);
+    }
     if (cfg_cc != 1) {
         return XhciConfigureOutcome::Transfer(cfg_cc);
     }
-    dma_finish_rx(xhci_ctrl_buf, 256);
     // GitHub issue #338: the walk itself is byte work and now lives in
     // kernel/drivers/usb/config_descriptor.tkb, where linux_user can run it
     // without a board. What stays here is the transport: two control
