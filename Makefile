@@ -1749,12 +1749,12 @@ allcheck:
 	rm -rf "$(LANE_TIMING_DIR)"; mkdir -p "$(LANE_TIMING_DIR)"; \
 	export TAKIBI_LANE_TIMING_DIR="$(LANE_TIMING_DIR)"; \
 	resource_lease_run_suite allcheck \
-		$(MAKE) langcheck slowcheck test linuxcheck kernelcheck || status=$$?; \
+		$(MAKE) langcheck slowcheck test linuxcheck modelcheck kernelcheck || status=$$?; \
 	echo; \
 	python3 scripts/summarize_lane_timing.py "$(LANE_TIMING_DIR)" || true; \
 	echo "lane timing artifact: $(LANE_TIMING_DIR:$(CURDIR)/%=%)"; \
 	if [ $$status -eq 0 ]; then \
-		echo "PASS allcheck: langcheck slowcheck test linuxcheck $(KERNELCHECK_LANES)"; \
+		echo "PASS allcheck: langcheck slowcheck test linuxcheck modelcheck $(KERNELCHECK_LANES)"; \
 	else \
 		echo "FAIL allcheck: one or more checks failed (see the lane output above)" >&2; \
 		exit $$status; \
@@ -1787,13 +1787,13 @@ cicheck:
 	rm -rf "$(LANE_TIMING_DIR)"; mkdir -p "$(LANE_TIMING_DIR)"; \
 	export TAKIBI_LANE_TIMING_DIR="$(LANE_TIMING_DIR)"; \
 	resource_lease_run_suite cicheck \
-		$(MAKE) langcheck slowcheck test linuxcheck $(KERNELCHECK_QEMU_LANES) \
+		$(MAKE) langcheck slowcheck test linuxcheck modelcheck $(KERNELCHECK_QEMU_LANES) \
 		|| status=$$?; \
 	echo; \
 	python3 scripts/summarize_lane_timing.py "$(LANE_TIMING_DIR)" || true; \
 	echo "lane timing artifact: $(LANE_TIMING_DIR:$(CURDIR)/%=%)"; \
 	if [ $$status -eq 0 ]; then \
-		echo "PASS cicheck: langcheck slowcheck test linuxcheck $(KERNELCHECK_QEMU_LANES)"; \
+		echo "PASS cicheck: langcheck slowcheck test linuxcheck modelcheck $(KERNELCHECK_QEMU_LANES)"; \
 	else \
 		echo "FAIL cicheck: one or more checks failed (see the lane output above)" >&2; \
 		exit $$status; \
@@ -1876,10 +1876,13 @@ allbuild:
 ## build outputs. Does not touch examples/ -- use `make -f examples/Makefile
 ## clean` for that.
 # GitHub issue #601: the TLA+ models under kernel/models/, checked with TLC
-# and Apalache. Fetches the pinned tools on first use. Not in allcheck yet.
+# and Apalache. Fetches the pinned tools on first use. A lane of allcheck
+# and cicheck.
 .PHONY: modelcheck
 modelcheck:
-	@bash scripts/run_model_checks.sh
+	@bash scripts/lane_timing.sh begin modelcheck
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_model_checks.sh
+	@bash scripts/lane_timing.sh end modelcheck 0
 
 clean:
 	dune clean

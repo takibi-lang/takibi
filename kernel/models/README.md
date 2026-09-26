@@ -13,7 +13,7 @@ make modelcheck
 ```
 
 It fetches the pinned tools on first use (`scripts/fetch_model_tools.sh`,
-Java 21 required) and is not part of `make allcheck` yet.
+Java 21 required). It is a lane of `make allcheck` and `make cicheck`.
 
 ## How the models are written
 
@@ -32,6 +32,31 @@ a window.
 Every model has two variants, fixed and unfixed, selected by a constant. The
 unfixed one must violate its property, or the model has stopped modelling the
 defect it was written for, and `make modelcheck` fails.
+
+## Where one model ends and the next begins
+
+A model is one **protocol**: a piece of shared state together with the
+actions that touch it under one discipline -- one lock, one ownership rule.
+Not one issue: an issue usually adds a slice or a variant pair to the model
+of the protocol it changes, and opens a new model only when the state it
+touches belongs to no existing one.
+
+- **Candidates, from the kernel as it stands:** wait and wake per wait reason
+  (the decide-then-sleep window); stack ownership and movement (Migrate, idle
+  entry and leave); ext2 mutation against counted readers; connection close
+  against the reference count; a signal taken and restored across a call
+  restart.
+- **Size.** TLC must still cover the whole state space in seconds to
+  minutes. Leave out what the property does not depend on, and say so in the
+  action table's "dropped" column rather than silently.
+- **Two protocols in one model** only when a defect actually crosses the
+  boundary between them. Model that interaction; do not merge the two whole.
+- **Every model carries a variant pair** for the defect or design decision
+  that motivated it: the fixed variant holds, and the unfixed one violates
+  the property for the stated reason. `make modelcheck` enforces both.
+- **Where to look for the next property:** commits whose `Protocol:` trailer
+  says `yes -- <property>`, indexed by the `protocol` issue label. Each one
+  names a property phrased so it can be checked.
 
 ## Wait4Block.tla -- the wait4 ChildExit window (#550)
 

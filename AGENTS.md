@@ -194,6 +194,7 @@ Read the applicable nested guidance before editing these trees:
 - `kernel/AGENTS.md` for maintained kernel implementation rules.
 - `kernel/arch/arm64/AGENTS.md` for AArch64 exception and return invariants.
 - `examples/AGENTS.md` for historical artifacts.
+- `kernel/models/AGENTS.md` for the TLA+ protocol models.
 
 Use these cross-agent skills when the task matches. Codex reads the canonical
 entrypoint under `.agents/skills/`; Claude Code has a matching entrypoint under

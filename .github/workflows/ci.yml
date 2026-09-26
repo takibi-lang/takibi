@@ -1,8 +1,8 @@
 name: CI
 
 # The hardware-free half of `make allcheck`, which is what a hosted runner can
-# run: langcheck, slowcheck, the compiler unit tests, linux_user, and the seven QEMU
-# lanes. `make cicheck` is that set, derived from the same variable allcheck
+# run: langcheck, slowcheck, the compiler unit tests, linux_user, the TLA+
+# models, and the seven QEMU lanes. `make cicheck` is that set, derived from the same variable allcheck
 # uses so the two cannot drift apart.
 #
 # The RPi5 and STM32 lanes are absent deliberately, not by oversight. A
@@ -77,6 +77,21 @@ jobs:
       # LLVM bindings are compiled, not downloaded. Deliberately an action
       # with a dependency-keyed cache rather than a prebuilt image -- an image
       # drifts from this file silently, a cache key does not.
+      # GitHub issue #601: the TLA+ models' lane (make modelcheck). Java 21
+      # is what Apalache 0.62 needs. The tools themselves are pinned and
+      # sha256-checked by scripts/fetch_model_tools.sh; the cache only
+      # saves downloading Apalache's ~190 MB on every run, and is keyed on
+      # that script so a version bump fetches afresh.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: actions/cache@v4
+        with:
+          path: /home/runner/model-tools
+          key: model-tools-${{ hashFiles('scripts/fetch_model_tools.sh') }}
+
       - uses: ocaml/setup-ocaml@v3
         with:
           ocaml-compiler: "5.4.0"
@@ -136,6 +151,7 @@ jobs:
           TAKIBI_JOBS=1 KERNEL_QEMU_TIMEOUT=240 KERNEL_QEMU_TIMING_PROFILE=hosted make cicheck
         env:
           GH_TOKEN: ${{ github.token }}
+          TAKIBI_MODEL_TOOLS_DIR: /home/runner/model-tools
 
       # Printed, never gated. The unsafe-block and assembly counts are
       # supposed to be moving right now -- multicore work adds atomics -- so a
