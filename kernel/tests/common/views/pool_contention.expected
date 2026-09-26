@@ -28,7 +28,8 @@ tcp owner contention: peer excluded while held and one state transition complete
 pool walk stage: complete
 pool walk: a Live view holds the read lock through payload use, and a stale released-chunk cursor is refused ok
 ext2 mutation contention reader: control-overlap=1 waited-overlap=0
+ext2 mutation contention core0 reader: control-overlap=1 waited-overlap=0
 ext2 mutation contention stage: complete
 ext2 mutation contention counts: asked=2 clear=1 held=1
-ext2 mutation contention: a peer is told no mutation is in flight while core 0 holds nothing, told there is one while it holds the guard, and a mutation waits for a peer reader already inside ok
+ext2 mutation contention: a peer is told no mutation is in flight while core 0 holds nothing, told there is one while it holds the guard, and a mutation on either core waits for a reader already inside on the other ok
 signal contention: two cores setting and clearing pending signal bits lost updates with a forged guard and none under the process-run lock ok

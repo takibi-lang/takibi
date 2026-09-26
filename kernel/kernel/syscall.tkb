@@ -2510,9 +2510,14 @@ fn kernel_syscall_clone_child_return(parent_frame_sp: usize, child_pid: usize)
 // el0_context_set_sp_el0 and then calling el0_context_resume makes that
 // class of bug structurally impossible now: there is no second code path
 // left that could reload and silently discard these two field writes.
-fn kernel_syscall_child_exec_return(frame_sp: usize) {
+fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
     kernel_process_exec_failure_clear();
     let result: KernelChildExecPrepareResult = kernel_process_child_exec_prepare();
+    // GitHub issue #597: the prepare was the last ext2 read of this execve.
+    if (syscall_scratch_here().ext2_reader) {
+        syscall_scratch_here().ext2_reader = false;
+        ext2_read_leave();
+    }
     match result {
         KernelChildExecPrepareResult::Prepared => {}
         KernelChildExecPrepareResult::NotChildOrPending => {
@@ -2606,9 +2611,9 @@ fn kernel_syscall_clone_parent_return(parent_sp: usize) {
 // GitHub issue #9: peer-safety. Since #583 a syscall runs where it is
 // called unless syscall_peer_refused names it or syscall_peer_safe narrows
 // it by descriptor; the migration gate reruns those on core 0. read and
-// write are split by descriptor in the order their handlers use. ext2
-// MUTATION stays core 0's: #533 found it unserialized against a peer reader,
-// and #559's reader count covers peer readers only.
+// write are split by descriptor in the order their handlers use. Of the
+// ext2 mutations, only a file write stays core 0's (by descriptor, below);
+// the directory mutations run anywhere since #597.
 // GitHub issue #533: the five ext2 MUTATIONS, each under the filesystem
 // lock for exactly as long as its own linear tokens live.
 //
@@ -2641,9 +2646,9 @@ private fn syscall_ext2_write_locked(inode: usize, offset: usize,
     return answer;
 }
 
-private fn syscall_ext2_mkdir_locked(parent_inode: usize, leaf: borrow []u8)
-        -> usize {
-    let guard = ext2_mutation_take();
+private fn syscall_ext2_mkdir_under(
+        guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        parent_inode: usize, leaf: borrow []u8) -> usize {
     let mut answer: usize = 0;
     match ext2_lookup_directory(syscall_ext2_mount, parent_inode, leaf) {
         Ext2LookupResult::Found(existing) => { answer = LINUX_EEXIST; }
@@ -2660,16 +2665,15 @@ private fn syscall_ext2_mkdir_locked(parent_inode: usize, leaf: borrow []u8)
             }
         }
     }
-    ext2_mutation_give(guard);
     return answer;
 }
 
 // Unsupported is a symlink or a file reaching an indirect block, which the
 // ext2 layer does not release; EPERM is Linux's word for a filesystem that
 // does not allow the unlink.
-private fn syscall_ext2_unlink_locked(parent_inode: usize, leaf: borrow []u8)
-        -> usize {
-    let guard = ext2_mutation_take();
+private fn syscall_ext2_unlink_under(
+        guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        parent_inode: usize, leaf: borrow []u8) -> usize {
     let answer: usize = match ext2_unlink_name(
             syscall_ext2_mount, parent_inode, leaf) {
         Ext2UnlinkNameResult::Unlinked => { 0 }
@@ -2678,16 +2682,15 @@ private fn syscall_ext2_unlink_locked(parent_inode: usize, leaf: borrow []u8)
         Ext2UnlinkNameResult::Unsupported => { LINUX_EPERM }
         Ext2UnlinkNameResult::Invalid => { LINUX_EIO }
     };
-    ext2_mutation_give(guard);
     return answer;
 }
 
 // The claim and the removal are one section: the owner minted from the tree
 // lives across both, and handing it back is what ext2_directory_keep does on
 // every path that does not remove.
-private fn syscall_ext2_rmdir_locked(parent_inode: usize, leaf: borrow []u8)
-        -> usize {
-    let guard = ext2_mutation_take();
+private fn syscall_ext2_rmdir_under(
+        guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        parent_inode: usize, leaf: borrow []u8) -> usize {
     let mut answer: usize = 0;
     match ext2_claim_directory(syscall_ext2_mount, parent_inode, leaf) {
         Ext2ClaimResult::Invalid => { answer = LINUX_EIO; }
@@ -2709,18 +2712,18 @@ private fn syscall_ext2_rmdir_locked(parent_inode: usize, leaf: borrow []u8)
             }
         }
     }
-    ext2_mutation_give(guard);
     return answer;
 }
 
 // Unsupported is a directory moved to another parent, which the ext2 layer
 // does not do; EPERM is Linux's word for a filesystem that does not allow
 // the rename.
-private fn syscall_ext2_rename_locked(old_directory: usize,
+private fn syscall_ext2_rename_under(
+        guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        old_directory: usize,
                                       old_name: borrow []u8,
                                       new_parent_inode: usize,
                                       new_leaf: borrow []u8) -> usize {
-    let guard = ext2_mutation_take();
     let answer: usize = match ext2_rename_in(
             syscall_ext2_mount, old_directory, old_name,
             new_parent_inode, new_leaf) {
@@ -2731,8 +2734,160 @@ private fn syscall_ext2_rename_locked(old_directory: usize,
         Ext2RenameResult::Unsupported => { LINUX_EPERM }
         Ext2RenameResult::Invalid => { LINUX_EIO }
     };
-    ext2_mutation_give(guard);
     return answer;
+}
+
+// GitHub issue #597: mkdirat's whole arm, lookup included, under the
+// mutation guard its caller holds. With mutation admitted on a peer, the
+// parent a lookup finds could otherwise be renamed or removed by another
+// core before the mutation it gates -- the atomicity core 0's
+// non-preemptible dispatch used to give for free.
+private fn syscall_mkdirat_under(guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        x0: usize, x1: usize) -> usize !{unsafe} {
+    // mkdirat(dirfd, pathname, mode), GitHub issue #538. The mode is not
+    // applied: every directory is 0755 and every process is root, which
+    // is the whole of this kernel's permission model today.
+    if (syscall_ext2_ready == false) {
+        return LINUX_EBADF;
+    }
+    let path_name: []u8 = match kernel_syscall_path_name(x1) {
+        SyscallPathResult::Fault => { return LINUX_EFAULT; }
+        SyscallPathResult::Invalid => { return LINUX_ENOENT; }
+        SyscallPathResult::Name(path) => { path }
+    };
+    let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
+    let absolute: bool = path_view[0] == 0x2F;
+    let parent: SyscallParent = match kernel_syscall_parent_of(
+            x0, absolute, path_name) {
+        SyscallParentResult::Errno(errno) => {
+            return errno;
+        }
+        SyscallParentResult::Found(found) => { found }
+    };
+    let leaf: []u8 = kernel_syscall_leaf(path_name, parent);
+    if (leaf.len == 0) { return LINUX_ENOENT; }
+    if (kernel_syscall_leaf_is_dot(leaf) ||
+        kernel_syscall_leaf_is_dot_dot(leaf)) {
+        return LINUX_EEXIST;
+    }
+    return 
+        syscall_ext2_mkdir_under(guard, parent.inode, leaf);
+}
+
+// GitHub issue #597: unlinkat's whole arm, lookup included, under the
+// mutation guard its caller holds. With mutation admitted on a peer, the
+// parent a lookup finds could otherwise be renamed or removed by another
+// core before the mutation it gates -- the atomicity core 0's
+// non-preemptible dispatch used to give for free.
+private fn syscall_unlinkat_under(guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        x0: usize, x1: usize, x2: usize) -> usize !{unsafe} {
+    // unlinkat(dirfd, pathname, flags), GitHub issue #538: unlink with no
+    // flag, rmdir with AT_REMOVEDIR, and EINVAL for any other flag.
+    if (x2 != 0 && x2 != LINUX_AT_REMOVEDIR) {
+        return LINUX_EINVAL;
+    }
+    if (syscall_ext2_ready == false) {
+        return LINUX_EBADF;
+    }
+    let path_name: []u8 = match kernel_syscall_path_name(x1) {
+        SyscallPathResult::Fault => { return LINUX_EFAULT; }
+        SyscallPathResult::Invalid => { return LINUX_ENOENT; }
+        SyscallPathResult::Name(path) => { path }
+    };
+    let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
+    let absolute: bool = path_view[0] == 0x2F;
+    let parent: SyscallParent = match kernel_syscall_parent_of(
+            x0, absolute, path_name) {
+        SyscallParentResult::Errno(errno) => {
+            return errno;
+        }
+        SyscallParentResult::Found(found) => { found }
+    };
+    let leaf: []u8 = kernel_syscall_leaf(path_name, parent);
+    if (leaf.len == 0) { return LINUX_ENOENT; }
+    if (x2 == 0) {
+        return 
+            syscall_ext2_unlink_under(guard, parent.inode, leaf);
+    }
+    // Linux's own answers: rmdir(".") is EINVAL, rmdir("..") ENOTEMPTY.
+    if (kernel_syscall_leaf_is_dot(leaf)) {
+        return LINUX_EINVAL;
+    }
+    if (kernel_syscall_leaf_is_dot_dot(leaf)) {
+        return LINUX_ENOTEMPTY;
+    }
+    return 
+        syscall_ext2_rmdir_under(guard, parent.inode, leaf);
+}
+
+// GitHub issue #597: renameat's whole arm, lookup included, under the
+// mutation guard its caller holds. With mutation admitted on a peer, the
+// parent a lookup finds could otherwise be renamed or removed by another
+// core before the mutation it gates -- the atomicity core 0's
+// non-preemptible dispatch used to give for free.
+private fn syscall_renameat_under(guard: borrow Ext2MutationGuard[ext2_mutation_lock],
+        x0: usize, x1: usize, x2: usize, x3: usize) -> usize !{unsafe} {
+    // renameat(olddirfd, oldpath, newdirfd, newpath), GitHub issue #538.
+    // Both paths are read through the one per-core path buffer, so the
+    // old path's directory is resolved and its last component copied out
+    // before the new path is read over it.
+    if (syscall_ext2_ready == false) {
+        return LINUX_EBADF;
+    }
+    let old_path: []u8 = match kernel_syscall_path_name(x1) {
+        SyscallPathResult::Fault => { return LINUX_EFAULT; }
+        SyscallPathResult::Invalid => { return LINUX_ENOENT; }
+        SyscallPathResult::Name(path) => { path }
+    };
+    let old_view: []u8 = syscall_scratch_here().path_buffer as []u8;
+    let old_absolute: bool = old_view[0] == 0x2F;
+    let old_parent: SyscallParent = match kernel_syscall_parent_of(
+            x0, old_absolute, old_path) {
+        SyscallParentResult::Errno(errno) => {
+            return errno;
+        }
+        SyscallParentResult::Found(found) => { found }
+    };
+    let old_leaf: []u8 = kernel_syscall_leaf(old_path, old_parent);
+    if (old_leaf.len == 0) { return LINUX_ENOENT; }
+    // Linux's answer for renaming `.` or `..`.
+    if (kernel_syscall_leaf_is_dot(old_leaf) ||
+        kernel_syscall_leaf_is_dot_dot(old_leaf)) {
+        return LINUX_EBUSY;
+    }
+    let mut old_name_storage: [u8; 256];
+    let old_name_view: []u8 = old_name_storage as []u8;
+    let old_length: usize = old_leaf.len;
+    if (old_length > old_name_view.len) {
+        return LINUX_EINVAL;
+    }
+    let old_name: []u8 = old_name_view[0..<old_length];
+    slice_copy(old_name, old_leaf);
+    let old_directory: usize = old_parent.inode;
+
+    let new_path: []u8 = match kernel_syscall_path_name(x3) {
+        SyscallPathResult::Fault => { return LINUX_EFAULT; }
+        SyscallPathResult::Invalid => { return LINUX_ENOENT; }
+        SyscallPathResult::Name(path) => { path }
+    };
+    let new_view: []u8 = syscall_scratch_here().path_buffer as []u8;
+    let new_absolute: bool = new_view[0] == 0x2F;
+    let new_parent: SyscallParent = match kernel_syscall_parent_of(
+            x2, new_absolute, new_path) {
+        SyscallParentResult::Errno(errno) => {
+            return errno;
+        }
+        SyscallParentResult::Found(found) => { found }
+    };
+    let new_leaf: []u8 = kernel_syscall_leaf(new_path, new_parent);
+    if (new_leaf.len == 0) { return LINUX_ENOENT; }
+    if (kernel_syscall_leaf_is_dot(new_leaf) ||
+        kernel_syscall_leaf_is_dot_dot(new_leaf)) {
+        return LINUX_EBUSY;
+    }
+    return 
+        syscall_ext2_rename_under(guard, old_directory, old_name,
+                                   new_parent.inode, new_leaf);
 }
 
 // GitHub issue #583: the REFUSAL LIST. Every syscall this kernel implements
@@ -2755,11 +2910,6 @@ fn syscall_peer_refused(number: usize) -> bool {
         number == AARCH64_NR_TAKIBI_PARENT_PROGRESS) {
         return true;
     }
-    // ext2 mutation: mkdirat, unlinkat, renameat. A mutator waits for PEER
-    // readers (#559); core 0's readers are not counted, which is sound only
-    // while every mutation runs on core 0 -- and exec reads the image from
-    // ext2 after its syscall has returned, outside any count.
-    if (number == 34 || number == 35 || number == 38) { return true; }
     // The socket calls other than a connected read and write: socket, bind,
     // listen, accept, accept4, getpeername, setsockopt, shutdown, sendfile.
     // They record into syscall_test_evidence's core-0-only counters, listen
@@ -2926,14 +3076,13 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     // below is what keeps that question being asked now that the table
     // admits these calls rather than refusing them.
     //
-    // NOT the write path. The five mutating arms take the guard, and
-    // admitting them here would make a peer the sixth caller of a boundary
-    // whose own limitations section says nothing proves a sixth would take
-    // it.
+    // NOT the file write path, which stays core 0's by descriptor. The
+    // directory mutations are admitted since #597, and
+    // scripts/check_ext2_mutation_guard.py is what proves each mutator is
+    // reached with the guard held.
     //
-    // #559 is the honest remainder and is unchanged by this: the reader's
-    // question is asked at syscall ENTRY only, so a mutation that starts
-    // during an in-flight peer read still overlaps it.
+    // #559 closed the in-flight window: a reader is counted until its
+    // syscall is done, and a mutation waits for the count to drain.
     if (number == AARCH64_NR_OPENAT || number == AARCH64_NR_CLOSE ||
         number == AARCH64_NR_NEWFSTATAT) {
         return true;
@@ -3026,6 +3175,12 @@ fn syscall_reaches_filesystem(number: usize, fd: usize) -> bool {
         number == AARCH64_NR_NEWFSTATAT) {
         return true;
     }
+    // GitHub issue #597: execve looks the image up in dispatch, and a
+    // child's exec prepare streams it from ext2 after dispatch has
+    // returned; the registration made here is held across both.
+    if (number == AARCH64_NR_EXECVE || number == AARCH64_NR_EXECVEAT) {
+        return true;
+    }
     if (number == 63 || number == AARCH64_NR_READV) {
         return kernel_syscall_file_readable(fd);
     }
@@ -3076,8 +3231,10 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
         kernel_syscall_dispatch_action(esr, number, x0, x1, x2, x3, x4));
     // GitHub issue #559: the ext2 reader registered at entry is done with
     // ext2 by the time the handler has chosen what happens next, whatever
-    // that is -- Block and Migrate included.
-    if (syscall_scratch_here().ext2_reader) {
+    // that is -- Block and Migrate included. ChildExec is the exception
+    // (#597): its exec prepare reads the image after this returns, and
+    // kernel_syscall_child_exec_return releases the registration then.
+    if (syscall_scratch_here().ext2_reader && action_code != 8) {
         syscall_scratch_here().ext2_reader = false;
         ext2_read_leave();
     }
@@ -3154,12 +3311,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     if (cpu_id() != 0 && syscall_peer_safe(number, x0, x1) == false) {
         return SyscallAction::Migrate;
     }
-    // GitHub issue #533: a peer must not read a tree that is being rewritten.
-    // The mutators above hold kernel/fs/ext2/mutation_lock.tkb; this asks,
-    // with one acquire-load and no wait, whether one is inside right now,
-    // and hands this syscall to core 0 if so. Core 0 never asks: mutation
-    // runs there too and this kernel is not preemptible, so a core 0 reader
-    // cannot be dispatched while a core 0 mutation is mid-rewrite.
+    // GitHub issue #533: a reader must not read a tree that is being
+    // rewritten. The mutators hold kernel/fs/ext2/mutation_lock.tkb; this
+    // asks, with one acquire-load and no wait, whether one is inside right
+    // now. A peer hands its syscall to core 0 if so. Core 0 asks too since
+    // GitHub issue #597 let a peer mutate: it has nowhere to hand the call,
+    // so it waits for an interrupt and reruns it.
     //
     // GitHub issue #533: asked of anything that reaches ext2, independently
     // of whether the peer-safe table admits it. A normal process can now run
@@ -3173,8 +3330,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // starts meanwhile waits for it -- the entry question alone let a
     // mutation start during an admitted read. A call the peer-safety table
     // refuses has been sent to core 0 above already.
-    if (cpu_id() != 0 && syscall_reaches_filesystem(number, x0)) {
-        if (ext2_read_enter() == false) { return SyscallAction::Migrate; }
+    if (syscall_reaches_filesystem(number, x0)) {
+        if (ext2_read_enter() == false) {
+            if (cpu_id() == 0) { return SyscallAction::WaitInterrupt; }
+            return SyscallAction::Migrate;
+        }
         syscall_scratch_here().ext2_reader = true;
     }
     kernel_init_boot_fixture_poll();
@@ -3285,6 +3445,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (x0 == 11) {
             return SyscallAction::Resume(
                 workload_peer_read_peer_ready());
+        }
+        // /bin/peer-mutate (GitHub issue #597).
+        if (x0 == 14) {
+            return SyscallAction::Resume(workload_peer_mutation_report());
         }
         // /bin/movecost (GitHub issue #503): x1 is the phase.
         if (x0 == 13) {
@@ -3592,138 +3756,27 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
 
     if (number == 34) {
-        // mkdirat(dirfd, pathname, mode), GitHub issue #538. The mode is not
-        // applied: every directory is 0755 and every process is root, which
-        // is the whole of this kernel's permission model today.
-        if (syscall_ext2_ready == false) {
-            return SyscallAction::Resume(LINUX_EBADF);
-        }
-        let path_name: []u8 = match kernel_syscall_path_name(x1) {
-            SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
-            SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
-            SyscallPathResult::Name(path) => { path }
-        };
-        let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
-        let absolute: bool = path_view[0] == 0x2F;
-        let parent: SyscallParent = match kernel_syscall_parent_of(
-                x0, absolute, path_name) {
-            SyscallParentResult::Errno(errno) => {
-                return SyscallAction::Resume(errno);
-            }
-            SyscallParentResult::Found(found) => { found }
-        };
-        let leaf: []u8 = kernel_syscall_leaf(path_name, parent);
-        if (leaf.len == 0) { return SyscallAction::Resume(LINUX_ENOENT); }
-        if (kernel_syscall_leaf_is_dot(leaf) ||
-            kernel_syscall_leaf_is_dot_dot(leaf)) {
-            return SyscallAction::Resume(LINUX_EEXIST);
-        }
-        return SyscallAction::Resume(
-            syscall_ext2_mkdir_locked(parent.inode, leaf));
+        let guard = ext2_mutation_take();
+        let answer: usize = syscall_mkdirat_under(guard, x0, x1);
+        ext2_mutation_give(guard);
+        if (answer == 0) { workload_peer_mutation_note(1); }
+        return SyscallAction::Resume(answer);
     }
 
     if (number == 35) {
-        // unlinkat(dirfd, pathname, flags), GitHub issue #538: unlink with no
-        // flag, rmdir with AT_REMOVEDIR, and EINVAL for any other flag.
-        if (x2 != 0 && x2 != LINUX_AT_REMOVEDIR) {
-            return SyscallAction::Resume(LINUX_EINVAL);
-        }
-        if (syscall_ext2_ready == false) {
-            return SyscallAction::Resume(LINUX_EBADF);
-        }
-        let path_name: []u8 = match kernel_syscall_path_name(x1) {
-            SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
-            SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
-            SyscallPathResult::Name(path) => { path }
-        };
-        let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
-        let absolute: bool = path_view[0] == 0x2F;
-        let parent: SyscallParent = match kernel_syscall_parent_of(
-                x0, absolute, path_name) {
-            SyscallParentResult::Errno(errno) => {
-                return SyscallAction::Resume(errno);
-            }
-            SyscallParentResult::Found(found) => { found }
-        };
-        let leaf: []u8 = kernel_syscall_leaf(path_name, parent);
-        if (leaf.len == 0) { return SyscallAction::Resume(LINUX_ENOENT); }
-        if (x2 == 0) {
-            return SyscallAction::Resume(
-                syscall_ext2_unlink_locked(parent.inode, leaf));
-        }
-        // Linux's own answers: rmdir(".") is EINVAL, rmdir("..") ENOTEMPTY.
-        if (kernel_syscall_leaf_is_dot(leaf)) {
-            return SyscallAction::Resume(LINUX_EINVAL);
-        }
-        if (kernel_syscall_leaf_is_dot_dot(leaf)) {
-            return SyscallAction::Resume(LINUX_ENOTEMPTY);
-        }
-        return SyscallAction::Resume(
-            syscall_ext2_rmdir_locked(parent.inode, leaf));
+        let guard = ext2_mutation_take();
+        let answer: usize = syscall_unlinkat_under(guard, x0, x1, x2);
+        ext2_mutation_give(guard);
+        if (answer == 0 && x2 != 0) { workload_peer_mutation_note(4); }
+        return SyscallAction::Resume(answer);
     }
 
     if (number == 38) {
-        // renameat(olddirfd, oldpath, newdirfd, newpath), GitHub issue #538.
-        // Both paths are read through the one per-core path buffer, so the
-        // old path's directory is resolved and its last component copied out
-        // before the new path is read over it.
-        if (syscall_ext2_ready == false) {
-            return SyscallAction::Resume(LINUX_EBADF);
-        }
-        let old_path: []u8 = match kernel_syscall_path_name(x1) {
-            SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
-            SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
-            SyscallPathResult::Name(path) => { path }
-        };
-        let old_view: []u8 = syscall_scratch_here().path_buffer as []u8;
-        let old_absolute: bool = old_view[0] == 0x2F;
-        let old_parent: SyscallParent = match kernel_syscall_parent_of(
-                x0, old_absolute, old_path) {
-            SyscallParentResult::Errno(errno) => {
-                return SyscallAction::Resume(errno);
-            }
-            SyscallParentResult::Found(found) => { found }
-        };
-        let old_leaf: []u8 = kernel_syscall_leaf(old_path, old_parent);
-        if (old_leaf.len == 0) { return SyscallAction::Resume(LINUX_ENOENT); }
-        // Linux's answer for renaming `.` or `..`.
-        if (kernel_syscall_leaf_is_dot(old_leaf) ||
-            kernel_syscall_leaf_is_dot_dot(old_leaf)) {
-            return SyscallAction::Resume(LINUX_EBUSY);
-        }
-        let mut old_name_storage: [u8; 256];
-        let old_name_view: []u8 = old_name_storage as []u8;
-        let old_length: usize = old_leaf.len;
-        if (old_length > old_name_view.len) {
-            return SyscallAction::Resume(LINUX_EINVAL);
-        }
-        let old_name: []u8 = old_name_view[0..<old_length];
-        slice_copy(old_name, old_leaf);
-        let old_directory: usize = old_parent.inode;
-
-        let new_path: []u8 = match kernel_syscall_path_name(x3) {
-            SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
-            SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
-            SyscallPathResult::Name(path) => { path }
-        };
-        let new_view: []u8 = syscall_scratch_here().path_buffer as []u8;
-        let new_absolute: bool = new_view[0] == 0x2F;
-        let new_parent: SyscallParent = match kernel_syscall_parent_of(
-                x2, new_absolute, new_path) {
-            SyscallParentResult::Errno(errno) => {
-                return SyscallAction::Resume(errno);
-            }
-            SyscallParentResult::Found(found) => { found }
-        };
-        let new_leaf: []u8 = kernel_syscall_leaf(new_path, new_parent);
-        if (new_leaf.len == 0) { return SyscallAction::Resume(LINUX_ENOENT); }
-        if (kernel_syscall_leaf_is_dot(new_leaf) ||
-            kernel_syscall_leaf_is_dot_dot(new_leaf)) {
-            return SyscallAction::Resume(LINUX_EBUSY);
-        }
-        return SyscallAction::Resume(
-            syscall_ext2_rename_locked(old_directory, old_name,
-                                       new_parent.inode, new_leaf));
+        let guard = ext2_mutation_take();
+        let answer: usize = syscall_renameat_under(guard, x0, x1, x2, x3);
+        ext2_mutation_give(guard);
+        if (answer == 0) { workload_peer_mutation_note(2); }
+        return SyscallAction::Resume(answer);
     }
 
     if (number == 61) {

@@ -1,0 +1,67 @@
+/* The three ext2 directory mutations on a peer (GitHub issue #597). A
+ * static-PIE EL0 program, kept free of writable globals and compiled with
+ * --forbid-trap, run once from init.sh. It pins itself to CPU 1, then
+ * makes, renames and removes one directory. The kernel notes each success
+ * made off core 0; tag 14 prints the peer_mutation view's line only when
+ * all three were this process's. It prints nothing itself unless it fails.
+ */
+
+const WRITE_SYSCALL: usize = 64;
+const EXIT_SYSCALL: usize = 93;
+const MKDIRAT_SYSCALL: usize = 34;
+const UNLINKAT_SYSCALL: usize = 35;
+const RENAMEAT_SYSCALL: usize = 38;
+const SETAFFINITY_SYSCALL: usize = 122;
+const GETCPU_SYSCALL: usize = 168;
+const WORKLOAD_PROGRESS_SYSCALL: usize = 453;
+const PEER_MUTATION_TAG: usize = 14;
+const LINUX_AT_FDCWD: usize = 0xFFFFFFFFFFFFFF9C;
+const LINUX_AT_REMOVEDIR: usize = 0x200;
+const PEER_MUTATE_ARRIVAL_POLLS: usize = 1000000;
+
+private fn peer_mutate_fail(line: borrow []u8) {
+    svc5(WRITE_SYSCALL, 1, line as *u8 as usize, line.len, 0, 0);
+    svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+}
+
+private fn peer_mutate_cpu(cpu_bytes: borrow [u8; 4..]) -> usize {
+    if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize, 0, 0, 0, 0) != 0) {
+        return 99;
+    }
+    return cpu_bytes[0] as usize;
+}
+
+fn peer_mutate() {
+    let mut mask: [u8; 8];
+    for index: usize in 0..<8 { mask[index] = 0; }
+    mask[0] = 2;
+    if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) != 0) {
+        peer_mutate_fail(bs"peer-mutate: cpu 1 alone was refused\n");
+    }
+    let mut cpu_bytes: [u8; 4];
+    let mut here: usize = peer_mutate_cpu(cpu_bytes as []u8);
+    for poll: usize in 0..<PEER_MUTATE_ARRIVAL_POLLS {
+        if (here != 1) { here = peer_mutate_cpu(cpu_bytes as []u8); }
+    }
+    if (here != 1) {
+        peer_mutate_fail(bs"peer-mutate: never reached cpu 1\n");
+    }
+    let made: []u8 = bs"/peer-mutate\0";
+    let moved: []u8 = bs"/peer-mutated\0";
+    if (svc5(MKDIRAT_SYSCALL, LINUX_AT_FDCWD, made as *u8 as usize, 0x1ED,
+             0, 0) != 0) {
+        peer_mutate_fail(bs"peer-mutate: mkdirat failed\n");
+    }
+    if (svc5(RENAMEAT_SYSCALL, LINUX_AT_FDCWD, made as *u8 as usize,
+             LINUX_AT_FDCWD, moved as *u8 as usize, 0) != 0) {
+        peer_mutate_fail(bs"peer-mutate: renameat failed\n");
+    }
+    if (svc5(UNLINKAT_SYSCALL, LINUX_AT_FDCWD, moved as *u8 as usize,
+             LINUX_AT_REMOVEDIR, 0, 0) != 0) {
+        peer_mutate_fail(bs"peer-mutate: unlinkat failed\n");
+    }
+    if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_MUTATION_TAG, 0, 0, 0, 0) != 1) {
+        peer_mutate_fail(bs"peer-mutate: the three mutations did not all complete on a peer\n");
+    }
+    svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+}

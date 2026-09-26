@@ -15,16 +15,19 @@ state in this kernel is safe *because of* them:
   online core takes timer interrupts and enters the syscall and scheduler
   paths. A process with no affinity mask is eligible on every online core;
   a peer syscall runs where it was called unless `syscall_peer_refused`
-  names it (GitHub issue #583: the process lifecycle, ext2 mutation, the
-  socket calls other than connected read and write, and syslog, each with
-  its reason) or `syscall_peer_safe` narrows it by descriptor; those are
+  names it (GitHub issue #583: the process lifecycle, the socket calls
+  other than connected read and write, and syslog, each with its reason) or `syscall_peer_safe` narrows it by descriptor; those are
   rerun on core 0. The busy-pair fixture pins its workers during the
   staged boot checks, then widens them for the measured phase and alternates
   explicit CPU 0/1 affinity requests to observe actual migrations. The
   filesystem boundary is now a LOCK rather than an
   admission claim -- ext2 mutation excludes itself through
-  `kernel/fs/ext2/mutation_lock.tkb`, and a peer reader that finds a mutation
-  in flight is rerun on core 0 (GitHub issues #533 and #9).
+  `kernel/fs/ext2/mutation_lock.tkb`, and a reader that finds a mutation
+  in flight is rerun: on core 0 from a peer, after an interrupt on core 0
+  (GitHub issues #533 and #9). mkdirat, unlinkat and renameat run on any
+  core since #597: each takes the guard before its path lookup, and a
+  mutation waits for every CPU's counted readers, including a child
+  execve's until its exec prepare has read the image.
 - `KERNEL_PREEMPTIBLE` -- 0. A timer interrupt taken at EL1 sets a flag and the
   switch happens at syscall return. That is `CONFIG_PREEMPT_NONE`, and it is
   why many field accesses need no lock.

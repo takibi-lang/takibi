@@ -254,6 +254,16 @@ private let mut move_cost_stored: usize;
 private let mut move_cost_lost: usize;
 private let mut move_cost_reported: bool;
 
+// GitHub issue #597: /bin/peer-mutate's evidence that the three ext2
+// mutations completed on a peer. The syscall arms note each success made
+// off core 0, for whichever process made it; the fixture's tag-14 call
+// reports only when all three were its own. Written under the run lock.
+const PEER_MUTATION_MKDIR: usize = 1;
+const PEER_MUTATION_RENAME: usize = 2;
+const PEER_MUTATION_RMDIR: usize = 4;
+private let mut workload_peer_mutation_pid: usize;
+private let mut workload_peer_mutation_seen: usize;
+
 enum WorkloadCpuMode { Idle; El0; El1; Irq; }
 
 struct WorkloadProfileCore {
@@ -1337,6 +1347,34 @@ private fn workload_ordinary_placement_guard_complete() -> usize {
     process_run_unlock(guard);
     if (complete) { return 1; }
     return 0;
+}
+
+// A mutating syscall arm's success, from any CPU. Only a peer counts, and
+// a different process restarts the set.
+fn workload_peer_mutation_note(kind: usize) {
+    if (cpu_id() == 0) { return; }
+    let guard = process_run_lock();
+    let pid: usize = kernel_process_current_pid();
+    if (workload_peer_mutation_pid != pid) {
+        workload_peer_mutation_pid = pid;
+        workload_peer_mutation_seen = 0;
+    }
+    workload_peer_mutation_seen = workload_peer_mutation_seen | kind;
+    process_run_unlock(guard);
+}
+
+// Tag 14: 1 and the line when this process made all three on a peer.
+fn workload_peer_mutation_report() -> usize {
+    let guard = process_run_lock();
+    let complete: bool =
+        workload_peer_mutation_pid == kernel_process_current_pid() &&
+        workload_peer_mutation_seen ==
+            (PEER_MUTATION_MKDIR | PEER_MUTATION_RENAME | PEER_MUTATION_RMDIR);
+    process_run_unlock(guard);
+    if (complete == false) { return 0; }
+    kernel_boot_log(
+        "workload: ext2 mkdirat, renameat and unlinkat completed on a peer, each under the mutation guard\n");
+    return 1;
 }
 
 // Tag 13. `phase` is MOVE_COST_BEGIN, MOVE_COST_END or MOVE_COST_SUMMARY;

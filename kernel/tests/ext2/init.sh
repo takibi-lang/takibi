@@ -91,6 +91,14 @@ if [ "$?" -ne 0 ]; then
     exit 1
 fi
 
+# GitHub issue #597: mkdirat, renameat and unlinkat on a peer. The kernel
+# prints the peer_mutation view's line; this prints only a failure.
+/bin/peer-mutate
+if [ "$?" -ne 0 ]; then
+    echo "peer-mutate failed"
+    exit 1
+fi
+
 # Read the retained, kernel-timestamped text ring through Linux syslog(2),
 # exactly as the packaged BusyBox dmesg applet does on Linux.
 /bin/dmesg

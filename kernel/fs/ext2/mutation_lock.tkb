@@ -25,12 +25,11 @@
 //   cache hit, read-ahead run -- return before any lock at all.
 //
 // So a reader instead ASKS whether a mutation is in flight, with one
-// acquire-load and no spin, and a peer reader that finds one is sent to core
-// 0 by the migration gate (SyscallAction::Migrate, which already exists for
-// exactly this: rerun this syscall on core 0). Declining is not an error
-// returned to userspace and not a wait on core 0 -- the first would fail
-// /bin/peer-read's chunk verdict, and the second is the shape that cost the
-// busy pair its fairness in this issue's third step.
+// acquire-load and no spin. A peer reader that finds one is sent to core 0
+// by the migration gate (SyscallAction::Migrate: rerun this syscall on core
+// 0). A core 0 reader has nowhere to go, so it waits for an interrupt and
+// reruns (GitHub issue #597). Neither is an error returned to userspace,
+// which would fail /bin/peer-read's chunk verdict.
 //
 // RANK 20, OUTSIDE THE DEVICE LOCK
 //
@@ -58,12 +57,21 @@
 // enforces this section's presence here: kernel/fs/ is not one of
 // scripts/check_kernel_lib_limitations_header.py's directories yet.
 //
-// - BOTH WINDOWS ARE CLOSED FOR PEER READERS (GitHub issue #559). A read
-//   starting during a mutation is sent to core 0 by the entry question; a
-//   mutation starting during a peer read waits for the reader count
-//   (ext2_read_enter / ext2_read_leave) to drain. Core 0's readers are not
-//   counted, which is sound only while mutations run on core 0 alone --
-//   admitting a mutating syscall on a peer (#583) has to revisit that.
+// - BOTH WINDOWS ARE CLOSED FOR EVERY READER (GitHub issues #559, #597).
+//   A read starting during a mutation is refused at syscall entry; a
+//   mutation starting during a read waits for the reader count
+//   (ext2_read_enter / ext2_read_leave) to drain. Every CPU's readers are
+//   counted since mutation runs on a peer too, and an execve's registration
+//   is held until its child exec prepare has streamed the image.
+// - A READER OUTSIDE A SYSCALL IS NOT COUNTED. The count is taken by the
+//   syscall gate (syscall_reaches_filesystem) and by nothing else, so an
+//   ext2 read added on another path -- a fault handler, a kernel thread --
+//   would not be. Today the only one is the boot fixture's, before any
+//   peer runs a process.
+// - A MUTATOR WAITING ON ITS OWN CPU'S READER WOULD WAIT FOREVER. It cannot
+//   happen while KERNEL_PREEMPTIBLE is 0: a CPU's count is held only inside
+//   one syscall (or an execve and its prepare), which no other syscall on
+//   that CPU interleaves, and the mutating syscalls are not readers.
 // - NOTHING PROVES A MUTATOR TAKES IT. The five mutating syscall arms do,
 //   and the guard being linear makes a missed release a compile error on
 //   every path, but a sixth arm added later would compile and simply fail to
@@ -75,6 +83,7 @@
 //   above cannot simply demand the guard at every mutator call site without
 //   naming that path.
 use "kernel/lib/task_mutex.tkb";
+use "kernel/lib/execution_model.tkb";
 
 // No initialisation: a global's .bss zero is already SPIN_LOCK_FREE, and
 // task_mutex_init FORCE-FREES, which on two cores releases a lock the other
@@ -88,27 +97,28 @@ linear struct Ext2MutationGuard[lock: addr] {
     private cpu: usize;
 }
 
-// GitHub issue #559: peer readers inside ext2 right now. A reader on a
-// peer adds one at syscall entry (ext2_read_enter) and takes it away when
-// the syscall is done (ext2_read_leave); a mutator, holding the lock, waits
-// for it to reach zero. So a mutation starting while a peer read is in
-// flight waits for that read, which the entry question alone did not do.
-// Readers stay concurrent with each other and with the device: they never
-// take the lock, so peer_filesystem.expected's contention is untouched.
+// GitHub issue #559: readers inside ext2 right now. A reader adds one at
+// syscall entry (ext2_read_enter) and takes it away when the syscall is
+// done (ext2_read_leave); a mutator, holding the lock, waits for it to reach
+// zero. So a mutation starting while a read is in flight waits for that
+// read, which the entry question alone did not do. Readers stay concurrent
+// with each other and with the device: they never take the lock, so
+// peer_filesystem.expected's contention is untouched.
 //
-// Core 0's readers are not counted. Mutation runs on core 0 too and this
-// kernel is not preemptible, so a core 0 reader and a core 0 mutation never
-// overlap; and a mutator waiting on core 0 for a core 0 reader would wait
-// forever.
-private let mut ext2_peer_readers: usize;
+// Every CPU's readers since GitHub issue #597 admitted mutation on a peer.
+// Before that only peers were counted, because a core 0 reader could not
+// overlap a mutation that also ran only on core 0.
+private let mut ext2_readers: usize;
 
-private fn ext2_peer_readers_address() -> usize {
-    return (&ext2_peer_readers) as usize;
+private fn ext2_readers_address() -> usize {
+    return (&ext2_readers) as usize;
 }
 
 fn ext2_mutation_take() -> Ext2MutationGuard[ext2_mutation_lock]
         !{acquires_lock_20_ext2_mutation, lock_guard_20_ext2_mutation,
           unsafe} {
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+                  "a mutator waits for every CPU's ext2 readers, so a reader preempted on this CPU would be waited for forever");
     task_mutex_acquire(&ext2_mutation_lock);
     // The Dekker half: the lock is visibly held before the count is read,
     // and ext2_read_enter publishes its count before it reads the lock, so
@@ -116,7 +126,7 @@ fn ext2_mutation_take() -> Ext2MutationGuard[ext2_mutation_lock]
     // counted here and waited for; one that saw it held has undone its
     // count and gone to core 0.
     dsb_ish();
-    while (unsafe { atomic_load_acquire(ext2_peer_readers_address()) } != 0) { }
+    while (unsafe { atomic_load_acquire(ext2_readers_address()) } != 0) { }
     let mut guard: Ext2MutationGuard[ext2_mutation_lock] = { cpu_id() };
     return guard;
 }
@@ -133,15 +143,15 @@ fn ext2_mutation_take_without_readers_unchecked()
     return guard;
 }
 
-// A peer reader's arrival. True: counted and admitted, and ext2_read_leave
-// is owed. False: a mutation is in flight, nothing is owed, and the caller
-// sends the syscall to core 0 as the entry question always has.
+// A reader's arrival. True: counted and admitted, and ext2_read_leave is
+// owed. False: a mutation is in flight, nothing is owed, and the caller
+// reruns the syscall -- on core 0 from a peer, after an interrupt on core 0.
 fn ext2_read_enter() -> bool !{unsafe} {
-    unsafe { atomic_fetch_add_relaxed(ext2_peer_readers_address(), 1); }
+    unsafe { atomic_fetch_add_relaxed(ext2_readers_address(), 1); }
     dsb_ish();
     if (task_mutex_is_held(&ext2_mutation_lock)) {
         unsafe {
-            atomic_fetch_add_relaxed(ext2_peer_readers_address(),
+            atomic_fetch_add_relaxed(ext2_readers_address(),
                                      0xFFFFFFFFFFFFFFFF);
         }
         return false;
@@ -153,7 +163,7 @@ fn ext2_read_enter() -> bool !{unsafe} {
 fn ext2_read_leave() !{unsafe} {
     dsb_ish();
     unsafe {
-        atomic_fetch_add_relaxed(ext2_peer_readers_address(),
+        atomic_fetch_add_relaxed(ext2_readers_address(),
                                  0xFFFFFFFFFFFFFFFF);
     }
 }
@@ -164,12 +174,6 @@ fn ext2_mutation_give(guard: sink Ext2MutationGuard[ext2_mutation_lock]) {
 
 // The reader's question. One acquire-load of the lock word, no spin, no
 // wait: true means some core is inside a mutation right now.
-//
-// A reader on core 0 does not ask at all. Mutation runs on core 0 too, and
-// this kernel is not preemptible (KERNEL_PREEMPTIBLE is 0), so a core 0
-// reader cannot be running while a core 0 mutation is mid-rewrite -- the
-// mutation returned before this syscall was dispatched. Only a peer can
-// observe a partial tree, which is why the gate asks only there.
 fn ext2_mutation_in_flight() -> bool !{unsafe} {
     return task_mutex_is_held(&ext2_mutation_lock);
 }

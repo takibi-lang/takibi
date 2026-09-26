@@ -14,8 +14,12 @@ review, and review is exactly what stops being done. So this is the check
 that the set stays closed.
 
 The rule: every call to a mutator, outside the file that defines them, is
-inside a function that takes the guard -- or its file is named below with a
-reason. One exemption exists and is real: the boot fixture mutates before any
+inside a function that takes the guard, or that is handed one as a
+`borrow Ext2MutationGuard[ext2_mutation_lock]` parameter -- or its file is
+named below with a reason. The parameter form counts because the compiler
+checks it: the guard is linear and minted only by the take, so a caller
+cannot produce one it does not hold (GitHub issue #597, whose mutating arms
+take the guard before their path lookup and pass it down). One exemption exists and is real: the boot fixture mutates before any
 peer can reach a filesystem, which is the same argument the admission claim
 used to make for the whole kernel.
 
@@ -49,6 +53,7 @@ MUTATORS = (
 )
 
 TAKE = "ext2_mutation_take()"
+HELD = "guard: borrow Ext2MutationGuard[ext2_mutation_lock]"
 
 # The file that defines the mutators, and the one that defines the lock: both
 # name these functions without calling them.
@@ -105,7 +110,8 @@ def guard_problems(sources: dict[str, str]) -> tuple[list[str], int]:
                         "function, so nothing can take the guard")
                     continue
                 name, body = holder
-                if TAKE in body:
+                signature = body.split("{", 1)[0]
+                if TAKE in body or HELD in signature:
                     guarded += 1
                     continue
                 if rel in UNGUARDED_ALLOWED:
@@ -152,6 +158,20 @@ def main() -> int:
               "still accepted, so this check proves nothing")
         return 1
 
+    # The same for the parameter form: a helper whose borrowed guard is
+    # replaced by a plain word must be caught.
+    if HELD not in broken.get(target, ""):
+        print("FAIL ext2-mutation-guard: the negative control's subject "
+              f"({target}) no longer receives the guard as a parameter")
+        return 1
+    unborrowed = dict(sources)
+    unborrowed[target] = unborrowed[target].replace(HELD, "guard: usize", 1)
+    control, _ = guard_problems(unborrowed)
+    if not control:
+        print("FAIL ext2-mutation-guard: a helper whose guard parameter was "
+              "removed was still accepted")
+        return 1
+
     def calls_a_mutator(text: str) -> bool:
         # Per LINE, because strip_comment on a whole file truncates it at the
         # first comment -- which made this read the boot fixture's header and
@@ -175,7 +195,7 @@ def main() -> int:
         "ext2-mutation-guard",
         f"{guarded} guarded mutation call site(s), "
         f"{len(UNGUARDED_ALLOWED)} file exempt with a stated reason, and a "
-        "helper stripped of its guard is refused",
+        "helper stripped of its guard, taken or borrowed, is refused",
         guarded_call_sites=guarded,
     )
     return 0
