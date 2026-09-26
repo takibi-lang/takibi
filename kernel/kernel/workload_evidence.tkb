@@ -48,6 +48,7 @@ use "kernel/arch/arm64/kernel/timer.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/occupancy.tkb";
 use "kernel/kernel/profile_samples.tkb";
+use "kernel/arch/arm64/kernel/pmu_extern.tkb";
 use "kernel/kernel/profile_timeline.tkb";
 
 // The two inittab entries, told apart by the tag they pass rather than by
@@ -216,6 +217,42 @@ private let mut workload_busy_pair: WorkloadBusyPair;
 // publish it Blocked before the CPU0 timer wake scans all slots.
 private let mut workload_peer_net_wake_pid: usize;
 private let mut workload_peer_net_wake_block_requested: bool;
+
+// GitHub issue #503: what one move between cores costs, asked by #582.
+// /bin/movecost brackets each pass over its working set with tag 13, and
+// each bracket reads the PMU event-counter pair (CPU_CYCLES, INST_RETIRED)
+// on the CPU the syscall runs on. A pass whose two reads ran on different
+// CPUs, or by a different process, has no meaningful difference and is
+// counted lost rather than stored. The records are printed from core 0 at
+// the fixture's summary call, not as each pass ends, so no peer prints.
+//
+// All of it is written under the process-run lock.
+const MOVE_COST_MAX: usize = 32;
+const MOVE_COST_BEGIN: usize = 0;
+const MOVE_COST_END: usize = 1;
+const MOVE_COST_SUMMARY: usize = 2;
+const MOVE_COST_WRAP: usize = 0xFFFFFFFF;
+
+struct MoveCostOpen {
+    pid: usize;
+    cycles: usize;
+    instructions: usize;
+    live: bool;
+}
+
+struct MoveCostRecord {
+    round: usize;
+    cold: bool;
+    cpu: usize;
+    cycles: usize;
+    instructions: usize;
+}
+
+private let mut move_cost_open: [MoveCostOpen; KERNEL_MAX_CORES];
+private let mut move_cost_records: [MoveCostRecord; MOVE_COST_MAX];
+private let mut move_cost_stored: usize;
+private let mut move_cost_lost: usize;
+private let mut move_cost_reported: bool;
 
 enum WorkloadCpuMode { Idle; El0; El1; Irq; }
 
@@ -1300,6 +1337,95 @@ private fn workload_ordinary_placement_guard_complete() -> usize {
     process_run_unlock(guard);
     if (complete) { return 1; }
     return 0;
+}
+
+// Tag 13. `phase` is MOVE_COST_BEGIN, MOVE_COST_END or MOVE_COST_SUMMARY;
+// an end names its round and whether the pass was the first on a CPU the
+// process had just moved to. Answers 1 when the phase was taken, 0 when
+// this CPU has no usable counters or the call was refused.
+fn workload_move_cost_progress(phase: usize, round: usize, cold: usize)
+        -> usize {
+    let raw_cpu: usize = cpu_id();
+    if (raw_cpu >= KERNEL_MAX_CORES) { return 0; }
+    let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
+    if (phase == MOVE_COST_SUMMARY) { return workload_move_cost_report(); }
+    if (pmu_count_supported() == 0) { return 0; }
+    if (phase == MOVE_COST_BEGIN) {
+        pmu_count_start();
+        let guard = process_run_lock();
+        move_cost_open[cpu].pid = kernel_process_current_pid();
+        move_cost_open[cpu].live = true;
+        // Last, so the lock and the bookkeeping above are outside the
+        // interval; the end reads first for the same reason.
+        move_cost_open[cpu].instructions = pmu_count_instructions();
+        move_cost_open[cpu].cycles = pmu_count_cycles();
+        process_run_unlock(guard);
+        return 1;
+    }
+    if (phase != MOVE_COST_END) { return 0; }
+    let end_cycles: usize = pmu_count_cycles();
+    let end_instructions: usize = pmu_count_instructions();
+    let guard = process_run_lock();
+    let opened: bool = move_cost_open[cpu].live &&
+        move_cost_open[cpu].pid == kernel_process_current_pid();
+    move_cost_open[cpu].live = false;
+    if (opened == false || move_cost_stored >= MOVE_COST_MAX) {
+        move_cost_lost = move_cost_lost + 1;
+        process_run_unlock(guard);
+        return 1;
+    }
+    let index: usize = move_cost_stored;
+    if (index < MOVE_COST_MAX) {
+        move_cost_records[index].round = round;
+        move_cost_records[index].cold = cold != 0;
+        move_cost_records[index].cpu = raw_cpu;
+        move_cost_records[index].cycles =
+            (end_cycles - move_cost_open[cpu].cycles) & MOVE_COST_WRAP;
+        move_cost_records[index].instructions =
+            (end_instructions - move_cost_open[cpu].instructions) &
+            MOVE_COST_WRAP;
+        move_cost_stored = index + 1;
+    }
+    process_run_unlock(guard);
+    return 1;
+}
+
+// Printed once, from core 0: the records, then the totals the host
+// collector checks them against.
+private fn workload_move_cost_report() -> usize {
+    if (cpu_id() != 0) { return 0; }
+    let guard = process_run_lock();
+    if (move_cost_reported) {
+        process_run_unlock(guard);
+        return 0;
+    }
+    move_cost_reported = true;
+    let stored: usize = move_cost_stored;
+    let lost: usize = move_cost_lost;
+    process_run_unlock(guard);
+    for index: usize in 0..<MOVE_COST_MAX {
+        if (index < stored) {
+            kernel_boot_log("profile: move-cost name=move-cost round=");
+            uart_put_udec(move_cost_records[index].round);
+            if (move_cost_records[index].cold) {
+                kernel_boot_log(" kind=cold cpu=");
+            } else {
+                kernel_boot_log(" kind=warm cpu=");
+            }
+            uart_put_udec(move_cost_records[index].cpu);
+            kernel_boot_log(" cycles=");
+            uart_put_udec(move_cost_records[index].cycles);
+            kernel_boot_log(" instructions=");
+            uart_put_udec(move_cost_records[index].instructions);
+            kernel_boot_log("\n");
+        }
+    }
+    kernel_boot_log("profile: move-cost-summary name=move-cost stored=");
+    uart_put_udec(stored);
+    kernel_boot_log(" lost=");
+    uart_put_udec(lost);
+    kernel_boot_log("\n");
+    return 1;
 }
 
 fn workload_busy_record_progress(tag: usize, checksum: usize,

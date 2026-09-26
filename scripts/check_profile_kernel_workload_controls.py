@@ -199,6 +199,43 @@ def main():
         if result.returncode == 0 or "does not follow the end record" not in result.stderr:
             raise RuntimeError("pre-end CPU record negative control did not reject")
 
+        # GitHub issue #503: the move-cost records.
+        move_cost = root / "move-cost.json"
+
+        def move_cost_text(rounds, lost=0, instructions=900, same_cpu=False):
+            text = ""
+            for number in range(rounds):
+                cpu = 0 if same_cpu else number % 2
+                text += (f"profile: move-cost name=move-cost round={number} "
+                         f"kind=cold cpu={cpu} cycles=150 "
+                         f"instructions={instructions}\n"
+                         f"profile: move-cost name=move-cost round={number} "
+                         f"kind=warm cpu={cpu} cycles=100 "
+                         f"instructions=900\n")
+            return text + (f"profile: move-cost-summary name=move-cost "
+                           f"stored={rounds * 2} lost={lost}\n")
+
+        uart.write_text(move_cost_text(2), encoding="ascii")
+        result = run("move-cost", "--uart-log", str(uart), "--output",
+                     str(move_cost), "--target", "rpi5", "--commit", "test")
+        if (result.returncode != 0 or json.loads(
+                move_cost.read_text(encoding="ascii"))["median_move_cycles"]
+                != 50):
+            raise RuntimeError("move-cost positive control failed")
+        for text, target, message in (
+                (move_cost_text(2, lost=1), "rpi5", "lost 1 passes"),
+                (move_cost_text(2, same_cpu=True), "rpi5", "did not move"),
+                (move_cost_text(2, instructions=2000), "rpi5",
+                 "retired different work"),
+                (move_cost_text(0), "qemu", "stored no records")):
+            uart.write_text(text, encoding="ascii")
+            result = run("move-cost", "--uart-log", str(uart), "--output",
+                         str(move_cost), "--target", target,
+                         "--commit", "test")
+            if result.returncode == 0 or message not in result.stderr:
+                raise RuntimeError(
+                    f"move-cost negative control did not reject: {message}")
+
         legacy = root / "legacy.json"
         legacy.write_text(json.dumps({
             "schema": "takibi.kernel.workload/v1",
@@ -211,7 +248,7 @@ def main():
 
     report_pass(
         "profile-kernel-workload",
-        "per-CPU summary, Perfetto timeline, rejection, v1 chart",
+        "per-CPU summary, Perfetto timeline, move cost, rejection, v1 chart",
         cases=CASES.ran)
 
 

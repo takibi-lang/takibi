@@ -82,6 +82,15 @@ fi
 # way any other external command here is: ash forks and execve()s it.
 /bin/user_payload
 
+# GitHub issue #503: what one move between cores costs. Silent on success;
+# its numbers are the kernel's `profile: move-cost` records, collected by the
+# lane runners. Here, before the busy pair starts, so nothing else computes.
+/bin/movecost
+if [ "$?" -ne 0 ]; then
+    echo "movecost failed"
+    exit 1
+fi
+
 # Read the retained, kernel-timestamped text ring through Linux syslog(2),
 # exactly as the packaged BusyBox dmesg applet does on Linux.
 /bin/dmesg

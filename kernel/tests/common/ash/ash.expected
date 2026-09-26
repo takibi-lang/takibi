@@ -47,6 +47,7 @@ httpd
 httpd.sh
 ls
 mkdir
+movecost
 mv
 nproc
 od

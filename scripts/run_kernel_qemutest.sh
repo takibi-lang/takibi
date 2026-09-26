@@ -300,6 +300,13 @@ python3 "$REPO_ROOT/scripts/profile_kernel_workload.py" collect \
     --uart-log "$UART_LOG" --output "$ARTIFACT_DIR/busy-pair-profile.json" \
     --target qemu
 
+# GitHub issue #503: what one move between cores costs, from /bin/movecost's
+# PMU event-counter records. The collector refuses a lost pass, a round that
+# did not move, and a record with no cycles; QEMU is not the authority on the number.
+python3 "$REPO_ROOT/scripts/profile_kernel_workload.py" move-cost \
+    --uart-log "$UART_LOG" --output "$ARTIFACT_DIR/move-cost.json" \
+    --target qemu
+
 # GitHub issue #501: validate the bounded off-CPU records and export standard
 # Perfetto trace-event JSON. These six kinds are the part of the general
 # timeline vocabulary the named CPU-bound workload must actually exercise.

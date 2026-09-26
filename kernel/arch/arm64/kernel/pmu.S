@@ -164,3 +164,71 @@ pmu_sample_stop:
     msr     pmovsclr_el0, x1
     isb
     ret
+
+/* GitHub issue #503: two PMUv3 EVENT counters for measured questions, beside
+ * the cycle counter above. Event counters 0 and 1, never PMCCNTR_EL0, so the
+ * flat-PC sampler keeps its counter and neither user can reprogram the
+ * other's. Counter 0 counts CPU_CYCLES (0x11), counter 1 INST_RETIRED
+ * (0x08), both at EL0 and EL1 (the P and U filter bits are clear). They are
+ * 32-bit counters without FEAT_PMUv3p5's PMCR_EL0.LP, so the caller takes
+ * differences modulo 2^32 over intervals far shorter than a wrap. */
+
+/* pmu_count_supported() -> usize
+ *
+ * 1 when this CPU implements PMUv3 and PMCR_EL0.N reports at least two
+ * event counters, 0 otherwise. The ID register is read first, so a CPU
+ * without PMUv3 never executes the PMCR_EL0 access. */
+    .global pmu_count_supported
+    .type pmu_count_supported, %function
+pmu_count_supported:
+    mrs     x1, id_aa64dfr0_el1
+    ubfx    x1, x1, #8, #4
+    mov     x0, #0
+    cbz     x1, .Lcount_supported_done
+    cmp     x1, #0xf
+    b.eq    .Lcount_supported_done
+    mrs     x1, pmcr_el0
+    ubfx    x1, x1, #11, #5
+    cmp     x1, #2
+    b.lo    .Lcount_supported_done
+    mov     x0, #1
+.Lcount_supported_done:
+    ret
+
+/* pmu_count_start()
+ *
+ * Program and enable both event counters on this CPU. Idempotent, and it
+ * does not reset their values: callers only ever take differences. PMCR_EL0.E
+ * is the global enable the sampler also sets; this sets it and never clears
+ * it. */
+    .global pmu_count_start
+    .type pmu_count_start, %function
+pmu_count_start:
+    mov     x1, #0x11
+    msr     pmevtyper0_el0, x1
+    mov     x1, #0x08
+    msr     pmevtyper1_el0, x1
+    mrs     x2, pmcr_el0
+    orr     x2, x2, #(1 << 0)      /* E: enable the counters */
+    msr     pmcr_el0, x2
+    mov     x1, #3
+    msr     pmcntenset_el0, x1
+    isb
+    ret
+
+/* pmu_count_cycles() -> usize, pmu_count_instructions() -> usize
+ *
+ * The raw 32-bit values of event counters 0 and 1. */
+    .global pmu_count_cycles
+    .type pmu_count_cycles, %function
+pmu_count_cycles:
+    isb
+    mrs     x0, pmevcntr0_el0
+    ret
+
+    .global pmu_count_instructions
+    .type pmu_count_instructions, %function
+pmu_count_instructions:
+    isb
+    mrs     x0, pmevcntr1_el0
+    ret

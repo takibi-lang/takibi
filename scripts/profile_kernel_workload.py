@@ -23,6 +23,11 @@ TIMELINE_KINDS = {
     "irq-enter": "irq",
     "irq-exit": "irq",
 }
+MOVE_COST_RE = re.compile(r"^profile: (move-cost|move-cost-summary) (.+)$")
+# RPi5 only: how far a cold pass's retired instructions may stray from the
+# warm pass beside it. The two run the same code; a timer interrupt landing
+# in one of them is the expected difference, and it is small.
+MOVE_COST_INSTRUCTION_TOLERANCE = 0.10
 BUSY_MEASUREMENT_RE = re.compile(
     r"^workload: busy pair measured .*\bcpu_a=([0-9]+) "
     r"cpu_b=([0-9]+)\b")
@@ -190,6 +195,107 @@ def collect(args):
         },
     }
     Path(args.output).write_text(json.dumps(artifact, indent=2) + "\n", encoding="ascii")
+
+
+def median(values):
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
+
+
+def move_cost(args):
+    """GitHub issue #503: the cost of one move between cores.
+
+    Each round is a cold pass -- the first on a CPU the process has just
+    moved to -- and a warm pass after it on the same CPU. The artifact keeps
+    every record and reports the median cold-minus-warm cycle difference,
+    which is what the move cost. QEMU's counters come from virtual time and
+    its INST_RETIRED reads zero without icount, so there only the shape of
+    the records is checked."""
+    lines = uart_lines(args.uart_log)
+    records = []
+    summaries = []
+    for line in lines:
+        match = MOVE_COST_RE.match(line.rstrip("\r\n"))
+        if not match:
+            continue
+        fields = parse_fields(match.group(2))
+        if fields.get("name") != "move-cost":
+            continue
+        if match.group(1) == "move-cost":
+            records.append(fields)
+        else:
+            summaries.append(fields)
+    if len(summaries) != 1:
+        raise ValueError(f"expected one move-cost summary, found {len(summaries)}")
+    stored = integer(summaries[0], "stored")
+    lost = integer(summaries[0], "lost")
+    if stored != len(records):
+        raise ValueError(
+            f"move-cost summary says {stored} records, found {len(records)}")
+    if stored == 0:
+        raise ValueError("move-cost stored no records: no PMU event counters")
+    if lost != 0:
+        raise ValueError(f"move-cost lost {lost} passes")
+    if stored % 2 != 0:
+        raise ValueError("move-cost records do not pair into rounds")
+    rounds = []
+    previous_cpu = None
+    for index in range(0, stored, 2):
+        cold, warm = records[index], records[index + 1]
+        round_number = index // 2
+        if (cold.get("kind") != "cold" or warm.get("kind") != "warm" or
+                integer(cold, "round") != round_number or
+                integer(warm, "round") != round_number):
+            raise ValueError(f"move-cost round {round_number} is malformed")
+        cpu = integer(cold, "cpu")
+        if integer(warm, "cpu") != cpu:
+            raise ValueError(
+                f"move-cost round {round_number} ran its passes on two cpus")
+        if previous_cpu is not None and cpu == previous_cpu:
+            raise ValueError(
+                f"move-cost round {round_number} did not move: cpu {cpu} again")
+        previous_cpu = cpu
+        entry = {
+            "round": round_number,
+            "cpu": cpu,
+            "cold_cycles": integer(cold, "cycles"),
+            "warm_cycles": integer(warm, "cycles"),
+            "cold_instructions": integer(cold, "instructions"),
+            "warm_instructions": integer(warm, "instructions"),
+        }
+        if entry["cold_cycles"] == 0 or entry["warm_cycles"] == 0:
+            raise ValueError(f"move-cost round {round_number} counted no cycles")
+        if args.target == "rpi5":
+            warm_instructions = entry["warm_instructions"]
+            if warm_instructions == 0 or entry["cold_instructions"] == 0:
+                raise ValueError(
+                    f"move-cost round {round_number} retired no instructions")
+            if (abs(entry["cold_instructions"] - warm_instructions) >
+                    warm_instructions * MOVE_COST_INSTRUCTION_TOLERANCE):
+                raise ValueError(
+                    f"move-cost round {round_number}: cold and warm passes "
+                    f"retired different work")
+        entry["move_cycles"] = entry["cold_cycles"] - entry["warm_cycles"]
+        rounds.append(entry)
+    artifact = {
+        "schema": "takibi.kernel.move-cost/v1",
+        "environment": {"target": args.target, "commit": args.commit},
+        "working_set_bytes": args.working_set_bytes,
+        "rounds": rounds,
+        "median_cold_cycles": median([r["cold_cycles"] for r in rounds]),
+        "median_warm_cycles": median([r["warm_cycles"] for r in rounds]),
+        "median_move_cycles": median([r["move_cycles"] for r in rounds]),
+        "authoritative": args.target == "rpi5",
+    }
+    Path(args.output).write_text(json.dumps(artifact, indent=2) + "\n",
+                                 encoding="ascii")
+    print(f"move-cost ({args.target}): median cold "
+          f"{artifact['median_cold_cycles']} cycles, warm "
+          f"{artifact['median_warm_cycles']}, one move "
+          f"{artifact['median_move_cycles']} over {len(rounds)} rounds")
 
 
 def timeline_records(lines, kind, name):
@@ -431,6 +537,15 @@ def main():
         "--require-kind", action="append", default=[],
         choices=sorted(TIMELINE_KINDS))
     timeline_parser.set_defaults(run=timeline)
+    move_cost_parser = subparsers.add_parser("move-cost")
+    move_cost_parser.add_argument("--uart-log", required=True)
+    move_cost_parser.add_argument("--output", required=True)
+    move_cost_parser.add_argument("--target", required=True,
+                                  choices=("qemu", "rpi5"))
+    move_cost_parser.add_argument("--working-set-bytes", type=int,
+                                  default=262144)
+    move_cost_parser.add_argument("--commit", default=None)
+    move_cost_parser.set_defaults(run=move_cost)
     chart_parser = subparsers.add_parser("chart")
     chart_parser.add_argument("--output", required=True)
     chart_parser.add_argument("artifacts", nargs="+")

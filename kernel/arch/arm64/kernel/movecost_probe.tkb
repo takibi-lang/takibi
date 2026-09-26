@@ -1,0 +1,130 @@
+/* What one move between cores costs (GitHub issue #503, the question #582
+ * asked). A static-PIE EL0 program, kept free of writable globals and
+ * compiled with --forbid-trap, run once from init.sh before the busy pair
+ * starts. It prints nothing unless it fails: the numbers are the kernel's
+ * `profile: move-cost` records, which scripts/profile_kernel_workload.py
+ * collects into an artifact.
+ *
+ * Each pass touches every cache line of a 256 KiB working set, which is
+ * larger than a Cortex-A76's 64 KiB L1D and fits its 512 KiB L2. A round
+ * moves this process to the other of two CPUs by its own mask, then
+ * measures the first pass there (cold: the caches and TLB of that CPU hold
+ * nothing of this process) and a second pass (warm). The move itself
+ * happens at a syscall boundary before the cold pass opens, so the
+ * interval holds the cache and TLB refill the move causes, not the
+ * migration path's own instructions.
+ */
+
+const WRITE_SYSCALL: usize = 64;
+const EXIT_SYSCALL: usize = 93;
+const SETAFFINITY_SYSCALL: usize = 122;
+const GETAFFINITY_SYSCALL: usize = 123;
+const MMAP_SYSCALL: usize = 222;
+const WORKLOAD_PROGRESS_SYSCALL: usize = 453;
+const MOVE_COST_TAG: usize = 13;
+const MOVE_COST_BEGIN: usize = 0;
+const MOVE_COST_END: usize = 1;
+const MOVE_COST_SUMMARY: usize = 2;
+const LINUX_PROT_READ_WRITE: usize = 3;
+const LINUX_MAP_PRIVATE_ANONYMOUS: usize = 0x22;
+const LINUX_NO_FD: usize = 0xFFFFFFFFFFFFFFFF;
+const MOVECOST_ERROR_FLOOR: usize = 0xFFFFFFFFFFFFF000;
+const MOVECOST_BYTES: usize = 262144;
+const MOVECOST_LINE: usize = 64;
+const MOVECOST_LINES: usize = 4096;
+const MOVECOST_ROUNDS: usize = 8;
+
+private fn movecost_fail(line: borrow []u8) {
+    svc5(WRITE_SYSCALL, 1, line as *u8 as usize, line.len, 0, 0);
+    svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+}
+
+private fn movecost_pin(cpu: usize) -> bool {
+    let mut mask: [u8; 8];
+    for index: usize in 0..<8 { mask[index] = 0; }
+    mask[0] = (1 << cpu) as u8;
+    return svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) == 0;
+}
+
+// One read-modify-write per cache line, so every line is brought in and
+// dirtied on the CPU running the pass.
+private fn movecost_pass(set: borrow [u8; 262144..]) {
+    for line: usize in 0..<MOVECOST_LINES {
+        let index: usize = line * MOVECOST_LINE;
+        if (index < set.len) { set[index] = set[index] ^ 1; }
+    }
+}
+
+private fn movecost_measured_pass(set: borrow [u8; 262144..], round: usize,
+                                  cold: usize) -> bool {
+    if (svc5(WORKLOAD_PROGRESS_SYSCALL, MOVE_COST_TAG, MOVE_COST_BEGIN,
+             0, 0, 0) != 1) {
+        return false;
+    }
+    movecost_pass(set);
+    return svc5(WORKLOAD_PROGRESS_SYSCALL, MOVE_COST_TAG, MOVE_COST_END,
+                round, cold, 0) == 1;
+}
+
+fn movecost_probe() !{unsafe} {
+    // The two highest-numbered online CPUs: 1 and 0 on two-vCPU QEMU,
+    // 3 and 2 on the board, where neither is core 0.
+    let mut mask: [u8; 8];
+    for index: usize in 0..<8 { mask[index] = 0; }
+    if (svc5(GETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) != 8) {
+        movecost_fail(bs"movecost: the online mask could not be read\n");
+    }
+    let online: usize = mask[0] as usize;
+    let mut first: usize = 8;
+    let mut second: usize = 8;
+    for step: usize in 0..<8 {
+        let cpu: usize = 7 - step;
+        if ((online & (1 << cpu)) != 0) {
+            if (first == 8) {
+                first = cpu;
+            } else if (second == 8) {
+                second = cpu;
+            }
+        }
+    }
+    if (second == 8) {
+        movecost_fail(bs"movecost: fewer than two cpus are online\n");
+    }
+    let base: usize = svc5(MMAP_SYSCALL, 0, MOVECOST_BYTES,
+                           LINUX_PROT_READ_WRITE,
+                           LINUX_MAP_PRIVATE_ANONYMOUS, LINUX_NO_FD);
+    if (base >= MOVECOST_ERROR_FLOOR || base == 0) {
+        movecost_fail(bs"movecost: the working set could not be mapped\n");
+    }
+    // An anonymous mapping is a length the kernel just granted, which the
+    // type system has no way to see: this is the one unchecked view.
+    let pointer: *u8 = unsafe { base as *u8 };
+    let set: [u8; 262144..] = unsafe { pointer[0..<262144] };
+    // Fault every page in and warm the first CPU before anything is timed.
+    if (movecost_pin(first) == false) {
+        movecost_fail(bs"movecost: the first cpu was refused\n");
+    }
+    movecost_pass(set);
+    movecost_pass(set);
+    for round: usize in 0..<MOVECOST_ROUNDS {
+        let mut target: usize = second;
+        if ((round & 1) == 1) { target = first; }
+        if (movecost_pin(target) == false) {
+            movecost_fail(bs"movecost: a move was refused\n");
+        }
+        if (movecost_measured_pass(set, round, 1) == false ||
+            movecost_measured_pass(set, round, 0) == false) {
+            // No PMU event counters on this CPU: nothing to measure, and
+            // the summary says so by storing nothing.
+            break;
+        }
+    }
+    if (movecost_pin(0) == false) {
+        movecost_fail(bs"movecost: cpu 0 was refused\n");
+    }
+    if (svc5(WORKLOAD_PROGRESS_SYSCALL, MOVE_COST_TAG, MOVE_COST_SUMMARY,
+             0, 0, 0) != 1) {
+        movecost_fail(bs"movecost: the kernel did not report the records\n");
+    }
+    svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+}

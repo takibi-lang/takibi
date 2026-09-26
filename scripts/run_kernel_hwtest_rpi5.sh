@@ -556,6 +556,13 @@ python3 "$REPO_ROOT/scripts/profile_kernel_workload.py" collect \
     --uart-log "$UART_LOG" --output "$ARTIFACT_DIR/busy-pair-profile.json" \
     --target rpi5
 
+# GitHub issue #503: what one move between cores costs, from /bin/movecost's
+# PMU event-counter records. The collector refuses a lost pass, a round that
+# did not move, and a cold pass that retired different work.
+python3 "$REPO_ROOT/scripts/profile_kernel_workload.py" move-cost \
+    --uart-log "$UART_LOG" --output "$ARTIFACT_DIR/move-cost.json" \
+    --target rpi5
+
 # GitHub issue #501: the same bounded event contract and Perfetto export as
 # QEMU, with real interrupt timing checked on the Cortex-A76 board.
 python3 "$REPO_ROOT/scripts/profile_kernel_workload.py" timeline \

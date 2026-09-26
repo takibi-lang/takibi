@@ -543,6 +543,26 @@ failure where it happened, because a lane that ran the interval and saw no
 sample has a broken hardware source rather than an empty profile. This host-side contract is independently testable; QEMU
 output is not RPi5 performance evidence.
 
+Both runners also save `move-cost.json`: what one move of a process between
+cores costs. `/bin/movecost` runs from init.sh before the busy pair starts. It
+walks a 256 KiB working set (one read-modify-write per cache line) and moves
+itself between the two highest-numbered online CPUs by its own mask. Each
+round has two passes on the CPU it just moved to: a cold pass, the first
+there, and a warm pass after it. Workload tag 13 brackets every pass. It
+reads two PMUv3 event counters, `CPU_CYCLES` and `INST_RETIRED`, on the CPU
+the syscall runs on. These are event counters 0 and 1, never the sampler's
+PMCCNTR_EL0 (`pmu_count_*` in `kernel/arch/arm64/kernel/pmu.S`).
+
+The kernel keeps a pass only when both reads ran on one CPU for one process.
+It counts any other pass as lost, and prints `profile: move-cost` records
+from core 0. The collector refuses the artifact if a pass was lost or a
+round did not move. On RPi5 it also refuses a cold pass that retired
+different work from its warm pass. It then reports the median cold-minus-warm
+difference. The counters are not multiplexed, so enabled and running time
+are the same interval. QEMU's cycles come from virtual time and its
+INST_RETIRED reads zero without icount, so there only the collection path is
+checked.
+
 This is an explicit profiling command, not a performance threshold in
 `make allcheck`.
 

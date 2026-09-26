@@ -36,3 +36,16 @@ extern fn pmu_sample_rearm(period: usize);
 
 // Disable the counter and its interrupt, and clear any latched overflow.
 extern fn pmu_sample_stop();
+
+// GitHub issue #503: the event-counter pair, CPU_CYCLES in event counter 0
+// and INST_RETIRED in event counter 1. Separate from the sampler's cycle
+// counter above. Values are 32 bits wide; take differences modulo 2^32.
+
+// 1 when this CPU has PMUv3 with at least two event counters.
+extern fn pmu_count_supported() -> usize;
+
+// Program and enable both counters on this CPU without resetting them.
+extern fn pmu_count_start();
+
+extern fn pmu_count_cycles() -> usize;
+extern fn pmu_count_instructions() -> usize;
