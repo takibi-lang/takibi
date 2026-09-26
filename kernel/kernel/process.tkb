@@ -3085,6 +3085,53 @@ private fn kernel_process_frame_belongs_to(
 // onto this CPU's IRQ stack. The interrupted process frame remains intact,
 // but the physical process stack is no longer in use and may become eligible
 // for another CPU once its logical state becomes Ready.
+// GitHub issue #468: three authorities answer "which address-space root is
+// active" -- the process record's own root, this CPU's software target root
+// (process_image.tkb), and TTBR0_EL1, which is what the hardware walks --
+// and #437's hardest bug was two of them disagreeing while each looked
+// valid. EL0 return is the one moment all three must name the same root,
+// and the last moment a disagreement is still a report rather than a user
+// access through the wrong page table. So they are compared here, on every
+// EL0 return, and a disagreement fail-stops with all three values. Not a
+// counter: the fallback counter #437 had was healthy and wrong at once.
+//
+// Measured before it became a fail-stop: 6615 EL0 returns in one QEMU boot,
+// no disagreement.
+const TTBR0_BADDR_MASK: usize = 0x0000FFFFFFFFFFFE;
+
+private fn kernel_process_root_authorities_check(incoming: ProcessHandle,
+                                                 frame_sp: usize) {
+    let slot: usize = incoming.pool_index;
+    let record_l1: usize = address_space_l1_physical(slot);
+    let hardware_l1: usize = crash_snapshot_read_ttbr0_el1() & TTBR0_BADDR_MASK;
+    let mut target: usize = 0xFFFFFFFFFFFFFFFF;
+    match process_image_target_root_peek() {
+        ProcessImageTargetRootResult::Missing => {}
+        ProcessImageTargetRootResult::Ready(root) => {
+            target = process_image_root_index(root);
+        }
+    }
+    if (record_l1 == hardware_l1 && target == slot) { return; }
+    kernel_boot_log("oops: root authorities disagree at EL0 return: pid=");
+    uart_put_udec(scheduled_process_pid_of_handle(incoming));
+    kernel_boot_log(" slot=");
+    uart_put_udec(slot);
+    kernel_boot_log(" record_l1=");
+    uart_put_hex(record_l1);
+    kernel_boot_log(" ttbr0_l1=");
+    uart_put_hex(hardware_l1);
+    if (target == 0xFFFFFFFFFFFFFFFF) {
+        kernel_boot_log(" target=unset\n");
+    } else {
+        kernel_boot_log(" target_slot=");
+        uart_put_udec(target);
+        kernel_boot_log(" target_l1=");
+        uart_put_hex(address_space_l1_physical(target));
+        kernel_boot_log("\n");
+    }
+    kernel_syscall_fail_stop(frame_sp);
+}
+
 fn kernel_process_stack_interrupt_depart() {
     let core: usize = cpu_id();
     if (core >= KERNEL_MAX_CORES || execution_here().stack_live == false) {
@@ -3156,6 +3203,9 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
         kernel_init_boot_fixture_reaped(
             scheduled_process_pid_of_handle(incoming));
     }
+    // Last, after the deferred reap: that reap is the path that left the
+    // target at root 0 in #437.
+    kernel_process_root_authorities_check(incoming, frame_sp);
 }
 
 // Called after kernel_secondary_idle_enter has moved SP_EL1 onto this CPU's

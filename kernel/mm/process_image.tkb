@@ -506,6 +506,18 @@ fn process_image_target_root_result()
         process_image_root(process_image_target_root_here()));
 }
 
+// GitHub issue #468: this CPU's target root for a check, WITHOUT counting.
+// process_image_target_root_result counts every absent answer and a view
+// asserts those counts, so a check asked on every EL0 return must not move
+// them.
+fn process_image_target_root_peek() -> ProcessImageTargetRootResult {
+    if (process_image_target_root_is_set_here() == false) {
+        return ProcessImageTargetRootResult::Missing;
+    }
+    return ProcessImageTargetRootResult::Ready(
+        process_image_root(process_image_target_root_here()));
+}
+
 fn process_image_pte_read(index: usize) -> usize {
     return address_space_pte_read(process_image_target_root_here(), index);
 }
