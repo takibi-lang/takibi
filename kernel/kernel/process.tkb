@@ -772,22 +772,107 @@ private let mut scheduled_process_missing_reason: usize = 0;
 // context.
 private let mut scheduled_process_missing_cpu: usize = 0;
 private let mut scheduled_process_missing_current: usize = 0;
-// Which record walk this cpu was inside when the miss happened, per-CPU
-// because only the missing core's answer means anything. 0 is none of them,
-// which is itself an answer: the reader is not a walk at all.
-//   1 kernel_process_secondary_start   2 kernel_process_next_ready
-//   3 kernel_process_reap_own_zombies  4 scheduled_process_release_every_process
-private let mut scheduled_process_walk_site: [usize; KERNEL_MAX_CORES];
-private let mut scheduled_process_missing_site: usize = 0;
+// GitHub issue #573: what this CPU is doing, one word per CPU, readable by a
+// capture after the fact. #569 and #571 each stalled on "what was this CPU
+// doing when the miss happened", and each time the answer was an ad-hoc
+// per-CPU word added, read once and removed. This is that word, kept.
+//
+// The vocabulary is this enum, and kernel_activity_name answers with a
+// match that has no default arm: an activity added without a name does not
+// compile. The first four values keep the numbers the record-walk marker
+// they replace used. A site enters with kernel_activity_enter and leaves by
+// restoring what it found, so a record walk inside a syscall reads as the
+// walk and then as the syscall again.
+//
+// Readers: the record-miss reports in the boot suite, the oops record
+// (`oops: activity=`), and DDB's `current` (`ddb: activity cpu=`), which is
+// taken with every CPU stopped. One store per entry and per exit; no lock,
+// since only this CPU writes its own word.
+enum KernelActivity: u8 {
+    None; SecondaryStart; NextReady; ReapOwnZombies; ReleaseEveryProcess;
+    Syscall; IdleLoop;
+}
 
-private fn scheduled_process_walk_site_here() -> *usize {
-    let base: *usize = scheduled_process_walk_site;
+fn kernel_activity_name(activity: KernelActivity) -> *u8 {
+    match activity {
+        KernelActivity::None => { return "none" as *u8; }
+        KernelActivity::SecondaryStart => { return "secondary-start" as *u8; }
+        KernelActivity::NextReady => { return "next-ready" as *u8; }
+        KernelActivity::ReapOwnZombies => { return "reap-own-zombies" as *u8; }
+        KernelActivity::ReleaseEveryProcess => {
+            return "release-every-process" as *u8;
+        }
+        KernelActivity::Syscall => { return "syscall" as *u8; }
+        KernelActivity::IdleLoop => { return "idle-loop" as *u8; }
+    }
+}
+
+private let mut kernel_activity: [KernelActivity; KERNEL_MAX_CORES];
+private let mut scheduled_process_missing_site: KernelActivity;
+
+private fn kernel_activity_here() -> *KernelActivity {
+    let base: *KernelActivity = kernel_activity;
     let core: usize = cpu_id();
     if (core >= KERNEL_MAX_CORES) { return base; }
     return base + (core as isize);
 }
 
-fn scheduled_process_missing_site_value() -> usize {
+fn kernel_activity_enter(activity: KernelActivity) -> KernelActivity {
+    let previous: KernelActivity = *kernel_activity_here();
+    *kernel_activity_here() = activity;
+    return previous;
+}
+
+fn kernel_activity_leave(previous: KernelActivity) {
+    *kernel_activity_here() = previous;
+}
+
+fn kernel_activity_set(activity: KernelActivity) {
+    *kernel_activity_here() = activity;
+}
+
+// Any CPU's word, for a reporter that runs with every CPU stopped.
+fn kernel_activity_of(core: {0..<KERNEL_MAX_CORES as usize}) -> KernelActivity {
+    return kernel_activity[core];
+}
+
+// The oops record keeps words, not enums, because it is a retained layout
+// read by gdb scripts as well; these two cross that boundary. A code no
+// activity has reads as "unknown" rather than being trusted. The chain below
+// is not checked for exhaustiveness the way kernel_activity_name is; the
+// oops lane refuses `unknown` until GitHub issue #608 gives the language a
+// checked integer-to-enum conversion.
+fn kernel_activity_code_here() -> usize {
+    return ((*kernel_activity_here()) as u8) as usize;
+}
+
+fn kernel_activity_name_for_code(code: usize) -> *u8 {
+    let mut named: *u8 = "unknown" as *u8;
+    if (code == (KernelActivity::None as u8) as usize) {
+        named = kernel_activity_name(KernelActivity::None);
+    }
+    if (code == (KernelActivity::SecondaryStart as u8) as usize) {
+        named = kernel_activity_name(KernelActivity::SecondaryStart);
+    }
+    if (code == (KernelActivity::NextReady as u8) as usize) {
+        named = kernel_activity_name(KernelActivity::NextReady);
+    }
+    if (code == (KernelActivity::ReapOwnZombies as u8) as usize) {
+        named = kernel_activity_name(KernelActivity::ReapOwnZombies);
+    }
+    if (code == (KernelActivity::ReleaseEveryProcess as u8) as usize) {
+        named = kernel_activity_name(KernelActivity::ReleaseEveryProcess);
+    }
+    if (code == (KernelActivity::Syscall as u8) as usize) {
+        named = kernel_activity_name(KernelActivity::Syscall);
+    }
+    if (code == (KernelActivity::IdleLoop as u8) as usize) {
+        named = kernel_activity_name(KernelActivity::IdleLoop);
+    }
+    return named;
+}
+
+fn scheduled_process_missing_site_value() -> KernelActivity {
     return scheduled_process_missing_site;
 }
 
@@ -797,7 +882,7 @@ fn scheduled_process_missing_site_value() -> usize {
 private let mut scheduled_process_freed_slot_count: usize = 0;
 private let mut scheduled_process_freed_first_slot: usize = 0;
 private let mut scheduled_process_freed_cpu: usize = 0;
-private let mut scheduled_process_freed_site: usize = 0;
+private let mut scheduled_process_freed_site: KernelActivity;
 
 fn scheduled_process_freed_slot_count_value() -> usize {
     return scheduled_process_freed_slot_count;
@@ -811,7 +896,7 @@ fn scheduled_process_freed_cpu_value() -> usize {
     return scheduled_process_freed_cpu;
 }
 
-fn scheduled_process_freed_site_value() -> usize {
+fn scheduled_process_freed_site_value() -> KernelActivity {
     return scheduled_process_freed_site;
 }
 
@@ -876,7 +961,7 @@ private fn scheduled_process_record_at(slot: usize) -> *ProcessRecord
                     scheduled_process_freed_first_slot = slot;
                     scheduled_process_freed_cpu = cpu_id();
                     scheduled_process_freed_site =
-                        *scheduled_process_walk_site_here();
+                        *kernel_activity_here();
                 }
                 return &scheduled_process_record_absent;
             }
@@ -887,7 +972,7 @@ private fn scheduled_process_record_at(slot: usize) -> *ProcessRecord
                 scheduled_process_missing_reason = 2;
                 scheduled_process_missing_cpu = cpu_id();
                 scheduled_process_missing_site =
-                    *scheduled_process_walk_site_here();
+                    *kernel_activity_here();
                 // +1, so 0 means "no current process here" rather than
                 // "current is slot 0". The first version could not tell
                 // those apart and the difference is the idle path.
@@ -1922,7 +2007,8 @@ private fn scheduled_process_record_reset(slot: usize) !{unsafe} {
 // kernel_syscall_process_configure, an image record) can outlive the
 // process the way the static record itself does.
 private fn scheduled_process_release_every_process() !{unsafe} {
-    *scheduled_process_walk_site_here() = 4;
+    let activity_before: KernelActivity =
+        kernel_activity_enter(KernelActivity::ReleaseEveryProcess);
     scheduled_process_pool_init();
     let mut cursor = scheduled_process_first_pool_slot();
     let mut walking: bool = true;
@@ -1942,6 +2028,7 @@ private fn scheduled_process_release_every_process() !{unsafe} {
     scheduled_process_boot_live = false;
     // Back to zero minted, so the next process created is pid 1 again.
     scheduled_process_pid_counter_restore(0);
+    kernel_activity_leave(activity_before);
 }
 
 // No exec teardown here, deliberately: a whole-world reset is not a
@@ -3206,6 +3293,8 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
     // Last, after the deferred reap: that reap is the path that left the
     // target at root 0 in #437.
     kernel_process_root_authorities_check(incoming, frame_sp);
+    // Back to EL0: the kernel is doing nothing on this CPU's behalf.
+    kernel_activity_set(KernelActivity::None);
 }
 
 // Called after kernel_secondary_idle_enter has moved SP_EL1 onto this CPU's
@@ -4338,7 +4427,8 @@ fn kernel_process_affinity_set(pid: usize, requested: usize)
 
 private fn kernel_process_next_ready(from: ProcessHandle, cpu: usize)
         -> ProcessNextReadyResult {
-    *scheduled_process_walk_site_here() = 2;
+    let activity_before: KernelActivity =
+        kernel_activity_enter(KernelActivity::NextReady);
     let mut root: ProcessHandle = kernel_process_chain_root(from);
     let mut cursor: ProcessHandle = from;
     let mut remaining: usize = scheduled_process_pool_live_count() + 1;
@@ -4348,11 +4438,11 @@ private fn kernel_process_next_ready(from: ProcessHandle, cpu: usize)
         if (scheduled_process_same_slot(cursor, from) == false &&
             scheduled_process_state_of(cursor) == ProcessSlotState::Ready &&
             kernel_process_cpu_allows_slot(cpu, cursor.pool_index)) {
-            *scheduled_process_walk_site_here() = 0;
+            kernel_activity_leave(activity_before);
             return ProcessNextReadyResult::Next(cursor);
         }
     }
-    *scheduled_process_walk_site_here() = 0;
+    kernel_activity_leave(activity_before);
     return ProcessNextReadyResult::Missing;
 }
 
@@ -4494,7 +4584,8 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
         process_run_unlock(guard);
         return ProcessSecondaryStart::Idle;
     }
-    *scheduled_process_walk_site_here() = 1;
+    let activity_before: KernelActivity =
+        kernel_activity_enter(KernelActivity::SecondaryStart);
     let mut cursor = scheduled_process_first_slot();
     let mut walking: bool = true;
     while (walking) {
@@ -4515,7 +4606,7 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
                         ScheduledProcessReadyTakeResult::Ready(resources) => {
                             let (owner, ready) = resources;
                             let running = scheduled_process_start(owner, ready);
-                            *scheduled_process_walk_site_here() = 0;
+                            kernel_activity_leave(activity_before);
                             process_run_unlock(guard);
                             return kernel_process_secondary_start_reserved(
                                 owner, running);
@@ -4526,7 +4617,7 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
             }
         }
     }
-    *scheduled_process_walk_site_here() = 0;
+    kernel_activity_leave(activity_before);
     process_run_unlock(guard);
     return ProcessSecondaryStart::Idle;
 }
@@ -8409,7 +8500,8 @@ fn process_execution_model_assumption() {
 // fails a view instead of being collected quietly.
 fn kernel_process_reap_own_zombies() !{unsafe} {
     if (execution_here().current_live == false) { return; }
-    *scheduled_process_walk_site_here() = 3;
+    let activity_before: KernelActivity =
+        kernel_activity_enter(KernelActivity::ReapOwnZombies);
     let mut sweeping: usize = scheduled_process_pool_live_count() + 1;
     while (sweeping != 0) {
         sweeping = sweeping - 1;
@@ -8467,7 +8559,7 @@ fn kernel_process_reap_own_zombies() !{unsafe} {
         }
         if (found == false) { sweeping = 0; }
     }
-    *scheduled_process_walk_site_here() = 0;
+    kernel_activity_leave(activity_before);
 }
 
 // Whose child list, if any, holds this slot.

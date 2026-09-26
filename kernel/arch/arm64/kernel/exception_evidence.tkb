@@ -86,6 +86,9 @@ struct CrashSnapshot {
     // rather than implying the rest do not exist.
     fd_kind: [usize; CRASH_FD_SNAPSHOT_SLOTS];
     fd_object: [usize; CRASH_FD_SNAPSHOT_SLOTS];
+    // GitHub issue #573: what the faulting CPU was doing, as a
+    // KernelActivity code (kernel/kernel/process.tkb).
+    activity: usize;
 }
 
 let mut crash_snapshot: CrashSnapshot;
@@ -1491,6 +1494,17 @@ private fn ddb_render_current() !{unsafe} {
     ddb_puts(" state="); ddb_put_udec(ddb_snapshot.process_state);
     ddb_puts(" wait="); ddb_put_udec(ddb_snapshot.wait_reason);
     ddb_puts("\n");
+    // GitHub issue #573: every online CPU's activity word. The world is
+    // stopped while DDB runs, so each word is still what its CPU was doing.
+    for raw: usize in 0..<KERNEL_MAX_CORES {
+        if (raw < kernel_online_core_count()) {
+            let core: {0..<KERNEL_MAX_CORES as usize} = raw;
+            ddb_puts("ddb: activity cpu="); ddb_put_udec(raw);
+            ddb_puts(" ");
+            ddb_puts(kernel_activity_name(kernel_activity_of(core)));
+            ddb_puts("\n");
+        }
+    }
 }
 
 private fn ddb_render_intr() !{unsafe} {
@@ -2543,6 +2557,9 @@ private fn crash_snapshot_render_from(record: *CrashSnapshot,
     kernel_boot_log(" image=");
     if (record.image_kind == 1) { kernel_boot_log("exec\n"); }
     else { kernel_boot_log("bootstrap\n"); }
+    kernel_boot_log("oops: activity=");
+    kernel_boot_log(kernel_activity_name_for_code(record.activity));
+    kernel_boot_log("\n");
     // A SEPARATE line, not fields appended above: the oops lane matches that
     // one with `image=bootstrap$` anchored at the end, and no view filter
     // selects `oops:` at all, so a new line costs nothing and an appended
@@ -2810,6 +2827,7 @@ fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
     crash_snapshot_here().wait_reason = kernel_process_crash_wait_reason();
     crash_snapshot_here().wait4_status_ptr = kernel_process_crash_wait4_status_ptr();
     crash_snapshot_here().root_slot = kernel_process_crash_root_slot();
+    crash_snapshot_here().activity = kernel_activity_code_here();
     crash_snapshot_here().root_l1 = address_space_l1_physical(crash_snapshot_here().root_slot);
     crash_snapshot_here().root_asid = address_space_asid(crash_snapshot_here().root_slot);
     // Slot 0 through the same two accessors the line above uses, so the pair

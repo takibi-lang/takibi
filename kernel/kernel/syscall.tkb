@@ -3594,6 +3594,7 @@ fn kernel_syscall_migrate_return(frame_sp: usize) {
 fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
                            x2: usize, x3: usize, x4: usize)
         -> (usize, usize) !{unsafe} {
+    kernel_activity_set(KernelActivity::Syscall);
     kernel_log_peer_drain();
     workload_profile_note_syscall(number);
     // GitHub issue #580: sample the real BusyBox sleep applet at syscall

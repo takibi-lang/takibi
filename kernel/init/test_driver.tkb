@@ -531,7 +531,7 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
         kernel_boot_log(" cpu=");
         uart_put_udec(scheduled_process_freed_cpu_value());
         kernel_boot_log(" site=");
-        uart_put_udec(scheduled_process_freed_site_value());
+        kernel_boot_log(kernel_activity_name(scheduled_process_freed_site_value()));
         kernel_boot_log("\n");
     }
     if (scheduled_process_record_missing_uses() != 0) {
@@ -546,7 +546,7 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
         kernel_boot_log(" current=");
         uart_put_udec(scheduled_process_missing_current_value());
         kernel_boot_log(" site=");
-        uart_put_udec(scheduled_process_missing_site_value());
+        kernel_boot_log(kernel_activity_name(scheduled_process_missing_site_value()));
         kernel_boot_log("\n");
     }
     // GitHub issue #488: a reap that took the record execution_here() still

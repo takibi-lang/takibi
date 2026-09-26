@@ -281,6 +281,7 @@ fn kernel_secondary_main(context: usize) !{unsafe} {
                     el0_context_resume(next_sp);
                 }
             }
+            kernel_activity_set(KernelActivity::IdleLoop);
             wfi();
         }
     }
@@ -351,6 +352,7 @@ fn kernel_core0_idle_loop() {
                 el0_context_resume(next_sp);
             }
         }
+        kernel_activity_set(KernelActivity::IdleLoop);
         wfi();
     }
 }
