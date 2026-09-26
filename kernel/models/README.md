@@ -80,8 +80,51 @@ Properties:
   fairness the kernel's scheduler rotation provides.
 - `TypeOK`, `RunningMatchesCores`: bookkeeping sanity.
 
+## StackOwnership.tla -- kernel stacks across switch, exit and idle
+
+Two cores; a parent and the child it clones. A core's logical current
+process and the stack it physically stands on are separate variables, as
+they are in the kernel, and `owner` records each process stack's physical
+owner.
+
+Two constants re-introduce the two past defects #601 asked the model to
+find. Each is one variant, and `make modelcheck` requires both to fail:
+
+- `EXIT_IDLES = FALSE` is 08df64c6's deadlock. After an exit, core 0
+  waited for a successor while it still stood on the zombie's stack. The
+  only successor was the parent, which could not start while that stack
+  was owned. TLC reports `Deadlock reached`. Apalache reports a deadlock
+  only when every run of some length is stuck, so this variant is TLC's to
+  find, and Apalache only shows that it runs.
+- `LEAVE_CHECKS_STACK = FALSE` is 765a27af's lost child. A process leaving
+  its core hands back whatever stack the core stands on. A clone child's
+  first return stands on its parent's, so the parent was made Ready and the
+  child was lost. TLC and Apalache both report `RunningMatchesCores`, in
+  two steps.
+
+| Action | Kernel function it abstracts | What is kept, what is dropped |
+| --- | --- | --- |
+| `Clone` | `kernel_process_clone_begin`, `kernel_syscall_clone_child_return` | the child's first return runs first, on its parent's stack; fork's fd and VM copies are dropped |
+| `SwitchComplete` | `kernel_process_stack_switch_complete` | the physical handoff at exception return: release the stack stood on, own the current process's |
+| `Wait4Block` | the wait4 arm of `kernel_syscall_dispatch_action`, `kernel_process_block_current` | a parent blocks before its child exits, with no successor; the #550 window is Wait4Block.tla's, not this model's |
+| `ChildExit` | `kernel_process_child_exit`, `kernel_syscall_exit_current_process` | the child becomes a zombie and wakes a Blocked parent, leaving it Ready with its continuation; the core still stands on the zombie's stack |
+| `IdleEnter` | `kernel_process_stack_idle_complete`, `kernel_process_stack_idle_blocked` | a core with no current process moves to its idle stack and releases the one it stood on |
+| `Dispatch` | `kernel_process_secondary_start`, `scheduled_process_ready_take` | a core takes a Ready process whose stack no core owns, and a parent with a continuation only once the child's stack is free too; affinity is dropped |
+| `Wait4Reap` | `kernel_syscall_wait4_deliver` | the parent reaps once the child's stack is free |
+| `Leave` | `kernel_process_core0_leave_excluded`, `kernel_process_migrate_current`, `kernel_process_stack_idle_yield` | a running process leaves its core and the stack the core stands on is released and made Ready; why it leaves (affinity, a refused syscall, the tick) is dropped |
+
+Properties:
+
+- `StackSafety` (#601's safety property, TLC): a core stands only on a stack
+  it owns, and since `owner` names one core per stack, no stack is used by
+  two cores at once.
+- `RunningMatchesCores`: a Running process is some core's current process,
+  on one core. The lost child violates it.
+- `ChildReaped` (liveness, TLC only): the parent's wait4 completes.
+- Deadlock freedom: TLC's own check, which the exit variant fails.
+
 `scripts/check_model_function_map.py` fails the build when a function named
-in this table no longer exists, so a rename or removal forces the table,
+in these tables no longer exists, so a rename or removal forces the table,
 and a look at the model, to be updated.
 
 ## Keeping models and the kernel in step
