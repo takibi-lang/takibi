@@ -25,25 +25,28 @@ OUT="$REPO_ROOT/_build/models"
 MODELS="$REPO_ROOT/kernel/models"
 mkdir -p "$OUT"
 
-failures=0
-fail() { echo "FAIL modelcheck: $*"; failures=$((failures + 1)); }
+# Every TLC run, typecheck and Apalache run is independent, so they run at
+# once, MODELCHECK_JOBS at a time (default: every core), and are judged when
+# all have finished. This is deliberately not TAKIBI_JOBS: that one is 1 on
+# CI to keep QEMU lanes from starving each other's guest vCPUs, which says
+# nothing about these JVMs -- and on CI no other lane runs beside this one.
+JOBS="${MODELCHECK_JOBS:-$(nproc)}"
+QUEUE="$OUT/jobs.list"
+: >"$QUEUE"
+EXPECT="$OUT/expect.list"
+: >"$EXPECT"
 
-# tlc <model> <variant>: run TLC, keep the log, print it on failure.
-tlc() {
-    local log="$OUT/$1-$2.tlc.log"
-    (cd "$MODELS" && java -XX:+UseParallelGC -cp "$TLA_JAR" tlc2.TLC \
-        -workers auto -config "$1_$2.cfg" -metadir "$OUT/$1-$2.states" \
-        "$1.tla") >"$log" 2>&1 || true
-    echo "$log"
+# Each job is one line: a log path, then the command that writes it. Every
+# Apalache run gets its own --out-dir, since concurrent runs sharing one
+# would write into each other's.
+queue_tlc() {  # model variant
+    echo "$OUT/$1-$2.tlc.log java -XX:+UseParallelGC -cp $TLA_JAR tlc2.TLC -workers 1 -config $1_$2.cfg -metadir $OUT/$1-$2.states $1.tla" >>"$QUEUE"
 }
-
-# apalache <model> <cinit> <invariant> <length>: a shallow check.
-apalache() {
-    local log="$OUT/$1-$2.apalache.log"
-    (cd "$MODELS" && "$APALACHE" check --out-dir="$OUT/apalache" \
-        --cinit="$2" --init=Init --next=Next --inv="$3" --length="$4" \
-        "$1.tla") >"$log" 2>&1 || true
-    echo "$log"
+queue_typecheck() {  # model
+    echo "$OUT/$1.typecheck.log $APALACHE typecheck --out-dir=$OUT/apalache/$1-typecheck $1.tla" >>"$QUEUE"
+}
+queue_apalache() {  # model variant cinit invariant length
+    echo "$OUT/$1-$2.apalache.log $APALACHE check --out-dir=$OUT/apalache/$1-$2 --cinit=$3 --init=Init --next=Next --inv=$4 --length=$5 $1.tla" >>"$QUEUE"
 }
 
 # check_model <model> <apalache invariant> <apalache length> <variant>...
@@ -55,40 +58,16 @@ apalache() {
 # such a variant expects "ok" from Apalache, which then shows only that it
 # runs.
 check_model() {
-    local model="$1" invariant="$2" length="$3" before="$failures" log
+    local model="$1" invariant="$2" length="$3"
     shift 3
-
-    log="$OUT/$model.typecheck.log"
-    (cd "$MODELS" && "$APALACHE" typecheck --out-dir="$OUT/apalache" \
-        "$model.tla") >"$log" 2>&1 || true
-    grep -q "Type checker \[OK\]" "$log" ||
-        fail "$model: Apalache typecheck failed (see $log)"
-
+    queue_typecheck "$model"
     local variant cfg cinit tlc_expect apa_expect
     for variant in "$@"; do
         IFS=: read -r cfg cinit tlc_expect apa_expect <<<"$variant"
-
-        log="$(tlc "$model" "$cfg")"
-        case "$tlc_expect" in
-            pass) grep -q "Model checking completed. No error has been found." "$log" ||
-                      fail "$model $cfg: TLC found an error (see $log)" ;;
-            deadlock) grep -q "Error: Deadlock reached." "$log" ||
-                      fail "$model $cfg: TLC did not report the deadlock (see $log)" ;;
-            *) grep -q "Invariant $tlc_expect is violated." "$log" ||
-                   fail "$model $cfg: TLC did not report $tlc_expect (see $log)" ;;
-        esac
-
-        log="$(apalache "$model" "$cinit" "$invariant" "$length")"
-        case "$apa_expect" in
-            ok) grep -q "EXITCODE: OK" "$log" ||
-                    fail "$model $cfg: Apalache found an error (see $log)" ;;
-            violated) grep -q "EXITCODE: ERROR (12)" "$log" ||
-                    fail "$model $cfg: Apalache did not report $invariant (see $log)" ;;
-        esac
+        queue_tlc "$model" "$cfg"
+        queue_apalache "$model" "$cfg" "$cinit" "$invariant" "$length"
+        echo "$model $cfg $tlc_expect $apa_expect $invariant $length" >>"$EXPECT"
     done
-
-    [ "$failures" -eq "$before" ] &&
-        echo "PASS modelcheck: $model -- $# variant(s) each gave TLC's and Apalache's (length $length) expected verdict, types check"
 }
 
 check_model Wait4Block NoLostWakeup 4 \
@@ -105,4 +84,41 @@ check_model RecordLifetime ReadsOnlyLiveRecords 6 \
     unfixed:CInitUnfixed:ReadsOnlyLiveRecords:violated \
     readerunlocked:CInitReaderUnlocked:ReadsOnlyLiveRecords:violated
 
+# Run. A job's own exit status is not the verdict -- an unfixed variant is
+# SUPPOSED to fail -- so every job is allowed to fail here and judged below.
+(cd "$MODELS" && xargs -P "$JOBS" -L 1 sh -c 'log="$0"; "$@" >"$log" 2>&1 || true' <"$QUEUE")
+
+failures=0
+fail() { echo "FAIL modelcheck: $*"; failures=$((failures + 1)); }
+
+for model in $(cut -d' ' -f1 "$EXPECT" | uniq); do
+    grep -q "Type checker \[OK\]" "$OUT/$model.typecheck.log" ||
+        fail "$model: Apalache typecheck failed (see $OUT/$model.typecheck.log)"
+done
+
+declare -A variants lengths
+while read -r model cfg tlc_expect apa_expect invariant length; do
+    variants[$model]=$(( ${variants[$model]:-0} + 1 ))
+    lengths[$model]=$length
+    log="$OUT/$model-$cfg.tlc.log"
+    case "$tlc_expect" in
+        pass) grep -q "Model checking completed. No error has been found." "$log" ||
+                  fail "$model $cfg: TLC found an error (see $log)" ;;
+        deadlock) grep -q "Error: Deadlock reached." "$log" ||
+                  fail "$model $cfg: TLC did not report the deadlock (see $log)" ;;
+        *) grep -q "Invariant $tlc_expect is violated." "$log" ||
+               fail "$model $cfg: TLC did not report $tlc_expect (see $log)" ;;
+    esac
+    log="$OUT/$model-$cfg.apalache.log"
+    case "$apa_expect" in
+        ok) grep -q "EXITCODE: OK" "$log" ||
+                fail "$model $cfg: Apalache found an error (see $log)" ;;
+        violated) grep -q "EXITCODE: ERROR (12)" "$log" ||
+                fail "$model $cfg: Apalache did not report $invariant (see $log)" ;;
+    esac
+done <"$EXPECT"
+
 [ "$failures" -eq 0 ] || exit 1
+for model in $(cut -d' ' -f1 "$EXPECT" | uniq); do
+    echo "PASS modelcheck: $model -- ${variants[$model]} variant(s) each gave TLC's and Apalache's (length ${lengths[$model]}) expected verdict, types check"
+done
