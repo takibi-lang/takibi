@@ -266,6 +266,7 @@ private let mut move_cost_reported: bool;
 const PEER_MUTATION_MKDIR: usize = 1;
 const PEER_MUTATION_RENAME: usize = 2;
 const PEER_MUTATION_RMDIR: usize = 4;
+const PEER_MUTATION_WRITE: usize = 8;
 private let mut workload_peer_mutation_pid: usize;
 private let mut workload_peer_mutation_seen: usize;
 
@@ -1396,11 +1397,12 @@ fn workload_peer_mutation_report() -> usize {
     let complete: bool =
         workload_peer_mutation_pid == kernel_process_current_pid() &&
         workload_peer_mutation_seen ==
-            (PEER_MUTATION_MKDIR | PEER_MUTATION_RENAME | PEER_MUTATION_RMDIR);
+            (PEER_MUTATION_MKDIR | PEER_MUTATION_RENAME | PEER_MUTATION_RMDIR |
+             PEER_MUTATION_WRITE);
     process_run_unlock(guard);
     if (complete == false) { return 0; }
     kernel_boot_log(
-        "workload: ext2 mkdirat, renameat and unlinkat completed on a peer, each under the mutation guard\n");
+        "workload: ext2 mkdirat, renameat, unlinkat and a file write completed on a peer, each under the mutation guard\n");
     return 1;
 }
 

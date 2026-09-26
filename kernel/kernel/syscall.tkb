@@ -2688,9 +2688,22 @@ fn kernel_syscall_clone_parent_return(parent_sp: usize) {
 // A lookup that decides whether a mutation may proceed belongs INSIDE the
 // same guard as the mutation it gates -- mkdir's existence check is the
 // example: outside it, another core could create the name in between.
-private fn syscall_ext2_write_locked(inode: usize, offset: usize,
-                                     content: []u8) -> usize {
+// GitHub issue #602: the file position is read, bounded and advanced under
+// the same guard as the write it positions. Two processes sharing one open
+// file (a forked descriptor) on two CPUs would otherwise both write at the
+// position they read and both advance it by their own length, which lost
+// one write -- harmless while every file write ran on core 0, whose
+// dispatch is not preemptible. A reader's position update is not under
+// this guard; see kernel/CONCURRENCY.md.
+private fn syscall_ext2_write_locked(fd: usize, content: []u8) -> usize {
     let guard = ext2_mutation_take();
+    let offset: usize = kernel_syscall_file_offset(fd);
+    let length: usize = content.len;
+    if (offset > EXT2_MAX_SINGLE_FILE_BLOCKS * KERNEL_BLOCK_SIZE - length) {
+        ext2_mutation_give(guard);
+        return LINUX_EINVAL;
+    }
+    let inode: usize = kernel_syscall_file_inode(fd);
     let mut answer: usize = LINUX_EINVAL;
     if (offset == 0) {
         match ext2_resize_small_file(syscall_ext2_mount, inode, content) {
@@ -2703,6 +2716,10 @@ private fn syscall_ext2_write_locked(inode: usize, offset: usize,
             Ext2ResizeResult::Invalid => { }
             Ext2ResizeResult::Resized => { answer = 0; }
         }
+    }
+    if (answer == 0 &&
+        kernel_syscall_file_set_offset(fd, offset + length) == false) {
+        answer = LINUX_EBADF;
     }
     ext2_mutation_give(guard);
     return answer;
@@ -3408,8 +3425,12 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     }
     // The terminal: a peer's output goes through its console ring (#534),
     // and input is ordered by the run lock (#547).
+    // An ext2 file since GitHub issue #602: the write, its position and
+    // its bound are one section under the mutation guard, which waits for
+    // every CPU's counted readers.
     if (number == AARCH64_NR_WRITE) {
-        return kernel_syscall_terminal_is_open(fd);
+        return kernel_syscall_terminal_is_open(fd) ||
+            kernel_syscall_file_is_open(fd);
     }
     // GitHub issue #581: the filesystem READ path, which is the first
     // subsystem in this table rather than another per-process word.
@@ -3969,10 +3990,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             if (kernel_syscall_file_writable(fd) == false) {
                 return SyscallAction::Resume(LINUX_EBADF);
             }
-            let file_offset: usize = kernel_syscall_file_offset(fd);
-            if (length == 0 || length > KERNEL_BLOCK_SIZE ||
-                file_offset > EXT2_MAX_SINGLE_FILE_BLOCKS *
-                              KERNEL_BLOCK_SIZE - length) {
+            if (length == 0 || length > KERNEL_BLOCK_SIZE) {
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
             let destination_base: *u8 = syscall_scratch_here().file_buffer as *u8;
@@ -3988,12 +4006,9 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
             let content = content_buffer[0..<length];
-            let resized: usize = syscall_ext2_write_locked(
-                    kernel_syscall_file_inode(fd), file_offset, content);
-            if (resized != 0) { return SyscallAction::Resume(resized); }
-            if (kernel_syscall_file_set_offset(fd, file_offset + length) == false) {
-                return SyscallAction::Resume(LINUX_EBADF);
-            }
+            let answer: usize = syscall_ext2_write_locked(fd, content);
+            if (answer != 0) { return SyscallAction::Resume(answer); }
+            workload_peer_mutation_note(8);
             return SyscallAction::Resume(length);
         }
         if (kernel_syscall_terminal_is_open(fd) == false) {

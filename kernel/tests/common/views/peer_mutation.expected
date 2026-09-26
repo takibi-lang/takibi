@@ -1,1 +1,1 @@
-workload: ext2 mkdirat, renameat and unlinkat completed on a peer, each under the mutation guard
+workload: ext2 mkdirat, renameat, unlinkat and a file write completed on a peer, each under the mutation guard

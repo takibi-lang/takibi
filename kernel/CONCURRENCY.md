@@ -28,6 +28,12 @@ state in this kernel is safe *because of* them:
   core since #597: each takes the guard before its path lookup, and a
   mutation waits for every CPU's counted readers, including a child
   execve's until its exec prepare has read the image.
+  A `write` to an ext2 file runs on any core since #602: it reads the file
+  position, checks its bound, writes, and advances the position all under
+  the guard, so two writers sharing one open file serialize. A reader's
+  position update is not under the guard: a `read` and a `write` through
+  one shared open file on two CPUs can still race the position word, as
+  two readers could before.
 - `KERNEL_PREEMPTIBLE` -- 0. A timer interrupt taken at EL1 sets a flag and the
   switch happens at syscall return. That is `CONFIG_PREEMPT_NONE`, and it is
   why many field accesses need no lock.
