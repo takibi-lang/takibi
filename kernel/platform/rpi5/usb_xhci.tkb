@@ -1356,13 +1356,9 @@ fn usb_disk_initialize_stages() -> UsbInitOutcome {
         XhciConfigureOutcome::Ok => { }
     }
 
-    let scratch_base: usize = (msc_scratch_buf as *u8) as usize;
-    let scratch_dma: usize = scratch_base + rp1_dma_pci_offset;
-
-    // Get Max LUN -- a single-LUN device is allowed to STALL this rather
-    // than answer, so its own outcome is not checked.
-    dma_prepare_tx(msc_scratch_buf as *u8, 512);
-    usb_ctrl_xfer(0xA1, 0xFE, 0, xhci_msc_interface_num, 1, scratch_dma, true);
+    // This driver always addresses LUN 0 in its CBW. Get Max LUN only
+    // reports how many other LUNs exist, so no control-IN transfer or
+    // ignored DMA result is needed before the first command.
 
     // Do NOT send a gratuitous Bulk-Only Mass Storage Reset here. The
     // port reset + SET_CONFIGURATION above already established a fresh
