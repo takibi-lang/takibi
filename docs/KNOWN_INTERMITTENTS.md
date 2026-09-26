@@ -30,6 +30,7 @@ whether a row has gone quiet or has merely stopped being looked for.
 
 | Symptom | Rate | Issue | Last seen |
 | --- | --- | --- | --- |
+| `the payload never asked for its input` | 1 of 9 cicheck runs after the alloc-rollback split | #607 | 2026-09-26 |
 | `workload: peer read 98304 pattern bytes` | line MISSING from peer_filesystem.actual: 1 local cicheck; 0 of 30 standalone | #604 | 2026-09-26 |
 | `ARP while HTTPd is listening` | 1 of 30 standalone samples | #605 | 2026-09-26 |
 | `the scripted BREAK never fired` | 1 CI run of the DDB lane since e824b030 (run 36207501077); 0 of 10 locally | #603 | 2026-09-26 |
