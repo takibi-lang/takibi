@@ -65,7 +65,9 @@ ATOMIC_ALLOWED = {
         "surface over the atomics",
     "arch/arm64/kernel/secondary.tkb":
         "the secondary core's tick counter, genuinely written by one core "
-        "and read by another with no lock between them",
+        "and read by another with no lock between them; and the boot "
+        "handshake word, one release store by the starting core and an "
+        "acquire load in core 0's bounded wait (GitHub issue #560)",
     "arch/arm64/kernel/exception_evidence.tkb":
         "GitHub issue #496: DdbSnapshot's one valid-last word. The snapshot "
         "is captured with interrupts masked and has no competing writer; "

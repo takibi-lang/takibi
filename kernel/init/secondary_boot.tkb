@@ -45,7 +45,6 @@ fn kernel_secondary_boot_await(core: {0..<KERNEL_MAX_CORES as usize},
     let start: i64 = read_cntpct();
     let deadline_ticks: i64 = read_cntfrq();
     while ((read_cntpct() - start) < deadline_ticks) {
-        signal_fence();
         if (kernel_secondary_boot_state_value_for(core) == 0x100 + core) {
             if (status == 0) {
                 return SecondaryBootResult::Started;
@@ -62,7 +61,6 @@ fn kernel_secondary_boot_await(core: {0..<KERNEL_MAX_CORES as usize},
 // KERNEL_ACTIVE_CORES may admit it to the scheduler.
 fn kernel_secondary_boot_report() !{logs, unsafe} {
     kernel_secondary_boot_state_clear();
-    signal_fence();
     let mut core_one_started: bool = false;
     for raw: usize in 1..<KERNEL_MAX_CORES {
         let core: {0..<KERNEL_MAX_CORES as usize} = raw;

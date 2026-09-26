@@ -34,9 +34,21 @@ use "kernel/lib/execution_model.tkb";
 const SECONDARY_CORE_ID: usize = 1;
 
 // One handshake word per possible secondary. Core 0 polls the target core's
-// slot to know it reached compiled Takibi. `io` rather than an atomic because
-// each slot is a one-shot publication with one writer and a bounded reader.
-private let mut kernel_secondary_boot_state: [io usize; KERNEL_MAX_CORES];
+// slot to know it reached compiled Takibi.
+//
+// GitHub issue #560: written with a release store and read with an acquire
+// load. It used to be an `io` word published with signal_fence(), which
+// orders only what one core's compiler emits -- the last cross-core
+// publication in the kernel ordered by nothing. The word carries no payload,
+// so the cost of a late observation was a started core reported as
+// NotStarted; but telling those two apart is the only thing the handshake
+// is for.
+private let mut kernel_secondary_boot_state: [usize; KERNEL_MAX_CORES];
+
+private fn kernel_secondary_boot_state_address(
+        core: {0..<KERNEL_MAX_CORES as usize}) -> usize {
+    return (&kernel_secondary_boot_state[core]) as usize;
+}
 
 // Core 0's PSCI authority for the contiguous online prefix. A successful
 // CPU_ON joins the prefix before the target publishes its Takibi handshake.
@@ -60,7 +72,7 @@ private fn secondary_tick_address(core: {0..<KERNEL_MAX_CORES as usize})
     return (&secondary_tick_count[core]) as usize;
 }
 
-fn kernel_secondary_boot_state_clear() {
+fn kernel_secondary_boot_state_clear() !{unsafe} {
     // GitHub issue #479: establish the lazily initialized VM record pools
     // before PSCI can expose a second kernel execution context. Their ordinary
     // callers retain lazy initialization for pre-secondary core-0 use; after
@@ -68,14 +80,18 @@ fn kernel_secondary_boot_state_clear() {
     process_image_pool_init_before_secondary();
     address_space_backing_pool_init_before_secondary();
     for core: usize in 0..<KERNEL_MAX_CORES {
-        kernel_secondary_boot_state[core] = 0;
+        unsafe {
+            atomic_store_release(kernel_secondary_boot_state_address(core), 0);
+        }
     }
     kernel_online_cores = 1;
 }
 
 fn kernel_secondary_boot_state_value_for(
-        core: {0..<KERNEL_MAX_CORES as usize}) -> usize {
-    return kernel_secondary_boot_state[core] as usize;
+        core: {0..<KERNEL_MAX_CORES as usize}) -> usize !{unsafe} {
+    return unsafe {
+        atomic_load_acquire(kernel_secondary_boot_state_address(core))
+    };
 }
 
 // Record only a contiguous prefix. A platform with a sparse topology keeps
@@ -146,7 +162,7 @@ fn secondary_timer_tick() !{interrupt, unsafe} {
 // waiting on wfe is woken by any core's SEV and core 0 executes one on
 // every tick -- the whole point is that this core wakes for its own
 // interrupt and nothing else.
-fn kernel_secondary_main(context: usize) {
+fn kernel_secondary_main(context: usize) !{unsafe} {
     let core_id: usize = cpu_id();
     // Every core the build reserves storage for comes up and idles here;
     // whether it may run processes is kernel_process_secondary_start's
@@ -157,8 +173,10 @@ fn kernel_secondary_main(context: usize) {
     if (core_id > 0 && core_id < KERNEL_MAX_CORES) {
         let core: {0..<KERNEL_MAX_CORES as usize} = core_id;
         if (context == 0x190 + core_id) {
-            kernel_secondary_boot_state[core] = 0x100 + core_id;
-            signal_fence();
+            unsafe {
+                atomic_store_release(kernel_secondary_boot_state_address(core),
+                                     0x100 + core_id);
+            }
         // Everything a core has to do FOR ITSELF, in the order it has to
         // do it. Core 0 reaches the same three through its platform's
         // platform_irq_init(), which additionally does the distributor and
