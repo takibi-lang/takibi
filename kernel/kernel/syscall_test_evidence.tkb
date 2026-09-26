@@ -7,11 +7,13 @@
 // syscall.tkb) or the persistent-service/shell lifecycle state (real
 // control-flow branches on those; a separate, later split out of #294).
 //
-// Current limitations (2026-09-24): the UART one-shot counters are used by
+// Current limitations (2026-09-26): the UART one-shot counters are used by
 // the core-0 boot and shell fixture. The socket counters are enabled only
-// during the core-0 connected-I/O fixture and frozen before HTTPd starts.
-// HTTPd workers can now run concurrently on separate CPUs; recording their
-// calls in these ordinary usize fields would race.
+// during the connected-I/O fixture and frozen before HTTPd starts. Since
+// GitHub issue #598 admitted the socket calls on a peer, the fixture's own
+// calls may run on any CPU, so each socket counter is read and written
+// under the process-run lock. The enable flag is
+// written by core 0 at configure and at the fixture's end only.
 
 struct SyscallTestEvidence {
     ppoll_uart_waits: usize;
@@ -78,89 +80,135 @@ fn syscall_test_evidence_record_read_uart_wait() -> bool {
 
 fn syscall_test_evidence_record_socket() {
     if (syscall_test_evidence.socket_fixture_active == false) { return; }
+    let guard = process_run_lock();
     syscall_test_evidence.socket_calls =
         syscall_test_evidence.socket_calls + 1;
+    process_run_unlock(guard);
 }
 
 fn syscall_test_evidence_socket_calls() -> usize {
-    return syscall_test_evidence.socket_calls;
+    let guard = process_run_lock();
+    let value: usize = syscall_test_evidence.socket_calls;
+    process_run_unlock(guard);
+    return value;
 }
 
 fn syscall_test_evidence_record_bind() {
     if (syscall_test_evidence.socket_fixture_active == false) { return; }
-    syscall_test_evidence.bind_calls = syscall_test_evidence.bind_calls + 1;
+    let guard = process_run_lock();
+    syscall_test_evidence.bind_calls =
+        syscall_test_evidence.bind_calls + 1;
+    process_run_unlock(guard);
 }
 
 fn syscall_test_evidence_bind_calls() -> usize {
-    return syscall_test_evidence.bind_calls;
+    let guard = process_run_lock();
+    let value: usize = syscall_test_evidence.bind_calls;
+    process_run_unlock(guard);
+    return value;
 }
 
 fn syscall_test_evidence_record_listen() {
     if (syscall_test_evidence.socket_fixture_active == false) { return; }
+    let guard = process_run_lock();
     syscall_test_evidence.listen_calls =
         syscall_test_evidence.listen_calls + 1;
+    process_run_unlock(guard);
 }
 
 fn syscall_test_evidence_listen_calls() -> usize {
-    return syscall_test_evidence.listen_calls;
+    let guard = process_run_lock();
+    let value: usize = syscall_test_evidence.listen_calls;
+    process_run_unlock(guard);
+    return value;
 }
 
 fn syscall_test_evidence_record_socket_close() {
     if (syscall_test_evidence.socket_fixture_active == false) { return; }
+    let guard = process_run_lock();
     syscall_test_evidence.socket_close_calls =
         syscall_test_evidence.socket_close_calls + 1;
+    process_run_unlock(guard);
 }
 
 fn syscall_test_evidence_socket_close_calls() -> usize {
-    return syscall_test_evidence.socket_close_calls;
+    let guard = process_run_lock();
+    let value: usize = syscall_test_evidence.socket_close_calls;
+    process_run_unlock(guard);
+    return value;
 }
 
 fn syscall_test_evidence_record_accept() {
     if (syscall_test_evidence.socket_fixture_active == false) { return; }
+    let guard = process_run_lock();
     syscall_test_evidence.accept_calls =
         syscall_test_evidence.accept_calls + 1;
+    process_run_unlock(guard);
 }
 
 fn syscall_test_evidence_accept_calls() -> usize {
-    return syscall_test_evidence.accept_calls;
+    let guard = process_run_lock();
+    let value: usize = syscall_test_evidence.accept_calls;
+    process_run_unlock(guard);
+    return value;
 }
 
 fn syscall_test_evidence_record_accept_capability_roundtrip() {
     if (syscall_test_evidence.socket_fixture_active == false) { return; }
+    let guard = process_run_lock();
     syscall_test_evidence.accept_capability_roundtrips =
         syscall_test_evidence.accept_capability_roundtrips + 1;
+    process_run_unlock(guard);
 }
 
 fn syscall_test_evidence_accept_capability_roundtrips() -> usize {
-    return syscall_test_evidence.accept_capability_roundtrips;
+    let guard = process_run_lock();
+    let value: usize = syscall_test_evidence.accept_capability_roundtrips;
+    process_run_unlock(guard);
+    return value;
 }
 
 fn syscall_test_evidence_record_connected_close() {
     if (syscall_test_evidence.socket_fixture_active == false) { return; }
+    let guard = process_run_lock();
     syscall_test_evidence.connected_close_calls =
         syscall_test_evidence.connected_close_calls + 1;
+    process_run_unlock(guard);
 }
 
 fn syscall_test_evidence_connected_close_calls() -> usize {
-    return syscall_test_evidence.connected_close_calls;
+    let guard = process_run_lock();
+    let value: usize = syscall_test_evidence.connected_close_calls;
+    process_run_unlock(guard);
+    return value;
 }
 
 fn syscall_test_evidence_record_connected_read() {
     if (syscall_test_evidence.socket_fixture_active == false) { return; }
+    let guard = process_run_lock();
     syscall_test_evidence.connected_read_calls =
         syscall_test_evidence.connected_read_calls + 1;
+    process_run_unlock(guard);
 }
 
 fn syscall_test_evidence_connected_read_calls() -> usize {
-    return syscall_test_evidence.connected_read_calls;
+    let guard = process_run_lock();
+    let value: usize = syscall_test_evidence.connected_read_calls;
+    process_run_unlock(guard);
+    return value;
 }
 
 fn syscall_test_evidence_record_connected_write() {
     if (syscall_test_evidence.socket_fixture_active == false) { return; }
+    let guard = process_run_lock();
     syscall_test_evidence.connected_write_calls =
         syscall_test_evidence.connected_write_calls + 1;
+    process_run_unlock(guard);
 }
 
 fn syscall_test_evidence_connected_write_calls() -> usize {
-    return syscall_test_evidence.connected_write_calls;
+    let guard = process_run_lock();
+    let value: usize = syscall_test_evidence.connected_write_calls;
+    process_run_unlock(guard);
+    return value;
 }

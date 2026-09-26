@@ -15,8 +15,8 @@ state in this kernel is safe *because of* them:
   online core takes timer interrupts and enters the syscall and scheduler
   paths. A process with no affinity mask is eligible on every online core;
   a peer syscall runs where it was called unless `syscall_peer_refused`
-  names it (GitHub issue #583: the process lifecycle, the socket calls
-  other than connected read and write, and syslog, each with its reason) or `syscall_peer_safe` narrows it by descriptor; those are
+  names it (GitHub issue #583: the process lifecycle and syslog, each
+  with its reason) or `syscall_peer_safe` narrows it by descriptor; those are
   rerun on core 0. The busy-pair fixture pins its workers during the
   staged boot checks, then widens them for the measured phase and alternates
   explicit CPU 0/1 affinity requests to observe actual migrations. The
@@ -116,8 +116,8 @@ Reporters (DDB, the oops) read the words without it, as reporters do.
 ## Connected sockets on a peer
 
 `read` and `write` on a connected TCP descriptor are admitted on any CPU
-(GitHub issue #581); close, shutdown, poll and accept are not, and the inetd
-response mode is not. Every `TcpConnection` field those two calls read or
+(GitHub issue #581), and so is the rest of the socket group since #598;
+the inetd response mode is not. Every `TcpConnection` field those two calls read or
 write is accessed under the connection's owner: `tcp_connection_take` takes
 the connection's `TaskMutex` and revalidates the pool generation after the
 acquire, and the open check happens after that, not before. Receive and
@@ -126,9 +126,40 @@ transmit additionally hold the sole network capability, which is behind a
 no connection lock on purpose -- it must not wait behind a receive -- and the
 read that follows re-decides open and available bytes under the owner.
 
-The socket evidence counters in `kernel/kernel/syscall_test_evidence.tkb`
-are active only during the core-0 connected-I/O fixture. They are frozen
-before HTTPd starts, so concurrent workers do not write the plain fields.
+The rest of the group, and what each relies on (GitHub issue #598):
+
+- **Closing a connected descriptor** -- `close`, `dup3` over one, and an
+  exiting process's reap -- goes through `kernel_connected_descriptor_close`.
+  It takes the connection's owner first, then reads the object's reference
+  count, then closes the transport if this is the last reference, and
+  clears the descriptor before giving the owner back. Two holders closing
+  on two CPUs therefore serialize, and exactly one of them closes the
+  transport. The count cannot rise under the owner, because only a holder
+  can duplicate a descriptor. Before #598 the count was read before the
+  owner was taken, and a peer exit's reap could race a close on core 0.
+- **`shutdown`** closes the transport under the owner, as the connected
+  write does. A holder that closes afterwards finds the connection gone
+  and only clears its descriptor.
+- **`bind`, `listen`, `accept`, `accept4`** run while holding the
+  listener's claim (`unified_listener_claim` in
+  `kernel/kernel/fd_table.tkb`): one call at a time per listener, for one
+  syscall and never across a Block. A second CPU that finds the claim held
+  waits for an interrupt and reruns. The claim covers the listener's port,
+  its state and the pending handshake, which two processes sharing a
+  listener through fork would otherwise interleave on. An accepted
+  connection's open flag and buffer position are written under its owner
+  before it is published.
+- **`socket`** allocates a descriptor in the caller's own table and an
+  object from the pool, whose lock covers the allocation.
+- **`getpeername`, `setsockopt`** touch only the caller's memory.
+- **`sendfile`** is an ext2 reader (counted at syscall entry, as `read` is).
+  It writes through `uart_user_write`, the queue `write(1)` uses, which on a
+  peer is its console ring. It advances the file position only by the bytes
+  the queue took.
+- The socket evidence counters in
+  `kernel/kernel/syscall_test_evidence.tkb`, and the listener-ready flag in
+  `syscall_test_lifecycle.tkb`, are read and written under the process-run
+  lock, since the fixture's own calls may now run on any CPU.
 
 ## Lock classes
 

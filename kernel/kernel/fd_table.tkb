@@ -594,6 +594,12 @@ struct SharedObject {
     // from 2 to 0 and 978 later operations were refused because the
     // handle no longer named anything.
     refs: GuardedField(usize);
+    // GitHub issue #598: 1 while one bind, listen or accept call is working
+    // on this LISTENER, under object_refcount_lock. Two processes can share
+    // a listener through fork, and on two CPUs their calls would otherwise
+    // interleave on port, state and the pending handshake above, which
+    // core 0's non-preemptible dispatch used to serialize for free.
+    listener_busy: GuardedField(usize);
 }
 private let mut object_pool: IntrusivePool(SharedObject);
 
@@ -1638,6 +1644,58 @@ fn unified_object_references(handle: UnifiedObjectHandle) -> usize !{unsafe} {
     let held: usize = *refs;
     guarded_field_give(guard, &object_refcount_lock);
     return held;
+}
+
+// GitHub issue #598: one call at a time on a listener. Linear, so every
+// path out of the call that claimed it gives it back; held only for the
+// length of one syscall, never across a Block.
+linear struct ListenerClaim[object: usize] {
+    private address: usize;
+    private generation: usize;
+}
+
+must_use variant ListenerClaimResult {
+    Missing;
+    Busy;
+    Claimed(exists object: usize. ListenerClaim[object]);
+}
+
+private fn listener_claim_new(address: usize, generation: usize @ object)
+        -> ListenerClaim[object] {
+    let mut claim: ListenerClaim[object] = { address, generation };
+    return claim;
+}
+
+fn unified_listener_claim(handle: UnifiedObjectHandle) -> ListenerClaimResult
+        !{unsafe} {
+    if (unified_object_matches(handle) == false) {
+        return ListenerClaimResult::Missing;
+    }
+    if (unified_object_at(handle).kind != UnifiedFdKind::Listener) {
+        return ListenerClaimResult::Missing;
+    }
+    let guard = guarded_field_take(&object_refcount_lock);
+    let busy = guarded_usize_value(guard,
+                                   &unified_object_at(handle).listener_busy);
+    if (*busy != 0) {
+        guarded_field_give(guard, &object_refcount_lock);
+        return ListenerClaimResult::Busy;
+    }
+    *busy = 1;
+    guarded_field_give(guard, &object_refcount_lock);
+    return ListenerClaimResult::Claimed(
+        listener_claim_new(handle.slot, handle.generation));
+}
+
+fn unified_listener_release(claim: sink ListenerClaim[object]) !{unsafe} {
+    let mut handle: UnifiedObjectHandle =
+        unified_object_handle_new(claim.address, claim.generation);
+    if (unified_object_matches(handle) == false) { return; }
+    let guard = guarded_field_take(&object_refcount_lock);
+    let busy = guarded_usize_value(guard,
+                                   &unified_object_at(handle).listener_busy);
+    *busy = 0;
+    guarded_field_give(guard, &object_refcount_lock);
 }
 
 fn unified_listener_state(handle: UnifiedObjectHandle) -> UnifiedListenerState {

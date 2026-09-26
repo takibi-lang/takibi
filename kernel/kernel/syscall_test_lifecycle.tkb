@@ -11,8 +11,11 @@
 // ever calls a named, self-contained function, never touches these
 // fields directly.
 //
-// Current limitations: single-writer, matching kernel/kernel/syscall.tkb's
-// own "NOT SYNCHRONIZED, single-core dispatch only" limitation.
+// Current limitations (2026-09-26): single-writer, matching
+// kernel/kernel/syscall.tkb's own "NOT SYNCHRONIZED, single-core dispatch
+// only" limitation, except the connected-fixture flag, which listen
+// consumes from any CPU and so is read and written under the process-run
+// lock (GitHub issue #598).
 
 private let mut syscall_connected_fixture_pending: bool;
 // Set only for the persistent terminal demo shell launched (via self-replace
@@ -54,16 +57,24 @@ enum ListenerReadyLabel: u8 { ConnectedFixture; Persistent; }
 // (moved from syscall.tkb's own listen() handler): checks and consumes
 // whichever pending flag matches, in the same priority order the original
 // inline if/else-if/else chain used.
+//
+// Under the process-run lock since GitHub issue #598 admitted listen on a
+// peer: two listens on two CPUs must not both consume the one pending flag.
 fn syscall_test_lifecycle_listener_ready_label() -> ListenerReadyLabel {
+    let guard = process_run_lock();
     if (syscall_connected_fixture_pending) {
         syscall_connected_fixture_pending = false;
+        process_run_unlock(guard);
         return ListenerReadyLabel::ConnectedFixture;
     }
+    process_run_unlock(guard);
     return ListenerReadyLabel::Persistent;
 }
 
 fn kernel_syscall_connected_fixture_start() {
+    let guard = process_run_lock();
     syscall_connected_fixture_pending = true;
+    process_run_unlock(guard);
 }
 
 fn kernel_syscall_persistent_shell_start() {

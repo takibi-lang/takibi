@@ -1,1 +1,2 @@
 workload: pinned httpd read and wrote a connected socket on the secondary cpu
+workload: pinned httpd closed and shut down a connected socket on the secondary cpu

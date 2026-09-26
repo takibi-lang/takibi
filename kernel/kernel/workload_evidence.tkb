@@ -204,6 +204,11 @@ struct WorkloadBusyPair {
     peer_socket_read: bool;
     peer_socket_write: bool;
     peer_socket_reported: bool;
+    // GitHub issue #598: the same handler's teardown -- a connected
+    // descriptor closed, and a shutdown -- on the secondary.
+    peer_socket_closed: bool;
+    peer_socket_shut_down: bool;
+    peer_socket_teardown_reported: bool;
     // A report this file refused: an unknown tag, or a caller that is not
     // a child of init. Zero on a healthy boot, and printed only when it
     // is not.
@@ -1246,6 +1251,28 @@ fn workload_peer_socket_served(is_write: bool) {
             kernel_boot_log(
                 "smp: core 0 handed away a process its affinity excludes and idled\n");
         }
+    }
+    process_run_unlock(guard);
+}
+
+// GitHub issue #598: a connected descriptor's close (by close(2), dup3 or
+// an exit's reap) or a shutdown completed on this CPU. Reported once, when
+// both have been seen on the secondary, after the read-and-write line.
+fn workload_peer_socket_teardown(is_shutdown: bool) {
+    if (cpu_id() != SECONDARY_CORE_ID) { return; }
+    let guard = process_run_lock();
+    if (is_shutdown) {
+        workload_busy_pair.peer_socket_shut_down = true;
+    } else {
+        workload_busy_pair.peer_socket_closed = true;
+    }
+    if (workload_busy_pair.peer_socket_teardown_reported == false &&
+        workload_busy_pair.peer_socket_reported &&
+        workload_busy_pair.peer_socket_closed &&
+        workload_busy_pair.peer_socket_shut_down) {
+        workload_busy_pair.peer_socket_teardown_reported = true;
+        kernel_boot_log(
+            "workload: pinned httpd closed and shut down a connected socket on the secondary cpu\n");
     }
     process_run_unlock(guard);
 }
