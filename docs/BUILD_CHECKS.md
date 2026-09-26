@@ -46,6 +46,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_elf_symbol_alignment_controls.py` | Positive and faithful negative controls for the ELF alignment guard |
 | `check_execution_model_coverage.py` | mutable kernel state declares its execution model |
 | `check_ext2_mutation_guard.py` | every ext2 mutation is reached under the filesystem lock's guard, or its file is named with the reason it cannot race a peer |
+| `check_model_function_map.py` | every kernel function a TLA+ model under kernel/models/ claims to abstract still has a definition |
 | `check_expected_line_endings.py` | stdout fixtures use one newline convention |
 | `check_expected_line_endings_controls.py` | Positive and failure-specific controls for expected-line-ending checks |
 | `check_fallback_counters.py` | every dead-slot fallback counter is summed into one positively reported line a view expects, so a fallback that fires loses a line rather than adding one |

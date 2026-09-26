@@ -1875,6 +1875,12 @@ allbuild:
 ## clean: remove dune build artifacts, kernel/ link outputs, and linux_user/
 ## build outputs. Does not touch examples/ -- use `make -f examples/Makefile
 ## clean` for that.
+# GitHub issue #601: the TLA+ models under kernel/models/, checked with TLC
+# and Apalache. Fetches the pinned tools on first use. Not in allcheck yet.
+.PHONY: modelcheck
+modelcheck:
+	@bash scripts/run_model_checks.sh
+
 clean:
 	dune clean
 	find kernel/build -type f \( -name '*.o' -o -name '*.elf' -o -name '*.bin' -o -name '*.img' -o -name '*.d' \) -delete 2>/dev/null || true
