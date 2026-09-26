@@ -6,7 +6,14 @@
  * that file's content, and the image outlives a boot on the board, so the
  * write leaves it as it was. The kernel notes each success
  * made off core 0; tag 14 prints the peer_mutation view's line only when
- * all three were this process's. It prints nothing itself unless it fails.
+ * all four were this process's. It prints nothing itself unless it fails.
+ *
+ * Then wait4 on the peer (GitHub issue #609). A child moves itself to CPU 0,
+ * naps and exits there; this process, back on CPU 1, calls wait4 first and
+ * so blocks in ChildExit on CPU 1. The child's exit on CPU 0 cannot start a
+ * parent pinned to CPU 1, so it leaves wait4 rewound, and CPU 1 reruns it
+ * and reaps the zombie. Tag 15 prints the peer_wait view's line only when
+ * both the block and the reap happened on a peer.
  */
 
 const WRITE_SYSCALL: usize = 64;
@@ -19,6 +26,11 @@ const CLOSE_SYSCALL: usize = 57;
 const READ_SYSCALL: usize = 63;
 const LINUX_O_WRONLY: usize = 1;
 const PEER_MUTATE_ERROR_FLOOR: usize = 0xFFFFFFFFFFFFF000;
+const CLONE_SYSCALL: usize = 220;
+const WAIT4_SYSCALL: usize = 260;
+const NANOSLEEP_SYSCALL: usize = 101;
+const CLONE_FORK_SIGCHLD: usize = 0x11;
+const PEER_WAIT_TAG: usize = 15;
 const SETAFFINITY_SYSCALL: usize = 122;
 const GETCPU_SYSCALL: usize = 168;
 const WORKLOAD_PROGRESS_SYSCALL: usize = 453;
@@ -37,6 +49,46 @@ private fn peer_mutate_cpu(cpu_bytes: borrow [u8; 4..]) -> usize {
         return 99;
     }
     return cpu_bytes[0] as usize;
+}
+
+private fn peer_mutate_back_on_cpu1(cpu_bytes: borrow [u8; 4..]) {
+    let mut here: usize = peer_mutate_cpu(cpu_bytes);
+    for poll: usize in 0..<PEER_MUTATE_ARRIVAL_POLLS {
+        if (here != 1) { here = peer_mutate_cpu(cpu_bytes); }
+    }
+    if (here != 1) {
+        peer_mutate_fail(bs"peer-mutate: never came back to cpu 1\n");
+    }
+}
+
+private fn peer_mutate_wait() {
+    let child: usize = svc5(CLONE_SYSCALL, CLONE_FORK_SIGCHLD, 0, 0, 0, 0);
+    if (child == 0) {
+        let mut mask: [u8; 8];
+        for index: usize in 0..<8 { mask[index] = 0; }
+        mask[0] = 1;
+        svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0);
+        // 300 ms, long enough that the parent is asleep in wait4 first.
+        let mut nap: [usize; 2];
+        nap[0] = 0;
+        nap[1] = 300000000;
+        svc5(NANOSLEEP_SYSCALL, nap as *usize as usize, 0, 0, 0, 0);
+        svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+    }
+    if (child >= PEER_MUTATE_ERROR_FLOOR) {
+        peer_mutate_fail(bs"peer-mutate: fork failed\n");
+    }
+    let mut cpu_bytes: [u8; 4];
+    peer_mutate_back_on_cpu1(cpu_bytes as []u8);
+    let mut status: [u8; 4];
+    for index: usize in 0..<4 { status[index] = 0xFF; }
+    if (svc5(WAIT4_SYSCALL, child, status as *u8 as usize, 0, 0, 0) != child ||
+        status[0] != 0 || status[1] != 0) {
+        peer_mutate_fail(bs"peer-mutate: wait4 did not reap the child with status 0\n");
+    }
+    if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_WAIT_TAG, 0, 0, 0, 0) != 1) {
+        peer_mutate_fail(bs"peer-mutate: wait4 did not both block and reap on a peer\n");
+    }
 }
 
 fn peer_mutate() {
@@ -95,5 +147,6 @@ fn peer_mutate() {
     if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_MUTATION_TAG, 0, 0, 0, 0) != 1) {
         peer_mutate_fail(bs"peer-mutate: the four mutations did not all complete on a peer\n");
     }
+    peer_mutate_wait();
     svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
 }

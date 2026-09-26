@@ -87,8 +87,9 @@ process and the stack it physically stands on are separate variables, as
 they are in the kernel, and `owner` records each process stack's physical
 owner.
 
-Two constants re-introduce the two past defects #601 asked the model to
-find. Each is one variant, and `make modelcheck` requires both to fail:
+Three constants re-introduce three past defects: the two #601 asked the
+model to find, and one #609 introduced. Each is one variant, and `make
+modelcheck` requires each to fail:
 
 - `EXIT_IDLES = FALSE` is 08df64c6's deadlock. After an exit, core 0
   waited for a successor while it still stood on the zombie's stack. The
@@ -101,6 +102,12 @@ find. Each is one variant, and `make modelcheck` requires both to fail:
   first return stands on its parent's, so the parent was made Ready and the
   child was lost. TLC and Apalache both report `RunningMatchesCores`, in
   two steps.
+- `WAKE_START_CHECKS_STACK = FALSE` is #609's shared stack. Once wait4 ran
+  on a peer, a parent could block there, publishing Blocked while that peer
+  still stood on its stack. The child's exit on core 0 woke the parent and
+  started it at once, on the same stack. TLC and Apalache both report
+  `StartsOnFreeStack`, in six steps: clone, switch, the parent dispatched
+  to the other core, switch, block, exit.
 
 | Action | Kernel function it abstracts | What is kept, what is dropped |
 | --- | --- | --- |
@@ -108,6 +115,7 @@ find. Each is one variant, and `make modelcheck` requires both to fail:
 | `SwitchComplete` | `kernel_process_stack_switch_complete` | the physical handoff at exception return: release the stack stood on, own the current process's |
 | `Wait4Block` | the wait4 arm of `kernel_syscall_dispatch_action`, `kernel_process_block_current` | a parent blocks before its child exits, with no successor; the #550 window is Wait4Block.tla's, not this model's |
 | `ChildExit` | `kernel_process_child_exit`, `kernel_syscall_exit_current_process` | the child becomes a zombie and wakes a Blocked parent, leaving it Ready with its continuation; the core still stands on the zombie's stack |
+| `ChildExitStart` | `kernel_process_child_exit`, `kernel_process_exit_reserved` | the same exit starting the woken parent on this core at once, only when no core owns the parent's stack; affinity is dropped |
 | `IdleEnter` | `kernel_process_stack_idle_complete`, `kernel_process_stack_idle_blocked` | a core with no current process moves to its idle stack and releases the one it stood on |
 | `Dispatch` | `kernel_process_secondary_start`, `scheduled_process_ready_take` | a core takes a Ready process whose stack no core owns, and a parent with a continuation only once the child's stack is free too; affinity is dropped |
 | `Wait4Reap` | `kernel_syscall_wait4_deliver` | the parent reaps once the child's stack is free |
@@ -120,6 +128,9 @@ Properties:
   two cores at once.
 - `RunningMatchesCores`: a Running process is some core's current process,
   on one core. The lost child violates it.
+- `StartsOnFreeStack`: a core's current process has a stack no other core
+  owns. The direct start of #609 violates it. Apalache's shallow check is
+  given `CoreInvariants`, this and `RunningMatchesCores` together.
 - `ChildReaped` (liveness, TLC only): the parent's wait4 completes.
 - Deadlock freedom: TLC's own check, which the exit variant fails.
 

@@ -4932,75 +4932,6 @@ fn kernel_process_current_exit_has_waiter() -> bool {
                ProcessWaitReason::ChildExit;
 }
 
-// Would this process's exit leave this CPU with nowhere safe to continue?
-//
-// GitHub issue #448: an exit hands the CPU somewhere, and until a shell
-// could background a job that somewhere was always its parent, which was
-// always waiting for it. A background job's parent is off doing something
-// else, and if nothing else is runnable either then the exit has nowhere
-// to go -- kernel_process_child_exit returns 0 and the caller fail-stops.
-// Measured that way: `/bin/true &` twice from an interactive prompt, and
-// the second one's exit killed the kernel while its shell sat blocked on
-// the next keystroke.
-//
-// Asked BEFORE the exit does anything, so the caller can wait for an
-// interrupt and ask again with nothing torn down in between. The answer is
-// read without the run lock, so a peer may still take the process it
-// counted; the exit then idles after the teardown (core 0 has an idle
-// context since GitHub issue #592), and this check only spares the teardown
-// when nothing at all is runnable. A secondary CPU
-// has a third outcome: the exit tail switches to its architectural stack and
-// re-enters the idle loop, so absence of an admitted successor is not a
-// strand there.
-private fn kernel_process_exit_would_strand_on(cpu: usize) -> bool {
-    if (execution_here().current_live == false) { return false; }
-    let slot: usize = execution_here().current_handle.pool_index;
-    if (scheduled_process_record_at(slot).has_parent == false) { return false; }
-    let mut parent: ProcessHandle = scheduled_process_record_at(slot).parent;
-    if (scheduled_process_handle_matches(parent) == false) { return false; }
-    if (cpu != 0) { return false; }
-    let parent_admitted: bool =
-        kernel_process_cpu_allows_slot(cpu, parent.pool_index);
-    if (parent_admitted && scheduled_process_state_of(parent) ==
-            ProcessSlotState::Ready) {
-        return false;
-    }
-    // A parent already waiting for this exit is woken BY it, so it counts
-    // as somewhere to go even though it is blocked right now -- and even
-    // when this CPU may not run it (GitHub issue #9). Its affinity mask
-    // takes it to another CPU, and this core then idles after the exit.
-    // Requiring it to be admitted here deadlocked: /bin/affinity, pinned
-    // to CPU 1, waited in wait4 for a child exiting on core 0, and that
-    // exit waited for a successor only the parent's wake could produce.
-    if (scheduled_process_state_of(parent) ==
-            ProcessSlotState::Blocked &&
-        scheduled_process_wait_reason_of(parent) ==
-            ProcessWaitReason::ChildExit) {
-        return false;
-    }
-    // BusyBox init waits for blocked SIGCHLD through rt_sigtimedwait,
-    // rather than waiting in wait4. Child exit delivers that signal before
-    // selecting its successor, so this parent is another exit-produced
-    // runnable context even when every other live process runs on a peer.
-    let sigchld_bit: usize = 1 << 16;
-    if (scheduled_process_state_of(parent) ==
-            ProcessSlotState::Blocked &&
-        scheduled_process_wait_reason_of(parent) ==
-            ProcessWaitReason::Signal &&
-        (scheduled_process_record_of(parent).signal_mask & sigchld_bit) != 0 &&
-        (scheduled_process_record_of(parent).sigwait_set & sigchld_bit) != 0) {
-        return false;
-    }
-    match kernel_process_next_ready(execution_here().current_handle, cpu) {
-        ProcessNextReadyResult::Missing => { return true; }
-        ProcessNextReadyResult::Next(next) => { return false; }
-    }
-}
-
-fn kernel_process_exit_would_strand() -> bool {
-    return kernel_process_exit_would_strand_on(cpu_id());
-}
-
 fn kernel_process_current_has_relative() -> bool {
     if (execution_here().current_live == false) { return false; }
     let slot: usize = execution_here().current_handle.pool_index;
@@ -5782,6 +5713,13 @@ private fn kernel_process_block_would_miss(
         // this re-check (RECHECK = TRUE) and the defect without it.
         ProcessWaitReason::ChildExit => {
             let requested: usize = scheduled_process_record_of(from).wait4_pid;
+            // An exited child whose CPU has not yet left its stack is not
+            // collectable, but it has exited: its exit has already looked
+            // for a Blocked parent and found none, so sleeping now would
+            // sleep past it (#609).
+            if (kernel_process_child_zombie_stack_held(from, requested)) {
+                return true;
+            }
             if (requested == 0xFFFFFFFFFFFFFFFF) {
                 match kernel_process_first_zombie_of(from) {
                     ProcessNextReadyResult::Missing => { return false; }
@@ -7034,24 +6972,8 @@ private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
     scheduled_process_set_affinity_mask(parent.pool_index, 1);
     let peer_wait_parent_rejected: bool =
         kernel_process_cpu_allows_slot(1, parent.pool_index) == false;
-    let peer_idle_available: bool =
-        kernel_process_exit_would_strand_on(1) == false;
-    // With only this child running, SIGCHLD is also an exit-produced
-    // successor. A different wait set or an ignored signal is not.
-    let sigchld_bit: usize = 1 << 16;
-    let old_mask: usize = scheduled_process_record_of(parent).signal_mask;
-    let old_wait_set: usize = scheduled_process_record_of(parent).sigwait_set;
-    scheduled_process_record_of(parent).wait_reason = ProcessWaitReason::Signal;
-    scheduled_process_record_of(parent).signal_mask = sigchld_bit;
-    scheduled_process_record_of(parent).sigwait_set = sigchld_bit;
-    let signal_successor: bool = kernel_process_exit_would_strand() == false;
-    scheduled_process_record_of(parent).sigwait_set = 1 << 14;
-    let unrelated_wait: bool = kernel_process_exit_would_strand();
-    scheduled_process_record_of(parent).sigwait_set = sigchld_bit;
-    scheduled_process_record_of(parent).signal_mask = 0;
-    let ignored_signal: bool = kernel_process_exit_would_strand();
-    scheduled_process_record_of(parent).signal_mask = old_mask;
-    scheduled_process_record_of(parent).sigwait_set = old_wait_set;
+    // The exit-strand answers this probe also asserted went with the check
+    // itself in #609: an exit with no successor now idles on every CPU.
     let restore_guard = process_run_lock();
     let mut restored: bool = false;
     match scheduled_process_blocked_take(restore_guard, parent) {
@@ -7067,8 +6989,7 @@ private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
     }
     process_run_unlock(restore_guard);
     return restored && kernel_process_current_exit_has_waiter() == false &&
-        peer_wait_parent_rejected && peer_idle_available && signal_successor &&
-        unrelated_wait && ignored_signal;
+        peer_wait_parent_rejected;
 }
 
 // The scheduler probe calls scheduling functions directly instead of entering
@@ -7875,6 +7796,12 @@ fn kernel_process_child_exit(status: usize) -> usize {
     // Linux re-parents to init instead, which is the better answer once
     // there is something to re-parent that is still RUNNING. A zombie has
     // nothing left to run and only a status nobody asked for.
+    // A grandchild that exited on another CPU which has not yet left its
+    // stack is skipped here (#609: kernel_process_first_zombie_of does not
+    // name it), and nobody waits for it afterwards. The window is a peer
+    // exit landing within microseconds of its parent's own exit; the
+    // bounded suite's teardown sweep would still collect it, but a
+    // long-running kernel would keep the record.
     let mut draining: usize = scheduled_process_pool_live_count() + 1;
     while (draining != 0) {
         draining = draining - 1;
@@ -7932,22 +7859,19 @@ fn kernel_process_child_exit(status: usize) -> usize {
                         let ready = scheduled_process_wake(parent_owner, blocked);
                         kernel_process_trace_handle(
                             ProcessTraceWake, parent, child, status);
-                        // GitHub issue #9: wait4 is outside the peer-safety
-                        // table, so a parent its own affinity mask placed on
-                        // a peer would have this wait4 rerun on core 0 in
-                        // any case. Finish it here instead. The continuation
-                        // below cannot start while this core still stands on
-                        // the child's stack, and core 0 may wait on that
-                        // stack for a successor: that parent was the only
-                        // one, and it was waiting for this core to leave.
-                        if (cpu_id() == 0 &&
-                            scheduled_process_affinity_mask(
-                                parent.pool_index) != 0) {
-                            scheduled_process_set_core0_for_call(
-                                parent.pool_index, true);
-                        }
+                        // A parent this CPU may not run is left Ready with
+                        // its wait4 rewound (below) and reruns it wherever
+                        // its mask lets it -- a peer included since #609, so
+                        // it is no longer pinned to core 0 for the call.
+                        // So is a parent whose own CPU still stands on its
+                        // stack: a wait4 that blocked on a peer publishes
+                        // Blocked before that peer leaves the stack
+                        // (kernel_process_stack_idle_blocked), and starting
+                        // it here ran it on a stack two CPUs used at once.
                         if (kernel_process_cpu_allows_slot(
-                                cpu_id(), parent.pool_index)) {
+                                cpu_id(), parent.pool_index) &&
+                            scheduled_process_record_of(parent)
+                                .stack_owner_cpu == PROCESS_STACK_UNOWNED) {
                             scheduled_process_record_at(
                                 parent_owner.pool_index).wait_reason =
                                 ProcessWaitReason::None;
@@ -8061,7 +7985,9 @@ private fn kernel_process_first_zombie_of(parent: ProcessHandle)
             return ProcessNextReadyResult::Missing;
         }
         if (scheduled_process_state_of(cursor) ==
-                ProcessSlotState::Exited) {
+                ProcessSlotState::Exited &&
+            scheduled_process_record_of(cursor).stack_owner_cpu ==
+                PROCESS_STACK_UNOWNED) {
             return ProcessNextReadyResult::Next(cursor);
         }
         if (scheduled_process_record_of(cursor).has_next_sibling
@@ -8331,7 +8257,9 @@ private fn kernel_process_zombie_of_pid(parent: ProcessHandle, pid: usize)
         }
         if (scheduled_process_pid_of_handle(cursor) == pid &&
             scheduled_process_state_of(cursor) ==
-                ProcessSlotState::Exited) {
+                ProcessSlotState::Exited &&
+            scheduled_process_record_of(cursor).stack_owner_cpu ==
+                PROCESS_STACK_UNOWNED) {
             return ProcessNextReadyResult::Next(cursor);
         }
         if (scheduled_process_record_of(cursor).has_next_sibling
@@ -8341,6 +8269,54 @@ private fn kernel_process_zombie_of_pid(parent: ProcessHandle, pid: usize)
         cursor = scheduled_process_record_of(cursor).next_sibling;
     }
     return ProcessNextReadyResult::Missing;
+}
+
+// GitHub issue #609: a child that has exited but whose CPU still stands on
+// its kernel stack. kernel_process_child_exit makes the child Exited under
+// the run lock and the exiting CPU leaves the stack later, when it switches
+// to a successor or to its idle stack. Until then the zombie is not
+// collectable -- the two searches above skip it -- because reaping it would
+// free a stack and a record that CPU is still using. #552 put that release
+// before a reap, and scheduled_process_ready_take already refused a parent's
+// continuation in that window; the fast path of wait4, which finds the
+// zombie itself, did not ask. It surfaced once wait4 ran on a peer: both
+// CPUs fail-stopped, one with its current record already reset.
+//
+// `pid` is wait4's pid; all ones means any child.
+fn kernel_process_child_zombie_stack_held(parent: ProcessHandle, pid: usize)
+        -> bool {
+    if (scheduled_process_record_of(parent).has_first_child == false) {
+        return false;
+    }
+    let mut cursor: ProcessHandle =
+        scheduled_process_record_of(parent).first_child;
+    let mut remaining: usize = scheduled_process_pool_live_count() + 1;
+    while (remaining != 0) {
+        remaining = remaining - 1;
+        if (scheduled_process_handle_matches(cursor) == false) {
+            return false;
+        }
+        if ((pid == 0xFFFFFFFFFFFFFFFF ||
+             scheduled_process_pid_of_handle(cursor) == pid) &&
+            scheduled_process_state_of(cursor) == ProcessSlotState::Exited &&
+            scheduled_process_record_of(cursor).stack_owner_cpu !=
+                PROCESS_STACK_UNOWNED) {
+            return true;
+        }
+        if (scheduled_process_record_of(cursor).has_next_sibling
+                == false) {
+            return false;
+        }
+        cursor = scheduled_process_record_of(cursor).next_sibling;
+    }
+    return false;
+}
+
+// The same question about the current process's children, for wait4.
+fn kernel_process_current_child_zombie_stack_held(pid: usize) -> bool {
+    if (execution_here().current_live == false) { return false; }
+    return kernel_process_child_zombie_stack_held(
+        execution_here().current_handle, pid);
 }
 
 // The status of THAT child, without collecting it. The peek/reap pair has
@@ -8417,6 +8393,36 @@ fn kernel_process_child_wait_status_peek_for(slot: usize) -> usize {
             return scheduled_process_record_of(zombie).exit_status;
         }
     }
+}
+
+// The exit status of the child `pid` of the process in `slot`, whether or
+// not a CPU still stands on its stack. For kernel_syscall_wait4_deliver
+// only: it resumes a parent that a child's exit started directly, on the
+// exiting CPU, which still stands on that child's stack and releases it
+// only at the switch -- the deferred reap comes after. The collecting
+// searches skip such a zombie (#609), which is right for a reap and wrong
+// for this read.
+fn kernel_process_child_exit_status_for(slot: usize, pid: usize) -> usize {
+    let mut parent: ProcessHandle = scheduled_process_handle_of_slot(slot);
+    if (scheduled_process_record_of(parent).has_first_child == false) {
+        return 0;
+    }
+    let mut cursor: ProcessHandle =
+        scheduled_process_record_of(parent).first_child;
+    let mut remaining: usize = scheduled_process_pool_live_count() + 1;
+    while (remaining != 0) {
+        remaining = remaining - 1;
+        if (scheduled_process_handle_matches(cursor) == false) { return 0; }
+        if (scheduled_process_pid_of_handle(cursor) == pid &&
+            scheduled_process_state_of(cursor) == ProcessSlotState::Exited) {
+            return scheduled_process_record_of(cursor).exit_status;
+        }
+        if (scheduled_process_record_of(cursor).has_next_sibling == false) {
+            return 0;
+        }
+        cursor = scheduled_process_record_of(cursor).next_sibling;
+    }
+    return 0;
 }
 
 // Consumes: this is the reap. Returns the status it reaped, so the

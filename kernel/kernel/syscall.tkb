@@ -2200,14 +2200,13 @@ fn syscall_action_encode(action: SyscallAction) -> (usize, usize) {
 // EL0 process.
 fn kernel_syscall_exit_current_process(status: usize) -> SyscallAction {
     if (kernel_process_is_child()) {
-        // GitHub issue #448: nothing is torn down yet, so waiting for an
-        // interrupt and running this syscall again is free of side
-        // effects -- and it is the only thing to do when a core-0 exit has
-        // nowhere to hand the CPU. A peer may return to architectural idle.
-        // See kernel_process_exit_would_strand.
-        if (kernel_process_exit_would_strand()) {
-            return SyscallAction::WaitInterrupt;
-        }
+        // GitHub issue #448 made an exit with nowhere to hand the CPU wait
+        // for an interrupt and rerun, because core 0 had nowhere else to
+        // go. It has since #592: an exit with no successor idles on any
+        // CPU (kernel_process_child_exit's tail). The wait went with it,
+        // after it livelocked a child exiting on core 0 against a parent
+        // polling wait4(WNOHANG) on a peer (#609): the exit waited for the
+        // parent to become Ready or Blocked, and the parent was neither.
         match kernel_syscall_clone_files_reap() {
             KernelFdReapResult::Failed => { return SyscallAction::Unreachable; }
             KernelFdReapResult::Reaped => { }
@@ -2285,7 +2284,8 @@ fn kernel_syscall_wait4_deliver(frame_sp: usize, reaped_pid: usize,
             }
             UserWriteRangeResult::Ok(range) => {
                 let status: usize =
-                    kernel_process_child_wait_status_peek_for(parent_slot);
+                    kernel_process_child_exit_status_for(parent_slot,
+                                                         reaped_pid);
                 if (user_write_u32(range, 0,
                         ((status & 0xFF) << 8) as u32) == false) {
                     el0_context_set_x0(frame_sp, LINUX_EFAULT);
@@ -3271,15 +3271,14 @@ private fn syscall_accept_claimed(number: usize, x0: usize, x1: usize,
 // of the call. What each group needs before it can leave the list is on
 // issue #583.
 fn syscall_peer_refused(number: usize) -> bool {
-    // The process lifecycle: clone and its forms, exec, wait4, and the
-    // payload fixture's parent report. Every multicore defect this project
-    // has closed lived here (#532, #552, #569, #571), each found with these
-    // operations on core 0, and wait4's walk and its Blocked publication
-    // are not yet one critical section against a peer exit (#550).
+    // The process lifecycle: clone and its forms, exec, and the payload
+    // fixture's parent report. Every multicore defect this project has
+    // closed lived here (#532, #552, #569, #571), each found with these
+    // operations on core 0. wait4 left the list in #609, once #550 had made
+    // its decision and its Blocked publication one critical section.
     if (number == AARCH64_NR_CLONE || number == AARCH64_NR_CLONE3 ||
         number == AARCH64_NR_FORK || number == AARCH64_NR_VFORK ||
         number == AARCH64_NR_EXECVE || number == AARCH64_NR_EXECVEAT ||
-        number == AARCH64_NR_WAIT4 ||
         number == AARCH64_NR_TAKIBI_PARENT_PROGRESS) {
         return true;
     }
@@ -3819,6 +3818,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (x0 == 11) {
             return SyscallAction::Resume(
                 workload_peer_read_peer_ready());
+        }
+        // /bin/peer-mutate's wait4 half (GitHub issue #609).
+        if (x0 == 15) {
+            return SyscallAction::Resume(workload_peer_wait_report());
         }
         // /bin/peer-mutate (GitHub issue #597).
         if (x0 == 14) {
@@ -5452,7 +5455,17 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             collectable = kernel_process_child_waitable_pid(requested_pid);
         }
         let has_live_child: bool = kernel_process_current_has_live_child();
+        let mut requested_for_held: usize = 0xFFFFFFFFFFFFFFFF;
+        if (selecting) { requested_for_held = requested_pid; }
+        let zombie_stack_held: bool =
+            kernel_process_current_child_zombie_stack_held(requested_for_held);
         process_run_unlock(decision_guard);
+        // GitHub issue #609: the awaited child has exited, but its CPU has
+        // not yet left its stack. Neither collectable nor worth sleeping
+        // for; ask again after an interrupt, by which time it has.
+        if (collectable == false && zombie_stack_held) {
+            return SyscallAction::WaitInterrupt;
+        }
         if (collectable == false) {
             if (wait_options == LINUX_WNOHANG) {
                 return SyscallAction::Resume(0);
@@ -5493,6 +5506,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 kernel_process_current_set_pending_block(
                     ProcessWaitReason::ChildExit, x1);
                 kernel_process_current_set_wait4_pid(requested_pid);
+                workload_peer_wait_note(true);
                 return SyscallAction::Block;
             }
             return SyscallAction::Resume(LINUX_ECHILD);
@@ -5526,6 +5540,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     }
                     kernel_init_boot_fixture_reaped(
                         kernel_process_current_pid());
+                    workload_peer_wait_note(false);
                     return SyscallAction::Resume(
                         kernel_process_last_child_pid());
                 }
@@ -5542,6 +5557,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // bounded boot fixture ends now. The hook is a no-op for every
         // other reaper and after the first one.
         kernel_init_boot_fixture_reaped(kernel_process_current_pid());
+        workload_peer_wait_note(false);
         return SyscallAction::Resume(kernel_process_last_child_pid());
     }
     if (number == AARCH64_NR_GETCWD) {

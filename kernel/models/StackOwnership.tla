@@ -10,7 +10,7 @@
 (* after an exit it stands on the zombie's stack until it moves to its    *)
 (* idle stack. `owner` is each process stack's physical owner.            *)
 (*                                                                         *)
-(* Two past defects are variants, each re-introduced by one constant:      *)
+(* Three past defects are variants, each re-introduced by one constant:    *)
 (*                                                                         *)
 (* EXIT_IDLES = FALSE -- 08df64c6's deadlock. After an exit, core 0 waited *)
 (*   for a successor while still standing on the zombie's stack. The only *)
@@ -32,7 +32,9 @@ CONSTANTS
     \* @type: Bool;
     EXIT_IDLES,
     \* @type: Bool;
-    LEAVE_CHECKS_STACK
+    LEAVE_CHECKS_STACK,
+    \* @type: Bool;
+    WAKE_START_CHECKS_STACK
 
 Cores == {"c0", "c1"}
 Procs == {"parent", "child"}
@@ -129,6 +131,20 @@ ChildExit(c) ==
     /\ current' = [current EXCEPT ![c] = None]
     /\ UNCHANGED <<stands, owner>>
 
+\* The same exit, when the parent is Blocked in wait4 and this core may run
+\* it: the parent is woken and started here at once, and the core still
+\* stands on the zombie's stack until the switch completes. Allowed only
+\* when no core owns the parent's stack; otherwise ChildExit above leaves
+\* it Ready. WAKE_START_CHECKS_STACK = FALSE drops that check.
+ChildExitStart(c) ==
+    /\ Settled(c, "child")
+    /\ state["parent"] = "Blocked"
+    /\ WAKE_START_CHECKS_STACK => owner["parent"] = None
+    /\ state' = [state EXCEPT !["child"] = "Exited", !["parent"] = "Running"]
+    /\ current' = [current EXCEPT ![c] = "parent"]
+    /\ reapPending' = TRUE
+    /\ UNCHANGED <<stands, owner>>
+
 \* A core with no current process moves to its idle stack and releases the
 \* stack it stood on: an exited process's (kernel_process_stack_idle_complete),
 \* or a blocked one's (kernel_process_stack_idle_blocked).
@@ -186,6 +202,7 @@ Next ==
         \/ SwitchComplete(c)
         \/ Wait4Block(c)
         \/ ChildExit(c)
+        \/ ChildExitStart(c)
         \/ IdleEnter(c)
         \/ Wait4Reap(c)
         \/ Leave(c)
@@ -200,7 +217,7 @@ Fairness ==
         /\ SF_vars(\E p \in Procs : Dispatch(c, p))
         /\ SF_vars(Clone(c))
         /\ SF_vars(Wait4Block(c))
-        /\ SF_vars(ChildExit(c))
+        /\ SF_vars(ChildExit(c) \/ ChildExitStart(c))
         /\ SF_vars(Wait4Reap(c))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
@@ -229,14 +246,29 @@ RunningMatchesCores ==
     /\ \A c, d \in Cores :
            (c # d /\ current[c] # None) => current[c] # current[d]
 
+\* A core's current process has a stack no OTHER core owns: a process is
+\* started only on a free stack, or its own core's. #609's direct start of
+\* a parent whose blocking core still stood on its stack violates this.
+StartsOnFreeStack ==
+    \A c \in Cores : current[c] # None => owner[current[c]] \in {None, c}
+
+\* The one invariant Apalache's shallow check is given: both defects that
+\* break a safety property are found through it.
+CoreInvariants == RunningMatchesCores /\ StartsOnFreeStack
+
 \* The parent's wait4 completes: the child is reaped.
 ChildReaped == <>(state["child"] = "Reaped")
 
 ----------------------------------------------------------------------------
 (* Constant initializers for Apalache. *)
 
-CInitFixed == EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE
-CInitExitWaits == EXIT_IDLES = FALSE /\ LEAVE_CHECKS_STACK = TRUE
-CInitLeaveUnchecked == EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = FALSE
+CInitFixed ==
+    EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
+CInitExitWaits ==
+    EXIT_IDLES = FALSE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = TRUE
+CInitLeaveUnchecked ==
+    EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = FALSE /\ WAKE_START_CHECKS_STACK = TRUE
+CInitWakeStartUnchecked ==
+    EXIT_IDLES = TRUE /\ LEAVE_CHECKS_STACK = TRUE /\ WAKE_START_CHECKS_STACK = FALSE
 
 =============================================================================

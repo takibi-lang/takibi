@@ -268,6 +268,12 @@ const PEER_MUTATION_RENAME: usize = 2;
 const PEER_MUTATION_RMDIR: usize = 4;
 const PEER_MUTATION_WRITE: usize = 8;
 private let mut workload_peer_mutation_pid: usize;
+// GitHub issue #609: /bin/peer-mutate's wait4 on CPU 1 -- that it blocked
+// there in ChildExit, and that it reaped there. Same pid discipline as the
+// mutation set below.
+private let mut workload_peer_wait_pid: usize;
+private let mut workload_peer_wait_blocked: bool;
+private let mut workload_peer_wait_reaped: bool;
 private let mut workload_peer_mutation_seen: usize;
 
 enum WorkloadCpuMode { Idle; El0; El1; Irq; }
@@ -1389,6 +1395,39 @@ fn workload_peer_mutation_note(kind: usize) {
     }
     workload_peer_mutation_seen = workload_peer_mutation_seen | kind;
     process_run_unlock(guard);
+}
+
+// wait4 decided to block (blocked = true) or reaped (false). Only a peer
+// counts; a different process restarts the pair.
+fn workload_peer_wait_note(blocked: bool) {
+    if (cpu_id() == 0) { return; }
+    let guard = process_run_lock();
+    let pid: usize = kernel_process_current_pid();
+    if (workload_peer_wait_pid != pid) {
+        workload_peer_wait_pid = pid;
+        workload_peer_wait_blocked = false;
+        workload_peer_wait_reaped = false;
+    }
+    if (blocked) {
+        workload_peer_wait_blocked = true;
+    } else {
+        workload_peer_wait_reaped = true;
+    }
+    process_run_unlock(guard);
+}
+
+// Tag 15: 1 and the line when this process both blocked in wait4 and reaped
+// on a peer.
+fn workload_peer_wait_report() -> usize {
+    let guard = process_run_lock();
+    let complete: bool =
+        workload_peer_wait_pid == kernel_process_current_pid() &&
+        workload_peer_wait_blocked && workload_peer_wait_reaped;
+    process_run_unlock(guard);
+    if (complete == false) { return 0; }
+    kernel_boot_log(
+        "workload: wait4 blocked on a peer until its child exited elsewhere, and reaped there\n");
+    return 1;
 }
 
 // Tag 14: 1 and the line when this process made all three on a peer.

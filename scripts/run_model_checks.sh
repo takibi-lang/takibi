@@ -74,10 +74,11 @@ check_model Wait4Block NoLostWakeup 4 \
     fixed:CInitFixed:pass:ok \
     unfixed:CInitUnfixed:NoLostWakeup:violated
 
-check_model StackOwnership RunningMatchesCores 6 \
+check_model StackOwnership CoreInvariants 6 \
     fixed:CInitFixed:pass:ok \
     exitwaits:CInitExitWaits:deadlock:ok \
-    leaveunchecked:CInitLeaveUnchecked:RunningMatchesCores:violated
+    leaveunchecked:CInitLeaveUnchecked:RunningMatchesCores:violated \
+    wakestartunchecked:CInitWakeStartUnchecked:StartsOnFreeStack:violated
 
 check_model RecordLifetime ReadsOnlyLiveRecords 6 \
     fixed:CInitFixed:pass:ok \
