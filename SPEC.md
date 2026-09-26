@@ -2488,10 +2488,12 @@ separate, isolated full-line buffer range. `dma_prepare_tx` remains
 valid for a plain `*T`, because cleaning rounded endpoint lines does not
 discard adjacent dirty data. Targets without either a cache-maintenance
 contract or coherent DMA reject these builtins during type checking.
-When an RX builtin receives a bare fixed array and its maintenance length
-is a compile-time constant, the length must fit that array's provable byte
-extent. Pointer aliases and dynamic lengths do not yet carry this extent
-proof; this check does not establish CPU/device ownership.
+When an RX builtin receives a fixed array directly or through an immutable
+local pointer alias, and its maintenance length is a compile-time constant,
+the length must fit that array's provable byte extent. Address-preserving
+pointer casts and chains of immutable local aliases retain the extent proof;
+pointer arithmetic, mutable aliases, calls, returned pointers, and dynamic
+lengths do not. This check does not establish CPU/device ownership.
 `signal_fence()` is
 a compiler-only ISR/normal-context memory boundary (side-effecting empty
 inline asm with a memory clobber, no hardware barrier instruction).

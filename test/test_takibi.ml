@@ -12652,6 +12652,32 @@ let codegen_tests = [
        expect_type_error "exceeds fixed allocation 'words' (64 bytes)"
          "let mut words: [u32; 16] align(64);
           fn bad() { dma_finish_rx(words, 128); }" ();
+       expect_codegen_ok
+         "let mut status: [u8; 64] align(64);
+          fn receive() {
+            let first = status;
+            let second = first;
+            dma_prepare_rx(second, 64);
+            dma_finish_rx(second, 64);
+          }" ();
+       expect_type_error "exceeds fixed allocation 'status' (64 bytes)"
+         "let mut status: [u8; 64] align(64);
+          fn bad() {
+            let first = status;
+            let second = first;
+            dma_prepare_rx(second, 128);
+          }" ();
+       expect_type_error "exceeds fixed allocation 'words' (64 bytes)"
+         "let mut words: [u32; 16] align(64);
+          fn bad() {
+            let p = words as *align(64) u8;
+            dma_finish_rx(p, 128);
+          }" ();
+       expect_codegen_ok
+         "let mut status: [u8; 64] align(64);
+          fn receive(status: *align(64) u8) {
+            dma_prepare_rx(status, 128);
+          }" ();
        Target_info.configure "thumbv7em-none-eabi");
 
   Alcotest.test_case "dma_finish_rx rejects an unproven pointer, dma_prepare_tx accepts it" `Quick

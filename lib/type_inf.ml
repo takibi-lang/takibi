@@ -10220,6 +10220,99 @@ let infer_program (prog : Ast.toplevel list) : program_types =
    | [] -> ()
    | [(loc, msg)] -> raise (Types.TypeError (loc, msg))
    | errors -> raise (Types.MultiTypeError errors));
+  (* Keep the fixed extent of an immutable local pointer alias until it is
+     passed to an RX cache builtin. This is deliberately a narrow place
+     proof: a cast preserves the address, but pointer arithmetic, mutable
+     aliases, returned pointers, and calls have no known allocation root.
+     Binding IDs keep a shadowing local distinct from the global or earlier
+     local with the same spelling. Ownership transitions are checked by a
+     separate rule; an extent proof does not grant CPU access. *)
+  let check_dma_alias_extents (fdef : Ast.func) =
+    let bindings =
+      (StringMap.find (overload_key fdef.name fdef.params) functions).bindings in
+    let global_extent name =
+      match StringMap.find_opt name genv with
+      | Some (ty, _) ->
+          (match repr ty with
+           | TArray (elem, count) ->
+               Option.map (fun elem_bytes -> (name, count * elem_bytes))
+                 (const_type_size senv (to_ast elem))
+           | _ -> None)
+      | None -> None
+    in
+    let rec origin aliases (e : Ast.expr) = match e.desc with
+      | Ast.Var name ->
+          (match Local_bindings.id_for_expr bindings e with
+           | Some id -> Types.IntMap.find_opt id aliases
+           | None -> global_extent name)
+      | Ast.Cast ((Ast.TypePtr _ | Ast.TypeAlignedPtr _), inner)
+      | Ast.Unsafe inner -> origin aliases inner
+      | _ -> None
+    in
+    let rec expr aliases (e : Ast.expr) =
+      (match e.desc with
+       | Ast.Call (("dma_prepare_rx" | "dma_finish_rx") as fname,
+                   [ptr; len]) ->
+           (match origin aliases ptr, static_slice_bound senv len with
+            | Some (root, extent), Some bytes when bytes > extent ->
+                raise (TypeError (len.loc, Printf.sprintf
+                  "%s range of %d bytes exceeds fixed allocation '%s' (%d bytes)"
+                  fname bytes root extent))
+            | _ -> ())
+       | _ -> ());
+      match e.desc with
+      | Ast.Call (_, args) | Ast.StructLit args | Ast.TupleLit args ->
+          List.iter (expr aliases) args
+      | Ast.VariantCtor (_, _, payload) | Ast.Bnot payload
+      | Ast.Deref payload | Ast.AddrOf payload | Ast.Cast (_, payload)
+      | Ast.FieldGet (payload, _) | Ast.Unsafe payload -> expr aliases payload
+      | Ast.BinOp (_, left, right) | Ast.Index (left, right)
+      | Ast.Assign (left, right) -> expr aliases left; expr aliases right
+      | Ast.SliceOf (base, lo, hi) ->
+          expr aliases base; expr aliases lo; expr aliases hi
+      | Ast.IntLit _ | Ast.BoolLit _ | Ast.StringLit _ | Ast.ByteSliceLit _
+      | Ast.Var _ | Ast.ViewLit _ | Ast.EnumVariant _ | Ast.SizeOf _
+      | Ast.AlignOf _ | Ast.ContainsStableOwner _ | Ast.OffsetOf _
+      | Ast.EmbedFile _ -> ()
+    and stmts aliases body = List.fold_left stmt aliases body
+    and stmt aliases (s : Ast.stmt) = match s.desc with
+      | Ast.Let (is_mutable, _, _, init, _) ->
+          Option.iter (expr aliases) init;
+          (match is_mutable, init, Local_bindings.ids_for_stmt bindings s with
+           | false, Some value, [id] ->
+               (match origin aliases value with
+                | Some root -> Types.IntMap.add id root aliases
+                | None -> aliases)
+           | _ -> aliases)
+      | Ast.Return value -> Option.iter (expr aliases) value; aliases
+      | Ast.Expr value | Ast.Yield value | Ast.LetTuple (_, value) ->
+          expr aliases value; aliases
+      | Ast.Block body | Ast.UnsafeBlock body ->
+          ignore (stmts aliases body); aliases
+      | Ast.If (condition, yes, no) ->
+          expr aliases condition;
+          ignore (stmts aliases yes); ignore (stmts aliases no); aliases
+      | Ast.While (condition, body) ->
+          expr aliases condition; ignore (stmts aliases body); aliases
+      | Ast.For (_, _, lo, hi, body) ->
+          expr aliases lo; expr aliases hi; ignore (stmts aliases body); aliases
+      | Ast.ForEach (_, sequence, body) ->
+          expr aliases sequence; ignore (stmts aliases body); aliases
+      | Ast.Match (subject, arms) | Ast.LetMatch (_, _, _, subject, arms) ->
+          expr aliases subject;
+          List.iter (function
+            | Ast.ArmVariant (_, _, _, body) | Ast.ArmWild body
+            | Ast.ArmIntLit (_, body) | Ast.ArmByteSliceLit (_, body) ->
+                ignore (stmts aliases body)) arms;
+          aliases
+      | Ast.StaticAssert (condition, _) -> expr aliases condition; aliases
+      | Ast.Break | Ast.Continue -> aliases
+    in
+    ignore (stmts Types.IntMap.empty fdef.body)
+  in
+  List.iter (function
+    | Ast.FuncDef f -> check_dma_alias_extents f
+    | _ -> ()) prog;
   (* GitHub issue #476: after the linear pass has proved every token is
      consumed on every path, prove each commit saw every field written. *)
   List.iter (function
