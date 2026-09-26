@@ -233,6 +233,7 @@ let mut msc_tag: u32 = 0;
 private let mut msc_write10_command_count: usize = 0;
 
 let mut xhci_ready: bool = false;
+private let mut xhci_controller_unusable: bool = false;
 
 // -- Media Access Interface (matches examples/common_stm32/sdmmc.tkb and
 // examples/common_rpi3/usb_msc.tkb) -----------------------------------
@@ -646,9 +647,35 @@ fn msc_cbw_header(data_len: u32, dir_in: bool, cb_len: u32) {
 // phase (into/from data_base, the CALLER's own buffer -- unlike the
 // rp1_usb_smoke.tkb original this was ported from, which always used one
 // fixed internal buffer), CSW in. The CBW must already be built by
-// msc_cbw_header() plus the caller's CDB bytes. Returns 0 on success, or
-// a small nonzero code identifying which stage failed.
-fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
+// msc_cbw_header() plus the caller's CDB bytes. A timeout has no matching
+// transfer event, so it cannot enter the completed-error recovery path.
+must_use variant MscCommandResult {
+    Ok;
+    CompletedError(u32);
+    RestartRequired;
+    ControllerUnusable;
+}
+must_use variant MscTimeoutResult {
+    RestartRequired;
+    ControllerUnusable;
+}
+
+// A missing event leaves the transfer outstanding. xHCI HCHalted means the
+// pending pipelined transactions have finished (xHCI 1.2 section 5.4.1.1).
+// Reset the host controller before another command can reuse a DMA range.
+// A failed halt/reset is conservatively treated as unproven quiescence, so
+// this boot must never reinitialize the controller.
+fn msc_abort_unobserved_transfer() -> MscTimeoutResult {
+    xhci_ready = false;
+    if (xhci_halt_and_reset()) {
+        return MscTimeoutResult::RestartRequired;
+    }
+    xhci_controller_unusable = true;
+    return MscTimeoutResult::ControllerUnusable;
+}
+
+fn msc_run_command(data_len: u32, dir_in: bool,
+                   data: *align(64) u8) -> MscCommandResult {
     let data_base: usize = data as usize;
     // READ CAPACITY returns only eight bytes into the 512-byte scratch
     // buffer. Sector transfers use the larger dedicated bounce buffer.
@@ -665,8 +692,18 @@ fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
 
     dma_prepare_tx(msc_cbw_buf as *u8, 64);
     let cbw_cc: u32 = usb_bulk_xfer(false, cbw_dma, 31);
+    if (cbw_cc == 0) {
+        match msc_abort_unobserved_transfer() {
+            MscTimeoutResult::RestartRequired => {
+                return MscCommandResult::RestartRequired;
+            }
+            MscTimeoutResult::ControllerUnusable => {
+                return MscCommandResult::ControllerUnusable;
+            }
+        }
+    }
     if (cbw_cc != 1) {
-        return 1;
+        return MscCommandResult::CompletedError(1);
     }
 
     if (data_len > 0) {
@@ -684,18 +721,42 @@ fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
         // disk_write) own the recovery-and-retry policy, via
         // msc_recover_transport().
         let data_cc: u32 = usb_bulk_xfer(dir_in, data_dma, data_len);
+        if (data_cc == 0) {
+            match msc_abort_unobserved_transfer() {
+                MscTimeoutResult::RestartRequired => {
+                    if (dir_in) {
+                        dma_finish_rx(data, cache_length);
+                    }
+                    return MscCommandResult::RestartRequired;
+                }
+                MscTimeoutResult::ControllerUnusable => {
+                    return MscCommandResult::ControllerUnusable;
+                }
+            }
+        }
         // A nonzero code came from a transfer event, even when that event
         // reports an error. No later write from this transfer is pending.
         if (dir_in && data_cc != 0) {
             dma_finish_rx(data, cache_length);
         }
         if (data_cc != 1 && data_cc != 13) {
-            return 2;
+            return MscCommandResult::CompletedError(2);
         }
     }
 
     dma_prepare_rx(msc_csw_buf, 64);
     let mut csw_cc: u32 = usb_bulk_xfer(true, csw_dma, 13);
+    if (csw_cc == 0) {
+        match msc_abort_unobserved_transfer() {
+            MscTimeoutResult::RestartRequired => {
+                dma_finish_rx(msc_csw_buf, 64);
+                return MscCommandResult::RestartRequired;
+            }
+            MscTimeoutResult::ControllerUnusable => {
+                return MscCommandResult::ControllerUnusable;
+            }
+        }
+    }
     if (csw_cc != 0) {
         dma_finish_rx(msc_csw_buf, 64);
     }
@@ -721,12 +782,23 @@ fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
         delay_us(50000);
         dma_prepare_rx(msc_csw_buf, 64);
         csw_cc = usb_bulk_xfer(true, csw_dma, 13);
+        if (csw_cc == 0) {
+            match msc_abort_unobserved_transfer() {
+                MscTimeoutResult::RestartRequired => {
+                    dma_finish_rx(msc_csw_buf, 64);
+                    return MscCommandResult::RestartRequired;
+                }
+                MscTimeoutResult::ControllerUnusable => {
+                    return MscCommandResult::ControllerUnusable;
+                }
+            }
+        }
         if (csw_cc != 0) {
             dma_finish_rx(msc_csw_buf, 64);
         }
     }
     if (csw_cc != 1 && csw_cc != 13) {
-        return 3;
+        return MscCommandResult::CompletedError(3);
     }
 
     let mut csw_sig: u32 = 0;
@@ -737,15 +809,15 @@ fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
         csw_tag = csw_tag | ((msc_csw_buf[4 + i] as u32) << sh);
     }
     if (csw_sig != 0x53425355) {
-        return 4;
+        return MscCommandResult::CompletedError(4);
     }
     if (csw_tag != msc_tag) {
-        return 5;
+        return MscCommandResult::CompletedError(5);
     }
     if (msc_csw_buf[12] != 0) {
-        return 6;
+        return MscCommandResult::CompletedError(6);
     }
-    return 0;
+    return MscCommandResult::Ok;
 }
 
 // -- Bring-up sequence, split into stages matching rp1_usb_smoke.tkb's
@@ -1241,6 +1313,9 @@ fn xhci_configure_endpoint(in_num: {1..<16 as usize},
 // sentence. Each now names itself, and the ones that received a controller
 // completion code, a transport status or a block size carry it.
 fn usb_disk_initialize_stages() -> UsbInitOutcome {
+    if (xhci_controller_unusable) {
+        return UsbInitOutcome::Reset;
+    }
     if (xhci_halt_and_reset() == false) {
         return UsbInitOutcome::Reset;
     }
@@ -1306,8 +1381,22 @@ fn usb_disk_initialize_stages() -> UsbInitOutcome {
     for i: usize in 0..<50 {
         msc_cbw_header(0, false, 6);
         msc_cbw_buf[15] = 0x00;
-        readiness = usb_retry_record_attempt(
-            readiness, msc_run_command(0, false, msc_scratch_buf));
+        match msc_run_command(0, false, msc_scratch_buf) {
+            MscCommandResult::Ok => {
+                readiness = usb_retry_record_attempt(readiness, 0);
+            }
+            MscCommandResult::CompletedError(status) => {
+                readiness = usb_retry_record_attempt(readiness, status);
+            }
+            MscCommandResult::RestartRequired => {
+                readiness = usb_retry_record_attempt(readiness, 7);
+                return UsbInitOutcome::TestUnitReady(readiness);
+            }
+            MscCommandResult::ControllerUnusable => {
+                readiness = usb_retry_record_attempt(readiness, 8);
+                return UsbInitOutcome::TestUnitReady(readiness);
+            }
+        }
         if (readiness.succeeded) {
             break;
         }
@@ -1321,9 +1410,17 @@ fn usb_disk_initialize_stages() -> UsbInitOutcome {
     // storage stack's own fixed assumption.
     msc_cbw_header(8, true, 10);
     msc_cbw_buf[15] = 0x25;
-    let capacity_status: u32 = msc_run_command(8, true, msc_scratch_buf);
-    if (capacity_status != 0) {
-        return UsbInitOutcome::ReadCapacity(capacity_status);
+    match msc_run_command(8, true, msc_scratch_buf) {
+        MscCommandResult::Ok => { }
+        MscCommandResult::CompletedError(status) => {
+            return UsbInitOutcome::ReadCapacity(status);
+        }
+        MscCommandResult::RestartRequired => {
+            return UsbInitOutcome::ReadCapacity(7);
+        }
+        MscCommandResult::ControllerUnusable => {
+            return UsbInitOutcome::ReadCapacity(8);
+        }
     }
     let mut block_size: u32 = 0;
     for i: usize in 4..<8 {
@@ -1404,12 +1501,11 @@ fn msc_scsi_lba_cdb(op: u8, sector: u32, sectors: usize) {
     msc_cbw_buf[23] = (sectors & 0xFF) as u8;
 }
 
-// Same retry policy as RPi3's own disk_read/disk_write: one attempt, and
-// on ANY failure a full msc_recover_transport() (Bulk-Only Mass Storage
+// Same retry policy as RPi3's own disk_read/disk_write for completed errors:
+// one attempt, and then a full msc_recover_transport() (Bulk-Only Mass Storage
 // Reset + clear-halt on both bulk endpoints) followed by exactly one
-// retry of the same, side-effect-free-to-repeat command. Not attempted
-// more than once -- a transport that fails twice in a row needs a caller
-// decision, not a longer retry loop.
+// retry of the same, side-effect-free-to-repeat command. An unobserved
+// transfer aborts instead; a BOT reset does not quiesce the host controller.
 fn disk_read_sectors(sector: u32, buf: []u8) -> DiskIoResult {
     if (disk_io_ok(disk_status()) == false) {
         return DiskIoResult::Err(-1);
@@ -1424,17 +1520,29 @@ fn disk_read_sectors(sector: u32, buf: []u8) -> DiskIoResult {
     let length: usize = buf.len;
     msc_cbw_header(length as u32, true, 10);
     msc_scsi_lba_cdb(0x28, sector, sectors);
-    let mut rc: u32 = msc_run_command(length as u32, true,
-                                       msc_bounce_buf);
-    if (rc != 0) {
+    let mut retry: bool = false;
+    match msc_run_command(length as u32, true, msc_bounce_buf) {
+        MscCommandResult::Ok => { }
+        MscCommandResult::CompletedError(_) => { retry = true; }
+        MscCommandResult::RestartRequired => { return DiskIoResult::Err(-1); }
+        MscCommandResult::ControllerUnusable => { return DiskIoResult::Err(-1); }
+    }
+    if (retry) {
         msc_recover_transport();
         msc_cbw_header(length as u32, true, 10);
         msc_scsi_lba_cdb(0x28, sector, sectors);
-        rc = msc_run_command(length as u32, true,
-                             msc_bounce_buf);
-    }
-    if (rc != 0) {
-        return DiskIoResult::Err(-1);
+        match msc_run_command(length as u32, true, msc_bounce_buf) {
+            MscCommandResult::Ok => { }
+            MscCommandResult::CompletedError(_) => {
+                return DiskIoResult::Err(-1);
+            }
+            MscCommandResult::RestartRequired => {
+                return DiskIoResult::Err(-1);
+            }
+            MscCommandResult::ControllerUnusable => {
+                return DiskIoResult::Err(-1);
+            }
+        }
     }
     for i: usize in 0..<MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE {
         if (i < buf.len) {
@@ -1455,8 +1563,8 @@ fn disk_write(sector: u32, buf: [u8; MSC_SECTOR_SIZE..]) -> DiskIoResult {
 // Write a bounded contiguous run with one WRITE(10). The bounce buffer is
 // cache-line aligned and sized for the complete DMA range, so callers may
 // provide ordinary, unaligned byte storage. A failed write is replayed once
-// with the same bytes and LBA range, preserving the existing single-sector
-// recovery policy.
+// with the same bytes and LBA range after a completed error. A transfer
+// without a matching event aborts before any replay.
 fn disk_write_sectors(sector: u32, buf: []u8) -> DiskIoResult {
     if (disk_io_ok(disk_status()) == false) {
         return DiskIoResult::Err(-1);
@@ -1477,10 +1585,11 @@ fn disk_write_sectors(sector: u32, buf: []u8) -> DiskIoResult {
     msc_cbw_header(length as u32, false, 10);
     msc_scsi_lba_cdb(0x2A, sector, sectors);
     msc_write10_command_count = msc_write10_command_count + 1;
-    let rc1: u32 = msc_run_command(length as u32, false,
-                                    msc_bounce_buf);
-    if (rc1 == 0) {
-        return DiskIoResult::Ok;
+    match msc_run_command(length as u32, false, msc_bounce_buf) {
+        MscCommandResult::Ok => { return DiskIoResult::Ok; }
+        MscCommandResult::CompletedError(_) => { }
+        MscCommandResult::RestartRequired => { return DiskIoResult::Err(-1); }
+        MscCommandResult::ControllerUnusable => { return DiskIoResult::Err(-1); }
     }
     msc_recover_transport();
     // This is deliberately limited to one replay of the exact same
@@ -1491,10 +1600,16 @@ fn disk_write_sectors(sector: u32, buf: []u8) -> DiskIoResult {
     msc_cbw_header(length as u32, false, 10);
     msc_scsi_lba_cdb(0x2A, sector, sectors);
     msc_write10_command_count = msc_write10_command_count + 1;
-    let rc2: u32 = msc_run_command(length as u32,
-                                    false, msc_bounce_buf);
-    if (rc2 != 0) {
-        return DiskIoResult::Err(-1);
+    match msc_run_command(length as u32, false, msc_bounce_buf) {
+        MscCommandResult::Ok => { return DiskIoResult::Ok; }
+        MscCommandResult::CompletedError(_) => {
+            return DiskIoResult::Err(-1);
+        }
+        MscCommandResult::RestartRequired => {
+            return DiskIoResult::Err(-1);
+        }
+        MscCommandResult::ControllerUnusable => {
+            return DiskIoResult::Err(-1);
+        }
     }
-    return DiskIoResult::Ok;
 }
