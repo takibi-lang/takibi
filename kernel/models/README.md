@@ -123,6 +123,32 @@ Properties:
 - `ChildReaped` (liveness, TLC only): the parent's wait4 completes.
 - Deadlock freedom: TLC's own check, which the exit variant fails.
 
+## RecordLifetime.tla -- a process record read while another CPU reaps it (#482)
+
+One record, one reader, one reaper. The reader is a scheduler walk or an
+interrupt-side wake: it holds the process-run lock, probes the record live,
+lets the pool's view go, and reads through the pointer. The reaper tears down
+what the exited process owned, then removes the record from the pool.
+
+Three variants:
+
+- `REMOVE_UNDER_LOCK = FALSE` is the kernel before #482. The removal ran
+  outside the run lock, and TLC finds a read of a freed record in five
+  steps: exit, probe, teardown, remove, read.
+- `REMOVE_UNDER_LOCK = TRUE` is the fix, and `ReadsOnlyLiveRecords` holds.
+- `READER_HOLDS_LOCK = FALSE`, with the fix in place, breaks the assumption
+  the fix rests on: that a reader of another process's record holds the run
+  lock from probe to read. The type system enforces the removal's half, the
+  guard `scheduled_process_slot_remove` requires. It does not enforce the
+  reader's half, and this variant shows the fix alone is not enough.
+
+| Action | Kernel function it abstracts | What is kept, what is dropped |
+| --- | --- | --- |
+| `ReaderProbe`, `ReaderMiss`, `ReaderRead` | `kernel_process_secondary_start`, `kernel_process_next_ready`, `kernel_process_deadline_wake_all`, via `scheduled_process_record_at` | the probe returns a pointer and drops the pool's view; the read comes later, under the run lock the walk already holds |
+| `ReaperTeardown` | `scheduled_process_reap_teardown` | frees what only the exited process owned; no lock |
+| `ReaperRemove` | `scheduled_process_reap_remove`, `scheduled_process_slot_remove` | resets and removes the record, under the run-lock guard since #482 |
+| `Exit` | `kernel_process_child_exit` | the process becomes a zombie; the rest of exit is dropped |
+
 `scripts/check_model_function_map.py` fails the build when a function named
 in these tables no longer exists, so a rename or removal forces the table,
 and a look at the model, to be updated.

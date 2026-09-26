@@ -58,7 +58,11 @@ use "kernel/lib/locked_cell.tkb";
 //   reporter that has stopped every peer. payload_unproven_of releases a
 //   normal view before returning its bare pointer; those eleven caller-owned
 //   lifetime exceptions remain named and checked by
-//   scripts/check_liveness_proof_escapes.py rather than weakening every view.
+//   scripts/check_liveness_proof_escapes.py rather than weakening every view,
+//   and since GitHub issue #482 each entry there names what keeps its payload
+//   alive: a reaper's exclusivity, a reference count, a connection owner, or
+//   -- for process records, which other CPUs' scheduler walks read -- the
+//   process-run guard scheduled_process_slot_remove now requires.
 // - LIVE SAYS THE SLOT IS THE CALLER'S, NOT THAT ITS PAYLOAD IS WRITTEN.
 //   The two entry points promise different things about the bytes, and a
 //   walker that reads a payload field needs to know which (issue #514).

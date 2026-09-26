@@ -100,4 +100,9 @@ check_model StackOwnership RunningMatchesCores 6 \
     exitwaits:CInitExitWaits:deadlock:ok \
     leaveunchecked:CInitLeaveUnchecked:RunningMatchesCores:violated
 
+check_model RecordLifetime ReadsOnlyLiveRecords 6 \
+    fixed:CInitFixed:pass:ok \
+    unfixed:CInitUnfixed:ReadsOnlyLiveRecords:violated \
+    readerunlocked:CInitReaderUnlocked:ReadsOnlyLiveRecords:violated
+
 [ "$failures" -eq 0 ] || exit 1

@@ -45,29 +45,47 @@ ESCAPE_RE = re.compile(
 FN_RE = re.compile(r"^(?:private )?fn ([A-Za-z_0-9]+)")
 
 # (file, enclosing function) -> why this caller cannot hold the proof.
+# GitHub issue #482: each entry names what keeps the payload alive after
+# the pool's view is dropped -- the lifetime the caller supplies instead --
+# not merely that the function returns a pointer. A new entry has to find
+# its own answer.
 ALLOWED = {
     ("kernel/kernel/fd_table.tkb", "fd_context_at"):
-        "returns the pointer to callers that index it directly",
+        "a process's fd context is released only when the process is reaped "
+        "(or its creation is rolled back before anyone sees it); until then "
+        "only the process's own syscalls and, after it exits, its reaper reach "
+        "it",
     ("kernel/kernel/fd_table.tkb", "fd_block_at"):
-        "returns the pointer",
+        "descriptor blocks belong to one fd context and are released only "
+        "with it, so fd_context_at's lifetime covers them",
     ("kernel/kernel/fd_table.tkb", "unified_object_at"):
-        "returns the pointer",
+        "a shared object is freed only when its reference count reaches zero "
+        "under object_refcount_lock, and every reader reaches it through a "
+        "descriptor that holds one of those references",
     ("kernel/kernel/process.tkb", "scheduled_process_record_at"):
-        "the counted process-record accessor; returns the pointer to 77 "
-        "call sites that still take a bare slot (GitHub issue #492)",
+        "a record leaves the pool only through scheduled_process_slot_remove, "
+        "which requires the process-run guard (#482); a reader of another "
+        "process's record holds that lock, and a reader of its own is not "
+        "yet reaped. Returns the pointer to 77 call sites that still take a "
+        "bare slot (#492)",
     ("kernel/kernel/process.tkb", "scheduled_process_record_peek"):
         "deliberately tolerates a dead slot for crash and trace paths, and "
         "returns the pointer",
     ("kernel/mm/address_space.tkb", "address_space_backing_at"):
-        "returns the pointer",
+        "a backing is released only when its process is reaped, and only a "
+        "process holding a Running token (or its reaper) activates or edits "
+        "it",
     ("kernel/mm/address_space.tkb", "address_space_backing_existing_at"):
-        "returns the pointer",
+        "the same lifetime as address_space_backing_at",
     ("kernel/mm/process_image.tkb", "process_image_record_at"):
-        "returns the pointer",
+        "an image record is released only when its process is reaped, and "
+        "only that process's exec and fault paths, or its reaper, reach it",
     ("kernel/net/tcp.tkb", "tcp_frame_slice"):
-        "returns a slice of the payload, which outlives the view",
+        "a frame belongs to one connection and is released only with it or "
+        "displaced by a holder of that connection's owner",
     ("kernel/net/tcp.tkb", "tcp_connection_payload"):
-        "returns the pointer",
+        "a connection is freed only by tcp_connection_free, which consumes "
+        "its owner; every caller holds the owner while it uses the payload",
     ("kernel/net/tcp.tkb", "tcp_connection_alloc"):
         "uses the payload after the pool owner is discharged into "
         "TcpConnectionOwner, which is the ownership handoff GitHub issue "

@@ -2018,7 +2018,9 @@ private fn scheduled_process_release_every_process() !{unsafe} {
             ProcessSlotCursor::At(slot) => {
                 let next = scheduled_process_next_slot(slot);
                 scheduled_process_release_slot_resources(slot);
-                scheduled_process_slot_remove(slot);
+                let removal_guard = process_run_lock();
+                scheduled_process_slot_remove(removal_guard, slot);
+                process_run_unlock(removal_guard);
                 cursor = next;
             }
         }
@@ -2047,7 +2049,15 @@ private fn scheduled_process_release_slot_resources(slot: usize) !{unsafe} {
 // Gives a slot back. The bootstrap's record is a static and is only
 // marked free; a pool record is removed, and its kernel stack run is
 // parked rather than freed (see scheduled_process_spare).
-private fn scheduled_process_slot_remove(slot: usize) !{unsafe} {
+//
+// GitHub issue #482: under the process-run lock, by type. Every CPU's
+// scheduler walk and the interrupt-side wakes read records they do not own
+// under that lock, through scheduled_process_record_at's escaped pointer;
+// a removal outside it could scrub and free a record between one of those
+// probes and its read. See scheduled_process_reap.
+private fn scheduled_process_slot_remove(
+        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+        slot: usize) !{unsafe} {
     if (slot == 0) {
         scheduled_process_boot_live = false;
         return;
@@ -2336,7 +2346,9 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
                 kernel_boot_log_resource_exhausted(
                     "physical page allocator" as *u8,
                     page_allocator_total_count());
-                scheduled_process_slot_remove(slot);
+                let rollback_guard = process_run_lock();
+                scheduled_process_slot_remove(rollback_guard, slot);
+                process_run_unlock(rollback_guard);
                 return ScheduledProcessAllocResult::Full;
             }
             PageRunAllocResult::Allocated(run) => {
@@ -2355,7 +2367,9 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
                     kernel_boot_log_resource_exhausted(
                         "kernel stack run (unaligned; refused)" as *u8,
                         KERNEL_STACK_RUN_PAGES);
-                    scheduled_process_slot_remove(slot);
+                    let rollback_guard = process_run_lock();
+                    scheduled_process_slot_remove(rollback_guard, slot);
+                    process_run_unlock(rollback_guard);
                     return ScheduledProcessAllocResult::Full;
                 }
             }
@@ -2365,7 +2379,9 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
         AddressSpaceEnsureResult::Ok => {}
         AddressSpaceEnsureResult::SlotOutOfRange => {
             address_space_backing_release(slot);
-            scheduled_process_slot_remove(slot);
+            let rollback_guard = process_run_lock();
+            scheduled_process_slot_remove(rollback_guard, slot);
+            process_run_unlock(rollback_guard);
             return ScheduledProcessAllocResult::Full;
         }
         AddressSpaceEnsureResult::OutOfMemory => {
@@ -2380,7 +2396,9 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
             // pool slot per attempt. It must come before the process
             // record goes, because the handle naming it lives there.
             address_space_backing_release(slot);
-            scheduled_process_slot_remove(slot);
+            let rollback_guard = process_run_lock();
+            scheduled_process_slot_remove(rollback_guard, slot);
+            process_run_unlock(rollback_guard);
             return ScheduledProcessAllocResult::Full;
         }
     }
@@ -2397,7 +2415,9 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
             page_allocator_total_count());
         address_space_release_root(slot);
         address_space_backing_release(slot);
-        scheduled_process_slot_remove(slot);
+        let rollback_guard = process_run_lock();
+        scheduled_process_slot_remove(rollback_guard, slot);
+        process_run_unlock(rollback_guard);
         return ScheduledProcessAllocResult::Full;
     }
     if (unified_fd_context_ensure(slot) == false) {
@@ -2407,7 +2427,9 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
         process_image_record_release(slot);
         address_space_release_root(slot);
         address_space_backing_release(slot);
-        scheduled_process_slot_remove(slot);
+        let rollback_guard = process_run_lock();
+        scheduled_process_slot_remove(rollback_guard, slot);
+        process_run_unlock(rollback_guard);
         return ScheduledProcessAllocResult::Full;
     }
     let bottom: usize = kernel_stack_bottom(slot);
@@ -2420,7 +2442,9 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
         process_image_record_release(slot);
         address_space_release_root(slot);
         address_space_backing_release(slot);
-        scheduled_process_slot_remove(slot);
+        let rollback_guard = process_run_lock();
+        scheduled_process_slot_remove(rollback_guard, slot);
+        process_run_unlock(rollback_guard);
         return ScheduledProcessAllocResult::Full;
     }
     scheduled_process_record_at(slot).saved_sp =
@@ -2779,10 +2803,36 @@ fn scheduled_process_exit(
     return exited;
 }
 
+// GitHub issue #482: a reap is two steps, and only the second needs the
+// process-run lock.
+//
+// The teardown frees what belongs to the exited process alone: its fd
+// context, roots, image and backing. Nothing but the process and its reaper
+// reaches those. It can free pages and reach a world stop, which a peer
+// spinning on the IRQ-masking run lock could not acknowledge, so it runs
+// wherever the caller is.
+//
+// The removal hands the RECORD back to the pool, and that record is not
+// the exited process's alone. Every CPU's scheduler walk, the timer's wakes
+// and the UART wake read records of processes they do not own under the
+// run lock, through a pointer the pool's view has already let go of
+// (scheduled_process_record_at, one of the named liveness escapes). With
+// the removal outside the lock, a reap on one CPU could scrub and free a
+// record between another CPU's probe and its read, and a peer's own exit
+// reaps its zombies on that peer. So the removal takes the run lock's
+// guard, and a reader that holds the lock sees the record either whole or
+// already gone.
 fn scheduled_process_reap(
+        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
         owner: sink ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Exited])
         !{unsafe, invalidates_ProcessHandle} {
+    scheduled_process_reap_teardown(owner);
+    scheduled_process_reap_remove(guard, owner, state);
+}
+
+fn scheduled_process_reap_teardown(
+        owner: borrow ScheduledProcessOwner[process]) !{unsafe} {
     // GitHub issue #488: see scheduled_process_reaped_current_count.
     if (execution_here().current_live) {
         if (execution_here().current_handle.pool_index == owner.pool_index) {
@@ -2794,7 +2844,6 @@ fn scheduled_process_reap(
         ProcessTraceReap, scheduled_process_pid_of_slot(owner.pool_index),
         owner.generation, 0, 0, 4, 0, owner.pool_index,
         scheduled_process_record_at(owner.pool_index).saved_sp, 0);
-    scheduled_process_state_drop(state);
     unified_fd_context_release(owner.pool_index);
     address_space_release_root(owner.pool_index);
     // GitHub issue #392: a root's image record dies with the process, as
@@ -2813,13 +2862,20 @@ fn scheduled_process_reap(
     if (used > scheduled_process_stack_deepest_reaped) {
         scheduled_process_stack_deepest_reaped = used;
     }
-    // The record itself goes last: everything above still needed to read
-    // it. Reset first, because slot 0's record is a static that survives
-    // -- for a pool slot the reset is written into memory about to be
-    // handed back, which costs a few stores and keeps one rule instead of
-    // two.
+}
+
+// The record itself goes last: the teardown still needed to read it. Reset
+// first, because slot 0's record is a static that survives -- for a pool
+// slot the reset is written into memory about to be handed back, which
+// costs a few stores and keeps one rule instead of two.
+fn scheduled_process_reap_remove(
+        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+        owner: sink ScheduledProcessOwner[process],
+        state: sink ScheduledProcessState[process, ProcessState::Exited])
+        !{unsafe, invalidates_ProcessHandle} {
+    scheduled_process_state_drop(state);
     scheduled_process_record_reset(owner.pool_index);
-    scheduled_process_slot_remove(owner.pool_index);
+    scheduled_process_slot_remove(guard, owner.pool_index);
     scheduled_process_owner_drop(owner);
 }
 
@@ -2891,7 +2947,9 @@ fn scheduled_process_probe_slot_acquire() -> usize !{unsafe} {
 fn scheduled_process_probe_slot_release(slot: usize) !{unsafe} {
     scheduled_process_release_slot_resources(slot);
     scheduled_process_record_reset(slot);
-    scheduled_process_slot_remove(slot);
+    let removal_guard = process_run_lock();
+    scheduled_process_slot_remove(removal_guard, slot);
+    process_run_unlock(removal_guard);
 }
 
 fn scheduled_process_stack_top(handle: ProcessHandle) -> usize !{unsafe} {
@@ -2945,7 +3003,7 @@ private fn scheduled_process_probe_cycle_locked(
         ScheduledProcessExitedTakeResult::Missing => { return false; }
         ScheduledProcessExitedTakeResult::Exited(resources) => {
             let (owner, exited) = resources;
-            scheduled_process_reap(owner, exited);
+            scheduled_process_reap(guard, owner, exited);
             return true;
         }
     }
@@ -7431,7 +7489,7 @@ fn kernel_process_clone_rollback() -> ProcessCloneRollbackResult {
                 ScheduledProcessExitedTakeResult::Missing => {}
                 ScheduledProcessExitedTakeResult::Exited(done) => {
                     let (exited_owner, exited_state) = done;
-                    scheduled_process_reap(exited_owner, exited_state);
+                    scheduled_process_reap(guard, exited_owner, exited_state);
                     parent = execution_here().current_handle;
                 }
             }
@@ -8184,7 +8242,13 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
             scheduled_process_record_of(child).has_parent = false;
             scheduled_process_record_of(child).has_next_sibling =
                 false;
-            scheduled_process_reap(exited_owner, exited_state);
+            // The teardown outside the lock, as before; the removal under
+            // it (#482, see scheduled_process_reap).
+            scheduled_process_reap_teardown(exited_owner);
+            let removal_guard = process_run_lock();
+            scheduled_process_reap_remove(removal_guard, exited_owner,
+                                          exited_state);
+            process_run_unlock(removal_guard);
             parent = process_handle_new(parent_slot, parent_generation);
         }
     }
