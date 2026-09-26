@@ -8349,6 +8349,14 @@ fn process_execution_model_assumption() {
 //
 // Bounded by the live count: each reap removes one child from the list, so
 // the walk cannot outlast the processes that exist.
+//
+// It sweeps by STATE, so it would also collect an Exited record with no
+// parent link -- the record GitHub issue #464 saw once on RPi5 against an
+// intermediate build. Measured since, it does not happen: such a reap is
+// counted as `process reap: unlinked=`, and the shared `process_reap` view
+// asserts 0 on every QEMU and RPi5 boot. So this sweep is belt and braces,
+// not the thing standing between that record and a leak, and a recurrence
+// fails a view instead of being collected quietly.
 fn kernel_process_reap_own_zombies() !{unsafe} {
     if (execution_here().current_live == false) { return; }
     *scheduled_process_walk_site_here() = 3;
