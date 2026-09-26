@@ -105,11 +105,20 @@ def resumed(normalized: bytes) -> bool:
     Anchored after `ddb: continuing` so nothing earlier in the capture can
     satisfy it. The shell does not echo what is typed at it, so the only
     source of this line is the command having run.
+
+    With or without a prompt in front of it, then. Which one appears is that
+    same race -- whether the shell answered the waking newline before the
+    BREAK -- and it moved again in #609, when wait4 began to run on a peer
+    and the shell's scheduling around the break changed: four-core RPi5
+    printed `/ # ddb-resume-ok` nine times while this refused all of them.
+    Either form proves the command ran; only the absence of the output
+    proves it did not.
     """
     continuing = normalized.find(b"ddb: continuing\n")
     if continuing < 0:
         return False
-    return normalized.find(b"\nddb-resume-ok\n", continuing) >= 0
+    return (normalized.find(b"\nddb-resume-ok\n", continuing) >= 0 or
+            normalized.find(b"\n/ # ddb-resume-ok\n", continuing) >= 0)
 
 
 def main() -> int:
