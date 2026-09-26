@@ -4003,6 +4003,25 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                  TMultiple (n, TUsize)
              | _ -> TUsize in
            ignore (check_expr senv eenv tyenv fenv len length_contract);
+           (* A bare fixed array still has an allocation extent before it
+              decays to a pointer. Check a statically known RX maintenance
+              length against that extent; the pointer/length contract alone
+              proves alignment and divisibility, not containment. Aliases
+              need separate provenance tracking and remain outside this
+              direct-place check. *)
+           (match fname, ptr.desc with
+            | ("dma_prepare_rx" | "dma_finish_rx"), Ast.Var name ->
+                (match repr (lookup ptr.loc name tyenv),
+                       static_slice_bound senv len with
+                 | TArray (elem, count), Some bytes ->
+                     (match const_type_size senv (to_ast elem) with
+                      | Some elem_bytes when bytes > count * elem_bytes ->
+                          raise (TypeError (len.loc, Printf.sprintf
+                            "%s range of %d bytes exceeds fixed allocation '%s' (%d bytes)"
+                            fname bytes name (count * elem_bytes)))
+                      | _ -> ())
+                 | _ -> ())
+            | _ -> ());
            TVoid
        | _ -> raise (TypeError (e.loc, Printf.sprintf
            "%s expects two arguments: %s(ptr, len)" fname fname)))

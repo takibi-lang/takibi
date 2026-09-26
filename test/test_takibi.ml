@@ -12636,6 +12636,24 @@ let codegen_tests = [
           }" ();
        Target_info.configure "thumbv7em-none-eabi");
 
+  Alcotest.test_case
+    "DMA RX fixed array range cannot exceed its allocation" `Quick
+    (fun () ->
+       Target_info.configure "aarch64-none-elf";
+       expect_codegen_ok
+         "let mut status: [u8; 64] align(64);
+          fn receive() {
+            dma_prepare_rx(status, 64);
+            dma_finish_rx(status, 64);
+          }" ();
+       expect_type_error "exceeds fixed allocation 'status' (64 bytes)"
+         "let mut status: [u8; 64] align(64);
+          fn bad() { dma_prepare_rx(status, 128); }" ();
+       expect_type_error "exceeds fixed allocation 'words' (64 bytes)"
+         "let mut words: [u32; 16] align(64);
+          fn bad() { dma_finish_rx(words, 128); }" ();
+       Target_info.configure "thumbv7em-none-eabi");
+
   Alcotest.test_case "dma_finish_rx rejects an unproven pointer, dma_prepare_tx accepts it" `Quick
     (fun () ->
        expect_type_error "cannot pass unproven"
