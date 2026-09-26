@@ -27,7 +27,7 @@ step, landed as its own commit.
    any core can issue any syscall, and a process can continue on another
    core. #9, #582, #600 (linear token for values taken before a call
    restart; before #597 and #598), #597 (ext2 mutation), #598 (socket setup and
-   teardown); and the multicore-correctness issues
+   teardown), #602 (ext2 file write); and the multicore-correctness issues
    #550, #560, #482, #464, #468, #556, #573. #601 writes the first PlusCal
    model and checks the #550 design with it before that fix lands.
 2. **Run the multicore workload mainly on RPi5 and fix what it finds.** #584
