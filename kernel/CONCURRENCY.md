@@ -77,9 +77,20 @@ Ready successor publishes Blocked under the run lock, after the same last
 looks a switching block takes (`kernel_process_block_would_miss`), and the
 CPU idles; the stack is released by `kernel_process_stack_idle_blocked`,
 and until then `scheduled_process_ready_take` will not start the process
-even if a wake has made it Ready (GitHub issue #583). wait4's ChildExit is
-the exception: it still reruns, because its walk and the Blocked
-publication are not one critical section against a peer's exit (#550).
+even if a wake has made it Ready (GitHub issue #583). wait4's ChildExit
+blocks this way too since #550.
+
+`kernel_process_block_would_miss` is where every wait reason answers the
+decide-then-sleep question (GitHub issue #550): a wait decides in one
+critical section and publishes Blocked in a later one, so an event can
+arrive between them and find no Blocked waiter. Each reason either
+re-checks its event there, under the lock its waker takes -- UartRx,
+UartTx, ChildExit (the awaited child, by the pid wait4 recorded), Signal --
+or names what delivers the event again: core 0's tick wakes every NetRx
+waiter and every waiter whose deadline has passed. The function is one
+`match` with no default arm, so a wait reason added later does not compile
+until its answer is written there. `kernel/models/Wait4Block.tla` checks
+the ChildExit re-check.
 
 A timer tick taken from EL0 idles a CPU too, on any core, when the
 interrupted process's mask no longer names that CPU and nothing else Ready

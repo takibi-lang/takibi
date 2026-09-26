@@ -269,6 +269,11 @@ struct ProcessRecord {
     // parent (the same bug class issue #248 fixed for reaped_pid/
     // parent_slot -- see kernel_syscall_wait4_deliver's header comment).
     wait4_status_ptr: usize;
+    // GitHub issue #550: the pid wait4 is waiting for, as the syscall
+    // received it (all ones for "any child"). The Blocked publication
+    // re-checks THAT child: "is any child a zombie" would spin a wait4(X)
+    // beside an uncollected sibling Y.
+    wait4_pid: usize;
     parent: ProcessHandle;
     has_parent: bool;
     // GitHub issue #437: FIRST child, and the sibling link beside it.
@@ -1901,6 +1906,7 @@ private fn scheduled_process_record_reset(slot: usize) !{unsafe} {
     record.sigchld_ignored = false;
     record.deadline_result = 0;
     record.wait4_status_ptr = 0;
+    record.wait4_pid = 0;
     record.has_parent = false;
     record.has_first_child = false;
     record.has_next_sibling = false;
@@ -5545,22 +5551,77 @@ fn kernel_process_syscall_return_schedule(current_sp: usize) -> usize {
 // then. So a bit the wait accepts, or an unmasked SIGTERM, pending now
 // means the rerun takes it (or exits at entry), and one raised after this
 // publishes Blocked is delivered to a Blocked waiter.
+// GitHub issue #550: the last look before a wait publishes Blocked, asked in
+// the critical section that publishes it. A process decides to wait in one
+// section and becomes Blocked in a later one; an event that arrives between
+// the two finds no Blocked waiter. True means the event is already here, and
+// the caller runs the syscall again instead of sleeping.
+//
+// Every wait reason answers here, and the match has no default arm, so a
+// reason added later does not compile until someone writes its answer. The
+// answer is one of two things: a re-check of the event, made under the lock
+// its waker takes, or the name of what delivers the event again later.
 private fn kernel_process_block_would_miss(
         guard: borrow ProcessRunGuard[lock], from: ProcessHandle,
         reason: ProcessWaitReason) -> bool {
-    if (reason == ProcessWaitReason::UartRx && kernel_uart_rx_pending()) {
-        return true;
-    }
-    if (reason == ProcessWaitReason::Signal) {
-        let waiting: *ProcessRecord = scheduled_process_record_of(from);
-        let sigterm_bit: usize = 1 << 14;
-        let mut wanted: usize = waiting.sigwait_set;
-        if ((waiting.signal_mask & sigterm_bit) == 0) {
-            wanted = wanted | sigterm_bit;
+    match reason {
+        // Not a wait: nothing blocks with it.
+        ProcessWaitReason::None => { return false; }
+        // #547: the RX interrupt pushes a byte only under this lock, after
+        // finding no Blocked reader.
+        ProcessWaitReason::UartRx => { return kernel_uart_rx_pending(); }
+        // The TX interrupt's wake (kernel_process_uart_tx_wake_all) runs
+        // under this lock on core 0. Only core 0 blocks on UartTx -- a peer
+        // writer waits for its tick (syscall_terminal_write_wait) -- and the
+        // lock masks core 0's interrupts, so the room read here cannot move
+        // before Blocked is published.
+        ProcessWaitReason::UartTx => { return kernel_log_tx_writer_room(); }
+        // #550's ChildExit window. kernel_process_child_exit makes the child
+        // a zombie under this lock and wakes only a parent already Blocked
+        // in ChildExit, so a child that exited after wait4 decided to block
+        // is found here or not at all. kernel/models/Wait4Block.tla checks
+        // this re-check (RECHECK = TRUE) and the defect without it.
+        ProcessWaitReason::ChildExit => {
+            let requested: usize = scheduled_process_record_of(from).wait4_pid;
+            if (requested == 0xFFFFFFFFFFFFFFFF) {
+                match kernel_process_first_zombie_of(from) {
+                    ProcessNextReadyResult::Missing => { return false; }
+                    ProcessNextReadyResult::Next(zombie) => { return true; }
+                }
+            }
+            match kernel_process_zombie_of_pid(from, requested) {
+                ProcessNextReadyResult::Missing => { return false; }
+                ProcessNextReadyResult::Next(zombie) => { return true; }
+            }
         }
-        if ((waiting.pending_signals & wanted) != 0) { return true; }
+        // Delivered again: core 0's timer tick (timer_irq_handler) wakes
+        // every NetRx waiter on every tick, under this lock. A frame that
+        // arrives inside the window costs at most one tick, not the wait.
+        ProcessWaitReason::NetRx => { return false; }
+        // Delivered again: the same tick's kernel_process_deadline_wake_all
+        // wakes a Blocked waiter whose deadline has passed, whenever it
+        // passed.
+        ProcessWaitReason::Deadline => { return false; }
+        // A signal is raised under this lock (#570); one raised inside the
+        // window is pending here.
+        ProcessWaitReason::Signal => {
+            let waiting: *ProcessRecord = scheduled_process_record_of(from);
+            let sigterm_bit: usize = 1 << 14;
+            let mut wanted: usize = waiting.sigwait_set;
+            if ((waiting.signal_mask & sigterm_bit) == 0) {
+                wanted = wanted | sigterm_bit;
+            }
+            return (waiting.pending_signals & wanted) != 0;
+        }
     }
-    return false;
+}
+
+// wait4's requested pid, recorded beside its status pointer when it blocks.
+fn kernel_process_current_set_wait4_pid(pid: usize) {
+    if (execution_here().current_live) {
+        scheduled_process_record_of(execution_here().current_handle)
+            .wait4_pid = pid;
+    }
 }
 
 // What kernel_process_block_current returns when the wait was published
@@ -5577,13 +5638,14 @@ const PROCESS_BLOCK_TO_IDLE: usize = 1;
 // refuses a Ready process whose stack is still owned, so a wake that lands
 // before this CPU leaves the stack cannot start it elsewhere.
 //
-// NOT for wait4's ChildExit: its walk and this publication are not yet one
-// critical section against a peer's exit (#550), so it keeps rerunning.
+// wait4's ChildExit included since #550: kernel_process_block_would_miss
+// re-checks the awaited child in this critical section, so a child that
+// exited after wait4 decided to block reruns wait4 instead of leaving its
+// parent Blocked beside a zombie.
 private fn kernel_process_block_to_idle(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock],
         from: ProcessHandle, current_sp: usize, reason: ProcessWaitReason,
         trace_aux: usize) -> bool {
-    if (reason == ProcessWaitReason::ChildExit) { return false; }
     if (execution_here().current_live == false ||
         scheduled_process_same_slot(execution_here().current_handle, from)
             == false ||

@@ -80,9 +80,10 @@ Wait4Decide ==
     /\ UNCHANGED current
 
 \* Publishing Blocked, and switching this core to a Ready successor --
-\* any Ready process, as kernel_process_next_ready picks one.
-\* With RECHECK, an exited child cancels the block and wait4 reruns.
-\* Without a Ready successor, a ChildExit wait also reruns: it never idles.
+\* any Ready process, as kernel_process_next_ready picks one -- or, with
+\* none, leaving it idle (kernel_process_block_to_idle, open to ChildExit
+\* since #550). With RECHECK, an exited child cancels the block and wait4
+\* reruns.
 Wait4Block ==
     \E c \in Cores :
         /\ RunsOn("parent", c)
@@ -97,8 +98,9 @@ Wait4Block ==
                                                 ![q] = "Running"]
                      /\ current' = [current EXCEPT ![c] = q]
                      /\ wait' = "asleep"
-             ELSE /\ wait' = "call"
-                  /\ UNCHANGED <<state, current>>
+             ELSE /\ state' = [state EXCEPT !["parent"] = "Blocked"]
+                  /\ current' = [current EXCEPT ![c] = None]
+                  /\ wait' = "asleep"
 
 \* The child exits. It wakes the parent only if the parent is already
 \* Blocked in wait4; the core it ran on goes idle.
