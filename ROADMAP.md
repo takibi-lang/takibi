@@ -27,18 +27,22 @@ step, landed as its own commit.
    any core can issue any syscall, and a process can continue on another
    core. #9, #582, #600 (linear token for values taken before a call
    restart; before #597 and #598), #597 (ext2 mutation), #598 (socket setup and
-   teardown), #602 (ext2 file write); and the multicore-correctness issues
+   teardown), #602 (ext2 file write), then #9's lifecycle split in order:
+   #609 (wait4), #610 (execve), #611 (clone, fork, vfork); and the multicore-correctness issues
    #550, #560, #482, #464, #468, #573. #556 is off the route: it waits for
    the next preserved failure of the oops lane, and until then there is
    nothing to work on. #601 wrote the first TLA+ models (plain TLA+
    with Apalache types, not PlusCal) and checked the #550 design with them
-   before that fix landed.
+   before that fix landed. Last in this step: #612, syslog on a peer through a
+   lockless sequence-checked reader of the single-writer log.
 2. **Run the multicore workload mainly on RPi5 and fix what it finds.** #584
    is the workload, #572 its fairness verdict. Each defect it finds gets a
    deterministic lane before its issue closes.
 3. **Takibi's provisional answer to safe pointers and safe memory access,
    with multicore as a premise.** #343, #342, #202, #518, #131, #132, #370,
-   #216.
+   #216, and #613: a lockless multi-writer kernel log ring with its protocol
+   in the type system, the multicore-specific subject this discussion is
+   judged against.
 4. **Begin evaluating recent research**: typestate, the K framework,
    invariants, partial TLA+. First consumers #590, #308 and #109; proof-side entry
    #13. An evaluation, not a decision to adopt.
