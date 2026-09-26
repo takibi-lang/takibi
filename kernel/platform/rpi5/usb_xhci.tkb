@@ -684,16 +684,21 @@ fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
         // disk_write) own the recovery-and-retry policy, via
         // msc_recover_transport().
         let data_cc: u32 = usb_bulk_xfer(dir_in, data_dma, data_len);
+        // A nonzero code came from a transfer event, even when that event
+        // reports an error. No later write from this transfer is pending.
+        if (dir_in && data_cc != 0) {
+            dma_finish_rx(data, cache_length);
+        }
         if (data_cc != 1 && data_cc != 13) {
             return 2;
-        }
-        if (dir_in) {
-            dma_finish_rx(data, cache_length);
         }
     }
 
     dma_prepare_rx(msc_csw_buf, 64);
     let mut csw_cc: u32 = usb_bulk_xfer(true, csw_dma, 13);
+    if (csw_cc != 0) {
+        dma_finish_rx(msc_csw_buf, 64);
+    }
     // Special-cased STALL handling on the CSW stage specifically, kept
     // to a bounded retry LOOP -- not a single retry, and deliberately
     // NOT a restart with a fresh CBW. A single retry (U-Boot's own
@@ -716,11 +721,13 @@ fn msc_run_command(data_len: u32, dir_in: bool, data: *align(64) u8) -> u32 {
         delay_us(50000);
         dma_prepare_rx(msc_csw_buf, 64);
         csw_cc = usb_bulk_xfer(true, csw_dma, 13);
+        if (csw_cc != 0) {
+            dma_finish_rx(msc_csw_buf, 64);
+        }
     }
     if (csw_cc != 1 && csw_cc != 13) {
         return 3;
     }
-    dma_finish_rx(msc_csw_buf, 64);
 
     let mut csw_sig: u32 = 0;
     let mut csw_tag: u32 = 0;
