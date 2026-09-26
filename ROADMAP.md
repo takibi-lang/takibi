@@ -28,8 +28,11 @@ step, landed as its own commit.
    core. #9, #582, #600 (linear token for values taken before a call
    restart; before #597 and #598), #597 (ext2 mutation), #598 (socket setup and
    teardown), #602 (ext2 file write); and the multicore-correctness issues
-   #550, #560, #482, #464, #468, #556, #573. #601 writes the first PlusCal
-   model and checks the #550 design with it before that fix lands.
+   #550, #560, #482, #464, #468, #573. #556 is off the route: it waits for
+   the next preserved failure of the oops lane, and until then there is
+   nothing to work on. #601 wrote the first TLA+ models (plain TLA+
+   with Apalache types, not PlusCal) and checked the #550 design with them
+   before that fix landed.
 2. **Run the multicore workload mainly on RPi5 and fix what it finds.** #584
    is the workload, #572 its fairness verdict. Each defect it finds gets a
    deterministic lane before its issue closes.
