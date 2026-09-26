@@ -1830,9 +1830,9 @@ fn syscall_deadline_wait(timespec_address: usize, absolute: bool)
 fn syscall_signal_wait(wait_set: usize, timeout_address: usize)
         -> SyscallAction {
     match kernel_process_current_signal_take(wait_set) {
-        ProcessSignalPendingResult::Pending(signum) => {
+        ProcessSignalPendingResult::Pending(taken) => {
             kernel_process_current_clear_deadline();
-            return SyscallAction::Resume(signum);
+            return SyscallAction::Resume(taken_signal_delivered(taken));
         }
         ProcessSignalPendingResult::Missing => {}
     }
@@ -3181,33 +3181,53 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     kernel_syscall_persistent_shell_checkpoint_selected();
     match kernel_process_current_termination_signal_take() {
         ProcessSignalPendingResult::Missing => {}
-        ProcessSignalPendingResult::Pending(signum) => {
+        ProcessSignalPendingResult::Pending(taken) => {
             // A core-0 exit with nowhere to hand the CPU waits and reruns
-            // this syscall. The rerun must still see the signal it was for.
-            match kernel_syscall_exit_current_process(128 + signum) {
+            // this syscall, and so does a migration: the rerun must still
+            // see the signal it was for. TakenSignal is linear, so each arm
+            // has to say which of the two happened (GitHub issue #600).
+            let status: usize = 128 + taken_signal_number(taken);
+            match kernel_syscall_exit_current_process(status) {
                 SyscallAction::WaitInterrupt => {
-                    kernel_process_current_termination_signal_restore();
+                    taken_signal_restore(taken);
                     return SyscallAction::WaitInterrupt;
                 }
+                SyscallAction::Migrate => {
+                    taken_signal_restore(taken);
+                    return SyscallAction::Migrate;
+                }
+                SyscallAction::Block => {
+                    taken_signal_restore(taken);
+                    return SyscallAction::Block;
+                }
                 SyscallAction::Unreachable => {
+                    let delivered: usize = taken_signal_delivered(taken);
                     return SyscallAction::Unreachable;
                 }
                 SyscallAction::Resume(value) => {
+                    let delivered: usize = taken_signal_delivered(taken);
                     return SyscallAction::Resume(value);
                 }
                 SyscallAction::Exit(value) => {
+                    let delivered: usize = taken_signal_delivered(taken);
                     return SyscallAction::Exit(value);
                 }
                 SyscallAction::CloneChild(value) => {
+                    let delivered: usize = taken_signal_delivered(taken);
                     return SyscallAction::CloneChild(value);
                 }
                 SyscallAction::CloneParent(value) => {
+                    let delivered: usize = taken_signal_delivered(taken);
                     return SyscallAction::CloneParent(value);
                 }
-                SyscallAction::Block => { return SyscallAction::Block; }
-                SyscallAction::Exec => { return SyscallAction::Exec; }
-                SyscallAction::ChildExec => { return SyscallAction::ChildExec; }
-                SyscallAction::Migrate => { return SyscallAction::Migrate; }
+                SyscallAction::Exec => {
+                    let delivered: usize = taken_signal_delivered(taken);
+                    return SyscallAction::Exec;
+                }
+                SyscallAction::ChildExec => {
+                    let delivered: usize = taken_signal_delivered(taken);
+                    return SyscallAction::ChildExec;
+                }
             }
         }
     }

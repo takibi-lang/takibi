@@ -5879,9 +5879,58 @@ fn kernel_process_current_set_sigchld_ignored(ignored: bool) {
     }
 }
 
+// GitHub issue #600: a signal taken off `pending_signals` is a value that
+// exists nowhere else until it is delivered. The syscall that took it may
+// still end by rewinding itself -- an exit that has to wait and rerun, and
+// in general any path that retries the call -- and a rerun that finds the
+// bit gone lets the process outlive the signal. #592 found exactly that and
+// fixed it with a restore call that the one path remembered to make.
+//
+// Linear, so remembering is no longer the mechanism: every path out of a
+// take must either hand the signal to the caller as delivered or put it
+// back, and a path that does neither is a compile error. The handle it
+// carries is the process it was taken from, so the restore reaches that
+// process even if the current one has changed by then.
+linear struct TakenSignal[signal: usize] {
+    private pool_index: usize;
+    private generation: usize;
+    private signum: usize @ signal;
+}
+
 must_use variant ProcessSignalPendingResult {
     Missing;
-    Pending(usize);
+    Pending(exists signal: usize. TakenSignal[signal]);
+}
+
+private fn taken_signal_new(pool_index: usize, generation: usize,
+                            signum: usize @ signal) -> TakenSignal[signal] {
+    let mut taken: TakenSignal[signal] = { pool_index, generation, signum };
+    return taken;
+}
+
+fn taken_signal_number(taken: borrow TakenSignal[signal]) -> usize {
+    return taken.signum;
+}
+
+// The signal reached its effect: a signal wait returned it, or the process
+// is exiting because of it.
+fn taken_signal_delivered(taken: sink TakenSignal[signal]) -> usize {
+    return taken.signum;
+}
+
+// The syscall that took it will be rerun: make it pending again, on the
+// process it came from. A process that has gone since has nothing to
+// restore to.
+fn taken_signal_restore(taken: sink TakenSignal[signal]) {
+    let mut handle: ProcessHandle = { taken.pool_index, taken.generation };
+    let signum: usize = taken.signum;
+    if (signum == 0 || signum > 64) { return; }
+    let guard = process_run_lock();
+    if (scheduled_process_handle_matches(handle)) {
+        let record: *ProcessRecord = scheduled_process_record_of(handle);
+        process_signal_pending_raise(guard, record, 1 << (signum - 1));
+    }
+    process_run_unlock(guard);
 }
 
 fn kernel_process_current_signal_take(wait_set: usize)
@@ -5890,15 +5939,17 @@ fn kernel_process_current_signal_take(wait_set: usize)
         return ProcessSignalPendingResult::Missing;
     }
     let guard = process_run_lock();
-    let record: *ProcessRecord =
-        scheduled_process_record_of(execution_here().current_handle);
+    let mut handle: ProcessHandle = execution_here().current_handle;
+    let record: *ProcessRecord = scheduled_process_record_of(handle);
     let available: usize = record.pending_signals & wait_set;
     for bit: usize in 0..<64 {
         let bit_mask: usize = 1 << bit;
         if ((available & bit_mask) != 0) {
             process_signal_pending_clear(guard, record, bit_mask);
             process_run_unlock(guard);
-            return ProcessSignalPendingResult::Pending(bit + 1);
+            return ProcessSignalPendingResult::Pending(
+                taken_signal_new(handle.pool_index, handle.generation,
+                                 bit + 1));
         }
     }
     process_run_unlock(guard);
@@ -5914,8 +5965,8 @@ fn kernel_process_current_termination_signal_take()
         return ProcessSignalPendingResult::Missing;
     }
     let guard = process_run_lock();
-    let record: *ProcessRecord =
-        scheduled_process_record_of(execution_here().current_handle);
+    let mut handle: ProcessHandle = execution_here().current_handle;
+    let record: *ProcessRecord = scheduled_process_record_of(handle);
     let sigterm_bit: usize = 1 << 14;
     if ((record.pending_signals & sigterm_bit) == 0 ||
         (record.signal_mask & sigterm_bit) != 0) {
@@ -5924,20 +5975,8 @@ fn kernel_process_current_termination_signal_take()
     }
     process_signal_pending_clear(guard, record, sigterm_bit);
     process_run_unlock(guard);
-    return ProcessSignalPendingResult::Pending(15);
-}
-
-// Put back a SIGTERM that kernel_process_current_termination_signal_take
-// took for an exit that did not happen: the exit asked to wait and rerun the
-// syscall, and the rerun has to find the signal still pending or the process
-// outlives it.
-fn kernel_process_current_termination_signal_restore() {
-    if (execution_here().current_live == false) { return; }
-    let guard = process_run_lock();
-    let record: *ProcessRecord =
-        scheduled_process_record_of(execution_here().current_handle);
-    process_signal_pending_raise(guard, record, 1 << 14);
-    process_run_unlock(guard);
+    return ProcessSignalPendingResult::Pending(
+        taken_signal_new(handle.pool_index, handle.generation, 15));
 }
 
 fn kernel_process_current_prepare_signal_wait(wait_set: usize) {
