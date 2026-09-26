@@ -96,6 +96,10 @@ check_model RecordLifetime RecordInvariants 6 \
     readerunlocked:CInitReaderUnlocked:ReadsOnlyLiveRecords:violated \
     execunlocked:CInitExecUnlocked:NoTornRead:violated
 
+check_model FixedDmaOwnership Safety 5 \
+    fixed:CInitFixed:pass:ok \
+    unfixed:CInitUnfixed:Safety:violated
+
 # Run. A job's own exit status is not the verdict -- an unfixed variant is
 # SUPPOSED to fail -- so every job is allowed to fail here and judged below.
 (cd "$MODELS" && xargs -P "$JOBS" -L 1 sh -c 'log="$0"; "$@" >"$log" 2>&1 || true' <"$QUEUE")

@@ -6,7 +6,7 @@ to the Takibi functions it abstracts, and says what the action keeps and
 what it drops. The model and the code are never compiled together, so this
 check is what ties the table to both:
 
-- every backquoted `kernel_*` / `scheduled_process_*` name in a row has an
+- every backquoted `kernel_*` / `scheduled_process_*` / DMA driver name in a row has an
   `fn <name>` definition under kernel/, and every action a row names is
   defined in the section's .tla;
 - every "dropped" cell is `nothing`, or `; `-separated entries of the form
@@ -48,7 +48,8 @@ from pass_line import report_pass
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 MODELS = ROOT / "kernel" / "models"
 README = MODELS / "README.md"
-NAME_RE = re.compile(r"`((?:kernel|scheduled_process)_[a-z0-9_]+)`")
+NAME_RE = re.compile(
+    r"`((?:kernel|scheduled_process|virtio_blk|usb_bulk|xhci)_[a-z0-9_]+)`")
 SECTION_RE = re.compile(r"^## (\w+)\.tla\b")
 ACTION_RE = re.compile(r"`(\w+)`")
 ELSEWHERE_RE = re.compile(r"^modelled elsewhere: `(?:(\w+)\.)?(\w+)`$")

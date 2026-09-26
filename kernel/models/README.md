@@ -1,6 +1,6 @@
 # Kernel protocol models
 
-TLA+ models of the kernel's multicore protocols (GitHub issue #601). A model
+TLA+ models of the kernel's shared-state protocols. A model
 checks a design before the change that implements it; it is not kept in
 lockstep with the implementation, and it is not proof that the Takibi code is
 correct. What ties the two together is the table below and the review of a
@@ -23,11 +23,12 @@ space, safety and liveness. Apalache type-checks it and runs a shallow check,
 so a model can move to Apalache, whose symbolic search scales past what TLC
 can enumerate, without a rewrite.
 
-Each action is one critical section under the process-run lock in the
-kernel. An action is atomic in the model exactly because it is atomic there,
-and a window between two critical sections is a place where another action
-can run. That is the whole point of writing the model: #550's defect is such
-a window.
+Each action is one indivisible protocol step. In the process models that is
+one critical section under the process-run lock; in the DMA model it is one
+guarded slot exchange, submission, completion observation, or confirmed
+reset. A window between actions is a place where another participant can
+act. That is the whole point of writing the model: #550's defect is such a
+window.
 
 Every model has two variants, fixed and unfixed, selected by a constant. The
 unfixed one must violate its property, or the model has stopped modelling the
@@ -260,6 +261,30 @@ is one of three checkable forms:
 action named in these tables no longer exists, or when a dropped entry has
 none of the three forms or names something that does not exist. A rename or
 removal forces the table, and a look at the model, to be updated.
+
+## FixedDmaOwnership.tla -- a fixed receive allocation across DMA (#596)
+
+One allocation and one explicit linear authority. A guarded stable-slot
+exchange gives the CPU token to a synchronous request. Submission turns it
+into a DMA token. An observed completion, including a completed error, or a
+confirmed reset allows recovery; an unobserved timeout does not. The unfixed
+variant permits recovery on timeout and reaches a CPU access while the device
+may still write.
+
+| Action | Kernel function it abstracts | What is kept, what is dropped |
+| --- | --- | --- |
+| `TakeCpu`, `PutCpu` | `stable_replace` at the driver's owner slot | one guarded exchange per action and unique token storage; lock implementation and buffer bytes are dropped |
+| `Submit` | `virtio_blk_submit`, `usb_bulk_xfer` | preparation and device submission hand off authority; descriptor layout and cache instructions are dropped |
+| `ObserveCompletion` | `virtio_blk_submit`, `usb_bulk_xfer` | an observed completion, including completed error, stops writes to the request buffer; completion codes are dropped |
+| `Timeout` | `virtio_blk_submit`, `usb_bulk_xfer` | a missing completion leaves device activity possible; timer arithmetic is dropped |
+| `ConfirmReset` | `virtio_blk_reset`, `xhci_halt_and_reset` | successful reset confirmation ends device writes; a failed reset does not enable this action |
+| `Finish` | `virtio_blk_submit`, `usb_bulk_xfer` | RX finish returns CPU authority only after completion or reset; the unfixed variant also permits timeout |
+| `CpuAccess` | `virtio_blk_submit`, `usb_bulk_xfer` | one ordinary CPU read or write through the protected allocation; alias syntax and compiler provenance are dropped |
+
+`UniqueAuthority` checks that the only token is either in the slot or held by
+the request. `NoCpuAccessWhileDeviceMayWrite` checks the DMA safety property.
+This model does not prove the compiler's direct/alias access rule, cache
+maintenance, or the hardware reset contract; those require separate evidence.
 
 ## Keeping models and the kernel in step
 
