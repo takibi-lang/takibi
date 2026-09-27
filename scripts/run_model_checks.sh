@@ -86,6 +86,10 @@ check_model StackOwnership CoreInvariants 6 \
     leaveunchecked:CInitLeaveUnchecked:RunningMatchesCores:violated \
     wakestartunchecked:CInitWakeStartUnchecked:StartsOnFreeStack:violated:8
 
+check_model LogReader NoTornRead 10 \
+    fixed:CInitFixed:pass:ok \
+    unchecked:CInitUnchecked:NoTornRead:violated:13
+
 check_model RecordLifetime RecordInvariants 6 \
     fixed:CInitFixed:pass:ok \
     unfixed:CInitUnfixed:ReadsOnlyLiveRecords:violated \

@@ -126,7 +126,10 @@ ATOMIC_ALLOWED = {
     "printk/log.tkb":
         "ordinary peer lines are single-producer per CPU and consumed by "
         "core 0; release/acquire publishes complete bounded records without "
-        "making terminal reporters wait on a console lock",
+        "making terminal reporters wait on a console lock. Since #612 the "
+        "retained ring too: core 0 publishes each record's count and fields "
+        "with release, and syslog on any CPU reads them with acquire and "
+        "drops a record reused while it copied (LogReader.tla)",
     "drivers/block/block_cache.tkb":
         "GitHub issue #533: the write epoch. Each core writes ONLY its own "
         "count, so there is no read-modify-write and nothing to exclude -- "

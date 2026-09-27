@@ -5,7 +5,8 @@
  * set differs between two-vCPU QEMU and four-core RPi5.
  *
  * A mask is an admission request. This process pins itself to CPU 1 and
- * calls syslog, which the kernel's refusal list (syscall_peer_refused)
+ * calls the parent-progress report, which the kernel's refusal list
+ * (syscall_peer_refused)
  * keeps on core 0, so the migration gate reruns it there. Whether that happened on core 0 is
  * not visible from EL0; the affinity gdb lane watches for it.
  */
@@ -15,11 +16,10 @@ const EXIT_SYSCALL: usize = 93;
 const SETAFFINITY_SYSCALL: usize = 122;
 const GETAFFINITY_SYSCALL: usize = 123;
 const KILL_SYSCALL: usize = 129;
-const SYSLOG_SYSCALL: usize = 116;
-// syslog's SYSLOG_ACTION_SIZE_BUFFER: the retained log's capacity, a
-// read with no effect.
-const SYSLOG_ACTION_SIZE_BUFFER: usize = 10;
-const SYSLOG_ANSWER_CEILING: usize = 0x10000000;
+// The payload fixture's parent-progress report, the one syscall the refusal
+// list still keeps on core 0. This process has no child blocked on the
+// UART, so it answers EINVAL and records nothing.
+const PARENT_PROGRESS_SYSCALL: usize = 452;
 const DUP3_SYSCALL: usize = 24;
 const FCNTL_SYSCALL: usize = 25;
 const FACCESSAT_SYSCALL: usize = 48;
@@ -310,15 +310,14 @@ fn affinity_probe() {
     if (heap_break == 0 || page != heap_break) {
         affinity_fail(bs"affinity: brk and mmap asked from cpu 1 did not answer\n");
     }
-    // syslog is outside the peer-safety table -- the retained log's only
-    // writer is core 0 -- so asked from CPU 1 it is rerun on core 0 and must
-    // still answer. The size query answers the log's capacity, which is
-    // neither zero nor an errno, so a call that went nowhere cannot pass for
-    // one that ran. This was execve until GitHub issue #610 admitted it.
-    let capacity: usize = svc5(SYSLOG_SYSCALL, SYSLOG_ACTION_SIZE_BUFFER,
-                               0, 0, 0, 0);
-    if (capacity == 0 || capacity >= SYSLOG_ANSWER_CEILING) {
-        affinity_fail(bs"affinity: syslog asked from cpu 1 did not answer\n");
+    // The parent-progress report is outside the peer-safety table, so
+    // asked from CPU 1 it is rerun on core 0 and must still answer. With no
+    // child blocked on the UART it answers EINVAL, which an unimplemented
+    // number would not (that is ENOSYS), so a call that went nowhere cannot
+    // pass for one that ran. This was execve until GitHub issue #610
+    // admitted it, and syslog until #612.
+    if (svc5(PARENT_PROGRESS_SYSCALL, 0, 0, 0, 0, 0) != LINUX_EINVAL) {
+        affinity_fail(bs"affinity: parent_progress asked from cpu 1 did not answer\n");
     }
     // Say it BEFORE the spinner goes. This line is written from CPU 1, so it
     // is published into this CPU's console ring, and the only thing that
@@ -327,7 +326,7 @@ fn affinity_probe() {
     // gained an idle loop (#592), each wake of that loop. Written when only
     // the syscall drain existed: the spinner's naps were what kept it
     // running, which is why the spinner has to outlive this output.
-    affinity_say(bs"affinity: pinned to cpu 1, where syslog, outside the peer-safe table, still answered\n");
+    affinity_say(bs"affinity: pinned to cpu 1, where parent_progress, outside the peer-safe table, still answered\n");
     // GitHub issue #579: every OTHER online cpu, while the same spinner is
     // still keeping core 0 occupied. Cpu 1 is proved above; this walks the
     // rest of the reported online set, which is empty on two-vCPU QEMU and

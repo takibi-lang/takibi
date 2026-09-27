@@ -206,6 +206,37 @@ Four variants:
 | `Exit` | `kernel_process_child_exit` | the process becomes a zombie | the rest of exit -- irrelevant to `ReadsOnlyLiveRecords`: only the zombie state lets a reaper start, and nothing else in exit frees the record | `11cfcf76aa70` |
 | `ExecWrite`, `ExecWriteEnd` | the execve arm of `kernel_syscall_dispatch_action`, `scheduled_process_set_command_line` | the live process's command line is replaced in one critical section under the run lock; `ExecWriteEnd` is the second half only the unfixed variant takes | the argument count, inode and pending flag written in the same hold -- irrelevant to `NoTornRead`: no reader copies them | `7ede7482b59c` |
 
+## LogReader.tla -- the kernel log read on one CPU while core 0 appends (#612)
+
+One writer, core 0, appends records to a ring of two slots, and publishes
+the count of records it has begun. A reader on another CPU, syslog(2) on a
+peer, takes no lock: it loads the count, then the record's slot length,
+copies that many bytes, and loads the count again. A record whose slot was
+reused in between is dropped and counted lost.
+
+The model is sequentially consistent. That the kernel's stores and loads
+keep this order on ARMv8 is argued at the top of `kernel/printk/log.tkb`:
+the count is published first, every later store to a slot is a release, and
+every reader load is an acquire.
+
+Two variants:
+
+- `SECOND_CHECK = TRUE` is the kernel, and `NoTornRead` holds.
+- `SECOND_CHECK = FALSE` skips the second load of the count. TLC reports
+  `NoTornRead` in thirteen steps: the reader copies a record while the
+  writer wraps round and overwrites it.
+
+The first version had the reader copy whole slots, without the length. TLC
+found the record just begun still holding the bytes of the record it
+replaces. They were copied as the new record, and since nothing had been
+reused, the check passed them.
+
+| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
+| --- | --- | --- | --- | --- |
+| `WriterStart` | `kernel_log_start_line` | the count is published, then the slot's length reset and its stamp set | the tick and the core column -- irrelevant to `NoTornRead`: they are published the same way as the length and read the same way | `e522396d26e2` |
+| `WriterByte` | `kernel_log_capture_uart_byte` | one byte's word, then the length that admits it | the truncated mark -- irrelevant to `NoTornRead`: it travels in the length word itself | `4cde3d847cb5` |
+| `ReaderBegin`, `ReaderLength`, `ReaderByte`, `ReaderCopied`, `ReaderCheck`, `ReaderAgain` | `kernel_log_snapshot_build`, `kernel_log_snapshot_record` | the count, the stamp and the length, the byte copies, the second count, and dropping a reused record | the snapshot's headers and timestamp formatting -- irrelevant to `NoTornRead`: they are derived from the fields copied, not further reads of the ring | `0fbed2bd1511` |
+
 ## The dropped column
 
 #609's shared stack sat in a path StackOwnership.tla's ChildExit listed as

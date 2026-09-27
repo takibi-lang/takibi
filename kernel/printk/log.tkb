@@ -17,10 +17,36 @@ const KERNEL_LOG_TEXT_MAX: usize = 160;
 const KERNEL_LOG_TEXT_BYTES: usize = 40960;
 const KERNEL_LOG_SNAPSHOT_CAPACITY: usize = 65536;
 
-private let mut kernel_log_text: [u8; KERNEL_LOG_TEXT_BYTES];
-private let mut kernel_log_ticks: [i64; KERNEL_LOG_RECORD_COUNT];
+// GitHub issue #612: the retained ring is read on any CPU, by syslog(2), with
+// no lock (kernel/models/LogReader.tla). Core 0 stays its only writer. The
+// protocol, in ARMv8 terms:
+//
+// - kernel_log_started counts the records core 0 has begun; record s lives
+//   in slot s % KERNEL_LOG_RECORD_COUNT. Beginning one, core 0 publishes the
+//   new count FIRST, with release, and only then writes the slot. Every
+//   store it makes to a slot after that is itself a release store -- the
+//   stamp, the tick, the core, the length, each word of text -- so a reader
+//   that sees any of them also sees the count that says the slot was reused.
+// - A reader acquire-loads the count, then per record the slot's stamp
+//   (which must name that record), its length and every field, each with
+//   acquire, so the loads stay in that order and before the count is loaded
+//   again. If that second count says the slot has been reused since, the
+//   record is dropped and counted lost rather than returned.
+//
+// Text is kept in words so that each store can be a release: the atomic
+// intrinsics are word-sized. Only core 0 stores a word, so the byte's
+// read-modify-write needs no exclusion.
+const KERNEL_LOG_TEXT_WORDS: usize = 5120;
+// The truncated mark travels in the length word, so one release publishes
+// both and a reader cannot see one without the other.
+const KERNEL_LOG_LENGTH_TRUNCATED: usize = 0x100000000;
+const KERNEL_LOG_LENGTH_MASK: usize = 0xFFFFFFFF;
+private let mut kernel_log_text: [usize; KERNEL_LOG_TEXT_WORDS];
+private let mut kernel_log_ticks: [usize; KERNEL_LOG_RECORD_COUNT];
 private let mut kernel_log_lengths: [usize; KERNEL_LOG_RECORD_COUNT];
-private let mut kernel_log_line_truncated: [bool; KERNEL_LOG_RECORD_COUNT];
+// Record number + 1 of the record a slot holds; 0 for none yet.
+private let mut kernel_log_stamps: [usize; KERNEL_LOG_RECORD_COUNT];
+private let mut kernel_log_started: usize;
 // GitHub issue #465: which core's line this is, and when THAT core emitted it.
 //
 // A peer's line reaches the ring through core 0's drain, so without these two
@@ -46,8 +72,29 @@ private let mut kernel_log_active: bool;
 private let mut kernel_log_active_slot: usize;
 private let mut kernel_log_boot_tick: i64;
 private let mut kernel_log_frequency: i64;
-private let mut kernel_log_snapshot: [u8; KERNEL_LOG_SNAPSHOT_CAPACITY];
-private let mut kernel_log_snapshot_length: usize;
+// One snapshot per CPU: syslog(2) builds it and copies it out in one
+// syscall, which since #612 may run on any CPU.
+struct KernelLogSnapshot {
+    length: usize;
+    bytes: [u8; KERNEL_LOG_SNAPSHOT_CAPACITY];
+}
+private let mut kernel_log_snapshots: [KernelLogSnapshot; KERNEL_MAX_CORES];
+
+private fn kernel_log_snapshot_here() -> *KernelLogSnapshot {
+    let base: *KernelLogSnapshot = kernel_log_snapshots;
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) { return base; }
+    return base + (core as isize);
+}
+
+// The word stores and loads the protocol above is made of.
+private fn kernel_log_publish(word: *usize, value: usize) !{unsafe} {
+    unsafe { atomic_store_release(word as usize, value); }
+}
+
+private fn kernel_log_observe(word: *usize) -> usize !{unsafe} {
+    return unsafe { atomic_load_acquire(word as usize) };
+}
 // Peer capture lasts through every numeric/string fragment until the fragment
 // that completes the line returns (kernel_log_end_fragment);
 // DDB writes directly to the device and terminal crash reporting explicitly
@@ -101,7 +148,13 @@ fn kernel_log_init() {
     kernel_log_active_slot = 0;
     kernel_log_boot_tick = read_cntpct();
     kernel_log_frequency = read_cntfrq();
-    kernel_log_snapshot_length = 0;
+    // A reset, not a reuse: every stamp goes back to none, and the count to
+    // zero. Core 0 only, before any reader can run (boot, and the bounds
+    // probe that ends by calling this).
+    for slot: usize in 0..<KERNEL_LOG_RECORD_COUNT {
+        kernel_log_stamps[slot] = 0;
+    }
+    kernel_log_started = 0;
 }
 
 private fn kernel_log_start_line() {
@@ -115,17 +168,22 @@ private fn kernel_log_start_line() {
         kernel_log_overwritten = kernel_log_overwritten + 1;
     }
     if (slot < KERNEL_LOG_RECORD_COUNT) {
+        let safe_slot: {0..<KERNEL_LOG_RECORD_COUNT as usize} = slot;
+        // #612: the count first, so the stores below never precede it.
+        let record: usize = kernel_log_started;
+        kernel_log_publish(&kernel_log_started, record + 1);
         // A drained peer line carries its own core and its own tick; anything
         // else is this core writing now.
+        let mut line_cpu: usize = cpu_id();
+        let mut line_tick: i64 = read_cntpct() - kernel_log_boot_tick;
         if (kernel_log_deferred) {
-            kernel_log_cpu[slot] = kernel_log_deferred_cpu;
-            kernel_log_ticks[slot] = kernel_log_deferred_tick;
-        } else {
-            kernel_log_cpu[slot] = cpu_id();
-            kernel_log_ticks[slot] = read_cntpct() - kernel_log_boot_tick;
+            line_cpu = kernel_log_deferred_cpu;
+            line_tick = kernel_log_deferred_tick;
         }
-        kernel_log_lengths[slot] = 0;
-        kernel_log_line_truncated[slot] = false;
+        kernel_log_publish(&kernel_log_cpu[safe_slot], line_cpu);
+        kernel_log_publish(&kernel_log_ticks[safe_slot], line_tick as usize);
+        kernel_log_publish(&kernel_log_lengths[safe_slot], 0);
+        kernel_log_publish(&kernel_log_stamps[safe_slot], record + 1);
         kernel_log_active_slot = slot;
         kernel_log_active = true;
     }
@@ -668,15 +726,26 @@ fn kernel_log_capture_uart_byte(value: u8) -> bool {
         kernel_log_active = false;
         return true;
     }
-    let length: usize = kernel_log_lengths[slot];
+    let safe_slot: {0..<KERNEL_LOG_RECORD_COUNT as usize} = slot;
+    // #612: the byte's word, then the length that admits it, each a release
+    // store; the truncated mark rides in the length.
+    let stored: usize = kernel_log_lengths[safe_slot];
+    let length: usize = stored & KERNEL_LOG_LENGTH_MASK;
     if (length < KERNEL_LOG_TEXT_MAX) {
         let offset: usize = slot * KERNEL_LOG_TEXT_MAX + length;
-        if (offset < KERNEL_LOG_TEXT_BYTES) {
-            kernel_log_text[offset] = value;
-            kernel_log_lengths[slot] = length + 1;
+        let word_index: usize = offset / 8;
+        if (word_index < KERNEL_LOG_TEXT_WORDS) {
+            let safe_word: {0..<KERNEL_LOG_TEXT_WORDS as usize} = word_index;
+            let shift: usize = (offset % 8) * 8;
+            let word: usize = (kernel_log_text[safe_word] &
+                               ~(0xFF << shift)) |
+                              ((value as usize) << shift);
+            kernel_log_publish(&kernel_log_text[safe_word], word);
+            kernel_log_publish(&kernel_log_lengths[safe_slot], stored + 1);
         }
-    } else {
-        kernel_log_line_truncated[slot] = true;
+    } else if ((stored & KERNEL_LOG_LENGTH_TRUNCATED) == 0) {
+        kernel_log_publish(&kernel_log_lengths[safe_slot],
+                           stored | KERNEL_LOG_LENGTH_TRUNCATED);
     }
     if (value == 10) {
         kernel_log_active = false;
@@ -899,12 +968,13 @@ fn kernel_log_enter_emergency() {
 }
 
 private fn kernel_log_snapshot_push(value: u8) {
-    let length: usize = kernel_log_snapshot_length;
-    if (length < 65536) {
+    let snapshot: *KernelLogSnapshot = kernel_log_snapshot_here();
+    let length: usize = snapshot.length;
+    if (length < KERNEL_LOG_SNAPSHOT_CAPACITY) {
         let safe_length:
-            {0..<65536 as usize} = length;
-        kernel_log_snapshot[safe_length] = value;
-        kernel_log_snapshot_length = length + 1;
+            {0..<KERNEL_LOG_SNAPSHOT_CAPACITY as usize} = length;
+        snapshot.bytes[safe_length] = value;
+        snapshot.length = length + 1;
     }
 }
 
@@ -949,46 +1019,103 @@ private fn kernel_log_snapshot_timestamp(ticks: i64) {
     kernel_log_snapshot_push(32);
 }
 
-// A partial final line is included. Long lines and ring overwrite are both
-// reported explicitly instead of being presented as complete history.
-fn kernel_log_snapshot_build() -> usize {
-    kernel_log_snapshot_length = 0;
-    if (kernel_log_overwritten != 0) {
-        kernel_log_snapshot_text("<4>kernel log: overwritten records=" as *u8);
-        kernel_log_snapshot_decimal6(kernel_log_overwritten % 1000000);
-        kernel_log_snapshot_push(10);
+// What copying one record came to.
+enum KernelLogRecordCopy { Kept; Lost; }
+
+// Record `record` into this CPU's snapshot, or nothing, by the protocol at
+// the top of this file. `second_check` false is the negative control's
+// reader, which trusts whatever it copied; `overwrite_mid_copy` has core 0's
+// own ring overwrite the slot after the first text byte is copied, which is
+// what makes that control deterministic. Both are false for syslog(2).
+private fn kernel_log_snapshot_record(record: usize, second_check: bool,
+                                      overwrite_mid_copy: bool)
+        -> KernelLogRecordCopy !{unsafe} {
+    let snapshot: *KernelLogSnapshot = kernel_log_snapshot_here();
+    let mark: usize = snapshot.length;
+    let slot: usize = record % KERNEL_LOG_RECORD_COUNT;
+    let safe_slot: {0..<KERNEL_LOG_RECORD_COUNT as usize} = slot;
+    // Not yet stamped with this record -- still being begun, or already
+    // replaced -- and there is nothing of it to copy.
+    if (kernel_log_observe(&kernel_log_stamps[safe_slot]) != record + 1) {
+        return KernelLogRecordCopy::Lost;
     }
-    let mut index: usize = 0;
-    while (index < kernel_log_count) {
-        let slot: usize = (kernel_log_oldest + index) % KERNEL_LOG_RECORD_COUNT;
-        if (slot < KERNEL_LOG_RECORD_COUNT) {
-            kernel_log_snapshot_timestamp(kernel_log_ticks[slot]);
-            // GitHub issue #465: a core column, printed only for a core that
-            // is not the console owner. Every line a single-core boot retains
-            // is core 0's, so its dmesg is byte-identical to what it was --
-            // and a peer's line is the one that could not previously be told
-            // from core 0's at all.
-            if (kernel_log_cpu[slot] != 0) {
-                kernel_log_snapshot_text("cpu" as *u8);
-                kernel_log_snapshot_push(((kernel_log_cpu[slot] % 10) + 48) as u8);
-                kernel_log_snapshot_push(32);
+    let stored: usize = kernel_log_observe(&kernel_log_lengths[safe_slot]);
+    let line_cpu: usize = kernel_log_observe(&kernel_log_cpu[safe_slot]);
+    let line_tick: usize = kernel_log_observe(&kernel_log_ticks[safe_slot]);
+    kernel_log_snapshot_timestamp(line_tick as i64);
+    // GitHub issue #465: a core column, printed only for a core that is not
+    // the console owner. Every line a single-core boot retains is core 0's,
+    // so its dmesg is byte-identical to what it was -- and a peer's line is
+    // the one that could not previously be told from core 0's at all.
+    if (line_cpu != 0) {
+        kernel_log_snapshot_text("cpu" as *u8);
+        kernel_log_snapshot_push(((line_cpu % 10) + 48) as u8);
+        kernel_log_snapshot_push(32);
+    }
+    let length: usize = stored & KERNEL_LOG_LENGTH_MASK;
+    for byte_index: usize in 0..<KERNEL_LOG_TEXT_MAX {
+        if (byte_index < length) {
+            let offset: usize = slot * KERNEL_LOG_TEXT_MAX + byte_index;
+            let word_index: usize = offset / 8;
+            if (word_index < KERNEL_LOG_TEXT_WORDS) {
+                let safe_word: {0..<KERNEL_LOG_TEXT_WORDS as usize} =
+                    word_index;
+                let word: usize =
+                    kernel_log_observe(&kernel_log_text[safe_word]);
+                kernel_log_snapshot_push(
+                    ((word >> ((offset % 8) * 8)) & 0xFF) as u8);
             }
-            let length: usize = kernel_log_lengths[slot];
-            let mut byte_index: usize = 0;
-            while (byte_index < length && byte_index < KERNEL_LOG_TEXT_MAX) {
-                let offset: usize = slot * KERNEL_LOG_TEXT_MAX + byte_index;
-                if (offset < KERNEL_LOG_TEXT_BYTES) {
-                    kernel_log_snapshot_push(kernel_log_text[offset]);
-                }
-                byte_index = byte_index + 1;
-            }
-            if (kernel_log_line_truncated[slot]) {
-                kernel_log_snapshot_text("... [line truncated]\n" as *u8);
+            if (byte_index == 0 && overwrite_mid_copy) {
+                kernel_log_overwrite_slot_for_probe(record);
             }
         }
-        index = index + 1;
     }
-    return kernel_log_snapshot_length;
+    if ((stored & KERNEL_LOG_LENGTH_TRUNCATED) != 0) {
+        kernel_log_snapshot_text("... [line truncated]\n" as *u8);
+    }
+    // The slot was reused if core 0 has since begun the record that takes
+    // it over: record + KERNEL_LOG_RECORD_COUNT.
+    if (second_check &&
+        kernel_log_observe(&kernel_log_started) >
+            record + KERNEL_LOG_RECORD_COUNT) {
+        snapshot.length = mark;
+        return KernelLogRecordCopy::Lost;
+    }
+    return KernelLogRecordCopy::Kept;
+}
+
+// A partial final line is included. Long lines, records the ring had already
+// overwritten, and records overwritten while this copied them are each
+// reported explicitly instead of being presented as complete history.
+fn kernel_log_snapshot_build() -> usize !{unsafe} {
+    let snapshot: *KernelLogSnapshot = kernel_log_snapshot_here();
+    snapshot.length = 0;
+    let end: usize = kernel_log_observe(&kernel_log_started);
+    let mut begin: usize = 0;
+    if (end > KERNEL_LOG_RECORD_COUNT) {
+        begin = end - KERNEL_LOG_RECORD_COUNT;
+    }
+    if (begin != 0) {
+        kernel_log_snapshot_text("<4>kernel log: overwritten records=" as *u8);
+        kernel_log_snapshot_decimal6(begin % 1000000);
+        kernel_log_snapshot_push(10);
+    }
+    let mut lost: usize = 0;
+    for index: usize in 0..<KERNEL_LOG_RECORD_COUNT {
+        if (begin + index < end) {
+            match kernel_log_snapshot_record(begin + index, true, false) {
+                KernelLogRecordCopy::Kept => {}
+                KernelLogRecordCopy::Lost => { lost = lost + 1; }
+            }
+        }
+    }
+    if (lost != 0) {
+        kernel_log_snapshot_text(
+            "<4>kernel log: records overwritten while read=" as *u8);
+        kernel_log_snapshot_decimal6(lost % 1000000);
+        kernel_log_snapshot_push(10);
+    }
+    return snapshot.length;
 }
 
 fn kernel_log_snapshot_capacity() -> usize {
@@ -996,10 +1123,12 @@ fn kernel_log_snapshot_capacity() -> usize {
 }
 
 fn kernel_log_snapshot_copy(offset: usize, destination: []u8) -> usize {
-    if (offset >= kernel_log_snapshot_length) { return 0; }
+    let snapshot: *KernelLogSnapshot = kernel_log_snapshot_here();
+    let snapshot_length: usize = snapshot.length;
+    if (offset >= snapshot_length) { return 0; }
     let mut amount: usize = destination.len;
-    if (amount > kernel_log_snapshot_length - offset) {
-        amount = kernel_log_snapshot_length - offset;
+    if (amount > snapshot_length - offset) {
+        amount = snapshot_length - offset;
     }
     let mut index: usize = 0;
     while (index < amount) {
@@ -1011,15 +1140,61 @@ fn kernel_log_snapshot_copy(offset: usize, destination: []u8) -> usize {
             index < destination.len) {
             let safe_source:
                 {0..<KERNEL_LOG_SNAPSHOT_CAPACITY as usize} = source_index;
-            destination[index] = kernel_log_snapshot[safe_source];
+            destination[index] = snapshot.bytes[safe_source];
         }
         index = index + 1;
     }
     return amount;
 }
 
+// One retained record "<byte><byte>\n", written the way core 0 writes any.
+private fn kernel_log_probe_record(byte: u8) {
+    kernel_log_begin_fragment();
+    let first: bool = kernel_log_capture_uart_byte(byte);
+    let second: bool = kernel_log_capture_uart_byte(byte);
+    let newline: bool = kernel_log_capture_uart_byte(10);
+}
+
+// The negative control's writer: core 0 begins records until `record`'s
+// slot has been taken over, each "bb\n", as a writer on another CPU would
+// during a peer's copy.
+private fn kernel_log_overwrite_slot_for_probe(record: usize) {
+    for step: usize in 0..<KERNEL_LOG_RECORD_COUNT {
+        if (kernel_log_started <= record + KERNEL_LOG_RECORD_COUNT) {
+            kernel_log_probe_record(98);
+        }
+    }
+}
+
+// GitHub issue #612's negative control, deterministic because the overwrite
+// is injected between a record's first and second text byte. The checked
+// reader must drop the record and leave nothing of it in the snapshot; the
+// reader that skips the second count must return it torn -- 'a' then 'b' --
+// which is what the check exists to catch.
+private fn kernel_log_torn_read_probe() -> bool !{unsafe} {
+    let snapshot: *KernelLogSnapshot = kernel_log_snapshot_here();
+    kernel_log_probe_record(97);
+    snapshot.length = 0;
+    let checked_record: usize = kernel_log_started - 1;
+    match kernel_log_snapshot_record(checked_record, true, true) {
+        KernelLogRecordCopy::Kept => { return false; }
+        KernelLogRecordCopy::Lost => {}
+    }
+    if (snapshot.length != 0) { return false; }
+    kernel_log_probe_record(97);
+    let unchecked_record: usize = kernel_log_started - 1;
+    match kernel_log_snapshot_record(unchecked_record, false, true) {
+        KernelLogRecordCopy::Lost => { return false; }
+        KernelLogRecordCopy::Kept => {}
+    }
+    // "[000000.000000] " then the text.
+    return snapshot.length >= 18 && snapshot.bytes[16] == 97 &&
+        snapshot.bytes[17] == 98;
+}
+
 // Destructive boot-time probe, followed immediately by kernel_log_init(). It
-// exercises both bounded-loss signals without emitting 257 UART lines.
+// exercises both bounded-loss signals without emitting 257 UART lines, and
+// #612's torn-read control.
 fn kernel_log_bounds_probe() -> bool {
     for record: usize in 0..<257 {
         kernel_log_begin_fragment();
@@ -1031,10 +1206,12 @@ fn kernel_log_bounds_probe() -> bool {
         return false;
     }
     let snapshot_length: usize = kernel_log_snapshot_build();
-    if (snapshot_length < 3 || kernel_log_snapshot[0] != 60 ||
-        kernel_log_snapshot[1] != 52 || kernel_log_snapshot[2] != 62) {
+    let snapshot: *KernelLogSnapshot = kernel_log_snapshot_here();
+    if (snapshot_length < 3 || snapshot.bytes[0] != 60 ||
+        snapshot.bytes[1] != 52 || snapshot.bytes[2] != 62) {
         return false;
     }
+    if (kernel_log_torn_read_probe() == false) { return false; }
     kernel_log_begin_fragment();
     for byte_index: usize in 0..<161 {
         kernel_log_capture_uart_byte(121);
@@ -1042,7 +1219,7 @@ fn kernel_log_bounds_probe() -> bool {
     let slot: usize = kernel_log_active_slot;
     if (slot >= 256) { return false; }
     let safe_slot: {0..<256 as usize} = slot;
-    if (kernel_log_line_truncated[safe_slot] == false) {
+    if ((kernel_log_lengths[safe_slot] & KERNEL_LOG_LENGTH_TRUNCATED) == 0) {
         return false;
     }
     // A fatal report must bypass even an unfinished suppressed line, and

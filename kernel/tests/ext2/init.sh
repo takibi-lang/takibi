@@ -134,6 +134,14 @@ else
     exit 1
 fi
 
+# GitHub issue #612: the same read on CPU 1, while core 0 keeps logging. The
+# kernel prints the peer_syslog view's line; the text itself is discarded.
+/bin/taskset -c 1 /bin/dmesg >/dev/null
+if [ "$?" -ne 0 ]; then
+    echo "peer dmesg failed"
+    exit 1
+fi
+
 for phase in fd uart telnet; do
     echo "init: phase $phase"
 done

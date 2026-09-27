@@ -2348,8 +2348,18 @@ private fn syscall_syslog(action: usize, address: usize, requested: usize)
         }
         copied = copied + chunk;
     }
+    // GitHub issue #612: the peer_syslog view's line, once, from the first
+    // complete read on a peer. The snapshot it copied is whole records only,
+    // with any overwritten while it read counted on a line of its own.
+    if (cpu_id() != 0 && syscall_syslog_peer_reported == false) {
+        syscall_syslog_peer_reported = true;
+        kernel_boot_log(
+            "workload: syslog read the retained log on a peer, every record whole or counted lost\n");
+    }
     return SyscallAction::Resume(copied);
 }
+
+private let mut syscall_syslog_peer_reported: bool = false;
 
 must_use variant KernelUartDeliveryResult { Consumed; RetryRead; }
 
@@ -3280,15 +3290,12 @@ fn syscall_peer_refused(number: usize) -> bool {
     // per CPU and its record writes one hold (#618), with the three execs
     // that stay core 0's handed there from the handler; clone, clone3, fork
     // and vfork in #611, whose child's first return on its parent's stack
-    // StackOwnership.tla already models on either core.
+    // StackOwnership.tla already models on either core. syslog, the one
+    // entry that was not lifecycle, left in #612: its reader takes no lock
+    // and drops a record overwritten while it copied (LogReader.tla).
     if (number == AARCH64_NR_TAKIBI_PARENT_PROGRESS) {
         return true;
     }
-    // syslog: the retained log's only writer is core 0 (#465), appending a
-    // byte at a time with no lock, and the snapshot buffer is one global. A
-    // reader elsewhere would race both, and dmesg is not worth a lock on
-    // every logged byte.
-    if (number == AARCH64_NR_SYSLOG) { return true; }
     return false;
 }
 
