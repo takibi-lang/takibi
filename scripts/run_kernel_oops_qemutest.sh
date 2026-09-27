@@ -269,6 +269,24 @@ if [ "$MODE" != child_exec ] && [ "$MODE" != child_exec_prepare_failure ] &&
     exit 1
 fi
 
+# GitHub issue #619: the core that runs the console stopped the other one
+# first, so no running core can take the UART RX interrupt and eat the
+# console's input. In peer_fault the peer runs the console before core 0 is
+# online to acknowledge; its stop is Partial and released, so core 0 can
+# still reach its own fault.
+if [ "$MODE" != peer_fault ] &&
+        ! grep -Eq '^oops: world-stop complete mask=0x0*2$' "$UART_LOG"; then
+    echo "FAIL kernel/qemu oops: the console ran without stopping the other core first" >&2
+    sed 's/^/  /' "$UART_LOG" >&2 || true
+    exit 1
+fi
+if [ "$MODE" = peer_fault ] &&
+        ! grep -Eq '^oops: world-stop partial mask=0x[0-9a-f]+ released; other cores still run$' "$UART_LOG"; then
+    echo "FAIL kernel/qemu oops: the peer's console did not report a released partial stop" >&2
+    sed 's/^/  /' "$UART_LOG" >&2 || true
+    exit 1
+fi
+
 # GitHub issue #486: the two-core claim, and the three things it rests on.
 #
 # Both cores reported -- the single shared snapshot this replaced kept

@@ -315,6 +315,12 @@ fn world_stop_partial_release(partial: sink WorldStopPartial[id],
     world_stop_resume(stop);
 }
 
+// A fail-stop that stopped the world never resumes it (GitHub issue #619):
+// the other cores stay in world_stop_interrupt_hold for as long as the
+// machine is on. This spends the token without the release the ordinary
+// callers owe, and is for that terminal path only.
+fn world_stop_keep_forever(stopped: sink WorldStopped[id]) {}
+
 fn world_stop_partial_mask(partial: borrow WorldStopPartial[id]) -> usize {
     return partial.stopped_mask;
 }

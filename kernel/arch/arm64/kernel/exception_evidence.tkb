@@ -2698,6 +2698,46 @@ private fn crash_console_append(
     return length;
 }
 
+// GitHub issue #619: stop every other core before the console reads input,
+// and never resume them. A fail-stop parks only its own core, and a core
+// still running takes the UART RX interrupt -- both platforms route it to
+// core 0 -- and so ate the bytes a peer's console was polling for. Stopped,
+// the others hold in world_stop_interrupt_hold with IRQs masked, and ps and
+// proc read a machine that is not moving. A core that does not acknowledge
+// in time (one crashing too, IRQs masked) makes the stop Partial. That one
+// is released, not kept: a request left standing would stop a core that
+// takes it later, possibly before that core reports a fault of its own --
+// #486's peer_fault lane is exactly that core. It is reported, and the
+// console runs anyway: best effort, like every reporter.
+private fn crash_world_stop() !{unsafe} {
+    match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
+                           DDB_WORLD_STOP_SPINS) {
+        WorldStopResult::Busy => {
+            crash_report_claim();
+            kernel_boot_log("oops: world-stop busy; other cores still run\n");
+            crash_report_release();
+        }
+        WorldStopResult::Partial(partial) => {
+            let mask: usize = world_stop_partial_mask(partial);
+            world_stop_partial_release(partial, &kernel_world_stop);
+            crash_report_claim();
+            kernel_boot_log("oops: world-stop partial mask=");
+            uart_put_hex(mask);
+            kernel_boot_log(" released; other cores still run\n");
+            crash_report_release();
+        }
+        WorldStopResult::Complete(stopped) => {
+            let mask: usize = world_stopped_mask(stopped);
+            world_stop_keep_forever(stopped);
+            crash_report_claim();
+            kernel_boot_log("oops: world-stop complete mask=");
+            uart_put_hex(mask);
+            kernel_boot_log("\n");
+            crash_report_release();
+        }
+    }
+}
+
 private fn crash_console_run() !{unsafe} {
     // The ordinary UART RX handler belongs to the suspended kernel and may
     // wake a process. Keep it out of a terminal exception monitor and poll
@@ -2875,6 +2915,7 @@ fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
     if (unsafe { atomic_swap_acquire(crash_console_owner_address(),
                                      CRASH_CONSOLE_CLAIMED) }
             == CRASH_CONSOLE_FREE) {
+        crash_world_stop();
         crash_console_run();
     }
     // Under the claim like every other line this path writes: it was the
