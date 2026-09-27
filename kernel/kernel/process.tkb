@@ -4867,11 +4867,18 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
         match cursor {
             ProcessSlotCursor::Done => { walking = false; }
             ProcessSlotCursor::At(slot) => {
-                // Slot 0 is the bootstrap record, which may be Ready with no
-                // resumable EL0 frame. Only core 0 is ever allowed it, and
-                // core 0's idle loop (#592) must not pick it either.
-                if (slot != 0 &&
-                    scheduled_process_record_state(slot) ==
+                // Slot 0 is PID 1, which only core 0 may run
+                // (kernel_process_cpu_allows_slot). Core 0's idle loop
+                // (#592) takes it like any other: by the time peer dispatch
+                // is enabled, just before run_initial_user, the bootstrap has
+                // its complete image, and from then on it is Ready only after
+                // a block or a switch saved its EL0 frame. It used to be
+                // skipped here, which left PID 1 Ready and never run once
+                // #611 put init's children on peers: a child that exits on a
+                // peer leaves its parent Ready rather than starting it, and
+                // an idle core 0 then never took it, so init stopped
+                // reaping and respawning (four-core RPi5, every run).
+                if (scheduled_process_record_state(slot) ==
                         ProcessSlotState::Ready &&
                     kernel_process_cpu_allows_slot(cpu_id(), slot)) {
                     let mut handle: ProcessHandle =
