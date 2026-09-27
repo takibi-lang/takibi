@@ -270,6 +270,16 @@ private let mut kernel_log_tx_queue: [u8; KERNEL_LOG_TX_QUEUE_BYTES];
 private let mut kernel_log_tx_head: usize = 0;
 private let mut kernel_log_tx_tail: usize = 0;
 private let mut kernel_log_tx_count: usize = 0;
+// GitHub issue #611: the last byte core 0 put on the wire, from any stream
+// -- kernel log text, a user write, a drained peer console record -- and
+// whether a kernel log line is about to start after one that did not end.
+// A shell on a peer wrote `... job control turned off` and its newline in
+// two records, core 0 started `profile: begin` between them, and the host
+// parser, which reads lines, never saw the record. So a kernel line always
+// starts at the beginning of a wire line: core 0 sends one newline of its
+// own first when the wire is mid-line. The retained log never sees it.
+private let mut kernel_log_wire_last: u8 = 10;
+private let mut kernel_log_wire_break_due: bool = false;
 
 // False until the platform has armed its TX interrupt. Early boot runs before
 // platform_irq_init(), so a byte queued then would never be drained; DDB and
@@ -379,6 +389,7 @@ fn kernel_log_tx_push(value: u8) -> bool {
     if (slot >= KERNEL_LOG_TX_QUEUE_BYTES) { return false; }
     let safe_slot: {0..<KERNEL_LOG_TX_QUEUE_BYTES as usize} = slot;
     kernel_log_tx_queue[safe_slot] = value;
+    kernel_log_wire_last = value;
     kernel_log_tx_tail = slot + 1;
     if (kernel_log_tx_tail >= KERNEL_LOG_TX_QUEUE_BYTES) {
         kernel_log_tx_tail = 0;
@@ -419,6 +430,7 @@ private fn uart_tx_spin_store(c: u8) !{unsafe} {
     while (uart_tx_fifo_full()) { }
     kernel_log_note_tx_spin(read_cntpct() - spin_from);
     uart_tx_store(c);
+    if (cpu_id() == 0) { kernel_log_wire_last = c; }
 }
 
 // Move queued bytes into the FIFO while both have room. Runs from the TX
@@ -443,6 +455,16 @@ fn uart_putc(c: u8) !{logs, unsafe} {
         uart_tx_spin_store(c);
         return;
     }
+    if (kernel_log_wire_break_due) {
+        kernel_log_wire_break_due = false;
+        uart_wire_byte(10);
+    }
+    uart_wire_byte(c);
+}
+
+// One byte from core 0 onto the wire, queued or spun; uart_putc without
+// the retained log's capture.
+private fn uart_wire_byte(c: u8) !{logs, unsafe} {
     kernel_log_note_tx_byte();
     if (kernel_log_tx_is_live() == false) {
         uart_tx_spin_store(c);
@@ -638,6 +660,7 @@ fn kernel_log_capture_uart_byte(value: u8) -> bool {
             return true;
         }
         kernel_log_start_line();
+        if (kernel_log_wire_last != 10) { kernel_log_wire_break_due = true; }
     }
     if (kernel_log_active == false) { return true; }
     let slot: usize = kernel_log_active_slot;

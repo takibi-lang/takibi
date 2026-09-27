@@ -682,7 +682,12 @@ def main() -> int:
         except (ValueError, StopIteration) as error:
             raise RuntimeError(
                 "ash transcript boundaries were not observed" + silence) from error
-        actual = [line.removeprefix("/ # ") for line in lines[start:end + 1]]
+        # GitHub issue #611: a kernel line now always starts a wire line of
+        # its own, so one that arrives after the shell's prompt leaves the
+        # prompt alone on the line before it. A bare prompt carries no
+        # transcript content, the same reason the prefix is stripped.
+        actual = [line.removeprefix("/ # ") for line in lines[start:end + 1]
+                  if line != "/ # "]
         if actual != expected:
             diff = "".join(difflib.unified_diff(
                 [line + "\n" for line in expected],
