@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The TLA+ action tables still point at real code and justify every drop.
 
-GitHub issues #601 and #616. kernel/models/README.md maps each model action
+GitHub issues #601, #616 and #617. kernel/models/README.md maps each model action
 to the Takibi functions it abstracts, and says what the action keeps and
 what it drops. The model and the code are never compiled together, so this
 check is what ties the table to both:
@@ -21,13 +21,24 @@ check is what ties the table to both:
 #609's defect sat in a path StackOwnership.tla listed as dropped with no
 reason, which is why a bare "X is dropped" is refused.
 
-It catches a rename, a removal, and an unjustified drop. It does NOT catch a
-change of behaviour inside a function that keeps its name; that is the
-review's job.
+- every row's "reviewed" cell is a hash of the bodies of the functions it
+  maps and of the guards its dropped paths name, comments and whitespace
+  stripped. A change to any of them fails
+  until a reviewer re-reads the row against the model and restamps it:
+
+      python3 scripts/check_model_function_map.py --restamp
+
+  The commit that restamps says what was reviewed. #609 changed
+  kernel_process_child_exit in a way that mattered to StackOwnership.tla,
+  and nothing asked for the model to be looked at.
+
+The hash says only "look again", not what is wrong, and it fires whether or
+not any test exercises the change.
 
 Exit code only (0 = pass, 1 = fail).
 """
 
+import hashlib
 import pathlib
 import re
 import sys
@@ -68,6 +79,41 @@ def function_body(name: str, sources: str) -> str | None:
     match = re.search(rf"^(?:private )?fn {name}\b.*?^}}", sources,
                       re.M | re.S)
     return match.group(0) if match else None
+
+
+def normalised(body: str) -> str:
+    """The body with comments and whitespace outside string literals gone."""
+    out = []
+    i = 0
+    while i < len(body):
+        if body.startswith("//", i):
+            i = body.find("\n", i) % (len(body) + 1)
+        elif body.startswith("/*", i):
+            i = body.find("*/", i + 2) + 2 or len(body)
+        elif body[i] == '"':
+            end = i + 1
+            while end < len(body) and body[end] != '"':
+                end += 2 if body[end] == "\\" else 1
+            out.append(body[i:end + 1])
+            i = end + 1
+        else:
+            if not body[i].isspace():
+                out.append(body[i])
+            i += 1
+    return "".join(out)
+
+
+def stamped_names(cells: list[str]) -> list[str]:
+    """The functions a row maps, then the guards its dropped paths rely on."""
+    return NAME_RE.findall(cells[1]) + NAME_RE.findall(cells[3])
+
+
+def row_hash(names: list[str], sources: str) -> str:
+    digest = hashlib.sha256()
+    for name in names:
+        digest.update(normalised(function_body(name, sources) or "").encode())
+        digest.update(b"\0")
+    return digest.hexdigest()[:12]
 
 
 def missing(names: list[str], sources: str) -> list[str]:
@@ -118,8 +164,8 @@ def dropped_errors(model: str, cell: str, tla_defs: dict[str, set[str]],
 
 def row_errors(model: str, cells: list[str], tla_defs: dict[str, set[str]],
                sources: str) -> list[str]:
-    if len(cells) != 4:
-        return [f"{cells[0]} has {len(cells)} cells, not 4"]
+    if len(cells) != 5:
+        return [f"{cells[0]} has {len(cells)} cells, not 5"]
     errors = [f"{model}.tla does not define action {action}"
               for action in ACTION_RE.findall(cells[0])
               if action not in tla_defs.get(model, set())]
@@ -128,37 +174,69 @@ def row_errors(model: str, cells: list[str], tla_defs: dict[str, set[str]],
                "against the code that replaced it"
                for name in missing(NAME_RE.findall(cells[1]), sources)]
     errors += dropped_errors(model, cells[3], tla_defs, sources)
+    stamp = f"`{row_hash(stamped_names(cells), sources)}`"
+    if not errors and cells[4] != stamp:
+        errors.append(f"{cells[0]}: a function it maps changed since the "
+                      f"row was reviewed ({cells[4]}, now {stamp}). Re-read "
+                      "the row and the model's action against the code, "
+                      "then run this script with --restamp")
     return errors
+
+
+def restamp(text: str, sources: str) -> str:
+    lines = []
+    for line in text.splitlines(keepends=True):
+        if line.startswith("| `"):
+            cells = line.rstrip("\n").strip("|").split("|")
+            if len(cells) == 5:
+                cells[4] = " `" + row_hash(stamped_names(cells), sources) + "` "
+                line = "|" + "|".join(cells) + "|\n"
+        lines.append(line)
+    return "".join(lines)
 
 
 def controls_fail(tla_defs: dict[str, set[str]], sources: str) -> list[str]:
     """Rows that must be refused; a name for each one that is not."""
     refused = {
         "absent function": ["`Dispatch`", "`kernel_model_map_control_absent`",
-                            "x", "nothing"],
+                            "x", "nothing", ""],
         "bare drop": ["`Dispatch`", "`kernel_process_secondary_start`", "x",
-                      "affinity is dropped"],
+                      "affinity is dropped", ""],
         "absent action": ["`Dispatch`", "`kernel_process_secondary_start`",
-                          "x", "a -- modelled elsewhere: `Wait4Block.Absent`"],
+                          "x", "a -- modelled elsewhere: `Wait4Block.Absent`", ""],
         "absent activity": ["`Dispatch`", "`kernel_process_secondary_start`",
                             "x", "a -- guarded: `scheduled_process_start` "
-                            "fail-stops with `control-absent`"],
+                            "fail-stops with `control-absent`", ""],
         "guard elsewhere": ["`Dispatch`", "`kernel_process_secondary_start`",
                             "x", "a -- guarded: `scheduled_process_start` "
-                            "fail-stops with `reap-on-owned-stack`"],
+                            "fail-stops with `reap-on-owned-stack`", ""],
         "absent property": ["`Dispatch`", "`kernel_process_secondary_start`",
-                            "x", "a -- irrelevant to `ControlAbsent`: no"],
+                            "x", "a -- irrelevant to `ControlAbsent`: no", ""],
     }
-    return [name for name, cells in refused.items()
-            if not row_errors("StackOwnership", cells, tla_defs, sources)]
+    failed = [name for name, cells in refused.items()
+              if not row_errors("StackOwnership", cells, tla_defs, sources)]
+    body = "fn f() -> usize {\n    // why\n    let s = \"a  // b\";\n    return 1;\n}\n"
+    commented = body.replace("// why", "/* reworded */ // other")
+    changed = body.replace("return 1", "return 2")
+    string = body.replace("a  // b", "a // b")
+    if row_hash(["f"], body) != row_hash(["f"], commented):
+        failed.append("comment-only edit restamps")
+    if row_hash(["f"], body) == row_hash(["f"], changed):
+        failed.append("body edit keeps its stamp")
+    if row_hash(["f"], body) == row_hash(["f"], string):
+        failed.append("string edit keeps its stamp")
+    return failed
 
 
 def main() -> int:
-    rows = table_rows(README.read_text(encoding="utf-8"))
     tla_defs = {path.stem: defined_names(path.read_text(encoding="utf-8"))
                 for path in MODELS.glob("*.tla")}
     sources = "\n".join(path.read_text(encoding="utf-8")
                         for path in sorted((ROOT / "kernel").rglob("*.tkb")))
+    if sys.argv[1:] == ["--restamp"]:
+        README.write_text(restamp(README.read_text(encoding="utf-8"), sources),
+                          encoding="utf-8")
+    rows = table_rows(README.read_text(encoding="utf-8"))
     failed = False
     for model, cells in rows:
         for error in row_errors(model, cells, tla_defs, sources):
@@ -166,8 +244,9 @@ def main() -> int:
                   f"{model}: {error}")
             failed = True
     if failed:
-        print("FAIL model-function-map: an action row points at nothing or "
-              "drops a path without saying why that is safe")
+        print("FAIL model-function-map: an action row points at nothing, "
+              "drops a path without saying why that is safe, or maps code "
+              "changed since its review")
         return 1
     if not_refused := controls_fail(tla_defs, sources):
         print("FAIL model-function-map: negative control(s) "
@@ -175,12 +254,13 @@ def main() -> int:
               "proves nothing")
         return 1
     drops = sum(len(cells[3].split("; ")) for _, cells in rows
-                if len(cells) == 4 and cells[3] != "nothing")
+                if len(cells) == 5 and cells[3] != "nothing")
     report_pass(
         "model-function-map",
         f"{len(rows)} action row(s) name existing actions and functions, "
-        f"{drops} dropped path(s) are each justified, and an unjustified "
-        "row is refused",
+        f"{drops} dropped path(s) are each justified, every row's review "
+        "stamp matches its functions, and an unjustified row, a body edit "
+        "and a string edit are refused while a comment edit is not",
         action_rows=len(rows),
         dropped_paths=drops,
         models=len({model for model, _ in rows}))

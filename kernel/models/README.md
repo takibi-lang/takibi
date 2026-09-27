@@ -62,14 +62,14 @@ touches belongs to no existing one.
 
 Two cores; a parent, its child, and one other runnable process.
 
-| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe |
-| --- | --- | --- | --- |
-| `Wait4Decide` | the wait4 arm of `kernel_syscall_dispatch_action` | the zombie check and the decision to block, under one hold of the run lock (#571) | the pid, the status copy and ECHILD -- irrelevant to `NoLostWakeup`: none of them changes which process is Blocked or Exited |
-| `Wait4Block` | `kernel_process_block_current`, `kernel_process_block_reserved` | successor choice and the Blocked publication in one critical section; `RECHECK` is the zombie re-check there | ASID preparation and the lock drop around it -- irrelevant to `NoLostWakeup`: the drop comes after Blocked is published and re-checked, and the successor it crosses with is already reserved Running |
-| `ChildExit` | `kernel_process_child_exit` | the child becomes a zombie and wakes the parent only if the parent is Blocked in ChildExit | zombie draining -- irrelevant to `NoLostWakeup`: it reaps the exiting child's own children, never this parent or this child; SIGCHLD -- irrelevant to `NoLostWakeup`: it makes no process Blocked or Exited, and only such a step can break the property; the direct parent start -- modelled elsewhere: `StackOwnership.ChildExitStart` |
-| `Wait4Resume` | `kernel_syscall_wait4_deliver` | the woken parent reaps | the user-memory status write -- irrelevant to `NoLostWakeup`: it runs after the reap, when the child is no longer Exited |
-| `Preempt` | `kernel_process_timer_schedule` | the timer takes a process off its core, never inside the parent's wait4 syscall (`KERNEL_PREEMPTIBLE` is 0) | nothing |
-| `Dispatch` | `kernel_process_secondary_start`, `kernel_process_schedule` | an idle core takes a Ready process | affinity -- irrelevant to `NoLostWakeup`: it only forbids some dispatches, and the model already allows each one it forbids; stack ownership -- modelled elsewhere: `StackOwnership.Dispatch` |
+| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
+| --- | --- | --- | --- | --- |
+| `Wait4Decide` | the wait4 arm of `kernel_syscall_dispatch_action` | the zombie check and the decision to block, under one hold of the run lock (#571) | the pid, the status copy and ECHILD -- irrelevant to `NoLostWakeup`: none of them changes which process is Blocked or Exited | `d52280d1d5f8` |
+| `Wait4Block` | `kernel_process_block_current`, `kernel_process_block_reserved` | successor choice and the Blocked publication in one critical section; `RECHECK` is the zombie re-check there | ASID preparation and the lock drop around it -- irrelevant to `NoLostWakeup`: the drop comes after Blocked is published and re-checked, and the successor it crosses with is already reserved Running | `a5833111b50b` |
+| `ChildExit` | `kernel_process_child_exit` | the child becomes a zombie and wakes the parent only if the parent is Blocked in ChildExit | zombie draining -- irrelevant to `NoLostWakeup`: it reaps the exiting child's own children, never this parent or this child; SIGCHLD -- irrelevant to `NoLostWakeup`: it makes no process Blocked or Exited, and only such a step can break the property; the direct parent start -- modelled elsewhere: `StackOwnership.ChildExitStart` | `11cfcf76aa70` |
+| `Wait4Resume` | `kernel_syscall_wait4_deliver` | the woken parent reaps | the user-memory status write -- irrelevant to `NoLostWakeup`: it runs after the reap, when the child is no longer Exited | `7eee22656d13` |
+| `Preempt` | `kernel_process_timer_schedule` | the timer takes a process off its core, never inside the parent's wait4 syscall (`KERNEL_PREEMPTIBLE` is 0) | nothing | `6e9c1a975798` |
+| `Dispatch` | `kernel_process_secondary_start`, `kernel_process_schedule` | an idle core takes a Ready process | affinity -- irrelevant to `NoLostWakeup`: it only forbids some dispatches, and the model already allows each one it forbids; stack ownership -- modelled elsewhere: `StackOwnership.Dispatch` | `58a2f906d1da` |
 
 Properties:
 
@@ -109,17 +109,17 @@ modelcheck` requires each to fail:
   `StartsOnFreeStack`, in six steps: clone, switch, the parent dispatched
   to the other core, switch, block, exit.
 
-| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe |
-| --- | --- | --- | --- |
-| `Clone` | `kernel_process_clone_begin`, `kernel_syscall_clone_child_return` | the child's first return runs first, on its parent's stack | fork's fd and VM copies -- irrelevant to `StackSafety`: they touch no kernel stack and no core's current process |
-| `SwitchComplete` | `kernel_process_stack_switch_complete` | the physical handoff at exception return: release the stack stood on, own the current process's | nothing |
-| `Wait4Block` | the wait4 arm of `kernel_syscall_dispatch_action`, `kernel_process_block_current` | a parent blocks before its child exits, with no successor | the #550 window -- modelled elsewhere: `Wait4Block.Wait4Decide`; a block that switches straight to a successor, leaving the core on the parent's stack -- guarded: `scheduled_process_start` fail-stops with `start-on-owned-stack` |
-| `ChildExit` | `kernel_process_child_exit`, `kernel_syscall_exit_current_process` | the child becomes a zombie and wakes a Blocked parent, leaving it Ready with its continuation; the core still stands on the zombie's stack | zombie draining -- guarded: `scheduled_process_exited_take` fail-stops with `reap-on-owned-stack`; SIGCHLD -- irrelevant to `StackSafety`: it moves no stack and no core's current process |
-| `ChildExitStart` | `kernel_process_child_exit`, `kernel_process_exit_reserved` | the same exit starting the woken parent on this core at once, only when no core owns the parent's stack | affinity -- irrelevant to `StartsOnFreeStack`: it only forbids some starts, and the model already allows each one it forbids |
-| `IdleEnter` | `kernel_process_stack_idle_complete`, `kernel_process_stack_idle_blocked` | a core with no current process moves to its idle stack and releases the one it stood on | nothing |
-| `Dispatch` | `kernel_process_secondary_start`, `scheduled_process_ready_take` | a core takes a Ready process whose stack no core owns, and a parent with a continuation only once the child's stack is free too | affinity -- irrelevant to `StartsOnFreeStack`: it only forbids some dispatches, and the model already allows each one it forbids |
-| `Wait4Reap` | `kernel_syscall_wait4_deliver` | the parent reaps once the child's stack is free | nothing |
-| `Leave` | `kernel_process_core0_leave_excluded`, `kernel_process_migrate_current`, `kernel_process_stack_idle_yield` | a running process leaves its core and the stack the core stands on is released and made Ready | why it leaves (affinity, a refused syscall, the tick) -- irrelevant to `StackSafety`: the model lets a running process leave at any step, which covers every reason |
+| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
+| --- | --- | --- | --- | --- |
+| `Clone` | `kernel_process_clone_begin`, `kernel_syscall_clone_child_return` | the child's first return runs first, on its parent's stack | fork's fd and VM copies -- irrelevant to `StackSafety`: they touch no kernel stack and no core's current process | `8afff9121e55` |
+| `SwitchComplete` | `kernel_process_stack_switch_complete` | the physical handoff at exception return: release the stack stood on, own the current process's | nothing | `65c121a7b22d` |
+| `Wait4Block` | the wait4 arm of `kernel_syscall_dispatch_action`, `kernel_process_block_current` | a parent blocks before its child exits, with no successor | the #550 window -- modelled elsewhere: `Wait4Block.Wait4Decide`; a block that switches straight to a successor, leaving the core on the parent's stack -- guarded: `scheduled_process_start` fail-stops with `start-on-owned-stack` | `f8bb51133571` |
+| `ChildExit` | `kernel_process_child_exit`, `kernel_syscall_exit_current_process` | the child becomes a zombie and wakes a Blocked parent, leaving it Ready with its continuation; the core still stands on the zombie's stack | zombie draining -- guarded: `scheduled_process_exited_take` fail-stops with `reap-on-owned-stack`; SIGCHLD -- irrelevant to `StackSafety`: it moves no stack and no core's current process | `8be750a6598c` |
+| `ChildExitStart` | `kernel_process_child_exit`, `kernel_process_exit_reserved` | the same exit starting the woken parent on this core at once, only when no core owns the parent's stack | affinity -- irrelevant to `StartsOnFreeStack`: it only forbids some starts, and the model already allows each one it forbids | `338857e44e80` |
+| `IdleEnter` | `kernel_process_stack_idle_complete`, `kernel_process_stack_idle_blocked` | a core with no current process moves to its idle stack and releases the one it stood on | nothing | `dfe9912c0db0` |
+| `Dispatch` | `kernel_process_secondary_start`, `scheduled_process_ready_take` | a core takes a Ready process whose stack no core owns, and a parent with a continuation only once the child's stack is free too | affinity -- irrelevant to `StartsOnFreeStack`: it only forbids some dispatches, and the model already allows each one it forbids | `42173edee711` |
+| `Wait4Reap` | `kernel_syscall_wait4_deliver` | the parent reaps once the child's stack is free | nothing | `7eee22656d13` |
+| `Leave` | `kernel_process_core0_leave_excluded`, `kernel_process_migrate_current`, `kernel_process_stack_idle_yield` | a running process leaves its core and the stack the core stands on is released and made Ready | why it leaves (affinity, a refused syscall, the tick) -- irrelevant to `StackSafety`: the model lets a running process leave at any step, which covers every reason | `8998d35e0ddd` |
 
 Properties:
 
@@ -153,12 +153,12 @@ Three variants:
   guard `scheduled_process_slot_remove` requires. It does not enforce the
   reader's half, and this variant shows the fix alone is not enough.
 
-| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe |
-| --- | --- | --- | --- |
-| `ReaderProbe`, `ReaderMiss`, `ReaderRead` | `kernel_process_secondary_start`, `kernel_process_next_ready`, `kernel_process_deadline_wake_all`, via `scheduled_process_record_at` | the probe returns a pointer and drops the pool's view; the read comes later, under the run lock the walk already holds | which walk reads and what it reads -- irrelevant to `ReadsOnlyLiveRecords`: the property depends only on whether the record was freed before the read |
-| `ReaperTeardown` | `scheduled_process_reap_teardown` | frees what only the exited process owned; no lock | nothing |
-| `ReaperRemove` | `scheduled_process_reap_remove`, `scheduled_process_slot_remove` | resets and removes the record, under the run-lock guard since #482 | nothing |
-| `Exit` | `kernel_process_child_exit` | the process becomes a zombie | the rest of exit -- irrelevant to `ReadsOnlyLiveRecords`: only the zombie state lets a reaper start, and nothing else in exit frees the record |
+| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
+| --- | --- | --- | --- | --- |
+| `ReaderProbe`, `ReaderMiss`, `ReaderRead` | `kernel_process_secondary_start`, `kernel_process_next_ready`, `kernel_process_deadline_wake_all`, via `scheduled_process_record_at` | the probe returns a pointer and drops the pool's view; the read comes later, under the run lock the walk already holds | which walk reads and what it reads -- irrelevant to `ReadsOnlyLiveRecords`: the property depends only on whether the record was freed before the read | `d6ce01c1b91a` |
+| `ReaperTeardown` | `scheduled_process_reap_teardown` | frees what only the exited process owned; no lock | nothing | `cb5d9162eac3` |
+| `ReaperRemove` | `scheduled_process_reap_remove`, `scheduled_process_slot_remove` | resets and removes the record, under the run-lock guard since #482 | nothing | `0804bbb466af` |
+| `Exit` | `kernel_process_child_exit` | the process becomes a zombie | the rest of exit -- irrelevant to `ReadsOnlyLiveRecords`: only the zombie state lets a reaper start, and nothing else in exit frees the record | `11cfcf76aa70` |
 
 ## The dropped column
 
@@ -187,7 +187,7 @@ removal forces the table, and a look at the model, to be updated.
 ## Keeping models and the kernel in step
 
 A model and the `.tkb` code drift apart silently: nothing compiles them
-together. What exists today, and what is proposed:
+together. Three things keep them in step:
 
 1. **The table above.** Each action names the functions it abstracts and
    what it deliberately leaves out. A reviewer of a change to one of those
@@ -195,8 +195,11 @@ together. What exists today, and what is proposed:
 2. **A build check that the named functions exist and every drop is
    justified** (in place). It catches a rename, a removal and a path left
    out with no reason, not a change of behaviour.
-3. **Proposed, not built:** record a hash of each mapped function's body in
-   the table, and fail when the code changes until someone re-reviews the row
-   and updates the hash. That turns "the model may be stale" into a failing
-   check at the moment it becomes true, at the cost of a stamp to update on
-   every edit to those functions.
+3. **A review stamp per row** (in place). The Reviewed column is a hash of
+   the bodies of the functions the row maps and of the guards its dropped
+   paths name, comments and whitespace stripped. Any change to that code
+   fails the build until someone re-reads the row against the model and runs
+   `python3 scripts/check_model_function_map.py --restamp`; the commit that
+   restamps says what was reviewed. A comment-only edit keeps the stamp. The
+   stamp says only "look again", not what is wrong, and it fires whether or
+   not any test exercises the change.

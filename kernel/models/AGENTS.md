@@ -15,4 +15,7 @@ The rules an edit must keep:
   when a function or action it names no longer exists, or when a dropped
   path does not say why leaving it out is safe, in one of the three forms
   the README's "The dropped column" defines.
+- A change to a function a row maps fails the same check until the row is
+  re-read against the model and restamped with `--restamp`. Say in the
+  commit what was reviewed.
 - Run `make modelcheck`.
