@@ -40,7 +40,7 @@ must_use variant UsbConfigParseResult {
 // must declare a length that fits in what is left, and the last one must end
 // exactly at the end. A trailing fragment is malformed, and so is a bLength
 // that would run past the buffer -- the two shapes this refuses.
-fn usb_config_descriptor_parse(configuration: []u8) -> UsbConfigParseResult {
+fn usb_config_descriptor_parse(configuration: borrow []u8) -> UsbConfigParseResult {
     // And the buffer must BEGIN with the configuration descriptor itself,
     // which is nine bytes. xhci_configure() already refuses a wTotalLength
     // below nine before it asks the device for the bytes, but that guard

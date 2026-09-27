@@ -94,11 +94,12 @@ let mut xhci_cmd_ring: [Trb; CMD_RING_TRBS] align(64);
 private let mut xhci_evt_ring: [Trb; EVT_RING_TRBS] align(64);
 let mut xhci_erst: [u32; 4] align(64);
 let mut xhci_input_ctx: [u32; INPUT_CTX_SIZE / 4] align(64);
-let mut xhci_device_ctx: [u32; DEVICE_CTX_SIZE / 4] align(64);
+private let mut xhci_device_ctx: [u32; DEVICE_CTX_SIZE / 4] align(64);
 let mut xhci_ep0_ring: [Trb; EP0_RING_TRBS] align(64);
 let mut xhci_bulk_in_ring: [Trb; BULK_RING_TRBS] align(64);
 let mut xhci_bulk_out_ring: [Trb; BULK_RING_TRBS] align(64);
-let mut xhci_ctrl_buf: [u8; 256] align(64);
+struct dma_fixed XhciControlReceive { private bytes: [u8; 256]; }
+private let mut xhci_control_receive: XhciControlReceive align(64);
 
 let mut xhci_slot_id: usize = 0;
 let mut xhci_ep0_enq: usize = 0;
@@ -239,6 +240,40 @@ private fn msc_csw_put(value: sink MscCswReceiveAuthority) {
         MscCswReceiveAuthority::Cpu(stale) => { msc_csw_fail_cpu(stale); }
         MscCswReceiveAuthority::Device(stale) => {
             msc_csw_fail_device(stale);
+        }
+    }
+}
+
+private fn xhci_control_take() -> XhciControlReceiveAuthority {
+    let guard = msc_dma_lock(&dma_owner_XhciControlReceive.mutex);
+    let previous: XhciControlReceiveAuthority = stable_replace(
+        guard, &dma_owner_XhciControlReceive.mutex,
+        dma_owner_XhciControlReceive.value, XhciControlReceiveAuthority::Empty);
+    msc_dma_unlock(guard, &dma_owner_XhciControlReceive.mutex);
+    return previous;
+}
+
+private fn xhci_control_fail_cpu(stale: sink *XhciControlReceiveCpu) {
+    kernel_syscall_fail_stop(0);
+}
+
+private fn xhci_control_fail_device(stale: sink *XhciControlReceiveDevice) {
+    kernel_syscall_fail_stop(0);
+}
+
+private fn xhci_control_put(value: sink XhciControlReceiveAuthority) {
+    let guard = msc_dma_lock(&dma_owner_XhciControlReceive.mutex);
+    let previous: XhciControlReceiveAuthority = stable_replace(
+        guard, &dma_owner_XhciControlReceive.mutex,
+        dma_owner_XhciControlReceive.value, value);
+    msc_dma_unlock(guard, &dma_owner_XhciControlReceive.mutex);
+    match previous {
+        XhciControlReceiveAuthority::Empty => { return; }
+        XhciControlReceiveAuthority::Cpu(stale) => {
+            xhci_control_fail_cpu(stale);
+        }
+        XhciControlReceiveAuthority::Device(stale) => {
+            xhci_control_fail_device(stale);
         }
     }
 }
@@ -742,6 +777,49 @@ fn msc_abort_unobserved_transfer() -> MscTimeoutResult {
     }
     xhci_controller_unusable = true;
     return MscTimeoutResult::ControllerUnusable;
+}
+
+// A control DATA IN TD has one final Transfer Event. On a missing event,
+// halt and reset the controller before restoring CPU ownership.
+private fn xhci_receive_configuration(length: u32) -> u32 !{unsafe} {
+    match xhci_control_take() {
+        XhciControlReceiveAuthority::Cpu(cpu) => {
+            let device = dma_begin_rx(cpu, XhciControlReceive);
+            let buffer_dma: usize = unsafe {
+                dma_device_addr(device, XhciControlReceive)
+            } + rp1_dma_pci_offset;
+            let completion: u32 = usb_ctrl_xfer(0x80, 6, 0x0200, 0,
+                                                 length, buffer_dma, true);
+            if (completion == 0) {
+                match msc_abort_unobserved_transfer() {
+                    MscTimeoutResult::RestartRequired => {
+                        let restored = unsafe {
+                            dma_finish_owned_rx(device, XhciControlReceive)
+                        };
+                        xhci_control_put(XhciControlReceiveAuthority::Cpu(restored));
+                        return 0;
+                    }
+                    MscTimeoutResult::ControllerUnusable => {
+                        xhci_control_put(XhciControlReceiveAuthority::Device(device));
+                        return 0;
+                    }
+                }
+            }
+            let restored = unsafe {
+                dma_finish_owned_rx(device, XhciControlReceive)
+            };
+            xhci_control_put(XhciControlReceiveAuthority::Cpu(restored));
+            return completion;
+        }
+        XhciControlReceiveAuthority::Empty => {
+            kernel_syscall_fail_stop(0);
+            return 0;
+        }
+        XhciControlReceiveAuthority::Device(stale) => {
+            xhci_control_fail_device(stale);
+            return 0;
+        }
+    }
 }
 
 must_use variant MscDataReceiveResult {
@@ -1259,33 +1337,35 @@ fn xhci_address_device() -> XhciAddressOutcome !{unsafe} {
 // Configuration Descriptor -> parse Mass Storage interface + bulk
 // endpoints -> Configure Endpoint -> SET_CONFIGURATION.
 fn xhci_configure() -> XhciConfigureOutcome {
-    let ctrl_buf_base: usize = (xhci_ctrl_buf as *u8) as usize;
-    let ctrl_buf_dma: usize = ctrl_buf_base + rp1_dma_pci_offset;
-    let control_bytes = xhci_ctrl_buf as []u8;
-
-    dma_prepare_rx(xhci_ctrl_buf, 256);
-    let cfg9_cc: u32 = usb_ctrl_xfer(0x80, 6, 0x0200, 0, 9, ctrl_buf_dma, true);
-    if (cfg9_cc != 0) {
-        dma_finish_rx(xhci_ctrl_buf, 256);
-    }
+    let cfg9_cc: u32 = xhci_receive_configuration(9);
     if (cfg9_cc != 1) {
         return XhciConfigureOutcome::Transfer(cfg9_cc);
     }
-    let total_len: usize = (control_bytes[2] as usize) |
-                           ((control_bytes[3] as usize) << 8);
+    let total_len: usize = match xhci_control_take() {
+        XhciControlReceiveAuthority::Cpu(cpu) => {
+            let bytes = dma_cpu_slice(cpu, XhciControlReceive);
+            let length: usize = (bytes[2] as usize) |
+                                  ((bytes[3] as usize) << 8);
+            xhci_control_put(XhciControlReceiveAuthority::Cpu(cpu));
+            length
+        }
+        XhciControlReceiveAuthority::Empty => {
+            kernel_syscall_fail_stop(0);
+            return XhciConfigureOutcome::Transfer(0);
+        }
+        XhciControlReceiveAuthority::Device(stale) => {
+            xhci_control_fail_device(stale);
+            return XhciConfigureOutcome::Transfer(0);
+        }
+    };
     // A configuration descriptor is indivisible input. Silently truncating
     // wTotalLength to the DMA buffer used to make the parser accept a prefix
     // while raw pointers hid whether each child descriptor still fitted.
-    if (total_len > control_bytes.len || total_len < 9) {
+    if (total_len > 256 || total_len < 9) {
         return XhciConfigureOutcome::Malformed;
     }
 
-    dma_prepare_rx(xhci_ctrl_buf, 256);
-    let cfg_cc: u32 = usb_ctrl_xfer(0x80, 6, 0x0200, 0, total_len as u32,
-                                    ctrl_buf_dma, true);
-    if (cfg_cc != 0) {
-        dma_finish_rx(xhci_ctrl_buf, 256);
-    }
+    let cfg_cc: u32 = xhci_receive_configuration(total_len as u32);
     if (cfg_cc != 1) {
         return XhciConfigureOutcome::Transfer(cfg_cc);
     }
@@ -1293,7 +1373,23 @@ fn xhci_configure() -> XhciConfigureOutcome {
     // kernel/drivers/usb/config_descriptor.tkb, where linux_user can run it
     // without a board. What stays here is the transport: two control
     // transfers, a DMA wait, and publishing what came back.
-    match usb_config_descriptor_parse(control_bytes[0..<total_len]) {
+    let parsed = match xhci_control_take() {
+        XhciControlReceiveAuthority::Cpu(cpu) => {
+            let bytes = dma_cpu_slice(cpu, XhciControlReceive);
+            let result = usb_config_descriptor_parse(bytes[0..<total_len]);
+            xhci_control_put(XhciControlReceiveAuthority::Cpu(cpu));
+            result
+        }
+        XhciControlReceiveAuthority::Empty => {
+            kernel_syscall_fail_stop(0);
+            return XhciConfigureOutcome::Transfer(0);
+        }
+        XhciControlReceiveAuthority::Device(stale) => {
+            xhci_control_fail_device(stale);
+            return XhciConfigureOutcome::Transfer(0);
+        }
+    };
+    match parsed {
         UsbConfigParseResult::Malformed => {
             return XhciConfigureOutcome::Malformed;
         }
@@ -1333,7 +1429,7 @@ fn xhci_configure_endpoint(in_num: {1..<16 as usize},
 
     let input_ctx_base: usize = (xhci_input_ctx as *u8) as usize;
     let input_ctx_dma: usize = input_ctx_base + rp1_dma_pci_offset;
-    dma_finish_rx(xhci_device_ctx, DEVICE_CTX_SIZE);
+    dma_refresh_live(xhci_device_ctx);
 
     // Seed the Input Context from the controller's OUTPUT Device
     // Context (U-Boot's xhci_slot_copy/xhci_endpoint_copy) -- the Slot
