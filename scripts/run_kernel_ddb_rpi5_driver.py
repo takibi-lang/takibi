@@ -55,6 +55,48 @@ MILESTONES = ("wake-sent", "wake-acked", "break-sent", "first-prompt",
 # that is not listening says so instead of being broken into.
 WAKE_ACK_SECONDS = 3.0
 
+# What a board that did not answer the wake byte is asked before the lane
+# fails, and how long each answer may take. The same read-only walk the QEMU
+# lanes take at a stall (run_kernel_uart_driver.py's POSTMORTEM_COMMANDS).
+SILENT_POSTMORTEM_COMMANDS = (b"oops\n", b"intr\n", b"bt\n", b"sched\n",
+                              b"current\n", b"ps\n", b"stacks\n",
+                              b"events\n")
+SILENT_POSTMORTEM_SECONDS = 10.0
+
+
+def silent_board_postmortem(uart, log, received):
+    """Break into a board that did not answer, and record what DDB says.
+
+    Twice in allcheck on 2026-09-27 the wake byte drew nothing and the lane
+    failed with an empty capture: nothing said whether the kernel was
+    stopped, running without a shell, or not running at all. A BREAK that
+    draws a prompt answers the first two; one that draws nothing answers the
+    third. Either way the lane still fails -- this only keeps the evidence.
+    Returns a short phrase for the failure message.
+    """
+    uart.send_break(0.25)
+    deadline = time.monotonic() + SILENT_POSTMORTEM_SECONDS
+    asked = 0
+    while time.monotonic() < deadline:
+        chunk = uart.read(4096)
+        if chunk:
+            received.extend(chunk)
+            log.write(chunk)
+            log.flush()
+        prompts = received.count(b"ddb> ")
+        while asked < prompts and asked < len(SILENT_POSTMORTEM_COMMANDS):
+            uart.write(SILENT_POSTMORTEM_COMMANDS[asked])
+            uart.flush()
+            asked += 1
+            deadline = time.monotonic() + SILENT_POSTMORTEM_SECONDS
+        if prompts > len(SILENT_POSTMORTEM_COMMANDS):
+            break
+    if asked == 0:
+        return ("a serial BREAK then drew no debugger prompt either, so the "
+                "kernel was not running")
+    return (f"a serial BREAK reached the debugger, and {asked} read-only "
+            "command(s) were walked; their answers are in the capture")
+
 # How long a resume command may draw no echo before it is sent again. A
 # healthy round trip is 0.2s, so this is generous by an order of magnitude and
 # still leaves the 20s budget room for several attempts.
@@ -174,11 +216,13 @@ def main() -> int:
                 timeline.mark("wake-acked")
                 break
         if "wake-acked" not in timeline.at:
+            evidence = silent_board_postmortem(uart, log, received)
             raise timeline.bail(
                 "RPi5 did not answer the byte that produces the process "
-                "UART-wake event, so breaking in would have inspected a ring "
-                "that never saw one. This is the board not listening, NOT a "
-                "diagnostic-ring retention defect")
+                "UART-wake event, so the guarded-fault exercise would have "
+                "inspected a ring that never saw one. This is the board not "
+                "listening, NOT a diagnostic-ring retention defect; "
+                + evidence)
         uart.send_break(0.25)
         timeline.mark("break-sent")
         while time.monotonic() < deadline:

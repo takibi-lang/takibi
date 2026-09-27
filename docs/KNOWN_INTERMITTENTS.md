@@ -34,6 +34,7 @@ whether a row has gone quiet or has merely stopped being looked for.
 | `workload: peer read 98304 pattern bytes` | line MISSING from peer_filesystem.actual: 2 of 7 local cicheck runs; 0 of 47 standalone | #604 | 2026-09-27 |
 | `ARP while HTTPd is listening` | 1 of 30 standalone samples | #605 | 2026-09-26 |
 | `the scripted BREAK never fired` | 1 CI run of the DDB lane since e824b030 (run 36207501077); 0 of 10 locally | #603 | 2026-09-26 |
+| `RPi5 did not answer the byte that produces the process` | 2 of about 8 allcheck runs; 0 of 4 standalone | #621 | 2026-09-27 |
 
 ## Reading a row
 
