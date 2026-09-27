@@ -2535,10 +2535,11 @@ Name)` consumes the device token, finishes the same RX range, and returns
 observed completion, including a completed error, or confirmed device
 quiescence/reset. An unobserved timeout alone is not sufficient evidence.
 `dma_device_addr(dev, Name)` borrows the device token and exports the array's
-raw bus address as `usize` inside `unsafe { ... }` for a descriptor or MMIO
-boundary. That escape is trusted; converting the exported integer back to a
-CPU pointer or submitting it to another device is outside the ownership
-proof. The unprotected `dma_prepare_rx` and `dma_finish_rx` builtins above
+address as `usize` inside `unsafe { ... }` for device address translation and
+a descriptor or MMIO boundary. That escape is trusted; converting the
+exported integer back to a CPU pointer or submitting it to another device is
+outside the ownership proof. The unprotected `dma_prepare_rx` and
+`dma_finish_rx` builtins above
 remain available for legacy allocations but do not carry this guarantee.
 
 `signal_fence()` is

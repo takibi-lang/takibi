@@ -51,6 +51,7 @@
 // rp1_usbhost0_op.
 use "kernel/drivers/usb/config_descriptor.tkb";
 use "kernel/drivers/usb/init_report.tkb";
+use "kernel/lib/mutex.tkb";
 
 const RP1_USBHOST0_BASE: usize = 0x1F00200000;
 let mut rp1_usbhost0_base: usize = RP1_USBHOST0_BASE;
@@ -196,7 +197,53 @@ fn xhci_cmd_advance() {
 }
 
 let mut msc_cbw_buf: [u8; 64] align(64);
-let mut msc_csw_buf: [u8; 64] align(64);
+struct dma_fixed MscCswReceive { private bytes: [u8; 64]; }
+private let mut msc_csw_receive: MscCswReceive align(64);
+
+private linear struct MscCswGuard[lock: addr] { private flags: usize; }
+
+private fn msc_csw_lock(lock: *Mutex @ address) -> MscCswGuard[address]
+        !{acquires_lock_40_msc_csw, lock_guard_40_msc_csw} {
+    let mut guard: MscCswGuard[address] = { mutex_acquire(lock) };
+    return guard;
+}
+
+private fn msc_csw_unlock(guard: sink MscCswGuard[address],
+                          lock: *Mutex @ address) {
+    mutex_release(lock, guard.flags);
+}
+
+private fn msc_csw_take() -> MscCswReceiveAuthority {
+    let guard = msc_csw_lock(&dma_owner_MscCswReceive.mutex);
+    let previous: MscCswReceiveAuthority = stable_replace(
+        guard, &dma_owner_MscCswReceive.mutex,
+        dma_owner_MscCswReceive.value, MscCswReceiveAuthority::Empty);
+    msc_csw_unlock(guard, &dma_owner_MscCswReceive.mutex);
+    return previous;
+}
+
+private fn msc_csw_fail_cpu(stale: sink *MscCswReceiveCpu) {
+    kernel_syscall_fail_stop(0);
+}
+
+private fn msc_csw_fail_device(stale: sink *MscCswReceiveDevice) {
+    kernel_syscall_fail_stop(0);
+}
+
+private fn msc_csw_put(value: sink MscCswReceiveAuthority) {
+    let guard = msc_csw_lock(&dma_owner_MscCswReceive.mutex);
+    let previous: MscCswReceiveAuthority = stable_replace(
+        guard, &dma_owner_MscCswReceive.mutex,
+        dma_owner_MscCswReceive.value, value);
+    msc_csw_unlock(guard, &dma_owner_MscCswReceive.mutex);
+    match previous {
+        MscCswReceiveAuthority::Empty => { return; }
+        MscCswReceiveAuthority::Cpu(stale) => { msc_csw_fail_cpu(stale); }
+        MscCswReceiveAuthority::Device(stale) => {
+            msc_csw_fail_device(stale);
+        }
+    }
+}
 // General-purpose 512-byte scratch for small metadata transfers (Get Max
 // LUN, SCSI INQUIRY, READ CAPACITY) -- disk_read/disk_write DMA straight
 // into the caller's own buffer instead, via msc_run_command's data_base
@@ -674,6 +721,78 @@ fn msc_abort_unobserved_transfer() -> MscTimeoutResult {
     return MscTimeoutResult::ControllerUnusable;
 }
 
+private fn msc_csw_receive_attempt(cpu: sink *MscCswReceiveCpu,
+                                   remaining_stall_retries: usize)
+        -> MscCommandResult !{unsafe} {
+    let device = dma_begin_rx(cpu, MscCswReceive);
+    let csw_dma: usize = unsafe {
+        dma_device_addr(device, MscCswReceive)
+    } + rp1_dma_pci_offset;
+    let completion: u32 = usb_bulk_xfer(true, csw_dma, 13);
+    if (completion == 0) {
+        match msc_abort_unobserved_transfer() {
+            MscTimeoutResult::RestartRequired => {
+                let restored = unsafe {
+                    dma_finish_owned_rx(device, MscCswReceive)
+                };
+                msc_csw_put(MscCswReceiveAuthority::Cpu(restored));
+                return MscCommandResult::RestartRequired;
+            }
+            MscTimeoutResult::ControllerUnusable => {
+                msc_csw_put(MscCswReceiveAuthority::Device(device));
+                return MscCommandResult::ControllerUnusable;
+            }
+        }
+    }
+    // Any nonzero code came from a final transfer event, even a STALL.
+    let restored = unsafe { dma_finish_owned_rx(device, MscCswReceive) };
+    if (completion == 6 && remaining_stall_retries > 0) {
+        // Retry this CSW, not a fresh CBW: the device still owes the CSW
+        // for the command it accepted. Real hardware needs up to eight
+        // bounded STALL recoveries after a WRITE(10).
+        xhci_recover_bulk_stall(true, xhci_msc_bulk_in_ep, xhci_bulk_in_dci);
+        delay_us(50000);
+        return msc_csw_receive_attempt(restored,
+                                       remaining_stall_retries - 1);
+    }
+    if (completion != 1 && completion != 13) {
+        msc_csw_put(MscCswReceiveAuthority::Cpu(restored));
+        return MscCommandResult::CompletedError(3);
+    }
+    let bytes = dma_cpu_slice(restored, MscCswReceive);
+    let mut csw_sig: u32 = 0;
+    let mut csw_tag: u32 = 0;
+    for i: usize in 0..<4 {
+        let sh: u32 = (i * 8) as u32;
+        csw_sig = csw_sig | ((bytes[i] as u32) << sh);
+        csw_tag = csw_tag | ((bytes[4 + i] as u32) << sh);
+    }
+    let signature_ok: bool = csw_sig == 0x53425355;
+    let tag_ok: bool = csw_tag == msc_tag;
+    let status_ok: bool = bytes[12] == 0;
+    msc_csw_put(MscCswReceiveAuthority::Cpu(restored));
+    if (signature_ok == false) { return MscCommandResult::CompletedError(4); }
+    if (tag_ok == false) { return MscCommandResult::CompletedError(5); }
+    if (status_ok == false) { return MscCommandResult::CompletedError(6); }
+    return MscCommandResult::Ok;
+}
+
+private fn msc_read_csw() -> MscCommandResult !{unsafe} {
+    match msc_csw_take() {
+        MscCswReceiveAuthority::Cpu(cpu) => {
+            return msc_csw_receive_attempt(cpu, 8);
+        }
+        MscCswReceiveAuthority::Empty => {
+            kernel_syscall_fail_stop(0);
+            return MscCommandResult::ControllerUnusable;
+        }
+        MscCswReceiveAuthority::Device(stale) => {
+            msc_csw_fail_device(stale);
+            return MscCommandResult::ControllerUnusable;
+        }
+    }
+}
+
 fn msc_run_command(data_len: u32, dir_in: bool,
                    data: *align(64) u8) -> MscCommandResult {
     let data_base: usize = data as usize;
@@ -686,8 +805,6 @@ fn msc_run_command(data_len: u32, dir_in: bool,
         * DMA_CACHE_LINE;
     let cbw_base: usize = (msc_cbw_buf as *u8) as usize;
     let cbw_dma: usize = cbw_base + rp1_dma_pci_offset;
-    let csw_base: usize = (msc_csw_buf as *u8) as usize;
-    let csw_dma: usize = csw_base + rp1_dma_pci_offset;
     let data_dma: usize = data_base + rp1_dma_pci_offset;
 
     dma_prepare_tx(msc_cbw_buf as *u8, 64);
@@ -744,80 +861,7 @@ fn msc_run_command(data_len: u32, dir_in: bool,
         }
     }
 
-    dma_prepare_rx(msc_csw_buf, 64);
-    let mut csw_cc: u32 = usb_bulk_xfer(true, csw_dma, 13);
-    if (csw_cc == 0) {
-        match msc_abort_unobserved_transfer() {
-            MscTimeoutResult::RestartRequired => {
-                dma_finish_rx(msc_csw_buf, 64);
-                return MscCommandResult::RestartRequired;
-            }
-            MscTimeoutResult::ControllerUnusable => {
-                return MscCommandResult::ControllerUnusable;
-            }
-        }
-    }
-    if (csw_cc != 0) {
-        dma_finish_rx(msc_csw_buf, 64);
-    }
-    // Special-cased STALL handling on the CSW stage specifically, kept
-    // to a bounded retry LOOP -- not a single retry, and deliberately
-    // NOT a restart with a fresh CBW. A single retry (U-Boot's own
-    // usb_stor_BBB_clear_endpt_stall pattern) was tried first here and
-    // was not always enough on real hardware: this device can apparently
-    // take more than one attempt to finish internally committing a
-    // WRITE(10) before its CSW is ready. Critically, once the device has
-    // accepted a CBW it is WAITING for that CBW's own CSW to be read --
-    // sending a brand new CBW instead (this function's own caller's
-    // first instinct, matching a naive "restart the whole command" retry
-    // policy) is a genuine BOT phase violation from the device's point
-    // of view and was confirmed on real hardware to make things worse:
-    // the FRESH CBW itself then stalls too, because the device is still
-    // sitting on the OLD CSW. Keep retrying the SAME CSW read.
-    for i: usize in 0..<8 {
-        if (csw_cc != 6) {
-            break;
-        }
-        xhci_recover_bulk_stall(true, xhci_msc_bulk_in_ep, xhci_bulk_in_dci);
-        delay_us(50000);
-        dma_prepare_rx(msc_csw_buf, 64);
-        csw_cc = usb_bulk_xfer(true, csw_dma, 13);
-        if (csw_cc == 0) {
-            match msc_abort_unobserved_transfer() {
-                MscTimeoutResult::RestartRequired => {
-                    dma_finish_rx(msc_csw_buf, 64);
-                    return MscCommandResult::RestartRequired;
-                }
-                MscTimeoutResult::ControllerUnusable => {
-                    return MscCommandResult::ControllerUnusable;
-                }
-            }
-        }
-        if (csw_cc != 0) {
-            dma_finish_rx(msc_csw_buf, 64);
-        }
-    }
-    if (csw_cc != 1 && csw_cc != 13) {
-        return MscCommandResult::CompletedError(3);
-    }
-
-    let mut csw_sig: u32 = 0;
-    let mut csw_tag: u32 = 0;
-    for i: usize in 0..<4 {
-        let sh: u32 = (i * 8) as u32;
-        csw_sig = csw_sig | ((msc_csw_buf[i] as u32) << sh);
-        csw_tag = csw_tag | ((msc_csw_buf[4 + i] as u32) << sh);
-    }
-    if (csw_sig != 0x53425355) {
-        return MscCommandResult::CompletedError(4);
-    }
-    if (csw_tag != msc_tag) {
-        return MscCommandResult::CompletedError(5);
-    }
-    if (msc_csw_buf[12] != 0) {
-        return MscCommandResult::CompletedError(6);
-    }
-    return MscCommandResult::Ok;
+    return msc_read_csw();
 }
 
 // -- Bring-up sequence, split into stages matching rp1_usb_smoke.tkb's
