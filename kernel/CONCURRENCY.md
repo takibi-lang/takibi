@@ -73,7 +73,10 @@ on that process's own kernel stack -- a clone child's first return still
 stands on its parent's. The hand-off is the peers' ordering: publish no
 current process, move SP off the process stack, then make the process
 Ready with its stack unowned under the run lock. The idle loop takes a Ready
-process core 0 may run, never slot 0's bootstrap record. An exit with no
+process core 0 may run, PID 1 (slot 0) included: once peer dispatch is
+enabled, just before `run_initial_user`, a Ready PID 1 always has a saved
+EL0 frame, and skipping it left init Ready and never run whenever its child
+exited on a peer. An exit with no
 successor idles the same way (the exited process's stack is released by
 `kernel_process_stack_idle_complete`), and so does a wait: a block with no
 Ready successor publishes Blocked under the run lock, after the same last

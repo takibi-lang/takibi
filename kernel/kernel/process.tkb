@@ -4847,6 +4847,63 @@ private fn kernel_process_secondary_start_reserved(
     }
 }
 
+// An idle CPU that goes on idling beside a Ready process it may run and
+// could take. The walk above decides what to take; this asks the same
+// question independently -- every record, slot 0 included, by state, mask
+// and stack owner alone -- so a filter the walk should not have had shows
+// up by name. It found nothing to watch for until b1447bfb, where the walk
+// skipped PID 1 and init was left Ready on every four-core RPi5 run; the
+// evidence then took five instrumented board runs to collect.
+//
+// A take can be refused for a moment (a reap waiting for a stack to be
+// released), so only the same pid left for KERNEL_IDLE_STARVATION_PASSES
+// consecutive empty passes on this CPU is reported, once per boot.
+const KERNEL_IDLE_STARVATION_PASSES: usize = 256;
+private let mut kernel_idle_starvation_pid: [usize; KERNEL_MAX_CORES];
+private let mut kernel_idle_starvation_passes: [usize; KERNEL_MAX_CORES];
+private let mut kernel_idle_starvation_reported: bool = false;
+
+private fn kernel_process_idle_starvation_note(
+        guard: borrow ProcessRunGuard[scheduled_process_run_lock]) !{unsafe} {
+    let raw_cpu: usize = cpu_id();
+    if (raw_cpu >= KERNEL_MAX_CORES) { return; }
+    let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
+    let mut left: usize = 0;
+    let mut cursor = scheduled_process_first_slot();
+    let mut walking: bool = true;
+    while (walking) {
+        match cursor {
+            ProcessSlotCursor::Done => { walking = false; }
+            ProcessSlotCursor::At(slot) => {
+                if (left == 0 &&
+                    scheduled_process_record_state(slot) ==
+                        ProcessSlotState::Ready &&
+                    kernel_process_cpu_allows_slot(raw_cpu, slot) &&
+                    scheduled_process_record_at(slot).stack_owner_cpu ==
+                        PROCESS_STACK_UNOWNED) {
+                    left = scheduled_process_record_at(slot).pid;
+                }
+                cursor = scheduled_process_next_slot(slot);
+            }
+        }
+    }
+    if (left == 0 || left != kernel_idle_starvation_pid[cpu]) {
+        kernel_idle_starvation_pid[cpu] = left;
+        kernel_idle_starvation_passes[cpu] = 0;
+        return;
+    }
+    kernel_idle_starvation_passes[cpu] = kernel_idle_starvation_passes[cpu] + 1;
+    if (kernel_idle_starvation_passes[cpu] == KERNEL_IDLE_STARVATION_PASSES &&
+        kernel_idle_starvation_reported == false) {
+        kernel_idle_starvation_reported = true;
+        kernel_boot_log("sched: STARVED cpu=");
+        uart_put_udec(raw_cpu);
+        kernel_boot_log(" idled beside Ready pid=");
+        uart_put_udec(left);
+        kernel_boot_log(" it may run\n");
+    }
+}
+
 // Called by a secondary CPU's architectural idle loop. Idle means no admitted
 // Ready process exists yet; Frame carries a complete saved EL0 context.
 fn kernel_process_secondary_start() -> ProcessSecondaryStart {
@@ -4900,6 +4957,7 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
         }
     }
     kernel_activity_leave(activity_before);
+    kernel_process_idle_starvation_note(guard);
     process_run_unlock(guard);
     return ProcessSecondaryStart::Idle;
 }
