@@ -30,10 +30,8 @@
 // files). This file is a faithful port of that same proven logic into
 // library form: identical register offsets, masks, timing and DMA
 // addressing, with the diagnostic-only isolation-test code and per-step
-// uart narration removed, and one real behavioral generalization
-// (msc_run_command takes a caller-supplied data buffer instead of always
-// using an internal one) so disk_read/disk_write can DMA straight into
-// the caller's own buffer.
+// uart narration removed. Outbound payloads use the caller-selected TX
+// bounce buffer; inbound payloads use one protected fixed receive buffer.
 //
 // See examples/common_rpi5/AGENTS.md's USB bring-up status updates and
 // the rpi5_usb_bringup memory file for the full derivation of every
@@ -200,25 +198,25 @@ let mut msc_cbw_buf: [u8; 64] align(64);
 struct dma_fixed MscCswReceive { private bytes: [u8; 64]; }
 private let mut msc_csw_receive: MscCswReceive align(64);
 
-private linear struct MscCswGuard[lock: addr] { private flags: usize; }
+private linear struct MscDmaGuard[lock: addr] { private flags: usize; }
 
-private fn msc_csw_lock(lock: *Mutex @ address) -> MscCswGuard[address]
-        !{acquires_lock_40_msc_csw, lock_guard_40_msc_csw} {
-    let mut guard: MscCswGuard[address] = { mutex_acquire(lock) };
+private fn msc_dma_lock(lock: *Mutex @ address) -> MscDmaGuard[address]
+        !{acquires_lock_40_msc_dma, lock_guard_40_msc_dma} {
+    let mut guard: MscDmaGuard[address] = { mutex_acquire(lock) };
     return guard;
 }
 
-private fn msc_csw_unlock(guard: sink MscCswGuard[address],
+private fn msc_dma_unlock(guard: sink MscDmaGuard[address],
                           lock: *Mutex @ address) {
     mutex_release(lock, guard.flags);
 }
 
 private fn msc_csw_take() -> MscCswReceiveAuthority {
-    let guard = msc_csw_lock(&dma_owner_MscCswReceive.mutex);
+    let guard = msc_dma_lock(&dma_owner_MscCswReceive.mutex);
     let previous: MscCswReceiveAuthority = stable_replace(
         guard, &dma_owner_MscCswReceive.mutex,
         dma_owner_MscCswReceive.value, MscCswReceiveAuthority::Empty);
-    msc_csw_unlock(guard, &dma_owner_MscCswReceive.mutex);
+    msc_dma_unlock(guard, &dma_owner_MscCswReceive.mutex);
     return previous;
 }
 
@@ -231,11 +229,11 @@ private fn msc_csw_fail_device(stale: sink *MscCswReceiveDevice) {
 }
 
 private fn msc_csw_put(value: sink MscCswReceiveAuthority) {
-    let guard = msc_csw_lock(&dma_owner_MscCswReceive.mutex);
+    let guard = msc_dma_lock(&dma_owner_MscCswReceive.mutex);
     let previous: MscCswReceiveAuthority = stable_replace(
         guard, &dma_owner_MscCswReceive.mutex,
         dma_owner_MscCswReceive.value, value);
-    msc_csw_unlock(guard, &dma_owner_MscCswReceive.mutex);
+    msc_dma_unlock(guard, &dma_owner_MscCswReceive.mutex);
     match previous {
         MscCswReceiveAuthority::Empty => { return; }
         MscCswReceiveAuthority::Cpu(stale) => { msc_csw_fail_cpu(stale); }
@@ -244,16 +242,41 @@ private fn msc_csw_put(value: sink MscCswReceiveAuthority) {
         }
     }
 }
-// General-purpose 512-byte scratch for small metadata transfers (Get Max
-// LUN, SCSI INQUIRY, READ CAPACITY) -- disk_read/disk_write DMA straight
-// into the caller's own buffer instead, via msc_run_command's data_base
-// parameter.
-let mut msc_scratch_buf: [u8; 512] align(64);
-// Every disk_read/disk_write_sectors DMA goes through this instead of the
-// caller's own buffer. Not an optimization -- a correctness requirement.
-// This CPU's cache line is 64 bytes. DMA receive buffers are whole,
-// cache-line-aligned allocations so dma_prepare_rx/dma_finish_rx can safely
-// invalidate them before device ownership and before CPU consumption.
+
+private fn msc_data_take() -> MscDataReceiveAuthority {
+    let guard = msc_dma_lock(&dma_owner_MscDataReceive.mutex);
+    let previous: MscDataReceiveAuthority = stable_replace(
+        guard, &dma_owner_MscDataReceive.mutex,
+        dma_owner_MscDataReceive.value, MscDataReceiveAuthority::Empty);
+    msc_dma_unlock(guard, &dma_owner_MscDataReceive.mutex);
+    return previous;
+}
+
+private fn msc_data_fail_cpu(stale: sink *MscDataReceiveCpu) {
+    kernel_syscall_fail_stop(0);
+}
+
+private fn msc_data_fail_device(stale: sink *MscDataReceiveDevice) {
+    kernel_syscall_fail_stop(0);
+}
+
+private fn msc_data_put(value: sink MscDataReceiveAuthority) {
+    let guard = msc_dma_lock(&dma_owner_MscDataReceive.mutex);
+    let previous: MscDataReceiveAuthority = stable_replace(
+        guard, &dma_owner_MscDataReceive.mutex,
+        dma_owner_MscDataReceive.value, value);
+    msc_dma_unlock(guard, &dma_owner_MscDataReceive.mutex);
+    match previous {
+        MscDataReceiveAuthority::Empty => { return; }
+        MscDataReceiveAuthority::Cpu(stale) => { msc_data_fail_cpu(stale); }
+        MscDataReceiveAuthority::Device(stale) => {
+            msc_data_fail_device(stale);
+        }
+    }
+}
+// TX uses the ordinary bounce buffer; RX uses a separate protected fixed
+// allocation. Both are isolated and cache-line aligned, so callers may use
+// ordinary byte slices regardless of their own alignment.
 //
 // Found on real hardware, and it presented as silent data corruption
 // rather than an error: examples/common/fat12.tkb's buffers are
@@ -263,9 +286,8 @@ let mut msc_scratch_buf: [u8; 512] align(64);
 // very first read into a never-touched buffer has no dirty lines to
 // write back.
 //
-// Bouncing through a buffer that is 64-byte aligned AND a whole number
-// of cache lines long removes the caller-alignment requirement entirely,
-// which is why disk_read/disk_write below accept ordinary byte slices.
+// Bouncing through isolated whole cache lines removes the caller-alignment
+// requirement, which is why disk_read/disk_write accept ordinary slices.
 // Empirical RPi5 limit for this driver: 128 sectors (64 KiB) succeeds
 // through rootfs provisioning and the complete kernelcheck-rpi5 suite.
 // 192 and 256 sectors stalled during the first rootfs WRITE(10), before
@@ -276,6 +298,8 @@ let mut msc_scratch_buf: [u8; 512] align(64);
 const MSC_MAX_TRANSFER_SECTORS: usize = 128;
 const MSC_SECTOR_SIZE: usize = 512;
 let mut msc_bounce_buf: [u8; MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE] align(64);
+struct dma_fixed MscDataReceive { private bytes: [u8; 65536]; }
+private let mut msc_data_receive: MscDataReceive align(64);
 let mut msc_tag: u32 = 0;
 private let mut msc_write10_command_count: usize = 0;
 
@@ -691,9 +715,8 @@ fn msc_cbw_header(data_len: u32, dir_in: bool, cb_len: u32) {
 }
 
 // Run one complete Bulk-Only Transport command: CBW out, optional data
-// phase (into/from data_base, the CALLER's own buffer -- unlike the
-// rp1_usb_smoke.tkb original this was ported from, which always used one
-// fixed internal buffer), CSW in. The CBW must already be built by
+// phase through the TX bounce buffer or protected RX allocation, then CSW in.
+// The CBW must already be built by
 // msc_cbw_header() plus the caller's CDB bytes. A timeout has no matching
 // transfer event, so it cannot enter the completed-error recovery path.
 must_use variant MscCommandResult {
@@ -719,6 +742,55 @@ fn msc_abort_unobserved_transfer() -> MscTimeoutResult {
     }
     xhci_controller_unusable = true;
     return MscTimeoutResult::ControllerUnusable;
+}
+
+must_use variant MscDataReceiveResult {
+    Completed(u32);
+    RestartRequired;
+    ControllerUnusable;
+}
+
+private fn msc_data_receive_once(length: u32)
+        -> MscDataReceiveResult !{unsafe} {
+    static_assert(MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE == 65536,
+                  "the protected receive extent covers one maximal USB transfer");
+    match msc_data_take() {
+        MscDataReceiveAuthority::Cpu(cpu) => {
+            let device = dma_begin_rx(cpu, MscDataReceive);
+            let data_dma: usize = unsafe {
+                dma_device_addr(device, MscDataReceive)
+            } + rp1_dma_pci_offset;
+            let completion: u32 = usb_bulk_xfer(true, data_dma, length);
+            if (completion == 0) {
+                match msc_abort_unobserved_transfer() {
+                    MscTimeoutResult::RestartRequired => {
+                        let restored = unsafe {
+                            dma_finish_owned_rx(device, MscDataReceive)
+                        };
+                        msc_data_put(MscDataReceiveAuthority::Cpu(restored));
+                        return MscDataReceiveResult::RestartRequired;
+                    }
+                    MscTimeoutResult::ControllerUnusable => {
+                        msc_data_put(MscDataReceiveAuthority::Device(device));
+                        return MscDataReceiveResult::ControllerUnusable;
+                    }
+                }
+            }
+            let restored = unsafe {
+                dma_finish_owned_rx(device, MscDataReceive)
+            };
+            msc_data_put(MscDataReceiveAuthority::Cpu(restored));
+            return MscDataReceiveResult::Completed(completion);
+        }
+        MscDataReceiveAuthority::Empty => {
+            kernel_syscall_fail_stop(0);
+            return MscDataReceiveResult::ControllerUnusable;
+        }
+        MscDataReceiveAuthority::Device(stale) => {
+            msc_data_fail_device(stale);
+            return MscDataReceiveResult::ControllerUnusable;
+        }
+    }
 }
 
 private fn msc_csw_receive_attempt(cpu: sink *MscCswReceiveCpu,
@@ -795,14 +867,9 @@ private fn msc_read_csw() -> MscCommandResult !{unsafe} {
 
 fn msc_run_command(data_len: u32, dir_in: bool,
                    data: *align(64) u8) -> MscCommandResult {
+    // `data` is used only for outbound payloads. Inbound payloads use the
+    // protected receive allocation inside msc_data_receive_once.
     let data_base: usize = data as usize;
-    // READ CAPACITY returns only eight bytes into the 512-byte scratch
-    // buffer. Sector transfers use the larger dedicated bounce buffer.
-    // Invalidate complete lines from those isolated allocations while the
-    // USB transfer itself keeps its exact protocol length.
-    let cache_length: multiple(DMA_CACHE_LINE) usize =
-        ((data_len as usize + DMA_CACHE_LINE - 1) / DMA_CACHE_LINE)
-        * DMA_CACHE_LINE;
     let cbw_base: usize = (msc_cbw_buf as *u8) as usize;
     let cbw_dma: usize = cbw_base + rp1_dma_pci_offset;
     let data_dma: usize = data_base + rp1_dma_pci_offset;
@@ -825,39 +892,35 @@ fn msc_run_command(data_len: u32, dir_in: bool,
 
     if (data_len > 0) {
         if (dir_in) {
-            dma_prepare_rx(data, cache_length);
-        } else {
-            dma_prepare_tx(data as *u8, data_len as usize);
-        }
-        // Short Packet (13) is a normal, successful outcome for a
-        // device that had less data than we offered to read. Any other
-        // non-success code (STALL Error=6 in particular) means the
-        // transport is out of sync; this function makes exactly one
-        // attempt and reports which stage failed, matching RPi3's own
-        // msc_read10_once/msc_write10_once -- callers (disk_read/
-        // disk_write) own the recovery-and-retry policy, via
-        // msc_recover_transport().
-        let data_cc: u32 = usb_bulk_xfer(dir_in, data_dma, data_len);
-        if (data_cc == 0) {
-            match msc_abort_unobserved_transfer() {
-                MscTimeoutResult::RestartRequired => {
-                    if (dir_in) {
-                        dma_finish_rx(data, cache_length);
+            match msc_data_receive_once(data_len) {
+                MscDataReceiveResult::Completed(code) => {
+                    if (code != 1 && code != 13) {
+                        return MscCommandResult::CompletedError(2);
                     }
+                }
+                MscDataReceiveResult::RestartRequired => {
                     return MscCommandResult::RestartRequired;
                 }
-                MscTimeoutResult::ControllerUnusable => {
+                MscDataReceiveResult::ControllerUnusable => {
                     return MscCommandResult::ControllerUnusable;
                 }
             }
-        }
-        // A nonzero code came from a transfer event, even when that event
-        // reports an error. No later write from this transfer is pending.
-        if (dir_in && data_cc != 0) {
-            dma_finish_rx(data, cache_length);
-        }
-        if (data_cc != 1 && data_cc != 13) {
-            return MscCommandResult::CompletedError(2);
+        } else {
+            dma_prepare_tx(data as *u8, data_len as usize);
+            let data_cc: u32 = usb_bulk_xfer(false, data_dma, data_len);
+            if (data_cc == 0) {
+                match msc_abort_unobserved_transfer() {
+                    MscTimeoutResult::RestartRequired => {
+                        return MscCommandResult::RestartRequired;
+                    }
+                    MscTimeoutResult::ControllerUnusable => {
+                        return MscCommandResult::ControllerUnusable;
+                    }
+                }
+            }
+            if (data_cc != 1 && data_cc != 13) {
+                return MscCommandResult::CompletedError(2);
+            }
         }
     }
 
@@ -1427,7 +1490,7 @@ fn usb_disk_initialize_stages() -> UsbInitOutcome {
     for i: usize in 0..<50 {
         msc_cbw_header(0, false, 6);
         msc_cbw_buf[15] = 0x00;
-        match msc_run_command(0, false, msc_scratch_buf) {
+        match msc_run_command(0, false, msc_bounce_buf) {
             MscCommandResult::Ok => {
                 readiness = usb_retry_record_attempt(readiness, 0);
             }
@@ -1456,7 +1519,7 @@ fn usb_disk_initialize_stages() -> UsbInitOutcome {
     // storage stack's own fixed assumption.
     msc_cbw_header(8, true, 10);
     msc_cbw_buf[15] = 0x25;
-    match msc_run_command(8, true, msc_scratch_buf) {
+    match msc_run_command(8, true, msc_bounce_buf) {
         MscCommandResult::Ok => { }
         MscCommandResult::CompletedError(status) => {
             return UsbInitOutcome::ReadCapacity(status);
@@ -1469,8 +1532,18 @@ fn usb_disk_initialize_stages() -> UsbInitOutcome {
         }
     }
     let mut block_size: u32 = 0;
-    for i: usize in 4..<8 {
-        block_size = (block_size << 8) | (msc_scratch_buf[i] as u32);
+    match msc_data_take() {
+        MscDataReceiveAuthority::Cpu(cpu) => {
+            let bytes = dma_cpu_slice(cpu, MscDataReceive);
+            for i: usize in 4..<8 {
+                block_size = (block_size << 8) | (bytes[i] as u32);
+            }
+            msc_data_put(MscDataReceiveAuthority::Cpu(cpu));
+        }
+        MscDataReceiveAuthority::Empty => { kernel_syscall_fail_stop(0); }
+        MscDataReceiveAuthority::Device(stale) => {
+            msc_data_fail_device(stale);
+        }
     }
     if (block_size != 512) {
         return UsbInitOutcome::UnsupportedBlockSize(block_size);
@@ -1590,9 +1663,19 @@ fn disk_read_sectors(sector: u32, buf: []u8) -> DiskIoResult {
             }
         }
     }
-    for i: usize in 0..<MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE {
-        if (i < buf.len) {
-            buf[i] = msc_bounce_buf[i];
+    match msc_data_take() {
+        MscDataReceiveAuthority::Cpu(cpu) => {
+            let bytes = dma_cpu_slice(cpu, MscDataReceive);
+            for i: usize in 0..<MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE {
+                if (i < buf.len) {
+                    buf[i] = bytes[i];
+                }
+            }
+            msc_data_put(MscDataReceiveAuthority::Cpu(cpu));
+        }
+        MscDataReceiveAuthority::Empty => { kernel_syscall_fail_stop(0); }
+        MscDataReceiveAuthority::Device(stale) => {
+            msc_data_fail_device(stale);
         }
     }
     return DiskIoResult::Ok;

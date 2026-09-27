@@ -49,7 +49,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 MODELS = ROOT / "kernel" / "models"
 README = MODELS / "README.md"
 NAME_RE = re.compile(
-    r"`((?:kernel|scheduled_process|virtio_blk|usb_bulk|xhci|msc)_[a-z0-9_]+)`")
+    r"`((?:kernel|scheduled_process|virtio_blk|usb_bulk|xhci|msc|disk)_[a-z0-9_]+)`")
 SECTION_RE = re.compile(r"^## (\w+)\.tla\b")
 ACTION_RE = re.compile(r"`(\w+)`")
 ELSEWHERE_RE = re.compile(r"^modelled elsewhere: `(?:(\w+)\.)?(\w+)`$")
