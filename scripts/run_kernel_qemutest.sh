@@ -76,7 +76,13 @@ QMP_PORT="${KERNEL_QEMU_QMP_PORT:-18674}"
 # is deliberately started directly so QEMU_PID names the process that owns
 # the lane's sockets; cleanup must wait for that process before a following
 # invocation can safely reuse the fixed ports.
+# GitHub issue #620: TIMEOUT_SECS is how long the guest, and each of the
+# network peer's waits, may go without progress; CEILING_SECS is the last
+# resort for a host that hangs outright. A single 90 s budget for the whole
+# run failed guests that were only slow under a loaded host.
 TIMEOUT_SECS="${KERNEL_QEMU_TIMEOUT:-90}"
+CEILING_SECS="${KERNEL_QEMU_CEILING:-270}"
+export KERNEL_QEMU_TIMEOUT="$TIMEOUT_SECS" KERNEL_QEMU_CEILING="$CEILING_SECS"
 # Keep the maintained kernel lane away from the historical examples' QEMU
 # datagram ports. A stale or concurrent legacy runner on 17771/17772 can
 # otherwise consume frames and make unrelated kernel views fail.
@@ -167,7 +173,7 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --postmortem-log "$ARTIFACT_DIR/ddb-postmortem.log" \
     --qmp-port "$QMP_PORT" \
     --stdin "$ASH_DIR/ash.stdin" --expected "$ASH_DIR/ash.expected" \
-    --timeout "$TIMEOUT_SECS" \
+    --timeout "$TIMEOUT_SECS" --ceiling "$CEILING_SECS" \
     --stop-marker 'peer user console: record=17/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' \
     --interactive-httpd-listener-file "$INTERACTIVE_HTTPD_LISTENER" \
     --foreground-httpd-listener-file "$FOREGROUND_HTTPD_LISTENER" \
@@ -195,7 +201,7 @@ peer_status=0
 # before the final request phase. A blocking accept must still be waiting:
 # exposing that internal deadline as EAGAIN used to terminate BusyBox HTTPd.
 KERNEL_HTTPD_IDLE_SECONDS=31 \
-timeout "$TIMEOUT_SECS" python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" \
+timeout "$CEILING_SECS" python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" \
     "$NETDEV_LOCAL_PORT" "$NETDEV_REMOTE_PORT" \
     --interactive-ready-file "$INTERACTIVE_HTTPD_LISTENER" \
     --httpd-peer-guard-file "$HTTPD_GUARD_FILE" \

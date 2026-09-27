@@ -148,7 +148,7 @@ jobs:
           # development host 90s is already several times what a boot takes.
           # Boot performance is calibrated separately from the capture budget:
           # hosted 35s, local 25s. The validator documents the measurements.
-          TAKIBI_JOBS=1 KERNEL_QEMU_TIMEOUT=240 KERNEL_QEMU_TIMING_PROFILE=hosted make cicheck
+          TAKIBI_JOBS=1 KERNEL_QEMU_TIMEOUT=240 KERNEL_QEMU_CEILING=720 KERNEL_QEMU_TIMING_PROFILE=hosted make cicheck
         env:
           GH_TOKEN: ${{ github.token }}
           TAKIBI_MODEL_TOOLS_DIR: /home/runner/model-tools

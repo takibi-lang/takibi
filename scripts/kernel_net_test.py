@@ -91,21 +91,28 @@ def guard_httpd_peer(seconds: float) -> None:
 
 
 # Every readiness wait below has to expire while this process is still alive
-# to say so. Each lane runs this script as `timeout "$TIMEOUT_SECS" python3
-# ...`, and a wait that outlasts that budget is killed with status 124 and
-# prints nothing -- the diagnostic that names which marker never arrived is
-# exactly what a person needs, and exactly what would be lost. So the deadline
-# is measured from this process's own start (the `timeout` starts with it) and
-# left short of the kill by MARKER_SAFETY_SECONDS.
+# to say so. Each lane runs this script as `timeout "$CEILING_SECS" python3
+# ...`, and a wait that outlasts that is killed with status 124 and prints
+# nothing -- the diagnostic that names which marker never arrived is exactly
+# what a person needs, and exactly what would be lost.
 #
-# The 90 here must stay equal to the shells' own `${KERNEL_QEMU_TIMEOUT:-90}`:
-# when the variable is unset, the shell uses its default and this uses this
-# one, and a disagreement would put the deadline back on the wrong side of the
-# kill. `make cicheck` sets 240, so both sides move together there.
+# GitHub issue #620: each wait gets its own budget, counted from when it
+# starts, not one budget from this process's start. The single budget failed
+# guests that were merely slow: under allcheck's load a boot took 49 s where
+# it takes 31 s alone, and the 31 s HTTPd idle then ran the peer past 90 s
+# with the kernel answering every request. A wait still gives up short of the
+# ceiling by MARKER_SAFETY_SECONDS, whatever its own budget says.
+#
+# The defaults must stay equal to the shells' own `${KERNEL_QEMU_TIMEOUT:-90}`
+# and `${KERNEL_QEMU_CEILING:-270}`: when a variable is unset the shell uses
+# its default and this uses this one, and a disagreement would put the
+# deadline back on the wrong side of the kill. `make cicheck-as-ci` sets 240
+# and 720, so both sides move together there.
 STARTED_AT = time.monotonic()
-OUTER_BUDGET_SECONDS = float(os.environ.get("KERNEL_QEMU_TIMEOUT", "90"))
+PHASE_BUDGET_SECONDS = float(os.environ.get("KERNEL_QEMU_TIMEOUT", "90"))
+OUTER_BUDGET_SECONDS = float(os.environ.get("KERNEL_QEMU_CEILING", "270"))
 MARKER_SAFETY_SECONDS = 10.0
-MARKER_BUDGET_SECONDS = max(5.0, OUTER_BUDGET_SECONDS - MARKER_SAFETY_SECONDS)
+MARKER_BUDGET_SECONDS = max(5.0, PHASE_BUDGET_SECONDS - MARKER_SAFETY_SECONDS)
 
 
 def wait_for_marker(marker, label):
@@ -115,13 +122,15 @@ def wait_for_marker(marker, label):
     absence means and fail, which is the only reason this budget is bounded
     the way it is.
     """
-    deadline = STARTED_AT + MARKER_BUDGET_SECONDS
+    began = time.monotonic()
+    deadline = min(began + MARKER_BUDGET_SECONDS,
+                   STARTED_AT + OUTER_BUDGET_SECONDS - MARKER_SAFETY_SECONDS)
     while not marker.exists() and time.monotonic() < deadline:
         time.sleep(0.1)
     if marker.exists():
         return True
     print("  waited %.1fs of a %.1fs budget for the %s marker and it never "
-          "arrived" % (time.monotonic() - STARTED_AT, MARKER_BUDGET_SECONDS,
+          "arrived" % (time.monotonic() - began, MARKER_BUDGET_SECONDS,
                        label))
     return False
 

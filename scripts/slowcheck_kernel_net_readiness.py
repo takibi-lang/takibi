@@ -39,18 +39,22 @@ from pass_line import CaseCount
 ROOT = Path(__file__).resolve().parent.parent
 PEER = ROOT / "scripts" / "kernel_net_test.py"
 
-# The budgets the shells pass: the default when KERNEL_QEMU_TIMEOUT is unset,
-# and the one `make cicheck` sets for a slower runner.
-OUTER_BUDGETS = (90.0, 240.0)
+# The (no-progress, ceiling) pairs the shells pass: the defaults when neither
+# variable is set, and the pair `make cicheck-as-ci` sets for a slower runner.
+# GitHub issue #620: the outer kill is the ceiling now; the no-progress
+# budget is each wait's own.
+OUTER_BUDGETS = ((90.0, 270.0), (240.0, 720.0))
 
 
-def load(outer_budget):
-    """Import the peer with a given outer budget, without running main()."""
+def load(budgets):
+    """Import the peer with given budgets, without running main()."""
     env = dict(os.environ)
-    if outer_budget is None:
+    if budgets is None:
         env.pop("KERNEL_QEMU_TIMEOUT", None)
+        env.pop("KERNEL_QEMU_CEILING", None)
     else:
-        env["KERNEL_QEMU_TIMEOUT"] = str(int(outer_budget))
+        env["KERNEL_QEMU_TIMEOUT"] = str(int(budgets[0]))
+        env["KERNEL_QEMU_CEILING"] = str(int(budgets[1]))
     probe = (
         "import runpy, sys, json, time;"
         "sys.argv = ['kernel_net_test.py'];"
@@ -63,7 +67,7 @@ def load(outer_budget):
                          capture_output=True, text=True)
     if out.returncode != 0:
         print(f"FAIL net-readiness control: importing the peer with "
-              f"KERNEL_QEMU_TIMEOUT={outer_budget} failed\n{out.stderr}")
+              f"budgets {budgets} failed\n{out.stderr}")
         return None
     return json.loads(out.stdout)
 
@@ -72,11 +76,12 @@ def load(outer_budget):
 CASES = CaseCount()
 
 
-def timed_wait(exists_after):
+def timed_wait(exists_after, idle_first=0.0):
     """Run wait_for_marker against a marker that appears after N seconds.
 
-    Returns (returned, elapsed, output). `exists_after` of None means the
-    marker is never created.
+    Returns (output, elapsed). `exists_after` of None means the marker is
+    never created. `idle_first` spends that long in the peer before the wait
+    starts, as the phases before a real wait do.
     """
     CASES.note()
     with tempfile.TemporaryDirectory() as work:
@@ -88,12 +93,17 @@ def timed_wait(exists_after):
             "sys.argv = ['kernel_net_test.py'];"
             f"m = runpy.run_path({str(PEER)!r}, run_name='not_main');"
             "from pathlib import Path;"
+            f"time.sleep({idle_first!r});"
+            "began = time.monotonic();"
             f"print('RETURNED', m['wait_for_marker'](Path({str(marker)!r}),"
-            " 'test'))"
+            " 'test'));"
+            "print('WAITED %.1f' % (time.monotonic() - began))"
         )
         env = dict(os.environ)
-        # A budget short enough to run here, and above the helper's own floor.
-        env["KERNEL_QEMU_TIMEOUT"] = "13"
+        # Budgets short enough to run here, and above the helper's own floor:
+        # each wait may take 5 s, and the ceiling leaves 20 s of speaking room.
+        env["KERNEL_QEMU_TIMEOUT"] = "15"
+        env["KERNEL_QEMU_CEILING"] = "30"
         started = time.monotonic()
         out = subprocess.run([sys.executable, "-c", probe], env=env,
                              capture_output=True, text=True)
@@ -188,8 +198,9 @@ def main() -> int:
             return 1
 
     # 1. The budget leaves room to speak, for every outer budget in use.
-    for outer in OUTER_BUDGETS:
-        info = load(outer)
+    for budgets in OUTER_BUDGETS:
+        outer = budgets[1]
+        info = load(budgets)
         if info is None:
             return 1
         if info["outer"] != outer:
@@ -203,27 +214,30 @@ def main() -> int:
                   f"This is the defect the interactive wait had.")
             return 1
 
-    # 2. The default must match the shells' own `${KERNEL_QEMU_TIMEOUT:-90}`.
-    # A disagreement puts the deadline back on the wrong side of the kill for
-    # exactly the runs nobody set the variable for.
+    # 2. The default must match the shells' own `${KERNEL_QEMU_CEILING:-270}`
+    # in every runner that kills the peer with it. A disagreement puts the
+    # deadline back on the wrong side of the kill for exactly the runs nobody
+    # set the variable for.
     unset = load(None)
     if unset is None:
         return 1
-    shell_default = None
-    for line in (ROOT / "scripts" / "run_kernel_qemutest.sh").read_text(
-            encoding="ascii").splitlines():
-        if line.startswith("TIMEOUT_SECS="):
-            shell_default = float(
-                line.split(":-", 1)[1].split("}", 1)[0])
-    if shell_default is None:
-        print("FAIL net-readiness control: run_kernel_qemutest.sh no longer "
-              "declares TIMEOUT_SECS, so its default cannot be compared")
-        return 1
-    if unset["outer"] != shell_default:
-        print(f"FAIL net-readiness control: with KERNEL_QEMU_TIMEOUT unset "
-              f"the peer assumes {unset['outer']:.0f}s and the shell uses "
-              f"{shell_default:.0f}s")
-        return 1
+    for runner in ("run_kernel_qemutest.sh",
+                   "run_kernel_alloc_rollback_qemutest.sh"):
+        shell_default = None
+        for line in (ROOT / "scripts" / runner).read_text(
+                encoding="ascii").splitlines():
+            if line.startswith("CEILING_SECS="):
+                shell_default = float(
+                    line.split(":-", 1)[1].split("}", 1)[0])
+        if shell_default is None:
+            print(f"FAIL net-readiness control: {runner} no longer declares "
+                  "CEILING_SECS, so its default cannot be compared")
+            return 1
+        if unset["outer"] != shell_default:
+            print(f"FAIL net-readiness control: with KERNEL_QEMU_CEILING "
+                  f"unset the peer assumes {unset['outer']:.0f}s and "
+                  f"{runner} uses {shell_default:.0f}s")
+            return 1
 
     # 3. A marker that is already there returns at once and prints nothing.
     output, elapsed = timed_wait(0)
@@ -251,10 +265,31 @@ def main() -> int:
         print(f"FAIL net-readiness control: the give-up printed no line "
               f"naming the marker\n{output}")
         return 1
-    if elapsed >= 13.0:
+    if elapsed >= 30.0:
         print(f"FAIL net-readiness control: the give-up took {elapsed:.1f}s "
-              f"against a 13s outer budget, so `timeout` would have killed "
+              f"against a 30s ceiling, so `timeout` would have killed "
               f"it first\n{output}")
+        return 1
+
+    # 5. GitHub issue #620: a wait's budget counts from when that wait
+    # starts. A peer that spent 12 s on earlier phases -- a slow boot -- must
+    # still give this wait its full 5 s, which the old budget from the
+    # process's start (15 - 10) had already spent.
+    output, elapsed = timed_wait(None, idle_first=12.0)
+    waited = next((float(line.split()[1]) for line in output.splitlines()
+                   if line.startswith("WAITED ")), 0.0)
+    if "RETURNED False" not in output or waited < 4.5:
+        print(f"FAIL net-readiness control: after 12 s of earlier phases the "
+              f"wait gave up after {waited:.1f}s, not its own 5 s: the "
+              f"budget is still counted from the process's start\n{output}")
+        return 1
+
+    # 6. And near the ceiling the wait still gives up in time to speak: 25 s
+    # in, with a 30 s ceiling and 10 s of safety, it has no time left at all.
+    output, elapsed = timed_wait(None, idle_first=25.0)
+    if "RETURNED False" not in output or elapsed >= 30.0:
+        print(f"FAIL net-readiness control: a wait begun near the ceiling "
+              f"ran to {elapsed:.1f}s against a 30s ceiling\n{output}")
         return 1
 
     from pass_line import report_pass
@@ -262,9 +297,9 @@ def main() -> int:
                 "network probes and the init exchange wait for their own "
                 "readiness markers, marker waits "
                 "give up inside every outer budget the lanes "
-                "use, agrees with the shell's own default, returns at once "
-                "for a marker that is there, and names the one that never "
-                "arrives",
+                "use, agrees with the shells' own default, returns at once "
+                "for a marker that is there, names the one that never "
+                "arrives, and counts its budget from its own start (#620)",
                 outer_budgets=len(OUTER_BUDGETS), waits_exercised=CASES.ran)
     return 0
 

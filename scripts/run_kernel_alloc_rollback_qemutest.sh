@@ -107,7 +107,10 @@ GDB_PORT="${KERNEL_QEMU_ALLOC_ROLLBACK_GDB_PORT:-18690}"
 # GitHub issue #593: QMP, for the serial BREAK a requested DDB walk sends.
 QMP_PORT="${KERNEL_QEMU_ALLOC_ROLLBACK_QMP_PORT:-18699}"
 TIMEOUT_SECS="${KERNEL_QEMU_ALLOC_ROLLBACK_TIMEOUT:-${KERNEL_QEMU_TIMEOUT:-90}}"
-export KERNEL_QEMU_TIMEOUT="$TIMEOUT_SECS"
+# GitHub issue #620: no-progress budget above, last-resort ceiling here, as
+# in run_kernel_qemutest.sh.
+CEILING_SECS="${KERNEL_QEMU_CEILING:-270}"
+export KERNEL_QEMU_TIMEOUT="$TIMEOUT_SECS" KERNEL_QEMU_CEILING="$CEILING_SECS"
 NETDEV_LOCAL_PORT="${KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_LOCAL_PORT:-18691}"
 NETDEV_REMOTE_PORT="${KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_REMOTE_PORT:-18692}"
 mkdir -p "$ARTIFACT_POINT_DIR"
@@ -185,7 +188,8 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --port "socket://127.0.0.1:$SERIAL_PORT" --log "$UART_LOG" \
     --postmortem-log "$ARTIFACT_POINT_DIR/ddb-postmortem.log" \
     --stdin "$ASH_DIR/ash.stdin" --expected "$ASH_DIR/ash.expected" \
-    --timeout "$TIMEOUT_SECS" --stop-marker 'resources: pages=0' \
+    --timeout "$TIMEOUT_SECS" --ceiling "$CEILING_SECS" \
+    --stop-marker 'resources: pages=0' \
     --interactive-httpd-listener-file "$INTERACTIVE_HTTPD_LISTENER" \
     --foreground-httpd-listener-file "$FOREGROUND_HTTPD_LISTENER" \
     --init-listener-file "$INIT_LISTENER" \
@@ -212,7 +216,7 @@ uart_driver_pid=$!
 gdb_log="$ARTIFACT_POINT_DIR/arm-gdb.log"
 armed=false
 for _ in $(seq 1 50); do
-    timeout "$TIMEOUT_SECS" gdb-multiarch -q -batch "$ELF" \
+    timeout "$CEILING_SECS" gdb-multiarch -q -batch "$ELF" \
         -ex "target remote :$GDB_PORT" \
         -ex "source $REPO_ROOT/scripts/kernel_debug_metadata.gdb" \
         -ex "takibi-debug-metadata $DEBUG_METADATA" \
@@ -237,7 +241,7 @@ fi
 
 echo "[kernel/qemu alloc-rollback] driving host-side network peer (ARP/ICMP/TCP)"
 peer_status=0
-timeout "$TIMEOUT_SECS" python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" \
+timeout "$CEILING_SECS" python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" \
     "$NETDEV_LOCAL_PORT" "$NETDEV_REMOTE_PORT" \
     --interactive-ready-file "$INTERACTIVE_HTTPD_LISTENER" \
     --daemon-ready-file "$FOREGROUND_HTTPD_LISTENER" \

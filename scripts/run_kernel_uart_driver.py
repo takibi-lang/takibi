@@ -257,7 +257,13 @@ def main() -> int:
     parser.add_argument("--timing-log",
                         help="optional line-oriented UART receipt timeline")
     parser.add_argument("--baud", type=int, default=115200)
+    # GitHub issue #620: --timeout is how long the guest may send nothing
+    # before the capture is judged stopped, counted from its last output
+    # rather than from the start, so a guest slowed by a loaded host is not
+    # failed for being slow. --ceiling is the last resort against a host that
+    # hangs outright; the default is three no-progress budgets.
     parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument("--ceiling", type=float, default=None)
     parser.add_argument("--stop-marker", default="resources: pages=0")
     # GitHub issue #448: the CPU-bound pair /etc/inittab starts runs
     # concurrently with this ash session and reports its verdict when both
@@ -356,6 +362,8 @@ def main() -> int:
     if not expected:
         raise RuntimeError(f"empty ash expected fixture: {args.expected}")
 
+    if args.ceiling is None:
+        args.ceiling = 3 * args.timeout
     deadline = time.monotonic() + args.timeout
     connection = None
     last_error = None
@@ -398,6 +406,14 @@ def main() -> int:
                 chunk = connection.read(4096)
                 if chunk:
                     last_chunk_at = time.monotonic()
+                    # GitHub issue #620: progress moves the deadline, up to
+                    # the ceiling. Not once a BREAK or a DDB prompt has set
+                    # the postmortem's own deadline: the walk is bounded by
+                    # that, however much the debugger prints.
+                    if not break_asked and postmortem_at is None:
+                        deadline = max(deadline, min(
+                            last_chunk_at + args.timeout,
+                            capture_started + args.ceiling))
                     output.extend(chunk)
                     capture.write(chunk)
                     capture.flush()
