@@ -52,7 +52,7 @@ of #604, #621 and #556 when they next recur.
 
 ### Territory B: everything else, ordered by current priority
 
-1. **Kernel and userspace capability:** #596, #204, #433,
+1. **Kernel and userspace capability:** #204, #433,
    #430, #434, #435, #220, #595.
 2. **Resource use and measured performance:** #389, #422, #497, #520, #553,
    #386, #502.
@@ -61,7 +61,7 @@ of #604, #621 and #556 when they next recur.
 4. **Toolchain, portability and hardware-lane support:** #599, #576, #568, #123,
    #124, #122, #95, #51, #50, #85, #268.
 5. **Deferred or not a scheduled work item:** #432, #555, #250, #444, #429,
-   #149, #567, #539, #536.
+   #149, #567, #539, #536, #622, #623, #624.
 
 Items are ordered within each band as well as between bands. The deferred
 items stay listed so a changed premise can bring them back into the queue.

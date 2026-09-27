@@ -74,6 +74,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_known_intermittents_controls.py` | Controls for the known-intermittent table's rules, in both directions |
 | `check_lane_artifact_root.py` | every kernel lane hangs its capture off one artifact root, so a repeated lane keeps each sample's evidence instead of overwriting it |
 | `check_lane_artifact_root_controls.py` | Controls for the lane artifact-root check, in both directions |
+| `check_legacy_dma_rx_scope.py` | legacy receive cache calls in maintained code remain only the audited GEM data-buffer calls |
+| `check_legacy_dma_rx_scope_controls.py` | Controls for new, changed, and removed legacy RX calls |
 | `check_liveness_proof_escapes.py` | every place that drops a pool's liveness proof is declared with a reason |
 | `check_lock_discipline.py` | global mutexes are not force-reset and raw atomics stay allowlisted |
 | `check_measure_kernel_tcp_throughput_controls.py` | Controls for the wire-throughput measurement, with a scripted curl |
