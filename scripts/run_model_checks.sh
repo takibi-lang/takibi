@@ -51,7 +51,12 @@ queue_apalache() {  # model variant cinit invariant length
 
 # check_model <model> <apalache invariant> <apalache length> <variant>...
 # Each variant is "<cfg suffix>:<CInit operator>:<TLC expectation>:<Apalache
-# expectation>". A TLC expectation is "pass", "deadlock", or the name of the
+# expectation>[:<length>]". The optional length overrides the model's for
+# that variant alone: a violation that takes more steps needs the longer
+# bound, and giving it to every variant makes Apalache's shallow checks the
+# slowest thing in allcheck -- StackOwnership at 8 took 77 s a variant and
+# slowed every QEMU lane beside it past the network peer's budget.
+# A TLC expectation is "pass", "deadlock", or the name of the
 # invariant that must be reported violated. An Apalache expectation is "ok"
 # or "violated". Apalache reports a deadlock only when every run of some
 # length is stuck, so a deadlock that one branch reaches is TLC's to find;
@@ -61,12 +66,13 @@ check_model() {
     local model="$1" invariant="$2" length="$3"
     shift 3
     queue_typecheck "$model"
-    local variant cfg cinit tlc_expect apa_expect
+    local variant cfg cinit tlc_expect apa_expect bound
     for variant in "$@"; do
-        IFS=: read -r cfg cinit tlc_expect apa_expect <<<"$variant"
+        IFS=: read -r cfg cinit tlc_expect apa_expect bound <<<"$variant"
+        bound="${bound:-$length}"
         queue_tlc "$model" "$cfg"
-        queue_apalache "$model" "$cfg" "$cinit" "$invariant" "$length"
-        echo "$model $cfg $tlc_expect $apa_expect $invariant $length" >>"$EXPECT"
+        queue_apalache "$model" "$cfg" "$cinit" "$invariant" "$bound"
+        echo "$model $cfg $tlc_expect $apa_expect $invariant $bound" >>"$EXPECT"
     done
 }
 
@@ -74,11 +80,11 @@ check_model Wait4Block NoLostWakeup 4 \
     fixed:CInitFixed:pass:ok \
     unfixed:CInitUnfixed:NoLostWakeup:violated
 
-check_model StackOwnership CoreInvariants 8 \
+check_model StackOwnership CoreInvariants 6 \
     fixed:CInitFixed:pass:ok \
     exitwaits:CInitExitWaits:deadlock:ok \
     leaveunchecked:CInitLeaveUnchecked:RunningMatchesCores:violated \
-    wakestartunchecked:CInitWakeStartUnchecked:StartsOnFreeStack:violated
+    wakestartunchecked:CInitWakeStartUnchecked:StartsOnFreeStack:violated:8
 
 check_model RecordLifetime RecordInvariants 6 \
     fixed:CInitFixed:pass:ok \
@@ -98,10 +104,15 @@ for model in $(cut -d' ' -f1 "$EXPECT" | uniq); do
         fail "$model: Apalache typecheck failed (see $OUT/$model.typecheck.log)"
 done
 
-declare -A variants lengths
+declare -A variants shortest longest
 while read -r model cfg tlc_expect apa_expect invariant length; do
     variants[$model]=$(( ${variants[$model]:-0} + 1 ))
-    lengths[$model]=$length
+    if [ -z "${shortest[$model]:-}" ] || [ "$length" -lt "${shortest[$model]}" ]; then
+        shortest[$model]=$length
+    fi
+    if [ -z "${longest[$model]:-}" ] || [ "$length" -gt "${longest[$model]}" ]; then
+        longest[$model]=$length
+    fi
     log="$OUT/$model-$cfg.tlc.log"
     case "$tlc_expect" in
         pass) grep -q "Model checking completed. No error has been found." "$log" ||
@@ -122,5 +133,7 @@ done <"$EXPECT"
 
 [ "$failures" -eq 0 ] || exit 1
 for model in $(cut -d' ' -f1 "$EXPECT" | uniq); do
-    echo "PASS modelcheck: $model -- ${variants[$model]} variant(s) each gave TLC's and Apalache's (length ${lengths[$model]}) expected verdict, types check"
+    bounds=${shortest[$model]}
+    [ "${longest[$model]}" = "$bounds" ] || bounds="$bounds-${longest[$model]}"
+    echo "PASS modelcheck: $model -- ${variants[$model]} variant(s) each gave TLC's and Apalache's (length $bounds) expected verdict, types check"
 done
