@@ -80,6 +80,20 @@ and until then `scheduled_process_ready_take` will not start the process
 even if a wake has made it Ready (GitHub issue #583). wait4's ChildExit
 blocks this way too since #550.
 
+A child's exit that wakes its parent may start the parent at once, on the
+exiting CPU, without passing through `scheduled_process_ready_take`. Since
+wait4 runs on a peer (GitHub issue #609) that parent may have blocked on
+another CPU that still stands on its stack, so the direct start checks the
+stack's owner itself and otherwise leaves the parent Ready with its wait4
+rewound. `scheduled_process_start`, which every start passes, fail-stops
+with activity `start-on-owned-stack` if any path starts a process on a
+stack another CPU owns (`StartsOnFreeStack` in
+`kernel/models/StackOwnership.tla`). A zombie is likewise not collectable
+while the CPU that ran its exit still stands on its stack: the zombie
+searches skip it, and wait4 waits for an interrupt and asks again;
+`scheduled_process_exited_take`, which every reap passes, fail-stops with
+activity `reap-on-owned-stack` if a path does not.
+
 `kernel_process_block_would_miss` is where every wait reason answers the
 decide-then-sleep question (GitHub issue #550): a wait decides in one
 critical section and publishes Blocked in a later one, so an event can

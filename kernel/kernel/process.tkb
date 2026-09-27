@@ -791,6 +791,13 @@ private let mut scheduled_process_missing_current: usize = 0;
 enum KernelActivity: u8 {
     None; SecondaryStart; NextReady; ReapOwnZombies; ReleaseEveryProcess;
     Syscall; IdleLoop;
+    // Not an activity but a verdict: scheduled_process_start found the
+    // stack owned by another CPU (#609) and fail-stops with this set, so
+    // the oops names the cause rather than where the fault surfaced.
+    StartOnOwnedStack;
+    // The same for scheduled_process_exited_take: a zombie reaped while a
+    // CPU still stands on its stack (#609).
+    ReapOnOwnedStack;
 }
 
 fn kernel_activity_name(activity: KernelActivity) -> *u8 {
@@ -804,6 +811,12 @@ fn kernel_activity_name(activity: KernelActivity) -> *u8 {
         }
         KernelActivity::Syscall => { return "syscall" as *u8; }
         KernelActivity::IdleLoop => { return "idle-loop" as *u8; }
+        KernelActivity::StartOnOwnedStack => {
+            return "start-on-owned-stack" as *u8;
+        }
+        KernelActivity::ReapOnOwnedStack => {
+            return "reap-on-owned-stack" as *u8;
+        }
     }
 }
 
@@ -834,6 +847,36 @@ fn kernel_activity_set(activity: KernelActivity) {
 // Any CPU's word, for a reporter that runs with every CPU stopped.
 fn kernel_activity_of(core: {0..<KERNEL_MAX_CORES as usize}) -> KernelActivity {
     return kernel_activity[core];
+}
+
+// GitHub issue #609: which process a CPU runs and which one's stack it
+// stands on, for DDB's `current` with the world stopped. They differ after
+// a switch until the exception return, and after a block or an exit until
+// idle entry. #609's shared stack was two CPUs where these two answers
+// overlapped. 0 is "none" (pid 0 is never a process here).
+private fn execution_of(core: {0..<KERNEL_MAX_CORES as usize}) -> *ExecutionState {
+    let base: *ExecutionState = execution_state;
+    return base + (core as isize);
+}
+
+fn kernel_process_cpu_current_pid(core: {0..<KERNEL_MAX_CORES as usize})
+        -> usize {
+    let state: *ExecutionState = execution_of(core);
+    if (state.current_live == false) { return 0; }
+    if (scheduled_process_handle_matches(state.current_handle) == false) {
+        return 0;
+    }
+    return scheduled_process_pid_of_handle(state.current_handle);
+}
+
+fn kernel_process_cpu_stack_pid(core: {0..<KERNEL_MAX_CORES as usize})
+        -> usize {
+    let state: *ExecutionState = execution_of(core);
+    if (state.stack_live == false) { return 0; }
+    if (scheduled_process_handle_matches(state.stack_handle) == false) {
+        return 0;
+    }
+    return scheduled_process_pid_of_handle(state.stack_handle);
 }
 
 // The oops record keeps words, not enums, because it is a retained layout
@@ -868,6 +911,12 @@ fn kernel_activity_name_for_code(code: usize) -> *u8 {
     }
     if (code == (KernelActivity::IdleLoop as u8) as usize) {
         named = kernel_activity_name(KernelActivity::IdleLoop);
+    }
+    if (code == (KernelActivity::StartOnOwnedStack as u8) as usize) {
+        named = kernel_activity_name(KernelActivity::StartOnOwnedStack);
+    }
+    if (code == (KernelActivity::ReapOnOwnedStack as u8) as usize) {
+        named = kernel_activity_name(KernelActivity::ReapOnOwnedStack);
     }
     return named;
 }
@@ -2694,6 +2743,15 @@ fn scheduled_process_exited_take(guard: borrow ProcessRunGuard[lock],
     if (scheduled_process_handle_matches(handle) == false) {
         return ScheduledProcessExitedTakeResult::Missing;
     }
+    // GitHub issue #609: every reap takes the zombie here, and none may
+    // while the CPU that ran its exit still stands on its stack; the
+    // collecting searches skip such a zombie, and the deferred reap runs
+    // only after the release. A path that forgot would free a stack in use.
+    if (scheduled_process_record_of(handle).stack_owner_cpu !=
+            PROCESS_STACK_UNOWNED) {
+        kernel_activity_set(KernelActivity::ReapOnOwnedStack);
+        kernel_syscall_fail_stop(0);
+    }
     let owner = scheduled_process_owner_new(handle.pool_index,
                                             handle.generation);
     let state = scheduled_process_exited_state(owner);
@@ -2737,6 +2795,18 @@ fn scheduled_process_start(
         state: sink ScheduledProcessState[process, ProcessState::Ready])
         -> ScheduledProcessState[process, ProcessState::Running] {
     scheduled_process_state_drop(state);
+    // GitHub issue #609: StackOwnership.tla's StartsOnFreeStack, checked
+    // where every start passes. A process starts on a stack no core owns,
+    // or on this core's own (a block that would miss restarts in place).
+    // #609's direct start of a woken parent broke this silently: the fault
+    // surfaced later, far away, as two CPUs' oopses on one slot. No log
+    // line: the timer's schedule reaches here from interrupt context.
+    let stack_owner: usize =
+        scheduled_process_record_at(owner.pool_index).stack_owner_cpu;
+    if (stack_owner != PROCESS_STACK_UNOWNED && stack_owner != cpu_id()) {
+        kernel_activity_set(KernelActivity::StartOnOwnedStack);
+        kernel_syscall_fail_stop(0);
+    }
     // GitHub issue #579: this is the one place a CPU takes a Ready process
     // for itself -- every scheduling path reaches Running through here, and
     // every caller holds the process-run lock -- so it is where "this core
