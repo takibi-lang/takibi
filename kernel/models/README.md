@@ -64,12 +64,12 @@ Two cores; a parent, its child, and one other runnable process.
 
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
-| `Wait4Decide` | the wait4 arm of `kernel_syscall_dispatch_action` | the zombie check and the decision to block, under one hold of the run lock (#571) | the pid, the status copy and ECHILD -- irrelevant to `NoLostWakeup`: none of them changes which process is Blocked or Exited | `d52280d1d5f8` |
+| `Wait4Decide` | the wait4 arm of `kernel_syscall_dispatch_action` | the zombie check and the decision to block, under one hold of the run lock (#571) | the pid, the status copy and ECHILD -- irrelevant to `NoLostWakeup`: none of them changes which process is Blocked or Exited | `7f648f591838` |
 | `Wait4Block` | `kernel_process_block_current`, `kernel_process_block_reserved` | successor choice and the Blocked publication in one critical section; `RECHECK` is the zombie re-check there | ASID preparation and the lock drop around it -- irrelevant to `NoLostWakeup`: the drop comes after Blocked is published and re-checked, and the successor it crosses with is already reserved Running | `a5833111b50b` |
 | `ChildExit` | `kernel_process_child_exit` | the child becomes a zombie and wakes the parent only if the parent is Blocked in ChildExit | zombie draining -- irrelevant to `NoLostWakeup`: it reaps the exiting child's own children, never this parent or this child; SIGCHLD -- irrelevant to `NoLostWakeup`: it makes no process Blocked or Exited, and only such a step can break the property; the direct parent start -- modelled elsewhere: `StackOwnership.ChildExitStart` | `11cfcf76aa70` |
 | `Wait4Resume` | `kernel_syscall_wait4_deliver` | the woken parent reaps | the user-memory status write -- irrelevant to `NoLostWakeup`: it runs after the reap, when the child is no longer Exited | `7eee22656d13` |
 | `Preempt` | `kernel_process_timer_schedule` | the timer takes a process off its core, never inside the parent's wait4 syscall (`KERNEL_PREEMPTIBLE` is 0) | nothing | `6e9c1a975798` |
-| `Dispatch` | `kernel_process_secondary_start`, `kernel_process_schedule` | an idle core takes a Ready process | affinity -- irrelevant to `NoLostWakeup`: it only forbids some dispatches, and the model already allows each one it forbids; stack ownership -- modelled elsewhere: `StackOwnership.Dispatch` | `58a2f906d1da` |
+| `Dispatch` | `kernel_process_secondary_start`, `kernel_process_schedule` | an idle core takes a Ready process | affinity -- irrelevant to `NoLostWakeup`: it only forbids some dispatches, and the model already allows each one it forbids; stack ownership -- modelled elsewhere: `StackOwnership.Reserve` | `58a2f906d1da` |
 
 Properties:
 
@@ -87,6 +87,14 @@ process and the stack it physically stands on are separate variables, as
 they are in the kernel, and `owner` records each process stack's physical
 owner.
 
+Each action is one hold of the process-run lock where the kernel really
+takes one, which GitHub issue #606's trace of real runs is what showed.
+Three kernel sequences are two holds: a switch reserves its successor
+(Ready to Running, `reserved`) and commits it as current after preparing
+the address space unlocked; a clone makes the still-Constructing child
+current and finishes it later; a process leaving its core stops being
+current first and is made Ready on the idle stack afterwards.
+
 Three constants re-introduce three past defects: the two #601 asked the
 model to find, and one #609 introduced. Each is one variant, and `make
 modelcheck` requires each to fail:
@@ -101,38 +109,65 @@ modelcheck` requires each to fail:
   its core hands back whatever stack the core stands on. A clone child's
   first return stands on its parent's, so the parent was made Ready and the
   child was lost. TLC and Apalache both report `RunningMatchesCores`, in
-  two steps.
+  three steps: clone begin, clone finish, the child's leave.
 - `WAKE_START_CHECKS_STACK = FALSE` is #609's shared stack. Once wait4 ran
   on a peer, a parent could block there, publishing Blocked while that peer
   still stood on its stack. The child's exit on core 0 woke the parent and
   started it at once, on the same stack. TLC and Apalache both report
-  `StartsOnFreeStack`, in six steps: clone, switch, the parent dispatched
-  to the other core, switch, block, exit.
+  `StartsOnFreeStack`, in eight steps: clone begin and finish, switch, the
+  parent reserved and committed on the other core, switch, block, exit.
 
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
-| `Clone` | `kernel_process_clone_begin`, `kernel_syscall_clone_child_return` | the child's first return runs first, on its parent's stack | fork's fd and VM copies -- irrelevant to `StackSafety`: they touch no kernel stack and no core's current process | `8afff9121e55` |
-| `SwitchComplete` | `kernel_process_stack_switch_complete` | the physical handoff at exception return: release the stack stood on, own the current process's | nothing | `65c121a7b22d` |
-| `Wait4Block` | the wait4 arm of `kernel_syscall_dispatch_action`, `kernel_process_block_current` | a parent blocks before its child exits, with no successor | the #550 window -- modelled elsewhere: `Wait4Block.Wait4Decide`; a block that switches straight to a successor, leaving the core on the parent's stack -- guarded: `scheduled_process_start` fail-stops with `start-on-owned-stack` | `f8bb51133571` |
+| `CloneBegin` | `kernel_process_clone_begin` | the child becomes the core's current process while still Constructing; the core stands on the parent's stack | fork's fd and VM copies -- irrelevant to `StackSafety`: they touch no kernel stack and no core's current process | `f11918ec53ec` |
+| `CloneFinish` | `kernel_process_clone_context_install` | the child is Running and the parent Ready, in a later hold | nothing | `5eede8468b0e` |
+| `SwitchComplete` | `kernel_process_stack_switch_complete` | the physical handoff at exception return: release the stack stood on, own the current process's | the deferred reap it runs after the release -- modelled elsewhere: `Wait4Reap` | `65c121a7b22d` |
+| `Reserve` | `kernel_process_schedule`, `kernel_process_secondary_start`, `kernel_process_block_current` | a core takes a Ready process whose stack no core owns, and a parent with a continuation only once the child's stack is free too, and marks it Running before it is current | affinity -- irrelevant to `StartsOnFreeStack`: it only forbids some reservations, and the model already allows each one it forbids; the unlocked ASID preparation before the commit -- irrelevant to `StackSafety`: it moves no stack, and the reserved process is Running, so no other core can take it | `b11f243bcdb4` |
+| `Commit` | `kernel_process_secondary_start_reserved`, `kernel_process_exit_reserved` | the reserved successor becomes current on a core with no running current process | nothing | `ed64257b2134` |
+| `SwitchAway` | `kernel_process_schedule_reserved`, `kernel_process_block_reserved` | the reserved successor replaces a running current process, which is preempted, naps, or blocks in wait4; the core still stands on the outgoing stack | which child a wait4 waits for, and whether it has exited -- modelled elsewhere: `Wait4Block.Wait4Block` | `ed5db36000b3` |
+| `Wait4Block` | the wait4 arm of `kernel_syscall_dispatch_action`, `kernel_process_block_to_idle` | a parent blocks before its child exits, with no successor | the #550 window -- modelled elsewhere: `Wait4Block.Wait4Decide` | `17e6b3fcaf03` |
+| `Nap` | `kernel_process_block_to_idle` | a process blocks for anything but a child's exit, with no successor | what it waits for -- irrelevant to `StackSafety`: every other wait reason blocks and wakes the same way | `d514a4753153` |
+| `Wake` | `kernel_process_deadline_wake_all` | a napping process becomes Ready wherever its stack is | the other wakers (UART, network, signal) -- irrelevant to `StackSafety`: each makes a Blocked process Ready and moves no stack | `bbf0e8d69dc2` |
 | `ChildExit` | `kernel_process_child_exit`, `kernel_syscall_exit_current_process` | the child becomes a zombie and wakes a Blocked parent, leaving it Ready with its continuation; the core still stands on the zombie's stack | zombie draining -- guarded: `scheduled_process_exited_take` fail-stops with `reap-on-owned-stack`; SIGCHLD -- irrelevant to `StackSafety`: it moves no stack and no core's current process | `8be750a6598c` |
-| `ChildExitStart` | `kernel_process_child_exit`, `kernel_process_exit_reserved` | the same exit starting the woken parent on this core at once, only when no core owns the parent's stack | affinity -- irrelevant to `StartsOnFreeStack`: it only forbids some starts, and the model already allows each one it forbids | `338857e44e80` |
+| `ChildExitStart` | `kernel_process_child_exit` | the same exit reserving the woken parent for this core at once, only when no core owns the parent's stack; `Commit` makes it current | affinity -- irrelevant to `StartsOnFreeStack`: it only forbids some starts, and the model already allows each one it forbids | `11cfcf76aa70` |
 | `IdleEnter` | `kernel_process_stack_idle_complete`, `kernel_process_stack_idle_blocked` | a core with no current process moves to its idle stack and releases the one it stood on | nothing | `dfe9912c0db0` |
-| `Dispatch` | `kernel_process_secondary_start`, `scheduled_process_ready_take` | a core takes a Ready process whose stack no core owns, and a parent with a continuation only once the child's stack is free too | affinity -- irrelevant to `StartsOnFreeStack`: it only forbids some dispatches, and the model already allows each one it forbids | `42173edee711` |
-| `Wait4Reap` | `kernel_syscall_wait4_deliver` | the parent reaps once the child's stack is free | nothing | `7eee22656d13` |
-| `Leave` | `kernel_process_core0_leave_excluded`, `kernel_process_migrate_current`, `kernel_process_stack_idle_yield` | a running process leaves its core and the stack the core stands on is released and made Ready | why it leaves (affinity, a refused syscall, the tick) -- irrelevant to `StackSafety`: the model lets a running process leave at any step, which covers every reason | `8998d35e0ddd` |
+| `Wait4Reap` | `kernel_syscall_wait4_deliver` | the parent reaps once the child's stack is free | which process reaps (a deferred reap, an exiting parent's drain) -- guarded: `scheduled_process_exited_take` fail-stops with `reap-on-owned-stack` | `1ee2f13d18ee` |
+| `LeaveBegin` | `kernel_process_core0_leave_excluded`, `kernel_process_migrate_current`, `kernel_process_tick_leave_excluded` | a running process stops being its core's current process and stays Running | why it leaves (affinity, a refused syscall, the tick) -- irrelevant to `StackSafety`: the model lets a running process leave at any step, which covers every reason | `1c0ce3df5711` |
+| `LeaveComplete` | `kernel_process_stack_idle_yield` | on the idle stack, the process the core stood on is made Ready and its stack released | nothing | `ce19a54c76bf` |
 
 Properties:
 
 - `StackSafety` (#601's safety property, TLC): a core stands only on a stack
   it owns, and since `owner` names one core per stack, no stack is used by
   two cores at once.
-- `RunningMatchesCores`: a Running process is some core's current process,
-  on one core. The lost child violates it.
-- `StartsOnFreeStack`: a core's current process has a stack no other core
-  owns. The direct start of #609 violates it. Apalache's shallow check is
-  given `CoreInvariants`, this and `RunningMatchesCores` together.
+- `RunningMatchesCores`: a Running process is held by some core -- current,
+  reserved, or stood on while it leaves or finishes a clone -- and no
+  process is current or reserved on two cores. The lost child violates it.
+- `StartsOnFreeStack`: a core's current process, and its reserved
+  successor, have a stack no other core owns. The direct start of #609
+  violates it. Apalache's shallow check is given `CoreInvariants`, this and
+  `RunningMatchesCores` together.
 - `ChildReaped` (liveness, TLC only): the parent's wait4 completes.
 - Deadlock freedom: TLC's own check, which the exit variant fails.
+
+### Checked against real runs
+
+`/bin/protocol-trace` opens a window in which the kernel diffs this
+model's state -- each process's state and stack owner, each core's current
+process and the stack it stands on -- at every release of the run lock
+(`kernel/kernel/protocol_trace.tkb`), and prints the changes when the window
+closes. `scripts/validate_protocol_trace.py` replays them against these
+actions, written again there with the same names, generalized to every core
+and process, on every QEMU and RPi5 kernel lane. It fails on a hold no
+action describes, on an action whose enabling condition does not hold, on a
+broken invariant, and on a required action the window never exercised.
+
+What a PASS claims is narrow: every transition the kernel made in that
+window is one the model has. It says nothing about paths the window did not
+run, and nothing about whether the model is right. What it catches is a
+path the model lacks that runs routinely: #609's direct start ran on every
+ordinary wait4 wake, and replaying the recorded window without
+`ChildExitStart` fails on the first one.
 
 ## RecordLifetime.tla -- a process record read while another CPU reaps it (#482)
 

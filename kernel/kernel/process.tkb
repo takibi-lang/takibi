@@ -4,6 +4,7 @@ use "kernel/lib/slotmap.tkb";
 use "kernel/lib/freelist.tkb";
 use "kernel/lib/pool_lock.tkb";
 use "kernel/kernel/process_test_evidence.tkb";
+use "kernel/kernel/protocol_trace.tkb";
 // A process slot remains the temporary address-space key, but process.tkb
 // owns no table details. scheduled_process_alloc/reap are the lifecycle
 // choke points for kernel/mm/address_space.tkb's backing-page and ASID
@@ -1160,6 +1161,114 @@ private fn scheduled_process_ddb_copy_one(
     output[index].signal_mask = record.signal_mask;
     output[index].affinity_mask = record.affinity_mask;
     output[index].core0_for_call = record.core0_for_call;
+}
+
+// GitHub issue #606: one diff pass of kernel/kernel/protocol_trace.tkb,
+// called with the run lock held. The protocol state is what
+// StackOwnership.tla models: each process's state and stack owner, and each
+// core's current process and the stack it stands on.
+const PROTOCOL_TRACE_PROBE_BUDGET: usize = 256;
+
+private fn kernel_process_protocol_state(state: ProcessSlotState) -> usize {
+    match state {
+        ProcessSlotState::Free => { return 0; }
+        ProcessSlotState::Ready => { return 1; }
+        ProcessSlotState::Running => { return 2; }
+        ProcessSlotState::Blocked => { return 3; }
+        ProcessSlotState::Exited => { return 4; }
+        ProcessSlotState::Constructing => { return 5; }
+    }
+}
+
+private fn kernel_process_protocol_reason(reason: ProcessWaitReason)
+        -> usize {
+    match reason {
+        ProcessWaitReason::None => { return 0; }
+        ProcessWaitReason::UartRx => { return 1; }
+        ProcessWaitReason::ChildExit => { return 2; }
+        ProcessWaitReason::NetRx => { return 3; }
+        ProcessWaitReason::Deadline => { return 4; }
+        ProcessWaitReason::Signal => { return 5; }
+        ProcessWaitReason::UartTx => { return 6; }
+    }
+}
+
+private fn kernel_process_protocol_owner(owner: usize) -> usize {
+    if (owner == PROCESS_STACK_UNOWNED) { return PROTOCOL_TRACE_NONE; }
+    return owner;
+}
+
+private fn kernel_process_protocol_observe(unlocked: bool) !{unsafe} {
+    protocol_trace_pass_begin(unlocked);
+    if (scheduled_process_boot_live) {
+        protocol_trace_observe_process(
+            scheduled_process_boot_record.pid,
+            kernel_process_protocol_state(scheduled_process_boot_record.state),
+            kernel_process_protocol_owner(
+                scheduled_process_boot_record.stack_owner_cpu),
+            kernel_process_protocol_reason(
+                scheduled_process_boot_record.wait_reason));
+    }
+    let mut slot: usize = 0;
+    if (scheduled_process_pool_ready) {
+        slot = intrusive_pool_first_slot(&scheduled_process_pool);
+    }
+    let mut probes: usize = 0;
+    while (slot != 0 && probes < PROTOCOL_TRACE_PROBE_BUDGET) {
+        let next: usize = intrusive_pool_next_slot(&scheduled_process_pool, slot);
+        match intrusive_pool_probe_slot_unproven(&scheduled_process_pool, slot) {
+            IntrusiveSlotProbe::NoPayload => {}
+            IntrusiveSlotProbe::Live(slot_view) => {
+                let record: *ProcessRecord = intrusive_pool_payload_of(
+                    &scheduled_process_pool, slot_view);
+                // A slot being allocated is not a process yet.
+                if (record.state != ProcessSlotState::Free) {
+                    protocol_trace_observe_process(
+                        record.pid,
+                        kernel_process_protocol_state(record.state),
+                        kernel_process_protocol_owner(record.stack_owner_cpu),
+                        kernel_process_protocol_reason(record.wait_reason));
+                }
+                intrusive_view_release(slot_view);
+            }
+        }
+        probes = probes + 1;
+        slot = next;
+    }
+    if (slot != 0) { protocol_trace_note_lost(); }
+    for core: usize in 0..<KERNEL_MAX_CORES {
+        let mut current: usize = PROTOCOL_TRACE_NONE;
+        if (execution_state[core].current_live) {
+            current = scheduled_process_pid_of_handle(
+                execution_state[core].current_handle);
+        }
+        let mut stands: usize = PROTOCOL_TRACE_NONE;
+        if (execution_state[core].stack_live) {
+            stands = scheduled_process_pid_of_handle(
+                execution_state[core].stack_handle);
+        }
+        protocol_trace_observe_core(core, current, stands);
+    }
+    protocol_trace_pass_end(unlocked);
+}
+
+// /bin/protocol-trace opens and closes the window (GitHub issue #606). The
+// opening pass records the whole protocol state as sequence 0; the closing
+// hold is the window's last step, and the report is printed after it,
+// outside the lock.
+fn kernel_process_protocol_trace_open() -> usize {
+    let guard = process_run_lock();
+    protocol_trace_open();
+    process_run_unlock(guard);
+    return 1;
+}
+
+fn kernel_process_protocol_trace_close() -> usize {
+    let guard = process_run_lock();
+    protocol_trace_close();
+    process_run_unlock(guard);
+    protocol_trace_report();
+    return 1;
 }
 
 // Fixed work for interrupt-safe DDB entry: at most 64 physical pool slots
@@ -2622,10 +2731,18 @@ fn process_run_lock() -> ProcessRunGuard[scheduled_process_run_lock]
           irq_masking_guard} {
     let mut guard: ProcessRunGuard[scheduled_process_run_lock] =
         { mutex_acquire(&scheduled_process_run_lock) };
+    // GitHub issue #606: what changed while nobody held the lock.
+    if (protocol_trace_is_active()) {
+        kernel_process_protocol_observe(true);
+    }
     return guard;
 }
 
 fn process_run_unlock(guard: sink ProcessRunGuard[scheduled_process_run_lock]) {
+    // GitHub issue #606: this hold's step, before anyone else can take one.
+    if (protocol_trace_is_active()) {
+        kernel_process_protocol_observe(false);
+    }
     mutex_release(&scheduled_process_run_lock, guard.flags);
 }
 

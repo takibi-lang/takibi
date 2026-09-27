@@ -74,7 +74,7 @@ check_model Wait4Block NoLostWakeup 4 \
     fixed:CInitFixed:pass:ok \
     unfixed:CInitUnfixed:NoLostWakeup:violated
 
-check_model StackOwnership CoreInvariants 6 \
+check_model StackOwnership CoreInvariants 8 \
     fixed:CInitFixed:pass:ok \
     exitwaits:CInitExitWaits:deadlock:ok \
     leaveunchecked:CInitLeaveUnchecked:RunningMatchesCores:violated \

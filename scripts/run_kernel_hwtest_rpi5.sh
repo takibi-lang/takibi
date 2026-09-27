@@ -552,6 +552,9 @@ echo "[kernel/rpi5] init-managed HTTPd passed"
 
 python3 "$REPO_ROOT/scripts/validate_kernel_dmesg_timestamps.py" \
     --platform rpi5 --timing-log "$UART_TIMING_LOG" "$UART_LOG"
+# GitHub issue #606: /bin/protocol-trace's window of the stack-ownership
+# protocol, replayed against kernel/models/StackOwnership.tla.
+python3 "$REPO_ROOT/scripts/validate_protocol_trace.py" "$UART_LOG"
 python3 "$REPO_ROOT/scripts/profile_kernel_workload.py" collect \
     --uart-log "$UART_LOG" --output "$ARTIFACT_DIR/busy-pair-profile.json" \
     --target rpi5

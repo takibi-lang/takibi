@@ -58,6 +58,7 @@ peer-read
 peer-spin
 peer-tty
 ppoll-probe
+protocol-trace
 ps
 rm
 rmdir

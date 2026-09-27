@@ -3819,6 +3819,13 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             return SyscallAction::Resume(
                 workload_peer_read_peer_ready());
         }
+        // /bin/protocol-trace's window (GitHub issue #606).
+        if (x0 == 16) {
+            return SyscallAction::Resume(kernel_process_protocol_trace_open());
+        }
+        if (x0 == 17) {
+            return SyscallAction::Resume(kernel_process_protocol_trace_close());
+        }
         // /bin/peer-mutate's wait4 half (GitHub issue #609).
         if (x0 == 15) {
             return SyscallAction::Resume(workload_peer_wait_report());

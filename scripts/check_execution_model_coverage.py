@@ -73,6 +73,9 @@ EXEMPT = {
     "lib/diagnostic_ring.tkb":
         "per-CPU rings published through GitHub issue #299's protocol; the "
         "commit word is an atomic and the reader re-checks it",
+    "kernel/protocol_trace.tkb":
+        "every write is made holding the process-run lock, and the report "
+        "reads the buffer only after a hold has closed the window",
     "arch/arm64/kernel/secondary.tkb":
         "the secondary core's own entry point, which carries its own "
         "assertion in kernel_secondary_main",

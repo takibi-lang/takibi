@@ -99,6 +99,15 @@ if [ "$?" -ne 0 ]; then
     exit 1
 fi
 
+# GitHub issue #606: a window of the stack-ownership protocol as it ran,
+# printed by the kernel for scripts/validate_protocol_trace.py to replay
+# against StackOwnership.tla. This prints only a failure.
+/bin/protocol-trace
+if [ "$?" -ne 0 ]; then
+    echo "protocol-trace failed"
+    exit 1
+fi
+
 # Read the retained, kernel-timestamped text ring through Linux syslog(2),
 # exactly as the packaged BusyBox dmesg applet does on Linux.
 /bin/dmesg

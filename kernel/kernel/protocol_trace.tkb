@@ -1,0 +1,264 @@
+// The stack-ownership protocol as it actually ran, for
+// scripts/validate_protocol_trace.py to replay against StackOwnership.tla
+// (GitHub issue #606, stage 1).
+//
+// What is recorded is not a list of hand-placed events. Every hold of the
+// process-run lock inside a window is diffed, at its release, against the
+// last state seen: each process's (state, stack owner) and each core's
+// (current process, stack stood on). A change is recorded under that hold's
+// sequence number, so the host sees one step per critical section, in the
+// lock's own total order. A path that changes the protocol state is recorded
+// whether or not anyone knew to instrument it, which is the point: #609's
+// defect was a path the model did not know about. The same diff taken at
+// acquire records what changed while nobody held the lock, marked unlocked.
+//
+// A window is opened and closed by /bin/protocol-trace through the
+// workload-progress syscall. Opening records every live process and every
+// core as sequence 0, so the replay starts from the kernel's real state
+// rather than from an assumed one. Closing prints the whole buffer.
+//
+// Current limitations (2026-09-27):
+// - Only what the run lock serializes is ordered. A change made outside it
+//   is attributed to the next hold that notices, on whichever CPU that is,
+//   and marked unlocked; the checker decides what that means.
+// - The buffer holds PROTOCOL_TRACE_EVENTS changes, and the processes
+//   tracked are bounded by PROTOCOL_TRACE_PROCESSES. Anything beyond either
+//   is counted as lost and the checker refuses the window: a replay with a
+//   gap in it proves nothing.
+// - Every writer holds the process-run lock; the report runs after the
+//   window is closed under that lock, so it reads a buffer nobody writes.
+
+use "kernel/lib/execution_model.tkb";
+
+const PROTOCOL_TRACE_EVENTS: usize = 512;
+const PROTOCOL_TRACE_PROCESSES: usize = 64;
+// A process's stack owner, or a core's current or stood-on process, that
+// names nothing.
+const PROTOCOL_TRACE_NONE: usize = 0xFFFFFFFFFFFFFFFF;
+
+enum ProtocolTraceKind { Process; Gone; Core; }
+
+struct ProtocolTraceEvent {
+    sequence: usize;
+    cpu: usize;
+    unlocked: bool;
+    kind: ProtocolTraceKind;
+    // Process: pid, state, owner, wait reason.  Gone: pid.
+    // Core: core, current pid, stood-on pid.
+    first: usize;
+    second: usize;
+    third: usize;
+    fourth: usize;
+}
+
+struct ProtocolTraceProcess {
+    pid: usize;
+    state: usize;
+    owner: usize;
+    reason: usize;
+    seen: bool;
+}
+
+struct ProtocolTraceCore {
+    current: usize;
+    stands: usize;
+}
+
+private let mut protocol_trace_active: bool = false;
+private let mut protocol_trace_sequence: usize;
+private let mut protocol_trace_stored: usize;
+private let mut protocol_trace_lost: usize;
+private let mut protocol_trace_events:
+    [ProtocolTraceEvent; PROTOCOL_TRACE_EVENTS];
+private let mut protocol_trace_processes:
+    [ProtocolTraceProcess; PROTOCOL_TRACE_PROCESSES];
+private let mut protocol_trace_process_count: usize;
+private let mut protocol_trace_cores: [ProtocolTraceCore; KERNEL_MAX_CORES];
+private let mut protocol_trace_unlocked_pass: bool;
+
+fn protocol_trace_is_active() -> bool {
+    return protocol_trace_active;
+}
+
+private fn protocol_trace_record(kind: ProtocolTraceKind, first: usize,
+                                 second: usize, third: usize, fourth: usize) {
+    let stored: usize = protocol_trace_stored;
+    if (stored >= PROTOCOL_TRACE_EVENTS) {
+        protocol_trace_lost = protocol_trace_lost + 1;
+        return;
+    }
+    let slot: {0..<PROTOCOL_TRACE_EVENTS as usize} = stored;
+    protocol_trace_events[slot].sequence = protocol_trace_sequence;
+    protocol_trace_events[slot].cpu = cpu_id();
+    protocol_trace_events[slot].unlocked = protocol_trace_unlocked_pass;
+    protocol_trace_events[slot].kind = kind;
+    protocol_trace_events[slot].first = first;
+    protocol_trace_events[slot].second = second;
+    protocol_trace_events[slot].third = third;
+    protocol_trace_events[slot].fourth = fourth;
+    protocol_trace_stored = stored + 1;
+}
+
+// Opening: forget every earlier window. The caller then observes every
+// process and core, which records them all, as sequence 0.
+fn protocol_trace_open() {
+    protocol_trace_sequence = 0;
+    protocol_trace_stored = 0;
+    protocol_trace_lost = 0;
+    protocol_trace_process_count = 0;
+    for core: usize in 0..<KERNEL_MAX_CORES {
+        protocol_trace_cores[core].current = 0;
+        protocol_trace_cores[core].stands = 0;
+    }
+    protocol_trace_unlocked_pass = false;
+    protocol_trace_active = true;
+}
+
+fn protocol_trace_close() { protocol_trace_active = false; }
+
+// The caller's walk stopped before the pool's end: the pass is incomplete.
+fn protocol_trace_note_lost() {
+    protocol_trace_lost = protocol_trace_lost + 1;
+}
+
+// One diff pass. `unlocked` says the pass is taken at acquire, so whatever
+// it finds changed while no CPU held the lock; at release it is this hold's
+// own step, and the next hold gets the next sequence number.
+fn protocol_trace_pass_begin(unlocked: bool) {
+    protocol_trace_unlocked_pass = unlocked;
+    for index: usize in 0..<PROTOCOL_TRACE_PROCESSES {
+        protocol_trace_processes[index].seen = false;
+    }
+}
+
+fn protocol_trace_observe_process(pid: usize, state: usize, owner: usize,
+                                  reason: usize) {
+    let count: usize = protocol_trace_process_count;
+    for index: usize in 0..<PROTOCOL_TRACE_PROCESSES {
+        if (index < count && protocol_trace_processes[index].pid == pid) {
+            protocol_trace_processes[index].seen = true;
+            if (protocol_trace_processes[index].state != state ||
+                protocol_trace_processes[index].owner != owner ||
+                protocol_trace_processes[index].reason != reason) {
+                protocol_trace_processes[index].state = state;
+                protocol_trace_processes[index].owner = owner;
+                protocol_trace_processes[index].reason = reason;
+                protocol_trace_record(
+                    ProtocolTraceKind::Process, pid, state, owner, reason);
+            }
+            return;
+        }
+    }
+    if (count >= PROTOCOL_TRACE_PROCESSES) {
+        protocol_trace_lost = protocol_trace_lost + 1;
+        return;
+    }
+    let slot: {0..<PROTOCOL_TRACE_PROCESSES as usize} = count;
+    protocol_trace_processes[slot].pid = pid;
+    protocol_trace_processes[slot].state = state;
+    protocol_trace_processes[slot].owner = owner;
+    protocol_trace_processes[slot].reason = reason;
+    protocol_trace_processes[slot].seen = true;
+    protocol_trace_process_count = count + 1;
+    protocol_trace_record(ProtocolTraceKind::Process, pid, state, owner,
+                          reason);
+}
+
+fn protocol_trace_observe_core(core: {0..<KERNEL_MAX_CORES as usize},
+                               current: usize, stands: usize) {
+    if (protocol_trace_cores[core].current == current &&
+        protocol_trace_cores[core].stands == stands &&
+        protocol_trace_sequence != 0) {
+        return;
+    }
+    protocol_trace_cores[core].current = current;
+    protocol_trace_cores[core].stands = stands;
+    protocol_trace_record(ProtocolTraceKind::Core, core, current, stands, 0);
+}
+
+// A process no longer in the pool is recorded gone, and the entries still
+// tracked are packed to the front.
+fn protocol_trace_pass_end(unlocked: bool) {
+    let count: usize = protocol_trace_process_count;
+    let mut kept: usize = 0;
+    for position: usize in 0..<PROTOCOL_TRACE_PROCESSES {
+        if (position < count) {
+            if (protocol_trace_processes[position].seen) {
+                let dest: usize = kept;
+                if (dest < PROTOCOL_TRACE_PROCESSES) {
+                    protocol_trace_processes[dest].pid =
+                        protocol_trace_processes[position].pid;
+                    protocol_trace_processes[dest].state =
+                        protocol_trace_processes[position].state;
+                    protocol_trace_processes[dest].owner =
+                        protocol_trace_processes[position].owner;
+                    protocol_trace_processes[dest].reason =
+                        protocol_trace_processes[position].reason;
+                }
+                kept = kept + 1;
+            } else {
+                protocol_trace_record(ProtocolTraceKind::Gone,
+                                      protocol_trace_processes[position].pid,
+                                      0, 0, 0);
+            }
+        }
+    }
+    protocol_trace_process_count = kept;
+    if (unlocked == false) {
+        protocol_trace_sequence = protocol_trace_sequence + 1;
+    }
+}
+
+private fn protocol_trace_put(value: usize) {
+    if (value == PROTOCOL_TRACE_NONE) {
+        kernel_boot_log(" -");
+    } else {
+        kernel_boot_log(" ");
+        uart_put_udec(value);
+    }
+}
+
+// After protocol_trace_close, from a context that may print. One line per
+// change; scripts/validate_protocol_trace.py is the only reader.
+fn protocol_trace_report() {
+    kernel_boot_log("protocol-trace: begin cores=");
+    uart_put_udec(kernel_online_core_count());
+    kernel_boot_log(" stored=");
+    uart_put_udec(protocol_trace_stored);
+    kernel_boot_log(" lost=");
+    uart_put_udec(protocol_trace_lost);
+    kernel_boot_log(" holds=");
+    uart_put_udec(protocol_trace_sequence);
+    kernel_boot_log("\n");
+    let stored: usize = protocol_trace_stored;
+    for slot: usize in 0..<PROTOCOL_TRACE_EVENTS {
+        if (slot < stored) {
+            kernel_boot_log("protocol-trace: ");
+            uart_put_udec(protocol_trace_events[slot].sequence);
+            kernel_boot_log(" ");
+            uart_put_udec(protocol_trace_events[slot].cpu);
+            if (protocol_trace_events[slot].unlocked) {
+                kernel_boot_log(" u");
+            } else {
+                kernel_boot_log(" l");
+            }
+            match protocol_trace_events[slot].kind {
+                ProtocolTraceKind::Process => { kernel_boot_log(" p"); }
+                ProtocolTraceKind::Gone => { kernel_boot_log(" g"); }
+                ProtocolTraceKind::Core => { kernel_boot_log(" c"); }
+            }
+            protocol_trace_put(protocol_trace_events[slot].first);
+            protocol_trace_put(protocol_trace_events[slot].second);
+            protocol_trace_put(protocol_trace_events[slot].third);
+            match protocol_trace_events[slot].kind {
+                ProtocolTraceKind::Process => {
+                    protocol_trace_put(protocol_trace_events[slot].fourth);
+                }
+                ProtocolTraceKind::Gone => {}
+                ProtocolTraceKind::Core => {}
+            }
+            kernel_boot_log("\n");
+        }
+    }
+    kernel_boot_log("protocol-trace: end\n");
+}

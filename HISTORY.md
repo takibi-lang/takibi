@@ -15,6 +15,35 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-27: StackOwnership.tla re-cut to the kernel's real lock holds (#606)
+
+The first trace of real runs (#606 stage 1) showed StackOwnership.tla was
+coarser than the kernel it modelled. The model said "one action per
+critical section", but three of its actions were two holds of the
+process-run lock in the kernel. A switch reserves its successor (Ready to
+Running) and makes it current in a later hold, after the unlocked ASID
+preparation. A clone makes the child current while it is Constructing and
+finishes it later. A leave stops being current first and is made Ready on
+the idle stack afterwards. The timer switch and the child's nap were not
+modelled at all. The model was rewritten so each action is one real hold,
+with `reserved` as new state; all three past-defect variants still fail,
+the wake-start one now in eight steps.
+
+The maintainer chose a bounded window over streaming the whole boot: the
+first 45 s of the QEMU lane holds the run lock about 350,000 times, and a
+full stream over the RPi5's 115200-baud UART would have cost minutes per
+run. The window costs about 0.4 s. Its claim was scoped explicitly: a PASS
+says every transition in the window is one the model has, not that the
+model is right.
+
+The issue's first acceptance item -- that reverting #609's stack-owner
+check fails the checker on every run -- cannot hold as written: with the
+check reverted, a run where the parent's stack happens to be free behaves
+identically to the fixed kernel. What does fail on every run, with no race,
+is the model lacking the path, which was #609's actual situation; the
+controls replay the recorded window without ChildExitStart for that, and
+plant the shared-stack start in a synthetic window for the other.
+
 ## 2026-09-23: ROADMAP.md archived here when it became a work split only
 
 `ROADMAP.md` had grown to 2858 lines, most of it the history of completed

@@ -568,6 +568,18 @@ checked.
 This is an explicit profiling command, not a performance threshold in
 `make allcheck`.
 
+Both runners also replay a window of the stack-ownership protocol against
+`kernel/models/StackOwnership.tla`. `/bin/protocol-trace` runs from init.sh:
+it opens the window (workload tag 16), clones a napping child and waits for
+it twice -- once free to run anywhere, once pinned to CPU 1 with the child
+on CPU 0 -- and closes it (tag 17) from CPU 0. Inside the window the kernel
+diffs each process's state and stack owner, and each core's current and
+stood-on process, at every hold of the process-run lock, and prints the
+changes at the close. `scripts/validate_protocol_trace.py` fails the lane
+on a hold no model action describes, a lost change, or a model action the
+window never exercised; `kernel/models/README.md` says what that does and
+does not prove.
+
 ## QEMU/AArch64 integration
 
 QEMU/AArch64 lets anyone build and boot a substantial, real integration
