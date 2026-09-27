@@ -29,6 +29,10 @@ from pass_line import CaseCount, report_pass
 ROOT = Path(__file__).resolve().parent.parent
 VALIDATOR = ROOT / "scripts" / "validate_protocol_trace.py"
 WINDOW = ROOT / "kernel" / "tests" / "qemu" / "protocol_trace.window"
+# The debug lane's window that first took an interrupt from EL0 inside it,
+# which the model did not have until it failed an allcheck.
+INTERRUPT_WINDOW = (ROOT / "kernel" / "tests" / "qemu-debug" /
+                    "protocol_trace.window")
 
 CASES = CaseCount()
 
@@ -62,6 +66,17 @@ SHARED_STACK = [
 ]
 
 
+# An interrupt from EL0 releases the running process's stack, and the tick
+# inside it leaves the core; then the same leave with no interrupt taken.
+TICK_LEAVE = SNAPSHOT[:1] + ["0 0 l p 11 2 1 0", "0 0 l c 0 10 10",
+                             "0 0 l c 1 11 11",
+                             "1 0 l p 10 2 - 0", "1 0 l c 0 10 -",
+                             "2 0 l p 10 1 - 0", "2 0 l c 0 - -"]
+TICK_LEAVE_UNINTERRUPTED = SNAPSHOT[:1] + [
+    "0 0 l p 11 2 1 0", "0 0 l c 0 10 10", "0 0 l c 1 11 11",
+    "1 0 l p 10 1 0 0", "1 0 l c 0 - 10"]
+
+
 def run(text, *extra):
     with tempfile.NamedTemporaryFile("w", suffix=".log") as log:
         log.write(text)
@@ -71,10 +86,11 @@ def run(text, *extra):
             capture_output=True, text=True, check=False)
 
 
-def expect(name, result, passes, needle):
+def expect(name, result, passes, needle, absent=None):
     CASES.note()
     output = result.stdout + result.stderr
-    if (result.returncode == 0) != passes or needle not in output:
+    if (result.returncode == 0) != passes or needle not in output or \
+            (absent is not None and absent in output):
         print(f"FAIL validate-protocol-trace controls: {name}: expected "
               f"{'PASS' if passes else 'a refusal'} saying {needle!r}, got "
               f"exit {result.returncode}:\n{output}")
@@ -84,7 +100,21 @@ def expect(name, result, passes, needle):
 
 def main() -> int:
     recorded = WINDOW.read_text(encoding="utf-8")
+    interrupted = INTERRUPT_WINDOW.read_text(encoding="utf-8")
     checks = [
+        expect("the recorded window with an interrupt from EL0",
+               run(interrupted), True, "InterruptDepart=1"),
+        expect("that window without InterruptDepart",
+               run(interrupted, "--without", "InterruptDepart"), False,
+               "IdleEnter not enabled: current[c0] = 76"),
+        expect("an allocation landing inside another CPU's hold",
+               run(window(SNAPSHOT + ["1 1 l p 12 5 - 0"])), False,
+               "never exercised", absent="ERROR"),
+        expect("a tick leave inside an interrupt", run(window(TICK_LEAVE)),
+               False, "never exercised", absent="ERROR"),
+        expect("a tick leave with no interrupt taken",
+               run(window(TICK_LEAVE_UNINTERRUPTED)), False,
+               "TickLeave not enabled: c0 is not inside an interrupt"),
         expect("the recorded QEMU window", run(recorded), True,
                "PASS protocol-trace:"),
         expect("the recorded window without ChildExitStart",
@@ -113,7 +143,9 @@ def main() -> int:
         return 1
     report_pass(
         "validate-protocol-trace controls",
-        "the recorded QEMU window passes; it fails without ChildExitStart, "
+        "both recorded QEMU windows pass; they fail without ChildExitStart "
+        "and InterruptDepart, an allocation inside another CPU's hold is "
+        "absorbed, a tick leave passes only inside an interrupt, "
         "and #609's shared-stack start, a lost change, a cut report, an "
         "unlocked change, an unsafe snapshot, an unexercised window and a "
         "missing window are each refused with their diagnostic",

@@ -70,10 +70,12 @@ VARIABLES
     stands,     \* per core: the process whose stack it stands on, or Idle
     \* @type: Str -> Str;
     owner,      \* per process: the core owning its stack, or None
+    \* @type: Str -> Bool;
+    interrupted, \* per core: inside an interrupt taken from EL0
     \* @type: Bool;
     reapPending \* the parent was woken in wait4 and still has to reap the child
 
-vars == <<state, current, reserved, stands, owner, reapPending>>
+vars == <<state, current, reserved, stands, owner, interrupted, reapPending>>
 
 \* "Blocked" is the parent in wait4 (ProcessWaitReason::ChildExit);
 \* "Napping" is any other block, here the child's nanosleep.
@@ -88,6 +90,12 @@ Settled(c, p) == current[c] = p /\ stands[c] = p
 \* scheduled_process_ready_take: a Ready process may be started only once no
 \* core owns its stack -- and a parent carrying a wait4 continuation only once
 \* no core owns the exited child's stack either.
+\* An interrupt taken from EL0 moved the core off p's stack and released
+\* it, and p is still the core's current process.
+\* @type: (Str, Str) => Bool;
+Departed(c, p) ==
+    interrupted[c] /\ current[c] = p /\ stands[c] = Idle /\ owner[p] = None
+
 \* @type: (Str) => Bool;
 Takeable(p) ==
     /\ state[p] = "Ready"
@@ -110,6 +118,7 @@ Init ==
     /\ reserved = [c \in Cores |-> None]
     /\ stands = [c \in Cores |-> IF c = "c0" THEN "parent" ELSE Idle]
     /\ owner = [p \in Procs |-> IF p = "parent" THEN "c0" ELSE None]
+    /\ interrupted = [c \in Cores |-> FALSE]
     /\ reapPending = FALSE
 
 ----------------------------------------------------------------------------
@@ -122,14 +131,14 @@ CloneBegin(c) ==
     /\ state["child"] = "Constructing"
     /\ reserved[c] = None
     /\ current' = [current EXCEPT ![c] = "child"]
-    /\ UNCHANGED <<state, reserved, stands, owner, reapPending>>
+    /\ UNCHANGED <<state, reserved, stands, owner, interrupted, reapPending>>
 
 \* The child's frame is installed: it is Running and the parent Ready.
 CloneFinish(c) ==
     /\ current[c] = "child"
     /\ state["child"] = "Constructing"
     /\ state' = [state EXCEPT !["parent"] = "Ready", !["child"] = "Running"]
-    /\ UNCHANGED <<current, reserved, stands, owner, reapPending>>
+    /\ UNCHANGED <<current, reserved, stands, owner, interrupted, reapPending>>
 
 \* The exception return completes the physical switch: the core leaves the
 \* stack it stood on (releasing it unless it is the idle stack) and takes
@@ -144,6 +153,7 @@ SwitchComplete(c) ==
                    ELSE IF p = stands[c] THEN None
                    ELSE owner[p]]
     /\ stands' = [stands EXCEPT ![c] = current[c]]
+    /\ interrupted' = [interrupted EXCEPT ![c] = FALSE]
     /\ UNCHANGED <<state, current, reserved, reapPending>>
 
 \* A core reserves a takeable Ready process as its successor. An idle core
@@ -160,7 +170,7 @@ Reserve(c, p) ==
     /\ Takeable(p)
     /\ state' = [state EXCEPT ![p] = "Running"]
     /\ reserved' = [reserved EXCEPT ![c] = p]
-    /\ UNCHANGED <<current, stands, owner, reapPending>>
+    /\ UNCHANGED <<current, stands, owner, interrupted, reapPending>>
 
 \* The reserved successor becomes current on a core with no running
 \* current process: an idle core, or one whose current process has exited.
@@ -170,15 +180,16 @@ Commit(c) ==
        \/ current[c] # None /\ state[current[c]] = "Exited"
     /\ current' = [current EXCEPT ![c] = reserved[c]]
     /\ reserved' = [reserved EXCEPT ![c] = None]
-    /\ UNCHANGED <<state, stands, owner, reapPending>>
+    /\ UNCHANGED <<state, stands, owner, interrupted, reapPending>>
 
 \* The reserved successor replaces a running current process, which is
 \* preempted (Ready), napping, or the parent blocking in wait4. The core
-\* still stands on the outgoing process's stack.
+\* still stands on the outgoing process's stack -- or, inside an interrupt
+\* taken from EL0, on its idle (IRQ) stack, the process's already released.
 SwitchAway(c, how) ==
     /\ reserved[c] # None
     /\ current[c] # None
-    /\ Settled(c, current[c])
+    /\ Settled(c, current[c]) \/ Departed(c, current[c])
     /\ state[current[c]] = "Running"
     /\ \/ how = "Ready"
        \/ how = "Napping" /\ current[c] = "child"
@@ -186,7 +197,7 @@ SwitchAway(c, how) ==
     /\ state' = [state EXCEPT ![current[c]] = how]
     /\ current' = [current EXCEPT ![c] = reserved[c]]
     /\ reserved' = [reserved EXCEPT ![c] = None]
-    /\ UNCHANGED <<stands, owner, reapPending>>
+    /\ UNCHANGED <<stands, owner, interrupted, reapPending>>
 
 \* The parent calls wait4 before the child has exited and blocks with no
 \* successor. The core has no current process and still stands on the
@@ -197,7 +208,7 @@ Wait4Block(c) ==
     /\ WaitsForChild
     /\ state' = [state EXCEPT !["parent"] = "Blocked"]
     /\ current' = [current EXCEPT ![c] = None]
-    /\ UNCHANGED <<reserved, stands, owner, reapPending>>
+    /\ UNCHANGED <<reserved, stands, owner, interrupted, reapPending>>
 
 \* The child naps with no successor, the same way.
 Nap(c) ==
@@ -205,13 +216,13 @@ Nap(c) ==
     /\ reserved[c] = None
     /\ state' = [state EXCEPT !["child"] = "Napping"]
     /\ current' = [current EXCEPT ![c] = None]
-    /\ UNCHANGED <<reserved, stands, owner, reapPending>>
+    /\ UNCHANGED <<reserved, stands, owner, interrupted, reapPending>>
 
 \* The nap's deadline passes: the child is Ready, wherever its stack is.
 Wake ==
     /\ state["child"] = "Napping"
     /\ state' = [state EXCEPT !["child"] = "Ready"]
-    /\ UNCHANGED <<current, reserved, stands, owner, reapPending>>
+    /\ UNCHANGED <<current, reserved, stands, owner, interrupted, reapPending>>
 
 \* The child exits and becomes a zombie. A parent Blocked in wait4 is woken
 \* and left Ready with its continuation. The core has no current process
@@ -225,7 +236,7 @@ ChildExit(c) ==
                           !["parent"] = IF wakes THEN "Ready" ELSE @]
            /\ reapPending' = (reapPending \/ wakes)
     /\ current' = [current EXCEPT ![c] = None]
-    /\ UNCHANGED <<reserved, stands, owner>>
+    /\ UNCHANGED <<reserved, stands, owner, interrupted>>
 
 \* The same exit, when the parent is Blocked in wait4 and this core may run
 \* it: the parent is woken and reserved for this core at once, and a later
@@ -240,7 +251,7 @@ ChildExitStart(c) ==
     /\ state' = [state EXCEPT !["child"] = "Exited", !["parent"] = "Running"]
     /\ reserved' = [reserved EXCEPT ![c] = "parent"]
     /\ reapPending' = TRUE
-    /\ UNCHANGED <<current, stands, owner>>
+    /\ UNCHANGED <<current, stands, owner, interrupted>>
 
 \* A core with no current process moves to its idle stack and releases the
 \* stack it stood on: an exited process's (kernel_process_stack_idle_complete),
@@ -255,7 +266,7 @@ IdleEnter(c) ==
     /\ EXIT_IDLES \/ state[stands[c]] # "Exited"
     /\ owner' = [owner EXCEPT ![stands[c]] = None]
     /\ stands' = [stands EXCEPT ![c] = Idle]
-    /\ UNCHANGED <<state, current, reserved, reapPending>>
+    /\ UNCHANGED <<state, current, reserved, interrupted, reapPending>>
 
 \* The parent finishes wait4 by reaping the zombie: woken from its wait,
 \* or calling wait4 after the child has already exited.
@@ -266,7 +277,7 @@ Wait4Reap(c) ==
     /\ owner["child"] = None
     /\ state' = [state EXCEPT !["child"] = "Reaped"]
     /\ reapPending' = FALSE
-    /\ UNCHANGED <<current, reserved, stands, owner>>
+    /\ UNCHANGED <<current, reserved, stands, owner, interrupted>>
 
 \* A running process stops being this core's current process without
 \* exiting: an excluded process at a syscall return
@@ -280,7 +291,33 @@ LeaveBegin(c) ==
     /\ stands[c] # Idle
     /\ LEAVE_CHECKS_STACK => stands[c] = current[c]
     /\ current' = [current EXCEPT ![c] = None]
-    /\ UNCHANGED <<state, reserved, stands, owner, reapPending>>
+    /\ UNCHANGED <<state, reserved, stands, owner, interrupted, reapPending>>
+
+\* An interrupt taken from EL0: its entry moves the core to its IRQ stack
+\* and releases the interrupted process's stack, which stays current and
+\* Running. SwitchComplete at the exception return takes it back.
+InterruptDepart(c) ==
+    /\ current[c] # None
+    /\ Settled(c, current[c])
+    /\ state[current[c]] = "Running"
+    /\ reserved[c] = None
+    /\ owner' = [owner EXCEPT ![current[c]] = None]
+    /\ stands' = [stands EXCEPT ![c] = Idle]
+    /\ interrupted' = [interrupted EXCEPT ![c] = TRUE]
+    /\ UNCHANGED <<state, current, reserved, reapPending>>
+
+\* Inside that interrupt, the tick finds the process may no longer run
+\* here and nothing else may: it is made Ready, its stack already free, and
+\* the core idles.
+TickLeave(c) ==
+    /\ current[c] # None
+    /\ Departed(c, current[c])
+    /\ state[current[c]] = "Running"
+    /\ reserved[c] = None
+    /\ state' = [state EXCEPT ![current[c]] = "Ready"]
+    /\ current' = [current EXCEPT ![c] = None]
+    /\ interrupted' = [interrupted EXCEPT ![c] = FALSE]
+    /\ UNCHANGED <<reserved, stands, owner, reapPending>>
 
 \* On its idle stack, kernel_process_stack_idle_yield makes Ready the
 \* process whose stack the core stood on, and releases that stack.
@@ -292,7 +329,7 @@ LeaveComplete(c) ==
     /\ state' = [state EXCEPT ![stands[c]] = "Ready"]
     /\ owner' = [owner EXCEPT ![stands[c]] = None]
     /\ stands' = [stands EXCEPT ![c] = Idle]
-    /\ UNCHANGED <<current, reserved, reapPending>>
+    /\ UNCHANGED <<current, reserved, interrupted, reapPending>>
 
 Next ==
     \/ Wake
@@ -309,6 +346,8 @@ Next ==
         \/ Wait4Reap(c)
         \/ LeaveBegin(c)
         \/ LeaveComplete(c)
+        \/ InterruptDepart(c)
+        \/ TickLeave(c)
         \/ \E p \in Procs : Reserve(c, p)
         \/ \E how \in {"Ready", "Napping", "Blocked"} : SwitchAway(c, how)
 
@@ -343,6 +382,7 @@ TypeOK ==
     /\ \A c \in Cores : reserved[c] \in Procs \union {None}
     /\ \A c \in Cores : stands[c] \in Procs \union {Idle}
     /\ \A p \in Procs : owner[p] \in Cores \union {None}
+    /\ \A c \in Cores : interrupted[c] \in BOOLEAN
 
 \* #601's safety property. A core stands only on a stack it owns; since
 \* `owner` names one core per stack, no stack is used by two cores at once.

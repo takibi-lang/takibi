@@ -29,6 +29,15 @@ modelled at all. The model was rewritten so each action is one real hold,
 with `reserved` as new state; all three past-defect variants still fail,
 the wake-start one now in eight steps.
 
+The first `make allcheck` after that landed failed on the debug lane:
+"IdleEnter not enabled: current[c0] = 76". Its window had taken an
+interrupt from EL0, whose entry releases the running process's stack while
+it stays current (`kernel_process_stack_interrupt_depart`); the main lane's
+window had not, by timing. The model gained `InterruptDepart`, `TickLeave`
+and per-core `interrupted`, and that window is kept as a second fixture.
+This is the replay working as intended and also its limit in one event: a
+path is found only when a window happens to run it.
+
 The maintainer chose a bounded window over streaming the whole boot: the
 first 45 s of the QEMU lane holds the run lock about 350,000 times, and a
 full stream over the RPi5's 115200-baud UART would have cost minutes per

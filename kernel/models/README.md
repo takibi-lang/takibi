@@ -89,7 +89,9 @@ owner.
 
 Each action is one hold of the process-run lock where the kernel really
 takes one, which GitHub issue #606's trace of real runs is what showed.
-Three kernel sequences are two holds: a switch reserves its successor
+An interrupt from EL0 releases the interrupted process's stack on entry
+and takes it back on return (`interrupted` remembers which cores are inside
+one). Three kernel sequences are two holds: a switch reserves its successor
 (Ready to Running, `reserved`) and commits it as current after preparing
 the address space unlocked; a clone makes the still-Constructing child
 current and finishes it later; a process leaving its core stops being
@@ -124,7 +126,7 @@ modelcheck` requires each to fail:
 | `SwitchComplete` | `kernel_process_stack_switch_complete` | the physical handoff at exception return: release the stack stood on, own the current process's | the deferred reap it runs after the release -- modelled elsewhere: `Wait4Reap` | `65c121a7b22d` |
 | `Reserve` | `kernel_process_schedule`, `kernel_process_secondary_start`, `kernel_process_block_current` | a core takes a Ready process whose stack no core owns, and a parent with a continuation only once the child's stack is free too, and marks it Running before it is current | affinity -- irrelevant to `StartsOnFreeStack`: it only forbids some reservations, and the model already allows each one it forbids; the unlocked ASID preparation before the commit -- irrelevant to `StackSafety`: it moves no stack, and the reserved process is Running, so no other core can take it | `b11f243bcdb4` |
 | `Commit` | `kernel_process_secondary_start_reserved`, `kernel_process_exit_reserved` | the reserved successor becomes current on a core with no running current process | nothing | `ed64257b2134` |
-| `SwitchAway` | `kernel_process_schedule_reserved`, `kernel_process_block_reserved` | the reserved successor replaces a running current process, which is preempted, naps, or blocks in wait4; the core still stands on the outgoing stack | which child a wait4 waits for, and whether it has exited -- modelled elsewhere: `Wait4Block.Wait4Block` | `ed5db36000b3` |
+| `SwitchAway` | `kernel_process_schedule_reserved`, `kernel_process_block_reserved` | the reserved successor replaces a running current process, which is preempted, naps, or blocks in wait4; the core still stands on the outgoing stack, or on its IRQ stack inside an interrupt from EL0 | which child a wait4 waits for, and whether it has exited -- modelled elsewhere: `Wait4Block.Wait4Block` | `ed5db36000b3` |
 | `Wait4Block` | the wait4 arm of `kernel_syscall_dispatch_action`, `kernel_process_block_to_idle` | a parent blocks before its child exits, with no successor | the #550 window -- modelled elsewhere: `Wait4Block.Wait4Decide` | `17e6b3fcaf03` |
 | `Nap` | `kernel_process_block_to_idle` | a process blocks for anything but a child's exit, with no successor | what it waits for -- irrelevant to `StackSafety`: every other wait reason blocks and wakes the same way | `d514a4753153` |
 | `Wake` | `kernel_process_deadline_wake_all` | a napping process becomes Ready wherever its stack is | the other wakers (UART, network, signal) -- irrelevant to `StackSafety`: each makes a Blocked process Ready and moves no stack | `bbf0e8d69dc2` |
@@ -132,8 +134,10 @@ modelcheck` requires each to fail:
 | `ChildExitStart` | `kernel_process_child_exit` | the same exit reserving the woken parent for this core at once, only when no core owns the parent's stack; `Commit` makes it current | affinity -- irrelevant to `StartsOnFreeStack`: it only forbids some starts, and the model already allows each one it forbids | `11cfcf76aa70` |
 | `IdleEnter` | `kernel_process_stack_idle_complete`, `kernel_process_stack_idle_blocked` | a core with no current process moves to its idle stack and releases the one it stood on | nothing | `dfe9912c0db0` |
 | `Wait4Reap` | `kernel_syscall_wait4_deliver` | the parent reaps once the child's stack is free | which process reaps (a deferred reap, an exiting parent's drain) -- guarded: `scheduled_process_exited_take` fail-stops with `reap-on-owned-stack` | `1ee2f13d18ee` |
-| `LeaveBegin` | `kernel_process_core0_leave_excluded`, `kernel_process_migrate_current`, `kernel_process_tick_leave_excluded` | a running process stops being its core's current process and stays Running | why it leaves (affinity, a refused syscall, the tick) -- irrelevant to `StackSafety`: the model lets a running process leave at any step, which covers every reason | `1c0ce3df5711` |
+| `LeaveBegin` | `kernel_process_core0_leave_excluded`, `kernel_process_migrate_current` | a running process stops being its core's current process and stays Running | why it leaves (affinity, a refused syscall, the tick) -- irrelevant to `StackSafety`: the model lets a running process leave at any step, which covers every reason | `2debf6d7809d` |
 | `LeaveComplete` | `kernel_process_stack_idle_yield` | on the idle stack, the process the core stood on is made Ready and its stack released | nothing | `ce19a54c76bf` |
+| `InterruptDepart` | `kernel_process_stack_interrupt_depart` | an interrupt from EL0 moves the core to its IRQ stack and releases the interrupted process's stack; the process stays current and Running, and `SwitchComplete` takes it back at the return | which interrupt it was -- irrelevant to `StackSafety`: every lower-EL IRQ enters through the same hook | `fa897c653001` |
+| `TickLeave` | `kernel_process_tick_leave_excluded` | inside that interrupt, a process that may no longer run here is made Ready, its stack already free, and the core idles | why it may not run here (its mask) -- irrelevant to `StackSafety`: the model lets it leave at any interrupt | `136bd8158a72` |
 
 Properties:
 

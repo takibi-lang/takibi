@@ -19,8 +19,10 @@
 //
 // Current limitations (2026-09-27):
 // - Only what the run lock serializes is ordered. A change made outside it
-//   is attributed to the next hold that notices, on whichever CPU that is,
-//   and marked unlocked; the checker decides what that means.
+//   is attributed to the next pass that notices, on whichever CPU that is:
+//   an acquire, marked unlocked, or the release of an unrelated hold,
+//   marked locked. The one such change the kernel makes is allocating a
+//   Constructing record, and the checker takes that in wherever it lands.
 // - The buffer holds PROTOCOL_TRACE_EVENTS changes, and the processes
 //   tracked are bounded by PROTOCOL_TRACE_PROCESSES. Anything beyond either
 //   is counted as lost and the checker refuses the window: a replay with a

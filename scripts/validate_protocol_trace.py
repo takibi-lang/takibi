@@ -29,6 +29,10 @@ What the replay leaves out, and why (the model's own "dropped" discipline):
 - which child a wait4 waits for, and who reaps a zombie: the trace carries
   no parent link. Irrelevant to StackSafety: neither moves a stack.
 - affinity: it only forbids steps, and the replay allows each one.
+- allocation: a record appearing Constructing is taken in wherever the
+  diff sees it, since the pool's lock, not the run lock, orders it.
+  Irrelevant to StackSafety: a Constructing record owns no stack and is
+  nobody's current process until CloneBegin.
 
 The kernel's state codes: 1 Ready, 2 Running, 3 Blocked, 4 Exited,
 5 Constructing; a Blocked process whose wait reason is 2 (ChildExit) is the
@@ -75,12 +79,13 @@ class World:
     current: dict     # core -> pid or None
     stands: dict      # core -> pid or IDLE
     reserved: dict    # core -> pid or None
+    interrupted: dict  # core -> inside an interrupt taken from EL0
     reap_pending: dict  # parent pid -> exited child pid
 
     def copy(self):
         return World(dict(self.state), dict(self.owner), dict(self.current),
                      dict(self.stands), dict(self.reserved),
-                     dict(self.reap_pending))
+                     dict(self.interrupted), dict(self.reap_pending))
 
 
 @dataclasses.dataclass
@@ -159,7 +164,7 @@ def parse(lines):
 def initial_world(hold, cores):
     if hold.sequence != 0 or hold.unlocked:
         raise TraceError("the window does not start with its snapshot")
-    world = World({}, {}, {}, {}, {}, {})
+    world = World({}, {}, {}, {}, {}, {}, {})
     for pid, (state, owner) in hold.processes.items():
         world.state[pid] = state
         world.owner[pid] = owner
@@ -168,6 +173,12 @@ def initial_world(hold, cores):
             raise TraceError(f"the snapshot has no line for core {core}")
         world.current[core], world.stands[core] = hold.cores[core]
         world.reserved[core] = None
+        # A core the window opens inside an EL0 interrupt: its current
+        # process runs and it stands on its IRQ stack.
+        current = world.current[core]
+        world.interrupted[core] = (
+            current is not None and world.stands[core] == IDLE
+            and world.state.get(current) == "Running")
     return world
 
 
@@ -190,6 +201,11 @@ def changed(world, hold):
 
 def settled(world, core, pid):
     return world.current[core] == pid and world.stands[core] == pid
+
+
+def departed(world, core, pid):
+    return (world.interrupted[core] and world.current[core] == pid
+            and world.stands[core] == IDLE and world.owner.get(pid) is None)
 
 
 def takeable(world, pid):
@@ -265,6 +281,7 @@ def switch_complete(world, hold, procs, cores):
     if outgoing != IDLE:
         after.owner[outgoing] = None
     after.stands[core] = incoming
+    after.interrupted[core] = False
     return after
 
 
@@ -329,8 +346,8 @@ def switch_away(world, hold, procs, cores):
         return None
     if world.reserved[core] != current:
         return f"reserved[c{core}] = {world.reserved[core]}, not {current}"
-    if not settled(world, core, pid):
-        return f"current[c{core}] # stands[c{core}]"
+    if not settled(world, core, pid) and not departed(world, core, pid):
+        return f"c{core} neither settled on {pid} nor inside an interrupt"
     if state == "Blocked" and pid in world.reap_pending:
         return f"{pid} has a wake pending"
     after = world.copy()
@@ -524,6 +541,51 @@ def leave_complete(world, hold, procs, cores):
     return after
 
 
+def interrupt_depart(world, hold, procs, cores):
+    one_core, one_proc = only(cores), only(procs)
+    if hold.gone or not one_core or not one_proc:
+        return None
+    core, (current, stands) = one_core
+    pid, (state, owner) = one_proc
+    if stands != IDLE or current != pid or world.current[core] != pid \
+            or state != world.state.get(pid) or owner is not None \
+            or world.stands[core] != pid:
+        return None
+    if state != "Running":
+        return f"state[{pid}] = {state}"
+    if world.reserved[core] is not None:
+        return f"reserved[c{core}] = {world.reserved[core]}"
+    if world.owner.get(pid) != core:
+        return f"owner[{pid}] = {world.owner.get(pid)}, not c{core}"
+    after = world.copy()
+    after.owner[pid] = None
+    after.stands[core] = IDLE
+    after.interrupted[core] = True
+    return after
+
+
+def tick_leave(world, hold, procs, cores):
+    one_core, one_proc = only(cores), only(procs)
+    if hold.gone or not one_core or not one_proc:
+        return None
+    core, (current, stands) = one_core
+    pid, (state, owner) = one_proc
+    if current is not None or stands != world.stands[core] \
+            or world.current[core] != pid or state != "Ready" \
+            or owner != world.owner.get(pid) \
+            or world.state.get(pid) != "Running":
+        return None
+    if not departed(world, core, pid):
+        return f"c{core} is not inside an interrupt, off {pid}'s stack"
+    if world.reserved[core] is not None:
+        return f"reserved[c{core}] = {world.reserved[core]}"
+    after = world.copy()
+    after.state[pid] = "Ready"
+    after.current[core] = None
+    after.interrupted[core] = False
+    return after
+
+
 ACTIONS = {
     "CloneBegin": clone_begin,
     "CloneFinish": clone_finish,
@@ -540,6 +602,8 @@ ACTIONS = {
     "Wait4Reap": wait4_reap,
     "LeaveBegin": leave_begin,
     "LeaveComplete": leave_complete,
+    "InterruptDepart": interrupt_depart,
+    "TickLeave": tick_leave,
 }
 
 
@@ -586,20 +650,28 @@ def invariants(world):
     return None
 
 
+def absorb_allocations(world, hold):
+    """Take in the records that appeared Constructing, and drop them.
+
+    Allocation inserts a record under the pool's lock, not the run lock,
+    so the diff sees it at whichever hold comes next -- an acquire, or the
+    release of an unrelated hold on another CPU. It is not a model step:
+    the model's child exists, Constructing, from the start.
+    """
+    for pid, (state, owner) in list(hold.processes.items()):
+        if pid not in world.state and state == "Constructing" \
+                and owner is None:
+            world.state[pid] = state
+            world.owner[pid] = owner
+            del hold.processes[pid]
+
+
 def unlocked_errors(world, hold):
     """What changed with no lock held; only allocation may."""
     procs, cores = changed(world, hold)
     errors = []
     for pid, (state, owner) in procs.items():
-        known = world.state.get(pid)
-        if known is None and state == "Constructing" and owner is None:
-            world.state[pid] = state
-            world.owner[pid] = owner
-        elif known == state and world.owner.get(pid) == owner:
-            pass
-        else:
-            errors.append(f"{pid} changed to {state}/{owner} with no lock "
-                          "held")
+        errors.append(f"{pid} changed to {state}/{owner} with no lock held")
     if cores or hold.gone:
         errors.append("a core or the pool changed with no lock held")
     return errors
@@ -615,6 +687,7 @@ def replay(cores, holds, without=None):
         return [f"sequence 0: the snapshot already violates {why}"], counts
     for hold in holds[1:]:
         where = f"sequence {hold.sequence} (cpu {hold.cpu})"
+        absorb_allocations(world, hold)
         if hold.unlocked:
             errors += [f"{where}: {e}" for e in unlocked_errors(world, hold)]
             continue
