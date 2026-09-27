@@ -23,16 +23,21 @@ step, landed as its own commit.
 
 ### Territory A: the multicore route, in this order
 
+**A red allcheck comes first (maintainer, 2026-09-27).** A failing `make
+allcheck` stops every other piece of work, and Territory B is busy, so the
+lane that meets such a failure analyses and fixes it, whatever territory
+its cause lies in. The goal is to drive the probability of an allcheck
+failure toward zero step by step. Held by A under this rule now: #620 (the
+QEMU network peer's fixed 90 s budget, replaced by per-phase no-progress
+timeouts) and the analysis of #604 when it next recurs.
+
 1. **True multicore support**: every online core runs ordinary processes,
    any core can issue any syscall, and a process can continue on another
-   core. First, so the models can be trusted to lead the next changes:
-   #616 (every path a model drops is covered elsewhere, checked) and #617
-   (a changed function a model abstracts forces a review of its row), then
-   #606 stage 1 (the kernel's lock-ordered protocol events replayed against
-   StackOwnership.tla on every lane run, so a path the model lacks fails a
-   passing run rather than waiting for a race). Then
-   #9, with its lifecycle split in order: #610 (execve), #611 (clone, fork,
-   vfork), each with its model action written before the code. #556 is off
+   core. The models now lead the changes: every path a model drops is
+   justified and every row carries a review stamp, and a window of real
+   steps is replayed against StackOwnership.tla on every kernel lane. Next
+   in #9's lifecycle split: #611 (clone, fork, vfork), with its model
+   action written before the code. #556 is off
    the route: it waits for the next preserved failure of the oops lane, and
    until then there is nothing to work on.
    The TLA+ models under `kernel/models/` (plain TLA+ with Apalache types)
