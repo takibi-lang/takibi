@@ -271,15 +271,15 @@ confirmed reset allows recovery; an unobserved timeout does not. The unfixed
 variant permits recovery on timeout and reaches a CPU access while the device
 may still write.
 
-| Action | Kernel function it abstracts | What is kept, what is dropped |
-| --- | --- | --- |
-| `TakeCpu`, `PutCpu` | `stable_replace` at the driver's owner slot | one guarded exchange per action and unique token storage; lock implementation and buffer bytes are dropped |
-| `Submit` | `virtio_blk_submit`, `usb_bulk_xfer` | preparation and device submission hand off authority; descriptor layout and cache instructions are dropped |
-| `ObserveCompletion` | `virtio_blk_submit`, `usb_bulk_xfer` | an observed completion, including completed error, stops writes to the request buffer; completion codes are dropped |
-| `Timeout` | `virtio_blk_submit`, `usb_bulk_xfer` | a missing completion leaves device activity possible; timer arithmetic is dropped |
-| `ConfirmReset` | `virtio_blk_reset`, `xhci_halt_and_reset` | successful reset confirmation ends device writes; a failed reset does not enable this action |
-| `Finish` | `virtio_blk_submit`, `usb_bulk_xfer` | RX finish returns CPU authority only after completion or reset; the unfixed variant also permits timeout |
-| `CpuAccess` | `virtio_blk_submit`, `usb_bulk_xfer` | one ordinary CPU read or write through the protected allocation; alias syntax and compiler provenance are dropped |
+| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
+| --- | --- | --- | --- | --- |
+| `TakeCpu`, `PutCpu` | the guarded owner exchange in `virtio_blk_submit`, `usb_bulk_xfer` | one serialized slot exchange and unique token storage | lock instructions -- irrelevant to `UniqueAuthority`: the action assumes the exchange is serialized, which the driver lock must establish; buffer bytes -- irrelevant to `UniqueAuthority`: they hold no authority | `d921fd03d25e` |
+| `Submit` | `virtio_blk_submit`, `usb_bulk_xfer` | preparation and submission transfer authority to the device | descriptor layout and cache instructions -- irrelevant to `UniqueAuthority`: neither can create another token | `d921fd03d25e` |
+| `ObserveCompletion` | `virtio_blk_submit`, `usb_bulk_xfer` | an observed final completion, including a completed error, ends writes to the request buffer | completion code values -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: every final completion ends device writes to this request buffer | `d921fd03d25e` |
+| `Timeout` | `virtio_blk_submit`, `usb_bulk_xfer` | a missing completion leaves device activity possible | timer arithmetic -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: elapsed time alone does not end device writes | `d921fd03d25e` |
+| `ConfirmReset` | `virtio_blk_reset`, `xhci_halt_and_reset` | confirmed reset ends device writes | failed reset handling -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: failure cannot enable this action or return CPU authority | `6e15cb3ae484` |
+| `Finish` | `virtio_blk_submit`, `usb_bulk_xfer` | RX finish returns CPU authority after completion or reset; the unfixed variant also permits timeout | cache instructions -- irrelevant to `UniqueAuthority`: they do not create a token | `d921fd03d25e` |
+| `CpuAccess` | `virtio_blk_submit`, `usb_bulk_xfer` | one CPU read or write through the protected allocation, permitted only with CPU authority | alias syntax and provenance -- irrelevant to `UniqueAuthority`: they cannot create another token, while their access safety requires the separate compiler checks | `d921fd03d25e` |
 
 `UniqueAuthority` checks that the only token is either in the slot or held by
 the request. `NoCpuAccessWhileDeviceMayWrite` checks the DMA safety property.
