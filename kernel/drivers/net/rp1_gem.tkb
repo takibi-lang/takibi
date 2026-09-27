@@ -46,8 +46,8 @@ fn net_rx_validated(slot: {0..<1 as usize} @ desc,
     return frame;
 }
 
-let mut gem_rx_desc: [u32; 16] align(64);
-let mut gem_tx_desc: [u32; 16] align(64);
+private let mut gem_rx_desc: [u32; 16] align(64);
+private let mut gem_tx_desc: [u32; 16] align(64);
 let mut gem_rx_buf: [u8; 2048] align(64);
 let mut gem_tx_buf: [u8; 1536] align(64);
 private let mut net_init_once: InitOnce;
@@ -272,11 +272,11 @@ fn net_init() -> NetInitResult !{unsafe} {
 }
 
 // DDB sees a completed hardware-owned descriptor without acquiring or
-// returning the RX capability. The DMA finish operation makes the live
-// descriptor word safe to inspect from the stopped-world snapshot.
+// returning the RX capability. Refreshing the live descriptor permits a
+// completion check without acquiring the separate RX data buffer.
 fn kernel_net_rx_frame_pending() -> NetPendingState {
     if (rp1_gem_net_ready == false) { return NetPendingState::No; }
-    dma_finish_rx(gem_rx_desc, 64);
+    dma_refresh_live(gem_rx_desc);
     if ((gem_rx_desc[0] & 1) != 0) { return NetPendingState::Yes; }
     return NetPendingState::No;
 }
@@ -294,7 +294,7 @@ fn gem_irq_handler() !{interrupt} {
 }
 
 fn net_rx_wait() !{may_block} {
-    dma_finish_rx(gem_rx_desc, 64);
+    dma_refresh_live(gem_rx_desc);
     if ((gem_rx_desc[0] & 1) != 0) { return; }
     // GitHub issue #187: wakes on a real GEM RX interrupt, or on
     // kernel/platform/rpi5/timer_irq.tkb's periodic ~15ms tick if nothing
@@ -305,7 +305,7 @@ fn net_rx_wait() !{may_block} {
 }
 
 fn net_rx_acquire(ready: sink NetRxCanAcquire) -> NetRxAcquire {
-    dma_finish_rx(gem_rx_desc, 64);
+    dma_refresh_live(gem_rx_desc);
     if ((gem_rx_desc[0] & 1) == 0) {
         return NetRxAcquire::None(view NetRxCanAcquire);
     }
@@ -383,7 +383,7 @@ fn net_tx_complete(in_flight: sink NetTxInFlight[desc]) -> NetRxCanAcquire !{may
     // rather than a real deadline -- TX completion is not expected to
     // ever genuinely take this long.
     for i: i32 in 0..<1000 {
-        dma_finish_rx(gem_tx_desc, 64);
+        dma_refresh_live(gem_tx_desc);
         if (in_flight.slot == 0 && (gem_tx_desc[1] & (1 << 31)) != 0) { break; }
         if (in_flight.slot == 1 && (gem_tx_desc[5] & (1 << 31)) != 0) { break; }
         workload_profile_interrupt_wait();
@@ -429,7 +429,7 @@ fn net_transmit_ready(ready: sink NetRxCanAcquire,
     // waits via interrupt_wait() (real TCOMP interrupt or the periodic
     // timer tick) instead of a tight CPU spin, bounded the same way.
     for i: i32 in 0..<1000 {
-        dma_finish_rx(gem_tx_desc, 64);
+        dma_refresh_live(gem_tx_desc);
         if (slot == 0 && (gem_tx_desc[1] & (1 << 31)) != 0) { break; }
         if (slot == 1 && (gem_tx_desc[5] & (1 << 31)) != 0) { break; }
         workload_profile_interrupt_wait();

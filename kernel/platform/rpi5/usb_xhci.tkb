@@ -91,7 +91,7 @@ let mut xhci_scratchpad_array: [u32; 2 * 2] align(64);
 let mut xhci_scratchpad_buf0: [u8; 4096] align(4096);
 let mut xhci_scratchpad_buf1: [u8; 4096] align(4096);
 let mut xhci_cmd_ring: [Trb; CMD_RING_TRBS] align(64);
-let mut xhci_evt_ring: [Trb; EVT_RING_TRBS] align(64);
+private let mut xhci_evt_ring: [Trb; EVT_RING_TRBS] align(64);
 let mut xhci_erst: [u32; 4] align(64);
 let mut xhci_input_ctx: [u32; INPUT_CTX_SIZE / 4] align(64);
 let mut xhci_device_ctx: [u32; DEVICE_CTX_SIZE / 4] align(64);
@@ -400,7 +400,7 @@ fn usb_await_event(want_type: u32, timeout_ms: usize) -> u32 !{unsafe} {
         // rather than literal milliseconds but a permanently wedged device
         // eventually returns 0 instead of sleeping forever.
         for i: usize in 0..<timeout_ms {
-            dma_finish_rx(xhci_evt_ring, EVT_RING_TRBS * 16);
+            dma_refresh_live(xhci_evt_ring);
             let d3: u32 = evt_ring[xhci_evt_idx as isize].dw3;
             if ((d3 & 1) == xhci_evt_cycle) {
                 seen = true;
