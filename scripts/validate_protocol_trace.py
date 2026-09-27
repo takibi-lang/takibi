@@ -57,15 +57,22 @@ STATES = {1: "Ready", 2: "Running", 3: "Blocked", 4: "Exited",
           5: "Constructing"}
 WAIT_CHILD_EXIT = 2
 
-# What /bin/protocol-trace is written to make the kernel do, one entry per
-# step it takes. Where timing decides which of two actions a step is, the
-# entry names both and either one counts: the napping child blocks with its
-# parent as the successor (SwitchAway) unless another core took the parent
-# first, when it blocks with none (Nap) -- an allcheck debug lane saw the
-# second. An action in the model and not here may legitimately not happen.
+# What /bin/protocol-trace makes the kernel do on every run, whatever the
+# timing, one entry per step; where timing decides which of two actions the
+# step is, the entry names both and either counts. The clone, the moves
+# between CPUs that pinning forces, the child's exit and the reap happen
+# every time.
+#
+# What does not is left out on purpose, after allcheck runs showed each
+# missing: the child's 100 ms nap can find its deadline already past on a
+# host that stalled the vCPU, so it never blocks (no Nap, SwitchAway or
+# Wake), and then the parent may reach wait4 after the exit and never block
+# either (no Wait4Block, and ChildExit rather than ChildExitStart). Those
+# are still replayed and counted when they happen; a run without them is
+# not a failure. An action in the model and not here may legitimately not
+# happen.
 REQUIRED = (("CloneBegin",), ("CloneFinish",), ("SwitchComplete",),
-            ("Reserve",), ("Commit",), ("SwitchAway", "Nap"),
-            ("Wait4Block",), ("Wake",), ("ChildExit",), ("ChildExitStart",),
+            ("Reserve",), ("Commit",), ("ChildExit", "ChildExitStart"),
             ("IdleEnter",), ("Wait4Reap",), ("LeaveBegin",),
             ("LeaveComplete",))
 
