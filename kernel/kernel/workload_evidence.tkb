@@ -826,6 +826,18 @@ private fn workload_busy_record_progress_locked(
                     workload_busy_pair.peer_exit_cpu = cpu_id();
                     return WorkloadBusyProgressResult::Value(2);
                 }
+                // GitHub issue #604: the armed process was on a peer when
+                // it was armed, and nothing kept it there. Its mask was
+                // wide, core 0 took it, and it went on reporting from core 0
+                // -- never told to exit, since that answer waits for a peer,
+                // and never told to move, since no other answer is given
+                // here. init waited for a child that would not die, and the
+                // boot stopped after `busy pair migrated`. Send it back.
+                if (workload_busy_pair.peer_exit_pid ==
+                        kernel_process_current_pid()) {
+                    return WorkloadBusyProgressResult::Value(
+                        WORKLOAD_BUSY_ANSWER_PIN_CPU1);
+                }
                 return WorkloadBusyProgressResult::Value(0);
             }
             if (tag == workload_busy_pair.peer_exit_tag) {
