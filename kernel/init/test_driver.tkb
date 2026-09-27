@@ -1050,6 +1050,7 @@ fn kernel_test_common_probes() {
     }
     if (kernel_syscall_subset_probe()) {
         kernel_boot_log("syscall subset: mmap prot+fd reject, clone invalid=EINVAL/exhausted=EAGAIN, sigaction signum+oldact ok\n");
+        kernel_boot_log("syscall subset: vectored inetd split+partial+short+wait ok\n");
     } else {
         kernel_boot_log("syscall subset: failed\n");
     }
@@ -1368,11 +1369,10 @@ irq_uart_rx_unmask();
     // -- shell_read's own ppoll()-based UART wait needs them
     // already active, not re-armed here; only the ring itself is
     // reset again, to clear whatever shell_read left behind.
-    // GitHub issue #180: index 1 is the middle of the EL0
-    // fixture's 3 write()s (0 = 19-byte header, 1 = 1460-byte
-    // body, 2 = final byte) -- a genuine drop within the large
-    // response, not a bookend.
-    kernel_tcp_inject_drop_data_segment(1);
+    // GitHub issue #180: drop the large body, after writev's two header
+    // segments (indices 0 and 1). Index 2 is the 1460-byte body; the final
+    // byte is index 3. Keep the genuine body drop as the vector shape changes.
+    kernel_tcp_inject_drop_data_segment(2);
     kernel_tcp_inject_drop_next_fin();
     kernel_uart_rx_ring_reset();
     kernel_process_execution_reset();

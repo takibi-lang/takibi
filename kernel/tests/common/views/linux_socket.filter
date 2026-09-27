@@ -1,1 +1,1 @@
-^(linux socket syscalls:|userspace socket partial write:)
+^(linux socket syscalls:|userspace socket partial write:|userspace socket vectored io:)

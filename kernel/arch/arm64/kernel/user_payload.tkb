@@ -314,14 +314,42 @@ fn initial_user_payload() {
     // regression here is caught at compile time instead of as a runtime
     // hang; stack locals are always safe since they live in this process's
     // private, writable stack mapping.
-    let mut user_payload_rx_buf: [u8; 8];
+    let mut user_payload_rx_buf: [u8; 16];
     let rx_base: *u8 = user_payload_rx_buf as *u8;
 
+    // Three iovecs include an empty entry between two real segments.
+    let mut io_vectors: [u8; 48];
+    let vectors_base: *u8 = io_vectors as *u8;
+    payload_write_u64(vectors_base, 0, ptr_of(rx_base, 0));
+    payload_write_u64(vectors_base, 8, 3);
+    payload_write_u64(vectors_base, 16, 0);
+    payload_write_u64(vectors_base, 24, 0);
+    payload_write_u64(vectors_base, 32, ptr_of(rx_base, 3));
+    payload_write_u64(vectors_base, 40, 5);
+    fail_if(svc5(65, 5, ptr_of(vectors_base, 0), 3, 0, 0) != 8);
+    // A short first segment must return without touching the invalid next
+    // segment or waiting for another packet on this connection.
+    payload_write_u64(vectors_base, 8, 16);
+    payload_write_u64(vectors_base, 16, 0);
+    payload_write_u64(vectors_base, 24, 1);
+    fail_if(svc5(65, 6, ptr_of(vectors_base, 0), 2, 0, 0) != 8);
+    // The physical peer fixture expects connection B's reply in one packet.
+    // Empty neighbors still exercise writev without changing that wire shape.
+    payload_write_u64(vectors_base, 0, 0);
+    payload_write_u64(vectors_base, 8, 0);
+    payload_write_u64(vectors_base, 16, connection_b_response as *u8 as usize);
+    payload_write_u64(vectors_base, 24, connection_b_response.len);
+    payload_write_u64(vectors_base, 32, 0);
+    payload_write_u64(vectors_base, 40, 0);
+    fail_if(svc5(66, 6, ptr_of(vectors_base, 0), 3, 0, 0) != 8);
     fail_if(svc5(63, 5, ptr_of(rx_base, 0), 8, 0, 0) != 8);
-    fail_if(svc5(63, 6, ptr_of(rx_base, 0), 8, 0, 0) != 8);
-    fail_if(svc5(64, 6, (connection_b_response as *u8) as usize, connection_b_response.len, 0, 0) != 8);
-    fail_if(svc5(63, 5, ptr_of(rx_base, 0), 8, 0, 0) != 8);
-    fail_if(svc5(64, 5, (socket_response as *u8) as usize, socket_response.len, 0, 0) != 19);
+    // Connection A's peer collects a byte stream, so split its header into
+    // two real TCP writev segments and retain the exact response content.
+    payload_write_u64(vectors_base, 0, socket_response as *u8 as usize);
+    payload_write_u64(vectors_base, 8, 9);
+    payload_write_u64(vectors_base, 16, ptr_of(socket_response as *u8, 9));
+    payload_write_u64(vectors_base, 24, 10);
+    fail_if(svc5(66, 5, ptr_of(vectors_base, 0), 2, 0, 0) != 19);
 
     // Same reasoning as user_payload_rx_buf above: must be a stack local.
     let mut user_payload_large_buf: [u8; LARGE_LEN];
@@ -329,10 +357,15 @@ fn initial_user_payload() {
         user_payload_large_buf[i] = 0x5a;
     }
     let large_base: *u8 = user_payload_large_buf as *u8;
-    fail_if(svc5(64, 5, ptr_of(large_base, 0), LARGE_LEN, 0, 0) != 1460);
+    // A partial TCP segment ends writev before the following sentinel.
+    payload_write_u64(vectors_base, 0, ptr_of(large_base, 0));
+    payload_write_u64(vectors_base, 8, LARGE_LEN);
+    payload_write_u64(vectors_base, 16, connection_b_response as *u8 as usize);
+    payload_write_u64(vectors_base, 24, 1);
+    fail_if(svc5(66, 5, ptr_of(vectors_base, 0), 2, 0, 0) != 1460);
     fail_if(svc5(64, 5, ptr_of(large_base, 1460), 1, 0, 0) != 1);
     let socket_write_success: []u8 =
-        bs"userspace socket partial write: 1460+1 ok\n";
+        bs"userspace socket partial write: 1460+1 ok\nuserspace socket vectored io: split, empty, short ok\n";
     fail_if(svc5(64, 1, (socket_write_success as *u8) as usize,
                  socket_write_success.len, 0, 0) !=
             socket_write_success.len);

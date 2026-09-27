@@ -1457,8 +1457,8 @@ fn kernel_syscall_socket_evidence() -> bool !{unsafe} {
            kernel_connected_fd_is_open(5) == false &&
            kernel_connected_fd_is_open(6) == false &&
            syscall_test_evidence_connected_close_calls() == 2 &&
-           syscall_test_evidence_connected_read_calls() == 3 &&
-           syscall_test_evidence_connected_write_calls() == 4 &&
+           syscall_test_evidence_connected_read_calls() == 4 &&
+           syscall_test_evidence_connected_write_calls() == 5 &&
            syscall_test_evidence_socket_close_calls() == 1 &&
            kernel_listener_state(4) == UnifiedListenerState::Closed;
     syscall_test_evidence_finish_socket_fixture();
@@ -1607,7 +1607,35 @@ fn kernel_syscall_leaf_is_dot_dot(leaf: []u8) -> bool {
 // huge as unsigned usize, which would work, but a discriminated variant
 // makes the distinction a type-level fact instead of a convention every
 // call site has to remember).
-must_use variant WriteSegmentResult { Errno(usize); Written(usize); WouldBlock; }
+must_use variant SyscallIoResult {
+    Errno(usize);
+    Transferred(usize);
+    NetWait;
+    UartWait;
+    InterruptWait;
+    TerminalWait;
+}
+
+// Install a wait only when the syscall has transferred no bytes. A vectored
+// call with a completed prefix returns that prefix instead of replaying it.
+fn syscall_io_action(result: SyscallIoResult) -> SyscallAction {
+    match result {
+        SyscallIoResult::Errno(errno) => { return SyscallAction::Resume(errno); }
+        SyscallIoResult::Transferred(count) => { return SyscallAction::Resume(count); }
+        SyscallIoResult::NetWait => {
+            kernel_process_current_set_pending_block(ProcessWaitReason::NetRx, 0);
+            return SyscallAction::Block;
+        }
+        SyscallIoResult::UartWait => {
+            let process_slot: usize = kernel_syscall_process_slot();
+            scheduled_process_set_uart_block_delivery(process_slot, UartBlockDelivery::Read);
+            kernel_process_current_set_pending_block(ProcessWaitReason::UartRx, 0);
+            return SyscallAction::Block;
+        }
+        SyscallIoResult::InterruptWait => { return SyscallAction::WaitInterrupt; }
+        SyscallIoResult::TerminalWait => { return syscall_terminal_write_wait(); }
+    }
+}
 
 // GitHub issue #544: a userspace write to the UART terminal, in chunks. Each
 // chunk is one bounded copy from user memory into the syscall scratch buffer,
@@ -1683,90 +1711,427 @@ fn syscall_terminal_write_wait() -> SyscallAction {
     }
     return SyscallAction::WaitInterrupt;
 }
-must_use variant ReadSegmentResult { Errno(usize); Read(usize); }
 
-// Single-segment write, fd 1/2 (raw UART) only. Deliberately NOT shared
-// with write(64)'s own handler below (which also supports connected TCP
-// fds, descriptor duplication, and ext2 files) -- extracting
-// that already-proven-working, TCP-timing-sensitive code into a shared
-// helper was judged more regression risk than this issue's actual
-// traced scenarios (uname -a's writev to stdout) need. Broadening
-// writev/readv to the other fd kinds is natural follow-up work, not
-// done here.
-fn syscall_writev_segment(fd: usize, address: usize, length: usize)
-        -> WriteSegmentResult {
-    if (kernel_syscall_terminal_is_open(fd) == false) {
-        return WriteSegmentResult::Errno(LINUX_EBADF);
-    }
-    match syscall_terminal_write(address, length) {
-        TerminalWriteResult::Errno(errno) => {
-            return WriteSegmentResult::Errno(errno);
+// Shared scalar and vectored fd operation; byte counts and errors stay distinct.
+fn syscall_write_segment(fd: usize, address: usize, length: usize)
+        -> SyscallIoResult !{unsafe} {
+        if (kernel_connected_fd_is_open(fd) &&
+            (fd != 1 || kernel_syscall_inetd_mode() == false)) {
+            syscall_test_evidence_record_connected_write();
+            if (kernel_connected_fd_is_open(fd) == false) {
+                return SyscallIoResult::Errno(LINUX_EBADF);
+            }
+            let write_slot: usize =
+                match kernel_connection_fd_lookup(fd) {
+                    KernelConnectionLookupResult::Missing => {
+                        return SyscallIoResult::Errno(LINUX_EBADF);
+                    }
+                    KernelConnectionLookupResult::Found(found) => { found }
+                };
+            let write_generation: usize = kernel_connection_fd_identity(fd);
+            if (length == 0) {
+                return SyscallIoResult::Errno(LINUX_EINVAL);
+            }
+            let mut amount: usize = length;
+            if (amount > 1460) { amount = 1460; }
+            // GitHub issue #581: the open check and the received-length
+            // snapshot are taken under the connection's owner, not before
+            // it, so a peer's write cannot act on a state the owning core
+            // is changing.
+            match tcp_connection_take(write_slot, write_generation) {
+                TcpConnectionTakeResult::Missing => {
+                    return SyscallIoResult::Errno(LINUX_EINVAL);
+                }
+                TcpConnectionTakeResult::Ready(owner) => {
+                  if (tcp_connection_of(owner).connection_open == false) {
+                      tcp_connection_put(owner);
+                      return SyscallIoResult::Errno(LINUX_EINVAL);
+                  }
+                  let received_length: usize =
+                      tcp_connection_of(owner).socket_buffer_length;
+                  match network_capability_take() {
+                    NetworkCapabilityTakeResult::Empty => {
+                        tcp_connection_put(owner);
+                        return SyscallIoResult::NetWait;
+                    }
+                    NetworkCapabilityTakeResult::Ready(ready) => {
+                    let socket_buffers = tcp_connection_rx_slice(tcp_connection_payload(write_slot));
+                    let destination_base: *u8 = socket_buffers as *u8;
+                    match user_range_check_read(kernel_process_current_root(), address, amount) {
+                        UserReadRangeResult::Fault => {
+                            tcp_connection_put(owner);
+                            match network_capability_put(ready) {
+                                NetworkCapabilityPutResult::Stored => {}
+                                NetworkCapabilityPutResult::Conflict => {}
+                            }
+                            return SyscallIoResult::Errno(LINUX_EFAULT);
+                        }
+                        UserReadRangeResult::Ok(range) => {
+                            let copied: bool = copy_from_user_raw(
+                                range, destination_base, amount);
+                        }
+                    }
+                    match kernel_tcp_send_received(
+                            owner, ready,
+                            socket_buffers[0..<1460],
+                            received_length, amount) {
+                        KernelTcpSendResult::Invalid(after_invalid) => {
+                            match network_capability_put(after_invalid) {
+                                NetworkCapabilityPutResult::Stored => {
+                                    tcp_connection_put(owner);
+                                    return SyscallIoResult::Errno(LINUX_EINVAL);
+                                }
+                                NetworkCapabilityPutResult::Conflict => {
+                                    tcp_connection_free(owner);
+                                    return SyscallIoResult::Errno(LINUX_EINVAL);
+                                }
+                            }
+                        }
+                        KernelTcpSendResult::Sent(after_send) => {
+                            match network_capability_put(after_send) {
+                                NetworkCapabilityPutResult::Conflict => {
+                                    tcp_connection_free(owner);
+                                    return SyscallIoResult::Errno(LINUX_EINVAL);
+                                }
+                                NetworkCapabilityPutResult::Stored => {
+                                    tcp_connection_put(owner);
+                                    workload_peer_socket_served(true);
+                                    return SyscallIoResult::Transferred(amount);
+                                }
+                            }
+                        }
+                    }
+                    }
+                  }
+                }
+            }
         }
-        TerminalWriteResult::Written(count) => {
-            return WriteSegmentResult::Written(count);
+        if (fd == 1 && kernel_syscall_inetd_mode()) {
+            let inetd_write_slot: usize =
+                match kernel_connection_fd_lookup(fd) {
+                    KernelConnectionLookupResult::Missing => {
+                        return SyscallIoResult::Errno(LINUX_EBADF);
+                    }
+                    KernelConnectionLookupResult::Found(found) => { found }
+                };
+            let inetd_write_generation: usize = kernel_connection_fd_identity(fd);
+            // GitHub issue #581: the response buffer and its length are the
+            // connection's, so they are appended to under its owner.
+            match tcp_connection_take(inetd_write_slot, inetd_write_generation) {
+                TcpConnectionTakeResult::Missing => {
+                    return SyscallIoResult::Errno(LINUX_EINVAL);
+                }
+                TcpConnectionTakeResult::Ready(owner) => {
+                    let conn: *TcpConnection = tcp_connection_of(owner);
+                    if (conn.connection_open == false ||
+                        length > 1460 - conn.inetd_response_length) {
+                        tcp_connection_put(owner);
+                        return SyscallIoResult::Errno(LINUX_EINVAL);
+                    }
+                    let response_base: *u8 =
+                        (tcp_connection_inetd_slice(conn) as *u8) +
+                        (conn.inetd_response_length as isize);
+                    match user_range_check_read(kernel_process_current_root(), address, length) {
+                        UserReadRangeResult::Fault => {
+                            tcp_connection_put(owner);
+                            return SyscallIoResult::Errno(LINUX_EFAULT);
+                        }
+                        UserReadRangeResult::Ok(range) => {
+                            let copied: bool =
+                                copy_from_user_raw(range, response_base, length);
+                        }
+                    }
+                    conn.inetd_response_length = conn.inetd_response_length + length;
+                    tcp_connection_put(owner);
+                    return SyscallIoResult::Transferred(length);
+                }
+            }
         }
-        TerminalWriteResult::WouldBlock => {
-            return WriteSegmentResult::WouldBlock;
+        if (kernel_syscall_file_is_open(fd)) {
+            if (kernel_syscall_file_writable(fd) == false) {
+                return SyscallIoResult::Errno(LINUX_EBADF);
+            }
+            if (length == 0 || length > KERNEL_BLOCK_SIZE) {
+                return SyscallIoResult::Errno(LINUX_EINVAL);
+            }
+            let destination_base: *u8 = syscall_scratch_here().file_buffer as *u8;
+            match user_range_check_read(kernel_process_current_root(), address, length) {
+                UserReadRangeResult::Fault => { return SyscallIoResult::Errno(LINUX_EFAULT); }
+                UserReadRangeResult::Ok(range) => {
+                    let copied: bool =
+                        copy_from_user_raw(range, destination_base, length);
+                }
+            }
+            let content_buffer = syscall_scratch_here().file_buffer as []u8;
+            if (length > content_buffer.len) {
+                return SyscallIoResult::Errno(LINUX_EINVAL);
+            }
+            let content = content_buffer[0..<length];
+            let answer: usize = syscall_ext2_write_locked(fd, content);
+            if (answer != 0) { return SyscallIoResult::Errno(answer); }
+            workload_peer_mutation_note(8);
+            return SyscallIoResult::Transferred(length);
         }
-    }
+        if (kernel_syscall_terminal_is_open(fd) == false) {
+            return SyscallIoResult::Errno(LINUX_EBADF);
+        }
+        match syscall_terminal_write(address, length) {
+            TerminalWriteResult::Errno(errno) => {
+                return SyscallIoResult::Errno(errno);
+            }
+            TerminalWriteResult::Written(count) => {
+                return SyscallIoResult::Transferred(count);
+            }
+            TerminalWriteResult::WouldBlock => {
+                return SyscallIoResult::TerminalWait;
+            }
+        }
 }
 
-// Single-segment read from any open ext2 file descriptor.
-fn syscall_readv_segment(fd: usize, address: usize, length: usize)
-        -> ReadSegmentResult !{unsafe} {
-    if (kernel_syscall_file_is_open(fd) == false ||
-            kernel_syscall_file_readable(fd) == false) {
-        return ReadSegmentResult::Errno(LINUX_EBADF);
-    }
-    let mut copied: usize = 0;
-    while (copied < length) {
-        let mut chunk_limit: usize = length - copied;
-        if (chunk_limit > KERNEL_BLOCK_SIZE) {
-            chunk_limit = KERNEL_BLOCK_SIZE;
-        }
-        let staging_buffer = syscall_scratch_here().file_buffer as []u8;
-        if (chunk_limit > staging_buffer.len) {
-            return ReadSegmentResult::Errno(LINUX_EINVAL);
-        }
-        let staging = staging_buffer[0..<chunk_limit];
-        match ext2_read_file_chunk(
-                syscall_ext2_mount, kernel_syscall_file_inode(fd),
-                kernel_syscall_file_offset(fd),
-                staging) {
-            Ext2ReadResult::Invalid => {
-                if (copied != 0) { return ReadSegmentResult::Read(copied); }
-                return ReadSegmentResult::Errno(LINUX_EINVAL);
-            }
-            Ext2ReadResult::Read(chunk) => {
-                if (chunk == 0) { break; }
-                let target_address: usize = match checked_add_usize(address, copied) {
-                    CheckedUsize::Overflow => {
-                        if (copied != 0) { return ReadSegmentResult::Read(copied); }
-                        return ReadSegmentResult::Errno(LINUX_EFAULT);
+// Shared scalar and vectored fd operation; byte counts and errors stay distinct.
+fn syscall_read_segment(fd: usize, address: usize, requested: usize)
+        -> SyscallIoResult !{unsafe} {
+        if (kernel_connected_fd_is_open(fd)) {
+            let read_slot: usize =
+                match kernel_connection_fd_lookup(fd) {
+                    KernelConnectionLookupResult::Missing => {
+                        return SyscallIoResult::Errno(LINUX_EBADF);
                     }
-                    CheckedUsize::Value(value) => { value }
+                    KernelConnectionLookupResult::Found(found) => { found }
                 };
-                match user_range_check_write(kernel_process_current_root(),
-                                       target_address, chunk) {
-                    UserWriteRangeResult::Fault => {
-                        if (copied != 0) { return ReadSegmentResult::Read(copied); }
-                        return ReadSegmentResult::Errno(LINUX_EFAULT);
-                    }
-                    UserWriteRangeResult::Ok(range) => {
-                        let copied_chunk: bool = copy_to_user_raw(
-                            range, syscall_scratch_here().file_buffer as *u8, chunk);
+            let read_generation: usize = kernel_connection_fd_identity(fd);
+            // GitHub issue #581: every connection field below is read and
+            // written under the connection's owner. A peer may make this
+            // call, so an open check or a buffered-copy cursor update taken
+            // before the owner would race the core that holds it.
+            match tcp_connection_take(read_slot, read_generation) {
+              TcpConnectionTakeResult::Missing => {
+                return SyscallIoResult::Errno(LINUX_EBADF);
+              }
+              TcpConnectionTakeResult::Ready(owner) => {
+               let conn: *TcpConnection = tcp_connection_of(owner);
+               if (conn.connection_open == false) {
+                   tcp_connection_put(owner);
+                   return SyscallIoResult::Errno(LINUX_EBADF);
+               }
+               if (requested == 0) {
+                   tcp_connection_put(owner);
+                   return SyscallIoResult::Errno(LINUX_EBADF);
+               }
+               // A NetRx wake retries this same EL0 read syscall. Keep the
+               // evidence count and timeout window attached to that logical
+               // read rather than counting each handler re-entry as a new
+               // userspace operation.
+               if (conn.receive_waiting == false) {
+                   syscall_test_evidence_record_connected_read();
+                   conn.receive_started_at = read_cntpct();
+                   conn.receive_waiting = true;
+               }
+               if (conn.socket_buffer_offset < conn.socket_buffer_length) {
+                   conn.receive_waiting = false;
+                   let available: usize =
+                       conn.socket_buffer_length - conn.socket_buffer_offset;
+                   let mut buffered: usize = requested;
+                   if (buffered > available) { buffered = available; }
+                   let buffered_base: *u8 =
+                       (tcp_connection_rx_slice(conn) as *u8) +
+                       (conn.socket_buffer_offset as isize);
+                   match user_range_check_write(kernel_process_current_root(), address, buffered) {
+                       UserWriteRangeResult::Fault => {
+                           tcp_connection_put(owner);
+                           return SyscallIoResult::Errno(LINUX_EFAULT);
+                       }
+                       UserWriteRangeResult::Ok(range) => {
+                           let copied: bool =
+                               copy_to_user_raw(range, buffered_base, buffered);
+                       }
+                   }
+                   conn.socket_buffer_offset = conn.socket_buffer_offset + buffered;
+                   tcp_connection_put(owner);
+                   workload_peer_socket_served(false);
+                   return SyscallIoResult::Transferred(buffered);
+               }
+               let ready: NetRxCanAcquire = match network_capability_take() {
+                 NetworkCapabilityTakeResult::Empty => {
+                    tcp_connection_put(owner);
+                    return SyscallIoResult::NetWait;
+                 }
+                 NetworkCapabilityTakeResult::Ready(r) => { r }
+               };
+               let socket_buffers = tcp_connection_rx_slice(tcp_connection_payload(read_slot));
+               match kernel_tcp_receive_once(
+                    owner, ready, socket_buffers[0..<1460]) {
+                KernelTcpReceiveResult::Pending(next) => {
+                    match network_capability_put(next) {
+                        NetworkCapabilityPutResult::Stored => {
+                            tcp_connection_put(owner);
+                            return SyscallIoResult::NetWait;
+                        }
+                        NetworkCapabilityPutResult::Conflict => {
+                            tcp_connection_free(owner);
+                            return SyscallIoResult::Errno(LINUX_EINVAL);
+                        }
                     }
                 }
-                if (kernel_syscall_file_set_offset(
-                        fd, kernel_syscall_file_offset(fd) + chunk) == false) {
-                    if (copied != 0) { return ReadSegmentResult::Read(copied); }
-                    return ReadSegmentResult::Errno(LINUX_EBADF);
+                KernelTcpReceiveResult::Routed(next) => {
+                    match network_capability_put(next) {
+                        NetworkCapabilityPutResult::Stored => {
+                            tcp_connection_put(owner);
+                            return SyscallIoResult::NetWait;
+                        }
+                        NetworkCapabilityPutResult::Conflict => {
+                            tcp_connection_free(owner);
+                            return SyscallIoResult::Errno(LINUX_EINVAL);
+                        }
+                    }
                 }
-                copied = copied + chunk;
+                KernelTcpReceiveResult::TimedOut(next) => {
+                    match network_capability_put(next) {
+                        NetworkCapabilityPutResult::Stored => {
+                            tcp_connection_put(owner);
+                            return SyscallIoResult::Errno(LINUX_EAGAIN);
+                        }
+                        NetworkCapabilityPutResult::Conflict => {
+                            tcp_connection_free(owner);
+                            return SyscallIoResult::Errno(LINUX_EINVAL);
+                        }
+                    }
+                }
+                KernelTcpReceiveResult::Received(next) => {
+                    let received: usize =
+                        kernel_tcp_received_length(owner);
+                    tcp_connection_payload(read_slot).socket_buffer_length = received;
+                    let mut amount: usize = received;
+                    if (amount > requested) { amount = requested; }
+                    let source_base: *u8 =
+                        tcp_connection_rx_slice(tcp_connection_payload(read_slot)) as *u8;
+                    match user_range_check_write(kernel_process_current_root(), address, amount) {
+                        UserWriteRangeResult::Fault => {
+                            match network_capability_put(next) {
+                                NetworkCapabilityPutResult::Stored => {}
+                                NetworkCapabilityPutResult::Conflict => {}
+                            }
+                            tcp_connection_put(owner);
+                            return SyscallIoResult::Errno(LINUX_EFAULT);
+                        }
+                        UserWriteRangeResult::Ok(range) => {
+                            let copied: bool =
+                                copy_to_user_raw(range, source_base, amount);
+                        }
+                    }
+                    tcp_connection_payload(read_slot).socket_buffer_offset = amount;
+                    match network_capability_put(next) {
+                        NetworkCapabilityPutResult::Stored => {
+                            tcp_connection_put(owner);
+                            workload_peer_socket_served(false);
+                            return SyscallIoResult::Transferred(amount);
+                        }
+                        NetworkCapabilityPutResult::Conflict => {
+                            tcp_connection_free(owner);
+                            return SyscallIoResult::Errno(LINUX_EINVAL);
+                        }
+                    }
+                }
+               }
+              }
             }
         }
-    }
-    return ReadSegmentResult::Read(copied);
+        if (fd == 0 && kernel_syscall_terminal_is_open(fd)) {
+            return syscall_read_uart(address, requested);
+        }
+        if (kernel_syscall_file_is_open(fd) == false ||
+            kernel_syscall_file_readable(fd) == false) {
+            return SyscallIoResult::Errno(LINUX_EBADF);
+        }
+        let opened_inode: usize = kernel_syscall_file_inode(fd);
+        if (procfs_inode_is_ours(opened_inode)) {
+            let staging_buffer: []u8 =
+                syscall_scratch_here().file_buffer as []u8;
+            let total: usize = procfs_render_file(opened_inode,
+                                                  staging_buffer);
+            let offset: usize = kernel_syscall_file_offset(fd);
+            if (offset >= total || requested == 0) {
+                return SyscallIoResult::Transferred(0);
+            }
+            let mut amount: usize = total - offset;
+            if (amount > requested) { amount = requested; }
+            match user_range_check_write(kernel_process_current_root(),
+                                         address, amount) {
+                UserWriteRangeResult::Fault => {
+                    return SyscallIoResult::Errno(LINUX_EFAULT);
+                }
+                UserWriteRangeResult::Ok(range) => {
+                    let source: *u8 = (syscall_scratch_here().file_buffer as *u8) +
+                        (offset as isize);
+                    copy_to_user_raw(range, source, amount);
+                }
+            }
+            if (kernel_syscall_file_set_offset(fd, offset + amount) == false) {
+                return SyscallIoResult::Errno(LINUX_EBADF);
+            }
+            return SyscallIoResult::Transferred(amount);
+        }
+        // Do not turn the requested length into a kernel allocation. Each
+        // iteration obtains one ext2 block and copies it into the next
+        // validated portion of the user range, matching the bounded
+        // page/buffer-cache transfer shape used by Unix kernels.
+        let mut copied: usize = 0;
+        while (copied < requested) {
+            let mut chunk_limit: usize = requested - copied;
+            if (chunk_limit > KERNEL_BLOCK_SIZE) {
+                chunk_limit = KERNEL_BLOCK_SIZE;
+            }
+            let staging_buffer = syscall_scratch_here().file_buffer as []u8;
+            if (chunk_limit > staging_buffer.len) {
+                return SyscallIoResult::Errno(LINUX_EINVAL);
+            }
+            let staging = staging_buffer[0..<chunk_limit];
+            match ext2_read_file_chunk(
+                    syscall_ext2_mount, kernel_syscall_file_inode(fd),
+                    kernel_syscall_file_offset(fd),
+                    staging) {
+                Ext2ReadResult::Invalid => {
+                    if (copied != 0) { return SyscallIoResult::Transferred(copied); }
+                    return SyscallIoResult::Errno(LINUX_EINVAL);
+                }
+                Ext2ReadResult::Read(chunk) => {
+                    if (chunk == 0) { return SyscallIoResult::Transferred(copied); }
+                    let target_address: usize =
+                        match checked_add_usize(address, copied) {
+                            CheckedUsize::Overflow => {
+                                if (copied != 0) {
+                                    return SyscallIoResult::Transferred(copied);
+                                }
+                                return SyscallIoResult::Errno(LINUX_EFAULT);
+                            }
+                            CheckedUsize::Value(value) => { value }
+                        };
+                    match user_range_check_write(kernel_process_current_root(),
+                                           target_address, chunk) {
+                        UserWriteRangeResult::Fault => {
+                            if (copied != 0) {
+                                return SyscallIoResult::Transferred(copied);
+                            }
+                            return SyscallIoResult::Errno(LINUX_EFAULT);
+                        }
+                        UserWriteRangeResult::Ok(range) => {
+                            let copied_chunk: bool = copy_to_user_raw(
+                                range, syscall_scratch_here().file_buffer as *u8, chunk);
+                        }
+                    }
+                    if (kernel_syscall_file_set_offset(
+                            fd, kernel_syscall_file_offset(fd) + chunk) ==
+                            false) {
+                        if (copied != 0) {
+                            return SyscallIoResult::Transferred(copied);
+                        }
+                        return SyscallIoResult::Errno(LINUX_EBADF);
+                    }
+                    copied = copied + chunk;
+                }
+            }
+        }
+        return SyscallIoResult::Transferred(copied);
 }
 
 // ppoll(2) readiness for one fd: (is_valid_fd, revents). fd 0 checks the
@@ -2090,10 +2455,10 @@ fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
     return SyscallAction::Resume(LINUX_EINVAL);
 }
 
-fn syscall_read_uart(address: usize, requested: usize) -> SyscallAction {
-    if (requested == 0) { return SyscallAction::Resume(0); }
+fn syscall_read_uart(address: usize, requested: usize) -> SyscallIoResult {
+    if (requested == 0) { return SyscallIoResult::Transferred(0); }
     match user_range_check_write(kernel_process_current_root(), address, requested) {
-        UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+        UserWriteRangeResult::Fault => { return SyscallIoResult::Errno(LINUX_EFAULT); }
         UserWriteRangeResult::Ok(range) => {
             // GitHub issue #547: the ring is read under the lock its
             // producer holds, so a reader on any CPU sees a byte only
@@ -2130,20 +2495,16 @@ fn syscall_read_uart(address: usize, requested: usize) -> SyscallAction {
                 // nothing.
                 let process_slot: usize = kernel_syscall_process_slot();
                 if (scheduled_process_slot_valid(process_slot)) {
-                    scheduled_process_set_uart_block_delivery(
-                        process_slot, UartBlockDelivery::Read);
-                    kernel_process_current_set_pending_block(
-                        ProcessWaitReason::UartRx, 0);
-                    return SyscallAction::Block;
+                    return SyscallIoResult::UartWait;
                 }
-                return SyscallAction::WaitInterrupt;
+                return SyscallIoResult::InterruptWait;
             }
             let value: u8 = kernel_uart_rx_getc();
             process_run_unlock(guard);
             if (user_write_byte(range, 0, value) == false) {
-                return SyscallAction::Resume(LINUX_EFAULT);
+                return SyscallIoResult::Errno(LINUX_EFAULT);
             }
-            return SyscallAction::Resume(1);
+            return SyscallIoResult::Transferred(1);
         }
     }
 }
@@ -3428,6 +3789,7 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     if (kernel_connected_fd_is_open(fd)) {
         if (kernel_syscall_inetd_mode()) { return false; }
         return number == 63 || number == AARCH64_NR_WRITE ||
+            number == AARCH64_NR_READV || number == AARCH64_NR_WRITEV ||
             number == AARCH64_NR_CLOSE || number == 24 || number == 210 ||
             number == 205 || number == 208;
     }
@@ -3436,7 +3798,7 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     // An ext2 file since GitHub issue #602: the write, its position and
     // its bound are one section under the mutation guard, which waits for
     // every CPU's counted readers.
-    if (number == AARCH64_NR_WRITE) {
+    if (number == AARCH64_NR_WRITE || number == AARCH64_NR_WRITEV) {
         return kernel_syscall_terminal_is_open(fd) ||
             kernel_syscall_file_is_open(fd);
     }
@@ -3466,16 +3828,10 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
         number == AARCH64_NR_NEWFSTATAT) {
         return true;
     }
-    if (number == 63) {
+    if (number == 63 || number == AARCH64_NR_READV) {
         if (fd == 0 && kernel_syscall_terminal_is_open(fd)) { return true; }
         return kernel_syscall_file_readable(fd);
     }
-    // GitHub issue #583, first increment: the vectored forms. readv reads
-    // only a readable ext2 file (syscall_readv_segment) and writev writes
-    // only the terminal (syscall_writev_segment), the same paths read and
-    // write are admitted for above, so they carry the same argument and the
-    // same mutation question.
-    if (number == AARCH64_NR_READV) { return kernel_syscall_file_readable(fd); }
     // GitHub issue #583, second increment: the descriptor table.
     //
     // fcntl (F_SETFD, F_DUPFD, F_DUPFD_CLOEXEC) and dup3 edit the CALLER's
@@ -3533,9 +3889,6 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     if (number == AARCH64_NR_PPOLL ||
         number == AARCH64_NR_TAKIBI_UART_RX_WAIT) {
         return true;
-    }
-    if (number == AARCH64_NR_WRITEV) {
-        return kernel_syscall_terminal_is_open(fd);
     }
     // Everything the refusal list above does not name, and the descriptor
     // rules above do not narrow, runs where it was called (#583).
@@ -3877,182 +4230,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
 
     if (number == AARCH64_NR_WRITE) {
-        let fd: usize = x0;
-        let address: usize = x1;
-        let length: usize = x2;
-        if (kernel_connected_fd_is_open(fd) &&
-            (fd != 1 || kernel_syscall_inetd_mode() == false)) {
-            syscall_test_evidence_record_connected_write();
-            if (kernel_connected_fd_is_open(fd) == false) {
-                return SyscallAction::Resume(LINUX_EBADF);
-            }
-            let write_slot: usize =
-                match kernel_connection_fd_lookup(fd) {
-                    KernelConnectionLookupResult::Missing => {
-                        return SyscallAction::Resume(LINUX_EBADF);
-                    }
-                    KernelConnectionLookupResult::Found(found) => { found }
-                };
-            let write_generation: usize = kernel_connection_fd_identity(fd);
-            if (length == 0) {
-                return SyscallAction::Resume(LINUX_EINVAL);
-            }
-            let mut amount: usize = length;
-            if (amount > 1460) { amount = 1460; }
-            // GitHub issue #581: the open check and the received-length
-            // snapshot are taken under the connection's owner, not before
-            // it, so a peer's write cannot act on a state the owning core
-            // is changing.
-            match tcp_connection_take(write_slot, write_generation) {
-                TcpConnectionTakeResult::Missing => {
-                    return SyscallAction::Resume(LINUX_EINVAL);
-                }
-                TcpConnectionTakeResult::Ready(owner) => {
-                  if (tcp_connection_of(owner).connection_open == false) {
-                      tcp_connection_put(owner);
-                      return SyscallAction::Resume(LINUX_EINVAL);
-                  }
-                  let received_length: usize =
-                      tcp_connection_of(owner).socket_buffer_length;
-                  match network_capability_take() {
-                    NetworkCapabilityTakeResult::Empty => {
-                        tcp_connection_put(owner);
-                        kernel_process_current_set_pending_block(
-                            ProcessWaitReason::NetRx, 0);
-                        return SyscallAction::Block;
-                    }
-                    NetworkCapabilityTakeResult::Ready(ready) => {
-                    let socket_buffers = tcp_connection_rx_slice(tcp_connection_payload(write_slot));
-                    let destination_base: *u8 = socket_buffers as *u8;
-                    match user_range_check_read(kernel_process_current_root(), address, amount) {
-                        UserReadRangeResult::Fault => {
-                            tcp_connection_put(owner);
-                            match network_capability_put(ready) {
-                                NetworkCapabilityPutResult::Stored => {}
-                                NetworkCapabilityPutResult::Conflict => {}
-                            }
-                            return SyscallAction::Resume(LINUX_EFAULT);
-                        }
-                        UserReadRangeResult::Ok(range) => {
-                            let copied: bool = copy_from_user_raw(
-                                range, destination_base, amount);
-                        }
-                    }
-                    match kernel_tcp_send_received(
-                            owner, ready,
-                            socket_buffers[0..<1460],
-                            received_length, amount) {
-                        KernelTcpSendResult::Invalid(after_invalid) => {
-                            match network_capability_put(after_invalid) {
-                                NetworkCapabilityPutResult::Stored => {
-                                    tcp_connection_put(owner);
-                                    return SyscallAction::Resume(LINUX_EINVAL);
-                                }
-                                NetworkCapabilityPutResult::Conflict => {
-                                    tcp_connection_free(owner);
-                                    return SyscallAction::Resume(LINUX_EINVAL);
-                                }
-                            }
-                        }
-                        KernelTcpSendResult::Sent(after_send) => {
-                            match network_capability_put(after_send) {
-                                NetworkCapabilityPutResult::Conflict => {
-                                    tcp_connection_free(owner);
-                                    return SyscallAction::Resume(LINUX_EINVAL);
-                                }
-                                NetworkCapabilityPutResult::Stored => {
-                                    tcp_connection_put(owner);
-                                    workload_peer_socket_served(true);
-                                    return SyscallAction::Resume(amount);
-                                }
-                            }
-                        }
-                    }
-                    }
-                  }
-                }
-            }
-        }
-        if (fd == 1 && kernel_syscall_inetd_mode()) {
-            let inetd_write_slot: usize =
-                match kernel_connection_fd_lookup(fd) {
-                    KernelConnectionLookupResult::Missing => {
-                        return SyscallAction::Resume(LINUX_EBADF);
-                    }
-                    KernelConnectionLookupResult::Found(found) => { found }
-                };
-            let inetd_write_generation: usize = kernel_connection_fd_identity(fd);
-            // GitHub issue #581: the response buffer and its length are the
-            // connection's, so they are appended to under its owner.
-            match tcp_connection_take(inetd_write_slot, inetd_write_generation) {
-                TcpConnectionTakeResult::Missing => {
-                    return SyscallAction::Resume(LINUX_EINVAL);
-                }
-                TcpConnectionTakeResult::Ready(owner) => {
-                    let conn: *TcpConnection = tcp_connection_of(owner);
-                    if (conn.connection_open == false ||
-                        length > 1460 - conn.inetd_response_length) {
-                        tcp_connection_put(owner);
-                        return SyscallAction::Resume(LINUX_EINVAL);
-                    }
-                    let response_base: *u8 =
-                        (tcp_connection_inetd_slice(conn) as *u8) +
-                        (conn.inetd_response_length as isize);
-                    match user_range_check_read(kernel_process_current_root(), address, length) {
-                        UserReadRangeResult::Fault => {
-                            tcp_connection_put(owner);
-                            return SyscallAction::Resume(LINUX_EFAULT);
-                        }
-                        UserReadRangeResult::Ok(range) => {
-                            let copied: bool =
-                                copy_from_user_raw(range, response_base, length);
-                        }
-                    }
-                    conn.inetd_response_length = conn.inetd_response_length + length;
-                    tcp_connection_put(owner);
-                    return SyscallAction::Resume(length);
-                }
-            }
-        }
-        if (kernel_syscall_file_is_open(fd)) {
-            if (kernel_syscall_file_writable(fd) == false) {
-                return SyscallAction::Resume(LINUX_EBADF);
-            }
-            if (length == 0 || length > KERNEL_BLOCK_SIZE) {
-                return SyscallAction::Resume(LINUX_EINVAL);
-            }
-            let destination_base: *u8 = syscall_scratch_here().file_buffer as *u8;
-            match user_range_check_read(kernel_process_current_root(), address, length) {
-                UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
-                UserReadRangeResult::Ok(range) => {
-                    let copied: bool =
-                        copy_from_user_raw(range, destination_base, length);
-                }
-            }
-            let content_buffer = syscall_scratch_here().file_buffer as []u8;
-            if (length > content_buffer.len) {
-                return SyscallAction::Resume(LINUX_EINVAL);
-            }
-            let content = content_buffer[0..<length];
-            let answer: usize = syscall_ext2_write_locked(fd, content);
-            if (answer != 0) { return SyscallAction::Resume(answer); }
-            workload_peer_mutation_note(8);
-            return SyscallAction::Resume(length);
-        }
-        if (kernel_syscall_terminal_is_open(fd) == false) {
-            return SyscallAction::Resume(LINUX_EBADF);
-        }
-        match syscall_terminal_write(address, length) {
-            TerminalWriteResult::Errno(errno) => {
-                return SyscallAction::Resume(errno);
-            }
-            TerminalWriteResult::Written(count) => {
-                return SyscallAction::Resume(count);
-            }
-            TerminalWriteResult::WouldBlock => {
-                return syscall_terminal_write_wait();
-            }
-        }
+        return syscall_io_action(syscall_write_segment(x0, x1, x2));
     }
 
     if (number == 56) {
@@ -4501,259 +4679,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
 
     if (number == 63) {
-        let fd: usize = x0;
-        let address: usize = x1;
-        let requested: usize = x2;
-        // An accepted socket duplicated onto stdin is still a connection,
-        // not the kernel console. Resolve unified fd ownership before the
-        // UART fallback.
-        if (kernel_connected_fd_is_open(fd)) {
-            let read_slot: usize =
-                match kernel_connection_fd_lookup(fd) {
-                    KernelConnectionLookupResult::Missing => {
-                        return SyscallAction::Resume(LINUX_EBADF);
-                    }
-                    KernelConnectionLookupResult::Found(found) => { found }
-                };
-            let read_generation: usize = kernel_connection_fd_identity(fd);
-            // GitHub issue #581: every connection field below is read and
-            // written under the connection's owner. A peer may make this
-            // call, so an open check or a buffered-copy cursor update taken
-            // before the owner would race the core that holds it.
-            match tcp_connection_take(read_slot, read_generation) {
-              TcpConnectionTakeResult::Missing => {
-                return SyscallAction::Resume(LINUX_EBADF);
-              }
-              TcpConnectionTakeResult::Ready(owner) => {
-               let conn: *TcpConnection = tcp_connection_of(owner);
-               if (conn.connection_open == false) {
-                   tcp_connection_put(owner);
-                   return SyscallAction::Resume(LINUX_EBADF);
-               }
-               if (requested == 0) {
-                   tcp_connection_put(owner);
-                   return SyscallAction::Resume(LINUX_EBADF);
-               }
-               // A NetRx wake retries this same EL0 read syscall. Keep the
-               // evidence count and timeout window attached to that logical
-               // read rather than counting each handler re-entry as a new
-               // userspace operation.
-               if (conn.receive_waiting == false) {
-                   syscall_test_evidence_record_connected_read();
-                   conn.receive_started_at = read_cntpct();
-                   conn.receive_waiting = true;
-               }
-               if (conn.socket_buffer_offset < conn.socket_buffer_length) {
-                   conn.receive_waiting = false;
-                   let available: usize =
-                       conn.socket_buffer_length - conn.socket_buffer_offset;
-                   let mut buffered: usize = requested;
-                   if (buffered > available) { buffered = available; }
-                   let buffered_base: *u8 =
-                       (tcp_connection_rx_slice(conn) as *u8) +
-                       (conn.socket_buffer_offset as isize);
-                   match user_range_check_write(kernel_process_current_root(), address, buffered) {
-                       UserWriteRangeResult::Fault => {
-                           tcp_connection_put(owner);
-                           return SyscallAction::Resume(LINUX_EFAULT);
-                       }
-                       UserWriteRangeResult::Ok(range) => {
-                           let copied: bool =
-                               copy_to_user_raw(range, buffered_base, buffered);
-                       }
-                   }
-                   conn.socket_buffer_offset = conn.socket_buffer_offset + buffered;
-                   tcp_connection_put(owner);
-                   workload_peer_socket_served(false);
-                   return SyscallAction::Resume(buffered);
-               }
-               let ready: NetRxCanAcquire = match network_capability_take() {
-                 NetworkCapabilityTakeResult::Empty => {
-                    tcp_connection_put(owner);
-                    kernel_process_current_set_pending_block(
-                        ProcessWaitReason::NetRx, 0);
-                    return SyscallAction::Block;
-                 }
-                 NetworkCapabilityTakeResult::Ready(r) => { r }
-               };
-               let socket_buffers = tcp_connection_rx_slice(tcp_connection_payload(read_slot));
-               match kernel_tcp_receive_once(
-                    owner, ready, socket_buffers[0..<1460]) {
-                KernelTcpReceiveResult::Pending(next) => {
-                    match network_capability_put(next) {
-                        NetworkCapabilityPutResult::Stored => {
-                            tcp_connection_put(owner);
-                            kernel_process_current_set_pending_block(
-                                ProcessWaitReason::NetRx, 0);
-                            return SyscallAction::Block;
-                        }
-                        NetworkCapabilityPutResult::Conflict => {
-                            tcp_connection_free(owner);
-                            return SyscallAction::Resume(LINUX_EINVAL);
-                        }
-                    }
-                }
-                KernelTcpReceiveResult::Routed(next) => {
-                    match network_capability_put(next) {
-                        NetworkCapabilityPutResult::Stored => {
-                            tcp_connection_put(owner);
-                            kernel_process_current_set_pending_block(
-                                ProcessWaitReason::NetRx, 0);
-                            return SyscallAction::Block;
-                        }
-                        NetworkCapabilityPutResult::Conflict => {
-                            tcp_connection_free(owner);
-                            return SyscallAction::Resume(LINUX_EINVAL);
-                        }
-                    }
-                }
-                KernelTcpReceiveResult::TimedOut(next) => {
-                    match network_capability_put(next) {
-                        NetworkCapabilityPutResult::Stored => {
-                            tcp_connection_put(owner);
-                            return SyscallAction::Resume(LINUX_EAGAIN);
-                        }
-                        NetworkCapabilityPutResult::Conflict => {
-                            tcp_connection_free(owner);
-                            return SyscallAction::Resume(LINUX_EINVAL);
-                        }
-                    }
-                }
-                KernelTcpReceiveResult::Received(next) => {
-                    let received: usize =
-                        kernel_tcp_received_length(owner);
-                    tcp_connection_payload(read_slot).socket_buffer_length = received;
-                    let mut amount: usize = received;
-                    if (amount > requested) { amount = requested; }
-                    let source_base: *u8 =
-                        tcp_connection_rx_slice(tcp_connection_payload(read_slot)) as *u8;
-                    match user_range_check_write(kernel_process_current_root(), address, amount) {
-                        UserWriteRangeResult::Fault => {
-                            match network_capability_put(next) {
-                                NetworkCapabilityPutResult::Stored => {}
-                                NetworkCapabilityPutResult::Conflict => {}
-                            }
-                            tcp_connection_put(owner);
-                            return SyscallAction::Resume(LINUX_EFAULT);
-                        }
-                        UserWriteRangeResult::Ok(range) => {
-                            let copied: bool =
-                                copy_to_user_raw(range, source_base, amount);
-                        }
-                    }
-                    tcp_connection_payload(read_slot).socket_buffer_offset = amount;
-                    match network_capability_put(next) {
-                        NetworkCapabilityPutResult::Stored => {
-                            tcp_connection_put(owner);
-                            workload_peer_socket_served(false);
-                            return SyscallAction::Resume(amount);
-                        }
-                        NetworkCapabilityPutResult::Conflict => {
-                            tcp_connection_free(owner);
-                            return SyscallAction::Resume(LINUX_EINVAL);
-                        }
-                    }
-                }
-               }
-              }
-            }
-        }
-        if (fd == 0 && kernel_syscall_terminal_is_open(fd)) {
-            return syscall_read_uart(address, requested);
-        }
-        if (kernel_syscall_file_is_open(fd) == false ||
-            kernel_syscall_file_readable(fd) == false) {
-            return SyscallAction::Resume(LINUX_EBADF);
-        }
-        let opened_inode: usize = kernel_syscall_file_inode(fd);
-        if (procfs_inode_is_ours(opened_inode)) {
-            let staging_buffer: []u8 =
-                syscall_scratch_here().file_buffer as []u8;
-            let total: usize = procfs_render_file(opened_inode,
-                                                  staging_buffer);
-            let offset: usize = kernel_syscall_file_offset(fd);
-            if (offset >= total || requested == 0) {
-                return SyscallAction::Resume(0);
-            }
-            let mut amount: usize = total - offset;
-            if (amount > requested) { amount = requested; }
-            match user_range_check_write(kernel_process_current_root(),
-                                         address, amount) {
-                UserWriteRangeResult::Fault => {
-                    return SyscallAction::Resume(LINUX_EFAULT);
-                }
-                UserWriteRangeResult::Ok(range) => {
-                    let source: *u8 = (syscall_scratch_here().file_buffer as *u8) +
-                        (offset as isize);
-                    copy_to_user_raw(range, source, amount);
-                }
-            }
-            if (kernel_syscall_file_set_offset(fd, offset + amount) == false) {
-                return SyscallAction::Resume(LINUX_EBADF);
-            }
-            return SyscallAction::Resume(amount);
-        }
-        // Do not turn the requested length into a kernel allocation. Each
-        // iteration obtains one ext2 block and copies it into the next
-        // validated portion of the user range, matching the bounded
-        // page/buffer-cache transfer shape used by Unix kernels.
-        let mut copied: usize = 0;
-        while (copied < requested) {
-            let mut chunk_limit: usize = requested - copied;
-            if (chunk_limit > KERNEL_BLOCK_SIZE) {
-                chunk_limit = KERNEL_BLOCK_SIZE;
-            }
-            let staging_buffer = syscall_scratch_here().file_buffer as []u8;
-            if (chunk_limit > staging_buffer.len) {
-                return SyscallAction::Resume(LINUX_EINVAL);
-            }
-            let staging = staging_buffer[0..<chunk_limit];
-            match ext2_read_file_chunk(
-                    syscall_ext2_mount, kernel_syscall_file_inode(fd),
-                    kernel_syscall_file_offset(fd),
-                    staging) {
-                Ext2ReadResult::Invalid => {
-                    if (copied != 0) { return SyscallAction::Resume(copied); }
-                    return SyscallAction::Resume(LINUX_EINVAL);
-                }
-                Ext2ReadResult::Read(chunk) => {
-                    if (chunk == 0) { return SyscallAction::Resume(copied); }
-                    let target_address: usize =
-                        match checked_add_usize(address, copied) {
-                            CheckedUsize::Overflow => {
-                                if (copied != 0) {
-                                    return SyscallAction::Resume(copied);
-                                }
-                                return SyscallAction::Resume(LINUX_EFAULT);
-                            }
-                            CheckedUsize::Value(value) => { value }
-                        };
-                    match user_range_check_write(kernel_process_current_root(),
-                                           target_address, chunk) {
-                        UserWriteRangeResult::Fault => {
-                            if (copied != 0) {
-                                return SyscallAction::Resume(copied);
-                            }
-                            return SyscallAction::Resume(LINUX_EFAULT);
-                        }
-                        UserWriteRangeResult::Ok(range) => {
-                            let copied_chunk: bool = copy_to_user_raw(
-                                range, syscall_scratch_here().file_buffer as *u8, chunk);
-                        }
-                    }
-                    if (kernel_syscall_file_set_offset(
-                            fd, kernel_syscall_file_offset(fd) + chunk) ==
-                            false) {
-                        if (copied != 0) {
-                            return SyscallAction::Resume(copied);
-                        }
-                        return SyscallAction::Resume(LINUX_EBADF);
-                    }
-                    copied = copied + chunk;
-                }
-            }
-        }
-        return SyscallAction::Resume(copied);
+        return syscall_io_action(syscall_read_segment(x0, x1, x2));
     }
 
     if (number == AARCH64_NR_FCNTL) {
@@ -6076,23 +6002,36 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                             if (total == 0) { return SyscallAction::Resume(LINUX_EFAULT); }
                             return SyscallAction::Resume(total);
                         }
-                        match syscall_readv_segment(
+                        if (iov_len == 0) { continue; }
+                        match syscall_read_segment(
                                 fd, iov_base as usize, iov_len as usize) {
-                            ReadSegmentResult::Errno(e) => {
+                            SyscallIoResult::Errno(e) => {
                                 if (total == 0) { return SyscallAction::Resume(e); }
                                 return SyscallAction::Resume(total);
                             }
-                            ReadSegmentResult::Read(n) => {
+                            SyscallIoResult::NetWait => {
+                                if (total != 0) { return SyscallAction::Resume(total); }
+                                return syscall_io_action(SyscallIoResult::NetWait);
+                            }
+                            SyscallIoResult::UartWait => {
+                                if (total != 0) { return SyscallAction::Resume(total); }
+                                return syscall_io_action(SyscallIoResult::UartWait);
+                            }
+                            SyscallIoResult::InterruptWait => {
+                                if (total != 0) { return SyscallAction::Resume(total); }
+                                return syscall_io_action(SyscallIoResult::InterruptWait);
+                            }
+                            SyscallIoResult::TerminalWait => {
+                                if (total != 0) { return SyscallAction::Resume(total); }
+                                return syscall_io_action(SyscallIoResult::TerminalWait);
+                            }
+                            SyscallIoResult::Transferred(n) => {
                                 match checked_add_usize(total, n) {
                                     CheckedUsize::Overflow => { return SyscallAction::Resume(total); }
                                     CheckedUsize::Value(v) => { total = v; }
                                 }
-                                // A shorter-than-requested segment means EOF
-                                // was hit (ext2_read_small_file already
-                                // clamps to the file's real remaining
-                                // length) -- further segments would only
-                                // ever read 0 too.
-                                if (n == 0) { return SyscallAction::Resume(total); }
+                                // A short read ends the vector, including EOF.
+                                if (n < iov_len as usize) { return SyscallAction::Resume(total); }
                             }
                         }
                     }
@@ -6128,19 +6067,30 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                             if (total == 0) { return SyscallAction::Resume(LINUX_EFAULT); }
                             return SyscallAction::Resume(total);
                         }
-                        match syscall_writev_segment(
+                        if (iov_len == 0) { continue; }
+                        match syscall_write_segment(
                                 fd, iov_base as usize, iov_len as usize) {
-                            WriteSegmentResult::Errno(e) => {
+                            SyscallIoResult::Errno(e) => {
                                 if (total == 0) { return SyscallAction::Resume(e); }
                                 return SyscallAction::Resume(total);
                             }
-                            WriteSegmentResult::WouldBlock => {
-                                if (total == 0) {
-                                    return syscall_terminal_write_wait();
-                                }
-                                return SyscallAction::Resume(total);
+                            SyscallIoResult::NetWait => {
+                                if (total != 0) { return SyscallAction::Resume(total); }
+                                return syscall_io_action(SyscallIoResult::NetWait);
                             }
-                            WriteSegmentResult::Written(n) => {
+                            SyscallIoResult::UartWait => {
+                                if (total != 0) { return SyscallAction::Resume(total); }
+                                return syscall_io_action(SyscallIoResult::UartWait);
+                            }
+                            SyscallIoResult::InterruptWait => {
+                                if (total != 0) { return SyscallAction::Resume(total); }
+                                return syscall_io_action(SyscallIoResult::InterruptWait);
+                            }
+                            SyscallIoResult::TerminalWait => {
+                                if (total != 0) { return SyscallAction::Resume(total); }
+                                return syscall_io_action(SyscallIoResult::TerminalWait);
+                            }
+                            SyscallIoResult::Transferred(n) => {
                                 match checked_add_usize(total, n) {
                                     CheckedUsize::Overflow => { return SyscallAction::Resume(total); }
                                     CheckedUsize::Value(v) => { total = v; }
@@ -6335,6 +6285,156 @@ private fn kernel_syscall_clone_failure_action(
     }
 }
 
+// With the network capability held by the caller (or absent at boot), the
+// second read cannot acquire it. It must return its already copied prefix
+// without installing NetRx as this process's pending wait.
+fn syscall_vectored_prefix_wait_probe(address: usize, slot: usize,
+                                      generation: usize) -> bool !{unsafe} {
+    match tcp_connection_take(slot, generation) {
+        TcpConnectionTakeResult::Missing => { return false; }
+        TcpConnectionTakeResult::Ready(owner) => {
+            tcp_connection_of(owner).socket_buffer_length = 1;
+            tcp_connection_of(owner).socket_buffer_offset = 0;
+            tcp_connection_put(owner);
+        }
+    }
+    match user_range_check_write(kernel_process_current_root(), address, 32) {
+        UserWriteRangeResult::Fault => { return false; }
+        UserWriteRangeResult::Ok(range) => {
+            let first: bool = user_write_u64(range, 8, 1);
+            let next_base: bool = user_write_u64(range, 16, (address + 65) as u64);
+            let next_len: bool = user_write_u64(range, 24, 1);
+            if (first == false || next_base == false || next_len == false) {
+                return false;
+            }
+        }
+    }
+    let prior_wait: ProcessWaitReason = kernel_process_current_pending_block_reason();
+    let (action, count) = kernel_syscall_dispatch(
+        SYSCALL_TRAP_ESR, AARCH64_NR_READV, 1, address, 2, 0, 0);
+    return action == 1 && count == 1 &&
+        kernel_process_current_pending_block_reason() == prior_wait;
+}
+
+// Exercise the retained inetd buffer path without a live network exchange.
+// The caller owns a mapped scratch page; this probe restores its stdout and
+// frees its private transport before returning, including on refusals.
+fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
+    let process: usize = kernel_syscall_process_slot();
+    // The preceding process-table probe may have released root 0's context.
+    if (unified_fd_context_ensure(process) == false) { return false; }
+    let saved_fd: usize = match unified_fd_alloc(process, 3) {
+        UnifiedFdAllocResult::Full => { return false; }
+        UnifiedFdAllocResult::Allocated(fd) => { fd }
+    };
+    let had_stdout: bool = kernel_syscall_terminal_is_open(1);
+    if (had_stdout && kernel_regular_fd_duplicate(1, saved_fd) == false) {
+        return false;
+    }
+    let owner = match tcp_connection_alloc() {
+        TcpConnectionAllocResult::Full => {
+            kernel_connected_fd_clear(saved_fd);
+            return false;
+        }
+        TcpConnectionAllocResult::Allocated(found) => { found }
+    };
+    let slot: usize = tcp_connection_of(owner).self_address;
+    let generation: usize = tcp_connection_identity(owner);
+    tcp_connection_of(owner).connection_open = true;
+    let rx = tcp_connection_rx_slice(tcp_connection_of(owner));
+    rx[0] = 0x61;
+    rx[1] = 0x62;
+    tcp_connection_of(owner).socket_buffer_length = 2;
+    tcp_connection_put(owner);
+    kernel_connected_fd_clear(1);
+    let mut ok: bool = true;
+    match unified_connection_create(process, 1, slot, generation) {
+        UnifiedOpenResult::Invalid => { ok = false; }
+        UnifiedOpenResult::Full => { ok = false; }
+        UnifiedOpenResult::Ok => {
+            kernel_syscall_set_inetd_mode(true);
+            match user_range_check_write(kernel_process_current_root(), address, 80) {
+                UserWriteRangeResult::Fault => { ok = false; }
+                UserWriteRangeResult::Ok(range) => {
+                    let a: bool = user_write_byte(range, 64, 0x61);
+                    let b: bool = user_write_byte(range, 65, 0x62);
+                    let base0: bool = user_write_u64(range, 0, (address + 64) as u64);
+                    let len0: bool = user_write_u64(range, 8, 1);
+                    let base1: bool = user_write_u64(range, 16, (address + 65) as u64);
+                    let len1: bool = user_write_u64(range, 24, 1);
+                    ok = a && b && base0 && len0 && base1 && len1;
+                }
+            }
+            let (write_action, write_count) = kernel_syscall_dispatch(
+                SYSCALL_TRAP_ESR, AARCH64_NR_WRITEV, 1, address, 2, 0, 0);
+            if (write_action != 1 || write_count != 2) { ok = false; }
+            // The second segment faults after one byte was already appended.
+            match user_range_check_write(kernel_process_current_root(), address, 32) {
+                UserWriteRangeResult::Fault => { ok = false; }
+                UserWriteRangeResult::Ok(range) => {
+                    let changed: bool = user_write_u64(range, 16, 0);
+                    if (changed == false) { ok = false; }
+                }
+            }
+            let (partial_action, partial_count) = kernel_syscall_dispatch(
+                SYSCALL_TRAP_ESR, AARCH64_NR_WRITEV, 1, address, 2, 0, 0);
+            if (partial_action != 1 || partial_count != 1) { ok = false; }
+            // inetd reads still consume the connected descriptor's RX data.
+            // A short first segment must leave the invalid second untouched.
+            match user_range_check_write(kernel_process_current_root(), address, 32) {
+                UserWriteRangeResult::Fault => { ok = false; }
+                UserWriteRangeResult::Ok(range) => {
+                    let changed: bool = user_write_u64(range, 8, 4);
+                    if (changed == false) { ok = false; }
+                }
+            }
+            let (read_action, read_count) = kernel_syscall_dispatch(
+                SYSCALL_TRAP_ESR, AARCH64_NR_READV, 1, address, 2, 0, 0);
+            if (read_action != 1 || read_count != 2) { ok = false; }
+            match user_range_check_read(kernel_process_current_root(), address + 64, 2) {
+                UserReadRangeResult::Fault => { ok = false; }
+                UserReadRangeResult::Ok(range) => {
+                    if (user_read_byte(range, 0) != 0x61 ||
+                        user_read_byte(range, 1) != 0x62) { ok = false; }
+                }
+            }
+            match network_capability_take() {
+                NetworkCapabilityTakeResult::Empty => {
+                    if (syscall_vectored_prefix_wait_probe(address, slot, generation) == false) {
+                        ok = false;
+                    }
+                }
+                NetworkCapabilityTakeResult::Ready(ready) => {
+                    if (syscall_vectored_prefix_wait_probe(address, slot, generation) == false) {
+                        ok = false;
+                    }
+                    match network_capability_put(ready) {
+                        NetworkCapabilityPutResult::Conflict => { ok = false; }
+                        NetworkCapabilityPutResult::Stored => {}
+                    }
+                }
+            }
+            kernel_syscall_set_inetd_mode(false);
+        }
+    }
+    match tcp_connection_take(slot, generation) {
+        TcpConnectionTakeResult::Missing => { ok = false; }
+        TcpConnectionTakeResult::Ready(after) => {
+            let conn = tcp_connection_of(after);
+            let response = tcp_connection_inetd_slice(conn);
+            if (conn.inetd_response_length != 3 || response[0] != 0x61 ||
+                response[1] != 0x62 || response[2] != 0x61) { ok = false; }
+            tcp_connection_free(after);
+        }
+    }
+    kernel_connected_fd_clear(1);
+    if (had_stdout && kernel_regular_fd_duplicate(saved_fd, 1) == false) {
+        ok = false;
+    }
+    kernel_connected_fd_clear(saved_fd);
+    return ok;
+}
+
 // Boot-time negative-test coverage for issue #175: the real BusyBox/musl
 // binary never requests PROT_EXEC/a real fd for mmap, an invalid rt_sigaction
 // signum, or a non-null rt_sigaction oldact it then checks byte-for-byte, so
@@ -6421,6 +6521,7 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
                 }
             }
 
+            if (syscall_vectored_inetd_probe(oldact_va) == false) { ok = false; }
             user_pte_clear(probe_index);
             return ok;
         }

@@ -1207,9 +1207,11 @@ run, not a specification.
   permission transition (`RW+XN` <-> `R+XN` on data, heap, and stack) and
   returns a real error for anything else. `munmap` is unsupported by
   design: the process arena is reclaimed as a unit.
-- **Scatter/gather I/O.** `writev` covers the UART descriptors and `readv`
-  covers ext2 files. Neither reaches the connected-TCP or inetd-mode paths
-  that plain `write`/`read` already support.
+- **Scatter/gather I/O.** `readv` and `writev` share the scalar fd operations,
+  including TCP aliases, files and the inetd response buffer. Empty segments
+  are skipped and a short segment ends the call. An error or wait after a
+  completed prefix returns that prefix, so a retry cannot replay its bytes.
+  The scalar transfer limits also apply to each segment.
 - **`ppoll`.** Blocks and wakes on UART RX for the single-descriptor stdin
   shape BusyBox ash's `read` builtin uses. Any other shape reports current
   readiness immediately, and a non-NULL timeout is never armed.
