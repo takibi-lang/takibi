@@ -281,6 +281,11 @@ private let mut workload_peer_mutation_seen: usize;
 private let mut workload_peer_exec_pid: usize;
 private let mut workload_peer_exec_cpu: usize;
 private let mut workload_peer_exec_control: bool;
+// GitHub issue #611: /bin/peer-fork -- the CPU each fork by one process ran
+// on, and whether one on core 0 was reported first.
+private let mut workload_peer_fork_pid: usize;
+private let mut workload_peer_fork_cpu: usize;
+private let mut workload_peer_fork_control: bool;
 
 enum WorkloadCpuMode { Idle; El0; El1; Irq; }
 
@@ -1470,6 +1475,44 @@ fn workload_peer_exec_report() -> usize {
     if (answer == 1) {
         kernel_boot_log(
             "workload: execve committed on a peer and its new image ran there, after one on core 0 was told apart\n");
+    }
+    return answer;
+}
+
+// A fork by `parent` ran on this CPU. A different process restarts the
+// record.
+fn workload_clone_note(parent: usize) {
+    let guard = process_run_lock();
+    if (workload_peer_fork_pid != parent) {
+        workload_peer_fork_pid = parent;
+        workload_peer_fork_control = false;
+    }
+    workload_peer_fork_cpu = cpu_id();
+    process_run_unlock(guard);
+}
+
+// Tag 19, asked by the parent once it has reaped the child its last fork
+// made, and checked the child's exit status itself. 2 when that fork ran on
+// core 0: the negative control. 1 and the line when it ran on a peer after
+// the control. 3 when a second fork ran on core 0 too -- a peer's fork was
+// handed there. 0 otherwise.
+fn workload_peer_fork_report() -> usize {
+    let guard = process_run_lock();
+    let ours: bool = workload_peer_fork_pid == kernel_process_current_pid();
+    let cpu: usize = workload_peer_fork_cpu;
+    let mut answer: usize = 0;
+    if (ours && cpu == 0 && workload_peer_fork_control) {
+        answer = 3;
+    } else if (ours && cpu == 0) {
+        workload_peer_fork_control = true;
+        answer = 2;
+    } else if (ours && workload_peer_fork_control) {
+        answer = 1;
+    }
+    process_run_unlock(guard);
+    if (answer == 1) {
+        kernel_boot_log(
+            "workload: fork ran on a peer, its child ran and exited there and was reaped, after one on core 0 was told apart\n");
     }
     return answer;
 }

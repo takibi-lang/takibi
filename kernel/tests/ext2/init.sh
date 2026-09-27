@@ -107,6 +107,14 @@ if [ "$?" -ne 0 ]; then
     exit 1
 fi
 
+# GitHub issue #611: fork on CPU 1, after one on core 0 as the control. The
+# kernel prints the peer_fork view's line; this prints only a failure.
+/bin/peer-fork
+if [ "$?" -ne 0 ]; then
+    echo "peer-fork failed"
+    exit 1
+fi
+
 # GitHub issue #606: a window of the stack-ownership protocol as it ran,
 # printed by the kernel for scripts/validate_protocol_trace.py to replay
 # against StackOwnership.tla. This prints only a failure.

@@ -54,6 +54,7 @@ od
 peer-console
 peer-exec
 peer-exec-image
+peer-fork
 peer-mutate
 peer-net-wake
 peer-read

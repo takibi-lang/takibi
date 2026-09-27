@@ -3271,17 +3271,17 @@ private fn syscall_accept_claimed(number: usize, x0: usize, x1: usize,
 // of the call. What each group needs before it can leave the list is on
 // issue #583.
 fn syscall_peer_refused(number: usize) -> bool {
-    // The process lifecycle: clone and its forms, and the payload fixture's
-    // parent report. Every multicore defect this project has closed lived
-    // here (#532, #552, #569, #571), each found with these operations on
-    // core 0. wait4 left the list in #609, once #550 had made its decision
-    // and its Blocked publication one critical section. execve and execveat
-    // left it in #610: exec's per-call state is per CPU, its record writes
-    // are one hold (#618), and the two execs that stay core 0's are handed
-    // there from the handler.
-    if (number == AARCH64_NR_CLONE || number == AARCH64_NR_CLONE3 ||
-        number == AARCH64_NR_FORK || number == AARCH64_NR_VFORK ||
-        number == AARCH64_NR_TAKIBI_PARENT_PROGRESS) {
+    // The payload fixture's parent report, the last of the process
+    // lifecycle here. Every multicore defect this project has closed lived in
+    // that lifecycle (#532, #552, #569, #571), each found with its operations
+    // on core 0, and they left this list one at a time: wait4 in #609, once
+    // #550 had made its decision and its Blocked publication one critical
+    // section; execve and execveat in #610, once exec's per-call state was
+    // per CPU and its record writes one hold (#618), with the three execs
+    // that stay core 0's handed there from the handler; clone, clone3, fork
+    // and vfork in #611, whose child's first return on its parent's stack
+    // StackOwnership.tla already models on either core.
+    if (number == AARCH64_NR_TAKIBI_PARENT_PROGRESS) {
         return true;
     }
     // syslog: the retained log's only writer is core 0 (#465), appending a
@@ -3820,6 +3820,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (x0 == 11) {
             return SyscallAction::Resume(
                 workload_peer_read_peer_ready());
+        }
+        // /bin/peer-fork (GitHub issue #611).
+        if (x0 == 19) {
+            return SyscallAction::Resume(workload_peer_fork_report());
         }
         // /bin/peer-exec-image (GitHub issue #610).
         if (x0 == 18) {

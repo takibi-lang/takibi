@@ -1,0 +1,1 @@
+workload: fork ran on a peer, its child ran and exited there and was reaped, after one on core 0 was told apart

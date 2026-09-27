@@ -7553,10 +7553,13 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
             // `kernel_process_current_pid() != 1`, which is always true here
             // regardless of who forked).
             execution_here().current_handle = child;
+            // GitHub issue #611: clones run on any CPU now, so the count
+            // moves under the lock that orders them.
+            process_test_evidence_record_clone();
             process_run_unlock(publish_guard);
             workload_busy_note_selected(
                 scheduled_process_pid_of_handle(child));
-            process_test_evidence_record_clone();
+            workload_clone_note(scheduled_process_pid_of_handle(parent));
             kernel_process_trace_record(
                 ProcessTraceFork, scheduled_process_pid_of_handle(child),
                 child.generation,
@@ -7640,12 +7643,12 @@ fn kernel_process_clone_rollback() -> ProcessCloneRollbackResult {
             }
         }
     }
+    process_test_evidence_release_clone();
     process_run_unlock(guard);
     workload_busy_note_selected(
         scheduled_process_pid_of_handle(parent));
     let activation: CurrentRootActivationResult =
         kernel_process_activate_current_root();
-    process_test_evidence_release_clone();
     match activation {
         CurrentRootActivationResult::Invalid => {
             return ProcessCloneRollbackResult::Invalid;
