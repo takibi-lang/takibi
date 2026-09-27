@@ -192,6 +192,8 @@ private fn virtio_blk_submit_owned(request_type: u32, sector: u32,
                                   write: bool,
                                   receive_cpu: sink *VirtioBlkReceiveCpu)
         -> bool !{unsafe} {
+    static_assert(sizeof(VirtioBlkReceive) >= 513,
+                  "the protected receive extent covers data and status");
     let sector_buffer = buffer[0..<512];
     if (write) {
         slice_copy(virtio_blk_data_buf as []u8, sector_buffer);

@@ -9589,6 +9589,29 @@ let infer_tests = [
           return device;
         }");
 
+  Alcotest.test_case "fixed DMA CPU slice cannot enter a retaining call" `Quick
+    (expect_type_error
+       "authority-derived and cannot be passed to retaining parameter"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
+        private let mut dma_fixed596: DmaFixed596 align(64);
+        fn retain(bytes: []u8) {}
+        fn bad(cpu: sink *DmaFixed596Cpu) -> *DmaFixed596Cpu {
+          let bytes = dma_cpu_slice(cpu, DmaFixed596);
+          retain(bytes);
+          return cpu;
+        }");
+
+  Alcotest.test_case "fixed DMA device address needs a trusted boundary" `Quick
+    (expect_type_error
+       "dma_device_addr exports a raw bus address; use unsafe"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
+        private let mut dma_fixed596: DmaFixed596 align(64);
+        fn bad(device: sink *DmaFixed596Device) -> usize {
+          return dma_device_addr(device, DmaFixed596);
+        }");
+
   Alcotest.test_case "fixed DMA finish requires trusted completion" `Quick
     (expect_type_error
        "dma_finish_owned_rx requires unsafe completion or reset evidence"

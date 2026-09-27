@@ -781,7 +781,9 @@ fn msc_abort_unobserved_transfer() -> MscTimeoutResult {
 
 // A control DATA IN TD has one final Transfer Event. On a missing event,
 // halt and reset the controller before restoring CPU ownership.
-private fn xhci_receive_configuration(length: u32) -> u32 !{unsafe} {
+private fn xhci_receive_configuration(length: {1..<257 as u32}) -> u32 !{unsafe} {
+    static_assert(sizeof(XhciControlReceive) == 256,
+                  "the protected control receive extent covers the descriptor");
     match xhci_control_take() {
         XhciControlReceiveAuthority::Cpu(cpu) => {
             let device = dma_begin_rx(cpu, XhciControlReceive);
@@ -828,9 +830,10 @@ must_use variant MscDataReceiveResult {
     ControllerUnusable;
 }
 
-private fn msc_data_receive_once(length: u32)
+private fn msc_data_receive_once(length: {1..<65537 as u32})
         -> MscDataReceiveResult !{unsafe} {
-    static_assert(MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE == 65536,
+    static_assert(sizeof(MscDataReceive) ==
+                  MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE,
                   "the protected receive extent covers one maximal USB transfer");
     match msc_data_take() {
         MscDataReceiveAuthority::Cpu(cpu) => {
@@ -874,6 +877,8 @@ private fn msc_data_receive_once(length: u32)
 private fn msc_csw_receive_attempt(cpu: sink *MscCswReceiveCpu,
                                    remaining_stall_retries: usize)
         -> MscCommandResult !{unsafe} {
+    static_assert(sizeof(MscCswReceive) >= 13,
+                  "the protected CSW extent covers its transfer");
     let device = dma_begin_rx(cpu, MscCswReceive);
     let csw_dma: usize = unsafe {
         dma_device_addr(device, MscCswReceive)
@@ -943,7 +948,7 @@ private fn msc_read_csw() -> MscCommandResult !{unsafe} {
     }
 }
 
-fn msc_run_command(data_len: u32, dir_in: bool,
+fn msc_run_command(data_len: {0..<65537 as u32}, dir_in: bool,
                    data: *align(64) u8) -> MscCommandResult {
     // `data` is used only for outbound payloads. Inbound payloads use the
     // protected receive allocation inside msc_data_receive_once.
@@ -1733,10 +1738,14 @@ fn disk_read_sectors(sector: u32, buf: []u8) -> DiskIoResult {
         return DiskIoResult::Err(-1);
     }
     let length: usize = buf.len;
-    msc_cbw_header(length as u32, true, 10);
+    if (length > 65536) { return DiskIoResult::Err(-1); }
+    let length_u32: u32 = length as u32;
+    if (length_u32 >= 65537) { return DiskIoResult::Err(-1); }
+    let transfer_len: {0..<65537 as u32} = length_u32;
+    msc_cbw_header(transfer_len, true, 10);
     msc_scsi_lba_cdb(0x28, sector, sectors);
     let mut retry: bool = false;
-    match msc_run_command(length as u32, true, msc_bounce_buf) {
+    match msc_run_command(transfer_len, true, msc_bounce_buf) {
         MscCommandResult::Ok => { }
         MscCommandResult::CompletedError(_) => { retry = true; }
         MscCommandResult::RestartRequired => { return DiskIoResult::Err(-1); }
@@ -1744,9 +1753,9 @@ fn disk_read_sectors(sector: u32, buf: []u8) -> DiskIoResult {
     }
     if (retry) {
         msc_recover_transport();
-        msc_cbw_header(length as u32, true, 10);
+        msc_cbw_header(transfer_len, true, 10);
         msc_scsi_lba_cdb(0x28, sector, sectors);
-        match msc_run_command(length as u32, true, msc_bounce_buf) {
+        match msc_run_command(transfer_len, true, msc_bounce_buf) {
             MscCommandResult::Ok => { }
             MscCommandResult::CompletedError(_) => {
                 return DiskIoResult::Err(-1);
@@ -1802,15 +1811,19 @@ fn disk_write_sectors(sector: u32, buf: []u8) -> DiskIoResult {
         return DiskIoResult::Err(-1);
     }
     let length: usize = buf.len;
+    if (length > 65536) { return DiskIoResult::Err(-1); }
+    let length_u32: u32 = length as u32;
+    if (length_u32 >= 65537) { return DiskIoResult::Err(-1); }
+    let transfer_len: {0..<65537 as u32} = length_u32;
     for i: usize in 0..<MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE {
         if (i < buf.len) {
             msc_bounce_buf[i] = buf[i];
         }
     }
-    msc_cbw_header(length as u32, false, 10);
+    msc_cbw_header(transfer_len, false, 10);
     msc_scsi_lba_cdb(0x2A, sector, sectors);
     msc_write10_command_count = msc_write10_command_count + 1;
-    match msc_run_command(length as u32, false, msc_bounce_buf) {
+    match msc_run_command(transfer_len, false, msc_bounce_buf) {
         MscCommandResult::Ok => { return DiskIoResult::Ok; }
         MscCommandResult::CompletedError(_) => { }
         MscCommandResult::RestartRequired => { return DiskIoResult::Err(-1); }
@@ -1822,10 +1835,10 @@ fn disk_write_sectors(sector: u32, buf: []u8) -> DiskIoResult {
     // its CSW was lost, repeating identical bytes to the identical LBA
     // is content-idempotent; no general write-command retry policy is
     // implied.
-    msc_cbw_header(length as u32, false, 10);
+    msc_cbw_header(transfer_len, false, 10);
     msc_scsi_lba_cdb(0x2A, sector, sectors);
     msc_write10_command_count = msc_write10_command_count + 1;
-    match msc_run_command(length as u32, false, msc_bounce_buf) {
+    match msc_run_command(transfer_len, false, msc_bounce_buf) {
         MscCommandResult::Ok => { return DiskIoResult::Ok; }
         MscCommandResult::CompletedError(_) => {
             return DiskIoResult::Err(-1);

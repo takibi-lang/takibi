@@ -15,9 +15,8 @@ and the development container verifies the response with real `curl`.
 - Raspberry Pi firmware and TF-A hand control to a minimal AArch64 EL2 shim.
 - The shim performs required architectural setup and drops once to EL1.
 - The monolithic kernel and its drivers run at EL1.
-- PSCI starts core 1 through its own stack and EL2-to-EL1 transition; it
-  validates shared-MMU visibility and then parks. Core 0 runs the current
-  process scheduler and all device interrupts.
+- PSCI starts core 1 through its own stack and EL2-to-EL1 transition. After
+  validating shared-MMU visibility, both cores run ordinary processes.
 - RPi5 UART RX, RP1 Cadence GEM Ethernet, and RP1 xHCI USB are all dispatched
   through GIC-400 and RP1 MIP0/MSI-X interrupts; the ARM generic timer (PPI
   #30) provides a periodic wake source so Ethernet's retry loops keep their
@@ -26,9 +25,9 @@ and the development container verifies the response with real `curl`.
   stack mappings.
 - Ordinary kernel services do not use EL2 HVC as an internal service layer.
 - Page, mapping, process, file, socket, and frame lifetimes retain explicit
-  affine or linear ownership. On cache-maintained targets, DMA builtins prove
-  RX buffer alignment and whole-line lengths, but do not enforce the buffer's
-  CPU/DMA ownership interval.
+  affine or linear ownership. Legacy DMA cache builtins prove RX alignment
+  and whole-line lengths. The fixed DMA allocation operations also enforce
+  CPU/device token handoff for allocations declared with `dma_fixed`.
 - A pooled scheduler table (`ProcessRecord`) gives each live process a
   dedicated address-space root, ASID, and unified descriptor table. There is
   no process-count constant: a record is a pool allocation, so the page
@@ -1144,8 +1143,8 @@ run, not a specification.
   device. A write on either core retires the other's copies.
 - **Processes.** A pooled `ProcessRecord` scheduler table with no
   process-count ceiling, with lazily backed kernel stacks and directly owned
-  address-space page tables, all on core 0.
-  Core 1 proves autonomous EL1 entry and shared-MMU visibility, then parks.
+  address-space page tables. Both cores run ordinary processes after core 1
+  proves autonomous EL1 entry and shared-MMU visibility.
   `execve` resolves `argv[0]` as an ext2 path, validates a bounded ELF
   metadata window, and streams each PT_LOAD page from the file. Static
   BusyBox applets such as `/bin/echo` are hard links to its ELF, so their

@@ -18,7 +18,7 @@ CONSTANTS
 
 VARIABLES
     \* @type: Str;
-    slot,          \* "Cpu" | "Empty": persistent authority storage
+    slot,          \* "Cpu" | "Empty" | "Dma": persistent authority storage
     \* @type: Str;
     token,         \* "None" | "Cpu" | "Dma": local linear authority
     \* @type: Bool;
@@ -49,6 +49,15 @@ PutCpu ==
     /\ slot = "Empty"
     /\ token = "Cpu"
     /\ slot' = "Cpu"
+    /\ token' = "None"
+    /\ UNCHANGED <<deviceActive, evidence, invalidAccess>>
+
+(* A failed reset leaves the device token in the slot and disables reuse. *)
+PutDma ==
+    /\ slot = "Empty"
+    /\ token = "Dma"
+    /\ evidence = "ResetFailed"
+    /\ slot' = "Dma"
     /\ token' = "None"
     /\ UNCHANGED <<deviceActive, evidence, invalidAccess>>
 
@@ -84,6 +93,12 @@ ConfirmReset ==
     /\ evidence' = "Reset"
     /\ UNCHANGED <<slot, token, invalidAccess>>
 
+ResetFailed ==
+    /\ token = "Dma"
+    /\ evidence = "TimedOut"
+    /\ evidence' = "ResetFailed"
+    /\ UNCHANGED <<slot, token, deviceActive, invalidAccess>>
+
 Finish ==
     /\ token = "Dma"
     /\ (evidence \in {"Complete", "Reset"}
@@ -96,26 +111,35 @@ CpuAccess ==
     /\ invalidAccess' = (invalidAccess \/ deviceActive)
     /\ UNCHANGED <<slot, token, deviceActive, evidence>>
 
+(* The controller is unusable and rejects every later request. *)
+Disabled ==
+    /\ slot = "Dma"
+    /\ token = "None"
+    /\ UNCHANGED vars
+
 Next ==
     \/ TakeCpu
     \/ PutCpu
+    \/ PutDma
     \/ Submit
     \/ ObserveCompletion
     \/ Timeout
     \/ ConfirmReset
+    \/ ResetFailed
     \/ Finish
     \/ CpuAccess
+    \/ Disabled
 
 Spec == Init /\ [][Next]_vars
 
 TypeOK ==
-    /\ slot \in {"Cpu", "Empty"}
+    /\ slot \in {"Cpu", "Empty", "Dma"}
     /\ token \in {"None", "Cpu", "Dma"}
     /\ deviceActive \in BOOLEAN
-    /\ evidence \in {"None", "Complete", "TimedOut", "Reset"}
+    /\ evidence \in {"None", "Complete", "TimedOut", "Reset", "ResetFailed"}
     /\ invalidAccess \in BOOLEAN
 
-UniqueAuthority == (slot = "Cpu") <=> (token = "None")
+UniqueAuthority == (slot = "Empty") <=> (token # "None")
 NoCpuAccessWhileDeviceMayWrite == ~invalidAccess
 Safety == UniqueAuthority /\ NoCpuAccessWhileDeviceMayWrite
 

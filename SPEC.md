@@ -2510,8 +2510,10 @@ data: [T; N]; }` marks a record with exactly one nonempty fixed array
 field. Exactly one `private let mut` global of that record type must be
 declared with `align(...)` and no initializer. On a cache-maintained target,
 both the alignment and the array's byte extent must be multiples of the
-target cache-line size. The compiler rejects a marked declaration on a target
-without a DMA cache-maintenance contract.
+target cache-line size. The element type must have a byte extent the type
+checker can compute; arrays of ordinary unpacked structs are not currently
+accepted by this ownership form. The compiler rejects a marked declaration
+on a target without a DMA cache-maintenance contract.
 
 For each record, the compiler creates linear opaque `NameCpu` and
 `NameDevice` token types, a linear `NameAuthority` variant with `Cpu`,
