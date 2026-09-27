@@ -1,0 +1,78 @@
+/* execve on a peer (GitHub issue #610): two static-PIE EL0 programs linked
+ * from this one object, kept free of writable globals and compiled with
+ * --forbid-trap. run once from init.sh.
+ *
+ * /bin/peer-exec pins itself to CPU 0 and execs /bin/peer-exec-image. That
+ * image asks the kernel (workload tag 18) where the exec committed. The
+ * answer must be 2, core 0: the negative control, which shows the report
+ * tells a core-0 exec apart. It then pins itself to CPU 1 and execs itself
+ * again there. The second answer must be 1: the exec committed on CPU 1 and
+ * the new image is running on CPU 1, and the kernel prints the peer_exec
+ * view's line. It prints nothing itself unless it fails.
+ */
+
+const WRITE_SYSCALL: usize = 64;
+const EXIT_SYSCALL: usize = 93;
+const EXECVE_SYSCALL: usize = 221;
+const SETAFFINITY_SYSCALL: usize = 122;
+const GETCPU_SYSCALL: usize = 168;
+const WORKLOAD_PROGRESS_SYSCALL: usize = 453;
+const PEER_EXEC_TAG: usize = 18;
+const PEER_EXEC_ON_PEER: usize = 1;
+const PEER_EXEC_ON_CORE0: usize = 2;
+const PEER_EXEC_ARRIVAL_POLLS: usize = 1000000;
+
+private fn peer_exec_fail(line: borrow []u8) {
+    svc5(WRITE_SYSCALL, 1, line as *u8 as usize, line.len, 0, 0);
+    svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+}
+
+// Pin to one CPU and wait until this process is running there.
+private fn peer_exec_move_to(cpu: u8) {
+    let mut mask: [u8; 8];
+    for index: usize in 0..<8 { mask[index] = 0; }
+    mask[0] = (1 << cpu) as u8;
+    if (svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) != 0) {
+        peer_exec_fail(bs"peer-exec: the affinity mask was refused\n");
+    }
+    let mut cpu_bytes: [u8; 4];
+    cpu_bytes[0] = 99;
+    for poll: usize in 0..<PEER_EXEC_ARRIVAL_POLLS {
+        if (cpu_bytes[0] != cpu) {
+            if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize,
+                     0, 0, 0, 0) != 0) {
+                cpu_bytes[0] = 99;
+            }
+        }
+    }
+    if (cpu_bytes[0] != cpu) {
+        peer_exec_fail(bs"peer-exec: never arrived on the pinned cpu\n");
+    }
+}
+
+private fn peer_exec_image_exec() {
+    let mut argv: [usize; 2];
+    argv[0] = "/bin/peer-exec-image" as *u8 as usize;
+    argv[1] = 0;
+    svc5(EXECVE_SYSCALL, "/bin/peer-exec-image" as *u8 as usize,
+         argv as *usize as usize, 0, 0, 0);
+    peer_exec_fail(bs"peer-exec: execve returned\n");
+}
+
+fn peer_exec() {
+    peer_exec_move_to(0);
+    peer_exec_image_exec();
+}
+
+fn peer_exec_image() {
+    let answer: usize = svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_EXEC_TAG,
+                             0, 0, 0, 0);
+    if (answer == PEER_EXEC_ON_CORE0) {
+        peer_exec_move_to(1);
+        peer_exec_image_exec();
+    }
+    if (answer != PEER_EXEC_ON_PEER) {
+        peer_exec_fail(bs"peer-exec: the exec on cpu 1 did not both commit and run there\n");
+    }
+    svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+}

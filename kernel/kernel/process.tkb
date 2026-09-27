@@ -8660,6 +8660,7 @@ fn kernel_process_child_wait_status_consume_for(slot: usize) -> usize
 // process's own execve() succeeds -- execution_here().current_handle still
 // names it directly, no switch has happened yet.
 fn kernel_process_child_exec_mark() {
+    workload_exec_commit_note();
     if (execution_here().current_live) {
         let slot: usize = execution_here().current_handle.pool_index;
         scheduled_process_record_at(slot).exec_image_live = true;

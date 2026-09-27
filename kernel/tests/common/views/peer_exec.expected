@@ -1,0 +1,1 @@
+workload: execve committed on a peer and its new image ran there, after one on core 0 was told apart

@@ -275,6 +275,12 @@ private let mut workload_peer_wait_pid: usize;
 private let mut workload_peer_wait_blocked: bool;
 private let mut workload_peer_wait_reaped: bool;
 private let mut workload_peer_mutation_seen: usize;
+// GitHub issue #610: /bin/peer-exec -- the CPU each exec of one process
+// committed on, and whether an exec on core 0 was reported (and told apart)
+// before the one on a peer.
+private let mut workload_peer_exec_pid: usize;
+private let mut workload_peer_exec_cpu: usize;
+private let mut workload_peer_exec_control: bool;
 
 enum WorkloadCpuMode { Idle; El0; El1; Irq; }
 
@@ -1428,6 +1434,44 @@ fn workload_peer_wait_report() -> usize {
     kernel_boot_log(
         "workload: wait4 blocked on a peer until its child exited elsewhere, and reaped there\n");
     return 1;
+}
+
+// An exec committed on this CPU. A different process restarts the record.
+fn workload_exec_commit_note() {
+    let guard = process_run_lock();
+    let pid: usize = kernel_process_current_pid();
+    if (workload_peer_exec_pid != pid) {
+        workload_peer_exec_pid = pid;
+        workload_peer_exec_control = false;
+    }
+    workload_peer_exec_cpu = cpu_id();
+    process_run_unlock(guard);
+}
+
+// Tag 18, asked by the image an exec just started. 2 when that exec
+// committed on core 0: the negative control, which the next answer needs.
+// 1 and the line when it committed on a peer, the new image is running on
+// that same peer, and the control came first. 3 when a second exec
+// committed on core 0 too -- a peer's exec was handed there. 0 otherwise.
+fn workload_peer_exec_report() -> usize {
+    let guard = process_run_lock();
+    let ours: bool = workload_peer_exec_pid == kernel_process_current_pid();
+    let committed: usize = workload_peer_exec_cpu;
+    let mut answer: usize = 0;
+    if (ours && committed == 0 && workload_peer_exec_control) {
+        answer = 3;
+    } else if (ours && committed == 0) {
+        workload_peer_exec_control = true;
+        answer = 2;
+    } else if (ours && committed == cpu_id() && workload_peer_exec_control) {
+        answer = 1;
+    }
+    process_run_unlock(guard);
+    if (answer == 1) {
+        kernel_boot_log(
+            "workload: execve committed on a peer and its new image ran there, after one on core 0 was told apart\n");
+    }
+    return answer;
 }
 
 // Tag 14: 1 and the line when this process made all three on a peer.

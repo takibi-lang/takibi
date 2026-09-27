@@ -46,9 +46,28 @@ let mut ext2_mount_ready: bool;
 // streams from ext2.
 const EXEC_METADATA_SIZE: usize = 1024;
 let mut rootfs_metadata: [u8; EXEC_METADATA_SIZE];
-let mut exec_resolve_image: [u8; EXEC_METADATA_SIZE];
-let mut dynamic_primary_metadata: [u8; EXEC_METADATA_SIZE];
-let mut dynamic_interpreter_metadata: [u8; EXEC_METADATA_SIZE];
+// GitHub issue #610: what one execve carries from resolving its image to
+// returning into it, per CPU. A resolved plan's `image` is a slice of these
+// buffers, and the prepare that maps it and the return that enters it run
+// on the same CPU in one non-preemptible EL1 span; two CPUs exec'ing at
+// once each have their own.
+struct ExecScratch {
+    resolve_image: [u8; EXEC_METADATA_SIZE];
+    primary_metadata: [u8; EXEC_METADATA_SIZE];
+    interpreter_metadata: [u8; EXEC_METADATA_SIZE];
+    entry: usize;
+    stack: usize;
+}
+
+private let mut exec_scratch: [ExecScratch; KERNEL_MAX_CORES];
+
+// The same bounded array-decay as syscall.tkb's syscall_scratch_here().
+private fn exec_scratch_here() -> *ExecScratch {
+    let base: *ExecScratch = exec_scratch;
+    let core: usize = cpu_id();
+    if (core >= KERNEL_MAX_CORES) { return base; }
+    return base + (core as isize);
+}
 
 fn exec_metadata_prefix(metadata: [u8; EXEC_METADATA_SIZE..],
                         length: usize) -> []u8 {
@@ -58,8 +77,6 @@ fn exec_metadata_prefix(metadata: [u8; EXEC_METADATA_SIZE..],
     }
     return metadata[0..<EXEC_METADATA_SIZE];
 }
-let mut kernel_child_exec_entry: usize;
-let mut kernel_child_exec_stack: usize;
 let mut kernel_init_socket_evidence: bool;
 let mut saved_rootfs_plan: DistroElfLoadPlan;
 let mut rootfs_plan_ready: bool;
@@ -183,7 +200,7 @@ fn kernel_exec_resolve_ext2_inode_at(mount: Ext2Mount, inode: usize,
 fn kernel_exec_resolve_ext2_name(mount: Ext2Mount, name: []u8)
         -> ExecResolveResult !{unsafe} {
     return kernel_exec_resolve_ext2_name_at(
-        mount, name, exec_resolve_image as []u8);
+        mount, name, exec_scratch_here().resolve_image as []u8);
 }
 
 // The one interpreter this kernel maps: the musl loader. Its PT_INTERP
@@ -217,7 +234,7 @@ fn kernel_exec_resolve_musl_pair(primary: Ext2ExecImage, mount: Ext2Mount)
     }
     match kernel_exec_resolve_ext2_name_at(
             mount, bs"lib/ld-musl-aarch64.so.1",
-            dynamic_interpreter_metadata as []u8) {
+            exec_scratch_here().interpreter_metadata as []u8) {
         ExecResolveResult::NotFound => {
             return DynamicExecResolveResult::Invalid;
         }
@@ -235,7 +252,7 @@ fn kernel_exec_resolve_dynamic_ext2_images(mount: Ext2Mount)
         -> DynamicExecResolveResult !{unsafe} {
     match kernel_exec_resolve_ext2_name_at(
             mount, bs"bin/busybox-extras",
-            dynamic_primary_metadata as []u8) {
+            exec_scratch_here().primary_metadata as []u8) {
         ExecResolveResult::NotFound => {
             return DynamicExecResolveResult::Invalid;
         }
@@ -254,7 +271,7 @@ fn kernel_exec_resolve_dynamic_ext2(mount: Ext2Mount)
     let inode: usize = kernel_syscall_exec_inode();
     if (inode == 0) { return DynamicExecResolveResult::NotRequested; }
     match kernel_exec_resolve_ext2_inode_at(
-            mount, inode, dynamic_primary_metadata as []u8) {
+            mount, inode, exec_scratch_here().primary_metadata as []u8) {
         ExecResolveResult::NotFound => {
             return DynamicExecResolveResult::NotRequested;
         }
@@ -302,8 +319,8 @@ fn kernel_process_child_exec_map_result(
             return KernelChildExecPrepareResult::StaticMapOutOfMemory;
         }
         ProcessImageMapResult::Mapped(pages) => {
-            kernel_child_exec_entry = process_image_entry(pages);
-            kernel_child_exec_stack = process_image_stack_pointer(pages);
+            exec_scratch_here().entry = process_image_entry(pages);
+            exec_scratch_here().stack = process_image_stack_pointer(pages);
             let (heap_start, heap_limit) = process_image_heap_range(pages);
             match process_image_exec_install(pages) {
                 ProcessImageExecInstallResult::AlreadyInstalled => {
@@ -817,8 +834,8 @@ fn kernel_process_child_exec_prepare() -> KernelChildExecPrepareResult {
                         return KernelChildExecPrepareResult::DynamicPairInvalid;
                     }
                     ProcessImagePairProbeResult::Ready(pages) => {
-                        kernel_child_exec_entry = process_image_entry(pages);
-                        kernel_child_exec_stack =
+                        exec_scratch_here().entry = process_image_entry(pages);
+                        exec_scratch_here().stack =
                             process_image_stack_pointer(pages);
                         let (heap_start, heap_limit) =
                             process_image_heap_range(pages);
@@ -877,11 +894,11 @@ fn kernel_process_child_exec_prepare() -> KernelChildExecPrepareResult {
 }
 
 fn kernel_process_child_exec_entry() -> usize {
-    return kernel_child_exec_entry;
+    return exec_scratch_here().entry;
 }
 
 fn kernel_process_child_exec_stack() -> usize {
-    return kernel_child_exec_stack;
+    return exec_scratch_here().stack;
 }
 
 fn kernel_process_child_exec_reap() {

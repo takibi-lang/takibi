@@ -99,6 +99,14 @@ if [ "$?" -ne 0 ]; then
     exit 1
 fi
 
+# GitHub issue #610: execve on CPU 1, after one on core 0 as the control.
+# The kernel prints the peer_exec view's line; this prints only a failure.
+/bin/peer-exec
+if [ "$?" -ne 0 ]; then
+    echo "peer-exec failed"
+    exit 1
+fi
+
 # GitHub issue #606: a window of the stack-ownership protocol as it ran,
 # printed by the kernel for scripts/validate_protocol_trace.py to replay
 # against StackOwnership.tla. This prints only a failure.

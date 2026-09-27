@@ -3271,14 +3271,16 @@ private fn syscall_accept_claimed(number: usize, x0: usize, x1: usize,
 // of the call. What each group needs before it can leave the list is on
 // issue #583.
 fn syscall_peer_refused(number: usize) -> bool {
-    // The process lifecycle: clone and its forms, exec, and the payload
-    // fixture's parent report. Every multicore defect this project has
-    // closed lived here (#532, #552, #569, #571), each found with these
-    // operations on core 0. wait4 left the list in #609, once #550 had made
-    // its decision and its Blocked publication one critical section.
+    // The process lifecycle: clone and its forms, and the payload fixture's
+    // parent report. Every multicore defect this project has closed lived
+    // here (#532, #552, #569, #571), each found with these operations on
+    // core 0. wait4 left the list in #609, once #550 had made its decision
+    // and its Blocked publication one critical section. execve and execveat
+    // left it in #610: exec's per-call state is per CPU, its record writes
+    // are one hold (#618), and the two execs that stay core 0's are handed
+    // there from the handler.
     if (number == AARCH64_NR_CLONE || number == AARCH64_NR_CLONE3 ||
         number == AARCH64_NR_FORK || number == AARCH64_NR_VFORK ||
-        number == AARCH64_NR_EXECVE || number == AARCH64_NR_EXECVEAT ||
         number == AARCH64_NR_TAKIBI_PARENT_PROGRESS) {
         return true;
     }
@@ -3818,6 +3820,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (x0 == 11) {
             return SyscallAction::Resume(
                 workload_peer_read_peer_ready());
+        }
+        // /bin/peer-exec-image (GitHub issue #610).
+        if (x0 == 18) {
+            return SyscallAction::Resume(workload_peer_exec_report());
         }
         // /bin/protocol-trace's window (GitHub issue #606).
         if (x0 == 16) {
@@ -5139,6 +5145,17 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (kernel_syscall_exec_pending()) {
             return SyscallAction::Resume(LINUX_EAGAIN);
         }
+        // GitHub issue #610: a child's exec runs where it is called. The
+        // root process's own (SyscallAction::Exec) does not: it returns
+        // through run_initial_user, core 0's boot entry into PID 1, so a
+        // peer hands it to core 0 before anything is written. So does any
+        // exec in inetd mode: its close-on-exec pass may close a connected
+        // descriptor, and in that mode those are core 0's (see
+        // syscall_peer_safe).
+        if (cpu_id() != 0 && (kernel_process_is_child() == false ||
+                              kernel_syscall_inetd_mode())) {
+            return SyscallAction::Migrate;
+        }
         let mut path_address: usize = x0;
         let mut argv_address: usize = x1;
         if (number == AARCH64_NR_EXECVEAT) {
@@ -5203,6 +5220,15 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     script_offset = prefix.length;
                 }
             }
+        }
+        // GitHub issue #610: exec'ing BusyBox Extras hands off the bounded
+        // socket fixture (kernel_syscall_daemon_start), which resets the TCP
+        // connection pool core 0's network path owns. That exec, alone,
+        // stays core 0's; nothing has been written yet, so the rerun there
+        // starts clean.
+        if (cpu_id() != 0 && exec_inode != 0 &&
+            kernel_exec_primary_is_busybox_extras(exec_inode)) {
+            return SyscallAction::Migrate;
         }
         let mut output_offset: usize = script_offset;
         let mut argc: usize = script_argc;
