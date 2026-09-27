@@ -10,7 +10,7 @@ let hard_keywords = [
   "void"; "extern"; "symbol"; "vector_table"; "exception_entry";
   "exception_restore"; "embed_file"; "struct"; "opaque"; "affine";
   "linear"; "view"; "variant"; "must_use"; "exists"; "borrow";
-  "sink"; "private"; "packed"; "be"; "publish"; "no_copy"; "io"; "enum"; "match";
+  "sink"; "private"; "packed"; "be"; "publish"; "no_copy"; "dma_fixed"; "io"; "enum"; "match";
   "align"; "multiple"; "sizeof"; "alignof"; "contains_stable_owner"; "use";
   "offsetof"; "static_assert"; "type"; "generic"; "bool"; "unsafe";
   "true"; "false"; "i8"; "i16"; "i32"; "i64"; "u8"; "u16";
@@ -30,6 +30,8 @@ let compiler_builtins = [
   "dma_publish"; "dma_consume"; "device_fence"; "signal_fence";
   "interrupt_wait"; "interrupt_notify";
   "dma_prepare_tx"; "dma_prepare_rx"; "dma_finish_rx";
+  "dma_cpu_ptr"; "dma_begin_rx"; "dma_finish_owned_rx";
+  "dma_device_addr";
   "checked_add_usize"; "checked_mul_usize";
   "mrs_cntfrq_el0"; "mrs_cntpct_el0"; "mrs_sctlr_el1";
   "mrs_esr_el1"; "mrs_far_el1"; "mrs_elr_el1"; "mrs_spsr_el1";

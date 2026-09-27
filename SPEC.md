@@ -2494,6 +2494,51 @@ the length must fit that array's provable byte extent. Address-preserving
 pointer casts and chains of immutable local aliases retain the extent proof;
 pointer arithmetic, mutable aliases, calls, returned pointers, and dynamic
 lengths do not. This check does not establish CPU/device ownership.
+
+**Protected fixed RX allocations.** `struct dma_fixed Name { private
+data: [T; N]; }` marks a record with exactly one nonempty fixed array
+field. Exactly one `private let mut` global of that record type must be
+declared with `align(...)` and no initializer. On a cache-maintained target,
+both the alignment and the array's byte extent must be multiples of the
+target cache-line size. The compiler rejects a marked declaration on a target
+without a DMA cache-maintenance contract.
+
+For each record, the compiler creates linear opaque `NameCpu` and
+`NameDevice` token types, a linear `NameAuthority` variant with `Cpu`,
+`Empty`, and `Device` cases, and a private stable owner global
+`dma_owner_Name` with `mutex` and `value` fields. Zero initialization puts
+the only initial CPU token in the first `Cpu` case; its runtime pointer
+payload is zero and must never be dereferenced. No claim function can mint a
+second token. Casts to either token, extern functions carrying a token, and
+additional zero-initialized authority globals are rejected. The declaring
+program must provide a zero-initializable `Mutex` type for the slot's lock
+field. An exchange of this
+slot through `stable_replace` must spell the compiler-created global
+directly for both the mutex and owner field. The guard still represents a
+real lock acquisition supplied by the caller, as for other stable slots.
+
+Ordinary reads, writes, address-taking, field access, and casts of the
+protected record are rejected, including through a pointer to that record.
+`dma_cpu_ptr(cpu, Name)` borrows a live `*NameCpu` token and returns a pointer
+to the first array element. The returned pointer and its pointer/integer
+aliases are tied to the CPU token: they cannot be returned, retained by a
+call, stored durably, or used after the token is consumed. Calls may use a
+derived pointer through an explicitly nonretaining borrowed parameter while
+the CPU token remains live.
+
+`dma_begin_rx(cpu, Name)` consumes the CPU token, prepares the entire fixed
+array for device writes, and returns `*NameDevice`. `dma_finish_owned_rx(dev,
+Name)` consumes the device token, finishes the same RX range, and returns
+`*NameCpu`. The latter requires `unsafe { ... }`: the caller must have
+observed completion, including a completed error, or confirmed device
+quiescence/reset. An unobserved timeout alone is not sufficient evidence.
+`dma_device_addr(dev, Name)` borrows the device token and exports the array's
+raw bus address as `usize` inside `unsafe { ... }` for a descriptor or MMIO
+boundary. That escape is trusted; converting the exported integer back to a
+CPU pointer or submitting it to another device is outside the ownership
+proof. The unprotected `dma_prepare_rx` and `dma_finish_rx` builtins above
+remain available for legacy allocations but do not carry this guarantee.
+
 `signal_fence()` is
 a compiler-only ISR/normal-context memory boundary (side-effecting empty
 inline asm with a memory clobber, no hardware barrier instruction).

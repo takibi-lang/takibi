@@ -196,6 +196,7 @@ let () =
     Type_layout.reset ();
     Publish_registry.reset ();
     No_copy_registry.reset ();
+    Dma_fixed_registry.reset ();
     Generic_scope.reset ();
     Ast.reset_precedence_errors ();
     (* GitHub issue #55: every file named on the command line is an entry
@@ -247,6 +248,7 @@ let () =
        Before monomorphization so that everything downstream sees only
        ordinary StructDef/OpaqueStructDef declarations. *)
     let prog = Publish_record.run prog in
+    let prog = Dma_fixed_record.run prog in
 
     let prog = Monomorphize.run ~explain_inference:!explain_inference prog in
 

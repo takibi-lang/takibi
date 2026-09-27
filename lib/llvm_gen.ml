@@ -4451,6 +4451,64 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
               | Atomic_spec.Compare_exchange -> "compare_exchange")
              (Atomic_spec.ordering_name spec.ordering) name)))
 
+  | Call ("dma_cpu_ptr", [owner; { desc = Var record; _ }]) ->
+      let _ = gen_expr locals owner in
+      (match Dma_fixed_registry.allocation_of record,
+             Dma_fixed_registry.fields_of record with
+       | Some global, Some [(field, TypeArray (elem, _))] ->
+           let (_, storage) = Hashtbl.find global_vars global in
+           let llty = Hashtbl.find struct_lltypes record in
+           let (field_index, _) = field_info record field in
+           let ptr = build_in_bounds_gep llty storage
+             [| const_int (i32_type context) 0;
+                const_int (i32_type context) field_index |]
+             "dma.cpu.ptr" builder in
+           (TypePtr elem, ptr)
+       | _ -> raise (Error (Printf.sprintf
+           "dma_cpu_ptr has no fixed allocation for '%s'" record)))
+
+  | Call ("dma_device_addr", [owner; { desc = Var record; _ }]) ->
+      let _ = gen_expr locals owner in
+      (match Dma_fixed_registry.allocation_of record,
+             Dma_fixed_registry.fields_of record with
+       | Some global, Some [(field, TypeArray (_, _))] ->
+           let (_, storage) = Hashtbl.find global_vars global in
+           let llty = Hashtbl.find struct_lltypes record in
+           let (field_index, _) = field_info record field in
+           let ptr = build_in_bounds_gep llty storage
+             [| const_int (i32_type context) 0;
+                const_int (i32_type context) field_index |]
+             "dma.device.ptr" builder in
+           (TypeUsize, build_ptrtoint ptr (usize_lltype ())
+             "dma.device.addr" builder)
+       | _ -> raise (Error (Printf.sprintf
+           "dma_device_addr has no fixed allocation for '%s'" record)))
+
+  | Call (("dma_begin_rx" | "dma_finish_owned_rx") as operation,
+          [owner; { desc = Var record; _ }]) ->
+      let (_, token) = gen_expr locals owner in
+      (match Dma_fixed_registry.allocation_of record,
+             Dma_fixed_registry.fields_of record with
+       | Some global, Some [(_, (TypeArray (_, _) as array_ty))] ->
+           let size = match const_type_size array_ty with
+             | Some n -> n
+             | None -> raise (Error (Printf.sprintf
+                 "fixed DMA allocation '%s' has no known byte extent" global)) in
+           let var = { desc = Var global; loc = e.loc } in
+           let ptr = { desc = Cast (TypePtr TypeU8,
+             { desc = AddrOf var; loc = e.loc }); loc = e.loc } in
+           let len = { desc = IntLit (Int64.of_int size); loc = e.loc } in
+           let cache_operation = if operation = "dma_begin_rx"
+             then "dma_prepare_rx" else "dma_finish_rx" in
+           ignore (gen_expr locals { desc = Call (cache_operation, [ptr; len]);
+             loc = e.loc });
+           let next_type = if operation = "dma_begin_rx"
+             then Dma_fixed_registry.device_token record
+             else Dma_fixed_registry.cpu_token record in
+           (TypePtr (TypeNamed next_type), token)
+       | _ -> raise (Error (Printf.sprintf
+           "%s has no fixed allocation for '%s'" operation record)))
+
   | Call (("publish_begin" | "publish_commit" | "publish_abandon"
           | "publish_copy") as name, args) ->
       (* GitHub issue #299: the four operations of the publication record.

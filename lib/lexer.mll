@@ -41,6 +41,7 @@ let hard_keyword_token = function
   | "sink" -> SINK | "private" -> PRIVATE | "packed" -> PACKED | "be" -> BE
   | "publish" -> PUBLISH
   | "no_copy" -> NO_COPY
+  | "dma_fixed" -> DMA_FIXED
   | "io" -> IO | "enum" -> ENUM | "match" -> MATCH | "align" -> ALIGN
   | "multiple" -> MULTIPLE
   | "sizeof" -> SIZEOF | "alignof" -> ALIGNOF

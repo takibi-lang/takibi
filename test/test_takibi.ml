@@ -33,6 +33,7 @@ let parse src =
   Type_layout.reset ();
   Publish_registry.reset ();
   No_copy_registry.reset ();
+  Dma_fixed_registry.reset ();
   Generic_scope.reset ();
   Ast.reset_precedence_errors ();
   let lexbuf = Lexing.from_string src in
@@ -45,11 +46,11 @@ let parse src =
 let infer src =
   Type_inf.infer_program
     (Declared_type_resolver.run
-       (Monomorphize.run (Publish_record.run (parse src))))
+       (Monomorphize.run (Dma_fixed_record.run (Publish_record.run (parse src)))))
 
 let unused_errors ?(external_entries = ["main"]) src =
   let prog = Declared_type_resolver.run
-      (Monomorphize.run (Publish_record.run (parse src))) in
+      (Monomorphize.run (Dma_fixed_record.run (Publish_record.run (parse src)))) in
   let types = Type_inf.infer_program prog in
   Unused_functions.check ~external_entries ~check_files:[] prog types
 
@@ -65,6 +66,7 @@ let infer_files files =
   Type_layout.reset ();
   Publish_registry.reset ();
   No_copy_registry.reset ();
+  Dma_fixed_registry.reset ();
   Generic_scope.reset ();
   Ast.reset_precedence_errors ();
   let prog = List.concat_map (fun (filename, src) ->
@@ -74,7 +76,7 @@ let infer_files files =
   ) files in
   Type_inf.infer_program
     (Declared_type_resolver.run
-       (Monomorphize.run (Publish_record.run prog)))
+       (Monomorphize.run (Dma_fixed_record.run (Publish_record.run prog))))
 
 (* Runs the full pipeline through LLVM codegen (no object-file emission).
    A test that did not select a target gets the project's primary AArch64
@@ -89,7 +91,7 @@ let gen_codegen src =
     ignore (Llvm_gen.setup_target ~triple:"aarch64-none-elf" ());
   let prog =
     Declared_type_resolver.run
-      (Monomorphize.run (Publish_record.run (parse src))) in
+      (Monomorphize.run (Dma_fixed_record.run (Publish_record.run (parse src)))) in
   let prog_types = Type_inf.infer_program prog in
   Llvm_gen.gen_program ~prog_types prog
 
@@ -9418,6 +9420,160 @@ let infer_tests = [
         fn ok(p: &mut RefArrPool) { p.slots[0] = 1; }
         fn f() { let mut pool: RefArrPool = {{0, 0, 0, 0}}; ok(&pool); }");
 
+  Alcotest.test_case "fixed DMA declaration names one private allocation" `Quick
+    (expect_ok
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
+        private let mut dma_fixed596: DmaFixed596 align(64);");
+
+  Alcotest.test_case "fixed DMA allocation refuses direct array access" `Quick
+    (expect_type_error
+       "fixed DMA allocation 'dma_fixed596' cannot be accessed directly"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
+        private let mut dma_fixed596: DmaFixed596 align(64);
+        fn bad() -> u8 { return dma_fixed596.bytes[0]; }");
+
+  Alcotest.test_case "fixed DMA field refuses pointer alias access" `Quick
+    (expect_type_error
+       "fixed DMA record 'DmaFixed596' cannot be read through a field"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
+        private let mut dma_fixed596: DmaFixed596 align(64);
+        fn bad(p: *DmaFixed596) -> u8 { return p.bytes[0]; }");
+
+  Alcotest.test_case "fixed DMA allocation refuses address alias" `Quick
+    (expect_type_error
+       "cannot take the address of fixed DMA allocation 'dma_fixed596'"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
+        private let mut dma_fixed596: DmaFixed596 align(64);
+        fn bad() -> *DmaFixed596 { return &dma_fixed596; }");
+
+  Alcotest.test_case "fixed DMA pointer refuses raw cast escape" `Quick
+    (expect_type_error
+       "fixed DMA record values and pointers cannot be cast"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
+        private let mut dma_fixed596: DmaFixed596 align(64);
+        fn bad(p: *DmaFixed596) -> *u8 {
+          return unsafe { p as *u8 };
+        }");
+
+  Alcotest.test_case "fixed DMA declaration refuses a second allocation" `Quick
+    (expect_type_error
+       "requires exactly one fixed global allocation"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
+        private let mut first596: DmaFixed596 align(64);
+        private let mut second596: DmaFixed596 align(64);");
+
+  Alcotest.test_case "fixed DMA allocation requires isolated cache lines" `Quick
+    (expect_type_error
+       "must have cache-line-aligned storage and extent"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaFixed596 { private bytes: [u8; 65]; }
+        private let mut dma_fixed596: DmaFixed596 align(64);");
+
+  Alcotest.test_case "fixed DMA authority cast cannot forge a CPU token" `Quick
+    (expect_type_error
+       "fixed DMA authority 'DmaFixed596Cpu' for 'DmaFixed596' cannot be constructed by a cast"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
+        private let mut dma_fixed596: DmaFixed596 align(64);
+        fn forge() -> *DmaFixed596Cpu {
+          return unsafe { 0 as *DmaFixed596Cpu };
+        }");
+
+  Alcotest.test_case "fixed DMA integer literal cannot forge a CPU token" `Quick
+    (expect_type_error
+       "fixed DMA authority 'DmaFixed596Cpu' cannot be constructed from an integer literal"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
+        private let mut dma_fixed596: DmaFixed596 align(64);
+        fn forge() -> *DmaFixed596Cpu {
+          let token: *DmaFixed596Cpu = 0;
+          return token;
+        }");
+
+  Alcotest.test_case "fixed DMA authority variant cannot forge a CPU token" `Quick
+    (expect_type_error
+       "fixed DMA authority 'DmaFixed596Cpu' cannot be constructed from an integer literal"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
+        private let mut dma_fixed596: DmaFixed596 align(64);
+        fn forge() -> DmaFixed596Authority {
+          return DmaFixed596Authority::Cpu(0);
+        }");
+
+  Alcotest.test_case "fixed DMA authority cannot arrive from an extern" `Quick
+    (expect_type_error
+       "extern function 'forge' cannot carry fixed DMA authority"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
+        private let mut dma_fixed596: DmaFixed596 align(64);
+        extern fn forge() -> *DmaFixed596Cpu;");
+
+  Alcotest.test_case "fixed DMA authority variant cannot arrive from an extern" `Quick
+    (expect_type_error
+       "extern function 'forge' cannot carry fixed DMA authority"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
+        private let mut dma_fixed596: DmaFixed596 align(64);
+        extern fn forge() -> DmaFixed596Authority;");
+
+  Alcotest.test_case "fixed DMA authority cannot be zero initialized in another global" `Quick
+    (expect_type_error
+       "global 'forged_cpu596' cannot carry fixed DMA authority"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
+        private let mut dma_fixed596: DmaFixed596 align(64);
+        private let mut forged_cpu596: *DmaFixed596Cpu;");
+
+  Alcotest.test_case "fixed DMA pointer alias expires at handoff" `Quick
+    (expect_type_error
+       "pointer 'ptr' is derived from linear value 'cpu' and cannot be used after 'cpu' is consumed"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
+        private let mut dma_fixed596: DmaFixed596 align(64);
+        fn bad(cpu: sink *DmaFixed596Cpu) -> *DmaFixed596Device {
+          let ptr = dma_cpu_ptr(cpu, DmaFixed596);
+          let device = dma_begin_rx(cpu, DmaFixed596);
+          let value = ptr[0];
+          return device;
+        }");
+
+  Alcotest.test_case "fixed DMA integer alias expires at handoff" `Quick
+    (expect_type_error
+       "value 'address' is derived from linear value 'cpu' and cannot be used after 'cpu' is consumed"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
+        private let mut dma_fixed596: DmaFixed596 align(64);
+        fn bad(cpu: sink *DmaFixed596Cpu) -> *DmaFixed596Device {
+          let address = dma_cpu_ptr(cpu, DmaFixed596) as usize;
+          let device = dma_begin_rx(cpu, DmaFixed596);
+          let value = address;
+          return device;
+        }");
+
+  Alcotest.test_case "fixed DMA finish requires trusted completion" `Quick
+    (expect_type_error
+       "dma_finish_owned_rx requires unsafe completion or reset evidence"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
+        private let mut dma_fixed596: DmaFixed596 align(64);
+        fn bad(device: sink *DmaFixed596Device) -> *DmaFixed596Cpu {
+          return dma_finish_owned_rx(device, DmaFixed596);
+        }");
+
+  Alcotest.test_case "fixed DMA slot cannot be replicated by zero initialization" `Quick
+    (expect_type_error
+       "must have only its compiler-created owner slot"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
+        private let mut dma_fixed596: DmaFixed596 align(64);
+        private let mut second_slot596: DmaFixed596Slot;");
+
 ]
 
 (* -- Codegen tests ----------------------------------------------------------
@@ -9470,6 +9626,41 @@ let with_embed_fixture contents f =
   Fun.protect ~finally:(fun () -> Sys.remove path) (fun () -> f path)
 
 let codegen_tests = [
+  Alcotest.test_case "fixed DMA generated owner slot exchanges with a lock guard" `Quick
+    (expect_codegen_ok
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaSlot596 { private bytes: [u8; 64]; }
+        private let mut dma_slot596: DmaSlot596 align(64);
+        linear struct DmaGuard596[lock: addr] { private flags: usize; }
+        fn dma_lock596(m: *Mutex @ lock) -> DmaGuard596[lock] {
+          let mut guard: DmaGuard596[lock] = { 0 };
+          return guard;
+        }
+        fn dma_unlock596(guard: sink DmaGuard596[lock], m: *Mutex @ lock) {}
+        fn dma_exchange596(replacement: DmaSlot596Authority)
+            -> DmaSlot596Authority {
+          let guard = dma_lock596(&dma_owner_DmaSlot596.mutex);
+          let previous: DmaSlot596Authority = stable_replace(
+              guard, &dma_owner_DmaSlot596.mutex,
+              dma_owner_DmaSlot596.value, replacement);
+          dma_unlock596(guard, &dma_owner_DmaSlot596.mutex);
+          return previous;
+        }");
+
+  Alcotest.test_case "fixed DMA CPU pointer and ownership transitions codegen" `Quick
+    (expect_codegen_ok
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaCodegen596 { private bytes: [u8; 64]; }
+        private let mut dma_codegen596: DmaCodegen596 align(64);
+        fn dma_roundtrip596(cpu: sink *DmaCodegen596Cpu)
+            -> *DmaCodegen596Cpu !{unsafe} {
+          let ptr = dma_cpu_ptr(cpu, DmaCodegen596);
+          let value = ptr[0];
+          let device = dma_begin_rx(cpu, DmaCodegen596);
+          let address = unsafe { dma_device_addr(device, DmaCodegen596) };
+          return unsafe { dma_finish_owned_rx(device, DmaCodegen596) };
+        }");
+
   Alcotest.test_case
     "ignored plain variant payload codegens without a local binding" `Quick
     (expect_codegen_ok

@@ -1613,6 +1613,13 @@ let stable_owner_structs : (string, unit) Hashtbl.t = Hashtbl.create 8
 let is_stable_owner_field sname fname =
   Hashtbl.mem stable_owner_fields (sname, fname)
 
+let rec contains_fixed_dma_record_ty t = match repr t with
+  | TStruct name -> Dma_fixed_registry.is_fixed name
+  | TPtr t | TAlignedPtr (_, t) | TArray (t, _) | TSlice (t, _)
+  | TIo t | TRef t | TRefMut t | TSingleton (t, _)
+  | TExists (_, _, _, t) -> contains_fixed_dma_record_ty t
+  | _ -> false
+
 (* GitHub issue #369: is this type, or anything reachable inside it,
    stable owner storage?
 
@@ -1761,6 +1768,12 @@ let opaque_struct_names_all = ref StringSet.empty
 let check_private_type_construction (loc : Ast.loc) (target : Ast.type_expr) =
   let rec walk = function
     | Ast.TypeNamed n ->
+        (match Dma_fixed_registry.record_of_token n with
+         | Some record ->
+             raise (TypeError (loc, Printf.sprintf
+               "fixed DMA authority '%s' for '%s' cannot be constructed by a cast"
+               n record))
+         | None -> ());
         (match Hashtbl.find_opt private_opaque_types n with
          | Some file when file <> Ast.source_file_of_loc loc ->
              raise (TypeError (loc, Printf.sprintf
@@ -2368,6 +2381,12 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       (* Check local/global variables first *)
       (match StringMap.find_opt name tyenv with
        | Some (t, _) ->
+           (match repr t with
+            | TStruct record when Dma_fixed_registry.is_fixed record ->
+                raise (TypeError (e.loc, Printf.sprintf
+                  "fixed DMA allocation '%s' cannot be accessed directly; use a CPU authority operation"
+                  name))
+            | _ -> ());
            (* Array types decay to pointer. io T is a value type: return T (volatile handled in codegen) *)
            (match repr t with
             | TArray (inner, _) ->
@@ -2725,6 +2744,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   | AddrOf inner -> infer_addrof_wrapped senv eenv tyenv fenv e inner `Ptr
   | Cast (target_ty, e) ->
       let src_ty = infer_expr senv eenv tyenv fenv e in
+      if contains_fixed_dma_record_ty src_ty
+         || contains_fixed_dma_record_ty (of_ast target_ty) then
+        raise (TypeError (e.loc,
+          "fixed DMA record values and pointers cannot be cast; use an authority operation"));
       check_resource_cast_away e.loc src_ty;
       check_private_type_construction e.loc target_ty;
       if contains_stable_owner_value_ty src_ty
@@ -3603,7 +3626,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       (match args with
        | [guard;
           ({ desc = AddrOf
-               ({ desc = FieldGet (lock_base, _); _ } as lock_place); _ }
+               ({ desc = FieldGet (lock_base, lock_fname); _ } as lock_place); _ }
             as lock_addr);
           ({ desc = FieldGet (base_expr, fname); _ } as field_expr);
           replacement] ->
@@ -3673,6 +3696,17 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
              | None -> raise (TypeError (base_expr.loc,
                  "stable_replace target must be a struct field"))
            in
+           (match Dma_fixed_registry.record_of_slot_type sname with
+            | Some record ->
+                let expected = Dma_fixed_registry.slot_global record in
+                (match lock_base.desc, base_expr.desc with
+                 | Ast.Var lock_name, Ast.Var owner_name
+                   when lock_name = expected && owner_name = expected
+                        && lock_fname = "mutex" && fname = "value" -> ()
+                 | _ -> raise (TypeError (field_expr.loc, Printf.sprintf
+                     "fixed DMA authority slot '%s' must be exchanged at its compiler-created global place"
+                     expected)))
+            | None -> ());
            check_private_field_access field_expr.loc sname fname;
            if not (is_stable_owner_field sname fname) then
              raise (TypeError (field_expr.loc, Printf.sprintf
@@ -3959,6 +3993,99 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            TUsize
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "%s expects six arguments: %s(nr, x0, x1, x2, x3, x4)" fname fname)))
+
+  | Call ("dma_cpu_ptr", [({ desc = Ast.Var _; _ } as owner);
+                            { desc = Ast.Var record; _ }]) ->
+      (match Dma_fixed_registry.fields_of record,
+             Dma_fixed_registry.allocation_of record with
+       | Some [(_, Ast.TypeArray (elem, _))], Some _ ->
+           let owner_ty = infer_expr senv eenv tyenv fenv owner in
+           (match repr owner_ty with
+            | TPtr (TStruct token)
+              when token = Dma_fixed_registry.cpu_token record ->
+                TPtr (of_ast elem)
+            | _ -> raise (TypeError (owner.loc, Printf.sprintf
+                "dma_cpu_ptr for '%s' requires its CPU authority token"
+                record)))
+       | _ -> raise (TypeError (e.loc, Printf.sprintf
+           "dma_cpu_ptr requires a registered fixed DMA record type, got '%s'"
+           record)))
+  | Call ("dma_cpu_ptr", _) ->
+      raise (TypeError (e.loc,
+        "dma_cpu_ptr expects a CPU token and a fixed DMA record type"))
+
+  | Call ("dma_device_addr", [({ desc = Ast.Var _; _ } as owner);
+                               { desc = Ast.Var record; _ }]) ->
+      (match Dma_fixed_registry.allocation_of record with
+       | Some _ ->
+           let owner_ty = infer_expr senv eenv tyenv fenv owner in
+           (match repr owner_ty with
+            | TPtr (TStruct token)
+              when token = Dma_fixed_registry.device_token record -> ()
+            | _ -> raise (TypeError (owner.loc, Printf.sprintf
+                "dma_device_addr for '%s' requires its device authority token"
+                record)));
+           if !unsafe_depth = 0 then
+             raise (TypeError (e.loc,
+               "dma_device_addr exports a raw bus address; use unsafe at the device descriptor boundary"));
+           note_type_checker_unsafe_use ();
+           TUsize
+       | None -> raise (TypeError (e.loc, Printf.sprintf
+           "dma_device_addr requires a registered fixed DMA record type, got '%s'"
+           record)))
+  | Call ("dma_device_addr", _) ->
+      raise (TypeError (e.loc,
+        "dma_device_addr expects a device token and a fixed DMA record type"))
+
+  | Call (("dma_begin_rx" | "dma_finish_owned_rx") as operation,
+          [({ desc = Ast.Var _; _ } as owner); { desc = Ast.Var record; _ }]) ->
+      let source_token, destination_token =
+        if operation = "dma_begin_rx" then
+          (Dma_fixed_registry.cpu_token record,
+           Dma_fixed_registry.device_token record)
+        else
+          (Dma_fixed_registry.device_token record,
+           Dma_fixed_registry.cpu_token record) in
+      (match Dma_fixed_registry.fields_of record,
+             Dma_fixed_registry.allocation_of record with
+       | Some [(_, (Ast.TypeArray (_, _) as array_ty))], Some global ->
+           let owner_ty = infer_expr senv eenv tyenv fenv owner in
+           (match repr owner_ty with
+            | TPtr (TStruct token) when token = source_token -> ()
+            | _ -> raise (TypeError (owner.loc, Printf.sprintf
+                "%s for '%s' requires its %s authority token"
+                operation record
+                (if operation = "dma_begin_rx" then "CPU" else "device"))));
+           let size = match const_type_size senv array_ty with
+             | Some n -> n
+             | None -> raise (TypeError (e.loc,
+                 "fixed DMA allocation has no known byte extent")) in
+           (match Target_info.dma_cache_contract () with
+            | Target_info.Cache_line line ->
+                let alignment = Option.value
+                  (StringMap.find_opt global !global_align_bytes_baseline)
+                  ~default:1 in
+                if alignment mod line <> 0 || size mod line <> 0 then
+                  raise (TypeError (e.loc, Printf.sprintf
+                    "fixed DMA allocation '%s' must have cache-line-aligned storage and extent"
+                    global))
+            | Target_info.Coherent -> ()
+            | Target_info.Unsupported -> raise (TypeError (e.loc,
+                "fixed DMA ownership operations are unavailable on this target")));
+           if operation = "dma_finish_owned_rx" then begin
+             if !unsafe_depth = 0 then
+               raise (TypeError (e.loc,
+                 "dma_finish_owned_rx requires unsafe completion or reset evidence"));
+             note_type_checker_unsafe_use ()
+           end;
+           TPtr (TStruct destination_token)
+       | _ -> raise (TypeError (e.loc, Printf.sprintf
+           "%s requires a registered fixed DMA record type, got '%s'"
+           operation record)))
+  | Call (("dma_begin_rx" | "dma_finish_owned_rx") as operation, _) ->
+      raise (TypeError (e.loc, Printf.sprintf
+        "%s expects an authority token and a fixed DMA record type"
+        operation))
 
   | Call (("dma_prepare_tx" | "dma_prepare_rx" | "dma_finish_rx") as fname, args) ->
       let required_alignment =
@@ -4530,6 +4657,10 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                      sname fname));
                  sname
            in
+           if Dma_fixed_registry.is_fixed sname then
+             raise (TypeError (e.loc, Printf.sprintf
+               "fixed DMA record '%s' cannot be assigned through a field without CPU authority"
+               sname));
            let fields = match StringMap.find_opt sname senv with
              | Some (fs, _, _) -> fs
              | None ->
@@ -4612,6 +4743,10 @@ and infer_addrof_wrapped senv eenv tyenv fenv (e : Ast.expr) (inner : Ast.expr)
    | Var name ->
        check_private_global_access e.loc name;
        let (t, is_mut) = lookup_binding e.loc name tyenv in
+       if contains_fixed_dma_record_ty t then
+         raise (TypeError (e.loc, Printf.sprintf
+           "cannot take the address of fixed DMA allocation '%s'; use an authority operation"
+           name));
        (match repr t with
         | TPtr _ | TAlignedPtr _ -> invalidate_place_projections name
         | _ -> ());
@@ -4737,6 +4872,10 @@ and infer_field_access ~decay senv eenv tyenv fenv (loc : Ast.loc)
          gates is stores, which is what the protocol is about. *)
       let via_token = Publish_registry.is_token sname in
       let sname = publish_record_behind sname in
+      if Dma_fixed_registry.is_fixed sname then
+        raise (TypeError (loc, Printf.sprintf
+          "fixed DMA record '%s' cannot be read through a field without CPU authority"
+          sname));
       if Publish_registry.is_publish sname then
         Hashtbl.replace publish_field_at loc (sname, fname, via_token);
       let fields = match StringMap.find_opt sname senv with
@@ -4835,6 +4974,11 @@ and place_undecayed_type senv eenv tyenv fenv (e : Ast.expr) : ty =
    infer_expr/unify_at directly instead of through here. *)
 and check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : ty =
   match e.desc, repr expected with
+  | Ast.IntLit _, (TPtr (TStruct token) | TAlignedPtr (_, TStruct token))
+    when Option.is_some (Dma_fixed_registry.record_of_token token) ->
+      raise (TypeError (e.loc, Printf.sprintf
+        "fixed DMA authority '%s' cannot be constructed from an integer literal"
+        token))
   | _, TMultiple (n, TUsize) ->
       let actual = infer_expr senv eenv tyenv fenv e in
       unify_at e.loc actual TUsize;
@@ -6428,6 +6572,40 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         StringMap.add name fields defs
     | _ -> defs
   ) StringMap.empty prog in
+  let rec type_contains_fixed_dma_authority seen ty =
+    let nested name =
+      if StringSet.mem name seen then false
+      else
+        let seen = StringSet.add name seen in
+        (match StringMap.find_opt name ordinary_struct_fields with
+         | Some fields -> List.exists (fun (_, field_ty) ->
+             type_contains_fixed_dma_authority seen field_ty) fields
+         | None ->
+             (match Hashtbl.find_opt variant_defs name with
+              | Some cases -> List.exists (fun (_, payload) ->
+                  Option.fold ~none:false
+                    ~some:(type_contains_fixed_dma_authority seen) payload) cases
+              | None -> false)) in
+    match ty with
+    | Ast.TypeNamed name | Ast.TypeIndexed (name, _)
+    | Ast.TypeVariant (name, _) ->
+        Dma_fixed_registry.type_mentions_token ty || nested name
+    | Ast.TypePtr t | Ast.TypeAlignedPtr (_, t) | Ast.TypeIo t
+    | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _)
+    | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
+    | Ast.TypeSingleton (t, _) | Ast.TypeRefined (_, _, t)
+    | Ast.TypeMultiple (_, t) | Ast.TypeExists (_, _, t)
+    | Ast.TypeArraySym (t, _) | Ast.TypeSliceSym (t, _) ->
+        type_contains_fixed_dma_authority seen t
+    | Ast.TypeTuple ts ->
+        List.exists (type_contains_fixed_dma_authority seen) ts
+    | Ast.TypeFn (args, ret, _) ->
+        List.exists (type_contains_fixed_dma_authority seen) args
+        || type_contains_fixed_dma_authority seen ret
+    | _ -> false
+  in
+  let type_contains_fixed_dma_authority ty =
+    type_contains_fixed_dma_authority StringSet.empty ty in
   let affine_names = List.fold_left (fun names -> function
     | Ast.OpaqueStructDef (name, Ast.KindAffine, _, _) -> StringSet.add name names
     | Ast.OwnedStructDef (name, Ast.KindAffine, _, _, _, _, _, _, _) ->
@@ -6506,6 +6684,60 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         Hashtbl.replace private_globals name (Ast.source_file_of_loc loc)
     | _ -> ()
   ) prog;
+  Hashtbl.iter (fun record fields ->
+    (match fields with
+     | [(_, Ast.TypeArray (_, count))] when count > 0 -> ()
+     | _ -> raise (TypeError (Lexing.dummy_pos,
+         Printf.sprintf "struct dma_fixed '%s' requires one nonempty fixed array field"
+           record)));
+    (match List.find_opt (function
+       | Ast.StructDef (name, _, _, _, _, _) -> name = record
+       | _ -> false) prog with
+     | Some (Ast.StructDef (_, [(field, _)], _, _, private_fields, _))
+       when List.mem field private_fields -> ()
+     | Some (Ast.StructDef (_, _, _, _, _, loc)) ->
+         raise (TypeError (loc, Printf.sprintf
+           "struct dma_fixed '%s' requires a private array field" record))
+     | _ -> raise (TypeError (Lexing.dummy_pos,
+         "internal error: fixed DMA registry has no struct declaration")));
+    let globals = List.filter_map (function
+      | Ast.LetDef (name, Some (Ast.TypeNamed sname), init, align,
+                    is_mutable, is_private, loc) when sname = record ->
+          Some (name, init, align, is_mutable, is_private, loc)
+      | _ -> None) prog in
+    (match globals with
+     | [(name, None, Some _, true, true, _)] ->
+         Dma_fixed_registry.register_allocation record name
+     | [(_, _, _, _, _, loc)] ->
+         raise (TypeError (loc, Printf.sprintf
+           "struct dma_fixed '%s' requires one private mutable aligned global without an initializer"
+           record))
+     | _ -> raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+         "struct dma_fixed '%s' requires exactly one fixed global allocation"
+         record)));
+    let slots = List.filter_map (function
+      | Ast.LetDef (name, Some ty, init, _, is_mutable, is_private, loc)
+        when Dma_fixed_registry.type_contains_slot record ty ->
+          Some (name, ty, init, is_mutable, is_private, loc)
+      | _ -> None) prog in
+    (match slots with
+     | [(name, Ast.TypeNamed ty, None, true, true, _)]
+       when name = Dma_fixed_registry.slot_global record
+            && ty = Dma_fixed_registry.slot_type record -> ()
+     | _ -> raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+         "fixed DMA record '%s' must have only its compiler-created owner slot"
+         record))))
+    Dma_fixed_registry.records;
+  List.iter (function
+    | Ast.LetDef (name, Some ty, _, _, _, _, loc)
+      when type_contains_fixed_dma_authority ty
+           && not (Hashtbl.fold (fun record _ allowed ->
+             allowed || name = Dma_fixed_registry.slot_global record
+               && ty = Ast.TypeNamed (Dma_fixed_registry.slot_type record))
+             Dma_fixed_registry.records false) ->
+        raise (TypeError (loc, Printf.sprintf
+          "global '%s' cannot carry fixed DMA authority" name))
+    | _ -> ()) prog;
   Hashtbl.reset private_functions;
   List.iter (function
     | Ast.FuncDef { name; is_private = true; def_loc; _ } ->
@@ -7394,6 +7626,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         allow_implicit_static := false;
         List.iter validate_stmt_types f.body
     | Ast.ExternFuncDef (name, params, ret, effects) ->
+        if List.exists (fun (_, ty) ->
+             Option.fold ~none:false
+               ~some:type_contains_fixed_dma_authority ty) params
+           || Option.fold ~none:false
+                ~some:type_contains_fixed_dma_authority ret then
+          raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+            "extern function '%s' cannot carry fixed DMA authority"
+            name));
         Option.iter (fun effects ->
           validate_effects ~allow_declaration_only:true ~allow_noreturn:true Lexing.dummy_pos
             "extern function" name effects;
@@ -7496,6 +7736,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             in
             (match Hashtbl.find_opt variant_defs variant_name with
              | Some ((_, None) :: _) -> ()
+             | Some (("Cpu", Some (Ast.TypePtr (Ast.TypeNamed token))) :: _)
+               when Dma_fixed_registry.is_initial_authority_variant variant_name
+                    && Option.is_some (Dma_fixed_registry.record_of_token token) -> ()
              | _ -> raise (TypeError (sloc, Printf.sprintf
                  "stable owner variant '%s' must declare a payload-free empty case first for zero initialization"
                  variant_name)))
@@ -7846,6 +8089,28 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         StringMap.add name (fields, is_packed, align_opt) m
     | _ -> m
   ) StringMap.empty prog in
+  Hashtbl.iter (fun record fields ->
+    match fields, Dma_fixed_registry.allocation_of record with
+    | [(_, (Ast.TypeArray (_, _) as array_ty))], Some global ->
+        let size = match const_type_size senv array_ty with
+          | Some bytes -> bytes
+          | None -> raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+              "fixed DMA allocation '%s' has no known byte extent" global)) in
+        (match Target_info.dma_cache_contract () with
+         | Target_info.Cache_line line ->
+             let alignment = Option.value
+               (StringMap.find_opt global !global_align_bytes_baseline)
+               ~default:1 in
+             if alignment mod line <> 0 || size mod line <> 0 then
+               raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+                 "fixed DMA allocation '%s' must have cache-line-aligned storage and extent"
+                 global))
+         | Target_info.Coherent -> ()
+         | Target_info.Unsupported ->
+             raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+               "fixed DMA allocation '%s' has no cache-maintenance contract on this target"
+               global)))
+    | _ -> assert false) Dma_fixed_registry.records;
   let eenv = List.fold_left (fun m -> function
     | Ast.EnumDef (name, ty_opt, variants, is_ne) ->
         let underlying = match ty_opt with Some t -> t | None -> Ast.TypeU32 in
@@ -9156,6 +9421,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                    | Ast.Bor | Ast.Bxor | Ast.Band | Ast.Shr | Ast.Shl),
                    left, right) ->
           PathSet.union (expr_taint taints left) (expr_taint taints right)
+      | Ast.Call ("dma_cpu_ptr", [{ Ast.desc = Ast.Var owner; _ }; _]) ->
+          PathSet.singleton (pvar owner)
       | Ast.Call (name, args) ->
           let target = Option.value
             (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)
@@ -9195,6 +9462,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Cast (target, _) -> ast_region_kind target
       | Ast.Deref _ | Ast.Index _ | Ast.FieldGet _ ->
           Option.bind (expr_ast_type e) ast_region_kind
+      | Ast.Call ("dma_cpu_ptr", _) -> Some RegionPointer
       | Ast.Call (name, _) ->
           let target = Option.value
             (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)
@@ -9395,6 +9663,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                require_available e.loc moved p;
                if consume then mv_consume p moved else moved
            | _ -> check_expr taints moved false base_expr)
+      | Ast.Call (("dma_begin_rx" | "dma_finish_owned_rx") as operation,
+                  [owner; _]) ->
+          if not consume then
+            raise (TypeError (e.loc, Printf.sprintf
+              "linear result of '%s' must be moved into an owning binding, returned, or matched"
+              operation));
+          check_expr taints moved true owner
       (* GitHub issue #299: the write token's obligation, in the pass that
          tracks obligations. publish_begin mints a linear value and the two
          terminators consume it, but neither is a declared function, so the
@@ -9575,7 +9850,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Deref a ->
           require_no_region_aggregate_load e.loc e (expr_taint taints a);
           check_expr taints moved false a
-      | Ast.Bnot a | Ast.Cast (_, a) | Ast.Unsafe a ->
+      | Ast.Unsafe a ->
+          check_expr taints moved consume a
+      | Ast.Bnot a | Ast.Cast (_, a) ->
           check_expr taints moved false a
       | Ast.StructLit xs ->
           require_no_taint_aggregate e.loc taints "struct value" xs;
