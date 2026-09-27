@@ -2520,7 +2520,9 @@ real lock acquisition supplied by the caller, as for other stable slots.
 Ordinary reads, writes, address-taking, field access, and casts of the
 protected record are rejected, including through a pointer to that record.
 `dma_cpu_ptr(cpu, Name)` borrows a live `*NameCpu` token and returns a pointer
-to the first array element. The returned pointer and its pointer/integer
+to the first array element. `dma_cpu_slice(cpu, Name)` borrows the same token
+and returns a slice with the array's static minimum length. The returned
+pointer or slice and its pointer/integer
 aliases are tied to the CPU token: they cannot be returned, retained by a
 call, stored durably, or used after the token is consumed. Calls may use a
 derived pointer through an explicitly nonretaining borrowed parameter while

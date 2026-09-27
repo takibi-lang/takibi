@@ -9543,6 +9543,19 @@ let infer_tests = [
           return device;
         }");
 
+  Alcotest.test_case "fixed DMA slice alias expires at handoff" `Quick
+    (expect_type_error
+       "derived from linear value 'cpu' and cannot be used after 'cpu' is consumed"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
+        private let mut dma_fixed596: DmaFixed596 align(64);
+        fn bad(cpu: sink *DmaFixed596Cpu) -> *DmaFixed596Device {
+          let bytes = dma_cpu_slice(cpu, DmaFixed596);
+          let device = dma_begin_rx(cpu, DmaFixed596);
+          let value = bytes[0];
+          return device;
+        }");
+
   Alcotest.test_case "fixed DMA integer alias expires at handoff" `Quick
     (expect_type_error
        "value 'address' is derived from linear value 'cpu' and cannot be used after 'cpu' is consumed"
@@ -9659,6 +9672,19 @@ let codegen_tests = [
           let device = dma_begin_rx(cpu, DmaCodegen596);
           let address = unsafe { dma_device_addr(device, DmaCodegen596) };
           return unsafe { dma_finish_owned_rx(device, DmaCodegen596) };
+        }");
+
+  Alcotest.test_case "fixed DMA CPU slice copies a bounded array" `Quick
+    (expect_codegen_ok
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaSlice596 { private bytes: [u8; 64]; }
+        private let mut dma_slice596: DmaSlice596 align(64);
+        fn dma_slice_copy596(cpu: sink *DmaSlice596Cpu,
+                             source: borrow [u8; 64..])
+            -> *DmaSlice596Device {
+          let bytes = dma_cpu_slice(cpu, DmaSlice596);
+          slice_copy(bytes, source);
+          return dma_begin_rx(cpu, DmaSlice596);
         }");
 
   Alcotest.test_case

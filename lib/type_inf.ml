@@ -3994,25 +3994,27 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ -> raise (TypeError (e.loc,
            Printf.sprintf "%s expects six arguments: %s(nr, x0, x1, x2, x3, x4)" fname fname)))
 
-  | Call ("dma_cpu_ptr", [({ desc = Ast.Var _; _ } as owner);
-                            { desc = Ast.Var record; _ }]) ->
+  | Call (("dma_cpu_ptr" | "dma_cpu_slice") as operation,
+          [({ desc = Ast.Var _; _ } as owner);
+           { desc = Ast.Var record; _ }]) ->
       (match Dma_fixed_registry.fields_of record,
              Dma_fixed_registry.allocation_of record with
-       | Some [(_, Ast.TypeArray (elem, _))], Some _ ->
+       | Some [(_, Ast.TypeArray (elem, count))], Some _ ->
            let owner_ty = infer_expr senv eenv tyenv fenv owner in
            (match repr owner_ty with
             | TPtr (TStruct token)
               when token = Dma_fixed_registry.cpu_token record ->
-                TPtr (of_ast elem)
+                if operation = "dma_cpu_ptr" then TPtr (of_ast elem)
+                else TSlice (of_ast elem, count)
             | _ -> raise (TypeError (owner.loc, Printf.sprintf
-                "dma_cpu_ptr for '%s' requires its CPU authority token"
-                record)))
+                "%s for '%s' requires its CPU authority token"
+                operation record)))
        | _ -> raise (TypeError (e.loc, Printf.sprintf
-           "dma_cpu_ptr requires a registered fixed DMA record type, got '%s'"
-           record)))
-  | Call ("dma_cpu_ptr", _) ->
-      raise (TypeError (e.loc,
-        "dma_cpu_ptr expects a CPU token and a fixed DMA record type"))
+           "%s requires a registered fixed DMA record type, got '%s'"
+           operation record)))
+  | Call (("dma_cpu_ptr" | "dma_cpu_slice") as operation, _) ->
+      raise (TypeError (e.loc, Printf.sprintf
+        "%s expects a CPU token and a fixed DMA record type" operation))
 
   | Call ("dma_device_addr", [({ desc = Ast.Var _; _ } as owner);
                                { desc = Ast.Var record; _ }]) ->
@@ -9421,7 +9423,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                    | Ast.Bor | Ast.Bxor | Ast.Band | Ast.Shr | Ast.Shl),
                    left, right) ->
           PathSet.union (expr_taint taints left) (expr_taint taints right)
-      | Ast.Call ("dma_cpu_ptr", [{ Ast.desc = Ast.Var owner; _ }; _]) ->
+      | Ast.Call (("dma_cpu_ptr" | "dma_cpu_slice"),
+                  [{ Ast.desc = Ast.Var owner; _ }; _]) ->
           PathSet.singleton (pvar owner)
       | Ast.Call (name, args) ->
           let target = Option.value
@@ -9463,6 +9466,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Deref _ | Ast.Index _ | Ast.FieldGet _ ->
           Option.bind (expr_ast_type e) ast_region_kind
       | Ast.Call ("dma_cpu_ptr", _) -> Some RegionPointer
+      | Ast.Call ("dma_cpu_slice", _) -> Some RegionSlice
       | Ast.Call (name, _) ->
           let target = Option.value
             (StringMap.find_opt (loc_key e.loc) !resolved_call_targets)

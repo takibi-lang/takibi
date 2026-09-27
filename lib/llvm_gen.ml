@@ -4451,11 +4451,12 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
               | Atomic_spec.Compare_exchange -> "compare_exchange")
              (Atomic_spec.ordering_name spec.ordering) name)))
 
-  | Call ("dma_cpu_ptr", [owner; { desc = Var record; _ }]) ->
+  | Call (("dma_cpu_ptr" | "dma_cpu_slice") as operation,
+          [owner; { desc = Var record; _ }]) ->
       let _ = gen_expr locals owner in
       (match Dma_fixed_registry.allocation_of record,
              Dma_fixed_registry.fields_of record with
-       | Some global, Some [(field, TypeArray (elem, _))] ->
+       | Some global, Some [(field, TypeArray (elem, count))] ->
            let (_, storage) = Hashtbl.find global_vars global in
            let llty = Hashtbl.find struct_lltypes record in
            let (field_index, _) = field_info record field in
@@ -4463,9 +4464,11 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              [| const_int (i32_type context) 0;
                 const_int (i32_type context) field_index |]
              "dma.cpu.ptr" builder in
-           (TypePtr elem, ptr)
+           if operation = "dma_cpu_ptr" then (TypePtr elem, ptr)
+           else (TypeSlice (elem, count),
+                 make_slice ptr (const_int (usize_lltype ()) count))
        | _ -> raise (Error (Printf.sprintf
-           "dma_cpu_ptr has no fixed allocation for '%s'" record)))
+           "%s has no fixed allocation for '%s'" operation record)))
 
   | Call ("dma_device_addr", [owner; { desc = Var record; _ }]) ->
       let _ = gen_expr locals owner in
