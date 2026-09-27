@@ -57,12 +57,17 @@ STATES = {1: "Ready", 2: "Running", 3: "Blocked", 4: "Exited",
           5: "Constructing"}
 WAIT_CHILD_EXIT = 2
 
-# What /bin/protocol-trace is written to make the kernel do. An action in
-# the model and not here may legitimately not happen in a given window.
-REQUIRED = ("CloneBegin", "CloneFinish", "SwitchComplete", "Reserve",
-            "Commit", "SwitchAway", "Wait4Block", "Wake", "ChildExit",
-            "ChildExitStart", "IdleEnter", "Wait4Reap", "LeaveBegin",
-            "LeaveComplete")
+# What /bin/protocol-trace is written to make the kernel do, one entry per
+# step it takes. Where timing decides which of two actions a step is, the
+# entry names both and either one counts: the napping child blocks with its
+# parent as the successor (SwitchAway) unless another core took the parent
+# first, when it blocks with none (Nap) -- an allcheck debug lane saw the
+# second. An action in the model and not here may legitimately not happen.
+REQUIRED = (("CloneBegin",), ("CloneFinish",), ("SwitchComplete",),
+            ("Reserve",), ("Commit",), ("SwitchAway", "Nap"),
+            ("Wait4Block",), ("Wake",), ("ChildExit",), ("ChildExitStart",),
+            ("IdleEnter",), ("Wait4Reap",), ("LeaveBegin",),
+            ("LeaveComplete",))
 
 NONE = None
 IDLE = "idle"
@@ -755,8 +760,9 @@ def main() -> int:
         print("FAIL protocol-trace: the kernel made a step "
               "kernel/models/StackOwnership.tla does not allow")
         return 1
-    unseen = [name for name in REQUIRED
-              if name != args.without and counts[name] == 0]
+    unseen = [" or ".join(step) for step in REQUIRED
+              if args.without not in step
+              and not any(counts[name] for name in step)]
     if unseen:
         print("FAIL protocol-trace: the window never exercised "
               f"{', '.join(unseen)}, so a PASS would say nothing about it")

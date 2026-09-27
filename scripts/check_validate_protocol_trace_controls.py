@@ -33,6 +33,10 @@ WINDOW = ROOT / "kernel" / "tests" / "qemu" / "protocol_trace.window"
 # which the model did not have until it failed an allcheck.
 INTERRUPT_WINDOW = (ROOT / "kernel" / "tests" / "qemu-debug" /
                     "protocol_trace.window")
+# A debug-lane window in which the napping child blocked with no successor
+# (Nap) because another core had taken its parent: SwitchAway never ran.
+NAP_WINDOW = (ROOT / "kernel" / "tests" / "qemu-debug" /
+              "protocol_trace_nap.window")
 
 CASES = CaseCount()
 
@@ -101,7 +105,10 @@ def expect(name, result, passes, needle, absent=None):
 def main() -> int:
     recorded = WINDOW.read_text(encoding="utf-8")
     interrupted = INTERRUPT_WINDOW.read_text(encoding="utf-8")
+    napped = NAP_WINDOW.read_text(encoding="utf-8")
     checks = [
+        expect("the recorded window whose child napped with no successor",
+               run(napped), True, "SwitchAway=0, Wait4Block=2, Nap=1"),
         expect("the recorded window with an interrupt from EL0",
                run(interrupted), True, "InterruptDepart=1"),
         expect("that window without InterruptDepart",
@@ -143,7 +150,7 @@ def main() -> int:
         return 1
     report_pass(
         "validate-protocol-trace controls",
-        "both recorded QEMU windows pass; they fail without ChildExitStart "
+        "three recorded QEMU windows pass, one with Nap in SwitchAway's place; they fail without ChildExitStart "
         "and InterruptDepart, an allocation inside another CPU's hold is "
         "absorbed, a tick leave passes only inside an interrupt, "
         "and #609's shared-stack start, a lost change, a cut report, an "
