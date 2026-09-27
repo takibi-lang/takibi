@@ -25,9 +25,13 @@ step, landed as its own commit.
 
 1. **True multicore support**: every online core runs ordinary processes,
    any core can issue any syscall, and a process can continue on another
-   core. #9, with its lifecycle split in order: #610 (execve), #611 (clone,
-   fork, vfork). #556 is off the route: it waits for the next preserved
-   failure of the oops lane, and until then there is nothing to work on.
+   core. First, so the models can be trusted to lead the next changes:
+   #616 (every path a model drops is covered elsewhere, checked) and #617
+   (a changed function a model abstracts forces a review of its row). Then
+   #9, with its lifecycle split in order: #610 (execve), #611 (clone, fork,
+   vfork), each with its model action written before the code. #556 is off
+   the route: it waits for the next preserved failure of the oops lane, and
+   until then there is nothing to work on.
    The TLA+ models under `kernel/models/` (plain TLA+ with Apalache types)
    check a protocol change before it lands. Last in this step: #612, syslog
    on a peer through a lockless sequence-checked reader of the single-writer
