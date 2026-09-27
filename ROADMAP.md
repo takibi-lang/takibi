@@ -27,24 +27,16 @@ step, landed as its own commit.
 allcheck` stops every other piece of work, and Territory B is busy, so the
 lane that meets such a failure analyses and fixes it, whatever territory
 its cause lies in. The goal is to drive the probability of an allcheck
-failure toward zero step by step. Held by A under this rule now: #620 (the
-QEMU network peer's fixed 90 s budget, replaced by per-phase no-progress
-timeouts) and the analysis of #604 when it next recurs.
+failure toward zero step by step. Held by A under this rule now: the analysis
+of #604, #621 and #556 when they next recur.
 
-1. **True multicore support**: every online core runs ordinary processes,
-   any core can issue any syscall, and a process can continue on another
-   core. The models now lead the changes: every path a model drops is
-   justified and every row carries a review stamp, and a window of real
-   steps is replayed against StackOwnership.tla on every kernel lane. Next
-   in #9's lifecycle split: #611 (clone, fork, vfork), with its model
-   action written before the code. #556 is off
-   the route: it waits for the next preserved failure of the oops lane, and
-   until then there is nothing to work on.
-   The TLA+ models under `kernel/models/` (plain TLA+ with Apalache types)
-   check a protocol change before it lands. Last in this step: #612, syslog
-   on a peer through a lockless sequence-checked reader of the single-writer
-   log.
-2. **Run the multicore workload mainly on RPi5 and fix what it finds.** #584
+1. **True multicore support**: done (2026-09-27). Every online core runs
+   ordinary processes, including PID 1 on core 0's idle loop; exec, clone,
+   fork, vfork and syslog run on a peer. The models lead the changes: every
+   path a model drops is justified, every row carries a review stamp, and
+   a window of real steps is replayed against StackOwnership.tla on every
+   kernel lane (#606 stage 1; stages 2 and 3 are unscheduled).
+2. **Next: run the multicore workload mainly on RPi5 and fix what it finds.** #584
    is the workload, #572 its fairness verdict. Each defect it finds gets a
    deterministic lane before its issue closes; #615's race-window switch is
    how a window found by chance is made to fail every run.
