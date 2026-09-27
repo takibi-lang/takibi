@@ -93,6 +93,13 @@ fn uart_tx_irq_disable() !{unsafe} {
     *imsc = *imsc & ~(1 << 5);
 }
 
+// GitHub issue #619: a crash console polls the FIFO itself, and no other
+// core's interrupt handler may take a byte from it. RXIM, RTIM and BEIM.
+fn uart_rx_irq_disable() !{unsafe} {
+    let imsc: *io u32 = unsafe { (rpi5_uart_base + 0x38) as *io u32 };
+    *imsc = *imsc & ~((1 << 4) | (1 << 6) | (1 << 9));
+}
+
 fn uart_rx_discard(discarded: u8) !{unsafe} {
 }
 

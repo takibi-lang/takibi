@@ -2758,6 +2758,11 @@ private fn crash_console_run() !{unsafe} {
         KernelLogTxStandDown::WasSpinning => { }
         KernelLogTxStandDown::NotConsoleOwner => { }
     }
+    // GitHub issue #619: whatever crash_world_stop managed, no core's UART
+    // interrupt may take the bytes this loop polls for. A stop that was only
+    // Partial -- a loaded host did not run core 0's vCPU inside the bound --
+    // left core 0 taking the RX interrupt, and it ate `trace`.
+    uart_rx_irq_disable();
     crash_report_claim();
     kernel_boot_log("ddb: read-only crash console\n");
     crash_report_release();
