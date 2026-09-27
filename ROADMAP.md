@@ -25,22 +25,21 @@ step, landed as its own commit.
 
 1. **True multicore support**: every online core runs ordinary processes,
    any core can issue any syscall, and a process can continue on another
-   core. #9, #582, #600 (linear token for values taken before a call
-   restart; before #597 and #598), #597 (ext2 mutation), #598 (socket setup and
-   teardown), #602 (ext2 file write), then #9's lifecycle split in order:
-   #609 (wait4), #610 (execve), #611 (clone, fork, vfork); and the multicore-correctness issues
-   #550, #560, #482, #464, #468, #573. #556 is off the route: it waits for
-   the next preserved failure of the oops lane, and until then there is
-   nothing to work on. #601 wrote the first TLA+ models (plain TLA+
-   with Apalache types, not PlusCal) and checked the #550 design with them
-   before that fix landed. Last in this step: #612, syslog on a peer through a
-   lockless sequence-checked reader of the single-writer log.
+   core. #9, with its lifecycle split in order: #610 (execve), #611 (clone,
+   fork, vfork). #556 is off the route: it waits for the next preserved
+   failure of the oops lane, and until then there is nothing to work on.
+   The TLA+ models under `kernel/models/` (plain TLA+ with Apalache types)
+   check a protocol change before it lands. Last in this step: #612, syslog
+   on a peer through a lockless sequence-checked reader of the single-writer
+   log.
 2. **Run the multicore workload mainly on RPi5 and fix what it finds.** #584
    is the workload, #572 its fairness verdict. Each defect it finds gets a
-   deterministic lane before its issue closes.
+   deterministic lane before its issue closes; #615's race-window switch is
+   how a window found by chance is made to fail every run.
 3. **Takibi's provisional answer to safe pointers and safe memory access,
    with multicore as a premise.** #343, #342, #202, #518, #131, #132, #370,
-   #216, and #613: a lockless multi-writer kernel log ring with its protocol
+   #216, #614 (a process start and a zombie reap that require a stack-free
+   proof), and #613: a lockless multi-writer kernel log ring with its protocol
    in the type system, the multicore-specific subject this discussion is
    judged against.
 4. **Begin evaluating recent research**: typestate, the K framework,
@@ -52,7 +51,7 @@ step, landed as its own commit.
 1. **Kernel and userspace capability:** #596, #204, #433,
    #430, #434, #435, #220, #595.
 2. **Resource use and measured performance:** #389, #422, #497, #520, #553,
-   #386, #502, #503.
+   #386, #502.
 3. **Compiler safety and language research:** #58, #203, #252, #200, #201,
    #282, #129, #374, #417, #155, #28, #8.
 4. **Toolchain, portability and hardware-lane support:** #599, #576, #568, #123,
