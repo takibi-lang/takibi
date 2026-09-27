@@ -27,7 +27,10 @@ step, landed as its own commit.
    any core can issue any syscall, and a process can continue on another
    core. First, so the models can be trusted to lead the next changes:
    #616 (every path a model drops is covered elsewhere, checked) and #617
-   (a changed function a model abstracts forces a review of its row). Then
+   (a changed function a model abstracts forces a review of its row), then
+   #606 stage 1 (the kernel's lock-ordered protocol events replayed against
+   StackOwnership.tla on every lane run, so a path the model lacks fails a
+   passing run rather than waiting for a race). Then
    #9, with its lifecycle split in order: #610 (execve), #611 (clone, fork,
    vfork), each with its model action written before the code. #556 is off
    the route: it waits for the next preserved failure of the oops lane, and
