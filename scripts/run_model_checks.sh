@@ -80,10 +80,11 @@ check_model StackOwnership CoreInvariants 8 \
     leaveunchecked:CInitLeaveUnchecked:RunningMatchesCores:violated \
     wakestartunchecked:CInitWakeStartUnchecked:StartsOnFreeStack:violated
 
-check_model RecordLifetime ReadsOnlyLiveRecords 6 \
+check_model RecordLifetime RecordInvariants 6 \
     fixed:CInitFixed:pass:ok \
     unfixed:CInitUnfixed:ReadsOnlyLiveRecords:violated \
-    readerunlocked:CInitReaderUnlocked:ReadsOnlyLiveRecords:violated
+    readerunlocked:CInitReaderUnlocked:ReadsOnlyLiveRecords:violated \
+    execunlocked:CInitExecUnlocked:NoTornRead:violated
 
 # Run. A job's own exit status is not the verdict -- an unfixed variant is
 # SUPPOSED to fail -- so every job is allowed to fail here and judged below.

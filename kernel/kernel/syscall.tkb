@@ -5298,6 +5298,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (argc >= 16) { return SyscallAction::Resume(LINUX_EINVAL); }
         let packed_argc: {0..<16 as usize} = argc;
         let diagnostic_argv: []u8 = syscall_exec_argv_here();
+        // GitHub issue #618: one critical section, so a procfs snapshot on
+        // another CPU copies the old command line or the new one, never
+        // half of each.
+        let exec_guard = process_run_lock();
         scheduled_process_set_command_line(
             kernel_syscall_process_slot(),
             diagnostic_argv, output_offset);
@@ -5306,6 +5310,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         scheduled_process_set_exec_inode(
             kernel_syscall_process_slot(), exec_inode);
         scheduled_process_set_exec_pending(kernel_syscall_process_slot(), true);
+        process_run_unlock(exec_guard);
         if (kernel_process_is_child()) { return SyscallAction::ChildExec; }
         return SyscallAction::Exec;
     }

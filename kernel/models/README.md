@@ -64,7 +64,7 @@ Two cores; a parent, its child, and one other runnable process.
 
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
-| `Wait4Decide` | the wait4 arm of `kernel_syscall_dispatch_action` | the zombie check and the decision to block, under one hold of the run lock (#571) | the pid, the status copy and ECHILD -- irrelevant to `NoLostWakeup`: none of them changes which process is Blocked or Exited | `7f648f591838` |
+| `Wait4Decide` | the wait4 arm of `kernel_syscall_dispatch_action` | the zombie check and the decision to block, under one hold of the run lock (#571) | the pid, the status copy and ECHILD -- irrelevant to `NoLostWakeup`: none of them changes which process is Blocked or Exited | `098691f2cc02` |
 | `Wait4Block` | `kernel_process_block_current`, `kernel_process_block_reserved` | successor choice and the Blocked publication in one critical section; `RECHECK` is the zombie re-check there | ASID preparation and the lock drop around it -- irrelevant to `NoLostWakeup`: the drop comes after Blocked is published and re-checked, and the successor it crosses with is already reserved Running | `a5833111b50b` |
 | `ChildExit` | `kernel_process_child_exit` | the child becomes a zombie and wakes the parent only if the parent is Blocked in ChildExit | zombie draining -- irrelevant to `NoLostWakeup`: it reaps the exiting child's own children, never this parent or this child; SIGCHLD -- irrelevant to `NoLostWakeup`: it makes no process Blocked or Exited, and only such a step can break the property; the direct parent start -- modelled elsewhere: `StackOwnership.ChildExitStart` | `11cfcf76aa70` |
 | `Wait4Resume` | `kernel_syscall_wait4_deliver` | the woken parent reaps | the user-memory status write -- irrelevant to `NoLostWakeup`: it runs after the reap, when the child is no longer Exited | `7eee22656d13` |
@@ -127,7 +127,7 @@ modelcheck` requires each to fail:
 | `Reserve` | `kernel_process_schedule`, `kernel_process_secondary_start`, `kernel_process_block_current` | a core takes a Ready process whose stack no core owns, and a parent with a continuation only once the child's stack is free too, and marks it Running before it is current | affinity -- irrelevant to `StartsOnFreeStack`: it only forbids some reservations, and the model already allows each one it forbids; the unlocked ASID preparation before the commit -- irrelevant to `StackSafety`: it moves no stack, and the reserved process is Running, so no other core can take it | `b11f243bcdb4` |
 | `Commit` | `kernel_process_secondary_start_reserved`, `kernel_process_exit_reserved` | the reserved successor becomes current on a core with no running current process | nothing | `ed64257b2134` |
 | `SwitchAway` | `kernel_process_schedule_reserved`, `kernel_process_block_reserved` | the reserved successor replaces a running current process, which is preempted, naps, or blocks in wait4; the core still stands on the outgoing stack, or on its IRQ stack inside an interrupt from EL0 | which child a wait4 waits for, and whether it has exited -- modelled elsewhere: `Wait4Block.Wait4Block` | `ed5db36000b3` |
-| `Wait4Block` | the wait4 arm of `kernel_syscall_dispatch_action`, `kernel_process_block_to_idle` | a parent blocks before its child exits, with no successor | the #550 window -- modelled elsewhere: `Wait4Block.Wait4Decide` | `17e6b3fcaf03` |
+| `Wait4Block` | the wait4 arm of `kernel_syscall_dispatch_action`, `kernel_process_block_to_idle` | a parent blocks before its child exits, with no successor | the #550 window -- modelled elsewhere: `Wait4Block.Wait4Decide` | `b5a9e765e476` |
 | `Nap` | `kernel_process_block_to_idle` | a process blocks for anything but a child's exit, with no successor | what it waits for -- irrelevant to `StackSafety`: every other wait reason blocks and wakes the same way | `d514a4753153` |
 | `Wake` | `kernel_process_deadline_wake_all` | a napping process becomes Ready wherever its stack is | the other wakers (UART, network, signal) -- irrelevant to `StackSafety`: each makes a Blocked process Ready and moves no stack | `bbf0e8d69dc2` |
 | `ChildExit` | `kernel_process_child_exit`, `kernel_syscall_exit_current_process` | the child becomes a zombie and wakes a Blocked parent, leaving it Ready with its continuation; the core still stands on the zombie's stack | zombie draining -- guarded: `scheduled_process_exited_take` fail-stops with `reap-on-owned-stack`; SIGCHLD -- irrelevant to `StackSafety`: it moves no stack and no core's current process | `8be750a6598c` |
@@ -175,12 +175,14 @@ ordinary wait4 wake, and replaying the recorded window without
 
 ## RecordLifetime.tla -- a process record read while another CPU reaps it (#482)
 
-One record, one reader, one reaper. The reader is a scheduler walk or an
-interrupt-side wake: it holds the process-run lock, probes the record live,
-lets the pool's view go, and reads through the pointer. The reaper tears down
-what the exited process owned, then removes the record from the pool.
+One record, one reader, one reaper, and the process's own execve. The
+reader is a scheduler walk, an interrupt-side wake or procfs's snapshot: it
+holds the process-run lock, probes the record live, lets the pool's view
+go, and reads through the pointer. The reaper tears down what the exited
+process owned, then removes the record from the pool. execve rewrites the
+live record's command line, which the snapshot copies (#618).
 
-Three variants:
+Four variants:
 
 - `REMOVE_UNDER_LOCK = FALSE` is the kernel before #482. The removal ran
   outside the run lock, and TLC finds a read of a freed record in five
@@ -191,13 +193,18 @@ Three variants:
   lock from probe to read. The type system enforces the removal's half, the
   guard `scheduled_process_slot_remove` requires. It does not enforce the
   reader's half, and this variant shows the fix alone is not enough.
+  procfs's snapshot was such a reader until #618.
+- `EXEC_WRITES_UNDER_LOCK = FALSE` is execve rewriting the command line
+  outside the run lock. The rewrite is then two steps, and a locked reader
+  copies between them: TLC reports `NoTornRead` in three steps.
 
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
-| `ReaderProbe`, `ReaderMiss`, `ReaderRead` | `kernel_process_secondary_start`, `kernel_process_next_ready`, `kernel_process_deadline_wake_all`, via `scheduled_process_record_at` | the probe returns a pointer and drops the pool's view; the read comes later, under the run lock the walk already holds | which walk reads and what it reads -- irrelevant to `ReadsOnlyLiveRecords`: the property depends only on whether the record was freed before the read | `d6ce01c1b91a` |
+| `ReaderProbe`, `ReaderMiss`, `ReaderRead` | `kernel_process_secondary_start`, `kernel_process_next_ready`, `kernel_process_deadline_wake_all`, `scheduled_process_diagnostic_snapshot`, via `scheduled_process_record_at` | the probe returns a pointer and drops the pool's view; the read comes later, under the run lock the reader already holds | which reader reads and what it reads besides the command line -- irrelevant to `ReadsOnlyLiveRecords`: the property depends only on whether the record was freed before the read; the monitor's `ps` and `proc`, which read with no lock -- irrelevant to `ReadsOnlyLiveRecords`: they run with every other CPU stopped, so no reap can land during the read | `a399d0193db3` |
 | `ReaperTeardown` | `scheduled_process_reap_teardown` | frees what only the exited process owned; no lock | nothing | `cb5d9162eac3` |
 | `ReaperRemove` | `scheduled_process_reap_remove`, `scheduled_process_slot_remove` | resets and removes the record, under the run-lock guard since #482 | nothing | `0804bbb466af` |
 | `Exit` | `kernel_process_child_exit` | the process becomes a zombie | the rest of exit -- irrelevant to `ReadsOnlyLiveRecords`: only the zombie state lets a reaper start, and nothing else in exit frees the record | `11cfcf76aa70` |
+| `ExecWrite`, `ExecWriteEnd` | the execve arm of `kernel_syscall_dispatch_action`, `scheduled_process_set_command_line` | the live process's command line is replaced in one critical section under the run lock; `ExecWriteEnd` is the second half only the unfixed variant takes | the argument count, inode and pending flag written in the same hold -- irrelevant to `NoTornRead`: no reader copies them | `e416324e2852` |
 
 ## The dropped column
 

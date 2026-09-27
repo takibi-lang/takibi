@@ -1627,16 +1627,46 @@ fn scheduled_process_slot_for_pid(pid: usize) -> ProcessSlotForPidResult
 
 // Allocation-free, kernel-owned procfs input. The caller receives a value
 // copy, never a ProcessRecord pointer or a userspace argv pointer.
+//
+// GitHub issue #618: under the process-run lock, from the pid lookup to the
+// last byte copied. procfs reads run on any CPU, a peer can reap the record
+// (#609) or exec can rewrite its command line in between, and #482's fix --
+// the reap's removal under this lock -- protects only a reader that holds
+// it. RecordLifetime.tla's READER_HOLDS_LOCK and EXEC_WRITES_UNDER_LOCK
+// variants are what goes wrong without it.
 fn scheduled_process_diagnostic_snapshot(pid: usize)
         -> ProcessDiagnosticResult !{unsafe} {
+    let mut snapshot: ProcessDiagnosticSnapshot;
+    let guard = process_run_lock();
+    let found: bool = scheduled_process_diagnostic_fill(pid, &snapshot);
+    process_run_unlock(guard);
+    if (found == false) { return ProcessDiagnosticResult::Missing; }
+    return ProcessDiagnosticResult::Found(snapshot);
+}
+
+// The same copy with no lock, for the monitor's `ps` and `proc`: a reporter
+// must not take a lock (kernel/CONCURRENCY.md), and they run with every
+// other CPU stopped.
+private fn scheduled_process_diagnostic_copy(pid: usize)
+        -> ProcessDiagnosticResult !{unsafe} {
+    let mut snapshot: ProcessDiagnosticSnapshot;
+    if (scheduled_process_diagnostic_fill(pid, &snapshot) == false) {
+        return ProcessDiagnosticResult::Missing;
+    }
+    return ProcessDiagnosticResult::Found(snapshot);
+}
+
+// The copy both share. It fills the caller's snapshot rather than returning
+// one: a second 600-byte value in flight on the way out of a wrapper
+// overflowed a debug build's 16 KiB kernel stack under BusyBox ps.
+private fn scheduled_process_diagnostic_fill(
+        pid: usize, snapshot: borrow *ProcessDiagnosticSnapshot) -> bool
+        !{unsafe} {
     let slot: usize = match scheduled_process_slot_for_pid(pid) {
-        ProcessSlotForPidResult::Missing => {
-            return ProcessDiagnosticResult::Missing;
-        }
+        ProcessSlotForPidResult::Missing => { return false; }
         ProcessSlotForPidResult::Found(found) => { found }
     };
     let record: *ProcessRecord = scheduled_process_record_at(slot);
-    let mut snapshot: ProcessDiagnosticSnapshot;
     snapshot.pid = record.pid;
     snapshot.ppid = 0;
     if (record.has_parent) {
@@ -1657,7 +1687,7 @@ fn scheduled_process_diagnostic_snapshot(pid: usize)
     for index: usize in 0..<512 {
         snapshot.command_line[index] = record.command_line[index];
     }
-    return ProcessDiagnosticResult::Found(snapshot);
+    return true;
 }
 
 // PID-ordered enumeration gives procfs deterministic directory output even
@@ -1703,7 +1733,7 @@ fn kernel_process_monitor_ps() !{unsafe} {
         let pid: usize = scheduled_process_diagnostic_next_pid(after);
         if (pid == 0) { walking = false; }
         else {
-            match scheduled_process_diagnostic_snapshot(pid) {
+            match scheduled_process_diagnostic_copy(pid) {
                 ProcessDiagnosticResult::Missing => {}
                 ProcessDiagnosticResult::Found(snapshot) => {
                     kernel_boot_log("ps: "); uart_put_udec(snapshot.pid);
@@ -1729,7 +1759,7 @@ fn kernel_process_monitor_proc(pid: usize) !{unsafe} {
         ProcessSlotForPidResult::Found(found) => { found }
     };
     let snapshot: ProcessDiagnosticSnapshot =
-        match scheduled_process_diagnostic_snapshot(pid) {
+        match scheduled_process_diagnostic_copy(pid) {
             ProcessDiagnosticResult::Missing => {
                 kernel_boot_log("proc: no such pid\n");
                 return;
