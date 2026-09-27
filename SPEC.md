@@ -2495,6 +2495,16 @@ pointer casts and chains of immutable local aliases retain the extent proof;
 pointer arithmetic, mutable aliases, calls, returned pointers, and dynamic
 lengths do not. This check does not establish CPU/device ownership.
 
+`dma_refresh_live(name)` accepts only the name of a private mutable aligned
+fixed-array global whose entire byte extent consists of complete target
+cache lines. It performs the receive-side cache invalidation and consume
+barrier over that whole allocation while the device may still write it.
+The operation returns no pointer, slice, or ownership token. A caller may
+inspect live completion metadata under its device-specific completion-marker
+protocol; the refresh neither makes a data buffer CPU-owned nor proves that
+multiple metadata fields form one atomic snapshot. The compiler rejects a
+local alias, partial range, or unsupported cache-maintenance target.
+
 **Protected fixed RX allocations.** `struct dma_fixed Name { private
 data: [T; N]; }` marks a record with exactly one nonempty fixed array
 field. Exactly one `private let mut` global of that record type must be

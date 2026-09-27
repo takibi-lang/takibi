@@ -4487,6 +4487,30 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | _ -> raise (Error (Printf.sprintf
            "dma_device_addr has no fixed allocation for '%s'" record)))
 
+  | Call ("dma_refresh_live", [{ desc = Var name; _ }]) ->
+      (match Hashtbl.find_opt global_vars name with
+       | Some ((TypeArray _ as array_ty), _) ->
+           let dl = match !target_data with
+             | Some dl -> dl
+             | None -> raise (Error "dma_refresh_live: target data layout not initialized") in
+           let bytes = Int64.to_int
+             (Llvm_target.DataLayout.abi_size (ltype_of_ast array_ty) dl) in
+           (match Target_info.dma_cache_contract () with
+            | Target_info.Cache_line line when bytes mod line <> 0 ->
+                raise (Error (Printf.sprintf
+                  "dma_refresh_live allocation '%s' must own complete cache lines"
+                  name))
+            | _ -> ());
+           let var = { desc = Var name; loc = e.loc } in
+           let ptr = { desc = Cast (TypePtr TypeU8,
+             { desc = AddrOf var; loc = e.loc }); loc = e.loc } in
+           let len = { desc = IntLit (Int64.of_int bytes); loc = e.loc } in
+           ignore (gen_expr locals { desc = Call ("dma_finish_rx", [ptr; len]);
+             loc = e.loc });
+           (TypeVoid, const_null (i1_type context))
+       | _ -> raise (Error (Printf.sprintf
+           "dma_refresh_live has no fixed array global '%s'" name)))
+
   | Call (("dma_begin_rx" | "dma_finish_owned_rx") as operation,
           [owner; { desc = Var record; _ }]) ->
       let (_, token) = gen_expr locals owner in

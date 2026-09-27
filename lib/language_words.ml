@@ -30,6 +30,7 @@ let compiler_builtins = [
   "dma_publish"; "dma_consume"; "device_fence"; "signal_fence";
   "interrupt_wait"; "interrupt_notify";
   "dma_prepare_tx"; "dma_prepare_rx"; "dma_finish_rx";
+  "dma_refresh_live";
   "dma_cpu_ptr"; "dma_cpu_slice"; "dma_begin_rx"; "dma_finish_owned_rx";
   "dma_device_addr";
   "checked_add_usize"; "checked_mul_usize";

@@ -1534,6 +1534,12 @@ let inferred_effect_location key = StringMap.find_opt key !inferred_effect_locs
 let global_align_bytes_baseline : int StringMap.t ref = ref StringMap.empty
 let var_align_bytes : int StringMap.t ref = ref StringMap.empty
 
+(* Declarations used by the symbolic live-DMA refresh builtin. The call
+   names a global allocation, not a local expression that can shadow it. *)
+let live_dma_global_defs :
+    (Ast.type_expr * int option * bool * bool * Ast.loc) StringMap.t ref =
+  ref StringMap.empty
+
 (* GitHub issue #108: `private let` global name -> the source file (loc.pos_fname)
    it was declared in. Populated once, early in infer_program (globals are visible
    everywhere and already uniqueness-checked by claim_toplevel_name), then consulted
@@ -4089,6 +4095,37 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
         "%s expects an authority token and a fixed DMA record type"
         operation))
 
+  | Call ("dma_refresh_live", [{ desc = Ast.Var name; _ }]) ->
+      (match StringMap.find_opt name !live_dma_global_defs with
+       | Some (_, Some alignment, true, true, loc)
+         when not (StringSet.mem name !locally_bound_names) ->
+           check_private_global_access e.loc name;
+           let bytes = match repr (lookup e.loc name tyenv) with
+             | TArray (elem, count) when count > 0 ->
+                 const_type_size senv (Ast.TypeArray (to_ast elem, count))
+             | _ -> raise (TypeError (loc, Printf.sprintf
+                 "dma_refresh_live allocation '%s' has no fixed byte extent"
+                 name)) in
+           (match Target_info.dma_cache_contract () with
+            | Target_info.Cache_line line ->
+                if alignment mod line <> 0
+                   || Option.fold ~none:false
+                        ~some:(fun n -> n mod line <> 0) bytes then
+                  raise (TypeError (e.loc, Printf.sprintf
+                    "dma_refresh_live allocation '%s' must own complete cache lines"
+                    name))
+            | Target_info.Coherent -> ()
+            | Target_info.Unsupported ->
+                raise (TypeError (e.loc,
+                  "dma_refresh_live is unavailable on this target")));
+           TVoid
+       | _ -> raise (TypeError (e.loc, Printf.sprintf
+           "dma_refresh_live requires a private mutable aligned fixed-array global, got '%s'"
+           name)))
+  | Call ("dma_refresh_live", _) ->
+      raise (TypeError (e.loc,
+        "dma_refresh_live expects one fixed-array global name"))
+
   | Call (("dma_prepare_tx" | "dma_prepare_rx" | "dma_finish_rx") as fname, args) ->
       let required_alignment =
         match Target_info.dma_cache_contract () with
@@ -6349,6 +6386,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   resolved_call_targets := StringMap.empty;
   resolved_function_values := StringMap.empty;
   resolved_indirect_call_effects := StringMap.empty;
+  live_dma_global_defs := StringMap.empty;
   (* Reset every module-scoped per-program table up front. Some are reset
      again immediately before their population below; this single preamble
      plus the assertions makes omission visible instead of allowing a table
@@ -6680,6 +6718,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.LetDef (name, _, _, Some n, _, _, _) -> StringMap.add name n m
     | _ -> m
   ) StringMap.empty prog;
+  live_dma_global_defs := List.fold_left (fun m -> function
+    | Ast.LetDef (name, Some ty, _, align, is_mutable, is_private, loc) ->
+        StringMap.add name (ty, align, is_mutable, is_private, loc) m
+    | _ -> m) StringMap.empty prog;
   Hashtbl.reset private_globals;
   List.iter (function
     | Ast.LetDef (name, _, _, _, _, true, loc) ->

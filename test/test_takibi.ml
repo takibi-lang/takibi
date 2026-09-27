@@ -9426,6 +9426,26 @@ let infer_tests = [
         struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
         private let mut dma_fixed596: DmaFixed596 align(64);");
 
+  Alcotest.test_case "live DMA refresh requires private fixed global" `Quick
+    (expect_type_error
+       "dma_refresh_live requires a private mutable aligned fixed-array global"
+       "let mut public_ring596: [u32; 16] align(64);
+        fn poll() { dma_refresh_live(public_ring596); }");
+
+  Alcotest.test_case "live DMA refresh rejects a local alias" `Quick
+    (expect_type_error
+       "dma_refresh_live requires a private mutable aligned fixed-array global"
+       "fn poll() {
+          let mut local_ring596: [u32; 16] align(64);
+          dma_refresh_live(local_ring596);
+        }");
+
+  Alcotest.test_case "live DMA refresh requires complete cache lines" `Quick
+    (expect_type_error
+       "must own complete cache lines"
+       "private let mut short_ring596: [u32; 15] align(64);
+        fn poll() { dma_refresh_live(short_ring596); }");
+
   Alcotest.test_case "fixed DMA allocation refuses direct array access" `Quick
     (expect_type_error
        "fixed DMA allocation 'dma_fixed596' cannot be accessed directly"
@@ -9639,6 +9659,14 @@ let with_embed_fixture contents f =
   Fun.protect ~finally:(fun () -> Sys.remove path) (fun () -> f path)
 
 let codegen_tests = [
+  Alcotest.test_case "live DMA refresh codegens over the full private array" `Quick
+    (expect_codegen_ok
+       "private let mut live_ring596: [u32; 16] align(64);
+        fn poll() -> u32 {
+          dma_refresh_live(live_ring596);
+          return live_ring596[0];
+        }");
+
   Alcotest.test_case "fixed DMA generated owner slot exchanges with a lock guard" `Quick
     (expect_codegen_ok
        "struct no_copy Mutex { private word: usize; }
