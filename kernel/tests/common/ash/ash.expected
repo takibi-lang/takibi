@@ -69,6 +69,8 @@ ps
 rm
 rmdir
 script-interpreter-argument.sh
+session
+session-check
 sh
 sleep
 spread

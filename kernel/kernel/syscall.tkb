@@ -43,6 +43,8 @@ use "kernel/lib/occupancy.tkb";
 //   Up to five script levels are resolved; the sixth returns ELOOP.
 //
 const AARCH64_NR_WRITE: usize = 64;
+const AARCH64_NR_GETSID: usize = 156;
+const AARCH64_NR_SETSID: usize = 157;
 const AARCH64_NR_READV: usize = 65;
 const AARCH64_NR_WRITEV: usize = 66;
 const AARCH64_NR_PPOLL: usize = 73;
@@ -3745,6 +3747,10 @@ fn syscall_peer_refused(number: usize) -> bool {
 
 fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     if (syscall_peer_refused(number)) { return false; }
+    // Session lookups and changes hold the process-run lock.
+    if (number == AARCH64_NR_GETSID || number == AARCH64_NR_SETSID) {
+        return true;
+    }
     // The caller's own record, or architectural state: getpid, getppid,
     // the uid/gid family, gettid, clock_gettime, and getcpu (#533).
     if (number == 172 || number == 173 || number == 178 ||
@@ -6379,6 +6385,36 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
             ProcessAffinityResult::Mask(mask) => {
                 return SyscallAction::Resume(0);
+            }
+        }
+    }
+    if (number == AARCH64_NR_GETSID) {
+        // pid_t is signed 32-bit at the Linux syscall boundary.
+        if ((x0 & 0x80000000) != 0) {
+            return SyscallAction::Resume(LINUX_ESRCH);
+        }
+        match kernel_process_session_get(x0 & 0xFFFFFFFF) {
+            ProcessSessionResult::Id(id) => {
+                return SyscallAction::Resume(id);
+            }
+            ProcessSessionResult::Missing => {
+                return SyscallAction::Resume(LINUX_ESRCH);
+            }
+            ProcessSessionResult::Leader => {
+                return SyscallAction::Resume(LINUX_EPERM);
+            }
+        }
+    }
+    if (number == AARCH64_NR_SETSID) {
+        match kernel_process_session_create() {
+            ProcessSessionResult::Id(id) => {
+                return SyscallAction::Resume(id);
+            }
+            ProcessSessionResult::Missing => {
+                return SyscallAction::Resume(LINUX_ESRCH);
+            }
+            ProcessSessionResult::Leader => {
+                return SyscallAction::Resume(LINUX_EPERM);
             }
         }
     }

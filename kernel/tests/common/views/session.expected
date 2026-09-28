@@ -1,0 +1,2 @@
+session: init, fork, setsid, getsid, exec, EPERM, ESRCH ok
+session: init, fork, setsid, getsid, exec, EPERM, ESRCH ok

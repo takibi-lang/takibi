@@ -448,7 +448,7 @@ probe/board setup. A successful run includes:
 [kernel/rpi5] BusyBox httpd curl passed
 [kernel/rpi5] second BusyBox httpd curl passed
 [kernel/rpi5] userspace connected I/O passed
-PASS kernel/rpi5 (57 views, one boot)
+PASS kernel/rpi5 (58 views, one boot)
 ```
 
 It tests negative and positive ARP/ICMP behavior, TCP lifecycle, USB ext2
@@ -1141,6 +1141,13 @@ run, not a specification.
   sixteen 1 KiB blocks per core (`kernel/drivers/block/block_cache.tkb`),
   which is what keeps ext2's per-chunk metadata re-reads from reaching the
   device. A write on either core retires the other's copies.
+- **Sessions.** `setsid` creates a session whose ID is the caller's PID;
+  `getsid` reads the caller's or another existing process's session. Fork
+  inherits it and exec preserves it. A session has one process group with
+  the same ID, and a group leader cannot call `setsid` again (`EPERM`).
+  PID 1 starts in session/group 0, so BusyBox init can create session 1.
+  procfs reports these IDs in `/proc/PID/stat`. There is no `setpgid`,
+  controlling terminal, or foreground/background job control.
 - **Processes.** A pooled `ProcessRecord` scheduler table with no
   process-count ceiling, with lazily backed kernel stacks and directly owned
   address-space page tables. Both cores run ordinary processes after core 1
@@ -1163,7 +1170,7 @@ run, not a specification.
   earliest, matching Linux's "some terminated child" rather than promising
   an order. The two process-GROUP selectors Linux also accepts here,
   `pid == 0` and `pid < -1`, are `EINVAL` rather than wrong answers,
-  because there are no process groups yet to select over. A parent that never waits keeps its zombies until its own exit
+  because process-group wait selection is not implemented. A parent that never waits keeps its zombies until its own exit
   drains them, which is also Linux's behaviour.
   Scheduling is a round-robin over the process TREE: a process's successor
   is its first child, else its next sibling, else the nearest ancestor's

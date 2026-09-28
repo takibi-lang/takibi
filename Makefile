@@ -842,6 +842,10 @@ KERNEL_PEER_FORK_ELF     := $(KERNEL_BUILD_DIR)/peer_fork.elf
 KERNEL_NESTED_EXEC_TKB   := $(KERNEL_DIR)/arch/arm64/kernel/nested_exec_probe.tkb
 KERNEL_NESTED_EXEC_O     := $(KERNEL_BUILD_DIR)/nested_exec_probe.o
 KERNEL_NESTED_EXEC_ELF   := $(KERNEL_BUILD_DIR)/nested_exec.elf
+KERNEL_SESSION_TKB       := $(KERNEL_DIR)/arch/arm64/kernel/session_probe.tkb
+KERNEL_SESSION_O         := $(KERNEL_BUILD_DIR)/session_probe.o
+KERNEL_SESSION_ELF       := $(KERNEL_BUILD_DIR)/session.elf
+KERNEL_SESSION_CHECK_ELF := $(KERNEL_BUILD_DIR)/session_check.elf
 KERNEL_NESTED_FIXTURES   := $(wildcard $(KERNEL_EXT2_FIXTURE_DIR)/nested/*)
 KERNEL_RPI5_MAIN_O      := $(KERNEL_BUILD_DIR)/main.o
 KERNEL_RPI5_MAIN_DEBUG_O := $(KERNEL_BUILD_DIR)/main.debug.o
@@ -885,7 +889,7 @@ $(KERNEL_MUSL_LOADER): $(KERNEL_MUSL_APK)
 	tar -xOzf $< lib/ld-musl-aarch64.so.1 > $@
 	chmod +x $@
 
-$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/about.html $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/inittab $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSY_LOOP_A_ELF) $(KERNEL_BUSY_LOOP_B_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_REPORT_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_GUARD_ELF) $(KERNEL_BUSY_LOOP_PEER_SPIN_ELF) $(KERNEL_BUSY_LOOP_PEER_NET_WAKE_ELF) $(KERNEL_PEER_READ_ELF) $(KERNEL_CORE_READ_ELF) $(KERNEL_PEER_CONSOLE_ELF) $(KERNEL_PEER_TTY_ELF) $(KERNEL_CLOEXEC_ELF) $(KERNEL_CLOEXEC_CHECK_ELF) $(KERNEL_PPOLL_PROBE_ELF) $(KERNEL_AFFINITY_ELF) $(KERNEL_SPREAD_ELF) $(KERNEL_MOVECOST_ELF) $(KERNEL_PEER_MUTATE_ELF) $(KERNEL_PROTOCOL_TRACE_ELF) $(KERNEL_PEER_EXEC_ELF) $(KERNEL_PEER_EXEC_IMAGE_ELF) $(KERNEL_PEER_FORK_ELF) $(KERNEL_NESTED_EXEC_ELF) $(KERNEL_NESTED_FIXTURES) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_BUSYBOX_EXTRAS) $(KERNEL_MUSL_LOADER) $(KERNEL_TASKSET) scripts/make_interp_probe_elf.py | $(KERNEL_USER_BUILD_DIR)
+$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/about.html $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/inittab $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSY_LOOP_A_ELF) $(KERNEL_BUSY_LOOP_B_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_REPORT_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_GUARD_ELF) $(KERNEL_BUSY_LOOP_PEER_SPIN_ELF) $(KERNEL_BUSY_LOOP_PEER_NET_WAKE_ELF) $(KERNEL_PEER_READ_ELF) $(KERNEL_CORE_READ_ELF) $(KERNEL_PEER_CONSOLE_ELF) $(KERNEL_PEER_TTY_ELF) $(KERNEL_CLOEXEC_ELF) $(KERNEL_CLOEXEC_CHECK_ELF) $(KERNEL_PPOLL_PROBE_ELF) $(KERNEL_AFFINITY_ELF) $(KERNEL_SPREAD_ELF) $(KERNEL_MOVECOST_ELF) $(KERNEL_PEER_MUTATE_ELF) $(KERNEL_PROTOCOL_TRACE_ELF) $(KERNEL_PEER_EXEC_ELF) $(KERNEL_PEER_EXEC_IMAGE_ELF) $(KERNEL_PEER_FORK_ELF) $(KERNEL_NESTED_EXEC_ELF) $(KERNEL_SESSION_ELF) $(KERNEL_SESSION_CHECK_ELF) $(KERNEL_NESTED_FIXTURES) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_BUSYBOX_EXTRAS) $(KERNEL_MUSL_LOADER) $(KERNEL_TASKSET) scripts/make_interp_probe_elf.py | $(KERNEL_USER_BUILD_DIR)
 	rm -f $@.tmp
 	truncate -s 2621440 $@.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 mke2fs -q -t ext2 -b 1024 -I 128 -N 1024 -O none -F -U 00000000-0000-0000-0000-000000000177 $@.tmp 2560
@@ -958,6 +962,8 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_EXEC_ELF) $@.tmp:/bin/peer-exec
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_EXEC_IMAGE_ELF) $@.tmp:/bin/peer-exec-image
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_FORK_ELF) $@.tmp:/bin/peer-fork
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_SESSION_ELF) $@.tmp:/bin/session
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_SESSION_CHECK_ELF) $@.tmp:/bin/session-check
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_NESTED_EXEC_ELF) $@.tmp:/bin/nested-exec
 	E2FSPROGS_FAKE_TIME=1700000000 e2mkdir $@.tmp:/nested
 	@set -e; for fixture in $(KERNEL_NESTED_FIXTURES); do \
@@ -967,6 +973,8 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	    debugfs -w -R "set_inode_field /nested/$$(basename $$fixture) mode 0100755" $@.tmp >/dev/null 2>&1; \
 	done
 	debugfs -w -R 'set_inode_field /nested/noexec mode 0100644' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/session mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/session-check mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/nested-exec mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/busybox.static mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/busybox-extras mode 0100755' $@.tmp >/dev/null 2>&1
@@ -1209,6 +1217,19 @@ $(KERNEL_PEER_EXEC_ELF): $(KERNEL_PEER_EXEC_O)
 
 $(KERNEL_PEER_EXEC_IMAGE_ELF): $(KERNEL_PEER_EXEC_O)
 	$(LLD) -pie --no-dynamic-linker -e peer_exec_image $< -o $@
+	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
+
+$(KERNEL_SESSION_O): $(KERNEL_SESSION_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
+	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry session_probe --external-entry session_check --emit-depfile $@.d -o $@
+
+-include $(KERNEL_SESSION_O).d
+
+$(KERNEL_SESSION_ELF): $(KERNEL_SESSION_O)
+	$(LLD) -pie --no-dynamic-linker -e session_probe $< -o $@
+	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
+
+$(KERNEL_SESSION_CHECK_ELF): $(KERNEL_SESSION_O)
+	$(LLD) -pie --no-dynamic-linker -e session_check $< -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
 $(KERNEL_NESTED_EXEC_O): $(KERNEL_NESTED_EXEC_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)

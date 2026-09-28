@@ -239,6 +239,10 @@ struct ProcessRecord {
     // process only while a pid named a table row.
     pid: usize;
     start_time_ticks: usize;
+    // With no setpgid API, each session has exactly one process group.
+    // Both IDs are inherited by fork and preserved by exec. Zero is the
+    // bootstrap group before PID 1 creates its userspace session.
+    session_id: usize;
     // Bounded kernel-owned diagnostic copy. procfs must never retain or
     // revisit userspace argv pointers while a process can exit or replace
     // its address space underneath the read.
@@ -1083,6 +1087,7 @@ variant ProcessSlotCursor {
 struct ProcessDiagnosticSnapshot {
     pid: usize;
     ppid: usize;
+    session_id: usize;
     state: u8;
     resident_pages: usize;
     start_time_ticks: usize;
@@ -1685,6 +1690,7 @@ private fn scheduled_process_diagnostic_fill(
     };
     let record: *ProcessRecord = scheduled_process_record_at(slot);
     snapshot.pid = record.pid;
+    snapshot.session_id = record.session_id;
     snapshot.ppid = 0;
     if (record.has_parent) {
         snapshot.ppid = scheduled_process_pid_of_handle(record.parent);
@@ -2192,6 +2198,7 @@ fn scheduled_process_table_init() !{unsafe} {
 private fn scheduled_process_record_reset(slot: usize) !{unsafe} {
     let record: *ProcessRecord = scheduled_process_record_at(slot);
     record.pid = 0;
+    record.session_id = 0;
     record.start_time_ticks = 0;
     record.command_line_length = 0;
     record.saved_sp = 0;
@@ -2675,6 +2682,7 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
     // GitHub issue #392: the one place a pid is minted. Past every branch
     // that can still refuse the slot.
     scheduled_process_record_at(slot).pid = scheduled_process_mint_pid();
+    scheduled_process_record_at(slot).session_id = 0;
     let counter_frequency: usize = read_cntfrq() as usize;
     let tick_divisor: usize = counter_frequency / 100;
     if (tick_divisor != 0) {
@@ -7764,6 +7772,8 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
             // recorded against, which is why the enumeration change and
             // this one could be verified separately.
             let publish_guard = process_run_lock();
+            scheduled_process_record_of(child).session_id =
+                scheduled_process_record_of(parent).session_id;
             scheduled_process_record_of(child).next_sibling =
                 scheduled_process_record_of(parent).first_child;
             scheduled_process_record_of(child).has_next_sibling =
@@ -7967,6 +7977,49 @@ fn kernel_process_current_pid() -> usize {
         return scheduled_process_pid_of_handle(execution_here().current_handle);
     }
     return 1;
+}
+
+must_use variant ProcessSessionResult {
+    Id(usize);
+    Missing;
+    Leader;
+}
+
+// Copy or change session membership under the run lock, including lookup:
+// another CPU may otherwise reap a target while getsid reads its record.
+fn kernel_process_session_get(pid: usize) -> ProcessSessionResult {
+    let guard = process_run_lock();
+    let mut selected: usize = pid;
+    if (selected == 0) { selected = kernel_process_current_pid(); }
+    match scheduled_process_slot_for_pid(selected) {
+        ProcessSlotForPidResult::Missing => {
+            process_run_unlock(guard);
+            return ProcessSessionResult::Missing;
+        }
+        ProcessSlotForPidResult::Found(slot) => {
+            let id: usize = scheduled_process_record_at(slot).session_id;
+            process_run_unlock(guard);
+            return ProcessSessionResult::Id(id);
+        }
+    }
+}
+
+fn kernel_process_session_create() -> ProcessSessionResult {
+    let guard = process_run_lock();
+    if (execution_here().current_live == false) {
+        process_run_unlock(guard);
+        return ProcessSessionResult::Missing;
+    }
+    let mut current: ProcessHandle = execution_here().current_handle;
+    let record: *ProcessRecord = scheduled_process_record_of(current);
+    if (record.session_id == record.pid) {
+        process_run_unlock(guard);
+        return ProcessSessionResult::Leader;
+    }
+    let id: usize = record.pid;
+    record.session_id = id;
+    process_run_unlock(guard);
+    return ProcessSessionResult::Id(id);
 }
 
 // The caller holds ProcessRunGuard when it uses this snapshot to make a

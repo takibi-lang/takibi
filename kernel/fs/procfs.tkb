@@ -219,9 +219,14 @@ fn procfs_render_file(inode: usize, output: borrow [u8; 1024..])
     offset = procfs_put_byte(output, offset, snapshot.state);
     offset = procfs_put_byte(output, offset, 0x20);
     offset = procfs_put_usize(output, offset, snapshot.ppid);
-    // Fields 5 through 13: pgrp, session, tty_nr, tpgid, flags and faults.
+    // Fields 5 and 6: one process group per session until setpgid exists.
+    offset = procfs_put_byte(output, offset, 0x20);
+    offset = procfs_put_usize(output, offset, snapshot.session_id);
+    offset = procfs_put_byte(output, offset, 0x20);
+    offset = procfs_put_usize(output, offset, snapshot.session_id);
+    // Fields 7 through 13: tty_nr, tpgid, flags and faults.
     offset = procfs_put_text(output, offset,
-        bs" 0 0 0 0 0 0 0 0 0");
+        bs" 0 0 0 0 0 0 0");
     // Fields 14 through 24: utime, stime, child times, priority, nice,
     // thread count, itrealvalue, starttime, vsize and rss. Fields 25 through
     // 39 are consumed (though mostly discarded) by Alpine's enabled

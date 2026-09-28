@@ -1,0 +1,80 @@
+/* Session inheritance and creation through the real EL0 syscall boundary.
+ * Two entry points let an exec prove that session leadership survives image
+ * replacement. init.sh runs the parent on CPU 0 and CPU 1.
+ */
+const SESSION_ERROR_FLOOR: usize = 0xFFFFFFFFFFFFF000;
+
+private fn session_call(pid: usize) -> usize {
+    return svc5(156, pid, 0, 0, 0, 0);
+}
+
+private fn session_fail(line: borrow []u8) {
+    svc5(64, 1, line as *u8 as usize, line.len, 0, 0);
+    svc5(93, 1, 0, 0, 0, 0);
+}
+
+fn session_probe() {
+    let parent: usize = svc5(172, 0, 0, 0, 0, 0);
+    let inherited: usize = session_call(0);
+    if (inherited == 0 || inherited >= SESSION_ERROR_FLOOR ||
+        session_call(parent) != inherited || session_call(1) != 1 ||
+        session_call(0xFFFFFFFF00000000) != inherited ||
+        session_call(0xFFFFFFFF) != 0xFFFFFFFFFFFFFFFD ||
+        session_call(0x7FFFFFFF) != 0xFFFFFFFFFFFFFFFD) {
+        session_fail(bs"session: FAIL getsid and init session\n");
+    }
+    // Block SIGCHLD before fork, then wait for it before querying the zombie.
+    // This keeps the parent observation independent of scheduling speed.
+    let mut signals: [u8; 8];
+    for index: usize in 0..<8 { signals[index] = 0; }
+    signals[2] = 1;
+    if (svc5(135, 0, signals as *u8 as usize, 0, 8, 0) != 0) {
+        session_fail(bs"session: FAIL signal mask\n");
+    }
+    // Each fresh child must inherit the parent's session, even after a
+    // previous child created a session and its pool record was recycled.
+    for round: usize in 0..<2 {
+        let child: usize = svc5(220, 0x11, 0, 0, 0, 0);
+        if (child == 0) {
+            let pid: usize = svc5(172, 0, 0, 0, 0, 0);
+            if (session_call(0) != inherited ||
+                session_call(parent) != inherited ||
+                svc5(157, 0, 0, 0, 0, 0) != pid ||
+                session_call(0) != pid ||
+                svc5(157, 0, 0, 0, 0, 0) != 0xFFFFFFFFFFFFFFFF) {
+                session_fail(bs"session: FAIL child inheritance or setsid\n");
+            }
+            let mut argv: [usize; 2];
+            argv[0] = "/bin/session-check" as *u8 as usize;
+            argv[1] = 0;
+            svc5(221, argv[0], argv as *usize as usize, 0, 0, 0);
+            session_fail(bs"session: FAIL exec\n");
+        }
+        if (child >= SESSION_ERROR_FLOOR) {
+            session_fail(bs"session: FAIL fork\n");
+        }
+        if (svc5(137, signals as *u8 as usize, 0, 0, 8, 0) != 17 ||
+            session_call(child) != child || session_call(0) != inherited) {
+            session_fail(bs"session: FAIL parent observation\n");
+        }
+        let mut status: [u8; 4];
+        for index: usize in 0..<4 { status[index] = 0xFF; }
+        if (svc5(260, child, status as *u8 as usize, 0, 0, 0) != child ||
+            status[0] != 0 || status[1] != 0 ||
+            session_call(child) != 0xFFFFFFFFFFFFFFFD) {
+            session_fail(bs"session: FAIL child result or reaped pid\n");
+        }
+    }
+    let line: []u8 = bs"session: init, fork, setsid, getsid, exec, EPERM, ESRCH ok\n";
+    svc5(64, 1, line as *u8 as usize, line.len, 0, 0);
+    svc5(93, 0, 0, 0, 0, 0);
+}
+
+fn session_check() {
+    let pid: usize = svc5(172, 0, 0, 0, 0, 0);
+    if (session_call(0) != pid || session_call(pid) != pid ||
+        svc5(157, 0, 0, 0, 0, 0) != 0xFFFFFFFFFFFFFFFF) {
+        session_fail(bs"session: FAIL exec preserved leadership\n");
+    }
+    svc5(93, 0, 0, 0, 0, 0);
+}

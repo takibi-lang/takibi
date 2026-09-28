@@ -176,6 +176,15 @@ for cpu in 0 1; do
     fi
 done
 
+# Session lifecycle checks run after all existing process-image evidence.
+for cpu in 0 1; do
+    /bin/taskset -c "$cpu" /bin/session
+    if [ "$?" -ne 0 ]; then
+        echo "session: FAIL lifecycle"
+        exit 1
+    fi
+done
+
 for phase in fd uart telnet; do
     echo "init: phase $phase"
 done
