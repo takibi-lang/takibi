@@ -30,6 +30,7 @@ whether a row has gone quiet or has merely stopped being looked for.
 
 | Symptom | Rate | Issue | Last seen |
 | --- | --- | --- | --- |
+| `the peer console writer never delivered its last record` | 1 of 1 cicheck; 0 of 4 standalone | #631 | 2026-09-28 |
 | `the payload never asked for its input` | 1 of 9 cicheck runs after the alloc-rollback split | #607 | 2026-09-26 |
 | `workload: peer read 98304 pattern bytes` | line MISSING from peer_filesystem.actual: 2 of 7 local cicheck runs; 0 of 47 standalone | #604 | 2026-09-27 |
 | `ARP while HTTPd is listening` | 1 of 30 standalone samples | #605 | 2026-09-26 |
