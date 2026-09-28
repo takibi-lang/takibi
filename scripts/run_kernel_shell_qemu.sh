@@ -93,7 +93,7 @@ QEMU_LAUNCH_NS="$(date +%s%N)"
 # machine rather than exposed on the LAN.
 QEMU_COMMAND=(
     qemu-system-aarch64 \
-    -machine virt -cpu cortex-a53 -smp 2 -m 1024 -display none -monitor none \
+    -machine virt -cpu cortex-a53 -smp "${KERNEL_QEMU_SHELL_SMP:-2}" -m 1024 -display none -monitor none \
     -qmp "unix:$QMP_SOCKET,server=on,wait=off" \
     -chardev "socket,id=debug_uart,host=127.0.0.1,port=$QEMU_SERIAL_PORT,server=on,wait=off" \
     -serial chardev:debug_uart \

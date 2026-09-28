@@ -25,5 +25,7 @@ while [ "$i" -lt "$rounds" ]; do
     [ "$?" -eq 143 ] || mismatched=$((mismatched + 1))
     wait
     i=$((i + 1))
+    # A heartbeat, so a runner can tell a hang from a long run.
+    if [ $((i % 500)) -eq 0 ]; then echo "churn: progress $i"; fi
 done
 echo "churn: rounds=$i mismatched=$mismatched"

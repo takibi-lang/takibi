@@ -180,14 +180,86 @@ def ddb_read_vm(session):
     return dict(zip(names, (int(value) for value in found.groups())))
 
 
+def shell_resync(session):
+    """Wait until ash is reading a fresh line. False if it never does.
+
+    Typed straight after a DDB `continue`, the command's first byte could
+    reach ash as a line of its own: on the RPi5 `c` arrived, ash answered
+    with a new prompt, and `hurn.sh 9000` followed -- so a phase ended
+    before it began. An empty line and the prompt it draws put the shell
+    and this runner back in step.
+    """
+    start = len(session.normalized())
+    session.send(b"\n")
+    if session.wait_for(lambda n: SHELL_PROMPT in n[start:], 20) is None:
+        return False
+    # Let anything still in flight from the debugger land before typing.
+    settle = len(session.normalized())
+    session.wait_for(lambda n: len(n) > settle, 1)
+    return True
+
+
+# /bin/churn.sh prints this every 500 rounds. A phase with no heartbeat for
+# STALL_SECONDS has hung, whatever its overall deadline says. 500 rounds take
+# about 70 s on the RPi5 and about 5.5 minutes under two-core QEMU.
+PROGRESS = b"churn: progress "
+STALL_SECONDS_BY_PLATFORM = {"rpi5": 300, "qemu": 900}
+STALL_SECONDS = 300
+# What DDB is asked when a phase hangs, so the capture says why.
+HANG_COMMANDS = (b"ps", b"sched", b"wait", b"current", b"stacks", b"events",
+                 b"intr", b"trace")
+
+
+def ddb_walk_hang(session):
+    """Break into DDB on a hung phase, record its read-only views, stay stopped.
+
+    DDB refuses to inspect while another core holds the world stop (`busy`)
+    or when a core does not stop (`partial`). Whether that refusal persists
+    is itself the evidence -- a stop held for good, or cores trading it -- so
+    the break is sent again a few times before giving up.
+    """
+    for _ in range(4):
+        start = len(session.normalized())
+        session.send(b"\x14b")
+        session.wait_for(
+            lambda n: b"ddb> " in n[start:] or
+                      b"inspection refused" in n[start:], 20)
+        if b"ddb> " in session.normalized()[start:]:
+            break
+        session.wait_for(lambda n: False, 10)
+    else:
+        return
+    for command in HANG_COMMANDS:
+        seen = session.normalized().count(b"ddb> ")
+        session.send(command + b"\n")
+        session.wait_for(lambda n: n.count(b"ddb> ") > seen, 20)
+
+
 def run_phase(session, rounds):
     """Type one `churn.sh ROUNDS` and judge it. None, or why it failed."""
+    if shell_resync(session) is False:
+        return "the shell did not answer an empty line before the phase"
     start = len(session.normalized())
     session.send(f"churn.sh {rounds}\n".encode("ascii"))
-    answer = session.wait_for(
-        lambda n: VERDICT.search(n, start) or
-                  (SHELL_PROMPT in n[start:] and PromptWithoutVerdict()),
-        rounds * SECONDS_PER_ROUND + 10, watch_from=start)
+    deadline = time.monotonic() + rounds * SECONDS_PER_ROUND + 10
+    answer = None
+    heartbeats = 0
+    while answer is None and time.monotonic() < deadline:
+        answer = session.wait_for(
+            lambda n: VERDICT.search(n, start) or
+                      (SHELL_PROMPT in n[start:] and PromptWithoutVerdict()) or
+                      (n.count(PROGRESS, start) > heartbeats and "beat"),
+            min(STALL_SECONDS, max(1.0, deadline - time.monotonic())),
+            watch_from=start)
+        if answer == "beat":
+            heartbeats = session.normalized().count(PROGRESS, start)
+            answer = None
+            continue
+        if answer is None:
+            ddb_walk_hang(session)
+            return (f"no heartbeat for {STALL_SECONDS} s after "
+                    f"{heartbeats * 500} rounds: the phase hung; DDB's views "
+                    "are in the transcript")
     if isinstance(answer, PromptWithoutVerdict):
         # The verdict is printed before the next prompt, so a prompt with no
         # verdict ahead of it is the script ending early -- as it did when
@@ -198,6 +270,9 @@ def run_phase(session, rounds):
     if answer is None:
         return f"no verdict within {rounds} rounds' deadline: the workload hung"
     if isinstance(answer, FailureMarker):
+        # Keep reading: the first line of an oops is not the report, and
+        # the crash console walks its read-only commands after it.
+        session.wait_for(lambda n: False, 15)
         return f"the kernel printed {answer.marker.decode().strip()!r}"
     done, mismatched = int(answer.group(1)), int(answer.group(2))
     if done != rounds or mismatched != 0:
@@ -215,6 +290,8 @@ def main():
         help="the single long boot: two phases of ROUNDS each, DDB readings "
              "before and after, and a verdict on what accumulates")
     args = parser.parse_args()
+    global STALL_SECONDS
+    STALL_SECONDS = STALL_SECONDS_BY_PLATFORM[args.platform]
 
     root = os.environ.get("TAKIBI_LANE_ARTIFACT_ROOT",
                           os.path.join(REPO_ROOT, "_build"))
