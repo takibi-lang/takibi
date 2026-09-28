@@ -11,6 +11,7 @@ lib
 lost+found
 many
 mutable.txt
+nested
 peer-read.bin
 read_indirect.txt
 .
@@ -28,6 +29,7 @@ lib
 lost+found
 many
 mutable.txt
+nested
 peer-read.bin
 read_indirect.txt
 affinity
@@ -49,6 +51,7 @@ ls
 mkdir
 movecost
 mv
+nested-exec
 nproc
 od
 peer-console

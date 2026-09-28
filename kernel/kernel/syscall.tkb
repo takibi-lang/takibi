@@ -38,14 +38,9 @@ use "kernel/lib/occupancy.tkb";
 //   match its pool's documented contract exactly (`LINUX_EMFILE` for
 //   per-process fd exhaustion, `LINUX_ENFILE` for the global shared-
 //   object pool, etc.).
-// - execve's `#!` dispatch is ONE LEVEL DEEP: the interpreter a script
-//   names must itself be an executable image. Linux allows five nested
-//   script levels and reports ELOOP on the sixth; this kernel would
-//   instead fall back to the static BusyBox image for a nested one.
-//   Everything else about the directive matches measured Linux behavior:
-//   one argument wide, a 256-byte window (`BINPRM_BUF_SIZE`), '\n' or NUL
-//   ends it, CR does not, and a first line that fills the window without
-//   ending is refused rather than truncated.
+// - execve argv is bounded to fifteen entries and 512 bytes, including
+//   all interpreter arguments and script names in a nested shebang chain.
+//   Up to five script levels are resolved; the sixth returns ELOOP.
 //
 const AARCH64_NR_WRITE: usize = 64;
 const AARCH64_NR_READV: usize = 65;
@@ -122,6 +117,8 @@ const LINUX_ESRCH: usize = 0xFFFFFFFFFFFFFFFD;
 // what to do with a file it asked the kernel to execute and the kernel
 // declined; guessing an executable format on its behalf is what this errno
 // exists to avoid.
+const LINUX_E2BIG: usize = 0xFFFFFFFFFFFFFFF9;
+const LINUX_ELOOP: usize = 0xFFFFFFFFFFFFFFD8;
 const LINUX_ENOEXEC: usize = 0xFFFFFFFFFFFFFFF8;
 // Linux's answer for an ELF interpreter that exists but cannot be used.
 const LINUX_ELIBBAD: usize = 0xFFFFFFFFFFFFFFB0;
@@ -249,6 +246,9 @@ struct SyscallScratch {
     rlimit_buffer: [u8; 16];
     // GitHub issue #591: an ELF's PT_INTERP name, for the ext2 lookup.
     interpreter_buffer: [u8; 64];
+    // The ELF plan retains its metadata view. Keep this per-core window
+    // separate from argv/path staging while resolving script interpreters.
+    elf_buffer: [u8; KERNEL_BLOCK_SIZE];
     // GitHub issue #559: this CPU's current syscall is a counted ext2
     // reader and owes ext2_read_leave.
     ext2_reader: bool;
@@ -391,6 +391,7 @@ fn kernel_syscall_exec_inode() -> usize {
 struct SyscallScriptPrefix {
     argc: usize;
     length: usize;
+    inode: usize;
 }
 
 // Each case below was measured against Linux rather than assumed, because
@@ -416,6 +417,8 @@ must_use variant SyscallExecFormatResult {
     InterpreterAbsent;
     InterpreterUnsupported;
     Invalid;
+    TooBig;
+    TooDeep;
     Script(SyscallScriptPrefix);
 }
 
@@ -520,15 +523,12 @@ private fn syscall_exec_argv_append_line(offset: usize, from: usize,
     return SyscallArgvAppendResult::Appended(cursor + 1);
 }
 
-// Parse the `#!` directive already staged in the current core's scratch and build
-// the replacement argv: the interpreter becomes argv[0], its single optional
-// argument follows, and the pathname execve(2) was called with takes the
-// place of the caller's own argv[0]. That is the argv shape Linux's script
-// binfmt produces, and the reason the pathname is used rather than argv[0] is
-// that the interpreter has to be able to open the script it was given.
-// The process's exec path is rewritten to the interpreter for the same reason the
-// argv is: it names the image that will actually be loaded.
-private fn syscall_exec_script_prefix(line_length: usize, path_length: usize)
+// Prepend the staged directive's interpreter, optional single argument,
+// and current script pathname. Each rewrite drops the preceding argv[0],
+// so the deepest interpreter comes first and earlier script names follow.
+// The stored pathname then becomes the next interpreter to resolve.
+private fn syscall_exec_script_prefix(path_length: usize, previous_argc: usize,
+                                      previous_length: usize)
         -> SyscallExecFormatResult {
     let line: []u8 = syscall_script_line_here();
     let mut end: usize = 0;
@@ -615,12 +615,28 @@ private fn syscall_exec_script_prefix(line_length: usize, path_length: usize)
     if (interpreter_absolute == false) {
         return SyscallExecFormatResult::Absent;
     }
+    // Each new interpreter replaces the previous argv[0]. Preserve the
+    // remainder before writing its prefix, so deeper levels precede earlier
+    // directive arguments and script names without recursive stack growth.
+    let mut previous: [u8; 512];
+    let argv: []u8 = syscall_exec_argv_here();
+    let mut tail_start: usize = 0;
+    let mut first_ended: bool = previous_argc == 0;
+    if (previous_length > 512) { return SyscallExecFormatResult::TooBig; }
+    for position: usize in 0..<512 {
+        previous[position] = argv[position];
+        if (first_ended == false && position < previous_length &&
+            argv[position] == 0) {
+            tail_start = position + 1;
+            first_ended = true;
+        }
+    }
     let mut offset: usize = 0;
     let mut argc: usize = 0;
     match syscall_exec_argv_append_line(offset, interpreter_from,
                                         interpreter_to) {
         SyscallArgvAppendResult::Full => {
-            return SyscallExecFormatResult::Invalid;
+            return SyscallExecFormatResult::TooBig;
         }
         SyscallArgvAppendResult::Appended(next) => { offset = next; }
     }
@@ -631,7 +647,7 @@ private fn syscall_exec_script_prefix(line_length: usize, path_length: usize)
         match syscall_exec_argv_append_line(offset, argument_from,
                                             argument_to) {
             SyscallArgvAppendResult::Full => {
-                return SyscallExecFormatResult::Invalid;
+                return SyscallExecFormatResult::TooBig;
             }
             SyscallArgvAppendResult::Appended(next) => { offset = next; }
         }
@@ -644,12 +660,24 @@ private fn syscall_exec_script_prefix(line_length: usize, path_length: usize)
     let script_path = stored_path[0..<path_length];
     match syscall_exec_argv_append(offset, script_path) {
         SyscallArgvAppendResult::Full => {
-            return SyscallExecFormatResult::Invalid;
+            return SyscallExecFormatResult::TooBig;
         }
         SyscallArgvAppendResult::Appended(next) => { offset = next; }
     }
     argc = argc + 1;
-    // The pathname execve(2) was called with is in the replacement argv now,
+    if (previous_argc != 0) {
+        for position: usize in 0..<512 {
+            if (position >= tail_start && position < previous_length) {
+                let cursor: usize = offset;
+                if (cursor >= 512) { return SyscallExecFormatResult::TooBig; }
+                argv[cursor] = previous[position];
+                offset = offset + 1;
+            }
+        }
+        argc = argc + previous_argc - 1;
+    }
+    if (argc > 15) { return SyscallExecFormatResult::TooBig; }
+    // This level's script pathname is in the replacement argv now,
     // so the stored path can become what it has to name from here on: the
     // image that will actually be loaded.
     for path_index: usize in 0..<256 { stored_path[path_index] = 0; }
@@ -666,30 +694,9 @@ private fn syscall_exec_script_prefix(line_length: usize, path_length: usize)
             path_cursor = path_cursor + 1;
         }
     }
-    // Linux resolves the interpreter itself and reports ITS error, so a
-    // script naming a missing interpreter is ENOENT and one naming a
-    // directory is EACCES -- neither is a complaint about the script. The
-    // stored path is the interpreter now, so the same question asked of the
-    // original target above is asked of it here.
-    let interpreter_path: []u8 = stored_path;
-    let interpreter_length: usize = path_cursor;
-    if (interpreter_length > interpreter_path.len) {
-        return SyscallExecFormatResult::Invalid;
-    }
-    let interpreter_full = interpreter_path[0..<interpreter_length];
-    if (interpreter_full.len < 2) {
-        return SyscallExecFormatResult::Absent;
-    }
-    match syscall_exec_target(interpreter_full[1..<interpreter_full.len]) {
-        SyscallExecTargetResult::Absent => {
-            return SyscallExecFormatResult::Absent;
-        }
-        SyscallExecTargetResult::NotPermitted => {
-            return SyscallExecFormatResult::NotPermitted;
-        }
-        SyscallExecTargetResult::Inode(interpreter_inode) => {}
-    }
-    let mut prefix: SyscallScriptPrefix = { argc, offset };
+    // The next bounded resolution step checks this interpreter's own
+    // permissions and format before any process-image state is committed.
+    let mut prefix: SyscallScriptPrefix = { argc, offset, 0 };
     return SyscallExecFormatResult::Script(prefix);
 }
 
@@ -707,8 +714,9 @@ const SYSCALL_EXEC_INTERPRETER_MAX: usize = 64;
 
 private fn syscall_exec_elf_interpreter(inode: usize)
         -> SyscallExecFormatResult !{unsafe} {
+    // ELF probing must not overwrite the collected script argv or path.
     let window: [u8; KERNEL_BLOCK_SIZE..] =
-        syscall_scratch_here().file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+        syscall_scratch_here().elf_buffer as [u8; KERNEL_BLOCK_SIZE..];
     let file_length: usize = ext2_regular_file_size(syscall_ext2_mount, inode);
     let length: usize = match ext2_read_file_chunk(
             syscall_ext2_mount, inode, 0, window) {
@@ -785,48 +793,109 @@ private fn syscall_exec_elf_interpreter(inode: usize)
     return SyscallExecFormatResult::InterpreterUnsupported;
 }
 
-private fn syscall_exec_format(name: []u8, path_length: usize)
+private fn syscall_exec_format(path_length: usize)
         -> SyscallExecFormatResult !{unsafe} {
     if (syscall_ext2_ready == false) {
         return SyscallExecFormatResult::NotMounted;
     }
-    match syscall_exec_target(name) {
-        SyscallExecTargetResult::Absent => {
+    let mut current_length: usize = path_length;
+    let mut argc: usize = 0;
+    let mut prefix_length: usize = 0;
+    for depth: usize in 0..<6 {
+        let path: []u8 = syscall_exec_path_here();
+        let pathname_length: usize = current_length;
+        if (pathname_length < 2 || pathname_length > path.len) {
             return SyscallExecFormatResult::Absent;
         }
-        SyscallExecTargetResult::NotPermitted => {
-            return SyscallExecFormatResult::NotPermitted;
-        }
-        SyscallExecTargetResult::Inode(inode) => {
-            let line: []u8 = syscall_script_line_here();
-            for index: usize in 0..<SYSCALL_SCRIPT_LINE_MAX {
-                line[index] = 0;
+        let full = path[0..<pathname_length];
+        if (full.len < 2) { return SyscallExecFormatResult::Absent; }
+        match syscall_exec_target(full[1..<full.len]) {
+            SyscallExecTargetResult::Absent => {
+                return SyscallExecFormatResult::Absent;
             }
-            match ext2_read_file_chunk(syscall_ext2_mount, inode, 0, line) {
-                Ext2ReadResult::Invalid => {
-                    // The kind and the permission were already settled above,
-                    // so what is left is a read that failed on a file this
-                    // kernel was allowed to execute. Linux reports the read's
-                    // own error rather than a verdict about a format it never
-                    // saw.
-                    return SyscallExecFormatResult::Unreadable;
+            SyscallExecTargetResult::NotPermitted => {
+                return SyscallExecFormatResult::NotPermitted;
+            }
+            SyscallExecTargetResult::Inode(inode) => {
+                let line: []u8 = syscall_script_line_here();
+                for index: usize in 0..<SYSCALL_SCRIPT_LINE_MAX {
+                    line[index] = 0;
                 }
-                Ext2ReadResult::Read(length) => {
-                    if (length < 4) {
-                        return SyscallExecFormatResult::NotExecutable;
+                match ext2_read_file_chunk(syscall_ext2_mount, inode, 0, line) {
+                    Ext2ReadResult::Invalid => {
+                        // The kind and the permission were already settled above,
+                        // so what is left is a read that failed on a file this
+                        // kernel was allowed to execute. Linux reports the read's
+                        // own error rather than a verdict about a format it never
+                        // saw.
+                        return SyscallExecFormatResult::Unreadable;
                     }
-                    if (line[0] == 0x7F && line[1] == 0x45 &&
-                        line[2] == 0x4C && line[3] == 0x46) {
-                        return syscall_exec_elf_interpreter(inode);
+                    Ext2ReadResult::Read(length) => {
+                        if (length < 4) {
+                            return SyscallExecFormatResult::NotExecutable;
+                        }
+                        if (line[0] == 0x7F && line[1] == 0x45 &&
+                            line[2] == 0x4C && line[3] == 0x46) {
+                            match syscall_exec_elf_interpreter(inode) {
+                                SyscallExecFormatResult::Executable(executable) => {
+                                    if (argc == 0) {
+                                        return SyscallExecFormatResult::Executable(executable);
+                                    }
+                                    let mut prefix: SyscallScriptPrefix = {
+                                        argc, prefix_length, executable
+                                    };
+                                    return SyscallExecFormatResult::Script(prefix);
+                                }
+                                SyscallExecFormatResult::NotMounted => { return SyscallExecFormatResult::NotMounted; }
+                                SyscallExecFormatResult::Absent => { return SyscallExecFormatResult::Absent; }
+                                SyscallExecFormatResult::NotPermitted => { return SyscallExecFormatResult::NotPermitted; }
+                                SyscallExecFormatResult::Unreadable => { return SyscallExecFormatResult::Unreadable; }
+                                SyscallExecFormatResult::NotExecutable => { return SyscallExecFormatResult::NotExecutable; }
+                                SyscallExecFormatResult::InterpreterAbsent => { return SyscallExecFormatResult::InterpreterAbsent; }
+                                SyscallExecFormatResult::InterpreterUnsupported => { return SyscallExecFormatResult::InterpreterUnsupported; }
+                                SyscallExecFormatResult::Invalid => { return SyscallExecFormatResult::Invalid; }
+                                SyscallExecFormatResult::TooBig => { return SyscallExecFormatResult::TooBig; }
+                                SyscallExecFormatResult::TooDeep => { return SyscallExecFormatResult::TooDeep; }
+                                SyscallExecFormatResult::Script(value) => { return SyscallExecFormatResult::Script(value); }
+                            }
+                        }
+                        if (line[0] != 0x23 || line[1] != 0x21) {
+                            return SyscallExecFormatResult::NotExecutable;
+                        }
+                        if (depth == 5) { return SyscallExecFormatResult::TooDeep; }
+                        match syscall_exec_script_prefix(current_length, argc,
+                                                         prefix_length) {
+                            SyscallExecFormatResult::Script(prefix) => {
+                                argc = prefix.argc;
+                                prefix_length = prefix.length;
+                            }
+                            SyscallExecFormatResult::NotMounted => { return SyscallExecFormatResult::NotMounted; }
+                            SyscallExecFormatResult::Absent => { return SyscallExecFormatResult::Absent; }
+                            SyscallExecFormatResult::NotPermitted => { return SyscallExecFormatResult::NotPermitted; }
+                            SyscallExecFormatResult::Unreadable => { return SyscallExecFormatResult::Unreadable; }
+                            SyscallExecFormatResult::NotExecutable => { return SyscallExecFormatResult::NotExecutable; }
+                            SyscallExecFormatResult::InterpreterAbsent => { return SyscallExecFormatResult::InterpreterAbsent; }
+                            SyscallExecFormatResult::InterpreterUnsupported => { return SyscallExecFormatResult::InterpreterUnsupported; }
+                            SyscallExecFormatResult::Invalid => { return SyscallExecFormatResult::Invalid; }
+                            SyscallExecFormatResult::TooBig => { return SyscallExecFormatResult::TooBig; }
+                            SyscallExecFormatResult::TooDeep => { return SyscallExecFormatResult::TooDeep; }
+                            SyscallExecFormatResult::Executable(value) => { return SyscallExecFormatResult::Executable(value); }
+                        }
+                        let next_path: []u8 = syscall_exec_path_here();
+                        current_length = 0;
+                        let mut ended: bool = false;
+                        for index: usize in 0..<256 {
+                            if (ended == false) {
+                                if (next_path[index] == 0) { ended = true; }
+                                else { current_length = current_length + 1; }
+                            }
+                        }
                     }
-                    if (line[0] != 0x23 || line[1] != 0x21) {
-                        return SyscallExecFormatResult::NotExecutable;
-                    }
-                    return syscall_exec_script_prefix(length, path_length);
                 }
             }
         }
     }
+    return SyscallExecFormatResult::TooDeep;
 }
 
 must_use variant KernelFdReapResult { Failed; Reaped; }
@@ -5519,7 +5588,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         let mut script_offset: usize = 0;
         let mut exec_inode: usize = 0;
         if (exec_path_absolute) {
-            match syscall_exec_format(exec_lookup_name, path_length) {
+            match syscall_exec_format(path_length) {
                 SyscallExecFormatResult::NotMounted => {}
                 SyscallExecFormatResult::Executable(inode) => {
                     exec_inode = inode;
@@ -5545,9 +5614,16 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 SyscallExecFormatResult::Invalid => {
                     return SyscallAction::Resume(LINUX_EINVAL);
                 }
+                SyscallExecFormatResult::TooBig => {
+                    return SyscallAction::Resume(LINUX_E2BIG);
+                }
+                SyscallExecFormatResult::TooDeep => {
+                    return SyscallAction::Resume(LINUX_ELOOP);
+                }
                 SyscallExecFormatResult::Script(prefix) => {
                     script_argc = prefix.argc;
                     script_offset = prefix.length;
+                    exec_inode = prefix.inode;
                 }
             }
         }
@@ -5587,7 +5663,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                 return SyscallAction::Resume(LINUX_EFAULT);
                             }
                             SyscallPathResult::Invalid => {
-                                return SyscallAction::Resume(LINUX_EINVAL);
+                                return SyscallAction::Resume(LINUX_E2BIG);
                             }
                             SyscallPathResult::Name(path) => { path }
                         };
@@ -5605,28 +5681,28 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         match checked_add_usize(output_offset,
                                                 string_length + 1) {
                             CheckedUsize::Overflow => {
-                                return SyscallAction::Resume(LINUX_EINVAL);
+                                return SyscallAction::Resume(LINUX_E2BIG);
                             }
                             CheckedUsize::Value(end) => {
                                 if (end > 512 || argc >= 15) {
-                                    return SyscallAction::Resume(LINUX_EINVAL);
+                                    return SyscallAction::Resume(LINUX_E2BIG);
                                 }
                                 let copy_length: usize = string_length + 1;
                                 let destination_start: usize = output_offset;
                                 let exec_argv_view: []u8 =
                                     syscall_exec_argv_here();
                                 if (destination_start > exec_argv_view.len) {
-                                    return SyscallAction::Resume(LINUX_EINVAL);
+                                    return SyscallAction::Resume(LINUX_E2BIG);
                                 }
                                 let destination_tail = exec_argv_view[
                                     destination_start..<exec_argv_view.len];
                                 if (copy_length > destination_tail.len) {
-                                    return SyscallAction::Resume(LINUX_EINVAL);
+                                    return SyscallAction::Resume(LINUX_E2BIG);
                                 }
                                 let destination =
                                     destination_tail[0..<copy_length];
                                 if (copy_length > path_view.len) {
-                                    return SyscallAction::Resume(LINUX_EINVAL);
+                                    return SyscallAction::Resume(LINUX_E2BIG);
                                 }
                                 let source = path_view[0..<copy_length];
                                 let copied: usize = slice_copy(
@@ -5644,8 +5720,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
             if (vector_terminated) { break; }
         }
-        if (vector_terminated == false || argc == 0 ||
-            path_length == 0) {
+        if (vector_terminated == false) { return SyscallAction::Resume(LINUX_E2BIG); }
+        if (argc == 0 || path_length == 0) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
         // Keep the path validation explicit even though this first image

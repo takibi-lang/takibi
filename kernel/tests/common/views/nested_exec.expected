@@ -1,0 +1,6 @@
+LEAFARG /nested/0.sh ONEARG /nested/1.sh /nested/2.sh /nested/3.sh /nested/4.sh USERARG
+LEAFARG /nested/0.sh ONEARG /nested/1.sh /nested/2.sh /nested/3.sh /nested/4.sh USERARG A B C D E F
+nested: ELOOP, ENOEXEC, ENOENT, EACCES, E2BIG ok
+nested: child reexec survived
+nested: ELOOP, ENOEXEC, ENOENT, EACCES, E2BIG ok
+nested: child reexec survived

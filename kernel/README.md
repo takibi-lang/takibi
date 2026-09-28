@@ -448,7 +448,7 @@ probe/board setup. A successful run includes:
 [kernel/rpi5] BusyBox httpd curl passed
 [kernel/rpi5] second BusyBox httpd curl passed
 [kernel/rpi5] userspace connected I/O passed
-PASS kernel/rpi5 (56 views, one boot)
+PASS kernel/rpi5 (57 views, one boot)
 ```
 
 It tests negative and positive ARP/ICMP behavior, TCP lifecycle, USB ext2
@@ -1290,3 +1290,18 @@ interactive boots, after HTTP and DDB resume checks. The RPi5 suite tests
 poweroff on its existing integration boot after DDB resumes. The common
 EL0 payload checks invalid magic, unsupported commands, all four magic2
 values, CAD no-ops, and the 32-bit argument boundary without stopping.
+
+## Nested script execution
+
+`execve` follows up to five shebang interpreters before committing the new
+image. Each level prepends its interpreter, optional single argument, and
+script name, replacing the preceding interpreter name. The deepest
+interpreter therefore precedes all script names and the caller's arguments
+from argv[1]. A sixth script or a cycle returns `ELOOP`. A missing,
+unexecutable, or non-image interpreter returns `ENOENT`, `EACCES`, or
+`ENOEXEC` before image replacement. The full argv must fit fifteen entries
+and 512 bytes, including NUL terminators; overflow returns `E2BIG`.
+
+The normal integration boot checks a five-level chain and the fifteen-entry
+boundary. A syscall probe runs on core 0 and a peer, checks refused chains
+and both argv limits, then execs echo to prove its child lifecycle survived.

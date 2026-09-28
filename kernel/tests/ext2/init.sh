@@ -157,6 +157,25 @@ echo "ash wait: background child status=$?"
 wait
 echo "ash wait: every background child reaped"
 
+# Nested interpreter resolution runs after the existing process-image probes.
+/nested/4.sh USERARG
+if [ "$?" -ne 0 ]; then
+    echo "nested: FAIL five-level chain"
+    exit 1
+fi
+/nested/4.sh USERARG A B C D E F
+if [ "$?" -ne 0 ]; then
+    echo "nested: FAIL fifteen arguments"
+    exit 1
+fi
+for cpu in 0 1; do
+    /bin/taskset -c "$cpu" /bin/nested-exec
+    if [ "$?" -ne 0 ]; then
+        echo "nested: FAIL rejection lifecycle"
+        exit 1
+    fi
+done
+
 for phase in fd uart telnet; do
     echo "init: phase $phase"
 done
