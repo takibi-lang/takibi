@@ -6,6 +6,7 @@ import pty
 import re
 import select
 import signal
+import shutil
 import sys
 import time
 import urllib.request
@@ -81,7 +82,7 @@ def drain_terminal(terminal, transcript):
         transcript.extend(data)
 
 
-def verify_uart_transcript(pid, terminal_transcript):
+def verify_uart_transcript(pid, terminal_transcript, stop_marker):
     path_bytes = TRANSCRIPT_PATH.encode()
     for marker, description in (
         ("UART transcript: ".encode() + path_bytes, "transcript start path"),
@@ -97,6 +98,7 @@ def verify_uart_transcript(pid, terminal_transcript):
         fail(pid, terminal_transcript, f"UART transcript is not readable: {error}")
 
     required = (
+        (stop_marker, "all-core system stop"),
         (LISTENER_MARKER, "persistent HTTPd listener readiness"),
         (b"ddb: interrupt-safe UART debugger", "DDB entry"),
         (b"ddb: continuing", "DDB continue output"),
@@ -123,16 +125,24 @@ def verify_http(url):
                 )
 
 
-def main():
+def run_one(command, http_offset):
+    name = "restart" if command == "reboot" else command
+    stop_marker = f"\nsystem stop: {name} (all cores parked)\n".encode("ascii")
     pid, terminal = pty.fork()
     if pid == 0:
         os.chdir(REPO_ROOT)
         os.environ.pop("KERNEL_SHELL_TRANSCRIPT", None)
         os.environ["KERNEL_QEMU_SHELL_ARTIFACT_DIR"] = ARTIFACT_DIR
         os.environ.pop("KERNEL_QEMU_SHELL_SKIP_NETWORK", None)
+        # The previous HTTP listener can leave TIME_WAIT sockets. TCP and
+        # UDP have separate port spaces, so reuse the shell network numbers
+        # for the second and third HTTP listeners within the same lane block.
+        http_base = int(os.environ.get("KERNEL_QEMU_SHELL_HTTP_PORT", "18080"))
+        os.environ["KERNEL_QEMU_SHELL_HTTP_PORT"] = str(http_base + http_offset)
         os.execvp("make", ["make", "-j1", "kernelsh-qemu"])
 
     transcript = bytearray()
+    stop_sent = False
     break_sent = False
     ddb_prompt_count = 0
     command_sent = False
@@ -195,7 +205,11 @@ def main():
                     if (not command_sent and b"ddb: continuing\n" in normalized):
                         os.write(terminal, b"x=; echo " + COMMAND_RESULT + b"\n")
                         command_sent = True
-                    if command_sent and b"\n" + COMMAND_RESULT + b"\n" in normalized:
+                    if (command_sent and not stop_sent and
+                            b"\n" + COMMAND_RESULT + b"\n" in normalized):
+                        os.write(terminal, f"x=; /bin/busybox {command} -f\n".encode("ascii"))
+                        stop_sent = True
+                    if stop_sent and stop_marker in normalized:
                         os.write(terminal, b"\x1d")
                         break
 
@@ -203,7 +217,7 @@ def main():
             if exited_pid:
                 fail(pid, transcript, "make kernelsh-qemu exited before ash responded")
         else:
-            fail(pid, transcript, "timed out waiting for ash command response")
+            fail(pid, transcript, "timed out waiting for ash command response and system stop")
 
         deadline = time.monotonic() + EXIT_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
@@ -211,14 +225,21 @@ def main():
             if exited_pid:
                 if status == 0:
                     drain_terminal(terminal, transcript)
-                    verify_uart_transcript(pid, transcript)
-                    print("kernelsh-qemu PTY smoke test: PASS")
+                    verify_uart_transcript(pid, transcript, stop_marker)
+                    shutil.copyfile(TRANSCRIPT_PATH,
+                                    os.path.join(ARTIFACT_DIR, f"uart-{command}.log"))
+                    print(f"kernelsh-qemu PTY smoke test: PASS ({name}, all cores parked)")
                     return
                 fail(pid, transcript, "make kernelsh-qemu exited unsuccessfully")
             time.sleep(0.1)
         fail(pid, transcript, "timed out waiting for Ctrl-] cleanup")
     finally:
         os.close(terminal)
+
+
+def main():
+    for http_offset, command in enumerate(("halt", "poweroff", "reboot")):
+        run_one(command, http_offset)
 
 
 if __name__ == "__main__":

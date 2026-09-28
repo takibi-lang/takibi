@@ -448,7 +448,7 @@ probe/board setup. A successful run includes:
 [kernel/rpi5] BusyBox httpd curl passed
 [kernel/rpi5] second BusyBox httpd curl passed
 [kernel/rpi5] userspace connected I/O passed
-PASS kernel/rpi5 (54 views, one boot)
+PASS kernel/rpi5 (55 views, one boot)
 ```
 
 It tests negative and positive ARP/ICMP behavior, TCP lifecycle, USB ext2
@@ -1269,3 +1269,23 @@ The repository devcontainer contains the maintained environment. Detailed
 design decisions and hardware debugging history are retained in
 [`../HISTORY.md`](../HISTORY.md); this README describes the current supported
 workflow rather than replaying every intermediate milestone.
+
+## Userspace system stop
+
+From interactive ash, run `/bin/busybox halt -f`,
+`/bin/busybox poweroff -f`, or `/bin/busybox reboot -f`. These call
+`reboot(2)` directly. The signal-driven PID 1 shutdown sequence is not
+implemented. Each successful request stops every online peer through the
+world-stop controller, then parks core 0 with interrupts masked. The final
+UART line is `system stop: halt (all cores parked)`,
+`system stop: poweroff (all cores parked)`, or
+`system stop: restart (all cores parked)`. On both QEMU and RPi5, restart
+parks rather than re-entering boot, and poweroff does not remove physical
+power. The host runner ends its capture on the marker. A partial stop is
+released and returns `EAGAIN`, without printing a success marker.
+
+The normal QEMU integration suite tests all three commands in separate
+interactive boots, after HTTP and DDB resume checks. The RPi5 suite tests
+poweroff on its existing integration boot after DDB resumes. The common
+EL0 payload checks invalid magic, unsupported commands, all four magic2
+values, CAD no-ops, and the 32-bit argument boundary without stopping.

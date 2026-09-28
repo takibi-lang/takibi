@@ -12,6 +12,7 @@ use "kernel/kernel/syscall_test_evidence.tkb";
 use "kernel/kernel/syscall_test_lifecycle.tkb";
 use "kernel/kernel/workload_evidence.tkb";
 use "kernel/lib/execution_model.tkb";
+use "kernel/lib/occupancy.tkb";
 
 // Current limitations (2026-08-26). Keep this list current as
 // call sites change; a limitation that goes stale here is worse than
@@ -3642,6 +3643,9 @@ private fn syscall_accept_claimed(number: usize, x0: usize, x1: usize,
 // of the call. What each group needs before it can leave the list is on
 // issue #583.
 fn syscall_peer_refused(number: usize) -> bool {
+    // The terminal reboot path publishes its marker through core 0's
+    // console queue, after stopping every peer through the shared controller.
+    if (number == 142) { return true; }
     // The payload fixture's parent report, the last of the process
     // lifecycle here. Every multicore defect this project has closed lived in
     // that lifecycle (#532, #552, #569, #571), each found with its operations
@@ -3996,6 +4000,79 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     return (action_code, action_value);
 }
 
+// Linux's reboot ABI is decoded before any world-stop request. Alternate
+// magic2 values are real Linux ABI values, not commands or permissions.
+must_use variant SyscallRebootRequest {
+    Invalid;
+    Cad;
+    Halt;
+    Restart;
+    PowerOff;
+}
+
+fn syscall_reboot_request(magic1: usize, magic2: usize, command: usize)
+        -> SyscallRebootRequest {
+    // Linux declares these arguments as int, int, and unsigned int.
+    let first: u32 = magic1 as u32;
+    let second: u32 = magic2 as u32;
+    let cmd: u32 = command as u32;
+    if (first != 0xFEE1DEAD ||
+        (second != 672274793 && second != 85072278 &&
+         second != 369367448 && second != 537993216)) {
+        return SyscallRebootRequest::Invalid;
+    }
+    match cmd {
+        0x00000000 => { return SyscallRebootRequest::Cad; }
+        0x89ABCDEF => { return SyscallRebootRequest::Cad; }
+        0xCDEF0123 => { return SyscallRebootRequest::Halt; }
+        0x01234567 => { return SyscallRebootRequest::Restart; }
+        0x4321FEDC => { return SyscallRebootRequest::PowerOff; }
+        _ => { return SyscallRebootRequest::Invalid; }
+    }
+}
+
+// All three terminal requests park the machine on both platforms. Restart
+// does not re-enter boot, and poweroff does not remove physical power. The
+// complete WorldStopped token is required before any success marker appears.
+// A failed request releases its partial stop and lets userspace retry.
+fn syscall_system_stop(marker: *u8) -> SyscallAction !{unsafe} {
+    match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
+                           10000000) {
+        WorldStopResult::Busy => { return SyscallAction::Resume(LINUX_EAGAIN); }
+        WorldStopResult::Partial(partial) => {
+            world_stop_partial_release(partial, &kernel_world_stop);
+            return SyscallAction::Resume(LINUX_EAGAIN);
+        }
+        WorldStopResult::Complete(stopped) => {
+            disable_irq();
+            world_stop_keep_forever(stopped);
+            kernel_boot_log(marker);
+            uart_tx_flush();
+            platform_shutdown();
+            while (true) { interrupt_wait(); }
+            // Variant-return checking does not treat a terminal loop as a return.
+            return SyscallAction::Resume(LINUX_EAGAIN);
+        }
+    }
+}
+
+fn syscall_reboot(magic1: usize, magic2: usize, command: usize)
+        -> SyscallAction !{unsafe} {
+    match syscall_reboot_request(magic1, magic2, command) {
+        SyscallRebootRequest::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
+        SyscallRebootRequest::Cad => { return SyscallAction::Resume(0); }
+        SyscallRebootRequest::Halt => {
+            return syscall_system_stop("system stop: halt (all cores parked)\n" as *u8);
+        }
+        SyscallRebootRequest::Restart => {
+            return syscall_system_stop("system stop: restart (all cores parked)\n" as *u8);
+        }
+        SyscallRebootRequest::PowerOff => {
+            return syscall_system_stop("system stop: poweroff (all cores parked)\n" as *u8);
+        }
+    }
+}
+
 fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usize,
                            x2: usize, x3: usize, x4: usize)
         -> SyscallAction !{unsafe} {
@@ -4228,6 +4305,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
         }
     }
+
+    if (number == 142) { return syscall_reboot(x0, x1, x2); }
 
     if (number == AARCH64_NR_WRITE) {
         return syscall_io_action(syscall_write_segment(x0, x1, x2));

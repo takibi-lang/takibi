@@ -648,7 +648,15 @@ ddb_status=0
 python3 "$REPO_ROOT/scripts/run_kernel_ddb_rpi5_driver.py" \
     --port "$SERIAL_DEV" --log "$DDB_LOG" || ddb_status=$?
 
-# One verdict over both halves, so neither hides the other. The reason the
+# Stop only after DDB has resumed the shell on this same boot.
+stop_status=0
+if [ "$ddb_status" -eq 0 ]; then
+    python3 "$REPO_ROOT/kernel/tests/common/reboot_driver.py" \
+        --port "$SERIAL_DEV" --log "$ARTIFACT_DIR/poweroff-uart.log" \
+        --command poweroff || stop_status=$?
+fi
+
+# One verdict over views, debugger, and stop, so none hides another. The reason the
 # archive records names whichever failed, the way the view branch used to do
 # alone (issue #233's reasoning, widened: the archive used to be taken only
 # at a failing view, so every failure that stopped earlier -- ARP, TCP, the
@@ -662,6 +670,10 @@ if [ "$views_failed" -ne 0 ]; then
 fi
 if [ "$ddb_status" -ne 0 ]; then
     archive_parts="${archive_parts:+$archive_parts, }ddb exit $ddb_status"
+    verdict=1
+fi
+if [ "$stop_status" -ne 0 ]; then
+    archive_parts="${archive_parts:+$archive_parts, }poweroff exit $stop_status"
     verdict=1
 fi
 if [ "$verdict" -ne 0 ]; then

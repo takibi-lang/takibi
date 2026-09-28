@@ -286,6 +286,23 @@ fn initial_user_payload() {
     payload_write_u64(signal_base, 0, 0);
     fail_if(svc5(135, 2, ptr_of(signal_base, 0), 0, 8, 0) != 0);
 
+    // Reboot validation cannot stop the machine: every destructive command
+    // below has an invalid magic or unsupported command. CAD is a no-op.
+    fail_if(svc5(142, 0, 672274793, 0x4321FEDC, 0, 0) != EINVAL_RC);
+    fail_if(svc5(142, 0xFEE1DEAD, 0, 0xCDEF0123, 0, 0) != EINVAL_RC);
+    fail_if(svc5(142, 0xFEE1DEAD, 672274793, 0xA1B2C3D4, 0, 0) != EINVAL_RC);
+    let mut reboot_magic2: [usize; 4] = { 672274793, 85072278, 369367448, 537993216 };
+    for magic_index: usize in 0..<4 {
+        fail_if(svc5(142, 0xFEE1DEAD, reboot_magic2[magic_index], 0, 0, 0) != 0);
+        fail_if(svc5(142, 0xFEE1DEAD, reboot_magic2[magic_index], 0x89ABCDEF, 0, 0) != 0);
+    }
+    fail_if(svc5(142, 0xFFFFFFFFFEE1DEAD, 0x100000000 + 672274793,
+                 0x100000000, 0, 0) != 0);
+    fail_if(svc5(142, 0xFFFFFFFFFEE1DEAD, 672274793,
+                 0xFFFFFFFF89ABCDEF, 0, 0) != 0);
+    let reboot_abi: []u8 = bs"reboot ABI: magic+command validation, cad no-ops ok\n";
+    fail_if(svc5(64, 1, reboot_abi as *u8 as usize, reboot_abi.len, 0, 0) != reboot_abi.len);
+
     /* socket/bind/listen/close one IPv4 stream endpoint. */
     let mut socket_address: [u8; 16] = {
         0x02, 0x00, 0x1f, 0x90,
