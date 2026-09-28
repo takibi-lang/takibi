@@ -376,7 +376,15 @@ fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
         -> usize !{interrupt, unsafe} {
     let gicc_iar: *io u32 = unsafe { (rpi5_gicc_base + 0x0C) as *io u32 };
     let gicc_eoir: *io u32 = unsafe { (rpi5_gicc_base + 0x10) as *io u32 };
-    let id: u32 = *gicc_iar;
+    // GitHub issue #632: GICC_IAR is not the interrupt number alone. For an
+    // SGI, bits [12:10] name the CPU that sent it, so the world-stop SGI from
+    // core 3 reads 0xC01, not 1, and comparing the raw word recognised only
+    // stops that core 0 had started. A stop begun on a peer -- an ASID
+    // rollover under a four-core workload -- was acknowledged by nobody.
+    // Decide on the INTID; EOI with the whole word, which is what the GIC
+    // requires to deactivate that sender's SGI.
+    let iar: u32 = *gicc_iar;
+    let id: u32 = iar & 0x3FF;
 
     // Stop before touching profiling, scheduler, driver, or reporter state:
     // those are consumers of the proof the initiator is waiting to receive.
@@ -385,7 +393,7 @@ fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
         // the way into it -- one shared body, because the two platforms
         // differ here only in the SGI id and the EOI register.
         kernel_world_stop_serve(frame_sp);
-        *gicc_eoir = id;
+        *gicc_eoir = iar;
         return frame_sp;
     }
     workload_profile_irq_enter();
@@ -402,7 +410,7 @@ fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
         if (id == rpi5_timer_gic_intid) {
             next_sp = kernel_secondary_timer_schedule(frame_sp, lower_el);
         }
-        *gicc_eoir = id;
+        *gicc_eoir = iar;
         workload_profile_irq_exit();
         return kernel_timer_tick_leave(next_sp);
     }
@@ -452,14 +460,14 @@ fn rpi5_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
             kernel_stack_guard_check_interrupt(frame_sp);  // issue #375
             kernel_log_peer_console_drain();  // issue #534
             let next_sp: usize = kernel_process_timer_schedule(frame_sp);
-            *gicc_eoir = id;
+            *gicc_eoir = iar;
             workload_profile_irq_exit();
             return kernel_timer_tick_leave(next_sp);
         }
         kernel_process_request_reschedule();
     }
 
-    *gicc_eoir = id;
+    *gicc_eoir = iar;
     workload_profile_irq_exit();
     if (debug_break) { kernel_ddb_enter(frame_sp, 1, id as usize); }
     return frame_sp;

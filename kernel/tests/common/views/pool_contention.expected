@@ -33,3 +33,5 @@ ext2 mutation contention stage: complete
 ext2 mutation contention counts: asked=2 clear=1 held=1
 ext2 mutation contention: a peer is told no mutation is in flight while core 0 holds nothing, told there is one while it holds the guard, and a mutation on either core waits for a reader already inside on the other ok
 signal contention: two cores setting and clearing pending signal bits lost updates with a forged guard and none under the process-run lock ok
+world stop from a peer counts: result=1
+world stop from a peer: core 1 began the stop and core 0 acknowledged it ok

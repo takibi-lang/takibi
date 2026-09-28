@@ -135,4 +135,11 @@ fn contention_probes() !{unsafe} {
     } else {
         kernel_boot_log("signal contention: failed\n");
     }
+    // GitHub issue #632: the same stop begun on the peer, which core 0 must
+    // recognise although the SGI's IAR word names core 1 as its sender.
+    if (world_stop_peer_probe()) {
+        kernel_boot_log("world stop from a peer: core 1 began the stop and core 0 acknowledged it ok\n");
+    } else {
+        kernel_boot_log("world stop from a peer: failed\n");
+    }
 }

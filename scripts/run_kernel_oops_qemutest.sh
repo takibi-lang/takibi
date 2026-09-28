@@ -68,11 +68,18 @@ case "$MODE" in
         expected_detail=''
         ;;
     peer_fault)
-        # GitHub issue #486: two cores fault in one run. The peer's entry
-        # instruction is replaced before anything executes, so core 1
-        # fail-stops during bring-up; core 0 then reaches the ordinary EL0
-        # BRK below. Core 0's wait for the secondary is bounded and reports
-        # rather than hangs, which is what makes this injectable at all.
+        # A fault on the peer. Its entry instruction is replaced before
+        # anything executes, so core 1 fail-stops during bring-up, and its
+        # report must stop core 0 before the console runs (#619).
+        #
+        # This mode used to be the two-core report of GitHub issue #486: core
+        # 0 went on to its own EL0 BRK and both records were listed in fault
+        # order. That rested on the peer's world stop never being
+        # acknowledged -- GICC_IAR carries the sending CPU, and the dispatcher
+        # recognised only core 0's stop SGI (#632). With that fixed, the
+        # peer's report stops core 0 for good, as a fail-stop should, and
+        # core 0 never faults. A scenario where two cores fault before either
+        # can stop the other is its own issue.
         fault_instruction=0xd4200000
         expected_ec=3c
         expected_detail=''
@@ -123,9 +130,7 @@ if [ "$MODE" = peer_fault ]; then
     # userspace starts. The default budget is sized for the latter alone, and
     # measured at 1-in-3 failures here before this was raised.
     console_await=(--timeout 90)
-    # Both records before the first question: see the flag's own comment.
-    console_await+=(--await-line "oops: fail-stop seq=1 cpu=0"
-                    --await-line "oops: fail-stop seq=1 cpu=1")
+    console_await+=(--await-line "oops: fail-stop seq=1 cpu=1")
 fi
 python3 "$REPO_ROOT/scripts/run_kernel_crash_console.py" \
     --port "$SERIAL_PORT" --log "$UART_LOG" "${console_await[@]}" &
@@ -178,9 +183,12 @@ for _ in $(seq 1 50); do
         if [ "$MODE" = peer_fault ]; then
             # Written at the initial -S stop, before any core has executed:
             # QEMU is halted at attach, so this is the one moment the peer's
-            # entry can be replaced without racing its own bring-up.
-            gdb_commands+=(-ex "set {int}kernel_secondary_main = 0xd4200000")
-        fi
+            # entry can be replaced without racing its own bring-up. Nothing
+            # else: core 0 is stopped by the peer's report before it reaches
+            # userspace, so a breakpoint there would wait forever.
+            gdb_commands+=(-ex "set {int}kernel_secondary_main = 0xd4200000"
+                           -ex "detach")
+        else
         gdb_commands+=(
             -ex "break kernel_process_execution_reset"
             -ex "continue"
@@ -196,6 +204,7 @@ for _ in $(seq 1 50); do
             -ex "set {long}(\$x1 + 0x320) = 0xfeedfacefeedface"
             -ex "detach"
         )
+        fi
     fi
     if gdb-multiarch -q -batch "$ELF" "${gdb_commands[@]}" \
             >"$ARTIFACT_DIR/arm-gdb.log" 2>&1; then
@@ -224,6 +233,23 @@ if ! wait "$console_driver_pid"; then
     exit 1
 fi
 console_driver_pid=""
+
+# The peer's fault is its own verdict. It is taken at EL1 during bring-up
+# (slot 0, before any process exists, so no trace), its report must have
+# stopped core 0 (#619, possible since #632), and it must be the only one:
+# core 0, stopped, cannot fault after it.
+if [ "$MODE" = peer_fault ]; then
+    if ! grep -Eq "^oops: fail-stop seq=1 cpu=1 slot=0 ec=0x00000000000000$expected_ec " "$UART_LOG" ||
+            ! grep -Eq '^oops: world-stop complete mask=0x0*1$' "$UART_LOG" ||
+            ! grep -Eq '^oops: cores reported=1 faults=1 contended=[0-9]+ abandoned=0$' "$UART_LOG" ||
+            grep -Eq '^oops: fail-stop seq=[0-9]+ cpu=0 ' "$UART_LOG"; then
+        echo "FAIL kernel/qemu oops: the peer's fault did not stop core 0 and report alone" >&2
+        sed 's/^/  /' "$UART_LOG" >&2 || true
+        exit 1
+    fi
+    echo "PASS kernel/qemu oops: the peer's fail-stop stopped core 0 and reported alone"
+    exit 0
+fi
 
 if ! grep -Eq "^oops: fail-stop seq=[1-9][0-9]* cpu=[0-9]+ slot=8 ec=0x00000000000000$expected_ec " "$UART_LOG" ||
         ! grep -q '^oops: saved sp_el0=' "$UART_LOG" ||
@@ -271,62 +297,16 @@ fi
 
 # GitHub issue #619: the core that runs the console stopped the other one
 # first, so no running core can take the UART RX interrupt and eat the
-# console's input. In peer_fault the peer runs the console before core 0 is
-# online to acknowledge; its stop is Partial and released, so core 0 can
-# still reach its own fault.
-if [ "$MODE" != peer_fault ] &&
-        ! grep -Eq '^oops: world-stop complete mask=0x0*2$' "$UART_LOG"; then
+# console's input. In peer_fault the console runs on core 1 and the core it
+# stops is core 0.
+stopped_mask=2
+if [ "$MODE" = peer_fault ]; then stopped_mask=1; fi
+if ! grep -Eq "^oops: world-stop complete mask=0x0*$stopped_mask\$" "$UART_LOG"; then
     echo "FAIL kernel/qemu oops: the console ran without stopping the other core first" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1
 fi
-if [ "$MODE" = peer_fault ] &&
-        ! grep -Eq '^oops: world-stop partial mask=0x[0-9a-f]+ released; other cores still run$' "$UART_LOG"; then
-    echo "FAIL kernel/qemu oops: the peer's console did not report a released partial stop" >&2
-    sed 's/^/  /' "$UART_LOG" >&2 || true
-    exit 1
-fi
 
-# GitHub issue #486: the two-core claim, and the three things it rests on.
-#
-# Both cores reported -- the single shared snapshot this replaced kept
-# whichever wrote last, so the FIRST fault, usually the interesting one, was
-# the one lost. The console then presents them in machine-wide fault order,
-# which is the fact that arrangement destroyed.
-#
-# Every one of these is anchored, and that is itself the assertion. The first
-# version of this lane could not anchor any of them: two cores wrote the UART
-# at once and shredded each other's reports, and the parking line landed
-# inside the word `ddb> ` -- which stopped the console driver counting prompts
-# and turned the whole lane into a timeout. Anchored lines are the evidence
-# that the report claim orders every write in that file.
-#
-# `abandoned=0` is the assertion that keeps the report claim honest. It counts
-# the times a core gave up waiting for the UART and rendered into another
-# core's output anyway -- deliberately allowed, because a wedged core must not
-# silence one that still has something to say, but never expected on a healthy
-# run. It is a membership rule for CRASH_REPORT_SPIN_TURNS, not an estimate:
-# if this fires, the bound stopped outlasting one report and wants
-# investigating rather than raising.
-if [ "$MODE" = peer_fault ]; then
-    if ! grep -Eq '^oops: fail-stop seq=1 cpu=1 slot=0 ' "$UART_LOG" ||
-            ! grep -Eq '^oops: fail-stop seq=1 cpu=0 slot=8 ' "$UART_LOG" ||
-            ! grep -q '^oops: console owned by another core; parking$' "$UART_LOG" ||
-            ! grep -Eq '^oops: cores reported=2 faults=2 contended=[0-9]+ abandoned=0$' "$UART_LOG"; then
-        echo "FAIL kernel/qemu oops: two cores faulted and the report does not show both" >&2
-        sed 's/^/  /' "$UART_LOG" >&2 || true
-        exit 1
-    fi
-    # Fault order, read off the console's own listing: the peer faulted during
-    # bring-up and core 0 later, so the peer's record must come first.
-    order="$(grep -n '^oops: fail-stop seq=1 cpu=[01] ' "$UART_LOG" | tail -2 |
-        sed 's/.*cpu=\([01]\) .*/\1/' | tr -d '\n')"
-    if [ "$order" != "10" ]; then
-        echo "FAIL kernel/qemu oops: the console listed the faults as '$order', not peer-then-core-0" >&2
-        sed 's/^/  /' "$UART_LOG" >&2 || true
-        exit 1
-    fi
-fi
 if [ "$MODE" = child_exec ] &&
         { ! grep -Eq '^oops: trace seq=[1-9][0-9]* cpu=0 event=1 pid=[1-9][0-9]* ' "$UART_LOG" ||
           ! grep -Eq '^oops: trace seq=[1-9][0-9]* cpu=0 event=2 pid=[1-9][0-9]* ' "$UART_LOG" ||

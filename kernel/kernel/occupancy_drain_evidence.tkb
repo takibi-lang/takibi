@@ -367,3 +367,72 @@ fn world_stop_probe() -> bool !{unsafe} {
     return full && partial_ok && resumed &&
            world_stop_probe_inspections == 1 && repeated == 16 && busy == 16 && stale;
 }
+
+// GitHub issue #632: a world stop that a PEER begins. world_stop_probe above
+// only ever starts the stop on core 0, and GICC_IAR carries the sending CPU
+// in bits [12:10] of an SGI, so a dispatcher comparing the raw word saw 1
+// from core 0 and 0x401 from core 1 -- and every stop a peer began went
+// unacknowledged. That hid until a four-core churn run rolled the ASID
+// counter over on a peer. Here core 1 begins a two-core stop and core 0,
+// waiting with interrupts open, must acknowledge it.
+private let mut world_stop_peer_probe_armed: usize;
+// 0 not run, 1 Complete, 2 Partial, 3 Busy.
+private let mut world_stop_peer_probe_result: usize;
+
+private fn world_stop_peer_probe_address(value: *usize) -> usize {
+    return value as usize;
+}
+
+fn world_stop_peer_probe_is_armed() -> bool !{unsafe} {
+    return unsafe {
+        atomic_load_acquire(world_stop_peer_probe_address(
+            &world_stop_peer_probe_armed))
+    } == 1;
+}
+
+fn world_stop_peer_probe_secondary_run() !{unsafe} {
+    let mut result: usize = 0;
+    match world_stop_begin(&kernel_world_stop, 2, WORLD_STOP_PROBE_SPINS) {
+        WorldStopResult::Busy => { result = 3; }
+        WorldStopResult::Partial(partial) => {
+            world_stop_partial_release(partial, &kernel_world_stop);
+            result = 2;
+        }
+        WorldStopResult::Complete(stopped) => {
+            world_stop_release(stopped, &kernel_world_stop);
+            result = 1;
+        }
+    }
+    unsafe {
+        atomic_store_release(world_stop_peer_probe_address(
+            &world_stop_peer_probe_result), result);
+        atomic_store_release(world_stop_peer_probe_address(
+            &world_stop_peer_probe_armed), 0);
+    }
+}
+
+fn world_stop_peer_probe() -> bool !{unsafe} {
+    unsafe {
+        atomic_store_release(world_stop_peer_probe_address(
+            &world_stop_peer_probe_result), 0);
+        atomic_store_release(world_stop_peer_probe_address(
+            &world_stop_peer_probe_armed), 1);
+    }
+    let start: i64 = read_cntpct();
+    let window: i64 = read_cntfrq();
+    while (read_cntpct() - start < window &&
+           unsafe { atomic_load_acquire(world_stop_peer_probe_address(
+               &world_stop_peer_probe_armed)) } == 1) { }
+    unsafe {
+        atomic_store_release(world_stop_peer_probe_address(
+            &world_stop_peer_probe_armed), 0);
+    }
+    let result: usize = unsafe {
+        atomic_load_acquire(world_stop_peer_probe_address(
+            &world_stop_peer_probe_result))
+    };
+    kernel_boot_log("world stop from a peer counts: result=" as *u8);
+    uart_put_udec(result);
+    kernel_boot_log("\n" as *u8);
+    return result == 1;
+}

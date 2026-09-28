@@ -919,6 +919,15 @@ private fn workload_busy_record_progress_locked(
         if (workload_busy_pair.start_requested) {
             return WorkloadBusyProgressResult::Value(0);
         }
+        // Only core 0 opens the window. The CPU that opens it also closes
+        // it and prints the profile -- hundreds of lines -- and a peer's
+        // kernel lines go through its console ring, which drops them at
+        // that volume, the verdict line with them. Until GitHub issue #632
+        // this held by accident: a world stop begun on a peer was never
+        // acknowledged, so only core 0's attempt could complete.
+        if (cpu_id() != 0) {
+            return WorkloadBusyProgressResult::Value(0);
+        }
         workload_busy_pair.start_requested = true;
         return WorkloadBusyProgressResult::StartRequested;
     }
