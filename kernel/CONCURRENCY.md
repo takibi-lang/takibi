@@ -368,6 +368,13 @@ restored queue. Both directions cross publication records, and no lock is
 taken. On every other boot the flag is clear and the process exits at its
 first verdict, as before.
 
+The hold covers the whole CPU's output ring, including a shell prompt when
+the UART reader runs on CPU 1. The RPi5 driver therefore permits silence
+after its input newline and sends BREAK after a bounded response wait. It
+requires the CPU 0 trace to retain that newline's UART-wake event before the
+BREAK event. After `continue`, both the held peer record and the resumed
+shell's response must arrive.
+
 Terminal input (GitHub issue #547) goes the other way: the RX interrupt is
 routed to core 0, and the reader may be on another CPU. One lock orders it,
 the process-run lock that publishes Blocked:

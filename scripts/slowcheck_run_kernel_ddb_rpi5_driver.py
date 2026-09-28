@@ -17,6 +17,12 @@ it is not needed.
 So the board is replaced by a pty and the shell is scripted. One case answers
 the first command, one ignores the first and answers the second, and one never
 answers at all and is required to fail with the attempt count in the message.
+
+The peer-console fixture also deliberately holds CPU 1 output until DDB
+continue. A shell on that CPU cannot acknowledge the wake byte over UART
+before BREAK. The quiet control retains the input event and succeeds only
+through BREAK, inspection, release and resume. Missing, wrong-byte,
+wrong-core and out-of-order wake records must still fail.
 """
 
 import os
@@ -43,6 +49,7 @@ BANNER_TAIL = (b"ddb: world-stop complete mask=0x000000000000000e\n"
 # undrained for this BREAK, and the kernel names it at entry and delivers it
 # once `continue` lets the peer run.
 PEER_PENDING = b"ddb: peer console=pending\n"
+WAKE_EVENT = b"id=0x0000000000000201"
 PEER_EMPTY = b"ddb: peer console=empty\n"
 PEER_RECORD = (b"peer user console: queued before DDB, delivered after "
                b"continue \n")
@@ -73,6 +80,12 @@ REPLIES = {
     b"wait": (b"\nddb: wait current=37 state=running reason=none awaited=0\n"
               b"ddb: wait edges=0 blocked=0 unknown=0 truncated=0\n"),
 }
+# Quiet entries preserve the read-only postmortem before the fault exercise.
+# These extra commands are observed operations, not additional verdicts.
+for command in (b"oops", b"intr", b"sched", b"current", b"ps", b"stacks"):
+    REPLIES[command] = b"\ncontrol reply " + command + b"\n"
+
+
 # What the board actually produces: the command's output on its own line,
 # then the next prompt. The `ddb: continuing` line supplies the newline in
 # front of it.
@@ -90,14 +103,14 @@ def retry_seconds() -> float:
 
 def scripted_board(master: int, proc, answer_on_attempt: int, budget: float,
                    answer_wake: bool = True, restore_console: bool = True,
-                   hold_peer: bool = True, deliver_peer: bool = True):
+                   hold_peer: bool = True, deliver_peer: bool = True,
+                   answer_break: bool = True):
     """Play the kernel side; return how many resume commands were seen.
 
-    The driver's opening move is a newline whose only job is to make the
-    kernel record a process UART-wake, and it now waits to be answered before
-    breaking in. `answer_wake=False` plays a board that never answers it,
-    which is the case the driver has to attribute correctly rather than
-    reporting as a ring-retention defect.
+    The opening newline produces the retained input event. With
+    `answer_wake=False`, its response is held until DDB continue. The banner
+    still appears when BREAK is sent unless `answer_break=False` represents
+    a board that cannot enter the debugger at all.
 
     `restore_console=False` plays the kernel this driver's newest assertion
     exists for (GitHub issue #531): one that continues normally and leaves the
@@ -137,6 +150,13 @@ def scripted_board(master: int, proc, answer_on_attempt: int, budget: float,
         if not acked:
             acked = True
             if not answer_wake:
+                if answer_break:
+                    text = DRIVER.read_text(encoding="ascii")
+                    wait = re.search(r"^WAKE_RESPONSE_SECONDS = ([0-9.]+)$",
+                                     text, re.M)
+                    if wait is None:
+                        raise RuntimeError("missing wake response bound")
+                    announce_at = time.monotonic() + float(wait[1]) + 0.2
                 pending = b""
                 continue
             # What a shell answers an empty command line with.
@@ -172,7 +192,7 @@ CASES = CaseCount()
 
 def run_case(label, answer_on_attempt, timeout, expect_ok, needles,
              answer_wake=True, restore_console=True, hold_peer=True,
-             deliver_peer=True):
+             deliver_peer=True, answer_break=True):
     CASES.note()
     master, slave = pty.openpty()
     try:
@@ -185,7 +205,7 @@ def run_case(label, answer_on_attempt, timeout, expect_ok, needles,
             attempts = scripted_board(master, proc, answer_on_attempt,
                                       timeout + 10, answer_wake,
                                       restore_console, hold_peer,
-                                      deliver_peer)
+                                      deliver_peer, answer_break)
             stdout, stderr = proc.communicate(timeout=30)
     finally:
         os.close(master)
@@ -248,14 +268,39 @@ def main() -> int:
               f"command(s) went out in {silent_budget:.1f}s")
         return 1
 
-    # A board that never answers the byte the wake event depends on. The
-    # driver must say that, and must NOT go on to report a ring-retention
-    # defect about a ring nothing was given to retain (GitHub issue #519).
-    if run_case("a board that never answers the wake byte", 1, 6.0, False,
-                ["did not answer the byte", "wake-acked=never",
-                 "NOT a diagnostic-ring retention defect"],
-                answer_wake=False) is None:
+    # A working shell whose output is held until continue: the old driver
+    # failed this case before inspecting the event that proves input arrived.
+    if run_case("a wake response held until DDB continue", 1, 12.0, True,
+                ["PASS kernel/rpi5 ddb:", "wake-acked=never",
+                 "resume-echoed="], answer_wake=False) is None:
         return 1
+
+    if run_case("a board that never answers BREAK", 1, 6.0, False,
+                ["did not answer the UART BREAK", "wake-acked=never"],
+                answer_wake=False, answer_break=False) is None:
+        return 1
+
+    # A quiet board is acceptable only with the actual newline event before
+    # BREAK in CPU 0's ring. UART output or a generic event-ID hit is not proof.
+    intact_events = REPLIES[b"events"]
+    corruptions = (
+        ("missing wake event", intact_events.replace(WAKE_EVENT,
+                                                    b"id=0x0000000000000202")),
+        ("wrong wake byte", intact_events.replace(b"a=0x000000000000000a",
+                                                  b"a=0x000000000000000b")),
+        ("wake after BREAK", intact_events.replace(b"seq=1 cpu=0",
+                                                   b"seq=3 cpu=0")),
+        ("wake from another CPU", intact_events.replace(b"seq=1 cpu=0",
+                                                        b"seq=1 cpu=1")),
+    )
+    for label, events in corruptions:
+        REPLIES[b"events"] = events
+        outcome = run_case(label, 1, 12.0, False,
+                           ["did not retain a newline UART-wake event before BREAK"],
+                           answer_wake=False)
+        REPLIES[b"events"] = intact_events
+        if outcome is None:
+            return 1
 
     # A kernel that resumes correctly in every other respect and leaves the
     # console spinning (GitHub issue #531). This is the whole reason that
@@ -300,8 +345,9 @@ def main() -> int:
 
     report_pass(
         "ddb-rpi5-driver controls",
-        "the wake byte is acknowledged before the BREAK and a board "
-        "that never answers it says so, an immediate resume takes one "
+        "a wake response held until continue passes only with a newline "
+        "event before BREAK on CPU 0; missing, wrong-byte, wrong-core and "
+        "late wake events and an unanswered BREAK fail; an immediate resume takes one "
         "command, a dropped first command is retried during silence, a "
         "workload that never answers fails with the attempt count, a "
         "resume that leaves the console spinning fails, a break with no "

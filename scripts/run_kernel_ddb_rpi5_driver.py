@@ -49,53 +49,34 @@ import serial
 MILESTONES = ("wake-sent", "wake-acked", "break-sent", "first-prompt",
               "continuing", "resume-sent", "resume-echoed")
 
-# How long the board may take to answer the byte that produces the process
-# UART-wake event. Measured healthy runs answer it before the BREAK is even
-# sent; this is generous by orders of magnitude and only exists so a board
-# that is not listening says so instead of being broken into.
-WAKE_ACK_SECONDS = 3.0
+# A response is useful pacing, but not required: the DDB peer-console
+# fixture holds CPU 1's whole output ring until continue. An ash running on
+# that CPU consumes input and queues its prompt without answering here.
+# The event sequence below, not terminal output, proves input preceded BREAK.
+WAKE_RESPONSE_SECONDS = 3.0
 
-# What a board that did not answer the wake byte is asked before the lane
-# fails, and how long each answer may take. The same read-only walk the QEMU
-# lanes take at a stall (run_kernel_uart_driver.py's POSTMORTEM_COMMANDS).
+# Keep the existing read-only postmortem when there was no response, then
+# perform the same guarded-fault, inspection and resume checks as usual.
 SILENT_POSTMORTEM_COMMANDS = (b"oops\n", b"intr\n", b"bt\n", b"sched\n",
                               b"current\n", b"ps\n", b"stacks\n",
                               b"events\n")
-SILENT_POSTMORTEM_SECONDS = 10.0
 
 
-def silent_board_postmortem(uart, log, received):
-    """Break into a board that did not answer, and record what DDB says.
+def wake_preceded_break(text: str) -> bool:
+    """Both IRQ events are recorded on CPU 0; compare only that ring's order."""
+    wake_sequences = []
+    break_sequences = []
+    for seq, event, value in re.findall(
+        r"^ddb: event seq=(\d+) cpu=0 id=(0x[0-9a-f]+) "
+        r"a=(0x[0-9a-f]+) ", text.replace("\r", ""), re.MULTILINE
+    ):
+        if int(event, 16) == 0x0201 and int(value, 16) == 0x0A:
+            wake_sequences.append(int(seq))
+        elif int(event, 16) == 0x0101:
+            break_sequences.append(int(seq))
+    return bool(wake_sequences and break_sequences and
+                min(wake_sequences) < min(break_sequences))
 
-    Twice in allcheck on 2026-09-27 the wake byte drew nothing and the lane
-    failed with an empty capture: nothing said whether the kernel was
-    stopped, running without a shell, or not running at all. A BREAK that
-    draws a prompt answers the first two; one that draws nothing answers the
-    third. Either way the lane still fails -- this only keeps the evidence.
-    Returns a short phrase for the failure message.
-    """
-    uart.send_break(0.25)
-    deadline = time.monotonic() + SILENT_POSTMORTEM_SECONDS
-    asked = 0
-    while time.monotonic() < deadline:
-        chunk = uart.read(4096)
-        if chunk:
-            received.extend(chunk)
-            log.write(chunk)
-            log.flush()
-        prompts = received.count(b"ddb> ")
-        while asked < prompts and asked < len(SILENT_POSTMORTEM_COMMANDS):
-            uart.write(SILENT_POSTMORTEM_COMMANDS[asked])
-            uart.flush()
-            asked += 1
-            deadline = time.monotonic() + SILENT_POSTMORTEM_SECONDS
-        if prompts > len(SILENT_POSTMORTEM_COMMANDS):
-            break
-    if asked == 0:
-        return ("a serial BREAK then drew no debugger prompt either, so the "
-                "kernel was not running")
-    return (f"a serial BREAK reached the debugger, and {asked} read-only "
-            "command(s) were walked; their answers are in the capture")
 
 # How long a resume command may draw no echo before it is sent again. A
 # healthy round trip is 0.2s, so this is generous by an order of magnitude and
@@ -181,32 +162,14 @@ def main() -> int:
     with serial.Serial(args.port, 115200, timeout=0.25) as uart, open(
         args.log, "ab"
     ) as log:
-        # Establish the process UART-wake, do not assume it.
-        #
-        # The verdict below requires a DiagnosticEventProcessUartWake record
-        # in the ring. The kernel writes one on EVERY path through
-        # kernel_process_uart_wake -- delivered, retried, or no process
-        # blocked at all -- so the only way to be missing one is for no UART
-        # byte to have reached the kernel between the ring being enabled and
-        # the BREAK. That is what this newline is for, and it used to be
-        # written and immediately buried under a BREAK: `flush()` returns
-        # when the byte reaches the USB stack, not when it has been clocked
-        # out and consumed, so the BREAK could land first and the ring then
-        # held only the platform BREAK event. Observed once in five
-        # consecutive runs (GitHub issue #519), as `events cpu=0 count=1`
-        # holding id=0x0101 alone.
-        #
-        # So the byte is acknowledged before the BREAK goes out. Anything the
-        # target sends back is proof it processed input: a healthy board
-        # answers an empty command line with a newline of its own, which the
-        # captures show arriving before the debugger banner. The input queue
-        # is dropped first so a byte that predates the question cannot answer
-        # it.
+        # Generate one newline UART-wake. A visible response can pace BREAK,
+        # but the held peer ring may hide it until continue. Always verify
+        # the retained IRQ-event order before accepting this exercise.
         uart.reset_input_buffer()
         uart.write(b"\n")
         uart.flush()
         timeline.mark("wake-sent")
-        ack_deadline = min(time.monotonic() + WAKE_ACK_SECONDS, deadline)
+        ack_deadline = min(time.monotonic() + WAKE_RESPONSE_SECONDS, deadline)
         while time.monotonic() < ack_deadline:
             chunk = uart.read(4096)
             if chunk:
@@ -216,13 +179,7 @@ def main() -> int:
                 timeline.mark("wake-acked")
                 break
         if "wake-acked" not in timeline.at:
-            evidence = silent_board_postmortem(uart, log, received)
-            raise timeline.bail(
-                "RPi5 did not answer the byte that produces the process "
-                "UART-wake event, so the guarded-fault exercise would have "
-                "inspected a ring that never saw one. This is the board not "
-                "listening, NOT a diagnostic-ring retention defect; "
-                + evidence)
+            commands = SILENT_POSTMORTEM_COMMANDS + commands
         uart.send_break(0.25)
         timeline.mark("break-sent")
         while time.monotonic() < deadline:
@@ -277,6 +234,8 @@ def main() -> int:
             "RPi5 DDB did not resume after guarded fault "
             "(entered fail-stop crash console)"
         )
+    if prompt_count == 0:
+        raise timeline.bail("RPi5 DDB did not answer the UART BREAK")
     if prompt_count < 2:
         raise timeline.bail(
             "RPi5 DDB did not return to a prompt after guarded fault")
@@ -303,9 +262,9 @@ def main() -> int:
     ):
         raise timeline.bail(
             "RPi5 DDB did not report the interrupted PC boundary")
-    if "id=0x0000000000000201" not in text:
+    if not wake_preceded_break(text):
         raise timeline.bail(
-            "RPi5 DDB did not retain the process UART-wake event")
+            "RPi5 DDB did not retain a newline UART-wake event before BREAK")
     if "id=0x0000000000000101" not in text:
         raise timeline.bail(
             "RPi5 DDB did not retain the platform UART BREAK event")

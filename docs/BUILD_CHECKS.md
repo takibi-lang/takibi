@@ -135,7 +135,7 @@ for several rounds it gated `allbuild` so no kernel lane ran at all.
 | `slowcheck_qemu_session_ports.sh` | Regression controls for the per-session QEMU port block claim |
 | `slowcheck_resource_lease.sh` | Regression controls for cross-container board and aggregate-suite leases |
 | `slowcheck_run_kernel_build_locked.sh` | Regression controls for the cross-Make kernel build lock |
-| `slowcheck_run_kernel_ddb_rpi5_driver.py` | Controls for the RPi5 DDB driver, over a pty standing in for the board |
+| `slowcheck_run_kernel_ddb_rpi5_driver.py` | PTY controls for held output, a newline wake before BREAK on CPU 0, and the RPi5 DDB driver's resume retry |
 | `slowcheck_run_lane.sh` | Controls for the lane timing receipts and the summary built from them |
 
 ## `buildcheck_*` -- checks of a build product
