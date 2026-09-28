@@ -76,6 +76,7 @@ sh
 sleep
 spread
 taskset
+termios
 uname
 user_payload
 entry-00

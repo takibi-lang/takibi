@@ -81,4 +81,90 @@ fn app_main() {
     }
     check("a 68-byte line fits whole, and a reset keeps the drop total",
           whole && kernel_uart_rx_dropped_count() == 1);
+    check_terminal_ring();
+    check_terminal_policy();
+}
+
+// Canonical framing is byte policy, so exercise its capacity and editing
+// natively instead of spending a board lease to reach every ring boundary.
+private fn check_terminal_ring() {
+    kernel_uart_rx_ring_reset();
+    kernel_uart_rx_canonical_set(true);
+    let mut framing: bool = true;
+    match kernel_uart_rx_terminal_push(65, 0, 1) {
+        UartRxPushResult::Stored => { }
+        UartRxPushResult::Dropped => { framing = false; }
+    }
+    if (kernel_uart_rx_pending()) { framing = false; }
+    match kernel_uart_rx_terminal_push(10, 0, 0) {
+        UartRxPushResult::Stored => { }
+        UartRxPushResult::Dropped => { framing = false; }
+    }
+    if (kernel_uart_rx_pending()) { framing = false; }
+    match kernel_uart_rx_terminal_push(0, 2, 0) {
+        UartRxPushResult::Stored => { }
+        UartRxPushResult::Dropped => { framing = false; }
+    }
+    if (kernel_uart_rx_pending() == false) { framing = false; }
+    match kernel_uart_rx_read() {
+        UartRxReadResult::Byte(pair) => {
+            let (value, end) = pair;
+            if (value != 65 || end) { framing = false; }
+        }
+        UartRxReadResult::EndFile => { framing = false; }
+    }
+    match kernel_uart_rx_read() {
+        UartRxReadResult::Byte(pair) => {
+            let (value, end) = pair;
+            if (value != 10 || end) { framing = false; }
+        }
+        UartRxReadResult::EndFile => { framing = false; }
+    }
+    match kernel_uart_rx_read() {
+        UartRxReadResult::Byte(pair) => { framing = false; }
+        UartRxReadResult::EndFile => { }
+    }
+    check("quoted newline stays uncommitted and EOF copies no NUL", framing);
+    kernel_uart_rx_ring_reset();
+    let mut capacity: usize = 0;
+    for index: usize in 0..<4095 {
+        match kernel_uart_rx_terminal_push(65, 0, 1) {
+            UartRxPushResult::Stored => { capacity = capacity + 1; }
+            UartRxPushResult::Dropped => { }
+        }
+    }
+    let mut committed: bool = false;
+    match kernel_uart_rx_terminal_push(10, 1, 0) {
+        UartRxPushResult::Stored => { committed = true; }
+        UartRxPushResult::Dropped => { }
+    }
+    check("a full canonical line reserves its committing delimiter",
+          capacity == 4094 && committed && kernel_uart_rx_pending());
+    let mut prefix: bool = true;
+    for index: usize in 0..<4094 {
+        if (kernel_uart_rx_getc() != 65) { prefix = false; }
+    }
+    match kernel_uart_rx_erase() {
+        UartRxEditResult::Empty => { }
+        UartRxEditResult::Erased(pair) => { prefix = false; }
+    }
+    if (kernel_uart_rx_getc() != 10) { prefix = false; }
+    check("partial reads keep the delimiter and editing cannot cross it", prefix);
+    kernel_uart_rx_ring_reset();
+    match kernel_uart_rx_terminal_push(65, 0, 1) {
+        UartRxPushResult::Stored => { }
+        UartRxPushResult::Dropped => { }
+    }
+    match kernel_uart_rx_terminal_push(0, 2, 0) {
+        UartRxPushResult::Stored => { }
+        UartRxPushResult::Dropped => { }
+    }
+    match kernel_uart_rx_terminal_push(66, 0, 1) {
+        UartRxPushResult::Stored => { }
+        UartRxPushResult::Dropped => { }
+    }
+    kernel_uart_rx_canonical_set(false);
+    check("switching to raw removes EOF metadata without losing bytes",
+          kernel_uart_rx_queued() == 2 && kernel_uart_rx_getc() == 65 &&
+          kernel_uart_rx_getc() == 66 && kernel_uart_rx_pending() == false);
 }

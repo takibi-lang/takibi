@@ -1,0 +1,135 @@
+// Exercise the production termios policy and compact echo queue natively.
+use "kernel/drivers/serial/terminal.tkb";
+use "kernel/drivers/serial/terminal_echo.tkb";
+
+private fn policy_word(bytes: borrow [u8; 36..], field: {0..<4 as usize}, word: usize) {
+    for byte: usize in 0..<4 { bytes[field * 4 + byte] = (word >> (byte * 8)) as u8; }
+}
+
+fn check_terminal_policy() {
+    let mut settings: [u8; 36];
+    for index: usize in 0..<36 { settings[index] = terminal_settings_byte(index); }
+    policy_word(settings as [u8; 36..], 0, 0x1500);
+    policy_word(settings as [u8; 36..], 1, 5);
+    policy_word(settings as [u8; 36..], 2, 0x1CB2);
+    policy_word(settings as [u8; 36..], 3, 0x8A3B);
+    let mut accepted: bool = false;
+    match terminal_settings_apply(settings as [u8; 36..]) {
+        TerminalSettingsResult::Applied => { accepted = true; }
+        TerminalSettingsResult::Unsupported => { }
+    }
+    check("BusyBox init sane settings are all accepted", accepted);
+    let mut rejected: bool = true;
+    // Every flags word has at least one unsupported bit. Refuse the actual
+    // setters, not just the validation helper, and check state preservation.
+    for field: usize in 0..<4 {
+        let mut invalid: [u8; 36];
+        for index: usize in 0..<36 { invalid[index] = settings[index]; }
+        if (field < 4) {
+            let mut unsupported: usize = 0x80000000;
+            if (field == 2) { unsupported = 0x80; }
+            policy_word(invalid as [u8; 36..], field,
+                        terminal_word(settings as [u8; 36..], field) ^ unsupported);
+        }
+        match terminal_settings_apply(invalid as [u8; 36..]) {
+            TerminalSettingsResult::Applied => { rejected = false; }
+            TerminalSettingsResult::Unsupported => { }
+        }
+        for index: usize in 0..<36 {
+            if (terminal_settings_byte(index) != settings[index]) { rejected = false; }
+        }
+    }
+    for index: usize in 0..<36 {
+        if (index == 16 || index == 22 || index == 23 || index == 24 ||
+            index == 30 || index == 34 || index == 35) {
+            let mut invalid: [u8; 36];
+            for offset: usize in 0..<36 { invalid[offset] = settings[offset]; }
+            invalid[index] = invalid[index] ^ 1;
+            match terminal_settings_apply(invalid as [u8; 36..]) {
+                TerminalSettingsResult::Applied => { rejected = false; }
+                TerminalSettingsResult::Unsupported => { }
+            }
+        }
+    }
+    check("unsupported flags and timing fail without mutating settings", rejected);
+    let mut controls: bool = true;
+    match terminal_input_decode(13) {
+        TerminalInput::EndLine(value) => { if (value != 10) { controls = false; } }
+        _ => { controls = false; }
+    }
+    match terminal_input_decode(19) { TerminalInput::StopOutput => { } _ => { controls = false; } }
+    if (terminal_output_paused() == false) { controls = false; }
+    match terminal_input_decode(17) { TerminalInput::StartOutput => { } _ => { controls = false; } }
+    if (terminal_output_paused()) { controls = false; }
+    match terminal_input_decode(22) { TerminalInput::LiteralNext => { } _ => { controls = false; } }
+    match terminal_input_decode(3) {
+        TerminalInput::Byte(value) => { if (value != 3) { controls = false; } }
+        _ => { controls = false; }
+    }
+    match terminal_input_decode(3) {
+        TerminalInput::Signal(value) => { if (value != 2) { controls = false; } }
+        _ => { controls = false; }
+    }
+    match terminal_input_decode(28) {
+        TerminalInput::Signal(value) => { if (value != 3) { controls = false; } }
+        _ => { controls = false; }
+    }
+    match terminal_input_decode(26) {
+        TerminalInput::Signal(value) => { if (value != 20) { controls = false; } }
+        _ => { controls = false; }
+    }
+    match terminal_input_decode(127) { TerminalInput::Erase => { } _ => { controls = false; } }
+    match terminal_input_decode(21) { TerminalInput::Kill => { } _ => { controls = false; } }
+    match terminal_input_decode(23) { TerminalInput::WordErase => { } _ => { controls = false; } }
+    match terminal_input_decode(18) { TerminalInput::Reprint => { } _ => { controls = false; } }
+    match terminal_input_decode(4) { TerminalInput::EndFile => { } _ => { controls = false; } }
+    check("ICRNL IXON ISIG and IEXTEN decode the real control characters", controls);
+    terminal_input_flow_update(3072);
+    let mut flow: bool = terminal_input_flow_requested();
+    terminal_input_flow_update(2048);
+    if (terminal_input_flow_requested() == false) { flow = false; }
+    terminal_input_flow_update(1024);
+    if (terminal_input_flow_requested()) { flow = false; }
+    check("IXOFF hysteresis requests stop at high water and releases at low water", flow);
+    terminal_echo_reset();
+    let mut compact: bool = true;
+    for index: usize in 0..<4094 {
+        match terminal_echo_push(TerminalEchoOperation::Byte(65)) {
+            TerminalEchoPushResult::Queued => { }
+            TerminalEchoPushResult::Full => { compact = false; }
+        }
+    }
+    match terminal_echo_push(TerminalEchoOperation::Erase(32752)) {
+        TerminalEchoPushResult::Queued => { }
+        TerminalEchoPushResult::Full => { compact = false; }
+    }
+    for index: usize in 0..<4094 {
+        match terminal_echo_read() {
+            TerminalEchoReadResult::Byte(value) => { if (value != 65) { compact = false; } }
+            TerminalEchoReadResult::Empty => { compact = false; }
+        }
+    }
+    for index: usize in 0..<98256 {
+        let mut expected: u8 = 8;
+        if (index % 3 == 1) { expected = 32; }
+        match terminal_echo_read() {
+            TerminalEchoReadResult::Byte(value) => { if (value != expected) { compact = false; } }
+            TerminalEchoReadResult::Empty => { compact = false; }
+        }
+    }
+    check("a full canonical line and its tab-width kill fit as compact echo operations",
+          compact && terminal_echo_pending() == false && terminal_echo_drop_count() == 0);
+    let mut bounded: bool = true;
+    for index: usize in 0..<4096 {
+        match terminal_echo_push(TerminalEchoOperation::Byte(65)) {
+            TerminalEchoPushResult::Queued => { }
+            TerminalEchoPushResult::Full => { bounded = false; }
+        }
+    }
+    match terminal_echo_push(TerminalEchoOperation::Control(67)) {
+        TerminalEchoPushResult::Queued => { bounded = false; }
+        TerminalEchoPushResult::Full => { }
+    }
+    check("an echo operation beyond capacity is counted and never blocks", bounded && terminal_echo_drop_count() == 1);
+    terminal_echo_reset();
+}

@@ -459,6 +459,18 @@ private fn peer_identity(cpu_bytes: borrow [u8; 4..], peer_cpu: usize)
 // count and a position-weighted sum let the kernel tell a lost, repeated or
 // reordered byte from the line the driver typed.
 fn peer_tty() {
+    // This probe measures raw byte order including CR/LF, independently
+    // of the persistent shell's now-supported canonical termios settings.
+    let mut saved_terminal: [u8; 36];
+    let mut raw_terminal: [u8; 36];
+    if (svc5(29, 0, 0x5401, saved_terminal as *u8 as usize, 0, 0) != 0) {
+        svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+    }
+    for index: usize in 0..<36 { raw_terminal[index] = saved_terminal[index]; }
+    for index: usize in 0..<4 { raw_terminal[index] = 0; raw_terminal[12 + index] = 0; }
+    if (svc5(29, 0, 0x5404, raw_terminal as *u8 as usize, 0, 0) != 0) {
+        svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+    }
     let mut cpu_bytes: [u8; 4];
     let mut byte: [u8; 1];
     let peer_cpu: usize = svc5(
@@ -496,6 +508,9 @@ fn peer_tty() {
         }
     }
     if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_TTY_TAG, count, sum, 0, 0) == 2) {
+        if (svc5(29, 0, 0x5403, saved_terminal as *u8 as usize, 0, 0) != 0) {
+            svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+        }
         svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
     }
     svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);

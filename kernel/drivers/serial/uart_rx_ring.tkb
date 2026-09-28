@@ -12,10 +12,10 @@
 // counted rather than lost without trace, and the count is printed at the
 // end of every boot, so a drop is a reported number rather than a stall.
 //
-// One producer and one consumer, and each index has one writer: the UART RX
-// interrupt (kernel_uart_rx_isr in kernel/init/test_driver.tkb) writes head
-// and the drop count, and a syscall writes tail. Every caller in the kernel
-// holds the process-run lock around its access. That lock, not the compiler
+// The UART RX interrupt appends and edits the unfinished canonical line;
+// syscalls consume committed input and change its canonical interpretation.
+// Every caller in the kernel holds the process-run lock around its access.
+// That lock, not the compiler
 // fences below, orders a byte between CPUs, because a terminal reader need
 // not run on the CPU that takes the RX interrupt (GitHub issue #547). The
 // fences keep the single-threaded order for linux_user.
@@ -26,21 +26,78 @@
 const KERNEL_UART_RX_CAPACITY: usize = 4096;
 
 must_use variant UartRxPushResult { Stored; Dropped; }
+must_use variant UartRxReadResult { Byte((u8, bool)); EndFile; }
+must_use variant UartRxEditResult { Empty; Erased((u8, usize)); }
+struct UartRxLine {
+    first: {0..<KERNEL_UART_RX_CAPACITY as usize};
+    length: {0..<KERNEL_UART_RX_CAPACITY as usize};
+}
 
 private let mut kernel_uart_rx_buf: [u8; KERNEL_UART_RX_CAPACITY];
 private let mut kernel_uart_rx_head: io usize;
 private let mut kernel_uart_rx_tail: io usize;
 private let mut kernel_uart_rx_dropped: io usize;
+private let mut kernel_uart_rx_marks: [u8; KERNEL_UART_RX_CAPACITY];
+private let mut kernel_uart_rx_columns: [u8; KERNEL_UART_RX_CAPACITY];
+private let mut kernel_uart_rx_lines: io usize;
+private let mut kernel_uart_rx_canonical: io bool;
+private let mut kernel_uart_rx_line_columns: usize;
 
 // Empties the ring. The drop count is a boot total and survives this.
 fn kernel_uart_rx_ring_reset() {
     kernel_uart_rx_head = 0;
     kernel_uart_rx_tail = 0;
+    kernel_uart_rx_lines = 0;
+    kernel_uart_rx_line_columns = 0;
 }
 
 fn kernel_uart_rx_pending() -> bool {
+    if (kernel_uart_rx_canonical) { return kernel_uart_rx_lines != 0; }
     return kernel_uart_rx_tail != kernel_uart_rx_head;
 }
+
+fn kernel_uart_rx_canonical_set(enabled: bool) {
+    if (kernel_uart_rx_canonical == enabled) { return; }
+    kernel_uart_rx_canonical = enabled;
+    kernel_uart_rx_lines = 0;
+    let tail: usize = kernel_uart_rx_tail;
+    let queued: usize = kernel_uart_rx_queued();
+    let mut kept: usize = 0;
+    for offset: usize in 0..<KERNEL_UART_RX_CAPACITY {
+        if (offset < queued) {
+            let index: usize = (tail + offset) % KERNEL_UART_RX_CAPACITY;
+            if (index < KERNEL_UART_RX_CAPACITY) {
+                if (enabled == false) {
+                    // EOF is line metadata, not a raw NUL byte. Compact
+                    // toward the read side; no unread byte is overwritten.
+                    if (kernel_uart_rx_marks[index] != 2) {
+                        let target: usize = (tail + kept) % KERNEL_UART_RX_CAPACITY;
+                        if (target < KERNEL_UART_RX_CAPACITY) {
+                            kernel_uart_rx_buf[target] = kernel_uart_rx_buf[index];
+                            kernel_uart_rx_marks[target] = 0;
+                            kernel_uart_rx_columns[target] = 0;
+                            kept = kept + 1;
+                        }
+                    }
+                } else {
+                if (kernel_uart_rx_marks[index] == 0 &&
+                    kernel_uart_rx_buf[index] == 10) {
+                    kernel_uart_rx_marks[index] = 1;
+                }
+                if (kernel_uart_rx_marks[index] != 0) {
+                    kernel_uart_rx_lines = kernel_uart_rx_lines + 1;
+                }
+                }
+            }
+        }
+    }
+    if (enabled == false) {
+        kernel_uart_rx_head = (tail + kept) % KERNEL_UART_RX_CAPACITY;
+        kernel_uart_rx_line_columns = 0;
+    }
+}
+
+fn kernel_uart_rx_echo_column() -> usize { return kernel_uart_rx_line_columns; }
 
 // Read-only DDB observation. The stopped-world snapshot keeps the two
 // single-writer indices stable while it computes the same occupancy the
@@ -61,6 +118,19 @@ private fn kernel_uart_rx_count_drop() -> UartRxPushResult {
 }
 
 fn kernel_uart_rx_push(c: u8) -> UartRxPushResult {
+    return kernel_uart_rx_terminal_push(c, 0, 0);
+}
+
+// A delimiter commits the preceding bytes. An EOF marker commits them too
+// but is consumed without copying a byte into the reader's buffer.
+fn kernel_uart_rx_terminal_push(c: u8, mark: {0..<3 as u8},
+                                columns: {0..<9 as u8}) -> UartRxPushResult {
+    // Reserve a slot for the newline or EOF that makes a full canonical
+    // line readable, even if its sender ignores input flow control.
+    if (kernel_uart_rx_canonical && mark == 0 &&
+        kernel_uart_rx_queued() >= KERNEL_UART_RX_CAPACITY - 2) {
+        return kernel_uart_rx_count_drop();
+    }
     let head: usize = kernel_uart_rx_head;
     if (head >= KERNEL_UART_RX_CAPACITY) {
         return kernel_uart_rx_count_drop();
@@ -70,6 +140,11 @@ fn kernel_uart_rx_push(c: u8) -> UartRxPushResult {
         return kernel_uart_rx_count_drop();
     }
     kernel_uart_rx_buf[head] = c;
+    kernel_uart_rx_marks[head] = mark;
+    kernel_uart_rx_columns[head] = columns;
+    if (mark != 0) { kernel_uart_rx_lines = kernel_uart_rx_lines + 1; }
+    if (mark != 0) { kernel_uart_rx_line_columns = 0; }
+    else { kernel_uart_rx_line_columns = kernel_uart_rx_line_columns + (columns as usize); }
     signal_fence();
     kernel_uart_rx_head = next;
     return UartRxPushResult::Stored;
@@ -78,17 +153,119 @@ fn kernel_uart_rx_push(c: u8) -> UartRxPushResult {
 // The caller has asked kernel_uart_rx_pending() first, with interrupts
 // masked, and this is only reached when it answered true.
 fn kernel_uart_rx_getc() -> u8 {
+    match kernel_uart_rx_read() {
+        UartRxReadResult::Byte(pair) => { let (value, end) = pair; return value; }
+        UartRxReadResult::EndFile => { return 0; }
+    }
+}
+
+fn kernel_uart_rx_read() -> UartRxReadResult {
     signal_fence();
     let tail: usize = kernel_uart_rx_tail;
     if (tail >= KERNEL_UART_RX_CAPACITY) {
         kernel_uart_rx_tail = 0;
-        return 0;
+        return UartRxReadResult::EndFile;
     }
     let c: u8 = kernel_uart_rx_buf[tail];
+    let mark: u8 = kernel_uart_rx_marks[tail];
+    if (mark != 0 && kernel_uart_rx_lines != 0) {
+        kernel_uart_rx_lines = kernel_uart_rx_lines - 1;
+    }
     kernel_uart_rx_tail = (tail + 1) % KERNEL_UART_RX_CAPACITY;
-    return c;
+    if (mark == 2) { return UartRxReadResult::EndFile; }
+    return UartRxReadResult::Byte((c, kernel_uart_rx_canonical && mark == 1));
+}
+
+// Editing cannot cross a committed line or remove bytes a reader took.
+fn kernel_uart_rx_erase() -> UartRxEditResult {
+    let head: usize = kernel_uart_rx_head;
+    if (head == kernel_uart_rx_tail || head >= KERNEL_UART_RX_CAPACITY) {
+        return UartRxEditResult::Empty;
+    }
+    let last: usize = (head + KERNEL_UART_RX_CAPACITY - 1) % KERNEL_UART_RX_CAPACITY;
+    if (last < KERNEL_UART_RX_CAPACITY) {
+        if (kernel_uart_rx_marks[last] != 0) { return UartRxEditResult::Empty; }
+        let value: u8 = kernel_uart_rx_buf[last];
+        let columns: usize = kernel_uart_rx_columns[last] as usize;
+        kernel_uart_rx_buf[last] = 0;
+        kernel_uart_rx_columns[last] = 0;
+        if (kernel_uart_rx_line_columns >= columns) {
+            kernel_uart_rx_line_columns = kernel_uart_rx_line_columns - columns;
+        }
+        kernel_uart_rx_head = last;
+        return UartRxEditResult::Erased((value, columns));
+    }
+    return UartRxEditResult::Empty;
+}
+
+fn kernel_uart_rx_peek_last() -> UartRxEditResult {
+    let head: usize = kernel_uart_rx_head;
+    if (head == kernel_uart_rx_tail || head >= KERNEL_UART_RX_CAPACITY) {
+        return UartRxEditResult::Empty;
+    }
+    let last: usize = (head + KERNEL_UART_RX_CAPACITY - 1) % KERNEL_UART_RX_CAPACITY;
+    if (last < KERNEL_UART_RX_CAPACITY) {
+        if (kernel_uart_rx_marks[last] != 0) { return UartRxEditResult::Empty; }
+        return UartRxEditResult::Erased((kernel_uart_rx_buf[last],
+                                         kernel_uart_rx_columns[last] as usize));
+    }
+    return UartRxEditResult::Empty;
+}
+
+fn kernel_uart_rx_unfinished_length() -> usize {
+    let head: usize = kernel_uart_rx_head;
+    let queued: usize = kernel_uart_rx_queued();
+    let mut length: usize = 0;
+    let mut walking: bool = true;
+    for offset: usize in 0..<KERNEL_UART_RX_CAPACITY {
+        if (walking && offset < queued) {
+            let last: usize = (head + KERNEL_UART_RX_CAPACITY - 1 - offset) %
+                              KERNEL_UART_RX_CAPACITY;
+            if (last < KERNEL_UART_RX_CAPACITY) {
+                if (kernel_uart_rx_marks[last] != 0) { walking = false; }
+                else { length = length + 1; }
+            }
+        }
+    }
+    return length;
+}
+
+fn kernel_uart_rx_unfinished_snapshot() -> UartRxLine {
+    let length: usize = kernel_uart_rx_unfinished_length();
+    let first: usize = (kernel_uart_rx_head + KERNEL_UART_RX_CAPACITY - length)
+                      % KERNEL_UART_RX_CAPACITY;
+    if (first < KERNEL_UART_RX_CAPACITY && length < KERNEL_UART_RX_CAPACITY) {
+        let mut line: UartRxLine = { first, length };
+        return line;
+    }
+    let mut empty: UartRxLine = { 0, 0 };
+    return empty;
+}
+
+fn kernel_uart_rx_unfinished_byte(line: UartRxLine, offset: usize) -> UartRxReadResult {
+    if (offset >= line.length) { return UartRxReadResult::EndFile; }
+    let index: usize = (line.first + offset) % KERNEL_UART_RX_CAPACITY;
+    if (index < KERNEL_UART_RX_CAPACITY) {
+        return UartRxReadResult::Byte((kernel_uart_rx_buf[index], false));
+    }
+    return UartRxReadResult::EndFile;
 }
 
 fn kernel_uart_rx_dropped_count() -> usize {
     return kernel_uart_rx_dropped;
+}
+
+// Reprinting starts at a new display column, so tab erasure widths change.
+fn kernel_uart_rx_reprint_width(line: UartRxLine, offset: usize,
+                                width: {0..<9 as u8}) {
+    if (offset >= line.length) { return; }
+    let index: usize = (line.first + offset) % KERNEL_UART_RX_CAPACITY;
+    if (index < KERNEL_UART_RX_CAPACITY) {
+        let previous: usize = kernel_uart_rx_columns[index] as usize;
+        if (kernel_uart_rx_line_columns >= previous) {
+            kernel_uart_rx_line_columns = kernel_uart_rx_line_columns - previous;
+        }
+        kernel_uart_rx_columns[index] = width;
+        kernel_uart_rx_line_columns = kernel_uart_rx_line_columns + (width as usize);
+    }
 }

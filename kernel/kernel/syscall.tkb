@@ -5,6 +5,7 @@ use "kernel/arch/arm64/kernel/user_entry_extern.tkb";
 use "kernel/fs/ext2/ext2.tkb";
 use "kernel/fs/procfs.tkb";
 use "kernel/drivers/serial/uart_rx_ring.tkb";
+use "kernel/drivers/serial/terminal.tkb";
 use "kernel/net/socket_capability.tkb";
 use "kernel/net/tcp.tkb";
 use "kernel/kernel/fd_table.tkb";
@@ -43,6 +44,7 @@ use "kernel/lib/occupancy.tkb";
 //   Up to five script levels are resolved; the sixth returns ELOOP.
 //
 const AARCH64_NR_WRITE: usize = 64;
+const AARCH64_NR_IOCTL: usize = 29;
 const AARCH64_NR_GETSID: usize = 156;
 const AARCH64_NR_SETSID: usize = 157;
 const AARCH64_NR_READV: usize = 65;
@@ -94,9 +96,13 @@ const LINUX_EFAULT: usize = 0xFFFFFFFFFFFFFFF2;
 const LINUX_ENOSYS: usize = 0xFFFFFFFFFFFFFFDA;
 const LINUX_ENOENT: usize = 0xFFFFFFFFFFFFFFFE;
 const LINUX_EINVAL: usize = 0xFFFFFFFFFFFFFFEA;
+const LINUX_ENOTTY: usize = 0xFFFFFFFFFFFFFFE7;
 const LINUX_EAGAIN: usize = 0xFFFFFFFFFFFFFFF5;
 const LINUX_EACCES: usize = 0xFFFFFFFFFFFFFFF3;
 const LINUX_ECHILD: usize = 0xFFFFFFFFFFFFFFF6;
+const LINUX_SIGINT: usize = 2;
+const LINUX_SIGQUIT: usize = 3;
+const LINUX_SIGTSTP: usize = 20;
 const LINUX_SIGTERM: usize = 15;
 const LINUX_SIGCHLD: usize = 17;
 // GitHub issue #295: distinct errno for fixed-pool exhaustion, previously
@@ -1776,7 +1782,13 @@ fn syscall_terminal_write(address: usize, length: usize)
                 }
             }
         }
-        let queued: usize = uart_user_write(staging);
+        // Attribute publication and the whole bounded chunk admission are
+        // serialized with TCSETSW's drain query, including peer producers.
+        let guard = process_run_lock();
+        let convert: bool = (terminal_output_flags() & 5) == 5;
+        let queued: usize = uart_terminal_write_chunk(staging, convert);
+        process_run_unlock(guard);
+        if (queued == 0 && written == 0) { return TerminalWriteResult::WouldBlock; }
         written = written + queued;
         if (queued < chunk) {
             return TerminalWriteResult::Written(written);
@@ -2496,6 +2508,7 @@ fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
                 if (syscall_test_evidence_record_ppoll_uart_wait()) {
                     kernel_boot_log("shell ppoll: uart blocked\n");
                 }
+                syscall_terminal_note_wait();
                 // The answer syscall_read_uart gives: block, idling the CPU
                 // when nothing else can run here (#583). The Read delivery
                 // rewinds this ppoll, so the wake reruns it and it reports
@@ -2512,7 +2525,8 @@ fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
                         // The ash lane's /bin/ppoll-probe types its byte
                         // only after this line, so a kernel that retried
                         // the ppoll in EL1 instead leaves that probe waiting.
-                        if (syscall_test_evidence_record_ppoll_uart_block()) {
+                        if (syscall_terminal_ppoll_probe() &&
+                            syscall_test_evidence_record_ppoll_uart_block()) {
                             kernel_boot_log(
                                 "ppoll: stdin wait blocked beside a runnable process\n");
                         }
@@ -2547,6 +2561,122 @@ fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
     return SyscallAction::Resume(LINUX_EINVAL);
 }
 
+// Termios is shared by aliases of the single local UART, not by fd number.
+// ioctl runs on core 0; the run lock also orders its settings with peer reads.
+fn syscall_terminal_ioctl(fd: usize, request: usize, address: usize)
+        -> SyscallAction !{unsafe} {
+    if (kernel_syscall_terminal_is_open(fd) == false) {
+        match unified_fd_next_open(kernel_syscall_process_slot(), fd) {
+            UnifiedFdScanResult::Done => { return SyscallAction::Resume(LINUX_EBADF); }
+            UnifiedFdScanResult::Found(open) => {
+                if (open != fd) { return SyscallAction::Resume(LINUX_EBADF); }
+                return SyscallAction::Resume(LINUX_ENOTTY);
+            }
+        }
+    }
+    let command: usize = request & 0xFFFFFFFF;
+    if (command == 0x5413) {
+        match user_range_check_write(kernel_process_current_root(), address, 8) {
+            UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+            UserWriteRangeResult::Ok(range) => {
+                if (user_zero_fill(range) == false ||
+                    user_write_u16(range, 0, 24) == false ||
+                    user_write_u16(range, 2, 80) == false) {
+                    return SyscallAction::Resume(LINUX_EFAULT);
+                }
+                return SyscallAction::Resume(0);
+            }
+        }
+    }
+    if (command == 0x5401) {
+        match user_range_check_write(kernel_process_current_root(), address,
+                                    TERMINAL_TERMIOS_BYTES) {
+            UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+            UserWriteRangeResult::Ok(range) => {
+                let guard = process_run_lock();
+                for index: usize in 0..<TERMINAL_TERMIOS_BYTES {
+                    if (user_write_byte(range, index, terminal_settings_byte(index)) == false) {
+                        process_run_unlock(guard);
+                        return SyscallAction::Resume(LINUX_EFAULT);
+                    }
+                }
+                process_run_unlock(guard);
+                return SyscallAction::Resume(0);
+            }
+        }
+    }
+    if (command != 0x5402 && command != 0x5403 && command != 0x5404) {
+        return SyscallAction::Resume(LINUX_ENOTTY);
+    }
+    let mut settings: [u8; TERMINAL_TERMIOS_BYTES];
+    match user_range_check_read(kernel_process_current_root(), address,
+                               TERMINAL_TERMIOS_BYTES) {
+        UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
+        UserReadRangeResult::Ok(range) => {
+            for index: usize in 0..<TERMINAL_TERMIOS_BYTES {
+                settings[index] = user_read_byte(range, index);
+            }
+        }
+    }
+    match terminal_settings_validate(settings as [u8; TERMINAL_TERMIOS_BYTES..]) {
+        TerminalSettingsValidation::Unsupported => { return SyscallAction::Resume(LINUX_EINVAL); }
+        TerminalSettingsValidation::Valid => { }
+    }
+    let guard = process_run_lock();
+    if (command != 0x5402) {
+        let mut pending: bool = uart_terminal_output_pending() || uart_tx_busy();
+        for cpu: usize in 1..<KERNEL_MAX_CORES {
+            if (peer_console_drained(cpu) == false) { pending = true; }
+        }
+        if (pending) {
+            process_run_unlock(guard);
+            return syscall_terminal_write_wait();
+        }
+    }
+    match terminal_settings_apply(settings as [u8; TERMINAL_TERMIOS_BYTES..]) {
+        TerminalSettingsResult::Unsupported => {
+            process_run_unlock(guard);
+            return SyscallAction::Resume(LINUX_EINVAL);
+        }
+        TerminalSettingsResult::Applied => {
+            if (command == 0x5404) { kernel_uart_rx_ring_reset(); }
+            kernel_uart_rx_canonical_set(terminal_canonical());
+            terminal_input_flow_update(kernel_uart_rx_queued());
+            if (kernel_uart_rx_pending()) { kernel_process_terminal_settings_wake(guard); }
+            if (terminal_output_paused() == false) { kernel_process_uart_tx_wake_all(guard); }
+        }
+    }
+    process_run_unlock(guard);
+    uart_terminal_resume_output();
+    kernel_log_terminal_flow_poll();
+    interrupt_notify();
+    return SyscallAction::Resume(0);
+}
+
+// BusyBox's fallback read and its termios-enabled ppoll line editor both
+// publish the same readiness checkpoint to the UART integration driver.
+private fn syscall_terminal_note_wait() {
+    if (syscall_test_evidence_record_read_uart_wait()) {
+        if (kernel_syscall_persistent_shell_active()) {
+            kernel_boot_log("\npersistent shell: uart blocked\n");
+        } else { kernel_boot_log("\ninteractive shell: uart blocked\n"); }
+    }
+}
+
+private fn syscall_terminal_ppoll_probe() -> bool {
+    let slot: usize = kernel_syscall_process_slot();
+    if (scheduled_process_slot_valid(slot) == false) { return false; }
+    let guard = process_run_lock();
+    let command = scheduled_process_command_line(slot);
+    let expected = bs"/bin/ppoll-probe\0";
+    let mut matches: bool = true;
+    for index: usize in 0..<17 {
+        if (command[index] != expected[index]) { matches = false; }
+    }
+    process_run_unlock(guard);
+    return matches;
+}
+
 fn syscall_read_uart(address: usize, requested: usize) -> SyscallIoResult {
     if (requested == 0) { return SyscallIoResult::Transferred(0); }
     match user_range_check_write(kernel_process_current_root(), address, requested) {
@@ -2556,17 +2686,10 @@ fn syscall_read_uart(address: usize, requested: usize) -> SyscallIoResult {
             // producer holds, so a reader on any CPU sees a byte only
             // after that byte is stored.
             let guard = process_run_lock();
+            kernel_process_terminal_reader(guard);
             if (kernel_uart_rx_pending() == false) {
                 process_run_unlock(guard);
-                if (syscall_test_evidence_record_read_uart_wait()) {
-                    if (kernel_syscall_persistent_shell_active()) {
-                        kernel_boot_log(
-                            "\npersistent shell: uart blocked\n");
-                    } else {
-                        kernel_boot_log(
-                            "\ninteractive shell: uart blocked\n");
-                    }
-                }
+                syscall_terminal_note_wait();
                 // GitHub issue #448: block whenever ANYTHING else could
                 // run, not only when this process has a child. The old
                 // question was the right one while a process could have
@@ -2591,12 +2714,28 @@ fn syscall_read_uart(address: usize, requested: usize) -> SyscallIoResult {
                 }
                 return SyscallIoResult::InterruptWait;
             }
-            let value: u8 = kernel_uart_rx_getc();
-            process_run_unlock(guard);
-            if (user_write_byte(range, 0, value) == false) {
-                return SyscallIoResult::Errno(LINUX_EFAULT);
+            let canonical: bool = terminal_canonical();
+            let mut transferred: usize = 0;
+            let mut reading: bool = true;
+            for index: usize in 0..<KERNEL_UART_RX_CAPACITY {
+                if (reading && index < requested && kernel_uart_rx_pending()) {
+                    match kernel_uart_rx_read() {
+                        UartRxReadResult::EndFile => { reading = false; }
+                        UartRxReadResult::Byte(pair) => {
+                            let (value, end) = pair;
+                            if (user_write_byte(range, index, value) == false) {
+                                process_run_unlock(guard);
+                                return SyscallIoResult::Errno(LINUX_EFAULT);
+                            }
+                            transferred = transferred + 1;
+                            if (end || canonical == false) { reading = false; }
+                        }
+                    }
+                }
             }
-            return SyscallIoResult::Transferred(1);
+            terminal_input_flow_update(kernel_uart_rx_queued());
+            process_run_unlock(guard);
+            return SyscallIoResult::Transferred(transferred);
         }
     }
 }
@@ -3765,6 +3904,8 @@ fn syscall_peer_refused(number: usize) -> bool {
 
 fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     if (syscall_peer_refused(number)) { return false; }
+    // Attribute changes and transmitter-drain queries touch the UART on CPU 0.
+    if (number == AARCH64_NR_IOCTL) { return false; }
     // Session lookups and changes hold the process-run lock.
     if (number == AARCH64_NR_GETSID || number == AARCH64_NR_SETSID) {
         return true;
@@ -5164,6 +5305,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
     }
 
+    if (number == AARCH64_NR_IOCTL) {
+        return syscall_terminal_ioctl(x0, x1, x2);
+    }
+
     if (number == 63) {
         return syscall_io_action(syscall_read_segment(x0, x1, x2));
     }
@@ -6265,7 +6410,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (x0 == 0 || x1 > 64) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
-        if (x1 != 0 && x1 != LINUX_SIGTERM && x1 != LINUX_SIGCHLD) {
+        if (x1 != 0 && x1 != LINUX_SIGINT && x1 != LINUX_SIGQUIT &&
+            x1 != LINUX_SIGTERM && x1 != LINUX_SIGCHLD && x1 != LINUX_SIGTSTP) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
         if (x0 == kernel_process_current_pid() && x1 == LINUX_SIGTERM) {

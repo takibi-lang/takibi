@@ -1,0 +1,173 @@
+// UART line discipline shared by the two platform RX handlers.
+// CPU 0 receives and echoes. The process-run guard serializes editing and
+// settings against readers on every CPU; its IRQ masking also protects TX.
+use "kernel/drivers/serial/terminal.tkb";
+use "kernel/drivers/serial/uart_rx_ring.tkb";
+use "kernel/printk/log.tkb";
+use "kernel/kernel/process.tkb";
+
+private fn terminal_io_echo(value: u8) -> {0..<9 as u8} {
+    match terminal_echo(value) {
+        TerminalEcho::None => { return 0; }
+        TerminalEcho::Control(mapped) => {
+            uart_terminal_echo(TerminalEchoOperation::Control(mapped));
+            return 2;
+        }
+        TerminalEcho::Byte(byte) => {
+            let mut width: usize = 0;
+            if (byte == 9) { width = 8 - (uart_terminal_column() % 8); }
+            else if (byte >= 32 && byte != 127) { width = 1; }
+            if (byte == 10 && (terminal_output_flags() & 5) == 5) {
+                uart_terminal_echo(TerminalEchoOperation::Newline);
+            } else { uart_terminal_echo(TerminalEchoOperation::Byte(byte)); }
+            if (width < 9) { return width as u8; }
+            return 0;
+        }
+    }
+}
+
+private fn terminal_io_store(value: u8, mark: {0..<3 as u8}) {
+    if (terminal_canonical() == false) {
+        match kernel_uart_rx_push(value) {
+            UartRxPushResult::Stored => { let echoed: u8 = terminal_io_echo(value); }
+            UartRxPushResult::Dropped => { }
+        }
+        return;
+    }
+    // Determine width before storing, but do not echo a rejected input byte.
+    let mut width: u8 = 0;
+    match terminal_echo(value) {
+        TerminalEcho::None => { }
+        TerminalEcho::Control(mapped) => { width = 2; }
+        TerminalEcho::Byte(byte) => {
+            if (byte == 9) {
+                let columns: usize = 8 - (uart_terminal_column() % 8);
+                if (columns < 9) { width = columns as u8; }
+            } else if (byte >= 32 && byte != 127) { width = 1; }
+        }
+    }
+    let columns: u8 = width;
+    if (columns < 9) {
+        match kernel_uart_rx_terminal_push(value, mark, columns) {
+            UartRxPushResult::Stored => { let echoed: u8 = terminal_io_echo(value); }
+            UartRxPushResult::Dropped => { }
+        }
+    }
+}
+
+private fn terminal_io_erase_word() -> usize {
+    let mut columns: usize = 0;
+    let mut walking: bool = true;
+    let mut in_word: bool = false;
+    for step: usize in 0..<KERNEL_UART_RX_CAPACITY {
+        if (walking) {
+            match kernel_uart_rx_peek_last() {
+                UartRxEditResult::Empty => { walking = false; }
+                UartRxEditResult::Erased(pair) => {
+                    let (value, width) = pair;
+                    let alnum: bool = (value >= 48 && value <= 57) ||
+                        (value >= 65 && value <= 90) || (value >= 97 && value <= 122) ||
+                        value == 95;
+                    if (in_word && alnum == false) { walking = false; }
+                    else {
+                        if (alnum) { in_word = true; }
+                        match kernel_uart_rx_erase() {
+                            UartRxEditResult::Empty => { walking = false; }
+                            UartRxEditResult::Erased(erased) => {
+                                let (byte, count) = erased;
+                                columns = columns + count;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return columns;
+}
+
+fn terminal_io_receive(guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+                       received: u8) !{unsafe} {
+    match terminal_input_decode(received) {
+        TerminalInput::Byte(value) => { terminal_io_store(value, 0); }
+        TerminalInput::EndLine(value) => { terminal_io_store(value, 1); }
+        TerminalInput::EndFile => {
+            match kernel_uart_rx_terminal_push(0, 2, 0) {
+                UartRxPushResult::Stored => { }
+                UartRxPushResult::Dropped => { }
+            }
+        }
+        TerminalInput::Erase => {
+            match kernel_uart_rx_erase() {
+                UartRxEditResult::Empty => { }
+                UartRxEditResult::Erased(pair) => {
+                    let (value, columns) = pair;
+                    if (terminal_echo_erasure()) {
+                        uart_terminal_echo(TerminalEchoOperation::Erase(columns));
+                    } else { let echoed: u8 = terminal_io_echo(received); }
+                }
+            }
+        }
+        TerminalInput::Kill => {
+            let columns: usize = kernel_uart_rx_echo_column();
+            for step: usize in 0..<KERNEL_UART_RX_CAPACITY {
+                match kernel_uart_rx_erase() {
+                    UartRxEditResult::Empty => { }
+                    UartRxEditResult::Erased(pair) => {
+                        let (value, width) = pair;
+                    }
+                }
+            }
+            if (terminal_echo_kill_erasure()) {
+                uart_terminal_echo(TerminalEchoOperation::Erase(columns));
+            } else {
+                let echoed: u8 = terminal_io_echo(received);
+                if (terminal_echo_kill_newline()) { let width: u8 = terminal_io_echo(10); }
+            }
+        }
+        TerminalInput::WordErase => {
+            let columns: usize = terminal_io_erase_word();
+            if (terminal_echo_enabled()) {
+                uart_terminal_echo(TerminalEchoOperation::Erase(columns));
+            } else { let echoed: u8 = terminal_io_echo(received); }
+        }
+        TerminalInput::Reprint => {
+            let echoed: u8 = terminal_io_echo(received);
+            let newline: u8 = terminal_io_echo(10);
+            let mut line: UartRxLine = kernel_uart_rx_unfinished_snapshot();
+            for offset: usize in 0..<KERNEL_UART_RX_CAPACITY {
+                if (offset < line.length) {
+                    match kernel_uart_rx_unfinished_byte(line, offset) {
+                        UartRxReadResult::EndFile => { }
+                        UartRxReadResult::Byte(pair) => {
+                            let (value, end) = pair;
+                            let width: u8 = terminal_io_echo(value);
+                            if (width < 9) { kernel_uart_rx_reprint_width(line, offset, width); }
+                        }
+                    }
+                }
+            }
+        }
+        TerminalInput::StopOutput => { uart_tx_irq_disable(); }
+        TerminalInput::StartOutput => { kernel_process_uart_tx_wake_all(guard); }
+        TerminalInput::Signal(signum) => {
+            kernel_uart_rx_ring_reset();
+            terminal_input_cancel_literal();
+            uart_terminal_flush_output();
+            let echoed: u8 = terminal_io_echo(received);
+            kernel_process_terminal_signal(guard, signum);
+            kernel_process_uart_tx_wake_all(guard);
+        }
+        TerminalInput::LiteralNext => {
+            match terminal_echo(received) {
+                TerminalEcho::None => { }
+                TerminalEcho::Byte(value) => { }
+                TerminalEcho::Control(value) => {
+                    uart_terminal_echo(TerminalEchoOperation::Byte(94));
+                    uart_terminal_echo(TerminalEchoOperation::Byte(8));
+                }
+            }
+        }
+    }
+    terminal_input_flow_update(kernel_uart_rx_queued());
+}

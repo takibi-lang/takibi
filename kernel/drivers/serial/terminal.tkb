@@ -1,0 +1,254 @@
+// Linux termios policy for the single local UART terminal.
+// Callers serialize settings and input decoding under the process-run lock.
+// No device access or process ownership is hidden in this policy layer.
+use "kernel/lib/execution_model.tkb";
+
+const TERMINAL_TERMIOS_BYTES: usize = 36;
+const TERMINAL_IFLAG_MASK: usize = 0x1500;
+const TERMINAL_OFLAG_MASK: usize = 5;
+const TERMINAL_LFLAG_MASK: usize = 0x8A7B;
+const TERMINAL_CFLAG_BASE: usize = 0x18B2;
+
+must_use variant TerminalSettingsValidation { Valid; Unsupported; }
+must_use variant TerminalSettingsResult { Applied; Unsupported; }
+must_use variant TerminalInput {
+    Byte(u8); EndLine(u8); EndFile; Erase; Kill; WordErase; Reprint;
+    StopOutput; StartOutput; Signal(usize); LiteralNext;
+}
+variant TerminalEcho { None; Byte(u8); Control(u8); }
+
+private let mut terminal_settings: [u8; TERMINAL_TERMIOS_BYTES];
+private let mut terminal_settings_initialized: bool;
+private let mut terminal_literal_next: bool;
+// The run lock serializes writers. Independent TX readers use atomic
+// publication because they need only this one word, not a settings snapshot.
+private let mut terminal_output_stop_word: usize;
+private let mut terminal_input_stop_word: usize;
+
+private fn terminal_store_word(field: {0..<4 as usize}, value: usize) {
+    for byte: usize in 0..<4 {
+        terminal_settings[field * 4 + byte] =
+            ((value >> (byte * 8)) & 0xFF) as u8;
+    }
+}
+
+fn terminal_word(bytes: borrow [u8; TERMINAL_TERMIOS_BYTES..],
+                 field: {0..<4 as usize}) -> usize {
+    let mut word: usize = 0;
+    for byte: usize in 0..<4 {
+        word = word | ((bytes[field * 4 + byte] as usize) << (byte * 8));
+    }
+    return word;
+}
+
+private fn terminal_initialize() {
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+        "terminal settings and input state require non-preemptible lock holders");
+    if (terminal_settings_initialized) { return; }
+    for index: usize in 0..<TERMINAL_TERMIOS_BYTES {
+        terminal_settings[index] = 0;
+    }
+    // The UART starts at fixed 115200, eight data bits, no parity, one stop
+    // bit, local carrier and receive enabled. Input is initially raw, with
+    // no kernel echo or output conversion, matching the pre-termios path.
+    terminal_store_word(2, TERMINAL_CFLAG_BASE);
+    terminal_settings[17] = 3;
+    terminal_settings[18] = 28;
+    terminal_settings[19] = 127;
+    terminal_settings[20] = 21;
+    terminal_settings[21] = 4;
+    terminal_settings[23] = 1;
+    terminal_settings[25] = 17;
+    terminal_settings[26] = 19;
+    terminal_settings[27] = 26;
+    terminal_settings[29] = 18;
+    terminal_settings[31] = 23;
+    terminal_settings[32] = 22;
+    terminal_settings_initialized = true;
+}
+
+fn terminal_settings_byte(index: {0..<TERMINAL_TERMIOS_BYTES as usize}) -> u8 {
+    terminal_initialize();
+    return terminal_settings[index];
+}
+
+fn terminal_settings_validate(bytes: borrow [u8; TERMINAL_TERMIOS_BYTES..])
+        -> TerminalSettingsValidation {
+    let input: usize = terminal_word(bytes, 0);
+    let output: usize = terminal_word(bytes, 1);
+    let control: usize = terminal_word(bytes, 2);
+    let local: usize = terminal_word(bytes, 3);
+    if ((input & ~TERMINAL_IFLAG_MASK) != 0 ||
+        (output & ~TERMINAL_OFLAG_MASK) != 0 ||
+        (control & ~0x400) != TERMINAL_CFLAG_BASE ||
+        (local & ~TERMINAL_LFLAG_MASK) != 0 ||
+        bytes[16] != 0 || bytes[22] != 0 || bytes[23] != 1 ||
+        bytes[24] != 0 || bytes[30] != 0 ||
+        bytes[34] != 0 || bytes[35] != 0) {
+        return TerminalSettingsValidation::Unsupported;
+    }
+    return TerminalSettingsValidation::Valid;
+}
+
+fn terminal_settings_apply(bytes: borrow [u8; TERMINAL_TERMIOS_BYTES..])
+        -> TerminalSettingsResult !{unsafe} {
+    match terminal_settings_validate(bytes) {
+        TerminalSettingsValidation::Unsupported => { return TerminalSettingsResult::Unsupported; }
+        TerminalSettingsValidation::Valid => { }
+    }
+    let input: usize = terminal_word(bytes, 0);
+    for index: usize in 0..<TERMINAL_TERMIOS_BYTES {
+        terminal_settings[index] = bytes[index];
+    }
+    terminal_settings_initialized = true;
+    terminal_literal_next = false;
+    if ((input & 0x400) == 0) { terminal_output_pause(false); }
+    if ((input & 0x1000) == 0) {
+        unsafe { atomic_store_release((&terminal_input_stop_word) as usize, 0); }
+    }
+    return TerminalSettingsResult::Applied;
+}
+
+private fn terminal_local_flags() -> usize {
+    terminal_initialize();
+    return terminal_word(terminal_settings as [u8; TERMINAL_TERMIOS_BYTES..], 3);
+}
+
+fn terminal_canonical() -> bool {
+    return (terminal_local_flags() & 2) != 0;
+}
+
+fn terminal_output_flags() -> usize {
+    terminal_initialize();
+    return terminal_word(terminal_settings as [u8; TERMINAL_TERMIOS_BYTES..], 1);
+}
+
+private fn terminal_output_pause(paused: bool) !{unsafe} {
+    let mut value: usize = 0;
+    if (paused) { value = 1; }
+    unsafe { atomic_store_release((&terminal_output_stop_word) as usize, value); }
+}
+
+fn terminal_output_paused() -> bool !{unsafe} {
+    let value: usize = unsafe {
+        atomic_load_acquire((&terminal_output_stop_word) as usize)
+    };
+    return value != 0;
+}
+
+fn terminal_input_flow_requested() -> bool !{unsafe} {
+    let value: usize = unsafe {
+        atomic_load_acquire((&terminal_input_stop_word) as usize)
+    };
+    return value != 0;
+}
+
+fn terminal_input_flow_update(queued: usize) !{unsafe} {
+    if (terminal_input_flow_enabled() == false || queued <= 1024) {
+        unsafe { atomic_store_release((&terminal_input_stop_word) as usize, 0); }
+    } else if (queued >= 3072) {
+        unsafe { atomic_store_release((&terminal_input_stop_word) as usize, 1); }
+    }
+}
+
+fn terminal_input_flow_enabled() -> bool {
+    terminal_initialize();
+    return (terminal_word(terminal_settings as [u8; TERMINAL_TERMIOS_BYTES..], 0)
+            & 0x1000) != 0;
+}
+
+fn terminal_control_byte(index: {0..<19 as usize}) -> u8 {
+    terminal_initialize();
+    return terminal_settings[17 + index];
+}
+
+private fn terminal_control_matches(value: u8, index: {0..<19 as usize})
+        -> bool {
+    let control: u8 = terminal_control_byte(index);
+    return control != 0 && control == value;
+}
+
+fn terminal_echo(value: u8) -> TerminalEcho {
+    let flags: usize = terminal_local_flags();
+    if ((flags & 8) == 0) {
+        if (value == 10 && (flags & 0x42) == 0x42) {
+            return TerminalEcho::Byte(value);
+        }
+        return TerminalEcho::None;
+    }
+    if ((flags & 0x200) != 0 && value != 9 && value != 10 &&
+        (value < 32 || value == 127)) {
+        return TerminalEcho::Control(value ^ 0x40);
+    }
+    return TerminalEcho::Byte(value);
+}
+
+fn terminal_echo_enabled() -> bool { return (terminal_local_flags() & 8) != 0; }
+
+fn terminal_echo_erasure() -> bool {
+    return (terminal_local_flags() & 0x18) == 0x18;
+}
+
+fn terminal_echo_kill_erasure() -> bool {
+    return (terminal_local_flags() & 0x838) == 0x838;
+}
+
+fn terminal_echo_kill_newline() -> bool {
+    return (terminal_local_flags() & 0x28) == 0x28;
+}
+
+private fn terminal_input_signal(signum: usize, input: usize) -> TerminalInput {
+    // Linux resumes software-stopped output for an input-generated signal,
+    // so an INTR cannot leave its own echo or unrelated writers stranded.
+    if ((input & 0x400) != 0) { terminal_output_pause(false); }
+    return TerminalInput::Signal(signum);
+}
+
+fn terminal_input_decode(received: u8) -> TerminalInput {
+    terminal_initialize();
+    if (terminal_literal_next) {
+        terminal_literal_next = false;
+        return TerminalInput::Byte(received);
+    }
+    let input: usize = terminal_word(
+        terminal_settings as [u8; TERMINAL_TERMIOS_BYTES..], 0);
+    let local: usize = terminal_local_flags();
+    if ((input & 0x400) != 0) {
+        if (terminal_control_matches(received, 9)) {
+            terminal_output_pause(true);
+            return TerminalInput::StopOutput;
+        }
+        if (terminal_control_matches(received, 8)) {
+            terminal_output_pause(false);
+            return TerminalInput::StartOutput;
+        }
+    }
+    if ((local & 1) != 0) {
+        if (terminal_control_matches(received, 0)) { return terminal_input_signal(2, input); }
+        if (terminal_control_matches(received, 1)) { return terminal_input_signal(3, input); }
+        if (terminal_control_matches(received, 10)) { return terminal_input_signal(20, input); }
+    }
+    let mut value: u8 = received;
+    if (received == 13 && (input & 0x100) != 0) { value = 10; }
+    if ((local & 2) == 0) { return TerminalInput::Byte(value); }
+    if ((local & 0x8000) != 0) {
+        if (terminal_control_matches(value, 15)) {
+            terminal_literal_next = true;
+            return TerminalInput::LiteralNext;
+        }
+        if (terminal_control_matches(value, 14)) { return TerminalInput::WordErase; }
+        if ((local & 8) != 0 && terminal_control_matches(value, 12)) {
+            return TerminalInput::Reprint;
+        }
+    }
+    if (terminal_control_matches(value, 2)) { return TerminalInput::Erase; }
+    if (terminal_control_matches(value, 3)) { return TerminalInput::Kill; }
+    if (terminal_control_matches(value, 4)) { return TerminalInput::EndFile; }
+    if (value == 10 || terminal_control_matches(value, 11) ||
+        ((local & 0x8000) != 0 && terminal_control_matches(value, 16))) {
+        return TerminalInput::EndLine(value);
+    }
+    return TerminalInput::Byte(value);
+}
+
+fn terminal_input_cancel_literal() { terminal_literal_next = false; }

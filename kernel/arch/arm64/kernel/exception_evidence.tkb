@@ -1603,6 +1603,9 @@ private fn ddb_render_fds() !{unsafe} {
 // pair to the guard in that file's kill(2) arm. A signal the kernel starts
 // accepting and does not name here prints as a bare hex remainder, which is
 // the opacity this rendering exists to remove.
+const DDB_SIGNAL_SIGINT: usize = 2;
+const DDB_SIGNAL_SIGQUIT: usize = 3;
+const DDB_SIGNAL_SIGTSTP: usize = 20;
 const DDB_SIGNAL_SIGTERM: usize = 15;
 const DDB_SIGNAL_SIGCHLD: usize = 17;
 
@@ -1619,10 +1622,24 @@ private fn ddb_put_signal_set(set: usize) !{unsafe} {
         ddb_puts("none");
         return;
     }
+    let sigint: usize = 1 << (DDB_SIGNAL_SIGINT - 1);
+    let sigquit: usize = 1 << (DDB_SIGNAL_SIGQUIT - 1);
     let sigterm: usize = 1 << (DDB_SIGNAL_SIGTERM - 1);
     let sigchld: usize = 1 << (DDB_SIGNAL_SIGCHLD - 1);
+    let sigtstp: usize = 1 << (DDB_SIGNAL_SIGTSTP - 1);
     let mut printed: usize = 0;
+    if ((set & sigint) != 0) {
+        if (printed != 0) { ddb_puts(","); }
+        ddb_puts("sigint");
+        printed = printed + 1;
+    }
+    if ((set & sigquit) != 0) {
+        if (printed != 0) { ddb_puts(","); }
+        ddb_puts("sigquit");
+        printed = printed + 1;
+    }
     if ((set & sigterm) != 0) {
+        if (printed != 0) { ddb_puts(","); }
         ddb_puts("sigterm");
         printed = printed + 1;
     }
@@ -1631,7 +1648,12 @@ private fn ddb_put_signal_set(set: usize) !{unsafe} {
         ddb_puts("sigchld");
         printed = printed + 1;
     }
-    let remainder: usize = set & ~(sigterm | sigchld);
+    if ((set & sigtstp) != 0) {
+        if (printed != 0) { ddb_puts(","); }
+        ddb_puts("sigtstp");
+        printed = printed + 1;
+    }
+    let remainder: usize = set & ~(sigint | sigquit | sigterm | sigchld | sigtstp);
     if (remainder != 0) {
         if (printed != 0) { ddb_puts("+"); }
         ddb_put_hex(remainder);

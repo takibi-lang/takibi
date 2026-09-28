@@ -2,6 +2,7 @@
 // hardware setup and the platform-specific storage/network scenarios.
 
 use "kernel/kernel/process.tkb";
+use "kernel/drivers/serial/terminal_io.tkb";
 use "kernel/kernel/syscall.tkb";
 use "kernel/fs/elf64.tkb";
 use "kernel/mm/address_space.tkb";
@@ -699,6 +700,11 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
     uart_put_udec(KERNEL_UART_RX_CAPACITY);
     kernel_boot_log(" dropped=");
     uart_put_udec(kernel_uart_rx_dropped_count());
+    kernel_boot_log("\n");
+    kernel_boot_log("terminal echo: operations=");
+    uart_put_udec(TERMINAL_ECHO_OPERATIONS);
+    kernel_boot_log(" dropped=");
+    uart_put_udec(terminal_echo_drop_count());
     kernel_boot_log("\n");
     // GitHub issue #540: this counter was kept and never read. It answers
     // #448's open question: whether a reap handed a parent with no child
@@ -1475,13 +1481,9 @@ fn kernel_uart_rx_isr(c: u8) !{unsafe} {
         }
         ProcessUartWakeResult::RetryRead => {}
     }
-    // A byte the ring cannot hold is counted there and reported at the end
-    // of the boot (GitHub issue #543); the interrupt has nothing else to do
-    // with it.
-    match kernel_uart_rx_push(c) {
-        UartRxPushResult::Stored => { }
-        UartRxPushResult::Dropped => { }
-    }
+    terminal_io_receive(guard, c);
     process_run_unlock(guard);
+    uart_terminal_resume_output();
+    kernel_log_terminal_flow_poll();
     interrupt_notify();
 }

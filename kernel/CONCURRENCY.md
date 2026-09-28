@@ -390,6 +390,15 @@ the interrupt finds it. The lock's release and acquire order the ring's
 contents between CPUs; the ring's own fences are compiler-only. #546's look
 with local interrupts masked stays as a cheap early exit, since a local mask
 cannot hold off an interrupt taken on another CPU.
+Termios settings and canonical editing use the same guard. A canonical-to-raw
+change wakes retrying readers if buffered input becomes readable without a
+new interrupt. Whole user-output chunks are admitted under this guard too,
+so TCSETSW cannot apply between a peer's settings snapshot and publication.
+Echo operations and the tagged CPU-0 TX queue use local IRQ masking; a signal
+flush cannot interrupt a peer-record peek/retire pair. Single-word atomic
+publication carries output pause and input-throttle requests to TX paths
+that cannot acquire the process-run lock. See `TERMINAL.md`.
+
 `/bin/peer-tty` is the admitted reader on the secondary. The deterministic
 `peer` mode of kernelcheck-uart-wake-qemu uses gdb to hold CPU1 after the
 reader's last lockless look. It starts `/bin/peer-spin` first, waits for its

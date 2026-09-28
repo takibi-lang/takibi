@@ -6134,11 +6134,9 @@ private fn kernel_process_block_would_miss(
         // window is pending here.
         ProcessWaitReason::Signal => {
             let waiting: *ProcessRecord = scheduled_process_record_of(from);
-            let sigterm_bit: usize = 1 << 14;
-            let mut wanted: usize = waiting.sigwait_set;
-            if ((waiting.signal_mask & sigterm_bit) == 0) {
-                wanted = wanted | sigterm_bit;
-            }
+            let terminating: usize = (1 << 1) | (1 << 2) | (1 << 14);
+            let wanted: usize = waiting.sigwait_set |
+                                (terminating & ~waiting.signal_mask);
             return (waiting.pending_signals & wanted) != 0;
         }
     }
@@ -6546,10 +6544,8 @@ fn kernel_process_current_signal_take(wait_set: usize)
     return ProcessSignalPendingResult::Missing;
 }
 
-// Return one pending, unblocked signal whose maintained default action is
-// process termination. SIGTERM is the only such signal accepted by kill(2),
-// and its handler is never entered (only SIGCHLD's is), so its default
-// action always applies.
+// Take one unblocked signal with a terminating default action. Terminal
+// INTR and QUIT use the same resource-release path as SIGTERM.
 fn kernel_process_current_termination_signal_take()
         -> ProcessSignalPendingResult {
     if (execution_here().current_live == false) {
@@ -6558,16 +6554,20 @@ fn kernel_process_current_termination_signal_take()
     let guard = process_run_lock();
     let mut handle: ProcessHandle = execution_here().current_handle;
     let record: *ProcessRecord = scheduled_process_record_of(handle);
-    let sigterm_bit: usize = 1 << 14;
-    if ((record.pending_signals & sigterm_bit) == 0 ||
-        (record.signal_mask & sigterm_bit) != 0) {
-        process_run_unlock(guard);
-        return ProcessSignalPendingResult::Missing;
+    let available: usize = record.pending_signals & ~record.signal_mask;
+    for signum: usize in 1..<16 {
+        if (signum == 2 || signum == 3 || signum == 15) {
+            let bit: usize = 1 << (signum - 1);
+            if ((available & bit) != 0) {
+                process_signal_pending_clear(guard, record, bit);
+                process_run_unlock(guard);
+                return ProcessSignalPendingResult::Pending(
+                    taken_signal_new(handle.pool_index, handle.generation, signum));
+            }
+        }
     }
-    process_signal_pending_clear(guard, record, sigterm_bit);
     process_run_unlock(guard);
-    return ProcessSignalPendingResult::Pending(
-        taken_signal_new(handle.pool_index, handle.generation, 15));
+    return ProcessSignalPendingResult::Missing;
 }
 
 fn kernel_process_current_prepare_signal_wait(wait_set: usize) {
@@ -6739,10 +6739,32 @@ private fn kernel_process_signal_deliver_to(
     // BusyBox init path. One with a handler (GitHub issue #627) stays
     // pending, masked or not, until a syscall return can run the handler.
     let caught: bool = signum == 17 && record.sigchld_handler > 1;
-    if ((record.signal_mask & bit) == 0 && signum != 15 && caught == false) {
+    // Every session has one group, so every group is orphaned: no parent
+    // can be in the same session but a different group. Unblocked SIGTSTP
+    // therefore has the ignored orphan-group default. A blocked SIGTSTP
+    // still participates in sigwait, as the generated signal really exists.
+    if ((record.signal_mask & bit) == 0 && signum != 2 && signum != 3 &&
+        signum != 15 && caught == false) {
         return ProcessSignalSendResult::Delivered;
     }
     process_signal_pending_raise(guard, record, bit);
+    // A terminal-generated fatal signal must interrupt a blocked child too,
+    // not wait for that child's deadline or an unrelated input byte.
+    if ((signum == 2 || signum == 3) && (record.signal_mask & bit) == 0 &&
+        scheduled_process_state_of(target) == ProcessSlotState::Blocked) {
+        match scheduled_process_blocked_take(guard, target) {
+            ScheduledProcessBlockedTakeResult::Missing => {}
+            ScheduledProcessBlockedTakeResult::Blocked(resources) => {
+                let (owner, blocked) = resources;
+                record.deadline_ticks = 0;
+                record.deadline_result = 0;
+                record.wait_reason = ProcessWaitReason::None;
+                let ready = scheduled_process_wake(owner, blocked);
+                scheduled_process_release(owner, ready);
+            }
+        }
+        return ProcessSignalSendResult::Delivered;
+    }
     if (scheduled_process_state_of(target) == ProcessSlotState::Blocked &&
         scheduled_process_wait_reason_of(target) ==
             ProcessWaitReason::Signal &&
@@ -6778,6 +6800,82 @@ fn kernel_process_signal_child_exit(
     match result {
         ProcessSignalSendResult::Missing => {}
         ProcessSignalSendResult::Delivered => {}
+    }
+}
+
+private let mut terminal_foreground_session: usize;
+
+fn kernel_process_terminal_reader(
+        guard: borrow ProcessRunGuard[scheduled_process_run_lock]) {
+    if (execution_here().current_live) {
+        terminal_foreground_session = scheduled_process_record_of(
+            execution_here().current_handle).session_id;
+    }
+}
+
+// Without controlling terminals or setpgid, the last terminal reader's
+// session is the UART foreground group. Group IDs are session IDs, and pids
+// are monotonically allocated, so pool-slot reuse cannot retarget a signal.
+// A canonical-to-raw change can expose bytes to a reader that is already
+// asleep, without a new UART interrupt. Wake Linux retrying readers only;
+// the internal scalar waiter must receive a real byte from the RX handler.
+fn kernel_process_terminal_settings_wake(
+        guard: borrow ProcessRunGuard[scheduled_process_run_lock]) {
+    let mut cursor = scheduled_process_first_slot();
+    let mut walking: bool = true;
+    while (walking) {
+        match cursor {
+            ProcessSlotCursor::Done => { walking = false; }
+            ProcessSlotCursor::At(slot) => {
+                let next = scheduled_process_next_slot(slot);
+                if (scheduled_process_record_state(slot) == ProcessSlotState::Blocked &&
+                    scheduled_process_record_wait_reason(slot) == ProcessWaitReason::UartRx &&
+                    scheduled_process_uart_block_delivery(slot) == UartBlockDelivery::Read) {
+                    match scheduled_process_blocked_take(guard,
+                            scheduled_process_handle_of_slot(slot)) {
+                        ScheduledProcessBlockedTakeResult::Missing => { }
+                        ScheduledProcessBlockedTakeResult::Blocked(resources) => {
+                            let (owner, blocked) = resources;
+                            match kernel_syscall_uart_deliver(
+                                scheduled_process_record_at(owner.pool_index).saved_sp,
+                                owner.pool_index, 0) {
+                                KernelUartDeliveryResult::Consumed => { }
+                                KernelUartDeliveryResult::RetryRead => { }
+                            }
+                            let ready = scheduled_process_wake(owner, blocked);
+                            scheduled_process_record_at(owner.pool_index).wait_reason =
+                                ProcessWaitReason::None;
+                            scheduled_process_release(owner, ready);
+                        }
+                    }
+                }
+                cursor = next;
+            }
+        }
+    }
+}
+
+fn kernel_process_terminal_signal(
+        guard: borrow ProcessRunGuard[scheduled_process_run_lock], signum: usize) {
+    if (terminal_foreground_session == 0) { return; }
+    let mut cursor = scheduled_process_first_slot();
+    let mut walking: bool = true;
+    while (walking) {
+        match cursor {
+            ProcessSlotCursor::Done => { walking = false; }
+            ProcessSlotCursor::At(slot) => {
+                if (scheduled_process_record_at(slot).session_id ==
+                        terminal_foreground_session &&
+                    scheduled_process_record_at(slot).pid != 1) {
+                    match kernel_process_signal_deliver_to(
+                            guard, scheduled_process_handle_of_slot(slot), signum) {
+                        ProcessSignalSendResult::Missing => {}
+                        ProcessSignalSendResult::Delivered => {}
+                    }
+                }
+                cursor = scheduled_process_next_slot(slot);
+            }
+        }
     }
 }
 

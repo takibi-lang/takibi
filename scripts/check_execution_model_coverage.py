@@ -98,9 +98,8 @@ EXEMPT = {
         "cpu_id(); memory.tkb asserts KERNEL_PREEMPTIBLE == 0 beside its only "
         "caller, and another core's writes arrive through the write epoch",
     "drivers/serial/uart_rx_ring.tkb":
-        "one producer, one consumer: the UART RX interrupt, routed to CPU0, "
-        "writes head and the drop count; a syscall from a process admitted "
-        "to CPU0 writes tail with interrupts masked",
+        "the process-run lock serializes CPU 0's RX interrupt, termios "
+        "line editing and terminal reads on any CPU",
     "platform/qemu/uart.tkb": "device state; SPIs are routed to CPU0",
     "platform/qemu/timer_irq.tkb":
         "GIC device state is initialized before interrupts and used by its routed cores",

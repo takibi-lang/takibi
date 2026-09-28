@@ -4,3 +4,13 @@ ok     the bytes came out in the order they went in
 ok     an emptied ring has nothing pending
 ok     ten bytes cross the end of the ring and come back in order
 ok     a 68-byte line fits whole, and a reset keeps the drop total
+ok     quoted newline stays uncommitted and EOF copies no NUL
+ok     a full canonical line reserves its committing delimiter
+ok     partial reads keep the delimiter and editing cannot cross it
+ok     switching to raw removes EOF metadata without losing bytes
+ok     BusyBox init sane settings are all accepted
+ok     unsupported flags and timing fail without mutating settings
+ok     ICRNL IXON ISIG and IEXTEN decode the real control characters
+ok     IXOFF hysteresis requests stop at high water and releases at low water
+ok     a full canonical line and its tab-width kill fit as compact echo operations
+ok     an echo operation beyond capacity is counted and never blocks

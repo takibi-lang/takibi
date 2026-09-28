@@ -127,9 +127,14 @@ fn uart_rx_ready() -> bool !{unsafe} {
     return (*fr & (1 << 4)) == 0; // RXFE clear = data available
 }
 
+fn uart_tx_busy() -> bool !{unsafe} {
+    let fr: *io u32 = unsafe { (rpi5_uart_base + 0x18) as *io u32 };
+    return (*fr & (1 << 3)) != 0;
+}
+
 fn uart_tx_isr() !{unsafe} {
     uart_tx_drain_into_fifo();
-    if (kernel_log_tx_pending() == false) { uart_tx_irq_disable(); }
+    if (terminal_output_paused() || uart_terminal_output_pending() == false) { uart_tx_irq_disable(); }
 }
 
 // GitHub issue #517: one register access each, and nothing else. The

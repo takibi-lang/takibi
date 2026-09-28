@@ -58,6 +58,11 @@ ATOMIC_RE = re.compile(
 
 # Files permitted to use the raw atomic intrinsics, and why.
 ATOMIC_ALLOWED = {
+    "drivers/serial/terminal.tkb":
+        "the process-run lock serializes termios writers and RX readers; "
+        "TX consumers on other cores acquire only the single pause word, "
+        "and peer readers publish the single input-throttle request word "
+        "for CPU 0 to send without taking a lock in its TX path",
     "lib/spinlock.tkb":
         "the lock itself; every other user is supposed to go through it",
     "lib/diagnostic_ring.tkb":

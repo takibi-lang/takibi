@@ -1,0 +1,113 @@
+// Bounded terminal echo operations, expanded one byte at a time by TX.
+// CPU 0 is the sole producer and consumer; callers mask IRQs while using
+// the queue. Compact erasure operations keep a full canonical-line kill
+// bounded without making the receive interrupt wait on a paused transmitter.
+use "kernel/lib/execution_model.tkb";
+
+const TERMINAL_ECHO_OPERATIONS: usize = 4096;
+variant TerminalEchoOperation { Byte(u8); Control(u8); Erase(usize); Newline; }
+must_use variant TerminalEchoPushResult { Queued; Full; }
+must_use variant TerminalEchoReadResult { Empty; Byte(u8); }
+
+private let mut terminal_echo_operations: [u32; TERMINAL_ECHO_OPERATIONS];
+private let mut terminal_echo_head: usize;
+private let mut terminal_echo_tail: usize;
+private let mut terminal_echo_count: usize;
+private let mut terminal_echo_phase: u8;
+private let mut terminal_echo_dropped: usize;
+
+fn terminal_echo_pending() -> bool { return terminal_echo_count != 0; }
+fn terminal_echo_drop_count() -> usize { return terminal_echo_dropped; }
+
+fn terminal_echo_reset() {
+    terminal_echo_head = 0;
+    terminal_echo_tail = 0;
+    terminal_echo_count = 0;
+    terminal_echo_phase = 0;
+}
+
+private fn terminal_echo_full() -> TerminalEchoPushResult {
+    if (terminal_echo_dropped < 0xFFFFFFFFFFFFFFFF) {
+        terminal_echo_dropped = terminal_echo_dropped + 1;
+    }
+    return TerminalEchoPushResult::Full;
+}
+
+fn terminal_echo_push(operation: TerminalEchoOperation) -> TerminalEchoPushResult {
+    static_assert(KERNEL_PREEMPTIBLE == 0,
+        "terminal echo queue requires CPU 0 and masked receive/transmit IRQs");
+    // The two low bits encode the byte-expansion shape; the remaining
+    // bits carry a byte or an erasure count, never an address or ownership.
+    let mut encoded: u32 = 0;
+    match operation {
+        TerminalEchoOperation::Byte(value) => { encoded = (value as u32) << 2; }
+        TerminalEchoOperation::Control(value) => {
+            encoded = ((value as u32) << 2) | 1;
+        }
+        TerminalEchoOperation::Erase(columns) => {
+            if (columns == 0) { return TerminalEchoPushResult::Queued; }
+            if (columns > 32768) { return terminal_echo_full(); }
+            encoded = ((columns as u32) << 2) | 2;
+        }
+        TerminalEchoOperation::Newline => { encoded = 3; }
+    }
+    let tail: usize = terminal_echo_tail;
+    if (tail >= TERMINAL_ECHO_OPERATIONS ||
+        terminal_echo_count >= TERMINAL_ECHO_OPERATIONS) {
+        return terminal_echo_full();
+    }
+    terminal_echo_operations[tail] = encoded;
+    terminal_echo_tail = (tail + 1) % TERMINAL_ECHO_OPERATIONS;
+    terminal_echo_count = terminal_echo_count + 1;
+    return TerminalEchoPushResult::Queued;
+}
+
+private fn terminal_echo_retire() {
+    terminal_echo_head = (terminal_echo_head + 1) % TERMINAL_ECHO_OPERATIONS;
+    if (terminal_echo_count != 0) { terminal_echo_count = terminal_echo_count - 1; }
+    terminal_echo_phase = 0;
+}
+
+fn terminal_echo_read() -> TerminalEchoReadResult {
+    if (terminal_echo_count == 0) { return TerminalEchoReadResult::Empty; }
+    let head: usize = terminal_echo_head;
+    if (head >= TERMINAL_ECHO_OPERATIONS) { return TerminalEchoReadResult::Empty; }
+    let operation: u32 = terminal_echo_operations[head];
+    let parameter: u32 = operation >> 2;
+    match operation & 3 {
+        0 => {
+            terminal_echo_retire();
+            return TerminalEchoReadResult::Byte(parameter as u8);
+        }
+        1 => {
+            if (terminal_echo_phase == 0) {
+                terminal_echo_phase = 1;
+                return TerminalEchoReadResult::Byte(94);
+            }
+            terminal_echo_retire();
+            return TerminalEchoReadResult::Byte(parameter as u8);
+        }
+        2 => {
+            if (terminal_echo_phase == 0) {
+                terminal_echo_phase = 1;
+                return TerminalEchoReadResult::Byte(8);
+            }
+            if (terminal_echo_phase == 1) {
+                terminal_echo_phase = 2;
+                return TerminalEchoReadResult::Byte(32);
+            }
+            terminal_echo_phase = 0;
+            if (parameter <= 1) { terminal_echo_retire(); }
+            else { terminal_echo_operations[head] = ((parameter - 1) << 2) | 2; }
+            return TerminalEchoReadResult::Byte(8);
+        }
+        _ => {
+            if (terminal_echo_phase == 0) {
+                terminal_echo_phase = 1;
+                return TerminalEchoReadResult::Byte(13);
+            }
+            terminal_echo_retire();
+            return TerminalEchoReadResult::Byte(10);
+        }
+    }
+}

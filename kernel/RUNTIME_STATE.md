@@ -375,3 +375,9 @@ six files is that test-only state is now physically separated from
 production state at the file level, satisfying #294's "test-only
 lifecycle state is clearly separated from ordinary kernel state"
 acceptance criterion -- not that it stopped being global.
+
+The single UART's termios settings and canonical input metadata are shared
+under the process-run lock. CPU 0 owns the bounded echo operation queue and
+IRQ-protected transmit tags. Atomic pause and input-throttle words connect
+readers on any CPU to the lock-free TX paths; `TERMINAL.md` describes the
+state transitions and supported attributes.

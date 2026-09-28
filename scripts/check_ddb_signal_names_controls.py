@@ -79,11 +79,11 @@ def main() -> int:
     status, report = run(REPO)
     if status != 0:
         failures.append(f"the repository itself does not pass: {report.strip()!r}")
-    elif "2 signal(s) kill(2) accepts" not in report:
+    elif "5 signal(s) kill(2) accepts" not in report:
         failures.append(f"the repository passed about an unexpected "
                         f"vocabulary size: {report.strip()!r}")
 
-    # A third signal, accepted by kill(2) and never named. The kernel keeps
+    # Another signal, accepted by kill(2) and never named. The kernel keeps
     # working and every signal but this one prints as a word.
     failures += case(
         "a signal accepted and not named",
@@ -91,9 +91,8 @@ def main() -> int:
               "const LINUX_SIGCHLD: usize = 17;\n"
               "const LINUX_SIGUSR1: usize = 10;"),
          edit(SYSCALL,
-              "if (x1 != 0 && x1 != LINUX_SIGTERM && x1 != LINUX_SIGCHLD) {",
-              "if (x1 != 0 && x1 != LINUX_SIGTERM && x1 != LINUX_SIGCHLD &&\n"
-              "            x1 != LINUX_SIGUSR1) {")),
+              "x1 != LINUX_SIGTSTP) {",
+              "x1 != LINUX_SIGTSTP && x1 != LINUX_SIGUSR1) {")),
         "declares no DDB_SIGNAL_SIGUSR1")
 
     # The word left behind after the constant it stood for was renamed.
@@ -123,15 +122,15 @@ def main() -> int:
     # once inside the hex the view claims is what it could not name.
     failures += case(
         "a named bit left in the remainder",
-        edit(DEBUGGER, "set & ~(sigterm | sigchld);", "set & ~(sigterm);"),
+        edit(DEBUGGER, "set & ~(sigint | sigquit | sigterm | sigchld | sigtstp);", "set & ~(sigint | sigquit | sigterm | sigtstp);"),
         "print that signal twice")
 
     # And a remainder that subtracts something no constant derives, which
     # drops that bit from a view whose whole claim is that nothing is lost.
     failures += case(
         "an unnamed bit subtracted from the remainder",
-        edit(DEBUGGER, "set & ~(sigterm | sigchld);",
-             "set & ~(sigterm | sigchld | set);"),
+        edit(DEBUGGER, "set & ~(sigint | sigquit | sigterm | sigchld | sigtstp);",
+             "set & ~(sigint | sigquit | sigterm | sigchld | sigtstp | set);"),
         "a bit hidden from a view")
 
     # The check reads syscall.tkb's own guard. If that moves, the check must

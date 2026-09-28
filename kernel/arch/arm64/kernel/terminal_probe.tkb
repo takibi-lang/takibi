@@ -1,0 +1,233 @@
+// Exercise termios through the real EL0 boundary and host-driven UART input.
+// The same entry point repeats on CPU 0 and CPU 1, restoring the original
+// terminal settings before returning to the persistent BusyBox shell.
+const TERMINAL_PROBE_ERROR: usize = 0xFFFFFFFFFFFFF000;
+
+private fn terminal_probe_write(bytes: borrow []u8) {
+    let mut done: usize = 0;
+    while (done < bytes.len) {
+        let count: usize = svc5(64, 1, (bytes as *u8 as usize) + done,
+                               bytes.len - done, 0, 0);
+        if (count == 0 || count >= TERMINAL_PROBE_ERROR) { svc5(93, 1, 0, 0, 0, 0); }
+        done = done + count;
+    }
+}
+
+private fn terminal_probe_fail() {
+    terminal_probe_write(bs"termios: FAIL\n");
+    svc5(93, 1, 0, 0, 0, 0);
+}
+
+private fn terminal_probe_word(bytes: borrow [u8; 40..], field: {0..<4 as usize},
+                              word: usize) {
+    for byte: usize in 0..<4 { bytes[field * 4 + byte] = (word >> (byte * 8)) as u8; }
+}
+
+private fn terminal_probe_set(bytes: borrow [u8; 40..], request: usize) {
+    if (svc5(29, 0, request, bytes as *u8 as usize, 0, 0) != 0) {
+        terminal_probe_fail();
+    }
+}
+
+private fn terminal_probe_pin(cpu: usize) {
+    let mut mask: [u8; 8];
+    for index: usize in 0..<8 { mask[index] = 0; }
+    mask[0] = (1 << cpu) as u8;
+    if (svc5(122, 0, 8, mask as *u8 as usize, 0, 0) != 0) { terminal_probe_fail(); }
+}
+
+private fn terminal_probe_read(bytes: borrow [u8; 64..], cpu: usize) -> usize {
+    let count: usize = svc5(63, 0, bytes as *u8 as usize, 64, 0, 0);
+    let mut where: [u8; 4];
+    if (svc5(168, where as *u8 as usize, 0, 0, 0, 0) != 0 ||
+        where[0] != (cpu as u8) || where[1] != 0 || where[2] != 0 || where[3] != 0) {
+        terminal_probe_fail();
+    }
+    return count;
+}
+
+private fn terminal_probe_expect(bytes: borrow []u8, cpu: usize) {
+    let mut received: [u8; 64];
+    let mut got: usize = 0;
+    while (got < bytes.len) {
+        let count: usize = terminal_probe_read(received as [u8; 64..], cpu);
+        if (count == 0 || count > 64 || got + count > bytes.len) { terminal_probe_fail(); }
+        for index: usize in 0..<64 {
+            if (index < count) {
+                let source: usize = got + index;
+                if (source < bytes.len) {
+                    if (received[index] != bytes[source]) { terminal_probe_fail(); }
+                }
+            }
+        }
+        got = got + count;
+    }
+}
+
+fn terminal_probe() {
+    // Input-generated signals address the foreground group. Keep this probe
+    // out of the launching shell's session before exercising those signals.
+    if (svc5(157, 0, 0, 0, 0, 0) >= TERMINAL_PROBE_ERROR) { terminal_probe_fail(); }
+    let mut original: [u8; 40];
+    let mut settings: [u8; 40];
+    for index: usize in 0..<40 { original[index] = 0xA5; }
+    if (svc5(29, 0, 0x5401, original as *u8 as usize, 0, 0) != 0) { terminal_probe_fail(); }
+    for index: usize in 36..<40 {
+        if (original[index] != 0xA5) { terminal_probe_fail(); }
+    }
+    if (svc5(29, 999, 0x5401, original as *u8 as usize, 0, 0) != 0xFFFFFFFFFFFFFFF7 ||
+        svc5(29, 0, 0xFFFF, 0, 0, 0) != 0xFFFFFFFFFFFFFFE7 ||
+        svc5(29, 0, 0x5401, 0x7FFFFFFFF000, 0, 0) != 0xFFFFFFFFFFFFFFF2 ||
+        svc5(29, 0, 0x5402, 0x7FFFFFFFF000, 0, 0) != 0xFFFFFFFFFFFFFFF2 ||
+        svc5(29, 0, 0x5414, 0, 0, 0) != 0xFFFFFFFFFFFFFFE7) { terminal_probe_fail(); }
+    let file: usize = svc5(56, 0xFFFFFFFFFFFFFF9C,
+                           "/hello.txt" as *u8 as usize, 0, 0, 0);
+    if (file >= TERMINAL_PROBE_ERROR ||
+        svc5(29, file, 0x5401, original as *u8 as usize, 0, 0) != 0xFFFFFFFFFFFFFFE7) {
+        terminal_probe_fail();
+    }
+    svc5(57, file, 0, 0, 0, 0);
+    let mut size: [u8; 8];
+    if (svc5(29, 0, 0x5413, size as *u8 as usize, 0, 0) != 0 ||
+        size[0] != 24 || size[1] != 0 || size[2] != 80 || size[3] != 0 ||
+        size[4] != 0 || size[5] != 0 || size[6] != 0 || size[7] != 0) { terminal_probe_fail(); }
+    for cpu: usize in 0..<2 {
+        for index: usize in 0..<40 { settings[index] = original[index]; }
+        // Unsupported bits and read timing must fail without mutating the
+        // shared state; all three setters use the same validation policy.
+        for request: usize in 0x5402..<0x5405 {
+            settings[0] = settings[0] | 1;
+            if (svc5(29, 0, request, settings as *u8 as usize, 0, 0) != 0xFFFFFFFFFFFFFFEA) {
+                terminal_probe_fail();
+            }
+            settings[0] = original[0];
+        }
+        settings[22] = 1;
+        if (svc5(29, 0, 0x5402, settings as *u8 as usize, 0, 0) != 0xFFFFFFFFFFFFFFEA) {
+            terminal_probe_fail();
+        }
+        settings[22] = 0;
+        settings[23] = 1;
+        terminal_probe_word(settings as [u8; 40..], 0, 0x1500);
+        terminal_probe_word(settings as [u8; 40..], 1, 5);
+        terminal_probe_word(settings as [u8; 40..], 3, 0x8A3B);
+        terminal_probe_set(settings as [u8; 40..], 0x5404);
+        let mut alias: [u8; 40];
+        for index: usize in 0..<40 { alias[index] = 0xA5; }
+        if (svc5(29, 1, 0x5401, alias as *u8 as usize, 0, 0) != 0) { terminal_probe_fail(); }
+        for index: usize in 0..<36 {
+            if (alias[index] != settings[index]) { terminal_probe_fail(); }
+        }
+        terminal_probe_write(bs"termios: canonical input\n");
+        terminal_probe_pin(cpu);
+        terminal_probe_expect(bs"abx\n", cpu);
+        terminal_probe_write(bs"termios: canonical PASS\n");
+
+        terminal_probe_write(bs"termios: editing input\n");
+        let mut edited: [u8; 7] = { 111, 110, 101, 32, 88, 3, 10 };
+        terminal_probe_expect(edited as []u8, cpu);
+        terminal_probe_write(bs"termios: editing PASS\n");
+
+        terminal_probe_write(bs"termios: empty EOF input\n");
+        let mut eof: [u8; 64];
+        if (terminal_probe_read(eof as [u8; 64..], cpu) != 0) { terminal_probe_fail(); }
+        terminal_probe_write(bs"termios: tail EOF input\n");
+        terminal_probe_expect(bs"eof-tail", cpu);
+        terminal_probe_write(bs"termios: EOF PASS\n");
+
+        terminal_probe_word(settings as [u8; 40..], 3, 0);
+        terminal_probe_word(settings as [u8; 40..], 0, 0);
+        terminal_probe_set(settings as [u8; 40..], 0x5403);
+        terminal_probe_write(bs"termios: raw input\n");
+        terminal_probe_pin(cpu);
+        terminal_probe_expect(bs"raw-proof", cpu);
+        terminal_probe_write(bs"termios: raw PASS\n");
+
+        terminal_probe_word(settings as [u8; 40..], 3, 0x42);
+        terminal_probe_set(settings as [u8; 40..], 0x5402);
+        terminal_probe_write(bs"termios: newline echo input\n");
+        terminal_probe_pin(cpu);
+        terminal_probe_expect(bs"hidden\n", cpu);
+        terminal_probe_write(bs"termios: newline echo PASS\n");
+
+        terminal_probe_word(settings as [u8; 40..], 0, 0x1500);
+        terminal_probe_word(settings as [u8; 40..], 3, 0x8A3B);
+        terminal_probe_set(settings as [u8; 40..], 0x5402);
+        terminal_probe_write(bs"termios: output flow input\n");
+        terminal_probe_pin(cpu);
+        terminal_probe_expect(bs"FLOW\n", cpu);
+        terminal_probe_write(bs"termios: output flow PASS\n");
+
+        // Disable echo while filling the real UART ring beyond IXOFF's high
+        // water, then consume it below low water and require XON on the host.
+        terminal_probe_word(settings as [u8; 40..], 3, 2);
+        terminal_probe_set(settings as [u8; 40..], 0x5404);
+        terminal_probe_write(bs"termios: input flow input\n");
+        terminal_probe_pin(cpu);
+        let mut count: usize = 0;
+        let mut ended: bool = false;
+        while (ended == false) {
+            let got: usize = terminal_probe_read(eof as [u8; 64..], cpu);
+            if (got == 0 || got > 64) { terminal_probe_fail(); }
+            for index: usize in 0..<64 {
+                if (index < got) {
+                    if (eof[index] == 10) { ended = true; }
+                    else if (eof[index] != 70) { terminal_probe_fail(); }
+                    count = count + 1;
+                }
+            }
+        }
+        if (count != 3101) { terminal_probe_fail(); }
+        terminal_probe_write(bs"termios: input flow PASS\n");
+
+        terminal_probe_word(settings as [u8; 40..], 3, 0x8A3B);
+        terminal_probe_set(settings as [u8; 40..], 0x5404);
+        let mut mask: [u8; 8];
+        for index: usize in 0..<8 { mask[index] = 0; }
+        mask[0] = 6;
+        mask[2] = 8;
+        if (svc5(135, 0, mask as *u8 as usize, 0, 8, 0) != 0) { terminal_probe_fail(); }
+        terminal_probe_write(bs"termios: masked signals input\n");
+        terminal_probe_pin(cpu);
+        terminal_probe_expect(bs"\n", cpu);
+        if (svc5(137, mask as *u8 as usize, 0, 0, 8, 0) != 2 ||
+            svc5(137, mask as *u8 as usize, 0, 0, 8, 0) != 3 ||
+            svc5(137, mask as *u8 as usize, 0, 0, 8, 0) != 20) { terminal_probe_fail(); }
+        if (svc5(135, 1, mask as *u8 as usize, 0, 8, 0) != 0) { terminal_probe_fail(); }
+        terminal_probe_write(bs"termios: signals PASS\n");
+        terminal_probe_write(bs"termios: orphan SUSP input\n");
+        terminal_probe_expect(bs"\n", cpu);
+        terminal_probe_write(bs"termios: orphan SUSP PASS\n");
+        // Give a blocked child a session of its own, so a terminal signal
+        // cannot terminate the shell or this parent. A first line arms the
+        // foreground group before the host sees the fatal-input marker.
+        mask[0] = 0;
+        mask[2] = 1;
+        if (svc5(135, 0, mask as *u8 as usize, 0, 8, 0) != 0) { terminal_probe_fail(); }
+        for signum: usize in 2..<4 {
+            let child: usize = svc5(220, 0x11, 0, 0, 0, 0);
+            if (child == 0) {
+                if (svc5(157, 0, 0, 0, 0, 0) >= TERMINAL_PROBE_ERROR) { terminal_probe_fail(); }
+                terminal_probe_pin(cpu);
+                if (signum == 2) { terminal_probe_write(bs"termios: fatal INT arm\n"); }
+                else { terminal_probe_write(bs"termios: fatal QUIT arm\n"); }
+                terminal_probe_expect(bs"\n", cpu);
+                if (signum == 2) { terminal_probe_write(bs"termios: fatal INT input\n"); }
+                else { terminal_probe_write(bs"termios: fatal QUIT input\n"); }
+                terminal_probe_expect(bs"\n", cpu);
+                terminal_probe_fail();
+            }
+            if (child >= TERMINAL_PROBE_ERROR ||
+                svc5(137, mask as *u8 as usize, 0, 0, 8, 0) != 17) { terminal_probe_fail(); }
+            let mut status: [u8; 4];
+            if (svc5(260, child, status as *u8 as usize, 0, 0, 0) != child ||
+                status[0] != 0 || status[1] != (128 + signum) as u8) { terminal_probe_fail(); }
+            if (signum == 2) { terminal_probe_write(bs"termios: fatal INT PASS\n"); }
+            else { terminal_probe_write(bs"termios: fatal QUIT PASS\n"); }
+        }
+        if (svc5(135, 1, mask as *u8 as usize, 0, 8, 0) != 0) { terminal_probe_fail(); }
+        terminal_probe_set(original as [u8; 40..], 0x5404);
+    }
+    terminal_probe_write(bs"termios: every check PASS\n");
+    svc5(93, 0, 0, 0, 0, 0);
+}

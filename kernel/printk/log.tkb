@@ -11,6 +11,8 @@
 use "kernel/lib/execution_model.tkb";
 use "kernel/printk/number.tkb";
 use "kernel/printk/peer_console.tkb";
+use "kernel/drivers/serial/terminal.tkb";
+use "kernel/drivers/serial/terminal_echo.tkb";
 
 const KERNEL_LOG_RECORD_COUNT: usize = 256;
 const KERNEL_LOG_TEXT_MAX: usize = 160;
@@ -325,6 +327,8 @@ fn kernel_log_tx_spun_total() -> usize {
 // easy and the one this kernel cannot have -- every view compares text.
 const KERNEL_LOG_TX_QUEUE_BYTES: usize = 512;
 private let mut kernel_log_tx_queue: [u8; KERNEL_LOG_TX_QUEUE_BYTES];
+private let mut kernel_log_tx_terminal: [bool; KERNEL_LOG_TX_QUEUE_BYTES];
+private let mut kernel_log_terminal_column: usize;
 private let mut kernel_log_tx_head: usize = 0;
 private let mut kernel_log_tx_tail: usize = 0;
 private let mut kernel_log_tx_count: usize = 0;
@@ -447,6 +451,8 @@ fn kernel_log_tx_push(value: u8) -> bool {
     if (slot >= KERNEL_LOG_TX_QUEUE_BYTES) { return false; }
     let safe_slot: {0..<KERNEL_LOG_TX_QUEUE_BYTES as usize} = slot;
     kernel_log_tx_queue[safe_slot] = value;
+    kernel_log_tx_terminal[safe_slot] = false;
+    kernel_log_terminal_column_byte(value);
     kernel_log_wire_last = value;
     kernel_log_tx_tail = slot + 1;
     if (kernel_log_tx_tail >= KERNEL_LOG_TX_QUEUE_BYTES) {
@@ -454,6 +460,64 @@ fn kernel_log_tx_push(value: u8) -> bool {
     }
     kernel_log_tx_count = kernel_log_tx_count + 1;
     return true;
+}
+
+// Tags keep a signal flush from discarding queued kernel diagnostics.
+private fn kernel_log_tx_push_terminal(value: u8) -> bool {
+    let slot: usize = kernel_log_tx_tail;
+    if (kernel_log_tx_push(value) == false) { return false; }
+    if (slot < KERNEL_LOG_TX_QUEUE_BYTES) { kernel_log_tx_terminal[slot] = true; }
+    return true;
+}
+
+private fn kernel_log_terminal_column_byte(value: u8) {
+    if (value == 13) { kernel_log_terminal_column = 0; }
+    else if (value == 8) {
+        if (kernel_log_terminal_column != 0) {
+            kernel_log_terminal_column = kernel_log_terminal_column - 1;
+        }
+    } else if (value == 9) {
+        kernel_log_terminal_column = (kernel_log_terminal_column + 8) & ~7;
+    } else if (value >= 32 && value != 127) {
+        kernel_log_terminal_column = (kernel_log_terminal_column + 1) % 65536;
+    }
+}
+
+fn uart_terminal_column() -> usize { return kernel_log_terminal_column; }
+
+// CPU 0, IRQs masked. Input signals flush terminal output, while kernel
+// records survive. A peer publishes whole records with release ordering;
+// retiring the currently visible prefix cannot remove a future publication.
+fn uart_terminal_flush_output() {
+    terminal_echo_reset();
+    let count: usize = kernel_log_tx_count;
+    let head: usize = kernel_log_tx_head;
+    let mut kept: usize = 0;
+    for offset: usize in 0..<KERNEL_LOG_TX_QUEUE_BYTES {
+        if (offset < count) {
+            let source: usize = (head + offset) % KERNEL_LOG_TX_QUEUE_BYTES;
+            if (source < KERNEL_LOG_TX_QUEUE_BYTES &&
+                kernel_log_tx_terminal[source] == false) {
+                let target: usize = (head + kept) % KERNEL_LOG_TX_QUEUE_BYTES;
+                if (target < KERNEL_LOG_TX_QUEUE_BYTES) {
+                    kernel_log_tx_queue[target] = kernel_log_tx_queue[source];
+                    kernel_log_tx_terminal[target] = false;
+                    kept = kept + 1;
+                }
+            }
+        }
+    }
+    kernel_log_tx_count = kept;
+    kernel_log_tx_tail = (head + kept) % KERNEL_LOG_TX_QUEUE_BYTES;
+    let mut record: PeerConsoleRecord;
+    for cpu: usize in 1..<KERNEL_MAX_CORES {
+        for step: usize in 0..<PEER_CONSOLE_RECORDS {
+            match peer_console_peek(cpu, &record) {
+                PeerConsolePeek::Empty => { }
+                PeerConsolePeek::Ready(length) => { peer_console_retire(cpu); }
+            }
+        }
+    }
 }
 
 must_use variant KernelLogTxByte { Empty; Byte(u8); }
@@ -491,15 +555,81 @@ private fn uart_tx_spin_store(c: u8) !{unsafe} {
     if (cpu_id() == 0) { kernel_log_wire_last = c; }
 }
 
+// Only CPU 0 sends UART input-flow requests. Readers on other CPUs publish
+// their desired state atomically; coalescing to the latest state cannot leave
+// the sender stopped after the receive ring became empty.
+private let mut kernel_log_terminal_input_stopped: bool;
+
+fn kernel_log_terminal_flow_poll() !{unsafe} {
+    let flags: usize = mutex_irq_save();
+    let wanted: bool = terminal_input_flow_requested();
+    if (wanted != kernel_log_terminal_input_stopped) {
+        kernel_log_terminal_input_stopped = wanted;
+        let mut control: u8 = terminal_control_byte(8);
+        if (wanted) { control = terminal_control_byte(9); }
+        if (control != 0) { uart_wire_byte(control); }
+    }
+    mutex_irq_restore(flags);
+}
+
+// Echo operations are bounded and never spin in the receive interrupt.
+// The caller is CPU 0 with IRQs masked, including the RX handler itself.
+fn uart_terminal_echo(operation: TerminalEchoOperation) {
+    match terminal_echo_push(operation) {
+        TerminalEchoPushResult::Queued => {
+            match operation {
+                TerminalEchoOperation::Byte(value) => {
+                    kernel_log_terminal_column_byte(value);
+                }
+                TerminalEchoOperation::Control(value) => {
+                    kernel_log_terminal_column_byte(94);
+                    kernel_log_terminal_column_byte(value);
+                }
+                TerminalEchoOperation::Erase(columns) => {
+                    if (kernel_log_terminal_column >= columns) {
+                        kernel_log_terminal_column = kernel_log_terminal_column - columns;
+                    } else { kernel_log_terminal_column = 0; }
+                }
+                TerminalEchoOperation::Newline => { kernel_log_terminal_column = 0; }
+            }
+        }
+        TerminalEchoPushResult::Full => { }
+    }
+}
+
+fn uart_terminal_output_pending() -> bool {
+    return kernel_log_tx_pending() || terminal_echo_pending();
+}
+
+fn uart_terminal_resume_output() !{unsafe} {
+    let flags: usize = mutex_irq_save();
+    if (terminal_output_paused() == false) {
+        uart_tx_drain_into_fifo();
+        if (uart_terminal_output_pending()) { uart_tx_irq_enable(); }
+    }
+    mutex_irq_restore(flags);
+}
+
 // Move queued bytes into the FIFO while both have room. Runs from the TX
 // interrupt as well as from the poll-drain paths, so it carries neither
 // `logs` nor `locks`: the effect system rejects `locks` on an `!{interrupt}`
 // function, and a console that could block on one could not report the
 // deadlock it is in.
 fn uart_tx_drain_into_fifo() !{unsafe} {
-    while (kernel_log_tx_pending() && uart_tx_fifo_full() == false) {
+    if (terminal_output_paused()) { return; }
+    uart_tx_drain_into_fifo_force();
+}
+
+// Fatal/DDB flushes must remain available even after a user sent XOFF.
+private fn uart_tx_drain_into_fifo_force() !{unsafe} {
+    while (uart_terminal_output_pending() && uart_tx_fifo_full() == false) {
         match kernel_log_tx_pop() {
-            KernelLogTxByte::Empty => { return; }
+            KernelLogTxByte::Empty => {
+                match terminal_echo_read() {
+                    TerminalEchoReadResult::Empty => { return; }
+                    TerminalEchoReadResult::Byte(value) => { uart_tx_store(value); }
+                }
+            }
             KernelLogTxByte::Byte(value) => { uart_tx_store(value); }
         }
     }
@@ -524,7 +654,15 @@ fn uart_putc(c: u8) !{logs, unsafe} {
 // the retained log's capture.
 private fn uart_wire_byte(c: u8) !{logs, unsafe} {
     kernel_log_note_tx_byte();
+    // The paused queue belongs to terminal writes. Kernel diagnostics and
+    // terminal flow-control bytes remain usable without draining that queue.
+    if (terminal_output_paused()) {
+        kernel_log_terminal_column_byte(c);
+        uart_tx_spin_store(c);
+        return;
+    }
     if (kernel_log_tx_is_live() == false) {
+        kernel_log_terminal_column_byte(c);
         uart_tx_spin_store(c);
         return;
     }
@@ -545,7 +683,7 @@ private fn uart_wire_byte(c: u8) !{logs, unsafe} {
     }
     let queued: bool = kernel_log_tx_push(c);
     uart_tx_drain_into_fifo();
-    let still_pending: bool = kernel_log_tx_pending();
+    let still_pending: bool = uart_terminal_output_pending();
     mutex_irq_restore(irq_flags);
     if (queued == false) {
         uart_tx_spin_store(c);
@@ -567,9 +705,8 @@ private fn uart_wire_byte(c: u8) !{logs, unsafe} {
 // Kernel log text keeps its own rule: it polls when the queue is full. The
 // kernel cannot sleep at an arbitrary logging call, and one queue keeps the
 // order on the wire exactly what the calls made it -- which every view
-// compares. A queue of userspace output's own is the boundary a tty layer
-// would sit on (#435), and it needs a policy for merging two streams without
-// splitting a line; nothing calls for that yet.
+// compares. Terminal echo has a bounded operation queue of its own; writers
+// wait until it drains so a reply cannot overtake the input being echoed.
 const KERNEL_LOG_TX_WRITER_LOW_WATER: usize = 256;
 
 // DDB captures these before the console queue is stood down and flushed.
@@ -593,6 +730,8 @@ private let mut uart_user_write_sleeps: usize = 0;
 // live there is no queue to wait on and the bytes spin as they always have,
 // so the answer is the most one call takes.
 fn uart_user_write_room() -> usize {
+    if (terminal_output_paused()) { return 0; }
+    if (cpu_id() == 0 && terminal_echo_pending()) { return 0; }
     let cpu: usize = cpu_id();
     if (cpu != 0) { return peer_console_room(cpu); }
     if (kernel_log_tx_is_live() == false) {
@@ -608,7 +747,8 @@ fn uart_user_write_room() -> usize {
 
 // Whether the TX interrupt should wake sleeping writers.
 fn kernel_log_tx_writer_room() -> bool {
-    return kernel_log_tx_count <= KERNEL_LOG_TX_WRITER_LOW_WATER;
+    return terminal_output_paused() == false && terminal_echo_pending() == false &&
+           kernel_log_tx_count <= KERNEL_LOG_TX_WRITER_LOW_WATER;
 }
 
 // Queue what fits of a user write and return how many bytes that was. Each
@@ -616,6 +756,8 @@ fn kernel_log_tx_writer_room() -> bool {
 // is only counted once it is certain to be queued, so the one a full queue
 // turns away is counted when the retried write takes it.
 fn uart_user_write(bytes: borrow []u8) -> usize !{logs, unsafe} {
+    if (terminal_output_paused()) { return 0; }
+    if (cpu_id() == 0 && terminal_echo_pending()) { return 0; }
     // GitHub issue #534: a peer never touches the PL011 or core 0's queue.
     // What it hands over is published whole records, and the count is only
     // what the ring took.
@@ -643,7 +785,7 @@ fn uart_user_write(bytes: borrow []u8) -> usize !{logs, unsafe} {
                     let value: u8 = bytes[index];
                     if (kernel_log_capture_uart_byte(value)) {
                         kernel_log_note_tx_byte();
-                        if (kernel_log_tx_push(value) == false) { room = false; }
+                        if (kernel_log_tx_push_terminal(value) == false) { room = false; }
                     }
                     if (room) { taken = taken + 1; }
                 }
@@ -651,7 +793,7 @@ fn uart_user_write(bytes: borrow []u8) -> usize !{logs, unsafe} {
         }
     }
     uart_tx_drain_into_fifo();
-    let still_pending: bool = kernel_log_tx_pending();
+    let still_pending: bool = uart_terminal_output_pending();
     mutex_irq_restore(irq_flags);
     if (still_pending) { uart_tx_irq_enable(); }
     return taken;
@@ -681,9 +823,9 @@ fn uart_user_write_sleep_total() -> usize {
 // while the queue still holds earlier output would arrive out of order.
 fn uart_tx_flush() !{unsafe} {
     let irq_flags: usize = mutex_irq_save();
-    while (kernel_log_tx_pending()) {
+    while (uart_terminal_output_pending()) {
         while (uart_tx_fifo_full()) { }
-        uart_tx_drain_into_fifo();
+        uart_tx_drain_into_fifo_force();
     }
     uart_tx_irq_disable();
     mutex_irq_restore(irq_flags);
@@ -843,7 +985,7 @@ private fn kernel_log_peer_console_probe_step(
 //
 // No `logs`, no `locks`: the interrupt dispatcher calls it.
 fn kernel_log_peer_console_drain() {
-    if (cpu_id() != 0) { return; }
+    if (cpu_id() != 0 || terminal_output_paused() || terminal_echo_pending()) { return; }
     if (kernel_log_core_here().emergency || kernel_log_tx_is_live() == false) {
         return;
     }
@@ -855,31 +997,30 @@ fn kernel_log_peer_console_drain() {
                 if (peer_console_ddb_held(cpu)) { draining = false; }
             }
             if (draining) {
+                let irq_flags: usize = mutex_irq_save();
                 match peer_console_peek(cpu, &record) {
                     PeerConsolePeek::Empty => { draining = false; }
                     PeerConsolePeek::Ready(length) => {
-                        let irq_flags: usize = mutex_irq_save();
                         let count: usize = kernel_log_tx_count;
                         if (count > KERNEL_LOG_TX_QUEUE_BYTES ||
                             KERNEL_LOG_TX_QUEUE_BYTES - count < length) {
-                            mutex_irq_restore(irq_flags);
                             draining = false;
                         } else {
                             for i: usize in 0..<PEER_CONSOLE_RECORD_BYTES {
                                 if (i < length) {
                                     kernel_log_note_tx_byte();
                                     let pushed: bool =
-                                        kernel_log_tx_push(record.bytes[i]);
+                                        kernel_log_tx_push_terminal(record.bytes[i]);
                                 }
                             }
                             uart_tx_drain_into_fifo();
-                            let still_pending: bool = kernel_log_tx_pending();
-                            mutex_irq_restore(irq_flags);
+                            let still_pending: bool = uart_terminal_output_pending();
                             if (still_pending) { uart_tx_irq_enable(); }
                             peer_console_retire(cpu);
                         }
                     }
                 }
+                mutex_irq_restore(irq_flags);
             }
         }
     }
@@ -887,6 +1028,7 @@ fn kernel_log_peer_console_drain() {
 
 fn kernel_log_peer_drain() !{unsafe} {
     if (cpu_id() != 0) { return; }
+    kernel_log_terminal_flow_poll();
     kernel_log_peer_console_drain();
     for cpu: usize in 1..<KERNEL_MAX_CORES {
         let mut expected: usize = kernel_log_peer_consumed[cpu] + 1;
@@ -1293,4 +1435,46 @@ fn kernel_boot_log_resource_exhausted(resource: *u8, capacity: usize) {
 fn kernel_log_execution_model_assumption() {
     static_assert(KERNEL_PREEMPTIBLE == 0,
                   "per-core kernel-log line state cannot survive preemption into another writer");
+}
+
+// Encode within the available room before publishing. CPU 0 masks IRQs
+// across the room query and enqueue; a peer has one non-preemptible producer
+// and its consumer can only increase the available space. Thus a CR/LF pair
+// is admitted together, and a short write always counts whole input bytes.
+fn uart_terminal_write_chunk(bytes: borrow []u8, convert: bool) -> usize {
+    if (convert == false) { return uart_user_write(bytes); }
+    let flags: usize = mutex_irq_save();
+    let room: usize = uart_user_write_room();
+    let mut encoded: [u8; 512];
+    let mut produced: usize = 0;
+    let mut consumed: usize = 0;
+    let mut filling: bool = true;
+    for index: usize in 0..<256 {
+        if (filling && index < bytes.len) {
+            let value: u8 = bytes[index];
+            let mut width: usize = 1;
+            if (value == 10) { width = 2; }
+            if (produced + width > room || produced + width > 512) {
+                filling = false;
+            } else {
+                if (value == 10) {
+                    let position: usize = produced;
+                    if (position < 512) { encoded[position] = 13; }
+                    produced = produced + 1;
+                }
+                let position: usize = produced;
+                if (position < 512) { encoded[position] = value; }
+                produced = produced + 1;
+                consumed = consumed + 1;
+            }
+        }
+    }
+    let length: usize = produced;
+    let mut accepted: usize = 0;
+    if (length <= 512) {
+        let count: usize = uart_user_write(encoded[0..<length]);
+        if (count == length) { accepted = consumed; }
+    }
+    mutex_irq_restore(flags);
+    return accepted;
 }

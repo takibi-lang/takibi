@@ -1337,3 +1337,8 @@ and 512 bytes, including NUL terminators; overflow returns `E2BIG`.
 The normal integration boot checks a five-level chain and the fifteen-entry
 boundary. A syscall probe runs on core 0 and a peer, checks refused chains
 and both argv limits, then execs echo to prove its child lifecycle survived.
+
+The UART terminal implements the Linux termios subset BusyBox init needs,
+including canonical input, echo, line editing, software flow control and
+input-generated signals. See [TERMINAL.md](TERMINAL.md) for accepted
+attributes, limits and the shared CPU 0/1 UART verification scenario.
