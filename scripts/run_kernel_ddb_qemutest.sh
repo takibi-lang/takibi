@@ -244,7 +244,7 @@ fi
 # remainder for mask bits rt_sigprocmask set that no accepted signal number
 # stands for. Written out rather than left as `.*` so a field that stops
 # being rendered, or starts being rendered as a raw word again, fails here.
-sigset='(none|(sigterm|sigchld|sigterm,sigchld)(\+0x[0-9a-f]{16})?|0x[0-9a-f]{16})'
+sigset='(none|(sigint|sigquit|sigterm|sigchld|sigtstp)(,(sigint|sigquit|sigterm|sigchld|sigtstp))*(\+0x[0-9a-f]{16})?|0x[0-9a-f]{16})'
 
 if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         ! grep -q '^ddb: world-stop complete mask=0x0000000000000002$' "$UART_LOG" ||
@@ -322,8 +322,8 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         ! grep -q '^ddb: continuing$' "$UART_LOG" ||
         ! grep -q '^ddb: console tx=queued$' "$UART_LOG" ||
         { [ "$BREAK_SOURCE" = uart ] && ! grep -q '^ddb: peer console=pending$' "$UART_LOG"; } ||
-        { [ "$BREAK_SOURCE" = uart ] && ! grep -q '^peer user console: queued before DDB, delivered after continue $' "$UART_LOG"; } ||
-        ! grep -q '^init: ash bootstrap$' "$UART_LOG"; then
+        { [ "$BREAK_SOURCE" = uart ] && ! grep -Eq $'^peer user console: queued before DDB, delivered after continue\r?$' "$UART_LOG"; } ||
+        ! grep -Eq $'^init: ash bootstrap\r?$' "$UART_LOG"; then
     echo "FAIL kernel/qemu ddb: BREAK inspection did not resume boot" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1
@@ -338,7 +338,7 @@ pending = text.find("workload: peer console record pending for DDB\n")
 ddb = text.find("ddb: peer console=pending\n", pending)
 continuing = text.find("ddb: continuing\n", ddb)
 delivered = text.find(
-    "peer user console: queued before DDB, delivered after continue \n",
+    "peer user console: queued before DDB, delivered after continue\n",
     continuing,
 )
 raise SystemExit(0 if min(pending, ddb, continuing, delivered) >= 0 else 1)
@@ -362,7 +362,7 @@ fi
 # that a word appears at all is the durable claim, and it is the one that
 # fails if the naming path stops running on real state.
 if [ "$BREAK_SOURCE" = uart ] &&
-        ! grep -Eq '^ddb: ps pid=1 ppid=0 .* masked=(sigterm|sigchld)([,+]|$)' \
+        ! grep -Eq '^ddb: ps pid=1 ppid=0 .* masked=(sigint|sigquit|sigterm|sigchld|sigtstp)([,+]|$)' \
             "$UART_LOG"; then
     echo "FAIL kernel/qemu ddb: PID 1's process line did not name an accepted signal in its mask, so the signal rendering was never exercised against real state" >&2
     exit 1

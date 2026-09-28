@@ -346,8 +346,9 @@ peer that can hand over nothing retries on its own tick rather than sleeping
 on the TX interrupt. Records from different CPUs interleave only at record
 boundaries. While the queue is stood down for DDB or a fatal report, nothing
 is moved, and published records wait there. The maintained peer process makes
-one seventeen-record write into the sixteen-record ring, observes the exact
-1024-byte short count, and retries the final record. One common view compares
+one write of seventeen 63-byte lines into the sixteen-record ring. ONLCR adds
+sixteen CR bytes to the accepted prefix, so it observes the exact 1008-byte
+short count and retries the remaining bytes. One common view compares
 the seventeen records, in order and byte for byte; a second compares the
 kernel's verdict. The verdict is a peer kernel log line, which crosses a
 different channel, so where it lands among the records is drain timing, not a

@@ -171,7 +171,7 @@ def run_one(command, http_offset):
                         http_checked = True
                     ready = any(marker in normalized for marker in READY_MARKERS)
                     if (not reap_check_sent and http_checked and ready and
-                            b"/ # " in normalized):
+                            b" # " in normalized):
                         os.write(terminal, b"ps; echo " + HTTPD_REAP_RESULT + b"\n")
                         reap_check_sent = True
                     reap_marker = b"\n" + HTTPD_REAP_RESULT + b"\n"
@@ -192,7 +192,7 @@ def run_one(command, http_offset):
                     if reap_marker in normalized:
                         after_reap_marker = normalized.split(reap_marker, 1)[1]
                     if (not break_sent and reap_check_done and
-                            b"/ # " in after_reap_marker):
+                            b" # " in after_reap_marker):
                         os.write(terminal, b"\x14b")  # Ctrl-T, then lowercase b
                         break_sent = True
                     prompts = normalized.count(b"ddb> ")

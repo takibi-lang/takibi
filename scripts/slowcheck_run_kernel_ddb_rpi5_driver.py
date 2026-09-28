@@ -52,7 +52,7 @@ PEER_PENDING = b"ddb: peer console=pending\n"
 WAKE_EVENT = b"id=0x0000000000000201"
 PEER_EMPTY = b"ddb: peer console=empty\n"
 PEER_RECORD = (b"peer user console: queued before DDB, delivered after "
-               b"continue \n")
+               b"continue\n")
 
 # The exact lines the driver asserts on, taken from a real capture so a
 # change to either side shows up here rather than only on the board.
@@ -340,6 +340,17 @@ def main() -> int:
         outcome = run_case("a wait listing with no summary", 1, 6.0, False,
                            ["did not render the wait summary"])
     REPLIES[b"wait"] = intact_wait
+    if outcome is None:
+        return 1
+
+    # Termios makes ash's prompt selectable and echoes the input command.
+    # Only its output, with either prompt, proves execution after continue.
+    global RESUME_ECHO
+    original_resume = RESUME_ECHO
+    RESUME_ECHO = b" # ddb-resume-ok\r\n # "
+    outcome = run_case("termios fancy prompt after resume", 1, 6.0, True,
+                       ["PASS kernel/rpi5 ddb:", "resume-echoed="])
+    RESUME_ECHO = original_resume
     if outcome is None:
         return 1
 

@@ -1788,11 +1788,13 @@ fn syscall_terminal_write(address: usize, length: usize)
         let convert: bool = (terminal_output_flags() & 5) == 5;
         let queued: usize = uart_terminal_write_chunk(staging, convert);
         process_run_unlock(guard);
-        if (queued == 0 && written == 0) { return TerminalWriteResult::WouldBlock; }
-        written = written + queued;
-        if (queued < chunk) {
+        if (queued == 0) {
+            if (written == 0) { return TerminalWriteResult::WouldBlock; }
             return TerminalWriteResult::Written(written);
         }
+        // Conversion can fill the staging buffer before the input chunk
+        // ends. Keep admitting input until the actual queue has no room.
+        written = written + queued;
     }
     return TerminalWriteResult::Written(written);
 }
@@ -2505,7 +2507,8 @@ fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
             }
             if (ready_count == 0 && uart_wait && timeout_address == 0 &&
                 sigmask_address == 0) {
-                if (syscall_test_evidence_record_ppoll_uart_wait()) {
+                if (syscall_terminal_ppoll_probe() &&
+                    syscall_test_evidence_record_ppoll_uart_wait()) {
                     kernel_boot_log("shell ppoll: uart blocked\n");
                 }
                 syscall_terminal_note_wait();

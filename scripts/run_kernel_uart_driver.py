@@ -50,6 +50,43 @@ def diagnose_lifecycle(output: bytes, httpd_sent: bool,
             f"next expected '{next_expected}'")
 
 
+def ash_command_results(transcript, commands, setup):
+    """Remove exact command echoes, including terminal line wrapping."""
+    lines = []
+    for line in transcript:
+        while line.startswith("/ # ") or line.startswith(" # "):
+            line = line[4:] if line.startswith("/ # ") else line[3:]
+        if line:
+            lines.append(line)
+    command_index = 0
+    result = []
+    index = 0
+    while index < len(lines):
+        echoes = {setup, "/bin/termios"}
+        if command_index < len(commands):
+            echoes.add(commands[command_index])
+        joined = lines[index]
+        end = index + 1
+        while joined not in echoes and any(cmd.startswith(joined) for cmd in echoes):
+            if end == len(lines):
+                break
+            joined += lines[end]
+            end += 1
+        if joined in echoes:
+            if command_index < len(commands) and joined == commands[command_index]:
+                command_index += 1
+            index = end
+            continue
+        line = lines[index]
+        # ps's own PID changes when a preceding probe forks. Its positive
+        # PID is dynamic; keep the uid, time and command fields exact.
+        if re.fullmatch(r" +[1-9][0-9]* 0 +0:00 ps", line):
+            line = "    <pid> 0         0:00 ps"
+        result.append(line)
+        index += 1
+    return result
+
+
 def workload_ready(output: bytes, marker: str | None) -> bool:
     """Whether a caller-requested workload boundary has been observed."""
     return marker is None or marker.encode("ascii") in output
@@ -728,21 +765,9 @@ def main() -> int:
         # transcript content, the same reason the prefix is stripped.
         # The shared fixture compares command results. Kernel termios
         # lets ash echo and edit input now, so strip its prompts and exact
-        # sent command lines from both sides; unknown output still fails.
-        def command_result_lines(transcript):
-            result = []
-            for line in transcript:
-                while line.startswith("/ # ") or line.startswith(" # "):
-                    if line.startswith("/ # "):
-                        line = line.removeprefix("/ # ")
-                    else:
-                        line = line.removeprefix(" # ")
-                if (line and line not in commands and line != shell_setup and
-                        not (args.peer_tty and line == "/bin/termios")):
-                    result.append(line)
-            return result
-        actual = command_result_lines(lines[start:end + 1])
-        expected = command_result_lines(expected)
+        # sent command lines in order; unknown output still fails.
+        actual = ash_command_results(lines[start:end + 1], commands, shell_setup)
+        expected = ash_command_results(expected, [], "")
         if actual != expected:
             diff = "".join(difflib.unified_diff(
                 [line + "\n" for line in expected],

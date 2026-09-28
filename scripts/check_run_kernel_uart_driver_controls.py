@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression controls for the UART driver's timeout diagnosis.
+"""Regression controls for the UART driver's diagnosis and ash transcript.
 
 A capture that hits its deadline has two very different causes, and until
 GitHub issue #509 the driver reported only what a downstream check was still
@@ -111,6 +111,32 @@ def main() -> int:
             True, False, True, stop_marker):
         failures.append("interactive capture skipped unfinished host-side work")
 
+    # Terminal wrapping may split an echoed command, but only an exact
+    # reconstruction can be removed. Preserve every unmatched byte.
+    command = 'long_name=abcdef; echo "$long_name"'
+    setup = "PS1='/ # '"
+    cases = (
+        (["/ # " + command[:14], command[14:], "abcdef"], ["abcdef"]),
+        ([command[:14], "wrong", "abcdef"], [command[:14], "wrong", "abcdef"]),
+        ([command[:14]], [command[:14]]),
+        (["/ # " + command, "unexpected"], ["unexpected"]),
+        (["   18 0         0:00 ps"], ["    <pid> 0         0:00 ps"]),
+        (["   13 0         0:00 ps"], ["    <pid> 0         0:00 ps"]),
+        (["    0 0         0:00 ps"], ["    0 0         0:00 ps"]),
+        (["   18 1         0:00 ps"], ["   18 1         0:00 ps"]),
+        (["    1 0         0:00 init"], ["    1 0         0:00 init"]),
+    )
+    for transcript, expected in cases:
+        CASES.note()
+        if driver.ash_command_results(transcript, [command], setup) != expected:
+            failures.append(f"ash normalization changed {transcript!r}")
+
+    CASES.note()
+    if driver.ash_command_results(
+            ["/ # ls /bin", "ps", "/ # ps", "process rows"],
+            ["ls /bin", "ps"], setup) != ["ps", "process rows"]:
+        failures.append("a listed filename that equals a later command was removed")
+
     for failure in failures:
         print(f"ERROR\tuart-driver-silence: {failure}")
     if failures:
@@ -121,7 +147,8 @@ def main() -> int:
         "uart-driver-silence",
         "a timed-out capture says whether the guest stopped or merely "
         "ran late and names its last line; an interactive command waits "
-        "for its requested workload and stop boundaries",
+        "for its requested workload and stop boundaries; exact wrapped echoes "
+        "and dynamic ps PIDs normalize while wrong and incomplete output stays",
         cases=CASES.ran)
     return 0
 

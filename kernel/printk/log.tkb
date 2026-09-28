@@ -1449,7 +1449,7 @@ fn uart_terminal_write_chunk(bytes: borrow []u8, convert: bool) -> usize {
     let mut produced: usize = 0;
     let mut consumed: usize = 0;
     let mut filling: bool = true;
-    for index: usize in 0..<256 {
+    for index: usize in 0..<512 {
         if (filling && index < bytes.len) {
             let value: u8 = bytes[index];
             let mut width: usize = 1;

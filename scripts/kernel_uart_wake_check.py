@@ -123,6 +123,7 @@ def connect(deadline: float) -> socket.socket:
 def reader(connection: socket.socket) -> None:
     # The same two handshakes the ash lane's driver publishes, for the same
     # network peer: without them the boot's network fixtures wait it out.
+    cursor_queries_answered = 0
     published_init = False
     published_network = False
     connection.settimeout(0.2)
@@ -141,6 +142,10 @@ def reader(connection: socket.socket) -> None:
             with output_lock:
                 output.extend(chunk)
                 seen = bytes(output)
+            queries = seen.count(b"\x1b[6n")
+            while cursor_queries_answered < queries:
+                connection.sendall(b"\x1b[1;1R")
+                cursor_queries_answered += 1
             if (not published_init and
                     b"linux socket: listener ready port=8080\n" in seen):
                 open(INIT_LISTENER, "w").close()
@@ -154,7 +159,7 @@ def seen(predicate, timeout: float) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         with output_lock:
-            text = bytes(output)
+            text = bytes(output).replace(b"\r\n", b"\n")
         if predicate(text):
             return True
         time.sleep(0.1)
@@ -163,7 +168,7 @@ def seen(predicate, timeout: float) -> bool:
 
 def answered(text: bytes) -> bool:
     lines = text.decode("ascii", errors="replace").replace("\r", "").splitlines()
-    return any(line.removeprefix("/ # ") == ANSWER for line in lines)
+    return any(line.removeprefix("/ # ").removeprefix(" # ") == ANSWER for line in lines)
 
 
 class Counter(gdb.Breakpoint):
@@ -287,6 +292,8 @@ def run_peer(connection: socket.socket) -> None:
             break
         continue_bounded(False)
         if window.hit_count != index + 1:
+            gdb.execute("thread apply all bt 6")
+            gdb.execute("x/4wx &terminal_settings")
             verdict(False,
                     f"byte {index} ({value!r}) of {PEER_LINE!r} was pushed "
                     "into the ring by CPU0 while the reader on CPU1 was past "
@@ -484,6 +491,8 @@ def run() -> None:
         finally:
             timer.cancel()
         if window.hit_count != index + 1:
+            gdb.execute("thread apply all bt 6")
+            gdb.execute("x/4wx &terminal_settings")
             verdict(False,
                     f"byte {index} ({bytes([value])!r}) of {COMMAND!r} was sent "
                     "while the shell was on its way to sleep, and the shell "

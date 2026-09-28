@@ -125,6 +125,7 @@ def main() -> int:
     prompt_count = 0
     migration_context_sent = False
     peer_tty_sent = False
+    peer_alias_queries = None
     peer_tty_reading_at = None
     peer_tty_line_sent = False
     stall_break_at = None
@@ -151,6 +152,7 @@ def main() -> int:
         b"continue\n",
     ]
 
+    cursor_queries_answered = 0
     with serial, open(args.log, "wb") as log:
         while time.monotonic() < deadline:
             try:
@@ -160,9 +162,22 @@ def main() -> int:
             if chunk == b"":
                 break
             if chunk is not None:
-                received.extend(chunk)
+                received.extend(chunk.replace(b"\r", b""))
                 log.write(chunk)
                 log.flush()
+
+            queries = received.count(b"\x1b[6n")
+            while cursor_queries_answered < queries:
+                serial.sendall(b"\x1b[1;1R")
+                cursor_queries_answered += 1
+
+            if (args.break_source == "uart" and peer_alias_queries is None and
+                    b"persistent shell: uart blocked\n" in received):
+                # The held peer record deliberately stops draining this
+                # CPU's output. Prepare a short command while draining is
+                # still live, so line-editor echoes fit beside that record.
+                peer_alias_queries = queries
+                send_paced(serial, b"alias p=/bin/peer-tty\n")
 
             # Drive the two producers in an evidence-backed order rather than
             # guessing how much host sleep lets the guest run. The marker says
@@ -218,12 +233,13 @@ def main() -> int:
             # once the console writer's verdict is out. The shell then waits
             # in wait4 for it, and it blocks on uart-rx on the secondary.
             peer_console_viewed = (
-                b"workload: peer console short-wrote 1024 of 1088 bytes, "
+                b"workload: peer console short-wrote 1008 of 1071 bytes, "
                 b"then delivered the final record\n" in received
             )
             if (args.break_source == "uart" and migration_context_sent and
-                    peer_console_viewed and not peer_tty_sent):
-                send_paced(serial, b"/bin/peer-tty\n")
+                    peer_console_viewed and not peer_tty_sent and
+                    peer_alias_queries is not None and queries > peer_alias_queries):
+                send_paced(serial, b"p\n")
                 peer_tty_sent = True
             if (peer_tty_reading_at is None and
                     b"workload: peer tty reading the terminal on the "
@@ -321,7 +337,7 @@ def main() -> int:
             peer_delivery_ready = (
                 args.break_source == "software" or
                 b"peer user console: queued before DDB, delivered after "
-                b"continue \n" in received
+                b"continue\n" in received
             )
             # The reader DDB saw asleep takes its line once DDB has let go.
             if (args.break_source == "uart" and peer_tty_sent and

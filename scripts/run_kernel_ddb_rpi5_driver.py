@@ -140,8 +140,9 @@ def resumed(normalized: bytes) -> bool:
     continuing = normalized.find(b"ddb: continuing\n")
     if continuing < 0:
         return False
-    return (normalized.find(b"\nddb-resume-ok\n", continuing) >= 0 or
-            normalized.find(b"\n/ # ddb-resume-ok\n", continuing) >= 0)
+    tail = normalized[continuing:].replace(b"\x1b[6n", b"")
+    return any(line.removeprefix(b"/ # ").removeprefix(b" # ") == b"ddb-resume-ok"
+               for line in tail.splitlines())
 
 
 def main() -> int:
@@ -315,7 +316,7 @@ def main() -> int:
             "RPi5 DDB did not observe the held peer console record")
     continuing = text.find("ddb: continuing\n")
     delivered = text.find(
-        "peer user console: queued before DDB, delivered after continue \n",
+        "peer user console: queued before DDB, delivered after continue\n",
         continuing,
     )
     if continuing < 0 or delivered < 0:

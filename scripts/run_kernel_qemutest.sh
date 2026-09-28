@@ -174,7 +174,7 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --qmp-port "$QMP_PORT" \
     --stdin "$ASH_DIR/ash.stdin" --expected "$ASH_DIR/ash.expected" \
     --timeout "$TIMEOUT_SECS" --ceiling "$CEILING_SECS" \
-    --stop-marker 'peer user console: record=17/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' \
+    --stop-marker 'peer user console: record=17/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' \
     --interactive-httpd-listener-file "$INTERACTIVE_HTTPD_LISTENER" \
     --foreground-httpd-listener-file "$FOREGROUND_HTTPD_LISTENER" \
     --init-listener-file "$INIT_LISTENER" \

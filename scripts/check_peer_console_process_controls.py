@@ -41,8 +41,8 @@ def problems(tree: dict[str, str]) -> list[str]:
         if shape not in payload:
             result.append(f"peer payload lost operation: {shape}")
     for condition in (
-        "first != 1024",
-        "total != 1088",
+        "first != 1008",
+        "total != 1071",
         "workload_busy_pair.peer_console_reported ||\n"
         "        cpu_id() != SECONDARY_CORE_ID",
     ):
@@ -93,6 +93,10 @@ def problems(tree: dict[str, str]) -> list[str]:
         result.append("workload syscall no longer routes the writer tag")
     if "::once:/bin/peer-console" not in tree["kernel/tests/ext2/inittab"]:
         result.append("init no longer starts the real writer")
+    for command in ("/bin/busy-a", "/bin/busy-b",
+                    "/bin/taskset -c 1 /bin/httpd -f -p 8080 -h /"):
+        if "null::respawn:" + command not in tree["kernel/tests/ext2/inittab"]:
+            result.append("a background respawn can reset the interactive UART")
     if "$(KERNEL_PEER_CONSOLE_ELF)" not in tree["Makefile"]:
         result.append("rootfs no longer depends on the writer ELF")
     # The records and the verdict are two views. The verdict is a peer kernel
@@ -101,18 +105,18 @@ def problems(tree: dict[str, str]) -> list[str]:
     # after record 8 on RPi5, whose 512-byte transmit queue holds eight.
     lines = expected.splitlines()
     if len(lines) != 17 or "record=01/17" not in lines[0] or \
-            "record=17/17" not in lines[-1]:
+            "record=17/17" not in lines[-1] or any(len(line) != 62 for line in lines):
         result.append("view no longer fixes all seventeen bounded records")
     if tree["kernel/tests/common/views/peer_console_process.filter"].strip() != \
             "^peer user console: record=":
         result.append("view no longer selects exactly the numbered records")
     if tree["kernel/tests/common/views/peer_console_verdict.filter"].strip() != \
             "^workload: peer console short-wrote" or \
-            "1024 of 1088 bytes" not in \
+            "1008 of 1071 bytes" not in \
             tree["kernel/tests/common/views/peer_console_verdict.expected"]:
         result.append("verdict view no longer fixes the short-write verdict")
     stop = "--stop-marker 'peer user console: record=17/17 " \
-           "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'"
+           "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'"
     for runner in ("scripts/run_kernel_qemutest.sh",
                    "scripts/run_kernel_hwtest_rpi5.sh"):
         if stop not in tree[runner]:
@@ -132,7 +136,7 @@ def main() -> int:
         "write syscall": ("kernel/arch/arm64/kernel/peer_read.tkb",
                           "const WRITE_SYSCALL", "const OLD_WRITE_SYSCALL"),
         "short count": ("kernel/kernel/workload_evidence.tkb",
-                        "first != 1024", "first != 1088"),
+                        "first != 1008", "first != 1071"),
         "placement": ("kernel/kernel/workload_evidence.tkb",
                       "        workload_busy_pair.peer_console_reported ||\n"
                       "        cpu_id() != SECONDARY_CORE_ID",
@@ -182,6 +186,10 @@ def main() -> int:
             "    let first: usize = svc5(WRITE_SYSCALL, 1,"),
         "init entry": ("kernel/tests/ext2/inittab", "::once:/bin/peer-console",
                        "::once:/bin/old-console"),
+        "background tty": ("kernel/tests/ext2/inittab",
+                           "null::respawn:/bin/busy-a", "::respawn:/bin/busy-a"),
+        "converted record width": ("kernel/tests/common/views/peer_console_process.expected",
+                                   "record=08/17 ", "record=008/17 "),
         "qemu stop": ("scripts/run_kernel_qemutest.sh", "--stop-marker",
                       "--old-stop-marker"),
     }

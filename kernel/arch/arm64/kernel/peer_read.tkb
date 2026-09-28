@@ -219,7 +219,7 @@ private fn peer_pin(cpu: usize) -> bool {
 // that has a defined place in the stream rather than data silently dropped.
 fn peer_console() {
     let mut cpu_bytes: [u8; 4];
-    let output = bs"peer user console: record=01/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=02/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=03/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=04/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=05/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=06/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=07/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=08/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=09/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=10/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=11/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=12/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=13/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=14/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=15/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=16/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=17/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n";
+    let output = bs"peer user console: record=01/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=02/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=03/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=04/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=05/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=06/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=07/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=08/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=09/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=10/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=11/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=12/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=13/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=14/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=15/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=16/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=17/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n";
     // The kernel answers 0 while it is not this writer's turn: init starts
     // it long before the filesystem reader's verdict. Wait by SLEEPING
     // rather than by arithmetic. This wait happens on core 0, beside the
@@ -264,11 +264,23 @@ fn peer_console() {
     // some CPU to be in EL0 when the BREAK lands, and a pause made of
     // getcpu calls kept this CPU in EL1 most of the time. The sum rides
     // in the poll's unused argument so the loop is not optimized away.
-    let ddb_record = bs"peer user console: queued before DDB, delivered after continue \n";
+    let ddb_record = bs"peer user console: queued before DDB, delivered after continue\n";
     let mut action: usize = svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG,
                                  first, total, 0, 0);
     while (action != 2) {
-        if (action == 0) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
+        if (action == 0) {
+            let label = bs"peer console: refused first=0x";
+            svc5(WRITE_SYSCALL, 1, label as *u8 as usize, label.len, 0, 0);
+            let digits = bs"0123456789abcdef";
+            let mut number: [u8; 8];
+            for index: usize in 0..<8 {
+                let digit: usize = (first >> ((7 - index) * 4)) & 15;
+                if (digit < 16) { number[index] = digits[digit]; }
+            }
+            svc5(WRITE_SYSCALL, 1, number as *u8 as usize, 8, 0, 0);
+            svc5(WRITE_SYSCALL, 1, bs"\n" as *u8 as usize, 1, 0, 0);
+            svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+        }
         if (action == 3) {
             let ddb_written: usize = svc5(
                 WRITE_SYSCALL, 1, ddb_record as *u8 as usize,
@@ -464,18 +476,28 @@ fn peer_tty() {
     let mut saved_terminal: [u8; 36];
     let mut raw_terminal: [u8; 36];
     if (svc5(29, 0, 0x5401, saved_terminal as *u8 as usize, 0, 0) != 0) {
+        let error = bs"peer tty: terminal settings failed\n";
+        svc5(WRITE_SYSCALL, 1, error as *u8 as usize, error.len, 0, 0);
         svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
     }
     for index: usize in 0..<36 { raw_terminal[index] = saved_terminal[index]; }
     for index: usize in 0..<4 { raw_terminal[index] = 0; raw_terminal[12 + index] = 0; }
-    if (svc5(29, 0, 0x5404, raw_terminal as *u8 as usize, 0, 0) != 0) {
+    // DDB deliberately holds a peer output record here. TCSETS applies
+    // immediately; a draining change would wait for the BREAK we must enable.
+    if (svc5(29, 0, 0x5402, raw_terminal as *u8 as usize, 0, 0) != 0) {
+        let error = bs"peer tty: terminal settings failed\n";
+        svc5(WRITE_SYSCALL, 1, error as *u8 as usize, error.len, 0, 0);
         svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
     }
     let mut cpu_bytes: [u8; 4];
     let mut byte: [u8; 1];
     let peer_cpu: usize = svc5(
         WORKLOAD_PROGRESS_SYSCALL, PEER_TTY_TAG, 0, 0, 0, 0);
-    if (peer_cpu == 0) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
+    if (peer_cpu == 0) {
+        let error = bs"peer tty: registration failed\n";
+        svc5(WRITE_SYSCALL, 1, error as *u8 as usize, error.len, 0, 0);
+        svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+    }
     // The persistent shell starts this one only after the console writer's
     // verdict, so its registration succeeds first try and names the CPU to
     // pin to (GitHub issue #9).
@@ -486,6 +508,10 @@ fn peer_tty() {
     // nothing else is measuring here, so the two calls cost no sequencing of
     // their own.
     let identity: usize = peer_identity(cpu_bytes as []u8, peer_cpu);
+    if (identity == 0) {
+        let error = bs"peer tty: identity or CPU placement failed\n";
+        svc5(WRITE_SYSCALL, 1, error as *u8 as usize, error.len, 0, 0);
+    }
     if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_TTY_TAG, 9, identity, 0, 0) != 1) {
         svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
     }

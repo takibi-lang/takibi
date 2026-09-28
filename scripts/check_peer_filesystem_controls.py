@@ -118,7 +118,7 @@ def problems(tree: dict[str, str]) -> list[str]:
         result.append("view no longer selects the verdict")
     final_marker = (
         "peer user console: record=17/17 "
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
     )
     for runner in (
         "scripts/run_kernel_qemutest.sh",

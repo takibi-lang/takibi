@@ -1097,9 +1097,10 @@ fn workload_peer_net_wake_progress(step: usize)
 
 // Tag 4 belongs to /bin/peer-console. Registration happens before its first
 // write, and the process then stays off core 0. The first write is exactly
-// seventeen publication records while the ring holds sixteen, so accepting
-// only 1024 bytes proves the full-ring path returned a short count. The
-// payload retries the remaining record and reports all 1088 bytes only after
+// seventeen 63-byte input lines while the ring holds sixteen 64-byte records.
+// ONLCR adds a CR before each LF: 1008 input bytes plus sixteen CRs fill the
+// 1024-byte ring. That exact short count proves the full-ring path. The
+// payload retries the remaining bytes and reports all 1071 bytes only after
 // write(2) has accepted them.
 //
 // Returns 0 for a refused report, 1 to keep polling, 2 to exit, and 3 to
@@ -1135,14 +1136,14 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
     }
     if (workload_busy_pair.peer_console_initial_reported == false) {
         if (workload_busy_pair.peer_read_reported == false ||
-            first != 1024 || total != 1088) {
+            first != 1008 || total != 1071) {
             workload_busy_pair.refused = workload_busy_pair.refused + 1;
             process_run_unlock(guard);
             return 0;
         }
         workload_busy_pair.peer_console_initial_reported = true;
         kernel_boot_log(
-            "workload: peer console short-wrote 1024 of 1088 bytes, then delivered the final record\n");
+            "workload: peer console short-wrote 1008 of 1071 bytes, then delivered the final record\n");
         if (kernel_ddb_peer_console_test_enabled == false) {
             workload_busy_pair.peer_console_reported = true;
             process_run_unlock(guard);
@@ -1171,7 +1172,7 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
     }
     if (first != 0 || total != 0) {
         if (workload_busy_pair.peer_console_pending ||
-            first != 64 || total != 64) {
+            first != 63 || total != 63) {
             workload_busy_pair.refused = workload_busy_pair.refused + 1;
             process_run_unlock(guard);
             return 0;
