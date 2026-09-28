@@ -42,6 +42,10 @@ LABEL = "kernel/qemu affinity-rollover"
 BUSY_STOPS = 2
 RETRIED = (b"asid rollover: activation retried %d busy world stops, "
            b"then rolled over\n" % BUSY_STOPS)
+# The fork child's first activation, kernel_process_activate_current_root:
+# the path #584's run met next, once the exec path retried.
+CLONE_RETRIED = (b"asid rollover: clone activation retried %d busy world "
+                 b"stops, then rolled over\n" % BUSY_STOPS)
 # The boot reached the persistent shell after the injection was spent:
 # every later exec activated too.
 BOOT_DONE = b"interactive shell: uart blocked\n"
@@ -108,6 +112,7 @@ def main() -> None:
                      daemon=True).start()
     gdb.execute(f"target remote :{os.environ['AFFINITY_GDB_GDB_PORT']}")
     gdb.execute(f"set *(unsigned long *)&kernel_process_rollover_busy_injections = {BUSY_STOPS}")
+    gdb.execute(f"set *(unsigned long *)&kernel_process_clone_rollover_busy_injections = {BUSY_STOPS}")
     gdb.execute("detach")
     while time.monotonic() < deadline:
         with output_lock:
@@ -116,14 +121,18 @@ def main() -> None:
             verdict(False, "an activation that met a Busy world stop "
                            "fail-stopped the kernel instead of retrying")
             return
-        if RETRIED in text and BOOT_DONE in text.split(RETRIED, 1)[1]:
-            verdict(True, f"an activation met {BUSY_STOPS} Busy world stops, "
-                          "retried, rolled the ASID counter over, and the "
-                          "boot finished")
+        if (RETRIED in text and CLONE_RETRIED in text and
+                BOOT_DONE in text.split(RETRIED, 1)[1] and
+                BOOT_DONE in text.split(CLONE_RETRIED, 1)[1]):
+            verdict(True, f"an exec and a fork child activation each met "
+                          f"{BUSY_STOPS} Busy world stops, retried, rolled "
+                          "the ASID counter over, and the boot finished")
             return
         time.sleep(0.1)
     if RETRIED not in bytes(output):
-        verdict(False, "no activation reported the injected Busy world stops")
+        verdict(False, "no exec activation reported the injected Busy world stops")
+    elif CLONE_RETRIED not in bytes(output):
+        verdict(False, "no fork child activation reported the injected Busy world stops")
     else:
         verdict(False, "the boot did not reach the shell after the retry")
 

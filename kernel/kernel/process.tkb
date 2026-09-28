@@ -3865,6 +3865,9 @@ private let mut kernel_process_trace_fail_after_exec: bool;
 // many world-stop attempts as Busy before stopping the world for real, which
 // is the answer another core's rollover gives. Normal boot leaves it zero.
 private let mut kernel_process_rollover_busy_injections: usize;
+// The same for kernel_process_activate_current_root, the activation a fork
+// child makes before its first return to EL0 (GitHub issue #632).
+private let mut kernel_process_clone_rollover_busy_injections: usize;
 // The syscall path records its named committed-exec failure before it enters
 // the common fail-stop entry. The exhaustive enum makes adding a reason
 // without teaching the exception renderer about it a compile error.
@@ -5119,24 +5122,40 @@ fn kernel_process_activate_current_root() -> CurrentRootActivationResult {
         return CurrentRootActivationResult::Invalid;
     }
     let mut current: ProcessHandle = execution_here().current_handle;
+    // GitHub issue #632: as in kernel_process_activate_stable_root, a
+    // rollover that cannot stop the world at once is waited out and retried.
+    // A fork child makes this activation before its first return to EL0.
+    // #584's long churn run fail-stopped here on a Partial stop at the first
+    // ASID wrap after a DDB reading, on QEMU and RPi5, once exec no longer did.
+    if (kernel_process_clone_rollover_busy_injections != 0) {
+        asid_force_rollover_needed();
+    }
+    let mut injected_busy: usize = 0;
+    while (true) {
     match process_image_prepare_activation(current.pool_index) {
         AddressSpaceActivationPrepareResult::Invalid => {
             return CurrentRootActivationResult::Invalid;
         }
         AddressSpaceActivationPrepareResult::RolloverNeeded => {
+            if (kernel_process_clone_rollover_busy_injections != 0) {
+                kernel_process_clone_rollover_busy_injections =
+                    kernel_process_clone_rollover_busy_injections - 1;
+                injected_busy = injected_busy + 1;
+                kernel_process_rollover_backoff();
+                continue;
+            }
             match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
                                    SCHEDULER_WORLD_STOP_SPINS) {
                 WorldStopResult::Busy => {
-                    return CurrentRootActivationResult::Invalid;
+                    kernel_process_rollover_backoff();
                 }
                 WorldStopResult::Partial(partial) => {
                     world_stop_partial_release(partial, &kernel_world_stop);
-                    return CurrentRootActivationResult::Invalid;
+                    kernel_process_rollover_backoff();
                 }
                 WorldStopResult::Complete(stopped) => {
                     if (asid_rollover_stopped(stopped)) {}
                     world_stop_release(stopped, &kernel_world_stop);
-                    return kernel_process_activate_current_root();
                 }
             }
         }
@@ -5157,10 +5176,17 @@ fn kernel_process_activate_current_root() -> CurrentRootActivationResult {
             }
             let committed: bool = process_image_commit_activation(prepared);
             process_run_unlock(guard);
+            if (injected_busy != 0) {
+                kernel_boot_log("asid rollover: clone activation retried " as *u8);
+                uart_put_udec(injected_busy);
+                kernel_boot_log(" busy world stops, then rolled over\n" as *u8);
+            }
             if (committed) { return CurrentRootActivationResult::Activated; }
             return CurrentRootActivationResult::Invalid;
         }
     }
+    }
+    return CurrentRootActivationResult::Invalid;
 }
 
 // Activate a root while the current process remains fixed in non-preemptible
