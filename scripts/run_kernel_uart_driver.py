@@ -3,11 +3,16 @@
 
 import argparse
 import difflib
+import re
 from pathlib import Path
 import socket
+import sys
 import time
 
 import serial
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "kernel/tests/common"))
+from terminal_driver import TerminalScenario
 
 # The init-managed HTTPd and interactive shell start independently after the
 # finite sysinit action. HTTP integration may begin at the listener marker;
@@ -385,14 +390,21 @@ def main() -> int:
     break_asked = False
     break_failure = ""
     shell_step = 0
+    shell_setup_sent = False
+    # A tty makes BusyBox select its fancy prompt and column/color ls.
+    # Fix only the transcript's presentation inside this shell; the shared
+    # command fixture and every command result stay the same.
+    shell_setup = "PS1='/ # '; alias /bin/ls='/bin/ls -1 --color=never'"
     payload_sent = False
     httpd_shell_probe_sent = False
     httpd_sent = False
     httpd_probe_sent = False
     httpd_ready = False
+    terminal_scenario = TerminalScenario()
     peer_tty_sent = False
     peer_tty_line_sent = False
     ppoll_probe_byte_sent = False
+    cursor_queries_answered = 0
     httpd_done_seen_at = None
     capture_started = time.monotonic()
     last_chunk_at = capture_started
@@ -500,11 +512,28 @@ def main() -> int:
                         break
                     continue
 
-                prompt_count = output.count(b"/ # ")
+                # A serial terminal answers the cursor query emitted by
+                # BusyBox's termios-enabled line editor. Do this before
+                # commands, so the reply cannot reach the next application.
+                queries = output.count(b"\x1b[6n")
+                while cursor_queries_answered < queries:
+                    connection.write(b"\x1b[1;1R")
+                    cursor_queries_answered += 1
+                prompt_count = bytes(output).replace(shell_setup.encode("ascii"), b"").count(b"/ # ")
+                if args.peer_tty and terminal_scenario.started:
+                    # The foreground terminal probe adds one shell prompt.
+                    prompt_count -= 1
                 if (shell_step == 0 and
                         b"interactive shell: uart blocked\n" in output):
-                    connection.write((commands[0] + "\n").encode("ascii"))
-                    shell_step = 1
+                    if not shell_setup_sent:
+                        connection.write((shell_setup + "\n").encode("ascii"))
+                        shell_setup_sent = True
+                    elif prompt_count > 0:
+                        if args.peer_tty and not terminal_scenario.started:
+                            terminal_scenario.launch(connection, output)
+                        elif not args.peer_tty or terminal_scenario.done:
+                            connection.write((commands[0] + "\n").encode("ascii"))
+                            shell_step = 1
                 elif (shell_step > 0 and shell_step < len(commands) and
                       prompt_count >= shell_step + 1):
                     connection.write(
@@ -570,8 +599,12 @@ def main() -> int:
                 # records are still arriving until then, the shell's echo of
                 # the command would land in the middle of one, and the kernel
                 # refuses a reader that registers before that writer's view.
-                if (args.peer_tty and httpd_ready and not peer_tty_sent and
-                        args.stop_marker.encode("ascii") in output):
+                # Run termios before the main workload exits. BusyBox init
+                # restores sane terminal settings when respawning a child,
+                # which would otherwise overwrite the probe's attributes.
+                terminal_scenario.step(connection, output)
+                if (args.peer_tty and terminal_scenario.done and httpd_ready and
+                        args.stop_marker.encode("ascii") in output and not peer_tty_sent):
                     # The full path: ash in this BusyBox looks a bare name
                     # up as an applet first and reports it not found.
                     write_uart_line(connection, b"/bin/peer-tty")
@@ -672,11 +705,18 @@ def main() -> int:
                 f"{postmortem_budget(args.timeout):.0f}s, so the guest was "
                 "not merely stopped inside kernel code -- it was not running")
 
+    if args.peer_tty:
+        terminal_scenario.validate()
     text = output.decode("utf-8", errors="replace").replace("\r", "")
+    text = text.replace("\x1b[6n", "")
     if args.validate_ash:
         lines = text.splitlines()
         try:
             start = lines.index("interactive shell: uart blocked") + 1
+            if args.peer_tty:
+                # Its UART transcript is checked by TerminalScenario. The
+                # shared ash fixture starts with the following command.
+                start = lines.index("termios: every check PASS", start) + 1
             end = next(index for index in range(start, len(lines))
                        if "busybox interactive shell exit: 0" in lines[index])
         except (ValueError, StopIteration) as error:
@@ -686,8 +726,23 @@ def main() -> int:
         # its own, so one that arrives after the shell's prompt leaves the
         # prompt alone on the line before it. A bare prompt carries no
         # transcript content, the same reason the prefix is stripped.
-        actual = [line.removeprefix("/ # ") for line in lines[start:end + 1]
-                  if line != "/ # "]
+        # The shared fixture compares command results. Kernel termios
+        # lets ash echo and edit input now, so strip its prompts and exact
+        # sent command lines from both sides; unknown output still fails.
+        def command_result_lines(transcript):
+            result = []
+            for line in transcript:
+                while line.startswith("/ # ") or line.startswith(" # "):
+                    if line.startswith("/ # "):
+                        line = line.removeprefix("/ # ")
+                    else:
+                        line = line.removeprefix(" # ")
+                if (line and line not in commands and line != shell_setup and
+                        not (args.peer_tty and line == "/bin/termios")):
+                    result.append(line)
+            return result
+        actual = command_result_lines(lines[start:end + 1])
+        expected = command_result_lines(expected)
         if actual != expected:
             diff = "".join(difflib.unified_diff(
                 [line + "\n" for line in expected],
