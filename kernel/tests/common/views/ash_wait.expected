@@ -1,0 +1,2 @@
+ash wait: background child status=3
+ash wait: every background child reaped

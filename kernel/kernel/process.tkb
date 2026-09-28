@@ -263,6 +263,23 @@ struct ProcessRecord {
     // Linux gives SIGCHLD=SIG_IGN special process-lifecycle semantics:
     // children are discarded after exit instead of becoming waitable zombies.
     sigchld_ignored: bool;
+    // GitHub issue #627: the one asynchronous handler this kernel delivers,
+    // SIGCHLD's, as rt_sigaction installed it. handler 0 is SIG_DFL and 1
+    // SIG_IGN (sigchld_ignored above carries that one's lifecycle meaning);
+    // anything larger is an EL0 entry point, reached at a syscall return.
+    sigchld_handler: usize;
+    sigchld_flags: usize;
+    sigchld_restorer: usize;
+    sigchld_action_mask: usize;
+    // rt_sigsuspend's mask swap, as Linux's saved_sigmask: the mask the
+    // caller had, put back into the signal frame (and so restored by
+    // rt_sigreturn) or restored directly when nothing is delivered.
+    sigsuspend_saved_mask: usize;
+    sigsuspend_mask_saved: bool;
+    // A Signal-blocked waiter that is rt_sigsuspend rather than
+    // rt_sigtimedwait: its frame is rewound, and a wake leaves the signal
+    // pending for the rerun to deliver instead of consuming it.
+    sigwait_suspend: bool;
     deadline_result: usize;
     // GitHub issue #302: wait4()'s status pointer, owned per-slot so a
     // multi-level concurrent wait4() chain delivers each blocked parent's
@@ -1825,6 +1842,15 @@ private fn scheduled_process_copy_signal_mask(parent: ProcessHandle,
         scheduled_process_record_of(parent).signal_mask;
     scheduled_process_record_at(child).sigchld_ignored =
         scheduled_process_record_of(parent).sigchld_ignored;
+    // Linux: a forked child inherits its parent's handlers.
+    scheduled_process_record_at(child).sigchld_handler =
+        scheduled_process_record_of(parent).sigchld_handler;
+    scheduled_process_record_at(child).sigchld_flags =
+        scheduled_process_record_of(parent).sigchld_flags;
+    scheduled_process_record_at(child).sigchld_restorer =
+        scheduled_process_record_of(parent).sigchld_restorer;
+    scheduled_process_record_at(child).sigchld_action_mask =
+        scheduled_process_record_of(parent).sigchld_action_mask;
 }
 
 // Linux: a child inherits its parent's affinity mask across fork, and
@@ -2177,6 +2203,13 @@ private fn scheduled_process_record_reset(slot: usize) !{unsafe} {
     record.pending_signals = 0;
     record.sigwait_set = 0;
     record.sigchld_ignored = false;
+    record.sigchld_handler = 0;
+    record.sigchld_flags = 0;
+    record.sigchld_restorer = 0;
+    record.sigchld_action_mask = 0;
+    record.sigsuspend_saved_mask = 0;
+    record.sigsuspend_mask_saved = false;
+    record.sigwait_suspend = false;
     record.deadline_result = 0;
     record.wait4_status_ptr = 0;
     record.wait4_pid = 0;
@@ -6438,8 +6471,9 @@ fn kernel_process_current_signal_take(wait_set: usize)
 }
 
 // Return one pending, unblocked signal whose maintained default action is
-// process termination. Signal handlers do not exist yet, so SIGTERM is the
-// only such signal accepted by kill(2).
+// process termination. SIGTERM is the only such signal accepted by kill(2),
+// and its handler is never entered (only SIGCHLD's is), so its default
+// action always applies.
 fn kernel_process_current_termination_signal_take()
         -> ProcessSignalPendingResult {
     if (execution_here().current_live == false) {
@@ -6469,6 +6503,140 @@ fn kernel_process_current_prepare_signal_wait(wait_set: usize) {
     }
 }
 
+// GitHub issue #627: rt_sigsuspend's wait. The same Signal block as
+// rt_sigtimedwait's, but a wake leaves the signal pending (see
+// kernel_process_signal_deliver_to).
+fn kernel_process_current_prepare_signal_suspend(wait_set: usize) {
+    if (execution_here().current_live) {
+        let guard = process_run_lock();
+        scheduled_process_record_of(execution_here().current_handle)
+            .sigwait_suspend = true;
+        process_run_unlock(guard);
+        kernel_process_current_prepare_signal_wait(wait_set);
+    }
+}
+
+fn kernel_process_current_signal_suspending() -> bool {
+    if (execution_here().current_live == false) { return false; }
+    let guard = process_run_lock();
+    let suspending: bool =
+        scheduled_process_record_of(execution_here().current_handle)
+            .sigwait_suspend;
+    process_run_unlock(guard);
+    return suspending;
+}
+
+fn kernel_process_current_clear_signal_suspend() {
+    if (execution_here().current_live) {
+        let guard = process_run_lock();
+        scheduled_process_record_of(execution_here().current_handle)
+            .sigwait_suspend = false;
+        process_run_unlock(guard);
+    }
+}
+
+// rt_sigsuspend's mask swap: install the temporary mask and remember the
+// caller's, for the signal frame the same syscall's return builds.
+fn kernel_process_current_suspend_mask_install(mask: usize) {
+    let guard = process_run_lock();
+    if (execution_here().current_live) {
+        let record: *ProcessRecord =
+            scheduled_process_record_of(execution_here().current_handle);
+        let unmaskable: usize = (1 << 8) | (1 << 18);
+        record.sigsuspend_saved_mask = record.signal_mask;
+        record.sigsuspend_mask_saved = true;
+        record.signal_mask = mask & ~unmaskable;
+    }
+    process_run_unlock(guard);
+}
+
+// The mask a signal frame built now must restore: the saved one when an
+// rt_sigsuspend installed a temporary mask (which is then dropped), the
+// current one otherwise.
+fn kernel_process_current_frame_mask_take() -> usize {
+    let guard = process_run_lock();
+    let mut mask: usize = 0;
+    if (execution_here().current_live) {
+        let record: *ProcessRecord =
+            scheduled_process_record_of(execution_here().current_handle);
+        mask = record.signal_mask;
+        if (record.sigsuspend_mask_saved) {
+            mask = record.sigsuspend_saved_mask;
+            record.sigsuspend_mask_saved = false;
+        }
+    }
+    process_run_unlock(guard);
+    return mask;
+}
+
+// A syscall return that delivers nothing still owes an rt_sigsuspend its
+// original mask back.
+fn kernel_process_current_suspend_mask_restore() {
+    let guard = process_run_lock();
+    if (execution_here().current_live) {
+        let record: *ProcessRecord =
+            scheduled_process_record_of(execution_here().current_handle);
+        if (record.sigsuspend_mask_saved) {
+            record.signal_mask = record.sigsuspend_saved_mask;
+            record.sigsuspend_mask_saved = false;
+        }
+    }
+    process_run_unlock(guard);
+}
+
+struct SigchldAction {
+    handler: usize;
+    flags: usize;
+    restorer: usize;
+    mask: usize;
+}
+
+fn kernel_process_current_sigchld_action() -> SigchldAction {
+    let mut action: SigchldAction = { 0, 0, 0, 0 };
+    if (execution_here().current_live) {
+        let record: *ProcessRecord =
+            scheduled_process_record_of(execution_here().current_handle);
+        action.handler = record.sigchld_handler;
+        action.flags = record.sigchld_flags;
+        action.restorer = record.sigchld_restorer;
+        action.mask = record.sigchld_action_mask;
+    }
+    return action;
+}
+
+fn kernel_process_current_set_sigchld_action(action: SigchldAction) {
+    if (execution_here().current_live) {
+        let record: *ProcessRecord =
+            scheduled_process_record_of(execution_here().current_handle);
+        record.sigchld_handler = action.handler;
+        record.sigchld_flags = action.flags;
+        record.sigchld_restorer = action.restorer;
+        record.sigchld_action_mask = action.mask;
+    }
+}
+
+// Take a pending SIGCHLD the current process has a handler for and does
+// not mask, for a syscall return to run the handler.
+fn kernel_process_current_caught_signal_take() -> ProcessSignalPendingResult {
+    if (execution_here().current_live == false) {
+        return ProcessSignalPendingResult::Missing;
+    }
+    let guard = process_run_lock();
+    let mut handle: ProcessHandle = execution_here().current_handle;
+    let record: *ProcessRecord = scheduled_process_record_of(handle);
+    let sigchld_bit: usize = 1 << 16;
+    if (record.sigchld_handler <= 1 ||
+        (record.pending_signals & sigchld_bit) == 0 ||
+        (record.signal_mask & sigchld_bit) != 0) {
+        process_run_unlock(guard);
+        return ProcessSignalPendingResult::Missing;
+    }
+    process_signal_pending_clear(guard, record, sigchld_bit);
+    process_run_unlock(guard);
+    return ProcessSignalPendingResult::Pending(
+        taken_signal_new(handle.pool_index, handle.generation, 17));
+}
+
 fn kernel_process_block_signal(current_sp: usize) -> usize {
     return kernel_process_block_current(
         current_sp, ProcessWaitReason::Signal, 5);
@@ -6490,10 +6658,12 @@ private fn kernel_process_signal_deliver_to(
     }
     let bit: usize = 1 << (signum - 1);
     let record: *ProcessRecord = scheduled_process_record_of(target);
-    // There is no asynchronous handler entry yet. An unblocked SIGCHLD has
-    // its Linux default (ignored); a blocked one remains pending for
-    // rt_sigtimedwait, which is the BusyBox init path implemented here.
-    if ((record.signal_mask & bit) == 0 && signum != 15) {
+    // An unblocked SIGCHLD with no handler has its Linux default (ignored);
+    // a blocked one remains pending for rt_sigtimedwait, which is the
+    // BusyBox init path. One with a handler (GitHub issue #627) stays
+    // pending, masked or not, until a syscall return can run the handler.
+    let caught: bool = signum == 17 && record.sigchld_handler > 1;
+    if ((record.signal_mask & bit) == 0 && signum != 15 && caught == false) {
         return ProcessSignalSendResult::Delivered;
     }
     process_signal_pending_raise(guard, record, bit);
@@ -6505,8 +6675,14 @@ private fn kernel_process_signal_deliver_to(
             ScheduledProcessBlockedTakeResult::Missing => {}
             ScheduledProcessBlockedTakeResult::Blocked(resources) => {
                 let (owner, blocked) = resources;
-                el0_context_set_x0(record.saved_sp, signum);
-                process_signal_pending_clear(guard, record, bit);
+                if (record.sigwait_suspend) {
+                    // rt_sigsuspend: the frame was rewound, and the rerun
+                    // finds the signal still pending and delivers it.
+                    record.sigwait_suspend = false;
+                } else {
+                    el0_context_set_x0(record.saved_sp, signum);
+                    process_signal_pending_clear(guard, record, bit);
+                }
                 record.sigwait_set = 0;
                 record.deadline_ticks = 0;
                 record.deadline_result = 0;
@@ -8732,6 +8908,13 @@ fn kernel_process_child_exec_mark() {
     if (execution_here().current_live) {
         let slot: usize = execution_here().current_handle.pool_index;
         scheduled_process_record_at(slot).exec_image_live = true;
+        // Linux: execve resets every caught signal to SIG_DFL, because the
+        // handler address named the image that has just been replaced. An
+        // ignored signal stays ignored (sigchld_ignored is left alone).
+        scheduled_process_record_at(slot).sigchld_handler = 0;
+        scheduled_process_record_at(slot).sigchld_flags = 0;
+        scheduled_process_record_at(slot).sigchld_restorer = 0;
+        scheduled_process_record_at(slot).sigchld_action_mask = 0;
         let mut current: ProcessHandle = execution_here().current_handle;
         kernel_process_trace_record(
             ProcessTraceExecCommit,

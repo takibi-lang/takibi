@@ -109,6 +109,8 @@ el0_sync_body:
     ldr     x4, [sp, #16]
     ldr     x5, [sp, #24]
     ldr     x6, [sp, #32]
+    /* GitHub issue #627: the frame itself, for a signal frame. */
+    mov     x7, sp
     bl      kernel_syscall_dispatch
     mov     x6, x0
     mov     x7, x1

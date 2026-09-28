@@ -55,6 +55,8 @@ const AARCH64_NR_NANOSLEEP: usize = 101;
 const AARCH64_NR_CLOCK_NANOSLEEP: usize = 115;
 const AARCH64_NR_KILL: usize = 129;
 const AARCH64_NR_RT_SIGTIMEDWAIT: usize = 137;
+const AARCH64_NR_RT_SIGSUSPEND: usize = 133;
+const AARCH64_NR_RT_SIGRETURN: usize = 139;
 const AARCH64_NR_SYSLOG: usize = 116;
 const AARCH64_NR_GETCWD: usize = 17;
 // GitHub issue #581: the filesystem read path, named where the rest of this
@@ -2771,6 +2773,7 @@ fn kernel_syscall_uart_block_prepare(frame_sp: usize) {
 // records which reason first.
 fn kernel_syscall_block_return(frame_sp: usize) {
     let mut next_sp: usize = 0;
+    let mut suspend_rewound: bool = false;
     if (kernel_process_current_pending_block_reason() ==
             ProcessWaitReason::ChildExit) {
         next_sp = kernel_process_block_wait4(frame_sp);
@@ -2820,6 +2823,12 @@ fn kernel_syscall_block_return(frame_sp: usize) {
         next_sp = kernel_process_block_deadline(frame_sp);
     } else if (kernel_process_current_pending_block_reason() ==
                    ProcessWaitReason::Signal) {
+        // GitHub issue #627: rt_sigsuspend reruns after its wake and
+        // delivers the signal the wake left pending.
+        if (kernel_process_current_signal_suspending()) {
+            el0_context_retry_syscall(frame_sp);
+            suspend_rewound = true;
+        }
         next_sp = kernel_process_block_signal(frame_sp);
     } else {
         // GitHub issue #546: look at the ring once more, with interrupts
@@ -2866,7 +2875,8 @@ fn kernel_syscall_block_return(frame_sp: usize) {
                 ProcessWaitReason::UartRx &&
             scheduled_process_uart_block_delivery(
                 kernel_syscall_process_slot()) == UartBlockDelivery::Read;
-        if (uart_read_prepared == false) {
+        // rt_sigsuspend's frame was already rewound above.
+        if (uart_read_prepared == false && suspend_rewound == false) {
             el0_context_retry_syscall(frame_sp);
         }
         workload_profile_el0_enter();
@@ -3956,8 +3966,310 @@ fn kernel_syscall_migrate_return(frame_sp: usize) {
     kernel_secondary_idle_yield_enter();
 }
 
+// GitHub issue #627: asynchronous SIGCHLD handlers, rt_sigsuspend and
+// rt_sigreturn -- what BusyBox ash's `wait` builtin needs. It masks SIGCHLD,
+// then loops on sigsuspend until its handler has set a flag; with neither
+// call it spun forever beside an unreaped child.
+//
+// A handler runs only from a syscall return: kernel_syscall_dispatch hands
+// every Resume to syscall_signal_deliver below, which builds the frame the
+// handler returns through. A process that never makes a syscall never runs
+// its handler; ash, and every caller that waits for one, makes one.
+//
+// The frame is Linux's arm64 rt_sigframe, so a handler that reads its
+// ucontext reads what it would on Linux: siginfo (128 bytes), then the
+// ucontext, whose uc_sigmask is the mask rt_sigreturn restores and whose
+// mcontext carries x0..x30, sp, pc, pstate and one fpsimd_context record
+// followed by the empty terminator record. There is no vDSO, so the return
+// path is the caller's SA_RESTORER trampoline (musl always supplies one);
+// installing a handler without one is refused.
+const LINUX_EINTR: usize = 0xFFFFFFFFFFFFFFFC;
+const LINUX_SIGSEGV: usize = 11;
+const LINUX_SA_RESTORER: usize = 0x04000000;
+const LINUX_SA_NODEFER: usize = 0x40000000;
+const LINUX_SA_RESETHAND: usize = 0x80000000;
+const SIGFRAME_SIZE: usize = 4688;
+const SIGFRAME_UC_SIGMASK: usize = 168;
+const SIGFRAME_REGS: usize = 312;
+const SIGFRAME_SP: usize = 560;
+const SIGFRAME_PC: usize = 568;
+const SIGFRAME_PSTATE: usize = 576;
+const SIGFRAME_FPSIMD: usize = 592;
+const SIGFRAME_FPSIMD_MAGIC: usize = 0x46508001;
+const SIGFRAME_FPSIMD_SIZE: usize = 528;
+// EL0 may choose only the condition flags of the PSTATE it returns to.
+const SIGFRAME_PSTATE_USER_BITS: usize = 0xF0000000;
+// A lower-EL data abort (EC 0x24), level-3 translation fault (FSC 0x07).
+const SIGFRAME_STACK_GROWTH_ESR: usize = 0x90000007;
+
+fn syscall_signal_frame_layout_assumption() {
+    // The saved registers are copied as runs, so each run must be one.
+    static_assert(offsetof(ExceptionFrame, x30) ==
+                  offsetof(ExceptionFrame, x0) + 30 * 8,
+                  "x0..x30 must be contiguous in ExceptionFrame");
+    static_assert(offsetof(ExceptionFrame, q31) ==
+                  offsetof(ExceptionFrame, q0) + 31 * 16,
+                  "q0..q31 must be contiguous in ExceptionFrame");
+    static_assert(offsetof(ExceptionFrame, fpcr) ==
+                  offsetof(ExceptionFrame, fpsr) + 8,
+                  "fpsr and fpcr must be adjacent in ExceptionFrame");
+}
+
+// One saved word of the ABI-owned exception frame the syscall entered on.
+fn syscall_frame_word(frame_sp: usize, offset: usize) -> usize !{unsafe} {
+    let word: *usize = unsafe { (frame_sp + offset) as *usize };
+    return *word;
+}
+
+fn syscall_frame_word_set(frame_sp: usize, offset: usize, value: usize)
+        !{unsafe} {
+    let word: *usize = unsafe { (frame_sp + offset) as *usize };
+    *word = value;
+}
+
+// Write the frame for `signum` below the interrupted user stack. The frame
+// records x0 as `value`, the result the interrupted syscall returns once the
+// handler is done. False when the user stack cannot take it.
+fn syscall_signal_frame_write(frame_sp: usize, value: usize, signum: usize,
+                              restore_mask: usize) -> (bool, usize)
+        !{unsafe} {
+    let user_sp: usize = syscall_frame_word(
+        frame_sp, offsetof(ExceptionFrame, sp_el0));
+    if (user_sp < SIGFRAME_SIZE + 16) { return (false, 0); }
+    let base: usize = (user_sp - SIGFRAME_SIZE) & ~15;
+    // The stack below SP may not be populated yet: EL0 grows it by
+    // faulting, and this write is the kernel's. Ask the same growth path a
+    // translation fault on the frame's lowest byte would, with interrupts
+    // masked as they are on that path. Memory already there answers false,
+    // and the range check below is what decides.
+    let irq_flags: usize = mutex_irq_save();
+    let grown: bool = process_image_handle_data_abort(
+        SIGFRAME_STACK_GROWTH_ESR, base);
+    mutex_irq_restore(irq_flags);
+    match user_range_check_write(kernel_process_current_root(), base,
+                                 SIGFRAME_SIZE) {
+        UserWriteRangeResult::Fault => { return (false, 0); }
+        UserWriteRangeResult::Ok(range) => {
+            if (user_zero_fill(range) == false) { return (false, 0); }
+            let mut ok: bool = true;
+            // siginfo: si_signo, si_errno, si_code (CLD_EXITED). The child
+            // is not named: the one handler this kernel runs only records
+            // that some child changed state, and wait4 names it.
+            ok = ok && user_write_u32(range, 0, signum as u32);
+            ok = ok && user_write_u32(range, 8, 1);
+            ok = ok && user_write_u64(range, SIGFRAME_UC_SIGMASK,
+                                      restore_mask as u64);
+            for index: usize in 0..<31 {
+                let register: usize = syscall_frame_word(
+                    frame_sp, offsetof(ExceptionFrame, x0) + index * 8);
+                let mut saved: usize = register;
+                if (index == 0) { saved = value; }
+                ok = ok && user_write_u64(range, SIGFRAME_REGS + index * 8,
+                                          saved as u64);
+            }
+            ok = ok && user_write_u64(range, SIGFRAME_SP, user_sp as u64);
+            ok = ok && user_write_u64(range, SIGFRAME_PC,
+                syscall_frame_word(frame_sp,
+                                   offsetof(ExceptionFrame, elr_el1)) as u64);
+            ok = ok && user_write_u64(range, SIGFRAME_PSTATE,
+                syscall_frame_word(frame_sp,
+                                   offsetof(ExceptionFrame, spsr_el1)) as u64);
+            ok = ok && user_write_u32(range, SIGFRAME_FPSIMD,
+                                      SIGFRAME_FPSIMD_MAGIC as u32);
+            ok = ok && user_write_u32(range, SIGFRAME_FPSIMD + 4,
+                                      SIGFRAME_FPSIMD_SIZE as u32);
+            ok = ok && user_write_u32(range, SIGFRAME_FPSIMD + 8,
+                syscall_frame_word(frame_sp,
+                                   offsetof(ExceptionFrame, fpsr)) as u32);
+            ok = ok && user_write_u32(range, SIGFRAME_FPSIMD + 12,
+                syscall_frame_word(frame_sp,
+                                   offsetof(ExceptionFrame, fpcr)) as u32);
+            for word: usize in 0..<64 {
+                ok = ok && user_write_u64(range, SIGFRAME_FPSIMD + 16 + word * 8,
+                    syscall_frame_word(frame_sp,
+                        offsetof(ExceptionFrame, q0) + word * 8) as u64);
+            }
+            return (ok, base);
+        }
+    }
+}
+
+// Every Resume passes through here. With a caught SIGCHLD pending and
+// unmasked, the syscall's result goes into a signal frame and the process
+// returns into its handler instead.
+fn syscall_signal_deliver(frame_sp: usize, action: SyscallAction)
+        -> SyscallAction !{unsafe} {
+    let value: usize = match action {
+        SyscallAction::Resume(resumed) => { resumed }
+        SyscallAction::Unreachable => { return SyscallAction::Unreachable; }
+        SyscallAction::Exit(status) => { return SyscallAction::Exit(status); }
+        SyscallAction::CloneChild(pid) => {
+            return SyscallAction::CloneChild(pid);
+        }
+        SyscallAction::CloneParent(sp) => {
+            return SyscallAction::CloneParent(sp);
+        }
+        SyscallAction::Block => { return SyscallAction::Block; }
+        SyscallAction::WaitInterrupt => { return SyscallAction::WaitInterrupt; }
+        SyscallAction::Exec => { return SyscallAction::Exec; }
+        SyscallAction::ChildExec => { return SyscallAction::ChildExec; }
+        SyscallAction::Migrate => { return SyscallAction::Migrate; }
+    };
+    if (frame_sp == 0) {
+        kernel_process_current_suspend_mask_restore();
+        return SyscallAction::Resume(value);
+    }
+    match kernel_process_current_caught_signal_take() {
+        ProcessSignalPendingResult::Missing => {
+            kernel_process_current_suspend_mask_restore();
+            return SyscallAction::Resume(value);
+        }
+        ProcessSignalPendingResult::Pending(taken) => {
+            let signum: usize = taken_signal_number(taken);
+            let mut handler: SigchldAction = kernel_process_current_sigchld_action();
+            let restore_mask: usize = kernel_process_current_frame_mask_take();
+            let (written, base) = syscall_signal_frame_write(
+                frame_sp, value, signum, restore_mask);
+            if (written == false) {
+                // Linux forces SIGSEGV when the frame cannot be written.
+                let delivered: usize = taken_signal_delivered(taken);
+                return kernel_syscall_exit_current_process(
+                    128 + LINUX_SIGSEGV);
+            }
+            let delivered: usize = taken_signal_delivered(taken);
+            let mut handler_mask: usize = restore_mask | handler.mask;
+            if ((handler.flags & LINUX_SA_NODEFER) == 0) {
+                handler_mask = handler_mask | (1 << (signum - 1));
+            }
+            kernel_process_current_set_signal_mask(handler_mask);
+            if ((handler.flags & LINUX_SA_RESETHAND) != 0) {
+                let mut reset: SigchldAction = { 0, 0, 0, 0 };
+                kernel_process_current_set_sigchld_action(reset);
+            }
+            syscall_frame_word_set(frame_sp, offsetof(ExceptionFrame, x1),
+                                   base);
+            syscall_frame_word_set(frame_sp, offsetof(ExceptionFrame, x2),
+                                   base + 128);
+            syscall_frame_word_set(frame_sp, offsetof(ExceptionFrame, x30),
+                                   handler.restorer);
+            syscall_frame_word_set(frame_sp, offsetof(ExceptionFrame, sp_el0),
+                                   base);
+            syscall_frame_word_set(frame_sp, offsetof(ExceptionFrame, elr_el1),
+                                   handler.handler);
+            return SyscallAction::Resume(signum);
+        }
+    }
+}
+
+// rt_sigreturn: put back what syscall_signal_frame_write saved. The frame
+// is wherever the handler left SP, which is where the restorer calls from.
+fn syscall_signal_return(frame_sp: usize) -> SyscallAction !{unsafe} {
+    if (frame_sp == 0) { return SyscallAction::Resume(LINUX_EINVAL); }
+    let base: usize = syscall_frame_word(
+        frame_sp, offsetof(ExceptionFrame, sp_el0));
+    match user_range_check_read(kernel_process_current_root(), base,
+                                SIGFRAME_SIZE) {
+        UserReadRangeResult::Fault => {
+            return kernel_syscall_exit_current_process(128 + LINUX_SIGSEGV);
+        }
+        UserReadRangeResult::Ok(range) => {
+            let (magic_ok, magic) = user_read_u32(range, SIGFRAME_FPSIMD);
+            let (size_ok, size) = user_read_u32(range, SIGFRAME_FPSIMD + 4);
+            let (pc_ok, pc) = user_read_u64(range, SIGFRAME_PC);
+            let (sp_ok, sp) = user_read_u64(range, SIGFRAME_SP);
+            let (pstate_ok, pstate) = user_read_u64(range, SIGFRAME_PSTATE);
+            let (mask_ok, mask) = user_read_u64(range, SIGFRAME_UC_SIGMASK);
+            if (magic_ok == false || size_ok == false || pc_ok == false ||
+                sp_ok == false || pstate_ok == false || mask_ok == false ||
+                magic as usize != SIGFRAME_FPSIMD_MAGIC ||
+                size as usize != SIGFRAME_FPSIMD_SIZE ||
+                ((pc as usize) & 3) != 0) {
+                return kernel_syscall_exit_current_process(
+                    128 + LINUX_SIGSEGV);
+            }
+            let mut x0: usize = 0;
+            for index: usize in 0..<31 {
+                let (register_ok, register) =
+                    user_read_u64(range, SIGFRAME_REGS + index * 8);
+                if (index == 0) { x0 = register as usize; }
+                syscall_frame_word_set(
+                    frame_sp, offsetof(ExceptionFrame, x0) + index * 8,
+                    register as usize);
+            }
+            for word: usize in 0..<64 {
+                let (vector_ok, vector) =
+                    user_read_u64(range, SIGFRAME_FPSIMD + 16 + word * 8);
+                syscall_frame_word_set(
+                    frame_sp, offsetof(ExceptionFrame, q0) + word * 8,
+                    vector as usize);
+            }
+            let (fpsr_ok, fpsr) = user_read_u32(range, SIGFRAME_FPSIMD + 8);
+            let (fpcr_ok, fpcr) = user_read_u32(range, SIGFRAME_FPSIMD + 12);
+            syscall_frame_word_set(frame_sp, offsetof(ExceptionFrame, fpsr),
+                                   fpsr as usize);
+            syscall_frame_word_set(frame_sp, offsetof(ExceptionFrame, fpcr),
+                                   fpcr as usize);
+            let kept_pstate: usize = syscall_frame_word(
+                frame_sp, offsetof(ExceptionFrame, spsr_el1));
+            syscall_frame_word_set(frame_sp,
+                offsetof(ExceptionFrame, spsr_el1),
+                (kept_pstate & ~SIGFRAME_PSTATE_USER_BITS) |
+                ((pstate as usize) & SIGFRAME_PSTATE_USER_BITS));
+            syscall_frame_word_set(frame_sp, offsetof(ExceptionFrame, sp_el0),
+                                   sp as usize);
+            syscall_frame_word_set(frame_sp, offsetof(ExceptionFrame, elr_el1),
+                                   pc as usize);
+            kernel_process_current_set_signal_mask(mask as usize);
+            return SyscallAction::Resume(x0);
+        }
+    }
+}
+
+// rt_sigsuspend(mask, sigsetsize): wait, under `mask`, for a signal whose
+// handler then runs; always -EINTR. The process's own mask is not replaced
+// while it sleeps -- the wait set is what `mask` lets through -- so a rerun
+// after the wake asks the question afresh.
+fn syscall_signal_suspend(mask_address: usize, set_size: usize)
+        -> SyscallAction !{unsafe} {
+    if (set_size != 8) { return SyscallAction::Resume(LINUX_EINVAL); }
+    kernel_process_current_clear_signal_suspend();
+    let mut mask: usize = 0;
+    match user_range_check_read(kernel_process_current_root(),
+                                mask_address, 8) {
+        UserReadRangeResult::Fault => {
+            return SyscallAction::Resume(LINUX_EFAULT);
+        }
+        UserReadRangeResult::Ok(range) => {
+            let (read_ok, requested) = user_read_u64(range, 0);
+            if (read_ok == false) { return SyscallAction::Resume(LINUX_EFAULT); }
+            mask = requested as usize;
+        }
+    }
+    kernel_process_current_suspend_mask_install(mask);
+    match kernel_process_current_caught_signal_take() {
+        ProcessSignalPendingResult::Pending(taken) => {
+            // The return below takes it again and runs the handler under
+            // the temporary mask; the frame restores the caller's.
+            taken_signal_restore(taken);
+            return SyscallAction::Resume(LINUX_EINTR);
+        }
+        ProcessSignalPendingResult::Missing => {}
+    }
+    kernel_process_current_suspend_mask_restore();
+    let sigchld_bit: usize = 1 << (LINUX_SIGCHLD - 1);
+    let mut wait_set: usize = 0;
+    if (kernel_process_current_sigchld_action().handler > 1 &&
+        (mask & sigchld_bit) == 0) {
+        wait_set = sigchld_bit;
+    }
+    kernel_process_current_prepare_signal_suspend(wait_set);
+    return SyscallAction::Block;
+}
+
+// `frame_sp` is the EL0 frame this syscall entered on, for a signal frame
+// (GitHub issue #627); 0 from an in-kernel probe, which has none.
 fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
-                           x2: usize, x3: usize, x4: usize)
+                           x2: usize, x3: usize, x4: usize, frame_sp: usize)
         -> (usize, usize) !{unsafe} {
     kernel_activity_set(KernelActivity::Syscall);
     kernel_log_peer_drain();
@@ -3967,7 +4279,9 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     workload_ordinary_placement_note_syscall(number);
     let caller_slot: usize = kernel_syscall_process_slot();
     let (action_code, action_value) = syscall_action_encode(
-        kernel_syscall_dispatch_action(esr, number, x0, x1, x2, x3, x4));
+        syscall_signal_deliver(frame_sp,
+            kernel_syscall_dispatch_action(esr, number, x0, x1, x2, x3, x4,
+                                           frame_sp)));
     // GitHub issue #559: the ext2 reader registered at entry is done with
     // ext2 by the time the handler has chosen what happens next, whatever
     // that is -- Block and Migrate included. ChildExec is the exception
@@ -4074,7 +4388,7 @@ fn syscall_reboot(magic1: usize, magic2: usize, command: usize)
 }
 
 fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usize,
-                           x2: usize, x3: usize, x4: usize)
+                           x2: usize, x3: usize, x4: usize, frame_sp: usize)
         -> SyscallAction !{unsafe} {
     let exception_class: usize = (esr >> 26) & 0x3F;
     if (exception_class != 0x15) { return SyscallAction::Unreachable; }
@@ -5712,9 +6026,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         return SyscallAction::Resume(0);
     }
     if (number == AARCH64_NR_RT_SIGACTION) {
-        // rt_sigaction(signum, act, oldact, sigsetsize). Asynchronous signal
-        // handlers are not implemented, but SIGCHLD=SIG_IGN is not merely a
-        // handler choice on Linux: children must not remain as zombies.
+        // rt_sigaction(signum, act, oldact, sigsetsize). SIGCHLD's handler is
+        // the only one this kernel enters (syscall_signal_deliver), and
+        // SIGCHLD=SIG_IGN is not merely a handler choice on Linux: children
+        // must not remain as zombies. Other signals' actions are accepted
+        // and not kept.
         let signum: usize = x0;
         let act: usize = x1;
         let oldact: usize = x2;
@@ -5729,6 +6045,17 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     if (signum == LINUX_SIGCHLD &&
                         kernel_process_current_sigchld_ignored()) {
                         let wrote_handler: bool = user_write_u64(range, 0, 1);
+                    } else if (signum == LINUX_SIGCHLD) {
+                        let mut old: SigchldAction =
+                            kernel_process_current_sigchld_action();
+                        let wrote_handler: bool =
+                            user_write_u64(range, 0, old.handler as u64);
+                        let wrote_flags: bool =
+                            user_write_u64(range, 8, old.flags as u64);
+                        let wrote_restorer: bool =
+                            user_write_u64(range, 16, old.restorer as u64);
+                        let wrote_mask: bool =
+                            user_write_u64(range, 24, old.mask as u64);
                     }
                 }
             }
@@ -5740,15 +6067,31 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 }
                 UserReadRangeResult::Ok(range) => {
                     let (read_ok, handler) = user_read_u64(range, 0);
-                    if (read_ok == false) {
+                    let (flags_ok, flags) = user_read_u64(range, 8);
+                    let (restorer_ok, restorer) = user_read_u64(range, 16);
+                    let (mask_ok, mask) = user_read_u64(range, 24);
+                    if (read_ok == false || flags_ok == false ||
+                        restorer_ok == false || mask_ok == false) {
                         return SyscallAction::Resume(LINUX_EFAULT);
                     }
                     if (signum == LINUX_SIGCHLD) {
-                        if (handler > 1) {
+                        // GitHub issue #627: a handler returns through the
+                        // caller's restorer; there is no vDSO to fall back on.
+                        if (handler > 1 &&
+                            (((flags as usize) & LINUX_SA_RESTORER) == 0 ||
+                             restorer == 0)) {
                             return SyscallAction::Resume(LINUX_EINVAL);
                         }
                         kernel_process_current_set_sigchld_ignored(
                             handler == 1);
+                        let mut action: SigchldAction = { 0, 0, 0, 0 };
+                        if (handler > 1) {
+                            action.handler = handler as usize;
+                            action.flags = flags as usize;
+                            action.restorer = restorer as usize;
+                            action.mask = mask as usize;
+                        }
+                        kernel_process_current_set_sigchld_action(action);
                     }
                 }
             }
@@ -5792,6 +6135,12 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
         if (x1 != 0) { kernel_process_current_set_signal_mask(new_mask); }
         return SyscallAction::Resume(0);
+    }
+    if (number == AARCH64_NR_RT_SIGSUSPEND) {
+        return syscall_signal_suspend(x0, x1);
+    }
+    if (number == AARCH64_NR_RT_SIGRETURN) {
+        return syscall_signal_return(frame_sp);
     }
     if (number == AARCH64_NR_RT_SIGTIMEDWAIT) {
         if (x3 != 8) { return SyscallAction::Resume(LINUX_EINVAL); }
@@ -6390,7 +6739,7 @@ fn syscall_vectored_prefix_wait_probe(address: usize, slot: usize,
     }
     let prior_wait: ProcessWaitReason = kernel_process_current_pending_block_reason();
     let (action, count) = kernel_syscall_dispatch(
-        SYSCALL_TRAP_ESR, AARCH64_NR_READV, 1, address, 2, 0, 0);
+        SYSCALL_TRAP_ESR, AARCH64_NR_READV, 1, address, 2, 0, 0, 0);
     return action == 1 && count == 1 &&
         kernel_process_current_pending_block_reason() == prior_wait;
 }
@@ -6445,7 +6794,7 @@ fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
                 }
             }
             let (write_action, write_count) = kernel_syscall_dispatch(
-                SYSCALL_TRAP_ESR, AARCH64_NR_WRITEV, 1, address, 2, 0, 0);
+                SYSCALL_TRAP_ESR, AARCH64_NR_WRITEV, 1, address, 2, 0, 0, 0);
             if (write_action != 1 || write_count != 2) { ok = false; }
             // The second segment faults after one byte was already appended.
             match user_range_check_write(kernel_process_current_root(), address, 32) {
@@ -6456,7 +6805,7 @@ fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
                 }
             }
             let (partial_action, partial_count) = kernel_syscall_dispatch(
-                SYSCALL_TRAP_ESR, AARCH64_NR_WRITEV, 1, address, 2, 0, 0);
+                SYSCALL_TRAP_ESR, AARCH64_NR_WRITEV, 1, address, 2, 0, 0, 0);
             if (partial_action != 1 || partial_count != 1) { ok = false; }
             // inetd reads still consume the connected descriptor's RX data.
             // A short first segment must leave the invalid second untouched.
@@ -6468,7 +6817,7 @@ fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
                 }
             }
             let (read_action, read_count) = kernel_syscall_dispatch(
-                SYSCALL_TRAP_ESR, AARCH64_NR_READV, 1, address, 2, 0, 0);
+                SYSCALL_TRAP_ESR, AARCH64_NR_READV, 1, address, 2, 0, 0, 0);
             if (read_action != 1 || read_count != 2) { ok = false; }
             match user_range_check_read(kernel_process_current_root(), address + 64, 2) {
                 UserReadRangeResult::Fault => { ok = false; }
@@ -6569,17 +6918,17 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
             // mmap: PROT_EXEC is always rejected.
             let (action1, value1) = kernel_syscall_dispatch(
                 SYSCALL_TRAP_ESR, 222, 0, 4096, 0x4, 0x22,
-                0xFFFFFFFFFFFFFFFF);
+                0xFFFFFFFFFFFFFFFF, 0);
             if (action1 != 1 || value1 != LINUX_EINVAL) { ok = false; }
 
             // mmap: a real fd (file-backed) is always rejected.
             let (action2, value2) = kernel_syscall_dispatch(
-                SYSCALL_TRAP_ESR, 222, 0, 4096, 0x3, 0x22, 3);
+                SYSCALL_TRAP_ESR, 222, 0, 4096, 0x3, 0x22, 3, 0);
             if (action2 != 1 || value2 != LINUX_EINVAL) { ok = false; }
 
             // rt_sigaction: signum 0 is rejected.
             let (action3, value3) = kernel_syscall_dispatch(
-                SYSCALL_TRAP_ESR, 134, 0, 0, 0, 0, 0);
+                SYSCALL_TRAP_ESR, 134, 0, 0, 0, 0, 0, 0);
             if (action3 != 1 || value3 != LINUX_EINVAL) { ok = false; }
 
             // rt_sigaction: a non-null oldact is zero-filled, not left as
@@ -6591,7 +6940,7 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
                 }
             }
             let (action4, value4) = kernel_syscall_dispatch(
-                SYSCALL_TRAP_ESR, 134, 1, 0, oldact_va, 0, 0);
+                SYSCALL_TRAP_ESR, 134, 1, 0, oldact_va, 0, 0, 0);
             if (action4 != 1 || value4 != 0) { ok = false; }
             match user_range_check_read(kernel_process_current_root(), oldact_va, 1) {
                 UserReadRangeResult::Fault => { ok = false; }

@@ -142,6 +142,21 @@ if [ "$?" -ne 0 ]; then
     exit 1
 fi
 
+# GitHub issue #627: ash's `wait` for a background job masks SIGCHLD and
+# sleeps in rt_sigsuspend until its SIGCHLD handler has run, then returns
+# through rt_sigreturn. Without handler delivery it never returns at all.
+# ash first tries waitpid(WNOHANG), which reaps a child that has already
+# exited without ever sleeping; the children here therefore sleep first, so
+# `wait $!` reaches rt_sigsuspend while its child is still alive. The status
+# is 3 only if the signal frame carried the right child's result back. The
+# sleep is short because it counts against the boot-duration bound.
+/bin/sleep 0.3 &
+( /bin/sleep 0.3; exit 3 ) &
+wait $!
+echo "ash wait: background child status=$?"
+wait
+echo "ash wait: every background child reaped"
+
 for phase in fd uart telnet; do
     echo "init: phase $phase"
 done
