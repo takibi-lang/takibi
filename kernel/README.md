@@ -223,7 +223,18 @@ make kernelbuild       # build every maintained kernel target
 make kernelcheck       # build and test every maintained kernel target
 make kernelsh-qemu     # boot QEMU and use the current terminal as the ash UART console
 make kernelsh-rpi5     # load RPi5 over SWD and use the Debug Probe UART as the ash console
+make churn-qemu        # one sample of the process-churn workload (CHURN_ROUNDS=100)
+make hwcheck-churn-rpi5  # the same on the board
 ```
+
+The two churn targets are a finder for multicore defects, not a check, and
+no aggregate runs them. Each boots the interactive-shell image, types
+`churn.sh ROUNDS` (the script is `/bin/churn.sh` in the rootfs), and passes
+only when every round's fork, exec, exit, SIGTERM and `wait` returns the
+status it must, with no oops, starved-CPU report or DDB prompt. One clean
+sample says little; take a rate with
+`scripts/repeat_kernel_lane.sh N make churn-qemu` (or the RPi5 target), and
+give anything it finds a deterministic lane before its issue closes.
 
 The two `kernelsh-*` targets are deliberately interactive and do not run the
 automated view suite. RPi5 starts the physical-Ethernet peer needed to keep

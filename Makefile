@@ -889,7 +889,7 @@ $(KERNEL_MUSL_LOADER): $(KERNEL_MUSL_APK)
 	tar -xOzf $< lib/ld-musl-aarch64.so.1 > $@
 	chmod +x $@
 
-$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/about.html $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/inittab $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSY_LOOP_A_ELF) $(KERNEL_BUSY_LOOP_B_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_REPORT_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_GUARD_ELF) $(KERNEL_BUSY_LOOP_PEER_SPIN_ELF) $(KERNEL_BUSY_LOOP_PEER_NET_WAKE_ELF) $(KERNEL_PEER_READ_ELF) $(KERNEL_CORE_READ_ELF) $(KERNEL_PEER_CONSOLE_ELF) $(KERNEL_PEER_TTY_ELF) $(KERNEL_CLOEXEC_ELF) $(KERNEL_CLOEXEC_CHECK_ELF) $(KERNEL_PPOLL_PROBE_ELF) $(KERNEL_AFFINITY_ELF) $(KERNEL_SPREAD_ELF) $(KERNEL_MOVECOST_ELF) $(KERNEL_PEER_MUTATE_ELF) $(KERNEL_PROTOCOL_TRACE_ELF) $(KERNEL_PEER_EXEC_ELF) $(KERNEL_PEER_EXEC_IMAGE_ELF) $(KERNEL_PEER_FORK_ELF) $(KERNEL_NESTED_EXEC_ELF) $(KERNEL_SESSION_ELF) $(KERNEL_SESSION_CHECK_ELF) $(KERNEL_NESTED_FIXTURES) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_BUSYBOX_EXTRAS) $(KERNEL_MUSL_LOADER) $(KERNEL_TASKSET) scripts/make_interp_probe_elf.py | $(KERNEL_USER_BUILD_DIR)
+$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/about.html $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd.sh $(KERNEL_EXT2_FIXTURE_DIR)/churn.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/inittab $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSY_LOOP_A_ELF) $(KERNEL_BUSY_LOOP_B_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_REPORT_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_GUARD_ELF) $(KERNEL_BUSY_LOOP_PEER_SPIN_ELF) $(KERNEL_BUSY_LOOP_PEER_NET_WAKE_ELF) $(KERNEL_PEER_READ_ELF) $(KERNEL_CORE_READ_ELF) $(KERNEL_PEER_CONSOLE_ELF) $(KERNEL_PEER_TTY_ELF) $(KERNEL_CLOEXEC_ELF) $(KERNEL_CLOEXEC_CHECK_ELF) $(KERNEL_PPOLL_PROBE_ELF) $(KERNEL_AFFINITY_ELF) $(KERNEL_SPREAD_ELF) $(KERNEL_MOVECOST_ELF) $(KERNEL_PEER_MUTATE_ELF) $(KERNEL_PROTOCOL_TRACE_ELF) $(KERNEL_PEER_EXEC_ELF) $(KERNEL_PEER_EXEC_IMAGE_ELF) $(KERNEL_PEER_FORK_ELF) $(KERNEL_NESTED_EXEC_ELF) $(KERNEL_SESSION_ELF) $(KERNEL_SESSION_CHECK_ELF) $(KERNEL_NESTED_FIXTURES) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_BUSYBOX_EXTRAS) $(KERNEL_MUSL_LOADER) $(KERNEL_TASKSET) scripts/make_interp_probe_elf.py | $(KERNEL_USER_BUILD_DIR)
 	rm -f $@.tmp
 	truncate -s 2621440 $@.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 mke2fs -q -t ext2 -b 1024 -I 128 -N 1024 -O none -F -U 00000000-0000-0000-0000-000000000177 $@.tmp 2560
@@ -904,6 +904,7 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $@.tmp:/icon.png
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $@.tmp:/etc/init.sh
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/httpd.sh $@.tmp:/bin/httpd.sh
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/churn.sh $@.tmp:/bin/churn.sh
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $@.tmp:/etc/script-shebang.sh
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $@.tmp:/bin/script-interpreter-argument.sh
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $@.tmp:/etc/not-a-program
@@ -985,6 +986,7 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	debugfs -w -R 'set_inode_field /etc/interp-other mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /etc/init.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/httpd.sh mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/churn.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /etc/script-shebang.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/script-interpreter-argument.sh mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /etc/not-a-program mode 0100755' $@.tmp >/dev/null 2>&1
@@ -1806,6 +1808,18 @@ kernelsh-qemu: kernelbuild-qemu $(KERNEL_SHELL_EXT2_IMAGE)
 ## package is python3-serial); exit miniterm with Ctrl-].
 kernelsh-rpi5: kernelbuild-rpi5
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" bash scripts/run_kernel_shell_rpi5.sh
+
+## churn-qemu / hwcheck-churn-rpi5: one sample of the process-churn workload
+## (/bin/churn.sh through the interactive shell image; GitHub issue #584).
+## A finder, deliberately in no aggregate: take a rate with
+## `scripts/repeat_kernel_lane.sh N make churn-qemu`. CHURN_ROUNDS sets the
+## rounds per sample. The RPi5 one takes the board lease like any other.
+CHURN_ROUNDS ?= 100
+churn-qemu: kernelbuild-qemu $(KERNEL_SHELL_EXT2_IMAGE)
+	@python3 scripts/run_kernel_churn.py --platform qemu --rounds $(CHURN_ROUNDS)
+
+hwcheck-churn-rpi5: kernelbuild-rpi5
+	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" python3 scripts/run_kernel_churn.py --platform rpi5 --rounds $(CHURN_ROUNDS)
 
 ## lease-status: report which session holds each shared resource, and since when
 lease-status:
