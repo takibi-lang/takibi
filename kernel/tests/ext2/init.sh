@@ -185,6 +185,24 @@ for cpu in 0 1; do
     fi
 done
 
+# GitHub issue #630: musl maps a large allocation with mmap and returns it
+# with munmap. Each 64 KiB string below is built by doubling and dropped by
+# the next round, so little is live at once while the total mapped over the
+# loop is several times this process's 512 KiB arena. With munmap a no-op,
+# ash ran out of memory partway through.
+r=0
+while [ "$r" -lt 20 ]; do
+    x=aaaaaaaa
+    j=0
+    while [ "$j" -lt 13 ]; do
+        x="$x$x"
+        j=$((j + 1))
+    done
+    r=$((r + 1))
+done
+echo "ash heap: $r rounds of a ${#x}-byte string, arena reused"
+unset x
+
 for phase in fd uart telnet; do
     echo "init: phase $phase"
 done

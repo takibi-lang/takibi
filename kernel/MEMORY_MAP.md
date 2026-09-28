@@ -321,7 +321,7 @@ State: **HAND** throughout; the constants are CHECKED (const) above.
 | Window size | `USER_RANGE_WINDOW` = 1 GiB | what `user_range_check` accepts |
 | Window pages | `USER_SPACE_PAGE_COUNT` = 262144 | 1 GiB at `PAGE_SIZE` |
 | Text / rodata / rw | from page 0 upward | laid out by the ELF loader, `kernel/mm/process_image.tkb` |
-| Heap | above the image | `PROCESS_HEAP_PAGES_DEFAULT` = 128 pages |
+| Heap | above the image | `PROCESS_HEAP_PAGES_DEFAULT` = 128 pages, one arena: `brk` grows up from its bottom, anonymous `mmap` takes free pages from its top down, and `munmap` returns them to it (a per-process bitmap in `kernel/kernel/fd_table.tkb`) |
 | Stack guard | one unmapped page below `stack_low_page` | the only genuinely unmapped guard in this kernel |
 | Stack, lowest page | `stack_low_page` | 448 (static) or 504 (dynamic/musl), per image |
 | Stack, top page | `USER_SPACE_PAGE_COUNT - 1` | `process_stack_top_page()` |

@@ -181,6 +181,12 @@ struct ProcessFdContext {
     heap_break: usize;
     heap_start: usize;
     heap_limit: usize;
+    // GitHub issue #630: which arena pages an anonymous mmap holds, one bit
+    // per page (page 0 is heap_start). brk grows up from heap_start and
+    // mmap takes from the top down; neither may take a page the other
+    // holds, and munmap clears the bits so the space can be mapped again.
+    mmap_used_low: usize;
+    mmap_used_high: usize;
     // RLIMIT_NOFILE for this process. Zero in a freshly zeroed context,
     // which is why unified_fd_context_ensure writes the defaults rather
     // than relying on the zeroing -- a soft limit of 0 would refuse every
@@ -1091,6 +1097,8 @@ fn unified_process_heap_range_configure(
         ctx.heap_start = start;
         ctx.heap_limit = limit;
         ctx.heap_break = start;
+        ctx.mmap_used_low = 0;
+        ctx.mmap_used_high = 0;
         return UnifiedFdResult::Ok;
     }
     return UnifiedFdResult::Invalid;
@@ -1105,6 +1113,113 @@ fn unified_process_heap_configure(process: usize, value: usize)
         return UnifiedFdResult::Ok;
     }
     return UnifiedFdResult::Invalid;
+}
+
+// GitHub issue #630: the arena's anonymous-mapping pages. The bitmap covers
+// MMAP_ARENA_PAGES; an arena is PROCESS_HEAP_PAGES_DEFAULT pages, and the
+// assertion keeps the two from drifting apart.
+const MMAP_ARENA_PAGES: usize = 128;
+
+fn mmap_arena_assumption() {
+    static_assert(PROCESS_HEAP_PAGES_DEFAULT <= MMAP_ARENA_PAGES,
+                  "the mmap bitmap must cover the whole heap arena");
+}
+
+private fn mmap_page_used(ctx: *ProcessFdContext, page: usize) -> bool {
+    if (page < 64) { return ((ctx.mmap_used_low >> page) & 1) == 1; }
+    if (page < 128) {
+        return ((ctx.mmap_used_high >> (page - 64)) & 1) == 1;
+    }
+    return true;
+}
+
+private fn mmap_page_set(ctx: *ProcessFdContext, page: usize, used: bool) {
+    if (page < 64) {
+        if (used) { ctx.mmap_used_low = ctx.mmap_used_low | (1 << page); }
+        else { ctx.mmap_used_low = ctx.mmap_used_low & ~(1 << page); }
+    } else if (page < 128) {
+        let bit: usize = 1 << (page - 64);
+        if (used) { ctx.mmap_used_high = ctx.mmap_used_high | bit; }
+        else { ctx.mmap_used_high = ctx.mmap_used_high & ~bit; }
+    }
+}
+
+// Pages of the arena, capped at what the bitmap covers.
+private fn mmap_arena_page_count(ctx: *ProcessFdContext) -> usize {
+    if (ctx.heap_limit <= ctx.heap_start) { return 0; }
+    let pages: usize = (ctx.heap_limit - ctx.heap_start) / PAGE_SIZE;
+    if (pages > MMAP_ARENA_PAGES) { return MMAP_ARENA_PAGES; }
+    return pages;
+}
+
+// The first arena page at or above `address`, rounding up.
+private fn mmap_page_ceiling(ctx: *ProcessFdContext, address: usize) -> usize {
+    if (address <= ctx.heap_start) { return 0; }
+    return (address - ctx.heap_start + PAGE_SIZE - 1) / PAGE_SIZE;
+}
+
+must_use variant UnifiedMmapResult {
+    Full;
+    Mapped(usize);
+}
+
+// Take `pages` contiguous free pages above the break, as high as they fit,
+// so brk keeps the room below. The caller zeroes them: a page given back
+// by munmap still holds what its last mapping wrote.
+fn unified_process_mmap_take(process: usize, pages: usize)
+        -> UnifiedMmapResult {
+    let ctx_address: usize = fd_context_address(process);
+    if (ctx_address == 0 || pages == 0) { return UnifiedMmapResult::Full; }
+    let ctx: *ProcessFdContext = fd_context_at(process);
+    let floor: usize = mmap_page_ceiling(ctx, ctx.heap_break);
+    let mut end: usize = mmap_arena_page_count(ctx);
+    while (end >= pages && end - pages >= floor) {
+        let first: usize = end - pages;
+        let mut free: bool = true;
+        let mut page: usize = first;
+        while (page < end) {
+            if (mmap_page_used(ctx, page)) { free = false; }
+            page = page + 1;
+        }
+        if (free) {
+            page = first;
+            while (page < end) {
+                mmap_page_set(ctx, page, true);
+                page = page + 1;
+            }
+            return UnifiedMmapResult::Mapped(ctx.heap_start + first * PAGE_SIZE);
+        }
+        end = end - 1;
+    }
+    return UnifiedMmapResult::Full;
+}
+
+// munmap of one page, by address. A page outside the arena, or one no
+// mapping holds, is left alone, as Linux leaves an unmapped hole.
+fn unified_process_mmap_release_page(process: usize, address: usize) {
+    let ctx_address: usize = fd_context_address(process);
+    if (ctx_address == 0) { return; }
+    let ctx: *ProcessFdContext = fd_context_at(process);
+    if (address < ctx.heap_start) { return; }
+    let page: usize = (address - ctx.heap_start) / PAGE_SIZE;
+    if (page < mmap_arena_page_count(ctx)) {
+        mmap_page_set(ctx, page, false);
+    }
+}
+
+// Would moving the break to `value` run into a page a mapping holds? brk
+// refuses then, as Linux's does when it meets a mapping.
+fn unified_process_brk_blocked(process: usize, value: usize) -> bool {
+    let ctx_address: usize = fd_context_address(process);
+    if (ctx_address == 0) { return true; }
+    let ctx: *ProcessFdContext = fd_context_at(process);
+    let top: usize = mmap_page_ceiling(ctx, value);
+    let mut page: usize = 0;
+    while (page < top && page < MMAP_ARENA_PAGES) {
+        if (mmap_page_used(ctx, page)) { return true; }
+        page = page + 1;
+    }
+    return false;
 }
 
 fn unified_process_heap_break(process: usize) -> UnifiedOffsetResult {
@@ -2162,6 +2277,9 @@ private fn unified_fd_clone_run(parent: usize, child: usize,
     child_ctx.heap_break = parent_ctx.heap_break;
     child_ctx.heap_start = parent_ctx.heap_start;
     child_ctx.heap_limit = parent_ctx.heap_limit;
+    // A forked child has the same mappings, so the same pages are held.
+    child_ctx.mmap_used_low = parent_ctx.mmap_used_low;
+    child_ctx.mmap_used_high = parent_ctx.mmap_used_high;
     // GitHub issue #393: fork inherits RLIMIT_NOFILE, which is Linux's
     // behaviour and the reason the limit is per-process rather than
     // per-open-table -- a child that inherited descriptors but not the

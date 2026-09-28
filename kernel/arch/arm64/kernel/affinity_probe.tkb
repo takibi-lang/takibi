@@ -30,6 +30,7 @@ const LINUX_R_OK: usize = 4;
 const AFFINITY_DUP_FLOOR: usize = 20;
 const BRK_SYSCALL: usize = 214;
 const MMAP_SYSCALL: usize = 222;
+const MUNMAP_SYSCALL: usize = 215;
 const LINUX_PROT_READ_WRITE: usize = 3;
 const LINUX_MAP_PRIVATE_ANONYMOUS: usize = 0x22;
 const LINUX_NO_FD: usize = 0xFFFFFFFFFFFFFFFF;
@@ -302,13 +303,17 @@ fn affinity_probe() {
     svc5(CLOSE_SYSCALL, duplicate + 1, 0, 0, 0, 0);
     svc5(CLOSE_SYSCALL, duplicate, 0, 0, 0, 0);
     // The third increment: this process's own memory, from CPU 1. An
-    // anonymous page comes from the heap break, so the address mmap returns
-    // is the break brk reported.
+    // anonymous page is taken from the top of the heap arena, above the
+    // break brk reports (GitHub issue #630), and munmap gives it back.
     let heap_break: usize = svc5(BRK_SYSCALL, 0, 0, 0, 0, 0);
     let page: usize = svc5(MMAP_SYSCALL, 0, 4096, LINUX_PROT_READ_WRITE,
                            LINUX_MAP_PRIVATE_ANONYMOUS, LINUX_NO_FD);
-    if (heap_break == 0 || page != heap_break) {
+    if (heap_break == 0 || page < heap_break ||
+        page >= AFFINITY_ERROR_FLOOR || (page & 4095) != 0) {
         affinity_fail(bs"affinity: brk and mmap asked from cpu 1 did not answer\n");
+    }
+    if (svc5(MUNMAP_SYSCALL, page, 4096, 0, 0, 0) != 0) {
+        affinity_fail(bs"affinity: munmap asked from cpu 1 did not answer\n");
     }
     // The parent-progress report is outside the peer-safety table, so
     // asked from CPU 1 it is rerun on core 0 and must still answer. With no

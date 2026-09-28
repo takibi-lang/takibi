@@ -1059,6 +1059,24 @@ fn kernel_syscall_heap_set(value: usize) -> bool {
     }
 }
 
+// Give `length` bytes of mapping at `address` back to the arena. A page
+// mprotect made read-only stays held: handing it to a later mapping would
+// need the permission widened again, which this kernel refuses to do.
+fn syscall_munmap_pages(address: usize, length: usize) {
+    let (span_ok, first, last) = user_range_l3_span(address, length);
+    if (span_ok == false) { return; }
+    let slot: usize = address_space_root_slot(kernel_process_current_root());
+    let mut index: usize = first;
+    while (index <= last) {
+        if (user_page_writable(address_space_pte_read(slot, index))) {
+            unified_process_mmap_release_page(
+                kernel_syscall_process_slot(),
+                USER_TEXT_VA + index * PAGE_SIZE);
+        }
+        index = index + 1;
+    }
+}
+
 fn kernel_syscall_heap_start() -> usize {
     match unified_process_heap_start(kernel_syscall_process_slot()) {
         UnifiedOffsetResult::Missing => { return 0; }
@@ -6426,8 +6444,13 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     }
     if (number == 214) {
         if (x0 == 0) { return SyscallAction::Resume(kernel_syscall_heap_break()); }
+        // GitHub issue #630: a break that would run into a page an
+        // anonymous mapping holds is refused, and the old break returned,
+        // as Linux does when brk meets a mapping.
         if (x0 >= kernel_syscall_heap_start() &&
-            x0 <= kernel_syscall_heap_limit()) {
+            x0 <= kernel_syscall_heap_limit() &&
+            unified_process_brk_blocked(kernel_syscall_process_slot(), x0)
+                == false) {
             if (kernel_syscall_heap_set(x0) == false) {
                 return SyscallAction::Resume(LINUX_EINVAL);
             }
@@ -6465,20 +6488,44 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
             return SyscallAction::Resume(x0);
         }
-        if (rounded > kernel_syscall_heap_limit() -
-                kernel_syscall_heap_break()) {
-            return SyscallAction::Resume(0xFFFFFFFFFFFFFFFF);
+        // GitHub issue #630: a mapping takes free arena pages from the top
+        // down, apart from the break, and munmap gives them back. It used
+        // to advance the break itself and munmap did nothing, so every
+        // mapping was permanent and a long-lived process ran out of arena
+        // with almost nothing live.
+        match unified_process_mmap_take(kernel_syscall_process_slot(),
+                                        rounded / PAGE_SIZE) {
+            UnifiedMmapResult::Full => {
+                return SyscallAction::Resume(LINUX_ENOMEM);
+            }
+            UnifiedMmapResult::Mapped(address) => {
+                // Anonymous memory reads as zero; a reused page still holds
+                // what its previous mapping wrote.
+                match user_range_check_write(kernel_process_current_root(),
+                                             address, rounded) {
+                    UserWriteRangeResult::Fault => {
+                        syscall_munmap_pages(address, rounded);
+                        return SyscallAction::Resume(LINUX_ENOMEM);
+                    }
+                    UserWriteRangeResult::Ok(range) => {
+                        if (user_zero_fill(range) == false) {
+                            syscall_munmap_pages(address, rounded);
+                            return SyscallAction::Resume(LINUX_ENOMEM);
+                        }
+                    }
+                }
+                return SyscallAction::Resume(address);
+            }
         }
-        let result: usize = kernel_syscall_heap_break();
-        if (kernel_syscall_heap_set(
-                kernel_syscall_heap_break() + rounded) == false) {
-            return SyscallAction::Resume(LINUX_EINVAL);
-        }
-        return SyscallAction::Resume(result);
     }
     if (number == 215) {
-        // munmap: the fixed short-lived process arena is reclaimed as a
-        // unit; this does not relax load-time permissions.
+        // munmap(addr, len). The arena's pages stay mapped -- it is
+        // reclaimed as a unit at exit -- but they go back to the pool the
+        // next mmap takes from (GitHub issue #630).
+        if (x0 % PAGE_SIZE != 0 || x1 == 0 || x1 > 0xFFFFFFFFFFFFF000) {
+            return SyscallAction::Resume(LINUX_EINVAL);
+        }
+        syscall_munmap_pages(x0, (x1 + PAGE_SIZE - 1) & 0xFFFFFFFFFFFFF000);
         return SyscallAction::Resume(0);
     }
     if (number == 226) {
