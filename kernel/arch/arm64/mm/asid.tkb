@@ -232,6 +232,15 @@ fn asid_assign_attempt() -> AsidAssignAttempt {
     return AsidAssignAttempt::Assigned((value, generation));
 }
 
+// Test support for GitHub issue #632's lane: make the next assignment find
+// the counter exhausted, as the 65533rd assignment of a generation does.
+fn asid_force_rollover_needed() {
+    let guard = locked_cell_take(&asid_cell);
+    let state = locked_cell_value(guard, &asid_cell);
+    state.next = asid_last + 1;
+    locked_cell_give(&asid_cell, guard);
+}
+
 // Re-check under the ASID lock after the machine has stopped. Another caller
 // may have completed rollover while this caller was obtaining its token, so
 // false means the requested work is already done rather than failure.

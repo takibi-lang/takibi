@@ -11,6 +11,10 @@
 #                   wait4's two walks of its child list and lets only CPU1
 #                   run, which is the interleaving that used to answer ECHILD
 #                   for a collectable child.
+#   rollover        GitHub issue #632. gdb makes the next exec activation
+#                   meet an exhausted ASID counter and Busy world stops; the
+#                   kernel must retry rather than fail-stop. No command is
+#                   typed: the boot's own execs are the subject.
 #
 # One runner because the scaffolding -- the boot, the network peer, the
 # command typed into the shell -- is the same for both, and only what gdb
@@ -37,8 +41,9 @@ MODE="${KERNEL_QEMU_AFFINITY_GDB_MODE:-gate}"
 case "$MODE" in
     gate) CHECK_SCRIPT="$REPO_ROOT/scripts/kernel_affinity_gdb_check.py" ;;
     reap) CHECK_SCRIPT="$REPO_ROOT/scripts/kernel_affinity_reap_check.py" ;;
+    rollover) CHECK_SCRIPT="$REPO_ROOT/scripts/kernel_rollover_gdb_check.py" ;;
     *)
-        echo "error: KERNEL_QEMU_AFFINITY_GDB_MODE must be gate or reap, not '$MODE'" >&2
+        echo "error: KERNEL_QEMU_AFFINITY_GDB_MODE must be gate, reap or rollover, not '$MODE'" >&2
         exit 1
         ;;
 esac

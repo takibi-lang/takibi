@@ -219,6 +219,8 @@ make kernelcheck-uart-wake-qemu  # type into ash while gdb holds each read insid
 make kernelcheck-affinity-gdb-qemu  # gdb sees a peer's unaudited syscall handed to core 0,
                                    # and holds core 0 between wait4's two child-list walks
                                    # while a peer child exits in between
+                                   # and makes an exec's ASID rollover meet Busy
+                                   # world stops, which it must retry
 make kernelbuild       # build every maintained kernel target
 make kernelcheck       # build and test every maintained kernel target
 make kernelsh-qemu     # boot QEMU and use the current terminal as the ash UART console

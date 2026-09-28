@@ -3860,6 +3860,11 @@ private let mut kernel_process_trace_boot_enabled: bool;
 // stop immediately after a real child exec commit, proving one lifecycle tail
 // contains fork, exec prepare, and exec commit. Normal boot leaves it false.
 private let mut kernel_process_trace_fail_after_exec: bool;
+// Debugger-owned test configuration only (GitHub issue #632). Nonzero makes
+// the next stable activation find the ASID counter exhausted and treat that
+// many world-stop attempts as Busy before stopping the world for real, which
+// is the answer another core's rollover gives. Normal boot leaves it zero.
+private let mut kernel_process_rollover_busy_injections: usize;
 // The syscall path records its named committed-exec failure before it enters
 // the common fail-stop entry. The exhaustive enum makes adding a reason
 // without teaching the exception renderer about it a compile error.
@@ -5164,43 +5169,80 @@ fn kernel_process_activate_current_root() -> CurrentRootActivationResult {
 // current Running process around kernel-only work. Rollover still requires a
 // complete world stop. Once teardown depends on this switch there is no safe
 // userspace return on failure, so the existing syscall fail-stop is explicit.
+// GitHub issue #632: a rollover this core cannot stop the world for is
+// retried, not fatal. Busy means another core holds the world stop -- very
+// likely rolling the same counter over, after which the retried preparation
+// simply finds a current generation. Partial means a core did not
+// acknowledge in time; it has been released and asked again. Either used to
+// fail-stop the whole kernel, which #584's long churn run hit on RPi5 at the
+// ASID counter's first wrap during a real workload: exec is the one caller
+// with no scheduler to hand the work back to, and it has already committed
+// the new image, so it cannot fail either.
+//
+// The wait between attempts leaves this core's interrupt mask as it is. With
+// interrupts open it answers the other core's stop request while it waits;
+// with them masked the other core ends with Partial and releases, and this
+// core's next claim succeeds. The wait differs per core so two cores that
+// both retry do not keep meeting.
 fn kernel_process_activate_stable_root(root: usize) {
-    match process_image_prepare_activation(root) {
-        AddressSpaceActivationPrepareResult::Invalid => {
-            kernel_syscall_fail_stop(
-                scheduled_process_record_of(
-                    execution_here().current_handle).saved_sp);
-        }
-        AddressSpaceActivationPrepareResult::RolloverNeeded => {
-            match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
-                                   SCHEDULER_WORLD_STOP_SPINS) {
-                WorldStopResult::Busy => {
-                    kernel_syscall_fail_stop(
-                        scheduled_process_record_of(
-                            execution_here().current_handle).saved_sp);
-                }
-                WorldStopResult::Partial(partial) => {
-                    world_stop_partial_release(partial, &kernel_world_stop);
-                    kernel_syscall_fail_stop(
-                        scheduled_process_record_of(
-                            execution_here().current_handle).saved_sp);
-                }
-                WorldStopResult::Complete(stopped) => {
-                    if (asid_rollover_stopped(stopped)) {}
-                    world_stop_release(stopped, &kernel_world_stop);
-                    kernel_process_activate_stable_root(root);
-                    return;
-                }
-            }
-        }
-        AddressSpaceActivationPrepareResult::Prepared(prepared) => {
-            if (process_image_commit_activation(prepared) == false) {
+    let mut activating: bool = true;
+    let mut injected_busy: usize = 0;
+    if (kernel_process_rollover_busy_injections != 0) {
+        asid_force_rollover_needed();
+    }
+    while (activating) {
+        match process_image_prepare_activation(root) {
+            AddressSpaceActivationPrepareResult::Invalid => {
                 kernel_syscall_fail_stop(
                     scheduled_process_record_of(
                         execution_here().current_handle).saved_sp);
             }
+            AddressSpaceActivationPrepareResult::RolloverNeeded => {
+                if (kernel_process_rollover_busy_injections != 0) {
+                    kernel_process_rollover_busy_injections =
+                        kernel_process_rollover_busy_injections - 1;
+                    injected_busy = injected_busy + 1;
+                    kernel_process_rollover_backoff();
+                    continue;
+                }
+                match world_stop_begin(&kernel_world_stop,
+                                       kernel_online_core_count(),
+                                       SCHEDULER_WORLD_STOP_SPINS) {
+                    WorldStopResult::Busy => {
+                        kernel_process_rollover_backoff();
+                    }
+                    WorldStopResult::Partial(partial) => {
+                        world_stop_partial_release(partial, &kernel_world_stop);
+                        kernel_process_rollover_backoff();
+                    }
+                    WorldStopResult::Complete(stopped) => {
+                        if (asid_rollover_stopped(stopped)) {}
+                        world_stop_release(stopped, &kernel_world_stop);
+                    }
+                }
+            }
+            AddressSpaceActivationPrepareResult::Prepared(prepared) => {
+                if (process_image_commit_activation(prepared) == false) {
+                    kernel_syscall_fail_stop(
+                        scheduled_process_record_of(
+                            execution_here().current_handle).saved_sp);
+                }
+                activating = false;
+                if (injected_busy != 0) {
+                    kernel_boot_log("asid rollover: activation retried " as *u8);
+                    uart_put_udec(injected_busy);
+                    kernel_boot_log(" busy world stops, then rolled over\n" as *u8);
+                }
+            }
         }
     }
+}
+
+// About (cpu + 1) x 100 microseconds of the generic counter.
+fn kernel_process_rollover_backoff() {
+    let ticks: usize = (read_cntfrq() as usize / 10000) * (cpu_id() + 1);
+    let start: usize = read_cntpct() as usize;
+    while ((read_cntpct() as usize) - start < ticks) {}
 }
 
 // GitHub issue #244: distinguishes "no child at all" (wait4 should fail

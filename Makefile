@@ -1765,6 +1765,7 @@ kernelcheck-affinity-gdb-qemu: kernelbuild-check
 _kernelcheck-affinity-gdb-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash scripts/run_kernel_affinity_gdb_qemutest.sh
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_AFFINITY_GDB_MODE=reap KERNEL_QEMU_AFFINITY_GDB_SERIAL_PORT=18721 KERNEL_QEMU_AFFINITY_GDB_GDB_PORT=18722 KERNEL_QEMU_AFFINITY_GDB_NETDEV_LOCAL_PORT=18723 KERNEL_QEMU_AFFINITY_GDB_NETDEV_REMOTE_PORT=18724 KERNEL_QEMU_AFFINITY_GDB_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-affinity-reap-qemu" bash scripts/run_kernel_affinity_gdb_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_AFFINITY_GDB_MODE=rollover KERNEL_QEMU_AFFINITY_GDB_SERIAL_PORT=18660 KERNEL_QEMU_AFFINITY_GDB_GDB_PORT=18661 KERNEL_QEMU_AFFINITY_GDB_NETDEV_LOCAL_PORT=18662 KERNEL_QEMU_AFFINITY_GDB_NETDEV_REMOTE_PORT=18663 KERNEL_QEMU_AFFINITY_GDB_ARTIFACT_DIR="$(TAKIBI_LANE_ARTIFACT_ROOT)/kernel-affinity-rollover-qemu" bash scripts/run_kernel_affinity_gdb_qemutest.sh
 
 ## Issue #414: fail each of the five scheduled_process_alloc acquisitions
 ## once, one QEMU boot per point. GDB returns the allocator's OutOfMemory
