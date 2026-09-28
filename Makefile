@@ -1821,6 +1821,19 @@ churn-qemu: kernelbuild-qemu $(KERNEL_SHELL_EXT2_IMAGE)
 hwcheck-churn-rpi5: kernelbuild-rpi5
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" python3 scripts/run_kernel_churn.py --platform rpi5 --rounds $(CHURN_ROUNDS)
 
+## churn-long-qemu / hwcheck-churn-long-rpi5: the single long boot, for what
+## only accumulates. Two phases of CHURN_LONG_ROUNDS with DDB `vm` readings
+## around them. It passes only if the ASID counter rolled over during the
+## run and the second phase kept no pages the first did not. Measured on
+## QEMU, a round assigns about 4 ASIDs, so 2 x 9000 rounds pass the 65533
+## numbers of a 16-bit generation once. About two hours on QEMU.
+CHURN_LONG_ROUNDS ?= 9000
+churn-long-qemu: kernelbuild-qemu $(KERNEL_SHELL_EXT2_IMAGE)
+	@python3 scripts/run_kernel_churn.py --platform qemu --long --rounds $(CHURN_LONG_ROUNDS)
+
+hwcheck-churn-long-rpi5: kernelbuild-rpi5
+	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" python3 scripts/run_kernel_churn.py --platform rpi5 --long --rounds $(CHURN_LONG_ROUNDS)
+
 ## lease-status: report which session holds each shared resource, and since when
 lease-status:
 	@bash -c '. scripts/resource_lease.sh; resource_lease_status'

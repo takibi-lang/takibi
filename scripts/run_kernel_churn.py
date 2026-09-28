@@ -86,18 +86,143 @@ def terminate(pid):
         pass
 
 
+class Session:
+    """The pty around the shell runner, and what has arrived through it."""
+
+    def __init__(self, pid, terminal):
+        self.pid = pid
+        self.terminal = terminal
+        self.transcript = bytearray()
+
+    def normalized(self):
+        return HOST_NOTICE.sub(
+            b"", bytes(self.transcript).replace(b"\r", b""))
+
+    def send(self, data):
+        os.write(self.terminal, data)
+
+    def wait_for(self, done, seconds, watch_from=None):
+        """Read until done(normalized) returns something, and return it.
+
+        None on a deadline or an exited runner. With watch_from, kernel
+        failure text after that offset ends the wait with a FailureMarker.
+        """
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            readable, _, _ = select.select([self.terminal], [], [], 0.25)
+            if readable:
+                try:
+                    data = os.read(self.terminal, 4096)
+                except OSError:
+                    data = b""
+                if not data:
+                    return None
+                self.transcript.extend(data)
+            normalized = self.normalized()
+            if watch_from is not None:
+                for marker in FAILURE_MARKERS:
+                    if marker in normalized[watch_from:]:
+                        return FailureMarker(marker)
+            answer = done(normalized)
+            if answer:
+                return answer
+        return None
+
+
+class PromptWithoutVerdict:
+    pass
+
+
+# ash's interactive prompt. It follows the verdict line; see run_phase.
+SHELL_PROMPT = b"\n/ # "
+
+
+def last_lines(text, count=4):
+    lines = [line for line in text.decode("ascii", "replace").splitlines()
+             if line.strip()]
+    return " | ".join(lines[-count:])
+
+
+class FailureMarker:
+    def __init__(self, marker):
+        self.marker = marker
+
+
+# DDB's `vm` prints this line after the current process's; see
+# ddb_render_vm. The long run reads it for what accumulates over a boot.
+VM_GLOBAL = re.compile(
+    rb"\nddb: vm-global asid-width=([0-9]+) asid-generation=([0-9]+) "
+    rb"asid-next=([0-9]+) asid-rollovers=([0-9]+) "
+    rb"pages-live=([0-9]+) pages-total=([0-9]+)\n")
+DDB_CONTINUED = b"ddb: continuing"
+
+
+def ddb_read_vm(session):
+    """Break into DDB, read the global `vm` line, and continue.
+
+    A dict of its fields, or None if the debugger did not answer.
+    """
+    start = len(session.normalized())
+    # Ctrl-T then b: the shell console's serial BREAK, on both platforms.
+    session.send(b"\x14b")
+    if session.wait_for(lambda n: n.count(b"ddb> ", start) > 0, 20) is None:
+        return None
+    session.send(b"vm\n")
+    found = session.wait_for(
+        lambda n: VM_GLOBAL.search(n, start), 20)
+    session.send(b"continue\n")
+    if session.wait_for(lambda n: DDB_CONTINUED in n[start:], 20) is None:
+        return None
+    if found is None:
+        return None
+    names = ("asid_width", "asid_generation", "asid_next", "asid_rollovers",
+             "pages_live", "pages_total")
+    return dict(zip(names, (int(value) for value in found.groups())))
+
+
+def run_phase(session, rounds):
+    """Type one `churn.sh ROUNDS` and judge it. None, or why it failed."""
+    start = len(session.normalized())
+    session.send(f"churn.sh {rounds}\n".encode("ascii"))
+    answer = session.wait_for(
+        lambda n: VERDICT.search(n, start) or
+                  (SHELL_PROMPT in n[start:] and PromptWithoutVerdict()),
+        rounds * SECONDS_PER_ROUND + 10, watch_from=start)
+    if isinstance(answer, PromptWithoutVerdict):
+        # The verdict is printed before the next prompt, so a prompt with no
+        # verdict ahead of it is the script ending early -- as it did when
+        # ash printed `sh: out of memory` and returned at once, and the
+        # runner then waited five hours for a line that could not come.
+        return ("the shell prompt returned without a verdict: "
+                + last_lines(session.normalized()[start:]))
+    if answer is None:
+        return f"no verdict within {rounds} rounds' deadline: the workload hung"
+    if isinstance(answer, FailureMarker):
+        return f"the kernel printed {answer.marker.decode().strip()!r}"
+    done, mismatched = int(answer.group(1)), int(answer.group(2))
+    if done != rounds or mismatched != 0:
+        return (f"verdict rounds={done} mismatched={mismatched}, "
+                f"expected rounds={rounds} mismatched=0")
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--platform", choices=("qemu", "rpi5"), required=True)
     parser.add_argument("--rounds", type=int, default=100)
+    parser.add_argument(
+        "--long", action="store_true",
+        help="the single long boot: two phases of ROUNDS each, DDB readings "
+             "before and after, and a verdict on what accumulates")
     args = parser.parse_args()
 
     root = os.environ.get("TAKIBI_LANE_ARTIFACT_ROOT",
                           os.path.join(REPO_ROOT, "_build"))
-    artifact_dir = os.path.join(root, f"kernel-churn-{args.platform}")
+    kind = "churn-long" if args.long else "churn"
+    artifact_dir = os.path.join(root, f"kernel-{kind}-{args.platform}")
     os.makedirs(artifact_dir, exist_ok=True)
     transcript_path = os.path.join(artifact_dir, "churn-transcript.log")
-    label = f"[kernel/{args.platform} churn]"
+    label = f"[kernel/{args.platform} {kind}]"
 
     pid, terminal = pty.fork()
     if pid == 0:
@@ -115,56 +240,42 @@ def main():
         os.environ["KERNEL_RPI5_SHELL_NETWORK_PEER"] = "0"
         os.execvp("make", ["make", "-j1", "kernelsh-rpi5"])
 
-    transcript = bytearray()
-    command = f"churn.sh {args.rounds}\n".encode("ascii")
-    sent_at = None
-    deadline = time.monotonic() + BOOT_TIMEOUT_SECONDS[args.platform]
-    verdict = None
+    session = Session(pid, terminal)
+
+    # A runner stopped from outside (a timeout, a person) still leaves its
+    # transcript: SIGTERM becomes an exception, so the `finally` below runs.
+    def stop(signum, frame):
+        raise SystemExit(f"stopped by signal {signum}")
+    signal.signal(signal.SIGTERM, stop)
     failure = None
+    readings = []
     try:
-        while failure is None and verdict is None:
-            if time.monotonic() >= deadline:
-                failure = ("the shell never became ready" if sent_at is None
-                           else f"no verdict within {args.rounds} rounds' "
-                                "deadline: the workload hung")
+        ready = session.wait_for(
+            lambda n: any(marker in n for marker in READY_MARKERS),
+            BOOT_TIMEOUT_SECONDS[args.platform])
+        if ready is None:
+            failure = "the shell never became ready"
+        phases = 2 if args.long else 1
+        for phase in range(phases + 1):
+            if failure is not None:
                 break
-            readable, _, _ = select.select([terminal], [], [], 0.25)
-            if readable:
-                try:
-                    data = os.read(terminal, 4096)
-                except OSError:
-                    data = b""
-                if not data:
-                    failure = "the shell runner exited before a verdict"
+            if args.long:
+                reading = ddb_read_vm(session)
+                if reading is None:
+                    failure = f"DDB gave no vm reading before phase {phase + 1}"
                     break
-                transcript.extend(data)
-            normalized = HOST_NOTICE.sub(
-                b"", bytes(transcript).replace(b"\r", b""))
-            if sent_at is None:
-                if any(marker in normalized for marker in READY_MARKERS):
-                    # Everything before this point is boot; judge only
-                    # what follows the command.
-                    os.write(terminal, command)
-                    sent_at = len(normalized)
-                    deadline = (time.monotonic() +
-                                args.rounds * SECONDS_PER_ROUND + 10)
-                continue
-            after = normalized[sent_at:]
-            for marker in FAILURE_MARKERS:
-                if marker in after:
-                    failure = f"the kernel printed {marker.decode().strip()!r}"
-            match = VERDICT.search(after)
-            if match is not None:
-                verdict = (int(match.group(1)), int(match.group(2)))
-        if failure is None:
-            rounds, mismatched = verdict
-            if rounds != args.rounds or mismatched != 0:
-                failure = (f"verdict rounds={rounds} mismatched={mismatched}, "
-                           f"expected rounds={args.rounds} mismatched=0")
+                readings.append(reading)
+                print(f"{label} reading {phase}: " + " ".join(
+                    f"{key}={value}" for key, value in reading.items()))
+            if phase == phases:
+                break
+            failure = run_phase(session, args.rounds)
+        if failure is None and args.long:
+            failure = judge_long(readings)
         # Leave miniterm the ordinary way so the runner tears QEMU or the
         # board session down itself.
         try:
-            os.write(terminal, b"\x1d")
+            session.send(b"\x1d")
         except OSError:
             pass
         deadline = time.monotonic() + EXIT_TIMEOUT_SECONDS
@@ -175,7 +286,7 @@ def main():
                     data = os.read(terminal, 4096)
                 except OSError:
                     data = b""
-                transcript.extend(data)
+                session.transcript.extend(data)
             exited, _ = os.waitpid(pid, os.WNOHANG)
             if exited:
                 pid = 0
@@ -185,15 +296,39 @@ def main():
             terminate(pid)
         os.close(terminal)
         with open(transcript_path, "wb") as handle:
-            handle.write(bytes(transcript))
+            handle.write(bytes(session.transcript))
 
     shown = os.path.relpath(transcript_path, REPO_ROOT)
     if failure is not None:
         print(f"FAIL {label}: {failure}; transcript in {shown}",
               file=sys.stderr)
         return 1
-    print(f"PASS {label}: {args.rounds} rounds, every status as expected")
+    phases = "two phases of " if args.long else ""
+    print(f"PASS {label}: {phases}{args.rounds} rounds, every status as expected")
     return 0
+
+
+def judge_long(readings):
+    """What the long boot is for, from the three DDB readings.
+
+    - The ASID counter must have rolled over at least once: that is the
+      accumulating event this run exists to reach, and a run that never
+      got there has tested nothing it could not test in a short sample.
+    - Pages in use after the second phase must not exceed pages in use
+      after the first. The first phase is allowed to grow (caches warm,
+      the shell's own heap settles); the second repeats identical work, so
+      growth there is memory the workload keeps and never gives back.
+    """
+    before, first, second = readings
+    if second["asid_rollovers"] <= before["asid_rollovers"]:
+        return ("the ASID counter never rolled over "
+                f"(asid-next went {before['asid_next']} -> "
+                f"{second['asid_next']}); raise the rounds, this run did "
+                "not reach what it is for")
+    if second["pages_live"] > first["pages_live"]:
+        return ("pages in use grew during the second phase of identical "
+                f"work: {first['pages_live']} -> {second['pages_live']}")
+    return None
 
 
 if __name__ == "__main__":

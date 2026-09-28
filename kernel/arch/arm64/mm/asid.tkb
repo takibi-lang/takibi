@@ -139,6 +139,14 @@ fn asid_init() !{mmu_off, unsafe} {
     state.next = 1;
 }
 
+// DDB's `vm` (GitHub issue #584's long churn run reads it): generation,
+// next number and rollover count, without the lock a stopped CPU may hold.
+// The three words are not a consistent snapshot if a rollover is racing.
+fn asid_reporter_state() -> (usize, usize, usize) !{unsafe} {
+    let state = locked_cell_value_reporter(&asid_cell);
+    return ((*state).generation, (*state).next, (*state).rollover_count);
+}
+
 fn asid_width_bits() -> usize {
     return asid_bits;
 }

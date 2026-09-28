@@ -1754,6 +1754,14 @@ private fn page_allocator_total_count_locked(pool: borrow *BootPagePool)
     return available;
 }
 
+// DDB's `vm`: pages in use and pages the allocator owns, without the page
+// lock. Two walks, so they may span concurrent mutations.
+fn page_allocator_counts_reporter() -> (usize, usize) !{unsafe} {
+    let pool = locked_cell_value_reporter(&boot_page_pool_cell);
+    return (page_allocator_live_count_locked(pool),
+            page_allocator_total_count_locked(pool));
+}
+
 fn page_allocator_page_bytes() -> usize {
     return PAGE_SIZE;
 }

@@ -1569,6 +1569,17 @@ private fn ddb_render_vm() !{unsafe} {
     ddb_puts(" asid="); ddb_put_udec(ddb_snapshot.root_asid);
     ddb_puts(" l1="); ddb_put_hex(ddb_snapshot.root_l1);
     ddb_puts("\n");
+    // What accumulates over a long boot rather than per process: the ASID
+    // counter's generations and the page allocator's occupancy.
+    let (generation, next, rollovers) = asid_reporter_state();
+    let (pages_live, pages_total) = page_allocator_counts_reporter();
+    ddb_puts("ddb: vm-global asid-width="); ddb_put_udec(asid_width_bits());
+    ddb_puts(" asid-generation="); ddb_put_udec(generation);
+    ddb_puts(" asid-next="); ddb_put_udec(next);
+    ddb_puts(" asid-rollovers="); ddb_put_udec(rollovers);
+    ddb_puts(" pages-live="); ddb_put_udec(pages_live);
+    ddb_puts(" pages-total="); ddb_put_udec(pages_total);
+    ddb_puts("\n");
 }
 
 private fn ddb_render_fds() !{unsafe} {
