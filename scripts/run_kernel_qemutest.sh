@@ -245,7 +245,8 @@ kernel_views_normalize "$UART_LOG"
 
 python3 "$REPO_ROOT/scripts/validate_kernel_dmesg_timestamps.py" "$UART_LOG" \
     --timing-log "$UART_TIMING_LOG" \
-    --timing-profile "${KERNEL_QEMU_TIMING_PROFILE:-local}"
+    --timing-profile "${KERNEL_QEMU_TIMING_PROFILE:-local}" \
+    --boot-duration-mode "${KERNEL_QEMU_BOOT_DURATION_MODE:-report}"
 # GitHub issue #606: /bin/protocol-trace's window of the stack-ownership
 # protocol, replayed against kernel/models/StackOwnership.tla.
 python3 "$REPO_ROOT/scripts/validate_protocol_trace.py" "$UART_LOG"

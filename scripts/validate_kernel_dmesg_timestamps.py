@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the raw BusyBox dmesg transcript without normalizing its time."""
+"""Validate raw dmesg records and optionally enforce the boot performance bound."""
 
 import argparse
 import re
@@ -101,6 +101,9 @@ def main() -> None:
     parser.add_argument("--platform", choices=("qemu", "rpi5"), default="qemu")
     parser.add_argument("--timing-profile", choices=("local", "hosted"),
                         default="local")
+    parser.add_argument("--boot-duration-mode", choices=("report", "enforce"),
+                        default="enforce",
+                        help="report boot duration or enforce its performance bound")
     # The UART driver's per-line host timestamps. Required rather than
     # optional: without it the ash session would silently count as boot time
     # again, against a bound calibrated without it.
@@ -147,65 +150,17 @@ def main() -> None:
     # in the snapshot whose timestamps this validator reads.
     boot_done = b"linux socket: listener ready port=8080"
     #
-    # The bounds below were measured rather than guessed, on 2026-09-06:
-    #
-    #   QEMU  12 runs, 16.8 - 18.2 s. Eight sequential on a quiet host and
-    #         four while the rest of the QEMU fan-out ran beside them; the
-    #         concurrent ones were not slower on that development host.
-    #         This does not calibrate a different host's per-core speed.
-    #   RPi5  4 runs, 19.3 - 20.0 s. Real hardware, no host contention.
-    #
-    # Both distributions are within +-4% of their mean, which is why the
-    # bounds can be this close: 25 s is 37% above the worst QEMU run ever
-    # seen here and 28 s is 40% above the worst RPi5 one.
-    #
-    # The issue that asked for this suggested a 2x margin. 2x does not work:
-    # the regression it was opened about was +10.7 s (13.0 -> 23.7 s), and
-    # 2x of today's 17.4 s baseline is 34.8 s, which such a regression would
-    # pass straight through. The bound is set to catch that class -- anything
-    # over about +7 s -- and the headroom comes from the measured spread
-    # being tiny, not from a multiplier.
-    #
-    # WHEN THIS FIRES, INVESTIGATE; DO NOT RAISE IT. What it guards against
-    # is complexity added to a path that runs per page or per record: the
-    # kernel still boots and still passes every view, it is just slower, and
-    # nothing else in the suite says so. Raising the bound converts the one
-    # signal back into silence. If a genuinely slower boot is intended, say
-    # so here with the measurement that justifies it.
-    #
-    # The number is printed on every run, passing or not, because the bound
-    # only catches the large regressions: a +3 s one stays green and is
-    # visible only as a difference between two runs' output.
-    # Recalibrated 2026-09-11, GitHub issue #541: the bound no longer
-    # counts the interactive ash session. That session runs before the
-    # milestone, so every command added to kernel/tests/common/ash/ash.stdin
-    # was billed as boot time. One BusyBox exec costs 0.6-1.0 s under
-    # cicheck's parallel load, and #538's first three commands took the
-    # figure above to 25.2 s. At that point the only moves left were to stop
-    # adding userspace tests, or to verify userspace-visible behaviour from
-    # inside the kernel. Neither is what the bound is for.
-    #
-    # So the session's length, measured on the host's clock, is subtracted
-    # and the bound applies to what is left. The two clocks run at the same
-    # rate, which is all a subtraction of one length needs; they do not
-    # share an origin (the RPi5 host log starts about 17 s before the guest,
-    # at SWD load), which is why the length is subtracted rather than either
-    # edge compared with a ring timestamp.
-    #
-    # Measured on the separated figure, 2026-09-11:
-    #
-    #   QEMU  main 15.5 s, debug 15.0 s, both under cicheck's parallel load
-    #         (whole boots of 23.9 and 23.3 s, ash sessions of 8.4 and 8.3 s).
-    #   RPi5  18.0 s (a 20.2 s boot, a 2.2 s session: real cores run
-    #         BusyBox's execs about four times faster).
-    #
-    # The margin keeps the rule the 2026-09-06 numbers set: catch anything
-    # over about +7 s, and in particular the +10.7 s of #411. 22 s is 6.5 s
-    # above QEMU's worst and 25 s is 7 s above the board's. The hosted
-    # profile's 35 s is kept as it was and now applies to the smaller
-    # figure, so it is looser than before rather than stricter: no CI
-    # session length has been measured yet. This validator prints all three
-    # numbers on every run, and CI's own are what to recalibrate it from.
+    # Performance calibration, outside the interactive ash session:
+    # QEMU main/debug measured 15.5/15.0 s on 2026-09-11; the local
+    # bound is 22 s. RPi5 measured 18.0 s and retains its 25 s bound.
+    # Ordinary QEMU integration reports these measurements but does not
+    # enforce the performance bound. The same kernel measured 22.9/22.1 s
+    # under aggregate fan-out and 11.0/10.8 s in a two-lane recheck on
+    # 2026-09-28. Wall time alone cannot distinguish added kernel work
+    # from host scheduling delays. kernelperf-qemu enforces the unchanged
+    # bound separately; run it on a quiet host and investigate a failure.
+    # A report-only run still requires all markers, valid per-CPU ordering,
+    # the ash session's edges, the network interval and resource counters.
     assembled_prefix = b"memory: source=dtb base_bytes="
     if args.platform == "qemu":
         listener = b"virtio net: link ready mac=02:00:20:00:00:02"
@@ -217,7 +172,7 @@ def main() -> None:
             # CI run 34160800357, same 8924f4a6 kernel as the local 17.5s
             # boot: main 22.621s, debug 25.869s, both completed every network
             # exchange. Link-to-echo was 4.12s in both, versus 4.11s locally;
-            # the extra time was outside that protocol wait. The local 25s
+            # the extra time was outside that protocol wait. The local 22s
             # calibration is not portable to the hosted runner. Keep it for
             # local checks; 35s gives this runner 9.1s over its observed debug
             # boot and still rejects a +10.7s recurrence of issue #411.
@@ -249,7 +204,7 @@ def main() -> None:
     boot_us = by_text[boot_done]
     session_us = ash_session_us(args.timing_log)
     bounded_us = boot_us - session_us
-    if bounded_us > maximum_boot:
+    if args.boot_duration_mode == "enforce" and bounded_us > maximum_boot:
         fail(
             f"{args.platform} ({args.timing_profile}) reached its last boot milestone in "
             f"{bounded_us / 1_000_000:.1f} s outside the "
@@ -341,7 +296,8 @@ def main() -> None:
         f"{spin}{block_io}, uart tx waits={tx_waited} sleeps={tx_slept} "
         f"(queue {tx_queue}, low water {tx_low}), "
         f"timing-profile={args.timing_profile}, "
-        f"boot-bound={maximum_boot / 1_000_000:.0f} s"
+        f"boot-bound={maximum_boot / 1_000_000:.0f} s, "
+        f"boot-duration-mode={args.boot_duration_mode}"
     )
 
 

@@ -110,7 +110,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_slot_proof_dropped_to_index.py` | a slot liveness proof dropped to a bare index is declared with a reason, so #569's shape is a decision rather than a line |
 | `check_slot_proof_dropped_to_index_controls.py` | Controls for the slot-proof-to-index check, in both directions |
 | `check_single_dune_invocation.py` | exactly one rule runs `dune build`, so no second make invocation races its lock |
-| `check_validate_kernel_dmesg_timestamps_controls.py` | Controls for the dmesg timestamp validator, which had none |
+| `check_validate_kernel_dmesg_timestamps_controls.py` | Controls for dmesg integrity, measurement-only QEMU boot duration, and separately enforced performance bounds |
 | `check_validate_protocol_trace_controls.py` | Controls for the protocol-trace replay: three recorded QEMU windows pass (one with `Nap` in `SwitchAway`'s place), two of them fail without `ChildExitStart` and `InterruptDepart`; a tick leave outside an interrupt, #609's shared-stack start, a lost change, a cut report, an unlocked change, an unsafe snapshot and an unexercised window are refused |
 | `check_wont_compile_catalog.py` | every defect-catalog entry names a test case that exists, shows its figure, and agrees with the index |
 | `check_wont_compile_catalog_controls.py` | Controls for the defect catalog's structure check and for the sample runner's verdicts |

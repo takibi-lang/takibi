@@ -1636,6 +1636,12 @@ kernelcheck-repeat:
 
 kernelcheck-qemu: kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank
 
+# A separate performance run, outside allcheck/cicheck's concurrent fan-out.
+# Other host activity can still affect QEMU; run this on a quiet host.
+.PHONY: kernelperf-qemu
+kernelperf-qemu: kernelbuild-check
+	@bash scripts/run_lane.sh $@ env KERNEL_QEMU_BOOT_DURATION_MODE=enforce $(MAKE) _kernelcheck-qemu-main
+
 kernelcheck-qemu-main: kernelbuild-check
 	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-qemu-main
 

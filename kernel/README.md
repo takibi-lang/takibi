@@ -342,6 +342,18 @@ targets default to 30 MHz SWD on the validated Debug Probe/board setup; set
 `RPI5_SWD_SPEED=<kHz>` to use a more conservative speed for another probe or
 cable, for example `RPI5_SWD_SPEED=1000`.
 
+QEMU integration reports boot duration on every run. `allcheck` and `cicheck`
+validate the timestamps, required milestones, network interval and resource
+measurements without enforcing the boot-duration performance bound: host
+contention can lengthen an otherwise correct boot. For a separate performance
+verdict, run `make kernelperf-qemu` on a quiet host. This runs the ordinary
+QEMU integration and shell checks with the existing boot-duration bound
+enforced. The `KERNEL_QEMU_TIMING_PROFILE` setting selects the existing local
+or hosted calibration. Neither the RPi5 time bound nor the runners' timeout
+and progress limits are changed by this separation. Reported block-I/O and
+console counters remain required; they do not prove a bound on every boot
+algorithm's work.
+
 `kernelbuild`/`kernelcheck` run both the RPi5 and QEMU targets. See
 "QEMU/AArch64 integration" below for what `kernelcheck-qemu` covers and how
 it differs from the RPi5 lane -- in particular, `make kernelcheck` still

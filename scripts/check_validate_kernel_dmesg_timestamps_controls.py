@@ -4,7 +4,9 @@
 This validator asserts four things about a boot: that the records are
 timestamped and monotonic, that a fragment-assembled line arrives whole, that
 the bounded network interval falls in its window, and -- since GitHub issue
-#411 -- that the boot reached its last milestone inside a measured bound.
+#411 -- optionally that the boot reached its last milestone inside a measured
+bound. Ordinary QEMU integration reports duration; the performance lane
+enforces it. Reporting must disable only the boot-duration verdict.
 
 Every one of those passes on every healthy boot, which is the shape that rots
 unnoticed: a pattern that stops matching turns the check into a check of
@@ -85,7 +87,7 @@ def timing(session) -> bytes:
 
 
 def run(records, platform="qemu", extra=None, profile="local",
-        session=HEALTHY_SESSION):
+        session=HEALTHY_SESSION, mode="enforce"):
     if extra is None:
         extra = HEALTHY_TAIL
     with tempfile.NamedTemporaryFile(suffix=".log") as log, \
@@ -96,7 +98,8 @@ def run(records, platform="qemu", extra=None, profile="local",
         timed.flush()
         result = subprocess.run(
             [sys.executable, str(VALIDATOR), log.name, "--platform", platform,
-             "--timing-profile", profile, "--timing-log", timed.name],
+             "--timing-profile", profile, "--timing-log", timed.name,
+             "--boot-duration-mode", mode],
             capture_output=True, text=True)
     return result.returncode, result.stdout + result.stderr
 
@@ -105,9 +108,10 @@ def run(records, platform="qemu", extra=None, profile="local",
 CASES = CaseCount()
 
 
-def expect(label, records, ok, needle="", session=HEALTHY_SESSION):
+def expect(label, records, ok, needle="", session=HEALTHY_SESSION,
+           mode="enforce"):
     CASES.note()
-    status, output = run(records, session=session)
+    status, output = run(records, session=session, mode=mode)
     if (status == 0) != ok:
         print(f"FAIL dmesg-timestamps control: {label} exited {status}, "
               f"expected {'0' if ok else 'nonzero'}\n{output}")
@@ -173,6 +177,29 @@ def main() -> int:
     for label, records, ok, needle in cases:
         if not expect(label, records, ok, needle):
             return 1
+
+    # Exactly the same slow boot passes in report mode and fails above in
+    # enforce mode. It must still report the measured value, not hide it.
+    if not expect("a slow boot reported without a performance verdict",
+                  replace(HEALTHY,
+                          "linux socket: listener ready port=8080", 28.4),
+                  True, "bounded=26.4 s", mode="report"):
+        return 1
+    for label, records, ok, needle in cases:
+        if "slower" in label or "inside the bound" in label:
+            continue
+        if not expect("report mode: " + label, records, ok, needle,
+                      mode="report"):
+            return 1
+    if not expect("report mode still needs the session edges", HEALTHY,
+                  False, "were not both found in the host timing log",
+                  session=None, mode="report"):
+        return 1
+    status, output = run(HEALTHY, extra=b"", mode="report")
+    if status == 0 or "without printing `console: tx spin" not in output:
+        print("FAIL dmesg-timestamps control: report mode lost the resource "
+              f"measurement requirement\n{output}")
+        return 1
 
     # GitHub issue #541: what the separation is for. An ash script that grew
     # by eight seconds of execs moves the whole boot and not the bounded
@@ -354,8 +381,10 @@ def main() -> int:
 
     report_pass(
         "dmesg-timestamps controls",
-        "a healthy boot reports its duration, an empty transcript and a "
-        "missing milestone are refused, a slow boot says INVESTIGATE on "
+        "a healthy boot reports its duration, a report-only slow QEMU boot "
+        "passes while missing markers, bad timestamps, network intervals "
+        "and missing measurements still fail, an empty transcript and a "
+        "missing milestone are refused, a slow enforced boot says INVESTIGATE on "
         "both platforms, a boot just inside each bound passes, a long ash "
         "session is not billed as boot and a timing log without one is "
         "refused, and the "
