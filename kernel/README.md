@@ -817,6 +817,16 @@ public command inventory follows.
 <!-- DDB-COMMAND-INVENTORY-END -->
 `help` lists the same inventory.
 
+DDB inspects only after stopping every other core. When another core already
+holds the world stop it refuses (`ddb: world-stop busy; inspection refused`)
+and prints who holds it, from atomic loads with no lock:
+`ddb: world-stop held claimed= owner= requested= acks=`. `owner` is the
+holding CPU plus one, `requested` the generation it is waiting on, and each
+ack the generation that core last acknowledged, 0 when it is not stopped. A
+stop that stays held with no acks names the core to look at. `vm` also prints
+`ddb: vm-global`: the ASID width, generation, next number and rollover count,
+and the pages in use and owned by the allocator.
+
 `regs` reads the compiler-defined `ExceptionFrame` directly. DDB does not
 copy registers with handwritten assembly and does not duplicate frame
 offsets; the compiler-generated exception entry and return path remain the

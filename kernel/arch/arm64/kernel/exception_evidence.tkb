@@ -2435,6 +2435,26 @@ private fn kernel_ddb_enter_stopped(
     kernel_ddb_restore_fault_state(outer_esr_el1, outer_far_el1);
 }
 
+// GitHub issue #632: a refused DDB used to say only "busy", and the stop
+// behind it was held for good by a peer whose own requests nobody answered.
+// Name the holder and what each core last acknowledged, so the next such
+// hang says which core to look at. owner is cpu + 1; an ack of 0 means that
+// core is not in the pen now.
+fn ddb_render_world_stop_holder() !{interrupt, unsafe} {
+    ddb_puts("ddb: world-stop held claimed=");
+    ddb_put_udec(world_stop_reporter_word(0));
+    ddb_puts(" owner=");
+    ddb_put_udec(world_stop_reporter_word(1));
+    ddb_puts(" requested=");
+    ddb_put_udec(world_stop_reporter_word(2));
+    ddb_puts(" acks=");
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if (cpu != 0) { ddb_puts(","); }
+        ddb_put_udec(world_stop_reporter_ack(cpu));
+    }
+    ddb_puts("\n");
+}
+
 // Stop every online peer before touching the machine-global snapshot or the
 // page allocator's lock-free diagnostic view. A partial token is deliberately
 // not passed to kernel_ddb_enter_stopped: report the stopped set, resume it,
@@ -2446,6 +2466,7 @@ fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
             DDB_WORLD_STOP_SPINS) {
         WorldStopResult::Busy => {
             ddb_puts("\nddb: world-stop busy; inspection refused\n");
+            ddb_render_world_stop_holder();
         }
         WorldStopResult::Partial(partial) => {
             ddb_puts("\nddb: world-stop partial mask=");

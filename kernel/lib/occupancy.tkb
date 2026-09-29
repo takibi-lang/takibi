@@ -321,6 +321,33 @@ fn world_stop_partial_release(partial: sink WorldStopPartial[id],
 // callers owe, and is for that terminal path only.
 fn world_stop_keep_forever(stopped: sink WorldStopped[id]) {}
 
+// What DDB prints when it is refused a stop (GitHub issue #632): who holds
+// it, which request is out, and what each core last acknowledged. Plain
+// atomic loads, no token: a reporter takes nothing, and these words are only
+// ever read and written atomically. The four are not one snapshot.
+fn world_stop_reporter_word(which: usize) -> usize !{unsafe} {
+    if (which == 0) {
+        return unsafe {
+            atomic_load_acquire(world_stop_claimed_address(&kernel_world_stop))
+        };
+    }
+    if (which == 1) {
+        return unsafe {
+            atomic_load_acquire(world_stop_owner_address(&kernel_world_stop))
+        };
+    }
+    return unsafe {
+        atomic_load_acquire(world_stop_requested_address(&kernel_world_stop))
+    };
+}
+
+fn world_stop_reporter_ack(cpu: {0..<KERNEL_MAX_CORES as usize}) -> usize
+        !{unsafe} {
+    return unsafe {
+        atomic_load_acquire(world_stop_ack_address(&kernel_world_stop, cpu))
+    };
+}
+
 fn world_stop_partial_mask(partial: borrow WorldStopPartial[id]) -> usize {
     return partial.stopped_mask;
 }
