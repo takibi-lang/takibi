@@ -3110,6 +3110,16 @@ fn kernel_syscall_block_return(frame_sp: usize) {
         if (uart_read_prepared == false && suspend_rewound == false) {
             el0_context_retry_syscall(frame_sp);
         }
+        // GitHub issue #603: wait4 recorded ChildExit on this Running process
+        // when it chose to block. It did not block, so that is no continuation
+        // any more. Left set, the rerun wait4 can reap its child, and when a
+        // later tick leaves this process Ready, scheduled_process_ready_take
+        // finds no pending child and refuses it on every CPU for good.
+        if (kernel_process_current_pending_block_reason() ==
+                ProcessWaitReason::ChildExit) {
+            kernel_process_current_set_pending_block(
+                ProcessWaitReason::None, 0);
+        }
         workload_profile_el0_enter();
         el0_context_resume(frame_sp);
     }
