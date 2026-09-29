@@ -59,6 +59,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_gdb_no_guest_memory_read.py` | a gdb check script decides from registers, not guest memory read through whatever translation the stopped CPU has active (#585) |
 | `check_gdb_no_guest_memory_read_controls.py` | Controls for the gdb guest-memory-read check, in both directions |
 | `check_invariant_lines_unviewed.py` | invariant reports are either diagnostic-only or enforced by absence, never asserted as correct |
+| `check_gic_iar_intid.py` | the platform interrupt dispatchers decide on `GICC_IAR & 0x3FF` and hand only the raw word back to GICC_EOIR, so an SGI's sender bits cannot hide it (#632) |
+| `check_world_stop_refusals.py` | no `WorldStopResult::Busy` or `Partial` arm fail-stops the kernel; a refused world stop is waited out or handed back (#632) |
 | `check_irq_restore_sites.py` | no `enable_irq()` restores interrupts without consulting the state it overwrites |
 | `check_irq_restore_sites_controls.py` | Controls for the IRQ-restore site check |
 | `check_kernel_asm_entries.py` | the Makefile declares exactly the Takibi functions kernel assembly calls by name as entry points |
