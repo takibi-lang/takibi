@@ -3655,12 +3655,14 @@ private fn syscall_listen_claimed(number: usize, x0: usize, x1: usize,
     }
     match syscall_test_lifecycle_listener_ready_label() {
         ListenerReadyLabel::ConnectedFixture => {
-            kernel_boot_log("linux socket: listener ready port=8080\n");
+            kernel_boot_log("linux socket: listener ready port=");
         }
         ListenerReadyLabel::Persistent => {
-            kernel_boot_log("persistent server: listener ready port=8080\n");
+            kernel_boot_log("persistent server: listener ready port=");
         }
     }
+    uart_put_udec(kernel_listener_port(listen_fd) as usize);
+    kernel_boot_log("\n");
     return SyscallAction::Resume(0);
 }
 
