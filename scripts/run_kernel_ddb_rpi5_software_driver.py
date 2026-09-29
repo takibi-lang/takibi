@@ -18,6 +18,12 @@ def write_line(uart: serial.Serial, line: bytes) -> None:
     uart.flush()
 
 
+def shell_resumed(capture: bytes) -> bool:
+    normalized = capture.replace(b"\r", b"").replace(b"\x1b[6n", b"")
+    tail = normalized.partition(b"ddb: continuing\n")[2]
+    return re.search(rb"\nddb-software-resume-ok\n(?:/)? # ", tail) is not None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", required=True)
@@ -66,22 +72,14 @@ def main() -> int:
                 prompt_count += 1
 
             normalized = bytes(received).replace(b"\r", b"")
-            # This still proves the resume with a prompt-then-output
-            # marker, and its uart sibling no longer does. The two are
-            # deliberately asymmetric: that driver acknowledges the byte that
-            # wakes the shell before it breaks in, so by the time it resumes
-            # the shell has already answered and its first command produces
-            # output with no prompt in front (GitHub issue #519). This one
-            # sends no such byte and waits for a prompt to exist before
-            # typing, so the prompt is still there to match. If this driver
-            # ever gains the same acknowledgement, this marker has to move
-            # with it.
+            # Wait for the resumed shell before typing. Its echoed input
+            # is not proof of execution: require the exact result and the
+            # following prompt, after continue, with either ash prompt form.
             if (not shell_probe_sent and b"ddb: continuing\n" in normalized
-                    and b"/ # " in normalized):
+                    and b" # " in normalized.partition(b"ddb: continuing\n")[2]):
                 write_line(uart, b"echo ddb-software-resume-ok")
                 shell_probe_sent = True
-            if (shell_probe_sent
-                    and b"\nddb-software-resume-ok\n/ # " in normalized):
+            if shell_probe_sent and shell_resumed(normalized):
                 break
 
     text = bytes(received).replace(b"\r", b"").decode(
@@ -108,7 +106,7 @@ def main() -> int:
     if "ddb: console tx=queued\n" not in text:
         raise SystemExit(
             "RPi5 DDB did not restore the console transmit queue on continue")
-    if "\nddb-software-resume-ok\n/ # " not in text:
+    if not shell_resumed(bytes(received)):
         raise SystemExit("RPi5 shell did not resume in the same boot")
 
     frames = len(re.findall(

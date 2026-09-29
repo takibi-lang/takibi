@@ -41,6 +41,7 @@ that a single un-retried write had no recovery path at all.
 
 import argparse
 import re
+from pathlib import Path
 import time
 
 import serial
@@ -126,8 +127,8 @@ def resumed(normalized: bytes) -> bool:
     was describing a side effect of the race it now avoids.
 
     Anchored after `ddb: continuing` so nothing earlier in the capture can
-    satisfy it. The shell does not echo what is typed at it, so the only
-    source of this line is the command having run.
+    satisfy it. Ash can echo the input command, but an echoed
+    `echo ddb-resume-ok` line cannot satisfy the exact output predicate.
 
     With or without a prompt in front of it, then. Which one appears is that
     same race -- whether the shell answered the waking newline before the
@@ -145,90 +146,8 @@ def resumed(normalized: bytes) -> bool:
                for line in tail.splitlines())
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", required=True)
-    parser.add_argument("--log", required=True)
-    parser.add_argument("--timeout", type=float, default=20.0)
-    args = parser.parse_args()
-
-    timeline = Timeline(args.timeout)
-    deadline = time.monotonic() + args.timeout
-    received = bytearray()
-    prompt_count = 0
-    resume_command_sent = False
-    last_resume_write = 0.0
-    commands = (b"xkfault\n", b"events\n", b"bt\n", b"bt cpu 1\n",
-                b"wait\n", b"continue\n")
-    with serial.Serial(args.port, 115200, timeout=0.25) as uart, open(
-        args.log, "ab"
-    ) as log:
-        # Generate one newline UART-wake. A visible response can pace BREAK,
-        # but the held peer ring may hide it until continue. Always verify
-        # the retained IRQ-event order before accepting this exercise.
-        uart.reset_input_buffer()
-        uart.write(b"\n")
-        uart.flush()
-        timeline.mark("wake-sent")
-        ack_deadline = min(time.monotonic() + WAKE_RESPONSE_SECONDS, deadline)
-        while time.monotonic() < ack_deadline:
-            chunk = uart.read(4096)
-            if chunk:
-                received.extend(chunk)
-                log.write(chunk)
-                log.flush()
-                timeline.mark("wake-acked")
-                break
-        if "wake-acked" not in timeline.at:
-            commands = SILENT_POSTMORTEM_COMMANDS + commands
-        uart.send_break(0.25)
-        timeline.mark("break-sent")
-        while time.monotonic() < deadline:
-            # The read is what paces this loop, at its 0.25s timeout. An
-            # empty read must NOT skip the rest of the body: silence after
-            # the resume command is exactly the state the retry below exists
-            # for, and a `continue` here would mean the retry could only fire
-            # while the shell was already talking.
-            chunk = uart.read(4096)
-            if chunk:
-                received.extend(chunk)
-                log.write(chunk)
-                log.flush()
-
-            # Evaluated every iteration, not only when a chunk just arrived.
-            # The acknowledgement read above can pull the debugger banner in
-            # alongside the byte it was waiting for, and gating this on a
-            # NEW chunk then leaves a prompt sitting unanswered in a buffer
-            # while the session waits for output that has already been sent.
-            found = received.count(b"ddb> ")
-            if found:
-                timeline.mark("first-prompt")
-            while prompt_count < found:
-                if prompt_count < len(commands):
-                    uart.write(commands[prompt_count])
-                    uart.flush()
-                prompt_count += 1
-
-            normalized = bytes(received).replace(b"\r", b"")
-            if resumed(normalized):
-                timeline.mark("resume-echoed")
-                break
-            if b"ddb: continuing\n" in received:
-                timeline.mark("continuing")
-                # First write, then a resend for as long as no echo comes
-                # back. A write into a UART that has only just resumed has no
-                # other recovery path, and a resend is indistinguishable from
-                # the first command to the shell.
-                if (not resume_command_sent
-                        or time.monotonic() - last_resume_write
-                        >= RESUME_RETRY_SECONDS):
-                    uart.write(b"echo ddb-resume-ok\n")
-                    uart.flush()
-                    last_resume_write = time.monotonic()
-                    timeline.resume_attempts += 1
-                    timeline.mark("resume-sent")
-                    resume_command_sent = True
-
+def validate_capture(received: bytes, prompt_count: int, timeline: Timeline) -> None:
+    """Validate live and archived UART captures with the same predicates."""
     text = received.decode("ascii", errors="replace").replace("\r", "")
     if "oops: fail-stop" in text:
         raise timeline.bail(
@@ -315,11 +234,9 @@ def main() -> int:
         raise timeline.bail(
             "RPi5 DDB did not observe the held peer console record")
     continuing = text.find("ddb: continuing\n")
-    delivered = text.find(
-        "peer user console: queued before DDB, delivered after continue\n",
-        continuing,
-    )
-    if continuing < 0 or delivered < 0:
+    marker = "peer user console: queued before DDB, delivered after continue\n"
+    delivered = text.find(marker)
+    if not 0 <= continuing < delivered or text.count(marker) != 1:
         raise timeline.bail(
             "RPi5 peer console record did not follow DDB continue")
     if not resumed(bytes(received).replace(b"\r", b"")):
@@ -327,6 +244,102 @@ def main() -> int:
             f"RPi5 workload did not resume after DDB continue: "
             f"{timeline.resume_attempts} resume command(s) went out and no "
             "echo came back")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--port")
+    source.add_argument("--validate-log", type=Path)
+    parser.add_argument("--log")
+    parser.add_argument("--timeout", type=float, default=20.0)
+    args = parser.parse_args()
+
+    timeline = Timeline(args.timeout)
+    if args.validate_log is not None:
+        received = args.validate_log.read_bytes()
+        validate_capture(received, received.count(b"ddb> "), timeline)
+        print("PASS ddb-rpi5 capture validation: archived UART log")
+        return 0
+    if args.log is None:
+        parser.error("--log is required with --port")
+    deadline = time.monotonic() + args.timeout
+    received = bytearray()
+    prompt_count = 0
+    resume_command_sent = False
+    last_resume_write = 0.0
+    commands = (b"xkfault\n", b"events\n", b"bt\n", b"bt cpu 1\n",
+                b"wait\n", b"continue\n")
+    with serial.Serial(args.port, 115200, timeout=0.25) as uart, open(
+        args.log, "ab"
+    ) as log:
+        # Generate one newline UART-wake. A visible response can pace BREAK,
+        # but the held peer ring may hide it until continue. Always verify
+        # the retained IRQ-event order before accepting this exercise.
+        uart.reset_input_buffer()
+        uart.write(b"\n")
+        uart.flush()
+        timeline.mark("wake-sent")
+        ack_deadline = min(time.monotonic() + WAKE_RESPONSE_SECONDS, deadline)
+        while time.monotonic() < ack_deadline:
+            chunk = uart.read(4096)
+            if chunk:
+                received.extend(chunk)
+                log.write(chunk)
+                log.flush()
+                timeline.mark("wake-acked")
+                break
+        if "wake-acked" not in timeline.at:
+            commands = SILENT_POSTMORTEM_COMMANDS + commands
+        uart.send_break(0.25)
+        timeline.mark("break-sent")
+        while time.monotonic() < deadline:
+            # The read is what paces this loop, at its 0.25s timeout. An
+            # empty read must NOT skip the rest of the body: silence after
+            # the resume command is exactly the state the retry below exists
+            # for, and a `continue` here would mean the retry could only fire
+            # while the shell was already talking.
+            chunk = uart.read(4096)
+            if chunk:
+                received.extend(chunk)
+                log.write(chunk)
+                log.flush()
+
+            # Evaluated every iteration, not only when a chunk just arrived.
+            # The acknowledgement read above can pull the debugger banner in
+            # alongside the byte it was waiting for, and gating this on a
+            # NEW chunk then leaves a prompt sitting unanswered in a buffer
+            # while the session waits for output that has already been sent.
+            found = received.count(b"ddb> ")
+            if found:
+                timeline.mark("first-prompt")
+            while prompt_count < found:
+                if prompt_count < len(commands):
+                    uart.write(commands[prompt_count])
+                    uart.flush()
+                prompt_count += 1
+
+            normalized = bytes(received).replace(b"\r", b"")
+            if resumed(normalized):
+                timeline.mark("resume-echoed")
+                break
+            if b"ddb: continuing\n" in received:
+                timeline.mark("continuing")
+                # First write, then a resend for as long as no echo comes
+                # back. A write into a UART that has only just resumed has no
+                # other recovery path, and a resend is indistinguishable from
+                # the first command to the shell.
+                if (not resume_command_sent
+                        or time.monotonic() - last_resume_write
+                        >= RESUME_RETRY_SECONDS):
+                    uart.write(b"echo ddb-resume-ok\n")
+                    uart.flush()
+                    last_resume_write = time.monotonic()
+                    timeline.resume_attempts += 1
+                    timeline.mark("resume-sent")
+                    resume_command_sent = True
+
+    validate_capture(received, prompt_count, timeline)
     print("PASS kernel/rpi5 ddb: guarded fault recovered, inspected, and "
           "resumed")
     print(timeline.render())

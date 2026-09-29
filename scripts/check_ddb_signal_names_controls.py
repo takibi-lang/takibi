@@ -2,7 +2,7 @@
 """Controls for the DDB signal-vocabulary check.
 
 The repository passes today, so a control that only ran the check would prove
-nothing. Each rule is exercised against a planted copy of the two files it
+nothing. Each rule is exercised against a planted copy of the three files it
 reads.
 
 The case that matters is the first: a signal kill(2) starts accepting and the
@@ -23,6 +23,7 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 CHECK = "scripts/check_ddb_signal_names.py"
 SYSCALL = "kernel/kernel/syscall.tkb"
 DEBUGGER = "kernel/arch/arm64/kernel/exception_evidence.tkb"
+RUNNER = "scripts/run_kernel_ddb_qemutest.sh"
 
 
 def run(root):
@@ -46,7 +47,7 @@ def case(name, plants, want, should_fail=True):
         (root / "scripts").mkdir(parents=True)
         for script in ("check_ddb_signal_names.py", "pass_line.py"):
             shutil.copy(REPO / "scripts" / script, root / "scripts" / script)
-        for relative in (SYSCALL, DEBUGGER):
+        for relative in (SYSCALL, DEBUGGER, RUNNER):
             target = root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(REPO / relative, target)
@@ -147,6 +148,17 @@ def main() -> int:
         edit(DEBUGGER, "private fn ddb_put_signal_set(set: usize) !{unsafe} {",
              "private fn ddb_put_signal_set(bits: usize) !{unsafe} {"),
         "is missing or reshaped")
+
+    failures += case(
+        "a stale first signal alternative in the runner",
+        edit(RUNNER, "sigset='(none|(sigint|sigquit|sigterm|sigchld|sigtstp)",
+             "sigset='(none|(sigquit|sigterm|sigchld|sigtstp)"),
+        "runner signal vocabulary rejects")
+    failures += case(
+        "a stale real-state mask gate",
+        edit(RUNNER, "masked=(sigint|sigquit|sigterm|sigchld|sigtstp)([,+]|$)",
+             "masked=(sigterm|sigchld)([,+]|$)"),
+        "runner signal vocabulary does not exercise")
 
     for failure in failures:
         print(f"ERROR\tddb-signal-names-controls: {failure}")

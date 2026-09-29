@@ -7,8 +7,8 @@ already sent is indistinguishable from one that was never signalled, because
 blocks. `ps` now prints both words, and printing them created a second place
 the signal vocabulary is written down.
 
-The numbers live in kernel/kernel/syscall.tkb -- kill(2) accepts exactly
-`LINUX_SIGTERM` and `LINUX_SIGCHLD` and rejects everything else with EINVAL --
+The accepted numbers come from the explicit `LINUX_SIG...` guard in
+kernel/kernel/syscall.tkb; kill(2) rejects other signals with EINVAL,
 while the words live in kernel/arch/arm64/kernel/exception_evidence.tkb. A
 signal the kernel starts accepting and does not name there does not fail
 anything: the view keeps working and prints a bare hex remainder where a word
@@ -36,6 +36,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SYSCALL = ROOT / "kernel" / "kernel" / "syscall.tkb"
 DEBUGGER = ROOT / "kernel" / "arch" / "arm64" / "kernel" / "exception_evidence.tkb"
 
+RUNNER = ROOT / "scripts" / "run_kernel_ddb_qemutest.sh"
 RENDERER = "ddb_put_signal_set"
 
 
@@ -89,6 +90,28 @@ def renderer(text: str) -> tuple[dict[str, str], dict[str, str], list[str]]:
             f"{RENDERER} no longer subtracts the bits it named before "
             f"printing the remainder, so a named or an unnamed bit is lost")
     return bits, words, [term.strip() for term in kept.group(1).split("|")]
+
+
+def runner_problems(text: str, numbers: dict[str, int]) -> list[str]:
+    """Use rendered sets, so a stale alternative in either gate cannot pass."""
+    shape = re.search(r"^sigset='([^']+)'$", text, re.MULTILINE)
+    real = re.search(r"! grep -Eq '([^']* masked=[^']+)'", text)
+    if shape is None or real is None:
+        return ["runner signal vocabulary predicates are missing or reshaped"]
+    names = [name.lower() for name in sorted(numbers, key=numbers.get)]
+    for subset in range(1 << len(names)):
+        rendered = ",".join(name for bit, name in enumerate(names) if subset & (1 << bit))
+        for value in ((rendered, rendered + "+0x0000000020000000") if rendered else
+                      ("none", "0x0000000020000000")):
+            if re.fullmatch(shape[1], value) is None:
+                return [f"runner signal vocabulary rejects the real DDB set {value}"]
+    for name in names:
+        line = f"ddb: ps pid=1 ppid=0 state=3 masked={name}+0x0000000020000000 owner=none"
+        if re.search(real[1], line) is None:
+            return [f"runner signal vocabulary does not exercise PID 1 mask {name}"]
+    if re.fullmatch(shape[1], "sigunknown") is not None:
+        return ["runner signal vocabulary accepts an unknown named signal"]
+    return []
 
 
 def main() -> int:
@@ -151,6 +174,11 @@ def main() -> int:
                 f"not derive from a DDB_SIGNAL constant: a bit hidden from a "
                 f"view that claims to drop nothing")
 
+    try:
+        problems.extend(runner_problems(RUNNER.read_text(encoding="ascii"), numbers))
+    except (OSError, re.error) as error:
+        problems.append(f"runner signal vocabulary: {error}")
+
     if problems:
         for problem in problems:
             print(f"ERROR\tddb-signal-names: {problem}")
@@ -160,7 +188,7 @@ def main() -> int:
     report_pass("ddb-signal-names",
                 f"{len(numbers)} signal(s) kill(2) accepts are each named by "
                 f"the DDB process view, spelled from the constant, and "
-                f"subtracted from its hex remainder",
+                f"subtracted from its hex remainder, and accepted by both runner gates",
                 signals=len(numbers))
     return 0
 

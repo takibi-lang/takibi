@@ -954,6 +954,16 @@ oops report use one row formatter, so their field order cannot drift. Ordinary
 boots leave tracing and the report disabled. Both scheduler CPUs write their
 own ring and a global atomic sequence preserves the cross-CPU order.
 
+Archived physical UART captures can be checked without resetting a board:
+
+```sh
+python3 scripts/run_kernel_ddb_rpi5_driver.py --validate-log _build/kernel-hwtest-rpi5/ddb-uart.log
+```
+
+This runs the same final capture predicates as the live driver. It does not
+reproduce IRQ timing or the live retry loop; the saved event order and record
+contents are the evidence it checks.
+
 ### Init-managed HTTPd lifecycle
 
 PID 1 is the pinned BusyBox `init` applet. It reads `/etc/inittab`, runs the
