@@ -49,8 +49,17 @@ of #604, #621 and #556 when they next recur.
    #216, #614 (a process start and a zombie reap that require a stack-free
    proof), and #613: a lockless multi-writer kernel log ring with its
    protocol in the type system, the multicore-specific subject this
-   discussion is judged against.
-4. **Begin evaluating recent research**: typestate, the K framework,
+   discussion is judged against. #638 sets the preemption target this
+   step designs for: full kernel preemption, with no explicit-point
+   intermediate. Its typed preparation belongs here: a
+   preemption-disabled authority, and per-CPU access derived from it in
+   place of the 17 `KERNEL_PREEMPTIBLE == 0` assertions.
+4. **Flip to kernel preemption (#638).** Once step 3's authorities exist,
+   measure candidate designs' cost on RPi5 and set `KERNEL_PREEMPTIBLE`
+   to 1, with the models passing without their no-preemption guards. Never
+   during step 2's soak, whose defects must stay attributable to
+   multicore.
+5. **Begin evaluating recent research**: typestate, the K framework,
    invariants, partial TLA+. First consumers #590, #308 and #109; proof-side entry
    #13. An evaluation, not a decision to adopt.
 
