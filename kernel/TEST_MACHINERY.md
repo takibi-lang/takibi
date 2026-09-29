@@ -71,6 +71,15 @@ first IRQ-delivered byte. Every byte must be consumed in order without another
 interrupt. A canonical-input control must fail nonzero with the queued-byte
 diagnosis before the lane can pass.
 
+The DDB QEMU lane stops the armed busy worker between its peer-exit reply
+and its exit syscall. Its affinity must admit only that peer. The lane sets
+a pending reschedule at the reply and requires the exit syscall to remain
+on the same CPU; the later UART milestone still requires physical stack
+release before init collects the child. `KERNEL_PEER_EXIT_CONTROL=unpin`
+restores the former wide mask at the reply and must fail with the migration
+diagnosis. A missing DDB checkpoint also preserves live workload state,
+per-core execution state, and registers in `checkpoint-failure-gdb.log`.
+
 ## Syscall evidence counters
 
 `kernel/kernel/syscall_test_evidence.tkb` has twelve counters and one socket

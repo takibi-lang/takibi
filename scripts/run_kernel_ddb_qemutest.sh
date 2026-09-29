@@ -114,10 +114,15 @@ else
     # GitHub issue #534: the BREAK must land while a peer record is held.
     GDB_COMMANDS+=(
         -ex "set *(char *)&kernel_ddb_peer_console_test_enabled = 1"
+        -ex "source $REPO_ROOT/scripts/kernel_peer_exit_check.py"
     )
 fi
-gdb-multiarch -q -batch "$ELF" "${GDB_COMMANDS[@]}" \
-    -ex "detach" >/dev/null
+KERNEL_PEER_EXIT_TIMEOUT="$TIMEOUT_SECS" \
+    gdb-multiarch -q -batch "$ELF" "${GDB_COMMANDS[@]}" \
+    -ex "detach" >"$ARTIFACT_DIR/peer-exit-gdb.log" 2>&1
+if [ "$BREAK_SOURCE" = uart ]; then
+    grep '^PASS kernel/qemu peer-exit:' "$ARTIFACT_DIR/peer-exit-gdb.log"
+fi
 
 # The UART BREAK path now reaches the live migration phase rather than the
 # first shell prompt. Give it the driver's full boot budget; the indirect-file
@@ -129,6 +134,18 @@ for _wait in $(seq 1 "$((TIMEOUT_SECS * 10))"); do
     sleep 0.1
 done
 if [ ! -e "$SNAPSHOT_READY" ]; then
+    # The boot can stop before the driver reaches its DDB checkpoint. Keep
+    # the live workload state before cleanup destroys the guest; a later
+    # successful BREAK alone cannot identify which peer milestone stopped.
+    timeout 10s gdb-multiarch -q -batch "$ELF" \
+        -ex "target remote 127.0.0.1:$GDB_PORT" \
+        -ex 'maintenance packet Qqemu.PhyMemMode:1' \
+        -ex 'set print pretty on' \
+        -ex 'p workload_busy_pair' \
+        -ex 'p execution_state[0]' \
+        -ex 'p execution_state[1]' \
+        -ex 'thread apply all info registers pc sp x0 x1 x8' \
+        -ex 'detach' >"$ARTIFACT_DIR/checkpoint-failure-gdb.log" 2>&1 || true
     echo "FAIL kernel/qemu ddb: DDB snapshot was not ready for GDB" >&2
     exit 1
 fi

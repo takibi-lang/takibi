@@ -823,6 +823,13 @@ private fn workload_busy_record_progress_locked(
             if (workload_busy_pair.peer_exit_reported == false) {
                 if (workload_busy_pair.peer_exit_pid ==
                         kernel_process_current_pid() && cpu_id() != 0) {
+                    // The reply and exit(2) are separate syscalls. A timer
+                    // may hand this process to CPU 0 between them, where
+                    // exit cannot provide the peer stack-release evidence.
+                    // Hold its placement through the actual exit, under the
+                    // same run guard that chose this peer.
+                    scheduled_process_set_affinity_mask(
+                        kernel_syscall_process_slot(), 1 << cpu_id());
                     workload_busy_pair.peer_exit_cpu = cpu_id();
                     return WorkloadBusyProgressResult::Value(2);
                 }
