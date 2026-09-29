@@ -9,7 +9,7 @@ history, is archived in `HISTORY.md`.
 
 Live intermittents are listed in `docs/KNOWN_INTERMITTENTS.md`, not here.
 
-## Territories, re-cut 2026-09-25
+## Territories, re-cut 2026-09-25; queues refreshed 2026-09-29
 
 A territory is a role, not a set of directories and not a particular agent
 (`AGENTS.md`); which agent holds which is the maintainer's per-session
@@ -28,7 +28,7 @@ allcheck` stops every other piece of work, and Territory B is busy, so the
 lane that meets such a failure analyses and fixes it, whatever territory
 its cause lies in. The goal is to drive the probability of an allcheck
 failure toward zero step by step. Held by A under this rule now: the analysis
-of #604, #621 and #556 when they next recur.
+of #604 and #556 when they next recur.
 
 1. **True multicore support**: done (2026-09-27). Every online core runs
    ordinary processes, including PID 1 on core 0's idle loop; exec, clone,
@@ -77,14 +77,13 @@ of #604, #621 and #556 when they next recur.
 
 ### Territory B: everything else, ordered by current priority
 
-1. **Kernel and userspace capability:** #204, #433,
-   #430, #434, #435, #220, #595.
+1. **Kernel and userspace capability:** #220, #595, #635.
 2. **Resource use and measured performance:** #389, #422, #497, #520, #553,
    #386, #502.
 3. **Compiler safety and language research:** #58, #203, #252, #200, #201,
    #282, #129, #374, #417, #155, #28, #8.
 4. **Toolchain, portability and hardware-lane support:** #599, #576, #568, #123,
-   #124, #122, #95, #51, #50, #85, #268.
+   #124, #122, #95, #51, #50, #85, #268, #636.
 5. **Deferred or not a scheduled work item:** #432, #555, #250, #444, #429,
    #149, #567, #539, #536, #622, #623, #624.
 
