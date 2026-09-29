@@ -79,7 +79,18 @@ case "$MODE" in
         # recognised only core 0's stop SGI (#632). With that fixed, the
         # peer's report stops core 0 for good, as a fail-stop should, and
         # core 0 never faults. A scenario where two cores fault before either
-        # can stop the other is its own issue.
+        # can stop the other is concurrent_fault below.
+        fault_instruction=0xd4200000
+        expected_ec=3c
+        expected_detail=''
+        ;;
+    concurrent_fault)
+        # GitHub issue #634: two online cores fault before either can stop
+        # the other -- the case the fault-order ticket, the report claim and
+        # `abandoned=0` exist for, and the one peer_fault lost when #632 made
+        # a peer's world stop work. Both faults are BRK #0: core 0's at its
+        # first EL0 instruction, core 1's at EL1 in its idle loop. GDB holds
+        # each inside the fail-stop path and releases them together.
         fault_instruction=0xd4200000
         expected_ec=3c
         expected_detail=''
@@ -131,6 +142,14 @@ if [ "$MODE" = peer_fault ]; then
     # measured at 1-in-3 failures here before this was raised.
     console_await=(--timeout 90)
     console_await+=(--await-line "oops: fail-stop seq=1 cpu=1")
+elif [ "$MODE" = concurrent_fault ]; then
+    # A whole boot again: core 0's fault is PID 1's first instruction.
+    # Both records before the first question: the console's first prompt
+    # belongs to whichever core claimed it, and asking for `oops` before the
+    # other has reported would answer about half the machine and pass.
+    console_await=(--timeout 90)
+    console_await+=(--await-line "oops: fail-stop seq=1 cpu=0"
+                    --await-line "oops: fail-stop seq=1 cpu=1")
 fi
 python3 "$REPO_ROOT/scripts/run_kernel_crash_console.py" \
     --port "$SERIAL_PORT" --log "$UART_LOG" "${console_await[@]}" &
@@ -176,6 +195,57 @@ for _ in $(seq 1 50); do
             -ex "takibi-force-variant-return KernelChildExecPrepareResult CloneVmMissing"
             -ex "detach"
         )
+    elif [ "$MODE" = concurrent_fault ]; then
+        # QEMU's gdbstub numbers vCPUs from 1: thread 1 is core 0, thread 2
+        # is core 1. With scheduler-locking on, `continue` resumes only the
+        # selected vCPU and the other stays exactly where it stopped.
+        #
+        # 1. Core 0 stops at PID 1's first user instruction, which becomes
+        #    BRK. Core 1 is online and idle: no other process exists yet.
+        # 2. Core 1's idle loop calls kernel_log_peer_probe_step on every
+        #    wake, and nothing else does; its first instruction becomes BRK.
+        #    Core 1 alone runs, faults at EL1 and enters the fail-stop path.
+        #    It is held once it has taken fault ticket 1 and the report
+        #    claim, at the start of its own render. The ticket fixes the
+        #    order the console must list.
+        # 3. Core 0 alone runs into its BRK, through the same path, and is
+        #    held at its own report claim. Both are now past the fault entry
+        #    with interrupts masked, so neither can acknowledge a world stop
+        #    the other begins, and neither has begun one.
+        # 4. Core 0 alone runs on until its claim loop asks for the word's
+        #    address a second time: it has certainly seen the claim held.
+        #    Without this the renders overlapped in 8 runs of 10 and not in
+        #    the other 2, and `abandoned=0` said nothing on those two. Not
+        #    `stepi`: QEMU single-steps an exclusive load by running a whole
+        #    block at once, and here that block read the held word as free.
+        # 5. Detach releases both at once.
+        gdb_commands=(
+            -ex "target remote :$GDB_PORT"
+            -ex "break run_initial_user thread 1"
+            -ex "continue"
+            -ex "set {int}\$x0 = $fault_instruction"
+            -ex "delete"
+            -ex "set {int}kernel_log_peer_probe_step = $fault_instruction"
+            -ex "set scheduler-locking on"
+            -ex "break *crash_snapshot_capture thread 2"
+            -ex "thread 2"
+            -ex "continue"
+            -ex "delete"
+            -ex "break *crash_snapshot_render thread 2"
+            -ex "continue"
+            -ex "delete"
+            -ex "break *crash_report_claim thread 1"
+            -ex "thread 1"
+            -ex "continue"
+            -ex "delete"
+            -ex "break *crash_report_owner_address thread 1"
+            -ex "continue"
+            -ex "continue"
+            -ex "delete"
+            -ex "info threads"
+            -ex "set scheduler-locking off"
+            -ex "detach"
+        )
     else
         gdb_commands=(
             -ex "target remote :$GDB_PORT"
@@ -206,10 +276,20 @@ for _ in $(seq 1 50); do
         )
         fi
     fi
-    if gdb-multiarch -q -batch "$ELF" "${gdb_commands[@]}" \
-            >"$ARTIFACT_DIR/arm-gdb.log" 2>&1; then
+    # Bounded: a breakpoint the kernel never reaches leaves gdb waiting in
+    # `continue` for good, and concurrent_fault stages five of them. The
+    # bound is well past the console driver's, which has failed by then.
+    gdb_status=0
+    timeout 300 gdb-multiarch -q -batch "$ELF" "${gdb_commands[@]}" \
+        >"$ARTIFACT_DIR/arm-gdb.log" 2>&1 || gdb_status=$?
+    if [ "$gdb_status" -eq 0 ]; then
         armed=true
         break
+    fi
+    if [ "$gdb_status" -eq 124 ]; then
+        echo "FAIL kernel/qemu oops: GDB never reached a staged breakpoint" >&2
+        sed 's/^/  /' "$ARTIFACT_DIR/arm-gdb.log" >&2 || true
+        exit 1
     fi
     sleep 0.1
 done
@@ -248,6 +328,51 @@ if [ "$MODE" = peer_fault ]; then
         exit 1
     fi
     echo "PASS kernel/qemu oops: the peer's fail-stop stopped core 0 and reported alone"
+    exit 0
+fi
+
+# GitHub issue #486's two-core claim, restored by #634. Both cores reported,
+# and the console lists them in machine-wide fault order: core 1 took ticket
+# 1 before core 0 was let into its fault, so the console's listing (the
+# last two records in the log) must read core 1 then core 0.
+#
+# Every line is anchored, and that is itself the assertion: two cores
+# rendering to one UART at once shred each other's lines, so an anchored
+# line is the evidence that the report claim ordered every write.
+#
+# The console's world stop is Partial and released whichever core won the
+# console: the other is inside the fail-stop path with interrupts masked and
+# cannot acknowledge. That is the documented answer for a second crashing
+# core, and a Complete stop here would mean one core stopped the other
+# before it could report -- the scenario this mode exists to exclude.
+#
+# `abandoned=0` keeps the report claim honest. It counts a core that gave up
+# waiting and rendered into another's output anyway -- allowed, because a
+# wedged core must not silence one that still has something to say, but
+# never expected on a healthy run. If it fires, CRASH_REPORT_SPIN_TURNS
+# stopped outlasting one report, which wants investigating, not raising.
+# `contended` of at least one says the claim was actually asked the
+# question: GDB left core 0 spinning on the claim core 1 held.
+if [ "$MODE" = concurrent_fault ]; then
+    if ! grep -Eq "^oops: fail-stop seq=1 cpu=1 slot=0 ec=0x00000000000000$expected_ec " "$UART_LOG" ||
+            ! grep -Eq "^oops: fail-stop seq=1 cpu=0 slot=8 ec=0x00000000000000$expected_ec " "$UART_LOG" ||
+            ! grep -q '^oops: console owned by another core; parking$' "$UART_LOG" ||
+            ! grep -Eq '^oops: world-stop partial mask=0x0+ released; other cores still run$' "$UART_LOG" ||
+            grep -Eq '^oops: world-stop (complete|busy)' "$UART_LOG" ||
+            ! grep -Eq '^oops: cores reported=2 faults=2 contended=[1-9][0-9]* abandoned=0$' "$UART_LOG"; then
+        echo "FAIL kernel/qemu oops: two cores faulted together and the report does not show both" >&2
+        sed 's/^/  /' "$UART_LOG" >&2 || true
+        sed 's/^/  /' "$ARTIFACT_DIR/arm-gdb.log" >&2 || true
+        exit 1
+    fi
+    order="$(grep '^oops: fail-stop seq=1 cpu=[01] ' "$UART_LOG" | tail -2 |
+        sed 's/.*cpu=\([01]\) .*/\1/' | tr -d '\n')"
+    if [ "$order" != "10" ]; then
+        echo "FAIL kernel/qemu oops: the console listed the faults as '$order', not core-1-then-core-0" >&2
+        sed 's/^/  /' "$UART_LOG" >&2 || true
+        exit 1
+    fi
+    echo "PASS kernel/qemu oops: two concurrent faults both reported, in fault order"
     exit 0
 fi
 

@@ -690,7 +690,7 @@ regression from the failure being investigated:
 ```bash
 make kernelcheck-ddb-qemu       # UART BREAK and software BRK, inspect, resume
 make kernelcheck-ddb-rpi5-software # physical software BRK compiler-frame walk
-make kernelcheck-oops-qemu      # fail-stop console, GDB crash-snapshot read, a peer fault that stops core 0
+make kernelcheck-oops-qemu      # fail-stop console, GDB crash-snapshot read, one and two faulting cores
 make kernelcheck-qemu-debug     # full QEMU suite against the DWARF kernel
 make kernelcheck-rpi5           # includes the maintained physical DDB check
 ```
@@ -795,7 +795,13 @@ CrashSnapshot, and enters a read-only UART crash console with interrupts
 masked. Its initial commands are `oops`, `trace`, `ps`, and `proc PID`;
 unknown commands cannot mutate memory, registers, processes, or resume a
 terminal failure. The focused regression drives all four commands over the
-real QEMU UART connection. The test also sources the compiler-generated
+real QEMU UART connection. Two modes fault the peer: one where core 1 faults
+alone during bring-up and its report stops core 0 for good, and one where GDB
+holds both online cores inside the fail-stop path before releasing them
+together. The second requires both records, listed in fault order, a report
+claim that was contended and never abandoned, and a Partial console world
+stop, because the other core has interrupts masked and cannot acknowledge.
+The test also sources the compiler-generated
 _build/kernel-crash-snapshot-layout.gdb and then
 scripts/kernel_crash_snapshot.gdb's read-only takibi-oops command to inspect
 that retained record. The helper reads the snapshot's generated layout only;

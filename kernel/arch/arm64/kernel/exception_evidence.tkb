@@ -2758,10 +2758,10 @@ private fn crash_console_append(
 // core 0 -- and so ate the bytes a peer's console was polling for. Stopped,
 // the others hold in world_stop_interrupt_hold with IRQs masked, and ps and
 // proc read a machine that is not moving. A core that does not acknowledge
-// in time (one crashing too, IRQs masked) makes the stop Partial. That one
-// is released, not kept: a request left standing would stop a core that
-// takes it later, possibly before that core reports a fault of its own --
-// #486's peer_fault lane is exactly that core. It is reported, and the
+// in time (one crashing too, IRQs masked -- the oops lane's concurrent_fault
+// mode, #634) makes the stop Partial. That one is released, not kept: a
+// request left standing would stop a core that takes it later, possibly
+// before that core reports a fault of its own. It is reported, and the
 // console runs anyway: best effort, like every reporter.
 private fn crash_world_stop() !{unsafe} {
     match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
