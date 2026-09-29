@@ -124,7 +124,6 @@ def connect(deadline: float) -> socket.socket:
 def reader(connection: socket.socket) -> None:
     # The same two handshakes the ash lane's driver publishes, for the same
     # network peer: without them the boot's network fixtures wait it out.
-    cursor_queries_answered = 0
     published_init = False
     published_network = False
     connection.settimeout(0.2)
@@ -143,10 +142,8 @@ def reader(connection: socket.socket) -> None:
             with output_lock:
                 output.extend(chunk)
                 seen = bytes(output)
-            queries = seen.count(b"\x1b[6n")
-            while cursor_queries_answered < queries:
-                connection.sendall(b"\x1b[1;1R")
-                cursor_queries_answered += 1
+            # BusyBox's cursor query (ESC[6n) is not answered: a late
+            # reply lands in the next command (GitHub issue #644).
             if (not published_init and
                     b"linux socket: listener ready port=8080\n" in seen):
                 open(INIT_LISTENER, "w").close()

@@ -448,7 +448,6 @@ def main() -> int:
     peer_tty_sent = False
     peer_tty_line_sent = False
     ppoll_probe_byte_sent = False
-    cursor_queries_answered = 0
     httpd_done_seen_at = None
     capture_started = time.monotonic()
     last_chunk_at = capture_started
@@ -556,13 +555,13 @@ def main() -> int:
                         break
                     continue
 
-                # A serial terminal answers the cursor query emitted by
-                # BusyBox's termios-enabled line editor. Do this before
-                # commands, so the reply cannot reach the next application.
-                queries = output.count(b"\x1b[6n")
-                while cursor_queries_answered < queries:
-                    connection.write(b"\x1b[1;1R")
-                    cursor_queries_answered += 1
+                # BusyBox's termios-enabled line editor asks where the
+                # cursor is (ESC[6n) after each prompt. It is deliberately
+                # not answered: the editor does not wait for the reply, so a
+                # reply reaches whatever reads the UART next -- a running
+                # command, which echoed it, or the next command line, which
+                # took its tail as typed text (GitHub issue #644). The
+                # query is removed from the transcript instead.
                 prompt_count = bytes(output).replace(shell_setup.encode("ascii"), b"").count(b"/ # ")
                 if args.peer_tty and terminal_scenario.started:
                     # The foreground terminal probe adds one shell prompt.

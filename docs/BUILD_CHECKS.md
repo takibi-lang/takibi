@@ -86,6 +86,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_net_link_wait_controls.py` | Controls for the shared host-side reachability wait |
 | `check_no_conflict_markers.py` | no tracked file is left mid-merge, where a pattern-scanning check would answer about the half above the marker |
 | `check_no_conflict_markers_controls.py` | Positive and faithful negative controls for the conflict-marker check |
+| `check_no_cursor_reply.py` | no host driver answers BusyBox's cursor query, whose late reply lands in the next command (#644) |
+| `check_no_cursor_reply_controls.py` | Controls for the cursor-reply check, in both directions |
 | `check_pass_line_counts.py` | every check reports PASS through `scripts/pass_line.py`, asserting a count that is zero when it examined nothing |
 | `check_pass_line_counts_controls.py` | Controls for the PASS-line guard, in both directions |
 | `check_patch_embedded_image_controls.py` | Controls for the exact embedded-rootfs replacement used by the interactive RPi5 image |

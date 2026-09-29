@@ -77,9 +77,8 @@ def connect(deadline: float) -> socket.socket:
 
 
 def reader(connection: socket.socket) -> None:
-    # The ash lane's two handshakes, for the same network peer, and the
-    # answer a serial terminal gives BusyBox's cursor query.
-    cursor_queries_answered = 0
+    # The ash lane's two handshakes, for the same network peer. BusyBox's
+    # cursor query is not answered (GitHub issue #644).
     published_init = False
     published_network = False
     connection.settimeout(0.2)
@@ -98,9 +97,6 @@ def reader(connection: socket.socket) -> None:
             with output_lock:
                 output.extend(chunk)
                 text = bytes(output)
-            while cursor_queries_answered < text.count(b"\x1b[6n"):
-                connection.sendall(b"\x1b[1;1R")
-                cursor_queries_answered += 1
             if (not published_init and
                     b"linux socket: listener ready port=8080\n" in text):
                 open(INIT_LISTENER, "w").close()

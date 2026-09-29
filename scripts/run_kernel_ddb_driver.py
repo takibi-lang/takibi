@@ -152,7 +152,6 @@ def main() -> int:
         b"continue\n",
     ]
 
-    cursor_queries_answered = 0
     with serial, open(args.log, "wb") as log:
         while time.monotonic() < deadline:
             try:
@@ -166,10 +165,10 @@ def main() -> int:
                 log.write(chunk)
                 log.flush()
 
+            # BusyBox's cursor query (ESC[6n) follows every prompt, so its
+            # count marks a new prompt. It is not answered: a late reply
+            # lands in the next command (GitHub issue #644).
             queries = received.count(b"\x1b[6n")
-            while cursor_queries_answered < queries:
-                serial.sendall(b"\x1b[1;1R")
-                cursor_queries_answered += 1
 
             if (args.break_source == "uart" and peer_alias_queries is None and
                     b"persistent shell: uart blocked\n" in received):
