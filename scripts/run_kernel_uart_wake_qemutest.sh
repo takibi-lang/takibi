@@ -112,11 +112,16 @@ python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" "$NETDEV_LOCAL_PORT" "$NETDEV
     >"$ARTIFACT_DIR/net-peer.log" 2>&1 &
 PEER_PID=$!
 
+# Bounded from outside: a gdb stuck in `continue` otherwise holds the lane,
+# and every aggregate behind it, for good. Far above every step's own budget,
+# so reaching it means the check hung rather than ran slowly.
+GDB_CHECK_TIMEOUT=$(( ${KERNEL_QEMU_TIMEOUT:-120} * 6 ))
 UART_WAKE_SERIAL_PORT="$SERIAL_PORT" UART_WAKE_GDB_PORT="$GDB_PORT" \
 UART_WAKE_UART_LOG="$ARTIFACT_DIR/uart.log" UART_WAKE_VERDICT="$VERDICT" \
 UART_WAKE_METADATA="$REPO_ROOT/_build/kernel-debug-metadata.json" \
 UART_WAKE_INIT_LISTENER="$INIT_LISTENER" UART_WAKE_NETWORK_READY="$NETWORK_READY" \
 UART_WAKE_BOOT_TIMEOUT="${KERNEL_QEMU_TIMEOUT:-120}" UART_WAKE_MODE="$MODE" \
+    timeout "$GDB_CHECK_TIMEOUT" \
     gdb-multiarch -q -batch "$ELF" -x "$REPO_ROOT/scripts/kernel_uart_wake_check.py" \
     >"$ARTIFACT_DIR/gdb.log" 2>&1 || true
 

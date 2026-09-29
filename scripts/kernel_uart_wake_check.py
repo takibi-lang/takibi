@@ -181,23 +181,38 @@ class Counter(gdb.Breakpoint):
         return False
 
 
-def interrupt_after(seconds: float) -> threading.Timer:
-    timer = threading.Timer(seconds, lambda: os.kill(os.getpid(), signal.SIGINT))
-    timer.start()
-    return timer
+# A SIGINT that lands while gdb is not yet waiting on the target is lost,
+# and the `continue` it was meant for then waits for good: an allcheck sat in
+# the scalar control's second step for six minutes until it was killed by
+# hand. So the interrupt repeats until the caller says `continue` returned.
+INTERRUPT_RETRY = 2.0
+
+
+def interrupt_after(seconds: float) -> threading.Event:
+    returned = threading.Event()
+
+    def fire() -> None:
+        if returned.wait(seconds):
+            return
+        while not returned.is_set():
+            os.kill(os.getpid(), signal.SIGINT)
+            returned.wait(INTERRUPT_RETRY)
+
+    threading.Thread(target=fire, daemon=True).start()
+    return returned
 
 
 def continue_bounded(threads_locked: bool) -> None:
     """Resume the guest, or with the lock only the selected vCPU, for at
     most STEP_TIMEOUT."""
     gdb.execute("set scheduler-locking " + ("on" if threads_locked else "off"))
-    timer = interrupt_after(STEP_TIMEOUT)
+    returned = interrupt_after(STEP_TIMEOUT)
     try:
         gdb.execute("continue")
     except (gdb.error, KeyboardInterrupt):
         pass
     finally:
-        timer.cancel()
+        returned.set()
 
 
 def thread_pc(thread: int) -> int:
@@ -544,13 +559,13 @@ def run() -> None:
         # The guest is stopped; QEMU's main loop still moves the byte into
         # the PL011 FIFO and raises the interrupt line meanwhile.
         time.sleep(0.2)
-        timer = interrupt_after(STEP_TIMEOUT)
+        returned = interrupt_after(STEP_TIMEOUT)
         try:
             gdb.execute("continue")
         except (gdb.error, KeyboardInterrupt):
             pass
         finally:
-            timer.cancel()
+            returned.set()
         if window.hit_count != index + 1:
             gdb.execute("thread apply all bt 6")
             gdb.execute("x/4wx &terminal_settings")
