@@ -52,7 +52,7 @@ PEER_PENDING = b"ddb: peer console=pending\n"
 WAKE_EVENT = b"id=0x0000000000000201"
 PEER_EMPTY = b"ddb: peer console=empty\n"
 PEER_RECORD = (b"peer user console: queued before DDB, delivered after "
-               b"continue\n")
+               b"continue\r\n")
 
 # The exact lines the driver asserts on, taken from a real capture so a
 # change to either side shows up here rather than only on the board.

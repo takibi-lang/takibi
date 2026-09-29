@@ -229,7 +229,7 @@ def main() -> int:
                     timeline.mark("resume-sent")
                     resume_command_sent = True
 
-    text = received.decode("ascii", errors="replace")
+    text = received.decode("ascii", errors="replace").replace("\r", "")
     if "oops: fail-stop" in text:
         raise timeline.bail(
             "RPi5 DDB did not resume after guarded fault "
