@@ -131,6 +131,18 @@ fn secondary_tick_value() -> usize !{unsafe} {
     return secondary_tick_value_for(1);
 }
 
+// Any core's tick count, core 0's included (GitHub issue #649): a measured
+// interval that took a tick on its own CPU is not measuring only itself.
+fn kernel_tick_count_of(core: {0..<KERNEL_MAX_CORES as usize}) -> usize
+        !{unsafe} {
+    return secondary_tick_value_for(core);
+}
+
+// Core 0's tick, which does not come through secondary_timer_tick.
+fn kernel_core0_tick_note() !{unsafe} {
+    unsafe { atomic_fetch_add_relaxed(secondary_tick_address(0), 1); }
+}
+
 // Called from a platform IRQ dispatch when the interrupted core is not core
 // 0 and the interrupt is the timer PPI. Rearms this core's own timer and
 // counts. Deliberately does NOT call kernel_process_net_wake_all() or

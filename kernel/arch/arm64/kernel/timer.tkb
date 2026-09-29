@@ -46,8 +46,9 @@ fn timer_irq_setup() {
     enable_cntp();
 }
 
-fn timer_irq_handler() !{interrupt} {
+fn timer_irq_handler() !{interrupt, unsafe} {
     timer_tick_rearm();
+    kernel_core0_tick_note();
     // Every tick wakes network waiters, regardless of which EL it
     // interrupted. This is separate from the EL0-only scheduling half.
     //

@@ -65,12 +65,16 @@ def main() -> None:
         "    let guard = process_run_lock();\n"
         "    kernel_process_deadline_wake_all(guard);",
     )
-    # Forging is unsafe, so the handler that does it has to say so.
-    replace_once(
-        timer_path,
-        "fn timer_irq_handler() !{interrupt} {",
-        "fn timer_irq_handler() !{interrupt, unsafe} {",
-    )
+    # Forging is unsafe, so the handler that does it has to say so. It
+    # already does since it counts core 0's tick (GitHub issue #649); the
+    # edit stays for a handler that stops needing to.
+    handler = timer_path.read_text(encoding="ascii")
+    if "fn timer_irq_handler() !{interrupt, unsafe} {" not in handler:
+        replace_once(
+            timer_path,
+            "fn timer_irq_handler() !{interrupt} {",
+            "fn timer_irq_handler() !{interrupt, unsafe} {",
+        )
 
 
 if __name__ == "__main__":

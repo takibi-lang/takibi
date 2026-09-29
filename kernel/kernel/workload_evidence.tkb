@@ -485,6 +485,7 @@ const MOVE_COST_WRAP: usize = 0xFFFFFFFF;
 
 struct MoveCostOpen {
     pid: usize;
+    ticks: usize;
     cycles: usize;
     instructions: usize;
     live: bool;
@@ -494,6 +495,9 @@ struct MoveCostRecord {
     round: usize;
     cold: bool;
     cpu: usize;
+    // Timer ticks this CPU took inside the pass (GitHub issue #649). The
+    // PMU counts EL1 too, so a pass that took one also counted its handler.
+    ticks: usize;
     cycles: usize;
     instructions: usize;
 }
@@ -1816,7 +1820,7 @@ fn workload_peer_mutation_report() -> usize {
 // process had just moved to. Answers 1 when the phase was taken, 0 when
 // this CPU has no usable counters or the call was refused.
 fn workload_move_cost_progress(phase: usize, round: usize, cold: usize)
-        -> usize {
+        -> usize !{unsafe} {
     let raw_cpu: usize = cpu_id();
     if (raw_cpu >= KERNEL_MAX_CORES) { return 0; }
     let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
@@ -1829,6 +1833,7 @@ fn workload_move_cost_progress(phase: usize, round: usize, cold: usize)
         move_cost_open[cpu].live = true;
         // Last, so the lock and the bookkeeping above are outside the
         // interval; the end reads first for the same reason.
+        move_cost_open[cpu].ticks = kernel_tick_count_of(cpu);
         move_cost_open[cpu].instructions = pmu_count_instructions();
         move_cost_open[cpu].cycles = pmu_count_cycles();
         process_run_unlock(guard);
@@ -1837,6 +1842,7 @@ fn workload_move_cost_progress(phase: usize, round: usize, cold: usize)
     if (phase != MOVE_COST_END) { return 0; }
     let end_cycles: usize = pmu_count_cycles();
     let end_instructions: usize = pmu_count_instructions();
+    let end_ticks: usize = kernel_tick_count_of(cpu);
     let guard = process_run_lock();
     let opened: bool = move_cost_open[cpu].live &&
         move_cost_open[cpu].pid == kernel_process_current_pid();
@@ -1851,6 +1857,8 @@ fn workload_move_cost_progress(phase: usize, round: usize, cold: usize)
         move_cost_records[index].round = round;
         move_cost_records[index].cold = cold != 0;
         move_cost_records[index].cpu = raw_cpu;
+        move_cost_records[index].ticks =
+            end_ticks - move_cost_open[cpu].ticks;
         move_cost_records[index].cycles =
             (end_cycles - move_cost_open[cpu].cycles) & MOVE_COST_WRAP;
         move_cost_records[index].instructions =
@@ -1885,6 +1893,8 @@ private fn workload_move_cost_report() -> usize {
                 kernel_boot_log(" kind=warm cpu=");
             }
             uart_put_udec(move_cost_records[index].cpu);
+            kernel_boot_log(" ticks=");
+            uart_put_udec(move_cost_records[index].ticks);
             kernel_boot_log(" cycles=");
             uart_put_udec(move_cost_records[index].cycles);
             kernel_boot_log(" instructions=");
