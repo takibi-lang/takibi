@@ -53,8 +53,9 @@ of #604 and #556 when they next recur.
    `scripts/repeat_kernel_lane.sh`, then decide), #572 (a bounded
    busy-pair fairness verdict), #633 (the churn hang, unseen in four RPi5
    long runs since #632: close it or keep it). Audit follow-ups that do
-   not block step 3: #641 (a TLA+ model of the world stop) and #642 (a
-   boundary fixture for signal frames and mmap reuse).
+   not block step 3: #641 (a TLA+ model of the world stop), #642 (a
+   boundary fixture for signal frames and mmap reuse) and #643 (gdb stall
+   dump and ASID jump for four-core QEMU churn).
 3. **Takibi's provisional answer to safe pointers and safe memory access,
    with multicore as a premise.** #637 is the frame: derive every access
    from an authority and shrink the trusted base to named mint sites, in
