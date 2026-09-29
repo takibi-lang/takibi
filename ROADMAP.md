@@ -46,18 +46,15 @@ of #604 and #556 when they next recur.
    is the workload, #572 its fairness verdict. Each defect it finds gets a
    deterministic lane before its issue closes; #615's race-window switch is
    how a window found by chance is made to fail every run.
-   **Finish before step 3 starts (maintainer, 2026-09-29)**, because known
-   defects left open under step 3's kernel-wide changes would be masked or
-   misattributed. In this order:
-   - #634: restore a two-core concurrent fault scenario in the oops lane.
-     #632's fix removed the premise of the old peer_fault mode.
-   - #631: the uart-wake peer-console intermittent. Measure its rate with
-     `scripts/repeat_kernel_lane.sh`; if it does not recur, record the
-     measurement and decide.
-   - #572: a bounded busy-pair fairness verdict.
-   - #633: the churn hang (ash in rt_sigsuspend with no children and no
-     pending SIGCHLD). Not seen in four RPi5 long runs since #632; decide
-     whether to close it or keep it open, since no mechanism is known.
+   **Finish before step 3 starts (maintainer, 2026-09-29)**, since open
+   defects under step 3's kernel-wide changes would be masked or
+   misattributed. In order: #634 (a two-core concurrent fault scenario for
+   the oops lane), #631 (measure the uart-wake intermittent with
+   `scripts/repeat_kernel_lane.sh`, then decide), #572 (a bounded
+   busy-pair fairness verdict), #633 (the churn hang, unseen in four RPi5
+   long runs since #632: close it or keep it). Audit follow-ups that do
+   not block step 3: #641 (a TLA+ model of the world stop) and #642 (a
+   boundary fixture for signal frames and mmap reuse).
 3. **Takibi's provisional answer to safe pointers and safe memory access,
    with multicore as a premise.** #637 is the frame: derive every access
    from an authority and shrink the trusted base to named mint sites, in
@@ -94,7 +91,9 @@ of #604 and #556 when they next recur.
 
 ### Territory B: everything else, ordered by current priority
 
-1. **Kernel and userspace capability:** #220, #595, #635.
+1. **Kernel and userspace capability:** #220, #595, #635, #640 (report
+   unimplemented syscalls reached at run time; httpd's `sendto` gets
+   ENOSYS today).
 2. **Safe-memory language support that A's route consumes** (moved from A
    2026-09-29; nothing here waits for A): #639 (#637 stage 0, the
    raw-dereference ratchet); #342 (null safety); #13 restricted to `Phi`,
