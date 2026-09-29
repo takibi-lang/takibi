@@ -1446,34 +1446,16 @@ fn uart_terminal_write_chunk(bytes: borrow []u8, convert: bool) -> usize {
     let flags: usize = mutex_irq_save();
     let room: usize = uart_user_write_room();
     let mut encoded: [u8; 512];
-    let mut produced: usize = 0;
-    let mut consumed: usize = 0;
-    let mut filling: bool = true;
-    for index: usize in 0..<512 {
-        if (filling && index < bytes.len) {
-            let value: u8 = bytes[index];
-            let mut width: usize = 1;
-            if (value == 10) { width = 2; }
-            if (produced + width > room || produced + width > 512) {
-                filling = false;
-            } else {
-                if (value == 10) {
-                    let position: usize = produced;
-                    if (position < 512) { encoded[position] = 13; }
-                    produced = produced + 1;
-                }
-                let position: usize = produced;
-                if (position < 512) { encoded[position] = value; }
-                produced = produced + 1;
-                consumed = consumed + 1;
+    let mut accepted: usize = 0;
+    match terminal_encode_onlcr(bytes, encoded as [u8; 512..], room) {
+        TerminalEncodeResult::NoRoom => { }
+        TerminalEncodeResult::Encoded(counts) => {
+            let length: usize = counts.output_bytes;
+            if (length <= 512) {
+                let count: usize = uart_user_write(encoded[0..<length]);
+                if (count == length) { accepted = counts.input_bytes; }
             }
         }
-    }
-    let length: usize = produced;
-    let mut accepted: usize = 0;
-    if (length <= 512) {
-        let count: usize = uart_user_write(encoded[0..<length]);
-        if (count == length) { accepted = consumed; }
     }
     mutex_irq_restore(flags);
     return accepted;

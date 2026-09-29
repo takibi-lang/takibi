@@ -97,11 +97,12 @@ already-transmitted FIFO bytes cannot be recalled.
 
 `linux_user/uart_rx_ring` tests the production ring, settings rejection,
 control-byte policy, throttle hysteresis, compact erasure expansion and queue
-exhaustion. `/bin/termios` and its host UART scenario exercise the actual EL0
+exhaustion. It compiles the production ONLCR encoder and checks source/wire
+counts and whole CR/LF admission at room and staging-buffer boundaries. `/bin/termios` and its host UART scenario exercise the actual EL0
 ioctls, echo bytes, editing, EOF, flow control and masked signals on CPUs 0 and
 1. The usual QEMU and RPi5 UART driver runs it before the bounded ash command
 fixture, while the launching shell waits in the foreground. Respawning
 background init actions use `/dev/null` for standard I/O so they cannot reset
-the interactive UART or change the probe's settings. The peer-console writer starts once with
-UART output; it does not respawn. The existing raw peer-terminal reader still
+the interactive UART or change the probe's settings. The peer-console writer
+starts once with UART output; it does not respawn. The existing raw peer-terminal reader still
 runs after network integration.

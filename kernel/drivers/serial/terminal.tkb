@@ -252,3 +252,46 @@ fn terminal_input_decode(received: u8) -> TerminalInput {
 }
 
 fn terminal_input_cancel_literal() { terminal_literal_next = false; }
+
+// Source and wire counts are separate: a staging-buffer boundary is not
+// evidence that the downstream UART queue is full. This pure encoder is
+// compiled directly by linux_user boundary controls as well as both kernels.
+struct TerminalEncodedCounts {
+    input_bytes: {1..<513 as usize};
+    output_bytes: {1..<513 as usize};
+}
+must_use variant TerminalEncodeResult { NoRoom; Encoded(TerminalEncodedCounts); }
+
+fn terminal_encode_onlcr(bytes: borrow []u8, encoded: borrow [u8; 512..],
+                         room: usize) -> TerminalEncodeResult {
+    let mut produced: usize = 0;
+    let mut consumed: usize = 0;
+    let mut filling: bool = true;
+    for index: usize in 0..<512 {
+        if (filling && index < bytes.len) {
+            let value: u8 = bytes[index];
+            let mut width: usize = 1;
+            if (value == 10) { width = 2; }
+            if (produced + width > room || produced + width > 512) {
+                filling = false;
+            } else {
+                if (value == 10) {
+                    let position: usize = produced;
+                    if (position < 512) { encoded[position] = 13; }
+                    produced = produced + 1;
+                }
+                let position: usize = produced;
+                if (position < 512) { encoded[position] = value; }
+                produced = produced + 1;
+                consumed = consumed + 1;
+            }
+        }
+    }
+    let input: usize = consumed;
+    let output: usize = produced;
+    if (input > 0 && input < 513 && output > 0 && output < 513) {
+        let mut counts: TerminalEncodedCounts = { input, output };
+        return TerminalEncodeResult::Encoded(counts);
+    }
+    return TerminalEncodeResult::NoRoom;
+}

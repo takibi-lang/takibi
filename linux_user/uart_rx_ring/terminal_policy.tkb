@@ -91,6 +91,64 @@ fn check_terminal_policy() {
     terminal_input_flow_update(1024);
     if (terminal_input_flow_requested()) { flow = false; }
     check("IXOFF hysteresis requests stop at high water and releases at low water", flow);
+    // The producer can stop at 512 encoded bytes with downstream room
+    // still available. Source counts must not be confused with wire counts.
+    let mut input: [u8; 513];
+    let mut encoded: [u8; 512];
+    for index: usize in 0..<513 { input[index] = 65; }
+    let mut encoding: bool = true;
+    for room: usize in 0..<514 {
+        let mut expected: usize = room;
+        if (expected > 512) { expected = 512; }
+        match terminal_encode_onlcr(input as []u8, encoded as [u8; 512..], room) {
+            TerminalEncodeResult::NoRoom => { if (expected != 0) { encoding = false; } }
+            TerminalEncodeResult::Encoded(counts) => {
+                if (counts.input_bytes != expected || counts.output_bytes != expected) {
+                    encoding = false;
+                }
+                for index: usize in 0..<512 {
+                    if (index < counts.output_bytes && encoded[index] != 65) { encoding = false; }
+                }
+            }
+        }
+    }
+    check("ONLCR admits every plain byte up to room or the 512-byte staging bound", encoding);
+    for index: usize in 0..<513 { input[index] = 10; }
+    for room: usize in 0..<514 {
+        let mut capacity: usize = room;
+        if (capacity > 512) { capacity = 512; }
+        let expected: usize = capacity / 2;
+        match terminal_encode_onlcr(input as []u8, encoded as [u8; 512..], room) {
+            TerminalEncodeResult::NoRoom => { if (expected != 0) { encoding = false; } }
+            TerminalEncodeResult::Encoded(counts) => {
+                if (counts.input_bytes != expected || counts.output_bytes != expected * 2) {
+                    encoding = false;
+                }
+                for index: usize in 0..<512 {
+                    if (index < counts.output_bytes) {
+                        let mut byte: u8 = 13;
+                        if (index % 2 == 1) { byte = 10; }
+                        if (encoded[index] != byte) { encoding = false; }
+                    }
+                }
+            }
+        }
+    }
+    for index: usize in 0..<513 { input[index] = 65; }
+    input[511] = 10;
+    for room: usize in 512..<515 {
+        match terminal_encode_onlcr(input as []u8, encoded as [u8; 512..], room) {
+            TerminalEncodeResult::NoRoom => { encoding = false; }
+            TerminalEncodeResult::Encoded(counts) => {
+                if (counts.input_bytes != 511 || counts.output_bytes != 511) { encoding = false; }
+            }
+        }
+    }
+    match terminal_encode_onlcr(input[0..<0], encoded as [u8; 512..], 512) {
+        TerminalEncodeResult::NoRoom => { }
+        TerminalEncodeResult::Encoded(counts) => { encoding = false; }
+    }
+    check("ONLCR never splits CRLF at odd room or staging boundaries", encoding);
     terminal_echo_reset();
     let mut compact: bool = true;
     for index: usize in 0..<4094 {

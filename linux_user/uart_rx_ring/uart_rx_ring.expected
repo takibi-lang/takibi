@@ -12,5 +12,7 @@ ok     BusyBox init sane settings are all accepted
 ok     unsupported flags and timing fail without mutating settings
 ok     ICRNL IXON ISIG and IEXTEN decode the real control characters
 ok     IXOFF hysteresis requests stop at high water and releases at low water
+ok     ONLCR admits every plain byte up to room or the 512-byte staging bound
+ok     ONLCR never splits CRLF at odd room or staging boundaries
 ok     a full canonical line and its tab-width kill fit as compact echo operations
 ok     an echo operation beyond capacity is counted and never blocks
