@@ -96,7 +96,10 @@ class Session:
 
     def normalized(self):
         return HOST_NOTICE.sub(
-            b"", bytes(self.transcript).replace(b"\r", b""))
+            b"", bytes(self.transcript).replace(b"\r", b"").replace(
+                CURSOR_QUERY, b""))
+
+
 
     def send(self, data):
         os.write(self.terminal, data)
@@ -133,8 +136,19 @@ class PromptWithoutVerdict:
     pass
 
 
-# ash's interactive prompt. It follows the verdict line; see run_phase.
-SHELL_PROMPT = b"\n/ # "
+# BusyBox's line editor asks where the cursor is (ESC[6n) once termios
+# works. Left unanswered it carries on with the prompt; an answer typed
+# through this pty arrives as input text instead (`[1;1R`), so the query
+# is only removed before matching.
+CURSOR_QUERY = b"\x1b[6n"
+# ash's interactive prompt. It follows the verdict line; see run_phase. With
+# termios working, BusyBox's line editor prints ` # ` rather than `/ # `
+# unless PS1 is set, so either counts.
+SHELL_PROMPTS = (b"\n/ # ", b"\n # ")
+
+
+def has_prompt(text):
+    return any(prompt in text for prompt in SHELL_PROMPTS)
 
 
 def last_lines(text, count=4):
@@ -191,7 +205,7 @@ def shell_resync(session):
     """
     start = len(session.normalized())
     session.send(b"\n")
-    if session.wait_for(lambda n: SHELL_PROMPT in n[start:], 20) is None:
+    if session.wait_for(lambda n: has_prompt(n[start:]), 20) is None:
         return False
     # Let anything still in flight from the debugger land before typing.
     settle = len(session.normalized())
@@ -247,7 +261,7 @@ def run_phase(session, rounds):
     while answer is None and time.monotonic() < deadline:
         answer = session.wait_for(
             lambda n: VERDICT.search(n, start) or
-                      (SHELL_PROMPT in n[start:] and PromptWithoutVerdict()) or
+                      (has_prompt(n[start:]) and PromptWithoutVerdict()) or
                       (n.count(PROGRESS, start) > heartbeats and "beat"),
             min(STALL_SECONDS, max(1.0, deadline - time.monotonic())),
             watch_from=start)
