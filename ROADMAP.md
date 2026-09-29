@@ -65,12 +65,13 @@ of #604 and #556 when they next recur.
    language capabilities are B's. Also A's: #343, #518, #202, #614 (a
    stack-free proof for process start and zombie reap), and #613: a
    lockless multi-writer log ring with its protocol in the type system,
-   the multicore-specific subject this discussion is judged against. #638
-   sets the preemption target this step designs for: full kernel
-   preemption, with no explicit-point intermediate. Its typed preparation
-   belongs here: a preemption-disabled authority, and per-CPU access
-   derived from it in place of the 17 `KERNEL_PREEMPTIBLE == 0`
-   assertions.
+   the multicore-specific subject this discussion is judged against;
+   #645's herd7 litmus tests check its orderings, starting with today's
+   log. #647 extends #606's trace replay to RecordLifetime and Wait4Block.
+   #638 sets the preemption target this step designs for: full kernel
+   preemption, no explicit-point intermediate. Its typed preparation
+   belongs here: a preemption-disabled authority, with per-CPU access
+   derived from it in place of the 17 `KERNEL_PREEMPTIBLE == 0` asserts.
 4. **Flip to kernel preemption (#638).** Once step 3's authorities exist,
    measure candidate designs' cost on RPi5 and set `KERNEL_PREEMPTIBLE`
    to 1, with the models passing without their no-preemption guards. Never
@@ -97,7 +98,8 @@ of #604 and #556 when they next recur.
    ENOSYS today).
 2. **Safe-memory language support that A's route consumes** (moved from A
    2026-09-29; nothing here waits for A): #639 (#637 stage 0, the
-   raw-dereference ratchet); #342 (null safety); #13 restricted to `Phi`,
+   raw-dereference ratchet); #646 (compiler soundness fuzzing, the
+   footing of every static guarantee); #342 (null safety); #13 for `Phi`,
    with #216 and #109 as its first examples; #131 and #370 (stored
    ownership and branded containers, which feed #637 stage 2's option
    (c)). Once A's route step 2 closes: #637 stage 1's device groups, MMIO
