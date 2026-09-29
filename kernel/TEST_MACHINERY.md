@@ -80,6 +80,13 @@ restores the former wide mask at the reply and must fail with the migration
 diagnosis. A missing DDB checkpoint also preserves live workload state,
 per-core execution state, and registers in `checkpoint-failure-gdb.log`.
 
+The shared scheduler fixture also reserves a Ready parent with a pending
+wait4 continuation through the exit handoff's ordinary-successor path. It
+collects that parent's zombie and asks the production Ready selector to take
+the parent again. A continuation marker left behind by the exit handoff
+would refer to the collected child and permanently refuse this later take;
+the common scheduler verdict requires the complete sequence on both platforms.
+
 ## Syscall evidence counters
 
 `kernel/kernel/syscall_test_evidence.tkb` has twelve counters and one socket

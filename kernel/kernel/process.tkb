@@ -7803,13 +7803,96 @@ fn kernel_process_scheduler_probe() -> bool {
         process_test_evidence_deferred_switches() == 1 &&
         kernel_process_current_pid() == root_pid && saw_fork && saw_schedule &&
         saw_resume && saw_activate;
+    let continuation_ok: bool =
+        kernel_process_exit_continuation_probe(root_handle);
     kernel_process_scheduler_disable();
     scheduled_process_table_clear();
     // scheduled_process_table_clear above destroyed every pooled record
     // and reset the bootstrap's, so there is nothing left to clear here.
     execution_here().current_live = false;
     kernel_process_trace_disable();
-    return ok;
+    return ok && continuation_ok;
+}
+
+// Reserve a parent carrying a rewound wait4 continuation through the exit
+// handoff's ordinary-successor path. After it collects the zombie, a later
+// Ready take must still succeed. The fixture never restores its synthetic
+// frame, just like the timer and block scheduler probes above.
+private fn kernel_process_exit_continuation_probe(parent: ProcessHandle) -> bool {
+    if (scheduled_process_record_of(parent).has_first_child == false ||
+        kernel_process_scheduler_probe_stack_depart() == false) {
+        return false;
+    }
+    let mut child: ProcessHandle = scheduled_process_record_of(parent).first_child;
+    let child_pid: usize = scheduled_process_pid_of_handle(child);
+    let guard = process_run_lock();
+    match scheduled_process_ready_take(guard, child) {
+        ScheduledProcessReadyTakeResult::Missing => {
+            process_run_unlock(guard);
+            return false;
+        }
+        ScheduledProcessReadyTakeResult::Ready(resources) => {
+            let (owner, ready) = resources;
+            let running = scheduled_process_start(owner, ready);
+            let exited = scheduled_process_exit(owner, running);
+            scheduled_process_release(owner, exited);
+        }
+    }
+    match scheduled_process_running_take(guard, parent) {
+        ScheduledProcessRunningTakeResult::Missing => {
+            process_run_unlock(guard);
+            return false;
+        }
+        ScheduledProcessRunningTakeResult::Running(resources) => {
+            let (owner, running) = resources;
+            let ready = scheduled_process_yield(owner, running);
+            scheduled_process_record_of(parent).wait_reason =
+                ProcessWaitReason::ChildExit;
+            scheduled_process_record_of(parent).last_child_pid = child_pid;
+            scheduled_process_release(owner, ready);
+        }
+    }
+    execution_here().current_handle = child;
+    let resumed: usize = match scheduled_process_ready_take(guard, parent) {
+        ScheduledProcessReadyTakeResult::Missing => {
+            process_run_unlock(guard);
+            return false;
+        }
+        ScheduledProcessReadyTakeResult::Ready(resources) => {
+            let (owner, ready) = resources;
+            let running = scheduled_process_start(owner, ready);
+            process_run_unlock(guard);
+            kernel_process_exit_reserved(child, parent, owner, running, false, false)
+        }
+    };
+    if (resumed != 0x1000 || kernel_process_current_pid() !=
+            scheduled_process_pid_of_handle(parent)) {
+        return false;
+    }
+    let status: usize = kernel_process_child_wait_status_pid(child_pid);
+    if (status != 0 || kernel_process_current_has_child_pid(child_pid)) { return false; }
+    let mut resumed_parent: ProcessHandle = execution_here().current_handle;
+    let select_guard = process_run_lock();
+    let mut selectable: bool = false;
+    match scheduled_process_running_take(select_guard, resumed_parent) {
+        ScheduledProcessRunningTakeResult::Missing => {}
+        ScheduledProcessRunningTakeResult::Running(resources) => {
+            let (owner, running) = resources;
+            let ready = scheduled_process_yield(owner, running);
+            scheduled_process_release(owner, ready);
+            match scheduled_process_ready_take(select_guard, resumed_parent) {
+                ScheduledProcessReadyTakeResult::Missing => {}
+                ScheduledProcessReadyTakeResult::Ready(taken) => {
+                    let (next_owner, next_ready) = taken;
+                    let next_running = scheduled_process_start(next_owner, next_ready);
+                    scheduled_process_release(next_owner, next_running);
+                    selectable = true;
+                }
+            }
+        }
+    }
+    process_run_unlock(select_guard);
+    return selectable;
 }
 
 // Between allocation and frame installation, neither a Ready claim nor a
@@ -8389,6 +8472,17 @@ private fn kernel_process_exit_reserved(
                 return 0;
             }
             execution_here().current_handle = successor;
+            // Every incoming wait4 continuation now runs with its parent's
+            // root active. Consume the Ready marker even when an unrelated
+            // child's exit selected this successor rather than waking it.
+            // Otherwise its completed wait4 can reap the named zombie, then
+            // a later migration leaves it Ready with no child to satisfy
+            // scheduled_process_ready_take's continuation check.
+            if (scheduled_process_wait_reason_of(successor) ==
+                    ProcessWaitReason::ChildExit) {
+                scheduled_process_record_of(successor).wait_reason =
+                    ProcessWaitReason::None;
+            }
             let successor_sp: usize =
                 scheduled_process_record_of(successor).saved_sp;
             if (deliver_wait4 || auto_reap) {
