@@ -50,6 +50,13 @@ def diagnose_lifecycle(output: bytes, httpd_sent: bool,
             f"next expected '{next_expected}'")
 
 
+def shell_prompt_ready(output: bytes, setup: str) -> bool:
+    """Wait for the line editor's query after its latest complete prompt."""
+    clean = bytes(output).replace(setup.encode("ascii"), b"")
+    prompt = max(clean.rfind(b"/ # "), clean.rfind(b" # "))
+    return prompt >= 0 and clean.rfind(b"\x1b[6n") > prompt
+
+
 def ash_command_results(transcript, commands, setup):
     """Remove exact command echoes, including terminal line wrapping."""
     lines = []
@@ -560,7 +567,9 @@ def main() -> int:
                 if args.peer_tty and terminal_scenario.started:
                     # The foreground terminal probe adds one shell prompt.
                     prompt_count -= 1
+                prompt_ready = shell_prompt_ready(output, shell_setup)
                 if (shell_step == 0 and
+                        prompt_ready and
                         b"interactive shell: uart blocked\n" in output):
                     if not shell_setup_sent:
                         connection.write((shell_setup + "\n").encode("ascii"))
@@ -572,6 +581,7 @@ def main() -> int:
                             connection.write((commands[0] + "\n").encode("ascii"))
                             shell_step = 1
                 elif (shell_step > 0 and shell_step < len(commands) and
+                      prompt_ready and
                       prompt_count >= shell_step + 1):
                     connection.write(
                         (commands[shell_step] + "\n").encode("ascii"))

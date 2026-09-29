@@ -115,6 +115,18 @@ def main() -> int:
     # reconstruction can be removed. Preserve every unmatched byte.
     command = 'long_name=abcdef; echo "$long_name"'
     setup = "PS1='/ # '"
+    for output, expected in (
+        (b"interactive shell: uart blocked\n", False),
+        (b"/ # ", False),
+        (b"/ # \x1b[6", False),
+        (b"/ # \x1b[6n", True),
+        (b"/ # \x1b[6necho first\r\nfirst\r\n/ # ", False),
+        (b"/ # \x1b[6necho first\r\nfirst\r\n/ # \x1b[6n", True),
+        (b"/ # \x1b[6n" + setup.encode("ascii") + b"\r\n", True),
+    ):
+        CASES.note()
+        if driver.shell_prompt_ready(output, setup) != expected:
+            failures.append(f"shell input readiness changed {output!r}")
     cases = (
         (["/ # " + command[:14], command[14:], "abcdef"], ["abcdef"]),
         ([command[:14], "wrong", "abcdef"], [command[:14], "wrong", "abcdef"]),
