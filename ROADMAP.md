@@ -36,23 +36,18 @@ its cause lies in. The goal is to drive the probability of an allcheck
 failure toward zero step by step. Held by A under this rule now: the analysis
 of #604 and #556 when they next recur.
 
-1. **True multicore support**: done (2026-09-27). Every online core runs
-   ordinary processes, including PID 1 on core 0's idle loop; exec, clone,
-   fork, vfork and syslog run on a peer. The models lead the changes: every
-   path a model drops is justified, every row carries a review stamp, and
-   a window of real steps is replayed against StackOwnership.tla on every
-   kernel lane (#606 stage 1; stages 2 and 3 are unscheduled).
+Step 1, true multicore support, finished on 2026-09-27; #606's stages 2
+and 3 are unscheduled. The steps keep their numbers, which issues cite.
+
 2. **Next: run the multicore workload mainly on RPi5 and fix what it finds.** #584
    is the workload, #572 its fairness verdict. Each defect it finds gets a
    deterministic lane before its issue closes; #615's race-window switch is
    how a window found by chance is made to fail every run.
    **Finish before step 3 starts (maintainer, 2026-09-29)**, since open
    defects under step 3's kernel-wide changes would be masked or
-   misattributed. In order: #631 (measure the uart-wake intermittent with
-   `scripts/repeat_kernel_lane.sh`, then decide), #572 (a bounded
-   busy-pair fairness verdict), #633 (the churn hang, unseen in four RPi5
-   long runs since #632: close it or keep it). Audit follow-ups that do
-   not block step 3: #641 (a TLA+ model of the world stop), #642 (a
+   misattributed. In order: #572 (a bounded busy-pair fairness verdict),
+   #633 (the churn hang, unseen in four RPi5 long runs since #632: close
+   it or keep it). Audit follow-ups that do not block step 3: #641 (a TLA+ model of the world stop), #642 (a
    boundary fixture for signal frames and mmap reuse) and #643 (gdb stall
    dump and ASID jump for four-core QEMU churn).
 3. **Takibi's provisional answer to safe pointers and safe memory access,
