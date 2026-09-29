@@ -59,9 +59,21 @@ of #604, #621 and #556 when they next recur.
    to 1, with the models passing without their no-preemption guards. Never
    during step 2's soak, whose defects must stay attributable to
    multicore.
-5. **Begin evaluating recent research**: typestate, the K framework,
-   invariants, partial TLA+. First consumers #590, #308 and #109; proof-side entry
-   #13. An evaluation, not a decision to adopt.
+5. **Apply recent research where a real example needs it** (evaluated
+   2026-09-29; the reasoning is on #13). In this order:
+   - Restart #13 for `Phi` only (quantifier-free linear integer
+     arithmetic), with #216, #109 and #637's correlated-index group as the
+     first examples. `Delta` stays in the checker.
+   - Prototype on #613: indexed views generated from a TLA+ model's
+     actions, so TLC checks the invariant and the type checker checks that
+     the code takes only those transitions.
+   - Typestate advances with #637 stage 2 (stored authority); #590 and
+     #308 are its consumers.
+   - Iris supplies design vocabulary for #132 (invariants, ghost state). A
+     mechanized soundness proof of a Core fragment is optional research,
+     not scheduled.
+   - Not pursued: the K framework, and a Boogie-style IVL (Why3 if an IVL
+     is ever needed).
 
 ### Territory B: everything else, ordered by current priority
 
