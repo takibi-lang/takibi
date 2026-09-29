@@ -10,6 +10,10 @@ after the issue or development session which produced it has ended.
   and the evidence ordering that applies to hardware bring-up as well.
 - `BUILD_CHECKS.md` is the complete inventory of repository policy checks
   executed by `make langcheck`.
+- `UNSAFE_INVENTORY.md` is a dated snapshot of the kernel's `unsafe` blocks
+  and raw-pointer reach, grouped by the language mechanism that could remove
+  them. It is the baseline for the safe-memory design, not a maintained
+  contract.
 - `wont-compile/` is a catalog of kernel defect classes the compiler rejects,
   one entry per defect, each naming the test case that pins it. It is indexed
   by what goes wrong on the board rather than by language feature; `SPEC.md`
