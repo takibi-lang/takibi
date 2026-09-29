@@ -41,11 +41,15 @@ of #604, #621 and #556 when they next recur.
    deterministic lane before its issue closes; #615's race-window switch is
    how a window found by chance is made to fail every run.
 3. **Takibi's provisional answer to safe pointers and safe memory access,
-   with multicore as a premise.** #343, #342, #202, #518, #131, #132, #370,
+   with multicore as a premise.** #637 is the frame: derive every access
+   from an authority and shrink the trusted base to named mint sites, in
+   four stages. Its baseline is `docs/UNSAFE_INVENTORY.md`. Stage 0 (count
+   raw dereferences outside mint files) comes first. The step's other
+   issues fit into its stages: #343, #342, #202, #518, #131, #132, #370,
    #216, #614 (a process start and a zombie reap that require a stack-free
-   proof), and #613: a lockless multi-writer kernel log ring with its protocol
-   in the type system, the multicore-specific subject this discussion is
-   judged against.
+   proof), and #613: a lockless multi-writer kernel log ring with its
+   protocol in the type system, the multicore-specific subject this
+   discussion is judged against.
 4. **Begin evaluating recent research**: typestate, the K framework,
    invariants, partial TLA+. First consumers #590, #308 and #109; proof-side entry
    #13. An evaluation, not a decision to adopt.
