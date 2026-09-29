@@ -41,6 +41,21 @@ if [ "$MODE" = peer-suite ]; then
     KERNEL_QEMU_UART_WAKE_MODE=peer-net-control \
     KERNEL_QEMU_UART_WAKE_ELF="$CONTROL_ELF" \
         "$REPO_ROOT/scripts/run_kernel_uart_wake_qemutest.sh"
+    scalar_status=0
+    UART_WAKE_SCALAR_CONTROL=canonical \
+    KERNEL_QEMU_UART_WAKE_ARTIFACT_DIR="$ARTIFACT_DIR/scalar-control" \
+    KERNEL_QEMU_UART_WAKE_MODE=shell \
+    KERNEL_QEMU_UART_WAKE_ELF="$REPO_ROOT/kernel/build/qemu/kernel.elf" \
+        "$REPO_ROOT/scripts/run_kernel_uart_wake_qemutest.sh" \
+        >"$ARTIFACT_DIR/scalar-control.log" 2>&1 || scalar_status=$?
+    if [ "$scalar_status" -eq 0 ] || ! grep -q \
+            'queued scalar UART byte was not returned before a later input byte' \
+            "$ARTIFACT_DIR/scalar-control.log"; then
+        echo "FAIL kernel/qemu scalar UART: canonical negative control did not fail as expected" >&2
+        cat "$ARTIFACT_DIR/scalar-control.log" >&2
+        exit 1
+    fi
+    echo "PASS kernel/qemu scalar UART: canonical negative control failed with the queued-byte diagnosis"
     exit 0
 fi
 INIT_LISTENER="$ARTIFACT_DIR/init.listener"
@@ -99,6 +114,7 @@ PEER_PID=$!
 
 UART_WAKE_SERIAL_PORT="$SERIAL_PORT" UART_WAKE_GDB_PORT="$GDB_PORT" \
 UART_WAKE_UART_LOG="$ARTIFACT_DIR/uart.log" UART_WAKE_VERDICT="$VERDICT" \
+UART_WAKE_METADATA="$REPO_ROOT/_build/kernel-debug-metadata.json" \
 UART_WAKE_INIT_LISTENER="$INIT_LISTENER" UART_WAKE_NETWORK_READY="$NETWORK_READY" \
 UART_WAKE_BOOT_TIMEOUT="${KERNEL_QEMU_TIMEOUT:-120}" UART_WAKE_MODE="$MODE" \
     gdb-multiarch -q -batch "$ELF" -x "$REPO_ROOT/scripts/kernel_uart_wake_check.py" \

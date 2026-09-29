@@ -48,6 +48,7 @@ holding the lock; the interrupted timer waits for it, and the next control
 tick recovers the waiter. The pair runs sequentially on the existing lane.
 """
 
+import json
 import os
 import signal
 import socket
@@ -426,6 +427,68 @@ def run_peer_net_wake(connection: socket.socket) -> None:
                 "the peer published Blocked/NetRx, then resumed it on CPU1")
 
 
+def run_scalar_buffering(connection: socket.socket) -> bool:
+    # Stop at the next scalar call after the IRQ has delivered the first byte.
+    # Seed the ring while every vCPU is stopped: this is the real queued-byte
+    # state an IRQ leaves when the child is Ready rather than Blocked. No
+    # later input may rescue a reader that ignores that queued byte.
+    gdb.execute("set pagination off")
+    gdb.execute("set confirm off")
+    gdb.execute(f"target remote 127.0.0.1:{GDB_PORT}")
+    with open(os.environ["UART_WAKE_METADATA"], encoding="ascii") as metadata:
+        constants = {entry["name"]: entry["value"]
+                     for entry in json.load(metadata)["constants"]}
+    capacity = constants["KERNEL_UART_RX_CAPACITY"]
+    number = constants["AARCH64_NR_TAKIBI_UART_RX_WAIT"]
+    scalar = gdb.Breakpoint("kernel_syscall_dispatch")
+    scalar.condition = f"$x1 == {number}"
+    connection.sendall(PAYLOAD[:1])
+    continue_bounded(False)
+    if scalar.hit_count != 1:
+        scalar.delete()
+        gdb.execute("detach")
+        verdict(False, "the scalar reader did not resume after its first byte")
+        return False
+
+    def queue(bytes_to_queue: bytes) -> None:
+        head = int(gdb.parse_and_eval("*(unsigned long *)&kernel_uart_rx_head"))
+        tail = int(gdb.parse_and_eval("*(unsigned long *)&kernel_uart_rx_tail"))
+        if head != tail or not 0 <= head < capacity:
+            raise RuntimeError("scalar buffering window did not start with an empty ring")
+        for value in bytes_to_queue:
+            for name, byte in (("kernel_uart_rx_buf", value),
+                               ("kernel_uart_rx_marks", 0),
+                               ("kernel_uart_rx_columns", 0)):
+                gdb.execute(f"set *((unsigned char *)&{name} + {head}) = {byte}")
+            head = (head + 1) % capacity
+        gdb.execute(f"set *(unsigned long *)&kernel_uart_rx_head = {head}")
+
+    if os.environ.get("UART_WAKE_SCALAR_CONTROL") == "canonical":
+        # Recreate the old unread canonical prefix at the same real scalar
+        # syscall. This must fail without a new interrupt rescuing the wait.
+        gdb.execute("set *(unsigned char *)&kernel_uart_rx_canonical = 1")
+    queue(PAYLOAD[1:2])
+    continue_bounded(False)
+    if scalar.hit_count != 2:
+        gdb.execute("thread apply all bt 6")
+        scalar.delete()
+        gdb.execute("detach")
+        verdict(False, "queued scalar UART byte was not returned before a later input byte")
+        return False
+    # The next scalar call can now read the suffix already queued, proving
+    # a burst keeps its order as well as the one-byte no-new-interrupt case.
+    queue(PAYLOAD[2:])
+    scalar.delete()
+    gdb.execute("detach")
+    if not seen(lambda text: b"uart rx: scheduler block+wake ok" in text,
+                BOOT_TIMEOUT):
+        verdict(False, "the scalar reader did not consume its queued suffix in order")
+        return False
+    print(f"PASS {LABEL}: scalar IRQ delivery followed by queued prefix "
+          "and suffix preserved every byte without another interrupt", flush=True)
+    return True
+
+
 def run() -> None:
     connection = connect(time.monotonic() + 30)
     threading.Thread(target=reader, args=(connection,), daemon=True).start()
@@ -444,7 +507,8 @@ def run() -> None:
     if not seen(lambda text: PAYLOAD_READY in text, BOOT_TIMEOUT):
         verdict(False, "the payload never asked for its input")
         return
-    connection.sendall(PAYLOAD)
+    if not run_scalar_buffering(connection):
+        return
     if not seen(lambda text: PERSISTENT_READY in text, BOOT_TIMEOUT):
         verdict(False, "the persistent shell never reached its prompt")
         return

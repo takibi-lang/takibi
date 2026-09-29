@@ -62,6 +62,15 @@ The private AArch64 syscall numbers are 451 through 453 in
 | 452 | Parent progress | The parent reports after its compute section while the child is still blocked. This proves the two-process ordering that the UART scheduler probe requires; ordinary userspace output cannot establish the child's kernel wait state. |
 | 453 | Workload progress | Busy-pair and peer workloads report checksums, completed rounds, and wake milestones. The kernel compares the reports and directs the fixture's stop, exit, or respawn boundary. |
 
+The scalar UART fixture selects noncanonical input with echo off before its
+fork and restores the inherited attributes after collecting the child. Its
+IRQ path delivers directly into a blocked syscall frame; queued bytes must
+therefore also be readable without a line delimiter. The UART-wake QEMU lane
+stops the real scalar calls and seeds a queued prefix and suffix after the
+first IRQ-delivered byte. Every byte must be consumed in order without another
+interrupt. A canonical-input control must fail nonzero with the queued-byte
+diagnosis before the lane can pass.
+
 ## Syscall evidence counters
 
 `kernel/kernel/syscall_test_evidence.tkb` has twelve counters and one socket
