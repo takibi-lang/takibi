@@ -48,8 +48,7 @@ of #604 and #556 when they next recur.
    how a window found by chance is made to fail every run.
    **Finish before step 3 starts (maintainer, 2026-09-29)**, since open
    defects under step 3's kernel-wide changes would be masked or
-   misattributed. In order: #634 (a two-core concurrent fault scenario for
-   the oops lane), #631 (measure the uart-wake intermittent with
+   misattributed. In order: #631 (measure the uart-wake intermittent with
    `scripts/repeat_kernel_lane.sh`, then decide), #572 (a bounded
    busy-pair fairness verdict), #633 (the churn hang, unseen in four RPi5
    long runs since #632: close it or keep it). Audit follow-ups that do
