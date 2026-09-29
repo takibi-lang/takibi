@@ -80,6 +80,33 @@ compile wherever the language has enough information to prove the property.
 Raw hardware boundaries still exist; Takibi makes them explicit and auditable
 instead of pretending they disappeared.
 
+## Lightweight by design
+
+Deductive verifiers such as Verus, and verified kernels such as seL4, prove
+the functional correctness of selected code. That depth costs ghost code,
+invariants, and proof text that often outweighs the implementation. Takibi
+aims at a different point: removing whole classes of kernel defects across
+the entire kernel, at an annotation cost close to that of ordinary typed
+code. It follows the lightweight formal methods tradition (Alloy, and the
+TLA+ and model-checking practice used in industry) and builds it into the
+language instead of adding it beside the code.
+
+In practice this means:
+
+- **Types first, and cheap ones.** Refinements, ownership, and effects are
+  inferred or carried by one signature wherever possible. A check that
+  needs an annotation at every call site is a design smell.
+- **Bounded model checking for protocols.** Concurrency protocols are
+  modelled in TLA+ (`kernel/models/`), and the code is tied to the model by
+  types or by replaying real runs. The result is bounded evidence, and the
+  project says so rather than calling it a proof.
+- **Heavy only where trust concentrates.** Stronger reasoning is spent on
+  the few places where raw authority is minted and on lock-free protocols,
+  not spread across the kernel.
+- **Measured, not assumed.** The claim is how many defect classes are
+  excluded, and at what annotation cost, with the remaining trust listed in
+  [`TRUSTED_BASE.md`](TRUSTED_BASE.md) at its real strength.
+
 ## Why build a Linux-compatible kernel?
 
 A toy kernel with custom applications can avoid every difficult interface. An
@@ -337,8 +364,8 @@ OCaml bindings to the matching `llvm.19-static` package.
 
 Takibi is not an implementation of a single existing language. Its direction
 draws on refinement typing, linear logic, ATS-style proof-driven systems
-programming, separation logic, typestate, effect systems, safe-language OSes,
-and formally verified kernels. The project deliberately uses a small new
+programming, separation logic, typestate, effect systems, lightweight formal
+methods and model checking, safe-language OSes, and formally verified kernels. The project deliberately uses a small new
 language so its resource and proof model can evolve with the kernel experiment;
 that choice is a research tradeoff, not a claim that existing systems languages
 have no value.

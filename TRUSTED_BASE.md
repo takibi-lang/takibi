@@ -10,14 +10,20 @@ to be a usable result, not a result that depends on somebody reading advisory
 diagnostics. This does not imply that every possible kernel fault is currently
 expressible or rejected by the type system.
 
-## Four outcomes
+## Five outcomes
 
 | Outcome | Meaning |
 | --- | --- |
 | Static rejection | Parsing, typing, ownership, effect, exhaustiveness, or an enabled build policy rejects the program. No executable is produced. |
 | Generated runtime check | The compiler accepts the program but emits a check whose failure calls `llvm.trap`. This is development-time containment, not the finished form of kernel code. |
+| Bounded model check | A TLA+ model under `kernel/models/` checks a protocol's design over a bounded state space (`make modelcheck`). A pass is evidence for the design within those bounds, not a proof. It says something about the code only through a stated tie. Every model maps each action to the functions it abstracts, and a review stamp fails the build when those functions change. `StackOwnership.tla` is also replayed against a window of real runs on every kernel lane. `kernel/models/README.md` states each model's tie and how narrow a pass is. |
 | Explicit trusted boundary | An `unsafe` block, raw pointer, MMIO operation, DMA/cache operation, extern declaration, ABI bridge, or assembly file relies on a locally reviewed assumption the checker cannot establish. |
-| Outside the language model | Toolchain correctness, hardware behavior, concurrency protocols, resource exhaustion, and other facts described below are not proved by Takibi. |
+| Outside the language model | Toolchain correctness, hardware behavior, concurrency protocols with no model, resource exhaustion, and other facts described below are not proved by Takibi. |
+
+These are levels of assurance, and the project states each guarantee at its
+real level. It aims to move defect classes toward static rejection at low
+annotation cost (`README.md`, "Lightweight by design"). It does not raise a
+bounded model check to the level of a proof by calling it one.
 
 ## What the compiler checks
 

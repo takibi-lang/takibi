@@ -5,10 +5,12 @@ native machine code through an LLVM 19 backend.
 
 The project's ultimate goal is to demonstrate that runtime errors in a
 monolithic Unix-like kernel can be lifted into compile-time errors using
-refinement types, affine or linear ownership, and eventually SMT-backed proof
-obligations. Kernel memory corruption is often silent and security-relevant,
-so compile-time proof is the product goal rather than an optional hardening
-layer.
+refinement types, affine or linear ownership, effects, and lightweight model
+checking, at a cost low enough to apply across the whole kernel. Kernel
+memory corruption is often silent and security-relevant, so compile-time
+proof is the product goal rather than an optional hardening layer. Deep,
+annotation-heavy functional verification is deliberately not the goal; see
+"Lightweight by design" below.
 
 `SPEC.md` is authoritative for current language syntax and semantics.
 `HISTORY.md` records past engineering decisions and investigations. Do not
@@ -44,6 +46,22 @@ requirement and explicit user direction.
   build-time check under `scripts/` would catch and what it would miss; ship
   that when it catches the instance that actually occurred, and pursue the
   language-level version once its misses are themselves observed.
+- Lightweight by design (maintainer, 2026-09-29). Takibi removes whole
+  defect classes across the kernel at low cost, not the functional
+  correctness of a few modules at high cost. Take the cheapest mechanism
+  that removes the class, preferring them in this order:
+  1. a type the checker infers, or that one signature carries;
+  2. an indexed owner or erased view at an API boundary;
+  3. a bounded model check of a protocol, with types or a replay tying the
+     code to it;
+  4. a build-time check.
+  Ghost code, hand-written loop invariants, or an annotation at every call
+  site are not the default. Propose them only for the few places where trust
+  concentrates -- mint sites of raw authority and lock-free protocols -- and
+  only when a real example needs them. An external solver discharges pure
+  arithmetic goals only (`TAKIBI_CORE.md`, "Solver and Proof Boundary").
+  State each guarantee at its real strength (`TRUSTED_BASE.md`, "Five
+  outcomes"): a model check is bounded evidence, not a proof.
 - When readability suffers from a language limitation rather than a one-off,
   propose extending the syntax before extracting a shared helper. Helpers
   accumulate divergent variants and stop being shared.

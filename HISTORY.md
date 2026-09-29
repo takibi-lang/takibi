@@ -15,6 +15,39 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-09-29: "Lightweight by design" becomes the stated policy
+
+Until this date the stated aim was only "lift runtime errors into compile-time
+errors", with "eventually SMT-backed proof obligations" as the horizon. A
+review of the project's position against Rust-based kernel work, chiefly
+Asterinas with Verus and CortenMM, left a gap that the stated aim did not
+cover. Deep deductive verification of selected modules is well served by
+those projects and needs a team and proof effort this project does not have.
+Matching it is not a goal. The maintainer chose to make explicit what the
+project had in practice done all along: remove whole defect classes across
+the kernel at low annotation cost, in the lightweight formal methods
+tradition, and spend heavier reasoning only where trust concentrates.
+
+What changed:
+
+- `AGENTS.md` states the goal with lightweight model checking and "at a cost
+  low enough to apply across the whole kernel", and gains an always-on rule
+  that orders mechanisms by cost: inferred types, API-boundary owners and
+  views, bounded model checks tied to the code, then build checks.
+- `README.md` gains "Lightweight by design", the public statement of the
+  same position.
+- `TRUSTED_BASE.md` goes from four outcomes to five, adding "Bounded model
+  check". The TLA+ models had been giving evidence that was neither static
+  rejection nor merely "outside the language model". Naming the level keeps
+  that evidence from being overstated.
+
+The same session's decisions follow this policy. Safe memory access (#637)
+derives accesses from authorities and counts mint sites instead of adding
+annotations. Kernel preemption (#638) puts the types in place before the
+flip. The research evaluation recorded on #13 restricts any solver to pure
+arithmetic goals and does not pursue the K framework or a Boogie-style IVL.
+It also prefers TLA+-generated views, as on #613, to Verus-style ghost state.
+
 ## 2026-09-27: StackOwnership.tla re-cut to the kernel's real lock holds (#606)
 
 The first trace of real runs (#606 stage 1) showed StackOwnership.tla was
