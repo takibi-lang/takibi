@@ -19,6 +19,12 @@
 // that stopped covering one of them would drive it to the round count
 // itself.
 //
+// That held while both ran on one core. With a worker pinned to each CPU
+// (busy_loop_run), the skew measures the difference between the two cores'
+// other work, and it is a diagnostic now. The verdict is on each worker's
+// waits for its own CPU instead; see workload_busy_waits (GitHub issue
+// #572).
+//
 // Current limitations (2026-08-28). Keep this list current; a stale one
 // invites relying on a guarantee that quietly stopped holding.
 // - TWO TAGS, NOT N. The pair is the shape the inittab starts, and the
@@ -216,6 +222,245 @@ struct WorkloadBusyPair {
 }
 
 private let mut workload_busy_pair: WorkloadBusyPair;
+
+// GitHub issue #572: how long each worker waited for its CPU, and what ran
+// there while it did.
+//
+// The round skew cannot answer that. Each worker pins itself to its own CPU
+// for the measured window (busy_loop_run), so the two never compete, and
+// their skew is the difference between what ELSE each core ran. What the
+// scheduler does decide is who runs on a worker's own CPU while the worker
+// is Ready. The next-ready walk rotates from the outgoing process, so while
+// a worker waits, each other process is picked at most about once, and the
+// wait lasts about one slice per process picked.
+//
+// A wait begins when the worker's CPU switches from it to another process
+// and ends when the worker is picked again. Over it this counts the timer
+// ticks taken on that CPU, the distinct other pids picked there, and the
+// most picks of any one of them. Ticks are counted rather than time: a
+// vCPU the host did not run takes no ticks, so host load does not
+// lengthen a wait.
+//
+// Assumes the workers never block in the window. Their only syscall there
+// is the progress report, which does not. A wait already in progress when
+// the window opens is not seen; one still open when it closes is counted,
+// so a worker starved at the end is not missed. Every field is written
+// under the process run lock.
+const WORKLOAD_BUSY_WAIT_PIDS: usize = 8;
+
+struct WorkloadBusyWait {
+    waiting: bool;
+    core: usize;
+    ticks: usize;
+    distinct: usize;
+    pids: [usize; WORKLOAD_BUSY_WAIT_PIDS];
+    picks: [usize; WORKLOAD_BUSY_WAIT_PIDS];
+    // Picks of a pid that found the table full. Counted, not compared.
+    untracked: usize;
+    waits: usize;
+    max_ticks: usize;
+    // The most ticks one wait took beyond the distinct pids picked in it.
+    max_excess: usize;
+    max_picks: usize;
+}
+
+// Index 0 is tag A's worker and 1 is tag B's.
+private let mut workload_busy_waits: [WorkloadBusyWait; 2];
+
+// The verdict's two bounds, per wait. The rotating walk picks each other
+// process at most once while a worker waits. An idle CPU's take walks from
+// the first slot instead, so a competitor in an earlier slot that woke
+// again can be picked a second time; RPi5 shows 2 on every run. Each pick
+// costs at most a slice, so a wait takes about one tick per distinct
+// competitor, plus one when a competitor is inside a syscall at the tick
+// and is switched out at its return (KERNEL_PREEMPTIBLE == 0). Both bounds
+// are twice the largest value measured; the measurements and the
+// starvation control are in kernel/README.md.
+const WORKLOAD_BUSY_WAIT_PICKS_BOUND: usize = 4;
+const WORKLOAD_BUSY_WAIT_EXCESS_BOUND: usize = 4;
+
+// The negative control's injection (scripts/kernel_starve_gdb_check.py).
+// Debugger-owned and zero on every ordinary boot. A debugger that sets it to
+// N makes the next-ready walks pass over the first worker to begin a wait in
+// the window for N ticks of that wait: a scheduler that stopped covering one
+// of the pair, which is the defect the verdict exists to catch.
+private let mut workload_busy_starve_injection_ticks: usize;
+private let mut workload_busy_starve_armed: bool;
+private let mut workload_busy_starve_worker: usize;
+private let mut workload_busy_starve_remaining: usize;
+
+// Asked by the next-ready walks for every Ready candidate, under the
+// process run lock. False on every boot the debugger did not arm.
+fn workload_busy_starve_skips(pid: usize) -> bool {
+    if (workload_busy_starve_armed == false) { return false; }
+    if (workload_busy_starve_remaining == 0) { return false; }
+    let worker: usize = workload_busy_starve_worker;
+    if (worker >= 2) { return false; }
+    return pid != 0 && pid == workload_busy_worker_pid(worker);
+}
+
+private fn workload_busy_worker_pid(worker: {0..<2 as usize}) -> usize {
+    if (worker == 0) { return workload_busy_pair.a_pid; }
+    return workload_busy_pair.b_pid;
+}
+
+private fn workload_busy_waits_reset() {
+    for worker: usize in 0..<2 {
+        workload_busy_waits[worker].waiting = false;
+        workload_busy_waits[worker].core = 0;
+        workload_busy_waits[worker].ticks = 0;
+        workload_busy_waits[worker].distinct = 0;
+        workload_busy_waits[worker].untracked = 0;
+        workload_busy_waits[worker].waits = 0;
+        workload_busy_waits[worker].max_ticks = 0;
+        workload_busy_waits[worker].max_excess = 0;
+        workload_busy_waits[worker].max_picks = 0;
+    }
+}
+
+private fn workload_busy_wait_begin(worker: {0..<2 as usize}, core: usize) {
+    if (workload_busy_starve_injection_ticks != 0 &&
+        workload_busy_starve_armed == false) {
+        workload_busy_starve_armed = true;
+        workload_busy_starve_worker = worker;
+        workload_busy_starve_remaining = workload_busy_starve_injection_ticks;
+        workload_busy_starve_injection_ticks = 0;
+    }
+    workload_busy_waits[worker].waiting = true;
+    workload_busy_waits[worker].core = core;
+    workload_busy_waits[worker].ticks = 0;
+    workload_busy_waits[worker].distinct = 0;
+    for slot: usize in 0..<WORKLOAD_BUSY_WAIT_PIDS {
+        workload_busy_waits[worker].pids[slot] = 0;
+        workload_busy_waits[worker].picks[slot] = 0;
+    }
+}
+
+private fn workload_busy_wait_pick(worker: {0..<2 as usize}, pid: usize) {
+    for slot: usize in 0..<WORKLOAD_BUSY_WAIT_PIDS {
+        if (workload_busy_waits[worker].picks[slot] != 0 &&
+            workload_busy_waits[worker].pids[slot] == pid) {
+            let picks: usize = workload_busy_waits[worker].picks[slot] + 1;
+            workload_busy_waits[worker].picks[slot] = picks;
+            if (picks > workload_busy_waits[worker].max_picks) {
+                workload_busy_waits[worker].max_picks = picks;
+            }
+            return;
+        }
+    }
+    for slot: usize in 0..<WORKLOAD_BUSY_WAIT_PIDS {
+        if (workload_busy_waits[worker].picks[slot] == 0) {
+            workload_busy_waits[worker].pids[slot] = pid;
+            workload_busy_waits[worker].picks[slot] = 1;
+            workload_busy_waits[worker].distinct =
+                workload_busy_waits[worker].distinct + 1;
+            if (workload_busy_waits[worker].max_picks == 0) {
+                workload_busy_waits[worker].max_picks = 1;
+            }
+            return;
+        }
+    }
+    workload_busy_waits[worker].untracked =
+        workload_busy_waits[worker].untracked + 1;
+}
+
+private fn workload_busy_wait_end(worker: {0..<2 as usize}) {
+    if (workload_busy_waits[worker].waiting == false) { return; }
+    workload_busy_waits[worker].waiting = false;
+    workload_busy_waits[worker].waits = workload_busy_waits[worker].waits + 1;
+    let ticks: usize = workload_busy_waits[worker].ticks;
+    if (ticks > workload_busy_waits[worker].max_ticks) {
+        workload_busy_waits[worker].max_ticks = ticks;
+    }
+    let distinct: usize = workload_busy_waits[worker].distinct;
+    if (ticks > distinct &&
+        ticks - distinct > workload_busy_waits[worker].max_excess) {
+        workload_busy_waits[worker].max_excess = ticks - distinct;
+    }
+}
+
+// `previous` is what this CPU ran until this pick.
+private fn workload_busy_wait_note_selected(core: usize, previous: usize,
+                                            pid: usize) {
+    if (workload_profile_active == false) { return; }
+    for worker: usize in 0..<2 {
+        let worker_pid: usize = workload_busy_worker_pid(worker);
+        if (worker_pid != 0) {
+            if (pid == worker_pid) {
+                workload_busy_wait_end(worker);
+            } else {
+                if (previous == worker_pid) {
+                    workload_busy_wait_begin(worker, core);
+                }
+                if (workload_busy_waits[worker].waiting &&
+                    workload_busy_waits[worker].core == core) {
+                    workload_busy_wait_pick(worker, pid);
+                }
+            }
+        }
+    }
+}
+
+// A secondary's tick, which does not pass through timer_irq_handler and so
+// takes the run lock here -- only while the window is open, which is the
+// only time there is anything to count.
+fn workload_busy_note_tick() {
+    if (workload_profile_active == false) { return; }
+    let guard = process_run_lock();
+    workload_busy_note_tick_locked(guard);
+    process_run_unlock(guard);
+}
+
+// Every timer tick: core 0's from timer_irq_handler, under the lock it
+// already holds, and a secondary's through workload_busy_note_tick.
+fn workload_busy_note_tick_locked(guard: borrow ProcessRunGuard[lock]) {
+    if (workload_profile_active == false) { return; }
+    let core: usize = cpu_id();
+    for worker: usize in 0..<2 {
+        if (workload_busy_waits[worker].waiting &&
+            workload_busy_waits[worker].core == core) {
+            workload_busy_waits[worker].ticks =
+                workload_busy_waits[worker].ticks + 1;
+            if (workload_busy_starve_armed &&
+                workload_busy_starve_worker == worker &&
+                workload_busy_starve_remaining != 0) {
+                workload_busy_starve_remaining =
+                    workload_busy_starve_remaining - 1;
+            }
+        }
+    }
+}
+
+private fn workload_busy_waits_bounded() -> bool {
+    for worker: usize in 0..<2 {
+        if (workload_busy_waits[worker].max_picks >
+                WORKLOAD_BUSY_WAIT_PICKS_BOUND ||
+            workload_busy_waits[worker].max_excess >
+                WORKLOAD_BUSY_WAIT_EXCESS_BOUND) {
+            return false;
+        }
+    }
+    return true;
+}
+
+private fn workload_busy_waits_report() {
+    kernel_boot_log("workload: busy pair waits");
+    for worker: usize in 0..<2 {
+        if (worker == 0) { kernel_boot_log(" a:"); }
+        else { kernel_boot_log(" b:"); }
+        kernel_boot_log(" waits=");
+        uart_put_udec(workload_busy_waits[worker].waits);
+        kernel_boot_log(" max_ticks=");
+        uart_put_udec(workload_busy_waits[worker].max_ticks);
+        kernel_boot_log(" max_excess=");
+        uart_put_udec(workload_busy_waits[worker].max_excess);
+        kernel_boot_log(" max_picks=");
+        uart_put_udec(workload_busy_waits[worker].max_picks);
+        kernel_boot_log(" untracked=");
+        uart_put_udec(workload_busy_waits[worker].untracked);
+    }
+    kernel_boot_log("\n");
+}
 
 // One peer process owns this one-shot NetRx publication test. The tag-6
 // syscall registers it on CPU0, then asks the ordinary scheduler path to
@@ -616,6 +861,7 @@ private fn workload_profile_start(
     // breaks -- see workload_profile_finish.
     workload_busy_pair.a_ticks = 0;
     workload_busy_pair.b_ticks = 0;
+    workload_busy_waits_reset();
     for cpu: usize in 0..<KERNEL_MAX_CORES {
         if (cpu < online) {
             let selected: usize = workload_profile_selected_pid(cpu);
@@ -676,6 +922,8 @@ private fn workload_profile_finish(
             workload_busy_pair.last_tick[cpu] = now;
         }
     }
+    workload_busy_wait_end(0);
+    workload_busy_wait_end(1);
     profile_timeline_finish();
     workload_profile_active = false;
     profile_sample_finish();
@@ -725,6 +973,8 @@ fn workload_busy_note_selected_locked(
             workload_busy_pair.b_ticks = workload_busy_pair.b_ticks + spent;
         }
     }
+    workload_busy_wait_note_selected(
+        core, workload_busy_pair.last_pid[core], pid);
     workload_busy_pair.last_pid[core] = pid;
     workload_busy_pair.last_tick[core] = now;
     if (workload_busy_pair.a_pid != 0 && pid == workload_busy_pair.a_pid) {
@@ -1800,6 +2050,17 @@ private fn workload_busy_pair_report() !{unsafe} {
     } else if (workload_busy_pair.a_pid == workload_busy_pair.b_pid) {
         kernel_boot_log("workload: busy pair ONE pid reported both tags\n");
     }
+    // GitHub issue #572: fixed text when both bounds held, and the word a
+    // view refuses when either did. The numbers are on the waits line.
+    if (workload_busy_waits_bounded()) {
+        kernel_boot_log("workload: busy pair waits bounded: no competitor picked more than ");
+        uart_put_udec(WORKLOAD_BUSY_WAIT_PICKS_BOUND);
+        kernel_boot_log(" times, no wait over ");
+        uart_put_udec(WORKLOAD_BUSY_WAIT_EXCESS_BOUND);
+        kernel_boot_log(" ticks past one per competitor\n");
+    } else {
+        kernel_boot_log("workload: busy pair STARVED: a wait passed its bound\n");
+    }
     // The throughput half. `elapsed` is what the pair took wall-clock;
     // `cpu` is what each was actually given, which is the number a second
     // core has to change. Both in counter ticks, with the frequency beside
@@ -1825,6 +2086,7 @@ private fn workload_busy_pair_report() !{unsafe} {
     uart_put_udec(workload_busy_pair.a_restarts +
                   workload_busy_pair.b_restarts);
     kernel_boot_log("\n");
+    workload_busy_waits_report();
     kernel_boot_log("profile: end name=busy-pair elapsed_cycles=");
     uart_put_udec(workload_busy_pair.end_ticks -
                   workload_busy_pair.start_ticks);

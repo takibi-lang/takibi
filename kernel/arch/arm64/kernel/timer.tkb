@@ -59,6 +59,9 @@ fn timer_irq_handler() !{interrupt} {
     let guard = process_run_lock();
     kernel_process_net_wake_all(guard);
     kernel_process_deadline_wake_all(guard);
+    // GitHub issue #572: a tick on a CPU where a busy worker waits. Core 0
+    // only: a secondary's tick takes kernel_secondary_timer_schedule.
+    workload_busy_note_tick_locked(guard);
     process_run_unlock(guard);
     interrupt_notify();
 }

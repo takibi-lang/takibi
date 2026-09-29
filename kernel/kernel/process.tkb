@@ -4761,7 +4761,9 @@ private fn kernel_process_next_ready(from: ProcessHandle, cpu: usize)
         cursor = kernel_process_next_successor(cursor, root);
         if (scheduled_process_same_slot(cursor, from) == false &&
             scheduled_process_state_of(cursor) == ProcessSlotState::Ready &&
-            kernel_process_cpu_allows_slot(cpu, cursor.pool_index)) {
+            kernel_process_cpu_allows_slot(cpu, cursor.pool_index) &&
+            workload_busy_starve_skips(
+                scheduled_process_pid_of_handle(cursor)) == false) {
             kernel_activity_leave(activity_before);
             return ProcessNextReadyResult::Next(cursor);
         }
@@ -4984,9 +4986,13 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
                 // peer leaves its parent Ready rather than starting it, and
                 // an idle core 0 then never took it, so init stopped
                 // reaping and respawning (four-core RPi5, every run).
+                // The last test is #572's starvation control, false on
+                // every boot a debugger did not arm.
                 if (scheduled_process_record_state(slot) ==
                         ProcessSlotState::Ready &&
-                    kernel_process_cpu_allows_slot(cpu_id(), slot)) {
+                    kernel_process_cpu_allows_slot(cpu_id(), slot) &&
+                    workload_busy_starve_skips(
+                        scheduled_process_record_at(slot).pid) == false) {
                     let mut handle: ProcessHandle =
                         scheduled_process_handle_of_slot(slot);
                     match scheduled_process_ready_take(guard, handle) {

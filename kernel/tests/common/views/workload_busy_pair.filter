@@ -1,2 +1,2 @@
-^workload: busy pair (two pids|ONE pid|STARVED|REFUSED|init restarted|RESTART|done|migrated)
+^workload: busy pair (two pids|ONE pid|STARVED|REFUSED|waits bounded|init restarted|RESTART|done|migrated)
 ^workload: peer exit

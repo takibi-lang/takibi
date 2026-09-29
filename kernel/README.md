@@ -515,6 +515,28 @@ CPU's four time classes sum exactly to its wall cycles, then reports whether
 running or idle time dominates in aggregate. RPi5 is the performance authority;
 the QEMU artifact only validates the same collection path.
 
+The busy pair's fairness verdict bounds each worker's wait for its own CPU,
+not the two workers' round counts. In the measured window each worker is
+pinned to its own CPU, so they never compete, and their round skew reflects
+what else each core ran; it is printed as a diagnostic only. A wait runs from
+the moment the worker's CPU switches to another process until the worker is
+picked again, and its ticks are counted on that CPU, so a vCPU the host did
+not run adds nothing. The verdict requires that no other process is picked
+more than 4 times within one wait, and that no wait takes more than 4 timer
+ticks beyond one tick per distinct process picked.
+
+The rotating next-ready walk picks each competitor once. An idle CPU's take
+walks from the first slot, so an earlier-slot competitor can be picked a
+second time. A wait may also take one extra tick while a competitor finishes
+a syscall. Measured on 2026-09-29: 35 QEMU boots with six running at a time
+peaked at 1 pick and 0 excess ticks. Three RPi5 runs showed 2 picks and 0
+excess ticks every time. The QEMU starvation control's unstarved worker
+reached 2 excess ticks. Both bounds are twice the largest value seen. The
+`workload: busy pair waits` line prints the measured values. The negative
+control `KERNEL_QEMU_AFFINITY_GDB_MODE=starve` has both next-ready walks pass
+over one worker for 64 ticks. That wait runs 61 or more ticks past its
+competitors, and the verdict reads `STARVED`.
+
 Render a local revision-comparison chart from any saved artifacts without
 rerunning a board:
 

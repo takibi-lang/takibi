@@ -56,6 +56,10 @@ ALLOWED = {
         "the same inventory for the board: 1019 MiB behind two reservations, "
         "and the RP1 system timer cross-checked against the architected "
         "counter, which QEMU has no equivalent of",
+    ("qemu-debug", "boot"):
+        "the debug ELF's larger image moves usable_ram_start upward by "
+        "eight pages, so this overlay asserts its own allocator capacity; "
+        "the shared boot view still checks the other inventory lines",
     ("qemu", "network"):
         "the same test as rpi5/ethernet, named for the device that runs it: "
         "virtio-net against the host peer",

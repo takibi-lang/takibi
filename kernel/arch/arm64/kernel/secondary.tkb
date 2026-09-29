@@ -389,6 +389,8 @@ fn kernel_core0_idle_tick_reenter() {
 fn kernel_secondary_timer_schedule(frame_sp: usize, lower_el: bool)
         -> usize !{interrupt} {
     secondary_timer_tick();
+    // GitHub issue #572: a tick on a CPU where a busy worker waits.
+    workload_busy_note_tick();
     if (lower_el) {
         kernel_stack_guard_check_interrupt(frame_sp);
         return kernel_process_timer_schedule(frame_sp);

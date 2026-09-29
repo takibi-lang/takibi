@@ -15,6 +15,10 @@
 #                   meet an exhausted ASID counter and Busy world stops; the
 #                   kernel must retry rather than fail-stop. No command is
 #                   typed: the boot's own execs are the subject.
+#   starve          GitHub issue #572's negative control. gdb makes the
+#                   next-ready walks pass over one busy-pair worker for a
+#                   second of its wait; the pair's verdict must say STARVED,
+#                   for a wait past its tick bound. No command is typed.
 #
 # One runner because the scaffolding -- the boot, the network peer, the
 # command typed into the shell -- is the same for both, and only what gdb
@@ -42,8 +46,9 @@ case "$MODE" in
     gate) CHECK_SCRIPT="$REPO_ROOT/scripts/kernel_affinity_gdb_check.py" ;;
     reap) CHECK_SCRIPT="$REPO_ROOT/scripts/kernel_affinity_reap_check.py" ;;
     rollover) CHECK_SCRIPT="$REPO_ROOT/scripts/kernel_rollover_gdb_check.py" ;;
+    starve) CHECK_SCRIPT="$REPO_ROOT/scripts/kernel_starve_gdb_check.py" ;;
     *)
-        echo "error: KERNEL_QEMU_AFFINITY_GDB_MODE must be gate, reap or rollover, not '$MODE'" >&2
+        echo "error: KERNEL_QEMU_AFFINITY_GDB_MODE must be gate, reap, rollover or starve, not '$MODE'" >&2
         exit 1
         ;;
 esac
