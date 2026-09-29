@@ -21,6 +21,12 @@ implementation. If a B issue blocks a step of A's route, A pulls it and says
 so on the issue. Compiler work a step of A needs is done in A as part of that
 step, landed as its own commit.
 
+**Loosely coupled (maintainer, 2026-09-29), since either may stop for days.**
+A changes the kernel core's runtime behavior and needs four-core RPi5
+evidence. B delivers compiler capabilities and build checks, proven in
+compiler tests and `linux_user/`, which A adopts at its own pace. Neither
+waits: A does compiler work on its own critical path itself.
+
 ### Territory A: the multicore route, in this order
 
 **A red allcheck comes first (maintainer, 2026-09-27).** A failing `make
@@ -55,49 +61,55 @@ of #604 and #556 when they next recur.
 3. **Takibi's provisional answer to safe pointers and safe memory access,
    with multicore as a premise.** #637 is the frame: derive every access
    from an authority and shrink the trusted base to named mint sites, in
-   four stages. Its baseline is `docs/UNSAFE_INVENTORY.md`. Stage 0 (count
-   raw dereferences outside mint files) comes first. The step's other
-   issues fit into its stages: #343, #342, #202, #518, #131, #132, #370,
-   #216, #614 (a process start and a zombie reap that require a stack-free
-   proof), and #613: a lockless multi-writer kernel log ring with its
-   protocol in the type system, the multicore-specific subject this
-   discussion is judged against. #638 sets the preemption target this
-   step designs for: full kernel preemption, with no explicit-point
-   intermediate. Its typed preparation belongs here: a
-   preemption-disabled authority, and per-CPU access derived from it in
-   place of the 17 `KERNEL_PREEMPTIBLE == 0` assertions.
+   four stages, baseline `docs/UNSAFE_INVENTORY.md`. A holds the core
+   side (stage 1's atomic, stack/frame and page/user-memory groups, the
+   stage 2 decision, the stage 3 flip); stage 0, the device groups and the
+   language capabilities are B's. Also A's: #343, #518, #202, #614 (a
+   stack-free proof for process start and zombie reap), and #613: a
+   lockless multi-writer log ring with its protocol in the type system,
+   the multicore-specific subject this discussion is judged against. #638
+   sets the preemption target this step designs for: full kernel
+   preemption, with no explicit-point intermediate. Its typed preparation
+   belongs here: a preemption-disabled authority, and per-CPU access
+   derived from it in place of the 17 `KERNEL_PREEMPTIBLE == 0`
+   assertions.
 4. **Flip to kernel preemption (#638).** Once step 3's authorities exist,
    measure candidate designs' cost on RPi5 and set `KERNEL_PREEMPTIBLE`
    to 1, with the models passing without their no-preemption guards. Never
    during step 2's soak, whose defects must stay attributable to
    multicore.
 5. **Apply recent research where a real example needs it** (evaluated
-   2026-09-29; the reasoning is on #13). In this order:
-   - Restart #13 for `Phi` only (quantifier-free linear integer
-     arithmetic), with #216, #109 and #637's correlated-index group as the
-     first examples. `Delta` stays in the checker.
+   2026-09-29; the reasoning is on #13). The solver side (#13) is B's.
+   A's part, in this order:
    - Prototype on #613: indexed views generated from a TLA+ model's
      actions, so TLC checks the invariant and the type checker checks that
      the code takes only those transitions.
    - Typestate advances with #637 stage 2 (stored authority); #590 and
      #308 are its consumers.
-   - Iris supplies design vocabulary for #132 (invariants, ghost state). A
-     mechanized soundness proof of a Core fragment is optional research,
-     not scheduled.
+   - Iris supplies design vocabulary for lock and pool invariants (#132,
+     deferred in B). A mechanized soundness proof of a Core fragment is
+     optional research, not scheduled.
    - Not pursued: the K framework, and a Boogie-style IVL (Why3 if an IVL
      is ever needed).
 
 ### Territory B: everything else, ordered by current priority
 
 1. **Kernel and userspace capability:** #220, #595, #635.
-2. **Resource use and measured performance:** #389, #422, #497, #520, #553,
+2. **Safe-memory language support that A's route consumes** (moved from A
+   2026-09-29; nothing here waits for A): #639 (#637 stage 0, the
+   raw-dereference ratchet); #342 (null safety); #13 restricted to `Phi`,
+   with #216 and #109 as its first examples; #131 and #370 (stored
+   ownership and branded containers, which feed #637 stage 2's option
+   (c)). Once A's route step 2 closes: #637 stage 1's device groups, MMIO
+   and DMA, together with #622 and #623.
+3. **Resource use and measured performance:** #389, #422, #497, #520, #553,
    #386, #502.
-3. **Compiler safety and language research:** #58, #203, #252, #200, #201,
+4. **Compiler safety and language research:** #58, #203, #252, #200, #201,
    #282, #129, #374, #417, #155, #28, #8.
-4. **Toolchain, portability and hardware-lane support:** #599, #576, #568, #123,
+5. **Toolchain, portability and hardware-lane support:** #599, #576, #568, #123,
    #124, #122, #95, #51, #50, #85, #268, #636.
-5. **Deferred or not a scheduled work item:** #432, #555, #250, #444, #429,
-   #149, #567, #539, #536, #622, #623, #624.
+6. **Deferred or not a scheduled work item:** #432, #555, #250, #444, #429,
+   #149, #567, #539, #536, #624, #132.
 
 Items are ordered within each band as well as between bands. The deferred
 items stay listed so a changed premise can bring them back into the queue.
