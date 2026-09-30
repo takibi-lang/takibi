@@ -115,18 +115,21 @@ the change is reported as never woken.
   `kernel_process_child_exit`'s stack-owner test on the direct start, and
   fail-stops with `start-on-owned-stack`.
 - Window 603 opens where wait4 has recorded ChildExit and chosen to block,
-  so the child exits first and the block is abandoned. Its reverted kernel
-  keeps that marker when `kernel_syscall_block_return` reruns the syscall,
-  and the shell is left Ready and refused on every CPU:
-  `sched: STARVED ... idled beside Ready`.
+  so the child exits first and the block is abandoned. The decision is kept
+  apart from the published wait, so an abandoned block leaves nothing for
+  the scheduler. Its reverted kernel publishes the decision again, as one
+  `wait_reason` field once did, and drops the clear in
+  `kernel_syscall_block_return`; the shell is left Ready and refused on every
+  CPU: `sched: STARVED ... idled beside Ready`.
 - Window 633 opens in wait4 between reaping a zombie and returning its
-  pid, where a sibling exiting on another CPU writes the parent's
+  pid, where a sibling exiting on another CPU used to write the parent's
   `last_child_pid`. Only concurrent siblings reach it, so this window runs
   the churn workload (`scripts/run_kernel_churn.py`, 100 rounds, a
-  120-second stall bound) through the QEMU shell instead of the suite. Its
-  reverted kernel returns `last_child_pid` again, and the churn shell is left
-  waiting on a signal with no children, which DDB reports as a pid of 3 or
-  more blocked on `event=signal`.
+  120-second stall bound) through the QEMU shell instead of the suite. A
+  child's exit no longer writes its parent's record; the reverted kernel
+  puts that write back and returns the pid read afterwards, and the churn
+  shell is left waiting on a signal with no children, which DDB reports as a
+  pid of 3 or more blocked on `event=signal`.
 
 ## Syscall evidence counters
 

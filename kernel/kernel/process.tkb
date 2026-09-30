@@ -4,6 +4,7 @@ use "kernel/lib/slotmap.tkb";
 use "kernel/lib/freelist.tkb";
 use "kernel/lib/pool_lock.tkb";
 use "kernel/kernel/process_test_evidence.tkb";
+use "kernel/kernel/process_wait.tkb";
 use "kernel/kernel/protocol_trace.tkb";
 // A process slot remains the temporary address-space key, but process.tkb
 // owns no table details. scheduled_process_alloc/reap are the lifecycle
@@ -86,10 +87,6 @@ enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; Constructing;
 // which stops every other process for the duration -- kernel mode does not
 // preempt. Added at the end so the numbers the oops path prints for the
 // first three are unchanged.
-enum ProcessWaitReason: u8 {
-    None; UartRx; ChildExit; NetRx; Deadline; Signal; UartTx;
-}
-
 // GitHub issue #392: declared here, with the rest of a process's
 // lifecycle state, rather than in kernel/kernel/syscall.tkb where the
 // logic that uses them lives. They were `[T; KERNEL_PROCESS_MAX]` arrays
@@ -261,9 +258,16 @@ struct ProcessRecord {
     // only value from which another CPU may acquire this stack.
     stack_owner_cpu: usize;
     state: ProcessSlotState;
-    wait_reason: ProcessWaitReason;
+    // What this process is blocked on, and the child that woke a wait4 that
+    // is still pending. Private to process_wait.tkb, which is the only
+    // place either changes (GitHub issue #653).
+    wait: ProcessWaitCell;
+    // What the process running a syscall has decided to block on, read back
+    // by the block that follows. Separate from `wait` so a decision that is
+    // abandoned leaves nothing behind for a scheduler to trust (#603).
+    pending_block_reason: ProcessWaitReason;
     // Absolute generic-counter deadline for nanosleep/clock_nanosleep and
-    // finite ppoll. Meaningful only while wait_reason is Deadline.
+    // finite ppoll. Meaningful only while the published wait is Deadline.
     deadline_ticks: usize;
     // Linux signal sets use bit (signum - 1). Pending state and the set a
     // blocked rt_sigtimedwait accepts belong to the process whose frame is
@@ -324,8 +328,9 @@ struct ProcessRecord {
     // GitHub issue #437: the pid this process most recently REAPED, which
     // is genuinely about the reaper and stays here. What left is
     // child_exit_status/child_waitable: they described "the" child, and
-    // there is no longer one.
-    last_child_pid: usize;
+    // there is no longer one. Written only by the reaper itself (#653: a
+    // child's exit used to write it too, from another CPU).
+    last_reaped_pid: usize;
     // The status this process exited with, on the process that exited.
     // It lives here because the record now survives the exit -- see
     // kernel_process_child_exit. Meaningful only while state is Exited.
@@ -1162,7 +1167,7 @@ private fn scheduled_process_ddb_copy_one(
         ProcessSlotState::Exited => { output[index].state = 4; }
         ProcessSlotState::Constructing => { output[index].state = 5; }
     }
-    match record.wait_reason {
+    match process_wait_reason(&record.wait) {
         ProcessWaitReason::None => { output[index].wait_reason = 0; }
         ProcessWaitReason::UartRx => { output[index].wait_reason = 1; }
         ProcessWaitReason::ChildExit => { output[index].wait_reason = 2; }
@@ -1246,7 +1251,7 @@ private fn kernel_process_protocol_observe(unlocked: bool) !{unsafe} {
             kernel_process_protocol_owner(
                 scheduled_process_boot_record.stack_owner_cpu),
             kernel_process_protocol_reason(
-                scheduled_process_boot_record.wait_reason),
+                process_wait_reason(&scheduled_process_boot_record.wait)),
             PROTOCOL_TRACE_NONE);
     }
     let mut slot: usize = 0;
@@ -1267,7 +1272,7 @@ private fn kernel_process_protocol_observe(unlocked: bool) !{unsafe} {
                         record.pid,
                         kernel_process_protocol_state(record.state),
                         kernel_process_protocol_owner(record.stack_owner_cpu),
-                        kernel_process_protocol_reason(record.wait_reason),
+                        kernel_process_protocol_reason(process_wait_reason(&record.wait)),
                         kernel_process_protocol_parent(record));
                 }
                 intrusive_view_release(slot_view);
@@ -1428,12 +1433,12 @@ fn scheduled_process_state_of(handle: ProcessHandle) -> ProcessSlotState
 
 fn scheduled_process_record_wait_reason(slot: usize) -> ProcessWaitReason
         !{unsafe} {
-    return scheduled_process_record_at(slot).wait_reason;
+    return process_wait_reason(&scheduled_process_record_at(slot).wait);
 }
 
 fn scheduled_process_wait_reason_of(handle: ProcessHandle) -> ProcessWaitReason
         !{unsafe} {
-    return scheduled_process_record_of(handle).wait_reason;
+    return process_wait_reason(&scheduled_process_record_of(handle).wait);
 }
 
 // GitHub issue #392 and the multicore follow-up: syscall.tkb's per-process
@@ -1630,7 +1635,7 @@ fn scheduled_process_peek_state(slot: usize) -> ProcessSlotState !{unsafe} {
 
 fn scheduled_process_peek_wait_reason(slot: usize) -> ProcessWaitReason
         !{unsafe} {
-    return scheduled_process_record_peek(slot).wait_reason;
+    return process_wait_reason(&scheduled_process_record_peek(slot).wait);
 }
 
 fn scheduled_process_peek_saved_sp(slot: usize) -> usize !{unsafe} {
@@ -2245,7 +2250,8 @@ private fn scheduled_process_record_reset(slot: usize) !{unsafe} {
     record.saved_sp = 0;
     record.stack_owner_cpu = PROCESS_STACK_UNOWNED;
     record.state = ProcessSlotState::Free;
-    record.wait_reason = ProcessWaitReason::None;
+    process_wait_clear(&record.wait);
+    record.pending_block_reason = ProcessWaitReason::None;
     record.deadline_ticks = 0;
     record.signal_mask = 0;
     record.pending_signals = 0;
@@ -2264,7 +2270,7 @@ private fn scheduled_process_record_reset(slot: usize) !{unsafe} {
     record.has_parent = false;
     record.has_first_child = false;
     record.has_next_sibling = false;
-    record.last_child_pid = 0;
+    record.last_reaped_pid = 0;
     record.exit_status = 0;
     record.exec_image_live = false;
     scheduled_process_record_reset_syscall_state(slot);
@@ -3096,13 +3102,19 @@ fn scheduled_process_yield(
     return ready;
 }
 
+// The one place a process becomes Blocked, and so the one place a wait is
+// published (GitHub issue #653): state and reason change together, so a
+// process that is still Running never carries one.
 fn scheduled_process_block(
         owner: borrow ScheduledProcessOwner[process],
-        state: sink ScheduledProcessState[process, ProcessState::Running])
+        state: sink ScheduledProcessState[process, ProcessState::Running],
+        reason: ProcessWaitReason)
         -> ScheduledProcessState[process, ProcessState::Blocked] {
     scheduled_process_state_drop(state);
     scheduled_process_record_at(owner.pool_index).state =
         ProcessSlotState::Blocked;
+    process_wait_publish(&scheduled_process_record_at(owner.pool_index).wait,
+                         reason);
     workload_profile_note_block(
         scheduled_process_pid_of_slot(owner.pool_index));
     let mut blocked: ScheduledProcessState[process, ProcessState::Blocked] =
@@ -3110,7 +3122,39 @@ fn scheduled_process_block(
     return blocked;
 }
 
+// A wait has ended: the published wait is cleared, and so is the decision
+// that led to it, which a rerun of the syscall reads as "first entry" only
+// when nothing is left of the last one.
+private fn scheduled_process_wait_settle(record: *ProcessRecord) {
+    process_wait_clear(&record.wait);
+    record.pending_block_reason = ProcessWaitReason::None;
+}
+
+// A wake leaves nothing pending: the wait it ends is cleared with the state.
 fn scheduled_process_wake(
+        owner: borrow ScheduledProcessOwner[process],
+        state: sink ScheduledProcessState[process, ProcessState::Blocked])
+        -> ScheduledProcessState[process, ProcessState::Ready] {
+    scheduled_process_wait_settle(
+        scheduled_process_record_at(owner.pool_index));
+    return scheduled_process_wake_ready(owner, state);
+}
+
+// A ChildExit waiter woken by `child`'s exit on a CPU that cannot run it. It
+// stays Ready with its wait4 pending and names the child that woke it, so
+// the CPU that admits it delivers that child's result even if a sibling
+// exits meanwhile (GitHub issue #633).
+fn scheduled_process_wake_keeping_wait4(
+        owner: borrow ScheduledProcessOwner[process],
+        state: sink ScheduledProcessState[process, ProcessState::Blocked],
+        child_pid: usize)
+        -> ScheduledProcessState[process, ProcessState::Ready] {
+    process_wait_keep_continuation(
+        &scheduled_process_record_at(owner.pool_index).wait, child_pid);
+    return scheduled_process_wake_ready(owner, state);
+}
+
+private fn scheduled_process_wake_ready(
         owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Blocked])
         -> ScheduledProcessState[process, ProcessState::Ready] {
@@ -3502,6 +3546,11 @@ struct ExecutionState {
     deferred_reap_handle: ProcessHandle;
     deferred_reap_parent: ProcessHandle;
     deferred_reap_live: bool;
+    // The pid of the child whose exit this CPU last ran, for the code that
+    // runs right after it on this CPU (child_exec_reap). Only this CPU
+    // writes or reads it, unlike the parent's record, which a sibling's exit
+    // on another CPU could overwrite (#633).
+    last_exited_child_pid: usize;
     reschedule_pending: bool;
     scheduler_enabled: bool;
 }
@@ -4963,8 +5012,7 @@ private fn kernel_process_secondary_start_reserved(
             let next_sp: usize = scheduled_process_record_of(to).saved_sp;
             if (scheduled_process_wait_reason_of(to) ==
                     ProcessWaitReason::ChildExit) {
-                scheduled_process_record_of(to).wait_reason =
-                    ProcessWaitReason::None;
+                scheduled_process_wait_settle(scheduled_process_record_of(to));
             }
             scheduled_process_release(owner, running);
             process_run_unlock(guard);
@@ -5181,8 +5229,7 @@ private fn kernel_process_schedule_reserved(
             let next_sp: usize = scheduled_process_record_of(to).saved_sp;
             if (scheduled_process_wait_reason_of(to) ==
                     ProcessWaitReason::ChildExit) {
-                scheduled_process_record_of(to).wait_reason =
-                    ProcessWaitReason::None;
+                scheduled_process_wait_settle(scheduled_process_record_of(to));
             }
             scheduled_process_release(owner, running);
             process_run_unlock(guard);
@@ -6267,9 +6314,8 @@ private fn kernel_process_block_to_idle(
         ScheduledProcessRunningTakeResult::Missing => { return false; }
         ScheduledProcessRunningTakeResult::Running(from_resources) => {
             let (from_owner, from_running) = from_resources;
-            let blocked = scheduled_process_block(from_owner, from_running);
-            scheduled_process_record_at(from_owner.pool_index).wait_reason =
-                reason;
+            let blocked = scheduled_process_block(
+                from_owner, from_running, reason);
             scheduled_process_release(from_owner, blocked);
         }
     }
@@ -6392,9 +6438,7 @@ private fn kernel_process_block_reserved(
                 ScheduledProcessRunningTakeResult::Running(from_resources) => {
                     let (from_owner, from_running) = from_resources;
                     let blocked = scheduled_process_block(
-                        from_owner, from_running);
-                    scheduled_process_record_at(from_owner.pool_index)
-                        .wait_reason = reason;
+                        from_owner, from_running, reason);
                     scheduled_process_release(from_owner, blocked);
                 }
             }
@@ -6411,9 +6455,6 @@ private fn kernel_process_block_reserved(
                             ScheduledProcessStartCheck::Startable(startable) => {
                                 let from_running = scheduled_process_start(
                                     from_owner, startable);
-                                scheduled_process_record_at(
-                                    from_owner.pool_index).wait_reason =
-                                    ProcessWaitReason::None;
                                 scheduled_process_release(
                                     from_owner, from_running);
                             }
@@ -6443,8 +6484,7 @@ private fn kernel_process_block_reserved(
             let next_sp: usize = scheduled_process_record_of(to).saved_sp;
             if (scheduled_process_wait_reason_of(to) ==
                     ProcessWaitReason::ChildExit) {
-                scheduled_process_record_of(to).wait_reason =
-                    ProcessWaitReason::None;
+                scheduled_process_wait_settle(scheduled_process_record_of(to));
             }
             scheduled_process_release(owner, running);
             process_run_unlock(guard);
@@ -6489,7 +6529,7 @@ fn kernel_process_current_clear_deadline() {
         scheduled_process_record_of(execution_here().current_handle)
             .deadline_result = 0;
         scheduled_process_record_of(execution_here().current_handle)
-            .wait_reason = ProcessWaitReason::None;
+            .pending_block_reason = ProcessWaitReason::None;
     }
 }
 
@@ -6855,7 +6895,6 @@ private fn kernel_process_signal_deliver_to(
                 let (owner, blocked) = resources;
                 record.deadline_ticks = 0;
                 record.deadline_result = 0;
-                record.wait_reason = ProcessWaitReason::None;
                 let ready = scheduled_process_wake(owner, blocked);
                 scheduled_process_release(owner, ready);
             }
@@ -6882,7 +6921,6 @@ private fn kernel_process_signal_deliver_to(
                 record.deadline_ticks = 0;
                 record.deadline_result = 0;
                 let ready = scheduled_process_wake(owner, blocked);
-                record.wait_reason = ProcessWaitReason::None;
                 scheduled_process_release(owner, ready);
             }
         }
@@ -6940,8 +6978,6 @@ fn kernel_process_terminal_settings_wake(
                                 KernelUartDeliveryResult::RetryRead => { }
                             }
                             let ready = scheduled_process_wake(owner, blocked);
-                            scheduled_process_record_at(owner.pool_index).wait_reason =
-                                ProcessWaitReason::None;
                             scheduled_process_release(owner, ready);
                         }
                     }
@@ -7060,8 +7096,6 @@ fn kernel_process_deadline_wake_all(guard: borrow ProcessRunGuard[lock])
                                     .deadline_result);
                             let ready = scheduled_process_wake(owner, blocked);
                             scheduled_process_record_at(owner.pool_index)
-                                .wait_reason = ProcessWaitReason::None;
-                            scheduled_process_record_at(owner.pool_index)
                                 .deadline_ticks = 0;
                             scheduled_process_record_at(owner.pool_index)
                                 .deadline_result = 0;
@@ -7130,8 +7164,6 @@ fn kernel_process_net_wake_scan(guard: borrow ProcessRunGuard[lock])
                         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
                             let (owner, blocked) = resources;
                             let ready = scheduled_process_wake(owner, blocked);
-                            scheduled_process_record_at(owner.pool_index)
-                                .wait_reason = ProcessWaitReason::None;
                             scheduled_process_release(owner, ready);
                         }
                     }
@@ -7182,8 +7214,6 @@ fn kernel_process_uart_tx_wake_all(guard: borrow ProcessRunGuard[lock])
                         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
                             let (owner, blocked) = resources;
                             let ready = scheduled_process_wake(owner, blocked);
-                            scheduled_process_record_at(owner.pool_index)
-                                .wait_reason = ProcessWaitReason::None;
                             scheduled_process_release(owner, ready);
                         }
                     }
@@ -7433,8 +7463,6 @@ fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[lock], value: usize)
                 KernelUartDeliveryResult::RetryRead => { retry_read = true; }
             }
             let ready = scheduled_process_wake(owner, blocked);
-            scheduled_process_record_at(owner.pool_index).wait_reason =
-                ProcessWaitReason::None;
             scheduled_process_release(owner, ready);
             let mut waker: ProcessHandle = waiter;
             if (live) { waker = execution_here().current_handle; }
@@ -7689,7 +7717,7 @@ fn kernel_process_fanout_probe() -> bool !{unsafe} {
     }
     if (kernel_process_child_waitable_pid(pids[1]) == false) { return false; }
     if (kernel_process_child_wait_status_pid(pids[1]) != 41) { return false; }
-    if (kernel_process_last_child_pid() != pids[1]) { return false; }
+    if (kernel_process_last_reaped_pid() != pids[1]) { return false; }
     // The other two are untouched and still carry their own statuses --
     // the property a single parent-side field could not have.
     if (kernel_process_child_waitable_pid(pids[1])) { return false; }
@@ -7711,9 +7739,8 @@ private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
         ScheduledProcessReadyTakeResult::Ready(resources) => {
             let (owner, ready) = resources;
             let running = scheduled_process_start(owner, ready);
-            let blocked = scheduled_process_block(owner, running);
-            scheduled_process_record_at(owner.pool_index).wait_reason =
-                ProcessWaitReason::ChildExit;
+            let blocked = scheduled_process_block(
+                owner, running, ProcessWaitReason::ChildExit);
             scheduled_process_release(owner, blocked);
             arranged = true;
         }
@@ -7738,8 +7765,6 @@ private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
             let (owner, blocked) = resources;
             let ready = scheduled_process_wake(owner, blocked);
-            scheduled_process_record_at(owner.pool_index).wait_reason =
-                ProcessWaitReason::None;
             scheduled_process_release(owner, ready);
             restored = true;
         }
@@ -7965,9 +7990,12 @@ private fn kernel_process_exit_continuation_probe(parent: ProcessHandle) -> bool
         ScheduledProcessRunningTakeResult::Running(resources) => {
             let (owner, running) = resources;
             let ready = scheduled_process_yield(owner, running);
-            scheduled_process_record_of(parent).wait_reason =
-                ProcessWaitReason::ChildExit;
-            scheduled_process_record_of(parent).last_child_pid = child_pid;
+            // A Ready parent that a child's exit woke on a CPU that could not
+            // run it: the continuation the probe wants to observe.
+            process_wait_publish(&scheduled_process_record_of(parent).wait,
+                                 ProcessWaitReason::ChildExit);
+            process_wait_keep_continuation(
+                &scheduled_process_record_of(parent).wait, child_pid);
             scheduled_process_release(owner, ready);
         }
     }
@@ -8435,7 +8463,7 @@ fn kernel_process_current_set_pending_block(
         reason: ProcessWaitReason, wait4_status_ptr: usize) {
     if (execution_here().current_live) {
         scheduled_process_record_of(execution_here().current_handle)
-            .wait_reason = reason;
+            .pending_block_reason = reason;
         scheduled_process_record_of(execution_here().current_handle)
             .wait4_status_ptr = wait4_status_ptr;
     }
@@ -8444,7 +8472,7 @@ fn kernel_process_current_set_pending_block(
 fn kernel_process_current_pending_block_reason() -> ProcessWaitReason {
     if (execution_here().current_live) {
         return scheduled_process_record_of(execution_here().current_handle)
-            .wait_reason;
+            .pending_block_reason;
     }
     return ProcessWaitReason::None;
 }
@@ -8611,8 +8639,7 @@ private fn kernel_process_exit_reserved(
             // scheduled_process_ready_take's continuation check.
             if (scheduled_process_wait_reason_of(successor) ==
                     ProcessWaitReason::ChildExit) {
-                scheduled_process_record_of(successor).wait_reason =
-                    ProcessWaitReason::None;
+                scheduled_process_wait_settle(scheduled_process_record_of(successor));
             }
             let successor_sp: usize =
                 scheduled_process_record_of(successor).saved_sp;
@@ -8626,9 +8653,9 @@ private fn kernel_process_exit_reserved(
                 execution_here().deferred_reap_live = true;
             }
             // GitHub issue #633: the pid of THIS exiting child, from its own
-            // handle. The successor's last_child_pid is written by every
-            // child's exit, outside this lock, from whichever CPU it runs
-            // on, so a sibling exiting meanwhile would have the parent's
+            // handle. The parent's last_child_pid was written by every
+            // child's exit, outside this lock, from whichever CPU it ran
+            // on, so a sibling exiting meanwhile would have had the parent's
             // wait4 report the sibling and the reap collect this child.
             let reaped_pid: usize = scheduled_process_pid_of_handle(child);
             scheduled_process_release(owner, running);
@@ -8732,12 +8759,13 @@ fn kernel_process_child_exit(status: usize) -> usize {
     let auto_reap: bool =
         scheduled_process_record_of(parent).sigchld_ignored;
     scheduled_process_record_of(child).exit_status = status;
-    // Set here as well as in the reap, and both are needed. The blocked-
-    // parent path below hands this value to kernel_syscall_wait4_deliver
-    // as the pid to resume with, and it reads it BEFORE the reap that
-    // would otherwise set it -- a parent resuming with 0 is a wait() that
-    // never finishes, which is exactly how this first went wrong.
-    scheduled_process_record_of(parent).last_child_pid =
+    // GitHub issue #653: this CPU's own record of the child it is exiting,
+    // for kernel_process_child_exec_reap right after. It used to be written
+    // to the PARENT's record, where a sibling's exit on another CPU could
+    // overwrite it; the pid a blocked parent's wait4 is given comes from the
+    // exiting child's handle below, and a parent left pending names its
+    // waker in its own wait cell.
+    execution_here().last_exited_child_pid =
         scheduled_process_pid_of_handle(child);
     // GitHub issue #479 Group B: exit, parent wake, and successor reservation
     // are one decision under ProcessRunGuard. The reserved Running owner/state
@@ -8771,7 +8799,11 @@ fn kernel_process_child_exit(status: usize) -> usize {
                     ScheduledProcessBlockedTakeResult::Missing => {}
                     ScheduledProcessBlockedTakeResult::Blocked(parent_resources) => {
                         let (parent_owner, blocked) = parent_resources;
-                        let ready = scheduled_process_wake(parent_owner, blocked);
+                        // The wait stays pending, naming this child, unless the
+                        // direct start below clears it.
+                        let ready = scheduled_process_wake_keeping_wait4(
+                            parent_owner, blocked,
+                            scheduled_process_pid_of_handle(child));
                         kernel_process_trace_handle(
                             ProcessTraceWake, parent, child, status);
                         // A parent this CPU may not run is left Ready with
@@ -8788,9 +8820,9 @@ fn kernel_process_child_exit(status: usize) -> usize {
                             match scheduled_process_start_check(
                                     exit_guard, parent_owner, ready) {
                                 ScheduledProcessStartCheck::Startable(startable) => {
-                                    scheduled_process_record_at(
-                                        parent_owner.pool_index).wait_reason =
-                                        ProcessWaitReason::None;
+                                    scheduled_process_wait_settle(
+                                        scheduled_process_record_at(
+                                            parent_owner.pool_index));
                                     let parent_running =
                                         scheduled_process_start(
                                             parent_owner, startable);
@@ -8917,15 +8949,16 @@ private fn kernel_process_first_zombie_of(parent: ProcessHandle)
 }
 
 // A parent woken on a CPU that cannot admit it retains ChildExit as a
-// continuation marker while Ready. last_child_pid identifies the exact
-// zombie whose wait4 result still has to be delivered after that parent's
-// address space is active.
+// continuation marker while Ready. Its wait cell names the exact zombie
+// whose exit woke it, and whose wait4 result still has to be delivered after
+// that parent's address space is active.
 private fn kernel_process_pending_wait4_child(parent: ProcessHandle)
         -> ProcessNextReadyResult {
     if (scheduled_process_record_of(parent).has_first_child == false) {
         return ProcessNextReadyResult::Missing;
     }
-    let wanted: usize = scheduled_process_record_of(parent).last_child_pid;
+    let wanted: usize =
+        process_wait_woken_by(&scheduled_process_record_of(parent).wait);
     let mut cursor: ProcessHandle =
         scheduled_process_record_of(parent).first_child;
     let mut remaining: usize = scheduled_process_pool_live_count() + 1;
@@ -9095,7 +9128,7 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
             parent = process_handle_new(parent_slot, parent_generation);
         }
     }
-    scheduled_process_record_of(parent).last_child_pid = pid;
+    scheduled_process_record_of(parent).last_reaped_pid = pid;
     // scheduled_process_reap may clear the per-CPU process-image target while
     // tearing down the child. Recommit the reaper's root so a later COW fault
     // consults the same address space that TTBR0 already names.
@@ -9247,7 +9280,7 @@ fn kernel_process_child_waitable_pid(pid: usize) -> bool {
 }
 
 // wait4(pid)'s reap. Returns the status; the reaped pid is readable
-// afterwards through kernel_process_last_child_pid, same as wait4(-1).
+// afterwards through kernel_process_last_reaped_pid, same as wait4(-1).
 fn kernel_process_child_wait_status_pid(pid: usize) -> usize !{unsafe} {
     if (execution_here().current_live == false) { return 0; }
     let mut parent: ProcessHandle = execution_here().current_handle;
@@ -9411,10 +9444,16 @@ fn kernel_process_scheduler_acceptance_evidence() -> bool {
            kernel_process_schedulable_count() <= 1;
 }
 
-fn kernel_process_last_child_pid() -> usize {
+// The pid this process most recently reaped. Only the reaper writes it.
+fn kernel_process_last_reaped_pid() -> usize {
     if (execution_here().current_live == false) { return 0; }
     return scheduled_process_record_of(execution_here().current_handle)
-        .last_child_pid;
+        .last_reaped_pid;
+}
+
+// The child whose exit this CPU ran last.
+fn kernel_process_last_exited_child_pid() -> usize {
+    return execution_here().last_exited_child_pid;
 }
 
 // GitHub issue #245: process_test_evidence's clone_calls is a single

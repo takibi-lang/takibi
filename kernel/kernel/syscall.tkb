@@ -6070,10 +6070,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         let known_child: bool =
             kernel_process_current_has_child_pid(requested_pid) ||
             (requested_pid != 0 &&
-             requested_pid == kernel_process_last_child_pid());
+             requested_pid == kernel_process_last_reaped_pid());
         // GitHub issue #248: no longer rejects a child-status caller here
         // (kernel_process_is_child() used to gate this to the tree root
-        // only) -- kernel_process_current_has_child_pid()/_last_child_pid()
+        // only) -- kernel_process_current_has_child_pid()/_last_reaped_pid()
         // above are already relative to whichever slot is calling, and
         // kernel/kernel/process.tkb's own child-exit/wait bookkeeping is
         // now per-slot too, so any live process may legitimately wait4()

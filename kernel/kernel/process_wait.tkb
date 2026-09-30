@@ -1,0 +1,71 @@
+// What a process is waiting for, and the one child whose exit woke it
+// (GitHub issue #653).
+//
+// Both used to be plain fields of ProcessRecord that any path could write.
+// wait_reason was written for a process that was still Running when wait4
+// only meant to block (#603 path 2), and last_child_pid by every child's
+// exit on whichever CPU it ran on, so a sibling's exit retargeted a
+// parent's pending wait4 (#633). The fields are private here, so the
+// compiler refuses a write from anywhere else: a record's wait state changes
+// only through the four functions below, and those are called from
+// scheduled_process_block, scheduled_process_wake and the few places that
+// resume or keep a continuation. What the compiler does NOT check is that
+// those callers hold the right process state; that needs the state token
+// this file cannot see (it is declared in process.tkb, which imports this
+// one), and stays with review of those few call sites.
+//
+// A published wait belongs to a Blocked process. The one exception is a
+// wait4 continuation: a parent woken on a CPU that cannot run it stays
+// Ready with ChildExit and the pid of the child that woke it, until some
+// CPU resumes it.
+//
+// Current limitations (2026-09-30):
+// - THE CELL KNOWS NO PROCESS STATE. process_wait_publish can be called for
+//   a Running process; only its callers' tokens say otherwise.
+// - THE CALLER SERIALIZES. Every write is made holding the process-run
+//   lock, and a reader that does not hold it sees a value that may be one
+//   step old, which the two readers that do so (the DDB and crash
+//   reports) accept.
+// - ONE WOKEN CHILD. A second child exiting while the continuation is
+//   pending does not replace it: the first is the one whose wait4 result is
+//   delivered.
+
+enum ProcessWaitReason: u8 {
+    None; UartRx; ChildExit; NetRx; Deadline; Signal; UartTx;
+}
+
+struct ProcessWaitCell {
+    private reason: ProcessWaitReason;
+    // The pid of the child whose exit woke a wait4 that could not resume at
+    // once; meaningful only while reason is ChildExit and the process is
+    // Ready. 0 is "none": no process has pid 0.
+    private woken_by: usize;
+}
+
+// The process has been made Blocked for `reason`.
+fn process_wait_publish(cell: &mut ProcessWaitCell,
+                        reason: ProcessWaitReason) {
+    (*cell).reason = reason;
+    (*cell).woken_by = 0;
+}
+
+// A ChildExit waiter woken by `child` that cannot be resumed now: it stays
+// Ready with its wait4 pending, and names the child. The first waker wins.
+fn process_wait_keep_continuation(cell: &mut ProcessWaitCell, child: usize) {
+    if ((*cell).woken_by == 0) { (*cell).woken_by = child; }
+}
+
+// The process runs again, or is woken for any other reason: nothing is
+// pending.
+fn process_wait_clear(cell: &mut ProcessWaitCell) {
+    (*cell).reason = ProcessWaitReason::None;
+    (*cell).woken_by = 0;
+}
+
+fn process_wait_reason(cell: &ProcessWaitCell) -> ProcessWaitReason {
+    return (*cell).reason;
+}
+
+fn process_wait_woken_by(cell: &ProcessWaitCell) -> usize {
+    return (*cell).woken_by;
+}

@@ -37,7 +37,9 @@ def spin(label: str, peer_only: bool) -> str:
 
 
 # name -> the spin (file, the text it follows, peer only) and the check
-# (file, its text, what --revert leaves in its place).
+# (file, its text, what --revert leaves in its place). A window whose defect
+# the fix removed by construction lists several edits: --revert then puts back
+# the write that made the defect possible as well as removing the check.
 WINDOWS = {
     # GitHub issue #609: a peer published its process Blocked in wait4 and
     # still stands on that process's stack until its idle entry releases
@@ -75,13 +77,25 @@ WINDOWS = {
         "spin": ("kernel/process.tkb",
                  "fn kernel_process_block_wait4(current_sp: usize) -> usize {\n",
                  False),
-        "check": ("kernel/syscall.tkb",
-                  "        if (kernel_process_current_pending_block_reason() ==\n"
-                  "                ProcessWaitReason::ChildExit) {\n"
-                  "            kernel_process_current_set_pending_block(\n"
-                  "                ProcessWaitReason::None, 0);\n"
-                  "        }\n",
-                  ""),
+        # wait4's decision lives in pending_block_reason now, and only a
+        # block publishes a wait, so an abandoned block leaves nothing. The
+        # reverted kernel publishes the decision again, as the record's
+        # single wait_reason field did, and drops the clear.
+        "check": [
+            ("kernel/syscall.tkb",
+             "        if (kernel_process_current_pending_block_reason() ==\n"
+             "                ProcessWaitReason::ChildExit) {\n"
+             "            kernel_process_current_set_pending_block(\n"
+             "                ProcessWaitReason::None, 0);\n"
+             "        }\n",
+             ""),
+            ("kernel/process.tkb",
+             "            .pending_block_reason = reason;\n",
+             "            .pending_block_reason = reason;\n"
+             "        process_wait_publish(\n"
+             "            &scheduled_process_record_of(\n"
+             "                execution_here().current_handle).wait, reason);\n"),
+        ],
     },
     # GitHub issue #635: no window and no spin -- a control only. A terminal
     # settings change that makes queued bytes readable must wake a reader
@@ -97,7 +111,7 @@ WINDOWS = {
     },
     # GitHub issue #633: wait4 has reaped a zombie and is about to return
     # its pid. A sibling exiting on another CPU meanwhile writes the
-    # parent's last_child_pid. Returning the pid reaped is the check; the
+    # parent's last_child_pid (now last_reaped_pid). Returning the pid reaped is the check; the
     # reverted kernel returns last_child_pid read afterwards, as before,
     # and the shell waits for good for the child it was never told about.
     "633": {
@@ -105,10 +119,21 @@ WINDOWS = {
                  "                let reaped_status: usize =\n"
                  "                    kernel_process_current_reap_pid(zombie_pid);\n",
                  False),
-        "check": ("kernel/syscall.tkb",
-                  "                return SyscallAction::Resume(zombie_pid);\n",
-                  "                return SyscallAction::Resume(\n"
-                  "                    kernel_process_last_child_pid());\n"),
+        # A child's exit no longer writes its parent's record, so the
+        # reverted kernel also puts that write back.
+        "check": [
+            ("kernel/syscall.tkb",
+             "                return SyscallAction::Resume(zombie_pid);\n",
+             "                return SyscallAction::Resume(\n"
+             "                    kernel_process_last_reaped_pid());\n"),
+            ("kernel/process.tkb",
+             "    execution_here().last_exited_child_pid =\n"
+             "        scheduled_process_pid_of_handle(child);\n",
+             "    execution_here().last_exited_child_pid =\n"
+             "        scheduled_process_pid_of_handle(child);\n"
+             "    scheduled_process_record_of(parent).last_reaped_pid =\n"
+             "        scheduled_process_pid_of_handle(child);\n"),
+        ],
     },
 }
 
@@ -132,8 +157,10 @@ def main() -> None:
     source_root = Path(args[0]).resolve()
     overlay_root = Path(args[1]).resolve()
     window = WINDOWS[args[2]]
-    check_file, check, reverted = window["check"]
-    edited_files = {check_file}
+    checks = window["check"]
+    if isinstance(checks, tuple):
+        checks = [checks]
+    edited_files = {check_file for check_file, _, _ in checks}
     if window["spin"] is not None:
         spin_file, anchor, peer_only = window["spin"]
         edited_files.add(spin_file)
@@ -168,7 +195,8 @@ def main() -> None:
         replace_once(overlay_kernel / spin_file, anchor,
                      anchor + spin(args[2], peer_only))
     if revert:
-        replace_once(overlay_kernel / check_file, check, reverted)
+        for check_file, check, reverted in checks:
+            replace_once(overlay_kernel / check_file, check, reverted)
 
 
 if __name__ == "__main__":
