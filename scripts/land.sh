@@ -15,7 +15,8 @@
 #   4  the rebase stopped on a conflict; resolve it, then run again
 #
 # The allcheck output is kept under .git/takibi-land/ so a symptom can be
-# matched against docs/KNOWN_INTERMITTENTS.md after the run.
+# matched against docs/KNOWN_INTERMITTENTS.md after the run, and so are the
+# failing lanes' captures (failures/), each bounded to the newest few.
 
 set -uo pipefail
 
@@ -56,6 +57,36 @@ fi
 log_dir=".git/takibi-land"
 mkdir -p "$log_dir"
 log="$log_dir/allcheck-$tested.log"
+
+# `make clean` below removes _build, and with it every failing lane's archived
+# capture (scripts/archive_kernel_failure.sh writes them there). An
+# intermittent failure's raw transcript is exactly what a diagnosis needs, and
+# the next land run used to destroy it (GitHub issue #657 lost one this way).
+# Move them out first, and keep only the newest few of each kind: this
+# directory sits in .git, where nothing else prunes it, so an unbounded copy
+# per run would fill the disk unnoticed.
+keep_failure_archives=5
+keep_allcheck_logs=30
+failure_root="$log_dir/failures"
+for archive_dir in _build/*-failures; do
+    [ -d "$archive_dir" ] || continue
+    mkdir -p "$failure_root"
+    mv "$archive_dir" "$failure_root/$(basename "$archive_dir")-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+done
+prune_newest() {
+    # prune_newest KEEP PATH... : delete all but the newest KEEP entries.
+    local keep="$1"
+    shift
+    [ "$#" -gt 0 ] || return 0
+    ls -1dt -- "$@" 2>/dev/null | tail -n +"$((keep + 1))" | while IFS= read -r stale; do
+        rm -rf -- "$stale"
+    done
+}
+if [ -d "$failure_root" ]; then
+    prune_newest "$keep_failure_archives" "$failure_root"/*
+fi
+prune_newest "$keep_allcheck_logs" "$log_dir"/allcheck-*.log
+
 echo "land: make clean && make allcheck on $tested (log: $log)"
 make clean > "$log" 2>&1
 make allcheck 2>&1 | tee -a "$log"

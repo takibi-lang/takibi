@@ -28,6 +28,10 @@ the rule above in code. It:
 3. records `HEAD` as the tested commit and runs
    `make clean && make allcheck`, logging to
    `.git/takibi-land/allcheck-<commit>.log`;
+   before that clean it moves every failing lane's archived capture
+   (`_build/*-failures`) to `.git/takibi-land/failures/`, and keeps only the
+   newest five of those and thirty allcheck logs, so evidence survives the next
+   run and the directory cannot grow without bound;
 4. pushes exactly the tested commit as a fast-forward of `main`, and only
    if `HEAD` did not move and `origin/main` is still its ancestor.
 
