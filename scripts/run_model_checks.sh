@@ -96,6 +96,12 @@ check_model RecordLifetime RecordInvariants 6 \
     readerunlocked:CInitReaderUnlocked:ReadsOnlyLiveRecords:violated \
     execunlocked:CInitExecUnlocked:NoTornRead:violated
 
+check_model ConsoleTx Safety 10 \
+    fixed:CInitFixed:pass:ok \
+    ring:CInitRing:ProgramOrder:violated \
+    norecheck:CInitNoRecheck:NoLostWakeup:violated \
+    nested:CInitNested:deadlock:ok
+
 check_model FixedDmaOwnership Safety 5 \
     fixed:CInitFixed:pass:ok \
     unfixed:CInitUnfixed:Safety:violated

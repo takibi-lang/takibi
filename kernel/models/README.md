@@ -333,6 +333,55 @@ the request, including a retained Device token after reset failure.
 This model does not prove the compiler's direct/alias access rule, cache
 maintenance, or the hardware reset contract; those require separate evidence.
 
+## ConsoleTx.tla -- terminal output from any CPU onto one queue (#663)
+
+One process writes three chunks to the terminal and may run on core 0 or on a
+peer between writes. The model is the design decision for GitHub issue #663
+before any of it is built, so it describes the kernel as it stands
+(`LOCKED = FALSE`) and the option chosen (`LOCKED = TRUE`) side by side.
+
+`LOCKED = TRUE`: every CPU appends to the one transmit queue in a critical
+section under one console lock, the transmit interrupt takes chunks out under
+the same lock, and the lock order is run -> console. Each action is one such
+critical section, so the queue order is the lock order and a writer's chunks
+reach the wire in the order it wrote them. `LOCKED = FALSE`: core 0 appends
+directly and a peer publishes to its ring, which core 0 moves into the queue
+at moments of its own. Three variants each re-introduce one defect, and `make
+modelcheck` requires each to fail:
+
+- `LOCKED = FALSE` is the current design. A chunk written on a peer sits in
+  the ring while a chunk written later on core 0 goes straight to the queue,
+  so the wire gets them reversed. TLC and Apalache both report
+  `ProgramOrder`. This is what garbled the echo on the board.
+- `RECHECK = FALSE` is #550's decide-then-sleep window applied to the queue:
+  the writer decides the queue is full in one critical section and publishes
+  itself asleep in a later one, the interrupt drains between them, and the
+  writer sleeps beside a queue with room. TLC and Apalache both report
+  `NoLostWakeup`.
+- `NESTED = TRUE` is the lock-order defect: the transmit interrupt keeps the
+  console lock while it takes the run lock for the wake. A writer that got
+  the run lock first wants the console lock, so each waits for the other. TLC
+  reports `Deadlock reached`; Apalache only shows that the variant runs.
+
+| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
+| --- | --- | --- | --- | --- |
+| `WriterEnter` | `syscall_write_segment` | a terminal write is admitted whole under the run lock | fd lookup and the user-memory copy -- irrelevant to `ProgramOrder`: they run before the chunk is admitted and change no queue or lock | `e3b0c44298fc` |
+| `WriterAppend` | `uart_user_write`, `uart_terminal_write_chunk` | the append to the queue under the console lock, or the decision that there is no room; on a peer the publication to its ring, and the run lock let go | short counts and partial chunks -- irrelevant to `ProgramOrder`: a partial chunk is a shorter chunk, and the model already appends each whole | `e3b0c44298fc` |
+| `BlockWriter` | `kernel_process_block_uart_tx` | the writer publishes itself asleep under the run lock; `RECHECK` is the room re-check there | successor choice and the switch -- modelled elsewhere: `Wait4Block.Wait4Block` | `7e6b01ff47d6` |
+| `TxTake` | `uart_tx_isr` | one chunk leaves the queue onto the wire under the console lock and makes room; `NESTED` keeps the lock | the FIFO's capacity and the byte-by-byte drain -- irrelevant to `ProgramOrder`: bytes leave the queue in order, so a chunk taken whole is the same order | `e3b0c44298fc` |
+| `TxWake` | `kernel_process_uart_tx_wake_all` | under the run lock, a writer asleep on room becomes runnable | which other processes wait on UartTx -- irrelevant to `NoLostWakeup`: the model has one writer, and each waiter is woken by the same scan | `d28c4a94b108` |
+| `Drain` | `kernel_log_peer_console_drain` | core 0 moves the oldest ring chunk into the queue when it has room, at a moment of its own | the DDB hold that leaves a ring undrained -- irrelevant to `ProgramOrder`: it only delays a drain, and the model already lets a drain be delayed indefinitely | `377125f4fe63` |
+| `Migrate` | `kernel_process_timer_schedule` | the process changes CPU between writes, never inside one (`KERNEL_PREEMPTIBLE` is 0) | affinity -- irrelevant to `ProgramOrder`: it only forbids some moves, and the model already allows each one it forbids | `6e9c1a975798` |
+
+Properties:
+
+- `ProgramOrder` (safety): the wire is in the order the process wrote.
+- `NoLostWakeup` (safety): the writer is never asleep while the queue has
+  room and no wake is on its way.
+- `AllSent` (liveness, TLC only): every chunk is written and sent, under
+  fairness on each action.
+- `TypeOK`: bookkeeping sanity.
+
 ## Keeping models and the kernel in step
 
 A model and the `.tkb` code drift apart silently: nothing compiles them
