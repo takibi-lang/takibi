@@ -87,6 +87,27 @@ the parent again. A continuation marker left behind by the exit handoff
 would refer to the collected child and permanently refuse this later take;
 the common scheduler verdict requires the complete sequence on both platforms.
 
+`kernelcheck-race-window-qemu` makes a race window that QEMU crosses only
+by chance cross on every run (GitHub issue #615).
+`scripts/build_qemu_race_window.py` copies the files a named window touches
+into an overlay and inserts a spin of about 31 ms at the window's opening.
+It builds two QEMU kernels: "armed", with only the spin, and "reverted",
+with the check the window exercises also removed. The ordinary QEMU suite
+must pass on the armed kernel. On the reverted kernel it must fail, and the
+UART must show that check's own signature. The spin exists only in the
+overlay; `scripts/check_race_window_overlay_only.py` refuses it in kernel/,
+so no ordinary kernel carries it.
+
+- Window 609 opens, on a peer only, where the peer has published its process
+  Blocked in wait4 but still stands on its stack. Its reverted kernel drops
+  `kernel_process_child_exit`'s stack-owner test on the direct start, and
+  fail-stops with `start-on-owned-stack`.
+- Window 603 opens where wait4 has recorded ChildExit and chosen to block,
+  so the child exits first and the block is abandoned. Its reverted kernel
+  keeps that marker when `kernel_syscall_block_return` reruns the syscall,
+  and the shell is left Ready and refused on every CPU:
+  `sched: STARVED ... idled beside Ready`.
+
 ## Syscall evidence counters
 
 `kernel/kernel/syscall_test_evidence.tkb` has twelve counters and one socket

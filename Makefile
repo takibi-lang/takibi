@@ -52,7 +52,7 @@ LLVM_OBJCOPY := llvm-objcopy-19
 # `kernelcheck`), which made it easy to run the wrong one by accident.
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: _kernelcheck-qemu-main _kernelcheck-qemu-fdt-multibank _kernelcheck-qemu-ash _kernelcheck-shell-qemu _kernelcheck-qemu-debug-main _kernelcheck-qemu-debug-repeat _kernelcheck-qemu-debug-ash _kernelcheck-oops-qemu _kernelcheck-ddb-qemu _kernelcheck-stack-overflow-qemu _kernelcheck-alloc-rollback-qemu _kernelcheck-uart-wake-qemu _kernelcheck-affinity-gdb-qemu _kernelcheck-rpi5 _kernelcheck-ddb-rpi5-software build test coverage kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-ddb-rpi5-software kernelcheck-qemu kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-qemu-ash kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-qemu-debug-main kernelcheck-qemu-debug-repeat kernelcheck-qemu-debug-ash kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-alloc-rollback-qemu kernelcheck-uart-wake-qemu kernelcheck-affinity-gdb-qemu kernelcheck-repeat kernelsh-qemu kernelsh-rpi5 lease-status profile-kernel-workload-chart langcheck slowcheck linuxbuild linuxcheck clean FORCE
+.PHONY: _kernelcheck-qemu-main _kernelcheck-qemu-fdt-multibank _kernelcheck-qemu-ash _kernelcheck-shell-qemu _kernelcheck-qemu-debug-main _kernelcheck-qemu-debug-repeat _kernelcheck-qemu-debug-ash _kernelcheck-oops-qemu _kernelcheck-ddb-qemu _kernelcheck-stack-overflow-qemu _kernelcheck-alloc-rollback-qemu _kernelcheck-uart-wake-qemu _kernelcheck-affinity-gdb-qemu _kernelcheck-race-window-qemu _kernelcheck-rpi5_kernelcheck-ddb-rpi5-software build test coverage kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-ddb-rpi5-software kernelcheck-qemu kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-qemu-ash kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-qemu-debug-main kernelcheck-qemu-debug-repeat kernelcheck-qemu-debug-ash kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-alloc-rollback-qemu kernelcheck-uart-wake-qemu kernelcheck-affinity-gdb-qemu kernelcheck-race-window-qemu kernelcheck-repeatkernelsh-qemu kernelsh-rpi5 lease-status profile-kernel-workload-chart langcheck slowcheck linuxbuild linuxcheck clean FORCE
 
 .DEFAULT_GOAL := build
 
@@ -1326,6 +1326,10 @@ KERNEL_QEMU_MAIN_O       := $(KERNEL_QEMU_BUILD_DIR)/main.o
 KERNEL_QEMU_NET_WAKE_CONTROL_DIR := _build/qemu-net-wake-control-overlay
 KERNEL_QEMU_NET_WAKE_CONTROL_O := $(KERNEL_QEMU_BUILD_DIR)/net-wake-control-main.o
 KERNEL_QEMU_NET_WAKE_CONTROL_ELF := $(KERNEL_QEMU_BUILD_DIR)/kernel-net-wake-control.elf
+# GitHub issue #615: one widened race window per overlay, armed and with the
+# check it exercises reverted. scripts/build_qemu_race_window.py names them.
+KERNEL_QEMU_RACE_WINDOWS := 609 603
+KERNEL_QEMU_RACE_WINDOW_ELFS := $(foreach w,$(KERNEL_QEMU_RACE_WINDOWS),$(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-armed.elf $(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-reverted.elf)
 KERNEL_QEMU_LINK_LD      := $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld
 KERNEL_QEMU_ELF          := $(KERNEL_QEMU_BUILD_DIR)/kernel.elf
 KERNEL_QEMU_UART_TKB     := $(KERNEL_DIR)/platform/qemu/uart.tkb
@@ -1392,6 +1396,17 @@ $(KERNEL_QEMU_MAIN_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(
 $(KERNEL_QEMU_NET_WAKE_CONTROL_O): $(KERNEL_QEMU_MAIN_O) $(KERNEL_PROCESS_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) scripts/build_qemu_net_wake_control.py | $(KERNEL_QEMU_BUILD_DIR)
 	python3 scripts/build_qemu_net_wake_control.py . $(KERNEL_QEMU_NET_WAKE_CONTROL_DIR)
 	cd $(KERNEL_QEMU_NET_WAKE_CONTROL_DIR) && $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/rpi5/usb_xhci.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap $(KERNEL_UNUSED_CHECK_QEMU) --emit-depfile $(abspath $@).d -o $(abspath $@)
+
+$(KERNEL_QEMU_BUILD_DIR)/race-%-armed-main.o: $(KERNEL_QEMU_MAIN_O) scripts/build_qemu_race_window.py | $(KERNEL_QEMU_BUILD_DIR)
+	python3 scripts/build_qemu_race_window.py . _build/qemu-race-window-$*-armed $*
+	cd _build/qemu-race-window-$*-armed && $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/rpi5/usb_xhci.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap -o $(abspath $@)
+
+$(KERNEL_QEMU_BUILD_DIR)/race-%-reverted-main.o: $(KERNEL_QEMU_MAIN_O) scripts/build_qemu_race_window.py | $(KERNEL_QEMU_BUILD_DIR)
+	python3 scripts/build_qemu_race_window.py . _build/qemu-race-window-$*-reverted $* --revert
+	cd _build/qemu-race-window-$*-reverted && $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/rpi5/usb_xhci.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap -o $(abspath $@)
+
+$(KERNEL_QEMU_BUILD_DIR)/kernel-race-%.elf: $(KERNEL_QEMU_BUILD_DIR)/race-%-main.o $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_LINK_LD)
+	$(LLD) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $< -o $@
 
 $(KERNEL_QEMU_NET_WAKE_CONTROL_ELF): $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_NET_WAKE_CONTROL_O) $(KERNEL_QEMU_LINK_LD) $(KERNEL_RPI5_LINK_LD)
 	$(LLD) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_NET_WAKE_CONTROL_O) -o $@
@@ -1560,7 +1575,8 @@ kernelbuild: build
 # while preventing another Make process from interleaving object writes.
 .PHONY: _kernelbuild-check kernelbuild-check
 _kernelbuild-check: _kernelbuild _kernelbuild-qemu-debug _kernelbuild-rpi5-debug \
-	$(KERNEL_QEMU_NET_WAKE_CONTROL_ELF) kernel-debug-layout-check \
+	$(KERNEL_QEMU_NET_WAKE_CONTROL_ELF) $(KERNEL_QEMU_RACE_WINDOW_ELFS) \
+	kernel-debug-layout-check \
 	$(KERNEL_CRASH_SNAPSHOT_LAYOUT)
 
 kernelbuild-check: build
@@ -1765,6 +1781,17 @@ _kernelcheck-stack-overflow-qemu:
 ## Issues #546/#547/#587: deterministic UART and NetRx publication windows.
 ## GDB holds the guest at each cross-core race point; the peer suite also
 ## reboots a generated lockless NetRx control sequentially on the same ports.
+## GitHub issue #615: each named race window, widened by a source overlay so
+## it is crossed on every run. Armed, the ordinary suite must pass; with the
+## check the window exercises reverted, the boot must fail-stop with that
+## check's activity.
+kernelcheck-race-window-qemu: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-race-window-qemu
+
+_kernelcheck-race-window-qemu:
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=609 KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^oops: activity=start-on-owned-stack$$' KERNEL_QEMU_SERIAL_PORT=18668 KERNEL_QEMU_QMP_PORT=18669 KERNEL_QEMU_NETDEV_LOCAL_PORT=18670 KERNEL_QEMU_NETDEV_REMOTE_PORT=18675 bash scripts/run_kernel_race_window_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=603 KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^sched: STARVED cpu=[0-9]+ idled beside Ready pid=' KERNEL_QEMU_SERIAL_PORT=18676 KERNEL_QEMU_QMP_PORT=18681 KERNEL_QEMU_NETDEV_LOCAL_PORT=18682 KERNEL_QEMU_NETDEV_REMOTE_PORT=18700 bash scripts/run_kernel_race_window_qemutest.sh
+
 kernelcheck-uart-wake-qemu: kernelbuild-check
 	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-uart-wake-qemu
 
@@ -1869,7 +1896,7 @@ KERNELCHECK_QEMU_LANES := kernelcheck-qemu kernelcheck-qemu-debug \
 	kernelcheck-oops-qemu kernelcheck-ddb-qemu \
 	kernelcheck-stack-overflow-qemu \
 	kernelcheck-alloc-rollback-qemu kernelcheck-uart-wake-qemu \
-	kernelcheck-affinity-gdb-qemu
+	kernelcheck-affinity-gdb-qemu kernelcheck-race-window-qemu
 
 KERNELCHECK_LANES := $(KERNELCHECK_QEMU_LANES) kernelcheck-rpi5
 
