@@ -436,17 +436,19 @@ if ! grep -Eq "^oops: world-stop complete mask=0x0*$stopped_mask\$" "$UART_LOG";
     exit 1
 fi
 
+# The child_exec modes' fork, prepare and commit may run on any core since
+# #610 put exec on a peer; PID 1's own resume (event 7) is core 0's alone.
 if [ "$MODE" = child_exec ] &&
-        { ! grep -Eq '^oops: trace seq=[1-9][0-9]* cpu=0 event=1 pid=[1-9][0-9]* ' "$UART_LOG" ||
-          ! grep -Eq '^oops: trace seq=[1-9][0-9]* cpu=0 event=2 pid=[1-9][0-9]* ' "$UART_LOG" ||
-          ! grep -Eq '^oops: trace seq=[1-9][0-9]* cpu=0 event=3 pid=[1-9][0-9]* ' "$UART_LOG" ||
+        { ! grep -Eq '^oops: trace seq=[1-9][0-9]* cpu=[0-9]+ event=1 pid=[1-9][0-9]* ' "$UART_LOG" ||
+          ! grep -Eq '^oops: trace seq=[1-9][0-9]* cpu=[0-9]+ event=2 pid=[1-9][0-9]* ' "$UART_LOG" ||
+          ! grep -Eq '^oops: trace seq=[1-9][0-9]* cpu=[0-9]+ event=3 pid=[1-9][0-9]* ' "$UART_LOG" ||
           ! grep -q '^oops: exec prepare=debugger-after-commit$' "$UART_LOG"; }; then
     echo "FAIL kernel/qemu oops: child exec lifecycle trace was incomplete" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1
 fi
 if [ "$MODE" = child_exec_prepare_failure ] &&
-        { ! grep -Eq '^oops: trace seq=[1-9][0-9]* cpu=0 event=1 pid=[1-9][0-9]* ' "$UART_LOG" ||
+        { ! grep -Eq '^oops: trace seq=[1-9][0-9]* cpu=[0-9]+ event=1 pid=[1-9][0-9]* ' "$UART_LOG" ||
           ! grep -q '^oops: exec prepare=clone-vm-missing$' "$UART_LOG" ||
           ! grep -q 'takibi-force-variant-return: KernelChildExecPrepareResult::CloneVmMissing via registers' "$ARTIFACT_DIR/arm-gdb.log"; }; then
     echo "FAIL kernel/qemu oops: forced child exec prepare failure was not named" >&2
@@ -501,7 +503,7 @@ fi
 # command can still halt it and inspect the fixed CrashSnapshot. It reads the
 # kernel's one stored object, not a
 # duplicate ExceptionFrame or crash-record ABI in the test harness.
-gdb-multiarch -q -batch "$ELF" \
+timeout "${GDB_BATCH_TIMEOUT:-600}" gdb-multiarch -q -batch "$ELF" \
     -ex "target remote :$GDB_PORT" \
     -ex "interrupt" \
     -ex "source $SNAPSHOT_LAYOUT" \
@@ -544,9 +546,9 @@ if [ "$MODE" != child_exec ] &&
     exit 1
 fi
 if [ "$MODE" = child_exec ] &&
-        { ! grep -Eq '^takibi-oops: trace seq=[1-9][0-9]* cpu=0 event=1 pid=[1-9][0-9]* ' "$ARTIFACT_DIR/snapshot-gdb.log" ||
-          ! grep -Eq '^takibi-oops: trace seq=[1-9][0-9]* cpu=0 event=2 pid=[1-9][0-9]* ' "$ARTIFACT_DIR/snapshot-gdb.log" ||
-          ! grep -Eq '^takibi-oops: trace seq=[1-9][0-9]* cpu=0 event=3 pid=[1-9][0-9]* ' "$ARTIFACT_DIR/snapshot-gdb.log"; }; then
+        { ! grep -Eq '^takibi-oops: trace seq=[1-9][0-9]* cpu=[0-9]+ event=1 pid=[1-9][0-9]* ' "$ARTIFACT_DIR/snapshot-gdb.log" ||
+          ! grep -Eq '^takibi-oops: trace seq=[1-9][0-9]* cpu=[0-9]+ event=2 pid=[1-9][0-9]* ' "$ARTIFACT_DIR/snapshot-gdb.log" ||
+          ! grep -Eq '^takibi-oops: trace seq=[1-9][0-9]* cpu=[0-9]+ event=3 pid=[1-9][0-9]* ' "$ARTIFACT_DIR/snapshot-gdb.log"; }; then
     echo "FAIL kernel/qemu oops: retained child exec trace was incomplete" >&2
     sed 's/^/  /' "$ARTIFACT_DIR/snapshot-gdb.log" >&2 || true
     exit 1
