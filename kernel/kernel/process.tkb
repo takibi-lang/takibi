@@ -8494,8 +8494,12 @@ private fn kernel_process_exit_reserved(
                 execution_here().deferred_reap_parent = parent;
                 execution_here().deferred_reap_live = true;
             }
-            let reaped_pid: usize =
-                scheduled_process_record_of(successor).last_child_pid;
+            // GitHub issue #633: the pid of THIS exiting child, from its own
+            // handle. The successor's last_child_pid is written by every
+            // child's exit, outside this lock, from whichever CPU it runs
+            // on, so a sibling exiting meanwhile would have the parent's
+            // wait4 report the sibling and the reap collect this child.
+            let reaped_pid: usize = scheduled_process_pid_of_handle(child);
             scheduled_process_release(owner, running);
             process_run_unlock(guard);
             workload_busy_note_selected(
