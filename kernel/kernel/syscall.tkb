@@ -6139,54 +6139,42 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
             return SyscallAction::Resume(LINUX_ECHILD);
         }
-        if (x1 != 0) {
-            match user_range_check_write(kernel_process_current_root(), x1, 4) {
-                UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
-                UserWriteRangeResult::Ok(range) => {
-                    // GitHub issue #437: peek then reap, and both have to
-                    // name the SAME child once a parent can have several.
-                    // The peek is only used to write the status buffer, so
-                    // the selecting reap below is what settles which one is
-                    // collected.
-                    let mut status: usize =
-                        kernel_process_child_wait_status_peek();
-                    if (selecting) {
-                        status =
-                            kernel_process_child_wait_status_peek_pid(
-                                requested_pid);
+        // GitHub issue #633: one zombie, named once. Its status is written
+        // before it is reaped, so a faulting status pointer loses no child,
+        // and the pid returned is the pid reaped -- not last_child_pid read
+        // afterwards, which another child's exit on a peer can overwrite.
+        match kernel_process_current_zombie_pick(selecting, requested_pid) {
+            ProcessChildZombieResult::Missing => {
+                // Decided collectable above, and only this process reaps
+                // its own zombies, so this does not happen; ask again.
+                return SyscallAction::WaitInterrupt;
+            }
+            ProcessChildZombieResult::Found(picked) => {
+                let (zombie_pid, status) = picked;
+                if (x1 != 0) {
+                    match user_range_check_write(
+                            kernel_process_current_root(), x1, 4) {
+                        UserWriteRangeResult::Fault => {
+                            return SyscallAction::Resume(LINUX_EFAULT);
+                        }
+                        UserWriteRangeResult::Ok(range) => {
+                            if (user_write_u32(range, 0,
+                                    ((status & 0xFF) << 8) as u32) == false) {
+                                return SyscallAction::Resume(LINUX_EFAULT);
+                            }
+                        }
                     }
-                    if (user_write_u32(range, 0,
-                            ((status & 0xFF) << 8) as u32) == false) {
-                        return SyscallAction::Resume(LINUX_EFAULT);
-                    }
-                    let mut consumed_status: usize = 0;
-                    if (selecting) {
-                        consumed_status =
-                            kernel_process_child_wait_status_pid(requested_pid);
-                    } else {
-                        consumed_status = kernel_process_child_wait_status();
-                    }
-                    kernel_init_boot_fixture_reaped(
-                        kernel_process_current_pid());
-                    workload_peer_wait_note(false);
-                    return SyscallAction::Resume(
-                        kernel_process_last_child_pid());
                 }
+                let reaped_status: usize =
+                    kernel_process_current_reap_pid(zombie_pid);
+                // GitHub issue #270: PID 1 reaping its first child is where
+                // the bounded boot fixture ends now. The hook is a no-op for
+                // every other reaper and after the first one.
+                kernel_init_boot_fixture_reaped(kernel_process_current_pid());
+                workload_peer_wait_note(false);
+                return SyscallAction::Resume(zombie_pid);
             }
         }
-        let mut ignored_status: usize = 0;
-        if (selecting) {
-            ignored_status =
-                kernel_process_child_wait_status_pid(requested_pid);
-        } else {
-            ignored_status = kernel_process_child_wait_status();
-        }
-        // GitHub issue #270: PID 1 reaping its first child is where the
-        // bounded boot fixture ends now. The hook is a no-op for every
-        // other reaper and after the first one.
-        kernel_init_boot_fixture_reaped(kernel_process_current_pid());
-        workload_peer_wait_note(false);
-        return SyscallAction::Resume(kernel_process_last_child_pid());
     }
     if (number == AARCH64_NR_GETCWD) {
         // getcwd(): HTTPd immediately changes to its configured root; `/` is

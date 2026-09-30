@@ -72,6 +72,21 @@ WINDOWS = {
                   "        }\n",
                   ""),
     },
+    # GitHub issue #633: wait4 has reaped a zombie and is about to return
+    # its pid. A sibling exiting on another CPU meanwhile writes the
+    # parent's last_child_pid. Returning the pid reaped is the check; the
+    # reverted kernel returns last_child_pid read afterwards, as before,
+    # and the shell waits for good for the child it was never told about.
+    "633": {
+        "spin": ("kernel/syscall.tkb",
+                 "                let reaped_status: usize =\n"
+                 "                    kernel_process_current_reap_pid(zombie_pid);\n",
+                 False),
+        "check": ("kernel/syscall.tkb",
+                  "                return SyscallAction::Resume(zombie_pid);\n",
+                  "                return SyscallAction::Resume(\n"
+                  "                    kernel_process_last_child_pid());\n"),
+    },
 }
 
 

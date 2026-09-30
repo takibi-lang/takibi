@@ -9099,19 +9099,6 @@ fn kernel_process_current_child_zombie_stack_held(pid: usize) -> bool {
         execution_here().current_handle, pid);
 }
 
-// The status of THAT child, without collecting it. The peek/reap pair has
-// to name the same child once a parent can have several.
-fn kernel_process_child_wait_status_peek_pid(pid: usize) -> usize {
-    if (execution_here().current_live == false) { return 0; }
-    match kernel_process_zombie_of_pid(
-            execution_here().current_handle, pid) {
-        ProcessNextReadyResult::Missing => { return 0; }
-        ProcessNextReadyResult::Next(zombie) => {
-            return scheduled_process_record_of(zombie).exit_status;
-        }
-    }
-}
-
 // wait4(pid): is THAT child collectable, rather than any of them?
 fn kernel_process_child_waitable_pid(pid: usize) -> bool {
     if (execution_here().current_live == false) { return false; }
@@ -9135,43 +9122,54 @@ fn kernel_process_child_wait_status_pid(pid: usize) -> usize !{unsafe} {
     }
 }
 
+// GitHub issue #633: the ONE zombie a wait4 collects, named with its pid
+// and status together. wait4 used to write a status it peeked from the
+// first zombie, reap the first zombie again, and return
+// last_child_pid read afterwards. A child exiting on another CPU writes that
+// field too, so the pid returned could name a child that was not the one
+// reaped, and the shell never heard of the one that was: it waited in
+// rt_sigsuspend for a child it had already lost. Only the parent reaps its
+// own zombies, so the one named here is still there for
+// kernel_process_current_reap_pid.
+must_use variant ProcessChildZombieResult { Missing; Found((usize, usize)); }
+
+fn kernel_process_current_zombie_pick(selecting: bool, pid: usize)
+        -> ProcessChildZombieResult {
+    if (execution_here().current_live == false) {
+        return ProcessChildZombieResult::Missing;
+    }
+    let mut parent: ProcessHandle = execution_here().current_handle;
+    if (selecting) {
+        return kernel_process_zombie_named(
+            kernel_process_zombie_of_pid(parent, pid));
+    }
+    return kernel_process_zombie_named(kernel_process_first_zombie_of(parent));
+}
+
+private fn kernel_process_zombie_named(found: ProcessNextReadyResult)
+        -> ProcessChildZombieResult {
+    match found {
+        ProcessNextReadyResult::Missing => {
+            return ProcessChildZombieResult::Missing;
+        }
+        ProcessNextReadyResult::Next(zombie) => {
+            return ProcessChildZombieResult::Found((
+                scheduled_process_pid_of_handle(zombie),
+                scheduled_process_record_of(zombie).exit_status));
+        }
+    }
+}
+
+fn kernel_process_current_reap_pid(pid: usize) -> usize !{unsafe} {
+    return kernel_process_child_wait_status_pid(pid);
+}
+
 fn kernel_process_child_waitable() -> bool {
     if (execution_here().current_live == false) { return false; }
     match kernel_process_first_zombie_of(
             execution_here().current_handle) {
         ProcessNextReadyResult::Missing => { return false; }
         ProcessNextReadyResult::Next(zombie) => { return true; }
-    }
-}
-
-fn kernel_process_child_wait_status_peek() -> usize {
-    if (execution_here().current_live == false) { return 0; }
-    return kernel_process_child_wait_status_peek_for(
-        execution_here().current_handle.pool_index);
-}
-
-fn kernel_process_child_wait_status() -> usize !{unsafe} {
-    if (execution_here().current_live == false) { return 0; }
-    return kernel_process_child_wait_status_consume_for(
-        execution_here().current_handle.pool_index);
-}
-
-// Explicit-slot pair for kernel_syscall_wait4_deliver's own use (see this
-// file's kernel_process_child_exit): the one caller that needs a SPECIFIC
-// parent slot rather than "whichever slot is current."
-fn kernel_process_child_wait_status_peek_for(slot: usize) -> usize {
-    // GitHub issue #492: a slot with NO expectation attached, which is what
-    // this pair exists for -- kernel_syscall_wait4_deliver names a specific
-    // parent slot and has no generation to check it against.
-    // scheduled_process_handle_of_slot says exactly that: whoever is there
-    // now. Encoding it makes the absence of an expectation visible instead
-    // of hiding it in a bare usize.
-    match kernel_process_first_zombie_of(
-            scheduled_process_handle_of_slot(slot)) {
-        ProcessNextReadyResult::Missing => { return 0; }
-        ProcessNextReadyResult::Next(zombie) => {
-            return scheduled_process_record_of(zombie).exit_status;
-        }
     }
 }
 
@@ -9203,20 +9201,6 @@ fn kernel_process_child_exit_status_for(slot: usize, pid: usize) -> usize {
         cursor = scheduled_process_record_of(cursor).next_sibling;
     }
     return 0;
-}
-
-// Consumes: this is the reap. Returns the status it reaped, so the
-// current-slot wrapper above needs no second lookup.
-fn kernel_process_child_wait_status_consume_for(slot: usize) -> usize
-        !{unsafe} {
-    // The same no-expectation slot as its peek sibling above.
-    let mut parent: ProcessHandle = scheduled_process_handle_of_slot(slot);
-    match kernel_process_first_zombie_of(parent) {
-        ProcessNextReadyResult::Missing => { return 0; }
-        ProcessNextReadyResult::Next(zombie) => {
-            return kernel_process_reap_zombie(parent, zombie);
-        }
-    }
 }
 
 // Called from kernel_process_child_exec_prepare() right after that

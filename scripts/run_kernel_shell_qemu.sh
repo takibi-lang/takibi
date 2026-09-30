@@ -10,7 +10,9 @@ set -euo pipefail
 trap 'takibi_status=$?; echo "[$(basename "$0")] aborted at line $LINENO with exit $takibi_status: $BASH_COMMAND" >&2' ERR
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ELF="$REPO_ROOT/kernel/build/qemu/kernel.elf"
+# KERNEL_QEMU_SHELL_ELF runs another QEMU kernel through the same session, for
+# a race-window kernel under the churn workload (GitHub issue #615).
+ELF="${KERNEL_QEMU_SHELL_ELF:-$REPO_ROOT/kernel/build/qemu/kernel.elf}"
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2-shell.img"
 ARTIFACT_DIR="${KERNEL_QEMU_SHELL_ARTIFACT_DIR:-${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}/kernel-shell-qemu}"
 SHELL_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
