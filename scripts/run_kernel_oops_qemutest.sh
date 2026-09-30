@@ -422,10 +422,14 @@ fi
 
 # GitHub issue #619: the core that runs the console stopped the other one
 # first, so no running core can take the UART RX interrupt and eat the
-# console's input. In peer_fault the console runs on core 1 and the core it
-# stops is core 0.
+# console's input. The console runs on the core that fail-stopped, which is
+# not always core 0: since #610 an exec can run on a peer, so the
+# child_exec modes fail-stop on whichever core ran it. The stopped core is
+# the other one.
+faulted_cpu="$(grep -aoE '^oops: fail-stop seq=[0-9]+ cpu=[01] ' "$UART_LOG" |
+    head -1 | sed 's/.*cpu=\([01]\) /\1/')"
 stopped_mask=2
-if [ "$MODE" = peer_fault ]; then stopped_mask=1; fi
+if [ "$faulted_cpu" = 1 ]; then stopped_mask=1; fi
 if ! grep -Eq "^oops: world-stop complete mask=0x0*$stopped_mask\$" "$UART_LOG"; then
     echo "FAIL kernel/qemu oops: the console ran without stopping the other core first" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
