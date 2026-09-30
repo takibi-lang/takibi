@@ -56,6 +56,7 @@ use "kernel/lib/occupancy.tkb";
 use "kernel/kernel/profile_samples.tkb";
 use "kernel/arch/arm64/kernel/pmu_extern.tkb";
 use "kernel/kernel/profile_timeline.tkb";
+use "kernel/kernel/syscall_unimplemented.tkb";
 
 // The two inittab entries, told apart by the tag they pass rather than by
 // their pid -- a respawned entry gets a new pid and is still the same
@@ -1405,6 +1406,9 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
         workload_busy_pair.peer_console_initial_reported = true;
         kernel_boot_log(
             "workload: peer console short-wrote 1008 of 1071 bytes, then delivered the final record\n");
+        // GitHub issue #640: the boot's last stretch, so a number any earlier
+        // stage reached is in the table by now.
+        syscall_unimplemented_report();
         if (kernel_ddb_peer_console_test_enabled == false) {
             workload_busy_pair.peer_console_reported = true;
             process_run_unlock(guard);

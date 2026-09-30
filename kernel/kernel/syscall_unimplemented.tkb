@@ -20,6 +20,8 @@
 //   claimed once per boot and never released.
 
 use "kernel/lib/execution_model.tkb";
+use "kernel/printk/log.tkb";
+use "kernel/printk/number.tkb";
 
 const SYSCALL_UNIMPLEMENTED_MAX: usize = 512;
 
@@ -46,4 +48,25 @@ fn syscall_unimplemented_first_pid_of(number: {0..<SYSCALL_UNIMPLEMENTED_MAX as 
         -> usize !{unsafe} {
     let address: usize = (&syscall_unimplemented_first_pid[number]) as usize;
     return unsafe { atomic_load_acquire(address) };
+}
+
+// The boot's verdict, printed once near its end (the lanes compare it as a
+// view, so a number reached that a lane has not declared fails the lane).
+// One line per reached number, or the single clean line when none was.
+fn syscall_unimplemented_report() !{unsafe} {
+    let mut reached: usize = 0;
+    for number: usize in 0..<SYSCALL_UNIMPLEMENTED_MAX {
+        let first: usize = syscall_unimplemented_first_pid_of(number);
+        if (first != 0) {
+            reached = reached + 1;
+            kernel_boot_log("syscall: unimplemented nr=");
+            uart_put_udec(number);
+            kernel_boot_log(" first-pid=");
+            uart_put_udec(first);
+            kernel_boot_log("\n");
+        }
+    }
+    if (reached == 0) {
+        kernel_boot_log("syscall: no unimplemented number reached\n");
+    }
 }
