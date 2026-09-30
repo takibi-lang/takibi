@@ -80,6 +80,11 @@ broken:
   codebase reads it. When such a bound expires anywhere it has expired
   everywhere; fix every copy or remove the duplication.
 - Keep the formatter under a host-native test that needs no board.
+- QEMU's gdbstub `stepi` is itself an instrument that can lie. Stepping an
+  exclusive or acquire load (`ldar`, `ldaxr`/`stxr`) ran a whole block in
+  one step, and the loads read a held word as free (#634). Stage two cores
+  with breakpoints and `scheduler-locking`, not by single-stepping through
+  atomics.
 
 ## Probing a path that cannot log
 
