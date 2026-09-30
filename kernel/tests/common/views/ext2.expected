@@ -1,2 +1,2 @@
-ext2 mount: block=1024 inodes=1024 blocks=2560
+ext2 mount: block=1024 inodes=1024 blocks=2816
 ext2 symlink: /latest -> hello.txt ok

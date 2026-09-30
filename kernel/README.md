@@ -341,7 +341,7 @@ kernel address is `192.168.20.2`.
 must have booted this project's `jtag_stub.img` at least once; subsequent
 shell/check runs may reset and replace an already resident Takibi payload
 without another power cycle. Power-cycle after changing the SD-card payload.
-The shell kernel overwrites the first 2.5 MiB of the attached USB Mass Storage
+The shell kernel overwrites the first 2.75 MiB of the attached USB Mass Storage
 device with its interactive root filesystem, just as `kernelcheck-rpi5`
 provisions the ordinary integration image. Attach only the dedicated
 sacrificial test drive.
@@ -395,10 +395,10 @@ writable at its runtime address, so writes into it can silently fail.
 
 ### Destructive-test warning
 
-`make kernelcheck-rpi5` overwrites the first 2.5 MiB of the USB Mass Storage
+`make kernelcheck-rpi5` overwrites the first 2.75 MiB of the USB Mass Storage
 device attached to the RPi5 with its generated ext2 fixture. Attach only the
 project's dedicated sacrificial test drive. The kernel block adapter exposes
-only the first 2560 1-KiB blocks, which bounds this test independently of the
+only the first 2816 1-KiB blocks, which bounds this test independently of the
 physical device's capacity.
 
 ### Equipment

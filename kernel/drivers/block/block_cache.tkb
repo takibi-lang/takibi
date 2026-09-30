@@ -5,7 +5,7 @@
 // validate the inode, ext2_inode_block_pointer reads it again and then the
 // single- or double-indirect blocks, and only then the data. Exec streams a
 // 1.09 MB BusyBox that way, so a boot read about 140 MiB of 1 KiB blocks from
-// a 2.5 MiB filesystem, nearly all of it blocks it had just read.
+// a 2.75 MiB filesystem, nearly all of it blocks it had just read.
 //
 // Deliberately small, and write-through:
 //

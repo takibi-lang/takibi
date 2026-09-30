@@ -8,10 +8,10 @@ const KERNEL_BLOCK_SIZE: usize = 1024;
 const KERNEL_BLOCK_BATCH: usize = 64;
 
 // The fixture's extent: kernel/build/user/ext2.img's real size, fixed by its
-// own build recipe's `truncate -s 2621440`. The USB device exposes exactly
+// own build recipe's `truncate -s 2883584`. The USB device exposes exactly
 // this much of the medium, and kernel/platform/rpi5/usb_provision.tkb embeds
 // the image it writes there.
-const KERNEL_EXT2_IMAGE_LEN: usize = 2621440;
+const KERNEL_EXT2_IMAGE_LEN: usize = 2883584;
 
 struct KernelBlockDevice {
     // 1 = USB Mass Storage, 2 = QEMU virtio-blk. There is no memory backend:
@@ -40,7 +40,7 @@ fn usb_mass_storage_block_device() -> KernelBlockDeviceResult {
 
         DiskIoResult::Ok => { }
     }
-    // Deliberately expose only the fixture's 2.5 MiB extent. This bounds every
+    // Deliberately expose only the fixture's 2.75 MiB extent. This bounds every
     // destructive write far below the real medium's capacity until
     // partition/device ownership policy exists.
     let mut device: KernelBlockDevice = { 1, KERNEL_EXT2_IMAGE_LEN };

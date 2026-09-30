@@ -159,7 +159,7 @@ fn kernel_test_platform_storage() {
                 }
                 UsbProvisionResult::Copied => { }
             }
-            kernel_boot_log("usb ext2: provisioned blocks=2560\n");
+            kernel_boot_log("usb ext2: provisioned blocks=2816\n");
             let provision_ticks: i64 = read_cntpct() - provision_start;
             let provision_frequency: i64 = read_cntfrq();
             if (provision_frequency > 0) {
