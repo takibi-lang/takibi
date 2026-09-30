@@ -31,6 +31,12 @@ import time
 
 import gdb
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gdb_interrupt import interrupt_after  # noqa: E402
+
 
 SERIAL_PORT = int(os.environ["AFFINITY_GDB_SERIAL_PORT"])
 GDB_PORT = int(os.environ["AFFINITY_GDB_GDB_PORT"])
@@ -122,12 +128,6 @@ def seen(predicate, timeout: float) -> bool:
             return True
         time.sleep(0.1)
     return False
-
-
-def interrupt_after(seconds: float) -> threading.Timer:
-    timer = threading.Timer(seconds, lambda: os.kill(os.getpid(), signal.SIGINT))
-    timer.start()
-    return timer
 
 
 def continue_bounded(budget: float = STEP_TIMEOUT) -> None:

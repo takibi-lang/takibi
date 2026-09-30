@@ -152,7 +152,7 @@ then
     echo "FAIL kernel/rpi5 ddb: OpenOCD GDB port did not open" >&2
     exit 1
 fi
-gdb-multiarch -q -batch "$ELF" \
+timeout "${GDB_BATCH_TIMEOUT:-600}" gdb-multiarch -q -batch "$ELF" \
     -ex "target remote 127.0.0.1:$GDB_PORT" \
     -ex "source $REPO_ROOT/scripts/kernel_debug_metadata.gdb" \
     -ex "takibi-debug-metadata $DEBUG_METADATA" \

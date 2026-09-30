@@ -6,6 +6,12 @@ import threading
 
 import gdb
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gdb_interrupt import interrupt_after  # noqa: E402
+
 
 def current_record(cpu):
     execution = gdb.parse_and_eval("execution_state")[cpu]
@@ -41,9 +47,7 @@ class PeerExitBoundary(gdb.Breakpoint):
 
 
 def reach(boundary):
-    timer = threading.Timer(float(os.environ["KERNEL_PEER_EXIT_TIMEOUT"]),
-                            lambda: os.kill(os.getpid(), signal.SIGINT))
-    timer.start()
+    timer = interrupt_after(float(os.environ["KERNEL_PEER_EXIT_TIMEOUT"]))
     try:
         gdb.execute("continue")
     except (gdb.error, KeyboardInterrupt):

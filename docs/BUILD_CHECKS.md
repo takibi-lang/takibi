@@ -56,6 +56,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_fd_clone_transaction_controls.py` | Negative controls for the fd-clone transaction implementation boundary |
 | `check_find_stale_issue_workarounds_controls.py` | Controls for the stale-workaround worklist's matching |
 | `check_flag_guarded_fields.py` | optional fields are read only after their presence flags |
+| `check_gdb_bounded.py` | every gdb a lane runner starts runs under `timeout`, so a `continue` that never stops cannot hold an aggregate |
+| `check_gdb_bounded_controls.py` | Controls for the bounded-gdb check, in both directions |
 | `check_gdb_no_guest_memory_read.py` | a gdb check script decides from registers, not guest memory read through whatever translation the stopped CPU has active (#585) |
 | `check_gdb_no_guest_memory_read_controls.py` | Controls for the gdb guest-memory-read check, in both directions |
 | `check_invariant_lines_unviewed.py` | invariant reports are either diagnostic-only or enforced by absence, never asserted as correct |

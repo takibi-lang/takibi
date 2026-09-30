@@ -74,7 +74,7 @@ trap cleanup EXIT INT TERM HUP
 
 armed=false
 for _ in $(seq 1 50); do
-    if gdb-multiarch -q -batch "$ELF" \
+    if timeout "${GDB_BATCH_TIMEOUT:-600}" gdb-multiarch -q -batch "$ELF" \
             -ex "target remote :$GDB_PORT" \
             -ex "break *$ENTRY" \
             -ex "continue" \
@@ -111,7 +111,7 @@ fi
 # report cannot be trusted if written using the stack it is about is only
 # met if SP is now inside the dedicated overflow stack -- so read it back
 # rather than assuming the generated code did what it was asked.
-gdb-multiarch -q -batch "$ELF" \
+timeout "${GDB_BATCH_TIMEOUT:-600}" gdb-multiarch -q -batch "$ELF" \
     -ex "target remote :$GDB_PORT" \
     -ex "interrupt" \
     -ex "printf \"parked-sp %llu %llu %llu\\n\", (unsigned long long)\$sp, (unsigned long long)&overflow_stack_bottom, (unsigned long long)&overflow_stack_top" \

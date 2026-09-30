@@ -118,7 +118,7 @@ else
     )
 fi
 KERNEL_PEER_EXIT_TIMEOUT="$TIMEOUT_SECS" \
-    gdb-multiarch -q -batch "$ELF" "${GDB_COMMANDS[@]}" \
+    timeout "${GDB_BATCH_TIMEOUT:-600}" gdb-multiarch -q -batch "$ELF" "${GDB_COMMANDS[@]}" \
     -ex "detach" >"$ARTIFACT_DIR/peer-exit-gdb.log" 2>&1
 if [ "$BREAK_SOURCE" = uart ]; then
     grep '^PASS kernel/qemu peer-exit:' "$ARTIFACT_DIR/peer-exit-gdb.log"
@@ -171,7 +171,7 @@ python
 _tk_eval = _tk_eval_before_replaced_test
 end
 GDB
-gdb-multiarch -q -batch "$ELF" \
+timeout "${GDB_BATCH_TIMEOUT:-600}" gdb-multiarch -q -batch "$ELF" \
     -ex "target remote 127.0.0.1:$GDB_PORT" \
     -ex "interrupt" \
     -ex "source $REPO_ROOT/scripts/kernel_debug_metadata.gdb" \
