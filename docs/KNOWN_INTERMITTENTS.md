@@ -35,6 +35,8 @@ whether a row has gone quiet or has merely stopped being looked for.
 | `retired different work in their cold and warm passes` | 1 of 4 local RPi5 runs on 2026-09-29, every warm pass on CPU 2 | #649 | 2026-09-29 |
 | `ARP while HTTPd is listening` | 1 of 30 standalone samples | #605 | 2026-09-26 |
 | `the scripted BREAK never fired` | 1 CI run of the DDB lane since e824b030 (run 36207501077); 0 of 10 locally | #603 | 2026-09-26 |
+| `network init contention: failed` | 1 of 2 local allcheck aggregates on 563cb5f0, in `pool_contention`, with no counts line; 0 of 3 standalone | #654 | 2026-09-30 |
+| `the shell did not answer an empty line before the phase` | 1 of 2 local allcheck aggregates on 563cb5f0, in race-window 633's churn; 0 of 3 standalone | #655 | 2026-09-30 |
 
 ## Reading a row
 
