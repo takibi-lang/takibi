@@ -94,9 +94,8 @@ their numbers, which issues cite.
 
 ### Territory B: everything else, ordered by current priority
 
-1. **Kernel and userspace capability:** #220, #595, #635, #640 (report
-   unimplemented syscalls reached at run time; httpd's `sendto` gets
-   ENOSYS today).
+1. **Kernel and userspace capability:** #595, #635, #640 (report
+   unimplemented syscalls reached at run time).
 2. **Safe-memory language support that A's route consumes** (moved from A
    2026-09-29; nothing here waits for A): #639 (#637 stage 0, the
    raw-dereference ratchet); #646 (compiler soundness fuzzing, the
@@ -105,7 +104,9 @@ their numbers, which issues cite.
    ownership and branded containers, which feed #637 stage 2's option
    (c)). Once A's route step 2 closes: #637 stage 1's device groups, MMIO
    and DMA, together with #622 and #623.
-3. **Resource use and measured performance:** #389, #422, #497, #520, #553,
+3. **Resource use and measured performance:** #220 (telnet; lowered
+   2026-09-30 by the maintainer, not urgent, and it waits on PTY and
+   `pselect6` scoping), #389, #422, #497, #520, #553,
    #386, #502.
 4. **Compiler safety and language research:** #58, #203, #252, #200, #201,
    #282, #129, #374, #417, #155, #28, #8.
