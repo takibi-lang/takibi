@@ -39,7 +39,7 @@ Act on its exit status:
 | 1 | allcheck red | see below |
 | 2 | precondition failed | fix it (commit, check out `main`) and rerun |
 | 3 | `origin/main` moved | rerun; the whole allcheck runs again. After two such rounds, stop and report |
-| 4 | rebase conflict | resolve it if you understand it, otherwise stop and ask; then rerun |
+| 4 | rebase stopped | usually a conflict: resolve it if you understand it, otherwise stop and ask; then rerun. The script supplies a committer identity for the rebase itself, so a missing git identity is not a cause |
 
 ## When allcheck is red
 

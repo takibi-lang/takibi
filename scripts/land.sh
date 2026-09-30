@@ -34,8 +34,15 @@ if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
     exit 2
 fi
 
+# A rebase writes commits, and git refuses to when no identity is configured
+# (a fresh container has none). Every commit being replayed keeps its own
+# author; the committer is taken from HEAD's author, for this one command
+# only -- never written to any git config (AGENTS.md, "Git and GitHub safety
+# boundary"). An agent identity set in the environment wins.
 echo "land: syncing with origin/main"
-if ! git pull --rebase=merges --no-autostash; then
+if ! GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-$(git log -1 --format=%an)}" \
+     GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-$(git log -1 --format=%ae)}" \
+     git pull --rebase=merges --no-autostash; then
     echo "land: the rebase stopped; resolve it, then run land again" >&2
     exit 4
 fi
