@@ -367,11 +367,11 @@ modelcheck` requires each to fail:
 | --- | --- | --- | --- | --- |
 | `WriterEnter` | `syscall_write_segment` | a terminal write is admitted whole under the run lock | fd lookup and the user-memory copy -- irrelevant to `ProgramOrder`: they run before the chunk is admitted and change no queue or lock | `e3b0c44298fc` |
 | `WriterAppend` | `uart_user_write`, `uart_terminal_write_chunk` | the append to the queue under the console lock, or the decision that there is no room; on a peer the publication to its ring, and the run lock let go | short counts and partial chunks -- irrelevant to `ProgramOrder`: a partial chunk is a shorter chunk, and the model already appends each whole | `e3b0c44298fc` |
-| `BlockWriter` | `kernel_process_block_uart_tx` | the writer publishes itself asleep under the run lock; `RECHECK` is the room re-check there | successor choice and the switch -- modelled elsewhere: `Wait4Block.Wait4Block` | `7e6b01ff47d6` |
+| `BlockWriter` | `kernel_process_block_uart_tx` | the writer publishes itself asleep under the run lock; `RECHECK` is the room re-check there | successor choice and the switch -- modelled elsewhere: `Wait4Block.Wait4Block` | `010faee3252a` |
 | `TxTake` | `uart_tx_isr` | one chunk leaves the queue onto the wire under the console lock and makes room; `NESTED` keeps the lock | the FIFO's capacity and the byte-by-byte drain -- irrelevant to `ProgramOrder`: bytes leave the queue in order, so a chunk taken whole is the same order | `e3b0c44298fc` |
 | `TxWake` | `kernel_process_uart_tx_wake_all` | under the run lock, a writer asleep on room becomes runnable | which other processes wait on UartTx -- irrelevant to `NoLostWakeup`: the model has one writer, and each waiter is woken by the same scan | `d28c4a94b108` |
 | `Drain` | `kernel_log_peer_console_drain` | core 0 moves the oldest ring chunk into the queue when it has room, at a moment of its own | the DDB hold that leaves a ring undrained -- irrelevant to `ProgramOrder`: it only delays a drain, and the model already lets a drain be delayed indefinitely | `377125f4fe63` |
-| `Migrate` | `kernel_process_timer_schedule` | the process changes CPU between writes, never inside one (`KERNEL_PREEMPTIBLE` is 0) | affinity -- irrelevant to `ProgramOrder`: it only forbids some moves, and the model already allows each one it forbids | `6e9c1a975798` |
+| `Migrate` | `kernel_process_timer_schedule` | the process changes CPU between writes, never inside one (`KERNEL_PREEMPTIBLE` is 0) | affinity -- irrelevant to `ProgramOrder`: it only forbids some moves, and the model already allows each one it forbids | `bc680634a0cb` |
 
 Properties:
 
