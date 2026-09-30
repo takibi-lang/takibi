@@ -104,6 +104,7 @@ private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
     match ext2_replace_regular_file(
             mount, inode_number, ext2_write_fixture_source as []u8, 3) {
         Ext2ResizeResult::Resized => { return false; }
+        Ext2ResizeResult::Fenced => { return false; }
         Ext2ResizeResult::Invalid => { }
     }
     if (ext2_write_fixture_counts_match(
@@ -139,6 +140,7 @@ private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
     match ext2_resize_small_file(
             mount, inode_number, ext2_write_fixture_source as []u8) {
         Ext2ResizeResult::Invalid => { return false; }
+        Ext2ResizeResult::Fenced => { return false; }
         Ext2ResizeResult::Resized => { }
     }
     if (ext2_regular_file_size(mount, inode_number) !=
@@ -174,6 +176,7 @@ private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
     }
     match ext2_resize_small_file(mount, inode_number, bs"") {
         Ext2ResizeResult::Invalid => { return false; }
+        Ext2ResizeResult::Fenced => { return false; }
         Ext2ResizeResult::Resized => { }
     }
     if (ext2_regular_file_size(mount, inode_number) != 0 ||
@@ -185,6 +188,7 @@ private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
     match ext2_resize_small_file(
             mount, inode_number, ext2_write_fixture_source as []u8) {
         Ext2ResizeResult::Invalid => { return false; }
+        Ext2ResizeResult::Fenced => { return false; }
         Ext2ResizeResult::Resized => { }
     }
     if (ext2_write_fixture_counts_match(
@@ -196,6 +200,7 @@ private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
     }
     match ext2_resize_small_file(mount, inode_number, bs"before\n") {
         Ext2ResizeResult::Invalid => { return false; }
+        Ext2ResizeResult::Fenced => { return false; }
         Ext2ResizeResult::Resized => { }
     }
     return ext2_write_fixture_counts_match(
@@ -300,6 +305,335 @@ fn ext2_create_in_directory_check(mount: Ext2Mount) -> bool {
     }
 }
 
+// GitHub issue #595: one failed block read or write at every point of a
+// regular-file mutation, and a device that keeps failing.
+//
+// The sweep does not name the four phases (claim, staged data and pointer
+// write, inode publication, old-block release). It moves the failure across
+// every device write the mutation makes, so each phase is hit at each of its
+// own writes, and the classification says what the mutation is allowed to
+// have become: rolled back exactly, committed exactly, or -- only when the
+// device keeps failing -- fenced. Every verdict is read back through a fresh
+// mount: file bytes, i_size, i_blocks, bitmap and both free counts.
+must_use variant Ext2IoCase { Broken; Clean; RolledBack; Committed; Fenced; }
+
+const EXT2_IO_SWEEP_LIMIT: usize = 96;
+const EXT2_IO_SMALL_BYTES: usize = 2 * KERNEL_BLOCK_SIZE;
+
+private fn ext2_io_blocks(large: bool) -> usize {
+    if (large) { return 13; }
+    return 2;
+}
+
+// The blocks a payload of this size occupies, pointer block included.
+private fn ext2_io_sectors(large: bool) -> usize {
+    if (large) { return 28; }
+    return 4;
+}
+
+private fn ext2_io_bitmap_matches(mount: Ext2Mount) -> bool {
+    match ext2_block_bitmap_snapshot(
+            mount, ext2_write_fixture_readback as [u8; KERNEL_BLOCK_SIZE..]) {
+        Ext2ReadResult::Invalid => { return false; }
+        Ext2ReadResult::Read(length) => {
+            if (length != KERNEL_BLOCK_SIZE) { return false; }
+        }
+    }
+    for index: usize in 0..<KERNEL_BLOCK_SIZE {
+        if (ext2_write_fixture_readback[index] !=
+            ext2_write_fixture_bitmap[index]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// The file holds the payload (`payload`) or the fixture's original seven
+// bytes, in size, sectors and every byte.
+private fn ext2_io_file_is(mount: Ext2Mount, inode: usize, large: bool,
+                           payload: bool) -> bool {
+    if (payload == false) {
+        if (ext2_regular_file_size(mount, inode) != 7 ||
+            ext2_write_fixture_sectors_match(mount, inode, 2) == false) {
+            return false;
+        }
+        match ext2_read_small_file(mount, inode, ext2_read_fixture as []u8) {
+            Ext2ReadResult::Invalid => { return false; }
+            Ext2ReadResult::Read(length) => {
+                return length == 7 &&
+                       slice_eq(ext2_read_fixture[0..<7], bs"before\n");
+            }
+        }
+    }
+    let blocks: usize = ext2_io_blocks(large);
+    if (ext2_regular_file_size(mount, inode) != blocks * KERNEL_BLOCK_SIZE ||
+        ext2_write_fixture_sectors_match(
+            mount, inode, ext2_io_sectors(large)) == false) {
+        return false;
+    }
+    for block: usize in 0..<13 {
+        if (block < blocks) {
+            match ext2_read_file_chunk(
+                    mount, inode, block * KERNEL_BLOCK_SIZE,
+                    ext2_write_fixture_readback as []u8) {
+                Ext2ReadResult::Invalid => { return false; }
+                Ext2ReadResult::Read(length) => {
+                    if (length != KERNEL_BLOCK_SIZE) { return false; }
+                }
+            }
+            for byte: usize in 0..<KERNEL_BLOCK_SIZE {
+                if (ext2_write_fixture_readback[byte] !=
+                    ext2_write_fixture_source[block * KERNEL_BLOCK_SIZE + byte]) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+// Run the replacement with a failure armed and classify what it left. Every
+// check goes through a mount made afresh from the device.
+private fn ext2_io_case(mount: Ext2Mount, inode: usize, large: bool,
+                        on_write: bool, skip: usize, sticky: bool,
+                        base_blocks: usize, base_inodes: usize)
+        -> Ext2IoCase {
+    let mut outcome: usize = 0;
+    // The bitmap as it is now is what a rolled-back call must leave. It is
+    // taken per call because a replacement is copy-on-write: a file that went
+    // out and came back lives in other blocks than it began in.
+    match ext2_block_bitmap_snapshot(
+            mount, ext2_write_fixture_bitmap as [u8; KERNEL_BLOCK_SIZE..]) {
+        Ext2ReadResult::Invalid => { return Ext2IoCase::Broken; }
+        Ext2ReadResult::Read(length) => { }
+    }
+    block_fault_arm(on_write, skip, sticky);
+    if (large) {
+        match ext2_replace_regular_file(
+                mount, inode, ext2_write_fixture_source as []u8,
+                EXT2_MAX_WRITE_ALLOCATIONS) {
+            Ext2ResizeResult::Resized => { outcome = 0; }
+            Ext2ResizeResult::Invalid => { outcome = 1; }
+            Ext2ResizeResult::Fenced => { outcome = 2; }
+        }
+    } else {
+        match ext2_replace_regular_file(
+                mount, inode, ext2_write_fixture_source[0..<EXT2_IO_SMALL_BYTES],
+                EXT2_MAX_WRITE_ALLOCATIONS) {
+            Ext2ResizeResult::Resized => { outcome = 0; }
+            Ext2ResizeResult::Invalid => { outcome = 1; }
+            Ext2ResizeResult::Fenced => { outcome = 2; }
+        }
+    }
+    let injected: usize = block_fault_disarm();
+    if (outcome == 2) {
+        if (ext2_is_fenced() == false) { return Ext2IoCase::Broken; }
+        return Ext2IoCase::Fenced;
+    }
+    if (ext2_is_fenced()) { return Ext2IoCase::Broken; }
+    match ext2_mount(ext2_mount_device(mount)) {
+        Ext2MountResult::Invalid => { return Ext2IoCase::Broken; }
+        Ext2MountResult::Mounted(fresh) => {
+            let blocks: usize = ext2_io_blocks(large);
+            if (outcome == 1) {
+                // Rolled back: the state before the call, exactly.
+                if (injected == 0 ||
+                    ext2_io_file_is(fresh, inode, large, false) == false ||
+                    ext2_write_fixture_counts_match(
+                        fresh, base_blocks, base_inodes) == false ||
+                    ext2_io_bitmap_matches(fresh) == false) {
+                    return Ext2IoCase::Broken;
+                }
+                return Ext2IoCase::RolledBack;
+            }
+            // Committed: the new file, its blocks taken and the old one given
+            // back, and the counters agreeing with the bitmap.
+            let mut pointer: usize = 0;
+            if (large) { pointer = 1; }
+            if (ext2_io_file_is(fresh, inode, large, true) == false ||
+                ext2_write_fixture_counts_match(
+                    fresh, base_blocks - (blocks + pointer) + 1,
+                    base_inodes) == false) {
+                return Ext2IoCase::Broken;
+            }
+            if (ext2_counters_match_bitmaps(fresh) == false) {
+                return Ext2IoCase::Broken;
+            }
+            if (injected == 0) { return Ext2IoCase::Clean; }
+            return Ext2IoCase::Committed;
+        }
+    }
+}
+
+// Put the fixture file back to its original seven bytes with the device
+// healthy, recovering the mount first when it was fenced, and check that the
+// bitmap and counters are the ones the fixture started with.
+private fn ext2_io_restore(mount: Ext2Mount, inode: usize,
+                           base_blocks: usize, base_inodes: usize) -> bool {
+    if (ext2_is_fenced()) {
+        match ext2_recover(mount) {
+            Ext2RecoverResult::Failed => { return false; }
+            Ext2RecoverResult::Recovered => { }
+        }
+    }
+    match ext2_resize_small_file(mount, inode, bs"before\n") {
+        Ext2ResizeResult::Invalid => { return false; }
+        Ext2ResizeResult::Fenced => { return false; }
+        Ext2ResizeResult::Resized => { }
+    }
+    return ext2_io_file_is(mount, inode, false, false) &&
+           ext2_write_fixture_counts_match(mount, base_blocks, base_inodes) &&
+           ext2_counters_match_bitmaps(mount);
+}
+
+// Fail one access of the chosen kind at each position from `first` on, until
+// a run finishes before reaching the position. False on any broken verdict.
+private fn ext2_io_sweep(mount: Ext2Mount, inode: usize, large: bool,
+                         on_write: bool, first: usize, last: usize,
+                         base_blocks: usize, base_inodes: usize) -> bool {
+    let mut done: bool = false;
+    for skip: usize in 0..<EXT2_IO_SWEEP_LIMIT {
+        if (done == false && skip >= first && skip <= last) {
+            match ext2_io_case(mount, inode, large, on_write, skip, false,
+                               base_blocks, base_inodes) {
+                Ext2IoCase::Broken => { return false; }
+                Ext2IoCase::Fenced => { return false; }
+                Ext2IoCase::Clean => { done = true; }
+                Ext2IoCase::RolledBack => { }
+                Ext2IoCase::Committed => { }
+            }
+            if (ext2_io_restore(mount, inode, base_blocks, base_inodes) == false) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// A device that keeps failing from write number `skip` on: the mutation must
+// end Fenced, refuse the next one with the device healthy again, and leave
+// the mount consistent once ext2_recover has run.
+private fn ext2_io_fence(mount: Ext2Mount, inode: usize, skip: usize,
+                         committed: bool, base_blocks: usize,
+                         base_inodes: usize) -> bool {
+    match ext2_io_case(mount, inode, false, true, skip, true,
+                       base_blocks, base_inodes) {
+        Ext2IoCase::Fenced => { }
+        Ext2IoCase::Broken => { return false; }
+        Ext2IoCase::Clean => { return false; }
+        Ext2IoCase::RolledBack => { return false; }
+        Ext2IoCase::Committed => { return false; }
+    }
+    match ext2_replace_regular_file(
+            mount, inode, ext2_write_fixture_source[0..<EXT2_IO_SMALL_BYTES],
+            EXT2_MAX_WRITE_ALLOCATIONS) {
+        Ext2ResizeResult::Fenced => { }
+        Ext2ResizeResult::Invalid => { return false; }
+        Ext2ResizeResult::Resized => { return false; }
+    }
+    match ext2_recover(mount) {
+        Ext2RecoverResult::Failed => { return false; }
+        Ext2RecoverResult::Recovered => { }
+    }
+    if (ext2_is_fenced()) { return false; }
+    // Recovered means the interrupted cleanup finished: what the failure left
+    // half done is now either the original file or the committed one.
+    if (ext2_io_file_is(mount, inode, false, committed) == false) {
+        return false;
+    }
+    if (ext2_counters_match_bitmaps(mount) == false) { return false; }
+    if (committed == false && ext2_io_bitmap_matches(mount) == false) {
+        return false;
+    }
+    return ext2_io_restore(mount, inode, base_blocks, base_inodes);
+}
+
+private fn ext2_io_failure_check(mount: Ext2Mount) -> bool {
+    ext2_write_fixture_execution_model_assumption();
+    let mut base_blocks: usize = 0;
+    let mut base_inodes: usize = 0;
+    match ext2_free_counts(mount) {
+        Ext2FreeCountsResult::Invalid => { return false; }
+        Ext2FreeCountsResult::Counts(counts) => {
+            let (blocks, inodes) = counts;
+            base_blocks = blocks;
+            base_inodes = inodes;
+        }
+    }
+    match ext2_block_bitmap_snapshot(
+            mount, ext2_write_fixture_bitmap as [u8; KERNEL_BLOCK_SIZE..]) {
+        Ext2ReadResult::Invalid => { return false; }
+        Ext2ReadResult::Read(length) => {
+            if (length != KERNEL_BLOCK_SIZE) { return false; }
+        }
+    }
+    let mut inode: usize = 0;
+    match ext2_lookup_root(mount, bs"mutable.txt") {
+        Ext2LookupResult::Invalid => { return false; }
+        Ext2LookupResult::NotFound => { return false; }
+        Ext2LookupResult::Found(found) => { inode = found; }
+    }
+    for index: usize in 0..<EXT2_WRITE_FIXTURE_BYTES {
+        ext2_write_fixture_source[index] = ((index * 53 + 7) % 251) as u8;
+    }
+    if (ext2_io_file_is(mount, inode, false, false) == false) { return false; }
+    // Small payload: reference run, then a failed write and a failed read at
+    // every position the mutation reaches.
+    let small_before: usize = block_write_call_total();
+    match ext2_io_case(mount, inode, false, true, 1000000, false,
+                       base_blocks, base_inodes) {
+        Ext2IoCase::Clean => { }
+        Ext2IoCase::Broken => { return false; }
+        Ext2IoCase::Fenced => { return false; }
+        Ext2IoCase::RolledBack => { return false; }
+        Ext2IoCase::Committed => { return false; }
+    }
+    let small_writes: usize = block_write_call_total() - small_before;
+    if (ext2_io_restore(mount, inode, base_blocks, base_inodes) == false) {
+        return false;
+    }
+    if (ext2_io_sweep(mount, inode, false, true, 0, EXT2_IO_SWEEP_LIMIT,
+                      base_blocks, base_inodes) == false) {
+        return false;
+    }
+    if (ext2_io_sweep(mount, inode, false, false, 0, EXT2_IO_SWEEP_LIMIT,
+                      base_blocks, base_inodes) == false) {
+        return false;
+    }
+    // A device that keeps failing: once early (a staged claim is left to
+    // clean up) and once after the inode is published (old space is left).
+    if (small_writes < 8 ||
+        ext2_io_fence(mount, inode, 6, false, base_blocks, base_inodes) == false ||
+        ext2_io_fence(mount, inode, small_writes - 3, true,
+                      base_blocks, base_inodes) == false) {
+        return false;
+    }
+
+    // Large payload: through the pointer block. A case costs a thirteen-block
+    // write and a restore, so only the writes the small payload lacks are
+    // tried: the pointer block, the inode publication and one release write.
+    let large_before: usize = block_write_call_total();
+    match ext2_io_case(mount, inode, true, true, 1000000, false,
+                       base_blocks, base_inodes) {
+        Ext2IoCase::Clean => { }
+        Ext2IoCase::Broken => { return false; }
+        Ext2IoCase::Fenced => { return false; }
+        Ext2IoCase::RolledBack => { return false; }
+        Ext2IoCase::Committed => { return false; }
+    }
+    let large_writes: usize = block_write_call_total() - large_before;
+    if (ext2_io_restore(mount, inode, base_blocks, base_inodes) == false ||
+        large_writes < 16 || large_writes >= EXT2_IO_SWEEP_LIMIT) {
+        return false;
+    }
+    // The last four writes are the old block's release, the one before them
+    // is the inode, and the one before that is the pointer block.
+    return ext2_io_sweep(mount, inode, true, true, large_writes - 6,
+                         large_writes - 5, base_blocks, base_inodes) &&
+           ext2_io_sweep(mount, inode, true, true, large_writes - 3,
+                         large_writes - 3, base_blocks, base_inodes);
+}
+
 fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
     // GitHub issue #249: save the mount for
     // kernel_exec_resolve_argv0(), which runs later, from
@@ -396,6 +730,12 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
         kernel_boot_log("ext2 write indirect: rollback+grow+zero+restore ok\n");
     } else {
         kernel_boot_log("ext2 write indirect: failed\n");
+    }
+    // GitHub issue #595. Last, after every fixture that counts free blocks.
+    if (ext2_io_failure_check(mount)) {
+        kernel_boot_log("ext2 io failure: every phase rolled back or committed, fence+recover ok\n");
+    } else {
+        kernel_boot_log("ext2 io failure: failed\n");
     }
 }
 

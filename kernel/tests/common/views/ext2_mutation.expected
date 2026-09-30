@@ -4,3 +4,4 @@ ext2 write rollback: two blocks released
 ext2 create: create+lookup+unlink ok
 ext2 nested: create+lookup+unlink in /etc ok
 ext2 write indirect: rollback+grow+zero+restore ok
+ext2 io failure: every phase rolled back or committed, fence+recover ok

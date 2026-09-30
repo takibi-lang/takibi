@@ -135,6 +135,7 @@ const LINUX_ELIBBAD: usize = 0xFFFFFFFFFFFFFFB0;
 // this when the header read itself fails, rather than with a verdict about a
 // format it never saw.
 const LINUX_EIO: usize = 0xFFFFFFFFFFFFFFFB;
+const LINUX_EROFS: usize = 0xFFFFFFFFFFFFFFE2;
 // GitHub issue #538: the errnos BusyBox mkdir and rmdir tell apart.
 const LINUX_EEXIST: usize = 0xFFFFFFFFFFFFFFEF;
 const LINUX_ENOTDIR: usize = 0xFFFFFFFFFFFFFFEC;
@@ -3332,12 +3333,14 @@ private fn syscall_ext2_write_locked(fd: usize, content: []u8) -> usize {
     if (offset == 0) {
         match ext2_resize_small_file(syscall_ext2_mount, inode, content) {
             Ext2ResizeResult::Invalid => { }
+            Ext2ResizeResult::Fenced => { answer = LINUX_EROFS; }
             Ext2ResizeResult::Resized => { answer = 0; }
         }
     } else {
         match ext2_write_regular_file_range(
                 syscall_ext2_mount, inode, offset, content) {
             Ext2ResizeResult::Invalid => { }
+            Ext2ResizeResult::Fenced => { answer = LINUX_EROFS; }
             Ext2ResizeResult::Resized => { answer = 0; }
         }
     }

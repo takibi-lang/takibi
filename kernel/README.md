@@ -1196,8 +1196,22 @@ run, not a specification.
   geometry rather than a file-size literal. Kernel ext2 replacement and
   truncation cover direct and single-indirect blocks; each regular-file
   `write(2)` call accepts at most one block, advancing its file offset. The
-  first write at offset zero replaces the old contents. A directory
-  grows a block at a time when none of its blocks has room, up to its twelve
+  first write at offset zero replaces the old contents. A block-device
+  read or write that fails part-way through such a mutation ends in one of
+  three states, and `write(2)` answers each differently: the file is
+  unchanged and the bitmaps and counters are back where they were (`EINVAL`),
+  the file is the new one and the old space has been given back (success), or
+  the repair itself could not complete (`EROFS`). In the last case the mount
+  is fenced: every further ext2 write is refused until `ext2_recover` clears
+  the blocks the failed operation had staged or was releasing and rewrites the
+  free counts from the bitmaps. Bitmaps are the truth and the counters are
+  derived from them. A rejected write is assumed to leave its block as it
+  was; a torn sector or power loss is not covered. The boot fixture moves one
+  failed access across every device write and read of a two-block
+  replacement, and across the pointer-block, inode and release writes of a
+  thirteen-block one, and reads each verdict back through a fresh mount
+  (`block_fault_arm` in `kernel/drivers/block/memory.tkb` is the injector;
+  nothing else may arm it). A directory grows a block at a time when none of its blocks has room, up to its twelve
   direct blocks; removing the first entry of a block leaves a dead record
   there, as Linux's ext2 does, and a
   later add reuses it. A directory can be made in any directory, with `.`,

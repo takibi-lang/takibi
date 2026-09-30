@@ -157,6 +157,68 @@ private fn block_device_give(guard: sink BlockDeviceGuard[block_device_lock]) {
     task_mutex_release(&block_device_lock);
 }
 
+// GitHub issue #595: a failed device read or write, on demand.
+//
+// A recoverable block-I/O failure in the middle of an ext2 mutation had no
+// verdict, because nothing could make one happen at a chosen point. This is
+// the smallest thing that can: arm it, and the device access that many calls
+// later reports Invalid without reaching the device. It sits below the cache
+// and the read-ahead run, on the one path every device access takes, so it
+// exercises the same failure a real USB or virtio error would.
+//
+// Current limitations (2026-09-30):
+// - A FAILED WRITE LEAVES THE BLOCK AS IT WAS. That is what an injected
+//   failure does, and it is the failure model the ext2 recovery contract
+//   claims: a rejected write, not a torn one.
+// - READS COUNT ONLY THE ACCESSES THAT REACH THE DEVICE. A block the cache
+//   or the read-ahead run answers is not one, so a read fault lands on the
+//   Nth miss. A read-ahead run that fails falls back to the single read,
+//   which a non-sticky fault does not repeat.
+// - ONE FAULT AT A TIME, armed and read under the device lock. Nothing arms
+//   it outside the boot fixture, and nothing but a test may.
+private let mut block_fault_armed: bool;
+private let mut block_fault_on_write: bool;
+private let mut block_fault_skip: usize;
+private let mut block_fault_sticky: bool;
+private let mut block_fault_injected: usize;
+
+// Let `skip` accesses of the chosen kind through, then fail the next one, or
+// every one from then on when `sticky`.
+fn block_fault_arm(on_write: bool, skip: usize, sticky: bool) {
+    let guard = block_device_take();
+    block_fault_armed = true;
+    block_fault_on_write = on_write;
+    block_fault_skip = skip;
+    block_fault_sticky = sticky;
+    block_fault_injected = 0;
+    block_device_give(guard);
+}
+
+// Stop injecting and answer how many accesses were failed since arming.
+fn block_fault_disarm() -> usize {
+    let guard = block_device_take();
+    block_fault_armed = false;
+    let injected: usize = block_fault_injected;
+    block_fault_injected = 0;
+    block_device_give(guard);
+    return injected;
+}
+
+private fn block_fault_hits(
+        guard: borrow BlockDeviceGuard[block_device_lock],
+        on_write: bool) -> bool {
+    if (block_fault_armed == false || block_fault_on_write != on_write) {
+        return false;
+    }
+    if (block_fault_skip > 0) {
+        block_fault_skip = block_fault_skip - 1;
+        return false;
+    }
+    block_fault_injected = block_fault_injected + 1;
+    if (block_fault_sticky == false) { block_fault_armed = false; }
+    return true;
+}
+
 // GitHub issue #208: block_read and block_write go through the per-core
 // read cache in kernel/drivers/block/block_cache.tkb. `block io: reads=`
 // counts what reached a device, so the figure #208 is judged by moves with
@@ -316,6 +378,7 @@ private fn block_run_transfer_locked(
         guard: borrow BlockDeviceGuard[block_device_lock],
         here: {0..<KERNEL_MAX_CORES as usize}, device: KernelBlockDevice,
         first: usize, count: usize) -> bool !{unsafe} {
+    if (block_fault_hits(guard, false)) { return false; }
     if (device.backend == 1) {
         if (count > BLOCK_RUN_BLOCKS) { return false; }
         let target: *u8 = (block_run_data as *u8) +
@@ -407,6 +470,7 @@ private fn block_read_device_locked(
     if (block >= device.length / KERNEL_BLOCK_SIZE) {
         return BlockIoResult::Invalid;
     }
+    if (block_fault_hits(guard, false)) { return BlockIoResult::Invalid; }
     block_note_call(block_read_calls as []usize);
     workload_profile_note_block_read(KERNEL_BLOCK_SIZE);
     if (device.backend == 1) {
@@ -438,6 +502,7 @@ private fn block_write_device_locked(
     if (block >= device.length / KERNEL_BLOCK_SIZE) {
         return BlockIoResult::Invalid;
     }
+    if (block_fault_hits(guard, true)) { return BlockIoResult::Invalid; }
     block_note_call(block_write_calls as []usize);
     workload_profile_note_block_write(KERNEL_BLOCK_SIZE);
     if (device.backend == 1) {

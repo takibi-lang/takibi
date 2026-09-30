@@ -258,6 +258,15 @@ a syscall reaching ext2 now runs on either core and one shared staging buffer
 would let two reads overwrite each other's block mid-parse); `elf64.tkb`'s
 `ELF_IDENT_MAGIC` (a constant table, not mutable runtime state in practice).
 
+`ext2/ext2.tkb`'s `ext2_fenced`, `ext2_fence_pending` and
+`ext2_fence_pending_count` (GitHub issue #595) are one kernel-wide word and one
+operation's worth of block numbers: the kernel mounts one filesystem, callers
+serialize ext2 mutations under `ext2_mutation_lock`, and a fenced mount refuses
+the next mutation, so a second pending list cannot arise.
+`drivers/block/memory.tkb`'s `block_fault_*` words are the block-I/O failure
+injector of the same issue, armed and read under the block-device lock and
+armed only by the boot fixture.
+
 `drivers/block/memory.tkb`'s `block_read_calls`/`block_write_calls` are
 per-core for the same reason and for a smaller stake: they are the boot totals
 issues #281 and #208 are ordered against, and a lost increment would

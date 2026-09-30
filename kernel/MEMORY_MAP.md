@@ -158,7 +158,7 @@ the one row `--update` refuses to move for you.
 
 | Span | Ceiling | State |
 |---|---|---|
-| `usable_ram_start` - `_start` | `0x004c0000` | CHECKED (ELF ceiling) |
+| `usable_ram_start` - `_start` | `0x004d0000` | CHECKED (ELF ceiling) |
 
 Raised from `0x400000` on 2026-09-12, when reserving boot and per-core
 stacks for cores 2 and 3 took RPi5 to `0x408000` (4.03 MiB). QEMU was
@@ -170,6 +170,11 @@ The new value covers the next step already in view. With
 landed -- RPi5 is `0x440000` (4.25 MiB) and QEMU `0x1b8000`, and `.bss`
 grows by about 244 KiB of per-core arrays. `0x4c0000` leaves 512 KiB above
 that, close to the 448 KiB the previous value left when it was set.
+
+Raised from `0x4c0000` to `0x4d0000` on 2026-09-30 by the maintainer's
+decision, when the block-I/O failure injection, the ext2 recovery state and
+the boot fixture that exercises them (#595) took RPi5 to the old ceiling. The
+growth is `.bss` and code, not file bytes, so it costs no SWD time.
 
 What the span costs is not one number. The RPi5 lane loads the ELF with
 OpenOCD's `load_image ... elf`, which writes each LOAD segment's file
