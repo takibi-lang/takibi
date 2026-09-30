@@ -228,7 +228,8 @@ entrypoint under `.agents/skills/`; Claude Code has a matching entrypoint under
 - `github-workflow`: for GitHub issue operations, Found-by selection, and
   issue-closing commits.
 - `land`: to publish finished work -- rebase, a clean `make allcheck` on the
-  rebased HEAD, and a push of exactly that HEAD when it is green.
+  rebased HEAD, and a push of exactly that HEAD when it is green. Run it
+  without being asked each time an issue is finished.
 - `defect-followup`: right after fixing any defect, before landing it --
   root cause, regression test, and prevention of the class.
 - `session-audit`: before a session ends; propose it yourself when the
