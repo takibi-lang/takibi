@@ -289,6 +289,14 @@ def postmortem_note(before: bytes, answered: int, log_path) -> str:
             f"Walked: {walked}{where}")
 
 
+PEER_SETTINGS_READING = (
+    b"workload: settings wake reader waiting in a canonical read on the "
+    b"secondary cpu\n")
+PEER_SETTINGS_DONE = (
+    b"workload: settings change woke the blocked peer reader, which read "
+    b"its queued bytes in order\n")
+
+
 def write_uart_line(connection, line: bytes) -> None:
     # The kernel UART ISR currently drains one byte per interrupt. Pace the
     # synthetic console like typed input so a command longer than a 16-byte
@@ -358,6 +366,12 @@ def main() -> int:
     # the persistent shell and type it one line; the capture then also waits
     # for the kernel's verdict on that line.
     parser.add_argument("--peer-tty", action="store_true")
+    # GitHub issue #635: after /bin/peer-tty, run /bin/peer-settings. Its
+    # reader announces a canonical read on the secondary CPU; the three bytes
+    # go out then, with no newline, and the kernel says when the reader is
+    # asleep beside them. The capture waits for the kernel's verdict on
+    # whether the terminal settings change woke that reader.
+    parser.add_argument("--peer-settings", action="store_true")
     args = parser.parse_args()
 
     interactive_httpd = args.interactive_httpd_ready_file is not None
@@ -447,6 +461,8 @@ def main() -> int:
     terminal_scenario = TerminalScenario()
     peer_tty_sent = False
     peer_tty_line_sent = False
+    peer_settings_sent = False
+    peer_settings_bytes_sent = False
     ppoll_probe_byte_sent = False
     httpd_done_seen_at = None
     capture_started = time.monotonic()
@@ -649,7 +665,20 @@ def main() -> int:
                 # restores sane terminal settings when respawning a child,
                 # which would otherwise overwrite the probe's attributes.
                 terminal_scenario.step(connection, output)
+                # GitHub issue #635: /bin/peer-settings goes first. It needs
+                # the same quiet terminal, but not a held peer console: on the
+                # board the DDB half keeps /bin/peer-tty from exiting until it
+                # has run, so anything typed after peer-tty waits for that.
+                if (args.peer_settings and terminal_scenario.done and
+                        httpd_ready and
+                        args.stop_marker.encode("ascii") in output and
+                        not peer_settings_sent):
+                    write_uart_line(connection, b"/bin/peer-settings")
+                    peer_settings_sent = True
+                settings_finished = (not args.peer_settings or
+                                     PEER_SETTINGS_DONE in output)
                 if (args.peer_tty and terminal_scenario.done and httpd_ready and
+                        settings_finished and
                         args.stop_marker.encode("ascii") in output and not peer_tty_sent):
                     # The full path: ash in this BusyBox looks a bare name
                     # up as an applet first and reports it not found.
@@ -663,6 +692,24 @@ def main() -> int:
                 peer_tty_done = (
                     not args.peer_tty or
                     b"workload: peer tty read its 17-byte line" in output)
+                if (peer_settings_sent and not peer_settings_bytes_sent and
+                        PEER_SETTINGS_READING in output):
+                    # No newline: in canonical mode these are queued but not
+                    # readable, which is the state the reader must sleep in.
+                    for byte in b"abc":
+                        connection.write(bytes((byte,)))
+                        time.sleep(0.01)
+                    peer_settings_bytes_sent = True
+                if peer_settings_sent and (
+                        b"workload: settings wake FAILED" in output or
+                        b"peer-settings: " in output):
+                    raise RuntimeError(
+                        "the terminal settings change did not wake the "
+                        "reader asleep in a canonical read on the secondary "
+                        "cpu (GitHub issue #635): "
+                        + output.decode("utf-8", errors="replace")
+                        .replace("\r", "").splitlines()[-1])
+                peer_tty_done = peer_tty_done and settings_finished
 
                 if peer_tty_done and interactive_capture_complete(
                         output, httpd_ready,

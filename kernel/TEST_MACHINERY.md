@@ -98,6 +98,18 @@ UART must show that check's own signature. The spin exists only in the
 overlay; `scripts/check_race_window_overlay_only.py` refuses it in kernel/,
 so no ordinary kernel carries it.
 
+The `635` entry is a control with no window and no spin: only the reverted
+kernel is built and run, with the terminal settings change's wake of a
+sleeping reader removed, and its armed run is the ordinary suite. The
+ordinary suite's `/bin/peer-settings` step (GitHub issue #635) forks a reader
+onto the secondary CPU in a canonical read, waits until the kernel reads that
+reader's process record as asleep with three uncommitted bytes queued, first
+tries a change the kernel must refuse and checks that neither the settings nor
+the blocked read moved, and then switches the terminal to raw with no further
+UART byte. The reader must read the queued bytes in order. The kernel bounds
+the failure, not the success: a reader still asleep 200 secondary ticks after
+the change is reported as never woken.
+
 - Window 609 opens, on a peer only, where the peer has published its process
   Blocked in wait4 but still stands on its stack. Its reverted kernel drops
   `kernel_process_child_exit`'s stack-owner test on the direct start, and

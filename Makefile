@@ -52,7 +52,7 @@ LLVM_OBJCOPY := llvm-objcopy-19
 # `kernelcheck`), which made it easy to run the wrong one by accident.
 
 # -- Targets ------------------------------------------------------------------
-.PHONY: _kernelcheck-qemu-main _kernelcheck-qemu-fdt-multibank _kernelcheck-qemu-ash _kernelcheck-shell-qemu _kernelcheck-qemu-debug-main _kernelcheck-qemu-debug-repeat _kernelcheck-qemu-debug-ash _kernelcheck-oops-qemu _kernelcheck-ddb-qemu _kernelcheck-stack-overflow-qemu _kernelcheck-alloc-rollback-qemu _kernelcheck-uart-wake-qemu _kernelcheck-affinity-gdb-qemu _kernelcheck-race-window-qemu _kernelcheck-rpi5_kernelcheck-ddb-rpi5-software build test coverage kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-ddb-rpi5-software kernelcheck-qemu kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-qemu-ash kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-qemu-debug-main kernelcheck-qemu-debug-repeat kernelcheck-qemu-debug-ash kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-alloc-rollback-qemu kernelcheck-uart-wake-qemu kernelcheck-affinity-gdb-qemu kernelcheck-race-window-qemu kernelcheck-repeatkernelsh-qemu kernelsh-rpi5 lease-status profile-kernel-workload-chart langcheck slowcheck linuxbuild linuxcheck clean FORCE
+.PHONY: _kernelcheck-qemu-main _kernelcheck-qemu-fdt-multibank _kernelcheck-qemu-ash _kernelcheck-shell-qemu _kernelcheck-qemu-debug-main _kernelcheck-qemu-debug-repeat _kernelcheck-qemu-debug-ash _kernelcheck-oops-qemu _kernelcheck-ddb-qemu _kernelcheck-stack-overflow-qemu _kernelcheck-alloc-rollback-qemu _kernelcheck-uart-wake-qemu _kernelcheck-affinity-gdb-qemu _kernelcheck-race-window-qemu _kernelcheck-race-window-635-qemu _kernelcheck-rpi5_kernelcheck-ddb-rpi5-software build test coverage kernelbuild kernelcheck kernelbuild-rpi5 kernelbuild-qemu kernelbuild-qemu-debug kernelcheck-rpi5 kernelcheck-ddb-rpi5-software kernelcheck-qemu kernelcheck-qemu-main kernelcheck-qemu-fdt-multibank kernelcheck-qemu-ash kernelcheck-shell-qemu kernelcheck-qemu-debug kernelcheck-qemu-debug-main kernelcheck-qemu-debug-repeat kernelcheck-qemu-debug-ash kernelcheck-oops-qemu kernelcheck-ddb-qemu kernelcheck-alloc-rollback-qemu kernelcheck-uart-wake-qemu kernelcheck-affinity-gdb-qemu kernelcheck-race-window-qemu kernelcheck-race-window-635-qemu kernelcheck-repeatkernelsh-qemu kernelsh-rpi5 lease-status profile-kernel-workload-chart langcheck slowcheck linuxbuild linuxcheck clean FORCE
 
 .DEFAULT_GOAL := build
 
@@ -810,10 +810,13 @@ KERNEL_BUSY_LOOP_PEER_SPIN_ELF := $(KERNEL_BUILD_DIR)/busy_peer_spin.elf
 KERNEL_BUSY_LOOP_PEER_NET_WAKE_ELF := $(KERNEL_BUILD_DIR)/busy_peer_net_wake.elf
 KERNEL_PEER_READ_TKB     := $(KERNEL_DIR)/arch/arm64/kernel/peer_read.tkb
 KERNEL_PEER_READ_O       := $(KERNEL_BUILD_DIR)/peer_read.o
+KERNEL_PEER_SETTINGS_TKB := $(KERNEL_DIR)/arch/arm64/kernel/peer_settings.tkb
+KERNEL_PEER_SETTINGS_O   := $(KERNEL_BUILD_DIR)/peer_settings.o
 KERNEL_PEER_READ_ELF     := $(KERNEL_BUILD_DIR)/peer_read.elf
 KERNEL_CORE_READ_ELF     := $(KERNEL_BUILD_DIR)/core_read.elf
 KERNEL_PEER_CONSOLE_ELF  := $(KERNEL_BUILD_DIR)/peer_console.elf
 KERNEL_PEER_TTY_ELF      := $(KERNEL_BUILD_DIR)/peer_tty.elf
+KERNEL_PEER_SETTINGS_ELF := $(KERNEL_BUILD_DIR)/peer_settings.elf
 KERNEL_CLOEXEC_TKB       := $(KERNEL_DIR)/arch/arm64/kernel/cloexec_probe.tkb
 KERNEL_CLOEXEC_O         := $(KERNEL_BUILD_DIR)/cloexec_probe.o
 KERNEL_CLOEXEC_ELF       := $(KERNEL_BUILD_DIR)/cloexec.elf
@@ -896,7 +899,7 @@ $(KERNEL_MUSL_LOADER): $(KERNEL_MUSL_APK)
 	tar -xOzf $< lib/ld-musl-aarch64.so.1 > $@
 	chmod +x $@
 
-$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/about.html $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd.sh $(KERNEL_EXT2_FIXTURE_DIR)/churn.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/inittab $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSY_LOOP_A_ELF) $(KERNEL_BUSY_LOOP_B_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_REPORT_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_GUARD_ELF) $(KERNEL_BUSY_LOOP_PEER_SPIN_ELF) $(KERNEL_BUSY_LOOP_PEER_NET_WAKE_ELF) $(KERNEL_PEER_READ_ELF) $(KERNEL_CORE_READ_ELF) $(KERNEL_PEER_CONSOLE_ELF) $(KERNEL_PEER_TTY_ELF) $(KERNEL_CLOEXEC_ELF) $(KERNEL_CLOEXEC_CHECK_ELF) $(KERNEL_PPOLL_PROBE_ELF) $(KERNEL_AFFINITY_ELF) $(KERNEL_SPREAD_ELF) $(KERNEL_MOVECOST_ELF) $(KERNEL_PEER_MUTATE_ELF) $(KERNEL_PROTOCOL_TRACE_ELF) $(KERNEL_PEER_EXEC_ELF) $(KERNEL_PEER_EXEC_IMAGE_ELF) $(KERNEL_PEER_FORK_ELF) $(KERNEL_NESTED_EXEC_ELF) $(KERNEL_SESSION_ELF) $(KERNEL_SESSION_CHECK_ELF) $(KERNEL_TERMINAL_ELF) $(KERNEL_NESTED_FIXTURES) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_BUSYBOX_EXTRAS) $(KERNEL_MUSL_LOADER) $(KERNEL_TASKSET) scripts/make_interp_probe_elf.py | $(KERNEL_USER_BUILD_DIR)
+$(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT2_FIXTURE_DIR)/mutable.txt $(KERNEL_EXT2_FIXTURE_DIR)/index.html $(KERNEL_EXT2_FIXTURE_DIR)/about.html $(KERNEL_EXT2_FIXTURE_DIR)/icon.png $(KERNEL_EXT2_FIXTURE_DIR)/init.sh $(KERNEL_EXT2_FIXTURE_DIR)/httpd.sh $(KERNEL_EXT2_FIXTURE_DIR)/churn.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/script-interpreter-argument.sh $(KERNEL_EXT2_FIXTURE_DIR)/not-a-program $(KERNEL_EXT2_FIXTURE_DIR)/bad-interpreter.sh $(KERNEL_EXT2_FIXTURE_DIR)/crlf.sh $(KERNEL_EXT2_FIXTURE_DIR)/no-newline.sh $(KERNEL_EXT2_FIXTURE_DIR)/long-shebang.sh $(KERNEL_EXT2_FIXTURE_DIR)/inittab $(KERNEL_EXT2_FIXTURE_DIR)/large.txt $(KERNEL_RPI5_USER_PAYLOAD_ELF) $(KERNEL_BUSY_LOOP_A_ELF) $(KERNEL_BUSY_LOOP_B_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_REPORT_ELF) $(KERNEL_BUSY_LOOP_PLACEMENT_GUARD_ELF) $(KERNEL_BUSY_LOOP_PEER_SPIN_ELF) $(KERNEL_BUSY_LOOP_PEER_NET_WAKE_ELF) $(KERNEL_PEER_READ_ELF) $(KERNEL_CORE_READ_ELF) $(KERNEL_PEER_CONSOLE_ELF) $(KERNEL_PEER_TTY_ELF) $(KERNEL_PEER_SETTINGS_ELF) $(KERNEL_CLOEXEC_ELF) $(KERNEL_CLOEXEC_CHECK_ELF) $(KERNEL_PPOLL_PROBE_ELF) $(KERNEL_AFFINITY_ELF) $(KERNEL_SPREAD_ELF) $(KERNEL_MOVECOST_ELF) $(KERNEL_PEER_MUTATE_ELF) $(KERNEL_PROTOCOL_TRACE_ELF) $(KERNEL_PEER_EXEC_ELF) $(KERNEL_PEER_EXEC_IMAGE_ELF) $(KERNEL_PEER_FORK_ELF) $(KERNEL_NESTED_EXEC_ELF) $(KERNEL_SESSION_ELF) $(KERNEL_SESSION_CHECK_ELF) $(KERNEL_TERMINAL_ELF) $(KERNEL_NESTED_FIXTURES) $(KERNEL_BUSYBOX_STATIC) $(KERNEL_BUSYBOX_EXTRAS) $(KERNEL_MUSL_LOADER) $(KERNEL_TASKSET) scripts/make_interp_probe_elf.py | $(KERNEL_USER_BUILD_DIR)
 	rm -f $@.tmp
 	truncate -s 2621440 $@.tmp
 	E2FSPROGS_FAKE_TIME=1700000000 mke2fs -q -t ext2 -b 1024 -I 128 -N 1024 -O none -F -U 00000000-0000-0000-0000-000000000177 $@.tmp 2560
@@ -959,6 +962,7 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_CORE_READ_ELF) $@.tmp:/bin/core-read
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_CONSOLE_ELF) $@.tmp:/bin/peer-console
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_TTY_ELF) $@.tmp:/bin/peer-tty
+	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PEER_SETTINGS_ELF) $@.tmp:/bin/peer-settings
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_CLOEXEC_ELF) $@.tmp:/bin/cloexec
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_CLOEXEC_CHECK_ELF) $@.tmp:/bin/cloexec-check
 	E2FSPROGS_FAKE_TIME=1700000000 e2cp $(KERNEL_PPOLL_PROBE_ELF) $@.tmp:/bin/ppoll-probe
@@ -1014,6 +1018,7 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	debugfs -w -R 'set_inode_field /bin/core-read mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/peer-console mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/peer-tty mode 0100755' $@.tmp >/dev/null 2>&1
+	debugfs -w -R 'set_inode_field /bin/peer-settings mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/cloexec mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/cloexec-check mode 0100755' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /bin/ppoll-probe mode 0100755' $@.tmp >/dev/null 2>&1
@@ -1148,6 +1153,15 @@ $(KERNEL_PEER_CONSOLE_ELF): $(KERNEL_PEER_READ_O)
 
 $(KERNEL_PEER_TTY_ELF): $(KERNEL_PEER_READ_O)
 	$(LLD) -pie --no-dynamic-linker -e peer_tty $< -o $@
+	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
+
+$(KERNEL_PEER_SETTINGS_O): $(KERNEL_PEER_SETTINGS_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
+	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry peer_settings --emit-depfile $@.d -o $@
+
+-include $(KERNEL_PEER_SETTINGS_O).d
+
+$(KERNEL_PEER_SETTINGS_ELF): $(KERNEL_PEER_SETTINGS_O)
+	$(LLD) -pie --no-dynamic-linker -e peer_settings $< -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
 $(KERNEL_CLOEXEC_O): $(KERNEL_CLOEXEC_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
@@ -1330,7 +1344,9 @@ KERNEL_QEMU_NET_WAKE_CONTROL_ELF := $(KERNEL_QEMU_BUILD_DIR)/kernel-net-wake-con
 # GitHub issue #615: one widened race window per overlay, armed and with the
 # check it exercises reverted. scripts/build_qemu_race_window.py names them.
 KERNEL_QEMU_RACE_WINDOWS := 609 603 633
-KERNEL_QEMU_RACE_WINDOW_ELFS := $(foreach w,$(KERNEL_QEMU_RACE_WINDOWS),$(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-armed.elf $(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-reverted.elf)
+# Controls only: a reverted kernel, and no armed one (the ordinary kernel is it).
+KERNEL_QEMU_RACE_CONTROLS := 635
+KERNEL_QEMU_RACE_WINDOW_ELFS := $(foreach w,$(KERNEL_QEMU_RACE_WINDOWS),$(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-armed.elf $(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-reverted.elf) $(foreach w,$(KERNEL_QEMU_RACE_CONTROLS),$(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-reverted.elf)
 KERNEL_QEMU_LINK_LD      := $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld
 KERNEL_QEMU_ELF          := $(KERNEL_QEMU_BUILD_DIR)/kernel.elf
 KERNEL_QEMU_UART_TKB     := $(KERNEL_DIR)/platform/qemu/uart.tkb
@@ -1786,7 +1802,7 @@ _kernelcheck-stack-overflow-qemu:
 ## it is crossed on every run. Armed, the ordinary suite must pass; with the
 ## check the window exercises reverted, the boot must fail-stop with that
 ## check's activity.
-kernelcheck-race-window-qemu: kernelcheck-race-window-609-qemu kernelcheck-race-window-603-qemu kernelcheck-race-window-633-qemu
+kernelcheck-race-window-qemu: kernelcheck-race-window-609-qemu kernelcheck-race-window-603-qemu kernelcheck-race-window-633-qemu kernelcheck-race-window-635-qemu
 
 ## One lane per window, so an aggregate runs them side by side: each is
 ## two boots in sequence, and the two together as one lane were the
@@ -1808,6 +1824,12 @@ kernelcheck-race-window-633-qemu: kernelbuild-check
 
 _kernelcheck-race-window-633-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=633 KERNEL_QEMU_RACE_WINDOW_WORKLOAD=churn KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^ddb: wait pid=([3-9]|[1-9][0-9]+) state=blocked waits-for event=signal' KERNEL_QEMU_SERIAL_PORT=18636 KERNEL_QEMU_QMP_PORT=18637 KERNEL_QEMU_NETDEV_LOCAL_PORT=18638 KERNEL_QEMU_NETDEV_REMOTE_PORT=18639 bash scripts/run_kernel_race_window_qemutest.sh
+
+kernelcheck-race-window-635-qemu: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-race-window-635-qemu
+
+_kernelcheck-race-window-635-qemu:
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=635 KERNEL_QEMU_RACE_WINDOW_ARMED=skip KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^workload: settings wake FAILED: the reader is still asleep' KERNEL_QEMU_SERIAL_PORT=18730 KERNEL_QEMU_QMP_PORT=18731 KERNEL_QEMU_NETDEV_LOCAL_PORT=18732 KERNEL_QEMU_NETDEV_REMOTE_PORT=18733 bash scripts/run_kernel_race_window_qemutest.sh
 
 kernelcheck-uart-wake-qemu: kernelbuild-check
 	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-uart-wake-qemu
@@ -1914,7 +1936,8 @@ KERNELCHECK_QEMU_LANES := kernelcheck-qemu kernelcheck-qemu-debug \
 	kernelcheck-stack-overflow-qemu \
 	kernelcheck-alloc-rollback-qemu kernelcheck-uart-wake-qemu \
 	kernelcheck-affinity-gdb-qemu kernelcheck-race-window-609-qemu \
-	kernelcheck-race-window-603-qemu kernelcheck-race-window-633-qemu
+	kernelcheck-race-window-603-qemu kernelcheck-race-window-633-qemu \
+	kernelcheck-race-window-635-qemu
 
 KERNELCHECK_LANES := $(KERNELCHECK_QEMU_LANES) kernelcheck-rpi5
 

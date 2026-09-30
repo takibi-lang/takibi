@@ -130,7 +130,7 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --interactive-httpd-listener-file "$INTERACTIVE_HTTPD_LISTENER" \
     --interactive-httpd-ready-file "$INTERACTIVE_HTTPD_READY" \
     --interactive-httpd-done-file "$INTERACTIVE_HTTPD_DONE" \
-    --peer-tty \
+    --peer-tty --peer-settings \
     --workload-marker 'workload: busy pair done' \
     --validate-ash &
 uart_driver_pid=$!
@@ -410,7 +410,7 @@ echo "[kernel/rpi5] second BusyBox httpd curl passed"
 #
 # The sender above waits for kernel-validated interleaving, then the completion
 # loop waits for the IRQ-driven Blocked -> Ready evidence.
-capture_deadline="${RPI5_KERNEL_CAPTURE_SECONDS:-90}"
+capture_deadline="${RPI5_KERNEL_CAPTURE_SECONDS:-120}"
 capture_elapsed=0
 capture_complete=0
 while [ "$capture_elapsed" -lt "$capture_deadline" ]; do
@@ -418,7 +418,8 @@ while [ "$capture_elapsed" -lt "$capture_deadline" ]; do
     capture_elapsed=$((capture_elapsed + 1))
     if LC_ALL=C grep -aFq 'uart rx: scheduler block+wake ok' "$UART_LOG" &&
             LC_ALL=C grep -aFq 'busybox interactive shell exit: 0' "$UART_LOG" &&
-            LC_ALL=C grep -aFq 'resources: pages=0' "$UART_LOG"; then
+            LC_ALL=C grep -aFq 'resources: pages=0' "$UART_LOG" &&
+            LC_ALL=C grep -aFq 'workload: settings change woke the blocked peer reader' "$UART_LOG"; then
         capture_complete=1
         break
     fi

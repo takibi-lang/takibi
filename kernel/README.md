@@ -132,7 +132,9 @@ to BusyBox Extras. The independent
 Takibi test programs are `/bin/user_payload` (the EL0 syscall-ABI fixture),
 `/bin/peer-read` and `/bin/core-read` (the read-only block contention
 fixture), `/bin/peer-console` (the secondary-CPU console writer),
-`/bin/peer-tty` (the secondary-CPU terminal reader), and the pair
+`/bin/peer-tty` (the secondary-CPU terminal reader), `/bin/peer-settings`
+(a terminal settings change that must wake a reader already asleep in a
+canonical read on the secondary CPU), and the pair
 `/bin/busy-a`/`/bin/busy-b`, which are the same object linked
 twice with different ELF entry points so each knows which `respawn` entry it
 is without parsing `argv`. The ash session backgrounds a bounded placement
@@ -473,7 +475,7 @@ probe/board setup. A successful run includes:
 [kernel/rpi5] BusyBox httpd curl passed
 [kernel/rpi5] second BusyBox httpd curl passed
 [kernel/rpi5] userspace connected I/O passed
-PASS kernel/rpi5 (61 views, one boot)
+PASS kernel/rpi5 (62 views, one boot)
 ```
 
 It tests negative and positive ARP/ICMP behavior, TCP lifecycle, USB ext2

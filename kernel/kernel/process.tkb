@@ -6952,6 +6952,34 @@ fn kernel_process_terminal_settings_wake(
     }
 }
 
+// GitHub issue #635: is this pid asleep in a terminal read? Read from the
+// process record under the run lock, which is what a fixture asking "is the
+// reader blocked yet" needs instead of a guess from elapsed time.
+fn kernel_process_pid_blocked_in_uart_read(
+        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+        pid: usize) -> bool {
+    let mut cursor = scheduled_process_first_slot();
+    let mut walking: bool = true;
+    while (walking) {
+        match cursor {
+            ProcessSlotCursor::Done => { walking = false; }
+            ProcessSlotCursor::At(slot) => {
+                if (scheduled_process_record_at(slot).pid == pid &&
+                    scheduled_process_record_state(slot) ==
+                        ProcessSlotState::Blocked &&
+                    scheduled_process_record_wait_reason(slot) ==
+                        ProcessWaitReason::UartRx &&
+                    scheduled_process_uart_block_delivery(slot) ==
+                        UartBlockDelivery::Read) {
+                    return true;
+                }
+                cursor = scheduled_process_next_slot(slot);
+            }
+        }
+    }
+    return false;
+}
+
 fn kernel_process_terminal_signal(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock], signum: usize) {
     if (terminal_foreground_session == 0) { return; }

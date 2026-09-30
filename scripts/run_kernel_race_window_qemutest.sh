@@ -75,7 +75,11 @@ python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "$LABEL" \
     "udp:$NETDEV_REMOTE_PORT" || exit 1
 
 mkdir -p "$ROOT"
-if ! run_variant armed; then
+# A control-only window (#635) has no spin to survive: its armed kernel is the
+# ordinary one, which the ordinary suite already runs.
+if [ "${KERNEL_QEMU_RACE_WINDOW_ARMED:-run}" = skip ]; then
+    echo "$LABEL: armed run skipped, the ordinary suite is its armed run"
+elif ! run_variant armed; then
     echo "FAIL $LABEL: the armed kernel failed the $WORKLOAD with the check present" >&2
     grep -E '^FAIL' "$ROOT/armed.log" | sed 's/^/  /' >&2 || true
     exit 1
@@ -89,4 +93,8 @@ if ! grep -aEq "$SIGNATURE" "$(signature_file)"; then
     grep -aE '^(oops: (fail-stop|activity)|sched: STARVED|ddb: wait pid)' "$(signature_file)" | sed 's/^/  /' >&2 || true
     exit 1
 fi
-echo "PASS $LABEL: armed, the $WORKLOAD passed; with the check reverted, it failed showing $SIGNATURE"
+if [ "${KERNEL_QEMU_RACE_WINDOW_ARMED:-run}" = skip ]; then
+    echo "PASS $LABEL: with the check reverted, the $WORKLOAD failed showing $SIGNATURE"
+else
+    echo "PASS $LABEL: armed, the $WORKLOAD passed; with the check reverted, it failed showing $SIGNATURE"
+fi

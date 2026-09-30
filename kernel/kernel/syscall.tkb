@@ -4799,6 +4799,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (x0 == 5) {
             return SyscallAction::Resume(workload_peer_tty_progress(x1, x2));
         }
+        // /bin/peer-settings (GitHub issue #635).
+        if (x0 == 20) {
+            return SyscallAction::Resume(
+                workload_settings_wake_progress(x1, x2, x3));
+        }
         if (x0 == 6) {
             match workload_peer_net_wake_progress(x1) {
                 WorkloadPeerNetWakeResult::Cpu(cpu) => {

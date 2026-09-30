@@ -83,6 +83,18 @@ WINDOWS = {
                   "        }\n",
                   ""),
     },
+    # GitHub issue #635: no window and no spin -- a control only. A terminal
+    # settings change that makes queued bytes readable must wake a reader
+    # already asleep in a read. The reverted kernel drops that wake, so the
+    # reader sleeps on and the kernel's own bounded wait reports it. Only the
+    # reverted kernel is built or run for this entry.
+    "635": {
+        "spin": None,
+        "check": ("kernel/syscall.tkb",
+                  "            if (kernel_uart_rx_pending()) { "
+                  "kernel_process_terminal_settings_wake(guard); }\n",
+                  ""),
+    },
     # GitHub issue #633: wait4 has reaped a zombie and is about to return
     # its pid. A sibling exiting on another CPU meanwhile writes the
     # parent's last_child_pid. Returning the pid reaped is the check; the
@@ -120,9 +132,11 @@ def main() -> None:
     source_root = Path(args[0]).resolve()
     overlay_root = Path(args[1]).resolve()
     window = WINDOWS[args[2]]
-    spin_file, anchor, peer_only = window["spin"]
     check_file, check, reverted = window["check"]
-    edited_files = {spin_file, check_file}
+    edited_files = {check_file}
+    if window["spin"] is not None:
+        spin_file, anchor, peer_only = window["spin"]
+        edited_files.add(spin_file)
     source_kernel = source_root / "kernel"
     overlay_kernel = overlay_root / "kernel"
     if overlay_kernel.exists():
@@ -150,8 +164,9 @@ def main() -> None:
         (overlay_kernel / relative).write_text(
             (source_kernel / relative).read_text(encoding="ascii"),
             encoding="ascii")
-    replace_once(overlay_kernel / spin_file, anchor,
-                 anchor + spin(args[2], peer_only))
+    if window["spin"] is not None:
+        replace_once(overlay_kernel / spin_file, anchor,
+                     anchor + spin(args[2], peer_only))
     if revert:
         replace_once(overlay_kernel / check_file, check, reverted)
 

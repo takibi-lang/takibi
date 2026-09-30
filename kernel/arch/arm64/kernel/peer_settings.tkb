@@ -1,0 +1,205 @@
+/* GitHub issue #635: /bin/peer-settings. A terminal settings change must wake
+ * a reader that is already asleep in a canonical read, with no further UART
+ * byte to do it. A standalone static-PIE EL0 program, kept free of writable
+ * globals and compiled with --forbid-trap.
+ *
+ * The parent stays on CPU 0; the child, pinned to the secondary, reads the
+ * terminal in canonical mode, where the bytes the driver types without a
+ * newline are queued but not yet readable. The kernel says when the child is
+ * asleep with those bytes queued (a fact read from its process record, not a
+ * guess from elapsed time), and only then does the parent switch the terminal
+ * to raw mode. The child must read exactly the queued bytes. If it is never
+ * woken, the kernel says so after a bounded number of ticks and the parent
+ * reports it and gives up.
+ *
+ * Its own object, not another entry of peer_read.o: every entry of a shared
+ * object links the whole object, and the root filesystem image has few free
+ * blocks to spend on a copy of it.
+ */
+
+const READ_SYSCALL: usize = 63;
+const WRITE_SYSCALL: usize = 64;
+const EXIT_SYSCALL: usize = 93;
+const NANOSLEEP_SYSCALL: usize = 101;
+const SETAFFINITY_SYSCALL: usize = 122;
+const KILL_SYSCALL: usize = 129;
+const GETCPU_SYSCALL: usize = 168;
+const CLONE_SYSCALL: usize = 220;
+const WAIT4_SYSCALL: usize = 260;
+const WORKLOAD_PROGRESS_SYSCALL: usize = 453;
+const CLONE_FORK_SIGCHLD: usize = 0x11;
+const PEER_SETTINGS_TAG: usize = 20;
+const PEER_SETTINGS_POLLS: usize = 20000;
+const PEER_SETTINGS_ERROR_FLOOR: usize = 0xFFFFFFFFFFFFF000;
+const PEER_SETTINGS_ICANON: u8 = 2;
+
+private fn peer_settings_cpu(cpu_bytes: borrow [u8; 4..]) -> usize {
+    if (svc5(GETCPU_SYSCALL, cpu_bytes as *u8 as usize, 0, 0, 0, 0) != 0) {
+        return 99;
+    }
+    return cpu_bytes[0] as usize |
+           ((cpu_bytes[1] as usize) << 8) |
+           ((cpu_bytes[2] as usize) << 16) |
+           ((cpu_bytes[3] as usize) << 24);
+}
+
+// One bit per CPU; a runtime shift would need a bound the compiler cannot see
+// under --forbid-trap.
+private fn peer_settings_cpu_bit(cpu: usize) -> u8 {
+    if (cpu == 0) { return 1; }
+    if (cpu == 1) { return 2; }
+    if (cpu == 2) { return 4; }
+    if (cpu == 3) { return 8; }
+    return 0;
+}
+
+private fn peer_settings_pin(cpu: usize) -> bool {
+    let bit: u8 = peer_settings_cpu_bit(cpu);
+    if (bit == 0) { return false; }
+    let mut mask: [u8; 8];
+    for index: usize in 0..<8 { mask[index] = 0; }
+    mask[0] = bit;
+    return svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) == 0;
+}
+
+private fn peer_settings_fail(line: borrow []u8) {
+    svc5(WRITE_SYSCALL, 1, line as *u8 as usize, line.len, 0, 0);
+    svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+}
+
+private fn peer_settings_nap() {
+    let mut nap: [u8; 16];
+    for index: usize in 0..<16 { nap[index] = 0; }
+    // tv_sec = 0, tv_nsec = 1000000 (0x000F4240), little-endian.
+    nap[8] = 0x40;
+    nap[9] = 0x42;
+    nap[10] = 0x0F;
+    svc5(NANOSLEEP_SYSCALL, nap as *u8 as usize, 0, 0, 0, 0);
+}
+
+private fn peer_settings_reader(peer_cpu: usize) {
+    let mut cpu_bytes: [u8; 4];
+    let mut settings: [u8; 36];
+    let mut buffer: [u8; 1];
+    if (peer_settings_pin(peer_cpu) == false) {
+        peer_settings_fail(bs"peer-settings: the reader could not pin itself\n");
+    }
+    while (peer_settings_cpu(cpu_bytes as []u8) != peer_cpu) {}
+    // The premise of the whole check: this read is canonical.
+    if (svc5(29, 0, 0x5401, settings as *u8 as usize, 0, 0) != 0 ||
+        (settings[12] & PEER_SETTINGS_ICANON) == 0) {
+        peer_settings_fail(bs"peer-settings: the terminal is not canonical\n");
+    }
+    if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_SETTINGS_TAG, 1, 0, 0, 0) != 1) {
+        peer_settings_fail(bs"peer-settings: the reader was refused\n");
+    }
+    // The first read is the one the settings change wakes. Raw mode returns
+    // what is readable, which this kernel does a byte at a time, so the rest
+    // of the queued bytes come from further reads that need not sleep.
+    let mut total: usize = 0;
+    let mut sum: usize = 0;
+    let mut reading: bool = true;
+    for round: usize in 0..<8 {
+        if (reading) {
+            let got: usize = svc5(READ_SYSCALL, 0, buffer as *u8 as usize,
+                                  1, 0, 0);
+            if (got != 1) {
+                reading = false;
+            } else {
+                total = total + 1;
+                sum = sum + (buffer[0] as usize) * total;
+                if (total == 3) { reading = false; }
+            }
+        }
+    }
+    if (peer_settings_cpu(cpu_bytes as []u8) != peer_cpu) { sum = 0; }
+    svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_SETTINGS_TAG, 5, total, sum, 0);
+    svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+}
+
+fn peer_settings() {
+    let mut saved: [u8; 36];
+    let mut raw: [u8; 36];
+    let peer_cpu: usize = svc5(
+        WORKLOAD_PROGRESS_SYSCALL, PEER_SETTINGS_TAG, 0, 0, 0, 0);
+    if (peer_cpu == 0) {
+        peer_settings_fail(bs"peer-settings: registration failed\n");
+    }
+    if (peer_settings_pin(0) == false) {
+        peer_settings_fail(bs"peer-settings: the parent could not pin to cpu 0\n");
+    }
+    let child: usize = svc5(CLONE_SYSCALL, CLONE_FORK_SIGCHLD, 0, 0, 0, 0);
+    if (child == 0) { peer_settings_reader(peer_cpu); }
+    if (child >= PEER_SETTINGS_ERROR_FLOOR) {
+        peer_settings_fail(bs"peer-settings: fork failed\n");
+    }
+    // Wait for the fact, not for a time: the kernel answers 1 only when the
+    // child's record says asleep in a terminal read and the ring holds the
+    // uncommitted bytes.
+    let mut asleep: bool = false;
+    for poll: usize in 0..<PEER_SETTINGS_POLLS {
+        if (asleep == false) {
+            if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_SETTINGS_TAG,
+                     2, 0, 0, 0) == 1) {
+                asleep = true;
+            } else {
+                peer_settings_nap();
+            }
+        }
+    }
+    if (asleep == false) {
+        svc5(KILL_SYSCALL, child, 9, 0, 0, 0);
+        peer_settings_fail(bs"peer-settings: the reader never slept with its bytes queued\n");
+    }
+    if (svc5(29, 0, 0x5401, saved as *u8 as usize, 0, 0) != 0) {
+        peer_settings_fail(bs"peer-settings: terminal settings failed\n");
+    }
+    for index: usize in 0..<36 { raw[index] = saved[index]; }
+    // Raw: no input processing, no ICANON, and a read that returns as soon as
+    // one byte is there. TCSETS applies immediately.
+    for index: usize in 0..<4 { raw[index] = 0; raw[12 + index] = 0; }
+    raw[22] = 0;
+    // First a change the kernel must refuse (a raw read that returns with
+    // nothing, VMIN 0, is not supported). It must leave the settings as they
+    // were and the reader asleep with its bytes still queued.
+    raw[23] = 0;
+    if (svc5(29, 0, 0x5402, raw as *u8 as usize, 0, 0) == 0) {
+        svc5(KILL_SYSCALL, child, 9, 0, 0, 0);
+        peer_settings_fail(bs"peer-settings: unsupported settings were accepted\n");
+    }
+    let mut again: [u8; 36];
+    let mut unchanged: bool = svc5(29, 0, 0x5401, again as *u8 as usize,
+                                   0, 0) == 0;
+    for index: usize in 0..<36 {
+        if (again[index] != saved[index]) { unchanged = false; }
+    }
+    if (unchanged == false ||
+        svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_SETTINGS_TAG, 2, 0, 0, 0) != 1) {
+        svc5(KILL_SYSCALL, child, 9, 0, 0, 0);
+        peer_settings_fail(bs"peer-settings: a refused change altered the settings or the blocked read\n");
+    }
+    raw[23] = 1;
+    if (svc5(29, 0, 0x5402, raw as *u8 as usize, 0, 0) != 0) {
+        svc5(KILL_SYSCALL, child, 9, 0, 0, 0);
+        peer_settings_fail(bs"peer-settings: the raw settings were refused\n");
+    }
+    svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_SETTINGS_TAG, 3, 0, 0, 0);
+    let mut verdict: usize = 0;
+    for poll: usize in 0..<PEER_SETTINGS_POLLS {
+        if (verdict == 0) {
+            verdict = svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_SETTINGS_TAG,
+                           4, 0, 0, 0);
+            if (verdict == 0) { peer_settings_nap(); }
+        }
+    }
+    svc5(29, 0, 0x5402, saved as *u8 as usize, 0, 0);
+    if (verdict != 2) {
+        svc5(KILL_SYSCALL, child, 9, 0, 0, 0);
+    }
+    let mut status: [u8; 4];
+    svc5(WAIT4_SYSCALL, child, status as *u8 as usize, 0, 0, 0);
+    if (verdict != 2) {
+        peer_settings_fail(bs"peer-settings: the settings change did not wake the reader\n");
+    }
+    svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+}
