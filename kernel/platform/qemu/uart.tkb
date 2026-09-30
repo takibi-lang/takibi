@@ -77,11 +77,6 @@ fn uart_tx_busy() -> bool !{unsafe} {
     return (*fr & (1 << 3)) != 0;
 }
 
-fn uart_tx_isr() !{unsafe} {
-    uart_tx_drain_into_fifo();
-    if (terminal_output_paused() || uart_terminal_output_pending() == false) { uart_tx_irq_disable(); }
-}
-
 // GitHub issue #517: one register access each, and nothing else. The
 // sequence they serve lives in kernel/drivers/serial/pl011.tkb.
 fn uart_tx_irq_flagged() -> bool !{interrupt, unsafe} {

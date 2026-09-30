@@ -80,16 +80,19 @@ def main() -> int:
         failures.append(f"the repository passed about something else: "
                         f"{report.strip()!r}")
 
-    # Issue #454's actual defect, in the file it actually happened in.
+    # Issue #454's actual defect: the console unmasking under its caller.
+    # The mask is taken and given back by the console lock now (GitHub issue
+    # #663), so that is where an enable_irq() planted before the acquire
+    # recreates it.
     failures += case(
         "the console unmasks under its caller",
-        planted("kernel/printk/log.tkb",
-                "    let irq_flags: usize = mutex_irq_save();\n"
-                "    while (kernel_log_tx_full()) {",
+        planted("kernel/printk/console_lock.tkb",
+                "    let mut guard: ConsoleGuard[console_tx_lock] =\n"
+                "        { mutex_acquire(&console_tx_lock) };",
                 "    enable_irq();\n"
-                "    let irq_flags: usize = mutex_irq_save();\n"
-                "    while (kernel_log_tx_full()) {"),
-        "kernel/printk/log.tkb")
+                "    let mut guard: ConsoleGuard[console_tx_lock] =\n"
+                "        { mutex_acquire(&console_tx_lock) };"),
+        "kernel/printk/console_lock.tkb")
 
     # Replacing the shared restore helper with its absolute inner operation is
     # the direct one-line route back to the incident.

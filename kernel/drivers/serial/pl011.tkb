@@ -26,7 +26,7 @@ use "kernel/printk/log.tkb";
 // the board.
 fn uart_irq_service() -> bool !{interrupt, unsafe} {
     if (uart_tx_irq_flagged()) {
-        uart_tx_isr();
+        uart_tx_service();
         // GitHub issue #544: a userspace writer that found the transmit
         // queue above its low-water mark is asleep; once this drain brings
         // the queue down to the mark, it runs its write again.

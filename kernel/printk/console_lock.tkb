@@ -1,0 +1,64 @@
+// The console lock: one lock for the terminal's transmit path (GitHub issue
+// #663, option A).
+//
+// It orders every writer of the transmit queue, the terminal echo queue, the
+// column and wire-state words, and the FIFO drain, so that the order bytes
+// reach the wire is the order the lock was taken -- on whichever CPU. It is
+// what Linux's tty write lock, FreeBSD's per-tty mutex and OpenBSD's spltty
+// section are: one queue, one lock, contention accepted. Before it, core 0
+// was the only writer of all of this, with interrupts masked and no lock,
+// and a process on another CPU had to hand its bytes to a ring that core 0
+// drained at moments of its own (kernel/models/ConsoleTx.tla shows the
+// reordering, and the lock order below).
+//
+// LOCK ORDER. run -> console, and the console lock is innermost: it is taken
+// while the process-run lock is held (whole output chunks are admitted under
+// the run guard, and the receive handler echoes under it), and nothing is
+// taken while it is held. In particular the transmit interrupt lets go of it
+// BEFORE it takes the run lock for the wake; keeping it across the wake is
+// the NESTED variant of the model, which deadlocks against a writer that
+// holds the run lock and wants this one.
+//
+// NOTHING UNDER IT LOGS. A critical section that called kernel_boot_log would
+// take this lock again on the way to the UART and hang, because a Mutex has
+// no owner and no recursion count. The functions that run under it carry the
+// guard as a parameter, so a caller cannot reach them without holding it, and
+// they are written without `logs`.
+//
+// Current limitations (2026-09-30):
+// - THE KERNEL LOG AND THE TERMINAL ARE STILL TWO STREAMS. A peer's kernel
+//   log lines go through the per-CPU publication ring and core 0 moves them
+//   here at its own moments, as before; only TERMINAL output is ordered by
+//   this lock. That split is deliberate (kernel/CONCURRENCY.md, "Reporters
+//   must not take locks": an oops or a BREAK must not wait for a lock), and
+//   it is Linux's own split between printk and tty output.
+// - DDB AND THE CRASH CONSOLE DO NOT TAKE IT. They stand the queue down and
+//   write through uart_debug_putc. The world stop that precedes them waits for
+//   every other CPU to take an interrupt, which a CPU inside this lock does
+//   not until it leaves; the critical sections are short and bounded by the
+//   wire, so that is a delay, not a hang, but a holder stuck for good would
+//   stop the debugger entering.
+use "kernel/lib/mutex.tkb";
+
+let mut console_tx_lock: Mutex;
+
+// `[lock: addr]` names the one lock a guard came from, and linear, so no path
+// through a critical section can leave it held.
+linear struct ConsoleGuard[lock: addr] {
+    private flags: usize;
+}
+
+// mutex_acquire masks interrupts, then takes the word, and returns the state
+// a matching release restores -- so this is safe from the transmit and
+// receive interrupt handlers and from code that already has them masked.
+fn console_lock() -> ConsoleGuard[console_tx_lock]
+        !{acquires_lock_50_console, lock_guard_50_console,
+          irq_masking_guard} {
+    let mut guard: ConsoleGuard[console_tx_lock] =
+        { mutex_acquire(&console_tx_lock) };
+    return guard;
+}
+
+fn console_unlock(guard: sink ConsoleGuard[console_tx_lock]) {
+    mutex_release(&console_tx_lock, guard.flags);
+}

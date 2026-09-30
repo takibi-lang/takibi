@@ -387,6 +387,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/net/socket_capability.tkb \
 	kernel/net/tcp.tkb \
 	kernel/net/wire.tkb \
+	kernel/printk/console_lock.tkb \
 	kernel/printk/log.tkb \
 	kernel/printk/number.tkb \
 	kernel/printk/peer_console.tkb

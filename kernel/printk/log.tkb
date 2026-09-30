@@ -13,6 +13,7 @@ use "kernel/printk/number.tkb";
 use "kernel/printk/peer_console.tkb";
 use "kernel/drivers/serial/terminal.tkb";
 use "kernel/drivers/serial/terminal_echo.tkb";
+use "kernel/printk/console_lock.tkb";
 
 const KERNEL_LOG_RECORD_COUNT: usize = 256;
 const KERNEL_LOG_TEXT_MAX: usize = 160;
@@ -440,19 +441,19 @@ fn kernel_log_tx_full() -> bool {
     return kernel_log_tx_count >= KERNEL_LOG_TX_QUEUE_BYTES;
 }
 
-// Callers mask interrupts around these two: the drain runs from the TX
-// handler, so producer and consumer share the count. Masking rather than
-// locking is the sanctioned channel here -- kernel/lib/diagnostic_ring.tkb's
-// header explains why a console that can block on a lock is a console that
-// cannot report the deadlock it is in.
-fn kernel_log_tx_push(value: u8) -> bool {
+// Under the console lock (GitHub issue #663): the drain runs from the TX
+// handler on core 0 and producers run on any CPU, so producer and consumer
+// share the count. The guard parameter is what makes a call without the lock
+// unwritable. The lock masks interrupts, as the bare mask it replaces did.
+private fn kernel_log_tx_push(guard: borrow ConsoleGuard[console_tx_lock],
+                              value: u8) -> bool {
     if (kernel_log_tx_count >= KERNEL_LOG_TX_QUEUE_BYTES) { return false; }
     let slot: usize = kernel_log_tx_tail;
     if (slot >= KERNEL_LOG_TX_QUEUE_BYTES) { return false; }
     let safe_slot: {0..<KERNEL_LOG_TX_QUEUE_BYTES as usize} = slot;
     kernel_log_tx_queue[safe_slot] = value;
     kernel_log_tx_terminal[safe_slot] = false;
-    kernel_log_terminal_column_byte(value);
+    kernel_log_terminal_column_byte(guard, value);
     kernel_log_wire_last = value;
     kernel_log_tx_tail = slot + 1;
     if (kernel_log_tx_tail >= KERNEL_LOG_TX_QUEUE_BYTES) {
@@ -463,14 +464,16 @@ fn kernel_log_tx_push(value: u8) -> bool {
 }
 
 // Tags keep a signal flush from discarding queued kernel diagnostics.
-private fn kernel_log_tx_push_terminal(value: u8) -> bool {
+private fn kernel_log_tx_push_terminal(
+        guard: borrow ConsoleGuard[console_tx_lock], value: u8) -> bool {
     let slot: usize = kernel_log_tx_tail;
-    if (kernel_log_tx_push(value) == false) { return false; }
+    if (kernel_log_tx_push(guard, value) == false) { return false; }
     if (slot < KERNEL_LOG_TX_QUEUE_BYTES) { kernel_log_tx_terminal[slot] = true; }
     return true;
 }
 
-private fn kernel_log_terminal_column_byte(value: u8) {
+private fn kernel_log_terminal_column_byte(
+        guard: borrow ConsoleGuard[console_tx_lock], value: u8) {
     if (value == 13) { kernel_log_terminal_column = 0; }
     else if (value == 8) {
         if (kernel_log_terminal_column != 0) {
@@ -489,6 +492,7 @@ fn uart_terminal_column() -> usize { return kernel_log_terminal_column; }
 // records survive. A peer publishes whole records with release ordering;
 // retiring the currently visible prefix cannot remove a future publication.
 fn uart_terminal_flush_output() {
+    let guard = console_lock();
     terminal_echo_reset();
     let count: usize = kernel_log_tx_count;
     let head: usize = kernel_log_tx_head;
@@ -518,11 +522,13 @@ fn uart_terminal_flush_output() {
             }
         }
     }
+    console_unlock(guard);
 }
 
 must_use variant KernelLogTxByte { Empty; Byte(u8); }
 
-fn kernel_log_tx_pop() -> KernelLogTxByte {
+private fn kernel_log_tx_pop(guard: borrow ConsoleGuard[console_tx_lock])
+        -> KernelLogTxByte {
     if (kernel_log_tx_count == 0) { return KernelLogTxByte::Empty; }
     let slot: usize = kernel_log_tx_head;
     if (slot >= KERNEL_LOG_TX_QUEUE_BYTES) { return KernelLogTxByte::Empty; }
@@ -560,30 +566,37 @@ private fn uart_tx_spin_store(c: u8) !{unsafe} {
 // the sender stopped after the receive ring became empty.
 private let mut kernel_log_terminal_input_stopped: bool;
 
-fn kernel_log_terminal_flow_poll() !{unsafe} {
-    let flags: usize = mutex_irq_save();
+fn kernel_log_terminal_flow_poll() !{logs, unsafe} {
+    // The decision and the byte it sends are one section, so two callers
+    // cannot each send a STOP. uart_wire_byte takes the console lock itself,
+    // so the decision is made under a hold of its own and the byte follows;
+    // a second caller in between finds the flag already updated and sends
+    // nothing.
+    let guard = console_lock();
     let wanted: bool = terminal_input_flow_requested();
+    let mut control: u8 = 0;
     if (wanted != kernel_log_terminal_input_stopped) {
         kernel_log_terminal_input_stopped = wanted;
-        let mut control: u8 = terminal_control_byte(8);
+        control = terminal_control_byte(8);
         if (wanted) { control = terminal_control_byte(9); }
-        if (control != 0) { uart_wire_byte(control); }
     }
-    mutex_irq_restore(flags);
+    console_unlock(guard);
+    if (control != 0) { uart_wire_byte(control); }
 }
 
 // Echo operations are bounded and never spin in the receive interrupt.
 // The caller is CPU 0 with IRQs masked, including the RX handler itself.
 fn uart_terminal_echo(operation: TerminalEchoOperation) {
+    let guard = console_lock();
     match terminal_echo_push(operation) {
         TerminalEchoPushResult::Queued => {
             match operation {
                 TerminalEchoOperation::Byte(value) => {
-                    kernel_log_terminal_column_byte(value);
+                    kernel_log_terminal_column_byte(guard, value);
                 }
                 TerminalEchoOperation::Control(value) => {
-                    kernel_log_terminal_column_byte(94);
-                    kernel_log_terminal_column_byte(value);
+                    kernel_log_terminal_column_byte(guard, 94);
+                    kernel_log_terminal_column_byte(guard, value);
                 }
                 TerminalEchoOperation::Erase(columns) => {
                     if (kernel_log_terminal_column >= columns) {
@@ -595,6 +608,7 @@ fn uart_terminal_echo(operation: TerminalEchoOperation) {
         }
         TerminalEchoPushResult::Full => { }
     }
+    console_unlock(guard);
 }
 
 fn uart_terminal_output_pending() -> bool {
@@ -602,12 +616,12 @@ fn uart_terminal_output_pending() -> bool {
 }
 
 fn uart_terminal_resume_output() !{unsafe} {
-    let flags: usize = mutex_irq_save();
+    let guard = console_lock();
     if (terminal_output_paused() == false) {
-        uart_tx_drain_into_fifo();
+        uart_tx_drain_into_fifo(guard);
         if (uart_terminal_output_pending()) { uart_tx_irq_enable(); }
     }
-    mutex_irq_restore(flags);
+    console_unlock(guard);
 }
 
 // Move queued bytes into the FIFO while both have room. Runs from the TX
@@ -615,15 +629,30 @@ fn uart_terminal_resume_output() !{unsafe} {
 // `logs` nor `locks`: the effect system rejects `locks` on an `!{interrupt}`
 // function, and a console that could block on one could not report the
 // deadlock it is in.
-fn uart_tx_drain_into_fifo() !{unsafe} {
+private fn uart_tx_drain_into_fifo(
+        guard: borrow ConsoleGuard[console_tx_lock]) !{unsafe} {
     if (terminal_output_paused()) { return; }
-    uart_tx_drain_into_fifo_force();
+    uart_tx_drain_into_fifo_force(guard);
+}
+
+// The transmit interrupt's whole service: drain under the console lock, and
+// turn the interrupt off when there is nothing more to send. The lock is let go
+// BEFORE the caller (uart_irq_service) takes the run lock to wake a sleeping
+// writer -- never across it (kernel/models/ConsoleTx.tla, NESTED).
+fn uart_tx_service() !{unsafe} {
+    let guard = console_lock();
+    uart_tx_drain_into_fifo(guard);
+    if (terminal_output_paused() || uart_terminal_output_pending() == false) {
+        uart_tx_irq_disable();
+    }
+    console_unlock(guard);
 }
 
 // Fatal/DDB flushes must remain available even after a user sent XOFF.
-private fn uart_tx_drain_into_fifo_force() !{unsafe} {
+private fn uart_tx_drain_into_fifo_force(
+        guard: borrow ConsoleGuard[console_tx_lock]) !{unsafe} {
     while (uart_terminal_output_pending() && uart_tx_fifo_full() == false) {
-        match kernel_log_tx_pop() {
+        match kernel_log_tx_pop(guard) {
             KernelLogTxByte::Empty => {
                 match terminal_echo_read() {
                     TerminalEchoReadResult::Empty => { return; }
@@ -650,6 +679,14 @@ fn uart_putc(c: u8) !{logs, unsafe} {
     uart_wire_byte(c);
 }
 
+// The column the terminal is at after a byte the console sent without queuing
+// it: under the console lock, like every other writer of that word.
+private fn kernel_log_column_note(value: u8) {
+    let guard = console_lock();
+    kernel_log_terminal_column_byte(guard, value);
+    console_unlock(guard);
+}
+
 // One byte from core 0 onto the wire, queued or spun; uart_putc without
 // the retained log's capture.
 private fn uart_wire_byte(c: u8) !{logs, unsafe} {
@@ -657,39 +694,44 @@ private fn uart_wire_byte(c: u8) !{logs, unsafe} {
     // The paused queue belongs to terminal writes. Kernel diagnostics and
     // terminal flow-control bytes remain usable without draining that queue.
     if (terminal_output_paused()) {
-        kernel_log_terminal_column_byte(c);
+        kernel_log_column_note(c);
         uart_tx_spin_store(c);
         return;
     }
     if (kernel_log_tx_is_live() == false) {
-        kernel_log_terminal_column_byte(c);
+        kernel_log_column_note(c);
         uart_tx_spin_store(c);
         return;
     }
     // A full queue is drained by POLLING, never bypassed. Writing this byte
     // straight to the FIFO would put it ahead of everything already queued,
-    // and every view in this kernel compares text.
-    // Restore the state FOUND, never enable unconditionally. kernel_boot_log
-    // is reached from paths that already hold IRQs masked, and a console that
-    // unmasked them underneath its caller would be a far worse defect than the
-    // spinning this replaces -- the same reasoning mutex_irq_save/_restore
-    // carries in kernel/lib/pool_lock.tkb.
-    let irq_flags: usize = mutex_irq_save();
-    while (kernel_log_tx_full()) {
-        mutex_irq_restore(irq_flags);
-        while (uart_tx_fifo_full()) { }
-        disable_irq();
-        uart_tx_drain_into_fifo();
+    // and every view in this kernel compares text. The lock is let go while
+    // the FIFO is waited out, so the transmit interrupt, which takes it, can
+    // make room; the lock's own mask is restored to the state it FOUND, never
+    // enabled unconditionally, because kernel_boot_log is reached from paths
+    // that already hold IRQs masked.
+    let mut queued: bool = false;
+    let mut done: bool = false;
+    while (done == false) {
+        let guard = console_lock();
+        if (kernel_log_tx_full()) {
+            console_unlock(guard);
+            while (uart_tx_fifo_full()) { }
+            let drain = console_lock();
+            uart_tx_drain_into_fifo(drain);
+            console_unlock(drain);
+        } else {
+            queued = kernel_log_tx_push(guard, c);
+            uart_tx_drain_into_fifo(guard);
+            let still_pending: bool = uart_terminal_output_pending();
+            console_unlock(guard);
+            if (queued && still_pending) { uart_tx_irq_enable(); }
+            done = true;
+        }
     }
-    let queued: bool = kernel_log_tx_push(c);
-    uart_tx_drain_into_fifo();
-    let still_pending: bool = uart_terminal_output_pending();
-    mutex_irq_restore(irq_flags);
     if (queued == false) {
         uart_tx_spin_store(c);
-        return;
     }
-    if (still_pending) { uart_tx_irq_enable(); }
 }
 
 // GitHub issue #544: userspace output through the same queue, in chunks,
@@ -729,7 +771,8 @@ private let mut uart_user_write_sleeps: usize = 0;
 // the room in its console ring (GitHub issue #534). Before core 0's queue is
 // live there is no queue to wait on and the bytes spin as they always have,
 // so the answer is the most one call takes.
-fn uart_user_write_room() -> usize {
+private fn uart_user_write_room_locked(
+        guard: borrow ConsoleGuard[console_tx_lock]) -> usize {
     if (terminal_output_paused()) { return 0; }
     if (cpu_id() == 0 && terminal_echo_pending()) { return 0; }
     let cpu: usize = cpu_id();
@@ -737,12 +780,17 @@ fn uart_user_write_room() -> usize {
     if (kernel_log_tx_is_live() == false) {
         return KERNEL_LOG_TX_QUEUE_BYTES;
     }
-    let irq_flags: usize = mutex_irq_save();
     let count: usize = kernel_log_tx_count;
-    mutex_irq_restore(irq_flags);
     if (count > KERNEL_LOG_TX_WRITER_LOW_WATER) { return 0; }
     if (count >= KERNEL_LOG_TX_QUEUE_BYTES) { return 0; }
     return KERNEL_LOG_TX_QUEUE_BYTES - count;
+}
+
+fn uart_user_write_room() -> usize {
+    let guard = console_lock();
+    let room: usize = uart_user_write_room_locked(guard);
+    console_unlock(guard);
+    return room;
 }
 
 // Whether the TX interrupt should wake sleeping writers.
@@ -842,32 +890,23 @@ fn kernel_log_peer_console_report() !{logs, unsafe} {
     }
 }
 
-// Queue what fits of a user write and return how many bytes that was. Each
-// byte gets the bookkeeping uart_putc gives it, in the same order, and a byte
-// is only counted once it is certain to be queued, so the one a full queue
-// turns away is counted when the retried write takes it.
-fn uart_user_write(bytes: borrow []u8) -> usize !{logs, unsafe} {
-    if (terminal_output_paused()) { return 0; }
-    if (cpu_id() == 0 && terminal_echo_pending()) { return 0; }
+// Under the console lock. Returns how many bytes were taken and whether the
+// queue still holds something, so the caller can arm the transmit interrupt
+// after it lets go. Never called before the queue is live: that case spins
+// byte by byte through uart_putc, which takes the lock itself.
+private fn uart_user_write_locked(
+        guard: borrow ConsoleGuard[console_tx_lock], bytes: borrow []u8)
+        -> (usize, bool) !{unsafe} {
+    if (terminal_output_paused()) { return (0, false); }
+    if (cpu_id() == 0 && terminal_echo_pending()) { return (0, false); }
     // GitHub issue #534: a peer never touches the PL011 or core 0's queue.
     // What it hands over is published whole records, and the count is only
     // what the ring took.
     let cpu: usize = cpu_id();
     if (cpu != 0) {
         kernel_log_peer_stamp_records(cpu, bytes.len);
-        return peer_console_publish(cpu, bytes);
+        return (peer_console_publish(cpu, bytes), false);
     }
-    if (kernel_log_tx_is_live() == false) {
-        let mut spun: usize = 0;
-        for index: usize in 0..<KERNEL_LOG_TX_QUEUE_BYTES {
-            if (index < bytes.len) {
-                uart_putc(bytes[index]);
-                spun = spun + 1;
-            }
-        }
-        return spun;
-    }
-    let irq_flags: usize = mutex_irq_save();
     let mut taken: usize = 0;
     let mut room: bool = true;
     for index: usize in 0..<KERNEL_LOG_TX_QUEUE_BYTES {
@@ -879,16 +918,37 @@ fn uart_user_write(bytes: borrow []u8) -> usize !{logs, unsafe} {
                     let value: u8 = bytes[index];
                     if (kernel_log_capture_uart_byte(value)) {
                         kernel_log_note_tx_byte();
-                        if (kernel_log_tx_push_terminal(value) == false) { room = false; }
+                        if (kernel_log_tx_push_terminal(guard, value) == false) { room = false; }
                     }
                     if (room) { taken = taken + 1; }
                 }
             }
         }
     }
-    uart_tx_drain_into_fifo();
-    let still_pending: bool = uart_terminal_output_pending();
-    mutex_irq_restore(irq_flags);
+    uart_tx_drain_into_fifo(guard);
+    return (taken, uart_terminal_output_pending());
+}
+
+// Queue what fits of a user write and return how many bytes that was. Each
+// byte gets the bookkeeping uart_putc gives it, in the same order, and a byte
+// is only counted once it is certain to be queued, so the one a full queue
+// turns away is counted when the retried write takes it.
+fn uart_user_write(bytes: borrow []u8) -> usize !{logs, unsafe} {
+    if (terminal_output_paused()) { return 0; }
+    if (cpu_id() == 0 && terminal_echo_pending()) { return 0; }
+    if (cpu_id() == 0 && kernel_log_tx_is_live() == false) {
+        let mut spun: usize = 0;
+        for index: usize in 0..<KERNEL_LOG_TX_QUEUE_BYTES {
+            if (index < bytes.len) {
+                uart_putc(bytes[index]);
+                spun = spun + 1;
+            }
+        }
+        return spun;
+    }
+    let guard = console_lock();
+    let (taken, still_pending) = uart_user_write_locked(guard, bytes);
+    console_unlock(guard);
     if (still_pending) { uart_tx_irq_enable(); }
     return taken;
 }
@@ -916,13 +976,13 @@ fn uart_user_write_sleep_total() -> usize {
 // a halt -- because those write through uart_debug_putc, and a byte they emit
 // while the queue still holds earlier output would arrive out of order.
 fn uart_tx_flush() !{unsafe} {
-    let irq_flags: usize = mutex_irq_save();
+    let guard = console_lock();
     while (uart_terminal_output_pending()) {
         while (uart_tx_fifo_full()) { }
-        uart_tx_drain_into_fifo_force();
+        uart_tx_drain_into_fifo_force(guard);
     }
     uart_tx_irq_disable();
-    mutex_irq_restore(irq_flags);
+    console_unlock(guard);
 }
 
 fn kernel_log_capture_uart_byte(value: u8) -> bool {
@@ -1091,7 +1151,7 @@ fn kernel_log_peer_console_drain() {
                 if (peer_console_ddb_held(cpu)) { draining = false; }
             }
             if (draining) {
-                let irq_flags: usize = mutex_irq_save();
+                let guard = console_lock();
                 match peer_console_peek(cpu, &record) {
                     PeerConsolePeek::Empty => { draining = false; }
                     PeerConsolePeek::Ready(length) => {
@@ -1104,10 +1164,10 @@ fn kernel_log_peer_console_drain() {
                                 if (i < length) {
                                     kernel_log_note_tx_byte();
                                     let pushed: bool =
-                                        kernel_log_tx_push_terminal(record.bytes[i]);
+                                        kernel_log_tx_push_terminal(guard, record.bytes[i]);
                                 }
                             }
-                            uart_tx_drain_into_fifo();
+                            uart_tx_drain_into_fifo(guard);
                             let still_pending: bool = uart_terminal_output_pending();
                             if (still_pending) { uart_tx_irq_enable(); }
                             let waited: usize = kernel_log_peer_note_drained(cpu);
@@ -1126,7 +1186,7 @@ fn kernel_log_peer_console_drain() {
                         }
                     }
                 }
-                mutex_irq_restore(irq_flags);
+                console_unlock(guard);
             }
         }
     }
@@ -1549,20 +1609,43 @@ fn kernel_log_execution_model_assumption() {
 // is admitted together, and a short write always counts whole input bytes.
 fn uart_terminal_write_chunk(bytes: borrow []u8, convert: bool) -> usize {
     if (convert == false) { return uart_user_write(bytes); }
-    let flags: usize = mutex_irq_save();
-    let room: usize = uart_user_write_room();
     let mut encoded: [u8; 512];
     let mut accepted: usize = 0;
+    if (kernel_log_tx_is_live() == false) {
+        // Before the queue is live the bytes spin one at a time through
+        // uart_putc, which takes the console lock itself; hold only the mask.
+        let flags: usize = mutex_irq_save();
+        match terminal_encode_onlcr(bytes, encoded as [u8; 512..],
+                                    KERNEL_LOG_TX_QUEUE_BYTES) {
+            TerminalEncodeResult::NoRoom => { }
+            TerminalEncodeResult::Encoded(counts) => {
+                let length: usize = counts.output_bytes;
+                if (length <= 512) {
+                    let count: usize = uart_user_write(encoded[0..<length]);
+                    if (count == length) { accepted = counts.input_bytes; }
+                }
+            }
+        }
+        mutex_irq_restore(flags);
+        return accepted;
+    }
+    // Room, encoding and the write are one hold: nothing can take the room
+    // between the measurement and the use of it.
+    let guard = console_lock();
+    let room: usize = uart_user_write_room_locked(guard);
+    let mut pending: bool = false;
     match terminal_encode_onlcr(bytes, encoded as [u8; 512..], room) {
         TerminalEncodeResult::NoRoom => { }
         TerminalEncodeResult::Encoded(counts) => {
             let length: usize = counts.output_bytes;
             if (length <= 512) {
-                let count: usize = uart_user_write(encoded[0..<length]);
+                let (count, more) = uart_user_write_locked(guard, encoded[0..<length]);
+                pending = more;
                 if (count == length) { accepted = counts.input_bytes; }
             }
         }
     }
-    mutex_irq_restore(flags);
+    console_unlock(guard);
+    if (pending) { uart_tx_irq_enable(); }
     return accepted;
 }

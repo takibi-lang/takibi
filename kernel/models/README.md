@@ -373,6 +373,15 @@ modelcheck` requires each to fail:
 | `Drain` | `kernel_log_peer_console_drain` | core 0 moves the oldest ring chunk into the queue when it has room, at a moment of its own | the DDB hold that leaves a ring undrained -- irrelevant to `ProgramOrder`: it only delays a drain, and the model already lets a drain be delayed indefinitely | `377125f4fe63` |
 | `Migrate` | `kernel_process_timer_schedule` | the process changes CPU between writes, never inside one (`KERNEL_PREEMPTIBLE` is 0) | affinity -- irrelevant to `ProgramOrder`: it only forbids some moves, and the model already allows each one it forbids | `bc680634a0cb` |
 
+Where the kernel stands against the model: the console lock exists
+(`kernel/printk/console_lock.tkb`, order run -> console) and every core 0
+path and the transmit interrupt (`uart_tx_service`, which lets go of the lock
+before the wake) take it, so `TxTake`, `TxWake` and the core 0 half of
+`WriterAppend` are the `LOCKED = TRUE` actions. A peer's terminal write still
+publishes to its ring and core 0's `Drain` still moves it, now taking the lock
+per record, so peers are still the `LOCKED = FALSE` design until they append
+under the lock themselves.
+
 Properties:
 
 - `ProgramOrder` (safety): the wire is in the order the process wrote.
