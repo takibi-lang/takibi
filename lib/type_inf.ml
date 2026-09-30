@@ -2029,6 +2029,37 @@ let is_io_pointee = function
   | TIo _ -> true
   | _ -> false
 
+(* GitHub issue #659: a null raw pointer cannot be written or tested in safe
+   code. Absence is a closed variant whose case carries `&T`, or a sentinel
+   object returned by reference -- the maintained kernel already spells it
+   the second way. A literal zero is never a legitimate address constructor:
+   the literal-address exemption above exists for MMIO base addresses, and
+   none of them is zero. A null that arrives from a RUNTIME integer cast is a
+   mint-site obligation (it needs `unsafe` above), not a typing question.
+
+   `literal_zero_through_casts` looks through casts, because `0 as usize as
+   *T` is the same null spelled with an intermediate integer. Const_env
+   supplies the value of a `const` and of literal arithmetic. *)
+let rec literal_zero_through_casts (e : Ast.expr) : bool =
+  match e.desc with
+  | Cast (_, inner) -> literal_zero_through_casts inner
+  | _ -> (match Const_env.folded_value e with Some 0 -> true | _ -> false)
+
+let is_raw_pointer_ty t =
+  match repr t with
+  | TPtr _ | TAlignedPtr _ -> true
+  | _ -> false
+
+let null_pointer_advice =
+  "use a closed variant whose case carries &T, or return a sentinel object \
+   by reference (GitHub issue #659)"
+
+let check_null_pointer_literal loc (src_expr : Ast.expr) (tgt : ty) =
+  if is_raw_pointer_ty tgt && literal_zero_through_casts src_expr then
+    raise (TypeError (loc, Printf.sprintf
+      "a literal zero cast to %s writes a null raw pointer: %s"
+      (to_string tgt) null_pointer_advice))
+
 let check_nonliteral_ptr_cast_needs_unsafe loc (src_expr : Ast.expr) (tgt : ty) =
   if not (is_literal_derived src_expr) then
     match tgt with
@@ -2669,6 +2700,18 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
             | Some k -> TRefinedInt (k, k + 1, ct1)
             | None -> ct1)
        | Lt | Gt | Le | Ge | Eq | Ne ->
+           (* GitHub issue #659: with a null pointer unwritable there is no
+              null to test for, and `p == 0` used to reach code generation
+              and fail there. *)
+           (match op with
+            | Eq | Ne ->
+                if (is_raw_pointer_ty t1 && literal_zero_through_casts e2)
+                   || (is_raw_pointer_ty t2 && literal_zero_through_casts e1)
+                then
+                  raise (TypeError (e.loc, Printf.sprintf
+                    "comparing a raw pointer with zero tests for a null \
+                     that safe code cannot write: %s" null_pointer_advice))
+            | _ -> ());
            unify_at e.loc (canon_ty t1) (canon_ty t2);
            TBool
        (* Range propagation: n % m where m is a positive constant -> {0..<m}.
@@ -3157,6 +3200,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                      check_kinded_ptr_cast_needs_unsafe e.loc e tgt;
                      check_aligned_ptr_cast_needs_unsafe e.loc e tgt;
                      check_io_ptr_cast_needs_unsafe e.loc tgt;
+                     check_null_pointer_literal e.loc e tgt;
                      check_nonliteral_ptr_cast_needs_unsafe e.loc e tgt;
                      tgt)
             | _ ->
@@ -3172,6 +3216,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                 check_kinded_ptr_cast_needs_unsafe e.loc e tgt;
                 check_aligned_ptr_cast_needs_unsafe e.loc e tgt;
                 check_io_ptr_cast_needs_unsafe e.loc tgt;
+                check_null_pointer_literal e.loc e tgt;
                 check_nonliteral_ptr_cast_needs_unsafe e.loc e tgt;
                 (* GitHub issue #100 follow-up: an EXPLICIT `x as {lo..<hi
                    as base}` cast target reaches here for any source that

@@ -11,10 +11,11 @@
 use "kernel/lib/intrusive_pool.tkb";
 
 let mut control_pool: IntrusivePool(usize);
+let mut control_absent: usize;
 
 fn escape_the_proof(address: usize) -> *usize !{unsafe} {
     match intrusive_pool_probe_slot(&control_pool, address) {
-        IntrusiveSlotProbe::NoPayload => { return 0 as *usize; }
+        IntrusiveSlotProbe::NoPayload => { return &control_absent; }
         IntrusiveSlotProbe::Live(slot_view) => {
             let payload: *usize =
                 intrusive_pool_payload_of(&control_pool, slot_view);

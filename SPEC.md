@@ -3278,6 +3278,18 @@ Currently gates these six categories:
   additionally need their separate alignment proof. This makes every
   calculated-address minting boundary explicit while preserving ordinary
   literal-address constructors.
+- **A null raw pointer cannot be written or tested in safe code (GitHub
+  issue #659).** A literal zero cast to any raw pointer -- `0 as *T`,
+  `0 as usize as *T`, a `const` whose value is zero, and `*io T` and aligned
+  pointers alike, even inside `unsafe` -- is a compile error, and so is
+  comparing a raw pointer with the literal 0 (`p == 0`, `0 != p`). The
+  literal-address exemption above exists for MMIO base addresses, and none of
+  those is zero; with no way to write a null there is nothing to test for.
+  "Absent" is a closed variant whose case carries `&T`
+  (`variant Found { Some(&Node); None; }`), or a sentinel object returned by
+  reference, which is how the kernel already spells it. A null that arrives
+  from a runtime integer cast is not a typing question: that cast needs
+  `unsafe` above, and is a mint-site obligation.
 - Casting **any** value -- literal-derived or not -- to an affine/linear
   opaque handle pointer requires `unsafe`, with the one exception of a real
   object's address (`&x`) (GitHub issue #325, narrowing #218's own

@@ -4579,7 +4579,7 @@ let infer_tests = [
     (expect_ok "affine opaque struct Token;
                 fn release(t: sink *Token) {}
                 fn f() !{unsafe} {
-                    let t: *Token = unsafe { 0 as usize as *Token };
+                    let t: *Token = unsafe { 1 as usize as *Token };
                     release(t);
                 }");
 
@@ -4734,7 +4734,57 @@ let infer_tests = [
 
   Alcotest.test_case "a literal cast to an ordinary pointer remains accepted" `Quick
     (expect_ok
+       "fn f() { let p: *u32 = 4096 as usize as *u32; }");
+
+  (* GitHub issue #659: a null raw pointer can be neither written nor tested
+     in safe code. The replacements are a closed variant carrying &T and a
+     sentinel object returned by reference. *)
+  Alcotest.test_case "a literal zero cast to a raw pointer is refused (issue #659)" `Quick
+    (expect_type_error "writes a null raw pointer"
+       "fn f() { let p: *u32 = 0 as *u32; }");
+
+  Alcotest.test_case "a literal zero through an integer cast is refused (issue #659)" `Quick
+    (expect_type_error "writes a null raw pointer"
        "fn f() { let p: *u32 = 0 as usize as *u32; }");
+
+  Alcotest.test_case "a const zero cast to a raw pointer is refused (issue #659)" `Quick
+    (expect_type_error "writes a null raw pointer"
+       "const NONE: usize = 0;
+        fn f() { let p: *u32 = NONE as *u32; }");
+
+  Alcotest.test_case "a literal zero cast to an io pointer is refused inside unsafe too (issue #659)" `Quick
+    (expect_type_error "writes a null raw pointer"
+       "fn f() !{unsafe} { let p: *io u32 = unsafe { 0 as *io u32 }; }");
+
+  Alcotest.test_case "comparing a raw pointer with zero is refused, either side (issue #659)" `Quick
+    (expect_type_error "tests for a null"
+       "fn f(p: *u32) -> bool { return p == 0; }");
+
+  Alcotest.test_case "comparing zero with a raw pointer is refused (issue #659)" `Quick
+    (expect_type_error "tests for a null"
+       "fn f(p: *u32) -> bool { return 0 != p; }");
+
+  Alcotest.test_case "pointer identity, a non-zero literal address and an integer zero test stay accepted (issue #659)" `Quick
+    (expect_ok
+       "fn same(a: *u32, b: *u32) -> bool { return a == b; }
+        fn base() -> *u32 { let p: *u32 = 4096 as *u32; return p; }
+        fn empty(n: usize) -> bool { return n == 0; }");
+
+  Alcotest.test_case "a variant carrying &T is the accepted way to say absent (issue #659)" `Quick
+    (expect_ok
+       "struct Node { value: usize; }
+        let mut only: Node;
+        variant Found { Some(&Node); None; }
+        fn lookup(flag: bool) -> Found {
+            if (flag) { return Found::Some(&only); }
+            return Found::None;
+        }
+        fn use_it(flag: bool) -> usize {
+            match lookup(flag) {
+                Found::Some(node) => { return node.value; }
+                Found::None => { return 0; }
+            }
+        }");
 
   (* -- GitHub issue #218 follow-up: checked slice-to-struct-pointer casts - *)
 
