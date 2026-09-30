@@ -200,8 +200,8 @@ edited by both roles and require frequent rebasing:
 
 Rebase onto the upstream `main` before starting an issue and after each
 commit. `git fetch` and `git rebase` are yours to run and need no permission;
-only pushing is the maintainer's. One commit's worth of conflict can be
-understood on the spot; twelve cannot.
+pushing goes only through the `land` skill (see the safety boundary below).
+One commit's worth of conflict can be understood on the spot; twelve cannot.
 
 ## Required routing
 
@@ -227,6 +227,12 @@ entrypoint under `.agents/skills/`; Claude Code has a matching entrypoint under
 - `profile-qemu`: for QEMU/AArch64 PC-sampling or hot-spot measurement.
 - `github-workflow`: for GitHub issue operations, Found-by selection, and
   issue-closing commits.
+- `land`: to publish finished work -- rebase, a clean `make allcheck` on the
+  rebased HEAD, and a push of exactly that HEAD when it is green.
+- `defect-followup`: right after fixing any defect, before landing it --
+  root cause, regression test, and prevention of the class.
+- `session-audit`: before a session ends; propose it yourself when the
+  context grows large or several issues have closed.
 
 If UART remains responsive during a kernel failure, use DDB before adding
 prints to scheduler, exception, IRQ, VM, or process paths. QEMU cannot validate
@@ -234,10 +240,15 @@ physical cache coherence, real interrupt timing, or hardware concurrency.
 
 ## Git and GitHub safety boundary
 
-Agents stage and commit each completed unit without waiting to be asked, but
-must never run `git push`, merge remotely, or publish commits. The human
-maintainer owns that gate. Use `gh` for GitHub operations; do not use GitHub
-connectors or MCP tools.
+Agents stage and commit each completed unit without waiting to be asked.
+Publishing is gated (maintainer, 2026-09-30): an agent pushes only by running
+`scripts/land.sh` through the `land` skill. That pushes a fast-forward of
+`main`, and only the exact commit a clean `make allcheck` passed after
+rebasing onto origin main. Never force-push, merge remotely, or push
+anything else; a direct `git push` stays denied in the permission settings.
+When the hardware lanes cannot run because a board is absent, stop and wait
+for the maintainer rather than pushing on a lesser check. Use `gh` for GitHub
+operations; do not use GitHub connectors or MCP tools.
 
 Use the identity of the agent making the commit, applied only to the individual
 `git commit` invocation. Never change repository or global Git identity:

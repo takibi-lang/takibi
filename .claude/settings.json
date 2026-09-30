@@ -5,7 +5,10 @@
       "Bash(gh issue comment:*)",
       "Bash(gh issue create:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(scripts/land.sh)",
+      "Bash(./scripts/land.sh)",
+      "Bash(bash scripts/land.sh)"
     ],
     "deny": [
       "Bash(git push:*)"

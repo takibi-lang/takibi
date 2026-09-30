@@ -1,6 +1,6 @@
 ---
 name: github-workflow
-description: Apply the Takibi Git and GitHub workflow when creating or updating an issue, recording a design decision, preparing a commit that closes an issue, choosing a Found-by value, or finishing work that must be committed. Use for gh issue operations and issue-closing commits. Never push or merge.
+description: Apply the Takibi Git and GitHub workflow when creating or updating an issue, recording a design decision, preparing a commit that closes an issue, choosing a Found-by value, or finishing work that must be committed. Use for gh issue operations and issue-closing commits. Push only through the land skill.
 ---
 
 # Takibi Git and GitHub workflow

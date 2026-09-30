@@ -1,15 +1,17 @@
 ---
 name: github-workflow
-description: Apply the Takibi Git and GitHub workflow when creating or updating an issue, recording a design decision, preparing a commit that closes an issue, choosing a Found-by value, or finishing work that must be committed. Use for gh issue operations and issue-closing commits. Never push or merge.
+description: Apply the Takibi Git and GitHub workflow when creating or updating an issue, recording a design decision, preparing a commit that closes an issue, choosing a Found-by value, or finishing work that must be committed. Use for gh issue operations and issue-closing commits. Push only through the land skill.
 ---
 
 # Takibi Git and GitHub workflow
 
 ## Authority boundary
 
-Agents stage and commit completed work locally. Never run `git push`, merge a
-remote branch, or otherwise publish commits; the human maintainer owns that
-gate. A skill does not expand tool permissions or user authorization.
+Agents stage and commit completed work locally. Publish only through the
+`land` skill: a fast-forward push of `main` for the exact commit a clean
+`make allcheck` passed after rebasing onto `origin/main` (maintainer,
+2026-09-30). Never force-push, merge a remote branch, or publish anything
+else. A skill does not expand tool permissions or user authorization.
 
 Integrating is not publishing: `git fetch` and `git rebase` onto the upstream
 `main` are the agent's own to run, and AGENTS.md asks for them before an issue
@@ -129,4 +131,4 @@ the agent making the commit, applied only to that invocation:
 
 Set author and committer environment variables on `git commit`; never change
 repository or global `user.name` or `user.email`. After committing, report the
-commit hash and verification performed, and do not push.
+commit hash and verification performed. Push only through `land`.
