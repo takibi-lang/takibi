@@ -1,0 +1,49 @@
+// The syscall numbers a process reached that this kernel does not
+// implement, and the first process to reach each (GitHub issue #640).
+//
+// The dispatcher answers such a number with ENOSYS and nothing else, so a
+// missing syscall used to name itself only to someone with a debugger
+// (#627). Writing a line to the UART was tried and withdrawn: it landed in
+// the middle of ash's output and broke the lanes that compare it exactly.
+// This table is the quiet alternative. Recording touches no device; the
+// DDB `unimpl` command and the integration lanes read it.
+//
+// Current limitations (2026-09-30):
+// - THE FIRST CALLER ONLY. Later callers of a number are not counted. What
+//   the table answers is "which numbers were reached, and who to ask", and
+//   a count would not change either answer.
+// - NUMBERS AT OR ABOVE SYSCALL_UNIMPLEMENTED_MAX ARE NOT RECORDED. Linux
+//   AArch64 numbers end near 450, so the bound is slack rather than a
+//   cut-off, and record() says so by returning false.
+// - THE SLOT CLAIM IS AN ATOMIC COMPARE-EXCHANGE, so the file does not rely
+//   on the migration gate keeping unimplemented numbers on core 0. It is
+//   claimed once per boot and never released.
+
+use "kernel/lib/execution_model.tkb";
+
+const SYSCALL_UNIMPLEMENTED_MAX: usize = 512;
+
+// The first pid to reach each number; 0 means "not reached", and no
+// process has pid 0.
+private let mut syscall_unimplemented_first_pid: [usize; SYSCALL_UNIMPLEMENTED_MAX];
+
+// Returns true when the number fits the table (whether or not it was
+// already claimed).
+fn syscall_unimplemented_record(number: usize, pid: usize) -> bool !{unsafe} {
+    if (number < SYSCALL_UNIMPLEMENTED_MAX) {
+        let address: usize = (&syscall_unimplemented_first_pid[number]) as usize;
+        let claimed: bool = unsafe {
+            atomic_compare_exchange_acquire(address, 0, pid)
+        };
+        return true;
+    }
+    return false;
+}
+
+// The first pid to reach `number`, or 0 when it was not reached. Read by
+// DDB with the world stopped and by nothing on a syscall path.
+fn syscall_unimplemented_first_pid_of(number: {0..<SYSCALL_UNIMPLEMENTED_MAX as usize})
+        -> usize !{unsafe} {
+    let address: usize = (&syscall_unimplemented_first_pid[number]) as usize;
+    return unsafe { atomic_load_acquire(address) };
+}

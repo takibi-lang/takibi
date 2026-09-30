@@ -82,6 +82,12 @@ ATOMIC_ALLOWED = {
     "kernel/fd_table.tkb":
         "the shared-object contention probe lives in this file, because the "
         "retain/release it exercises are private to it",
+    "kernel/syscall_unimplemented.tkb":
+        "GitHub issue #640: a write-once table, one compare-exchange per "
+        "syscall number to claim the first-caller slot and an acquire load "
+        "to read it. It is recorded on the syscall path and read by DDB with "
+        "the world stopped, so a lock would put a wait on a path that must "
+        "stay quiet",
     "kernel/pool_contention_evidence.tkb": "two-core contention probe",
     "kernel/freelist_contention_evidence.tkb": "two-core contention probe",
     "kernel/page_contention_evidence.tkb": "two-core contention probe",

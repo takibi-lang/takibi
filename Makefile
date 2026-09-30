@@ -363,6 +363,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/kernel/syscall.tkb \
 	kernel/kernel/syscall_test_evidence.tkb \
 	kernel/kernel/syscall_test_lifecycle.tkb \
+	kernel/kernel/syscall_unimplemented.tkb \
 	kernel/kernel/tag_contention_evidence.tkb \
 	kernel/kernel/tcp_connection_contention_evidence.tkb \
 	kernel/kernel/workload_evidence.tkb \

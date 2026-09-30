@@ -3,8 +3,10 @@
 Every syscall number `kernel_syscall_dispatch` (`kernel/kernel/syscall.tkb`)
 recognizes, what it actually does, and why. Anything not listed here falls
 through to the final `return (1, LINUX_ENOSYS);` and is Unsupported by
-design. This file exists so that state is documented rather than silently
-true.
+design. The first process to reach each such number is recorded quietly and
+read with the DDB `unimpl` command; the DDB lane requires the table to be
+empty at its stop. This file exists so that state is documented rather than
+silently true.
 
 Reached-by-BusyBox column reflects the real, traced integration this kernel
 runs: pinned Alpine `busybox-static`/`busybox-extras` 1.37.0-r31 (ash +
@@ -64,6 +66,7 @@ runs: pinned Alpine `busybox-static`/`busybox-extras` 1.37.0-r31 (ash +
 | 201 | listen | Implemented | |
 | 202/242 | accept/accept4 | Implemented | takes one bounded step toward the three-way handshake, then returns the physical RX capability. An incomplete handshake remains on the listener; the caller blocks on `ProcessWaitReason::NetRx` and retries the same syscall after a timer wake. This lets a child on another CPU use the RX capability while the parent waits. An incomplete handshake does not return `EAGAIN` to userspace |
 | 205 | getpeername | Implemented | fixed `AF_INET` reply (single-peer-per-connection model) |
+| 206 | sendto | Partial | with no destination address (`dest_addr` NULL) it is `write` on the same descriptor, which is what musl's `send` issues, and BusyBox httpd reaches it; `flags` are ignored. A destination address returns `ENOSYS`, since every socket here is a connected stream |
 | 208 | setsockopt | Partial | `optval`/`optlen` validated through the user-memory boundary when `optlen != 0`; no `level`/`optname` is actually honored, but none is meaningfully actionable in this kernel's single-listener-per-port/single-connection model either (the two real calls reached, `SO_REUSEADDR` on the listener and `SO_KEEPALIVE` on each accepted connection, are both genuinely no-ops here) |
 | 210 | shutdown | Implemented | `SHUT_WR` on fd 1, both direct and inetd response modes |
 | 214 | brk | Implemented | real heap-break growth within the fixed 512 KiB process arena; a break that would reach a page an anonymous mapping holds is refused and the old break returned, as on Linux |

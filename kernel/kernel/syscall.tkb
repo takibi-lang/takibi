@@ -11,6 +11,7 @@ use "kernel/net/tcp.tkb";
 use "kernel/kernel/fd_table.tkb";
 use "kernel/kernel/syscall_test_evidence.tkb";
 use "kernel/kernel/syscall_test_lifecycle.tkb";
+use "kernel/kernel/syscall_unimplemented.tkb";
 use "kernel/kernel/workload_evidence.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/occupancy.tkb";
@@ -4875,6 +4876,15 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         return syscall_io_action(syscall_write_segment(x0, x1, x2));
     }
 
+    // sendto(fd, buf, len, flags, dest_addr, addrlen) with no destination is
+    // write(fd, buf, len): musl's send() is exactly that call, and every
+    // socket here is a connected stream. flags are ignored, as no flag
+    // (MSG_NOSIGNAL aside) changes what a connected write does here. A
+    // destination address on a stream socket is left to ENOSYS below.
+    if (number == 206 && x4 == 0) {
+        return syscall_io_action(syscall_write_segment(x0, x1, x2));
+    }
+
     if (number == 56) {
         // openat(dirfd, pathname, flags): absolute paths start at the ext2
         // root; relative paths use an open directory fd (or AT_FDCWD, whose
@@ -7004,6 +7014,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
         }
     }
+    // GitHub issue #640: no arm above took this number. Record who reached
+    // it, quietly -- a UART line here broke the lanes that compare ash's
+    // output exactly.
+    let recorded: bool = syscall_unimplemented_record(
+        number, kernel_process_current_pid());
     return SyscallAction::Resume(LINUX_ENOSYS);
 }
 

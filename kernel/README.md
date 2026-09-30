@@ -279,7 +279,7 @@ The existing TCP UART/miniterm data path is unchanged. The kernel prints
 `ddb>` and accepts the following commands.
 <!-- DDB-COMMAND-INVENTORY-START -->
 `oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `stacks`; `wait`;
-`proc PID`; `bt [PID|cpu N]`; `trace`; `events`; `xk ADDRESS [COUNT]`;
+`proc PID`; `bt [PID|cpu N]`; `trace`; `events`; `unimpl`; `xk ADDRESS [COUNT]`;
 `xp PHYSICAL [COUNT]`; `xu PID ADDRESS [COUNT]`; `help`; `continue`.
 <!-- DDB-COMMAND-INVENTORY-END -->
 `wait` derives who is waiting for what from that same snapshot: a blocked
@@ -841,7 +841,7 @@ scheduler, sleep, filesystem, network, or ordinary logging dependency. Its
 public command inventory follows.
 <!-- DDB-COMMAND-INVENTORY-START -->
 `oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `stacks`; `wait`;
-`proc PID`; `bt [PID|cpu N]`; `trace`; `events`; `xk ADDRESS [COUNT]`;
+`proc PID`; `bt [PID|cpu N]`; `trace`; `events`; `unimpl`; `xk ADDRESS [COUNT]`;
 `xp PHYSICAL [COUNT]`; `xu PID ADDRESS [COUNT]`; `help`; `continue`.
 <!-- DDB-COMMAND-INVENTORY-END -->
 `help` lists the same inventory.

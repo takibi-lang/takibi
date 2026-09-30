@@ -16,7 +16,7 @@ inspection, and resume.
 
 <!-- DDB-COMMAND-INVENTORY-START -->
 `oops`; `regs`; `intr`; `sched`; `current`; `vm`; `fds`; `ps`; `stacks`; `wait`;
-`proc PID`; `bt [PID|cpu N]`; `trace`; `events`; `xk ADDRESS [COUNT]`;
+`proc PID`; `bt [PID|cpu N]`; `trace`; `events`; `unimpl`; `xk ADDRESS [COUNT]`;
 `xp PHYSICAL [COUNT]`; `xu PID ADDRESS [COUNT]`; `help`; `continue`.
 <!-- DDB-COMMAND-INVENTORY-END -->
 
@@ -57,6 +57,9 @@ inspection, and resume.
 - `trace`: the typed process-lifecycle tail.
 - `events`: per-CPU diagnostic rings. Read CPUs independently; no total order
   is claimed across CPUs. Treat `damaged` and `overwritten` as evidence loss.
+- `unimpl`: the syscall numbers processes reached that the dispatcher has no arm
+  for, with the first pid to reach each. It is recorded without UART output;
+  an empty table prints `count=0`.
 - `xk ADDRESS [COUNT]`, `xp PHYSICAL [COUNT]`, `xu PID ADDRESS [COUNT]`:
   fault-contained reads of managed ordinary RAM. They reject MMIO and non-RAM
   storage rather than performing a potentially state-changing read.

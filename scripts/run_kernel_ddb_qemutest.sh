@@ -300,6 +300,7 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         ! grep -q '^ddb: bt test invalid saved contexts rejected$' "$UART_LOG" ||
         ! grep -q '^ddb: trace count=' "$UART_LOG" ||
         ! grep -q '^ddb: events cpu=0 count=' "$UART_LOG" ||
+        ! grep -q '^ddb: unimpl count=0$' "$UART_LOG" ||
         ! grep -Eq "^ddb: xk address=0x0*$KERNEL_READ_ADDRESS count=2$" "$UART_LOG" ||
         [ "$(grep -c '^ddb: xk byte address=0x.* value=0x' "$UART_LOG")" -lt 2 ] ||
         [ "$(grep -c '^ddb: usage: xk|xp HEX_ADDRESS \[COUNT_1_TO_64\]$' "$UART_LOG")" -ne 2 ] ||
@@ -320,7 +321,7 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         [ "$(grep -c '^ddb: usage: xu PID HEX_ADDRESS \[COUNT_1_TO_64\]$' "$UART_LOG")" -ne 2 ] ||
         ! grep -q '^ddb: xu pid not captured$' "$UART_LOG" ||
         ! grep -q '^ddb: xu unmapped address=0x0000000070000000$' "$UART_LOG" ||
-        ! grep -q '^commands: oops regs intr sched current vm fds ps stacks wait proc PID bt \[PID|cpu N\] trace events xk ADDRESS \[COUNT\] xp PHYSICAL \[COUNT\] xu PID ADDRESS \[COUNT\] help continue$' "$UART_LOG" ||
+        ! grep -q '^commands: oops regs intr sched current vm fds ps stacks wait proc PID bt \[PID|cpu N\] trace events unimpl xk ADDRESS \[COUNT\] xp PHYSICAL \[COUNT\] xu PID ADDRESS \[COUNT\] help continue$' "$UART_LOG" ||
         ! grep -Eq '^ddb: wait current=[0-9]+ state=[a-z-]+ reason=[a-z-]+( queued=[0-9]+( low-water=[0-9]+)?| frame-pending=(yes|no|unknown) connection-pending=(yes|no|unknown))? awaited=[01]$' "$UART_LOG" ||
         ! grep -Eq '^ddb: wait edges=[0-9]+ blocked=[0-9]+ unknown=[0-9]+ truncated=[01]$' "$UART_LOG" ||
         ! grep -q '^ddb: wait current=3 state=running reason=net-rx frame-pending=no connection-pending=unknown awaited=1$' "$UART_LOG" ||
