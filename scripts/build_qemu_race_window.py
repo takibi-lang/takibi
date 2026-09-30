@@ -75,7 +75,7 @@ WINDOWS = {
     # drop the marker, or the process is later Ready and refused everywhere.
     "603": {
         "spin": ("kernel/process.tkb",
-                 "fn kernel_process_block_wait4(current_sp: usize) -> usize {\n",
+                 "fn kernel_process_block_wait4(current: FrameRef) -> BlockSwitch {\n",
                  False),
         # wait4's decision lives in pending_block_reason now, and only a
         # block publishes a wait, so an abandoned block leaves nothing. The
@@ -83,11 +83,11 @@ WINDOWS = {
         # single wait_reason field did, and drops the clear.
         "check": [
             ("kernel/syscall.tkb",
-             "        if (kernel_process_current_pending_block_reason() ==\n"
-             "                ProcessWaitReason::ChildExit) {\n"
-             "            kernel_process_current_set_pending_block(\n"
-             "                ProcessWaitReason::None, 0);\n"
-             "        }\n",
+             "            if (kernel_process_current_pending_block_reason() ==\n"
+             "                    ProcessWaitReason::ChildExit) {\n"
+             "                kernel_process_current_set_pending_block(\n"
+             "                    ProcessWaitReason::None, 0);\n"
+             "            }\n",
              ""),
             ("kernel/process.tkb",
              "            .pending_block_reason = reason;\n",

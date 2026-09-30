@@ -183,6 +183,23 @@ edit made on purpose (`--lower` makes it). The budget names a reason for each
 file. It counts sites, not distinct pointers, and it does not say which are
 safe; choosing which files are mint sites is the later stages of the design.
 
+A saved exception frame is a `FrameRef` (`kernel/arch/arm64/kernel/frame_ref.tkb`),
+one private `usize`, so one register at the assembly boundary. Its words are
+read and written only through accessors named for what they hold, each bounded
+by a refined index, and the generic word access is private to that file. Three
+functions make one, and each trusts something the compiler cannot see:
+`frame_ref_from_entry` believes an assembly or generated entry's x0 is the frame
+it just saved, `frame_ref_from_saved` believes a process record's `saved_sp`
+is the frame that process last left the CPU with, and `maybe_frame_from_entry`
+is the first for the syscall dispatcher, which boot probes call with no frame.
+`scripts/check_stack_proof_states.py` holds the callers of each to a declared
+set and lists the few seams where a frame address is still a bare `usize` (an
+assembly ABI, a stack-bound comparison, the debugger). What a block's result
+was is a closed variant (`BlockSwitch`, `TimerSwitch`, `ExitSwitch`,
+`CloneInstall`), not an integer with sentinel values; only the assembly's own
+encoding of an exit, `SyscallAction::CloneParent`, still has one, and
+`kernel_syscall_clone_parent_action` is the single place that writes it.
+
 The classifier is deliberately mechanical. A block containing several kinds
 of operation receives one primary category, so the detailed list is a review
 queue rather than a semantic proof. A new explicit escape surface must either

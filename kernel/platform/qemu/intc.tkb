@@ -133,8 +133,8 @@ fn irq_uart_rx_unmask() !{unsafe} {
     *uart0_imsc = (1 << 4) | (1 << 6) | (1 << 9); // RXIM | RTIM | BEIM
 }
 
-fn platform_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
-        -> usize !{interrupt, unsafe} {
+fn platform_irq_dispatch_inner(frame: FrameRef, lower_el: bool)
+        -> FrameRef !{interrupt, unsafe} {
     let gicc_iar: *io u32 = unsafe { (qemu_gicc_base + 0x0C) as *io u32 };
     let gicc_eoir: *io u32 = unsafe { (qemu_gicc_base + 0x10) as *io u32 };
     // GitHub issue #632: GICC_IAR is not the interrupt number alone. For an
@@ -153,9 +153,9 @@ fn platform_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
         // GitHub issue #505: the pen, and the root this core publishes on
         // the way into it -- one shared body, because the two platforms
         // differ here only in the SGI id and the EOI register.
-        kernel_world_stop_serve(frame_sp);
+        kernel_world_stop_serve(frame);
         *gicc_eoir = iar;
-        return frame_sp;
+        return frame;
     }
     workload_profile_irq_enter();
 
@@ -167,13 +167,11 @@ fn platform_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
     // GICC_IAR is read before the branch, not after: acknowledging is the
     // interrupted core's own job on its own banked interface.
     if (cpu_id() != 0) {
-        let mut next_sp: usize = frame_sp;
-        if (id == qemu_timer_gic_intid) {
-            next_sp = kernel_secondary_timer_schedule(frame_sp, lower_el);
-        }
+        let switch: TimerSwitch = kernel_secondary_tick(
+            frame, lower_el, id == qemu_timer_gic_intid);
         *gicc_eoir = iar;
         workload_profile_irq_exit();
-        return kernel_timer_tick_leave(next_sp);
+        return kernel_timer_tick_leave(switch);
     }
 
     let mut debug_break: bool = false;
@@ -192,7 +190,7 @@ fn platform_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
         // out of the frame this entry already saved, and acknowledges the
         // PMU overflow before the EOI below -- the overflow status is what
         // holds the interrupt line asserted.
-        profile_sample_irq(frame_sp);
+        profile_sample_irq(frame);
     } else if (id == qemu_timer_gic_intid) {
         timer_irq_handler();
         // GitHub issue #453: this branch is why most of kernel/ can share
@@ -204,26 +202,30 @@ fn platform_irq_dispatch_inner(frame_sp: usize, lower_el: bool)
         // nine files assert it. Changing this line means changing that
         // constant, which will tell you which nine.
         if (lower_el) {
-            kernel_stack_guard_check_interrupt(frame_sp);  // issue #375
+            kernel_stack_guard_check_interrupt(frame_ref_address(frame));  // issue #375
             kernel_log_peer_console_drain();  // issue #534
-            let next_sp: usize = kernel_process_timer_schedule(frame_sp);
+            let switch: TimerSwitch = kernel_process_timer_schedule(frame);
             *gicc_eoir = iar;
             workload_profile_irq_exit();
-            return kernel_timer_tick_leave(next_sp);
+            return kernel_timer_tick_leave(switch);
         }
         kernel_process_request_reschedule();
     }
 
     *gicc_eoir = iar;
     workload_profile_irq_exit();
-    if (debug_break) { kernel_ddb_enter(frame_sp, 1, id as usize); }
-    return frame_sp;
+    if (debug_break) {
+        kernel_ddb_enter(frame_ref_address(frame), 1, id as usize);
+    }
+    return frame;
 }
 
 fn platform_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
-    return platform_irq_dispatch_inner(frame_sp, false);
+    return frame_ref_address(
+        platform_irq_dispatch_inner(frame_ref_from_entry(frame_sp), false));
 }
 
 fn platform_el0_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
-    return platform_irq_dispatch_inner(frame_sp, true);
+    return frame_ref_address(
+        platform_irq_dispatch_inner(frame_ref_from_entry(frame_sp), true));
 }

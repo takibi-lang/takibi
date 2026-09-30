@@ -292,8 +292,8 @@ fn kernel_secondary_main(context: usize) !{unsafe} {
             }
             match kernel_process_secondary_start() {
                 ProcessSecondaryStart::Idle => {}
-                ProcessSecondaryStart::Frame(next_sp) => {
-                    el0_context_resume(next_sp);
+                ProcessSecondaryStart::Frame(next) => {
+                    el0_context_resume(next);
                 }
             }
             kernel_activity_set(KernelActivity::IdleLoop);
@@ -363,8 +363,8 @@ fn kernel_core0_idle_loop() {
         kernel_log_peer_drain();
         match kernel_process_secondary_start() {
             ProcessSecondaryStart::Idle => {}
-            ProcessSecondaryStart::Frame(next_sp) => {
-                el0_context_resume(next_sp);
+            ProcessSecondaryStart::Frame(next) => {
+                el0_context_resume(next);
             }
         }
         kernel_activity_set(KernelActivity::IdleLoop);
@@ -376,11 +376,14 @@ fn kernel_core0_idle_loop() {
 // interrupt, with the value kernel_process_timer_schedule returned. The
 // tick gave the process back (GitHub issue #582), so leave the IRQ stack
 // for this CPU's idle loop rather than returning to a frame no longer ours.
-fn kernel_timer_tick_leave(next_sp: usize) -> usize !{interrupt} {
-    if (next_sp != PROCESS_TICK_TO_IDLE) { return next_sp; }
-    if (cpu_id() != 0) { kernel_secondary_idle_tick_enter(); }
-    kernel_core0_idle_tick_enter();
-    return next_sp;
+fn kernel_timer_tick_leave(switch: TimerSwitch) -> FrameRef !{interrupt} {
+    match switch {
+        TimerSwitch::Resume(frame) => { return frame; }
+        TimerSwitch::ToIdle => {
+            if (cpu_id() != 0) { kernel_secondary_idle_tick_enter(); }
+            kernel_core0_idle_tick_enter();
+        }
+    }
 }
 
 // Where the two enters above land, on the CPU's idle stack. The process's
@@ -398,17 +401,27 @@ fn kernel_core0_idle_tick_reenter() {
 
 // Shared timer policy; each platform still acknowledges its own GIC source
 // after this returns. Only a lower-EL interrupt may replace the saved frame.
-fn kernel_secondary_timer_schedule(frame_sp: usize, lower_el: bool)
-        -> usize !{interrupt} {
+fn kernel_secondary_timer_schedule(frame: FrameRef, lower_el: bool)
+        -> TimerSwitch !{interrupt} {
     secondary_timer_tick();
     // GitHub issue #572: a tick on a CPU where a busy worker waits.
     workload_busy_note_tick();
     if (lower_el) {
-        kernel_stack_guard_check_interrupt(frame_sp);
-        return kernel_process_timer_schedule(frame_sp);
+        kernel_stack_guard_check_interrupt(frame_ref_address(frame));
+        return kernel_process_timer_schedule(frame);
     }
     kernel_process_request_reschedule();
-    return frame_sp;
+    return TimerSwitch::Resume(frame);
+}
+
+// What a secondary core does with an interrupt that is not the world-stop
+// SGI: its timer tick runs the shared policy, anything else resumes the frame.
+// The platform acknowledges the source afterwards and then leaves for idle if
+// the tick said so (kernel_timer_tick_leave).
+fn kernel_secondary_tick(frame: FrameRef, lower_el: bool, is_timer: bool)
+        -> TimerSwitch !{interrupt} {
+    if (is_timer) { return kernel_secondary_timer_schedule(frame, lower_el); }
+    return TimerSwitch::Resume(frame);
 }
 
 // Does the secondary core's tick advance while core 0 CANNOT take an

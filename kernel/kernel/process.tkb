@@ -2950,10 +2950,11 @@ private fn scheduled_process_constructing_state(
 private fn scheduled_process_finish_clone(
         owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Constructing],
-        frame_sp: usize)
+        frame: FrameRef)
         -> ScheduledProcessState[process, ProcessState::Running] {
     scheduled_process_state_drop(state);
-    scheduled_process_record_at(owner.pool_index).saved_sp = frame_sp;
+    scheduled_process_record_at(owner.pool_index).saved_sp =
+        frame_ref_address(frame);
     scheduled_process_record_at(owner.pool_index).state = ProcessSlotState::Running;
     return scheduled_process_running_state(owner);
 }
@@ -3596,7 +3597,8 @@ private fn execution_here() -> *ExecutionState {
 }
 
 private fn kernel_process_frame_belongs_to(
-        handle: ProcessHandle, frame_sp: usize) -> bool {
+        handle: ProcessHandle, frame: FrameRef) -> bool {
+    let frame_sp: usize = frame_ref_address(frame);
     let mut bottom: usize = 0;
     let mut top: usize = 0;
     if (handle.pool_index == 0) {
@@ -3632,7 +3634,7 @@ private fn kernel_process_frame_belongs_to(
 const TTBR0_BADDR_MASK: usize = 0x0000FFFFFFFFFFFE;
 
 private fn kernel_process_root_authorities_check(incoming: ProcessHandle,
-                                                 frame_sp: usize) {
+                                                 frame: FrameRef) {
     let slot: usize = incoming.pool_index;
     let record_l1: usize = address_space_l1_physical(slot);
     let hardware_l1: usize = crash_snapshot_read_ttbr0_el1() & TTBR0_BADDR_MASK;
@@ -3661,7 +3663,7 @@ private fn kernel_process_root_authorities_check(incoming: ProcessHandle,
         uart_put_hex(address_space_l1_physical(target));
         kernel_boot_log("\n");
     }
-    kernel_syscall_fail_stop(frame_sp);
+    kernel_syscall_fail_stop(frame_ref_address(frame));
 }
 
 fn kernel_process_stack_interrupt_depart() {
@@ -3686,6 +3688,7 @@ fn kernel_process_stack_interrupt_depart() {
 // current_handle has logically moved to the incoming one. This is the
 // physical handoff boundary that a run-lock release alone cannot express.
 fn kernel_process_stack_switch_complete(frame_sp: usize) {
+    let mut frame: FrameRef = frame_ref_from_entry(frame_sp);
     let core: usize = cpu_id();
     if (core >= KERNEL_MAX_CORES) {
         kernel_syscall_fail_stop(frame_sp);
@@ -3716,7 +3719,7 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
         scheduled_process_state_of(incoming) != ProcessSlotState::Running ||
         scheduled_process_record_of(incoming).stack_owner_cpu !=
             PROCESS_STACK_UNOWNED ||
-        kernel_process_frame_belongs_to(incoming, frame_sp) == false) {
+        kernel_process_frame_belongs_to(incoming, frame) == false) {
         process_run_unlock(guard);
         kernel_syscall_fail_stop(frame_sp);
     }
@@ -3737,7 +3740,7 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
     }
     // Last, after the deferred reap: that reap is the path that left the
     // target at root 0 in #437.
-    kernel_process_root_authorities_check(incoming, frame_sp);
+    kernel_process_root_authorities_check(incoming, frame);
     // Back to EL0: the kernel is doing nothing on this CPU's behalf.
     kernel_activity_set(KernelActivity::None);
 }
@@ -4663,7 +4666,7 @@ fn kernel_process_core0_idle_was_seen(
 // process may not run on core 0, publish core 0 as having no current process
 // and keep the frame; kernel_process_stack_idle_yield makes it Ready once
 // core 0 is off its stack.
-fn kernel_process_core0_leave_excluded(frame_sp: usize) -> bool {
+fn kernel_process_core0_leave_excluded(frame: FrameRef) -> bool {
     if (cpu_id() != 0) { return false; }
     let guard = process_run_lock();
     if (execution_here().current_live == false) {
@@ -4686,7 +4689,7 @@ fn kernel_process_core0_leave_excluded(frame_sp: usize) -> bool {
         process_run_unlock(guard);
         return false;
     }
-    scheduled_process_record_at(slot).saved_sp = frame_sp;
+    scheduled_process_record_at(slot).saved_sp = frame_ref_address(frame);
     execution_here().current_live = false;
     execution_here().scheduler_enabled = false;
     execution_here().reschedule_pending = false;
@@ -4720,7 +4723,7 @@ fn kernel_process_reschedule_if_excluded_here() {
 // may NOT run it, the reason is the process's own affinity mask, which
 // already names where it may go; pinning it to core 0 would override the
 // mask the process just set and send it to a CPU it excluded.
-fn kernel_process_migrate_current(frame_sp: usize) -> bool {
+fn kernel_process_migrate_current(frame: FrameRef) -> bool {
     if (cpu_id() == 0) { return false; }
     let guard = process_run_lock();
     if (execution_here().current_live == false) {
@@ -4730,7 +4733,7 @@ fn kernel_process_migrate_current(frame_sp: usize) -> bool {
     let slot: usize = execution_here().current_handle.pool_index;
     let syscall_needs_core0: bool =
         kernel_process_cpu_allows_slot(cpu_id(), slot);
-    scheduled_process_record_at(slot).saved_sp = frame_sp;
+    scheduled_process_record_at(slot).saved_sp = frame_ref_address(frame);
     if (syscall_needs_core0) {
         scheduled_process_set_core0_for_call(slot, true);
     }
@@ -4917,27 +4920,27 @@ private fn kernel_process_next_ready(from: ProcessHandle, cpu: usize)
 // SP and the exception-return path installs it. So the guard's lifetime
 // does not have to survive a context switch, which is the problem Linux
 // solves with finish_task_switch.
-fn kernel_process_schedule(current_sp: usize) -> usize {
-    if (execution_here().current_live == false) { return current_sp; }
+fn kernel_process_schedule(current: FrameRef) -> FrameRef {
+    if (execution_here().current_live == false) { return current; }
     let mut from: ProcessHandle = execution_here().current_handle;
     let guard = process_run_lock();
     match kernel_process_next_ready(from, cpu_id()) {
         ProcessNextReadyResult::Missing => {
             process_run_unlock(guard);
-            return current_sp;
+            return current;
         }
         ProcessNextReadyResult::Next(to) => {
             match scheduled_process_ready_take(guard, to) {
                 ScheduledProcessReadyTakeResult::Missing => {
                     process_run_unlock(guard);
-                    return current_sp;
+                    return current;
                 }
                 ScheduledProcessReadyTakeResult::Ready(resources) => {
                     let (owner, ready) = resources;
                     let running = scheduled_process_start(owner, ready);
                     process_run_unlock(guard);
                     return kernel_process_schedule_reserved(
-                        from, owner, running, current_sp);
+                        from, owner, running, current);
                 }
             }
         }
@@ -4947,7 +4950,7 @@ fn kernel_process_schedule(current_sp: usize) -> usize {
 // Start a Ready process on a CPU that has no outgoing EL0 context yet. The
 // Ready -> Running state token is the reservation while ASID preparation may
 // drop ProcessRunGuard or stop the machine, exactly as in an ordinary switch.
-must_use variant ProcessSecondaryStart { Idle; Frame(usize); }
+must_use variant ProcessSecondaryStart { Idle; Frame(FrameRef); }
 
 private fn kernel_process_secondary_start_reserved(
         owner: sink ScheduledProcessOwner[process],
@@ -5014,14 +5017,15 @@ private fn kernel_process_secondary_start_reserved(
             workload_busy_note_selected_locked(
                 guard, scheduled_process_pid_of_handle(to));
             kernel_process_trace_handle(ProcessTraceResume, to, to, 0);
-            let next_sp: usize = scheduled_process_record_of(to).saved_sp;
+            let mut next: FrameRef =
+                frame_ref_from_saved(scheduled_process_record_of(to).saved_sp);
             if (scheduled_process_wait_reason_of(to) ==
                     ProcessWaitReason::ChildExit) {
                 scheduled_process_wait_settle(scheduled_process_record_of(to));
             }
             scheduled_process_release(owner, running);
             process_run_unlock(guard);
-            return ProcessSecondaryStart::Frame(next_sp);
+            return ProcessSecondaryStart::Frame(next);
         }
     }
 }
@@ -5158,29 +5162,29 @@ private fn kernel_process_schedule_reserved(
         from: ProcessHandle,
         owner: sink ScheduledProcessOwner[process],
         running: sink ScheduledProcessState[process, ProcessState::Running],
-        current_sp: usize) -> usize {
+        current: FrameRef) -> FrameRef {
     match process_image_prepare_activation(owner.pool_index) {
         AddressSpaceActivationPrepareResult::Invalid => {
             kernel_process_schedule_cancel_reserved(owner, running);
-            return current_sp;
+            return current;
         }
         AddressSpaceActivationPrepareResult::RolloverNeeded => {
             match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
                                    SCHEDULER_WORLD_STOP_SPINS) {
                 WorldStopResult::Busy => {
                     kernel_process_schedule_cancel_reserved(owner, running);
-                    return current_sp;
+                    return current;
                 }
                 WorldStopResult::Partial(partial) => {
                     world_stop_partial_release(partial, &kernel_world_stop);
                     kernel_process_schedule_cancel_reserved(owner, running);
-                    return current_sp;
+                    return current;
                 }
                 WorldStopResult::Complete(stopped) => {
                     if (asid_rollover_stopped(stopped)) {}
                     world_stop_release(stopped, &kernel_world_stop);
                     return kernel_process_schedule_reserved(
-                        from, owner, running, current_sp);
+                        from, owner, running, current);
                 }
             }
         }
@@ -5203,22 +5207,22 @@ private fn kernel_process_schedule_reserved(
                 let ready = scheduled_process_yield(owner, running);
                 scheduled_process_release(owner, ready);
                 process_run_unlock(guard);
-                return current_sp;
+                return current;
             }
-            scheduled_process_record_of(from).saved_sp = current_sp;
+            scheduled_process_record_of(from).saved_sp = frame_ref_address(current);
             if (kernel_process_yield_handle(guard, from) == false) {
                 process_image_cancel_activation(prepared);
                 let ready = scheduled_process_yield(owner, running);
                 scheduled_process_release(owner, ready);
                 process_run_unlock(guard);
-                return current_sp;
+                return current;
             }
             if (process_image_commit_activation(prepared) == false) {
                 if (kernel_process_start_handle(guard, from)) {}
                 let ready = scheduled_process_yield(owner, running);
                 scheduled_process_release(owner, ready);
                 process_run_unlock(guard);
-                return current_sp;
+                return current;
             }
             execution_here().current_handle = to;
             profile_timeline_schedule(
@@ -5231,14 +5235,15 @@ private fn kernel_process_schedule_reserved(
                 guard, scheduled_process_pid_of_handle(to));
             kernel_process_trace_handle(ProcessTraceSchedule, to, from, 0);
             kernel_process_trace_handle(ProcessTraceResume, to, from, 0);
-            let next_sp: usize = scheduled_process_record_of(to).saved_sp;
+            let mut next: FrameRef =
+                frame_ref_from_saved(scheduled_process_record_of(to).saved_sp);
             if (scheduled_process_wait_reason_of(to) ==
                     ProcessWaitReason::ChildExit) {
                 scheduled_process_wait_settle(scheduled_process_record_of(to));
             }
             scheduled_process_release(owner, running);
             process_run_unlock(guard);
-            return next_sp;
+            return next;
         }
     }
 }
@@ -6090,28 +6095,31 @@ fn kernel_stack_watermark_report() !{unsafe} {
     kernel_boot_log("\n");
 }
 
-fn kernel_process_timer_schedule(current_sp: usize) -> usize !{interrupt} {
-    if (execution_here().scheduler_enabled == false) { return current_sp; }
+// What the timer tick decided. `Resume` is the frame to return to, the
+// interrupted one when nothing was switched. `ToIdle` is a tick that gave the
+// interrupted process back with nothing to run in its place: the platform's
+// handler acknowledges the interrupt and then leaves for this CPU's idle loop
+// (kernel_timer_tick_leave) instead of returning to EL0.
+must_use variant TimerSwitch { Resume(FrameRef); ToIdle; }
+
+fn kernel_process_timer_schedule(current: FrameRef) -> TimerSwitch
+        !{interrupt} {
+    if (execution_here().scheduler_enabled == false) {
+        return TimerSwitch::Resume(current);
+    }
     execution_here().reschedule_pending = false;
     if (kernel_process_current_has_relative()) {
-        let next_sp: usize = kernel_process_schedule(current_sp);
-        if (next_sp != current_sp) {
+        let mut next: FrameRef = kernel_process_schedule(current);
+        if (frame_ref_address(next) != frame_ref_address(current)) {
             process_test_evidence_record_timer_switch();
-            return next_sp;
+            return TimerSwitch::Resume(next);
         }
     }
-    if (kernel_process_tick_leave_excluded(current_sp)) {
-        return PROCESS_TICK_TO_IDLE;
+    if (kernel_process_tick_leave_excluded(current)) {
+        return TimerSwitch::ToIdle;
     }
-    return current_sp;
+    return TimerSwitch::Resume(current);
 }
-
-// What kernel_process_timer_schedule returns when the tick gave the
-// interrupted process back with nothing to run in its place: the platform's
-// handler acknowledges the interrupt and then leaves for this CPU's idle
-// loop (kernel_timer_tick_leave) instead of returning to EL0. Never a valid
-// frame address.
-const PROCESS_TICK_TO_IDLE: usize = 1;
 
 // GitHub issue #582: the tick's half of the affinity gate. A process whose
 // own mask stopped naming this CPU used to keep it until its next syscall,
@@ -6125,7 +6133,7 @@ const PROCESS_TICK_TO_IDLE: usize = 1;
 // its IRQ stack and released the process's stack before dispatch ran, so
 // the Ready published below is immediately takeable, and the frame the
 // taker resumes is the one this entry saved.
-private fn kernel_process_tick_leave_excluded(frame_sp: usize) -> bool
+private fn kernel_process_tick_leave_excluded(frame: FrameRef) -> bool
         !{interrupt} {
     let guard = process_run_lock();
     if (execution_here().current_live == false ||
@@ -6136,11 +6144,11 @@ private fn kernel_process_tick_leave_excluded(frame_sp: usize) -> bool
     let mut outgoing: ProcessHandle = execution_here().current_handle;
     let slot: usize = outgoing.pool_index;
     if (slot == 0 || kernel_process_cpu_allows_slot(cpu_id(), slot) ||
-        kernel_process_frame_belongs_to(outgoing, frame_sp) == false) {
+        kernel_process_frame_belongs_to(outgoing, frame) == false) {
         process_run_unlock(guard);
         return false;
     }
-    scheduled_process_record_at(slot).saved_sp = frame_sp;
+    scheduled_process_record_at(slot).saved_sp = frame_ref_address(frame);
     // Leave its root before it can run elsewhere, as every idle entry does.
     address_space_activate_root(0);
     execution_here().current_live = false;
@@ -6148,22 +6156,22 @@ private fn kernel_process_tick_leave_excluded(frame_sp: usize) -> bool
     execution_here().reschedule_pending = false;
     if (kernel_process_yield_handle(guard, outgoing) == false) {
         process_run_unlock(guard);
-        kernel_syscall_fail_stop(frame_sp);
+        kernel_syscall_fail_stop(frame_ref_address(frame));
     }
     process_run_unlock(guard);
     return true;
 }
 
-fn kernel_process_syscall_return_schedule(current_sp: usize) -> usize {
-    if (execution_here().scheduler_enabled == false) { return current_sp; }
-    if (execution_here().reschedule_pending == false) { return current_sp; }
+fn kernel_process_syscall_return_schedule(current: FrameRef) -> FrameRef {
+    if (execution_here().scheduler_enabled == false) { return current; }
+    if (execution_here().reschedule_pending == false) { return current; }
     execution_here().reschedule_pending = false;
-    if (kernel_process_current_has_relative() == false) { return current_sp; }
-    let next_sp: usize = kernel_process_schedule(current_sp);
-    if (next_sp != current_sp) {
+    if (kernel_process_current_has_relative() == false) { return current; }
+    let mut next: FrameRef = kernel_process_schedule(current);
+    if (frame_ref_address(next) != frame_ref_address(current)) {
         process_test_evidence_record_deferred_switch();
     }
-    return next_sp;
+    return next;
 }
 
 // Block the running process and hand the CPU to the next runnable one.
@@ -6283,11 +6291,27 @@ fn kernel_process_current_set_wait4_pid(pid: usize) {
     }
 }
 
-// What kernel_process_block_current returns when the wait was published
-// Blocked with no successor to switch to: the caller leaves this process's
-// stack for the CPU's idle context instead of resuming anything. Never a
-// valid frame address.
-const PROCESS_BLOCK_TO_IDLE: usize = 1;
+// What a block came to. `Retry` is a wait that was not published (a successor
+// was claimed elsewhere, or the block would have missed its wake): the caller
+// resumes the frame it has and reruns the syscall. `ToIdle` is a wait
+// published Blocked with no successor to switch to: the caller leaves this
+// process's stack for the CPU's idle context instead of resuming anything.
+// `Switch` is the successor's frame.
+//
+// Not must_use: kernel_syscall_block_return asks whether it was a retry in two
+// branches and then matches the same value again, which a must_use (affine)
+// variant does not allow. Every function returns it, so it is not dropped.
+variant BlockSwitch { Retry; ToIdle; Switch(FrameRef); }
+
+// True when the block was not published and the caller reruns its syscall.
+fn block_switch_retried(switch: BlockSwitch) -> bool {
+    let retried: bool = match switch {
+        BlockSwitch::Retry => { true }
+        BlockSwitch::ToIdle => { false }
+        BlockSwitch::Switch(next) => { false }
+    };
+    return retried;
+}
 
 // GitHub issue #583: a wait with no Ready successor used to decline to
 // block and rerun its syscall, which is all a CPU with nowhere to idle can
@@ -6303,7 +6327,7 @@ const PROCESS_BLOCK_TO_IDLE: usize = 1;
 // parent Blocked beside a zombie.
 private fn kernel_process_block_to_idle(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock],
-        from: ProcessHandle, current_sp: usize, reason: ProcessWaitReason,
+        from: ProcessHandle, current: FrameRef, reason: ProcessWaitReason,
         trace_aux: usize) -> bool {
     if (execution_here().current_live == false ||
         scheduled_process_same_slot(execution_here().current_handle, from)
@@ -6314,7 +6338,7 @@ private fn kernel_process_block_to_idle(
         return false;
     }
     if (kernel_process_block_would_miss(guard, from, reason)) { return false; }
-    scheduled_process_record_of(from).saved_sp = current_sp;
+    scheduled_process_record_of(from).saved_sp = frame_ref_address(current);
     match scheduled_process_running_take(guard, from) {
         ScheduledProcessRunningTakeResult::Missing => { return false; }
         ScheduledProcessRunningTakeResult::Running(from_resources) => {
@@ -6331,34 +6355,34 @@ private fn kernel_process_block_to_idle(
     return true;
 }
 
-private fn kernel_process_block_current(current_sp: usize,
+private fn kernel_process_block_current(current: FrameRef,
                                         reason: ProcessWaitReason,
-                                        trace_aux: usize) -> usize {
+                                        trace_aux: usize) -> BlockSwitch {
     if (execution_here().current_live == false) {
-        return 0;
+        return BlockSwitch::Retry;
     }
     let mut from: ProcessHandle = execution_here().current_handle;
     let guard = process_run_lock();
     match kernel_process_next_ready(from, cpu_id()) {
         ProcessNextReadyResult::Missing => {
             let idle: bool = kernel_process_block_to_idle(
-                guard, from, current_sp, reason, trace_aux);
+                guard, from, current, reason, trace_aux);
             process_run_unlock(guard);
-            if (idle) { return PROCESS_BLOCK_TO_IDLE; }
-            return 0;
+            if (idle) { return BlockSwitch::ToIdle; }
+            return BlockSwitch::Retry;
         }
         ProcessNextReadyResult::Next(to) => {
             match scheduled_process_ready_take(guard, to) {
                 ScheduledProcessReadyTakeResult::Missing => {
                     process_run_unlock(guard);
-                    return 0;
+                    return BlockSwitch::Retry;
                 }
                 ScheduledProcessReadyTakeResult::Ready(resources) => {
                     let (owner, ready) = resources;
                     let running = scheduled_process_start(owner, ready);
                     process_run_unlock(guard);
                     return kernel_process_block_reserved(
-                        from, owner, running, current_sp, reason, trace_aux);
+                        from, owner, running, current, reason, trace_aux);
                 }
             }
         }
@@ -6369,30 +6393,30 @@ private fn kernel_process_block_reserved(
         from: ProcessHandle,
         owner: sink ScheduledProcessOwner[process],
         running: sink ScheduledProcessState[process, ProcessState::Running],
-        current_sp: usize, reason: ProcessWaitReason,
-        trace_aux: usize) -> usize {
+        current: FrameRef, reason: ProcessWaitReason,
+        trace_aux: usize) -> BlockSwitch {
     match process_image_prepare_activation(owner.pool_index) {
         AddressSpaceActivationPrepareResult::Invalid => {
             kernel_process_schedule_cancel_reserved(owner, running);
-            return 0;
+            return BlockSwitch::Retry;
         }
         AddressSpaceActivationPrepareResult::RolloverNeeded => {
             match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
                                    SCHEDULER_WORLD_STOP_SPINS) {
                 WorldStopResult::Busy => {
                     kernel_process_schedule_cancel_reserved(owner, running);
-                    return 0;
+                    return BlockSwitch::Retry;
                 }
                 WorldStopResult::Partial(partial) => {
                     world_stop_partial_release(partial, &kernel_world_stop);
                     kernel_process_schedule_cancel_reserved(owner, running);
-                    return 0;
+                    return BlockSwitch::Retry;
                 }
                 WorldStopResult::Complete(stopped) => {
                     if (asid_rollover_stopped(stopped)) {}
                     world_stop_release(stopped, &kernel_world_stop);
                     return kernel_process_block_reserved(
-                        from, owner, running, current_sp, reason, trace_aux);
+                        from, owner, running, current, reason, trace_aux);
                 }
             }
         }
@@ -6415,7 +6439,7 @@ private fn kernel_process_block_reserved(
                 let ready = scheduled_process_yield(owner, running);
                 scheduled_process_release(owner, ready);
                 process_run_unlock(guard);
-                return 0;
+                return BlockSwitch::Retry;
             }
             // GitHub issue #547: the last look at the terminal ring, in the
             // critical section that publishes Blocked. The RX interrupt
@@ -6429,16 +6453,16 @@ private fn kernel_process_block_reserved(
                 let ready = scheduled_process_yield(owner, running);
                 scheduled_process_release(owner, ready);
                 process_run_unlock(guard);
-                return 0;
+                return BlockSwitch::Retry;
             }
-            scheduled_process_record_of(from).saved_sp = current_sp;
+            scheduled_process_record_of(from).saved_sp = frame_ref_address(current);
             match scheduled_process_running_take(guard, from) {
                 ScheduledProcessRunningTakeResult::Missing => {
                     process_image_cancel_activation(prepared);
                     let ready = scheduled_process_yield(owner, running);
                     scheduled_process_release(owner, ready);
                     process_run_unlock(guard);
-                    return 0;
+                    return BlockSwitch::Retry;
                 }
                 ScheduledProcessRunningTakeResult::Running(from_resources) => {
                     let (from_owner, from_running) = from_resources;
@@ -6478,7 +6502,7 @@ private fn kernel_process_block_reserved(
                 let ready = scheduled_process_yield(owner, running);
                 scheduled_process_release(owner, ready);
                 process_run_unlock(guard);
-                return 0;
+                return BlockSwitch::Retry;
             }
             execution_here().current_handle = to;
             // GitHub issue #448/#469: every blocking handoff is accounted,
@@ -6486,14 +6510,15 @@ private fn kernel_process_block_reserved(
             workload_busy_note_selected_locked(
                 guard, scheduled_process_pid_of_handle(to));
             kernel_process_trace_handle(ProcessTraceResume, to, from, 0);
-            let next_sp: usize = scheduled_process_record_of(to).saved_sp;
+            let mut next: FrameRef =
+                frame_ref_from_saved(scheduled_process_record_of(to).saved_sp);
             if (scheduled_process_wait_reason_of(to) ==
                     ProcessWaitReason::ChildExit) {
                 scheduled_process_wait_settle(scheduled_process_record_of(to));
             }
             scheduled_process_release(owner, running);
             process_run_unlock(guard);
-            return next_sp;
+            return BlockSwitch::Switch(next);
         }
     }
 }
@@ -6502,9 +6527,9 @@ private fn kernel_process_block_reserved(
 // until the tick that wakes every such waiter. The caller has already put
 // the receive capability back and parked whatever it had in progress, so
 // this process is holding nothing while it waits.
-fn kernel_process_block_net(current_sp: usize) -> usize {
+fn kernel_process_block_net(current: FrameRef) -> BlockSwitch {
     return kernel_process_block_current(
-        current_sp, ProcessWaitReason::NetRx, 3);
+        current, ProcessWaitReason::NetRx, 3);
 }
 
 fn kernel_process_current_arm_deadline(deadline_ticks: usize,
@@ -6855,9 +6880,9 @@ fn kernel_process_current_caught_signal_take() -> ProcessSignalPendingResult {
         taken_signal_new(handle.pool_index, handle.generation, 17));
 }
 
-fn kernel_process_block_signal(current_sp: usize) -> usize {
+fn kernel_process_block_signal(current: FrameRef) -> BlockSwitch {
     return kernel_process_block_current(
-        current_sp, ProcessWaitReason::Signal, 5);
+        current, ProcessWaitReason::Signal, 5);
 }
 
 must_use variant ProcessSignalSendResult {
@@ -6919,7 +6944,8 @@ private fn kernel_process_signal_deliver_to(
                     // finds the signal still pending and delivers it.
                     record.sigwait_suspend = false;
                 } else {
-                    el0_context_set_x0(record.saved_sp, signum);
+                    el0_context_set_x0(frame_ref_from_saved(record.saved_sp),
+                                       signum);
                     process_signal_pending_clear(guard, record, bit);
                 }
                 record.sigwait_set = 0;
@@ -6977,7 +7003,9 @@ fn kernel_process_terminal_settings_wake(
                         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
                             let (owner, blocked) = resources;
                             match kernel_syscall_uart_deliver(
-                                scheduled_process_record_at(owner.pool_index).saved_sp,
+                                frame_ref_from_saved(
+                                    scheduled_process_record_at(
+                                        owner.pool_index).saved_sp),
                                 owner.pool_index, 0) {
                                 KernelUartDeliveryResult::Consumed => { }
                                 KernelUartDeliveryResult::RetryRead => { }
@@ -7061,9 +7089,9 @@ fn kernel_process_signal_send(pid: usize, signum: usize)
     return result;
 }
 
-fn kernel_process_block_deadline(current_sp: usize) -> usize {
+fn kernel_process_block_deadline(current: FrameRef) -> BlockSwitch {
     return kernel_process_block_current(
-        current_sp, ProcessWaitReason::Deadline, 4);
+        current, ProcessWaitReason::Deadline, 4);
 }
 
 // Complete timed syscalls directly from their saved frame when the generic
@@ -7095,8 +7123,9 @@ fn kernel_process_deadline_wake_all(guard: borrow ProcessRunGuard[lock])
                         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
                             let (owner, blocked) = resources;
                             el0_context_set_x0(
-                                scheduled_process_record_at(owner.pool_index)
-                                    .saved_sp,
+                                frame_ref_from_saved(
+                                    scheduled_process_record_at(
+                                        owner.pool_index).saved_sp),
                                 scheduled_process_record_at(owner.pool_index)
                                     .deadline_result);
                             let ready = scheduled_process_wake(owner, blocked);
@@ -7188,9 +7217,9 @@ fn kernel_process_net_wake_all(guard: borrow ProcessRunGuard[lock])
 // above its low-water mark and queued nothing, so it sleeps until the TX
 // interrupt has drained the queue back down. The syscall frame was rewound
 // before this, so the writer runs the same write again when it wakes.
-fn kernel_process_block_uart_tx(current_sp: usize) -> usize {
+fn kernel_process_block_uart_tx(current: FrameRef) -> BlockSwitch {
     return kernel_process_block_current(
-        current_sp, ProcessWaitReason::UartTx, 6);
+        current, ProcessWaitReason::UartTx, 6);
 }
 
 // Every process waiting for room in the UART transmit queue becomes runnable.
@@ -7229,7 +7258,7 @@ fn kernel_process_uart_tx_wake_all(guard: borrow ProcessRunGuard[lock])
     }
 }
 
-fn kernel_process_block_uart(current_sp: usize) -> usize {
+fn kernel_process_block_uart(current: FrameRef) -> BlockSwitch {
     // GitHub issue #448: the one-shot marker belongs to the fixture that
     // means it, and that is now a distinguishable thing rather than
     // "whoever blocked first".
@@ -7251,25 +7280,35 @@ fn kernel_process_block_uart(current_sp: usize) -> usize {
             fixture_block = false;
         }
     }
-    let next_sp: usize = kernel_process_block_current(
-        current_sp, ProcessWaitReason::UartRx, 1);
-    if (next_sp != 0) {
+    let blocked: BlockSwitch = kernel_process_block_current(
+        current, ProcessWaitReason::UartRx, 1);
+    // Anything but a retry is a block that was published.
+    let published: bool = match blocked {
+        BlockSwitch::Retry => { false }
+        BlockSwitch::ToIdle => { true }
+        BlockSwitch::Switch(next) => { true }
+    };
+    if (published) {
         if (process_test_evidence_record_uart_block(fixture_block)) {
             kernel_boot_log("uart rx: scheduler child blocked\n");
         }
     }
-    return next_sp;
+    return blocked;
 }
 
 // GitHub issue #244: the mirror image of kernel_process_block_uart() --
 // blocks current (the parent calling wait4()) so its own child can keep
 // running toward its exit.
-fn kernel_process_block_wait4(current_sp: usize) -> usize {
-    if (execution_here().current_live == false) { return 0; }
+fn kernel_process_block_wait4(current: FrameRef) -> BlockSwitch {
+    if (execution_here().current_live == false) {
+        return BlockSwitch::Retry;
+    }
     if (scheduled_process_record_of(execution_here().current_handle)
-            .has_first_child == false) { return 0; }
+            .has_first_child == false) {
+        return BlockSwitch::Retry;
+    }
     return kernel_process_block_current(
-        current_sp, ProcessWaitReason::ChildExit, 2);
+        current, ProcessWaitReason::ChildExit, 2);
 }
 
 // The UART IRQ transfers one byte directly into the suspended syscall frame.
@@ -7462,7 +7501,8 @@ fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[lock], value: usize)
         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
             let (owner, blocked) = resources;
             match kernel_syscall_uart_deliver(
-                    scheduled_process_record_at(owner.pool_index).saved_sp,
+                    frame_ref_from_saved(
+                        scheduled_process_record_at(owner.pool_index).saved_sp),
                     owner.pool_index, value) {
                 KernelUartDeliveryResult::Consumed => {}
                 KernelUartDeliveryResult::RetryRead => { retry_read = true; }
@@ -7530,25 +7570,60 @@ fn kernel_process_uart_block_evidence() -> bool {
 // the final counters: child Blocked/UartRx while parent is runnable, followed
 // by that same child Ready after wake.  Suppress the one human-facing UART
 // progress line locally; this is a structural probe, not a boot milestone.
+// The two probes below stand in frames that are not real ones, so they mint
+// FrameRefs from bare addresses; these three helpers are where they do.
+private fn kernel_process_probe_installed(parent: FrameRef, child: FrameRef)
+        -> bool {
+    let same: bool = match kernel_process_clone_context_install(parent, child) {
+        CloneInstall::Failed => { false }
+        CloneInstall::Installed(installed) => {
+            frame_ref_address(installed) == frame_ref_address(child)
+        }
+    };
+    return same;
+}
+
+private fn kernel_process_probe_blocks_to(child: FrameRef, parent: FrameRef)
+        -> bool {
+    let same: bool = match kernel_process_block_uart(child) {
+        BlockSwitch::Retry => { false }
+        BlockSwitch::ToIdle => { false }
+        BlockSwitch::Switch(resumed) => {
+            frame_ref_address(resumed) == frame_ref_address(parent)
+        }
+    };
+    return same;
+}
+
+// The frame address a tick resumes, 1 when it leaves for idle instead.
+private fn kernel_process_probe_tick_address(sp: usize) -> usize
+        !{interrupt} {
+    let address: usize = match kernel_process_timer_schedule(
+            frame_ref_from_entry(sp)) {
+        TimerSwitch::Resume(resumed) => { frame_ref_address(resumed) }
+        TimerSwitch::ToIdle => { 1 }
+    };
+    return address;
+}
+
 fn kernel_process_trace_block_wake_probe() -> bool !{unsafe} {
     kernel_process_execution_reset();
     kernel_process_trace_enable();
     process_test_evidence_set_uart_block_logged(true);
-    let parent_frame: usize =
-        (kernel_process_trace_probe_parent_frame as *usize) as usize;
-    let child_frame: usize =
-        (kernel_process_trace_probe_child_frame as *usize) as usize;
+    let mut parent_frame: FrameRef = frame_ref_from_entry(
+        (kernel_process_trace_probe_parent_frame as *usize) as usize);
+    let mut child_frame: FrameRef = frame_ref_from_entry(
+        (kernel_process_trace_probe_child_frame as *usize) as usize);
     let mut setup_ok: bool = false;
     match kernel_process_clone_begin(0x11, 0) {
         ProcessCloneResult::Invalid => {}
         ProcessCloneResult::ResourceExhausted => {}
         ProcessCloneResult::ChildConstructing(child_pid) => {
             if (child_pid == 2 &&
-                kernel_process_clone_context_install(parent_frame, child_frame) ==
-                    child_frame &&
+                kernel_process_probe_installed(parent_frame, child_frame) &&
                 kernel_process_scheduler_probe_stack_depart() &&
                 kernel_process_scheduler_probe_stack_arrive() &&
-                kernel_process_block_uart(child_frame) == parent_frame &&
+                kernel_process_probe_blocks_to(child_frame, parent_frame) &&
                 kernel_process_scheduler_probe_stack_depart() &&
                 kernel_process_scheduler_probe_stack_arrive()) {
                 match kernel_process_uart_record_parent_progress() {
@@ -7633,7 +7708,9 @@ private fn kernel_process_probe_run_to_exit_locked(
             let (owner, constructing) = resources;
             // This bookkeeping fixture never restores its synthetic frame.
             let running = scheduled_process_finish_clone(
-                owner, constructing, scheduled_process_record_of(handle).saved_sp);
+                owner, constructing,
+                frame_ref_from_saved(
+                    scheduled_process_record_of(handle).saved_sp));
             let exited = scheduled_process_exit(owner, running);
             scheduled_process_release(owner, exited);
         }
@@ -7879,8 +7956,9 @@ fn kernel_process_scheduler_probe() -> bool {
             if (kernel_process_clone_unselectable_probe(root_handle) == false ||
                 synthetic_child_peer_refused == false ||
                 child_pid != root_pid + 1 ||
-                kernel_process_clone_context_install(0x1000, 0x2000) !=
-                    0x2000) {
+                kernel_process_probe_installed(frame_ref_from_entry(0x1000),
+                                               frame_ref_from_entry(0x2000))
+                    == false) {
                 return false;
             }
         }
@@ -7915,18 +7993,18 @@ fn kernel_process_scheduler_probe() -> bool {
     if (kernel_process_scheduler_probe_stack_depart() == false) {
         return false;
     }
-    let parent_sp: usize = kernel_process_timer_schedule(0x2000);
+    let parent_sp: usize = kernel_process_probe_tick_address(0x2000);
     if (kernel_process_scheduler_probe_stack_arrive() == false ||
         kernel_process_scheduler_probe_stack_depart() == false) {
         return false;
     }
-    let child_sp: usize = kernel_process_timer_schedule(0x1000);
+    let child_sp: usize = kernel_process_probe_tick_address(0x1000);
     if (kernel_process_scheduler_probe_stack_arrive() == false) {
         return false;
     }
     kernel_process_request_reschedule();
-    let deferred_parent_sp: usize =
-        kernel_process_syscall_return_schedule(0x2000);
+    let deferred_parent_sp: usize = frame_ref_address(
+        kernel_process_syscall_return_schedule(frame_ref_from_entry(0x2000)));
     if (kernel_process_scheduler_probe_stack_depart() == false ||
         kernel_process_scheduler_probe_stack_arrive() == false) {
         return false;
@@ -8023,7 +8101,14 @@ private fn kernel_process_exit_continuation_probe(parent: ProcessHandle) -> bool
             let (owner, ready) = resources;
             let running = scheduled_process_start(owner, ready);
             process_run_unlock(guard);
-            kernel_process_exit_reserved(child, parent, owner, running, false, false)
+            // The frame address the probe's exit resumed, 0 for none.
+            let exited: ExitSwitch = kernel_process_exit_reserved(
+                child, parent, owner, running, false, false);
+            let address: usize = match exited {
+                ExitSwitch::Idle => { 0 }
+                ExitSwitch::Resume(frame) => { frame_ref_address(frame) }
+            };
+            address
         }
     };
     if (resumed != 0x1000 || kernel_process_current_pid() !=
@@ -8323,37 +8408,43 @@ fn kernel_process_clone_rollback() -> ProcessCloneRollbackResult {
 // (kernel_process_clone_begin() switches to it immediately), so the
 // parent is recovered via that child's own parent link rather than a
 // separate global execution_parent_handle.
-fn kernel_process_clone_context_install(parent_sp: usize, child_sp: usize)
-        -> usize {
-    if (execution_here().current_live == false || parent_sp == 0 ||
-        child_sp == 0) { return 0; }
+must_use variant CloneInstall { Failed; Installed(FrameRef); }
+
+fn kernel_process_clone_context_install(parent: FrameRef, child: FrameRef)
+        -> CloneInstall {
+    if (execution_here().current_live == false ||
+        frame_ref_address(parent) == 0 || frame_ref_address(child) == 0) {
+        return CloneInstall::Failed;
+    }
     if (scheduled_process_record_of(execution_here().current_handle)
-            .has_parent == false) { return 0; }
-    let mut child: ProcessHandle = execution_here().current_handle;
-    let mut parent: ProcessHandle =
-        scheduled_process_record_of(child).parent;
+            .has_parent == false) { return CloneInstall::Failed; }
+    let mut child_handle: ProcessHandle = execution_here().current_handle;
+    let mut parent_handle: ProcessHandle =
+        scheduled_process_record_of(child_handle).parent;
     // The copied child frame becomes Running in the same section that
     // publishes the parent's frame and makes that parent Ready.
     let guard = process_run_lock();
-    match scheduled_process_constructing_take(guard, child) {
+    match scheduled_process_constructing_take(guard, child_handle) {
         ScheduledProcessConstructingTakeResult::Missing => {
             process_run_unlock(guard);
-            return 0;
+            return CloneInstall::Failed;
         }
         ScheduledProcessConstructingTakeResult::Constructing(resources) => {
             let (owner, constructing) = resources;
             // Publish the parent's saved frame before Ready permits a peer
             // to restore it. The child's VM and FD setup already succeeded.
-            scheduled_process_record_of(parent).saved_sp = parent_sp;
-            if (kernel_process_yield_handle(guard, parent) == false) {
+            scheduled_process_record_of(parent_handle).saved_sp =
+                frame_ref_address(parent);
+            if (kernel_process_yield_handle(guard, parent_handle) == false) {
                 scheduled_process_release(owner, constructing);
                 process_run_unlock(guard);
-                return 0;
+                return CloneInstall::Failed;
             }
-            let running = scheduled_process_finish_clone(owner, constructing, child_sp);
+            let running = scheduled_process_finish_clone(
+                owner, constructing, child);
             scheduled_process_release(owner, running);
             process_run_unlock(guard);
-            return child_sp;
+            return CloneInstall::Installed(child);
         }
     }
 }
@@ -8452,10 +8543,10 @@ fn kernel_process_current_affinity_mask(
 // and logical current may then name the incoming process. The retained
 // stack_handle plus the frame range remain the independent authority. An
 // architectural idle-stack frame matches no process and reports zero.
-fn kernel_process_frame_pid_or_zero(frame_sp: usize) -> usize {
+fn kernel_process_frame_pid_or_zero(frame: FrameRef) -> usize {
     let mut physical: ProcessHandle = execution_here().stack_handle;
     if (scheduled_process_handle_matches(physical) &&
-        kernel_process_frame_belongs_to(physical, frame_sp)) {
+        kernel_process_frame_belongs_to(physical, frame)) {
         return scheduled_process_pid_of_handle(physical);
     }
     return 0;
@@ -8580,32 +8671,39 @@ private fn kernel_process_leave_parent_ready(
         parent: ProcessHandle,
         parent_owner: sink ScheduledProcessOwner[process],
         ready: sink ScheduledProcessState[process, ProcessState::Ready]) {
-    el0_context_retry_syscall(scheduled_process_record_of(parent).saved_sp);
+    el0_context_retry_syscall(
+        frame_ref_from_saved(scheduled_process_record_of(parent).saved_sp));
     scheduled_process_release(parent_owner, ready);
 }
+
+// What an exit came to: the frame of the process to resume in its place, or
+// `Idle` when nothing was admitted and this CPU leaves for its idle loop. At
+// the assembly boundary (SyscallAction::CloneParent) this is encoded as a
+// frame address, 0 for Idle, by kernel_syscall_clone_parent_action.
+must_use variant ExitSwitch { Idle; Resume(FrameRef); }
 
 private fn kernel_process_exit_reserved(
         child: ProcessHandle,
         parent: ProcessHandle,
         owner: sink ScheduledProcessOwner[process],
         running: sink ScheduledProcessState[process, ProcessState::Running],
-        deliver_wait4: bool, auto_reap: bool) -> usize {
+        deliver_wait4: bool, auto_reap: bool) -> ExitSwitch {
     match process_image_prepare_activation(owner.pool_index) {
         AddressSpaceActivationPrepareResult::Invalid => {
             kernel_process_schedule_cancel_reserved(owner, running);
-            return 0;
+            return ExitSwitch::Idle;
         }
         AddressSpaceActivationPrepareResult::RolloverNeeded => {
             match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
                                    SCHEDULER_WORLD_STOP_SPINS) {
                 WorldStopResult::Busy => {
                     kernel_process_schedule_cancel_reserved(owner, running);
-                    return 0;
+                    return ExitSwitch::Idle;
                 }
                 WorldStopResult::Partial(partial) => {
                     world_stop_partial_release(partial, &kernel_world_stop);
                     kernel_process_schedule_cancel_reserved(owner, running);
-                    return 0;
+                    return ExitSwitch::Idle;
                 }
                 WorldStopResult::Complete(stopped) => {
                     if (asid_rollover_stopped(stopped)) {}
@@ -8636,13 +8734,13 @@ private fn kernel_process_exit_reserved(
                 let ready = scheduled_process_yield(owner, running);
                 scheduled_process_release(owner, ready);
                 process_run_unlock(guard);
-                return 0;
+                return ExitSwitch::Idle;
             }
             if (process_image_commit_activation(prepared) == false) {
                 let ready = scheduled_process_yield(owner, running);
                 scheduled_process_release(owner, ready);
                 process_run_unlock(guard);
-                return 0;
+                return ExitSwitch::Idle;
             }
             execution_here().current_handle = successor;
             // Every incoming wait4 continuation now runs with its parent's
@@ -8655,12 +8753,12 @@ private fn kernel_process_exit_reserved(
                     ProcessWaitReason::ChildExit) {
                 scheduled_process_wait_settle(scheduled_process_record_of(successor));
             }
-            let successor_sp: usize =
-                scheduled_process_record_of(successor).saved_sp;
+            let mut successor_frame: FrameRef = frame_ref_from_saved(
+                scheduled_process_record_of(successor).saved_sp);
             if (deliver_wait4 || auto_reap) {
                 if (execution_here().deferred_reap_live) {
                     process_run_unlock(guard);
-                    kernel_syscall_fail_stop(successor_sp);
+                    kernel_syscall_fail_stop(frame_ref_address(successor_frame));
                 }
                 execution_here().deferred_reap_handle = child;
                 execution_here().deferred_reap_parent = parent;
@@ -8680,14 +8778,14 @@ private fn kernel_process_exit_reserved(
                 ProcessTraceResume, successor, child, 0);
             if (deliver_wait4) {
                 kernel_syscall_wait4_deliver(
-                    successor_sp, reaped_pid, successor.pool_index);
+                    successor_frame, reaped_pid, successor.pool_index);
             }
-            return successor_sp;
+            return ExitSwitch::Resume(successor_frame);
         }
     }
 }
 
-fn kernel_process_child_exit(status: usize) -> usize {
+fn kernel_process_child_exit(status: usize) -> ExitSwitch {
     process_test_evidence_record_child_exit(status);
     // GitHub issue #209: a child exit used to close the scheduling gate
     // here (kernel_process_scheduler_disable()), a leftover of the
@@ -8705,9 +8803,9 @@ fn kernel_process_child_exit(status: usize) -> usize {
     // off a dying context. Leaving preemption on is also the prerequisite
     // for genuinely concurrent children (a shell backgrounding a job with
     // `&`), where a child exit must not stop the survivors from running.
-    if (execution_here().current_live == false) { return 0; }
+    if (execution_here().current_live == false) { return ExitSwitch::Idle; }
     if (scheduled_process_record_of(execution_here().current_handle)
-            .has_parent == false) { return 0; }
+            .has_parent == false) { return ExitSwitch::Idle; }
     let current = current_process_new(
         execution_here().current_handle.generation);
     let mut child: ProcessHandle = current_process_handle(current);
@@ -8796,7 +8894,7 @@ fn kernel_process_child_exit(status: usize) -> usize {
         ScheduledProcessRunningTakeResult::Missing => {
             current_process_exit(current);
             process_run_unlock(exit_guard);
-            return 0;
+            return ExitSwitch::Idle;
         }
         ScheduledProcessRunningTakeResult::Running(resources) => {
             let (owner, running) = resources;
@@ -8919,7 +9017,7 @@ fn kernel_process_child_exit(status: usize) -> usize {
     execution_here().scheduler_enabled = false;
     execution_here().reschedule_pending = false;
     process_run_unlock(exit_guard);
-    return 0;
+    return ExitSwitch::Idle;
 }
 
 // GitHub issue #248: per-slot now, indexed by whichever slot is CURRENTLY

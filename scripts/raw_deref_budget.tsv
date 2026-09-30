@@ -21,7 +21,6 @@ kernel/init/test_driver.tkb	10	0	boot-time fixtures reaching process records dir
 kernel/kernel/fd_table.tkb	209	0	fd tables, blocks and contexts reached through liveness escapes (#637 F)
 kernel/kernel/pool_walk_contention_evidence.tkb	5	0	a two-core boot probe (pool payload access)
 kernel/kernel/process.tkb	750	0	process records reached through scheduled_process_record_at and its siblings, the biggest liveness escape (#637 F)
-kernel/kernel/profile_samples.tkb	2	0	the profiler's sample buffer (#637 C)
 kernel/kernel/signal_contention_evidence.tkb	2	0	a two-core boot probe (pool payload access)
 kernel/kernel/syscall.tkb	77	0	syscall frames and scratch buffers (#637 C)
 kernel/kernel/tcp_connection_contention_evidence.tkb	2	0	a two-core boot probe (pool payload access)

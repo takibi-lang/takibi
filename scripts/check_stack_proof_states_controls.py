@@ -92,6 +92,40 @@ def main() -> int:
         "scheduled_process_start_check mints a token without reading "
         "stack_owner_cpu")
 
+    # GitHub issue #661: the frame handle's mint set and its bare-usize seams.
+    def frames(name: str, text: str, wanted: str) -> list[str]:
+        CASES.note()
+        found, _ = check.check_frames({"control.tkb": text})
+        if not found:
+            return [f"{name}: planted defect passed"]
+        if not any(wanted in failure for failure in found):
+            return [f"{name}: failure did not explain {wanted!r}: {found}"]
+        return []
+
+    CASES.note()
+    clean, _ = check.check_frames({
+        "control.tkb": "fn kernel_syscall_migrate_return(frame_sp: usize) {\n"
+                       "    let mut f: FrameRef = frame_ref_from_entry(frame_sp);\n"
+                       "}\n"})
+    if clean:
+        failures.append(f"a declared entry was refused: {clean}")
+    failures += frames(
+        "a function that is not a declared entry mints a frame",
+        "fn sneaky() {\n    let mut f: FrameRef = frame_ref_from_entry(4096);\n}\n",
+        "sneaky calls frame_ref_from_entry and is not one of its declared callers")
+    failures += frames(
+        "a frame address rebuilt from a record outside the declared set",
+        "fn sneaky() {\n    let mut f: FrameRef = frame_ref_from_saved(0);\n}\n",
+        "sneaky calls frame_ref_from_saved")
+    failures += frames(
+        "a new function that takes a frame as a bare usize",
+        "fn sneaky(frame_sp: usize) {\n}\n",
+        "sneaky takes a frame address as a bare usize")
+    failures += frames(
+        "a frame parameter under another spelling",
+        "fn sneaky(successor_sp: usize) {\n}\n",
+        "sneaky takes a frame address as a bare usize")
+
     if failures:
         for failure in failures:
             print(f"FAIL stack-proof-states controls: {failure}")
@@ -100,8 +134,9 @@ def main() -> int:
         "stack-proof-states controls",
         "the tree passes, and a start that takes Ready, a reap that takes "
         "Exited, a token minted outside the named functions, a token "
-        "written as a literal and a check that no longer reads the stack "
-        "owner are each refused for their own reason",
+        "written as a literal, a check that no longer reads the stack owner, "
+        "and a frame minted or taken as a bare usize outside its declared "
+        "set are each refused for their own reason",
         cases=CASES.ran)
     return 0
 

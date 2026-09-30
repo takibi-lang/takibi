@@ -2335,6 +2335,26 @@ let run_guard_fixture =
    starts. The same for a zombie and a reap. Kept as a copy of the shape
    rather than the kernel file, like the run guard above; the kernel build
    is what proves the real functions have it. *)
+let frame_handle_fixture =
+  "struct FrameRef { private sp: usize; }
+   fn frame_general(frame: FrameRef, index: {0..<31 as usize}) -> usize {
+     return frame.sp + index * 8;
+   }
+   "
+
+let expect_type_error_files fragment files () =
+  match infer_files files with
+  | _ ->
+      Alcotest.failf "expected TypeError containing %S, but inference succeeded"
+        fragment
+  | exception Types.TypeError (_, msg) ->
+      if not (contains_substring msg fragment)
+      then Alcotest.failf "TypeError %S does not contain %S" msg fragment
+  | exception Types.MultiTypeError errors ->
+      if not (List.exists (fun (_, msg) -> contains_substring msg fragment) errors)
+      then Alcotest.failf "no entry of the MultiTypeError contains %S: %s"
+          fragment (String.concat " | " (List.map snd errors))
+
 let stack_proof_fixture =
   "enum ProcessState: u8 { Ready; Startable; Running; Blocked; Exited;
                            Reapable; }
@@ -3012,6 +3032,48 @@ let infer_tests = [
            run_unlock(guard, &run_lock_word);
            return taken;
          }")));
+
+  (* GitHub issue #661: the shape kernel/arch/arm64/kernel/frame_ref.tkb gives
+     a saved exception frame. Two files, because privacy is per file. *)
+  Alcotest.test_case "frame handle: accessors take a bounded index" `Quick
+    (fun () ->
+      ignore (infer_files
+        [ "frame.tkb", frame_handle_fixture;
+          "user.tkb",
+          "fn read(f: FrameRef) -> usize {\n\
+           \  let mut total: usize = 0;\n\
+           \  for index: usize in 0..<31 {\n\
+           \    total = total + frame_general(f, index);\n\
+           \  }\n\
+           \  return total;\n\
+           }\n" ]));
+
+  Alcotest.test_case "frame handle: a bare integer is not a frame" `Quick
+    (fun () ->
+      expect_type_error_files "cannot unify"
+        [ "frame.tkb", frame_handle_fixture;
+          "user.tkb",
+          "fn misuse(address: usize) -> usize {\n\
+           \  return frame_general(address, 0);\n\
+           }\n" ] ());
+
+  Alcotest.test_case "frame handle: an index past the frame is rejected" `Quick
+    (fun () ->
+      expect_type_error_files "31"
+        [ "frame.tkb", frame_handle_fixture;
+          "user.tkb",
+          "fn past(f: FrameRef) -> usize {\n\
+           \  return frame_general(f, 31);\n\
+           }\n" ] ());
+
+  Alcotest.test_case "frame handle: its address is private to its file" `Quick
+    (fun () ->
+      expect_type_error_files "is private to"
+        [ "frame.tkb", frame_handle_fixture;
+          "user.tkb",
+          "fn peek(f: FrameRef) -> usize {\n\
+           \  return f.sp;\n\
+           }\n" ] ());
 
   Alcotest.test_case
     "stack proof: a woken process is started only through the check" `Quick

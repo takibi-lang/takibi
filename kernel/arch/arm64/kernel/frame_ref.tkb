@@ -27,11 +27,39 @@
 
 struct FrameRef { private sp: usize; }
 
-// The mint. Called where an assembly entry passes a frame address, and where
-// a saved frame is rebuilt from a process record's saved_sp.
+// The two mints. Every FrameRef in the kernel comes from one of them, and
+// scripts/check_stack_proof_states.py holds their callers to a declared set.
+//
+// An assembly entry passes the frame it just saved, in x0.
 fn frame_ref_from_entry(sp: usize) -> FrameRef {
     let mut frame: FrameRef = { sp };
     return frame;
+}
+
+// A frame parked in a process record: rebuilt from the saved_sp written when
+// that process last left the CPU. Trusts that record's saved_sp.
+fn frame_ref_from_saved(saved_sp: usize) -> FrameRef {
+    let mut frame: FrameRef = { saved_sp };
+    return frame;
+}
+
+// The address, to park a frame in a record's saved_sp, and for the one place
+// that still hands a frame to assembly as a bare integer.
+fn frame_ref_address(frame: FrameRef) -> usize {
+    return frame.sp;
+}
+
+// Sometimes there is none: the boot-time probes call the syscall dispatcher
+// without a saved frame, and a frame-writing step then has nothing to write.
+variant MaybeFrame {
+    NoFrame;
+    Frame(FrameRef);
+}
+
+// The dispatcher's entry hands over the address, 0 when there is no frame.
+fn maybe_frame_from_entry(sp: usize) -> MaybeFrame {
+    if (sp == 0) { return MaybeFrame::NoFrame; }
+    return MaybeFrame::Frame(frame_ref_from_entry(sp));
 }
 
 private fn frame_word(frame: FrameRef, offset: usize) -> usize !{unsafe} {
@@ -43,6 +71,17 @@ private fn frame_word_set(frame: FrameRef, offset: usize, value: usize)
         !{unsafe} {
     let word: *usize = unsafe { (frame.sp + offset) as *usize };
     *word = value;
+}
+
+// A whole frame, byte for byte: clone gives the child a copy of its parent's
+// saved frame. The two are ABI-owned exception-frame bounds of EXC_CONTEXT_SIZE
+// bytes each, which is why this is the one place a frame becomes a byte slice.
+fn frame_copy(destination: FrameRef, source: FrameRef) !{unsafe} {
+    let source_base: *u8 = unsafe { source.sp as *u8 };
+    let destination_base: *u8 = unsafe { destination.sp as *u8 };
+    let src: []u8 = unsafe { source_base[0..<EXC_CONTEXT_SIZE as isize] };
+    let dst: []u8 = unsafe { destination_base[0..<EXC_CONTEXT_SIZE as isize] };
+    let copied: usize = slice_copy(dst, src);
 }
 
 // x0..x30, one word each.
