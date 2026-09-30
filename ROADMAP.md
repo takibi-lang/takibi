@@ -34,24 +34,16 @@ allcheck` stops every other piece of work, and Territory B is busy, so the
 lane that meets such a failure analyses and fixes it, whatever territory
 its cause lies in. The goal is to drive the probability of an allcheck
 failure toward zero step by step. Held by A under this rule now: the analysis
-of #604 and #556 when they next recur.
+of #604, #556, #603 and #649 when they next recur.
 
-Step 1, true multicore support, finished on 2026-09-27; #606's stages 2
-and 3 are unscheduled. The steps keep their numbers, which issues cite.
+Step 1, true multicore support, finished on 2026-09-27; #606 stage 1
+replays real runs against StackOwnership.tla. Step 2, running the multicore
+workload on RPi5 and fixing what it finds, finished its close-out list on
+2026-09-30; #584's churn stays a soak run at natural boundaries, and each
+defect it finds still gets a deterministic lane (the race-window lanes,
+`kernelcheck-race-window-*-qemu`) before its issue closes. The steps keep
+their numbers, which issues cite.
 
-2. **Next: run the multicore workload mainly on RPi5 and fix what it
-   finds.** #584 is the workload. Each defect it finds gets a deterministic
-   lane before its issue closes; the race-window lanes
-   (`kernelcheck-race-window-*-qemu`) are how a window found by chance is
-   made to fail every run.
-   **Finish before step 3 starts (maintainer, 2026-09-29)**, since open
-   defects under step 3's kernel-wide changes would be masked or
-   misattributed. The close-out list is done (2026-09-30). Audit follow-ups
-   that do not block step 3: #641 (a TLA+ model of the world stop), #642
-   (a boundary fixture for signal frames and mmap reuse), #643 (gdb stall
-   dump and ASID jump for four-core QEMU churn), #651 (contention probes'
-   rendezvous bounded by peer ticks) and #652 (lifecycle trace events for
-   signals and wait4 results).
 3. **Takibi's provisional answer to safe pointers and safe memory access,
    with multicore as a premise.** #637 is the frame: derive every access
    from an authority and shrink the trusted base to named mint sites, in
@@ -63,7 +55,11 @@ and 3 are unscheduled. The steps keep their numbers, which issues cite.
    lockless multi-writer log ring with its protocol in the type system,
    the multicore-specific subject this discussion is judged against;
    #645's herd7 litmus tests check its orderings, starting with today's
-   log. #647 extends #606's trace replay to RecordLifetime and Wait4Block.
+   log. #647 extends #606's trace replay to RecordLifetime and Wait4Block,
+   and #606 stage 2 then replaces the Python replay with a TLC trace spec,
+   so the replay cannot drift from the `.tla`: the point where model and
+   implementation are held together mechanically. Both finish before
+   step 4, whose models drop their no-preemption guards.
    #653 moves the wait reason into the Blocked state and retires
    `last_child_pid` as a wait4 input, the class behind #603 and the churn
    hang; it goes with #637 stage 2.
@@ -71,11 +67,17 @@ and 3 are unscheduled. The steps keep their numbers, which issues cite.
    preemption, no explicit-point intermediate. Its typed preparation
    belongs here: a preemption-disabled authority, with per-CPU access
    derived from it in place of the 17 `KERNEL_PREEMPTIBLE == 0` asserts.
+   Alongside this step, not blocking it (the step 2 audit's follow-ups):
+   #641 (a TLA+ model of the world stop), #642 (a boundary fixture for
+   signal frames and mmap reuse), #643 (gdb stall dump and ASID jump for
+   four-core QEMU churn), #651 (contention probes' rendezvous bounded by
+   peer ticks) and #652 (lifecycle trace events for signals and wait4
+   results).
 4. **Flip to kernel preemption (#638).** Once step 3's authorities exist,
    measure candidate designs' cost on RPi5 and set `KERNEL_PREEMPTIBLE`
    to 1, with the models passing without their no-preemption guards. Never
-   during step 2's soak, whose defects must stay attributable to
-   multicore.
+   while #584's soak is being run for a step's evidence, whose defects
+   must stay attributable to multicore.
 5. **Apply recent research where a real example needs it** (evaluated
    2026-09-29; the reasoning is on #13). The solver side (#13) is B's.
    A's part, in this order:
