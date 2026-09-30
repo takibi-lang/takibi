@@ -8,6 +8,7 @@
 # dereference and is made by hand with the reason written here.
 # Measured 2026-09-30. Columns: file, plain, io, reason (tab separated).
 kernel/arch/arm64/kernel/exception_evidence.tkb	141	0	DDB and the crash reporter read process records and stacks through raw pointers (#637 C, F)
+kernel/arch/arm64/kernel/frame_ref.tkb	2	0	the exception-frame mint site: a FrameRef's words are read and written here and nowhere else (#637 C)
 kernel/arch/arm64/mm/asid.tkb	25	0	the ASID allocator's records, reached through pool pointers (#637 F)
 kernel/arch/arm64/mm/mmu.tkb	2	0	page-table entries as a raw table (#637 H)
 kernel/boot/fdt.tkb	1	0	the device tree blob as raw memory (#637 H)
@@ -22,7 +23,7 @@ kernel/kernel/pool_walk_contention_evidence.tkb	5	0	a two-core boot probe (pool 
 kernel/kernel/process.tkb	750	0	process records reached through scheduled_process_record_at and its siblings, the biggest liveness escape (#637 F)
 kernel/kernel/profile_samples.tkb	2	0	the profiler's sample buffer (#637 C)
 kernel/kernel/signal_contention_evidence.tkb	2	0	a two-core boot probe (pool payload access)
-kernel/kernel/syscall.tkb	79	0	syscall frames and scratch buffers (#637 C)
+kernel/kernel/syscall.tkb	77	0	syscall frames and scratch buffers (#637 C)
 kernel/kernel/tcp_connection_contention_evidence.tkb	2	0	a two-core boot probe (pool payload access)
 kernel/lib/diagnostic_ring.tkb	6	0	per-CPU log rings published by atomics (#637 B)
 kernel/lib/intrusive_pool.tkb	93	0	the pool's own chunk carving, the mint of every payload pointer (#637 F)

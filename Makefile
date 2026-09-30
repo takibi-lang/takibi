@@ -322,6 +322,7 @@ KERNEL_UNUSED_NO_FUNCTIONS := \
 KERNEL_UNUSED_CHECKED := \
 	kernel/arch/arm64/boot/cpu.tkb \
 	kernel/arch/arm64/kernel/exception_evidence.tkb \
+	kernel/arch/arm64/kernel/frame_ref.tkb \
 	kernel/arch/arm64/kernel/platform_uart_common.tkb \
 	kernel/arch/arm64/kernel/secondary.tkb \
 	kernel/arch/arm64/kernel/timer.tkb \

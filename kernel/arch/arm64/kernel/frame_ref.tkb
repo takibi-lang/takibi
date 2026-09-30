@@ -1,0 +1,124 @@
+// A saved exception frame, named by the address it sits at, and the only code
+// that reads or writes a word of one (GitHub issue #661, #637 stage 1 group C).
+//
+// A frame used to be a bare `usize` everywhere, and the signal-frame code read
+// and wrote `frame_sp + offset` for an offset it computed itself, so nothing
+// bounded the offset by the frame's 0x330 bytes. A `FrameRef` holds the
+// address in a private field: a value of that type can only be made by
+// frame_ref_from_entry, and its words are reached only through the accessors
+// below, each named for what it reads and bounded by a refined index. The
+// generic word access is private to this file, so a caller cannot ask for an
+// arbitrary offset.
+//
+// The struct is one `usize`, which AAPCS64 passes and returns in x0 exactly
+// as a bare `usize`, so a FrameRef crosses the assembly boundary unchanged.
+//
+// What is trusted, and named: frame_ref_from_entry believes the address it is
+// given is the ExceptionFrame the CPU saved (an assembly entry hands it over
+// in x0, or a process record's saved_sp). Every access after that is bounded
+// by ExceptionFrame's own layout, which the static_asserts below tie to the
+// contiguity the loops assume.
+//
+// Current limitations (2026-09-30):
+// - A FrameRef is copyable and not indexed by a process, so one process's
+//   frame can still be handed where another's is meant; that is the next rung.
+// - The accessors do not check the address: a FrameRef that names memory that
+//   is not a live frame reads and writes that memory.
+
+struct FrameRef { private sp: usize; }
+
+// The mint. Called where an assembly entry passes a frame address, and where
+// a saved frame is rebuilt from a process record's saved_sp.
+fn frame_ref_from_entry(sp: usize) -> FrameRef {
+    let mut frame: FrameRef = { sp };
+    return frame;
+}
+
+private fn frame_word(frame: FrameRef, offset: usize) -> usize !{unsafe} {
+    let word: *usize = unsafe { (frame.sp + offset) as *usize };
+    return *word;
+}
+
+private fn frame_word_set(frame: FrameRef, offset: usize, value: usize)
+        !{unsafe} {
+    let word: *usize = unsafe { (frame.sp + offset) as *usize };
+    *word = value;
+}
+
+// x0..x30, one word each.
+fn frame_general(frame: FrameRef, index: {0..<31 as usize}) -> usize
+        !{unsafe} {
+    static_assert(offsetof(ExceptionFrame, x30) ==
+                  offsetof(ExceptionFrame, x0) + 30 * 8,
+                  "x0..x30 must be contiguous in ExceptionFrame");
+    return frame_word(frame, offsetof(ExceptionFrame, x0) + index * 8);
+}
+
+fn frame_general_set(frame: FrameRef, index: {0..<31 as usize}, value: usize)
+        !{unsafe} {
+    static_assert(offsetof(ExceptionFrame, x30) ==
+                  offsetof(ExceptionFrame, x0) + 30 * 8,
+                  "x0..x30 must be contiguous in ExceptionFrame");
+    frame_word_set(frame, offsetof(ExceptionFrame, x0) + index * 8, value);
+}
+
+// q0..q31 as 64 words of eight bytes.
+fn frame_vector_word(frame: FrameRef, word: {0..<64 as usize}) -> usize
+        !{unsafe} {
+    static_assert(offsetof(ExceptionFrame, q31) ==
+                  offsetof(ExceptionFrame, q0) + 31 * 16,
+                  "q0..q31 must be contiguous in ExceptionFrame");
+    return frame_word(frame, offsetof(ExceptionFrame, q0) + word * 8);
+}
+
+fn frame_vector_word_set(frame: FrameRef, word: {0..<64 as usize},
+                         value: usize) !{unsafe} {
+    static_assert(offsetof(ExceptionFrame, q31) ==
+                  offsetof(ExceptionFrame, q0) + 31 * 16,
+                  "q0..q31 must be contiguous in ExceptionFrame");
+    frame_word_set(frame, offsetof(ExceptionFrame, q0) + word * 8, value);
+}
+
+fn frame_sp_el0(frame: FrameRef) -> usize !{unsafe} {
+    return frame_word(frame, offsetof(ExceptionFrame, sp_el0));
+}
+
+fn frame_sp_el0_set(frame: FrameRef, value: usize) !{unsafe} {
+    frame_word_set(frame, offsetof(ExceptionFrame, sp_el0), value);
+}
+
+fn frame_elr_el1(frame: FrameRef) -> usize !{unsafe} {
+    return frame_word(frame, offsetof(ExceptionFrame, elr_el1));
+}
+
+fn frame_elr_el1_set(frame: FrameRef, value: usize) !{unsafe} {
+    frame_word_set(frame, offsetof(ExceptionFrame, elr_el1), value);
+}
+
+fn frame_spsr_el1(frame: FrameRef) -> usize !{unsafe} {
+    return frame_word(frame, offsetof(ExceptionFrame, spsr_el1));
+}
+
+fn frame_spsr_el1_set(frame: FrameRef, value: usize) !{unsafe} {
+    frame_word_set(frame, offsetof(ExceptionFrame, spsr_el1), value);
+}
+
+fn frame_fpsr(frame: FrameRef) -> usize !{unsafe} {
+    return frame_word(frame, offsetof(ExceptionFrame, fpsr));
+}
+
+fn frame_fpsr_set(frame: FrameRef, value: usize) !{unsafe} {
+    frame_word_set(frame, offsetof(ExceptionFrame, fpsr), value);
+}
+
+// fpcr is the word after fpsr.
+fn frame_fpcr(frame: FrameRef) -> usize !{unsafe} {
+    static_assert(offsetof(ExceptionFrame, fpcr) ==
+                  offsetof(ExceptionFrame, fpsr) + 8,
+                  "fpsr and fpcr must be adjacent in ExceptionFrame");
+    return frame_word(frame, offsetof(ExceptionFrame, fpcr));
+}
+
+fn frame_fpcr_set(frame: FrameRef, value: usize) !{unsafe} {
+    frame_word_set(frame, offsetof(ExceptionFrame, fpcr), value);
+}

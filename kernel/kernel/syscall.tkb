@@ -2,6 +2,7 @@ use "kernel/mm/page.tkb";
 use "kernel/mm/address_space.tkb";
 use "kernel/mm/user_memory.tkb";
 use "kernel/arch/arm64/kernel/user_entry_extern.tkb";
+use "kernel/arch/arm64/kernel/frame_ref.tkb";
 use "kernel/fs/ext2/ext2.tkb";
 use "kernel/fs/procfs.tkb";
 use "kernel/drivers/serial/uart_rx_ring.tkb";
@@ -4255,39 +4256,14 @@ const SIGFRAME_PSTATE_USER_BITS: usize = 0xF0000000;
 // A lower-EL data abort (EC 0x24), level-3 translation fault (FSC 0x07).
 const SIGFRAME_STACK_GROWTH_ESR: usize = 0x90000007;
 
-fn syscall_signal_frame_layout_assumption() {
-    // The saved registers are copied as runs, so each run must be one.
-    static_assert(offsetof(ExceptionFrame, x30) ==
-                  offsetof(ExceptionFrame, x0) + 30 * 8,
-                  "x0..x30 must be contiguous in ExceptionFrame");
-    static_assert(offsetof(ExceptionFrame, q31) ==
-                  offsetof(ExceptionFrame, q0) + 31 * 16,
-                  "q0..q31 must be contiguous in ExceptionFrame");
-    static_assert(offsetof(ExceptionFrame, fpcr) ==
-                  offsetof(ExceptionFrame, fpsr) + 8,
-                  "fpsr and fpcr must be adjacent in ExceptionFrame");
-}
-
-// One saved word of the ABI-owned exception frame the syscall entered on.
-fn syscall_frame_word(frame_sp: usize, offset: usize) -> usize !{unsafe} {
-    let word: *usize = unsafe { (frame_sp + offset) as *usize };
-    return *word;
-}
-
-fn syscall_frame_word_set(frame_sp: usize, offset: usize, value: usize)
-        !{unsafe} {
-    let word: *usize = unsafe { (frame_sp + offset) as *usize };
-    *word = value;
-}
-
 // Write the frame for `signum` below the interrupted user stack. The frame
 // records x0 as `value`, the result the interrupted syscall returns once the
 // handler is done. False when the user stack cannot take it.
 fn syscall_signal_frame_write(frame_sp: usize, value: usize, signum: usize,
                               restore_mask: usize) -> (bool, usize)
         !{unsafe} {
-    let user_sp: usize = syscall_frame_word(
-        frame_sp, offsetof(ExceptionFrame, sp_el0));
+    let mut frame: FrameRef = frame_ref_from_entry(frame_sp);
+    let user_sp: usize = frame_sp_el0(frame);
     if (user_sp < SIGFRAME_SIZE + 16) { return (false, 0); }
     let base: usize = (user_sp - SIGFRAME_SIZE) & ~15;
     // The stack below SP may not be populated yet: EL0 grows it by
@@ -4313,8 +4289,7 @@ fn syscall_signal_frame_write(frame_sp: usize, value: usize, signum: usize,
             ok = ok && user_write_u64(range, SIGFRAME_UC_SIGMASK,
                                       restore_mask as u64);
             for index: usize in 0..<31 {
-                let register: usize = syscall_frame_word(
-                    frame_sp, offsetof(ExceptionFrame, x0) + index * 8);
+                let register: usize = frame_general(frame, index);
                 let mut saved: usize = register;
                 if (index == 0) { saved = value; }
                 ok = ok && user_write_u64(range, SIGFRAME_REGS + index * 8,
@@ -4322,25 +4297,20 @@ fn syscall_signal_frame_write(frame_sp: usize, value: usize, signum: usize,
             }
             ok = ok && user_write_u64(range, SIGFRAME_SP, user_sp as u64);
             ok = ok && user_write_u64(range, SIGFRAME_PC,
-                syscall_frame_word(frame_sp,
-                                   offsetof(ExceptionFrame, elr_el1)) as u64);
+                frame_elr_el1(frame) as u64);
             ok = ok && user_write_u64(range, SIGFRAME_PSTATE,
-                syscall_frame_word(frame_sp,
-                                   offsetof(ExceptionFrame, spsr_el1)) as u64);
+                frame_spsr_el1(frame) as u64);
             ok = ok && user_write_u32(range, SIGFRAME_FPSIMD,
                                       SIGFRAME_FPSIMD_MAGIC as u32);
             ok = ok && user_write_u32(range, SIGFRAME_FPSIMD + 4,
                                       SIGFRAME_FPSIMD_SIZE as u32);
             ok = ok && user_write_u32(range, SIGFRAME_FPSIMD + 8,
-                syscall_frame_word(frame_sp,
-                                   offsetof(ExceptionFrame, fpsr)) as u32);
+                frame_fpsr(frame) as u32);
             ok = ok && user_write_u32(range, SIGFRAME_FPSIMD + 12,
-                syscall_frame_word(frame_sp,
-                                   offsetof(ExceptionFrame, fpcr)) as u32);
+                frame_fpcr(frame) as u32);
             for word: usize in 0..<64 {
                 ok = ok && user_write_u64(range, SIGFRAME_FPSIMD + 16 + word * 8,
-                    syscall_frame_word(frame_sp,
-                        offsetof(ExceptionFrame, q0) + word * 8) as u64);
+                    frame_vector_word(frame, word) as u64);
             }
             return (ok, base);
         }
@@ -4399,16 +4369,12 @@ fn syscall_signal_deliver(frame_sp: usize, action: SyscallAction)
                 let mut reset: SigchldAction = { 0, 0, 0, 0 };
                 kernel_process_current_set_sigchld_action(reset);
             }
-            syscall_frame_word_set(frame_sp, offsetof(ExceptionFrame, x1),
-                                   base);
-            syscall_frame_word_set(frame_sp, offsetof(ExceptionFrame, x2),
-                                   base + 128);
-            syscall_frame_word_set(frame_sp, offsetof(ExceptionFrame, x30),
-                                   handler.restorer);
-            syscall_frame_word_set(frame_sp, offsetof(ExceptionFrame, sp_el0),
-                                   base);
-            syscall_frame_word_set(frame_sp, offsetof(ExceptionFrame, elr_el1),
-                                   handler.handler);
+            let mut frame: FrameRef = frame_ref_from_entry(frame_sp);
+            frame_general_set(frame, 1, base);
+            frame_general_set(frame, 2, base + 128);
+            frame_general_set(frame, 30, handler.restorer);
+            frame_sp_el0_set(frame, base);
+            frame_elr_el1_set(frame, handler.handler);
             return SyscallAction::Resume(signum);
         }
     }
@@ -4418,8 +4384,8 @@ fn syscall_signal_deliver(frame_sp: usize, action: SyscallAction)
 // is wherever the handler left SP, which is where the restorer calls from.
 fn syscall_signal_return(frame_sp: usize) -> SyscallAction !{unsafe} {
     if (frame_sp == 0) { return SyscallAction::Resume(LINUX_EINVAL); }
-    let base: usize = syscall_frame_word(
-        frame_sp, offsetof(ExceptionFrame, sp_el0));
+    let mut frame: FrameRef = frame_ref_from_entry(frame_sp);
+    let base: usize = frame_sp_el0(frame);
     match user_range_check_read(kernel_process_current_root(), base,
                                 SIGFRAME_SIZE) {
         UserReadRangeResult::Fault => {
@@ -4445,33 +4411,23 @@ fn syscall_signal_return(frame_sp: usize) -> SyscallAction !{unsafe} {
                 let (register_ok, register) =
                     user_read_u64(range, SIGFRAME_REGS + index * 8);
                 if (index == 0) { x0 = register as usize; }
-                syscall_frame_word_set(
-                    frame_sp, offsetof(ExceptionFrame, x0) + index * 8,
-                    register as usize);
+                frame_general_set(frame, index, register as usize);
             }
             for word: usize in 0..<64 {
                 let (vector_ok, vector) =
                     user_read_u64(range, SIGFRAME_FPSIMD + 16 + word * 8);
-                syscall_frame_word_set(
-                    frame_sp, offsetof(ExceptionFrame, q0) + word * 8,
-                    vector as usize);
+                frame_vector_word_set(frame, word, vector as usize);
             }
             let (fpsr_ok, fpsr) = user_read_u32(range, SIGFRAME_FPSIMD + 8);
             let (fpcr_ok, fpcr) = user_read_u32(range, SIGFRAME_FPSIMD + 12);
-            syscall_frame_word_set(frame_sp, offsetof(ExceptionFrame, fpsr),
-                                   fpsr as usize);
-            syscall_frame_word_set(frame_sp, offsetof(ExceptionFrame, fpcr),
-                                   fpcr as usize);
-            let kept_pstate: usize = syscall_frame_word(
-                frame_sp, offsetof(ExceptionFrame, spsr_el1));
-            syscall_frame_word_set(frame_sp,
-                offsetof(ExceptionFrame, spsr_el1),
+            frame_fpsr_set(frame, fpsr as usize);
+            frame_fpcr_set(frame, fpcr as usize);
+            let kept_pstate: usize = frame_spsr_el1(frame);
+            frame_spsr_el1_set(frame,
                 (kept_pstate & ~SIGFRAME_PSTATE_USER_BITS) |
                 ((pstate as usize) & SIGFRAME_PSTATE_USER_BITS));
-            syscall_frame_word_set(frame_sp, offsetof(ExceptionFrame, sp_el0),
-                                   sp as usize);
-            syscall_frame_word_set(frame_sp, offsetof(ExceptionFrame, elr_el1),
-                                   pc as usize);
+            frame_sp_el0_set(frame, sp as usize);
+            frame_elr_el1_set(frame, pc as usize);
             kernel_process_current_set_signal_mask(mask as usize);
             return SyscallAction::Resume(x0);
         }
