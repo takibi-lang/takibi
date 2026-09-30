@@ -4,6 +4,13 @@
 The source set comes from depfiles emitted by successful --forbid-trap builds.
 This is an audit aid, not a proof: TRUSTED_BASE.md records the assumptions that
 cannot be counted.
+
+`--check-raw-deref TARGET AUDIT DEPFILE [--lower]` is the one gate in here
+(GitHub issue #639, #637 stage 0). It holds a kernel build's raw-pointer
+dereference sites, which the compiler lists with --emit-raw-deref-audit, to
+the per-file budget in scripts/raw_deref_budget.tsv, and is run by the rules
+that link each kernel object. A ratchet: a file with no row, over its row or
+UNDER its row fails, so the number only moves down by an edit made on purpose.
 """
 
 import argparse
@@ -13,6 +20,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from check_lock_discipline import ATOMIC_ALLOWED, ATOMIC_RE
+from pass_line import report_pass
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 KERNEL_DIR = REPO_ROOT / "kernel"
@@ -25,6 +33,133 @@ def read_depfile_sources(depfile: Path) -> list[str]:
     text = depfile.read_text().replace("\\\n", " ")
     _, _, prereqs = text.partition(":")
     return sorted(set(p for p in prereqs.split() if p.endswith(".tkb")))
+
+
+RAW_DEREF_BUDGET = Path(__file__).resolve().parent / "raw_deref_budget.tsv"
+
+
+def read_raw_deref_budget(path: Path) -> dict[str, tuple[int, int, str]]:
+    """file -> (plain, io, reason), from the tab separated budget."""
+    rows = {}
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) != 4 or not fields[3].strip():
+            sys.exit(f"error: {path.name}:{number}: a row is file, plain, io "
+                     "and a reason, tab separated")
+        if fields[0] in rows:
+            sys.exit(f"error: {path.name}:{number}: {fields[0]} appears twice")
+        rows[fields[0]] = (int(fields[1]), int(fields[2]), fields[3])
+    return rows
+
+
+def read_raw_deref_audit(path: Path) -> dict[str, list[int]]:
+    """file -> [plain, io] counts, from --emit-raw-deref-audit's output."""
+    lines = path.read_text().splitlines()
+    if not lines or lines[0].split("\t")[:6] != [
+            "file", "line", "column", "function", "form", "pointer"]:
+        sys.exit(f"error: {path} is not a raw-deref audit")
+    counts: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    for line in lines[1:]:
+        fields = line.split("\t")
+        counts[fields[0]][1 if fields[5] == "io" else 0] += 1
+    return dict(counts)
+
+
+def raw_deref_problems(audit: dict[str, list[int]],
+                       budget: dict[str, tuple[int, int, str]],
+                       compiled: set[str], exists) -> list[str]:
+    """Everything the ratchet refuses; `compiled` is this target's files."""
+    problems = []
+    for name in sorted(audit):
+        plain, io = audit[name]
+        if name not in budget:
+            problems.append(
+                f"{name}: {plain} plain and {io} io raw-pointer dereference "
+                "site(s) and no row in scripts/raw_deref_budget.tsv; a new "
+                "file that dereferences a raw pointer is declared there, "
+                "with its reason")
+    for name, (want_plain, want_io, _) in sorted(budget.items()):
+        if not exists(name):
+            problems.append(f"{name}: has a row and no longer exists; "
+                            "delete the row")
+        elif want_plain == 0 and want_io == 0:
+            problems.append(f"{name}: a row of zero; delete the row")
+        if name not in compiled:
+            continue
+        plain, io = audit.get(name, [0, 0])
+        for kind, have, want in (("plain", plain, want_plain),
+                                 ("io", io, want_io)):
+            if have > want:
+                problems.append(
+                    f"{name}: {have} {kind} dereference site(s), over its "
+                    f"budget of {want}; a new dereference is a decision, "
+                    "made in the budget with a reason")
+            elif have < want:
+                problems.append(
+                    f"{name}: {have} {kind} dereference site(s), under its "
+                    f"budget of {want}; lower the row (`--lower` does it) so "
+                    "the count cannot climb back unnoticed")
+    return problems
+
+
+def lower_raw_deref_budget(path: Path, audit: dict[str, list[int]],
+                           compiled: set[str]) -> list[str]:
+    """Lower every row of a compiled file to what it now has; never raise."""
+    changed = []
+    out = []
+    for line in path.read_text().splitlines():
+        fields = line.split("\t")
+        if line.startswith("#") or len(fields) != 4 or fields[0] not in compiled:
+            out.append(line)
+            continue
+        plain, io = audit.get(fields[0], [0, 0])
+        want_plain, want_io = int(fields[1]), int(fields[2])
+        new_plain, new_io = min(plain, want_plain), min(io, want_io)
+        if (new_plain, new_io) != (want_plain, want_io):
+            changed.append(f"{fields[0]}: {want_plain}/{want_io} -> "
+                           f"{new_plain}/{new_io}")
+        if (new_plain, new_io) == (0, 0):
+            continue  # a zero row is deleted
+        out.append("\t".join([fields[0], str(new_plain), str(new_io), fields[3]]))
+    path.write_text("\n".join(out) + "\n")
+    return changed
+
+
+def check_raw_deref_main(args: list[str]) -> int:
+    lower = "--lower" in args
+    args = [arg for arg in args if arg != "--lower"]
+    if len(args) != 3 or args[0] not in ("qemu", "rpi5"):
+        sys.exit("usage: measure_trusted_base.py --check-raw-deref "
+                 "qemu|rpi5 AUDIT DEPFILE [--lower]")
+    target, audit_path, depfile = args[0], Path(args[1]), Path(args[2])
+    audit = read_raw_deref_audit(audit_path)
+    budget = read_raw_deref_budget(RAW_DEREF_BUDGET)
+    compiled = {
+        Path(name).relative_to(REPO_ROOT).as_posix()
+        if Path(name).is_absolute() else name
+        for name in read_depfile_sources(depfile)}
+    if lower:
+        for line in lower_raw_deref_budget(RAW_DEREF_BUDGET, audit, compiled):
+            print(f"lowered {line}")
+        return 0
+    problems = raw_deref_problems(
+        audit, budget, compiled, lambda name: (REPO_ROOT / name).exists())
+    for problem in problems:
+        print(f"ERROR raw-deref-ratchet: {problem}")
+    if problems:
+        print(f"FAIL raw-deref-ratchet: {len(problems)} problem(s) in the "
+              f"{target} kernel's raw-pointer dereferences")
+        return 1
+    checked = sorted(name for name in budget if name in compiled)
+    report_pass(
+        "raw-deref-ratchet",
+        f"{target}: {sum(a[0] for a in audit.values())} plain and "
+        f"{sum(a[1] for a in audit.values())} io dereference site(s) in "
+        f"{len(audit)} file(s), each equal to its recorded budget",
+        files=len(audit))
+    return 0
 
 
 def count_lines(paths: list[Path]) -> int:
@@ -146,6 +281,8 @@ def count_pattern(paths: list[Path], pattern: str) -> int:
 
 
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "--check-raw-deref":
+        sys.exit(check_raw_deref_main(sys.argv[2:]))
     parser = argparse.ArgumentParser()
     parser.add_argument("--verbose", action="store_true",
                         help="list exact sources and unsafe-site classifications")

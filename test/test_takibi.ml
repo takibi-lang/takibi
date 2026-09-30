@@ -2537,6 +2537,87 @@ let infer_tests = [
       Alcotest.(check int) "fresh inference clears audit" 0
         (List.length (Type_inf.overflow_audit_sites ())));
 
+  (* GitHub issue #639 (#637 stage 0): the raw-pointer dereference audit. *)
+  Alcotest.test_case "raw deref audit records each read and store form" `Quick
+    (fun () ->
+      ignore (infer_files ["deref.tkb",
+        "struct S { a: i32; }\n\
+         fn reads(p: *S, q: *i32, r: *i32) -> i32 {\n\
+         \  let x: i32 = p.a;\n\
+         \  let y: i32 = *q;\n\
+         \  let z: i32 = r[1];\n\
+         \  return x;\n\
+         }\n\
+         fn writes(p: *S, q: *i32, r: *i32) {\n\
+         \  p.a = 1;\n\
+         \  *q = 2;\n\
+         \  r[3] = 4;\n\
+         }\n"]);
+      let sites = Type_inf.raw_deref_sites () in
+      let summary = List.map (fun site ->
+        (site.Type_inf.raw_function, site.Type_inf.raw_form,
+         site.Type_inf.raw_pointer)) sites |> List.sort compare in
+      Alcotest.(check (list (triple string string string)))
+        "one site per form, none merged"
+        [ ("reads", "deref", "plain"); ("reads", "field", "plain");
+          ("reads", "index", "plain"); ("writes", "store-deref", "plain");
+          ("writes", "store-field", "plain"); ("writes", "store-index", "plain") ]
+        summary;
+      List.iter (fun site ->
+        Alcotest.(check string) "original source filename" "deref.tkb"
+          site.Type_inf.raw_file) sites);
+
+  Alcotest.test_case "raw deref audit lists *io and aligned pointers by kind" `Quick
+    (fun () ->
+      ignore (infer
+        "fn device(register: *io u32) -> u32 { return *register; }
+         fn aligned(word: *align(8) u64) -> u64 { return *word; }");
+      let summary = List.map (fun site ->
+        (site.Type_inf.raw_function, site.Type_inf.raw_pointer))
+        (Type_inf.raw_deref_sites ()) |> List.sort compare in
+      Alcotest.(check (list (pair string string))) "io and aligned apart"
+        [ ("aligned", "aligned"); ("device", "io") ] summary);
+
+  Alcotest.test_case "raw deref audit excludes references, slices, arrays and values" `Quick
+    (fun () ->
+      ignore (infer
+        "struct S { a: i32; }
+         fn safe(shared: &S, s: []i32, v: S, arr: [i32; 4]) -> i32 {
+           let a: i32 = shared.a;
+           let b: i32 = s[0];
+           let c: i32 = v.a;
+           let d: i32 = arr[1];
+           return a + b + c + d;
+         }");
+      Alcotest.(check int) "none of these is a raw pointer" 0
+        (List.length (Type_inf.raw_deref_sites ())));
+
+  Alcotest.test_case "raw deref audit counts a generic function's site once" `Quick
+    (fun () ->
+      ignore (infer_files ["generic.tkb",
+        "fn peek(T: type, p: *T) -> T { return *p; }\n\
+         fn use_both(a: *i32, b: *u8) -> i32 {\n\
+         \  let x: i32 = peek(a);\n\
+         \  let y: u8 = peek(b);\n\
+         \  return x;\n\
+         }\n"]);
+      let sites = Type_inf.raw_deref_sites () in
+      Alcotest.(check int) "two instances, one source line, one site" 1
+        (List.length sites);
+      List.iter (fun site ->
+        Alcotest.(check string) "the source file, not the instance's name"
+          "generic.tkb" site.Type_inf.raw_file) sites);
+
+  Alcotest.test_case "raw deref audit counts a source site once and resets" `Quick
+    (fun () ->
+      ignore (infer
+        "fn twice(p: *i32) -> i32 { return *p + *p; }");
+      Alcotest.(check int) "two dereferences on one line are two columns" 2
+        (List.length (Type_inf.raw_deref_sites ()));
+      ignore (infer "fn empty() { return; }");
+      Alcotest.(check int) "fresh inference clears the audit" 0
+        (List.length (Type_inf.raw_deref_sites ())));
+
   Alcotest.test_case "overflow audit retains guarded endpoint exclusions" `Quick
     (fun () ->
       ignore (infer

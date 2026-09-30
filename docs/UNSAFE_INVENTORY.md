@@ -105,6 +105,30 @@ Notes on individual groups:
 - Null safety (#342) is not measured here. Nothing in the source marks a
   pointer that may be null, so this inventory has nothing to count for it.
 
+## Raw dereference sites (measured 2026-09-30, #639)
+
+`--emit-raw-deref-audit` lists every place the type checker sees a raw
+pointer dereferenced, in six forms: `*p`, `p.field`, `p[i]` and a store
+through each. Both kernel objects, deduplicated by source position so a
+generic function counts once:
+
+| Measure | Plain `*T` and `*align(N) T` | `*io T` | Files |
+| --- | ---: | ---: | ---: |
+| QEMU kernel | 2,377 | 172 | 33 |
+| RPi5 kernel | 2,372 | 220 | 34 |
+| Union, per-file budget in `scripts/raw_deref_budget.tsv` | 2,377 | 291 | 38 |
+
+The 545 above counts raw-pointer TYPES in signatures and declarations and 199
+counts `*io` types; these count SITES, and one pointer parameter used twenty
+times is twenty sites. So the two are not comparable one for one: the audit is
+the larger figure because it counts uses, and it counts only what the
+compiler proved is a raw pointer, where the type scan matched text. The five
+largest files hold 1,632 of the 2,377 plain sites: `process.tkb` (750),
+`tcp.tkb` (337), `fd_table.tkb` (209), `process_image.tkb` (159) and
+`page.tkb` (157), which is the pool-payload reach that point 2 above
+describes, seen from the dereference side. The EL0 test payloads are not
+audited yet.
+
 ## Outside the blocks
 
 These trusted boundaries are unchanged by any of the mechanisms above.

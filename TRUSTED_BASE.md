@@ -170,6 +170,19 @@ of what the compiler cannot check. Splitting one routine into named
 single-access primitives raises the block count while lowering the enclosed
 lines; wrapping a longer body in one block does the reverse. Read the pair.
 
+Raw-pointer dereferences are counted apart from `unsafe` blocks, because
+`unsafe` gates only the moment a pointer is minted and a `*T` that exists can
+be dereferenced anywhere. The compiler lists every such site with
+`--emit-raw-deref-audit <path>` (`p.field`, `*p`, `p[i]`, and a store through
+each; `*io T` and `*align(N) T` are marked; references, slices and arrays are
+not raw pointers and are not listed). Each kernel object's build holds the
+list to the per-file budget in `scripts/raw_deref_budget.tsv` with
+`python3 scripts/measure_trusted_base.py --check-raw-deref`: a file with no
+row, over its row or under its row fails, so the number moves down only by an
+edit made on purpose (`--lower` makes it). The budget names a reason for each
+file. It counts sites, not distinct pointers, and it does not say which are
+safe; choosing which files are mint sites is the later stages of the design.
+
 The classifier is deliberately mechanical. A block containing several kinds
 of operation receives one primary category, so the detailed list is a review
 queue rather than a semantic proof. A new explicit escape surface must either

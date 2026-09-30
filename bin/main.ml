@@ -58,6 +58,7 @@ let () =
   let emit_debug_metadata = ref "" in
   let emit_depfile = ref "" in
   let emit_overflow_audit = ref "" in
+  let emit_raw_deref_audit = ref "" in
   let emit_effect_matrix = ref false in
   let i = ref 1 in
   while !i < Array.length Sys.argv do
@@ -99,6 +100,13 @@ let () =
            exit 1
          );
          emit_overflow_audit := Sys.argv.(!i)
+     | "--emit-raw-deref-audit" ->
+         incr i;
+         if !i >= Array.length Sys.argv then (
+           Printf.eprintf "Error: --emit-raw-deref-audit requires a path\n";
+           exit 1
+         );
+         emit_raw_deref_audit := Sys.argv.(!i)
      | "--emit-effect-matrix" ->
          emit_effect_matrix := true
      | "-o" ->
@@ -169,7 +177,7 @@ let () =
 
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--forbid-trap] [--forbid-unsafe] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--forbid-trap] [--forbid-unsafe] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--version]\n"
       Sys.argv.(0);
     exit 1
   );
@@ -337,6 +345,25 @@ let () =
           loc.pos_fname loc.pos_lnum (loc.pos_cnum - loc.pos_bol + 1)
           (op_name site.overflow_op) lhs_ty lhs_fact lhs_excluded
           rhs_ty rhs_fact rhs_excluded
+      ) sites;
+      close_out out
+    end;
+
+    if !emit_raw_deref_audit <> "" then begin
+      (* GitHub issue #639: one line per raw-pointer dereference the type
+         checker recorded (Type_inf.raw_deref_site), sorted by position. *)
+      let sites = Type_inf.raw_deref_sites () |> List.sort (fun a b ->
+        let la = a.Type_inf.raw_loc and lb = b.Type_inf.raw_loc in
+        compare (a.Type_inf.raw_file, la.pos_lnum, la.pos_cnum, a.raw_form)
+                (b.Type_inf.raw_file, lb.pos_lnum, lb.pos_cnum, b.raw_form))
+      in
+      let out = open_out !emit_raw_deref_audit in
+      Printf.fprintf out "file\tline\tcolumn\tfunction\tform\tpointer\n";
+      List.iter (fun site ->
+        let loc = site.Type_inf.raw_loc in
+        Printf.fprintf out "%s\t%d\t%d\t%s\t%s\t%s\n"
+          site.raw_file loc.pos_lnum (loc.pos_cnum - loc.pos_bol + 1)
+          site.raw_function site.raw_form site.raw_pointer
       ) sites;
       close_out out
     end;

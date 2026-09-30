@@ -1,0 +1,47 @@
+# Raw-pointer dereference sites per kernel file: GitHub issue #639 (#637 stage 0).
+# `plain` counts *T and *align(N) T; `io` counts *io T. The compiler's
+# --emit-raw-deref-audit is what these numbers are measured from, and
+# `scripts/measure_trusted_base.py --check-raw-deref` holds a build to
+# them: a file with no row, over its row, or UNDER its row fails. Lowering
+# a row is a deliberate edit (`--lower` does it for the files a build
+# compiled); raising one, or adding a row, is a decision about a new
+# dereference and is made by hand with the reason written here.
+# Measured 2026-09-30. Columns: file, plain, io, reason (tab separated).
+kernel/arch/arm64/kernel/exception_evidence.tkb	141	0	DDB and the crash reporter read process records and stacks through raw pointers (#637 C, F)
+kernel/arch/arm64/mm/asid.tkb	25	0	the ASID allocator's records, reached through pool pointers (#637 F)
+kernel/arch/arm64/mm/mmu.tkb	2	0	page-table entries as a raw table (#637 H)
+kernel/boot/fdt.tkb	1	0	the device tree blob as raw memory (#637 H)
+kernel/drivers/block/virtio_blk.tkb	20	17	virtio rings and request buffers, plus device registers (#637 A, E)
+kernel/drivers/net/rp1_gem.tkb	0	11	RP1 GEM registers (#637 A)
+kernel/drivers/net/virtio_net.tkb	5	21	virtio rings and frames, plus device registers (#637 A, E)
+kernel/fs/elf64.tkb	16	0	ELF headers read from an image in memory (#637 D)
+kernel/fs/ext2/ext2.tkb	156	0	ext2 on-disk structures and cache blocks reached through pool pointers (#637 F)
+kernel/init/test_driver.tkb	10	0	boot-time fixtures reaching process records directly (#637 F)
+kernel/kernel/fd_table.tkb	209	0	fd tables, blocks and contexts reached through liveness escapes (#637 F)
+kernel/kernel/pool_walk_contention_evidence.tkb	5	0	a two-core boot probe (pool payload access)
+kernel/kernel/process.tkb	750	0	process records reached through scheduled_process_record_at and its siblings, the biggest liveness escape (#637 F)
+kernel/kernel/profile_samples.tkb	2	0	the profiler's sample buffer (#637 C)
+kernel/kernel/signal_contention_evidence.tkb	2	0	a two-core boot probe (pool payload access)
+kernel/kernel/syscall.tkb	79	0	syscall frames and scratch buffers (#637 C)
+kernel/kernel/tcp_connection_contention_evidence.tkb	2	0	a two-core boot probe (pool payload access)
+kernel/lib/diagnostic_ring.tkb	6	0	per-CPU log rings published by atomics (#637 B)
+kernel/lib/intrusive_pool.tkb	93	0	the pool's own chunk carving, the mint of every payload pointer (#637 F)
+kernel/lib/locked_cell.tkb	1	0	a lock-guarded cell's payload (#637 F)
+kernel/mm/address_space.tkb	67	0	address-space backing records reached through liveness escapes (#637 D, F)
+kernel/mm/page.tkb	157	0	physical pages and page metadata (#637 D)
+kernel/mm/process_image.tkb	159	0	process image records reached through liveness escapes (#637 F)
+kernel/mm/user_memory.tkb	11	0	the user-range mint site: user addresses become slices here (#637 D)
+kernel/net/arp.tkb	7	0	frames and the ARP table (#637 F)
+kernel/net/icmp.tkb	13	0	frames (#637 F)
+kernel/net/tcp.tkb	337	0	connection payloads and frames reached through liveness escapes (#637 F)
+kernel/platform/qemu/intc.tkb	0	19	GIC registers (#637 A)
+kernel/platform/qemu/timer_irq.tkb	0	2	GIC registers (#637 A)
+kernel/platform/qemu/uart.tkb	0	29	PL011 registers (#637 A)
+kernel/platform/rpi5/intc.tkb	0	76	GIC registers (#637 A)
+kernel/platform/rpi5/pcie.tkb	0	42	PCIe registers and windows (#637 A)
+kernel/platform/rpi5/system_timer_dtb.tkb	0	2	system timer registers (#637 A)
+kernel/platform/rpi5/timer_irq.tkb	0	2	GIC registers (#637 A)
+kernel/platform/rpi5/uart.tkb	0	28	PL011 registers (#637 A)
+kernel/platform/rpi5/usb_xhci.tkb	46	42	xHCI registers and DMA rings (#637 A, E)
+kernel/printk/log.tkb	49	0	the kernel log's ring and staging buffers (#637 B)
+kernel/printk/peer_console.tkb	6	0	the peer console rings (#637 B)

@@ -72,6 +72,38 @@ let overflow_audit_sites () =
 
 let active_overflow_audit_sites : overflow_audit_site list ref = ref []
 
+(* GitHub issue #639 (#637 stage 0): every place a raw pointer is
+   dereferenced. `unsafe` gates only the moment a pointer is minted, so once
+   a `*T` exists `p.field`, `*p` and `p[i]` compile anywhere and nothing
+   counted them. This table is what `--emit-raw-deref-audit` writes and
+   scripts/buildcheck_raw_deref_ratchet.py reads. A text scan cannot tell a
+   raw pointer from a slice, an array or a `&T` reference, and the type
+   checker can, which is why the record is made here.
+
+   A site is a dereference of a plain `*T`, an `*io T` (listed as "io") or an
+   `*align(N) T` (listed as "aligned"), in one of six forms: a read (`deref`
+   `*p`, `field` `p.f`, `index` `p[i]`) or a store through the pointer
+   (`store-deref`, `store-field`, `store-index`). References (`&T`, `&mut
+   T`), slices, arrays and indexed owners are not raw pointers and are not
+   recorded. Keyed by position and form, so a generic function checked more
+   than once counts once. *)
+type raw_deref_site = {
+  raw_file : string;
+  raw_loc : Lexing.position;
+  raw_function : string;
+  raw_form : string;
+  raw_pointer : string;
+}
+
+let raw_deref_table :
+    ((string * int * int * string), raw_deref_site) Hashtbl.t =
+  Hashtbl.create 1024
+
+let raw_deref_sites () =
+  Hashtbl.to_seq_values raw_deref_table |> List.of_seq
+
+let active_audit_function : string ref = ref "<global>"
+
 let merge_overflow_audit_facts left right =
   match left, right with
   | Some a, Some b
@@ -460,6 +492,31 @@ let strip_io t = match repr t with TIo inner -> inner | _ -> t
 let unify_at loc t1 t2 =
   try unify t1 t2
   with Unify_error msg -> raise (TypeError (loc, msg))
+
+(* Record a dereference of [t] at [loc] if [t] is a raw pointer type; any
+   other type is not one and is ignored. See raw_deref_site. *)
+let record_raw_deref (loc : Lexing.position) form t =
+  let pointer_kind = match repr t with
+    | TPtr inner ->
+        (match repr inner with TIo _ -> Some "io" | _ -> Some "plain")
+    | TAlignedPtr _ -> Some "aligned"
+    | _ -> None
+  in
+  match pointer_kind with
+  | None -> ()
+  | Some raw_pointer ->
+      (* A generic function's instance is checked under the name
+         "file#function$Type"; the source file is what a site belongs to. *)
+      let raw_file = match String.index_opt loc.pos_fname '#' with
+        | Some i -> String.sub loc.pos_fname 0 i
+        | None -> loc.pos_fname
+      in
+      let col = loc.pos_cnum - loc.pos_bol + 1 in
+      let key = (raw_file, loc.pos_lnum, col, form) in
+      if not (Hashtbl.mem raw_deref_table key) then
+        Hashtbl.add raw_deref_table key
+          { raw_file; raw_loc = loc; raw_function = !active_audit_function;
+            raw_form = form; raw_pointer }
 
 (* An integer literal starts as a polymorphic unbound type variable, so the
    ordinary unifier needs a separate value check when an expression flows
@@ -2777,6 +2834,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
   | Deref e1 ->
       let t1 = infer_expr senv eenv tyenv fenv e1 in
       check_deref_complete e1.loc t1;
+      record_raw_deref e.loc "deref" t1;
       let inner = match repr t1 with
         | TPtr inner ->
             (* *io T deref returns T (io is a storage qualifier; volatile handled in codegen) *)
@@ -3239,6 +3297,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
          ordinary (non-indexing) field read decays it, or bounds-check
          codegen loses the array length entirely. *)
       let vt = place_undecayed_type senv eenv tyenv fenv base in
+      record_raw_deref e.loc "index" vt;
       let it = infer_expr senv eenv tyenv fenv idx in
       Hashtbl.replace index_resolved_ty idx.loc (to_ast it);  (* GitHub issue #311 *)
       (match repr vt with
@@ -4558,6 +4617,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | Deref ptr_expr ->
            let pt = infer_expr senv eenv tyenv fenv ptr_expr in
            check_deref_complete ptr_expr.loc pt;
+           record_raw_deref e.loc "store-deref" pt;
            (match repr pt with
             | TRef _ ->
                 (* GitHub issue #314/#319: same "&T is read-only, &mut T
@@ -4604,6 +4664,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | Index (base, idx) ->
            check_no_write_through_shared_ref senv eenv tyenv fenv base;
            let vt = place_undecayed_type senv eenv tyenv fenv base in
+           record_raw_deref e.loc "store-index" vt;
            (* GitHub issue #534: `w.f[i] = v` is `w.f = v` for one element,
               so a live token is what permits it, as it permits the other. *)
            (match publish_place_of base with
@@ -4669,6 +4730,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            TVoid
        | FieldGet (base_expr, fname) ->
            let bt = infer_expr senv eenv tyenv fenv base_expr in
+           record_raw_deref e.loc "store-field" bt;
            (match repr bt with
             | TIndexedStruct _ ->
                 (match base_expr.desc with
@@ -4940,6 +5002,7 @@ and infer_addrof_wrapped senv eenv tyenv fenv (e : Ast.expr) (inner : Ast.expr)
 and infer_field_access ~decay senv eenv tyenv fenv (loc : Ast.loc)
     (base_expr : Ast.expr) (fname : string) : ty =
   let bt = infer_expr senv eenv tyenv fenv base_expr in
+  record_raw_deref loc "field" bt;
   match repr bt, fname with
   | TSlice _, "len" -> TUsize  (* s.len -- the slice's runtime length *)
   | bt_repr, _ ->
@@ -6324,6 +6387,7 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
     | Some (Ast.TypeBorrow _) -> StringSet.add name names
     | _ -> names) StringSet.empty fdef.params;
   Fun.protect ~finally:(fun () ->
+    active_audit_function := "<global>";
     active_static_scope := previous_scope;
     active_readonly_borrows := previous_readonly) (fun () ->
     check_const_shadowing fdef;
@@ -6350,6 +6414,7 @@ let infer_func senv eenv fenv genv (fdef : Ast.func) : func_info =
     Hashtbl.reset binding_fact_sources;
     Hashtbl.reset intrinsic_nonzero_at;
     active_overflow_audit_sites := [];
+    active_audit_function := fdef.name;
     List.iter2 (fun id ty -> Hashtbl.replace active_binding_types id ty)
       bindings.param_ids param_tys;
     (* Start with globals visible, then shadow them with params (params are mutable) *)
@@ -6419,6 +6484,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset publish_begin_record;  (* GitHub issue #476, same lifetime *)
   Hashtbl.reset slice_cast_len;     (* GitHub issue #372, same lifetime *)
   Hashtbl.reset overflow_audit_table;
+  Hashtbl.reset raw_deref_table;
+  active_audit_function := "<global>";
   Hashtbl.reset divisor_proven_nonzero_at;
   Hashtbl.reset signed_division_overflow_proven_safe_at;
   Hashtbl.reset array_index_proven_in_bounds_at;
