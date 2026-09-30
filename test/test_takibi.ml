@@ -2328,6 +2328,87 @@ let run_guard_fixture =
    }
    "
 
+(* GitHub issue #614: the shape kernel/kernel/process.tkb gives the proof
+   that no other core stands on a process's stack (StackOwnership.tla's
+   StartsOnFreeStack). A Ready process is not startable: only a check that
+   reads the stack owner turns it into a Startable token, and only that token
+   starts. The same for a zombie and a reap. Kept as a copy of the shape
+   rather than the kernel file, like the run guard above; the kernel build
+   is what proves the real functions have it. *)
+let stack_proof_fixture =
+  "enum ProcessState: u8 { Ready; Startable; Running; Blocked; Exited;
+                           Reapable; }
+   linear struct Owner[process: usize] {
+     pool_index: usize;
+     generation: usize @ process;
+   }
+   linear struct State[process: usize, state: ProcessState] {
+     pool_index: usize;
+   }
+   must_use variant StartCheck[process: usize] {
+     Standing(State[process, ProcessState::Ready]);
+     Startable(State[process, ProcessState::Startable]);
+   }
+   fn owner_new(slot: usize, generation: usize @ process) -> Owner[process] {
+     let mut owner: Owner[process] = { slot, generation };
+     return owner;
+   }
+   fn owner_drop(owner: sink Owner[process]) {}
+   fn state_drop(state: sink State[process, process_state]) {}
+   fn blocked_state(owner: borrow Owner[process])
+       -> State[process, ProcessState::Blocked] {
+     let mut state: State[process, ProcessState::Blocked] =
+       { owner.pool_index };
+     return state;
+   }
+   fn wake(owner: borrow Owner[process],
+           state: sink State[process, ProcessState::Blocked])
+       -> State[process, ProcessState::Ready] {
+     state_drop(state);
+     let mut ready: State[process, ProcessState::Ready] =
+       { owner.pool_index };
+     return ready;
+   }
+   fn start_check(owner: borrow Owner[process], stack_owned: bool,
+                  state: sink State[process, ProcessState::Ready])
+       -> StartCheck[process] {
+     if (stack_owned) { return StartCheck::Standing(state); }
+     state_drop(state);
+     let mut startable: State[process, ProcessState::Startable] =
+       { owner.pool_index };
+     return StartCheck::Startable(startable);
+   }
+   fn start(owner: borrow Owner[process],
+            state: sink State[process, ProcessState::Startable])
+       -> State[process, ProcessState::Running] {
+     state_drop(state);
+     let mut running: State[process, ProcessState::Running] =
+       { owner.pool_index };
+     return running;
+   }
+   fn exit(owner: borrow Owner[process],
+           state: sink State[process, ProcessState::Running])
+       -> State[process, ProcessState::Exited] {
+     state_drop(state);
+     let mut exited: State[process, ProcessState::Exited] =
+       { owner.pool_index };
+     return exited;
+   }
+   fn exited_take(owner: borrow Owner[process], stack_owned: bool,
+                  state: sink State[process, ProcessState::Exited])
+       -> State[process, ProcessState::Reapable] {
+     state_drop(state);
+     let mut reapable: State[process, ProcessState::Reapable] =
+       { owner.pool_index };
+     return reapable;
+   }
+   fn reap(owner: sink Owner[process],
+           state: sink State[process, ProcessState::Reapable]) {
+     state_drop(state);
+     owner_drop(owner);
+   }
+   "
+
 (* The real network backends use this shape for asynchronous in-place TX:
    starting DMA consumes the RX owner and returns a distinct linear owner.
    Only the completion transition restores the erased acquisition permit. *)
@@ -2850,6 +2931,57 @@ let infer_tests = [
            run_unlock(guard, &run_lock_word);
            return taken;
          }")));
+
+  Alcotest.test_case
+    "stack proof: a woken process is started only through the check" `Quick
+    (fun () ->
+      ignore (infer (stack_proof_fixture ^
+        "fn wake_and_start(blocked: sink State[process, ProcessState::Blocked],
+                           owner: sink Owner[process], stack_owned: bool) {
+           let ready = wake(owner, blocked);
+           match start_check(owner, stack_owned, ready) {
+             StartCheck::Startable(startable) => {
+               let running = start(owner, startable);
+               state_drop(running);
+             }
+             StartCheck::Standing(standing) => { state_drop(standing); }
+           }
+           owner_drop(owner);
+         }")));
+
+  Alcotest.test_case
+    "stack proof: starting a woken process without the check is rejected"
+    `Quick
+    (expect_type_error "static value mismatch"
+      (stack_proof_fixture ^
+        "fn wake_and_start(blocked: sink State[process, ProcessState::Blocked],
+                           owner: sink Owner[process]) {
+           let ready = wake(owner, blocked);
+           let running = start(owner, ready);
+           state_drop(running);
+           owner_drop(owner);
+         }"));
+
+  Alcotest.test_case
+    "stack proof: a zombie is reaped only through its take" `Quick
+    (fun () ->
+      ignore (infer (stack_proof_fixture ^
+        "fn exit_and_reap(running: sink State[process, ProcessState::Running],
+                          owner: sink Owner[process], stack_owned: bool) {
+           let exited = exit(owner, running);
+           let reapable = exited_take(owner, stack_owned, exited);
+           reap(owner, reapable);
+         }")));
+
+  Alcotest.test_case
+    "stack proof: reaping a zombie without its take is rejected" `Quick
+    (expect_type_error "static value mismatch"
+      (stack_proof_fixture ^
+        "fn exit_and_reap(running: sink State[process, ProcessState::Running],
+                          owner: sink Owner[process]) {
+           let exited = exit(owner, running);
+           reap(owner, exited);
+         }"));
 
   Alcotest.test_case "run guard: a take with no lock held is rejected" `Quick
     (expect_type_error "blocked_take expects 2 argument(s), got 1"
