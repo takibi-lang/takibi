@@ -45,9 +45,8 @@ and 3 are unscheduled. The steps keep their numbers, which issues cite.
    found by chance is made to fail every run.
    **Finish before step 3 starts (maintainer, 2026-09-29)**, since open
    defects under step 3's kernel-wide changes would be masked or
-   misattributed. Left: #633 (the churn hang, unseen in four RPi5 long runs
-   since #632: close it or keep it). Audit follow-ups that do not block
-   step 3: #641 (a TLA+ model of the world stop), #642 (a boundary fixture
+   misattributed. The close-out list is done (2026-09-30; #633 was wait4
+   returning a sibling's pid). Audit follow-ups that do not block step 3: #641 (a TLA+ model of the world stop), #642 (a boundary fixture
    for signal frames and mmap reuse) and #643 (gdb stall dump and ASID jump
    for four-core QEMU churn).
 3. **Takibi's provisional answer to safe pointers and safe memory access,
