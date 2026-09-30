@@ -17,6 +17,15 @@ EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2-shell.img"
 ARTIFACT_DIR="${KERNEL_QEMU_SHELL_ARTIFACT_DIR:-${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}/kernel-shell-qemu}"
 SHELL_EXT2_IMAGE="$ARTIFACT_DIR/ext2.img"
 QMP_SOCKET="$ARTIFACT_DIR/qmp.sock"
+# A Unix socket path is limited to 107 bytes. Past it QEMU refuses -qmp and
+# exits before binding the UART, and the console then reports only that the
+# UART never opened: a deep TAKIBI_LANE_ARTIFACT_ROOT cost a repeat run that
+# way. Say so here instead.
+if [ "$(printf '%s' "$QMP_SOCKET" | wc -c)" -gt 107 ]; then
+    echo "error: QMP socket path is over the 107-byte Unix socket limit;" \
+         "use a shorter artifact root: $QMP_SOCKET" >&2
+    exit 1
+fi
 HTTP_BRIDGE_LOG="$ARTIFACT_DIR/http-bridge.log"
 TRANSCRIPT_OVERRIDE="${KERNEL_SHELL_TRANSCRIPT:-}"
 

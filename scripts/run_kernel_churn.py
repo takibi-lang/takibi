@@ -221,7 +221,8 @@ def shell_resync(session):
     """
     start = len(session.normalized())
     session.send(b"\n")
-    if session.wait_for(lambda n: has_prompt(n[start:]), 20) is None:
+    if session.wait_for(lambda n: has_prompt(n[start:]),
+                        RESYNC_SECONDS) is None:
         return False
     # Let anything still in flight from the debugger land before typing.
     settle = len(session.normalized())
@@ -235,6 +236,12 @@ def shell_resync(session):
 PROGRESS = b"churn: progress "
 STALL_SECONDS_BY_PLATFORM = {"rpi5": 300, "qemu": 900}
 STALL_SECONDS = 300
+# How long ash may take to answer the resync's empty line. Twenty seconds
+# covers the board. QEMU inside an allcheck, beside every other lane, did not
+# answer in 20 s once after a 7.8 s shell start, and failed the race-window
+# 633 lane before its phase began.
+RESYNC_SECONDS_BY_PLATFORM = {"rpi5": 20, "qemu": 60}
+RESYNC_SECONDS = 20
 # What DDB is asked when a phase hangs, so the capture says why.
 HANG_COMMANDS = (b"ps", b"sched", b"wait", b"current", b"stacks", b"events",
                  b"intr", b"trace")
@@ -330,6 +337,8 @@ def main():
     global STALL_SECONDS
     STALL_SECONDS = (args.stall_seconds or
                      STALL_SECONDS_BY_PLATFORM[args.platform])
+    global RESYNC_SECONDS
+    RESYNC_SECONDS = RESYNC_SECONDS_BY_PLATFORM[args.platform]
 
     root = os.environ.get("TAKIBI_LANE_ARTIFACT_ROOT",
                           os.path.join(REPO_ROOT, "_build"))
