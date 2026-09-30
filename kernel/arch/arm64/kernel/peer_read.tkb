@@ -281,7 +281,14 @@ fn peer_console() {
             svc5(WRITE_SYSCALL, 1, bs"\n" as *u8 as usize, 1, 0, 0);
             svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
         }
-        if (action == 3) {
+        if (action == 4) {
+            // GitHub issue #657: the debugger half has not asked for the hold
+            // yet. Sleep rather than spin; the spin below is for the late
+            // BREAK, which lands only after the hold is armed.
+            svc5(NANOSLEEP_SYSCALL, nap as *u8 as usize, 0, 0, 0, 0);
+            action = svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG,
+                          0, 0, spin, 0);
+        } else if (action == 3) {
             let ddb_written: usize = svc5(
                 WRITE_SYSCALL, 1, ddb_record as *u8 as usize,
                 ddb_record.len, 0, 0);

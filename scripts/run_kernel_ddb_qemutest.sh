@@ -114,6 +114,7 @@ else
     # GitHub issue #534: the BREAK must land while a peer record is held.
     GDB_COMMANDS+=(
         -ex "set *(char *)&kernel_ddb_peer_console_test_enabled = 1"
+        -ex "set *(char *)&kernel_ddb_peer_console_hold_armed = 1"
         -ex "source $REPO_ROOT/scripts/kernel_peer_exit_check.py"
     )
 fi

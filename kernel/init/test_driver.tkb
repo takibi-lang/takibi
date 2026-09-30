@@ -732,6 +732,7 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
     }
     if (listed == false) { kernel_boot_log("none"); }
     kernel_boot_log("\n");
+    kernel_log_peer_console_report();
     if (page_allocator_live_count() == page_baseline) {
         kernel_boot_log("resources: pages=0\n");
         // GitHub issue #376: reported beside the other

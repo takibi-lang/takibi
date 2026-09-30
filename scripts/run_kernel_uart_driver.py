@@ -802,6 +802,25 @@ def main() -> int:
         terminal_scenario.validate()
     text = output.decode("utf-8", errors="replace").replace("\r", "")
     text = text.replace("\x1b[6n", "")
+    # GitHub issue #657: the echo of what this driver typed after the peer
+    # console chain must be the typed text, character for character, on a line
+    # of its own. Output another CPU held back used to make the first of these
+    # arrive with characters missing and the missing ones turn up later, and
+    # nothing compared it, so it passed unnoticed until it landed in a
+    # transcript that was compared.
+    for typed, wanted in ((b"/bin/peer-settings", args.peer_settings),
+                          (b"/bin/peer-tty", args.peer_tty)):
+        if not wanted:
+            continue
+        expected_line = typed.decode("ascii")
+        echoed = any(
+            line.removeprefix("/ # ").removeprefix(" # ") == expected_line
+            for line in text.splitlines())
+        if not echoed:
+            raise RuntimeError(
+                f"the echo of {expected_line!r} was not the typed text on a "
+                "line of its own: characters missing or delayed (GitHub "
+                "issue #657)" + silence)
     if args.validate_ash:
         lines = text.splitlines()
         try:

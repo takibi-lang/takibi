@@ -324,7 +324,8 @@ from core 0, and is admitted to the secondary only after the peer-filesystem
 verdict. When a UART-BREAK DDB lane has set the debugger-written
 `kernel_ddb_peer_console_test_enabled`, it keeps that PID for one more
 held record, through its holding and pending flags, until a debugger entry
-releases it. `kernel/printk/peer_console.tkb` carries that rendezvous in two
+releases it; `kernel_ddb_peer_console_hold_armed`, written by the same lane
+when the hold is wanted, keeps the writer asleep until then. `kernel/printk/peer_console.tkb` carries that rendezvous in two
 more publication records per CPU: a state the peer writes (Clear, Holding,
 Pending) and a release sequence core 0's debugger entry writes. Each side
 keeps its own sequence counter. After its first verdict the writer shares the

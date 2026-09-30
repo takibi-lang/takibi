@@ -1430,6 +1430,13 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
             process_run_unlock(guard);
             return 1;
         }
+        // Not armed yet (GitHub issue #657): 4 tells the writer to wait by
+        // sleeping, so a debugger half that is still a minute away costs the
+        // peer CPU nothing and holds nothing back.
+        if (kernel_ddb_peer_console_hold_armed == false) {
+            process_run_unlock(guard);
+            return 4;
+        }
         workload_busy_pair.peer_console_holding = true;
         peer_console_ddb_hold(SECONDARY_CORE_ID);
         process_run_unlock(guard);

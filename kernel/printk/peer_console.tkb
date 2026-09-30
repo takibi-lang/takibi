@@ -181,6 +181,20 @@ fn peer_console_retire(cpu: usize) {
     publish_commit(w, consumed);
 }
 
+// How many records this CPU has published and core 0 has taken, so a reader
+// can name the record a slot holds (GitHub issue #657's latency measurement).
+fn peer_console_published_count(cpu: usize) -> usize {
+    if (cpu >= KERNEL_MAX_CORES) { return 0; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    return peer_console_published[here];
+}
+
+fn peer_console_consumed_count(cpu: usize) -> usize {
+    if (cpu >= KERNEL_MAX_CORES) { return 0; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    return peer_console_consumed[here];
+}
+
 // Producer: core 0 has taken every record this CPU published.
 fn peer_console_drained(cpu: usize) -> bool {
     if (cpu >= KERNEL_MAX_CORES) { return false; }

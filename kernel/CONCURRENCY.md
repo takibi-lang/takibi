@@ -359,7 +359,11 @@ interleaving is executable on both platforms rather than only specified here.
 
 The UART-BREAK DDB lanes also make a BREAK land while a peer record is
 published but undrained. Their runner sets `kernel_ddb_peer_console_test_enabled`
-at the load checkpoint. The same process then waits until core 0 has drained
+at the load checkpoint, and `kernel_ddb_peer_console_hold_armed` when the hold
+is wanted: at the start on QEMU, where the BREAK lands mid-boot, and only
+before the debugger half on the board, because every terminal write a process
+on the peer CPU makes waits behind the held record. Until it is armed the
+writer sleeps. The same process then waits until core 0 has drained
 all seventeen records, publishes a Holding state, writes one more record, and
 reports it Pending. Core 0's drain leaves a CPU's ring alone while its state is
 not Clear. DDB entry reports `ddb: peer console=pending` and publishes a

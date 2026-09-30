@@ -301,6 +301,14 @@ let mut kernel_ddb_wait_test_enabled: bool;
 // keeps /bin/peer-console alive after its view, holding one record published
 // but undrained until a debugger entry releases it.
 let mut kernel_ddb_peer_console_test_enabled: bool;
+// GitHub issue #657: WHEN the hold begins. The record is held for the whole
+// interval between the two settings, and everything a process on the same CPU
+// writes to the terminal waits behind it -- including the shell's echo, which
+// showed as characters going missing and arriving after `continue`. So a lane
+// whose debugger half comes late sets this only then, and the first half has
+// an ordinary console. The QEMU lane, whose BREAK lands in the middle of the
+// boot, sets both at the start.
+let mut kernel_ddb_peer_console_hold_armed: bool;
 // GitHub issue #456: the guarded read's arming, per core.
 //
 // It used to be three machine-global words, and DDB's world stop was the

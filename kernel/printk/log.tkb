@@ -751,6 +751,97 @@ fn kernel_log_tx_writer_room() -> bool {
            kernel_log_tx_count <= KERNEL_LOG_TX_WRITER_LOW_WATER;
 }
 
+// GitHub issue #657: how long a peer's console record waits before core 0
+// moves it to the transmit queue. A peer's output reaches the wire only when
+// core 0 drains its ring (a syscall entry, a timer interrupt from EL0, or a
+// wake of core 0's idle loop), so a record can be reordered against core 0's
+// own output by however long that takes. The characters that once seemed to
+// go missing from an echo were records waiting here. This is the number that
+// says so directly the next time it looks like that.
+//
+// The producer stamps the slots it is about to fill BEFORE it publishes them,
+// and core 0 reads a slot's stamp only after it has seen the record, so the
+// publication's ordering covers the plain array. Core 0 alone writes the
+// statistics.
+private let mut kernel_log_peer_stamp:
+    [usize; KERNEL_MAX_CORES * PEER_CONSOLE_RECORDS];
+private let mut kernel_log_peer_drained: usize;
+private let mut kernel_log_peer_late: usize;
+private let mut kernel_log_peer_worst_ticks: usize;
+private let mut kernel_log_peer_worst_cpu: usize;
+private let mut kernel_log_peer_worst_length: usize;
+private let mut kernel_log_peer_worst_first: [u8; 8];
+
+private fn kernel_log_peer_stamp_slot(cpu: {0..<KERNEL_MAX_CORES as usize},
+                                      index: usize)
+        -> {0..<KERNEL_MAX_CORES * PEER_CONSOLE_RECORDS as usize} {
+    let within: {0..<PEER_CONSOLE_RECORDS as usize} =
+        index % PEER_CONSOLE_RECORDS;
+    return cpu * PEER_CONSOLE_RECORDS + within;
+}
+
+private fn kernel_log_peer_stamp_records(cpu: usize, length: usize) !{unsafe} {
+    if (cpu >= KERNEL_MAX_CORES) { return; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    let now: usize = read_cntpct() as usize;
+    let first: usize = peer_console_published_count(cpu);
+    let mut records: usize = (length + PEER_CONSOLE_RECORD_BYTES - 1) /
+                             PEER_CONSOLE_RECORD_BYTES;
+    let room: usize = peer_console_room(cpu) / PEER_CONSOLE_RECORD_BYTES;
+    if (records > room) { records = room; }
+    for step: usize in 0..<PEER_CONSOLE_RECORDS {
+        if (step < records) {
+            kernel_log_peer_stamp[kernel_log_peer_stamp_slot(here, first + step)] = now;
+        }
+    }
+}
+
+// Core 0, just before it retires the record it moved: count it and answer how
+// long it waited. The caller keeps the worst one's bytes, from its own copy of
+// the record, so this takes no pointer to it.
+private fn kernel_log_peer_note_drained(cpu: usize) -> usize !{unsafe} {
+    if (cpu >= KERNEL_MAX_CORES) { return 0; }
+    let here: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    let index: usize = peer_console_consumed_count(cpu);
+    let stamp: usize = kernel_log_peer_stamp[kernel_log_peer_stamp_slot(here, index)];
+    let now: usize = read_cntpct() as usize;
+    kernel_log_peer_drained = kernel_log_peer_drained + 1;
+    if (now < stamp) { return 0; }
+    let waited: usize = now - stamp;
+    // Late is about 30 ms: many times a normal wait, which ends at core 0's
+    // next syscall, timer interrupt or idle wake.
+    if (waited > ((read_cntfrq() >> 5) as usize)) {
+        kernel_log_peer_late = kernel_log_peer_late + 1;
+    }
+    return waited;
+}
+
+// Printed once, near the end of the boot. `worst` names the record that
+// waited longest, by its CPU, its length and its first bytes as numbers.
+fn kernel_log_peer_console_report() !{logs, unsafe} {
+    kernel_boot_log("console: peer records drained=");
+    uart_put_udec(kernel_log_peer_drained);
+    kernel_boot_log(" late=");
+    uart_put_udec(kernel_log_peer_late);
+    kernel_boot_log(" worst_ticks=");
+    uart_put_udec(kernel_log_peer_worst_ticks);
+    kernel_boot_log(" tickfreq=");
+    uart_put_udec(read_cntfrq() as usize);
+    kernel_boot_log("\n");
+    if (kernel_log_peer_late != 0) {
+        kernel_boot_log("console: peer worst record cpu=");
+        uart_put_udec(kernel_log_peer_worst_cpu);
+        kernel_boot_log(" length=");
+        uart_put_udec(kernel_log_peer_worst_length);
+        kernel_boot_log(" first bytes=");
+        for i: usize in 0..<8 {
+            uart_put_udec(kernel_log_peer_worst_first[i] as usize);
+            kernel_boot_log(" ");
+        }
+        kernel_boot_log("\n");
+    }
+}
+
 // Queue what fits of a user write and return how many bytes that was. Each
 // byte gets the bookkeeping uart_putc gives it, in the same order, and a byte
 // is only counted once it is certain to be queued, so the one a full queue
@@ -762,7 +853,10 @@ fn uart_user_write(bytes: borrow []u8) -> usize !{logs, unsafe} {
     // What it hands over is published whole records, and the count is only
     // what the ring took.
     let cpu: usize = cpu_id();
-    if (cpu != 0) { return peer_console_publish(cpu, bytes); }
+    if (cpu != 0) {
+        kernel_log_peer_stamp_records(cpu, bytes.len);
+        return peer_console_publish(cpu, bytes);
+    }
     if (kernel_log_tx_is_live() == false) {
         let mut spun: usize = 0;
         for index: usize in 0..<KERNEL_LOG_TX_QUEUE_BYTES {
@@ -1016,6 +1110,18 @@ fn kernel_log_peer_console_drain() {
                             uart_tx_drain_into_fifo();
                             let still_pending: bool = uart_terminal_output_pending();
                             if (still_pending) { uart_tx_irq_enable(); }
+                            let waited: usize = kernel_log_peer_note_drained(cpu);
+                            if (waited > kernel_log_peer_worst_ticks) {
+                                kernel_log_peer_worst_ticks = waited;
+                                kernel_log_peer_worst_cpu = cpu;
+                                kernel_log_peer_worst_length = length;
+                                for first: usize in 0..<8 {
+                                    if (first < length) {
+                                        kernel_log_peer_worst_first[first] =
+                                            record.bytes[first];
+                                    } else { kernel_log_peer_worst_first[first] = 0; }
+                                }
+                            }
                             peer_console_retire(cpu);
                         }
                     }
