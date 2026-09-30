@@ -41,14 +41,17 @@ and 3 are unscheduled. The steps keep their numbers, which issues cite.
 
 2. **Next: run the multicore workload mainly on RPi5 and fix what it
    finds.** #584 is the workload. Each defect it finds gets a deterministic
-   lane before its issue closes; #615's race-window switch is how a window
-   found by chance is made to fail every run.
+   lane before its issue closes; the race-window lanes
+   (`kernelcheck-race-window-*-qemu`) are how a window found by chance is
+   made to fail every run.
    **Finish before step 3 starts (maintainer, 2026-09-29)**, since open
    defects under step 3's kernel-wide changes would be masked or
-   misattributed. The close-out list is done (2026-09-30; #633 was wait4
-   returning a sibling's pid). Audit follow-ups that do not block step 3: #641 (a TLA+ model of the world stop), #642 (a boundary fixture
-   for signal frames and mmap reuse) and #643 (gdb stall dump and ASID jump
-   for four-core QEMU churn).
+   misattributed. The close-out list is done (2026-09-30). Audit follow-ups
+   that do not block step 3: #641 (a TLA+ model of the world stop), #642
+   (a boundary fixture for signal frames and mmap reuse), #643 (gdb stall
+   dump and ASID jump for four-core QEMU churn), #651 (contention probes'
+   rendezvous bounded by peer ticks) and #652 (lifecycle trace events for
+   signals and wait4 results).
 3. **Takibi's provisional answer to safe pointers and safe memory access,
    with multicore as a premise.** #637 is the frame: derive every access
    from an authority and shrink the trusted base to named mint sites, in
@@ -61,6 +64,9 @@ and 3 are unscheduled. The steps keep their numbers, which issues cite.
    the multicore-specific subject this discussion is judged against;
    #645's herd7 litmus tests check its orderings, starting with today's
    log. #647 extends #606's trace replay to RecordLifetime and Wait4Block.
+   #653 moves the wait reason into the Blocked state and retires
+   `last_child_pid` as a wait4 input, the class behind #603 and the churn
+   hang; it goes with #637 stage 2.
    #638 sets the preemption target this step designs for: full kernel
    preemption, no explicit-point intermediate. Its typed preparation
    belongs here: a preemption-disabled authority, with per-CPU access
