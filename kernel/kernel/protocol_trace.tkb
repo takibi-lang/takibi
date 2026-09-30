@@ -1,6 +1,8 @@
 // The stack-ownership protocol as it actually ran, for
 // scripts/validate_protocol_trace.py to replay against StackOwnership.tla
-// (GitHub issue #606, stage 1).
+// (GitHub issue #606, stage 1). Each process also carries its parent's pid,
+// which the same replay uses to hold the steps to Wait4Block.tla and
+// RecordLifetime.tla (#647).
 //
 // What is recorded is not a list of hand-placed events. Every hold of the
 // process-run lock inside a window is diffed, at its release, against the
@@ -45,12 +47,13 @@ struct ProtocolTraceEvent {
     cpu: usize;
     unlocked: bool;
     kind: ProtocolTraceKind;
-    // Process: pid, state, owner, wait reason.  Gone: pid.
+    // Process: pid, state, owner, wait reason, parent pid.  Gone: pid.
     // Core: core, current pid, stood-on pid.
     first: usize;
     second: usize;
     third: usize;
     fourth: usize;
+    fifth: usize;
 }
 
 struct ProtocolTraceProcess {
@@ -58,6 +61,7 @@ struct ProtocolTraceProcess {
     state: usize;
     owner: usize;
     reason: usize;
+    parent: usize;
     seen: bool;
 }
 
@@ -83,7 +87,8 @@ fn protocol_trace_is_active() -> bool {
 }
 
 private fn protocol_trace_record(kind: ProtocolTraceKind, first: usize,
-                                 second: usize, third: usize, fourth: usize) {
+                                 second: usize, third: usize, fourth: usize,
+                                 fifth: usize) {
     let stored: usize = protocol_trace_stored;
     if (stored >= PROTOCOL_TRACE_EVENTS) {
         protocol_trace_lost = protocol_trace_lost + 1;
@@ -98,6 +103,7 @@ private fn protocol_trace_record(kind: ProtocolTraceKind, first: usize,
     protocol_trace_events[slot].second = second;
     protocol_trace_events[slot].third = third;
     protocol_trace_events[slot].fourth = fourth;
+    protocol_trace_events[slot].fifth = fifth;
     protocol_trace_stored = stored + 1;
 }
 
@@ -134,19 +140,21 @@ fn protocol_trace_pass_begin(unlocked: bool) {
 }
 
 fn protocol_trace_observe_process(pid: usize, state: usize, owner: usize,
-                                  reason: usize) {
+                                  reason: usize, parent: usize) {
     let count: usize = protocol_trace_process_count;
     for index: usize in 0..<PROTOCOL_TRACE_PROCESSES {
         if (index < count && protocol_trace_processes[index].pid == pid) {
             protocol_trace_processes[index].seen = true;
             if (protocol_trace_processes[index].state != state ||
                 protocol_trace_processes[index].owner != owner ||
-                protocol_trace_processes[index].reason != reason) {
+                protocol_trace_processes[index].reason != reason ||
+                protocol_trace_processes[index].parent != parent) {
                 protocol_trace_processes[index].state = state;
                 protocol_trace_processes[index].owner = owner;
                 protocol_trace_processes[index].reason = reason;
-                protocol_trace_record(
-                    ProtocolTraceKind::Process, pid, state, owner, reason);
+                protocol_trace_processes[index].parent = parent;
+                protocol_trace_record(ProtocolTraceKind::Process, pid, state,
+                                      owner, reason, parent);
             }
             return;
         }
@@ -160,10 +168,11 @@ fn protocol_trace_observe_process(pid: usize, state: usize, owner: usize,
     protocol_trace_processes[slot].state = state;
     protocol_trace_processes[slot].owner = owner;
     protocol_trace_processes[slot].reason = reason;
+    protocol_trace_processes[slot].parent = parent;
     protocol_trace_processes[slot].seen = true;
     protocol_trace_process_count = count + 1;
     protocol_trace_record(ProtocolTraceKind::Process, pid, state, owner,
-                          reason);
+                          reason, parent);
 }
 
 fn protocol_trace_observe_core(core: {0..<KERNEL_MAX_CORES as usize},
@@ -175,7 +184,8 @@ fn protocol_trace_observe_core(core: {0..<KERNEL_MAX_CORES as usize},
     }
     protocol_trace_cores[core].current = current;
     protocol_trace_cores[core].stands = stands;
-    protocol_trace_record(ProtocolTraceKind::Core, core, current, stands, 0);
+    protocol_trace_record(ProtocolTraceKind::Core, core, current, stands, 0,
+                          0);
 }
 
 // A process no longer in the pool is recorded gone, and the entries still
@@ -196,12 +206,14 @@ fn protocol_trace_pass_end(unlocked: bool) {
                         protocol_trace_processes[position].owner;
                     protocol_trace_processes[dest].reason =
                         protocol_trace_processes[position].reason;
+                    protocol_trace_processes[dest].parent =
+                        protocol_trace_processes[position].parent;
                 }
                 kept = kept + 1;
             } else {
                 protocol_trace_record(ProtocolTraceKind::Gone,
                                       protocol_trace_processes[position].pid,
-                                      0, 0, 0);
+                                      0, 0, 0, 0);
             }
         }
     }
@@ -255,6 +267,7 @@ fn protocol_trace_report() {
             match protocol_trace_events[slot].kind {
                 ProtocolTraceKind::Process => {
                     protocol_trace_put(protocol_trace_events[slot].fourth);
+                    protocol_trace_put(protocol_trace_events[slot].fifth);
                 }
                 ProtocolTraceKind::Gone => {}
                 ProtocolTraceKind::Core => {}

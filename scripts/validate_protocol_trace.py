@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Replay a kernel protocol-trace window against StackOwnership.tla.
+"""Replay a kernel protocol-trace window against the kernel's TLA+ models.
 
-GitHub issue #606, stage 1. /bin/protocol-trace opens a window in which the
+GitHub issue #606, stage 1, and #647. /bin/protocol-trace opens a window in which the
 kernel diffs the stack-ownership state at every hold of the process-run
 lock (kernel/kernel/protocol_trace.tkb) and prints the changes when the
 window closes. This replays them, one hold at a time, against the actions of
@@ -21,13 +21,32 @@ It fails when:
 - an action the probe is written to exercise was never observed, which
   would make a PASS say nothing about it.
 
+The same steps are held to two more models, on the parent link each process
+line carries (#647):
+- Wait4Block.tla: a process only becomes Blocked in wait4 while none of its
+  children is a zombie (the RECHECK the model's fix adds), a child's exit
+  wakes exactly its parent, and NoLostWakeup holds after every step: no
+  process sleeps in ChildExit with an Exited child. The "decided" window
+  between wait4's two critical sections is not a state the trace can see;
+  what it can see is that the publication which closes it re-checks.
+- RecordLifetime.tla: a record is removed only once it is Exited
+  (Wait4Reap's enabling condition), and the removal is a hold's own step,
+  never made with no lock held (REMOVE_UNDER_LOCK). The reader's side, the probe and the
+  read through the pointer, is not a protocol change and is not observed, so
+  a PASS says the reaper keeps its half of the rule and nothing of the
+  reader's.
+Both assume one awaited child at a time, as /bin/protocol-trace runs: a
+parent blocked in wait4 for a specific pid while another child is already a
+zombie would be flagged although the kernel is right.
+
 What a PASS claims is narrow: every protocol transition the kernel made in
 this window is one the model has. It does not claim the model is right, and
 it says nothing about paths the window did not run.
 
 What the replay leaves out, and why (the model's own "dropped" discipline):
-- which child a wait4 waits for, and who reaps a zombie: the trace carries
-  no parent link. Irrelevant to StackSafety: neither moves a stack.
+- which child a wait4 waits for, and who reaps a zombie: StackSafety does
+  not depend on either, since neither moves a stack. The parent link is used
+  only by the Wait4Block checks above.
 - affinity: it only forbids steps, and the replay allows each one.
 - allocation: a record appearing Constructing is taken in wherever the
   diff sees it, since the pool's lock, not the run lock, orders it.
@@ -93,11 +112,13 @@ class World:
     reserved: dict    # core -> pid or None
     interrupted: dict  # core -> inside an interrupt taken from EL0
     reap_pending: dict  # parent pid -> exited child pid
+    parent: dict      # pid -> parent pid or None
 
     def copy(self):
         return World(dict(self.state), dict(self.owner), dict(self.current),
                      dict(self.stands), dict(self.reserved),
-                     dict(self.interrupted), dict(self.reap_pending))
+                     dict(self.interrupted), dict(self.reap_pending),
+                     dict(self.parent))
 
 
 @dataclasses.dataclass
@@ -106,6 +127,7 @@ class Hold:
     cpu: int
     unlocked: bool
     processes: dict   # pid -> (state, owner)
+    parents: dict     # pid -> parent pid or None, as reported
     gone: set
     cores: dict       # core -> (current, stands)
 
@@ -153,12 +175,13 @@ def parse(lines):
             fields[2], fields[3]
         key = (sequence, lock == "u")
         hold = steps.setdefault(
-            key, Hold(sequence, cpu, lock == "u", {}, set(), {}))
-        if kind == "p" and len(fields) == 8:
+            key, Hold(sequence, cpu, lock == "u", {}, {}, set(), {}))
+        if kind == "p" and len(fields) == 9:
             pid = int(fields[4])
             hold.processes[pid] = (
                 model_state(int(fields[5]), int(fields[7])),
                 value(fields[6]))
+            hold.parents[pid] = value(fields[8])
         elif kind == "g" and len(fields) == 7:
             hold.gone.add(int(fields[4]))
         elif kind == "c" and len(fields) == 7:
@@ -176,10 +199,11 @@ def parse(lines):
 def initial_world(hold, cores):
     if hold.sequence != 0 or hold.unlocked:
         raise TraceError("the window does not start with its snapshot")
-    world = World({}, {}, {}, {}, {}, {}, {})
+    world = World({}, {}, {}, {}, {}, {}, {}, {})
     for pid, (state, owner) in hold.processes.items():
         world.state[pid] = state
         world.owner[pid] = owner
+        world.parent[pid] = hold.parents[pid]
     for core in range(cores):
         if core not in hold.cores:
             raise TraceError(f"the snapshot has no line for core {core}")
@@ -508,6 +532,7 @@ def wait4_reap(world, hold, procs, cores):
     after = world.copy()
     del after.state[pid]
     del after.owner[pid]
+    after.parent.pop(pid, None)
     for parent, child in world.reap_pending.items():
         if child == pid:
             del after.reap_pending[parent]
@@ -654,6 +679,13 @@ def invariants(world):
                 world.current[c]) not in ("Running", "Constructing", "Exited"):
             return (f"RunningMatchesCores: c{c}'s current process "
                     f"{world.current[c]} is {world.state.get(world.current[c])}")
+    for pid, state in world.state.items():
+        if state != "Blocked":
+            continue
+        for child, parent in world.parent.items():
+            if parent == pid and world.state.get(child) == "Exited":
+                return (f"NoLostWakeup: {pid} sleeps in wait4 while its child "
+                        f"{child} is a zombie")
     for c in cores:
         for held in (world.current[c], world.reserved[c]):
             if held is not None and world.owner.get(held) not in (None, c):
@@ -675,6 +707,7 @@ def absorb_allocations(world, hold):
                 and owner is None:
             world.state[pid] = state
             world.owner[pid] = owner
+            world.parent[pid] = hold.parents.pop(pid)
             del hold.processes[pid]
 
 
@@ -684,9 +717,37 @@ def unlocked_errors(world, hold):
     errors = []
     for pid, (state, owner) in procs.items():
         errors.append(f"{pid} changed to {state}/{owner} with no lock held")
-    if cores or hold.gone:
-        errors.append("a core or the pool changed with no lock held")
+    for pid in sorted(hold.gone):
+        errors.append(f"record {pid} was removed with no lock held "
+                      "(RecordLifetime REMOVE_UNDER_LOCK)")
+    if cores:
+        errors.append("a core changed with no lock held")
     return errors
+
+
+def lifecycle_refusal(before, after, hold):
+    """Wait4Block.tla's enabling conditions, on a step already matched.
+
+    Returns None, or the refusal. RecordLifetime.tla's order needs no code
+    here: Wait4Reap only removes an Exited record, and unlocked_errors
+    refuses a removal with no lock held.
+    """
+    exited = [pid for pid, state in after.state.items()
+              if state == "Exited" and before.state.get(pid) != "Exited"]
+    for pid, state in after.state.items():
+        was = before.state.get(pid)
+        if state == "Blocked" and was != "Blocked":
+            zombies = [c for c, p in after.parent.items()
+                       if p == pid and after.state.get(c) == "Exited"]
+            if zombies:
+                return (f"Wait4Block not enabled: {pid} blocks with its "
+                        f"child {zombies[0]} already Exited")
+        if was == "Blocked" and state in ("Ready", "Running") and exited \
+                and not any(after.parent.get(x) == pid for x in exited):
+            return (f"ChildExit not enabled: {exited[0]} exits and wakes "
+                    f"{pid}, which is not its parent "
+                    f"({after.parent.get(exited[0])})")
+    return None
 
 
 def replay(cores, holds, without=None):
@@ -700,6 +761,9 @@ def replay(cores, holds, without=None):
     for hold in holds[1:]:
         where = f"sequence {hold.sequence} (cpu {hold.cpu})"
         absorb_allocations(world, hold)
+        for pid, parent in hold.parents.items():
+            if pid in world.state:
+                world.parent[pid] = parent
         if hold.unlocked:
             errors += [f"{where}: {e}" for e in unlocked_errors(world, hold)]
             continue
@@ -739,7 +803,12 @@ def replay(cores, holds, without=None):
                 f"{sorted(hold.gone)}"
             errors.append(f"{where}: {detail}")
             return errors, counts
-        name, world = matched
+        name, after = matched
+        why = lifecycle_refusal(world, after, hold)
+        if why:
+            errors.append(f"{where}: {why}")
+            return errors, counts
+        world = after
         counts[name] += 1
         why = invariants(world)
         if why:
@@ -765,7 +834,8 @@ def main() -> int:
         print(f"ERROR protocol-trace: {error}")
     if errors:
         print("FAIL protocol-trace: the kernel made a step "
-              "kernel/models/StackOwnership.tla does not allow")
+              "kernel/models/StackOwnership.tla, Wait4Block.tla or "
+              "RecordLifetime.tla does not allow")
         return 1
     unseen = [" or ".join(step) for step in REQUIRED
               if args.without not in step
@@ -778,7 +848,8 @@ def main() -> int:
     seen = ", ".join(f"{name}={count}" for name, count in counts.items())
     print(f"PASS protocol-trace: {steps} step(s) over {len(holds)} changed "
           f"hold(s) of {total}, on {cores} core(s), each a "
-          f"StackOwnership.tla action with its invariants intact ({seen})")
+          f"StackOwnership.tla action with its invariants intact, and the "
+          f"Wait4Block.tla and RecordLifetime.tla checks kept ({seen})")
     return 0
 
 

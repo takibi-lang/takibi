@@ -52,8 +52,8 @@ def window(changes, lost=0, end=True, holds=10):
 
 # Parent 10 and child 11 on core 0; core 1 idle.
 SNAPSHOT = [
-    "0 0 l p 10 2 0 0",
-    "0 0 l p 11 5 - 0",
+    "0 0 l p 10 2 0 0 -",
+    "0 0 l p 11 5 - 0 10",
     "0 0 l c 0 10 10",
     "0 0 l c 1 - -",
 ]
@@ -61,24 +61,69 @@ SNAPSHOT = [
 # #609: the parent blocked in wait4 on core 1, which still stands on its
 # stack, and the child running on core 0 exits and starts it.
 SHARED_STACK = [
-    "0 0 l p 10 3 1 2",
-    "0 0 l p 11 2 0 0",
+    "0 0 l p 10 3 1 2 -",
+    "0 0 l p 11 2 0 0 10",
     "0 0 l c 0 11 11",
     "0 0 l c 1 - 10",
-    "1 0 l p 11 4 0 0",
-    "1 0 l p 10 2 1 2",
+    "1 0 l p 11 4 0 0 10",
+    "1 0 l p 10 2 1 2 -",
 ]
 
 
 # An interrupt from EL0 releases the running process's stack, and the tick
 # inside it leaves the core; then the same leave with no interrupt taken.
-TICK_LEAVE = SNAPSHOT[:1] + ["0 0 l p 11 2 1 0", "0 0 l c 0 10 10",
+TICK_LEAVE = SNAPSHOT[:1] + ["0 0 l p 11 2 1 0 10", "0 0 l c 0 10 10",
                              "0 0 l c 1 11 11",
-                             "1 0 l p 10 2 - 0", "1 0 l c 0 10 -",
-                             "2 0 l p 10 1 - 0", "2 0 l c 0 - -"]
+                             "1 0 l p 10 2 - 0 -", "1 0 l c 0 10 -",
+                             "2 0 l p 10 1 - 0 -", "2 0 l c 0 - -"]
 TICK_LEAVE_UNINTERRUPTED = SNAPSHOT[:1] + [
-    "0 0 l p 11 2 1 0", "0 0 l c 0 10 10", "0 0 l c 1 11 11",
-    "1 0 l p 10 1 0 0", "1 0 l c 0 - 10"]
+    "0 0 l p 11 2 1 0 10", "0 0 l c 0 10 10", "0 0 l c 1 11 11",
+    "1 0 l p 10 1 0 0 -", "1 0 l c 0 - 10"]
+
+# Wait4Block.tla and RecordLifetime.tla (#647). Parent 10 runs on core 1
+# and its child 11 on core 0.
+FAMILY = [
+    "0 0 l p 10 2 1 0 -",
+    "0 0 l p 11 2 0 0 10",
+    "0 0 l c 0 11 11",
+    "0 0 l c 1 10 10",
+]
+
+# #550: the child exits first, and the parent then publishes Blocked with a
+# zombie child, which nothing will wake. The fix's re-check refuses it.
+BLOCK_WITH_ZOMBIE = FAMILY + [
+    "1 0 l p 11 4 0 0 10",
+    "1 0 l c 0 - 11",
+    "2 1 l p 10 3 1 2 -",
+    "2 1 l c 1 - 10",
+]
+
+# The parent blocks first, and the child's exit wakes nobody: the lost
+# wakeup itself, reached with each step individually legal.
+EXIT_WAKES_NOBODY = FAMILY + [
+    "1 1 l p 10 3 1 2 -",
+    "1 1 l c 1 - 10",
+    "2 0 l p 11 4 0 0 10",
+    "2 0 l c 0 - 11",
+]
+
+# The child's exit wakes a process that is not its parent.
+EXIT_WAKES_STRANGER = FAMILY[:1] + [
+    "0 0 l p 12 3 - 2 -",
+] + FAMILY[1:] + [
+    "1 0 l p 11 4 0 0 10",
+    "1 0 l p 12 1 - 0 -",
+    "1 0 l c 0 - 11",
+]
+
+# The child's zombie is removed with no lock held, and a live record is
+# removed at all.
+REMOVED_UNLOCKED = FAMILY + [
+    "1 0 l p 11 4 0 0 10",
+    "1 0 l c 0 - 11",
+    "2 0 u g 11 0 0",
+]
+REMOVED_LIVE = FAMILY + ["1 0 l g 11 0 0"]
 
 
 def run(text, *extra):
@@ -115,7 +160,7 @@ def main() -> int:
                run(interrupted, "--without", "InterruptDepart"), False,
                "IdleEnter not enabled: current[c0] = 76"),
         expect("an allocation landing inside another CPU's hold",
-               run(window(SNAPSHOT + ["1 1 l p 12 5 - 0"])), False,
+               run(window(SNAPSHOT + ["1 1 l p 12 5 - 0 10"])), False,
                "never exercised", absent="ERROR"),
         expect("a tick leave inside an interrupt", run(window(TICK_LEAVE)),
                False, "never exercised", absent="ERROR"),
@@ -130,15 +175,33 @@ def main() -> int:
         expect("#609's start on a stack another core owns",
                run(window(SHARED_STACK)), False,
                "ChildExitStart not enabled: owner[parent] = c1"),
+        expect("#550: blocking in wait4 with a zombie child",
+               run(window(BLOCK_WITH_ZOMBIE)), False,
+               "Wait4Block not enabled: 10 blocks with its child 11 "
+               "already Exited"),
+        expect("#550: an exit that wakes a Blocked parent nobody",
+               run(window(EXIT_WAKES_NOBODY)), False,
+               "NoLostWakeup: 10 sleeps in wait4 while its child 11 is a "
+               "zombie"),
+        expect("an exit that wakes a process that is not the parent",
+               run(window(EXIT_WAKES_STRANGER)), False,
+               "ChildExit not enabled: 11 exits and wakes 12, which is not "
+               "its parent"),
+        expect("a record removed with no lock held",
+               run(window(REMOVED_UNLOCKED)), False,
+               "record 11 was removed with no lock held"),
+        expect("a live record removed",
+               run(window(REMOVED_LIVE)), False,
+               "Wait4Reap not enabled: state[11] = Running"),
         expect("a window that lost changes",
                run(window(SNAPSHOT, lost=3)), False, "lost 3 change(s)"),
         expect("a report cut before its end",
                run(window(SNAPSHOT, end=False)), False, "no end line"),
         expect("a state changed with no lock held",
-               run(window(SNAPSHOT + ["1 0 u p 10 1 - 0"])), False,
+               run(window(SNAPSHOT + ["1 0 u p 10 1 - 0 -"])), False,
                "with no lock held"),
         expect("a snapshot already unsafe",
-               run(window(["0 0 l p 10 2 1 0", "0 0 l c 0 10 10",
+               run(window(["0 0 l p 10 2 1 0 -", "0 0 l c 0 10 10",
                            "0 0 l c 1 - -"])), False,
                "StackSafety: c0 stands on 10, owned by 1"),
         expect("a window that exercised nothing",
@@ -150,7 +213,9 @@ def main() -> int:
         return 1
     report_pass(
         "validate-protocol-trace controls",
-        "three recorded QEMU windows pass, one with Nap in SwitchAway's place; they fail without ChildExitStart "
+        "Wait4Block.tla's zombie-child block, lost wakeup and wrong-parent "
+        "wake, and RecordLifetime.tla's unlocked and premature removal, are "
+        "each refused; three recorded QEMU windows pass, one with Nap in SwitchAway's place; they fail without ChildExitStart "
         "and InterruptDepart, an allocation inside another CPU's hold is "
         "absorbed, a tick leave passes only inside an interrupt, "
         "and #609's shared-stack start, a lost change, a cut report, an "

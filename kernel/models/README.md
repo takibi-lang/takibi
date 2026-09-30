@@ -174,6 +174,26 @@ path the model lacks that runs routinely: #609's direct start ran on every
 ordinary wait4 wake, and replaying the recorded window without
 `ChildExitStart` fails on the first one.
 
+### Checked against real runs
+
+The protocol-trace replay of StackOwnership.tla (below) also holds its steps
+to this model, using the parent pid each process line carries (#647). A
+process only becomes Blocked in ChildExit while none of its children is a
+zombie, which is the `RECHECK` the fix adds; a child's exit wakes exactly its
+parent; and `NoLostWakeup` holds after every step. The controls plant #550's
+two shapes, a block with a zombie child and an exit that wakes nobody, and
+a wake of the wrong process.
+
+Narrower than StackOwnership's tie. The "decided" window between wait4's two
+critical sections is not a state the trace can see, so what is checked is
+that the publication closing it re-checks, not that the window is closed.
+Blocking needs the child's nap to have started before the parent reaches
+wait4, which a stalled vCPU can spoil, so a window may never block a parent
+and then says nothing about this model. One awaited child at a time is
+assumed, as `/bin/protocol-trace` runs: a parent that waits for one pid
+while another child is already a zombie would be flagged although the kernel
+is right.
+
 ## RecordLifetime.tla -- a process record read while another CPU reaps it (#482)
 
 One record, one reader, one reaper, and the process's own execve. The
@@ -206,6 +226,20 @@ Four variants:
 | `ReaperRemove` | `scheduled_process_reap_remove`, `scheduled_process_slot_remove` | resets and removes the record, under the run-lock guard since #482 | nothing | `0804bbb466af` |
 | `Exit` | `kernel_process_child_exit` | the process becomes a zombie | the rest of exit -- irrelevant to `ReadsOnlyLiveRecords`: only the zombie state lets a reaper start, and nothing else in exit frees the record | `11cfcf76aa70` |
 | `ExecWrite`, `ExecWriteEnd` | the execve arm of `kernel_syscall_dispatch_action`, `scheduled_process_set_command_line` | the live process's command line is replaced in one critical section under the run lock; `ExecWriteEnd` is the second half only the unfixed variant takes | the argument count, inode and pending flag written in the same hold -- irrelevant to `NoTornRead`: no reader copies them | `5f860ade1117` |
+
+### Checked against real runs
+
+The same replay holds the reaper's half of this model (#647): a record is
+removed only once it is Exited, and the removal is a step of its own hold of
+the run lock, never made with none held (`REMOVE_UNDER_LOCK`). The controls
+plant a removal with no lock held and the removal of a live record.
+
+Much narrower than the model. The reader's half, the probe and the read
+through the pointer, changes no protocol state, so nothing is recorded and a
+PASS says nothing about `READER_HOLDS_LOCK`. Nor is execve's command-line
+rewrite (`EXEC_WRITES_UNDER_LOCK`) observed: the record carries no image
+generation. The teardown is not observed either, since it is not a change of
+process state, pool membership or core.
 
 ## LogReader.tla -- the kernel log read on one CPU while core 0 appends (#612)
 

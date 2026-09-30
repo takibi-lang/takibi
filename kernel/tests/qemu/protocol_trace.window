@@ -1,90 +1,93 @@
-protocol-trace: begin cores=2 stored=88 lost=0 holds=1305
-protocol-trace: 0 0 l p 1 3 - 2
-protocol-trace: 0 0 l p 2 3 - 2
-protocol-trace: 0 0 l p 76 2 0 0
-protocol-trace: 0 0 l c 0 76 76
-protocol-trace: 0 0 l c 1 - -
-protocol-trace: 0 0 l c 2 - -
-protocol-trace: 0 0 l c 3 - -
-protocol-trace: 9 0 u p 77 5 - 0
-protocol-trace: 9 0 l c 0 77 76
-protocol-trace: 17 0 l p 77 2 - 0
-protocol-trace: 17 0 l p 76 1 0 0
-protocol-trace: 21 0 l p 77 2 0 0
-protocol-trace: 21 0 l p 76 1 - 0
-protocol-trace: 21 0 l c 0 77 77
-protocol-trace: 30 0 u p 77 2 0 4
-protocol-trace: 30 0 l p 76 2 - 0
-protocol-trace: 31 0 l p 77 3 0 4
-protocol-trace: 31 0 l c 0 76 77
-protocol-trace: 32 0 l p 77 3 - 4
-protocol-trace: 32 0 l p 76 2 0 0
-protocol-trace: 32 0 l c 0 76 76
-protocol-trace: 36 0 u p 76 2 0 2
-protocol-trace: 36 0 l p 76 3 0 2
-protocol-trace: 36 0 l c 0 - 76
-protocol-trace: 37 0 l p 76 3 - 2
-protocol-trace: 37 0 l c 0 - -
-protocol-trace: 60 0 l p 77 1 - 0
-protocol-trace: 61 0 l p 77 2 - 0
-protocol-trace: 62 0 l c 0 77 -
-protocol-trace: 63 0 l p 77 2 0 0
-protocol-trace: 63 0 l c 0 77 77
-protocol-trace: 66 0 l p 77 4 0 0
-protocol-trace: 66 0 l p 76 2 - 0
-protocol-trace: 67 0 l c 0 76 77
-protocol-trace: 70 0 l p 77 4 - 0
-protocol-trace: 70 0 l p 76 2 0 0
-protocol-trace: 70 0 l c 0 76 76
-protocol-trace: 72 0 l g 77 0 0
-protocol-trace: 78 0 l c 0 - 76
-protocol-trace: 79 0 l p 76 1 - 0
-protocol-trace: 79 0 l c 0 - -
-protocol-trace: 81 1 l p 76 2 - 0
-protocol-trace: 82 1 l c 1 76 -
-protocol-trace: 83 1 l p 76 2 1 0
-protocol-trace: 83 1 l c 1 76 76
-protocol-trace: 85 1 l c 1 - 76
-protocol-trace: 86 1 l p 76 1 - 0
-protocol-trace: 86 1 l c 1 - -
-protocol-trace: 89 0 l p 76 2 - 0
-protocol-trace: 90 0 l c 0 76 -
-protocol-trace: 91 0 l p 76 2 0 0
-protocol-trace: 91 0 l c 0 76 76
-protocol-trace: 94 0 u p 78 5 - 0
-protocol-trace: 94 0 l c 0 78 76
-protocol-trace: 101 0 l p 78 2 - 0
-protocol-trace: 101 0 l p 76 1 0 0
-protocol-trace: 105 0 l p 78 2 0 0
-protocol-trace: 105 0 l p 76 1 - 0
-protocol-trace: 105 0 l c 0 78 78
-protocol-trace: 115 0 u p 78 2 0 4
-protocol-trace: 133 1 l p 76 2 - 0
-protocol-trace: 135 1 l c 1 76 -
-protocol-trace: 137 1 l p 76 2 1 0
-protocol-trace: 137 1 l c 1 76 76
-protocol-trace: 144 0 u p 76 2 1 2
-protocol-trace: 146 1 l p 76 3 1 2
-protocol-trace: 146 1 l c 1 - 76
-protocol-trace: 148 1 l p 76 3 - 2
-protocol-trace: 148 1 l c 1 - -
-protocol-trace: 1261 0 u p 78 2 0 0
-protocol-trace: 1267 0 l p 78 4 0 0
-protocol-trace: 1267 0 l p 76 1 - 2
-protocol-trace: 1267 0 l c 0 - 78
-protocol-trace: 1269 0 l p 78 4 - 0
-protocol-trace: 1269 0 l c 0 - -
-protocol-trace: 1273 1 l p 76 2 - 2
-protocol-trace: 1274 1 l p 76 2 - 0
-protocol-trace: 1274 1 l c 1 76 -
-protocol-trace: 1275 1 l p 76 2 1 0
-protocol-trace: 1275 1 l c 1 76 76
-protocol-trace: 1280 1 l g 78 0 0
-protocol-trace: 1291 1 l c 1 - 76
-protocol-trace: 1292 1 l p 76 1 - 0
-protocol-trace: 1292 1 l c 1 - -
-protocol-trace: 1295 0 l p 76 2 - 0
-protocol-trace: 1296 0 l c 0 76 -
-protocol-trace: 1297 0 l p 76 2 0 0
-protocol-trace: 1297 0 l c 0 76 76
+protocol-trace: begin cores=2 stored=91 lost=0 holds=1181
+protocol-trace: 0 1 l p 1 3 - 2 -
+protocol-trace: 0 1 l p 2 3 - 2 1
+protocol-trace: 0 1 l p 85 2 1 0 2
+protocol-trace: 0 1 l c 0 - -
+protocol-trace: 0 1 l c 1 85 85
+protocol-trace: 0 1 l c 2 - -
+protocol-trace: 0 1 l c 3 - -
+protocol-trace: 10 1 u p 86 5 - 0 -
+protocol-trace: 10 1 l p 86 5 - 0 85
+protocol-trace: 10 1 l c 1 86 85
+protocol-trace: 20 1 l p 86 2 - 0 85
+protocol-trace: 20 1 l p 85 1 1 0 2
+protocol-trace: 23 1 l p 86 2 1 0 85
+protocol-trace: 23 1 l p 85 1 - 0 2
+protocol-trace: 23 1 l c 1 86 86
+protocol-trace: 34 1 u p 86 2 1 4 85
+protocol-trace: 34 1 l p 85 2 - 0 2
+protocol-trace: 35 1 l p 86 3 1 4 85
+protocol-trace: 35 1 l c 1 85 86
+protocol-trace: 36 1 l p 86 3 - 4 85
+protocol-trace: 36 1 l p 85 2 1 0 2
+protocol-trace: 36 1 l c 1 85 85
+protocol-trace: 40 1 u p 85 2 1 2 2
+protocol-trace: 41 1 l p 85 3 1 2 2
+protocol-trace: 41 1 l c 1 - 85
+protocol-trace: 42 1 l p 85 3 - 2 2
+protocol-trace: 42 1 l c 1 - -
+protocol-trace: 63 0 l p 86 1 - 0 85
+protocol-trace: 64 0 l p 86 2 - 0 85
+protocol-trace: 65 0 l c 0 86 -
+protocol-trace: 66 0 l p 86 2 0 0 85
+protocol-trace: 66 0 l c 0 86 86
+protocol-trace: 69 0 l p 86 4 0 0 85
+protocol-trace: 69 0 l p 85 2 - 0 2
+protocol-trace: 70 0 l c 0 85 86
+protocol-trace: 73 0 l p 86 4 - 0 85
+protocol-trace: 73 0 l p 85 2 0 0 2
+protocol-trace: 73 0 l c 0 85 85
+protocol-trace: 75 0 u p 86 4 - 0 -
+protocol-trace: 75 0 l g 86 0 0
+protocol-trace: 83 0 l c 0 - 85
+protocol-trace: 84 0 l p 85 1 - 0 2
+protocol-trace: 84 0 l c 0 - -
+protocol-trace: 86 1 l p 85 2 - 0 2
+protocol-trace: 87 1 l c 1 85 -
+protocol-trace: 88 1 l p 85 2 1 0 2
+protocol-trace: 88 1 l c 1 85 85
+protocol-trace: 91 1 u p 87 5 - 0 -
+protocol-trace: 91 1 l p 87 5 - 0 85
+protocol-trace: 91 1 l c 1 87 85
+protocol-trace: 101 1 l p 87 2 - 0 85
+protocol-trace: 101 1 l p 85 1 1 0 2
+protocol-trace: 104 1 l p 87 2 1 0 85
+protocol-trace: 104 1 l p 85 1 - 0 2
+protocol-trace: 104 1 l c 1 87 87
+protocol-trace: 111 1 l p 85 2 - 0 2
+protocol-trace: 112 1 l p 87 1 1 0 85
+protocol-trace: 112 1 l c 1 85 87
+protocol-trace: 113 1 l p 87 1 - 0 85
+protocol-trace: 113 1 l p 85 2 1 0 2
+protocol-trace: 113 1 l c 1 85 85
+protocol-trace: 117 1 u p 85 2 1 2 2
+protocol-trace: 118 1 l p 85 3 1 2 2
+protocol-trace: 118 1 l c 1 - 85
+protocol-trace: 119 1 l p 85 3 - 2 2
+protocol-trace: 119 1 l c 1 - -
+protocol-trace: 122 0 l p 87 2 - 0 85
+protocol-trace: 123 0 l c 0 87 -
+protocol-trace: 124 0 l p 87 2 0 0 85
+protocol-trace: 124 0 l c 0 87 87
+protocol-trace: 127 0 u p 87 2 0 4 85
+protocol-trace: 1128 0 u p 87 2 0 0 85
+protocol-trace: 1136 0 l p 87 4 0 0 85
+protocol-trace: 1136 0 l p 85 1 - 2 2
+protocol-trace: 1136 0 l c 0 - 87
+protocol-trace: 1138 0 l p 87 4 - 0 85
+protocol-trace: 1138 0 l c 0 - -
+protocol-trace: 1142 1 l p 85 2 - 2 2
+protocol-trace: 1143 1 l p 85 2 - 0 2
+protocol-trace: 1143 1 l c 1 85 -
+protocol-trace: 1144 1 l p 85 2 1 0 2
+protocol-trace: 1144 1 l c 1 85 85
+protocol-trace: 1149 1 u p 87 4 - 0 -
+protocol-trace: 1149 1 l g 87 0 0
+protocol-trace: 1164 1 l c 1 - 85
+protocol-trace: 1165 1 l p 85 1 - 0 2
+protocol-trace: 1165 1 l c 1 - -
+protocol-trace: 1168 0 l p 85 2 - 0 2
+protocol-trace: 1169 0 l c 0 85 -
+protocol-trace: 1170 0 l p 85 2 0 0 2
+protocol-trace: 1170 0 l c 0 85 85
 protocol-trace: end

@@ -1220,6 +1220,16 @@ private fn kernel_process_protocol_owner(owner: usize) -> usize {
     return owner;
 }
 
+// A record with no parent (the boot process, or an orphan the teardown
+// sweep detached) names nothing.
+private fn kernel_process_protocol_parent(record: borrow *ProcessRecord)
+        -> usize !{unsafe} {
+    if (record.has_parent) {
+        return scheduled_process_pid_of_handle(record.parent);
+    }
+    return PROTOCOL_TRACE_NONE;
+}
+
 private fn kernel_process_protocol_observe(unlocked: bool) !{unsafe} {
     protocol_trace_pass_begin(unlocked);
     if (scheduled_process_boot_live) {
@@ -1229,7 +1239,8 @@ private fn kernel_process_protocol_observe(unlocked: bool) !{unsafe} {
             kernel_process_protocol_owner(
                 scheduled_process_boot_record.stack_owner_cpu),
             kernel_process_protocol_reason(
-                scheduled_process_boot_record.wait_reason));
+                scheduled_process_boot_record.wait_reason),
+            PROTOCOL_TRACE_NONE);
     }
     let mut slot: usize = 0;
     if (scheduled_process_pool_ready) {
@@ -1249,7 +1260,8 @@ private fn kernel_process_protocol_observe(unlocked: bool) !{unsafe} {
                         record.pid,
                         kernel_process_protocol_state(record.state),
                         kernel_process_protocol_owner(record.stack_owner_cpu),
-                        kernel_process_protocol_reason(record.wait_reason));
+                        kernel_process_protocol_reason(record.wait_reason),
+                        kernel_process_protocol_parent(record));
                 }
                 intrusive_view_release(slot_view);
             }

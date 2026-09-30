@@ -623,8 +623,9 @@ diffs each process's state and stack owner, and each core's current and
 stood-on process, at every hold of the process-run lock, and prints the
 changes at the close. `scripts/validate_protocol_trace.py` fails the lane
 on a hold no model action describes, a lost change, or a model action the
-window never exercised; `kernel/models/README.md` says what that does and
-does not prove.
+window never exercised. The same steps are held to `Wait4Block.tla` and
+`RecordLifetime.tla` on the parent pid each process line carries;
+`kernel/models/README.md` says what that does and does not prove.
 
 ## QEMU/AArch64 integration
 
