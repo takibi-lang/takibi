@@ -1785,11 +1785,21 @@ _kernelcheck-stack-overflow-qemu:
 ## it is crossed on every run. Armed, the ordinary suite must pass; with the
 ## check the window exercises reverted, the boot must fail-stop with that
 ## check's activity.
-kernelcheck-race-window-qemu: kernelbuild-check
-	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-race-window-qemu
+kernelcheck-race-window-qemu: kernelcheck-race-window-609-qemu kernelcheck-race-window-603-qemu
 
-_kernelcheck-race-window-qemu:
+## One lane per window, so an aggregate runs them side by side: each is
+## two boots in sequence, and the two together as one lane were the
+## aggregate's longest by far.
+kernelcheck-race-window-609-qemu: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-race-window-609-qemu
+
+_kernelcheck-race-window-609-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=609 KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^oops: activity=start-on-owned-stack$$' KERNEL_QEMU_SERIAL_PORT=18668 KERNEL_QEMU_QMP_PORT=18669 KERNEL_QEMU_NETDEV_LOCAL_PORT=18670 KERNEL_QEMU_NETDEV_REMOTE_PORT=18675 bash scripts/run_kernel_race_window_qemutest.sh
+
+kernelcheck-race-window-603-qemu: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-race-window-603-qemu
+
+_kernelcheck-race-window-603-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=603 KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^sched: STARVED cpu=[0-9]+ idled beside Ready pid=' KERNEL_QEMU_SERIAL_PORT=18676 KERNEL_QEMU_QMP_PORT=18681 KERNEL_QEMU_NETDEV_LOCAL_PORT=18682 KERNEL_QEMU_NETDEV_REMOTE_PORT=18700 bash scripts/run_kernel_race_window_qemutest.sh
 
 kernelcheck-uart-wake-qemu: kernelbuild-check
@@ -1896,7 +1906,8 @@ KERNELCHECK_QEMU_LANES := kernelcheck-qemu kernelcheck-qemu-debug \
 	kernelcheck-oops-qemu kernelcheck-ddb-qemu \
 	kernelcheck-stack-overflow-qemu \
 	kernelcheck-alloc-rollback-qemu kernelcheck-uart-wake-qemu \
-	kernelcheck-affinity-gdb-qemu kernelcheck-race-window-qemu
+	kernelcheck-affinity-gdb-qemu kernelcheck-race-window-609-qemu \
+	kernelcheck-race-window-603-qemu
 
 KERNELCHECK_LANES := $(KERNELCHECK_QEMU_LANES) kernelcheck-rpi5
 
