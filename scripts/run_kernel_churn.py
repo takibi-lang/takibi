@@ -151,6 +151,22 @@ def has_prompt(text):
     return any(prompt in text for prompt in SHELL_PROMPTS)
 
 
+def has_returned_prompt(text, command):
+    """A prompt that is not ash redrawing the line just typed.
+
+    After a DDB `continue`, ash redraws its prompt with the pending command
+    line after it (` # churn.sh 9000`). That is the phase starting, not
+    ending, and counting it once ended a clean long run at the start of its
+    second phase with "the shell prompt returned without a verdict"."""
+    for prompt in SHELL_PROMPTS:
+        at = text.find(prompt)
+        while at >= 0:
+            if not text.startswith(command, at + len(prompt)):
+                return True
+            at = text.find(prompt, at + 1)
+    return False
+
+
 def last_lines(text, count=4):
     lines = [line for line in text.decode("ascii", "replace").splitlines()
              if line.strip()]
@@ -254,14 +270,16 @@ def run_phase(session, rounds):
     if shell_resync(session) is False:
         return "the shell did not answer an empty line before the phase"
     start = len(session.normalized())
-    session.send(f"churn.sh {rounds}\n".encode("ascii"))
+    command = f"churn.sh {rounds}".encode("ascii")
+    session.send(command + b"\n")
     deadline = time.monotonic() + rounds * SECONDS_PER_ROUND + 10
     answer = None
     heartbeats = 0
     while answer is None and time.monotonic() < deadline:
         answer = session.wait_for(
             lambda n: VERDICT.search(n, start) or
-                      (has_prompt(n[start:]) and PromptWithoutVerdict()) or
+                      (has_returned_prompt(n[start:], command) and
+                       PromptWithoutVerdict()) or
                       (n.count(PROGRESS, start) > heartbeats and "beat"),
             min(STALL_SECONDS, max(1.0, deadline - time.monotonic())),
             watch_from=start)
@@ -300,12 +318,18 @@ def main():
     parser.add_argument("--platform", choices=("qemu", "rpi5"), required=True)
     parser.add_argument("--rounds", type=int, default=100)
     parser.add_argument(
+        "--stall-seconds", type=int, default=0,
+        help="seconds without a heartbeat or verdict that count as a hang; "
+             "0 keeps the platform's default. A short run that must detect "
+             "a hang quickly passes a smaller bound than a long run needs")
+    parser.add_argument(
         "--long", action="store_true",
         help="the single long boot: two phases of ROUNDS each, DDB readings "
              "before and after, and a verdict on what accumulates")
     args = parser.parse_args()
     global STALL_SECONDS
-    STALL_SECONDS = STALL_SECONDS_BY_PLATFORM[args.platform]
+    STALL_SECONDS = (args.stall_seconds or
+                     STALL_SECONDS_BY_PLATFORM[args.platform])
 
     root = os.environ.get("TAKIBI_LANE_ARTIFACT_ROOT",
                           os.path.join(REPO_ROOT, "_build"))
