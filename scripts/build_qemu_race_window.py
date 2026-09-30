@@ -42,19 +42,30 @@ WINDOWS = {
     # GitHub issue #609: a peer published its process Blocked in wait4 and
     # still stands on that process's stack until its idle entry releases
     # it. A child exiting on core 0 meanwhile must not start the parent on
-    # that stack; kernel_process_child_exit's direct start checks the owner.
+    # that stack; kernel_process_child_exit's direct start asks
+    # scheduled_process_start_check, whose owner read is the check.
     "609": {
         "spin": ("kernel/process.tkb",
                  "fn kernel_process_stack_idle_blocked() {\n"
                  "    let core: usize = cpu_id();\n",
                  True),
         "check": ("kernel/process.tkb",
-                  "                        if (kernel_process_cpu_allows_slot(\n"
-                  "                                cpu_id(), parent.pool_index) &&\n"
-                  "                            scheduled_process_record_of(parent)\n"
-                  "                                .stack_owner_cpu == PROCESS_STACK_UNOWNED) {\n",
-                  "                        if (kernel_process_cpu_allows_slot(\n"
-                  "                                cpu_id(), parent.pool_index)) {\n"),
+                  "    if (scheduled_process_record_at(owner.pool_index).stack_owner_cpu !=\n"
+                  "            PROCESS_STACK_UNOWNED) {\n"
+                  "        return ScheduledProcessStartCheck::Standing(state);\n"
+                  "    }\n"
+                  "    scheduled_process_state_drop(state);\n"
+                  "    return ScheduledProcessStartCheck::Startable(\n"
+                  "        scheduled_process_startable_state(owner));\n"
+                  "}\n"
+                  "\n"
+                  "// The same for a process this CPU itself stands on:",
+                  "    scheduled_process_state_drop(state);\n"
+                  "    return ScheduledProcessStartCheck::Startable(\n"
+                  "        scheduled_process_startable_state(owner));\n"
+                  "}\n"
+                  "\n"
+                  "// The same for a process this CPU itself stands on:"),
     },
     # GitHub issue #603: wait4 has recorded ChildExit and chosen to block,
     # and the child exits before the block is published. The block is

@@ -66,7 +66,14 @@ use "kernel/lib/locked_cell.tkb";
 //   never waits keeps its zombies until it exits (its own exit drains
 //   them), which is Linux's behaviour and is a real way to hold slots.
 //
-enum ProcessState: u8 { Ready; Running; Blocked; Exited; Constructing; }
+// GitHub issue #614: Startable and Reapable are Ready and Exited with the
+// proof StackOwnership.tla's StartsOnFreeStack asks for -- no other core
+// stands on the process's kernel stack. Only the functions named in
+// "Where a stack is proved free" below mint them, and only
+// scheduled_process_start and scheduled_process_reap take them, so a path
+// that starts or reaps without asking does not compile.
+enum ProcessState: u8 { Ready; Startable; Running; Blocked; Exited; Reapable;
+                        Constructing; }
 enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; Constructing; }
 // GitHub issue #244: ChildExit lets wait4() actually block a parent whose
 // child hasn't exited yet, instead of returning -ECHILD immediately (safe
@@ -2066,11 +2073,20 @@ fn scheduled_bootstrap_process_handle(bootstrap: BootstrapProcessHandle)
     return bootstrap.handle;
 }
 
+// The case keeps the name of what was taken, a Ready process; the token it
+// carries is Startable, because taking it is where its stack was checked.
 must_use variant ScheduledProcessReadyTakeResult {
     Missing;
     Ready(exists process: usize.
           (ScheduledProcessOwner[process],
-           ScheduledProcessState[process, ProcessState::Ready]));
+           ScheduledProcessState[process, ProcessState::Startable]));
+}
+
+// A Ready process whose stack was looked at once more: either no other core
+// stands on it, and it is Startable, or one does, and it comes back Ready.
+must_use variant ScheduledProcessStartCheck[process: usize] {
+    Standing(ScheduledProcessState[process, ProcessState::Ready]);
+    Startable(ScheduledProcessState[process, ProcessState::Startable]);
 }
 
 must_use variant ScheduledProcessConstructingTakeResult {
@@ -2084,7 +2100,7 @@ must_use variant ScheduledProcessExitedTakeResult {
     Missing;
     Exited(exists process: usize.
            (ScheduledProcessOwner[process],
-            ScheduledProcessState[process, ProcessState::Exited]));
+            ScheduledProcessState[process, ProcessState::Reapable]));
 }
 
 must_use variant ScheduledProcessRunningTakeResult {
@@ -2114,10 +2130,23 @@ fn scheduled_process_owner_drop(
 fn scheduled_process_state_drop(
         state: sink ScheduledProcessState[process, process_state]) {}
 
-fn scheduled_process_ready_state(
+// Where a stack is proved free: scheduled_process_ready_take,
+// scheduled_process_start_check, scheduled_process_restart_check and
+// scheduled_process_exited_take are the only functions that build these two
+// states, each after reading the record's stack owner under the run lock.
+// The read itself is the trusted step; the type says that nobody skipped it.
+private fn scheduled_process_startable_state(
         owner: borrow ScheduledProcessOwner[process])
-        -> ScheduledProcessState[process, ProcessState::Ready] {
-    let mut state: ScheduledProcessState[process, ProcessState::Ready] =
+        -> ScheduledProcessState[process, ProcessState::Startable] {
+    let mut state: ScheduledProcessState[process, ProcessState::Startable] =
+        { owner.pool_index };
+    return state;
+}
+
+private fn scheduled_process_reapable_state(
+        owner: borrow ScheduledProcessOwner[process])
+        -> ScheduledProcessState[process, ProcessState::Reapable] {
+    let mut state: ScheduledProcessState[process, ProcessState::Reapable] =
         { owner.pool_index };
     return state;
 }
@@ -2889,7 +2918,7 @@ fn scheduled_process_ready_take(guard: borrow ProcessRunGuard[lock],
     }
     let owner = scheduled_process_owner_new(handle.pool_index,
                                             handle.generation);
-    let state = scheduled_process_ready_state(owner);
+    let state = scheduled_process_startable_state(owner);
     return ScheduledProcessReadyTakeResult::Ready((owner, state));
 }
 
@@ -2954,7 +2983,7 @@ fn scheduled_process_exited_take(guard: borrow ProcessRunGuard[lock],
     }
     let owner = scheduled_process_owner_new(handle.pool_index,
                                             handle.generation);
-    let state = scheduled_process_exited_state(owner);
+    let state = scheduled_process_reapable_state(owner);
     return ScheduledProcessExitedTakeResult::Exited((owner, state));
 }
 
@@ -2990,9 +3019,43 @@ fn scheduled_process_blocked_take(guard: borrow ProcessRunGuard[lock],
     return ScheduledProcessBlockedTakeResult::Blocked((owner, state));
 }
 
-fn scheduled_process_start(
+// A Ready process this caller already holds, offered for a start. Strict:
+// the stack must be no core's, which is what a woken parent started by
+// another process's exit needs (#609).
+fn scheduled_process_start_check(
+        guard: borrow ProcessRunGuard[lock],
         owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Ready])
+        -> ScheduledProcessStartCheck[process] {
+    if (scheduled_process_record_at(owner.pool_index).stack_owner_cpu !=
+            PROCESS_STACK_UNOWNED) {
+        return ScheduledProcessStartCheck::Standing(state);
+    }
+    scheduled_process_state_drop(state);
+    return ScheduledProcessStartCheck::Startable(
+        scheduled_process_startable_state(owner));
+}
+
+// The same for a process this CPU itself stands on: a block that would miss
+// restarts the very process that just blocked, in place.
+fn scheduled_process_restart_check(
+        guard: borrow ProcessRunGuard[lock],
+        owner: borrow ScheduledProcessOwner[process],
+        state: sink ScheduledProcessState[process, ProcessState::Ready])
+        -> ScheduledProcessStartCheck[process] {
+    let stack_owner: usize =
+        scheduled_process_record_at(owner.pool_index).stack_owner_cpu;
+    if (stack_owner != PROCESS_STACK_UNOWNED && stack_owner != cpu_id()) {
+        return ScheduledProcessStartCheck::Standing(state);
+    }
+    scheduled_process_state_drop(state);
+    return ScheduledProcessStartCheck::Startable(
+        scheduled_process_startable_state(owner));
+}
+
+fn scheduled_process_start(
+        owner: borrow ScheduledProcessOwner[process],
+        state: sink ScheduledProcessState[process, ProcessState::Startable])
         -> ScheduledProcessState[process, ProcessState::Running] {
     scheduled_process_state_drop(state);
     // GitHub issue #609: StackOwnership.tla's StartsOnFreeStack, checked
@@ -3095,7 +3158,7 @@ fn scheduled_process_exit(
 fn scheduled_process_reap(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock],
         owner: sink ScheduledProcessOwner[process],
-        state: sink ScheduledProcessState[process, ProcessState::Exited])
+        state: sink ScheduledProcessState[process, ProcessState::Reapable])
         !{unsafe, invalidates_ProcessHandle} {
     scheduled_process_reap_teardown(owner);
     scheduled_process_reap_remove(guard, owner, state);
@@ -3141,7 +3204,7 @@ fn scheduled_process_reap_teardown(
 fn scheduled_process_reap_remove(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock],
         owner: sink ScheduledProcessOwner[process],
-        state: sink ScheduledProcessState[process, ProcessState::Exited])
+        state: sink ScheduledProcessState[process, ProcessState::Reapable])
         !{unsafe, invalidates_ProcessHandle} {
     scheduled_process_state_drop(state);
     scheduled_process_record_reset(owner.pool_index);
@@ -6343,11 +6406,27 @@ private fn kernel_process_block_reserved(
                     ScheduledProcessBlockedTakeResult::Blocked(resources) => {
                         let (from_owner, blocked) = resources;
                         let ready = scheduled_process_wake(from_owner, blocked);
-                        let from_running = scheduled_process_start(
-                            from_owner, ready);
-                        scheduled_process_record_at(from_owner.pool_index)
-                            .wait_reason = ProcessWaitReason::None;
-                        scheduled_process_release(from_owner, from_running);
+                        match scheduled_process_restart_check(
+                                guard, from_owner, ready) {
+                            ScheduledProcessStartCheck::Startable(startable) => {
+                                let from_running = scheduled_process_start(
+                                    from_owner, startable);
+                                scheduled_process_record_at(
+                                    from_owner.pool_index).wait_reason =
+                                    ProcessWaitReason::None;
+                                scheduled_process_release(
+                                    from_owner, from_running);
+                            }
+                            // Another core stands on the stack this CPU
+                            // just blocked on: the same stop
+                            // scheduled_process_start makes.
+                            ScheduledProcessStartCheck::Standing(standing) => {
+                                scheduled_process_release(from_owner, standing);
+                                kernel_activity_set(
+                                    KernelActivity::StartOnOwnedStack);
+                                kernel_syscall_fail_stop(0);
+                            }
+                        }
                     }
                 }
                 let ready = scheduled_process_yield(owner, running);
@@ -8423,6 +8502,18 @@ fn kernel_process_current_root() -> AddressSpaceRoot {
 // ASID preparation runs without ProcessRunGuard. An exit cannot retry on a
 // later tick, so every preparation failure cancels the reservation and
 // returns 0 to the existing syscall fail-stop path.
+// Keep ChildExit on the Ready parent as its pending wait4 continuation.
+// Rewind the saved frame so a CPU that admits the parent runs ordinary
+// synchronous wait4 after activating the parent's root; that path can
+// validate user memory without making timer IRQ scheduling allocate.
+private fn kernel_process_leave_parent_ready(
+        parent: ProcessHandle,
+        parent_owner: sink ScheduledProcessOwner[process],
+        ready: sink ScheduledProcessState[process, ProcessState::Ready]) {
+    el0_context_retry_syscall(scheduled_process_record_of(parent).saved_sp);
+    scheduled_process_release(parent_owner, ready);
+}
+
 private fn kernel_process_exit_reserved(
         child: ProcessHandle,
         parent: ProcessHandle,
@@ -8665,28 +8756,30 @@ fn kernel_process_child_exit(status: usize) -> usize {
                         // (kernel_process_stack_idle_blocked), and starting
                         // it here ran it on a stack two CPUs used at once.
                         if (kernel_process_cpu_allows_slot(
-                                cpu_id(), parent.pool_index) &&
-                            scheduled_process_record_of(parent)
-                                .stack_owner_cpu == PROCESS_STACK_UNOWNED) {
-                            scheduled_process_record_at(
-                                parent_owner.pool_index).wait_reason =
-                                ProcessWaitReason::None;
-                            let parent_running =
-                                scheduled_process_start(parent_owner, ready);
-                            process_run_unlock(exit_guard);
-                            return kernel_process_exit_reserved(
-                                child, parent, parent_owner, parent_running,
-                                true, false);
+                                cpu_id(), parent.pool_index)) {
+                            match scheduled_process_start_check(
+                                    exit_guard, parent_owner, ready) {
+                                ScheduledProcessStartCheck::Startable(startable) => {
+                                    scheduled_process_record_at(
+                                        parent_owner.pool_index).wait_reason =
+                                        ProcessWaitReason::None;
+                                    let parent_running =
+                                        scheduled_process_start(
+                                            parent_owner, startable);
+                                    process_run_unlock(exit_guard);
+                                    return kernel_process_exit_reserved(
+                                        child, parent, parent_owner,
+                                        parent_running, true, false);
+                                }
+                                ScheduledProcessStartCheck::Standing(standing) => {
+                                    kernel_process_leave_parent_ready(
+                                        parent, parent_owner, standing);
+                                }
+                            }
+                        } else {
+                            kernel_process_leave_parent_ready(
+                                parent, parent_owner, ready);
                         }
-                        // Keep ChildExit on the Ready parent as its pending
-                        // wait4 continuation. Rewind the saved frame so a CPU
-                        // that admits the parent runs ordinary synchronous
-                        // wait4 after activating the parent's root; that path
-                        // can validate user memory without making timer IRQ
-                        // scheduling allocate.
-                        el0_context_retry_syscall(
-                            scheduled_process_record_of(parent).saved_sp);
-                        scheduled_process_release(parent_owner, ready);
                     }
                 }
             }
