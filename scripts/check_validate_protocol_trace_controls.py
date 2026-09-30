@@ -126,6 +126,13 @@ REMOVED_UNLOCKED = FAMILY + [
 REMOVED_LIVE = FAMILY + ["1 0 l g 11 0 0"]
 
 
+# #603 (#653): wait4's decision published on a process that is still Running
+# and reserved for no core, and any other wait on a Running process. Neither
+# changes the state, so the only thing that shows them is the reason.
+STALE_CHILD_EXIT = FAMILY + ["1 1 l p 10 2 1 2 -"]
+STALE_SIGNAL = FAMILY + ["1 1 l p 10 2 1 5 -"]
+
+
 def run(text, *extra):
     with tempfile.NamedTemporaryFile("w", suffix=".log") as log:
         log.write(text)
@@ -193,6 +200,12 @@ def main() -> int:
         expect("a live record removed",
                run(window(REMOVED_LIVE)), False,
                "Wait4Reap not enabled: state[11] = Running"),
+        expect("#603: ChildExit published on a Running process",
+               run(window(STALE_CHILD_EXIT)), False,
+               "WaitMatchesState: 10 is Running and holds the published wait 2"),
+        expect("a Signal wait held by a Running process",
+               run(window(STALE_SIGNAL)), False,
+               "WaitMatchesState: 10 is Running and holds the published wait 5"),
         expect("a window that lost changes",
                run(window(SNAPSHOT, lost=3)), False, "lost 3 change(s)"),
         expect("a report cut before its end",
@@ -214,8 +227,8 @@ def main() -> int:
     report_pass(
         "validate-protocol-trace controls",
         "Wait4Block.tla's zombie-child block, lost wakeup and wrong-parent "
-        "wake, and RecordLifetime.tla's unlocked and premature removal, are "
-        "each refused; three recorded QEMU windows pass, one with Nap in SwitchAway's place; they fail without ChildExitStart "
+        "wake, RecordLifetime.tla's unlocked and premature removal, and a "
+        "wait published on a Running process are each refused; three recorded QEMU windows pass, one with Nap in SwitchAway's place; they fail without ChildExitStart "
         "and InterruptDepart, an allocation inside another CPU's hold is "
         "absorbed, a tick leave passes only inside an interrupt, "
         "and #609's shared-stack start, a lost change, a cut report, an "

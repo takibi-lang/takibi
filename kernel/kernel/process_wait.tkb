@@ -20,8 +20,11 @@
 // CPU resumes it.
 //
 // Current limitations (2026-09-30):
-// - THE CELL KNOWS NO PROCESS STATE. process_wait_publish can be called for
-//   a Running process; only its callers' tokens say otherwise.
+// - THE CELL KNOWS NO PROCESS STATE BUT WHAT IT IS TOLD. process_wait_publish
+//   refuses a Running, Free, Exited or Constructing caller, and believes the
+//   state it is given; a caller that lies passes. The trace replay
+//   (scripts/validate_protocol_trace.py) checks the recorded result: a
+//   Running process holds no published wait on any lane that runs it.
 // - THE CALLER SERIALIZES. Every write is made holding the process-run
 //   lock, and a reader that does not hold it sees a value that may be one
 //   step old, which the two readers that do so (the DDB and crash
@@ -34,6 +37,20 @@ enum ProcessWaitReason: u8 {
     None; UartRx; ChildExit; NetRx; Deadline; Signal; UartTx;
 }
 
+// The process record's scheduling state, here because publish is asked which
+// one the caller is in.
+enum ProcessSlotState: u8 { Free; Ready; Running; Blocked; Exited; Constructing; }
+
+// A wait belongs to a process that is Blocked, or Ready holding a wait4
+// continuation. publish is told the caller's state and refuses any other, so
+// a path that publishes for a Running process stops instead of leaving a
+// marker the scheduler will later trust (#603). The caller supplies the
+// state it read; this is a stop for a stray caller, not a proof.
+must_use variant ProcessWaitPublish {
+    Published;
+    Refused;
+}
+
 struct ProcessWaitCell {
     private reason: ProcessWaitReason;
     // The pid of the child whose exit woke a wait4 that could not resume at
@@ -42,11 +59,24 @@ struct ProcessWaitCell {
     private woken_by: usize;
 }
 
-// The process has been made Blocked for `reason`.
+// The process has been made Blocked for `reason`; `state` is the state the
+// record is in now.
 fn process_wait_publish(cell: &mut ProcessWaitCell,
-                        reason: ProcessWaitReason) {
+                        reason: ProcessWaitReason,
+                        state: ProcessSlotState) -> ProcessWaitPublish {
+    match state {
+        ProcessSlotState::Blocked => {}
+        ProcessSlotState::Ready => {}
+        ProcessSlotState::Free => { return ProcessWaitPublish::Refused; }
+        ProcessSlotState::Running => { return ProcessWaitPublish::Refused; }
+        ProcessSlotState::Exited => { return ProcessWaitPublish::Refused; }
+        ProcessSlotState::Constructing => {
+            return ProcessWaitPublish::Refused;
+        }
+    }
     (*cell).reason = reason;
     (*cell).woken_by = 0;
+    return ProcessWaitPublish::Published;
 }
 
 // A ChildExit waiter woken by `child` that cannot be resumed now: it stays

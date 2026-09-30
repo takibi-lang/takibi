@@ -92,9 +92,14 @@ WINDOWS = {
             ("kernel/process.tkb",
              "            .pending_block_reason = reason;\n",
              "            .pending_block_reason = reason;\n"
-             "        process_wait_publish(\n"
-             "            &scheduled_process_record_of(\n"
-             "                execution_here().current_handle).wait, reason);\n"),
+             "        // The reverted kernel says it is Blocked, which it is not.\n"
+             "        match process_wait_publish(\n"
+             "                &scheduled_process_record_of(\n"
+             "                    execution_here().current_handle).wait, reason,\n"
+             "                ProcessSlotState::Blocked) {\n"
+             "            ProcessWaitPublish::Published => {}\n"
+             "            ProcessWaitPublish::Refused => {}\n"
+             "        }\n"),
         ],
     },
     # GitHub issue #635: no window and no spin -- a control only. A terminal

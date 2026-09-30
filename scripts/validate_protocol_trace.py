@@ -35,7 +35,12 @@ line carries (#647):
   read through the pointer, is not a protocol change and is not observed, so
   a PASS says the reaper keeps its half of the rule and nothing of the
   reader's.
-Both assume one awaited child at a time, as /bin/protocol-trace runs: a
+A third check is not a model's: a Running process holds no published wait,
+except the wait4 continuation of a process reserved for a core and not yet
+current (#653). The kernel's wait cell (kernel/kernel/process_wait.tkb)
+refuses the write at run time; this is the recorded evidence that no lane
+that ran the window did it.
+The two model checks assume one awaited child at a time, as /bin/protocol-trace runs: a
 parent blocked in wait4 for a specific pid while another child is already a
 zombie would be flagged although the kernel is right.
 
@@ -113,12 +118,13 @@ class World:
     interrupted: dict  # core -> inside an interrupt taken from EL0
     reap_pending: dict  # parent pid -> exited child pid
     parent: dict      # pid -> parent pid or None
+    reason: dict      # pid -> the kernel's wait reason code, 0 for none
 
     def copy(self):
         return World(dict(self.state), dict(self.owner), dict(self.current),
                      dict(self.stands), dict(self.reserved),
                      dict(self.interrupted), dict(self.reap_pending),
-                     dict(self.parent))
+                     dict(self.parent), dict(self.reason))
 
 
 @dataclasses.dataclass
@@ -128,6 +134,7 @@ class Hold:
     unlocked: bool
     processes: dict   # pid -> (state, owner)
     parents: dict     # pid -> parent pid or None, as reported
+    reasons: dict     # pid -> wait reason code, as reported
     gone: set
     cores: dict       # core -> (current, stands)
 
@@ -175,13 +182,14 @@ def parse(lines):
             fields[2], fields[3]
         key = (sequence, lock == "u")
         hold = steps.setdefault(
-            key, Hold(sequence, cpu, lock == "u", {}, {}, set(), {}))
+            key, Hold(sequence, cpu, lock == "u", {}, {}, {}, set(), {}))
         if kind == "p" and len(fields) == 9:
             pid = int(fields[4])
             hold.processes[pid] = (
                 model_state(int(fields[5]), int(fields[7])),
                 value(fields[6]))
             hold.parents[pid] = value(fields[8])
+            hold.reasons[pid] = value(fields[7]) or 0
         elif kind == "g" and len(fields) == 7:
             hold.gone.add(int(fields[4]))
         elif kind == "c" and len(fields) == 7:
@@ -199,11 +207,12 @@ def parse(lines):
 def initial_world(hold, cores):
     if hold.sequence != 0 or hold.unlocked:
         raise TraceError("the window does not start with its snapshot")
-    world = World({}, {}, {}, {}, {}, {}, {}, {})
+    world = World({}, {}, {}, {}, {}, {}, {}, {}, {})
     for pid, (state, owner) in hold.processes.items():
         world.state[pid] = state
         world.owner[pid] = owner
         world.parent[pid] = hold.parents[pid]
+        world.reason[pid] = hold.reasons[pid]
     for core in range(cores):
         if core not in hold.cores:
             raise TraceError(f"the snapshot has no line for core {core}")
@@ -679,6 +688,16 @@ def invariants(world):
                 world.current[c]) not in ("Running", "Constructing", "Exited"):
             return (f"RunningMatchesCores: c{c}'s current process "
                     f"{world.current[c]} is {world.state.get(world.current[c])}")
+    held = {p for c in cores for p in (world.reserved[c],) if p is not None}
+    for pid, state in world.state.items():
+        # #653: a published wait belongs to a process that is not running. A
+        # process reserved for a core and not yet current may still carry the
+        # wait4 continuation it was resumed from, which the commit consumes.
+        reason = world.reason.get(pid, 0)
+        if state == "Running" and reason != 0 and not (
+                reason == WAIT_CHILD_EXIT and pid in held):
+            return (f"WaitMatchesState: {pid} is Running and holds the "
+                    f"published wait {reason}")
     for pid, state in world.state.items():
         if state != "Blocked":
             continue
@@ -708,6 +727,7 @@ def absorb_allocations(world, hold):
             world.state[pid] = state
             world.owner[pid] = owner
             world.parent[pid] = hold.parents.pop(pid)
+            world.reason[pid] = hold.reasons.pop(pid)
             del hold.processes[pid]
 
 
@@ -764,11 +784,19 @@ def replay(cores, holds, without=None):
         for pid, parent in hold.parents.items():
             if pid in world.state:
                 world.parent[pid] = parent
+        if not hold.unlocked:
+            for pid, reason in hold.reasons.items():
+                if pid in world.state:
+                    world.reason[pid] = reason
         if hold.unlocked:
             errors += [f"{where}: {e}" for e in unlocked_errors(world, hold)]
             continue
         procs, cores_changed = changed(world, hold)
         if not procs and not cores_changed and not hold.gone:
+            why = invariants(world)
+            if why:
+                errors.append(f"{where}: {why}")
+                return errors, counts
             continue
         reported = world.copy()
         for pid, (state, owner) in hold.processes.items():
