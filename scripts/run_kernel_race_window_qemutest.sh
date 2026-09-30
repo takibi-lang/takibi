@@ -27,13 +27,37 @@ ARTIFACT_DIR="${KERNEL_QEMU_RACE_WINDOW_ARTIFACT_DIR:-${TAKIBI_LANE_ARTIFACT_ROO
 ROOT="$ARTIFACT_DIR/$WINDOW"
 LABEL="kernel/qemu race-window $WINDOW"
 
+# suite: the ordinary QEMU suite, whose UART capture carries the signature.
+# churn: scripts/run_kernel_churn.py's workload through the QEMU shell, for a
+# window only concurrent siblings reach (#633); its transcript carries it.
+WORKLOAD="${KERNEL_QEMU_RACE_WINDOW_WORKLOAD:-suite}"
+CHURN_ROUNDS="${KERNEL_QEMU_RACE_WINDOW_CHURN_ROUNDS:-100}"
+
 run_variant() {
     local variant="$1"
-    env KERNEL_QEMU_ELF="$REPO_ROOT/kernel/build/qemu/kernel-race-$WINDOW-$variant.elf" \
+    local elf="$REPO_ROOT/kernel/build/qemu/kernel-race-$WINDOW-$variant.elf"
+    if [ "$WORKLOAD" = churn ]; then
+        env KERNEL_QEMU_SHELL_ELF="$elf" \
+            KERNEL_QEMU_SHELL_SERIAL_PORT="${KERNEL_QEMU_SERIAL_PORT:-18668}" \
+            TAKIBI_LANE_ARTIFACT_ROOT="$ROOT/$variant" \
+            python3 "$REPO_ROOT/scripts/run_kernel_churn.py" --platform qemu \
+                --rounds "$CHURN_ROUNDS" --stall-seconds 120 \
+            >"$ROOT/$variant.log" 2>&1
+        return
+    fi
+    env KERNEL_QEMU_ELF="$elf" \
         KERNEL_QEMU_LABEL="qemu-race-$WINDOW-$variant" \
         KERNEL_QEMU_HWTEST_ARTIFACT_DIR="$ROOT/$variant" \
         bash "$REPO_ROOT/scripts/run_kernel_qemutest.sh" \
         >"$ROOT/$variant.log" 2>&1
+}
+
+signature_file() {
+    if [ "$WORKLOAD" = churn ]; then
+        echo "$ROOT/reverted/kernel-churn-qemu/churn-transcript.log"
+    else
+        echo "$ROOT/reverted/uart.log"
+    fi
 }
 
 # Declared here as well as in the runner this delegates to, so
@@ -52,17 +76,17 @@ python3 "$REPO_ROOT/scripts/qemu_port_guard.py" "$LABEL" \
 
 mkdir -p "$ROOT"
 if ! run_variant armed; then
-    echo "FAIL $LABEL: the armed kernel failed the suite with the check present" >&2
+    echo "FAIL $LABEL: the armed kernel failed the $WORKLOAD with the check present" >&2
     grep -E '^FAIL' "$ROOT/armed.log" | sed 's/^/  /' >&2 || true
     exit 1
 fi
 if run_variant reverted; then
-    echo "FAIL $LABEL: with the check reverted the suite passed, so the window was not crossed" >&2
+    echo "FAIL $LABEL: with the check reverted the $WORKLOAD passed, so the window was not crossed" >&2
     exit 1
 fi
-if ! grep -aEq "$SIGNATURE" "$ROOT/reverted/uart.log"; then
-    echo "FAIL $LABEL: with the check reverted the suite failed, but no line matched $SIGNATURE" >&2
-    grep -aE '^(oops: (fail-stop|activity)|sched: STARVED)' "$ROOT/reverted/uart.log" | sed 's/^/  /' >&2 || true
+if ! grep -aEq "$SIGNATURE" "$(signature_file)"; then
+    echo "FAIL $LABEL: with the check reverted the $WORKLOAD failed, but no line matched $SIGNATURE" >&2
+    grep -aE '^(oops: (fail-stop|activity)|sched: STARVED|ddb: wait pid)' "$(signature_file)" | sed 's/^/  /' >&2 || true
     exit 1
 fi
-echo "PASS $LABEL: armed, the suite passed; with the check reverted, it failed showing $SIGNATURE"
+echo "PASS $LABEL: armed, the $WORKLOAD passed; with the check reverted, it failed showing $SIGNATURE"

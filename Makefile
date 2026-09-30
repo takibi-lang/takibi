@@ -1328,7 +1328,7 @@ KERNEL_QEMU_NET_WAKE_CONTROL_O := $(KERNEL_QEMU_BUILD_DIR)/net-wake-control-main
 KERNEL_QEMU_NET_WAKE_CONTROL_ELF := $(KERNEL_QEMU_BUILD_DIR)/kernel-net-wake-control.elf
 # GitHub issue #615: one widened race window per overlay, armed and with the
 # check it exercises reverted. scripts/build_qemu_race_window.py names them.
-KERNEL_QEMU_RACE_WINDOWS := 609 603
+KERNEL_QEMU_RACE_WINDOWS := 609 603 633
 KERNEL_QEMU_RACE_WINDOW_ELFS := $(foreach w,$(KERNEL_QEMU_RACE_WINDOWS),$(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-armed.elf $(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-reverted.elf)
 KERNEL_QEMU_LINK_LD      := $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld
 KERNEL_QEMU_ELF          := $(KERNEL_QEMU_BUILD_DIR)/kernel.elf
@@ -1785,7 +1785,7 @@ _kernelcheck-stack-overflow-qemu:
 ## it is crossed on every run. Armed, the ordinary suite must pass; with the
 ## check the window exercises reverted, the boot must fail-stop with that
 ## check's activity.
-kernelcheck-race-window-qemu: kernelcheck-race-window-609-qemu kernelcheck-race-window-603-qemu
+kernelcheck-race-window-qemu: kernelcheck-race-window-609-qemu kernelcheck-race-window-603-qemu kernelcheck-race-window-633-qemu
 
 ## One lane per window, so an aggregate runs them side by side: each is
 ## two boots in sequence, and the two together as one lane were the
@@ -1801,6 +1801,12 @@ kernelcheck-race-window-603-qemu: kernelbuild-check
 
 _kernelcheck-race-window-603-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=603 KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^sched: STARVED cpu=[0-9]+ idled beside Ready pid=' KERNEL_QEMU_SERIAL_PORT=18676 KERNEL_QEMU_QMP_PORT=18681 KERNEL_QEMU_NETDEV_LOCAL_PORT=18682 KERNEL_QEMU_NETDEV_REMOTE_PORT=18700 bash scripts/run_kernel_race_window_qemutest.sh
+
+kernelcheck-race-window-633-qemu: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-race-window-633-qemu
+
+_kernelcheck-race-window-633-qemu:
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=633 KERNEL_QEMU_RACE_WINDOW_WORKLOAD=churn KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^ddb: wait pid=([3-9]|[1-9][0-9]+) state=blocked waits-for event=signal' KERNEL_QEMU_SERIAL_PORT=18636 KERNEL_QEMU_QMP_PORT=18637 KERNEL_QEMU_NETDEV_LOCAL_PORT=18638 KERNEL_QEMU_NETDEV_REMOTE_PORT=18639 bash scripts/run_kernel_race_window_qemutest.sh
 
 kernelcheck-uart-wake-qemu: kernelbuild-check
 	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-uart-wake-qemu
@@ -1907,7 +1913,7 @@ KERNELCHECK_QEMU_LANES := kernelcheck-qemu kernelcheck-qemu-debug \
 	kernelcheck-stack-overflow-qemu \
 	kernelcheck-alloc-rollback-qemu kernelcheck-uart-wake-qemu \
 	kernelcheck-affinity-gdb-qemu kernelcheck-race-window-609-qemu \
-	kernelcheck-race-window-603-qemu
+	kernelcheck-race-window-603-qemu kernelcheck-race-window-633-qemu
 
 KERNELCHECK_LANES := $(KERNELCHECK_QEMU_LANES) kernelcheck-rpi5
 

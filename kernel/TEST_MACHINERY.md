@@ -107,6 +107,14 @@ so no ordinary kernel carries it.
   keeps that marker when `kernel_syscall_block_return` reruns the syscall,
   and the shell is left Ready and refused on every CPU:
   `sched: STARVED ... idled beside Ready`.
+- Window 633 opens in wait4 between reaping a zombie and returning its
+  pid, where a sibling exiting on another CPU writes the parent's
+  `last_child_pid`. Only concurrent siblings reach it, so this window runs
+  the churn workload (`scripts/run_kernel_churn.py`, 100 rounds, a
+  120-second stall bound) through the QEMU shell instead of the suite. Its
+  reverted kernel returns `last_child_pid` again, and the churn shell is left
+  waiting on a signal with no children, which DDB reports as a pid of 3 or
+  more blocked on `event=signal`.
 
 ## Syscall evidence counters
 
