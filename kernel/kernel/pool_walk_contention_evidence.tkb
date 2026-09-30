@@ -132,12 +132,19 @@ struct PoolWalkItem {
 // half-fills if the real number is bigger.
 const POOL_WALK_FLOOR: usize = 16;
 
-// Both cores wait for each other at the rendezvous. Bounded in TIME, not
-// in iterations, because the two targets disagree about what an iteration
-// costs -- kernel/CONCURRENCY.md's rule, and the one this file's first
-// version broke by tuning a spin count that meant different things on
-// QEMU and on the board.
-const POOL_WALK_RENDEZVOUS_SHIFT: i64 = 2;
+// Both cores wait for each other at the rendezvous. Bounded by the OTHER
+// core's timer ticks, not by host time and not by iterations. Iterations
+// mean different things on QEMU and the board (kernel/CONCURRENCY.md's rule,
+// which this file's first version broke). Host time was the next choice,
+// and it could not tell a slow peer from a missing one: an allcheck beside
+// other QEMU lanes let 250 ms pass without core 1's vCPU running and failed
+// the round as `walk-never-held-it` (GitHub issue #650). A vCPU the host is
+// not running takes no ticks, so the peer failing to arrive after
+// POOL_WALK_RENDEZVOUS_TICKS of its own ticks means it ran and did not come.
+// 16 ticks is the 250 ms the time bound allowed a running peer. The wall
+// bound stays as a backstop for a peer that takes no ticks at all.
+const POOL_WALK_RENDEZVOUS_TICKS: usize = 16;
+const POOL_WALK_RENDEZVOUS_BACKSTOP_SECONDS: i64 = 10;
 
 private let mut pool_walk_pool: IntrusivePool(PoolWalkItem);
 private let mut pool_walk_ready: bool = false;
@@ -332,10 +339,11 @@ private fn pool_walk_once() !{unsafe} {
                 atomic_store_release(pool_walk_stale_address(), cursor);
                 atomic_store_release(pool_walk_held_seq_address(), round);
             }
-            let window: i64 = read_cntfrq() >> POOL_WALK_RENDEZVOUS_SHIFT;
+            let ticks_start: usize = pool_walk_peer_ticks();
             let start: i64 = read_cntpct();
             let mut released: bool = false;
-            while (released == false && read_cntpct() - start < window &&
+            while (released == false &&
+                   pool_walk_window_open(ticks_start, start) &&
                    unsafe {
                        atomic_load_acquire(pool_walk_armed_address())
                    } == 1) {
@@ -390,10 +398,11 @@ private fn pool_view_hold_once() !{unsafe} {
                 intrusive_pool_payload_of(&pool_walk_pool, slot_view);
             let first_ok: bool = payload.stamp == POOL_WALK_SENTINEL;
             unsafe { atomic_store_release(pool_view_held_address(), 1); }
-            let window: i64 = read_cntfrq() >> POOL_WALK_RENDEZVOUS_SHIFT;
+            let ticks_start: usize = pool_walk_peer_ticks();
             let start: i64 = read_cntpct();
             let mut released: bool = false;
-            while (released == false && read_cntpct() - start < window &&
+            while (released == false &&
+                   pool_walk_window_open(ticks_start, start) &&
                    unsafe {
                        atomic_load_acquire(pool_walk_armed_address())
                    } == 1) {
@@ -527,17 +536,29 @@ private fn pool_walk_floor_give_back() -> bool !{unsafe} {
 // Wait, bounded in time, for the other core to reach `target` on one of
 // the rendezvous sequences. False means it did not, which is a give-up
 // this file reports rather than a hang.
+// The other of the two participants, whose ticks bound a wait.
+private fn pool_walk_peer_ticks() -> usize !{unsafe} {
+    if (cpu_id() == 0) { return kernel_tick_count_of(1); }
+    return kernel_tick_count_of(0);
+}
+
+private fn pool_walk_window_open(ticks_start: usize, start: i64) -> bool
+        !{unsafe} {
+    return read_cntpct() - start <
+               read_cntfrq() * POOL_WALK_RENDEZVOUS_BACKSTOP_SECONDS &&
+           pool_walk_peer_ticks() - ticks_start < POOL_WALK_RENDEZVOUS_TICKS;
+}
+
 private fn pool_walk_await(sequence_address: usize, target: usize)
         -> bool !{unsafe} {
-    let window: i64 = read_cntfrq() >> POOL_WALK_RENDEZVOUS_SHIFT;
+    let ticks_start: usize = pool_walk_peer_ticks();
     let start: i64 = read_cntpct();
-    let mut met: bool = false;
-    while (met == false && read_cntpct() - start < window) {
+    while (pool_walk_window_open(ticks_start, start)) {
         if (unsafe { atomic_load_acquire(sequence_address) } >= target) {
-            met = true;
+            return true;
         }
     }
-    return met;
+    return unsafe { atomic_load_acquire(sequence_address) } >= target;
 }
 
 // One round: make the extra chunk, wait for the walker to be holding an

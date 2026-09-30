@@ -33,7 +33,6 @@ whether a row has gone quiet or has merely stopped being looked for.
 | `the payload never asked for its input` | 1 of 9 cicheck runs after the alloc-rollback split | #607 | 2026-09-26 |
 | `workload: peer read 98304 pattern bytes` | line MISSING from peer_filesystem.actual: 2 of 7 local cicheck runs; 0 of 47 standalone. The uart-wake lane reports the same stall as `the peer console writer never delivered its last record`: 1 of 1 cicheck, 0 of 4 standalone, 0 of 30 peer-suites run six at a time | #604 | 2026-09-29 |
 | `retired different work in their cold and warm passes` | 1 of 4 local RPi5 runs on 2026-09-29, every warm pass on CPU 2 | #649 | 2026-09-29 |
-| `walk-never-held-it` | 1 allcheck in another clone on 2026-09-29; unmeasured beyond it | #650 | 2026-09-29 |
 | `ARP while HTTPd is listening` | 1 of 30 standalone samples | #605 | 2026-09-26 |
 | `the scripted BREAK never fired` | 1 CI run of the DDB lane since e824b030 (run 36207501077); 0 of 10 locally | #603 | 2026-09-26 |
 
