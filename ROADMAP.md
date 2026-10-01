@@ -102,7 +102,7 @@ before its issue closes. The steps keep their numbers, which issues cite.
    #646 (compiler soundness fuzzing, the footing of every static
    guarantee); #13 for `Phi`, with #216 and #109 as its first examples;
    #663's stages S2 to S4 (one console queue under one lock; S1 landed, the
-   the rest were paused on #665, whose STARVED capture proved a control's designed failure, so B decides whether its remaining load-stall still blocks them; #657 closes with them); #131 and #370 (stored
+   the rest were paused on #665, whose cause (a fixture race with core 0's drain) is fixed and under observation; #657 closes with them); #131 and #370 (stored
    ownership and branded containers, which feed #637 stage 2's option (c)). Once A's route step 2 closes: #637 stage 1's
    device groups, MMIO and DMA, together with #622 and #623.
 2. **Resource use and measured performance:** #658, #220 (telnet; lowered
