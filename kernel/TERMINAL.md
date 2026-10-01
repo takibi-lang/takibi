@@ -86,7 +86,13 @@ the latest request, so a peer that drains the ring cannot leave the sender
 stopped indefinitely. Kernel diagnostics and debugger flushes remain available
 while terminal output is paused.
 
-CPU 0 owns the 4096-operation echo queue and masks IRQs for every access.
+The 4096-operation echo queue, the transmit queue and the column and
+wire-state words are covered by one console lock (`kernel/printk/console_lock.tkb`,
+innermost: run, then console), which masks IRQs for every access. Core 0 is
+the only writer of them today; a peer's terminal output still goes through its
+console ring and core 0 moves it in at moments of its own, so its bytes can be
+ordered after later bytes written on core 0 until peers take the same lock
+(GitHub issue #663, `kernel/models/ConsoleTx.tla`).
 One operation represents a byte, a caret pair, an entire erasure, or CR/LF.
 This fits a full canonical line and its kill without spinning inside the RX
 interrupt while output is stopped. An operation beyond capacity is rejected

@@ -223,6 +223,14 @@ also holds the allowlist of files permitted to use raw atomic intrinsics.
 `run -> fd -> pool -> page`, with `asid` a leaf. The scheduler's lock is the
 outermost. Nothing takes an outer lock while holding an inner one.
 
+The console lock (`kernel/printk/console_lock.tkb`, GitHub issue #663) sits
+inside the run lock: whole output chunks are admitted, and the receive handler
+echoes, under the run guard, and nothing is taken while the console lock is
+held. The transmit interrupt lets go of it before it takes the run lock for
+its wake; keeping it across the wake is the deadlock `kernel/models/ConsoleTx.tla`
+finds (the NESTED variant). Nothing under it logs, since a Mutex has no owner
+and a log call would take it again.
+
 Two locks carry a RANK the compiler checks, rather than an order held by
 convention (GitHub issue #466): `ext2_mutation` at 20 and `block_device` at
 30, so a filesystem mutation may take the device lock underneath it and the
@@ -399,8 +407,11 @@ Termios settings and canonical editing use the same guard. A canonical-to-raw
 change wakes retrying readers if buffered input becomes readable without a
 new interrupt. Whole user-output chunks are admitted under this guard too,
 so TCSETSW cannot apply between a peer's settings snapshot and publication.
-Echo operations and the tagged CPU-0 TX queue use local IRQ masking; a signal
-flush cannot interrupt a peer-record peek/retire pair. Single-word atomic
+Echo operations and the tagged TX queue are covered by the console lock
+(which masks interrupts, as the bare mask it replaced did); a signal flush
+cannot interrupt a peer-record peek/retire pair. Core 0 is still the only
+writer today: a peer's terminal write still publishes to its ring, until the
+second stage of GitHub issue #663 moves peers onto the same queue. Single-word atomic
 publication carries output pause and input-throttle requests to TX paths
 that cannot acquire the process-run lock. See `TERMINAL.md`.
 
