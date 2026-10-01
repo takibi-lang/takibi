@@ -220,9 +220,20 @@ def shell_resync(session):
     and this runner back in step.
     """
     start = len(session.normalized())
+    # GitHub issue #655: the evidence that tells a lost newline from a prompt
+    # that arrived before `start` was taken. `prompt_before` is whether the
+    # text up to `start` already ends in a prompt, which a resync that waits
+    # only for what comes AFTER `start` would never count.
+    prompt_before = has_prompt(session.normalized()[max(0, start - 16):start])
+    sent_at = time.monotonic()
     session.send(b"\n")
-    if session.wait_for(lambda n: has_prompt(n[start:]),
-                        RESYNC_SECONDS) is None:
+    answer = session.wait_for(lambda n: has_prompt(n[start:]),
+                              RESYNC_SECONDS)
+    print(f"[churn resync] start={start} prompt_before_start={prompt_before} "
+          f"answered={answer is not None} "
+          f"after={time.monotonic() - sent_at:.1f}s "
+          f"total={len(session.normalized())}", flush=True)
+    if answer is None:
         return False
     # Let anything still in flight from the debugger land before typing.
     settle = len(session.normalized())
