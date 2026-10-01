@@ -20,32 +20,41 @@
 // contiguity the loops assume.
 //
 // Current limitations (2026-09-30):
-// - A FrameRef is copyable and not indexed by a process, so one process's
-//   frame can still be handed where another's is meant; that is the next rung.
+// - A FrameRef is indexed by the process whose generation its mint was given,
+//   and resume consumes it. Nothing checks that the address is that process's
+//   frame: the entry mint takes the CPU's current generation, the saved mint
+//   takes the owner of the record whose saved_sp it reads.
 // - The accessors do not check the address: a FrameRef that names memory that
 //   is not a live frame reads and writes that memory.
 
-struct FrameRef { private sp: usize; }
+affine struct FrameRef[process: usize] { private sp: usize; }
 
 // The two mints. Every FrameRef in the kernel comes from one of them, and
 // scripts/check_stack_proof_states.py holds their callers to a declared set.
+// Each takes the generation of the process the frame belongs to, which is
+// what supplies the index, as current_process_new and
+// scheduled_process_owner_new do for theirs.
 //
-// An assembly entry passes the frame it just saved, in x0.
-fn frame_ref_from_entry(sp: usize) -> FrameRef {
-    let mut frame: FrameRef = { sp };
+// An assembly entry passes the frame it just saved, in x0; the generation is
+// that of the process this CPU is running.
+fn frame_ref_from_entry(sp: usize, generation: usize @ process)
+        -> FrameRef[process] {
+    let mut frame: FrameRef[process] = { sp };
     return frame;
 }
 
 // A frame parked in a process record: rebuilt from the saved_sp written when
-// that process last left the CPU. Trusts that record's saved_sp.
-fn frame_ref_from_saved(saved_sp: usize) -> FrameRef {
-    let mut frame: FrameRef = { saved_sp };
+// that process last left the CPU, for the process whose generation is given.
+// Trusts that record's saved_sp.
+fn frame_ref_from_saved(saved_sp: usize, generation: usize @ process)
+        -> FrameRef[process] {
+    let mut frame: FrameRef[process] = { saved_sp };
     return frame;
 }
 
 // The address, to park a frame in a record's saved_sp, and for the one place
 // that still hands a frame to assembly as a bare integer.
-fn frame_ref_address(frame: FrameRef) -> usize {
+fn frame_ref_address(frame: borrow FrameRef[process]) -> usize {
     return frame.sp;
 }
 
@@ -53,21 +62,40 @@ fn frame_ref_address(frame: FrameRef) -> usize {
 // without a saved frame, and a frame-writing step then has nothing to write.
 variant MaybeFrame {
     NoFrame;
-    Frame(FrameRef);
+    Frame(exists process: usize. FrameRef[process]);
 }
 
 // The dispatcher's entry hands over the address, 0 when there is no frame.
-fn maybe_frame_from_entry(sp: usize) -> MaybeFrame {
+fn maybe_frame_from_entry(sp: usize, generation: usize @ process)
+        -> MaybeFrame {
     if (sp == 0) { return MaybeFrame::NoFrame; }
-    return MaybeFrame::Frame(frame_ref_from_entry(sp));
+    return MaybeFrame::Frame(frame_ref_from_entry(sp, generation));
 }
 
-private fn frame_word(frame: FrameRef, offset: usize) -> usize !{unsafe} {
+// A frame whose process is not named: what the scheduler hands back when it
+// has chosen where the CPU goes next, which is a different process than the
+// one that entered. Only the assembly boundary and the resume remain.
+variant AnyFrame {
+    Frame(exists process: usize. FrameRef[process]);
+}
+
+fn frame_any(frame: sink FrameRef[process]) -> AnyFrame {
+    return AnyFrame::Frame(frame);
+}
+
+// To the assembly's ABI, which names a frame by its address.
+fn frame_any_address(any: sink AnyFrame) -> usize {
+    match any {
+        AnyFrame::Frame(frame) => { return frame_ref_address(frame); }
+    }
+}
+
+private fn frame_word(frame: borrow FrameRef[process], offset: usize) -> usize !{unsafe} {
     let word: *usize = unsafe { (frame.sp + offset) as *usize };
     return *word;
 }
 
-private fn frame_word_set(frame: FrameRef, offset: usize, value: usize)
+private fn frame_word_set(frame: borrow FrameRef[process], offset: usize, value: usize)
         !{unsafe} {
     let word: *usize = unsafe { (frame.sp + offset) as *usize };
     *word = value;
@@ -76,7 +104,7 @@ private fn frame_word_set(frame: FrameRef, offset: usize, value: usize)
 // A whole frame, byte for byte: clone gives the child a copy of its parent's
 // saved frame. The two are ABI-owned exception-frame bounds of EXC_CONTEXT_SIZE
 // bytes each, which is why this is the one place a frame becomes a byte slice.
-fn frame_copy(destination: FrameRef, source: FrameRef) !{unsafe} {
+fn frame_copy(destination: borrow FrameRef[to], source: borrow FrameRef[from]) !{unsafe} {
     let source_base: *u8 = unsafe { source.sp as *u8 };
     let destination_base: *u8 = unsafe { destination.sp as *u8 };
     let src: []u8 = unsafe { source_base[0..<EXC_CONTEXT_SIZE as isize] };
@@ -85,7 +113,7 @@ fn frame_copy(destination: FrameRef, source: FrameRef) !{unsafe} {
 }
 
 // x0..x30, one word each.
-fn frame_general(frame: FrameRef, index: {0..<31 as usize}) -> usize
+fn frame_general(frame: borrow FrameRef[process], index: {0..<31 as usize}) -> usize
         !{unsafe} {
     static_assert(offsetof(ExceptionFrame, x30) ==
                   offsetof(ExceptionFrame, x0) + 30 * 8,
@@ -93,7 +121,7 @@ fn frame_general(frame: FrameRef, index: {0..<31 as usize}) -> usize
     return frame_word(frame, offsetof(ExceptionFrame, x0) + index * 8);
 }
 
-fn frame_general_set(frame: FrameRef, index: {0..<31 as usize}, value: usize)
+fn frame_general_set(frame: borrow FrameRef[process], index: {0..<31 as usize}, value: usize)
         !{unsafe} {
     static_assert(offsetof(ExceptionFrame, x30) ==
                   offsetof(ExceptionFrame, x0) + 30 * 8,
@@ -102,7 +130,7 @@ fn frame_general_set(frame: FrameRef, index: {0..<31 as usize}, value: usize)
 }
 
 // q0..q31 as 64 words of eight bytes.
-fn frame_vector_word(frame: FrameRef, word: {0..<64 as usize}) -> usize
+fn frame_vector_word(frame: borrow FrameRef[process], word: {0..<64 as usize}) -> usize
         !{unsafe} {
     static_assert(offsetof(ExceptionFrame, q31) ==
                   offsetof(ExceptionFrame, q0) + 31 * 16,
@@ -110,7 +138,7 @@ fn frame_vector_word(frame: FrameRef, word: {0..<64 as usize}) -> usize
     return frame_word(frame, offsetof(ExceptionFrame, q0) + word * 8);
 }
 
-fn frame_vector_word_set(frame: FrameRef, word: {0..<64 as usize},
+fn frame_vector_word_set(frame: borrow FrameRef[process], word: {0..<64 as usize},
                          value: usize) !{unsafe} {
     static_assert(offsetof(ExceptionFrame, q31) ==
                   offsetof(ExceptionFrame, q0) + 31 * 16,
@@ -118,46 +146,46 @@ fn frame_vector_word_set(frame: FrameRef, word: {0..<64 as usize},
     frame_word_set(frame, offsetof(ExceptionFrame, q0) + word * 8, value);
 }
 
-fn frame_sp_el0(frame: FrameRef) -> usize !{unsafe} {
+fn frame_sp_el0(frame: borrow FrameRef[process]) -> usize !{unsafe} {
     return frame_word(frame, offsetof(ExceptionFrame, sp_el0));
 }
 
-fn frame_sp_el0_set(frame: FrameRef, value: usize) !{unsafe} {
+fn frame_sp_el0_set(frame: borrow FrameRef[process], value: usize) !{unsafe} {
     frame_word_set(frame, offsetof(ExceptionFrame, sp_el0), value);
 }
 
-fn frame_elr_el1(frame: FrameRef) -> usize !{unsafe} {
+fn frame_elr_el1(frame: borrow FrameRef[process]) -> usize !{unsafe} {
     return frame_word(frame, offsetof(ExceptionFrame, elr_el1));
 }
 
-fn frame_elr_el1_set(frame: FrameRef, value: usize) !{unsafe} {
+fn frame_elr_el1_set(frame: borrow FrameRef[process], value: usize) !{unsafe} {
     frame_word_set(frame, offsetof(ExceptionFrame, elr_el1), value);
 }
 
-fn frame_spsr_el1(frame: FrameRef) -> usize !{unsafe} {
+fn frame_spsr_el1(frame: borrow FrameRef[process]) -> usize !{unsafe} {
     return frame_word(frame, offsetof(ExceptionFrame, spsr_el1));
 }
 
-fn frame_spsr_el1_set(frame: FrameRef, value: usize) !{unsafe} {
+fn frame_spsr_el1_set(frame: borrow FrameRef[process], value: usize) !{unsafe} {
     frame_word_set(frame, offsetof(ExceptionFrame, spsr_el1), value);
 }
 
-fn frame_fpsr(frame: FrameRef) -> usize !{unsafe} {
+fn frame_fpsr(frame: borrow FrameRef[process]) -> usize !{unsafe} {
     return frame_word(frame, offsetof(ExceptionFrame, fpsr));
 }
 
-fn frame_fpsr_set(frame: FrameRef, value: usize) !{unsafe} {
+fn frame_fpsr_set(frame: borrow FrameRef[process], value: usize) !{unsafe} {
     frame_word_set(frame, offsetof(ExceptionFrame, fpsr), value);
 }
 
 // fpcr is the word after fpsr.
-fn frame_fpcr(frame: FrameRef) -> usize !{unsafe} {
+fn frame_fpcr(frame: borrow FrameRef[process]) -> usize !{unsafe} {
     static_assert(offsetof(ExceptionFrame, fpcr) ==
                   offsetof(ExceptionFrame, fpsr) + 8,
                   "fpsr and fpcr must be adjacent in ExceptionFrame");
     return frame_word(frame, offsetof(ExceptionFrame, fpcr));
 }
 
-fn frame_fpcr_set(frame: FrameRef, value: usize) !{unsafe} {
+fn frame_fpcr_set(frame: borrow FrameRef[process], value: usize) !{unsafe} {
     frame_word_set(frame, offsetof(ExceptionFrame, fpcr), value);
 }

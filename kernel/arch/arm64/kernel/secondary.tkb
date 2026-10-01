@@ -376,9 +376,9 @@ fn kernel_core0_idle_loop() {
 // interrupt, with the value kernel_process_timer_schedule returned. The
 // tick gave the process back (GitHub issue #582), so leave the IRQ stack
 // for this CPU's idle loop rather than returning to a frame no longer ours.
-fn kernel_timer_tick_leave(switch: TimerSwitch) -> FrameRef !{interrupt} {
+fn kernel_timer_tick_leave(switch: TimerSwitch) -> AnyFrame !{interrupt} {
     match switch {
-        TimerSwitch::Resume(frame) => { return frame; }
+        TimerSwitch::Resume(frame) => { return frame_any(frame); }
         TimerSwitch::ToIdle => {
             if (cpu_id() != 0) { kernel_secondary_idle_tick_enter(); }
             kernel_core0_idle_tick_enter();
@@ -401,7 +401,7 @@ fn kernel_core0_idle_tick_reenter() {
 
 // Shared timer policy; each platform still acknowledges its own GIC source
 // after this returns. Only a lower-EL interrupt may replace the saved frame.
-fn kernel_secondary_timer_schedule(frame: FrameRef, lower_el: bool)
+fn kernel_secondary_timer_schedule(frame: sink FrameRef[process], lower_el: bool)
         -> TimerSwitch !{interrupt} {
     secondary_timer_tick();
     // GitHub issue #572: a tick on a CPU where a busy worker waits.
@@ -418,7 +418,7 @@ fn kernel_secondary_timer_schedule(frame: FrameRef, lower_el: bool)
 // SGI: its timer tick runs the shared policy, anything else resumes the frame.
 // The platform acknowledges the source afterwards and then leaves for idle if
 // the tick said so (kernel_timer_tick_leave).
-fn kernel_secondary_tick(frame: FrameRef, lower_el: bool, is_timer: bool)
+fn kernel_secondary_tick(frame: sink FrameRef[process], lower_el: bool, is_timer: bool)
         -> TimerSwitch !{interrupt} {
     if (is_timer) { return kernel_secondary_timer_schedule(frame, lower_el); }
     return TimerSwitch::Resume(frame);

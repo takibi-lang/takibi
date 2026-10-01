@@ -2336,10 +2336,27 @@ let run_guard_fixture =
    rather than the kernel file, like the run guard above; the kernel build
    is what proves the real functions have it. *)
 let frame_handle_fixture =
-  "struct FrameRef { private sp: usize; }
-   fn frame_general(frame: FrameRef, index: {0..<31 as usize}) -> usize {
+  "affine struct FrameRef[process: usize] { private sp: usize; }
+   linear struct Owner[process: usize] {
+     private slot: usize;
+     private generation: usize @ process;
+   }
+   fn frame_general(frame: borrow FrameRef[process],
+                    index: {0..<31 as usize}) -> usize {
      return frame.sp + index * 8;
    }
+   fn frame_from_saved(owner: borrow Owner[process], saved: usize)
+       -> FrameRef[process] {
+     let mut frame: FrameRef[process] = { saved };
+     return frame;
+   }
+   fn owner_new(slot: usize, generation: usize @ process) -> Owner[process] {
+     let mut owner: Owner[process] = { slot, generation };
+     return owner;
+   }
+   fn owner_drop(owner: sink Owner[process]) {}
+   extern fn set_x0(frame: borrow FrameRef[process], value: usize);
+   extern fn resume(frame: sink FrameRef[process]) !{noreturn};
    "
 
 let expect_type_error_files fragment files () =
@@ -3040,7 +3057,7 @@ let infer_tests = [
       ignore (infer_files
         [ "frame.tkb", frame_handle_fixture;
           "user.tkb",
-          "fn read(f: FrameRef) -> usize {\n\
+          "fn read(f: borrow FrameRef[process]) -> usize {\n\
            \  let mut total: usize = 0;\n\
            \  for index: usize in 0..<31 {\n\
            \    total = total + frame_general(f, index);\n\
@@ -3062,7 +3079,7 @@ let infer_tests = [
       expect_type_error_files "31"
         [ "frame.tkb", frame_handle_fixture;
           "user.tkb",
-          "fn past(f: FrameRef) -> usize {\n\
+          "fn past(f: borrow FrameRef[process]) -> usize {\n\
            \  return frame_general(f, 31);\n\
            }\n" ] ());
 
@@ -3071,9 +3088,50 @@ let infer_tests = [
       expect_type_error_files "is private to"
         [ "frame.tkb", frame_handle_fixture;
           "user.tkb",
-          "fn peek(f: FrameRef) -> usize {\n\
+          "fn peek(f: borrow FrameRef[process]) -> usize {\n\
            \  return f.sp;\n\
            }\n" ] ());
+
+  (* GitHub issue #662: a frame is indexed by the process it belongs to, so a
+     delivery into one process cannot be handed another's frame, and resume
+     consumes the frame it is given. *)
+  Alcotest.test_case "frame handle: a frame of the owner's process is accepted"
+    `Quick
+    (fun () ->
+      ignore (infer_files
+        [ "frame.tkb", frame_handle_fixture;
+          "user.tkb",
+          "fn deliver(owner: borrow Owner[process], saved: usize) {\n\
+           \  let parked = frame_from_saved(owner, saved);\n\
+           \  set_x0(parked, 1);\n\
+           \  resume(parked);\n\
+           }\n" ]));
+
+  Alcotest.test_case "frame handle: another process's frame is rejected"
+    `Quick
+    (expect_type_error_files "static value mismatch"
+      [ "frame.tkb", frame_handle_fixture;
+        "user.tkb",
+        "fn deliver(parent: borrow Owner[parent_process],\n\
+         \           child: borrow Owner[child_process], saved: usize) {\n\
+         \  let child_frame = frame_from_saved(child, saved);\n\
+         \  deliver_into(parent, child_frame);\n\
+         }\n\
+         fn deliver_into(owner: borrow Owner[process],\n\
+         \               frame: borrow FrameRef[process]) {\n\
+         \  set_x0(frame, 2);\n\
+         }\n" ]);
+
+  Alcotest.test_case "frame handle: a frame is not usable after resume"
+    `Quick
+    (expect_type_error_files "already consumed"
+      [ "frame.tkb", frame_handle_fixture;
+        "user.tkb",
+        "fn after(owner: borrow Owner[process], saved: usize) {\n\
+         \  let parked = frame_from_saved(owner, saved);\n\
+         \  resume(parked);\n\
+         \  set_x0(parked, 1);\n\
+         }\n" ]);
 
   Alcotest.test_case
     "stack proof: a woken process is started only through the check" `Quick

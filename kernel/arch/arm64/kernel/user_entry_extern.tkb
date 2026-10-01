@@ -2,12 +2,20 @@ use "kernel/arch/arm64/kernel/frame_ref.tkb";
 
 extern fn user_code_sync(address: usize, length: usize);
 extern fn run_initial_user(entry: usize, stack_top: usize) -> usize;
-extern fn el0_context_set_x0(frame: FrameRef, value: usize);
-extern fn el0_context_set_elr_el1(frame: FrameRef, value: usize);
-extern fn el0_context_set_sp_el0(frame: FrameRef, value: usize);
-extern fn el0_context_set_tpidr_el0(frame: FrameRef, value: usize);
-extern fn el0_context_retry_syscall(frame: FrameRef);
-extern fn el0_context_resume(frame: FrameRef) !{noreturn};
+extern fn el0_context_set_x0(frame: borrow FrameRef[process], value: usize);
+extern fn el0_context_set_elr_el1(frame: borrow FrameRef[process], value: usize);
+extern fn el0_context_set_sp_el0(frame: borrow FrameRef[process], value: usize);
+extern fn el0_context_set_tpidr_el0(frame: borrow FrameRef[process], value: usize);
+extern fn el0_context_retry_syscall(frame: borrow FrameRef[process]);
+extern fn el0_context_resume(frame: sink FrameRef[process]) !{noreturn};
+
+// Resume a frame whose process the caller does not name.
+fn frame_any_resume(any: sink AnyFrame) {
+    match any {
+        AnyFrame::Frame(frame) => { el0_context_resume(frame); }
+    }
+}
+
 extern fn kernel_secondary_idle_enter() !{noreturn};
 extern fn kernel_secondary_idle_yield_enter() !{noreturn};
 extern fn kernel_core0_idle_yield_enter() !{noreturn};
@@ -30,7 +38,7 @@ extern fn kernel_ddb_breakpoint();
 extern fn kernel_ddb_guarded_read_u8(address: usize) -> usize !{unsafe};
 extern symbol kernel_ddb_memory_fault_return;
 extern fn kernel_ddb_restore_fault_state(esr_el1: usize, far_el1: usize);
-extern fn kernel_current_sync_fail_stop(frame: FrameRef) !{noreturn};
+extern fn kernel_current_sync_fail_stop(frame: sink FrameRef[process]) !{noreturn};
 
 // The fail-stop snapshot deliberately keeps these architectural reads in the
 // kernel's existing AArch64 assembly boundary.  They are not general language
@@ -44,7 +52,7 @@ extern fn kernel_stack_read_sp_el1() -> usize;
 extern fn crash_snapshot_read_tpidr_el0() -> usize;
 extern fn crash_snapshot_read_ttbr0_el1() -> usize;
 extern fn crash_snapshot_read_mpidr_el1() -> usize;
-extern fn crash_snapshot_copy_saved_frame(frame: FrameRef, output: *usize);
+extern fn crash_snapshot_copy_saved_frame(frame: borrow FrameRef[process], output: *usize);
 
 // Must match kernel/arch/arm64/kernel/exception_context.inc's EXC_CONTEXT_SIZE
 // exactly; that .inc file remains the single source of truth for the actual

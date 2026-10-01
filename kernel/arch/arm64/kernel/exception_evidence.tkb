@@ -1101,7 +1101,7 @@ fn kernel_ddb_stopped_root_publish(frame_sp: usize, pid: usize)
 // scripts/check_platform_file_parity.py refused the first version of this for
 // exactly that reason -- three added lines took the shared run past its
 // threshold, which is the check working rather than the check complaining.
-fn kernel_world_stop_serve(frame: FrameRef) !{interrupt, unsafe} {
+fn kernel_world_stop_serve(frame: borrow FrameRef[process]) !{interrupt, unsafe} {
     kernel_ddb_stopped_root_publish(
         frame_ref_address(frame), kernel_process_frame_pid_or_zero(frame));
     world_stop_interrupt_hold();
@@ -1198,7 +1198,8 @@ private fn ddb_current_unwind_root() -> DdbUnwindRoot !{unsafe} {
         1,
         ddb_snapshot.cpu,
         kernel_process_frame_pid_or_zero(
-            frame_ref_from_entry(ddb_snapshot.frame_sp)),
+            frame_ref_from_entry(ddb_snapshot.frame_sp,
+                                 kernel_process_entry_generation())),
         frame.elr_el1,
         frame.x29,
         ddb_snapshot.frame_sp + EXC_CONTEXT_SIZE,
@@ -2539,7 +2540,8 @@ fn kernel_ddb_sync_dispatch(frame_sp: usize) -> usize !{interrupt, unsafe} {
         frame.elr_el1 = frame.elr_el1 + 4;
         return frame_sp;
     }
-    kernel_current_sync_fail_stop(frame_ref_from_entry(frame_sp));
+    kernel_current_sync_fail_stop(
+        frame_ref_from_entry(frame_sp, kernel_process_entry_generation()));
 }
 
 
@@ -2980,8 +2982,9 @@ fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
     }
     crash_snapshot_here().saved_frame_available = 0;
     if (frame_sp != 0) {
-        crash_snapshot_copy_saved_frame(frame_ref_from_entry(frame_sp),
-                                        &snapshot.saved_sp_el0);
+        crash_snapshot_copy_saved_frame(
+            frame_ref_from_entry(frame_sp, kernel_process_entry_generation()),
+            &snapshot.saved_sp_el0);
         crash_snapshot_here().saved_frame_available = 1;
     }
     crash_snapshot_here().trace_count = kernel_process_crash_trace_copy(

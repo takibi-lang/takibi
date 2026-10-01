@@ -75,7 +75,8 @@ WINDOWS = {
     # drop the marker, or the process is later Ready and refused everywhere.
     "603": {
         "spin": ("kernel/process.tkb",
-                 "fn kernel_process_block_wait4(current: FrameRef) -> BlockSwitch {\n",
+                 "fn kernel_process_block_wait4(current: borrow FrameRef[process])\n"
+                 "        -> BlockSwitch {\n",
                  False),
         # wait4's decision lives in pending_block_reason now, and only a
         # block publishes a wait, so an abandoned block leaves nothing. The

@@ -192,7 +192,20 @@ functions make one, and each trusts something the compiler cannot see:
 it just saved, `frame_ref_from_saved` believes a process record's `saved_sp`
 is the frame that process last left the CPU with, and `maybe_frame_from_entry`
 is the first for the syscall dispatcher, which boot probes call with no frame.
-`scripts/check_stack_proof_states.py` holds the callers of each to a declared
+A frame is also indexed by a process (`FrameRef[process]`, affine): each mint
+takes a generation, which supplies the index. The saved-frame mint has one
+caller, `scheduled_process_saved_frame`, which takes the process's
+`ScheduledProcessOwner`, so a delivery into a parked process (wait4's status
+and pid, a signal wake, a UART byte, a deadline result) writes a frame whose
+index is that owner's, and a frame of another process is a static mismatch.
+`el0_context_resume` consumes its frame, so a frame used after it is refused.
+What the index does not say is where it comes from at an entry: the entry
+mint is given the CPU's current generation, so that a frame entering on this
+CPU is indexed by whichever process this CPU runs, and the scheduler, which
+writes `saved_sp` from the entered frame, still relies on that being the same
+process as `current_handle`. A clone child's frame is minted on the
+parent's stack before the child's owner exists, so `finish_clone` takes it
+under its own index. `scripts/check_stack_proof_states.py` holds the callers of each to a declared
 set and lists the few seams where a frame address is still a bare `usize` (an
 assembly ABI, a stack-bound comparison, the debugger). What a block's result
 was is a closed variant (`BlockSwitch`, `TimerSwitch`, `ExitSwitch`,

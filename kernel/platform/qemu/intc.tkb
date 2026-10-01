@@ -133,8 +133,8 @@ fn irq_uart_rx_unmask() !{unsafe} {
     *uart0_imsc = (1 << 4) | (1 << 6) | (1 << 9); // RXIM | RTIM | BEIM
 }
 
-fn platform_irq_dispatch_inner(frame: FrameRef, lower_el: bool)
-        -> FrameRef !{interrupt, unsafe} {
+fn platform_irq_dispatch_inner(frame: sink FrameRef[process], lower_el: bool)
+        -> AnyFrame !{interrupt, unsafe} {
     let gicc_iar: *io u32 = unsafe { (qemu_gicc_base + 0x0C) as *io u32 };
     let gicc_eoir: *io u32 = unsafe { (qemu_gicc_base + 0x10) as *io u32 };
     // GitHub issue #632: GICC_IAR is not the interrupt number alone. For an
@@ -155,7 +155,7 @@ fn platform_irq_dispatch_inner(frame: FrameRef, lower_el: bool)
         // differ here only in the SGI id and the EOI register.
         kernel_world_stop_serve(frame);
         *gicc_eoir = iar;
-        return frame;
+        return frame_any(frame);
     }
     workload_profile_irq_enter();
 
@@ -217,15 +217,17 @@ fn platform_irq_dispatch_inner(frame: FrameRef, lower_el: bool)
     if (debug_break) {
         kernel_ddb_enter(frame_ref_address(frame), 1, id as usize);
     }
-    return frame;
+    return frame_any(frame);
 }
 
 fn platform_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
-    return frame_ref_address(
-        platform_irq_dispatch_inner(frame_ref_from_entry(frame_sp), false));
+    return frame_any_address(platform_irq_dispatch_inner(
+        frame_ref_from_entry(frame_sp, kernel_process_entry_generation()),
+        false));
 }
 
 fn platform_el0_irq_dispatch(frame_sp: usize) -> usize !{interrupt} {
-    return frame_ref_address(
-        platform_irq_dispatch_inner(frame_ref_from_entry(frame_sp), true));
+    return frame_any_address(platform_irq_dispatch_inner(
+        frame_ref_from_entry(frame_sp, kernel_process_entry_generation()),
+        true));
 }

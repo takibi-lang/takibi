@@ -155,7 +155,7 @@ fn profile_sample_finish() {
 // the same IRQ entry every other source uses. `frame_sp` is the already-
 // saved exception frame, so the interrupted PC and its execution level are
 // read from architectural state rather than guessed.
-fn profile_sample_irq(frame: FrameRef) !{interrupt, unsafe} {
+fn profile_sample_irq(frame: borrow FrameRef[process]) !{interrupt, unsafe} {
     if (pmu_sample_pending() != 1) { return; }
     if (profile_sample_active == false) {
         // An overflow armed before the interval ended, delivered after.

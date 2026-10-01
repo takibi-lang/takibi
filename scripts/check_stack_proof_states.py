@@ -20,7 +20,8 @@ new place without reading the owner. This check pins the shape:
 The same file also pins the frame handle (GitHub issue #661, #637 stage 1 group
 C). A saved exception frame is a `FrameRef`, made only by `frame_ref_from_entry`
 (an assembly or generated entry hands over the address, or a probe stands one
-in), `frame_ref_from_saved` (rebuilt from a process record's saved_sp) and
+in), `frame_ref_from_saved` (rebuilt from a process record's saved_sp, for the
+process whose owner the one caller `scheduled_process_saved_frame` holds) and
 `maybe_frame_from_entry`; the callers of each are a declared set, and a
 parameter named for a frame address (`frame_sp`, `current_sp`, ...) is a bare
 `usize` only in the declared seams, where an assembly ABI or a stack-bound
@@ -74,15 +75,10 @@ FRAME_MINT_CALLERS = {
         "kernel_process_scheduler_probe",
     },
     "frame_ref_from_saved": {
-        # A frame rebuilt from a process record's saved_sp.
-        "kernel_process_secondary_start_reserved",
-        "kernel_process_schedule_reserved", "kernel_process_block_reserved",
-        "kernel_process_exit_reserved", "kernel_process_leave_parent_ready",
-        "kernel_process_signal_deliver_to",
-        "kernel_process_terminal_settings_wake",
-        "kernel_process_deadline_wake_all", "kernel_process_uart_wake",
-        # A boot probe that finishes a clone it never resumes.
-        "kernel_process_probe_run_to_exit_locked",
+        # A frame rebuilt from a process record's saved_sp, indexed by the
+        # owner of that record: every delivery into another process's frame
+        # and every scheduler pickup goes through this one function.
+        "scheduled_process_saved_frame",
         # A child's frame, placed at the top of its new stack and then copied.
         "kernel_syscall_clone_child_return",
     },
