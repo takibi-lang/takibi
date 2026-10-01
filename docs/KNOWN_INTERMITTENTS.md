@@ -36,6 +36,7 @@ whether a row has gone quiet or has merely stopped being looked for.
 | `ARP while HTTPd is listening` | 1 of 30 standalone samples | #605 | 2026-09-26 |
 | `the scripted BREAK never fired` | 1 CI run of the DDB lane since e824b030 (run 36207501077); 0 of 10 locally | #603 | 2026-09-26 |
 | `network init contention: failed` | 1 of 2 local allcheck aggregates on 563cb5f0, in `pool_contention`, with no counts line; 0 of 3 standalone | #654 | 2026-09-30 |
+| `/bin/peer-tty never said it was reading the terminal` | 2 of the last 3 full allcheck aggregates on 2026-10-01 (one on a docs-only commit), in kernelcheck-uart-wake-qemu; the same stall as race-window 603's armed run; 0 of 2 standalone | #665 | 2026-10-01 |
 | `retained CrashSnapshot was not readable` | 1 of 2 local allcheck aggregates on 5f0e249f, in kernelcheck-oops-qemu with the guest in world_stop_interrupt_hold; 0 of 1 standalone | #664 | 2026-09-30 |
 | `the shell did not answer an empty line before the phase` | 1 of 2 local allcheck aggregates on 563cb5f0, in race-window 633's churn; 0 of 3 standalone; again on 655f9c49, the console lock's first stage | #655 | 2026-09-30 |
 
