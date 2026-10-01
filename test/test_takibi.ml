@@ -279,6 +279,7 @@ let rec show_type = function
         | Ast.StaticName n -> n
         | Ast.StaticInt n -> string_of_int n
         | Ast.StaticEnum (name, case) -> name ^ "::" ^ case
+        | (Ast.StaticAdd _ | Ast.StaticSub _) as a -> Llvm_gen.static_arg_str a
       in
       Printf.sprintf "view %s[%s]" s
         (String.concat ", " (List.map arg args))
@@ -288,6 +289,7 @@ let rec show_type = function
         | Ast.StaticName n -> n
         | Ast.StaticInt n -> string_of_int n
         | Ast.StaticEnum (name, case) -> name ^ "::" ^ case
+        | (Ast.StaticAdd _ | Ast.StaticSub _) as a -> Llvm_gen.static_arg_str a
       in
       Printf.sprintf "%s[%s]" s
         (String.concat ", " (List.map arg args))
@@ -298,6 +300,7 @@ let rec show_type = function
         | Ast.StaticName n -> n
         | Ast.StaticInt n -> string_of_int n
         | Ast.StaticEnum (name, case) -> name ^ "::" ^ case
+        | (Ast.StaticAdd _ | Ast.StaticSub _) as a -> Llvm_gen.static_arg_str a
       in
       Printf.sprintf "%s[%s]" s (String.concat ", " (List.map arg args))
   | Ast.TypeSingleton (t, n) ->
@@ -305,6 +308,7 @@ let rec show_type = function
         | Ast.StaticName n -> n
         | Ast.StaticInt n -> string_of_int n
         | Ast.StaticEnum (name, case) -> name ^ "::" ^ case
+        | (Ast.StaticAdd _ | Ast.StaticSub _) as a -> Llvm_gen.static_arg_str a
       in
       Printf.sprintf "%s @ %s" (show_type t) n
   | Ast.TypeRefined (lo, hi, _) -> Printf.sprintf "{%d..<%d}" lo hi
@@ -2359,6 +2363,49 @@ let frame_handle_fixture =
    extern fn resume(frame: sink FrameRef[process]) !{noreturn};
    "
 
+let linear_region_fixture =
+  "struct Node { key: usize; value: usize; }
+   linear struct Region[base: usize, len: usize] {
+     private address: usize;
+     private size: usize;
+   }
+   fn region_drop(r: sink Region[b, l]) {}
+   must_use variant RegionSplit[b: usize, l: usize, k: usize] {
+     TooShort(Region[b, l]);
+     Split((Region[b, k], Region[b + k, l - k]));
+   }
+   fn region_split(r: sink Region[b, l], n: usize @ k)
+       -> RegionSplit[b, l, k] {
+     if (n > r.size) { return RegionSplit::TooShort(r); }
+     let mut head: Region[b, k] = { r.address, n };
+     let mut tail: Region[b + k, l - k] = { r.address + n, r.size - n };
+     region_drop(r);
+     return RegionSplit::Split((head, tail));
+   }
+   fn region_merge(head: sink Region[b, k], tail: sink Region[b + k, m])
+       -> Region[b, k + m] {
+     let mut whole: Region[b, k + m] = { head.address, head.size + tail.size };
+     region_drop(head);
+     region_drop(tail);
+     return whole;
+   }
+   fn region_node(r: borrow Region[b, 16]) -> *Node @ b !{unsafe} {
+     return unsafe { r.address as *Node };
+   }
+   "
+
+let region_use body =
+  linear_region_fixture ^
+  "fn use_heap(heap: sink Region[b, l]) -> Region[b, l] !{unsafe} {
+     match region_split(heap, 16) {
+       RegionSplit::TooShort(whole) => { return whole; }
+       RegionSplit::Split(parts) => {
+         let (first, rest) = parts;
+" ^ body ^ "
+       }
+     }
+   }"
+
 let owner_derived_fixture =
   "struct Conn { n: usize; }
    linear struct Owner[c: usize] {
@@ -3119,6 +3166,52 @@ let infer_tests = [
           "fn peek(f: borrow FrameRef[process]) -> usize {\n\
            \  return f.sp;\n\
            }\n" ] ());
+
+  (* GitHub issue #637, fundamental-option prototype
+     (linux_user/region_proto): memory as linear regions. Splitting and
+     merging are checked by static arithmetic on the regions' indices. *)
+  Alcotest.test_case "region prototype: split, use and merge back" `Quick
+    (fun () -> ignore (infer (region_use
+      "region_node(first).key = 7;
+       return region_merge(first, rest);")));
+
+  Alcotest.test_case "region prototype: merging in the wrong order is rejected"
+    `Quick
+    (expect_type_error "static value mismatch" (region_use
+      "return region_merge(rest, first);"));
+
+  Alcotest.test_case "region prototype: a region cannot be given back twice"
+    `Quick
+    (expect_type_error "already consumed" (region_use
+      "region_drop(first);
+       return region_merge(first, rest);"));
+
+  Alcotest.test_case "region prototype: a node pointer dies with its region"
+    `Quick
+    (expect_type_error "cannot be used after" (region_use
+      "let p = region_node(first);
+       let whole = region_merge(first, rest);
+       p.key = 1;
+       return whole;"));
+
+  Alcotest.test_case "region prototype: only a region one node long is a node"
+    `Quick
+    (expect_type_error "static value mismatch" (region_use
+      "let p = region_node(rest);
+       return region_merge(first, rest);"));
+
+  Alcotest.test_case "region prototype: a region is not split twice" `Quick
+    (expect_type_error "already consumed" (linear_region_fixture ^
+      "fn twice(heap: sink Region[b, l]) {
+         match region_split(heap, 16) {
+           RegionSplit::TooShort(w) => { region_drop(w); }
+           RegionSplit::Split(p) => { let (x, y) = p; region_drop(x); region_drop(y); }
+         }
+         match region_split(heap, 16) {
+           RegionSplit::TooShort(w) => { region_drop(w); }
+           RegionSplit::Split(p) => { let (x, y) = p; region_drop(x); region_drop(y); }
+         }
+       }"));
 
   (* GitHub issue #637 stage 2: a payload pointer derived from a borrowed
      owner is usable while the owner is, refused after the owner is consumed,

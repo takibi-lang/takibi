@@ -1069,7 +1069,7 @@ base_type_expr:
        (no such grouping form exists in base_type_expr today) since a
        COMMA is required. *)
     { TypeTuple (t1 :: t2 :: ts) }
-  | name = IDENT LBRACKET args = separated_nonempty_list(COMMA, static_arg) RBRACKET
+  | name = IDENT LBRACKET args = separated_nonempty_list(COMMA, index_static_arg) RBRACKET
     { TypeIndexed (name, args) }
   | name = IDENT LPAREN args = separated_nonempty_list(COMMA, type_expr) RPAREN
     { TypeGenericInst (name, args) }
@@ -1097,9 +1097,18 @@ static_arg:
   | enum_name = IDENT COLONCOLON case_name = IDENT
     { StaticEnum (enum_name, case_name) }
 
+(* Inside an index list a static argument may be a sum or difference of
+   names and integers (`Region[b + n, l - n]`). Only there: after `@` a
+   static argument stays a single atom, so `usize @ a + b` keeps parsing as
+   it always has. *)
+index_static_arg:
+  | a = static_arg { a }
+  | a = index_static_arg PLUS b = static_arg { StaticAdd (a, b) }
+  | a = index_static_arg MINUS b = static_arg { StaticSub (a, b) }
+
 view_static_args:
   | /* empty */ %prec BRACKET_ELSEWHERE { [] }
-  | LBRACKET args = separated_nonempty_list(COMMA, static_arg) RBRACKET { args }
+  | LBRACKET args = separated_nonempty_list(COMMA, index_static_arg) RBRACKET { args }
 
 (* Array size: a compile-time integer constant expression -- a literal, the
    name of an earlier `const NAME: T = N;`, or +/-/*// arithmetic combining those (parentheses allowed for

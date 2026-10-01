@@ -52,6 +52,11 @@ type static_arg =
     (* Enum::Case -- a nominal finite-state constant used only by the
        checker. Unlike StaticInt, equal runtime discriminants from different
        enums are not interchangeable. *)
+  | StaticAdd of static_arg * static_arg
+  | StaticSub of static_arg * static_arg
+    (* Linear arithmetic over integer static names, written only inside an
+       index list. Two terms are equal when their linear normal forms are
+       (Types.unify_static). *)
 [@@deriving show]
 
 type type_expr =

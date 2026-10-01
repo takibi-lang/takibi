@@ -1,0 +1,33 @@
+use "linux_user/region_proto/region.tkb";
+
+// A LIFO allocator over one region: every node it hands out is split off the
+// front of what is left, and freeing merges it back. Nothing below is
+// trusted -- a free in the wrong order, a second free, or a node read after
+// its free does not compile (test/test_takibi.ml, "region prototype").
+fn test_region_proto() !{unsafe} {
+    match region_arena_take() {
+        ArenaTake::Gone => { uart_puts("arena: gone\n"); }
+        ArenaTake::Taken(heap) => {
+            match region_split(heap, 16) {
+                RegionSplit::TooShort(whole) => {
+                    uart_puts("split: too short\n");
+                    region_arena_give(whole);
+                }
+                RegionSplit::Split(parts) => {
+                    let (first, rest) = parts;
+                    region_node(first).key = 7;
+                    region_node(first).value = 70;
+                    uart_puts("node: ");
+                    uart_print(region_node(first).key + region_node(first).value);
+                    uart_puts("\n");
+                    region_arena_give(region_merge(first, rest));
+                    uart_puts("arena: whole again\n");
+                }
+            }
+        }
+    }
+}
+
+fn app_main() {
+    test_region_proto();
+}

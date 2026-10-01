@@ -470,7 +470,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              hello print_int print_hex print_ptr mem array struct struct_refined \
                              nonexhaustive refined narrow enum align packed struct_align const_global \
                              sizeof_offsetof int64 bitops indexed_view tcp_conn_view \
-                             affine_escape_via_index align_ptr_proof linear_obligation tuple_pair \
+                             affine_escape_via_index align_ptr_proof linear_obligation tuple_pair region_proto \
                              field_lease match_int_lit \
                              callstack ringbuf crc8 djb2 slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
                              bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report uart_rx_ring block_cache peer_console

@@ -668,6 +668,13 @@ let record_unnecessary_unsafe loc what =
 
 (* Human-readable type names for trap-site messages (Ast.show_type_expr's
    raw constructor dump is too noisy for a user-facing compile error). *)
+let rec static_arg_str = function
+  | StaticName n -> n
+  | StaticInt n -> string_of_int n
+  | StaticEnum (name, case) -> name ^ "::" ^ case
+  | StaticAdd (a, b) -> static_arg_str a ^ " + " ^ static_arg_str b
+  | StaticSub (a, b) -> static_arg_str a ^ " - " ^ static_arg_str b
+
 let rec ty_str = function
   | TypeBool -> "bool"
   | TypeI8 -> "i8" | TypeI16 -> "i16" | TypeI32 -> "i32" | TypeI64 -> "i64"
@@ -684,29 +691,17 @@ let rec ty_str = function
   | TypeNamed s -> s
   | TypeView (s, []) -> "view " ^ s
   | TypeView (s, args) ->
-      let arg = function
-        | StaticName n -> n
-        | StaticInt n -> string_of_int n
-        | StaticEnum (name, case) -> name ^ "::" ^ case
-      in
+      let arg = static_arg_str in
       Printf.sprintf "view %s[%s]" s
         (String.concat ", " (List.map arg args))
   | TypeVariant (s, _) -> s
   | TypeExists (name, sort, body) ->
       Printf.sprintf "exists %s: %s. %s" name (ty_str sort) (ty_str body)
   | TypeIndexed (s, args) ->
-      let arg = function
-        | StaticName n -> n
-        | StaticInt n -> string_of_int n
-        | StaticEnum (name, case) -> name ^ "::" ^ case
-      in
+      let arg = static_arg_str in
       Printf.sprintf "%s[%s]" s (String.concat ", " (List.map arg args))
   | TypeSingleton (t, arg) ->
-      let n = match arg with
-        | StaticName n -> n
-        | StaticInt n -> string_of_int n
-        | StaticEnum (name, case) -> name ^ "::" ^ case
-      in
+      let n = static_arg_str arg in
       Printf.sprintf "%s @ %s" (ty_str t) n
   | TypeRefined (lo, hi, _) -> Printf.sprintf "{%d..<%d}" lo hi
   | TypeMultiple (n, base) ->

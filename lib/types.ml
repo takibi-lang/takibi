@@ -94,6 +94,10 @@ and static_term =
   | SParam of int * string
     (* Rigid while checking a universally quantified function body. *)
   | SVar of static_var ref
+  | SAdd of static_term * static_term
+  | SSub of static_term * static_term
+    (* Linear arithmetic over integer statics (Ast.StaticAdd/StaticSub).
+       Compared by linear normal form in unify_static, never structurally. *)
 
 and static_var =
   | SUnbound of int
@@ -173,13 +177,20 @@ let rec static_repr = function
       t'
   | t -> t
 
-let static_to_string t =
+let rec static_to_string t =
   match static_repr t with
   | SConst n -> string_of_int n
   | SEnum (name, case) -> Printf.sprintf "%s::%s" name case
   | SParam (_, name) -> name
   | SVar { contents = SUnbound id } -> Printf.sprintf "__static%d" id
   | SVar { contents = SLink _ } -> assert false
+  | SAdd (a, b) -> Printf.sprintf "%s + %s" (static_to_string a) (static_operand b)
+  | SSub (a, b) -> Printf.sprintf "%s - %s" (static_to_string a) (static_operand b)
+
+and static_operand t =
+  match static_repr t with
+  | SAdd _ | SSub _ -> "(" ^ static_to_string t ^ ")"
+  | _ -> static_to_string t
 
 (* Follow Link chains, applying path compression *)
 let rec repr = function
@@ -301,6 +312,12 @@ let rec subst_static_term old replacement term =
   match static_repr old, static_repr term with
   | SParam (old_id, _), SParam (id, _) when old_id = id -> replacement
   | SVar old_r, SVar r when old_r == r -> replacement
+  | _, SAdd (a, b) ->
+      SAdd (subst_static_term old replacement a,
+            subst_static_term old replacement b)
+  | _, SSub (a, b) ->
+      SSub (subst_static_term old replacement a,
+            subst_static_term old replacement b)
   | _, term -> term
 and subst_in_ty old replacement t =
   match repr t with
@@ -625,6 +642,7 @@ and unify_mutable_pointee actual expected =
 
 and unify_static s1 s2 =
   match static_repr s1, static_repr s2 with
+  | (SAdd _ | SSub _), _ | _, (SAdd _ | SSub _) -> unify_static_linear s1 s2
   | SConst a, SConst b when a = b -> ()
   | SEnum (enum1, case1), SEnum (enum2, case2)
       when enum1 = enum2 && case1 = case2 -> ()
@@ -638,12 +656,71 @@ and unify_static s1 s2 =
       raise (Unify_error (Printf.sprintf "static value mismatch: %s vs %s"
         (static_to_string a) (static_to_string b)))
 
+(* Linear normal form: a constant plus integer coefficients on rigid
+   parameters and unbound variables. Two arithmetic statics are equal when
+   their difference normalizes to zero; when the difference has exactly one
+   unbound variable with coefficient 1 or -1, that variable is solved for.
+   Nothing else is attempted: no division, no products of statics, no
+   solver call. *)
+and static_linear t : int * (static_term * int) list =
+  let add_term key coef terms =
+    let same k = match static_repr k, static_repr key with
+      | SParam (a, _), SParam (b, _) -> a = b
+      | SVar a, SVar b -> a == b
+      | _ -> false in
+    match List.partition (fun (k, _) -> same k) terms with
+    | [], rest -> (key, coef) :: rest
+    | (k, c) :: _, rest ->
+        if c + coef = 0 then rest else (k, c + coef) :: rest in
+  let rec go sign t (c, terms) =
+    match static_repr t with
+    | SConst n -> (c + sign * n, terms)
+    | SParam _ | SVar { contents = SUnbound _ } as k ->
+        (c, add_term k sign terms)
+    | SAdd (a, b) -> go sign b (go sign a (c, terms))
+    | SSub (a, b) -> go (-sign) b (go sign a (c, terms))
+    | SEnum (name, case) ->
+        raise (Unify_error (Printf.sprintf
+          "static enum case %s::%s cannot take part in arithmetic" name case))
+    | SVar { contents = SLink _ } -> assert false in
+  go 1 t (0, [])
+
+and static_of_linear (c, terms) =
+  let base = SConst c in
+  List.fold_left (fun acc (k, coef) ->
+    let rec times n acc op = if n = 0 then acc else times (n - 1) (op acc k) op in
+    if coef > 0 then times coef acc (fun a k -> SAdd (a, k))
+    else times (-coef) acc (fun a k -> SSub (a, k))) base terms
+
+and unify_static_linear s1 s2 =
+  let (c, terms) = static_linear (SSub (s1, s2)) in
+  if c = 0 && terms = [] then ()
+  else
+    let unbound = List.filter (fun (k, coef) ->
+      (match static_repr k with SVar _ -> true | _ -> false)
+      && (coef = 1 || coef = -1)) terms in
+    match unbound with
+    | (k, coef) :: _ ->
+        (* k * coef + rest = 0, so k = -(rest) / coef with coef = +-1. *)
+        let rest = List.filter (fun (k', _) -> k' != k) terms in
+        let solution =
+          if coef = 1 then static_of_linear (-c, List.map (fun (k, c) -> (k, -c)) rest)
+          else static_of_linear (c, rest) in
+        (match static_repr k with
+         | SVar r -> r := SLink solution
+         | _ -> assert false)
+    | [] ->
+        raise (Unify_error (Printf.sprintf "static value mismatch: %s vs %s"
+          (static_to_string s1) (static_to_string s2)))
+
 (* -- Conversion to/from Ast types ----------------------------------------- *)
 
-let static_of_ast scope = function
+let rec static_of_ast scope = function
   | Ast.StaticName name -> static_in_scope scope name
   | Ast.StaticInt n -> SConst n
   | Ast.StaticEnum (name, case) -> SEnum (name, case)
+  | Ast.StaticAdd (a, b) -> SAdd (static_of_ast scope a, static_of_ast scope b)
+  | Ast.StaticSub (a, b) -> SSub (static_of_ast scope a, static_of_ast scope b)
 
 (* GitHub issue #239: reject *T where T is itself pointer-shaped, i.e. two
    levels of raw pointer indirection (written * *T, *align(N) *T, *io *T,
@@ -751,6 +828,8 @@ let instantiate_static_params ty =
     match static_repr t with
     | (SConst _ | SEnum _) as t -> t
     | SVar _ as t -> t
+    | SAdd (a, b) -> SAdd (inst_static a, inst_static b)
+    | SSub (a, b) -> SSub (inst_static a, inst_static b)
     | SParam (id, _) ->
         (match Hashtbl.find_opt subst id with
          | Some t -> t
@@ -822,6 +901,8 @@ and static_to_ast t =
   | SParam (_, name) -> Ast.StaticName name
   | SVar { contents = SUnbound id } -> Ast.StaticName (Printf.sprintf "__static%d" id)
   | SVar { contents = SLink _ } -> assert false
+  | SAdd (a, b) -> Ast.StaticAdd (static_to_ast a, static_to_ast b)
+  | SSub (a, b) -> Ast.StaticSub (static_to_ast a, static_to_ast b)
 
 (* -- Output structs passed to codegen ------------------------------------- *)
 
