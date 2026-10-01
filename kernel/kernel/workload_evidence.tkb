@@ -1636,6 +1636,14 @@ fn workload_settings_wake_progress(operation: usize, count: usize,
                 workload_settings_wake.read_bad = true;
                 kernel_boot_log(
                     "workload: settings wake FAILED: the reader is still asleep after the change to raw mode, so the change did not wake it\n");
+                kernel_process_pid_log_wait(guard, workload_settings_wake.reader_pid);
+                kernel_boot_log("workload: settings wake queued=");
+                uart_put_udec(kernel_uart_rx_queued());
+                kernel_boot_log(" pending=");
+                uart_put_udec(kernel_uart_rx_pending() as usize);
+                kernel_boot_log(" canonical=");
+                uart_put_udec(terminal_canonical() as usize);
+                kernel_boot_log("\n");
                 answer = 3;
             }
         }

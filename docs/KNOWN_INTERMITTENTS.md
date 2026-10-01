@@ -33,12 +33,13 @@ whether a row has gone quiet or has merely stopped being looked for.
 | `the payload never asked for its input` | 1 of 9 cicheck runs after the alloc-rollback split | #607 | 2026-09-26 |
 | `workload: peer read 98304 pattern bytes` | line MISSING from peer_filesystem.actual: 2 of 7 local cicheck runs; 0 of 47 standalone. The uart-wake lane reports the same stall as `the peer console writer never delivered its last record`: 1 of 1 cicheck, 0 of 4 standalone, 0 of 30 peer-suites run six at a time | #604 | 2026-09-29 |
 | `retired different work in their cold and warm passes` | 1 of 4 local RPi5 runs on 2026-09-29, every warm pass on CPU 2; 1 of 3 on 2026-09-30 in land.sh (4 of 8 rounds disturbed) | #649 | 2026-09-30 |
-| `ARP while HTTPd is listening` | 1 of 30 standalone samples | #605 | 2026-09-26 |
+| `ARP while HTTPd is listening` | 1 of 30 standalone samples; again in a local allcheck on 8f289250, beside the settings_wake failure below | #605 | 2026-09-30 |
 | `the scripted BREAK never fired` | 1 CI run of the DDB lane since e824b030 (run 36207501077); 0 of 10 locally | #603 | 2026-09-26 |
 | `network init contention: failed` | 1 of 2 local allcheck aggregates on 563cb5f0, in `pool_contention`, with no counts line; 0 of 3 standalone | #654 | 2026-09-30 |
 | `/bin/peer-tty never said it was reading the terminal` | 2 of the last 3 full allcheck aggregates on 2026-10-01 (one on a docs-only commit), in kernelcheck-uart-wake-qemu; the same stall as race-window 603's armed run; 0 of 2 standalone | #665 | 2026-10-01 |
 | `retained CrashSnapshot was not readable` | 1 of 2 local allcheck aggregates on 5f0e249f, in kernelcheck-oops-qemu with the guest in world_stop_interrupt_hold; 0 of 1 standalone | #664 | 2026-09-30 |
 | `the shell did not answer an empty line before the phase` | 1 of 2 local allcheck aggregates on 563cb5f0, in race-window 633's churn; 0 of 3 standalone; again on 655f9c49, the console lock's first stage | #655 | 2026-09-30 |
+| `workload: settings wake FAILED: the reader is still asleep` | 1 local allcheck aggregate on 8f289250, in the peer_tty/settings_wake views; 0 of 11 armed-suite runs under host load | #667 | 2026-09-30 |
 
 ## Reading a row
 

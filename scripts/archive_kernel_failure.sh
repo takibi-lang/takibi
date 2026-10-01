@@ -54,6 +54,12 @@ cp -pr "$artifact_dir"/. "$archive/" 2>/dev/null || true
     date -u +%Y-%m-%dT%H:%M:%SZ
     echo "commit: $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
     echo "dirty: $(git status --porcelain 2>/dev/null | wc -l) file(s)"
+    # Which kernel and lane produced this capture. A race-window lane runs an
+    # armed and a reverted kernel back to back on the same ports, and a
+    # reverted run is meant to fail: without these two lines its archive looks
+    # like an armed failure (GitHub issue #665).
+    echo "lane: ${KERNEL_QEMU_LABEL:-unknown}"
+    echo "kernel: $(basename "${KERNEL_QEMU_ELF:-unknown}")"
 } >"$archive/MANIFEST"
 
 echo "archived full capture to: $archive" >&2

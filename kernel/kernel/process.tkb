@@ -7049,6 +7049,36 @@ fn kernel_process_pid_blocked_in_uart_read(
     return false;
 }
 
+// What a fixture that gave up on a sleeping pid says about it, so the failure
+// line is enough to tell a wake that never came from a wake that came and was
+// followed by another sleep. Codes are the DDB `ps` ones: state 0 free, 1 ready,
+// 2 running, 3 blocked; wait 1 uart-rx, 2 child-exit. delivery is 1 for a read
+// that retries, 0 for a scalar wait.
+fn kernel_process_pid_log_wait(
+        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
+        pid: usize) {
+    match scheduled_process_slot_for_pid(pid) {
+        ProcessSlotForPidResult::Missing => {
+            kernel_boot_log("workload: reader pid is gone\n");
+        }
+        ProcessSlotForPidResult::Found(slot) => {
+            kernel_boot_log("workload: reader pid="); uart_put_udec(pid);
+            kernel_boot_log(" state=");
+            uart_put_udec(kernel_process_protocol_state(
+                scheduled_process_record_state(slot)));
+            kernel_boot_log(" wait=");
+            uart_put_udec(kernel_process_protocol_reason(
+                scheduled_process_record_wait_reason(slot)));
+            kernel_boot_log(" delivery=");
+            match scheduled_process_uart_block_delivery(slot) {
+                UartBlockDelivery::Read => { uart_put_udec(1); }
+                UartBlockDelivery::Scalar => { uart_put_udec(0); }
+            }
+            kernel_boot_log("\n");
+        }
+    }
+}
+
 fn kernel_process_terminal_signal(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock], signum: usize) {
     if (terminal_foreground_session == 0) { return; }

@@ -37,6 +37,19 @@ one="$(find "$root" -mindepth 1 -maxdepth 1 -type d | head -1)"
 grep -q "reason: control reason" "$one/MANIFEST" && claim || fail "MANIFEST lost the reason"
 grep -q "^commit: " "$one/MANIFEST" && claim || fail "MANIFEST lost the commit"
 
+# GitHub issue #665: the capture names the lane and the kernel, so a reverted
+# control's designed failure cannot be read as an armed failure.
+root_named="$tmp_dir/failures-named"
+KERNEL_QEMU_LABEL=qemu-race-603-reverted \
+KERNEL_QEMU_ELF=/x/kernel-race-603-reverted.elf \
+    bash "$archiver" "$src" "$root_named" "named" >/dev/null 2>&1 && claim ||
+    fail "archiver exited non-zero with a lane named"
+named="$(find "$root_named" -mindepth 1 -maxdepth 1 -type d | head -1)"
+grep -q "^lane: qemu-race-603-reverted$" "$named/MANIFEST" && claim ||
+    fail "MANIFEST lost the lane"
+grep -q "^kernel: kernel-race-603-reverted.elf$" "$named/MANIFEST" && claim ||
+    fail "MANIFEST lost the kernel"
+
 # A second archive in the same second must not merge into the first.
 bash "$archiver" "$src" "$root" "second" >/dev/null 2>&1 && claim || fail "second archive failed"
 count="$(find "$root" -mindepth 1 -maxdepth 1 -type d | wc -l)"
