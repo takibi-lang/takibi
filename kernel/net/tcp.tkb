@@ -813,19 +813,19 @@ fn tcp_frame_slice(address: usize) -> [u8; 1514..] !{unsafe} {
     }
 }
 
-fn tcp_connection_tx_slice(conn: *TcpConnection) -> [u8; 1514..] !{unsafe} {
+fn tcp_connection_tx_slice(conn: borrow *TcpConnection) -> [u8; 1514..] !{unsafe} {
     return tcp_frame_slice(conn.tx_frame);
 }
 
 // The two syscall-side buffers. 1460 rather than 1514 because that is what
 // the callers bound their lengths by; the frame behind them is one MTU, so
 // the extra 54 bytes are headroom nobody addresses, not a second size.
-fn tcp_connection_rx_slice(conn: *TcpConnection) -> [u8; 1460..] !{unsafe} {
+fn tcp_connection_rx_slice(conn: borrow *TcpConnection) -> [u8; 1460..] !{unsafe} {
     let frame = tcp_frame_slice(conn.rx_frame);
     return frame[0..<1460];
 }
 
-fn tcp_connection_inetd_slice(conn: *TcpConnection) -> [u8; 1460..] !{unsafe} {
+fn tcp_connection_inetd_slice(conn: borrow *TcpConnection) -> [u8; 1460..] !{unsafe} {
     let frame = tcp_frame_slice(conn.inetd_frame);
     return frame[0..<1460];
 }
@@ -842,7 +842,8 @@ fn tcp_connection_owner_drop(owner: sink TcpConnectionOwner[connection]) {}
 // address may have come from an fd table entry that outlived the
 // connection it describes, and intrusive_pool_probe_slot rejects both a
 // bogus address and a live slot whose occupant has moved on.
-fn tcp_connection_payload(address: usize) -> *TcpConnection !{unsafe} {
+private fn tcp_connection_payload(address: usize) -> *TcpConnection
+        !{unsafe} {
     match intrusive_pool_probe_slot(&tcp_connection_pool, address) {
         IntrusiveSlotProbe::NoPayload => {
             kernel_boot_log("tcp: connection address names no live slot\n");
@@ -877,7 +878,7 @@ fn tcp_connection_payload(address: usize) -> *TcpConnection !{unsafe} {
 // operations that name a slot rather than an occupant. Those genuinely have
 // no expectation to check against.
 fn tcp_connection_of(owner: borrow TcpConnectionOwner[connection])
-        -> *TcpConnection !{unsafe} {
+        -> *TcpConnection @ connection !{unsafe} {
     // The check here and the payload lookup below validate the address
     // twice, and that is the deliberate trade. Fusing them means calling
     // intrusive_pool_probe_handle and laundering the view HERE, which adds
@@ -1621,7 +1622,7 @@ fn pending_tcp_reset_all(connection_address: usize) !{unsafe} {
 // callers still guard their deliberate-drop test injection on getting a
 // real entry, since arming that against "not queued" would mean the
 // frame is never transmitted at all.
-fn pending_tcp_record(conn: *TcpConnection,
+fn pending_tcp_record(conn: borrow *TcpConnection,
                       kind: PendingTcpKind, frame_length: usize)
         -> usize !{unsafe} {
     let pool_guard = intrusive_pool_lock(&tcp_retx_pool);
@@ -1733,7 +1734,8 @@ fn pending_tcp_chain_probe() -> bool !{unsafe} {
            intrusive_pool_live_count(&tcp_retx_pool) == 0;
 }
 
-fn pending_tcp_chain_probe_body(conn: *TcpConnection, other: *TcpConnection)
+fn pending_tcp_chain_probe_body(conn: borrow *TcpConnection,
+                                 other: borrow *TcpConnection)
         -> bool !{unsafe} {
     let live_before: usize = intrusive_pool_live_count(&tcp_retx_pool);
 
@@ -1893,7 +1895,7 @@ fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32,
 // four slots -- a deliberate choice, since servicing every connection's
 // deadlines from whichever one happens to be running would be a timing
 // change on a path with a history of them.
-fn pending_tcp_service_once(conn: *TcpConnection,
+fn pending_tcp_service_once(conn: borrow *TcpConnection,
                             ready_in: sink NetRxCanAcquire,
                              retry_ticks: i64)
         -> NetRxCanAcquire !{may_block, unsafe} {
@@ -2096,7 +2098,7 @@ fn pending_tcp_service_once(conn: *TcpConnection,
 // this file rather than a harmless miscount -- and usize underflow wraps
 // to an enormous number that would make kernel_tcp_close_stream spin to
 // its deadline every time.
-fn retx_count_after_release(conn: *TcpConnection) -> usize {
+fn retx_count_after_release(conn: borrow *TcpConnection) -> usize {
     let current: usize = conn.retx_count;
     if (current == 0) {
         kernel_boot_log("tcp retx: released an entry with an empty count\n");
@@ -2115,7 +2117,7 @@ fn retx_count_after_release(conn: *TcpConnection) -> usize {
 // A counter rather than a walk: the chain is stable owner storage, so
 // even a read-only walk has to take and put every link, and this is
 // polled in a loop.
-fn pending_tcp_any_active(conn: *TcpConnection) -> bool {
+fn pending_tcp_any_active(conn: borrow *TcpConnection) -> bool {
     return conn.retx_count != 0;
 }
 
@@ -2141,7 +2143,7 @@ fn fix_tcp_checksum(ip: borrow [u8; 20..], tcp_seg: borrow [u8; 20..]) {
 // Rewrites a SYN request into a SYN-ACK reply in place. Only called from
 // TCP_LISTEN after the caller has already validated the request (IP/TCP
 // checksums, dst port, SYN flag set).
-fn build_syn_ack(conn: *TcpConnection,
+fn build_syn_ack(conn: borrow *TcpConnection,
                  eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
@@ -2182,7 +2184,7 @@ fn build_syn_ack(conn: *TcpConnection,
 // given the caller's own tcp_len bound, but see the explicit check below
 // for why this needs to be enforced, not assumed, to construct tcp_seg
 // with a proven minimum).
-fn build_data_reply(conn: *TcpConnection,
+fn build_data_reply(conn: borrow *TcpConnection,
         eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
         tcp_seg: borrow [u8; 20..], response_len: u16,
         received_len: u16) -> bool {
@@ -2234,7 +2236,7 @@ fn build_data_reply(conn: *TcpConnection,
 // rcv_nxt by the caller) and sends our own FIN in the same segment.
 // Only called from TCP_ESTABLISHED after the caller has already validated
 // the request and confirmed seq == rcv_nxt (before incrementing it).
-fn build_fin_ack(conn: *TcpConnection,
+fn build_fin_ack(conn: borrow *TcpConnection,
                  eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
@@ -2267,7 +2269,7 @@ fn build_fin_ack(conn: *TcpConnection,
 // Rewrites a received data frame into an ACK with no payload.  This releases
 // the sole GEM RX capability between non-final stream segments while keeping
 // the already-copied bytes in the caller's reconstruction buffer.
-fn build_receive_ack(conn: *TcpConnection,
+fn build_receive_ack(conn: borrow *TcpConnection,
                      eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);

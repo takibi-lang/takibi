@@ -84,8 +84,10 @@ ALLOWED = {
         "a frame belongs to one connection and is released only with it or "
         "displaced by a holder of that connection's owner",
     ("kernel/net/tcp.tkb", "tcp_connection_payload"):
-        "a connection is freed only by tcp_connection_free, which consumes "
-        "its owner; every caller holds the owner while it uses the payload",
+        "private to tcp.tkb since GitHub issue #637 stage 2: the one mint of a "
+        "connection pointer from a raw address. tcp_connection_of returns it "
+        "tied to a borrowed owner, so outside the take, alloc and free paths "
+        "that mint or discharge that owner a pointer cannot outlive it",
     ("kernel/net/tcp.tkb", "tcp_connection_alloc"):
         "uses the payload after the pool owner is discharged into "
         "TcpConnectionOwner, which is the ownership handoff GitHub issue "

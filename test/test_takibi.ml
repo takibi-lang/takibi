@@ -2359,6 +2359,27 @@ let frame_handle_fixture =
    extern fn resume(frame: sink FrameRef[process]) !{noreturn};
    "
 
+let owner_derived_fixture =
+  "struct Conn { n: usize; }
+   linear struct Owner[c: usize] {
+     private slot: usize;
+     private generation: usize @ c;
+   }
+   let mut conns: [Conn; 4];
+   fn owner_new(slot: usize, generation: usize @ c) -> Owner[c] {
+     let mut o: Owner[c] = { slot, generation };
+     return o;
+   }
+   fn owner_drop(o: sink Owner[c]) {}
+   fn conn_of(owner: borrow Owner[c]) -> *Conn @ c {
+     return &conns[0];
+   }
+   fn ok(owner: borrow Owner[c]) -> usize {
+     let p = conn_of(owner);
+     return p.n;
+   }
+   "
+
 let atomic_word_fixture =
   "struct no_copy AtomicWord { private value: usize; }
    fn atomic_word_fetch_add(cell: *AtomicWord, value: usize) -> usize {
@@ -3098,6 +3119,33 @@ let infer_tests = [
           "fn peek(f: borrow FrameRef[process]) -> usize {\n\
            \  return f.sp;\n\
            }\n" ] ());
+
+  (* GitHub issue #637 stage 2: a payload pointer derived from a borrowed
+     owner is usable while the owner is, refused after the owner is consumed,
+     and cannot be handed to a parameter that might retain it. *)
+  Alcotest.test_case "owner-derived pointer: usable while the owner is held"
+    `Quick
+    (fun () ->
+      ignore (infer owner_derived_fixture));
+
+  Alcotest.test_case "owner-derived pointer: refused after the owner is consumed"
+    `Quick
+    (expect_type_error "cannot be used after"
+      (owner_derived_fixture ^
+       "fn bad(owner: sink Owner[c]) -> usize {
+          let p = conn_of(owner);
+          owner_drop(owner);
+          return p.n;
+        }"));
+
+  Alcotest.test_case "owner-derived pointer: not passed to a retaining parameter"
+    `Quick
+    (expect_type_error "retaining parameter"
+      (owner_derived_fixture ^
+       "fn keep(p: *Conn) -> usize { return p.n; }
+        fn bad(owner: borrow Owner[c]) -> usize {
+          return keep(conn_of(owner));
+        }"));
 
   (* GitHub issue #669: kernel/lib/atomic_word.tkb. Two files, because privacy
      is per file. *)
