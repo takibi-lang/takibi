@@ -58,6 +58,9 @@ cp -pr "$artifact_dir"/. "$archive/" 2>/dev/null || true
     # armed and a reverted kernel back to back on the same ports, and a
     # reverted run is meant to fail: without these two lines its archive looks
     # like an armed failure (GitHub issue #665).
+    # The host's load, because a lane that hit its guest timeout on a busy
+    # machine and a guest that stopped look alike in the capture (#665).
+    echo "load: $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null || echo unknown)"
     echo "lane: ${KERNEL_QEMU_LABEL:-unknown}"
     echo "kernel: $(basename "${KERNEL_QEMU_ELF:-unknown}")"
 } >"$archive/MANIFEST"

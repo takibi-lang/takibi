@@ -47,6 +47,7 @@ KERNEL_QEMU_ELF=/x/kernel-race-603-reverted.elf \
 named="$(find "$root_named" -mindepth 1 -maxdepth 1 -type d | head -1)"
 grep -q "^lane: qemu-race-603-reverted$" "$named/MANIFEST" && claim ||
     fail "MANIFEST lost the lane"
+grep -q "^load: " "$named/MANIFEST" && claim || fail "MANIFEST lost the host load"
 grep -q "^kernel: kernel-race-603-reverted.elf$" "$named/MANIFEST" && claim ||
     fail "MANIFEST lost the kernel"
 
