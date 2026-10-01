@@ -1,6 +1,7 @@
 // Linux termios policy for the single local UART terminal.
 // Callers serialize settings and input decoding under the process-run lock.
 // No device access or process ownership is hidden in this policy layer.
+use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/execution_model.tkb";
 
 const TERMINAL_TERMIOS_BYTES: usize = 36;
@@ -22,8 +23,8 @@ private let mut terminal_settings_initialized: bool;
 private let mut terminal_literal_next: bool;
 // The run lock serializes writers. Independent TX readers use atomic
 // publication because they need only this one word, not a settings snapshot.
-private let mut terminal_output_stop_word: usize;
-private let mut terminal_input_stop_word: usize;
+private let mut terminal_output_stop_word: AtomicWord;
+private let mut terminal_input_stop_word: AtomicWord;
 
 private fn terminal_store_word(field: {0..<4 as usize}, value: usize) {
     for byte: usize in 0..<4 {
@@ -104,7 +105,7 @@ fn terminal_settings_apply(bytes: borrow [u8; TERMINAL_TERMIOS_BYTES..])
     terminal_literal_next = false;
     if ((input & 0x400) == 0) { terminal_output_pause(false); }
     if ((input & 0x1000) == 0) {
-        unsafe { atomic_store_release((&terminal_input_stop_word) as usize, 0); }
+        atomic_word_store(&terminal_input_stop_word, 0);
     }
     return TerminalSettingsResult::Applied;
 }
@@ -126,28 +127,24 @@ fn terminal_output_flags() -> usize {
 private fn terminal_output_pause(paused: bool) !{unsafe} {
     let mut value: usize = 0;
     if (paused) { value = 1; }
-    unsafe { atomic_store_release((&terminal_output_stop_word) as usize, value); }
+    atomic_word_store(&terminal_output_stop_word, value);
 }
 
 fn terminal_output_paused() -> bool !{unsafe} {
-    let value: usize = unsafe {
-        atomic_load_acquire((&terminal_output_stop_word) as usize)
-    };
+    let value: usize = atomic_word_load(&terminal_output_stop_word);
     return value != 0;
 }
 
 fn terminal_input_flow_requested() -> bool !{unsafe} {
-    let value: usize = unsafe {
-        atomic_load_acquire((&terminal_input_stop_word) as usize)
-    };
+    let value: usize = atomic_word_load(&terminal_input_stop_word);
     return value != 0;
 }
 
 fn terminal_input_flow_update(queued: usize) !{unsafe} {
     if (terminal_input_flow_enabled() == false || queued <= 1024) {
-        unsafe { atomic_store_release((&terminal_input_stop_word) as usize, 0); }
+        atomic_word_store(&terminal_input_stop_word, 0);
     } else if (queued >= 3072) {
-        unsafe { atomic_store_release((&terminal_input_stop_word) as usize, 1); }
+        atomic_word_store(&terminal_input_stop_word, 1);
     }
 }
 

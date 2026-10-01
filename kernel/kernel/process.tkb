@@ -1,3 +1,4 @@
+use "kernel/lib/atomic_word.tkb";
 use "kernel/mm/page.tkb";
 use "kernel/lib/diagnostic_ring.tkb";
 use "kernel/lib/slotmap.tkb";
@@ -3997,11 +3998,7 @@ private let mut kernel_crash_trace:
 // segment.
 private let mut kernel_crash_trace_next: [usize; KERNEL_MAX_CORES];
 // The order. Shared, so it is the one word here that is an atomic.
-private let mut kernel_crash_trace_sequence: usize;
-
-private fn kernel_crash_trace_sequence_address() -> usize {
-    return (&kernel_crash_trace_sequence) as usize;
-}
+private let mut kernel_crash_trace_sequence: AtomicWord;
 
 // Which segment this core writes. Bounded for the same reason
 // execution_here() bounds its index: cpu_id() reads a hardware affinity
@@ -4109,9 +4106,7 @@ private fn kernel_process_crash_trace_reset() !{unsafe} {
     for core: usize in 0..<KERNEL_MAX_CORES {
         kernel_crash_trace_next[core] = 0;
     }
-    unsafe {
-        atomic_store_release(kernel_crash_trace_sequence_address(), 0);
-    }
+    atomic_word_store(&kernel_crash_trace_sequence, 0);
     for slot: usize in 0..<KERNEL_CRASH_TRACE_SLOTS {
         kernel_crash_trace[
             slot * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT +
@@ -4134,9 +4129,8 @@ fn kernel_process_trace_record(event: usize, pid: usize, generation: usize,
     // and needs no atomic. The SEQUENCE is shared and does, and it is a
     // fetch-add returning the previous value.
     let cpu: {0..<KERNEL_MAX_CORES as usize} = kernel_crash_trace_cpu();
-    let sequence: usize = unsafe {
-        atomic_fetch_add_relaxed(kernel_crash_trace_sequence_address(), 1)
-    } + 1;
+    let sequence: usize =
+        atomic_word_fetch_add(&kernel_crash_trace_sequence, 1) + 1;
     let local: usize = kernel_crash_trace_next[cpu] + 1;
     kernel_crash_trace_next[cpu] = local;
     let slot: {0..<KERNEL_CRASH_TRACE_SLOTS as usize} =

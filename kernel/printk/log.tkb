@@ -8,6 +8,7 @@
 // classified events remain kernel/diagnostic/event.tkb's job. A peer's
 // userspace output takes the same route through its own channel,
 // kernel/printk/peer_console.tkb, and never enters the retained log.
+use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/printk/number.tkb";
 use "kernel/printk/peer_console.tkb";
@@ -44,12 +45,12 @@ const KERNEL_LOG_TEXT_WORDS: usize = 5120;
 // both and a reader cannot see one without the other.
 const KERNEL_LOG_LENGTH_TRUNCATED: usize = 0x100000000;
 const KERNEL_LOG_LENGTH_MASK: usize = 0xFFFFFFFF;
-private let mut kernel_log_text: [usize; KERNEL_LOG_TEXT_WORDS];
-private let mut kernel_log_ticks: [usize; KERNEL_LOG_RECORD_COUNT];
-private let mut kernel_log_lengths: [usize; KERNEL_LOG_RECORD_COUNT];
+private let mut kernel_log_text: [AtomicWord; KERNEL_LOG_TEXT_WORDS];
+private let mut kernel_log_ticks: [AtomicWord; KERNEL_LOG_RECORD_COUNT];
+private let mut kernel_log_lengths: [AtomicWord; KERNEL_LOG_RECORD_COUNT];
 // Record number + 1 of the record a slot holds; 0 for none yet.
-private let mut kernel_log_stamps: [usize; KERNEL_LOG_RECORD_COUNT];
-private let mut kernel_log_started: usize;
+private let mut kernel_log_stamps: [AtomicWord; KERNEL_LOG_RECORD_COUNT];
+private let mut kernel_log_started: AtomicWord;
 // GitHub issue #465: which core's line this is, and when THAT core emitted it.
 //
 // A peer's line reaches the ring through core 0's drain, so without these two
@@ -63,7 +64,7 @@ private let mut kernel_log_started: usize;
 // CPU column necessary. The order is therefore arrival-at-core-0, and a peer
 // record's tick can be EARLIER than the record before it. That relationship
 // is the one #465 asks to be stated rather than inferred.
-private let mut kernel_log_cpu: [usize; KERNEL_LOG_RECORD_COUNT];
+private let mut kernel_log_cpu: [AtomicWord; KERNEL_LOG_RECORD_COUNT];
 private let mut kernel_log_deferred_cpu: usize;
 private let mut kernel_log_deferred_tick: i64;
 private let mut kernel_log_deferred: bool;
@@ -91,12 +92,12 @@ private fn kernel_log_snapshot_here() -> *KernelLogSnapshot {
 }
 
 // The word stores and loads the protocol above is made of.
-private fn kernel_log_publish(word: *usize, value: usize) !{unsafe} {
-    unsafe { atomic_store_release(word as usize, value); }
+private fn kernel_log_publish(word: *AtomicWord, value: usize) !{unsafe} {
+    atomic_word_store(word, value);
 }
 
-private fn kernel_log_observe(word: *usize) -> usize !{unsafe} {
-    return unsafe { atomic_load_acquire(word as usize) };
+private fn kernel_log_observe(word: *AtomicWord) -> usize !{unsafe} {
+    return atomic_word_load(word);
 }
 // Peer capture lasts through every numeric/string fragment until the fragment
 // that completes the line returns (kernel_log_end_fragment);
@@ -120,8 +121,9 @@ struct KernelLogCoreState {
     peer_line: [u8; KERNEL_LOG_PEER_LINE_BYTES];
 }
 private let mut kernel_log_core_state: [KernelLogCoreState; KERNEL_MAX_CORES];
-private let mut kernel_log_peer_published: [usize; KERNEL_LOG_PEER_SLOTS];
-private let mut kernel_log_peer_latest: [usize; KERNEL_MAX_CORES];
+private let mut kernel_log_peer_published:
+    [AtomicWord; KERNEL_LOG_PEER_SLOTS];
+private let mut kernel_log_peer_latest: [AtomicWord; KERNEL_MAX_CORES];
 private let mut kernel_log_peer_lengths: [usize; KERNEL_LOG_PEER_SLOTS];
 private let mut kernel_log_peer_truncated: [bool; KERNEL_LOG_PEER_SLOTS];
 // GitHub issue #465: when the PEER emitted this line, not when core 0
@@ -155,9 +157,9 @@ fn kernel_log_init() {
     // zero. Core 0 only, before any reader can run (boot, and the bounds
     // probe that ends by calling this).
     for slot: usize in 0..<KERNEL_LOG_RECORD_COUNT {
-        kernel_log_stamps[slot] = 0;
+        kernel_log_publish(&kernel_log_stamps[slot], 0);
     }
-    kernel_log_started = 0;
+    kernel_log_publish(&kernel_log_started, 0);
 }
 
 private fn kernel_log_start_line() {
@@ -173,7 +175,7 @@ private fn kernel_log_start_line() {
     if (slot < KERNEL_LOG_RECORD_COUNT) {
         let safe_slot: {0..<KERNEL_LOG_RECORD_COUNT as usize} = slot;
         // #612: the count first, so the stores below never precede it.
-        let record: usize = kernel_log_started;
+        let record: usize = kernel_log_observe(&kernel_log_started);
         kernel_log_publish(&kernel_log_started, record + 1);
         // A drained peer line carries its own core and its own tick; anything
         // else is this core writing now.
@@ -233,8 +235,7 @@ private fn kernel_log_peer_publish() !{unsafe} {
         ((sequence - 1) % KERNEL_LOG_PEER_RECORDS);
     if (slot >= KERNEL_LOG_PEER_SLOTS) { return; }
     let safe_slot: {0..<KERNEL_LOG_PEER_SLOTS as usize} = slot;
-    let published: *usize = kernel_log_peer_published;
-    unsafe { atomic_store_release((published + (slot as isize)) as usize, 0); }
+    kernel_log_publish(&kernel_log_peer_published[safe_slot], 0);
     let length: usize = kernel_log_core_here().peer_length;
     kernel_log_peer_lengths[safe_slot] = length;
     kernel_log_peer_truncated[safe_slot] = kernel_log_core_here().peer_truncated;
@@ -248,11 +249,9 @@ private fn kernel_log_peer_publish() !{unsafe} {
             }
         }
     }
-    let latest: *usize = kernel_log_peer_latest;
-    unsafe {
-        atomic_store_release((published + (slot as isize)) as usize, sequence);
-        atomic_store_release((latest + (cpu as isize)) as usize, sequence);
-    }
+    let safe_cpu: {0..<KERNEL_MAX_CORES as usize} = cpu;
+    kernel_log_publish(&kernel_log_peer_published[safe_slot], sequence);
+    kernel_log_publish(&kernel_log_peer_latest[safe_cpu], sequence);
     kernel_log_core_here().peer_length = 0;
     kernel_log_core_here().peer_truncated = false;
 }
@@ -1025,7 +1024,7 @@ fn kernel_log_capture_uart_byte(value: u8) -> bool {
     let safe_slot: {0..<KERNEL_LOG_RECORD_COUNT as usize} = slot;
     // #612: the byte's word, then the length that admits it, each a release
     // store; the truncated mark rides in the length.
-    let stored: usize = kernel_log_lengths[safe_slot];
+    let stored: usize = kernel_log_observe(&kernel_log_lengths[safe_slot]);
     let length: usize = stored & KERNEL_LOG_LENGTH_MASK;
     if (length < KERNEL_LOG_TEXT_MAX) {
         let offset: usize = slot * KERNEL_LOG_TEXT_MAX + length;
@@ -1033,7 +1032,7 @@ fn kernel_log_capture_uart_byte(value: u8) -> bool {
         if (word_index < KERNEL_LOG_TEXT_WORDS) {
             let safe_word: {0..<KERNEL_LOG_TEXT_WORDS as usize} = word_index;
             let shift: usize = (offset % 8) * 8;
-            let word: usize = (kernel_log_text[safe_word] &
+            let word: usize = (kernel_log_observe(&kernel_log_text[safe_word]) &
                                ~(0xFF << shift)) |
                               ((value as usize) << shift);
             kernel_log_publish(&kernel_log_text[safe_word], word);
@@ -1198,10 +1197,7 @@ fn kernel_log_peer_drain() !{unsafe} {
     kernel_log_peer_console_drain();
     for cpu: usize in 1..<KERNEL_MAX_CORES {
         let mut expected: usize = kernel_log_peer_consumed[cpu] + 1;
-        let latest_words: *usize = kernel_log_peer_latest;
-        let latest: usize = unsafe {
-            atomic_load_acquire((latest_words + (cpu as isize)) as usize)
-        };
+        let latest: usize = kernel_log_observe(&kernel_log_peer_latest[cpu]);
         if (latest >= expected + KERNEL_LOG_PEER_RECORDS) {
             expected = latest - KERNEL_LOG_PEER_RECORDS + 1;
             kernel_boot_log("kernel log: peer records overwritten\n");
@@ -1213,10 +1209,8 @@ fn kernel_log_peer_drain() !{unsafe} {
                 ((expected - 1) % KERNEL_LOG_PEER_RECORDS);
             if (slot >= KERNEL_LOG_PEER_SLOTS) { return; }
             let safe_slot: {0..<KERNEL_LOG_PEER_SLOTS as usize} = slot;
-            let published: *usize = kernel_log_peer_published;
-            let first: usize = unsafe {
-                atomic_load_acquire((published + (slot as isize)) as usize)
-            };
+            let first: usize =
+                kernel_log_observe(&kernel_log_peer_published[safe_slot]);
             if (first != expected) { return; }
             let length: usize = kernel_log_peer_lengths[safe_slot];
             let truncated: bool = kernel_log_peer_truncated[safe_slot];
@@ -1231,9 +1225,8 @@ fn kernel_log_peer_drain() !{unsafe} {
                     }
                 }
             }
-            let second: usize = unsafe {
-                atomic_load_acquire((published + (slot as isize)) as usize)
-            };
+            let second: usize =
+                kernel_log_observe(&kernel_log_peer_published[safe_slot]);
             if (second != expected) { return; }
             // Attribute the record to the core that WROTE it, with the tick
             // that core took. Cleared straight after the line so nothing
@@ -1468,7 +1461,8 @@ private fn kernel_log_probe_record(byte: u8) {
 // during a peer's copy.
 private fn kernel_log_overwrite_slot_for_probe(record: usize) {
     for step: usize in 0..<KERNEL_LOG_RECORD_COUNT {
-        if (kernel_log_started <= record + KERNEL_LOG_RECORD_COUNT) {
+        if (kernel_log_observe(&kernel_log_started) <=
+            record + KERNEL_LOG_RECORD_COUNT) {
             kernel_log_probe_record(98);
         }
     }
@@ -1483,14 +1477,14 @@ private fn kernel_log_torn_read_probe() -> bool !{unsafe} {
     let snapshot: *KernelLogSnapshot = kernel_log_snapshot_here();
     kernel_log_probe_record(97);
     snapshot.length = 0;
-    let checked_record: usize = kernel_log_started - 1;
+    let checked_record: usize = kernel_log_observe(&kernel_log_started) - 1;
     match kernel_log_snapshot_record(checked_record, true, true) {
         KernelLogRecordCopy::Kept => { return false; }
         KernelLogRecordCopy::Lost => {}
     }
     if (snapshot.length != 0) { return false; }
     kernel_log_probe_record(97);
-    let unchecked_record: usize = kernel_log_started - 1;
+    let unchecked_record: usize = kernel_log_observe(&kernel_log_started) - 1;
     match kernel_log_snapshot_record(unchecked_record, false, true) {
         KernelLogRecordCopy::Lost => { return false; }
         KernelLogRecordCopy::Kept => {}
@@ -1527,13 +1521,14 @@ fn kernel_log_bounds_probe() -> bool {
     let slot: usize = kernel_log_active_slot;
     if (slot >= 256) { return false; }
     let safe_slot: {0..<256 as usize} = slot;
-    if ((kernel_log_lengths[safe_slot] & KERNEL_LOG_LENGTH_TRUNCATED) == 0) {
+    if ((kernel_log_observe(&kernel_log_lengths[safe_slot]) &
+         KERNEL_LOG_LENGTH_TRUNCATED) == 0) {
         return false;
     }
     // A fatal report must bypass even an unfinished suppressed line, and
     // must leave the retained partial line untouched. init resets this mode
     // immediately after the destructive boot probe.
-    let retained_length: usize = kernel_log_lengths[safe_slot];
+    let retained_length: usize = kernel_log_observe(&kernel_log_lengths[safe_slot]);
     kernel_log_core_here().suppressed = true;
     // Arrange the live-queue case without emitting artificial bytes. A
     // terminal writer must leave polling selected even without the later
@@ -1544,7 +1539,7 @@ fn kernel_log_bounds_probe() -> bool {
     let visible: bool = kernel_log_capture_uart_byte(122);
     return visible && kernel_log_core_here().suppressed == false &&
         kernel_log_tx_is_live() == false &&
-        kernel_log_lengths[safe_slot] == retained_length;
+        kernel_log_observe(&kernel_log_lengths[safe_slot]) == retained_length;
 }
 
 // Hexadecimal with its `0x`, through the log ring.

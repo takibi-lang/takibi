@@ -82,6 +82,7 @@
 //   core 0 before any peer can reach a filesystem. It is also why the check
 //   above cannot simply demand the guard at every mutator call site without
 //   naming that path.
+use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/task_mutex.tkb";
 use "kernel/lib/execution_model.tkb";
 
@@ -108,11 +109,7 @@ linear struct Ext2MutationGuard[lock: addr] {
 // Every CPU's readers since GitHub issue #597 admitted mutation on a peer.
 // Before that only peers were counted, because a core 0 reader could not
 // overlap a mutation that also ran only on core 0.
-private let mut ext2_readers: usize;
-
-private fn ext2_readers_address() -> usize {
-    return (&ext2_readers) as usize;
-}
+private let mut ext2_readers: AtomicWord;
 
 fn ext2_mutation_take() -> Ext2MutationGuard[ext2_mutation_lock]
         !{acquires_lock_20_ext2_mutation, lock_guard_20_ext2_mutation,
@@ -126,7 +123,7 @@ fn ext2_mutation_take() -> Ext2MutationGuard[ext2_mutation_lock]
     // counted here and waited for; one that saw it held has undone its
     // count and gone to core 0.
     dsb_ish();
-    while (unsafe { atomic_load_acquire(ext2_readers_address()) } != 0) { }
+    while (atomic_word_load(&ext2_readers) != 0) { }
     let mut guard: Ext2MutationGuard[ext2_mutation_lock] = { cpu_id() };
     return guard;
 }
@@ -147,13 +144,11 @@ fn ext2_mutation_take_without_readers_unchecked()
 // owed. False: a mutation is in flight, nothing is owed, and the caller
 // reruns the syscall -- on core 0 from a peer, after an interrupt on core 0.
 fn ext2_read_enter() -> bool !{unsafe} {
-    unsafe { atomic_fetch_add_relaxed(ext2_readers_address(), 1); }
+    let before: usize = atomic_word_fetch_add(&ext2_readers, 1);
     dsb_ish();
     if (task_mutex_is_held(&ext2_mutation_lock)) {
-        unsafe {
-            atomic_fetch_add_relaxed(ext2_readers_address(),
-                                     0xFFFFFFFFFFFFFFFF);
-        }
+        let counted: usize =
+            atomic_word_fetch_add(&ext2_readers, 0xFFFFFFFFFFFFFFFF);
         return false;
     }
     return true;
@@ -162,10 +157,8 @@ fn ext2_read_enter() -> bool !{unsafe} {
 // Every ext2 access of the syscall is complete before the count drops.
 fn ext2_read_leave() !{unsafe} {
     dsb_ish();
-    unsafe {
-        atomic_fetch_add_relaxed(ext2_readers_address(),
-                                 0xFFFFFFFFFFFFFFFF);
-    }
+    let counted: usize =
+        atomic_word_fetch_add(&ext2_readers, 0xFFFFFFFFFFFFFFFF);
 }
 
 fn ext2_mutation_give(guard: sink Ext2MutationGuard[ext2_mutation_lock]) {

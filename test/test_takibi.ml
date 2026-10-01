@@ -2359,6 +2359,13 @@ let frame_handle_fixture =
    extern fn resume(frame: sink FrameRef[process]) !{noreturn};
    "
 
+let atomic_word_fixture =
+  "struct no_copy AtomicWord { private value: usize; }
+   fn atomic_word_fetch_add(cell: *AtomicWord, value: usize) -> usize {
+     return value;
+   }
+   "
+
 let expect_type_error_files fragment files () =
   match infer_files files with
   | _ ->
@@ -3091,6 +3098,43 @@ let infer_tests = [
           "fn peek(f: borrow FrameRef[process]) -> usize {\n\
            \  return f.sp;\n\
            }\n" ] ());
+
+  (* GitHub issue #669: kernel/lib/atomic_word.tkb. Two files, because privacy
+     is per file. *)
+  Alcotest.test_case "atomic word: a cell is accepted, a bare usize is not"
+    `Quick
+    (fun () ->
+      ignore (infer_files
+        [ "cell.tkb", atomic_word_fixture;
+          "user.tkb",
+          "let mut ticks: [AtomicWord; 4];\n\
+           fn bump(core: {0..<4 as usize}) -> usize {\n\
+           \  return atomic_word_fetch_add(&ticks[core], 1);\n\
+           }\n" ]);
+      expect_type_error_files "cannot unify"
+        [ "cell.tkb", atomic_word_fixture;
+          "user.tkb",
+          "fn bump(address: usize) -> usize {\n\
+           \  return atomic_word_fetch_add(address, 1);\n\
+           }\n" ] ());
+
+  Alcotest.test_case "atomic word: an index past the array is rejected" `Quick
+    (expect_type_error_files "4"
+      [ "cell.tkb", atomic_word_fixture;
+        "user.tkb",
+        "let mut ticks: [AtomicWord; 4];\n\
+         fn bump() -> usize {\n\
+         \  return atomic_word_fetch_add(&ticks[4], 1);\n\
+         }\n" ]);
+
+  Alcotest.test_case "atomic word: its value is private to its file" `Quick
+    (expect_type_error_files "is private to"
+      [ "cell.tkb", atomic_word_fixture;
+        "user.tkb",
+        "let mut word: AtomicWord;\n\
+         fn peek() -> usize {\n\
+         \  return word.value;\n\
+         }\n" ]);
 
   (* GitHub issue #662: a frame is indexed by the process it belongs to, so a
      delivery into one process cannot be handed another's frame, and resume

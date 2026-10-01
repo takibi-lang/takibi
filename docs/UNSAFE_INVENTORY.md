@@ -97,9 +97,15 @@ Notes on individual groups:
   Group A accounts for most of the block count while carrying the least
   memory-safety risk, because each block is one reviewed register address.
 - **B** uses `usize` addresses because the atomic intrinsics take one
-  (`SPEC.md`, "Atomic Operations"). A typed cell would fix which word is
-  addressed. It would not check the ordering argument between accesses,
-  which is the part #613 asks the type system to carry.
+  (`SPEC.md`, "Atomic Operations"). `kernel/lib/atomic_word.tkb` now fixes
+  which word is addressed: an `AtomicWord` cell, and arrays of them indexed by
+  a refined core number. The terminal, secondary-core, diagnostic-ring,
+  block-cache, ext2 reader count, unimplemented-syscall, crash-trace, log and
+  world-stop/occupancy words are cells; the files that still call an
+  intrinsic directly are the allowlist in `scripts/check_lock_discipline.py`.
+  A cell does not check the ordering argument between accesses, which is the
+  part #613 asks the type system to carry. The counts in the table are the
+  2026-09-29 baseline.
 - **F** is small in blocks and large in reach, for the reason given in point
   2 above. Of all the groups, F has the most bearing on use-after-free (#343).
 - Null safety (#342) is not measured here. Nothing in the source marks a

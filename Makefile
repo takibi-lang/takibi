@@ -369,6 +369,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/kernel/tag_contention_evidence.tkb \
 	kernel/kernel/tcp_connection_contention_evidence.tkb \
 	kernel/kernel/workload_evidence.tkb \
+	kernel/lib/atomic_word.tkb \
 	kernel/lib/byte_slice.tkb \
 	kernel/lib/diagnostic_ring.tkb \
 	kernel/lib/init_once.tkb \

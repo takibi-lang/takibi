@@ -160,7 +160,7 @@ def _tk_online_cpus():
     online = [0]
     state = _tk_eval("kernel_secondary_boot_state")
     for cpu in range(1, _tk_constant("KERNEL_MAX_CORES")):
-        if _tk_int(_tk_array_item(state, cpu)) == 0x100 + cpu:
+        if _tk_int(_tk_array_item(state, cpu)["value"]) == 0x100 + cpu:
             online.append(cpu)
     return online
 
@@ -207,7 +207,7 @@ def _tk_read_events():
     records = _tk_eval("diagnostic_trace_records")
     output = []
     for cpu in range(cpu_count):
-        latest_before = _tk_int(_tk_array_item(next_values, cpu))
+        latest_before = _tk_int(_tk_array_item(next_values, cpu)["value"])
         first = max(1, latest_before - capacity + 1)
         copied = []
         damaged = 0
@@ -224,7 +224,7 @@ def _tk_read_events():
                 damaged += 1
             else:
                 copied.append((sequence, fields))
-        latest_after = _tk_int(_tk_array_item(next_values, cpu))
+        latest_after = _tk_int(_tk_array_item(next_values, cpu)["value"])
         if latest_after != latest_before:
             output.append(
                 f"takibi-kernel: events cpu={cpu} status=replaced "

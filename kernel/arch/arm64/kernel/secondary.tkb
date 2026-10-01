@@ -27,6 +27,7 @@
 // - The tick counter is evidence, not a clock. It counts this core's timer
 //   interrupts and says nothing about wall time.
 
+use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/execution_model.tkb";
 
 // Which core today's platform wrapper starts. The common path below accepts
@@ -43,12 +44,7 @@ const SECONDARY_CORE_ID: usize = 1;
 // so the cost of a late observation was a started core reported as
 // NotStarted; but telling those two apart is the only thing the handshake
 // is for.
-private let mut kernel_secondary_boot_state: [usize; KERNEL_MAX_CORES];
-
-private fn kernel_secondary_boot_state_address(
-        core: {0..<KERNEL_MAX_CORES as usize}) -> usize {
-    return (&kernel_secondary_boot_state[core]) as usize;
-}
+private let mut kernel_secondary_boot_state: [AtomicWord; KERNEL_MAX_CORES];
 
 // Core 0's PSCI authority for the contiguous online prefix. A successful
 // CPU_ON joins the prefix before the target publishes its Takibi handshake.
@@ -65,12 +61,7 @@ private let mut kernel_online_cores: io usize;
 // genuinely run on different cores at the same time, which is the exact
 // situation `io` (volatile, no ordering) does not cover. One writer means
 // no compare-and-swap is needed here.
-private let mut secondary_tick_count: [usize; KERNEL_MAX_CORES];
-
-private fn secondary_tick_address(core: {0..<KERNEL_MAX_CORES as usize})
-        -> usize {
-    return (&secondary_tick_count[core]) as usize;
-}
+private let mut secondary_tick_count: [AtomicWord; KERNEL_MAX_CORES];
 
 fn kernel_secondary_boot_state_clear() !{unsafe} {
     // GitHub issue #479: establish the lazily initialized VM record pools
@@ -80,18 +71,14 @@ fn kernel_secondary_boot_state_clear() !{unsafe} {
     process_image_pool_init_before_secondary();
     address_space_backing_pool_init_before_secondary();
     for core: usize in 0..<KERNEL_MAX_CORES {
-        unsafe {
-            atomic_store_release(kernel_secondary_boot_state_address(core), 0);
-        }
+        atomic_word_store(&kernel_secondary_boot_state[core], 0);
     }
     kernel_online_cores = 1;
 }
 
 fn kernel_secondary_boot_state_value_for(
         core: {0..<KERNEL_MAX_CORES as usize}) -> usize !{unsafe} {
-    return unsafe {
-        atomic_load_acquire(kernel_secondary_boot_state_address(core))
-    };
+    return atomic_word_load(&kernel_secondary_boot_state[core]);
 }
 
 // Record only a contiguous prefix. A platform with a sparse topology keeps
@@ -122,9 +109,7 @@ fn kernel_online_core_count() -> usize {
 // claim made is that the value read was one this core actually reached.
 private fn secondary_tick_value_for(
         core: {0..<KERNEL_MAX_CORES as usize}) -> usize !{unsafe} {
-    return unsafe {
-        atomic_load_acquire(secondary_tick_address(core))
-    };
+    return atomic_word_load(&secondary_tick_count[core]);
 }
 
 fn secondary_tick_value() -> usize !{unsafe} {
@@ -140,7 +125,7 @@ fn kernel_tick_count_of(core: {0..<KERNEL_MAX_CORES as usize}) -> usize
 
 // Core 0's tick, which does not come through secondary_timer_tick.
 fn kernel_core0_tick_note() !{unsafe} {
-    unsafe { atomic_fetch_add_relaxed(secondary_tick_address(0), 1); }
+    let previous: usize = atomic_word_fetch_add(&secondary_tick_count[0], 1);
 }
 
 // Called from a platform IRQ dispatch when the interrupted core is not core
@@ -153,7 +138,7 @@ fn secondary_timer_tick() !{interrupt, unsafe} {
     let raw_core: usize = cpu_id();
     if (raw_core >= KERNEL_MAX_CORES) { return; }
     let core: {0..<KERNEL_MAX_CORES as usize} = raw_core;
-    unsafe { atomic_fetch_add_relaxed(secondary_tick_address(core), 1); }
+    let previous: usize = atomic_word_fetch_add(&secondary_tick_count[core], 1);
 }
 
 // Reached only by the secondary core, after PSCI has installed the entry
@@ -185,10 +170,8 @@ fn kernel_secondary_main(context: usize) !{unsafe} {
     if (core_id > 0 && core_id < KERNEL_MAX_CORES) {
         let core: {0..<KERNEL_MAX_CORES as usize} = core_id;
         if (context == 0x190 + core_id) {
-            unsafe {
-                atomic_store_release(kernel_secondary_boot_state_address(core),
-                                     0x100 + core_id);
-            }
+            atomic_word_store(&kernel_secondary_boot_state[core],
+                              0x100 + core_id);
         // Everything a core has to do FOR ITSELF, in the order it has to
         // do it. Core 0 reaches the same three through its platform's
         // platform_irq_init(), which additionally does the distributor and

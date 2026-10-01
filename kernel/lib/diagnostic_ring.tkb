@@ -24,6 +24,7 @@
 //   GitHub issue #476 a forgotten scalar field is a compile error there,
 //   not a zero left by publish_begin's scrub.
 
+use "kernel/lib/atomic_word.tkb";
 const DIAGNOSTIC_TRACE_CPUS: usize = 4;
 const DIAGNOSTIC_TRACE_EVENTS: usize = 8;
 const DIAGNOSTIC_TRACE_SLOTS: usize = 32;
@@ -57,15 +58,10 @@ struct DiagnosticTraceCopyResult {
     overwritten: usize;
 }
 
-private let mut diagnostic_trace_next: [usize; DIAGNOSTIC_TRACE_CPUS];
+private let mut diagnostic_trace_next: [AtomicWord; DIAGNOSTIC_TRACE_CPUS];
 private let mut diagnostic_trace_records:
     [DiagnosticEvent; DIAGNOSTIC_TRACE_SLOTS];
 let mut diagnostic_trace_test_enabled: bool;
-
-private fn diagnostic_trace_next_address(cpu: usize) -> usize {
-    let next: *usize = diagnostic_trace_next;
-    return (next + (cpu as isize)) as usize;
-}
 
 // Which record a (cpu, sequence) pair lands in. One function, so the ring's
 // only piece of address arithmetic has one home -- the writer and the
@@ -91,9 +87,9 @@ fn diagnostic_trace_record(event: usize, a: usize, b: usize,
     if (diagnostic_trace_test_enabled == false) { return; }
     let cpu: usize = cpu_id();
     if (cpu >= DIAGNOSTIC_TRACE_CPUS) { return; }
-    let sequence: usize = unsafe {
-        atomic_fetch_add_relaxed(diagnostic_trace_next_address(cpu), 1)
-    } + 1;
+    let ring_cpu: {0..<DIAGNOSTIC_TRACE_CPUS as usize} = cpu;
+    let sequence: usize =
+        atomic_word_fetch_add(&diagnostic_trace_next[ring_cpu], 1) + 1;
     // publish_begin clears the commit word with a release before anything
     // below runs, so an interrupt that reads this slot mid-write sees an
     // empty record rather than the previous one still looking plausible.
@@ -122,9 +118,8 @@ fn diagnostic_trace_copy_cpu(cpu: usize,
     let mut damaged: usize = 0;
     let mut overwritten: usize = 0;
     if (cpu < DIAGNOSTIC_TRACE_CPUS) {
-        let latest: usize = unsafe {
-            atomic_load_acquire(diagnostic_trace_next_address(cpu))
-        };
+        let ring_cpu: {0..<DIAGNOSTIC_TRACE_CPUS as usize} = cpu;
+        let latest: usize = atomic_word_load(&diagnostic_trace_next[ring_cpu]);
         let mut first: usize = 1;
         if (latest > DIAGNOSTIC_TRACE_EVENTS) {
             overwritten = latest - DIAGNOSTIC_TRACE_EVENTS;

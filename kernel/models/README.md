@@ -277,8 +277,8 @@ reused, the check passed them.
 
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
-| `WriterStart` | `kernel_log_start_line` | the count is published, then the slot's length reset and its stamp set | the tick and the core column -- irrelevant to `NoTornRead`: they are published the same way as the length and read the same way | `e522396d26e2` |
-| `WriterByte` | `kernel_log_capture_uart_byte` | one byte's word, then the length that admits it | the truncated mark -- irrelevant to `NoTornRead`: it travels in the length word itself | `4cde3d847cb5` |
+| `WriterStart` | `kernel_log_start_line` | the count is published, then the slot's length reset and its stamp set | the tick and the core column -- irrelevant to `NoTornRead`: they are published the same way as the length and read the same way | `c18fa6bf1368` |
+| `WriterByte` | `kernel_log_capture_uart_byte` | one byte's word, then the length that admits it | the truncated mark -- irrelevant to `NoTornRead`: it travels in the length word itself | `ae4277fe549b` |
 | `ReaderBegin`, `ReaderLength`, `ReaderByte`, `ReaderCopied`, `ReaderCheck`, `ReaderAgain` | `kernel_log_snapshot_build`, `kernel_log_snapshot_record` | the count, the stamp and the length, the byte copies, the second count, and dropping a reused record | the snapshot's headers and timestamp formatting -- irrelevant to `NoTornRead`: they are derived from the fields copied, not further reads of the ring | `0fbed2bd1511` |
 
 ## The dropped column

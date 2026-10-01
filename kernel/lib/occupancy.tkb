@@ -81,13 +81,14 @@
 //   Request generations are never reused, including on integer exhaustion:
 //   exhaustion refuses further requests rather than accepting an old ack.
 //   These guarantees were revised on 2026-09-08 for repeated interval stops.
+use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/execution_model.tkb";
 
 // Presence, per core. Private, so no other file can read or write it
 // except through the four entry points below -- which is what makes the
 // protocol the type rather than the convention.
 struct Occupancy {
-    private inside: [usize; KERNEL_MAX_CORES];
+    private inside: [AtomicWord; KERNEL_MAX_CORES];
 }
 
 // Held by a core while it is inside the region. Linear, so leaving is not
@@ -118,11 +119,11 @@ must_use variant OccupancyDrainResult[region: addr] {
 // resume cores that did acknowledge; its different type prevents it from
 // being passed to such a reader.
 struct WorldStop {
-    private claimed: usize;
-    private owner: usize;
+    private claimed: AtomicWord;
+    private owner: AtomicWord;
     private generation: usize;
-    private requested: usize;
-    private ack: [usize; KERNEL_MAX_CORES];
+    private requested: AtomicWord;
+    private ack: [AtomicWord; KERNEL_MAX_CORES];
 }
 
 linear struct WorldStopped[stop: addr] {
@@ -148,55 +149,29 @@ must_use variant WorldStopResult[stop: addr] {
 // exercise the partial result.
 let mut kernel_world_stop: WorldStop;
 
-private fn world_stop_claimed_address(stop: *WorldStop @ id) -> usize {
-    return (&(*stop).claimed) as usize;
-}
-
-private fn world_stop_owner_address(stop: *WorldStop @ id) -> usize {
-    return (&(*stop).owner) as usize;
-}
-
-private fn world_stop_requested_address(stop: *WorldStop @ id) -> usize {
-    return (&(*stop).requested) as usize;
-}
-
-private fn world_stop_ack_address(
-        stop: *WorldStop @ id,
-        cpu: {0..<KERNEL_MAX_CORES as usize}) -> usize {
-    let words: *usize = (*stop).ack;
-    return (words + (cpu as isize)) as usize;
-}
-
 // Called after the platform interrupt dispatcher has acknowledged the SGI
 // but before it touches ordinary kernel state. The interrupt remains active
 // until release. The holding pen spins rather than using interrupt_wait:
 // interrupt handlers cannot carry may_block, and this is a bounded diagnostic
 // or rollover interval rather than an idle state.
 fn world_stop_interrupt_hold() !{interrupt, unsafe} {
-    let generation: usize = unsafe {
-        atomic_load_acquire(world_stop_requested_address(&kernel_world_stop))
-    };
+    world_stop_hold(&kernel_world_stop);
+}
+
+private fn world_stop_hold(stop: *WorldStop @ id) !{interrupt, unsafe} {
+    let generation: usize =
+        atomic_word_load(&(*stop).requested);
     if (generation == 0) { return; }
     let raw_cpu: usize = cpu_id();
     if (raw_cpu >= KERNEL_MAX_CORES) { return; }
     let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
-    let owner: usize = unsafe {
-        atomic_load_acquire(world_stop_owner_address(&kernel_world_stop))
-    };
+    let owner: usize = atomic_word_load(&(*stop).owner);
     if (owner == raw_cpu + 1) { return; }
-    unsafe {
-        atomic_store_release(
-            world_stop_ack_address(&kernel_world_stop, cpu), generation);
+    atomic_word_store(&(*stop).ack[cpu], generation);
+    while (atomic_word_load(&(*stop).requested) ==
+               generation) {
     }
-    while (unsafe {
-               atomic_load_acquire(
-                   world_stop_requested_address(&kernel_world_stop))
-           } == generation) {
-    }
-    unsafe {
-        atomic_store_release(
-            world_stop_ack_address(&kernel_world_stop, cpu), 0);
-    }
+    atomic_word_store(&(*stop).ack[cpu], 0);
 }
 
 // Stop every other core in [0, cores). The platform sends one SGI to the
@@ -213,13 +188,11 @@ private fn world_stop_begin_config(stop: *WorldStop @ id, cores: usize,
     }
     // Every contender writes the SAME held value. A failed attempt must not
     // restore an earlier owner: that owner may have released in the meantime.
-    let claimed: usize = unsafe {
-        atomic_swap_acquire(world_stop_claimed_address(stop), 1)
-    };
+    let claimed: usize = atomic_word_swap(&(*stop).claimed, 1);
     if (claimed != 0) { return WorldStopResult::Busy; }
     let previous: usize = (*stop).generation;
     if (previous == ~(0 as usize)) {
-        unsafe { atomic_store_release(world_stop_claimed_address(stop), 0); }
+        atomic_word_store(&(*stop).claimed, 0);
         return WorldStopResult::Busy;
     }
     let generation: usize = previous + 1;
@@ -228,18 +201,14 @@ private fn world_stop_begin_config(stop: *WorldStop @ id, cores: usize,
     // leaving; only an acknowledgement of THIS generation proves it stopped
     // for this request. Its old holding loop also exits if a newer request
     // overtakes the zero written by release.
-    unsafe {
-        atomic_store_release(world_stop_owner_address(stop), raw_owner + 1);
-        atomic_store_release(world_stop_requested_address(stop), generation);
-    }
+    atomic_word_store(&(*stop).owner, raw_owner + 1);
+    atomic_word_store(&(*stop).requested, generation);
     // Negative control: model a delayed acknowledgement from the previous
     // request AFTER this request was published. Never used with notification.
     if (stale_ack_probe) {
         for cpu: usize in 0..<KERNEL_MAX_CORES {
             if (cpu < cores && cpu != raw_owner) {
-                unsafe {
-                    atomic_store_release(world_stop_ack_address(stop, cpu), previous);
-                }
+                atomic_word_store(&(*stop).ack[cpu], previous);
             }
         }
     }
@@ -254,9 +223,7 @@ private fn world_stop_begin_config(stop: *WorldStop @ id, cores: usize,
         stopped_mask = 0;
         for cpu: usize in 0..<KERNEL_MAX_CORES {
             if (cpu < cores && cpu != raw_owner) {
-                if (unsafe {
-                        atomic_load_acquire(world_stop_ack_address(stop, cpu))
-                    } != generation) {
+                if (atomic_word_load(&(*stop).ack[cpu]) != generation) {
                     complete = false;
                 } else {
                     stopped_mask = stopped_mask | (1 << cpu);
@@ -297,12 +264,10 @@ fn world_stop_begin_stale_ack_probe(
 }
 
 private fn world_stop_resume(stop: *WorldStop @ id) !{unsafe} {
-    unsafe {
-        atomic_store_release(world_stop_requested_address(stop), 0);
-    }
+    atomic_word_store(&(*stop).requested, 0);
     // owner remains stable until the next successful claimant publishes it.
     // Releasing the gate last prevents a new publication being cleared here.
-    unsafe { atomic_store_release(world_stop_claimed_address(stop), 0); }
+    atomic_word_store(&(*stop).claimed, 0);
 }
 
 fn world_stop_release(stopped: sink WorldStopped[id],
@@ -326,26 +291,25 @@ fn world_stop_keep_forever(stopped: sink WorldStopped[id]) {}
 // atomic loads, no token: a reporter takes nothing, and these words are only
 // ever read and written atomically. The four are not one snapshot.
 fn world_stop_reporter_word(which: usize) -> usize !{unsafe} {
-    if (which == 0) {
-        return unsafe {
-            atomic_load_acquire(world_stop_claimed_address(&kernel_world_stop))
-        };
-    }
-    if (which == 1) {
-        return unsafe {
-            atomic_load_acquire(world_stop_owner_address(&kernel_world_stop))
-        };
-    }
-    return unsafe {
-        atomic_load_acquire(world_stop_requested_address(&kernel_world_stop))
-    };
+    return world_stop_word_of(&kernel_world_stop, which);
+}
+
+private fn world_stop_word_of(stop: *WorldStop @ id, which: usize) -> usize
+        !{unsafe} {
+    if (which == 0) { return atomic_word_load(&(*stop).claimed); }
+    if (which == 1) { return atomic_word_load(&(*stop).owner); }
+    return atomic_word_load(&(*stop).requested);
 }
 
 fn world_stop_reporter_ack(cpu: {0..<KERNEL_MAX_CORES as usize}) -> usize
         !{unsafe} {
-    return unsafe {
-        atomic_load_acquire(world_stop_ack_address(&kernel_world_stop, cpu))
-    };
+    return world_stop_ack_of(&kernel_world_stop, cpu);
+}
+
+private fn world_stop_ack_of(stop: *WorldStop @ id,
+                             cpu: {0..<KERNEL_MAX_CORES as usize}) -> usize
+        !{unsafe} {
+    return atomic_word_load(&(*stop).ack[cpu]);
 }
 
 fn world_stop_partial_mask(partial: borrow WorldStopPartial[id]) -> usize {
@@ -377,9 +341,7 @@ private fn occupancy_cpu() -> {0..<KERNEL_MAX_CORES as usize} {
 // that has really finished.
 fn occupancy_enter(region: *Occupancy @ id) -> Occupying[id] !{unsafe} {
     let cpu: {0..<KERNEL_MAX_CORES as usize} = occupancy_cpu();
-    unsafe {
-        atomic_store_release(occupancy_word_address(region, cpu), 1);
-    }
+    atomic_word_store(&(*region).inside[cpu], 1);
     let mut visit: Occupying[id] = { cpu };
     return visit;
 }
@@ -388,9 +350,8 @@ fn occupancy_leave(visit: sink Occupying[id], region: *Occupancy @ id)
         !{unsafe} {
     let cpu: usize = visit.cpu;
     if (cpu < KERNEL_MAX_CORES) {
-        unsafe {
-            atomic_store_release(occupancy_word_address(region, cpu), 0);
-        }
+        let inside_cpu: {0..<KERNEL_MAX_CORES as usize} = cpu;
+        atomic_word_store(&(*region).inside[inside_cpu], 0);
     }
 }
 
@@ -407,9 +368,7 @@ fn occupancy_drain(region: *Occupancy @ id, spins: usize)
         remaining = remaining - 1;
         let mut occupied: bool = false;
         for cpu: usize in 0..<KERNEL_MAX_CORES {
-            if (unsafe {
-                    atomic_load_acquire(occupancy_word_address(region, cpu))
-                } != 0) {
+            if (atomic_word_load(&(*region).inside[cpu]) != 0) {
                 occupied = true;
             }
         }
@@ -425,11 +384,3 @@ fn occupancy_drain(region: *Occupancy @ id, spins: usize)
 // that obligation real.
 fn quiesced_release(proof: sink Quiesced[id]) {}
 
-// The address of one core's word. One function, so this file's only piece
-// of index arithmetic has one home.
-private fn occupancy_word_address(region: *Occupancy @ id,
-                                  cpu: {0..<KERNEL_MAX_CORES as usize})
-        -> usize {
-    let words: *usize = (*region).inside;
-    return (words + (cpu as isize)) as usize;
-}

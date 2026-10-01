@@ -58,21 +58,11 @@ ATOMIC_RE = re.compile(
 
 # Files permitted to use the raw atomic intrinsics, and why.
 ATOMIC_ALLOWED = {
-    "drivers/serial/terminal.tkb":
-        "the process-run lock serializes termios writers and RX readers; "
-        "TX consumers on other cores acquire only the single pause word, "
-        "and peer readers publish the single input-throttle request word "
-        "for CPU 0 to send without taking a lock in its TX path",
+    "lib/atomic_word.tkb":
+        "GitHub issue #669: the typed cell; the one file that turns a cell "
+        "into the intrinsics' address, so a user of a cell calls none",
     "lib/spinlock.tkb":
         "the lock itself; every other user is supposed to go through it",
-    "lib/diagnostic_ring.tkb":
-        "GitHub issue #299's publication protocol, which is the other safe "
-        "surface over the atomics",
-    "arch/arm64/kernel/secondary.tkb":
-        "the secondary core's tick counter, genuinely written by one core "
-        "and read by another with no lock between them; and the boot "
-        "handshake word, one release store by the starting core and an "
-        "acquire load in core 0's bounded wait (GitHub issue #560)",
     "arch/arm64/kernel/exception_evidence.tkb":
         "GitHub issue #496: DdbSnapshot's one valid-last word. The snapshot "
         "is captured with interrupts masked and has no competing writer; "
@@ -82,12 +72,6 @@ ATOMIC_ALLOWED = {
     "kernel/fd_table.tkb":
         "the shared-object contention probe lives in this file, because the "
         "retain/release it exercises are private to it",
-    "kernel/syscall_unimplemented.tkb":
-        "GitHub issue #640: a write-once table, one compare-exchange per "
-        "syscall number to claim the first-caller slot and an acquire load "
-        "to read it. It is recorded on the syscall path and read by DDB with "
-        "the world stopped, so a lock would put a wait on a path that must "
-        "stay quiet",
     "kernel/pool_contention_evidence.tkb": "two-core contention probe",
     "kernel/freelist_contention_evidence.tkb": "two-core contention probe",
     "kernel/page_contention_evidence.tkb": "two-core contention probe",
@@ -96,10 +80,6 @@ ATOMIC_ALLOWED = {
     "kernel/tag_contention_evidence.tkb": "two-core contention probe",
     "kernel/schedule_contention_evidence.tkb": "two-core contention probe",
     "kernel/signal_contention_evidence.tkb": "two-core contention probe",
-    "fs/ext2/mutation_lock.tkb":
-        "the peer reader count a mutator waits for (GitHub issue #559): "
-        "readers must not take a lock, so arrival and departure are one "
-        "atomic add each, ordered against the lock word by dsb ish",
     "kernel/ext2_mutation_contention_evidence.tkb":
         "two-core contention probe; GitHub issue #533's filesystem lock, "
         "whose production reader asks rather than waits, so the answer is "
@@ -117,38 +97,6 @@ ATOMIC_ALLOWED = {
     "kernel/tcp_connection_contention_evidence.tkb":
         "GitHub issue #483's two-core TcpConnectionOwner probe; atomics are "
         "only the cross-core phase publication and verdict counters",
-    "lib/occupancy.tkb":
-        "GitHub issue #479: \"no other core is inside this region\" as a "
-        "linear value. Each core writes ONLY its own word, so there is no "
-        "read-modify-write and nothing to exclude -- the atomics carry the "
-        "ORDERING, which is the whole content of the claim. A lock would be "
-        "the wrong answer here for the reason it is wrong in printk and in "
-        "a crash reporter: this runs while something is being torn down, "
-        "and it cannot block on the thing tearing it down. Not boot "
-        "reachable, so issue #484's mmu_off hazard does not apply",
-    "kernel/process.tkb":
-        "GitHub issue #479 Group B: the crash trace ring's global sequence. "
-        "Per-CPU segments make every other word single-writer, and the "
-        "sequence is the one shared value -- it is a fetch-add because a "
-        "reporter that can block cannot report the deadlock it is in, which "
-        "is the same reason Linux's printk ringbuffer is lock-free (see "
-        "issues #465 and #486). Not boot-reachable: nothing here runs before "
-        "main(), so issue #484's mmu_off hazard does not apply",
-    "printk/log.tkb":
-        "ordinary peer lines are single-producer per CPU and consumed by "
-        "core 0; release/acquire publishes complete bounded records without "
-        "making terminal reporters wait on a console lock. Since #612 the "
-        "retained ring too: core 0 publishes each record's count and fields "
-        "with release, and syslog on any CPU reads them with acquire and "
-        "drops a record reused while it copied (LogReader.tla)",
-    "drivers/block/block_cache.tkb":
-        "GitHub issue #533: the write epoch. Each core writes ONLY its own "
-        "count, so there is no read-modify-write and nothing to exclude -- "
-        "the atomics carry the ORDERING, which is the whole content of the "
-        "claim: a core's block bytes must not become visible after the count "
-        "that retires every other core's stale copy of that block. The "
-        "device mutex below this file cannot supply that ordering, because a "
-        "peer taking a cache HIT never reaches the device at all",
 }
 
 

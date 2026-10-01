@@ -41,6 +41,7 @@
 // Kept free of device access and logging, so linux_user/block_cache can
 // compile this file itself and drive two simulated cores against it.
 
+use "kernel/lib/atomic_word.tkb";
 const BLOCK_CACHE_BYTES: usize = 1024;
 const BLOCK_CACHE_SLOTS: usize = 16;
 
@@ -55,20 +56,12 @@ private let mut block_cache_epoch: [usize; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS]
 private let mut block_cache_used: [usize; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS];
 private let mut block_cache_tick: [usize; KERNEL_MAX_CORES];
 private let mut block_cache_hits: [usize; KERNEL_MAX_CORES];
-private let mut block_cache_writes: [usize; KERNEL_MAX_CORES];
-
-private fn block_cache_writes_address(
-        core: {0..<KERNEL_MAX_CORES as usize}) -> usize {
-    let words: *usize = block_cache_writes;
-    return (words + (core as isize)) as usize;
-}
+private let mut block_cache_writes: [AtomicWord; KERNEL_MAX_CORES];
 
 private fn block_cache_write_epoch() -> usize !{unsafe} {
     let mut epoch: usize = 0;
     for core: usize in 0..<KERNEL_MAX_CORES {
-        epoch = epoch + unsafe {
-            atomic_load_acquire(block_cache_writes_address(core))
-        };
+        epoch = epoch + atomic_word_load(&block_cache_writes[core]);
     }
     return epoch;
 }
@@ -179,10 +172,8 @@ fn block_cache_note_write(core: usize, backend: u8, block: usize,
                           written: bool) !{unsafe} {
     if (core >= KERNEL_MAX_CORES) { return; }
     let here: {0..<KERNEL_MAX_CORES as usize} = core;
-    let published: usize = block_cache_writes[here] + 1;
-    unsafe {
-        atomic_store_release(block_cache_writes_address(here), published);
-    }
+    let published: usize = atomic_word_load(&block_cache_writes[here]) + 1;
+    atomic_word_store(&block_cache_writes[here], published);
     if (written) {
         block_cache_store(here, backend, block, source);
     }
@@ -194,10 +185,8 @@ fn block_cache_note_write(core: usize, backend: u8, block: usize,
 fn block_cache_forget_all(core: usize) !{unsafe} {
     if (core >= KERNEL_MAX_CORES) { return; }
     let here: {0..<KERNEL_MAX_CORES as usize} = core;
-    let published: usize = block_cache_writes[here] + 1;
-    unsafe {
-        atomic_store_release(block_cache_writes_address(here), published);
-    }
+    let published: usize = atomic_word_load(&block_cache_writes[here]) + 1;
+    atomic_word_store(&block_cache_writes[here], published);
 }
 
 // The current write epoch, for a copy kept outside this file -- memory.tkb's

@@ -19,6 +19,7 @@
 //   on the migration gate keeping unimplemented numbers on core 0. It is
 //   claimed once per boot and never released.
 
+use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/printk/log.tkb";
 use "kernel/printk/number.tkb";
@@ -27,16 +28,15 @@ const SYSCALL_UNIMPLEMENTED_MAX: usize = 512;
 
 // The first pid to reach each number; 0 means "not reached", and no
 // process has pid 0.
-private let mut syscall_unimplemented_first_pid: [usize; SYSCALL_UNIMPLEMENTED_MAX];
+private let mut syscall_unimplemented_first_pid:
+    [AtomicWord; SYSCALL_UNIMPLEMENTED_MAX];
 
 // Returns true when the number fits the table (whether or not it was
 // already claimed).
 fn syscall_unimplemented_record(number: usize, pid: usize) -> bool !{unsafe} {
     if (number < SYSCALL_UNIMPLEMENTED_MAX) {
-        let address: usize = (&syscall_unimplemented_first_pid[number]) as usize;
-        let claimed: bool = unsafe {
-            atomic_compare_exchange_acquire(address, 0, pid)
-        };
+        let claimed: bool = atomic_word_compare_exchange(
+            &syscall_unimplemented_first_pid[number], 0, pid);
         return true;
     }
     return false;
@@ -46,8 +46,7 @@ fn syscall_unimplemented_record(number: usize, pid: usize) -> bool !{unsafe} {
 // DDB with the world stopped and by nothing on a syscall path.
 fn syscall_unimplemented_first_pid_of(number: {0..<SYSCALL_UNIMPLEMENTED_MAX as usize})
         -> usize !{unsafe} {
-    let address: usize = (&syscall_unimplemented_first_pid[number]) as usize;
-    return unsafe { atomic_load_acquire(address) };
+    return atomic_word_load(&syscall_unimplemented_first_pid[number]);
 }
 
 // The boot's verdict, printed once near its end (the lanes compare it as a
