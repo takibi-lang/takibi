@@ -813,20 +813,23 @@ fn tcp_frame_slice(address: usize) -> [u8; 1514..] !{unsafe} {
     }
 }
 
-fn tcp_connection_tx_slice(conn: borrow *TcpConnection) -> [u8; 1514..] !{unsafe} {
-    return tcp_frame_slice(conn.tx_frame);
+fn tcp_connection_tx_slice(owner: borrow TcpConnectionOwner[connection])
+        -> [u8; 1514..] @ connection !{unsafe} {
+    return tcp_frame_slice(tcp_connection_of(owner).tx_frame);
 }
 
 // The two syscall-side buffers. 1460 rather than 1514 because that is what
 // the callers bound their lengths by; the frame behind them is one MTU, so
 // the extra 54 bytes are headroom nobody addresses, not a second size.
-fn tcp_connection_rx_slice(conn: borrow *TcpConnection) -> [u8; 1460..] !{unsafe} {
-    let frame = tcp_frame_slice(conn.rx_frame);
+fn tcp_connection_rx_slice(owner: borrow TcpConnectionOwner[connection])
+        -> [u8; 1460..] @ connection !{unsafe} {
+    let frame = tcp_frame_slice(tcp_connection_of(owner).rx_frame);
     return frame[0..<1460];
 }
 
-fn tcp_connection_inetd_slice(conn: borrow *TcpConnection) -> [u8; 1460..] !{unsafe} {
-    let frame = tcp_frame_slice(conn.inetd_frame);
+fn tcp_connection_inetd_slice(owner: borrow TcpConnectionOwner[connection])
+        -> [u8; 1460..] @ connection !{unsafe} {
+    let frame = tcp_frame_slice(tcp_connection_of(owner).inetd_frame);
     return frame[0..<1460];
 }
 
@@ -1622,9 +1625,10 @@ fn pending_tcp_reset_all(connection_address: usize) !{unsafe} {
 // callers still guard their deliberate-drop test injection on getting a
 // real entry, since arming that against "not queued" would mean the
 // frame is never transmitted at all.
-fn pending_tcp_record(conn: borrow *TcpConnection,
+fn pending_tcp_record(connection_owner: borrow TcpConnectionOwner[connection],
                       kind: PendingTcpKind, frame_length: usize)
         -> usize !{unsafe} {
+    let conn: *TcpConnection = tcp_connection_of(connection_owner);
     let pool_guard = intrusive_pool_lock(&tcp_retx_pool);
     // insert_zeroed, not insert: RetxEntry holds a stable owner field
     // (`next`), and a recycled slot is neither zero nor fresh. This is
@@ -1671,7 +1675,7 @@ fn pending_tcp_record(conn: borrow *TcpConnection,
             init_retry.retries = 0;
             retx_unlock(init_guard, &entry.mutex);
             slice_copy(entry.frame as []u8,
-                       tcp_connection_tx_slice(conn));
+                       tcp_connection_tx_slice(connection_owner));
 
             // Append at the tail, keeping the queue oldest-first: reverse,
             // push, reverse back. Two extra walks of a chain that holds
@@ -1724,9 +1728,7 @@ fn pending_tcp_chain_probe() -> bool !{unsafe} {
         }
         TcpConnectionAllocResult::Allocated(owner) => { owner }
     };
-    let conn: *TcpConnection = tcp_connection_of(owner_a);
-    let other: *TcpConnection = tcp_connection_of(owner_b);
-    let ok: bool = pending_tcp_chain_probe_body(conn, other);
+    let ok: bool = pending_tcp_chain_probe_body(owner_a, owner_b);
     tcp_connection_free(owner_a);
     tcp_connection_free(owner_b);
     // Every frame and every retransmit entry back where it came from.
@@ -1734,9 +1736,11 @@ fn pending_tcp_chain_probe() -> bool !{unsafe} {
            intrusive_pool_live_count(&tcp_retx_pool) == 0;
 }
 
-fn pending_tcp_chain_probe_body(conn: borrow *TcpConnection,
-                                 other: borrow *TcpConnection)
+fn pending_tcp_chain_probe_body(owner_a: borrow TcpConnectionOwner[first],
+                                 owner_b: borrow TcpConnectionOwner[second])
         -> bool !{unsafe} {
+    let conn: *TcpConnection = tcp_connection_of(owner_a);
+    let other: *TcpConnection = tcp_connection_of(owner_b);
     let live_before: usize = intrusive_pool_live_count(&tcp_retx_pool);
 
     // One past the old ceiling of 4, plus one belonging to a DIFFERENT
@@ -1744,12 +1748,12 @@ fn pending_tcp_chain_probe_body(conn: borrow *TcpConnection,
     // entries out of a mixed chain rather than truncate a prefix.
     let mut queued: usize = 0;
     for i: usize in 0..<5 {
-        if (pending_tcp_record(conn, PendingTcpKind::Data,
+        if (pending_tcp_record(owner_a, PendingTcpKind::Data,
                                1000 + i) != 0) {
             queued = queued + 1;
         }
         if (i == 2) {
-            if (pending_tcp_record(other, PendingTcpKind::Fin, 9999)
+            if (pending_tcp_record(owner_b, PendingTcpKind::Fin, 9999)
                     == 0) {
                 return false;
             }
@@ -2609,7 +2613,7 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection],
         conn.remote_ip as []u8;
     let remote_mac_bytes =
         conn.remote_mac as []u8;
-    let stream_frames = tcp_connection_tx_slice(conn);
+    let stream_frames = tcp_connection_tx_slice(owner);
     // The port this handshake is for. kernel_tcp_accept_begin wrote it and
     // nothing changes it, so reading it back is what makes this function
     // need no argument for it -- which is the point: a step resumed by a
@@ -2697,7 +2701,7 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection],
                                             let source_payload_end: usize =
                                                 54 + payload_length;
                                             let receive_buffer =
-                                                tcp_connection_rx_slice(conn);
+                                                tcp_connection_rx_slice(owner);
                                             slice_copy(
                                                 receive_buffer[0..<payload_length],
                                                 frame[54..<source_payload_end]);
@@ -2886,7 +2890,7 @@ fn tcp_route_received_segment(current_address: usize,
                                 target.state = ConnState::Established;
                                 if (payload_length > 0) {
                                     let target_buffer =
-                                        tcp_connection_rx_slice(target);
+                                        tcp_connection_rx_slice(target_owner);
                                     let source_payload_end: usize =
                                         54 + payload_length;
                                     slice_copy(
@@ -2927,7 +2931,7 @@ fn tcp_route_received_segment(current_address: usize,
                                     return TcpReceiveRouteResult::Ack;
                                 }
                                 let target_buffer =
-                                    tcp_connection_rx_slice(target);
+                                    tcp_connection_rx_slice(target_owner);
                                 slice_copy(
                                     target_buffer[0..<payload_length],
                                     frame[54..<source_payload_end]);
@@ -3087,7 +3091,7 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection],
     if (payload_length >= 1 && payload_length <= 1460 &&
         received_length >= 1 && received_length <= 1460) {
         let length: usize = payload_length;
-        let frame_bytes = tcp_connection_tx_slice(conn);
+        let frame_bytes = tcp_connection_tx_slice(owner);
         slice_copy(frame_bytes[0..<6],
                    remote_mac_bytes[0..<6]);
         slice_copy(frame_bytes[6..<12], our_mac as []u8);
@@ -3134,7 +3138,7 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection],
         conn.data_segment_counter =
             conn.data_segment_counter + 1;
         let this_entry: usize = pending_tcp_record(
-            conn, PendingTcpKind::Data, frame_length);
+            owner, PendingTcpKind::Data, frame_length);
         // GitHub issue #295: this_entry == 0 means the segment could not
         // be queued (pending_tcp_record's own doc comment) -- there is
         // nothing to ever retransmit from, so the deliberate-drop test
@@ -3180,7 +3184,7 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection],
         conn.remote_ip as []u8;
     let remote_mac_bytes =
         conn.remote_mac as []u8;
-    let frame = tcp_connection_tx_slice(conn);
+    let frame = tcp_connection_tx_slice(owner);
     slice_copy(frame[0..<6],
                remote_mac_bytes[0..<6]);
     slice_copy(frame[6..<12], our_mac as []u8);
@@ -3214,7 +3218,7 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection],
     fix_tcp_checksum(ip, tcp);
     conn.snd_nxt = conn.snd_nxt + 1;
     let fin_entry: usize = pending_tcp_record(
-        conn, PendingTcpKind::Fin, 54);
+            owner, PendingTcpKind::Fin, 54);
     // GitHub issue #295: same reasoning as the Data-segment send site --
     // fin_entry == 0 means nothing tracks this FIN, so the deliberate-drop
     // injection must not arm (that would skip the only transmission this

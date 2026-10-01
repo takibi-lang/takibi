@@ -1864,7 +1864,7 @@ fn syscall_write_segment(fd: usize, address: usize, length: usize)
                         return SyscallIoResult::NetWait;
                     }
                     NetworkCapabilityTakeResult::Ready(ready) => {
-                    let socket_buffers = tcp_connection_rx_slice(tcp_connection_of(owner));
+                    let socket_buffers = tcp_connection_rx_slice(owner);
                     let destination_base: *u8 = socket_buffers as *u8;
                     match user_range_check_read(kernel_process_current_root(), address, amount) {
                         UserReadRangeResult::Fault => {
@@ -1938,7 +1938,7 @@ fn syscall_write_segment(fd: usize, address: usize, length: usize)
                         return SyscallIoResult::Errno(LINUX_EINVAL);
                     }
                     let response_base: *u8 =
-                        (tcp_connection_inetd_slice(conn) as *u8) +
+                        (tcp_connection_inetd_slice(owner) as *u8) +
                         (conn.inetd_response_length as isize);
                     match user_range_check_read(kernel_process_current_root(), address, length) {
                         UserReadRangeResult::Fault => {
@@ -2043,7 +2043,7 @@ fn syscall_read_segment(fd: usize, address: usize, requested: usize)
                    let mut buffered: usize = requested;
                    if (buffered > available) { buffered = available; }
                    let buffered_base: *u8 =
-                       (tcp_connection_rx_slice(conn) as *u8) +
+                       (tcp_connection_rx_slice(owner) as *u8) +
                        (conn.socket_buffer_offset as isize);
                    match user_range_check_write(kernel_process_current_root(), address, buffered) {
                        UserWriteRangeResult::Fault => {
@@ -2067,7 +2067,7 @@ fn syscall_read_segment(fd: usize, address: usize, requested: usize)
                  }
                  NetworkCapabilityTakeResult::Ready(r) => { r }
                };
-               let socket_buffers = tcp_connection_rx_slice(tcp_connection_of(owner));
+               let socket_buffers = tcp_connection_rx_slice(owner);
                match kernel_tcp_receive_once(
                     owner, ready, socket_buffers[0..<1460]) {
                 KernelTcpReceiveResult::Pending(next) => {
@@ -2113,7 +2113,7 @@ fn syscall_read_segment(fd: usize, address: usize, requested: usize)
                     let mut amount: usize = received;
                     if (amount > requested) { amount = requested; }
                     let source_base: *u8 =
-                        tcp_connection_rx_slice(tcp_connection_of(owner)) as *u8;
+                        tcp_connection_rx_slice(owner) as *u8;
                     match user_range_check_write(kernel_process_current_root(), address, amount) {
                         UserWriteRangeResult::Fault => {
                             match network_capability_put(next) {
@@ -5713,7 +5713,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
             NetworkCapabilityTakeResult::Ready(ready) => {
                 let inetd_responses =
-                    tcp_connection_inetd_slice(tcp_connection_of(owner));
+                    tcp_connection_inetd_slice(owner);
                 match kernel_tcp_send_received(
                         owner, ready, inetd_responses[0..<1460],
                         received_length,
@@ -7113,7 +7113,7 @@ fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
     let slot: usize = tcp_connection_of(owner).self_address;
     let generation: usize = tcp_connection_identity(owner);
     tcp_connection_of(owner).connection_open = true;
-    let rx = tcp_connection_rx_slice(tcp_connection_of(owner));
+    let rx = tcp_connection_rx_slice(owner);
     rx[0] = 0x61;
     rx[1] = 0x62;
     tcp_connection_of(owner).socket_buffer_length = 2;
@@ -7193,7 +7193,7 @@ fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
         TcpConnectionTakeResult::Missing => { ok = false; }
         TcpConnectionTakeResult::Ready(after) => {
             let conn = tcp_connection_of(after);
-            let response = tcp_connection_inetd_slice(conn);
+            let response = tcp_connection_inetd_slice(after);
             if (conn.inetd_response_length != 3 || response[0] != 0x61 ||
                 response[1] != 0x62 || response[2] != 0x61) { ok = false; }
             tcp_connection_free(after);

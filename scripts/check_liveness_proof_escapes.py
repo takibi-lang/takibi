@@ -81,8 +81,11 @@ ALLOWED = {
         "an image record is released only when its process is reaped, and "
         "only that process's exec and fault paths, or its reaper, reach it",
     ("kernel/net/tcp.tkb", "tcp_frame_slice"):
-        "a frame belongs to one connection and is released only with it or "
-        "displaced by a holder of that connection's owner",
+        "the one mint of a frame slice from a raw frame address, reached "
+        "through tcp_connection_tx_slice, _rx_slice and _inetd_slice, which "
+        "return it tied to the borrowed connection owner (GitHub issue #637 "
+        "stage 2); a frame is released only with its connection or displaced "
+        "by a holder of that connection's owner",
     ("kernel/net/tcp.tkb", "tcp_connection_payload"):
         "private to tcp.tkb since GitHub issue #637 stage 2: the one mint of a "
         "connection pointer from a raw address. tcp_connection_of returns it "

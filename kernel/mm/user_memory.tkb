@@ -237,7 +237,7 @@ fn copy_to_user(range: UserWriteRange, source: []u8) -> bool !{unsafe} {
 // bound (e.g. a per-connection cursor into a shared buffer) -- the pattern
 // this codebase already uses raw pointer arithmetic for on the kernel side.
 // The user-facing half is still only ever reached through UserReadRange/UserWriteRange.
-fn copy_from_user_raw(range: UserReadRange, destination: *u8, length: usize)
+fn copy_from_user_raw(range: UserReadRange, destination: borrow *u8, length: usize)
         -> bool !{unsafe} {
     if (length > range.length) { return false; }
     let source_base: *u8 = unsafe { range.address as *u8 };
@@ -251,7 +251,7 @@ fn copy_from_user_raw(range: UserReadRange, destination: *u8, length: usize)
     return true;
 }
 
-fn copy_to_user_raw(range: UserWriteRange, source: *u8, length: usize)
+fn copy_to_user_raw(range: UserWriteRange, source: borrow *u8, length: usize)
         -> bool !{unsafe} {
     if (length > range.length) { return false; }
     if (user_range_resolve_cow(range) == false) { return false; }
