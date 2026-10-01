@@ -46,6 +46,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_documented_counts_controls.py` | Controls for the documented-count check |
 | `check_elf_symbol_alignment_controls.py` | Positive and faithful negative controls for the ELF alignment guard |
 | `check_execution_model_coverage.py` | mutable kernel state declares its execution model |
+| `check_ext2_image_free_blocks.py` | the fixture ext2 image keeps at least 128 free blocks, so a program added to it cannot silently push a boot into the exhaustion stall of #658 |
 | `check_ext2_mutation_guard.py` | every ext2 mutation is reached under the filesystem lock's guard, or its file is named with the reason it cannot race a peer |
 | `check_model_function_map.py` | every kernel function a TLA+ model under kernel/models/ claims to abstract still has a definition, every path a model drops says why that is safe, and no mapped function changed since its row was reviewed |
 | `check_expected_line_endings.py` | stdout fixtures use one newline convention |

@@ -34,7 +34,7 @@ allcheck` stops every other piece of work, and Territory B is busy, so the
 lane that meets such a failure analyses and fixes it, whatever territory
 its cause lies in. The goal is to drive the probability of an allcheck
 failure toward zero step by step. A holds the analysis of #604, #556, #603,
-#649, #654 and #655 when they next recur.
+#649, #654, #655, #664 and #665 (its handoff memo) when they next recur.
 
 Steps 1 and 2 (true multicore support; the multicore workload on RPi5) are
 finished. #584's churn stays a soak run at natural boundaries, and each
@@ -50,9 +50,8 @@ before its issue closes. The steps keep their numbers, which issues cite.
    number going down (EL0 payloads: #660, B's). A holds stage 1's core
    groups in this order; each rung stands on the one before, so effort can
    stop at any of them:
-   - **C, stack and frame:** #661 (retire the `next_sp` sentinel; an opaque
-     frame handle with register accessors and two named mint sites), then
-     #662 (a frame indexed by its process, consumed by resume). Deriving a
+   - **C, stack and frame:** #662 (a frame indexed by its process, consumed
+     by resume), on the opaque frame handle that #661 landed. Deriving a
      frame from a stack region's ownership token needs stage 2 and is not
      scheduled.
    - **B, raw atomics:** a typed atomic cell (issue when C is under way);
@@ -102,17 +101,18 @@ before its issue closes. The steps keep their numbers, which issues cite.
    waits for A): #660 (the raw-dereference audit for the EL0 payloads);
    #646 (compiler soundness fuzzing, the footing of every static
    guarantee); #13 for `Phi`, with #216 and #109 as its first examples;
-   #131 and #370 (stored ownership and branded containers, which feed
-   #637 stage 2's option (c)). Once A's route step 2 closes: #637 stage 1's
+   #663's stages S2 to S4 (one console queue under one lock; S1 landed, the
+   rest wait on #665, and #657 closes with them); #131 and #370 (stored
+   ownership and branded containers, which feed #637 stage 2's option (c)). Once A's route step 2 closes: #637 stage 1's
    device groups, MMIO and DMA, together with #622 and #623.
-2. **Resource use and measured performance:** #220 (telnet; lowered
+2. **Resource use and measured performance:** #658, #220 (telnet; lowered
    2026-09-30 by the maintainer, not urgent, and it waits on PTY and
    `pselect6` scoping), #389, #422, #497, #520, #553,
    #386, #502.
 3. **Compiler safety and language research:** #58, #203, #252, #200, #201,
    #282, #129, #374, #417, #155, #28, #8.
 4. **Toolchain, portability and hardware-lane support:** #599, #576, #568, #123,
-   #124, #122, #95, #51, #50, #85, #268, #636.
+   #124, #122, #95, #51, #50, #85, #268, #636, #666.
 5. **Deferred or not a scheduled work item:** #432, #555, #250, #444, #429,
    #149, #567, #539, #536, #624, #132.
 

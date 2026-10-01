@@ -1061,6 +1061,7 @@ $(KERNEL_EXT2_IMAGE): Makefile $(KERNEL_EXT2_FIXTURE_DIR)/hello.txt $(KERNEL_EXT
 	debugfs -w -R 'link /hello.txt /etc/hlink' $@.tmp >/dev/null 2>&1
 	debugfs -w -R 'set_inode_field /hello.txt links_count 2' $@.tmp >/dev/null 2>&1
 	e2fsck -fn $@.tmp >/dev/null
+	python3 scripts/check_ext2_image_free_blocks.py $@.tmp
 	mv $@.tmp $@
 
 $(KERNEL_SHELL_EXT2_IMAGE): $(KERNEL_EXT2_IMAGE) \
