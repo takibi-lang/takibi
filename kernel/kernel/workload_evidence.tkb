@@ -195,6 +195,7 @@ struct WorkloadBusyPair {
     // A UART-BREAK DDB lane keeps it for one more record: held, pending,
     // then released by the debugger's entry.
     peer_console_pid: usize;
+    peer_console_first_seen: bool;
     peer_console_initial_reported: bool;
     peer_console_holding: bool;
     peer_console_pending: bool;
@@ -1362,8 +1363,9 @@ fn workload_peer_net_wake_progress(step: usize)
 // seventeen 63-byte input lines while the ring holds sixteen 64-byte records.
 // ONLCR adds a CR before each LF: 1008 input bytes plus sixteen CRs fill the
 // 1024-byte ring. That exact short count proves the full-ring path. The
-// payload retries the remaining bytes and reports all 1071 bytes only after
-// write(2) has accepted them.
+// payload reports that count at once, retries the remaining bytes and reports
+// all 1071 only after write(2) has accepted them. Core 0 does not drain this
+// ring until the first report, so the count cannot depend on its timing.
 //
 // Returns 0 for a refused report, 1 to keep polling, 2 to exit, and 3 to
 // write the one record a UART-BREAK DDB lane holds.
@@ -1386,6 +1388,11 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
             return 0;
         }
         workload_busy_pair.peer_console_pid = pid;
+        // The first write must meet a ring that core 0 is not emptying, or a
+        // drain landing between its chunks makes room and the write is no
+        // longer short -- a host stall on the peer's CPU was enough
+        // (GitHub issue #665). Held until the writer has reported that write.
+        peer_console_ddb_hold(SECONDARY_CORE_ID);
         process_run_unlock(guard);
         return SECONDARY_CORE_ID;
     }
@@ -1397,8 +1404,22 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
         return 0;
     }
     if (workload_busy_pair.peer_console_initial_reported == false) {
-        if (workload_busy_pair.peer_read_reported == false ||
-            first != 1008 || total != 1071) {
+        // The first report is (1008, 0), made right after the first write;
+        // it lets core 0 drain again so the writer can retry the rest. The
+        // second is (1008, 1071), once all of it is accepted.
+        if (workload_busy_pair.peer_console_first_seen == false) {
+            peer_console_ddb_clear(SECONDARY_CORE_ID);
+            if (workload_busy_pair.peer_read_reported == false ||
+                first != 1008 || total != 0) {
+                workload_busy_pair.refused = workload_busy_pair.refused + 1;
+                process_run_unlock(guard);
+                return 0;
+            }
+            workload_busy_pair.peer_console_first_seen = true;
+            process_run_unlock(guard);
+            return 1;
+        }
+        if (first != 1008 || total != 1071) {
             workload_busy_pair.refused = workload_busy_pair.refused + 1;
             process_run_unlock(guard);
             return 0;

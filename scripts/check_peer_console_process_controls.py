@@ -41,7 +41,8 @@ def problems(tree: dict[str, str]) -> list[str]:
         if shape not in payload:
             result.append(f"peer payload lost operation: {shape}")
     for condition in (
-        "first != 1008",
+        "first != 1008 || total != 1071",
+        "first != 1008 || total != 0",
         "total != 1071",
         "workload_busy_pair.peer_console_reported ||\n"
         "        cpu_id() != SECONDARY_CORE_ID",
@@ -66,10 +67,26 @@ def problems(tree: dict[str, str]) -> list[str]:
     # The handout also carries the writer's TURN, which the rule used to
     # carry: the CPU is named only once the filesystem reader has reported,
     # and asking earlier is not counted as a refusal.
-    if "        workload_busy_pair.peer_console_pid = pid;\n" \
+    if "        peer_console_ddb_hold(SECONDARY_CORE_ID);\n" \
        "        process_run_unlock(guard);\n" \
        "        return SECONDARY_CORE_ID;" not in evidence:
         result.append("registration no longer hands the writer its peer CPU")
+    # GitHub issue #665: the first write's short count is the ring's room only
+    # if core 0 does not drain between its chunks. Registration holds the
+    # drain, and the writer's first report -- made before it retries -- is
+    # what lets core 0 go on.
+    if "        workload_busy_pair.peer_console_pid = pid;\n" \
+       "        // The first write must meet a ring" not in evidence:
+        result.append("registration no longer holds core 0's drain of the "
+                      "writer's ring for its first write")
+    if "svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG, first, 0, 0, 0) == 0" \
+            not in tree["kernel/arch/arm64/kernel/peer_read.tkb"]:
+        result.append("the writer no longer reports its first write before "
+                      "it retries")
+    if "peer_console_first_seen == false) {\n" \
+       "            peer_console_ddb_clear(SECONDARY_CORE_ID);" not in evidence:
+        result.append("the writer's first report no longer releases the "
+                      "drain it was held under")
     if "if (workload_busy_pair.peer_read_reported == false) {" not in evidence:
         result.append("writer is named a CPU before the reader's verdict")
     if "return svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) == 0;" \
@@ -136,7 +153,27 @@ def main() -> int:
         "write syscall": ("kernel/arch/arm64/kernel/peer_read.tkb",
                           "const WRITE_SYSCALL", "const OLD_WRITE_SYSCALL"),
         "short count": ("kernel/kernel/workload_evidence.tkb",
-                        "first != 1008", "first != 1071"),
+                        "first != 1008 || total != 1071",
+                        "first != 1071 || total != 1071"),
+        "first count report": ("kernel/kernel/workload_evidence.tkb",
+                               "first != 1008 || total != 0",
+                               "first != 1071 || total != 0"),
+        "drain held for the first write": (
+            "kernel/kernel/workload_evidence.tkb",
+            "        peer_console_ddb_hold(SECONDARY_CORE_ID);\n"
+            "        process_run_unlock(guard);\n"
+            "        return SECONDARY_CORE_ID;",
+            "        process_run_unlock(guard);\n"
+            "        return SECONDARY_CORE_ID;"),
+        "drain released after the first write": (
+            "kernel/kernel/workload_evidence.tkb",
+            "peer_console_first_seen == false) {\n"
+            "            peer_console_ddb_clear(SECONDARY_CORE_ID);",
+            "peer_console_first_seen == false) {"),
+        "writer reports its first write": (
+            "kernel/arch/arm64/kernel/peer_read.tkb",
+            "svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG, first, 0, 0, 0) == 0",
+            "svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG, first, 0, 0, 0) == 99"),
         "placement": ("kernel/kernel/workload_evidence.tkb",
                       "        workload_busy_pair.peer_console_reported ||\n"
                       "        cpu_id() != SECONDARY_CORE_ID",
@@ -156,10 +193,10 @@ def main() -> int:
         # rewrite a sibling fixture's handout and prove nothing.
         "peer cpu handout": (
             "kernel/kernel/workload_evidence.tkb",
-            "        workload_busy_pair.peer_console_pid = pid;\n"
+            "        peer_console_ddb_hold(SECONDARY_CORE_ID);\n"
             "        process_run_unlock(guard);\n"
             "        return SECONDARY_CORE_ID;",
-            "        workload_busy_pair.peer_console_pid = pid;\n"
+            "        peer_console_ddb_hold(SECONDARY_CORE_ID);\n"
             "        process_run_unlock(guard);\n"
             "        return 0;"),
         "turn before the reader": ("kernel/kernel/workload_evidence.tkb",

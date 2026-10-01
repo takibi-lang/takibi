@@ -212,6 +212,22 @@ private fn peer_pin(cpu: usize) -> bool {
     return svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) == 0;
 }
 
+// The writer's report was refused: say what the first write returned, then
+// leave. Shared by the early report after that write and the final one.
+private fn peer_console_refused(first: usize) {
+    let label = bs"peer console: refused first=0x";
+    svc5(WRITE_SYSCALL, 1, label as *u8 as usize, label.len, 0, 0);
+    let digits = bs"0123456789abcdef";
+    let mut number: [u8; 8];
+    for index: usize in 0..<8 {
+        let digit: usize = (first >> ((7 - index) * 4)) & 15;
+        if (digit < 16) { number[index] = digits[digit]; }
+    }
+    svc5(WRITE_SYSCALL, 1, number as *u8 as usize, 8, 0, 0);
+    svc5(WRITE_SYSCALL, 1, bs"\n" as *u8 as usize, 1, 0, 0);
+    svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+}
+
 // GitHub issue #534: a real EL0 writer on the admitted peer. Each line is
 // exactly one 64-byte publication record. The single first write asks for
 // seventeen records, one more than the ring can hold, and must therefore be
@@ -251,6 +267,11 @@ fn peer_console() {
     let first: usize = svc5(WRITE_SYSCALL, 1,
                               output as *u8 as usize, output.len, 0, 0);
     let mut total: usize = first;
+    // Core 0 holds this ring until it hears the first write's count, so the
+    // count is the ring's room and not a race with its drain.
+    if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG, first, 0, 0, 0) == 0) {
+        peer_console_refused(first);
+    }
     while (total < output.len) {
         let wrote: usize = svc5(
             WRITE_SYSCALL, 1, output as *u8 as usize + total,
@@ -269,17 +290,7 @@ fn peer_console() {
                                  first, total, 0, 0);
     while (action != 2) {
         if (action == 0) {
-            let label = bs"peer console: refused first=0x";
-            svc5(WRITE_SYSCALL, 1, label as *u8 as usize, label.len, 0, 0);
-            let digits = bs"0123456789abcdef";
-            let mut number: [u8; 8];
-            for index: usize in 0..<8 {
-                let digit: usize = (first >> ((7 - index) * 4)) & 15;
-                if (digit < 16) { number[index] = digits[digit]; }
-            }
-            svc5(WRITE_SYSCALL, 1, number as *u8 as usize, 8, 0, 0);
-            svc5(WRITE_SYSCALL, 1, bs"\n" as *u8 as usize, 1, 0, 0);
-            svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0);
+            peer_console_refused(first);
         }
         if (action == 4) {
             // GitHub issue #657: the debugger half has not asked for the hold
