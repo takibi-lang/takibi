@@ -134,20 +134,24 @@ cleanup_and_archive() {
 trap cleanup_and_archive EXIT
 trap 'cleanup; exit 130' INT TERM HUP
 
-console_await=()
+# Every mode waits for a WHOLE BOOT, not just a crash console: the driver
+# starts with QEMU, and its budget runs from then. The driver's own default
+# (20 s) is sized for the console alone. Measured today at 7470ffef: the guest
+# reaches its last ext2 line in about 8 s alone and 19-21 s while the other
+# allcheck lanes boot beside it, so the default failed this lane in three
+# allcheck runs of three here while it passed alone. peer_fault was raised to 90 s
+# for the same reason earlier (1 in 3 failures); the other modes only
+# differed in being a few seconds shorter.
+console_await=(--timeout 90)
 if [ "$MODE" = peer_fault ]; then
-    # This mode waits for a WHOLE BOOT, not just a crash console: the peer
-    # fail-stops during bring-up and core 0 only reaches its own fault after
-    # userspace starts. The default budget is sized for the latter alone, and
-    # measured at 1-in-3 failures here before this was raised.
-    console_await=(--timeout 90)
+    # The peer fail-stops during bring-up and core 0 only reaches its own
+    # fault after userspace starts.
     console_await+=(--await-line "oops: fail-stop seq=1 cpu=1")
 elif [ "$MODE" = concurrent_fault ]; then
-    # A whole boot again: core 0's fault is PID 1's first instruction.
-    # Both records before the first question: the console's first prompt
-    # belongs to whichever core claimed it, and asking for `oops` before the
-    # other has reported would answer about half the machine and pass.
-    console_await=(--timeout 90)
+    # Core 0's fault is PID 1's first instruction. Both records before the
+    # first question: the console's first prompt belongs to whichever core
+    # claimed it, and asking for `oops` before the other has reported would
+    # answer about half the machine and pass.
     console_await+=(--await-line "oops: fail-stop seq=1 cpu=0"
                     --await-line "oops: fail-stop seq=1 cpu=1")
 fi
