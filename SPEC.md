@@ -546,12 +546,13 @@ linear struct Name[n: usize] { field: T; }   // indexed runtime obligation
   particular object (`let mut c: Cell[&pool];` does not parse). Static
   identity therefore travels through signatures and cannot yet be
   anchored in durable storage (GitHub issue #368).
-- **Inside an index list, an integer static argument may be a sum or
-  difference** of names and integers: `Region[b + k, l - k]`. Two such
-  arguments are equal when their linear normal forms are equal (`b + k + (l
-  - k)` is `b + l`), and an unknown static is solved for when it appears
-  once with coefficient 1 or -1. Nothing beyond that is attempted: no
-  products of statics, no division, no solver call, and no check that a
+- **Inside an index list, an integer static argument may be a sum,
+  difference or product** of names and integers: `Region[b + k * S, S]`.
+  Two such arguments are equal when their polynomial normal forms are equal
+  (`b + k + (l - k)` is `b + l`), and an unknown static is solved for when
+  it appears once, alone, with coefficient 1 or -1. A product of two
+  unknowns is matched factor by factor against a term of the same shape.
+  Nothing beyond that is attempted: no division, no solver call, and no check that a
   difference is non-negative -- the function that builds such a value
   states that with a run-time test (`linux_user/region_proto`). After `@`
   a static argument is still a single name, integer or enum case.

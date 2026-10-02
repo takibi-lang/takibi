@@ -279,7 +279,7 @@ let rec show_type = function
         | Ast.StaticName n -> n
         | Ast.StaticInt n -> string_of_int n
         | Ast.StaticEnum (name, case) -> name ^ "::" ^ case
-        | (Ast.StaticAdd _ | Ast.StaticSub _) as a -> Llvm_gen.static_arg_str a
+        | (Ast.StaticAdd _ | Ast.StaticSub _ | Ast.StaticMul _) as a -> Llvm_gen.static_arg_str a
       in
       Printf.sprintf "view %s[%s]" s
         (String.concat ", " (List.map arg args))
@@ -289,7 +289,7 @@ let rec show_type = function
         | Ast.StaticName n -> n
         | Ast.StaticInt n -> string_of_int n
         | Ast.StaticEnum (name, case) -> name ^ "::" ^ case
-        | (Ast.StaticAdd _ | Ast.StaticSub _) as a -> Llvm_gen.static_arg_str a
+        | (Ast.StaticAdd _ | Ast.StaticSub _ | Ast.StaticMul _) as a -> Llvm_gen.static_arg_str a
       in
       Printf.sprintf "%s[%s]" s
         (String.concat ", " (List.map arg args))
@@ -300,7 +300,7 @@ let rec show_type = function
         | Ast.StaticName n -> n
         | Ast.StaticInt n -> string_of_int n
         | Ast.StaticEnum (name, case) -> name ^ "::" ^ case
-        | (Ast.StaticAdd _ | Ast.StaticSub _) as a -> Llvm_gen.static_arg_str a
+        | (Ast.StaticAdd _ | Ast.StaticSub _ | Ast.StaticMul _) as a -> Llvm_gen.static_arg_str a
       in
       Printf.sprintf "%s[%s]" s (String.concat ", " (List.map arg args))
   | Ast.TypeSingleton (t, n) ->
@@ -308,7 +308,7 @@ let rec show_type = function
         | Ast.StaticName n -> n
         | Ast.StaticInt n -> string_of_int n
         | Ast.StaticEnum (name, case) -> name ^ "::" ^ case
-        | (Ast.StaticAdd _ | Ast.StaticSub _) as a -> Llvm_gen.static_arg_str a
+        | (Ast.StaticAdd _ | Ast.StaticSub _ | Ast.StaticMul _) as a -> Llvm_gen.static_arg_str a
       in
       Printf.sprintf "%s @ %s" (show_type t) n
   | Ast.TypeRefined (lo, hi, _) -> Printf.sprintf "{%d..<%d}" lo hi
@@ -2363,6 +2363,27 @@ let frame_handle_fixture =
    extern fn resume(frame: sink FrameRef[process]) !{noreturn};
    "
 
+let slot_index_fixture =
+  "linear struct Region[base: usize, len: usize] {
+     private address: usize;
+     private size: usize;
+   }
+   fn slot(t: borrow Region[b, n * S], i: usize @ k, s: usize @ S)
+       -> Region[b + k * S, S] {
+     let mut r: Region[b + k * S, S] = { 0, 0 };
+     return r;
+   }
+   fn give(t: borrow Region[b, n * S], r: sink Region[b + k * S, S],
+           i: usize @ k) {
+     drop_r(r);
+   }
+   fn drop_r(r: sink Region[b, l]) {}
+   fn right(t: borrow Region[b, n * 16], i: usize @ k) {
+     let r = slot(t, i, 16);
+     give(t, r, i);
+   }
+   "
+
 let linear_region_fixture =
   "struct Node { key: usize; value: usize; }
    linear struct Region[base: usize, len: usize] {
@@ -3199,6 +3220,18 @@ let infer_tests = [
     (expect_type_error "static value mismatch" (region_use
       "let p = region_node(rest);
        return region_merge(first, rest);"));
+
+  Alcotest.test_case "static arithmetic: a slot given back to its own index"
+    `Quick
+    (fun () -> ignore (infer slot_index_fixture));
+
+  Alcotest.test_case "static arithmetic: a slot given back to another index"
+    `Quick
+    (expect_type_error "static value mismatch: m vs k" (slot_index_fixture ^
+      "fn wrong(t: borrow Region[b, n * 16], i: usize @ k, j: usize @ m) {
+         let r = slot(t, i, 16);
+         give(t, r, j);
+       }"));
 
   Alcotest.test_case "region prototype: a region is not split twice" `Quick
     (expect_type_error "already consumed" (linear_region_fixture ^

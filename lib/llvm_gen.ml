@@ -674,6 +674,7 @@ let rec static_arg_str = function
   | StaticEnum (name, case) -> name ^ "::" ^ case
   | StaticAdd (a, b) -> static_arg_str a ^ " + " ^ static_arg_str b
   | StaticSub (a, b) -> static_arg_str a ^ " - " ^ static_arg_str b
+  | StaticMul (a, b) -> "(" ^ static_arg_str a ^ ") * (" ^ static_arg_str b ^ ")"
 
 let rec ty_str = function
   | TypeBool -> "bool"

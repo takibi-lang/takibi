@@ -1105,6 +1105,7 @@ index_static_arg:
   | a = static_arg { a }
   | a = index_static_arg PLUS b = static_arg { StaticAdd (a, b) }
   | a = index_static_arg MINUS b = static_arg { StaticSub (a, b) }
+  | a = index_static_arg TIMES b = static_arg { StaticMul (a, b) }
 
 view_static_args:
   | /* empty */ %prec BRACKET_ELSEWHERE { [] }

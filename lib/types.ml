@@ -96,8 +96,10 @@ and static_term =
   | SVar of static_var ref
   | SAdd of static_term * static_term
   | SSub of static_term * static_term
-    (* Linear arithmetic over integer statics (Ast.StaticAdd/StaticSub).
-       Compared by linear normal form in unify_static, never structurally. *)
+  | SMul of static_term * static_term
+    (* Polynomial arithmetic over integer statics (Ast.StaticAdd/Sub/Mul).
+       Compared by polynomial normal form in unify_static, never
+       structurally. *)
 
 and static_var =
   | SUnbound of int
@@ -186,10 +188,11 @@ let rec static_to_string t =
   | SVar { contents = SLink _ } -> assert false
   | SAdd (a, b) -> Printf.sprintf "%s + %s" (static_to_string a) (static_operand b)
   | SSub (a, b) -> Printf.sprintf "%s - %s" (static_to_string a) (static_operand b)
+  | SMul (a, b) -> Printf.sprintf "%s * %s" (static_operand a) (static_operand b)
 
 and static_operand t =
   match static_repr t with
-  | SAdd _ | SSub _ -> "(" ^ static_to_string t ^ ")"
+  | SAdd _ | SSub _ | SMul _ -> "(" ^ static_to_string t ^ ")"
   | _ -> static_to_string t
 
 (* Follow Link chains, applying path compression *)
@@ -317,6 +320,9 @@ let rec subst_static_term old replacement term =
             subst_static_term old replacement b)
   | _, SSub (a, b) ->
       SSub (subst_static_term old replacement a,
+            subst_static_term old replacement b)
+  | _, SMul (a, b) ->
+      SMul (subst_static_term old replacement a,
             subst_static_term old replacement b)
   | _, term -> term
 and subst_in_ty old replacement t =
@@ -642,7 +648,18 @@ and unify_mutable_pointee actual expected =
 
 and unify_static s1 s2 =
   match static_repr s1, static_repr s2 with
-  | (SAdd _ | SSub _), _ | _, (SAdd _ | SSub _) -> unify_static_linear s1 s2
+  | (SAdd _ | SSub _ | SMul _), _ | _, (SAdd _ | SSub _ | SMul _) ->
+      (try unify_static_poly s1 s2
+       with Unify_error _ as poly_error ->
+         (* The normal form cannot solve a product of two unknowns, as in
+            `n * 16` against a callee's `n' * S` before S is known. Two
+            terms of the same shape are then matched factor by factor. *)
+         match static_repr s1, static_repr s2 with
+         | SMul (a1, b1), SMul (a2, b2)
+         | SAdd (a1, b1), SAdd (a2, b2)
+         | SSub (a1, b1), SSub (a2, b2) ->
+             unify_static a1 a2; unify_static b1 b2
+         | _ -> raise poly_error)
   | SConst a, SConst b when a = b -> ()
   | SEnum (enum1, case1), SEnum (enum2, case2)
       when enum1 = enum2 && case1 = case2 -> ()
@@ -656,60 +673,92 @@ and unify_static s1 s2 =
       raise (Unify_error (Printf.sprintf "static value mismatch: %s vs %s"
         (static_to_string a) (static_to_string b)))
 
-(* Linear normal form: a constant plus integer coefficients on rigid
-   parameters and unbound variables. Two arithmetic statics are equal when
-   their difference normalizes to zero; when the difference has exactly one
-   unbound variable with coefficient 1 or -1, that variable is solved for.
-   Nothing else is attempted: no division, no products of statics, no
-   solver call. *)
-and static_linear t : int * (static_term * int) list =
-  let add_term key coef terms =
-    let same k = match static_repr k, static_repr key with
-      | SParam (a, _), SParam (b, _) -> a = b
-      | SVar a, SVar b -> a == b
-      | _ -> false in
-    match List.partition (fun (k, _) -> same k) terms with
-    | [], rest -> (key, coef) :: rest
-    | (k, c) :: _, rest ->
-        if c + coef = 0 then rest else (k, c + coef) :: rest in
-  let rec go sign t (c, terms) =
+(* Polynomial normal form: a sum of monomials with integer coefficients,
+   each monomial a sorted product of rigid parameters and unbound variables.
+   Two arithmetic statics are equal when their difference normalizes to
+   zero. When the difference has exactly one monomial that is a single
+   unbound variable with coefficient 1 or -1, and that variable appears in no
+   other monomial, it is solved for. Nothing else is attempted: no division,
+   no solver call. A product of two statics stays an opaque monomial until
+   one of them becomes a constant, which is what lets a generic `i * S`
+   match a concrete `i * 16`. *)
+and static_atom_key t =
+  match static_repr t with
+  | SParam (id, _) -> Some (0, id)
+  | SVar { contents = SUnbound id } -> Some (1, id)
+  | _ -> None
+
+and static_poly t : ((int * int) list * int) list * (int * int, static_term) Hashtbl.t =
+  let atoms = Hashtbl.create 8 in
+  let norm p =
+    let tbl = Hashtbl.create 8 in
+    List.iter (fun (m, c) ->
+      let cur = try Hashtbl.find tbl m with Not_found -> 0 in
+      Hashtbl.replace tbl m (cur + c)) p;
+    Hashtbl.fold (fun m c acc -> if c = 0 then acc else (m, c) :: acc) tbl []
+    |> List.sort compare in
+  let mul p q =
+    norm (List.concat_map (fun (m1, c1) ->
+      List.map (fun (m2, c2) -> (List.sort compare (m1 @ m2), c1 * c2)) q) p) in
+  let rec go t =
     match static_repr t with
-    | SConst n -> (c + sign * n, terms)
-    | SParam _ | SVar { contents = SUnbound _ } as k ->
-        (c, add_term k sign terms)
-    | SAdd (a, b) -> go sign b (go sign a (c, terms))
-    | SSub (a, b) -> go (-sign) b (go sign a (c, terms))
+    | SConst n -> norm [([], n)]
+    | (SParam _ | SVar { contents = SUnbound _ }) as a ->
+        (match static_atom_key a with
+         | Some k -> Hashtbl.replace atoms k a; [([k], 1)]
+         | None -> assert false)
+    | SAdd (a, b) -> norm (go a @ go b)
+    | SSub (a, b) -> norm (go a @ List.map (fun (m, c) -> (m, -c)) (go b))
+    | SMul (a, b) -> mul (go a) (go b)
     | SEnum (name, case) ->
         raise (Unify_error (Printf.sprintf
           "static enum case %s::%s cannot take part in arithmetic" name case))
     | SVar { contents = SLink _ } -> assert false in
-  go 1 t (0, [])
+  let p = go t in
+  (p, atoms)
 
-and static_of_linear (c, terms) =
-  let base = SConst c in
-  List.fold_left (fun acc (k, coef) ->
-    let rec times n acc op = if n = 0 then acc else times (n - 1) (op acc k) op in
-    if coef > 0 then times coef acc (fun a k -> SAdd (a, k))
-    else times (-coef) acc (fun a k -> SSub (a, k))) base terms
+and static_of_poly (p, atoms) =
+  let monomial m =
+    match m with
+    | [] -> SConst 1
+    | k :: rest ->
+        List.fold_left (fun acc k -> SMul (acc, Hashtbl.find atoms k))
+          (Hashtbl.find atoms k) rest in
+  let term m c = if m = [] then SConst (abs c)
+                 else if abs c = 1 then monomial m
+                 else SMul (SConst (abs c), monomial m) in
+  (* Print the positive monomials first, so a result reads `b + k - n`
+     rather than `0 - n + b + k`. *)
+  let positive, negative = List.partition (fun (_, c) -> c > 0) p in
+  match positive @ negative with
+  | [] -> SConst 0
+  | (m, c) :: rest ->
+      let first = if c > 0 then term m c else SSub (SConst 0, term m c) in
+      List.fold_left (fun acc (m, c) ->
+        if c > 0 then SAdd (acc, term m c) else SSub (acc, term m c))
+        first rest
 
-and unify_static_linear s1 s2 =
-  let (c, terms) = static_linear (SSub (s1, s2)) in
-  if c = 0 && terms = [] then ()
+and unify_static_poly s1 s2 =
+  let (p, atoms) = static_poly (SSub (s1, s2)) in
+  if p = [] then ()
   else
-    let unbound = List.filter (fun (k, coef) ->
-      (match static_repr k with SVar _ -> true | _ -> false)
-      && (coef = 1 || coef = -1)) terms in
-    match unbound with
-    | (k, coef) :: _ ->
-        (* k * coef + rest = 0, so k = -(rest) / coef with coef = +-1. *)
-        let rest = List.filter (fun (k', _) -> k' != k) terms in
-        let solution =
-          if coef = 1 then static_of_linear (-c, List.map (fun (k, c) -> (k, -c)) rest)
-          else static_of_linear (c, rest) in
-        (match static_repr k with
+    let solvable = List.filter (fun (m, c) ->
+      match m with
+      | [ (1, _) as k ] ->
+          (c = 1 || c = -1)
+          && List.for_all (fun (m', _) -> m' = m || not (List.mem k m')) p
+      | _ -> false) p in
+    match solvable with
+    | ([ k ], coef) :: _ ->
+        (* coef * k + rest = 0, so k = -rest / coef with coef = +-1. *)
+        let rest = List.filter (fun (m, _) -> m <> [ k ]) p in
+        let rest = if coef = 1 then List.map (fun (m, c) -> (m, -c)) rest
+                   else rest in
+        let solution = static_of_poly (rest, atoms) in
+        (match static_repr (Hashtbl.find atoms k) with
          | SVar r -> r := SLink solution
          | _ -> assert false)
-    | [] ->
+    | _ ->
         raise (Unify_error (Printf.sprintf "static value mismatch: %s vs %s"
           (static_to_string s1) (static_to_string s2)))
 
@@ -721,6 +770,7 @@ let rec static_of_ast scope = function
   | Ast.StaticEnum (name, case) -> SEnum (name, case)
   | Ast.StaticAdd (a, b) -> SAdd (static_of_ast scope a, static_of_ast scope b)
   | Ast.StaticSub (a, b) -> SSub (static_of_ast scope a, static_of_ast scope b)
+  | Ast.StaticMul (a, b) -> SMul (static_of_ast scope a, static_of_ast scope b)
 
 (* GitHub issue #239: reject *T where T is itself pointer-shaped, i.e. two
    levels of raw pointer indirection (written * *T, *align(N) *T, *io *T,
@@ -830,6 +880,7 @@ let instantiate_static_params ty =
     | SVar _ as t -> t
     | SAdd (a, b) -> SAdd (inst_static a, inst_static b)
     | SSub (a, b) -> SSub (inst_static a, inst_static b)
+    | SMul (a, b) -> SMul (inst_static a, inst_static b)
     | SParam (id, _) ->
         (match Hashtbl.find_opt subst id with
          | Some t -> t
@@ -903,6 +954,7 @@ and static_to_ast t =
   | SVar { contents = SLink _ } -> assert false
   | SAdd (a, b) -> Ast.StaticAdd (static_to_ast a, static_to_ast b)
   | SSub (a, b) -> Ast.StaticSub (static_to_ast a, static_to_ast b)
+  | SMul (a, b) -> Ast.StaticMul (static_to_ast a, static_to_ast b)
 
 (* -- Output structs passed to codegen ------------------------------------- *)
 

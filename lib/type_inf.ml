@@ -7052,7 +7052,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   in
   let rec check_static_arg loc sort = function
     | Ast.StaticInt n -> check_static_const loc sort n
-    | Ast.StaticAdd (a, b) | Ast.StaticSub (a, b) ->
+    | Ast.StaticAdd (a, b) | Ast.StaticSub (a, b) | Ast.StaticMul (a, b) ->
         (match sort with
          | Ast.TypeU8 | Ast.TypeU16 | Ast.TypeU32 | Ast.TypeU64
          | Ast.TypeUsize | Ast.TypeI8 | Ast.TypeI16 | Ast.TypeI32
@@ -7760,7 +7760,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                     "%s return annotation '@ %s::%s': a region annotation \
                      must name a static parameter, not an enum case"
                     value_kind enum_name case_name))
-              | Ast.StaticAdd _ | Ast.StaticSub _ ->
+              | Ast.StaticAdd _ | Ast.StaticSub _ | Ast.StaticMul _ ->
                   raise (TypeError (f.def_loc, Printf.sprintf
                     "%s return annotation: a region annotation must name a \
                      static parameter, not an arithmetic term" value_kind))

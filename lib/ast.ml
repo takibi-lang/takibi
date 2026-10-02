@@ -54,7 +54,8 @@ type static_arg =
        enums are not interchangeable. *)
   | StaticAdd of static_arg * static_arg
   | StaticSub of static_arg * static_arg
-    (* Linear arithmetic over integer static names, written only inside an
+  | StaticMul of static_arg * static_arg
+    (* Polynomial arithmetic over integer static names, written only inside an
        index list. Two terms are equal when their linear normal forms are
        (Types.unify_static). *)
 [@@deriving show]
