@@ -33,7 +33,7 @@ kernel/mm/process_image.tkb	159	0	process image records reached through liveness
 kernel/mm/user_memory.tkb	11	0	the user-range mint site: user addresses become slices here (#637 D)
 kernel/net/arp.tkb	7	0	frames and the ARP table (#637 F)
 kernel/net/icmp.tkb	13	0	frames (#637 F)
-kernel/net/tcp.tkb	337	0	connection payloads and frames reached through liveness escapes (#637 F)
+kernel/net/tcp.tkb	328	0	connection payloads and frames reached through liveness escapes (#637 F)
 kernel/platform/qemu/intc.tkb	0	19	GIC registers (#637 A)
 kernel/platform/qemu/timer_irq.tkb	0	2	GIC registers (#637 A)
 kernel/platform/qemu/uart.tkb	0	29	PL011 registers (#637 A)

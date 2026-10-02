@@ -2411,6 +2411,39 @@ let expect_region_error fragment src () =
       then Alcotest.failf "no entry contains %S: %s" fragment
           (String.concat " | " (List.map snd errors))
 
+(* A copy of kernel/net/tcp.tkb's frame access (GitHub issue #677): `late`
+   runs after the permission is given back. *)
+let frame_hold_use late =
+  "struct NetFrame { bytes: [u8; 1514]; }
+   variant FrameLink {
+     None;
+     Some(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]);
+   }
+   fn frame_bytes(slot: borrow RegionSlot(NetFrame)[p, k])
+       -> [u8; 1514..] @ p !{unsafe} {
+     return region_slot_at(slot).bytes as [u8; 1514..];
+   }
+   fn fill(frame: borrow [u8; 1514..]) { frame[0] = 1; }
+   fn hold() -> FrameLink { return FrameLink::None; }
+   fn unhold(link: sink FrameLink) !{unsafe} {
+     match link {
+       FrameLink::None => {}
+       FrameLink::Some(slot) => { region_slot_abandon(slot); }
+     }
+   }
+   fn send() -> bool !{unsafe} {
+     let FrameLink::Some(tx) = hold() else {
+       FrameLink::None => { return false; }
+     };
+     let frame = frame_bytes(tx);
+     fill(frame);
+     let ip = frame[14..<34];
+     ip[0] = 2;
+     unhold(FrameLink::Some(tx));
+     " ^ late ^ "
+     return true;
+   }"
+
 let table_use body =
   "struct Node { key: usize; value: usize; }
    let mut pool_a: [Node; 4];
@@ -3281,6 +3314,18 @@ let infer_tests = [
       "let node = region_slot_at(slot);
        let mut h: RegionHandle(Node) = region_give(a, slot);
        node.key = 1;"));
+
+  (* GitHub issue #677: the TCP frame shape. A connection parks each
+     frame's slot permission in a field (an existential FrameLink), a user
+     takes it out, borrows the bytes from it and puts it back; a slice of
+     those bytes kept past the put does not compile. *)
+  Alcotest.test_case "region pool: frame bytes held while the slot is out" `Quick
+    (fun () -> ignore (infer_regions (frame_hold_use "")));
+
+  Alcotest.test_case "region pool: frame bytes used after the slot went back"
+    `Quick
+    (expect_region_error "cannot be used after" (frame_hold_use
+      "ip[1] = 3;"));
 
   Alcotest.test_case "region table: a slot freed and still used" `Quick
     (expect_region_error "already consumed" (table_use

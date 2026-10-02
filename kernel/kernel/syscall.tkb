@@ -282,8 +282,8 @@ private fn syscall_scratch_here() -> *SyscallScratch {
 // arrays here (step 2), and syscall_socket_buffer/syscall_inetd_response
 // two more, at 1460 bytes per connection each (step 4b). All six are gone.
 // The scalars are fields of kernel/net/tcp.tkb's TcpConnection; the two
-// buffers are pooled NetFrames owned there, reached through
-// tcp_connection_rx_slice()/tcp_connection_inetd_slice(). **No storage in
+// buffers are pooled NetFrames owned there, reached by holding the frame's
+// permission (tcp_connection_frame_hold, #677). **No storage in
 // this file is keyed by a connection index any more.** TCP_CONNECTION_MAX
 // itself still appears, as the refinement on slot values passed across the
 // tcp.tkb boundary ({0..<TCP_CONNECTION_MAX as usize}) and the loops that
@@ -1864,10 +1864,24 @@ fn syscall_write_segment(fd: usize, address: usize, length: usize)
                         return SyscallIoResult::NetWait;
                     }
                     NetworkCapabilityTakeResult::Ready(ready) => {
-                    let socket_buffers = tcp_connection_rx_slice(owner);
+                    let FrameLink::Some(rx) =
+                            tcp_connection_frame_hold(owner, TcpFrameRole::Rx) else {
+                        FrameLink::None => {
+                            tcp_frame_missing();
+                            tcp_connection_put(owner);
+                            match network_capability_put(ready) {
+                                NetworkCapabilityPutResult::Stored => {}
+                                NetworkCapabilityPutResult::Conflict => {}
+                            }
+                            return SyscallIoResult::Errno(LINUX_EINVAL);
+                        }
+                    };
+                    let socket_buffers = tcp_frame_bytes(rx);
                     let destination_base: *u8 = socket_buffers as *u8;
                     match user_range_check_read(kernel_process_current_root(), address, amount) {
                         UserReadRangeResult::Fault => {
+                            tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
+                                                        FrameLink::Some(rx));
                             tcp_connection_put(owner);
                             match network_capability_put(ready) {
                                 NetworkCapabilityPutResult::Stored => {}
@@ -1880,10 +1894,13 @@ fn syscall_write_segment(fd: usize, address: usize, length: usize)
                                 range, destination_base, amount);
                         }
                     }
-                    match kernel_tcp_send_received(
+                    let sent = kernel_tcp_send_received(
                             owner, ready,
                             socket_buffers[0..<1460],
-                            received_length, amount) {
+                            received_length, amount);
+                    tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
+                                                FrameLink::Some(rx));
+                    match sent {
                         KernelTcpSendResult::Invalid(after_invalid) => {
                             match network_capability_put(after_invalid) {
                                 NetworkCapabilityPutResult::Stored => {
@@ -1937,11 +1954,21 @@ fn syscall_write_segment(fd: usize, address: usize, length: usize)
                         tcp_connection_put(owner);
                         return SyscallIoResult::Errno(LINUX_EINVAL);
                     }
+                    let FrameLink::Some(inetd) =
+                            tcp_connection_frame_hold(owner, TcpFrameRole::Inetd) else {
+                        FrameLink::None => {
+                            tcp_frame_missing();
+                            tcp_connection_put(owner);
+                            return SyscallIoResult::Errno(LINUX_EINVAL);
+                        }
+                    };
                     let response_base: *u8 =
-                        (tcp_connection_inetd_slice(owner) as *u8) +
+                        (tcp_frame_bytes(inetd) as *u8) +
                         (conn.inetd_response_length as isize);
                     match user_range_check_read(kernel_process_current_root(), address, length) {
                         UserReadRangeResult::Fault => {
+                            tcp_connection_frame_unhold(owner, TcpFrameRole::Inetd,
+                                                        FrameLink::Some(inetd));
                             tcp_connection_put(owner);
                             return SyscallIoResult::Errno(LINUX_EFAULT);
                         }
@@ -1950,6 +1977,8 @@ fn syscall_write_segment(fd: usize, address: usize, length: usize)
                                 copy_from_user_raw(range, response_base, length);
                         }
                     }
+                    tcp_connection_frame_unhold(owner, TcpFrameRole::Inetd,
+                                                FrameLink::Some(inetd));
                     conn.inetd_response_length = conn.inetd_response_length + length;
                     tcp_connection_put(owner);
                     return SyscallIoResult::Transferred(length);
@@ -2042,11 +2071,21 @@ fn syscall_read_segment(fd: usize, address: usize, requested: usize)
                        conn.socket_buffer_length - conn.socket_buffer_offset;
                    let mut buffered: usize = requested;
                    if (buffered > available) { buffered = available; }
+                   let FrameLink::Some(rx) =
+                           tcp_connection_frame_hold(owner, TcpFrameRole::Rx) else {
+                       FrameLink::None => {
+                           tcp_frame_missing();
+                           tcp_connection_put(owner);
+                           return SyscallIoResult::Errno(LINUX_EINVAL);
+                       }
+                   };
                    let buffered_base: *u8 =
-                       (tcp_connection_rx_slice(owner) as *u8) +
+                       (tcp_frame_bytes(rx) as *u8) +
                        (conn.socket_buffer_offset as isize);
                    match user_range_check_write(kernel_process_current_root(), address, buffered) {
                        UserWriteRangeResult::Fault => {
+                           tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
+                                                       FrameLink::Some(rx));
                            tcp_connection_put(owner);
                            return SyscallIoResult::Errno(LINUX_EFAULT);
                        }
@@ -2055,6 +2094,8 @@ fn syscall_read_segment(fd: usize, address: usize, requested: usize)
                                copy_to_user_raw(range, buffered_base, buffered);
                        }
                    }
+                   tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
+                                               FrameLink::Some(rx));
                    conn.socket_buffer_offset = conn.socket_buffer_offset + buffered;
                    tcp_connection_put(owner);
                    workload_peer_socket_served(false);
@@ -2067,9 +2108,24 @@ fn syscall_read_segment(fd: usize, address: usize, requested: usize)
                  }
                  NetworkCapabilityTakeResult::Ready(r) => { r }
                };
-               let socket_buffers = tcp_connection_rx_slice(owner);
-               match kernel_tcp_receive_once(
-                    owner, ready, socket_buffers[0..<1460]) {
+               let FrameLink::Some(rx) =
+                       tcp_connection_frame_hold(owner, TcpFrameRole::Rx) else {
+                   FrameLink::None => {
+                       tcp_frame_missing();
+                       tcp_connection_put(owner);
+                       match network_capability_put(ready) {
+                           NetworkCapabilityPutResult::Stored => {}
+                           NetworkCapabilityPutResult::Conflict => {}
+                       }
+                       return SyscallIoResult::Errno(LINUX_EINVAL);
+                   }
+               };
+               let socket_buffers = tcp_frame_bytes(rx);
+               let received_once = kernel_tcp_receive_once(
+                    owner, ready, socket_buffers[0..<1460]);
+               tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
+                                           FrameLink::Some(rx));
+               match received_once {
                 KernelTcpReceiveResult::Pending(next) => {
                     match network_capability_put(next) {
                         NetworkCapabilityPutResult::Stored => {
@@ -2112,10 +2168,23 @@ fn syscall_read_segment(fd: usize, address: usize, requested: usize)
                     tcp_connection_of(owner).socket_buffer_length = received;
                     let mut amount: usize = received;
                     if (amount > requested) { amount = requested; }
-                    let source_base: *u8 =
-                        tcp_connection_rx_slice(owner) as *u8;
+                    let FrameLink::Some(received_rx) =
+                            tcp_connection_frame_hold(owner, TcpFrameRole::Rx) else {
+                        FrameLink::None => {
+                            tcp_frame_missing();
+                            match network_capability_put(next) {
+                                NetworkCapabilityPutResult::Stored => {}
+                                NetworkCapabilityPutResult::Conflict => {}
+                            }
+                            tcp_connection_put(owner);
+                            return SyscallIoResult::Errno(LINUX_EINVAL);
+                        }
+                    };
+                    let source_base: *u8 = tcp_frame_bytes(received_rx) as *u8;
                     match user_range_check_write(kernel_process_current_root(), address, amount) {
                         UserWriteRangeResult::Fault => {
+                            tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
+                                                        FrameLink::Some(received_rx));
                             match network_capability_put(next) {
                                 NetworkCapabilityPutResult::Stored => {}
                                 NetworkCapabilityPutResult::Conflict => {}
@@ -2128,6 +2197,8 @@ fn syscall_read_segment(fd: usize, address: usize, requested: usize)
                                 copy_to_user_raw(range, source_base, amount);
                         }
                     }
+                    tcp_connection_frame_unhold(owner, TcpFrameRole::Rx,
+                                                FrameLink::Some(received_rx));
                     tcp_connection_of(owner).socket_buffer_offset = amount;
                     match network_capability_put(next) {
                         NetworkCapabilityPutResult::Stored => {
@@ -5712,12 +5783,26 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 return SyscallAction::Resume(LINUX_EAGAIN);
             }
             NetworkCapabilityTakeResult::Ready(ready) => {
-                let inetd_responses =
-                    tcp_connection_inetd_slice(owner);
-                match kernel_tcp_send_received(
+                let FrameLink::Some(inetd) =
+                        tcp_connection_frame_hold(owner, TcpFrameRole::Inetd) else {
+                    FrameLink::None => {
+                        tcp_frame_missing();
+                        match network_capability_put(ready) {
+                            NetworkCapabilityPutResult::Stored => {}
+                            NetworkCapabilityPutResult::Conflict => {}
+                        }
+                        tcp_connection_put(owner);
+                        return SyscallAction::Resume(LINUX_EINVAL);
+                    }
+                };
+                let inetd_responses = tcp_frame_bytes(inetd);
+                let sent = kernel_tcp_send_received(
                         owner, ready, inetd_responses[0..<1460],
                         received_length,
-                        tcp_connection_of(owner).inetd_response_length) {
+                        tcp_connection_of(owner).inetd_response_length);
+                tcp_connection_frame_unhold(owner, TcpFrameRole::Inetd,
+                                            FrameLink::Some(inetd));
+                match sent {
                     KernelTcpSendResult::Invalid(after_invalid) => {
                         match network_capability_put(after_invalid) {
                             NetworkCapabilityPutResult::Stored => { }
@@ -7113,9 +7198,19 @@ fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
     let slot: usize = tcp_connection_of(owner).self_address;
     let generation: usize = tcp_connection_identity(owner);
     tcp_connection_of(owner).connection_open = true;
-    let rx = tcp_connection_rx_slice(owner);
-    rx[0] = 0x61;
-    rx[1] = 0x62;
+    let FrameLink::Some(rx) =
+            tcp_connection_frame_hold(owner, TcpFrameRole::Rx) else {
+        FrameLink::None => {
+            tcp_frame_missing();
+            tcp_connection_free(owner);
+            kernel_connected_fd_clear(saved_fd);
+            return false;
+        }
+    };
+    let rx_bytes = tcp_frame_bytes(rx);
+    rx_bytes[0] = 0x61;
+    rx_bytes[1] = 0x62;
+    tcp_connection_frame_unhold(owner, TcpFrameRole::Rx, FrameLink::Some(rx));
     tcp_connection_of(owner).socket_buffer_length = 2;
     tcp_connection_put(owner);
     kernel_connected_fd_clear(1);
@@ -7193,9 +7288,21 @@ fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
         TcpConnectionTakeResult::Missing => { ok = false; }
         TcpConnectionTakeResult::Ready(after) => {
             let conn = tcp_connection_of(after);
-            let response = tcp_connection_inetd_slice(after);
+            let FrameLink::Some(inetd) =
+                    tcp_connection_frame_hold(after, TcpFrameRole::Inetd) else {
+                FrameLink::None => {
+                    tcp_frame_missing();
+                    tcp_connection_free(after);
+                    kernel_connected_fd_clear(1);
+                    kernel_connected_fd_clear(saved_fd);
+                    return false;
+                }
+            };
+            let response = tcp_frame_bytes(inetd);
             if (conn.inetd_response_length != 3 || response[0] != 0x61 ||
                 response[1] != 0x62 || response[2] != 0x61) { ok = false; }
+            tcp_connection_frame_unhold(after, TcpFrameRole::Inetd,
+                                        FrameLink::Some(inetd));
             tcp_connection_free(after);
         }
     }

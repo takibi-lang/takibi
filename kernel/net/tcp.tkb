@@ -182,15 +182,6 @@ struct TcpConnection {
     // records which connection it belongs to, and with no index left there
     // is nothing else to record.
     self_address: usize;
-    // Step 4: the pool slot address of this connection's transmit frame,
-    // 0 if it has none. The OWNER is `tx` below; this is how the bytes are
-    // found, and it is deliberately an erased address rather than a second
-    // copy of the handle -- validated by the pool on every use.
-    tx_frame: usize;
-    // Step 4b, same shape: the receive buffer read(2) drains, and the
-    // response buffer inetd-mode write(2) appends to.
-    rx_frame: usize;
-    inetd_frame: usize;
     connection_open: bool;
     socket_buffer_length: usize;
     socket_buffer_offset: usize;
@@ -364,8 +355,8 @@ fn kernel_tcp_ddb_connection_pending() -> NetPendingState !{unsafe} {
 
 // Reached only when an address that should name a live connection does
 // not. A real struct rather than a null pointer so the impossible case is
-// harmless instead of undefined, exactly as tcp_frame_absent_fallback is
-// for frames. Private because it holds stable owner storage.
+// harmless instead of undefined. Private because it holds stable owner
+// storage.
 private let mut tcp_connection_absent_fallback: TcpConnection;
 
 // GitHub issue #410: the two absent-slot fallbacks in this file logged every
@@ -648,13 +639,6 @@ private fn tcp_frame_pool_return_empty(
     }
 }
 
-// Reached only when a frame is missing from a connection that should have
-// one -- which the acquire/release pairing below is meant to make
-// impossible. A real buffer rather than a null pointer so that the
-// impossible case is harmless instead of undefined: the caller writes a
-// segment nobody sends, rather than faulting or scribbling on whatever
-// address 0 maps to. Every arrival is logged.
-private let mut tcp_frame_absent_fallback: [u8; 1514];
 
 fn tcp_frame_lock(m: *Mutex @ address) -> FrameGuard[address]
         !{acquires_lock_40_frame, lock_guard_40_frame} {
@@ -728,7 +712,7 @@ private fn tcp_pool_remove_expected(result: IntrusivePoolRemoveResult,
 // recycled slot would otherwise put a previous connection's bytes on the
 // wire past the length the caller meant to send -- and the same argument
 // covers a receive buffer read back past its recorded length.
-fn tcp_frame_take() -> (FrameLink, usize) !{unsafe} {
+fn tcp_frame_take() -> (FrameLink, bool) !{unsafe} {
     let guard = tcp_frame_pool_lock(&tcp_frame_pool);
     let mut attempts: usize = 0;
     while (attempts < 2) {
@@ -736,11 +720,8 @@ fn tcp_frame_take() -> (FrameLink, usize) !{unsafe} {
         match region_alloc(guard) {
             RegionAlloc(NetFrame)::Allocated(frame) => {
                 region_slot_zero(frame);
-                // The address comes back beside the link: the slice
-                // accessors still reach a frame by address (#677).
-                let address: usize = region_slot_address(frame);
                 tcp_frame_pool_unlock(guard);
-                return (FrameLink::Some(frame), address);
+                return (FrameLink::Some(frame), true);
             }
             RegionAlloc(NetFrame)::Full => {
                 match page_alloc_contiguous(TCP_FRAME_CHUNK_PAGES,
@@ -769,7 +750,7 @@ fn tcp_frame_take() -> (FrameLink, usize) !{unsafe} {
     tcp_frame_pool_unlock(guard);
     kernel_boot_log_resource_exhausted(
         "TCP frame pool (out of pages)" as *u8, 0);
-    return (FrameLink::None, 0);
+    return (FrameLink::None, false);
 }
 
 // Hands this connection its three frames, or returns false having released
@@ -778,19 +759,19 @@ fn tcp_frame_take() -> (FrameLink, usize) !{unsafe} {
 // with no frame to transmit from is not one this stack can serve.
 fn tcp_connection_frames_acquire(conn: borrow *TcpConnection) -> bool !{unsafe} {
     mutex_init(&conn.frames_mutex);
-    let (tx, tx_address) = tcp_frame_take();
-    if (tx_address == 0) {
+    let (tx, tx_taken) = tcp_frame_take();
+    if (tx_taken == false) {
         tcp_frame_release_link(tx);
         return false;
     }
-    let (rx, rx_address) = tcp_frame_take();
-    if (rx_address == 0) {
+    let (rx, rx_taken) = tcp_frame_take();
+    if (rx_taken == false) {
         tcp_frame_release_link(rx);
         tcp_frame_release_link(tx);
         return false;
     }
-    let (inetd, inetd_address) = tcp_frame_take();
-    if (inetd_address == 0) {
+    let (inetd, inetd_taken) = tcp_frame_take();
+    if (inetd_taken == false) {
         tcp_frame_release_link(inetd);
         tcp_frame_release_link(rx);
         tcp_frame_release_link(tx);
@@ -815,9 +796,6 @@ fn tcp_connection_frames_acquire(conn: borrow *TcpConnection) -> bool !{unsafe} 
     tcp_frame_unlock(inetd_guard, &conn.frames_mutex);
     tcp_frame_release_displaced(displaced_inetd);
 
-    conn.tx_frame = tx_address;
-    conn.rx_frame = rx_address;
-    conn.inetd_frame = inetd_address;
     return true;
 }
 
@@ -852,54 +830,90 @@ fn tcp_connection_frames_release(conn: *TcpConnection) !{unsafe} {
         inetd_guard, &conn.frames_mutex, conn.inetd, FrameLink::None);
     tcp_frame_unlock(inetd_guard, &conn.frames_mutex);
     tcp_frame_release_link(held_inetd);
-
-    conn.tx_frame = 0;
-    conn.rx_frame = 0;
-    conn.inetd_frame = 0;
 }
 
-// The transmit frame as a slice, reached by ADDRESS rather than by taking
-// the parked handle out and putting it back. The owner stays parked --
-// what it carries is the obligation to free, which nothing here wants to
-// borrow; what a caller wants is the bytes, and
-// intrusive_pool_probe_slot validates the address and gates the payload
-// behind a view it has to spend. So ownership stays linear and access
-// stays cheap, without either one pretending to be the other.
-fn tcp_frame_slice(address: usize) -> [u8; 1514..] !{unsafe} {
-    let guard = tcp_frame_pool_lock(&tcp_frame_pool);
-    let held: bool = region_pool_holds(guard, address);
-    tcp_frame_pool_unlock(guard);
-    if (held == false) {
-        kernel_boot_log("tcp frames: frame missing\n");
-        tcp_absent_fallback_note();
-        return tcp_frame_absent_fallback as [u8; 1514..];
-    }
-    // GitHub issue #677: the one place a frame is reached by address. The
-    // address was checked to be an Out slot of the pool just above; its
-    // connection keeps the slot's permission parked, which is what keeps it
-    // alive, and #677 replaces this with access through that permission.
-    let frame: *NetFrame = unsafe { address as *NetFrame };
-    return frame.bytes as [u8; 1514..];
+// GitHub issue #677: a frame's bytes are reached only through its slot's
+// permission. A connection's three frames each have a role, which names the
+// field the permission is parked in.
+enum TcpFrameRole: u8 { Tx; Rx; Inetd; }
+
+// Takes a frame's permission out of its field, leaving None there, so the
+// caller can borrow the bytes from it (tcp_frame_bytes) and must put it back
+// (tcp_connection_frame_unhold) before it returns -- the permission is
+// linear, so a path that forgets does not compile, and a slice used after
+// the permission went back does not either. The caller holds the
+// connection owner, and with it the connection lock, for the whole window:
+// nothing else reaches this field meanwhile, except a nested hold of the
+// SAME role on this path, which finds None and is told so.
+fn tcp_connection_frame_hold(owner: borrow TcpConnectionOwner[connection],
+                             role: TcpFrameRole) -> FrameLink !{unsafe} {
+    let conn: *TcpConnection = tcp_connection_of(owner);
+    let guard = tcp_frame_lock(&conn.frames_mutex);
+    let held: FrameLink = match role {
+        TcpFrameRole::Tx => {
+            stable_replace(guard, &conn.frames_mutex, conn.tx, FrameLink::None)
+        }
+        TcpFrameRole::Rx => {
+            stable_replace(guard, &conn.frames_mutex, conn.rx, FrameLink::None)
+        }
+        TcpFrameRole::Inetd => {
+            stable_replace(guard, &conn.frames_mutex, conn.inetd, FrameLink::None)
+        }
+    };
+    tcp_frame_unlock(guard, &conn.frames_mutex);
+    return held;
 }
 
-fn tcp_connection_tx_slice(owner: borrow TcpConnectionOwner[connection])
-        -> [u8; 1514..] @ connection !{unsafe} {
-    return tcp_frame_slice(tcp_connection_of(owner).tx_frame);
+fn tcp_connection_frame_unhold(owner: borrow TcpConnectionOwner[connection],
+                               role: TcpFrameRole,
+                               link: sink FrameLink) !{unsafe} {
+    let conn: *TcpConnection = tcp_connection_of(owner);
+    let guard = tcp_frame_lock(&conn.frames_mutex);
+    let displaced: FrameLink = match role {
+        TcpFrameRole::Tx => {
+            stable_replace(guard, &conn.frames_mutex, conn.tx, link)
+        }
+        TcpFrameRole::Rx => {
+            stable_replace(guard, &conn.frames_mutex, conn.rx, link)
+        }
+        TcpFrameRole::Inetd => {
+            stable_replace(guard, &conn.frames_mutex, conn.inetd, link)
+        }
+    };
+    tcp_frame_unlock(guard, &conn.frames_mutex);
+    tcp_frame_release_displaced(displaced);
 }
 
-// The two syscall-side buffers. 1460 rather than 1514 because that is what
-// the callers bound their lengths by; the frame behind them is one MTU, so
-// the extra 54 bytes are headroom nobody addresses, not a second size.
-fn tcp_connection_rx_slice(owner: borrow TcpConnectionOwner[connection])
-        -> [u8; 1460..] @ connection !{unsafe} {
-    let frame = tcp_frame_slice(tcp_connection_of(owner).rx_frame);
-    return frame[0..<1460];
+// The frame's bytes, tied to the borrowed permission: once it is given back
+// a use of the slice, or of anything cut from it, does not compile.
+fn tcp_frame_bytes(slot: borrow RegionSlot(NetFrame)[p, k])
+        -> [u8; 1514..] @ p !{unsafe} {
+    return region_slot_at(slot).bytes as [u8; 1514..];
 }
 
-fn tcp_connection_inetd_slice(owner: borrow TcpConnectionOwner[connection])
-        -> [u8; 1460..] @ connection !{unsafe} {
-    let frame = tcp_frame_slice(tcp_connection_of(owner).inetd_frame);
-    return frame[0..<1460];
+// Copies `source` to the start of one of the connection's frames: the
+// whole of a short access, held and given back here. False if the source
+// is longer than a frame or the frame is missing.
+fn tcp_connection_frame_fill(owner: borrow TcpConnectionOwner[connection],
+                             role: TcpFrameRole, source: borrow []u8)
+        -> bool !{unsafe} {
+    let length: usize = source.len;
+    if (length > 1514) { return false; }
+    let FrameLink::Some(slot) = tcp_connection_frame_hold(owner, role) else {
+        FrameLink::None => { tcp_frame_missing(); return false; }
+    };
+    let frame = tcp_frame_bytes(slot);
+    slice_copy(frame[0..<length], source);
+    tcp_connection_frame_unhold(owner, role, FrameLink::Some(slot));
+    return true;
+}
+
+// A hold that found no frame: a connection always has its three from
+// tcp_connection_alloc until it is freed, so this is a nested hold or a
+// bug. The caller gives up on the operation rather than touching anything.
+fn tcp_frame_missing() {
+    kernel_boot_log("tcp frames: frame missing\n");
+    tcp_absent_fallback_note();
 }
 
 fn tcp_connection_owner_new(slot: usize, generation: usize @ connection)
@@ -1686,7 +1700,8 @@ fn pending_tcp_reset_all(connection_address: usize) !{unsafe} {
 // real entry, since arming that against "not queued" would mean the
 // frame is never transmitted at all.
 fn pending_tcp_record(connection_owner: borrow TcpConnectionOwner[connection],
-                      kind: PendingTcpKind, frame_length: usize)
+                      kind: PendingTcpKind, frame: borrow [u8; 1514..],
+                      frame_length: usize)
         -> usize !{unsafe} {
     let conn: *TcpConnection = tcp_connection_of(connection_owner);
     let pool_guard = intrusive_pool_lock(&tcp_retx_pool);
@@ -1734,8 +1749,7 @@ fn pending_tcp_record(connection_owner: borrow TcpConnectionOwner[connection],
             init_retry.sent_at = read_cntpct();
             init_retry.retries = 0;
             retx_unlock(init_guard, &entry.mutex);
-            slice_copy(entry.frame as []u8,
-                       tcp_connection_tx_slice(connection_owner));
+            slice_copy(entry.frame as []u8, frame[0..<1514]);
 
             // Append at the tail, keeping the queue oldest-first: reverse,
             // push, reverse back. Two extra walks of a chain that holds
@@ -1796,6 +1810,10 @@ fn pending_tcp_chain_probe() -> bool !{unsafe} {
            intrusive_pool_live_count(&tcp_retx_pool) == 0;
 }
 
+// The probe checks the chain, not the bytes a segment carries, so its
+// segments copy this rather than a connection's transmit frame.
+private let mut pending_tcp_probe_frame: [u8; 1514];
+
 fn pending_tcp_chain_probe_body(owner_a: borrow TcpConnectionOwner[first],
                                  owner_b: borrow TcpConnectionOwner[second])
         -> bool !{unsafe} {
@@ -1809,11 +1827,13 @@ fn pending_tcp_chain_probe_body(owner_a: borrow TcpConnectionOwner[first],
     let mut queued: usize = 0;
     for i: usize in 0..<5 {
         if (pending_tcp_record(owner_a, PendingTcpKind::Data,
+                               pending_tcp_probe_frame as [u8; 1514..],
                                1000 + i) != 0) {
             queued = queued + 1;
         }
         if (i == 2) {
-            if (pending_tcp_record(owner_b, PendingTcpKind::Fin, 9999)
+            if (pending_tcp_record(owner_b, PendingTcpKind::Fin,
+                                   pending_tcp_probe_frame as [u8; 1514..], 9999)
                     == 0) {
                 return false;
             }
@@ -2673,7 +2693,14 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection],
         conn.remote_ip as []u8;
     let remote_mac_bytes =
         conn.remote_mac as []u8;
-    let stream_frames = tcp_connection_tx_slice(owner);
+    let FrameLink::Some(tx) =
+            tcp_connection_frame_hold(owner, TcpFrameRole::Tx) else {
+        FrameLink::None => {
+            tcp_frame_missing();
+            return KernelTcpAcceptStep::GaveUp(ready);
+        }
+    };
+    let stream_frames = tcp_frame_bytes(tx);
     // The port this handshake is for. kernel_tcp_accept_begin wrote it and
     // nothing changes it, so reading it back is what makes this function
     // need no argument for it -- which is the point: a step resumed by a
@@ -2760,11 +2787,10 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection],
                                             payload_length <= 1460) {
                                             let source_payload_end: usize =
                                                 54 + payload_length;
-                                            let receive_buffer =
-                                                tcp_connection_rx_slice(owner);
-                                            slice_copy(
-                                                receive_buffer[0..<payload_length],
-                                                frame[54..<source_payload_end]);
+                                            let _filled: bool =
+                                                tcp_connection_frame_fill(
+                                                    owner, TcpFrameRole::Rx,
+                                                    frame[54..<source_payload_end]);
                                             conn.rcv_nxt = conn.rcv_nxt +
                                                 (payload_length as u32);
                                             conn.received_length = payload_length;
@@ -2807,9 +2833,13 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection],
                     }
                 }
                 if (accepted) {
+                    tcp_connection_frame_unhold(owner, TcpFrameRole::Tx,
+                                                FrameLink::Some(tx));
                     return KernelTcpAcceptStep::Accepted(ready);
                 }
                 if (routed) {
+                    tcp_connection_frame_unhold(owner, TcpFrameRole::Tx,
+                                                FrameLink::Some(tx));
                     return KernelTcpAcceptStep::Pending(ready);
                 }
             }
@@ -2852,6 +2882,7 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection],
             conn.state = ConnState::Listen;
             tcp_injected_syn_pending = false;
         }
+    tcp_connection_frame_unhold(owner, TcpFrameRole::Tx, FrameLink::Some(tx));
     conn.accept_syn_ack_sent_at = syn_ack_sent_at;
     conn.accept_syn_ack_retries = syn_ack_retries;
     if ((read_cntpct() - conn.accept_start_at) >= conn.accept_deadline_ticks) {
@@ -2949,13 +2980,12 @@ fn tcp_route_received_segment(current_address: usize,
                                 // final ACK; preserve it for the new worker.
                                 target.state = ConnState::Established;
                                 if (payload_length > 0) {
-                                    let target_buffer =
-                                        tcp_connection_rx_slice(target_owner);
                                     let source_payload_end: usize =
                                         54 + payload_length;
-                                    slice_copy(
-                                        target_buffer[0..<payload_length],
-                                        frame[54..<source_payload_end]);
+                                    let _filled: bool =
+                                        tcp_connection_frame_fill(
+                                            target_owner, TcpFrameRole::Rx,
+                                            frame[54..<source_payload_end]);
                                     target.rcv_nxt = target.rcv_nxt +
                                         (payload_length as u32);
                                     target.received_length = payload_length;
@@ -2990,11 +3020,10 @@ fn tcp_route_received_segment(current_address: usize,
                                     tcp_connection_put(target_owner);
                                     return TcpReceiveRouteResult::Ack;
                                 }
-                                let target_buffer =
-                                    tcp_connection_rx_slice(target_owner);
-                                slice_copy(
-                                    target_buffer[0..<payload_length],
-                                    frame[54..<source_payload_end]);
+                                let _filled: bool =
+                                    tcp_connection_frame_fill(
+                                        target_owner, TcpFrameRole::Rx,
+                                        frame[54..<source_payload_end]);
                                 target.rcv_nxt = target.rcv_nxt +
                                     (payload_length as u32);
                                 target.received_length = payload_length;
@@ -3151,7 +3180,14 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection],
     if (payload_length >= 1 && payload_length <= 1460 &&
         received_length >= 1 && received_length <= 1460) {
         let length: usize = payload_length;
-        let frame_bytes = tcp_connection_tx_slice(owner);
+        let FrameLink::Some(tx) =
+                tcp_connection_frame_hold(owner, TcpFrameRole::Tx) else {
+            FrameLink::None => {
+                tcp_frame_missing();
+                return KernelTcpSendResult::Invalid(ready);
+            }
+        };
+        let frame_bytes = tcp_frame_bytes(tx);
         slice_copy(frame_bytes[0..<6],
                    remote_mac_bytes[0..<6]);
         slice_copy(frame_bytes[6..<12], our_mac as []u8);
@@ -3198,7 +3234,7 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection],
         conn.data_segment_counter =
             conn.data_segment_counter + 1;
         let this_entry: usize = pending_tcp_record(
-            owner, PendingTcpKind::Data, frame_length);
+            owner, PendingTcpKind::Data, frame_bytes, frame_length);
         // GitHub issue #295: this_entry == 0 means the segment could not
         // be queued (pending_tcp_record's own doc comment) -- there is
         // nothing to ever retransmit from, so the deliberate-drop test
@@ -3216,10 +3252,13 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection],
             // peer-ack path, the same one every other segment uses.
             tcp_drop_data_segment_index = -1;
             conn.injected_data_entry = this_entry;
+            tcp_connection_frame_unhold(owner, TcpFrameRole::Tx,
+                                        FrameLink::Some(tx));
             return KernelTcpSendResult::Sent(serviced);
         }
-        return KernelTcpSendResult::Sent(net_transmit_ready(
-            serviced, frame_bytes, frame_length as i32));
+        let sent = net_transmit_ready(serviced, frame_bytes, frame_length as i32);
+        tcp_connection_frame_unhold(owner, TcpFrameRole::Tx, FrameLink::Some(tx));
+        return KernelTcpSendResult::Sent(sent);
     }
     return KernelTcpSendResult::Invalid(ready);
 }
@@ -3244,7 +3283,14 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection],
         conn.remote_ip as []u8;
     let remote_mac_bytes =
         conn.remote_mac as []u8;
-    let frame = tcp_connection_tx_slice(owner);
+    let FrameLink::Some(tx) =
+            tcp_connection_frame_hold(owner, TcpFrameRole::Tx) else {
+        FrameLink::None => {
+            tcp_frame_missing();
+            return KernelTcpCloseResult::Closed(ready);
+        }
+    };
+    let frame = tcp_frame_bytes(tx);
     slice_copy(frame[0..<6],
                remote_mac_bytes[0..<6]);
     slice_copy(frame[6..<12], our_mac as []u8);
@@ -3278,7 +3324,7 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection],
     fix_tcp_checksum(ip, tcp);
     conn.snd_nxt = conn.snd_nxt + 1;
     let fin_entry: usize = pending_tcp_record(
-            owner, PendingTcpKind::Fin, 54);
+            owner, PendingTcpKind::Fin, frame, 54);
     // GitHub issue #295: same reasoning as the Data-segment send site --
     // fin_entry == 0 means nothing tracks this FIN, so the deliberate-drop
     // injection must not arm (that would skip the only transmission this
@@ -3289,6 +3335,7 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection],
     } else {
         ready = net_transmit_ready(ready, frame, 54);
     }
+    tcp_connection_frame_unhold(owner, TcpFrameRole::Tx, FrameLink::Some(tx));
     let start: i64 = read_cntpct();
     let counter_frequency: i64 = read_cntfrq();
     let deadline_ticks: i64 = counter_frequency * 5;
