@@ -36,6 +36,7 @@ whether a row has gone quiet or has merely stopped being looked for.
 | `ARP while HTTPd is listening` | 1 of 30 standalone samples; again in a local allcheck on 8f289250, beside the settings_wake failure below | #605 | 2026-09-30 |
 | `the scripted BREAK never fired` | 1 CI run of the DDB lane since e824b030 (run 36207501077); 0 of 10 locally | #603 | 2026-09-26 |
 | `fd refcount contention: failed` | 1 local allcheck aggregate on cf83193d, in race-window 609's armed run (host load 18), secondary one cycle ahead of its limit; 0 of 3 standalone | #670 | 2026-10-01 |
+| `BREAK inspection did not resume boot` | 1 local allcheck aggregate on 16fecc62 (kernels byte-identical to a green b0ce543c), after `ddb: continuing` and further guest output; 0 of 3 standalone | #676 | 2026-10-02 |
 | `network init contention: failed` | 1 of 2 local allcheck aggregates on 563cb5f0, in `pool_contention`, with no counts line; 0 of 3 standalone | #654 | 2026-09-30 |
 | `/bin/peer-tty never said it was reading the terminal` | 2 of the last 3 full allcheck aggregates on 2026-10-01 (one on a docs-only commit), in kernelcheck-uart-wake-qemu; the same stall as race-window 603's armed run; 0 of 2 standalone. Cause found and fixed in ac5a6b46 (the writer's first write raced core 0's drain); kept until a few aggregates stay clean | #665 | 2026-10-01 |
 | `retained CrashSnapshot was not readable` | 1 of 2 local allcheck aggregates on 5f0e249f, in kernelcheck-oops-qemu with the guest in world_stop_interrupt_hold; 0 of 1 standalone | #664 | 2026-09-30 |
