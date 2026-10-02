@@ -54,7 +54,7 @@ GLOBAL_RE = re.compile(r"^(?:private )?let mut ([A-Za-z_0-9]+)\s*:", re.M)
 MUTEX_INIT_RE = re.compile(r"mutex_init\(&([A-Za-z_0-9]+)")
 ATOMIC_RE = re.compile(
     r"\batomic_(?:load_acquire|store_release|swap_acquire|fetch_add_relaxed|"
-    r"compare_exchange_acquire)\b")
+    r"compare_exchange_acquire|compare_exchange_acq_rel)\b")
 
 # Files permitted to use the raw atomic intrinsics, and why.
 ATOMIC_ALLOWED = {

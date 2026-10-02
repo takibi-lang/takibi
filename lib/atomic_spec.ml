@@ -4,7 +4,7 @@
    taking another backend branch. *)
 
 type operation = Load | Store | Exchange | Fetch_add | Compare_exchange
-type ordering = Relaxed | Acquire | Release
+type ordering = Relaxed | Acquire | Release | Acq_rel
 
 type t = {
   name : string;
@@ -20,6 +20,10 @@ let all = [
     ordering = Relaxed };
   { name = "atomic_compare_exchange_acquire"; operation = Compare_exchange;
     ordering = Acquire };
+  (* GitHub issue #672: a count that both publishes and consumes (a pin
+     count whose last decrement hands the object to its freer). *)
+  { name = "atomic_compare_exchange_acq_rel"; operation = Compare_exchange;
+    ordering = Acq_rel };
 ]
 
 module StringMap = Map.Make (String)
@@ -36,3 +40,4 @@ let ordering_name = function
   | Relaxed -> "relaxed"
   | Acquire -> "acquire"
   | Release -> "release"
+  | Acq_rel -> "acq_rel"

@@ -2601,7 +2601,7 @@ it is a linear struct rather than an erased view.
 
 ### Atomic Operations (GitHub issues #17 and #450)
 
-Five intrinsics, usable only inside `unsafe { ... }`:
+Six intrinsics, usable only inside `unsafe { ... }`:
 
 ```
 atomic_load_acquire(addr: usize) -> usize
@@ -2609,6 +2609,8 @@ atomic_store_release(addr: usize, value: usize)
 atomic_swap_acquire(addr: usize, value: usize) -> usize
 atomic_fetch_add_relaxed(addr: usize, value: usize) -> usize
 atomic_compare_exchange_acquire(addr: usize, expected: usize,
+                                desired: usize) -> bool
+atomic_compare_exchange_acq_rel(addr: usize, expected: usize,
                                 desired: usize) -> bool
 ```
 
@@ -2621,6 +2623,7 @@ Their target-independent contracts are:
 | `atomic_swap_acquire` | exchange | acquire |
 | `atomic_fetch_add_relaxed` | fetch-add | relaxed |
 | `atomic_compare_exchange_acquire` | compare-exchange | acquire on success, relaxed on failure |
+| `atomic_compare_exchange_acq_rel` | compare-exchange | acquire and release on success, relaxed on failure |
 
 This table is one compiler contract, not a description inferred separately
 from each target's instructions. The type checker, effect inference, builtin
@@ -2664,6 +2667,7 @@ selected `--cpu` picks the encoding. Measured on real objdump output:
 | `atomic_swap_acquire` | `ldaxr`/`stxr` retry loop | `swpa` |
 | `atomic_fetch_add_relaxed` | `ldxr`/`add`/`stxr` retry loop | `ldadd` |
 | `atomic_compare_exchange_acquire` | `ldaxr`/`stxr` retry loop | `casa` |
+| `atomic_compare_exchange_acq_rel` | `ldaxr`/`stlxr` retry loop | `casal` |
 
 The load and store are inline asm rather than LLVM atomics because the
 OCaml bindings expose no ordering on `build_load`/`build_store` -- there is

@@ -15003,7 +15003,8 @@ let codegen_tests = [
           "atomic_store_release:store:release";
           "atomic_swap_acquire:exchange:acquire";
           "atomic_fetch_add_relaxed:fetch_add:relaxed";
-          "atomic_compare_exchange_acquire:compare_exchange:acquire"]
+          "atomic_compare_exchange_acquire:compare_exchange:acquire";
+          "atomic_compare_exchange_acq_rel:compare_exchange:acq_rel"]
          (List.map contract Atomic_spec.all));
 
   Alcotest.test_case
@@ -15018,6 +15019,9 @@ let codegen_tests = [
               let old: usize = unsafe { atomic_swap_acquire(addr, v) };
               let changed: bool = unsafe {
                 atomic_compare_exchange_acquire(addr, old, v)
+              };
+              let handed: bool = unsafe {
+                atomic_compare_exchange_acq_rel(addr, old, v)
               };
               return seen + old
                      + unsafe { atomic_fetch_add_relaxed(addr, v) };
@@ -15037,6 +15041,8 @@ let codegen_tests = [
            true (contains_substring ir "acquire monotonic");
          Alcotest.(check bool) "CAS success flag is extracted"
            true (contains_substring ir "extractvalue { i64, i1 }");
+         Alcotest.(check bool) "acq_rel CAS carries acq_rel success ordering"
+           true (contains_substring ir "acq_rel monotonic");
          Alcotest.(check bool) "load is ldar"
            true (contains_substring ir "ldar $0, [$1]");
          Alcotest.(check bool) "store is stlr"
@@ -15100,7 +15106,8 @@ let codegen_tests = [
            (Printf.sprintf "fn %s() {}" name) ())
          ["atomic_load_acquire"; "atomic_store_release";
           "atomic_swap_acquire"; "atomic_fetch_add_relaxed";
-          "atomic_compare_exchange_acquire"]);
+          "atomic_compare_exchange_acquire";
+          "atomic_compare_exchange_acq_rel"]);
 
   (* ---- GitHub issue #299: fixed-layout records with atomic commit
      publication. The record whose declaration these reuse is the shape

@@ -4417,19 +4417,27 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              | Atomic_spec.Relaxed -> AtomicOrdering.Monotonic
              | Atomic_spec.Acquire -> AtomicOrdering.Acquire
              | Atomic_spec.Release -> AtomicOrdering.Release
+             | Atomic_spec.Acq_rel -> AtomicOrdering.AcqiureRelease
            in
            (* singlethread = false. The whole point is the other core. *)
            let r = build_atomicrmw op p v ord false "atomic.rmw" builder in
            (TypeUsize, r)
-       | Atomic_spec.Compare_exchange, Atomic_spec.Acquire,
+       | Atomic_spec.Compare_exchange,
+         ((Atomic_spec.Acquire | Atomic_spec.Acq_rel) as ordering),
          [addr_e; expected_e; desired_e] ->
            let (_, a) = gen_expr ~expected_ty:TypeUsize locals addr_e in
            let p = build_inttoptr a (pointer_type context) "atomic.addr"
              builder in
            let (_, expected) = gen_expr ~expected_ty:TypeUsize locals expected_e in
            let (_, desired) = gen_expr ~expected_ty:TypeUsize locals desired_e in
+           (* Failure stays relaxed: a failed compare publishes nothing.
+              Acq_rel's failure ordering may not be stronger than acquire,
+              and the caller re-reads with an acquire load anyway. *)
+           let success_ord = match ordering with
+             | Atomic_spec.Acq_rel -> AtomicOrdering.AcqiureRelease
+             | _ -> AtomicOrdering.Acquire in
            let pair = Llvm_ext.build_atomic_cmpxchg p expected desired
-             AtomicOrdering.Acquire AtomicOrdering.Monotonic false
+             success_ord AtomicOrdering.Monotonic false
              "atomic.cmpxchg" builder in
            let success = build_extractvalue pair 1 "atomic.cmpxchg.success" builder in
            (TypeBool, success)
