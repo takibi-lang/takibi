@@ -52,6 +52,43 @@ fn test_region() {
     }
 }
 
+// A fixed pool: a table holds every slot's permission. Allocating hands a
+// slot's region out; giving it back stores it and returns a handle a program
+// may keep anywhere; taking by handle hands it out again, unless the slot was
+// freed since, which no stored handle can outlive.
+private let mut pool_arena: [Node; 4];
+
+fn test_table() {
+    let RegionTableOf(Node)::Taken(pool) = region_table_of(pool_arena) else {
+        RegionTableOf(Node)::Gone => { uart_puts("pool: already taken\n"); return; }
+    };
+    match region_alloc(pool) {
+        RegionAlloc(Node)::Full => { uart_puts("pool: full\n"); }
+        RegionAlloc(Node)::Allocated(slot) => {
+            region_slot_at(slot).key = 42;
+            let mut handle: RegionHandle(Node) = region_give(pool, slot);
+            match region_take(pool, handle) {
+                RegionTake(Node)::Stale => { uart_puts("pool: stale\n"); }
+                RegionTake(Node)::Taken(again) => {
+                    uart_puts("pool: key ");
+                    uart_print(region_slot_at(again).key);
+                    uart_puts("\n");
+                    region_free(pool, again);
+                }
+            }
+            match region_take(pool, handle) {           // freed since
+                RegionTake(Node)::Stale => { uart_puts("pool: old handle refused\n"); }
+                RegionTake(Node)::Taken(wrong) => {
+                    uart_puts("pool: old handle accepted\n");
+                    region_free(pool, wrong);
+                }
+            }
+        }
+    }
+    region_table_keep(pool);
+}
+
 fn app_main() {
     test_region();
+    test_table();
 }

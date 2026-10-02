@@ -277,7 +277,7 @@ and relocate_arm (mangled : string) (a : match_arm) : match_arm =
 let region_arrays : (string * (string * int)) list ref = ref []
 let region_claims : string list ref = ref []
 
-let region_of_lowering (e : expr) (array_name : string) : expr_desc =
+let region_of_lowering ?(table = false) (e : expr) (array_name : string) : expr_desc =
   match List.assoc_opt array_name !region_arrays with
   | None ->
       raise (Types.TypeError (e.loc, Printf.sprintf
@@ -287,6 +287,15 @@ let region_of_lowering (e : expr) (array_name : string) : expr_desc =
       region_claims := array_name :: !region_claims;
       let at d = { e with desc = d } in
       let first = at (Cast (TypePtr (TypeNamed elem), at (Var array_name))) in
+      if table then
+        Call ("__region_table_claim",
+          [ at (Cast (TypeUsize, first));
+            at (IntLit (Int64.of_int count));
+            at (AddrOf (at (Var ("__region_claimed__" ^ array_name))));
+            at (Cast (TypeUsize, at (Cast (TypePtr TypeUsize,
+              at (Var ("__region_meta__" ^ array_name))))));
+            first ])
+      else
       Call ("__region_claim",
         [ at (Cast (TypeUsize, first));
           at (IntLit (Int64.of_int count));
@@ -320,6 +329,8 @@ let rec walk_expr ~subst ~vsubst ~resolve_inst (e : expr) : expr =
     | ViewLit (name, args) -> ViewLit (name, args)
     | Call ("region_of", [ { desc = Var array_name; _ } ]) ->
         region_of_lowering e array_name
+    | Call ("region_table_of", [ { desc = Var array_name; _ } ]) ->
+        region_of_lowering ~table:true e array_name
     | Call (name, _) when is_reserved_region_name name ->
         raise (Types.TypeError (e.loc, Printf.sprintf
           "'%s' is reserved for the built-in region" name))
@@ -1068,6 +1079,8 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
         | ViewLit (name, args) -> ViewLit (name, args)
         | Call ("region_of", [ { desc = Var array_name; _ } ]) ->
             region_of_lowering e array_name
+        | Call ("region_table_of", [ { desc = Var array_name; _ } ]) ->
+            region_of_lowering ~table:true e array_name
         | Call (name, _) when is_reserved_region_name name ->
             raise (Types.TypeError (e.loc, Printf.sprintf
               "'%s' is reserved for the built-in region" name))

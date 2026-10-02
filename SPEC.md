@@ -2737,9 +2737,40 @@ match region_split(rest, wanted) {                   // run-time split point
   element type; the language has no type-generic variants. Names beginning
   `__region_` are reserved.
 
-Not yet: region_table (stored permissions), regions declared from the
-linker map and the DTB, byte regions for the lowest allocator layer. The
-surface is provisional.
+**region_table** stores permissions: a pool over a claimed array.
+
+```
+private let mut pool_arena: [Node; 4];
+
+let RegionTableOf(Node)::Taken(pool) = region_table_of(pool_arena) else { ... };
+match region_alloc(pool) {                          // a Free slot, handed out
+    RegionAlloc(Node)::Full => { ... }
+    RegionAlloc(Node)::Allocated(slot) => {         // RegionSlot(Node)[b, k]
+        region_slot_at(slot).key = 42;
+        let mut handle: RegionHandle(Node) = region_give(pool, slot);  // storable
+        match region_take(pool, handle) {           // generation-checked
+            RegionTake(Node)::Stale => { ... }      // freed since: refused
+            RegionTake(Node)::Taken(again) => { region_free(pool, again); }
+        }
+    }
+}
+region_table_keep(pool);                            // no tear-down yet
+```
+
+A slot's permission names its table by `b`, so a slot of another table, a
+slot given back twice, an element used after its slot was given back or
+freed, do not compile. A stored handle to a freed slot is refused at run
+time (`Stale`). The table is not yet guarded for use from several cores.
+
+A static that appears alone in a parameter's index (`region[b + k, 1]` with
+`k` unconstrained) is solved for whatever the argument needs, including the
+distance between two unrelated regions. That is why a slot is its own type
+rather than a one-element region of the array; a signature that relies on
+such a term has to constrain it (a `where`, or a type that fixes `b`).
+
+Not yet: regions declared from the linker map and the DTB, byte regions for
+the lowest allocator layer, guarded tables, tear-down. The surface is
+provisional.
 
 ### `where` constraints (GitHub issue #672)
 

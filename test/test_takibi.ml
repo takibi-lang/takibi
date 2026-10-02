@@ -2410,6 +2410,27 @@ let expect_region_error fragment src () =
       then Alcotest.failf "no entry contains %S: %s" fragment
           (String.concat " | " (List.map snd errors))
 
+let table_use body =
+  "struct Node { key: usize; value: usize; }
+   let mut pool_a: [Node; 4];
+   let mut pool_b: [Node; 4];
+   fn use_pools() {
+     let RegionTableOf(Node)::Taken(a) = region_table_of(pool_a) else {
+       RegionTableOf(Node)::Gone => { return; }
+     };
+     let RegionTableOf(Node)::Taken(other) = region_table_of(pool_b) else {
+       RegionTableOf(Node)::Gone => { region_table_keep(a); return; }
+     };
+     match region_alloc(a) {
+       RegionAlloc(Node)::Full => {}
+       RegionAlloc(Node)::Allocated(slot) => {
+" ^ body ^ "
+       }
+     }
+     region_table_keep(a);
+     region_table_keep(other);
+   }"
+
 let region_use body =
   "struct Node { key: usize; value: usize; }
    let mut arena: [Node; 64];
@@ -3234,6 +3255,36 @@ let infer_tests = [
     (expect_region_error "reserved for the built-in region" (region_use
       "region_release(region_merge(first, rest));
        let again = __region_claim(0, 1, &arena[0].key as *bool, &arena[0]);"));
+
+  Alcotest.test_case "region table: give, take by handle, free" `Quick
+    (fun () -> ignore (infer_regions (table_use
+      "region_slot_at(slot).key = 1;
+       let mut h: RegionHandle(Node) = region_give(a, slot);
+       match region_take(a, h) {
+         RegionTake(Node)::Stale => {}
+         RegionTake(Node)::Taken(r) => { region_free(a, r); }
+       }")));
+
+  Alcotest.test_case "region table: a slot given to another table" `Quick
+    (expect_region_error "static value mismatch" (table_use
+      "let mut h: RegionHandle(Node) = region_give(other, slot);"));
+
+  Alcotest.test_case "region table: a slot given back twice" `Quick
+    (expect_region_error "already consumed" (table_use
+      "let mut h: RegionHandle(Node) = region_give(a, slot);
+       let mut g: RegionHandle(Node) = region_give(a, slot);"));
+
+  Alcotest.test_case "region table: an element after its slot is given back"
+    `Quick
+    (expect_region_error "cannot be used after" (table_use
+      "let node = region_slot_at(slot);
+       let mut h: RegionHandle(Node) = region_give(a, slot);
+       node.key = 1;"));
+
+  Alcotest.test_case "region table: a slot freed and still used" `Quick
+    (expect_region_error "already consumed" (table_use
+      "region_free(a, slot);
+       region_slot_at(slot).key = 1;"));
 
   Alcotest.test_case "static arithmetic: a slot given back to its own index"
     `Quick

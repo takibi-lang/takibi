@@ -1105,7 +1105,11 @@ base_type_expr:
                "a built-in instance takes one type argument")) }
   | name = IDENT LPAREN args = separated_nonempty_list(COMMA, type_expr) RPAREN
     %prec BRACKET_ELSEWHERE
-    { TypeGenericInst (name, args) }
+    { match name, args with
+      | ("RegionHandle"), [ t ] ->
+          (* A built-in instance with no static indices (#672). *)
+          TypeNamed (mangle_builtin_instance $symbolstartpos name t)
+      | _ -> TypeGenericInst (name, args) }
     (* GitHub issue #207: Name(T1, T2, ...) -- a generic struct/variant
        instantiated with concrete type arguments, e.g. `Freelist(Page)`.
        Unambiguous against the bare `IDENT -> TypeNamed` rule below (one

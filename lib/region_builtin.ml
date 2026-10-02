@@ -98,6 +98,135 @@ fn region_count(r: borrow @R@[b, n]) -> usize {
 }
 
 fn region_release(r: sink @R@[b, n]) { region_discharge(r); }
+
+// -- region_table: the only way to store permissions (#672, second layer) --
+//
+// A table holds the one-element regions of every slot of a claimed array.
+// A slot is Free (in the table, unused), Live (in the table, named by a
+// handle) or Out (its region is held by the program). Each slot has a
+// generation, bumped on free, so a stored handle to a freed slot is
+// refused. The state and generation words are a hidden array per table.
+linear struct @TBL@[base: usize, count: usize] {
+    private address: usize;
+    private length: usize;
+    private meta: usize;
+}
+
+// One slot's permission, out of its table: b is the TABLE's position and k
+// the slot index. It is its own type rather than a region of the array, so
+// a slot of another table has another b and nothing solves one for the
+// other -- the static arithmetic would, given region[b + k, 1].
+linear struct @SL@[table: usize, slot: usize] {
+    private address: usize;
+}
+
+private fn region_slot_discharge(s: sink @SL@[b, k]) {}
+
+// The element in a slot; the pointer dies with the borrow of the slot.
+fn region_slot_at(s: borrow @SL@[b, k]) -> *@T@ @ b !{unsafe} {
+    return unsafe { s.address as *@T@ };
+}
+
+// What a program may store: a slot and the generation it was handed out in.
+struct @H@ {
+    private slot: usize;
+    private generation: usize;
+}
+
+must_use variant @TO@[b: usize, n: usize] {
+    Gone;
+    Taken(@TBL@[b, n]);
+}
+
+must_use variant @A@[b: usize] {
+    Full;
+    Allocated(exists k: usize. @SL@[b, k]);
+}
+
+must_use variant @TK@[b: usize] {
+    Stale;
+    Taken(exists k: usize. @SL@[b, k]);
+}
+
+const @T@__REGION_FREE: usize = 0;
+const @T@__REGION_LIVE: usize = 1;
+const @T@__REGION_OUT: usize = 2;
+
+private fn region_table_state(t: borrow @TBL@[b, n], slot: usize) -> *usize
+        !{unsafe} {
+    return unsafe { (t.meta + slot * 16) as *usize };
+}
+
+private fn region_table_generation(t: borrow @TBL@[b, n], slot: usize)
+        -> *usize !{unsafe} {
+    return unsafe { (t.meta + slot * 16 + 8) as *usize };
+}
+
+private fn region_slot(t: borrow @TBL@[b, n], slot: usize @ k)
+        -> @SL@[b, k] {
+    let mut s: @SL@[b, k] = { t.address + slot * sizeof(@T@) };
+    return s;
+}
+
+private fn region_slot_of(t: borrow @TBL@[b, n], s: borrow @SL@[b, k])
+        -> usize {
+    return (s.address - t.address) / sizeof(@T@);
+}
+
+fn __region_table_claim(address: usize @ b, count: usize @ n, claimed: *bool,
+                        meta: usize, witness: *@T@) -> @TO@[b, n] !{unsafe} {
+    if (*claimed) { return @TO@::Gone; }
+    *claimed = true;
+    let mut t: @TBL@[b, n] = { address, count, meta };
+    return @TO@::Taken(t);
+}
+
+// A Free slot becomes Out, its region handed to the caller.
+fn region_alloc(t: borrow @TBL@[b, n]) -> @A@[b] !{unsafe} {
+    let mut slot: usize = 0;
+    while (slot < t.length) {
+        if (*region_table_state(t, slot) == @T@__REGION_FREE) {
+            *region_table_state(t, slot) = @T@__REGION_OUT;
+            return @A@::Allocated(region_slot(t, slot));
+        }
+        slot = slot + 1;
+    }
+    return @A@::Full;
+}
+
+// Give an Out slot back as Live. The slot names its table by b, so a slot
+// of another table does not type-check.
+fn region_give(t: borrow @TBL@[b, n], s: sink @SL@[b, k]) -> @H@ !{unsafe} {
+    let slot: usize = region_slot_of(t, s);
+    *region_table_state(t, slot) = @T@__REGION_LIVE;
+    let mut h: @H@ = { slot, *region_table_generation(t, slot) };
+    region_slot_discharge(s);
+    return h;
+}
+
+// Take a Live slot out by a stored handle. A handle whose slot was freed
+// since, or is out already, is Stale.
+fn region_take(t: borrow @TBL@[b, n], h: @H@) -> @TK@[b] !{unsafe} {
+    if (h.slot >= t.length) { return @TK@::Stale; }
+    if (*region_table_state(t, h.slot) != @T@__REGION_LIVE ||
+        *region_table_generation(t, h.slot) != h.generation) {
+        return @TK@::Stale;
+    }
+    *region_table_state(t, h.slot) = @T@__REGION_OUT;
+    return @TK@::Taken(region_slot(t, h.slot));
+}
+
+// A table lives for the program: there is no tear-down yet, so a table is
+// kept rather than released.
+fn region_table_keep(t: sink @TBL@[b, n]) {}
+
+// Free an Out slot: every handle to it becomes Stale.
+fn region_free(t: borrow @TBL@[b, n], s: sink @SL@[b, k]) !{unsafe} {
+    let slot: usize = region_slot_of(t, s);
+    *region_table_state(t, slot) = @T@__REGION_FREE;
+    *region_table_generation(t, slot) = *region_table_generation(t, slot) + 1;
+    region_slot_discharge(s);
+}
 |}
 
 let replace_all ~sub ~by s =
@@ -118,6 +247,12 @@ let instance elem =
   |> replace_all ~sub:"@R@" ~by:("region__" ^ elem)
   |> replace_all ~sub:"@S@" ~by:("RegionSplit__" ^ elem)
   |> replace_all ~sub:"@O@" ~by:("RegionOf__" ^ elem)
+  |> replace_all ~sub:"@TBL@" ~by:("RegionTable__" ^ elem)
+  |> replace_all ~sub:"@SL@" ~by:("RegionSlot__" ^ elem)
+  |> replace_all ~sub:"@TO@" ~by:("RegionTableOf__" ^ elem)
+  |> replace_all ~sub:"@TK@" ~by:("RegionTake__" ^ elem)
+  |> replace_all ~sub:"@A@" ~by:("RegionAlloc__" ^ elem)
+  |> replace_all ~sub:"@H@" ~by:("RegionHandle__" ^ elem)
   |> replace_all ~sub:"@T@" ~by:elem
 
 let parse_source src =
@@ -147,7 +282,9 @@ let element_types (prog : Ast.toplevel list) claimed =
             Hashtbl.replace found (String.sub text (!i + lp) (!j - !i - lp)) ();
           i := !j
         end else incr i
-      done) [ "region__"; "RegionSplit__"; "RegionOf__" ] in
+      done) [ "region__"; "RegionSplit__"; "RegionOf__"; "RegionTable__";
+         "RegionTableOf__"; "RegionTake__"; "RegionAlloc__"; "RegionHandle__";
+         "RegionSlot__" ] in
   List.iter (fun item -> scan (Ast.show_toplevel item)) prog;
   Hashtbl.fold (fun k () acc -> k :: acc) found [] |> List.sort compare
 
@@ -161,6 +298,7 @@ let global_arrays (prog : Ast.toplevel list) =
     | _ -> None) prog
 
 let flag_name array = "__region_claimed__" ^ array
+let meta_name array = "__region_meta__" ^ array
 
 let run ~enabled prog =
   if not enabled then prog
@@ -174,7 +312,8 @@ let run ~enabled prog =
         (List.assoc_opt name !Monomorphize.region_arrays)) claims in
     let elems = element_types prog claimed in
     let defs = List.concat_map (fun elem -> parse_source (instance elem)) elems in
-    let flags = parse_source (String.concat "" (List.map (fun (name, _) ->
-      Printf.sprintf "let mut %s: bool = false;\n" (flag_name name)) claimed)) in
+    let flags = parse_source (String.concat "" (List.map (fun (name, (_, n)) ->
+      Printf.sprintf "let mut %s: bool = false;\nlet mut %s: [usize; %d];\n"
+        (flag_name name) (meta_name name) (2 * n)) claimed)) in
     defs @ flags @ prog
   end
