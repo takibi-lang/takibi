@@ -2459,6 +2459,16 @@ let pin_use body =
      " ^ body ^ "
    }"
 
+(* GitHub issue #131: an owner struct holding a pool pin; `rest` adds
+   functions over it. *)
+let stored_owner_use rest =
+  "struct Node { key: usize; value: usize; }
+   let mut pool: RegionPool(Node);
+   linear struct Owner[b: addr, k: usize] {
+     private pin: RegionPin(Node)[b, k];
+   }
+   " ^ rest
+
 let table_use body =
   "struct Node { key: usize; value: usize; }
    let mut pool_a: [Node; 4];
@@ -3499,6 +3509,46 @@ let infer_tests = [
            region_pool_unlock(o);
          }
        }")));
+
+  (* GitHub issue #131, first slice: a linear struct holding a pin. *)
+  Alcotest.test_case "stored owner: held, borrowed, moved out once" `Quick
+    (fun () -> ignore (infer_regions (stored_owner_use
+      "fn f(o: sink Owner[b, k]) -> RegionPin(Node)[b, k] !{unsafe} {
+         region_pin_at(o.pin).key = 1;
+         return o.pin;
+       }")));
+
+  Alcotest.test_case "stored owner: moved out through a borrow" `Quick
+    (expect_region_error "out of a borrowed" (stored_owner_use
+      "fn f(o: borrow Owner[b, k]) -> RegionPin(Node)[b, k] { return o.pin; }"));
+
+  Alcotest.test_case "stored owner: moved out twice" `Quick
+    (expect_region_error "already consumed" (stored_owner_use
+      "fn f(o: sink Owner[b, k]) -> RegionPin(Node)[b, k] {
+         let a = o.pin;
+         return o.pin;
+       }"));
+
+  Alcotest.test_case "stored owner: the struct used after its field moved" `Quick
+    (expect_region_error "already consumed" (stored_owner_use
+      "fn g(o: borrow Owner[b, k]) {}
+       fn f(o: sink Owner[b, k]) -> RegionPin(Node)[b, k] {
+         let a = o.pin;
+         g(o);
+         return a;
+       }"));
+
+  Alcotest.test_case "stored owner: dropped with a sink struct" `Quick
+    (expect_region_error "holds a stored owner" (stored_owner_use
+      "fn f(o: sink Owner[b, k]) {}"));
+
+  Alcotest.test_case "stored owner: a field indexed by a static the struct lacks"
+    `Quick
+    (expect_region_error "cannot hold a nested indexed owner"
+      "struct Node { key: usize; value: usize; }
+       linear struct Owner[k: usize] {
+         private pin: RegionPin(Node)[b, k];
+       }");
 
   Alcotest.test_case "region pool: a saved value comes back with the unlock"
     `Quick

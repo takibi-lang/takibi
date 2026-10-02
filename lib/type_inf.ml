@@ -393,6 +393,18 @@ let ret_of_ast_opt_in_decl_scope scope t =
 let indexed_struct_params : (string, Ast.static_param list) Hashtbl.t =
   Hashtbl.create 8
 
+(* GitHub issue #131: (struct, field) pairs that store a linear indexed
+   owner under a linear struct. *)
+let stored_owner_fields : (string * string, unit) Hashtbl.t = Hashtbl.create 8
+
+(* A struct type that holds a stored owner field: dropping it would drop
+   the owner, so even a `sink` of it must move the field out. *)
+let holds_stored_owner ty =
+  match ty with
+  | Ast.TypeIndexed (sname, _) ->
+      Hashtbl.fold (fun (s, _) () acc -> acc || s = sname) stored_owner_fields false
+  | _ -> false
+
 let indexed_struct_kinds : (string, Ast.opaque_kind) Hashtbl.t =
   Hashtbl.create 8
 
@@ -6625,6 +6637,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   reset_table must_use_variants;
   reset_table indexed_struct_params;
   reset_table indexed_struct_kinds;
+  reset_table stored_owner_fields;
   reset_table private_globals;
   reset_table private_functions;
   reset_table private_opaque_types;
@@ -8060,7 +8073,32 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         ) params;
         validation_static_scope := Some scope;
         allow_implicit_static := false;
+        (* GitHub issue #131, first slice: a linear struct may hold one
+           linear indexed owner whose indices are all the struct's own, so
+           the field's identity is exactly the struct's. It is borrowed
+           while the struct lives and moved out only by consuming the
+           whole struct (stored_owner_field_* below). *)
+        let stored_owner_field ty =
+          okind = Ast.KindLinear &&
+          (match ty with
+           | Ast.TypeIndexed (name, args) ->
+               Hashtbl.find_opt indexed_struct_kinds name = Some Ast.KindLinear
+               && args <> []
+               && List.for_all (function
+                    | Ast.StaticName n -> List.mem_assoc n params
+                    | _ -> false) args
+           | _ -> false) in
         List.iter (fun (fname, ty) ->
+          if stored_owner_field ty then begin
+            (* Moving the field out consumes the whole struct, so a second
+               such field would be dropped with it. *)
+            if holds_stored_owner (Ast.TypeIndexed (sname, [])) then
+              raise (TypeError (sloc, Printf.sprintf
+                "struct '%s' may hold one stored owner field; '%s' is a second"
+                sname fname));
+            Hashtbl.replace stored_owner_fields (sname, fname) ();
+            validate_nonparam_type sloc ty
+          end else begin
           if owned && ast_contains_stable_owner_value ty then
             raise (TypeError (sloc, Printf.sprintf
               "struct field '%s.%s' cannot contain stable owner storage '%s'"
@@ -8089,7 +8127,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               "indexed owner field '%s.%s' cannot nest a singleton inside storage"
               sname fname));
           check_struct_field_pointer sname fname sloc ty;
-          validate_nonparam_type sloc ty) fields
+          validate_nonparam_type sloc ty end) fields
     | Ast.VariantDef (vname, params, cases, _, vloc) ->
         if cases = [] then
           raise (TypeError (vloc, Printf.sprintf
@@ -9359,6 +9397,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         ~default:(Option.value (StringMap.find_opt name !var_types)
           ~default:Ast.TypeVoid)
     in
+    (* GitHub issue #131: the stored owner field of the struct a binding
+       holds, if `fname` is one. *)
+    let stored_owner_field_of base_id base_name fname =
+      match strip_borrow (binding_type base_id base_name) with
+      | Ast.TypeIndexed (sname, _) | Ast.TypeSink (Ast.TypeIndexed (sname, _)) ->
+          Hashtbl.mem stored_owner_fields (sname, fname)
+      | _ -> false
+    in
     let field_affine_type base_id base_name fname =
       match Some (binding_type base_id base_name) with
       | None -> None
@@ -9415,6 +9461,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        every path, which the early-exit checks below enforce. *)
     let exempt_params = List.fold_left (fun s (name, ty_opt) ->
       match ty_opt with
+      | Some (Ast.TypeSink ty) when holds_stored_owner ty -> s
       | Some (Ast.TypeBorrow _) | Some (Ast.TypeBorrowMut _)
       | Some (Ast.TypeSink _) -> PathSet.add (pvar name) s
       | _ -> s
@@ -9950,6 +9997,23 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           require_no_region_aggregate_load e.loc e
             (expr_taint taints base_expr);
           (match base_expr.desc with
+           | Ast.Var base_name when
+               (match pvar_expr base_expr base_name with
+                | PVar (id, _) -> stored_owner_field_of id base_name fname
+                | PField _ -> false) ->
+               (* GitHub issue #131: a stored owner field. Moving it out
+                  consumes the whole struct, so it moves once and the
+                  struct is not used after; through a borrow it is only
+                  borrowed. *)
+               let p = pvar_expr base_expr base_name in
+               require_available e.loc moved p;
+               if consume then begin
+                 if PathSet.mem p borrowed_params then
+                   raise (TypeError (e.loc, Printf.sprintf
+                     "cannot move '%s.%s' out of a borrowed '%s'; it can only \
+                      be borrowed" base_name fname base_name));
+                 mv_consume p moved
+               end else moved
            | (Ast.Var base_name as base_desc) when is_tracked_path (pfield base_name fname) ->
                let _ = base_desc in
                let p = pfield base_name fname in
@@ -10755,6 +10819,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        sink is terminal. *)
     List.iter (fun (name, ty_opt) ->
       let owned_kind = match ty_opt with
+        | Some (Ast.TypeSink ty) when holds_stored_owner ty -> Some Ast.KindLinear
         | Some (Ast.TypeBorrow _) | Some (Ast.TypeBorrowMut _)
         | Some (Ast.TypeSink _) -> None
         | Some ty when is_linear_type ty || is_must_use_type ty ->
@@ -10767,6 +10832,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let msg = if is_must_use_path (pvar name) then Printf.sprintf
             "must-use parameter '%s' is not handled on every path of this function"
             name
+          else if (match ty_opt with
+                   | Some (Ast.TypeSink ty) -> holds_stored_owner ty
+                   | _ -> false) then Printf.sprintf
+            "parameter '%s' holds a stored owner: move its owner field out \
+             on every path, even as `sink`" name
           else Printf.sprintf
             "linear parameter '%s' is not consumed on every path of this \
              function (forward it on every path, or take it as `sink` if \

@@ -1386,6 +1386,36 @@ the response remains the existing `i32` rendezvous channel. Focused failures liv
 `variant_nonexhaustive_wrong`, plus the two `tcp_conn_*_wrong` fixtures; each
 source explains the rejected rule in English.
 
+## Stored Owner Fields (GitHub issue #131, first slice)
+
+A LINEAR struct may hold one linear indexed owner whose static indices are
+all the struct's own, so the field names exactly the identity the struct
+carries:
+
+```
+linear struct Owner[b: addr, k: usize] {
+    private pin: RegionPin(Conn)[b, k];
+}
+
+fn conn_of(o: borrow Owner[b, k]) -> *Conn @ k !{unsafe} {
+    return region_pin_at(o.pin);              // borrowed while o lives
+}
+
+fn owner_release(o: sink Owner[b, k]) -> RegionPin(Conn)[b, k] {
+    return o.pin;                             // moving it out consumes o
+}
+```
+
+- Through a `borrow` of the struct the field can only be borrowed; moving
+  it out is an error.
+- Moving the field out consumes the whole struct: it moves once, and the
+  struct is not used afterwards.
+- A struct holding one is never dropped with it, not even as a `sink`
+  parameter: the field must be moved out on every path.
+- One such field per struct; a field indexed by a static the struct does
+  not carry, or any other nested owner, is still refused. The field is not
+  assigned after construction.
+
 ## Stable Owner Slots and `stable_replace`
 
 A stable owner slot is the implemented narrow exception to the general ban on
