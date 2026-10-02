@@ -92,6 +92,13 @@ build: $(TAKIBI)
 .PHONY: FORCE
 FORCE:
 
+# GitHub issue #673: two `dune build` invocations started together from
+# separate make processes (lanes run side by side) left one waiting on Dune's
+# own build lock for good. Every dune invocation here takes this lock first,
+# so they run one at a time instead.
+DUNE_INVOCATION_LOCK := _build/.takibi-dune-invocation.lock
+export DUNE_INVOCATION_LOCK
+
 ifeq ($(TAKIBI_KERNEL_BUILD_LOCK_HELD),1)
 # The public locked targets depend on `build` before entering their recursive
 # Make. The inner graph must reuse that completed compiler: invoking Dune from
@@ -100,7 +107,8 @@ ifeq ($(TAKIBI_KERNEL_BUILD_LOCK_HELD),1)
 $(TAKIBI):
 else
 $(TAKIBI): FORCE
-	dune build
+	@mkdir -p _build
+	flock $(DUNE_INVOCATION_LOCK) dune build
 endif
 
 ## test: run the ordered unit tests, then one reproducible shuffled pass

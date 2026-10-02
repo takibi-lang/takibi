@@ -37,7 +37,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "Running dune test --force..."
-if dune test --force > /tmp/list_dune_test_failures.$$.log 2>&1; then
+# GitHub issue #673: one dune at a time across make processes (Makefile,
+# DUNE_INVOCATION_LOCK); run standalone, take the same lock.
+lock="${DUNE_INVOCATION_LOCK:-_build/.takibi-dune-invocation.lock}"
+mkdir -p "$(dirname "$lock")"
+if flock "$lock" dune test --force > /tmp/list_dune_test_failures.$$.log 2>&1; then
     cat /tmp/list_dune_test_failures.$$.log
     rm -f /tmp/list_dune_test_failures.$$.log
     echo "All tests passed."

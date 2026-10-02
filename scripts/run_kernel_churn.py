@@ -234,6 +234,17 @@ def shell_resync(session):
           f"after={time.monotonic() - sent_at:.1f}s "
           f"total={len(session.normalized())}", flush=True)
     if answer is None:
+        # GitHub issue #655: whether the empty line was lost on the way in,
+        # or its answer is stuck on the way out (a shell on a peer CPU whose
+        # writes wait in that CPU's console ring until core 0 drains it,
+        # #657/#663). DDB's ps/current say where ash is and whether it is
+        # back in its terminal read; a prompt appearing once DDB is entered
+        # is the answer having been held.
+        held_from = len(session.normalized())
+        ddb_walk_hang(session)
+        late = has_prompt(session.normalized()[held_from:])
+        print(f"[churn resync] no answer; a prompt arrived once DDB was "
+              f"entered: {late}", flush=True)
         return False
     # Let anything still in flight from the debugger land before typing.
     settle = len(session.normalized())

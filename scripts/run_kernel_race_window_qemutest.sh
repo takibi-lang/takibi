@@ -81,7 +81,20 @@ if [ "${KERNEL_QEMU_RACE_WINDOW_ARMED:-run}" = skip ]; then
     echo "$LABEL: armed run skipped, the ordinary suite is its armed run"
 elif ! run_variant armed; then
     echo "FAIL $LABEL: the armed kernel failed the $WORKLOAD with the check present" >&2
-    grep -E '^FAIL' "$ROOT/armed.log" | sed 's/^/  /' >&2 || true
+    grep -E '^FAIL|^\[churn resync\]' "$ROOT/armed.log" | sed 's/^/  /' >&2 || true
+    # GitHub issue #655: an armed failure's evidence used to be overwritten
+    # by the next run of this lane, so a capture never survived to be read.
+    # Keep it where land.sh collects failures.
+    keep="${ARTIFACT_DIR}-failures/$(date -u +%Y%m%dT%H%M%SZ)-$WINDOW-armed"
+    mkdir -p "$keep"
+    cp -r "$ROOT/armed.log" "$ROOT/armed" "$keep/" 2>/dev/null || true
+    {
+        echo "reason: armed $WORKLOAD failed"
+        echo "commit: $(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null)"
+        echo "load: $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
+        echo "lane: race-window $WINDOW armed"
+    } > "$keep/MANIFEST"
+    echo "archived the armed run to: $keep" >&2
     exit 1
 fi
 if run_variant reverted; then
