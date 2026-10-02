@@ -39,7 +39,7 @@ whether a row has gone quiet or has merely stopped being looked for.
 | `network init contention: failed` | 1 of 2 local allcheck aggregates on 563cb5f0, in `pool_contention`, with no counts line; 0 of 3 standalone | #654 | 2026-09-30 |
 | `/bin/peer-tty never said it was reading the terminal` | 2 of the last 3 full allcheck aggregates on 2026-10-01 (one on a docs-only commit), in kernelcheck-uart-wake-qemu; the same stall as race-window 603's armed run; 0 of 2 standalone. Cause found and fixed in ac5a6b46 (the writer's first write raced core 0's drain); kept until a few aggregates stay clean | #665 | 2026-10-01 |
 | `retained CrashSnapshot was not readable` | 1 of 2 local allcheck aggregates on 5f0e249f, in kernelcheck-oops-qemu with the guest in world_stop_interrupt_hold; 0 of 1 standalone | #664 | 2026-09-30 |
-| `the shell did not answer an empty line before the phase` | 1 of 2 local allcheck aggregates on 563cb5f0, in race-window 633's churn; 0 of 3 standalone; again on 655f9c49, the console lock's first stage | #655 | 2026-09-30 |
+| `the shell did not answer an empty line before the phase` | 1 of 2 local allcheck aggregates on 563cb5f0, in race-window 633's churn; 0 of 3 standalone; again on 655f9c49, the console lock's first stage | #655 | 2026-10-02 |
 | `workload: settings wake FAILED: the reader is still asleep` | 1 local allcheck aggregate on 8f289250, in the peer_tty/settings_wake views; 0 of 11 armed-suite runs under host load | #667 | 2026-09-30 |
 
 ## Reading a row
