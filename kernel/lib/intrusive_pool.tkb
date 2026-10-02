@@ -801,13 +801,6 @@ fn intrusive_slot_address_offset_is_valid(
     return intrusive_pool_slot_is_valid(pool, address.raw + offset);
 }
 
-// Comparison with an untrusted integer does not mint an address. This is
-// used by corruption probes to prove that a poisoned link was not returned.
-fn intrusive_slot_address_matches_untrusted(
-        address: IntrusiveSlotAddress, untrusted: usize) -> bool {
-    return address.raw == untrusted;
-}
-
 // One-way projection for namespaces that use the address as an opaque numeric
 // identity (notably the scheduler and diagnostics). There is deliberately no
 // inverse: a usize must be validated by probe_slot before it can become an

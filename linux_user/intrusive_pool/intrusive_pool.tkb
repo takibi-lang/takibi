@@ -842,8 +842,7 @@ fn app_main() {
         }
     };
     uart_puts("the poisoned slot is itself still handed out normally: ");
-    uart_print(intrusive_slot_address_matches_untrusted(
-        intrusive_owner_slot(c1), c_slot1));
+    uart_print(intrusive_slot_address_identity(intrusive_owner_slot(c1)) == c_slot1);
     uart_puts("\n");
     intrusive_owner_drop(c1);
 
@@ -855,8 +854,7 @@ fn app_main() {
     intrusive_pool_unlock(&pool_c, g21);
     match r21 {
         IntrusivePoolInsertResult::Allocated(o) => {
-            if (intrusive_slot_address_matches_untrusted(
-                    intrusive_owner_slot(o), poison)) { returned_poison = true; }
+            if (intrusive_slot_address_identity(intrusive_owner_slot(o)) == poison) { returned_poison = true; }
             intrusive_owner_drop(o);
         }
         IntrusivePoolInsertResult::OutOfMemory => { rejected = true; }
@@ -994,8 +992,7 @@ fn app_main() {
     intrusive_pool_unlock(&pool_c, g27);
     match r27 {
         IntrusivePoolInsertResult::Allocated(o) => {
-            if (intrusive_slot_address_matches_untrusted(
-                    intrusive_owner_slot(o), live_slot)) { aliased = true; }
+            if (intrusive_slot_address_identity(intrusive_owner_slot(o)) == live_slot) { aliased = true; }
             intrusive_owner_drop(o);
         }
         IntrusivePoolInsertResult::OutOfMemory => { alias_rejected = true; }

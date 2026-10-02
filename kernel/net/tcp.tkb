@@ -435,7 +435,7 @@ let mut tcp_injected_syn_accepted: bool = false;
 // replaces, and an entry's slot is 2 to a page either way.
 variant RetxLink {
     End;
-    More(exists p: addr. exists a: usize. IntrusiveOwner[p, a]);
+    More(exists p: addr. exists k: usize. RegionSlot(RetxEntry)[p, k]);
 }
 
 // pending_tcp_kind/_frame/_frame_length/_expected_ack/_remote_ip/
@@ -503,10 +503,10 @@ private linear struct RetxGuard[lock: addr] {
     private flags: usize;
 }
 private let mut tcp_retx_chain: RetxChain;
-private let mut tcp_retx_pool: IntrusivePool(RetxEntry);
-// See tcp_connection_pool_init: that function is a reset called many
-// times, and the pool must be constructed exactly once.
-private let mut tcp_retx_pool_ready: bool = false;
+// GitHub issue #672 layer 3: the built-in region_pool, as the frame pool
+// below. The chain owns each entry's slot permission, so a walk reaches an
+// entry through it rather than by a (slot, generation) lookup.
+private let mut tcp_retx_pool: RegionPool(RetxEntry);
 
 let mut tcp_drop_data_segment_index: i32 = -1;
 let mut tcp_injected_data_retransmitted: bool = false;
@@ -1000,22 +1000,10 @@ fn tcp_connection_of(owner: borrow TcpConnectionOwner[connection])
 // use for the previous one's unacknowledged segments, and
 // pending_tcp_reset_all returns their pages properly.
 fn tcp_connection_pool_init() !{unsafe} {
-    if (tcp_retx_pool_ready == false) {
-        // No mutex_init: tcp_retx_chain is a global, so its mutex is
-        // already free from .bss, and mutex_init FORCE-FREES -- behind a
-        // lazy `ready` flag that is itself an unlocked read-modify-write.
-        // GitHub issue #479; scripts/check_lock_discipline.py found this
-        // one, and kernel/lib/mutex.tkb states the rule.
-        // Retain NOTHING. #346's one-empty-chunk reserve is the right
-        // default for a pool in steady churn, and the wrong one here: this
-        // kernel checks "no page is held at rest" as an invariant (the
-        // `resources` view's pages=0), and a retransmit queue is empty at
-        // rest by definition -- every segment is eventually acknowledged
-        // or given up on. Holding a page across that shows up as a leak,
-        // correctly.
-        intrusive_pool_init_retaining(&tcp_retx_pool, 0);
-        tcp_retx_pool_ready = true;
-    }
+    // tcp_retx_pool needs no construction, and tcp_retx_chain's mutex is
+    // already free from .bss (no mutex_init: it FORCE-FREES, GitHub issue
+    // #479). The retransmit pool retains no empty chunk: a retransmit queue
+    // is empty at rest, and the `resources` view checks pages=0 there.
     if (tcp_connection_pool_ready == false) {
         intrusive_pool_init_retaining(&tcp_connection_pool, 0);
         tcp_connection_pool_ready = true;
@@ -1089,9 +1077,6 @@ fn tcp_recycled_handle_count() -> usize !{unsafe} {
     if (tcp_connection_pool_ready) {
         total = total +
             intrusive_pool_recycled_handle_count(&tcp_connection_pool);
-    }
-    if (tcp_retx_pool_ready) {
-        total = total + intrusive_pool_recycled_handle_count(&tcp_retx_pool);
     }
     return total;
 }
@@ -1423,7 +1408,7 @@ fn tcp_connection_pool_probe() -> bool !{unsafe} {
     let drained: bool =
         intrusive_pool_live_count(&tcp_connection_pool) == 0 &&
         tcp_frame_live_count() == 0 &&
-        intrusive_pool_live_count(&tcp_retx_pool) == 0 &&
+        tcp_retx_live_count() == 0 &&
         page_allocator_live_count() == pages_before &&
         intrusive_pool_probe(&tcp_connection_pool);
     return distinct && stale_refused && drained;
@@ -1538,7 +1523,7 @@ fn retx_chain_put(link: RetxLink) -> bool {
     retx_unlock(guard, &tcp_retx_chain.mutex);
     match displaced {
         RetxLink::End => { return true; }
-        RetxLink::More(stray) => { intrusive_owner_drop(stray); return false; }
+        RetxLink::More(stray) => { retx_entry_release(stray); return false; }
     }
 }
 
@@ -1557,30 +1542,113 @@ fn retx_entry_put_next(entry: borrow *RetxEntry, link: RetxLink) -> bool {
     retx_unlock(guard, &entry.mutex);
     match displaced {
         RetxLink::End => { return true; }
-        RetxLink::More(stray) => { intrusive_owner_drop(stray); return false; }
+        RetxLink::More(stray) => { retx_entry_release(stray); return false; }
     }
 }
 
-// Frees one entry, given the (slot, generation) its link carried. Split
-// out because it is the same three lines in four places, and because the
-// rebranding it does is the one genuinely delicate step in this file.
-//
-// A parked handle's brand is EXISTENTIAL (GitHub issue #370): the field
-// knows it holds some pool's handle, not this pool's, and opening the
-// existential mints a fresh identity that will not match. So the only
-// route to a handle intrusive_pool_remove will accept is to take the slot
-// and generation off the parked one, discharge it, and rebuild -- which
-// is exactly the one way to produce a handle the pool did not mint, and
-// exactly why remove validates before it trusts one.
-fn retx_entry_free(slot: usize, generation: usize) !{unsafe} {
-    let mut checked: IntrusiveSlotAddress = intrusive_pool_validated_address(
-        &tcp_retx_pool, slot, generation);
-    let branded = intrusive_owner_new(&tcp_retx_pool, checked, generation);
-    let guard = intrusive_pool_lock(&tcp_retx_pool);
-    tcp_pool_remove_expected(
-        intrusive_pool_remove(&tcp_retx_pool, guard, branded),
-        "retransmit entry free" as *u8);
-    intrusive_pool_unlock(&tcp_retx_pool, guard);
+// Frees one entry whose permission came off the chain. The chain field
+// could not name the pool (#370), so the slot is adopted back with a
+// run-time check that it is an Out slot of this pool, as for frames. Its
+// own link is taken first: freeing an entry that still held one would
+// lose the rest of a chain.
+fn retx_entry_release(parked: sink RegionSlot(RetxEntry)[p, k]) !{unsafe} {
+    let entry: *RetxEntry = region_slot_at(parked);
+    match retx_entry_take_next(entry) {
+        RetxLink::End => {}
+        RetxLink::More(stray) => {
+            kernel_boot_log("tcp retx: a freed entry still had a link\n");
+            region_slot_abandon(stray);
+        }
+    }
+    let guard = tcp_retx_pool_lock(&tcp_retx_pool);
+    match region_slot_adopt(guard, parked) {
+        RegionAdopt(RetxEntry)::Foreign(foreign) => {
+            kernel_boot_log("tcp retx: a chained entry is not this pool's\n");
+            region_slot_abandon(foreign);
+        }
+        RegionAdopt(RetxEntry)::Adopted(mine) => {
+            region_free(guard, mine);
+            tcp_retx_pool_return_empty(guard);
+        }
+    }
+    tcp_retx_pool_unlock(guard);
+}
+
+private fn tcp_retx_pool_lock(pool: *RegionPool(RetxEntry) @ entries)
+        -> RegionPoolGuard(RetxEntry)[entries] !{unsafe} {
+    let flags: usize = mutex_irq_save();
+    return region_pool_lock_saving(pool, flags);
+}
+
+private fn tcp_retx_pool_unlock(guard: sink RegionPoolGuard(RetxEntry)[entries]) {
+    mutex_irq_restore(region_pool_unlock_saved(guard));
+}
+
+fn tcp_retx_live_count() -> usize !{unsafe} {
+    let guard = tcp_retx_pool_lock(&tcp_retx_pool);
+    let live: usize = region_pool_live_count(guard);
+    tcp_retx_pool_unlock(guard);
+    return live;
+}
+
+// Pages per chunk, as for frames: an entry carries a whole frame.
+const TCP_RETX_CHUNK_PAGES: usize = 2;
+
+private fn tcp_retx_pool_return_empty(
+        guard: borrow RegionPoolGuard(RetxEntry)[entries]) !{unsafe} {
+    let mut more: bool = true;
+    while (more) {
+        match region_pool_shrink(guard) {
+            RegionShrink(RetxEntry)::Nothing => { more = false; }
+            RegionShrink(RetxEntry)::Chunk(bytes) => {
+                let address: usize = region_bytes_address(bytes);
+                region_release(bytes);
+                page_run_transferred_release_physical(address, TCP_RETX_CHUNK_PAGES);
+            }
+        }
+    }
+}
+
+// One zeroed entry, or End when the page allocator is empty. Zeroed for
+// the reason intrusive_pool_insert_zeroed was required: `next` is stable
+// owner storage, whose empty state is a zero tag (#369).
+fn tcp_retx_take() -> RetxLink !{unsafe} {
+    let guard = tcp_retx_pool_lock(&tcp_retx_pool);
+    let mut attempts: usize = 0;
+    while (attempts < 2) {
+        attempts = attempts + 1;
+        match region_alloc(guard) {
+            RegionAlloc(RetxEntry)::Allocated(entry) => {
+                region_slot_zero(entry);
+                tcp_retx_pool_unlock(guard);
+                return RetxLink::More(entry);
+            }
+            RegionAlloc(RetxEntry)::Full => {
+                match page_alloc_contiguous(TCP_RETX_CHUNK_PAGES,
+                                            PageOwnerTag::PoolChunk) {
+                    PageRunAllocResult::OutOfMemory => { attempts = 2; }
+                    PageRunAllocResult::Allocated(run_owner) => {
+                        let base: usize = page_run_physical_address(run_owner);
+                        let _run_index: usize =
+                            page_run_owner_transfer_index(run_owner) as usize;
+                        let RegionBytes::Assumed(chunk) = region_bytes_assume(
+                            base, TCP_RETX_CHUNK_PAGES * PAGE_SIZE) else {};
+                        match region_pool_grow(guard, chunk) {
+                            RegionGrow(RetxEntry)::Grown => {}
+                            RegionGrow(RetxEntry)::TooSmall(back) => {
+                                region_release(back);
+                                page_run_transferred_release_physical(
+                                    base, TCP_RETX_CHUNK_PAGES);
+                                attempts = 2;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    tcp_retx_pool_unlock(guard);
+    return RetxLink::End;
 }
 
 // Reverses a detached chain. Every walk below rebuilds by pushing, which
@@ -1598,35 +1666,19 @@ fn retx_chain_reverse(link_in: RetxLink) -> RetxLink !{unsafe} {
         match link {
             RetxLink::End => { walking = false; link = RetxLink::End; }
             RetxLink::More(parked) => {
-                let mut slot: IntrusiveSlotAddress = intrusive_owner_slot(parked);
-                let generation: usize = intrusive_owner_generation(parked);
-                intrusive_owner_drop(parked);
-                if (intrusive_pool_matches(&tcp_retx_pool, slot, generation)) {
-                    let branded =
-                        intrusive_owner_new(&tcp_retx_pool, slot, generation);
-                    let entry: *RetxEntry =
-                        intrusive_pool_ref(&tcp_retx_pool, branded);
-                    let following: RetxLink = retx_entry_take_next(entry);
-                    if (retx_entry_put_next(entry, reversed) == false) {
-                        kernel_boot_log("tcp retx: chain link was not empty\n");
-                    }
-                    reversed = RetxLink::More(branded);
-                    link = following;
-                } else {
-                    // The chain named a slot the pool does not recognize.
-                    // Nothing further along it can be trusted either, so
-                    // stop rather than follow it; the entries beyond are
-                    // leaked, which is the bounded outcome.
-                    kernel_boot_log("tcp retx: chain names an unknown slot\n");
-                    walking = false;
-                    link = RetxLink::End;
+                let entry: *RetxEntry = region_slot_at(parked);
+                let following: RetxLink = retx_entry_take_next(entry);
+                if (retx_entry_put_next(entry, reversed) == false) {
+                    kernel_boot_log("tcp retx: chain link was not empty\n");
                 }
+                reversed = RetxLink::More(parked);
+                link = following;
             }
         }
     }
     match link {
         RetxLink::End => {}
-        RetxLink::More(leftover) => { intrusive_owner_drop(leftover); }
+        RetxLink::More(leftover) => { retx_entry_release(leftover); }
     }
     return reversed;
 }
@@ -1643,38 +1695,24 @@ fn pending_tcp_reset_all(connection_address: usize) !{unsafe} {
         match link {
             RetxLink::End => { walking = false; link = RetxLink::End; }
             RetxLink::More(parked) => {
-                let mut slot: IntrusiveSlotAddress = intrusive_owner_slot(parked);
-                let generation: usize = intrusive_owner_generation(parked);
-                intrusive_owner_drop(parked);
-                if (intrusive_pool_matches(&tcp_retx_pool, slot, generation)) {
-                    let branded =
-                        intrusive_owner_new(&tcp_retx_pool, slot, generation);
-                    let entry: *RetxEntry =
-                        intrusive_pool_ref(&tcp_retx_pool, branded);
-                    let following: RetxLink = retx_entry_take_next(entry);
-                    let mine: bool = entry.connection == connection_address;
-                    if (mine) {
-                        intrusive_owner_drop(branded);
-                        retx_entry_free(
-                            intrusive_slot_address_identity(slot), generation);
-                    } else {
-                        if (retx_entry_put_next(entry, kept) == false) {
-                            kernel_boot_log("tcp retx: chain link was not empty\n");
-                        }
-                        kept = RetxLink::More(branded);
-                    }
-                    link = following;
+                let entry: *RetxEntry = region_slot_at(parked);
+                let following: RetxLink = retx_entry_take_next(entry);
+                let mine: bool = entry.connection == connection_address;
+                if (mine) {
+                    retx_entry_release(parked);
                 } else {
-                    kernel_boot_log("tcp retx: chain names an unknown slot\n");
-                    walking = false;
-                    link = RetxLink::End;
+                    if (retx_entry_put_next(entry, kept) == false) {
+                        kernel_boot_log("tcp retx: chain link was not empty\n");
+                    }
+                    kept = RetxLink::More(parked);
                 }
+                link = following;
             }
         }
     }
     match link {
         RetxLink::End => {}
-        RetxLink::More(leftover) => { intrusive_owner_drop(leftover); }
+        RetxLink::More(leftover) => { retx_entry_release(leftover); }
     }
     if (retx_chain_put(retx_chain_reverse(kept)) == false) {
         kernel_boot_log("tcp retx: queue was not empty on reinstall\n");
@@ -1704,15 +1742,8 @@ fn pending_tcp_record(connection_owner: borrow TcpConnectionOwner[connection],
                       frame_length: usize)
         -> usize !{unsafe} {
     let conn: *TcpConnection = tcp_connection_of(connection_owner);
-    let pool_guard = intrusive_pool_lock(&tcp_retx_pool);
-    // insert_zeroed, not insert: RetxEntry holds a stable owner field
-    // (`next`), and a recycled slot is neither zero nor fresh. This is
-    // checked, not remembered -- plain insert does not compile for such a
-    // T (GitHub issue #369).
-    let inserted = intrusive_pool_insert_zeroed(&tcp_retx_pool, pool_guard);
-    intrusive_pool_unlock(&tcp_retx_pool, pool_guard);
-    match inserted {
-        IntrusivePoolInsertResult::OutOfMemory => {
+    match tcp_retx_take() {
+        RetxLink::End => {
             // capacity=0: there is no capacity to report any more, which
             // is the point of the change. The line still names the
             // resource, which is what an operator reading a boot log
@@ -1721,10 +1752,9 @@ fn pending_tcp_record(connection_owner: borrow TcpConnectionOwner[connection],
                 "TCP retransmit queue (out of pages)" as *u8, 0);
             return 0;
         }
-        IntrusivePoolInsertResult::Allocated(owner) => {
-            let entry_address: usize = intrusive_slot_address_identity(
-                intrusive_owner_slot(owner));
-            let entry: *RetxEntry = intrusive_pool_ref(&tcp_retx_pool, owner);
+        RetxLink::More(owner) => {
+            let entry_address: usize = region_slot_address(owner);
+            let entry: *RetxEntry = region_slot_at(owner);
             // GitHub issue #460: this was `entry.mutex = 0` and it
             // compiled after the field became a Mutex -- assigning an
             // integer to a struct emits a FOUR-BYTE store, so it zeroed
@@ -1807,7 +1837,7 @@ fn pending_tcp_chain_probe() -> bool !{unsafe} {
     tcp_connection_free(owner_b);
     // Every frame and every retransmit entry back where it came from.
     return ok && tcp_frame_live_count() == 0 &&
-           intrusive_pool_live_count(&tcp_retx_pool) == 0;
+           tcp_retx_live_count() == 0;
 }
 
 // The probe checks the chain, not the bytes a segment carries, so its
@@ -1819,7 +1849,7 @@ fn pending_tcp_chain_probe_body(owner_a: borrow TcpConnectionOwner[first],
         -> bool !{unsafe} {
     let conn: *TcpConnection = tcp_connection_of(owner_a);
     let other: *TcpConnection = tcp_connection_of(owner_b);
-    let live_before: usize = intrusive_pool_live_count(&tcp_retx_pool);
+    let live_before: usize = tcp_retx_live_count();
 
     // One past the old ceiling of 4, plus one belonging to a DIFFERENT
     // connection, interleaved so that reset_all below has to pick its own
@@ -1842,7 +1872,7 @@ fn pending_tcp_chain_probe_body(owner_a: borrow TcpConnectionOwner[first],
     if (queued != 5 ||
         conn.retx_count != 5 ||
         other.retx_count != 1 ||
-        intrusive_pool_live_count(&tcp_retx_pool) != live_before + 6) {
+        tcp_retx_live_count() != live_before + 6) {
         return false;
     }
 
@@ -1858,37 +1888,25 @@ fn pending_tcp_chain_probe_body(owner_a: borrow TcpConnectionOwner[first],
         match link {
             RetxLink::End => { walking = false; link = RetxLink::End; }
             RetxLink::More(parked) => {
-                let mut slot: IntrusiveSlotAddress = intrusive_owner_slot(parked);
-                let generation: usize = intrusive_owner_generation(parked);
-                intrusive_owner_drop(parked);
-                if (intrusive_pool_matches(&tcp_retx_pool, slot, generation)) {
-                    let branded =
-                        intrusive_owner_new(&tcp_retx_pool, slot, generation);
-                    let entry: *RetxEntry =
-                        intrusive_pool_ref(&tcp_retx_pool, branded);
-                    let following: RetxLink = retx_entry_take_next(entry);
-                    if (entry.connection == conn.self_address) {
-                        if (entry.frame_length != 1000 + walked) {
-                            lengths_ok = false;
-                        }
-                        walked = walked + 1;
-                    }
-                    if (retx_entry_put_next(entry, kept) == false) {
+                let entry: *RetxEntry = region_slot_at(parked);
+                let following: RetxLink = retx_entry_take_next(entry);
+                if (entry.connection == conn.self_address) {
+                    if (entry.frame_length != 1000 + walked) {
                         lengths_ok = false;
                     }
-                    kept = RetxLink::More(branded);
-                    link = following;
-                } else {
-                    lengths_ok = false;
-                    walking = false;
-                    link = RetxLink::End;
+                    walked = walked + 1;
                 }
+                if (retx_entry_put_next(entry, kept) == false) {
+                    lengths_ok = false;
+                }
+                kept = RetxLink::More(parked);
+                link = following;
             }
         }
     }
     match link {
         RetxLink::End => {}
-        RetxLink::More(leftover) => { intrusive_owner_drop(leftover); }
+        RetxLink::More(leftover) => { retx_entry_release(leftover); }
     }
     if (retx_chain_put(retx_chain_reverse(kept)) == false) { return false; }
     if (lengths_ok == false || walked != 5) { return false; }
@@ -1897,21 +1915,13 @@ fn pending_tcp_chain_probe_body(owner_a: borrow TcpConnectionOwner[first],
     pending_tcp_reset_all(conn.self_address);
     if (conn.retx_count != 0 ||
         other.retx_count != 1 ||
-        intrusive_pool_live_count(&tcp_retx_pool) != live_before + 1) {
+        tcp_retx_live_count() != live_before + 1) {
         return false;
     }
     pending_tcp_reset_all(other.self_address);
-    if (intrusive_pool_live_count(&tcp_retx_pool) != live_before ||
-        intrusive_pool_probe(&tcp_retx_pool) == false) {
+    if (tcp_retx_live_count() != live_before) {
         return false;
     }
-    // Give the pages back rather than leaving this probe's chunks held.
-    // #346's anti-thrash default retains one empty chunk per pool, which
-    // is the right policy for a queue in steady use and the wrong one for
-    // a boot probe that will not queue anything again for a while.
-    let reclaim_guard = intrusive_pool_lock(&tcp_retx_pool);
-    intrusive_pool_reclaim(&tcp_retx_pool, reclaim_guard);
-    intrusive_pool_unlock(&tcp_retx_pool, reclaim_guard);
     return true;
 }
 
@@ -1996,67 +2006,47 @@ fn pending_tcp_service_once(conn: borrow *TcpConnection,
                 match link {
                     RetxLink::End => { walking = false; link = RetxLink::End; }
                     RetxLink::More(parked) => {
-                        let mut slot: IntrusiveSlotAddress =
-                            intrusive_owner_slot(parked);
-                        let generation: usize =
-                            intrusive_owner_generation(parked);
-                        intrusive_owner_drop(parked);
-                        if (intrusive_pool_matches(
-                                &tcp_retx_pool, slot, generation)) {
-                            let branded = intrusive_owner_new(
-                                &tcp_retx_pool, slot, generation);
-                            let entry: *RetxEntry =
-                                intrusive_pool_ref(&tcp_retx_pool, branded);
-                            let following: RetxLink =
-                                retx_entry_take_next(entry);
-                            let mut acked: bool = false;
-                            if (entry.connection == conn.self_address &&
-                                pending_tcp_ack_matches(frame, len, entry)) {
-                                // A real peer ACK, not a synthetic flag
-                                // flip: this is what makes
-                                // kernel_tcp_injected_data_recovered() /
-                                // kernel_tcp_injected_fin_recovered()
-                                // genuinely prove recovery, matching the
-                                // same rigor
-                                // kernel_tcp_injected_syn_ack_recovered()
-                                // already had.
-                                if (intrusive_slot_address_matches_untrusted(
-                                        slot, conn.injected_data_entry) &&
-                                    tcp_injected_data_retransmitted) {
-                                    tcp_injected_data_recovery_observed = true;
-                                }
-                                if (intrusive_slot_address_matches_untrusted(
-                                        slot, conn.injected_fin_entry) &&
-                                    tcp_injected_fin_retransmitted) {
-                                    tcp_injected_fin_recovery_observed = true;
-                                }
-                                acked = true;
+                        let entry: *RetxEntry = region_slot_at(parked);
+                        let following: RetxLink =
+                            retx_entry_take_next(entry);
+                        let mut acked: bool = false;
+                        if (entry.connection == conn.self_address &&
+                            pending_tcp_ack_matches(frame, len, entry)) {
+                            // A real peer ACK, not a synthetic flag
+                            // flip: this is what makes
+                            // kernel_tcp_injected_data_recovered() /
+                            // kernel_tcp_injected_fin_recovered()
+                            // genuinely prove recovery, matching the
+                            // same rigor
+                            // kernel_tcp_injected_syn_ack_recovered()
+                            // already had.
+                            if (region_slot_address(parked) == conn.injected_data_entry &&
+                                tcp_injected_data_retransmitted) {
+                                tcp_injected_data_recovery_observed = true;
                             }
-                            if (acked) {
-                                intrusive_owner_drop(branded);
-                                retx_entry_free(
-                                    intrusive_slot_address_identity(slot),
-                                    generation);
-                                conn.retx_count =
-                                    retx_count_after_release(conn);
-                            } else {
-                                if (retx_entry_put_next(entry, kept) == false) {
-                                    kernel_boot_log("tcp retx: chain link was not empty\n");
-                                }
-                                kept = RetxLink::More(branded);
+                            if (region_slot_address(parked) == conn.injected_fin_entry &&
+                                tcp_injected_fin_retransmitted) {
+                                tcp_injected_fin_recovery_observed = true;
                             }
-                            link = following;
-                        } else {
-                            kernel_boot_log("tcp retx: chain names an unknown slot\n");
-                            walking = false;
-                            link = RetxLink::End;
+                            acked = true;
                         }
+                        if (acked) {
+                            retx_entry_release(parked);
+                            conn.retx_count =
+                                retx_count_after_release(conn);
+                        } else {
+                            if (retx_entry_put_next(entry, kept) == false) {
+                                kernel_boot_log("tcp retx: chain link was not empty\n");
+                            }
+                            kept = RetxLink::More(parked);
+                        }
+                        link = following;
                     }
                 }
             }
             match link {
                 RetxLink::End => {}
-                RetxLink::More(leftover) => { intrusive_owner_drop(leftover); }
+                RetxLink::More(leftover) => { retx_entry_release(leftover); }
             }
             if (retx_chain_put(retx_chain_reverse(kept)) == false) {
                 kernel_boot_log("tcp retx: queue was not empty on reinstall\n");
@@ -2091,85 +2081,69 @@ fn pending_tcp_service_once(conn: borrow *TcpConnection,
         match link {
             RetxLink::End => { walking = false; link = RetxLink::End; }
             RetxLink::More(parked) => {
-                let mut slot: IntrusiveSlotAddress = intrusive_owner_slot(parked);
-                let generation: usize = intrusive_owner_generation(parked);
-                intrusive_owner_drop(parked);
-                if (intrusive_pool_matches(&tcp_retx_pool, slot, generation)) {
-                    let branded =
-                        intrusive_owner_new(&tcp_retx_pool, slot, generation);
-                    let entry: *RetxEntry =
-                        intrusive_pool_ref(&tcp_retx_pool, branded);
-                    let following: RetxLink = retx_entry_take_next(entry);
-                    let mut expired: bool = false;
-                    // GitHub issue #452: decide and mutate under the guard,
-                    // TRANSMIT OUTSIDE IT. mutex_acquire masks interrupts,
-                    // and holding that across net_transmit_ready would mask
-                    // them for as long as handing a 1514-byte frame to the
-                    // NIC takes. The retry state is two words; the transmit
-                    // is not, and it needs none of it.
-                    //
-                    // `sent_at` is set before the transmit rather than
-                    // after, and the stored VALUE is unchanged: `now` is
-                    // read once before this loop, so both orders wrote the
-                    // same number.
-                    let mut retransmit: bool = false;
-                    let mut length: usize = 0;
-                    if (entry.connection == conn.self_address) {
-                        let scan_guard = retx_lock(&entry.mutex);
-                        let retry = retx_retry_state(scan_guard, entry);
-                        if (now - retry.sent_at >= retry_ticks) {
-                            if (retry.retries < TCP_RETRY_LIMIT) {
-                                retry.sent_at = now;
-                                retry.retries = retry.retries + 1;
-                                retransmit = true;
-                                length = entry.frame_length;
-                            } else {
-                                // Give up silently on this one segment --
-                                // the same per-segment exhaustion behavior
-                                // this file always had, scoped to this
-                                // entry rather than the whole queue.
-                                expired = true;
-                            }
-                        }
-                        retx_unlock(scan_guard, &entry.mutex);
-                    }
-                    if (retransmit) {
-                        let frame_bytes = entry.frame as []u8;
-                        ready = net_transmit_ready(
-                            ready, frame_bytes[0..<1514], length as i32);
-                        if (intrusive_slot_address_matches_untrusted(
-                                slot, conn.injected_data_entry)) {
-                            tcp_injected_data_retransmitted = true;
-                        }
-                        if (intrusive_slot_address_matches_untrusted(
-                                slot, conn.injected_fin_entry)) {
-                            tcp_injected_fin_retransmitted = true;
+                let entry: *RetxEntry = region_slot_at(parked);
+                let following: RetxLink = retx_entry_take_next(entry);
+                let mut expired: bool = false;
+                // GitHub issue #452: decide and mutate under the guard,
+                // TRANSMIT OUTSIDE IT. mutex_acquire masks interrupts,
+                // and holding that across net_transmit_ready would mask
+                // them for as long as handing a 1514-byte frame to the
+                // NIC takes. The retry state is two words; the transmit
+                // is not, and it needs none of it.
+                //
+                // `sent_at` is set before the transmit rather than
+                // after, and the stored VALUE is unchanged: `now` is
+                // read once before this loop, so both orders wrote the
+                // same number.
+                let mut retransmit: bool = false;
+                let mut length: usize = 0;
+                if (entry.connection == conn.self_address) {
+                    let scan_guard = retx_lock(&entry.mutex);
+                    let retry = retx_retry_state(scan_guard, entry);
+                    if (now - retry.sent_at >= retry_ticks) {
+                        if (retry.retries < TCP_RETRY_LIMIT) {
+                            retry.sent_at = now;
+                            retry.retries = retry.retries + 1;
+                            retransmit = true;
+                            length = entry.frame_length;
+                        } else {
+                            // Give up silently on this one segment --
+                            // the same per-segment exhaustion behavior
+                            // this file always had, scoped to this
+                            // entry rather than the whole queue.
+                            expired = true;
                         }
                     }
-                    if (expired) {
-                        intrusive_owner_drop(branded);
-                        retx_entry_free(
-                            intrusive_slot_address_identity(slot), generation);
-                        conn.retx_count =
-                            retx_count_after_release(conn);
-                    } else {
-                        if (retx_entry_put_next(entry, kept) == false) {
-                            kernel_boot_log("tcp retx: chain link was not empty\n");
-                        }
-                        kept = RetxLink::More(branded);
-                    }
-                    link = following;
-                } else {
-                    kernel_boot_log("tcp retx: chain names an unknown slot\n");
-                    walking = false;
-                    link = RetxLink::End;
+                    retx_unlock(scan_guard, &entry.mutex);
                 }
+                if (retransmit) {
+                    let frame_bytes = entry.frame as []u8;
+                    ready = net_transmit_ready(
+                        ready, frame_bytes[0..<1514], length as i32);
+                    if (region_slot_address(parked) == conn.injected_data_entry) {
+                        tcp_injected_data_retransmitted = true;
+                    }
+                    if (region_slot_address(parked) == conn.injected_fin_entry) {
+                        tcp_injected_fin_retransmitted = true;
+                    }
+                }
+                if (expired) {
+                    retx_entry_release(parked);
+                    conn.retx_count =
+                        retx_count_after_release(conn);
+                } else {
+                    if (retx_entry_put_next(entry, kept) == false) {
+                        kernel_boot_log("tcp retx: chain link was not empty\n");
+                    }
+                    kept = RetxLink::More(parked);
+                }
+                link = following;
             }
         }
     }
     match link {
         RetxLink::End => {}
-        RetxLink::More(leftover) => { intrusive_owner_drop(leftover); }
+        RetxLink::More(leftover) => { retx_entry_release(leftover); }
     }
     if (retx_chain_put(retx_chain_reverse(kept)) == false) {
         kernel_boot_log("tcp retx: queue was not empty on reinstall\n");

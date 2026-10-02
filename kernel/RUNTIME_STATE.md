@@ -226,8 +226,9 @@ addresses into them (the hazard #257 hit).
 `net/tcp.tkb`'s `tcp_connection_pool` (`IntrusivePool(TcpConnection)`,
 private), `tcp_frame_pool` (the built-in `RegionPool(NetFrame)` since
 #672: it grows by two-page chunks from the page allocator and gives a chunk
-whose frames are all free straight back), `tcp_retx_pool` and
-`tcp_retx_chain`;
+whose frames are all free straight back), `tcp_retx_pool` (also a
+built-in `RegionPool(RetxEntry)`, the same way) and `tcp_retx_chain`, which
+owns each queued entry's slot permission;
 `net/socket_capability.tkb`'s `network_capability_store` (the kernel owns
 exactly one physical RX capability, by hardware design, not by choice).
 
