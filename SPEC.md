@@ -2884,6 +2884,15 @@ match region_unpin(p) {                          // no pool lock needed
   the last holder sees every other holder's accesses. A slot's word keeps
   its state in bits 0-1, its pin count in bits 2-17 and its generation
   above; a slot at the pin limit refuses a new pin as `Stale`.
+- A kernel table that keeps an object's identity as two numbers names it
+  with `region_handle_from(guard, address, generation)` (a wrong pair is
+  only ever `Stale` at the pin), reads them back from a pin with
+  `region_pin_address` and `region_pin_generation`, and, holding only an
+  address, gets whatever occupies it now with `region_handle_current`.
+  `region_pool_next(guard, after)` walks the Live slots (`Next(handle)` or
+  `End`; start from `region_handle_from(guard, 0, 0)`).
+  `region_pool_lock_is_held(&pool)` lets a debugger that has stopped every
+  core avoid waiting on a lock an interrupted core holds.
 
 Overloads are chosen by the name of an indexed type, its static indices
 being settled by unification afterwards, and an integer literal argument

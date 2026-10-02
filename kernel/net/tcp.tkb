@@ -16,17 +16,17 @@
 // - CONNECTION STATE IS SERIALIZED across cores. Every
 //   TcpConnectionOwner represents its payload's held TaskMutex: allocation
 //   and take acquire it, while put releases it and free destroys the locked
-//   slot. The linear owner makes a forgotten release a compile error. This
-//   does not make an unowned IntrusivePool observation safe against a
-//   concurrent free; the open/pending queries and diagnostic walks retain
-//   kernel/lib/intrusive_pool.tkb's read-side limitation (issue #482).
-//   Nor may the current scheduler preempt one holder and run a waiter for
+//   slot. The linear owner makes a forgotten release a compile error. The
+//   owner holds the connection's pin in the built-in region_pool (#672), so
+//   no connection is freed while anyone holds a pin on it; the unowned
+//   open/pending queries and diagnostic walks pin what they read too, which
+//   closes the read-side limitation issue #482 recorded for them. Nor may the current scheduler preempt one holder and run a waiter for
 //   the same TaskMutex on that core; the assertion at the end keeps that
 //   distinct execution-model requirement checked.
 // - THERE IS NO CEILING LEFT. TCP_CONNECTION_MAX and PENDING_TCP_MAX are
-//   both gone (issue #257): a connection is a slot in
-//   IntrusivePool(TcpConnection), its frames are slots in a NetFrame pool,
-//   and its unacknowledged segments are a chain of pooled entries. The
+//   both gone (issue #257): a connection, its frames and its
+//   unacknowledged segments are slots in three built-in region_pools
+//   (#672), which grow and shrink by chunks of pages. The
 //   only exhaustion left is the page allocator being empty, still logged
 //   via kernel_boot_log_resource_exhausted and still reported to callers
 //   exactly as a full fixed pool was -- TcpConnectionAllocResult::Full
@@ -35,23 +35,23 @@
 //   to a hand-picked limit.
 // - A CONNECTION'S IDENTITY IS AN ADDRESS. What used to be
 //   `{0..<TCP_CONNECTION_MAX as usize}` -- a proof that an index named a
-//   real array element -- is intrusive_pool_matches, which proves more:
-//   that the address names a live slot of THIS pool whose occupant is
-//   still the one the generation names. See kernel/kernel/fd_table.tkb's
+//   real array element -- is region_pin on the (address, generation) the
+//   fd table keeps, which proves more: that the address names a Live slot
+//   of THIS pool whose occupant is still the one the generation names. See
+//   kernel/kernel/fd_table.tkb's
 //   transport_slot for what that means at the boundary where the pair is
 //   stored.
 // - THE RECEIVE PATH NOW ALLOCATES. Queuing a segment for retransmission
 //   takes a page from kernel/mm/page.tkb when the current chunk is full.
 //   That is reached from net_rx_wait() onward -- `!{may_block}` thread
 //   context, the one context that touches TCP -- never from an interrupt
-//   handler. The retransmit pool retains no empty chunk (retained_chunks
-//   = 0, unlike kernel/lib/intrusive_pool.tkb's own default) so that a
-//   drained queue holds no page: this kernel checks "no page held at
+//   handler. The retransmit pool gives an empty chunk straight back, so
+//   that a drained queue holds no page: this kernel checks "no page held at
 //   rest" as an invariant, and issue #373 is a live reason not to hold
 //   one anyway.
-// - This file has the `unsafe` EFFECT now, and no unsafe BLOCKS. Every
-//   entry point of kernel/lib/intrusive_pool.tkb that reaches a payload
-//   or a chunk header carries it, so anything calling them inherits it.
+// - This file has the `unsafe` EFFECT, and no unsafe BLOCKS. Every
+//   region_pool operation that reaches an element or a chunk carries it,
+//   so anything calling them inherits it.
 //   The distinction is worth keeping straight: nothing here elides a
 //   check of its own.
 // - Exactly one physical RX capability (NetRxCanAcquire,
@@ -78,15 +78,9 @@ use "kernel/net/icmp.tkb";
 // gone from this file -- a SlotMap(N) is exactly the compile-time ceiling
 // this issue set out to remove, and the pool below replaces both the
 // allocation and the generation bookkeeping it provided.
-// GitHub issue #257: the retransmit queue is a pool now, not an array.
-// kernel/lib/intrusive_pool.tkb names its page provider's symbols without
-// `use`ing anyone (issue #364), so kernel/mm/page.tkb has to be reached
-// FIRST -- the order of these three lines is load-bearing, and getting it
-// wrong fails with an unbound constant rather than silently. pool_lock is
-// the lock backend that file likewise names without binding.
+// The pools here are built-in region_pools (#672), grown from the page
+// allocator's runs.
 use "kernel/mm/page.tkb";
-use "kernel/lib/pool_lock.tkb";
-use "kernel/lib/intrusive_pool.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/mutex.tkb";
 use "kernel/lib/task_mutex.tkb";
@@ -183,6 +177,10 @@ struct TcpConnection {
     // is nothing else to record.
     self_address: usize;
     connection_open: bool;
+    // GitHub issue #672 layer 3: set by tcp_connection_free before it lets
+    // go of the lock, so a taker that was waiting for the lock and finds
+    // this gives up instead of minting an owner for a freed connection.
+    retired: bool;
     socket_buffer_length: usize;
     socket_buffer_offset: usize;
     inetd_response_length: usize;
@@ -267,25 +265,30 @@ struct TcpConnection {
 // still the one the generation names. Strictly more than the refinement
 // proved, since a refinement could not tell a live connection from a
 // recycled one -- that was always the generation's job.
-linear struct TcpConnectionOwner[connection: usize] {
-    private slot: usize;
-    private generation: usize @ connection;
+//
+// GitHub issue #672 layer 3: the owner HOLDS the connection's pin in the
+// built-in region_pool, so the connection pointer is derived from it
+// (tcp_connection_of) and the slot cannot be freed under it. `connection`
+// is the slot's index in its pool now, `pool` the pool's identity; the
+// generation the fd table keeps is checked when the pin is taken.
+linear struct TcpConnectionOwner[pool: addr, connection: usize] {
+    private pin: RegionPin(TcpConnection)[pool, connection];
 }
 
 must_use variant TcpConnectionAllocResult {
     Full;
-    Allocated(exists connection: usize. TcpConnectionOwner[connection]);
+    Allocated(exists pool: addr. exists connection: usize. TcpConnectionOwner[pool, connection]);
 }
 
 must_use variant TcpConnectionTakeResult {
     Missing;
-    Ready(exists connection: usize. TcpConnectionOwner[connection]);
+    Ready(exists pool: addr. exists connection: usize. TcpConnectionOwner[pool, connection]);
 }
 
 must_use variant TcpConnectionTryTakeResult {
     Missing;
     Busy;
-    Ready(exists connection: usize. TcpConnectionOwner[connection]);
+    Ready(exists pool: addr. exists connection: usize. TcpConnectionOwner[pool, connection]);
 }
 
 must_use variant TcpConnectionProbeStep {
@@ -311,8 +314,22 @@ must_use variant TcpConnectionProbeStep {
 // `put` is a drop, `Conflict` is unreachable, and TcpConnectionValue,
 // TcpConnectionStore, TcpConnectionGuard, tcp_connection_lock/_unlock and
 // TcpConnectionPutResult are deleted rather than ported.
-private let mut tcp_connection_pool: IntrusivePool(TcpConnection);
-private let mut tcp_connection_pool_ready: bool = false;
+private let mut tcp_connection_pool: RegionPool(TcpConnection);
+
+// One page per chunk: a connection is a few hundred bytes.
+const TCP_CONNECTION_CHUNK_PAGES: usize = 1;
+
+private fn tcp_connection_pool_lock(
+        pool: *RegionPool(TcpConnection) @ conns)
+        -> RegionPoolGuard(TcpConnection)[conns] !{unsafe} {
+    let flags: usize = mutex_irq_save();
+    return region_pool_lock_saving(pool, flags);
+}
+
+private fn tcp_connection_pool_unlock(
+        guard: sink RegionPoolGuard(TcpConnection)[conns]) {
+    mutex_irq_restore(region_pool_unlock_saved(guard));
+}
 
 const TCP_DDB_CONNECTION_PROBE_BUDGET: usize = 64;
 
@@ -322,56 +339,56 @@ const TCP_DDB_CONNECTION_PROBE_BUDGET: usize = 64;
 // through a write, so the snapshot reports Unknown. The slot walk is bounded
 // because this function runs on the interrupted stack.
 fn kernel_tcp_ddb_connection_pending() -> NetPendingState !{unsafe} {
-    if (tcp_connection_pool_ready == false) { return NetPendingState::No; }
-    if (intrusive_pool_lock_is_held_for_probe(&tcp_connection_pool)) {
+    if (region_pool_lock_is_held(&tcp_connection_pool)) {
         return NetPendingState::Unknown;
     }
-    let mut cursor: usize = intrusive_pool_first_slot(&tcp_connection_pool);
+    let guard = tcp_connection_pool_lock(&tcp_connection_pool);
+    let mut cursor: RegionHandle(TcpConnection) =
+        region_handle_from(guard, 0, 0);
     let mut probes: usize = 0;
     let mut busy: bool = false;
-    while (cursor != 0 && probes < TCP_DDB_CONNECTION_PROBE_BUDGET) {
-        let next: usize = intrusive_pool_next_slot(&tcp_connection_pool, cursor);
-        match intrusive_pool_probe_slot_unproven(&tcp_connection_pool, cursor) {
-            IntrusiveSlotProbe::NoPayload => {}
-            IntrusiveSlotProbe::Live(slot_view) => {
-                let conn: *TcpConnection = intrusive_pool_payload_of(
-                    &tcp_connection_pool, slot_view);
-                if (task_mutex_is_held(&conn.lock)) {
-                    busy = true;
-                } else if (conn.connection_open &&
-                        conn.socket_buffer_offset < conn.socket_buffer_length) {
-                    intrusive_view_release(slot_view);
-                    return NetPendingState::Yes;
+    let mut walking: bool = true;
+    let mut found: bool = false;
+    while (walking && probes < TCP_DDB_CONNECTION_PROBE_BUDGET) {
+        match region_pool_next(guard, cursor) {
+            RegionNext(TcpConnection)::End => { walking = false; }
+            RegionNext(TcpConnection)::Next(handle) => {
+                cursor = handle;
+                match region_pin(guard, handle) {
+                    RegionPinned(TcpConnection)::Stale => {}
+                    RegionPinned(TcpConnection)::Pinned(pin) => {
+                        let conn: *TcpConnection = region_pin_at(pin);
+                        if (task_mutex_is_held(&conn.lock)) {
+                            busy = true;
+                        } else if (conn.connection_open &&
+                                conn.socket_buffer_offset < conn.socket_buffer_length) {
+                            found = true;
+                            walking = false;
+                        }
+                        // Every core is stopped, so no retire can be in
+                        // flight: this is never the last pin.
+                        match region_unpin(pin) {
+                            RegionUnpin(TcpConnection)::Unpinned => {}
+                            RegionUnpin(TcpConnection)::Last(slot) => {
+                                region_slot_abandon(slot);
+                            }
+                        }
+                    }
                 }
-                intrusive_view_release(slot_view);
             }
         }
         probes = probes + 1;
-        cursor = next;
     }
-    if (cursor != 0 || busy) { return NetPendingState::Unknown; }
+    tcp_connection_pool_unlock(guard);
+    if (found) { return NetPendingState::Yes; }
+    if (walking || busy) { return NetPendingState::Unknown; }
     return NetPendingState::No;
 }
 
-// Reached only when an address that should name a live connection does
-// not. A real struct rather than a null pointer so the impossible case is
-// harmless instead of undefined. Private because it holds stable owner
-// storage.
-private let mut tcp_connection_absent_fallback: TcpConnection;
-
-// GitHub issue #410: the two absent-slot fallbacks in this file logged every
-// occurrence and counted none, which is the one shape of report that is bad
-// in both directions -- noisy if it happens often, and invisible in a summary
-// if it happens once. The four elsewhere (image record, target root, address
-// space backing, fd record, process record) were counted and summarised, and
-// this pair predates that convention.
-//
-// One counter for all three return sites, on the precedent
-// `unified_fd_record_missing_uses` set for its own three pools: the question
-// a reader has at the end of a boot is whether any lookup here landed on a
-// slot that was not the one it named, not which accessor it was. The
-// per-occurrence lines above already say which, and they stay -- they are
-// useful the first time, and they are no longer the only signal.
+// GitHub issue #410: absent-slot reports are counted as well as logged, so
+// one occurrence shows in a summary. Since #672 the connection pointer comes
+// from a pin and cannot be absent; what is left to count is a frame missing
+// from a connection (tcp_frame_missing).
 //
 // Indexed by cpu_id() and sized by KERNEL_MAX_CORES, the same shape as every
 // other counter in this family, so two cores cannot lose each other's
@@ -681,27 +698,6 @@ fn tcp_frame_release_link(link: FrameLink) !{unsafe} {
     }
 }
 
-// GitHub issue #371: every intrusive_pool_remove in this file discharges a
-// handle this file just minted, or rebuilt from a record it still holds.
-// So a refusal is a kernel bug in this file, not a race a caller could
-// have caused -- there is nothing to return it to and nothing to do
-// differently, but there is everything to be gained by saying it out
-// loud. Being quiet about a pool refusing a handle is what the counters
-// left behind: a number nobody reads until they are already debugging.
-//
-// The pool has not touched its free chain by this point, so continuing is
-// safe; what is lost is one slot, which the leak shows up as.
-private fn tcp_pool_remove_expected(result: IntrusivePoolRemoveResult,
-                                    site: *u8) {
-    let (ok, reason) = intrusive_remove_outcome(result);
-    if (ok) { return; }
-    kernel_boot_log("tcp: pool remove at ");
-    kernel_boot_log(site);
-    kernel_boot_log(" -- ");
-    kernel_boot_log(reason);
-    kernel_boot_log("\n");
-}
-
 // Hands this connection its transmit frame, or returns false having
 // changed nothing. Called from tcp_connection_alloc, whose Full result is
 // exactly the right thing to report when it fails -- a connection with no
@@ -812,7 +808,7 @@ fn tcp_frame_release_displaced(link: FrameLink) !{unsafe} {
     }
 }
 
-fn tcp_connection_frames_release(conn: *TcpConnection) !{unsafe} {
+fn tcp_connection_frames_release(conn: borrow *TcpConnection) !{unsafe} {
     let tx_guard = tcp_frame_lock(&conn.frames_mutex);
     let held_tx: FrameLink = stable_replace(
         tx_guard, &conn.frames_mutex, conn.tx, FrameLink::None);
@@ -845,7 +841,7 @@ enum TcpFrameRole: u8 { Tx; Rx; Inetd; }
 // connection owner, and with it the connection lock, for the whole window:
 // nothing else reaches this field meanwhile, except a nested hold of the
 // SAME role on this path, which finds None and is told so.
-fn tcp_connection_frame_hold(owner: borrow TcpConnectionOwner[connection],
+fn tcp_connection_frame_hold(owner: borrow TcpConnectionOwner[connection_pool, connection],
                              role: TcpFrameRole) -> FrameLink !{unsafe} {
     let conn: *TcpConnection = tcp_connection_of(owner);
     let guard = tcp_frame_lock(&conn.frames_mutex);
@@ -864,7 +860,7 @@ fn tcp_connection_frame_hold(owner: borrow TcpConnectionOwner[connection],
     return held;
 }
 
-fn tcp_connection_frame_unhold(owner: borrow TcpConnectionOwner[connection],
+fn tcp_connection_frame_unhold(owner: borrow TcpConnectionOwner[connection_pool, connection],
                                role: TcpFrameRole,
                                link: sink FrameLink) !{unsafe} {
     let conn: *TcpConnection = tcp_connection_of(owner);
@@ -894,7 +890,7 @@ fn tcp_frame_bytes(slot: borrow RegionSlot(NetFrame)[p, k])
 // Copies `source` to the start of one of the connection's frames: the
 // whole of a short access, held and given back here. False if the source
 // is longer than a frame or the frame is missing.
-fn tcp_connection_frame_fill(owner: borrow TcpConnectionOwner[connection],
+fn tcp_connection_frame_fill(owner: borrow TcpConnectionOwner[connection_pool, connection],
                              role: TcpFrameRole, source: borrow []u8)
         -> bool !{unsafe} {
     let length: usize = source.len;
@@ -916,69 +912,77 @@ fn tcp_frame_missing() {
     tcp_absent_fallback_note();
 }
 
-fn tcp_connection_owner_new(slot: usize, generation: usize @ connection)
-        -> TcpConnectionOwner[connection] !{lock_guard_30_connection} {
-    let mut owner: TcpConnectionOwner[connection] = { slot, generation };
+fn tcp_connection_owner_new(pin: sink RegionPin(TcpConnection)[p, k])
+        -> TcpConnectionOwner[p, k] !{lock_guard_30_connection} {
+    let mut owner: TcpConnectionOwner[p, k] = { pin };
     return owner;
 }
 
-fn tcp_connection_owner_drop(owner: sink TcpConnectionOwner[connection]) {}
+private fn tcp_connection_owner_release(owner: sink TcpConnectionOwner[p, k])
+        -> RegionPin(TcpConnection)[p, k] {
+    return owner.pin;
+}
 
-// The connection a pool address names. Validated on every call: the
-// address may have come from an fd table entry that outlived the
-// connection it describes, and intrusive_pool_probe_slot rejects both a
-// bogus address and a live slot whose occupant has moved on.
-private fn tcp_connection_payload(address: usize) -> *TcpConnection
+// The connection an owner holds, derived from its pin: no lookup, nothing
+// to find missing, and it dies with the borrow of the owner.
+fn tcp_connection_of(owner: borrow TcpConnectionOwner[p, connection])
+        -> *TcpConnection @ connection !{unsafe} {
+    return region_pin_at(owner.pin);
+}
+
+// Give up a pin. The last pin of a freed connection gives its slot back
+// to the pool here.
+private fn tcp_connection_unpin(pin: sink RegionPin(TcpConnection)[p, k])
         !{unsafe} {
-    match intrusive_pool_probe_slot(&tcp_connection_pool, address) {
-        IntrusiveSlotProbe::NoPayload => {
-            kernel_boot_log("tcp: connection address names no live slot\n");
-            tcp_absent_fallback_note();
-            return &tcp_connection_absent_fallback;
+    match region_unpin(pin) {
+        RegionUnpin(TcpConnection)::Unpinned => {}
+        RegionUnpin(TcpConnection)::Last(slot) => { tcp_connection_slot_free(slot); }
+    }
+}
+
+private fn tcp_connection_slot_free(slot: sink RegionSlot(TcpConnection)[p, k])
+        !{unsafe} {
+    let guard = tcp_connection_pool_lock(&tcp_connection_pool);
+    match region_slot_adopt(guard, slot) {
+        RegionAdopt(TcpConnection)::Foreign(stray) => {
+            kernel_boot_log("tcp: a freed connection is not this pool's\n");
+            region_slot_abandon(stray);
         }
-        IntrusiveSlotProbe::Live(slot_view) => {
-            // GitHub issue #488: this RETURNS the pointer, so it cannot
-            // hold the proof for the pointer's life. The unproven form
-            // names that and counts it in the trusted base; removing it
-            // means migrating this accessor's callers to hold the view
-            // themselves.
-            return intrusive_pool_payload_unproven_of(&tcp_connection_pool, slot_view);
+        RegionAdopt(TcpConnection)::Adopted(mine) => {
+            region_free(guard, mine);
+            tcp_connection_pool_return_empty(guard);
+        }
+    }
+    tcp_connection_pool_unlock(guard);
+}
+
+private fn tcp_connection_pool_return_empty(
+        guard: borrow RegionPoolGuard(TcpConnection)[conns]) !{unsafe} {
+    let mut more: bool = true;
+    while (more) {
+        match region_pool_shrink(guard) {
+            RegionShrink(TcpConnection)::Nothing => { more = false; }
+            RegionShrink(TcpConnection)::Chunk(bytes) => {
+                let address: usize = region_bytes_address(bytes);
+                region_release(bytes);
+                page_run_transferred_release_physical(
+                    address, TCP_CONNECTION_CHUNK_PAGES);
+            }
         }
     }
 }
 
-// The connection an OWNER names, and the owner carries a generation, so
-// this asks the question the address-only accessor above cannot.
-//
-// GitHub issue #492: `tcp_connection_payload(owner.slot)` is what stood
-// here, and it threw away the half of the owner that makes the lookup safe.
-// A slot that was freed and reallocated answers Live to an address, so an
-// owner outliving its connection -- which is what the linear type exists to
-// prevent, and what a bug in that discipline would look like -- would have
-// been handed the NEW connection's payload and gone on writing into it.
-// The generation is right there in the owner; spending it costs one
-// comparison.
-//
-// The address-only form above stays and is right for its callers: the fd
-// table's stored address, the pool walk's cursor, and the two lock
-// operations that name a slot rather than an occupant. Those genuinely have
-// no expectation to check against.
-fn tcp_connection_of(owner: borrow TcpConnectionOwner[connection])
-        -> *TcpConnection @ connection !{unsafe} {
-    // The check here and the payload lookup below validate the address
-    // twice, and that is the deliberate trade. Fusing them means calling
-    // intrusive_pool_probe_handle and laundering the view HERE, which adds
-    // a second declared liveness escape to this file for a pointer that
-    // already escapes once, one call down. One extra generation compare on
-    // a read path is cheaper than a second entry in the trusted-base
-    // inventory (scripts/check_liveness_proof_escapes.py).
-    if (intrusive_pool_matches_untrusted(&tcp_connection_pool, owner.slot,
-                                        owner.generation) == false) {
-        kernel_boot_log("tcp: connection owner names no live slot\n");
-        tcp_absent_fallback_note();
-        return &tcp_connection_absent_fallback;
-    }
-    return tcp_connection_payload(owner.slot);
+// A pin on the connection an (address, generation) pair names, or Stale.
+// The pool lock is held only for the check; the pin outlives it.
+private fn tcp_connection_pin(pool: *RegionPool(TcpConnection) @ conns,
+                              address: usize, generation: usize)
+        -> RegionPinned(TcpConnection)[conns] !{unsafe} {
+    let guard = tcp_connection_pool_lock(pool);
+    let mut handle: RegionHandle(TcpConnection) =
+        region_handle_from(guard, address, generation);
+    let pinned = region_pin(guard, handle);
+    tcp_connection_pool_unlock(guard);
+    return pinned;
 }
 
 // Despite the name, this is a RESET, not a one-time constructor: it is
@@ -1000,14 +1004,11 @@ fn tcp_connection_of(owner: borrow TcpConnectionOwner[connection])
 // use for the previous one's unacknowledged segments, and
 // pending_tcp_reset_all returns their pages properly.
 fn tcp_connection_pool_init() !{unsafe} {
-    // tcp_retx_pool needs no construction, and tcp_retx_chain's mutex is
-    // already free from .bss (no mutex_init: it FORCE-FREES, GitHub issue
-    // #479). The retransmit pool retains no empty chunk: a retransmit queue
-    // is empty at rest, and the `resources` view checks pages=0 there.
-    if (tcp_connection_pool_ready == false) {
-        intrusive_pool_init_retaining(&tcp_connection_pool, 0);
-        tcp_connection_pool_ready = true;
-    }
+    // Neither pool needs construction: a built-in region_pool starts empty
+    // from .bss, and tcp_retx_chain's mutex is already free (no mutex_init:
+    // it FORCE-FREES, GitHub issue #479). Both retain no empty chunk: the
+    // `resources` view checks pages=0 at rest.
+    //
     // Draining IS the reset now. There is no fixed set of connections to
     // put back into Listen: a connection exists only while it is
     // allocated, so a daemon restarting simply has none, and every page
@@ -1016,96 +1017,121 @@ fn tcp_connection_pool_init() !{unsafe} {
 }
 
 // Frees the first live connection, reporting whether it found one. The
-// walk restarts on every free rather than carrying a cursor across it:
-// with retained_chunks = 0 an emptied chunk goes straight back to the page
-// allocator, so an address computed before a free can name a page this
-// pool no longer owns (kernel/lib/intrusive_pool.tkb's own header says so,
-// and its exerciser restarts for the same reason). O(live^2) over a
+// walk restarts on every free rather than carrying a cursor across it: an
+// emptied chunk goes straight back to the page allocator. O(live^2) over a
 // handful of connections, once per reset.
 fn tcp_connection_free_first_live() -> bool !{unsafe} {
-    let mut cursor: usize = intrusive_pool_first_slot(&tcp_connection_pool);
-    while (cursor != 0) {
-        match intrusive_pool_probe_slot(&tcp_connection_pool, cursor) {
-            IntrusiveSlotProbe::NoPayload => {}
-            IntrusiveSlotProbe::Live(slot_view) => {
-                let generation: usize = intrusive_view_generation(slot_view);
-                intrusive_view_drop(slot_view);
-                // GitHub issue #462: this mints an owner only to hand it
-                // to free, and an owner means a held lock, so it acquires
-                // like any other mint.
-                task_mutex_acquire(&tcp_connection_payload(cursor).lock);
-                tcp_connection_free(
-                    tcp_connection_owner_new(cursor, generation));
-                return true;
+    let guard = tcp_connection_pool_lock(&tcp_connection_pool);
+    let first = region_pool_next(guard, region_handle_from(guard, 0, 0));
+    tcp_connection_pool_unlock(guard);
+    match first {
+        RegionNext(TcpConnection)::End => { return false; }
+        RegionNext(TcpConnection)::Next(handle) => {
+            match tcp_connection_take(region_handle_address(handle),
+                                      region_handle_generation(handle)) {
+                // Freed by someone else in between: the next walk moves on.
+                TcpConnectionTakeResult::Missing => { return true; }
+                TcpConnectionTakeResult::Ready(owner) => {
+                    tcp_connection_free(owner);
+                    return true;
+                }
             }
         }
-        cursor = intrusive_pool_next_slot(&tcp_connection_pool, cursor);
     }
-    return false;
 }
 
-// Has this connection buffered data userspace has not drained? One probe
-// keeps the slot's liveness proof across both field reads. A poll on a closed
-// connection is a normal false result and must not use the diagnostic
-// missing-payload fallback.
-//
-// It takes no connection lock, deliberately: poll must not wait behind a
-// receive that holds the owner, and its answer is only a readiness hint.
-// Each field is one aligned word, and the read that follows re-decides
-// open and available bytes under the owner (GitHub issue #581).
+// Has this connection buffered data userspace has not drained? It takes no
+// connection lock, deliberately: poll must not wait behind a receive that
+// holds the owner, and its answer is only a readiness hint. Each field is
+// one aligned word, and the read that follows re-decides open and available
+// bytes under the owner (GitHub issue #581). The fd table keeps only the
+// address here, so this asks whoever occupies it now.
 fn tcp_connection_has_pending_read(address: usize) -> bool !{unsafe} {
-    match intrusive_pool_probe_slot(&tcp_connection_pool, address) {
-        IntrusiveSlotProbe::NoPayload => { return false; }
-        IntrusiveSlotProbe::Live(slot_view) => {
-            // Only the answer escapes, so the proof is released here.
-            let conn: *TcpConnection =
-                intrusive_pool_payload_of(&tcp_connection_pool, slot_view);
+    let guard = tcp_connection_pool_lock(&tcp_connection_pool);
+    let pinned = region_pin(guard, region_handle_current(guard, address));
+    tcp_connection_pool_unlock(guard);
+    match pinned {
+        RegionPinned(TcpConnection)::Stale => { return false; }
+        RegionPinned(TcpConnection)::Pinned(pin) => {
+            let conn: *TcpConnection = region_pin_at(pin);
             let pending: bool = conn.connection_open &&
                    conn.socket_buffer_offset < conn.socket_buffer_length;
-            intrusive_view_release(slot_view);
+            tcp_connection_unpin(pin);
             return pending;
         }
     }
 }
 
-// "Is any connection still open" -- kernel/kernel/syscall.tkb's daemon
-// teardown check, which was a loop over TCP_CONNECTION_MAX array slots.
-// GitHub issue #492: lookups that named one of this file's pool slots with
-// the previous occupant's generation, across all three.
-fn tcp_recycled_handle_count() -> usize !{unsafe} {
-    let mut total: usize = 0;
-    if (tcp_connection_pool_ready) {
-        total = total +
-            intrusive_pool_recycled_handle_count(&tcp_connection_pool);
-    }
-    return total;
-}
+// GitHub issue #492 counted lookups that named a pool slot with a previous
+// occupant's generation. A pin is refused for those (Stale) and nothing is
+// read through them, so there is nothing left to count here.
+fn tcp_recycled_handle_count() -> usize { return 0; }
 
 fn tcp_any_connection_open() -> bool !{unsafe} {
-    let mut cursor: usize = intrusive_pool_first_slot(&tcp_connection_pool);
-    while (cursor != 0) {
-        match intrusive_pool_probe_slot(&tcp_connection_pool, cursor) {
-            IntrusiveSlotProbe::NoPayload => {}
-            IntrusiveSlotProbe::Live(slot_view) => {
-                // The proof is released on BOTH paths, which is why the
-                // answer is taken first rather than returned from inside
-                // the match arm (GitHub issue #488).
-                let conn: *TcpConnection =
-                    intrusive_pool_payload_of(&tcp_connection_pool, slot_view);
-                let open: bool = conn.connection_open;
-                intrusive_view_release(slot_view);
-                if (open) { return true; }
+    let guard = tcp_connection_pool_lock(&tcp_connection_pool);
+    let mut cursor: RegionHandle(TcpConnection) = region_handle_from(guard, 0, 0);
+    let mut open: bool = false;
+    let mut walking: bool = true;
+    while (walking) {
+        match region_pool_next(guard, cursor) {
+            RegionNext(TcpConnection)::End => { walking = false; }
+            RegionNext(TcpConnection)::Next(handle) => {
+                cursor = handle;
+                match region_pin(guard, handle) {
+                    RegionPinned(TcpConnection)::Stale => {}
+                    RegionPinned(TcpConnection)::Pinned(pin) => {
+                        if (region_pin_at(pin).connection_open) {
+                            open = true;
+                            walking = false;
+                        }
+                        // Under the pool lock no retire completes a free
+                        // (that takes this lock), but a Last can still
+                        // come back: give it up after the lock.
+                        match region_unpin(pin) {
+                            RegionUnpin(TcpConnection)::Unpinned => {}
+                            RegionUnpin(TcpConnection)::Last(slot) => {
+                                tcp_connection_pool_unlock(guard);
+                                tcp_connection_slot_free(slot);
+                                return open;
+                            }
+                        }
+                    }
+                }
             }
         }
-        cursor = intrusive_pool_next_slot(&tcp_connection_pool, cursor);
     }
-    return false;
+    tcp_connection_pool_unlock(guard);
+    return open;
 }
 
 fn tcp_connection_drain_all() !{unsafe} {
     let mut draining: bool = true;
     while (draining) {
         draining = tcp_connection_free_first_live();
+    }
+}
+
+// One page for the pool, or false when the page allocator is empty.
+private fn tcp_connection_pool_grow(
+        guard: borrow RegionPoolGuard(TcpConnection)[conns]) -> bool !{unsafe} {
+    match page_alloc_contiguous(TCP_CONNECTION_CHUNK_PAGES, PageOwnerTag::PoolChunk) {
+        PageRunAllocResult::OutOfMemory => { return false; }
+        PageRunAllocResult::Allocated(run_owner) => {
+            let base: usize = page_run_physical_address(run_owner);
+            let _run_index: usize =
+                page_run_owner_transfer_index(run_owner) as usize;
+            let RegionBytes::Assumed(chunk) = region_bytes_assume(
+                base, TCP_CONNECTION_CHUNK_PAGES * PAGE_SIZE) else {};
+            match region_pool_grow(guard, chunk) {
+                RegionGrow(TcpConnection)::Grown => { return true; }
+                RegionGrow(TcpConnection)::TooSmall(back) => {
+                    region_release(back);
+                    page_run_transferred_release_physical(
+                        base, TCP_CONNECTION_CHUNK_PAGES);
+                    return false;
+                }
+            }
+        }
     }
 }
 
@@ -1116,201 +1142,164 @@ fn tcp_connection_drain_all() !{unsafe} {
 // right answer to memory pressure and what dropping a SYN under pressure
 // means in TCP.
 fn tcp_connection_alloc() -> TcpConnectionAllocResult !{unsafe} {
-    let pool_guard = intrusive_pool_lock(&tcp_connection_pool);
-    let inserted = intrusive_pool_insert_zeroed(&tcp_connection_pool, pool_guard);
-    intrusive_pool_unlock(&tcp_connection_pool, pool_guard);
-    match inserted {
-        IntrusivePoolInsertResult::OutOfMemory => {
-            kernel_boot_log_resource_exhausted(
-                "TCP connection pool (out of pages)" as *u8, 0);
+    let guard = tcp_connection_pool_lock(&tcp_connection_pool);
+    match region_alloc(guard) {
+        RegionAlloc(TcpConnection)::Allocated(slot) => {
+            tcp_connection_pool_unlock(guard);
+            return tcp_connection_open_slot(&tcp_connection_pool, slot);
+        }
+        RegionAlloc(TcpConnection)::Full => {}
+    }
+    if (tcp_connection_pool_grow(guard)) {
+        match region_alloc(guard) {
+            RegionAlloc(TcpConnection)::Allocated(slot) => {
+                tcp_connection_pool_unlock(guard);
+                return tcp_connection_open_slot(&tcp_connection_pool, slot);
+            }
+            RegionAlloc(TcpConnection)::Full => {}
+        }
+    }
+    tcp_connection_pool_unlock(guard);
+    kernel_boot_log_resource_exhausted(
+        "TCP connection pool (out of pages)" as *u8, 0);
+    return TcpConnectionAllocResult::Full;
+}
+
+// A fresh slot made into a connection with its frames, published and
+// pinned for its first owner.
+private fn tcp_connection_open_slot(pool: *RegionPool(TcpConnection) @ conns,
+                                    slot: sink RegionSlot(TcpConnection)[conns, k])
+        -> TcpConnectionAllocResult !{unsafe} {
+    // Zeroed: a recycled slot holds its last occupant, the frame links are
+    // stable owner storage whose empty state is a zero tag (#369), and a
+    // zero TaskMutex is a free one.
+    region_slot_zero(slot);
+    let conn: *TcpConnection = region_slot_at(slot);
+    conn.self_address = region_slot_address(slot);
+    conn.state = ConnState::Listen;
+    conn.local_port = TCP_ECHO_PORT;
+    if (tcp_connection_frames_acquire(conn) == false) {
+        tcp_connection_slot_free(slot);
+        return TcpConnectionAllocResult::Full;
+    }
+    // Published (Live, with a generation) and pinned for the new owner in
+    // one hold of the pool lock: nothing can see the handle in between.
+    let opening = tcp_connection_pool_lock(pool);
+    let mut handle: RegionHandle(TcpConnection) = region_give(opening, slot);
+    let pinned = region_pin(opening, handle);
+    tcp_connection_pool_unlock(opening);
+    let RegionPinned(TcpConnection)::Pinned(pin) = pinned else {
+        RegionPinned(TcpConnection)::Stale => {
+            kernel_boot_log("tcp: a new connection could not be pinned\n");
             return TcpConnectionAllocResult::Full;
         }
-        IntrusivePoolInsertResult::Allocated(pool_owner) => {
-            let address: usize = intrusive_slot_address_identity(
-                intrusive_owner_slot(pool_owner));
-            let generation: usize = intrusive_owner_generation(pool_owner);
-            // GitHub issue #488: unproven, and this one is real. `conn` is
-            // used after intrusive_owner_drop(pool_owner) below --
-            // task_mutex_acquire(&conn.lock) -- because the pool's handle
-            // is deliberately discharged and TcpConnectionOwner takes over
-            // the obligation. The proof ends before the last use, so the
-            // tie cannot hold here without reordering an ownership handoff
-            // that issue #462 settled on purpose.
-            let conn: *TcpConnection =
-                intrusive_pool_ref_unproven(&tcp_connection_pool, pool_owner);
-            conn.self_address = address;
-            conn.state = ConnState::Listen;
-            conn.local_port = TCP_ECHO_PORT;
-            if (tcp_connection_frames_acquire(conn) == false) {
-                let undo_guard = intrusive_pool_lock(&tcp_connection_pool);
-                tcp_pool_remove_expected(
-                    intrusive_pool_remove(&tcp_connection_pool, undo_guard,
-                                          pool_owner),
-                    "connection alloc undo" as *u8);
-                intrusive_pool_unlock(&tcp_connection_pool, undo_guard);
-                return TcpConnectionAllocResult::Full;
-            }
-            // The pool's own handle is discharged here and TcpConnection's
-            // is handed out in its place: from now on the obligation to
-            // free this slot rides on TcpConnectionOwner, and
-            // tcp_connection_free rebuilds the pool handle to discharge
-            // it. That round trip is the documented one, and the reason
-            // intrusive_pool_remove validates what it is given.
-            intrusive_owner_drop(pool_owner);
-            // GitHub issue #462: acquired here rather than earlier so the
-            // frames_acquire failure path above, which mints no owner,
-            // has none to release. insert_zeroed left the word free.
-            task_mutex_acquire(&conn.lock);
-            return TcpConnectionAllocResult::Allocated(
-                tcp_connection_owner_new(address, generation));
-        }
-    }
+    };
+    // GitHub issue #462: an owner means a held lock. The zeroed word is free.
+    task_mutex_acquire(&region_pin_at(pin).lock);
+    return TcpConnectionAllocResult::Allocated(tcp_connection_owner_new(pin));
 }
 
-fn tcp_connection_slot(owner: borrow TcpConnectionOwner[connection]) -> usize {
-    return owner.slot;
+fn tcp_connection_slot(owner: borrow TcpConnectionOwner[p, connection]) -> usize {
+    return region_pin_address(owner.pin);
 }
 
-fn tcp_connection_identity(owner: borrow TcpConnectionOwner[connection])
-        -> usize {
-    return owner.generation;
+fn tcp_connection_identity(owner: borrow TcpConnectionOwner[p, connection])
+        -> usize !{unsafe} {
+    return region_pin_generation(owner.pin);
 }
 
-// What used to store the owner in a stable slot and describe the
-// impossible duplicate. With no parking lot there is nothing to store and
-// nothing to conflict with: an owner that has done its work is simply
-// discharged, and the connection stays exactly where it is.
-fn tcp_connection_put(owner: sink TcpConnectionOwner[connection])
+// The release. Linear, so every path out of every syscall that took a
+// connection reaches exactly one of these (GitHub issue #462). The lock
+// goes first: the pin is what keeps the lock's memory there.
+fn tcp_connection_put(owner: sink TcpConnectionOwner[p, connection])
         !{unsafe} {
-    // GitHub issue #462: the release. Linear, so every path out of every
-    // syscall that took a connection reaches exactly one of these -- which
-    // is what twelve hand-written call sites used to get right by review.
-    let address: usize = owner.slot;
-    tcp_connection_owner_drop(owner);
-    task_mutex_release(&tcp_connection_payload(address).lock);
+    let pin = tcp_connection_owner_release(owner);
+    task_mutex_release(&region_pin_at(pin).lock);
+    tcp_connection_unpin(pin);
 }
 
-// What used to pull an owner out of a stable slot and revalidate the pair
-// it was found under. Now it mints one from the pair directly, after the
-// same check -- intrusive_pool_matches, which is what the old
-// old slotmap_matches check was.
+// A pin and the connection's lock make an owner. The pin keeps the slot
+// from being freed while this waits for the lock; a connection freed in
+// that wait is marked retired, and the waiter gives up rather than mint an
+// owner for it. No pool lock is held while the connection lock is taken:
+// free holds the connection lock and then takes the pool lock.
 fn tcp_connection_take(slot_value: usize, generation: usize)
         -> TcpConnectionTakeResult !{unsafe} {
-    if (intrusive_pool_matches_untrusted(
-            &tcp_connection_pool, slot_value, generation)) {
-        // GitHub issue #462: the owner IS the exclusion now. This is the
-        // acquire, and the reason it can live here -- rather than needing
-        // a lock outside the payload -- is that the caller has no
-        // *TcpConnection yet: the pool hands us one, we lock it, and only
-        // then does a token for it exist.
-        //
-        // matches() above and payload() below each take the pool lock and
-        // RELEASE it before returning, so the acquire below is not nested
-        // inside it. That direction matters: free() holds this lock while
-        // taking the pool's, and the two orders together would deadlock.
-        task_mutex_acquire(&tcp_connection_payload(slot_value).lock);
-        let owner = tcp_connection_owner_new(slot_value, generation);
-        // The occupant can change while this caller waits for its lock.
-        // Revalidate after acquire so a freed-and-reused slot cannot mint an
-        // owner carrying the previous occupant's generation.
-        if (intrusive_pool_matches_untrusted(
-                &tcp_connection_pool, slot_value, generation) == false) {
-            tcp_connection_owner_drop(owner);
-            task_mutex_release(&tcp_connection_payload(slot_value).lock);
+    let RegionPinned(TcpConnection)::Pinned(pin) =
+            tcp_connection_pin(&tcp_connection_pool, slot_value, generation) else {
+        RegionPinned(TcpConnection)::Stale => {
             return TcpConnectionTakeResult::Missing;
         }
-        return TcpConnectionTakeResult::Ready(owner);
+    };
+    task_mutex_acquire(&region_pin_at(pin).lock);
+    if (region_pin_at(pin).retired) {
+        task_mutex_release(&region_pin_at(pin).lock);
+        tcp_connection_unpin(pin);
+        return TcpConnectionTakeResult::Missing;
     }
-    return TcpConnectionTakeResult::Missing;
+    return TcpConnectionTakeResult::Ready(tcp_connection_owner_new(pin));
 }
 
-// Try to own a scanned connection without holding the pool proof across its
-// per-connection lock. A receiver already owns another connection while it
-// routes a frame; waiting on this lock would hold the sole RX token behind a
-// long user copy on the target socket.
+// Try to own a scanned connection without waiting for its lock. A receiver
+// already owns another connection while it routes a frame; waiting on this
+// lock would hold the sole RX token behind a long user copy on the target
+// socket.
 fn tcp_connection_try_take(slot_value: usize, generation: usize)
         -> TcpConnectionTryTakeResult !{unsafe} {
-    if (intrusive_pool_matches_untrusted(
-            &tcp_connection_pool, slot_value, generation) == false) {
-        return TcpConnectionTryTakeResult::Missing;
-    }
-    let conn: *TcpConnection = tcp_connection_payload(slot_value);
-    if (task_mutex_trylock(&conn.lock) == false) {
+    let RegionPinned(TcpConnection)::Pinned(pin) =
+            tcp_connection_pin(&tcp_connection_pool, slot_value, generation) else {
+        RegionPinned(TcpConnection)::Stale => {
+            return TcpConnectionTryTakeResult::Missing;
+        }
+    };
+    if (task_mutex_trylock(&region_pin_at(pin).lock) == false) {
+        tcp_connection_unpin(pin);
         return TcpConnectionTryTakeResult::Busy;
     }
-    let owner = tcp_connection_owner_new(slot_value, generation);
-    if (intrusive_pool_matches_untrusted(
-            &tcp_connection_pool, slot_value, generation) == false) {
-        tcp_connection_owner_drop(owner);
-        task_mutex_release(&conn.lock);
+    if (region_pin_at(pin).retired) {
+        task_mutex_release(&region_pin_at(pin).lock);
+        tcp_connection_unpin(pin);
         return TcpConnectionTryTakeResult::Missing;
     }
-    return TcpConnectionTryTakeResult::Ready(owner);
+    return TcpConnectionTryTakeResult::Ready(tcp_connection_owner_new(pin));
 }
 
-// Test-only nonblocking entry through the same connection lock and
-// post-acquire generation check as tcp_connection_take. The increment is a
-// deliberately multi-statement read-modify-write of real connection state.
+// Test-only nonblocking entry through the same pin and connection lock as
+// tcp_connection_try_take. The increment is a deliberately multi-statement
+// read-modify-write of real connection state.
 fn tcp_connection_probe_step(slot_value: usize, generation: usize)
         -> TcpConnectionProbeStep !{unsafe} {
-    if (intrusive_pool_matches_untrusted(
-            &tcp_connection_pool, slot_value, generation) == false) {
-        return TcpConnectionProbeStep::Missing;
+    match tcp_connection_try_take(slot_value, generation) {
+        TcpConnectionTryTakeResult::Missing => { return TcpConnectionProbeStep::Missing; }
+        TcpConnectionTryTakeResult::Busy => { return TcpConnectionProbeStep::Busy; }
+        TcpConnectionTryTakeResult::Ready(owner) => {
+            let previous: u32 = tcp_connection_of(owner).snd_nxt;
+            tcp_connection_of(owner).snd_nxt = previous + 1;
+            tcp_connection_put(owner);
+            return TcpConnectionProbeStep::Advanced;
+        }
     }
-    let conn: *TcpConnection = tcp_connection_payload(slot_value);
-    if (task_mutex_trylock(&conn.lock) == false) {
-        return TcpConnectionProbeStep::Busy;
-    }
-    let owner = tcp_connection_owner_new(slot_value, generation);
-    if (intrusive_pool_matches_untrusted(
-            &tcp_connection_pool, slot_value, generation) == false) {
-        tcp_connection_owner_drop(owner);
-        task_mutex_release(&conn.lock);
-        return TcpConnectionProbeStep::Missing;
-    }
-    let previous: u32 = tcp_connection_of(owner).snd_nxt;
-    tcp_connection_of(owner).snd_nxt = previous + 1;
-    tcp_connection_put(owner);
-    return TcpConnectionProbeStep::Advanced;
 }
 
-// Consumes the owner and the connection with it.
-//
-// GitHub issue #462: this is the one consume that does NOT release the
-// lock, and the asymmetry is deliberate rather than an oversight. The slot
-// goes back to the pool here; releasing a lock on an object that has
-// ceased to exist would be describing a state nobody can observe, and the
-// address would already be eligible for reuse. What makes the next holder
-// safe is intrusive_pool_insert_zeroed, which clears the whole payload --
-// lock word included -- so every allocation starts free.
-//
-// The invariant is still closed: every owner corresponds to one held lock,
-// and an owner reaching here takes both out of existence together.
-//
-// Note it holds this lock while taking the POOL lock below. That is the
-// permitted direction; tcp_connection_take is careful not to be the other.
-fn tcp_connection_free(owner: sink TcpConnectionOwner[connection]) !{unsafe} {
-    let address: usize = owner.slot;
-    let generation: usize = owner.generation;
-    tcp_connection_owner_drop(owner);
-    // Give back what this connection holds before the slot itself: the
-    // retransmit entries name it by address, and the frames are owned in
-    // its own stable fields, so both have to go while it is still there
-    // to be found.
-    pending_tcp_reset_all(address);
-    let conn: *TcpConnection = tcp_connection_payload(address);
+// Consumes the owner and the connection with it. What the connection holds
+// goes back first -- its retransmit entries and its frames -- while the
+// owner still makes it reachable. Then it is marked retired, its lock is
+// released so a taker waiting for it wakes and gives up, and its pin is
+// retired: no new pin is granted from here on, and whoever gives up the
+// last pin (this owner, or a waiter) returns the slot to the pool.
+fn tcp_connection_free(owner: sink TcpConnectionOwner[p, connection]) !{unsafe} {
+    let conn: *TcpConnection = tcp_connection_of(owner);
+    pending_tcp_reset_all(conn);
     conn.state = ConnState::Listen;
     conn.connection_open = false;
     tcp_connection_frames_release(conn);
-    let mut checked: IntrusiveSlotAddress = intrusive_pool_validated_address(
-        &tcp_connection_pool, address, generation);
-    let branded = intrusive_owner_new(
-        &tcp_connection_pool, checked, generation);
-    let guard = intrusive_pool_lock(&tcp_connection_pool);
-    tcp_pool_remove_expected(
-        intrusive_pool_remove(&tcp_connection_pool, guard, branded),
-        "connection free" as *u8);
-    intrusive_pool_unlock(&tcp_connection_pool, guard);
+    conn.retired = true;
+    let pin = tcp_connection_owner_release(owner);
+    task_mutex_release(&region_pin_at(pin).lock);
+    match region_retire(pin) {
+        RegionRetire(TcpConnection)::Pending => {}
+        RegionRetire(TcpConnection)::Retired(slot) => { tcp_connection_slot_free(slot); }
+    }
 }
 
 // GitHub issue #257: what this probe used to prove was that the pool
@@ -1326,21 +1315,28 @@ fn tcp_connection_free(owner: sink TcpConnectionOwner[connection]) !{unsafe} {
 // old probe did -- there is no transfer-to-usize helper for
 // TcpConnectionOwner -- which is also why the count is a literal here
 // rather than a loop bound.
+fn tcp_connection_live_count() -> usize !{unsafe} {
+    let guard = tcp_connection_pool_lock(&tcp_connection_pool);
+    let live: usize = region_pool_live_count(guard);
+    tcp_connection_pool_unlock(guard);
+    return live;
+}
+
 fn tcp_connection_pool_probe() -> bool !{unsafe} {
     tcp_connection_pool_init();
     let pages_before: usize = page_allocator_live_count();
 
-    let owner_a: exists a: usize. TcpConnectionOwner[a] =
+    let owner_a: exists a_pool: addr. exists a: usize. TcpConnectionOwner[a_pool, a] =
             match tcp_connection_alloc() {
         TcpConnectionAllocResult::Full => { return false; }
         TcpConnectionAllocResult::Allocated(owner) => { owner }
     };
-    let owner_b: exists b: usize. TcpConnectionOwner[b] =
+    let owner_b: exists b_pool: addr. exists b: usize. TcpConnectionOwner[b_pool, b] =
             match tcp_connection_alloc() {
         TcpConnectionAllocResult::Full => { tcp_connection_free(owner_a); return false; }
         TcpConnectionAllocResult::Allocated(owner) => { owner }
     };
-    let owner_c: exists c: usize. TcpConnectionOwner[c] =
+    let owner_c: exists c_pool: addr. exists c: usize. TcpConnectionOwner[c_pool, c] =
             match tcp_connection_alloc() {
         TcpConnectionAllocResult::Full => {
             tcp_connection_free(owner_a);
@@ -1349,7 +1345,7 @@ fn tcp_connection_pool_probe() -> bool !{unsafe} {
         }
         TcpConnectionAllocResult::Allocated(owner) => { owner }
     };
-    let owner_d: exists d: usize. TcpConnectionOwner[d] =
+    let owner_d: exists d_pool: addr. exists d: usize. TcpConnectionOwner[d_pool, d] =
             match tcp_connection_alloc() {
         TcpConnectionAllocResult::Full => {
             tcp_connection_free(owner_a);
@@ -1359,7 +1355,7 @@ fn tcp_connection_pool_probe() -> bool !{unsafe} {
         }
         TcpConnectionAllocResult::Allocated(owner) => { owner }
     };
-    let owner_e: exists e: usize. TcpConnectionOwner[e] =
+    let owner_e: exists e_pool: addr. exists e: usize. TcpConnectionOwner[e_pool, e] =
             match tcp_connection_alloc() {
         TcpConnectionAllocResult::Full => {
             tcp_connection_free(owner_a);
@@ -1381,7 +1377,7 @@ fn tcp_connection_pool_probe() -> bool !{unsafe} {
         slot_a != slot_e &&
         tcp_connection_of(owner_a).local_port == 1111 &&
         tcp_connection_of(owner_e).local_port == 5555 &&
-        intrusive_pool_live_count(&tcp_connection_pool) == 5;
+        tcp_connection_live_count() == 5;
 
     // A freed connection's address is refused afterwards, on the
     // generation rather than on the address -- the address is perfectly
@@ -1406,11 +1402,10 @@ fn tcp_connection_pool_probe() -> bool !{unsafe} {
     // Everything back: no connection, no frame, no retransmit entry, and
     // no page any of them stood on.
     let drained: bool =
-        intrusive_pool_live_count(&tcp_connection_pool) == 0 &&
+        tcp_connection_live_count() == 0 &&
         tcp_frame_live_count() == 0 &&
         tcp_retx_live_count() == 0 &&
-        page_allocator_live_count() == pages_before &&
-        intrusive_pool_probe(&tcp_connection_pool);
+        page_allocator_live_count() == pages_before;
     return distinct && stale_refused && drained;
 }
 
@@ -1430,20 +1425,34 @@ fn tcp_connection_pool_probe() -> bool !{unsafe} {
 // over TCP_CONNECTION_MAX array slots. With a pool it is a scan, and it
 // visits only connections that actually exist.
 fn kernel_tcp_clear_injection_markers() !{unsafe} {
-    let mut cursor: usize = intrusive_pool_first_slot(&tcp_connection_pool);
-    while (cursor != 0) {
-        match intrusive_pool_probe_slot(&tcp_connection_pool, cursor) {
-            IntrusiveSlotProbe::NoPayload => {}
-            IntrusiveSlotProbe::Live(slot_view) => {
-                let conn: *TcpConnection =
-                    intrusive_pool_payload_of(&tcp_connection_pool, slot_view);
-                conn.injected_data_entry = 0;
-                conn.injected_fin_entry = 0;
-                intrusive_view_release(slot_view);
+    let guard = tcp_connection_pool_lock(&tcp_connection_pool);
+    let mut cursor: RegionHandle(TcpConnection) = region_handle_from(guard, 0, 0);
+    let mut walking: bool = true;
+    while (walking) {
+        match region_pool_next(guard, cursor) {
+            RegionNext(TcpConnection)::End => { walking = false; }
+            RegionNext(TcpConnection)::Next(handle) => {
+                cursor = handle;
+                match region_pin(guard, handle) {
+                    RegionPinned(TcpConnection)::Stale => {}
+                    RegionPinned(TcpConnection)::Pinned(pin) => {
+                        let conn: *TcpConnection = region_pin_at(pin);
+                        conn.injected_data_entry = 0;
+                        conn.injected_fin_entry = 0;
+                        match region_unpin(pin) {
+                            RegionUnpin(TcpConnection)::Unpinned => {}
+                            RegionUnpin(TcpConnection)::Last(slot) => {
+                                tcp_connection_pool_unlock(guard);
+                                tcp_connection_slot_free(slot);
+                                return;
+                            }
+                        }
+                    }
+                }
             }
         }
-        cursor = intrusive_pool_next_slot(&tcp_connection_pool, cursor);
     }
+    tcp_connection_pool_unlock(guard);
 }
 
 fn kernel_tcp_inject_drop_data_segment(index: usize) !{unsafe} {
@@ -1687,7 +1696,8 @@ fn retx_chain_reverse(link_in: RetxLink) -> RetxLink !{unsafe} {
 // the queue alone. Called once per connection from kernel_tcp_accept_begin
 // (alongside its own state = Listen reset), so a new connection never
 // inherits a previous one's outstanding segments.
-fn pending_tcp_reset_all(connection_address: usize) !{unsafe} {
+fn pending_tcp_reset_all(conn: borrow *TcpConnection) !{unsafe} {
+    let connection_address: usize = conn.self_address;
     let mut link: RetxLink = retx_chain_take();
     let mut kept: RetxLink = RetxLink::End;
     let mut walking: bool = true;
@@ -1717,7 +1727,6 @@ fn pending_tcp_reset_all(connection_address: usize) !{unsafe} {
     if (retx_chain_put(retx_chain_reverse(kept)) == false) {
         kernel_boot_log("tcp retx: queue was not empty on reinstall\n");
     }
-    let conn: *TcpConnection = tcp_connection_payload(connection_address);
     conn.retx_count = 0;
     conn.data_segment_counter = 0;
     conn.injected_data_entry = 0;
@@ -1737,7 +1746,7 @@ fn pending_tcp_reset_all(connection_address: usize) !{unsafe} {
 // callers still guard their deliberate-drop test injection on getting a
 // real entry, since arming that against "not queued" would mean the
 // frame is never transmitted at all.
-fn pending_tcp_record(connection_owner: borrow TcpConnectionOwner[connection],
+fn pending_tcp_record(connection_owner: borrow TcpConnectionOwner[connection_pool, connection],
                       kind: PendingTcpKind, frame: borrow [u8; 1514..],
                       frame_length: usize)
         -> usize !{unsafe} {
@@ -1819,12 +1828,12 @@ fn pending_tcp_record(connection_owner: borrow TcpConnectionOwner[connection],
 // separate function purely so that its eight failure returns cannot each
 // forget to.
 fn pending_tcp_chain_probe() -> bool !{unsafe} {
-    let owner_a: exists a: usize. TcpConnectionOwner[a] =
+    let owner_a: exists a_pool: addr. exists a: usize. TcpConnectionOwner[a_pool, a] =
             match tcp_connection_alloc() {
         TcpConnectionAllocResult::Full => { return false; }
         TcpConnectionAllocResult::Allocated(owner) => { owner }
     };
-    let owner_b: exists b: usize. TcpConnectionOwner[b] =
+    let owner_b: exists b_pool: addr. exists b: usize. TcpConnectionOwner[b_pool, b] =
             match tcp_connection_alloc() {
         TcpConnectionAllocResult::Full => {
             tcp_connection_free(owner_a);
@@ -1844,8 +1853,8 @@ fn pending_tcp_chain_probe() -> bool !{unsafe} {
 // segments copy this rather than a connection's transmit frame.
 private let mut pending_tcp_probe_frame: [u8; 1514];
 
-fn pending_tcp_chain_probe_body(owner_a: borrow TcpConnectionOwner[first],
-                                 owner_b: borrow TcpConnectionOwner[second])
+fn pending_tcp_chain_probe_body(owner_a: borrow TcpConnectionOwner[first_pool, first],
+                                 owner_b: borrow TcpConnectionOwner[second_pool, second])
         -> bool !{unsafe} {
     let conn: *TcpConnection = tcp_connection_of(owner_a);
     let other: *TcpConnection = tcp_connection_of(owner_b);
@@ -1912,13 +1921,13 @@ fn pending_tcp_chain_probe_body(owner_a: borrow TcpConnectionOwner[first],
     if (lengths_ok == false || walked != 5) { return false; }
 
     // Resetting one connection takes its five and leaves the other's one.
-    pending_tcp_reset_all(conn.self_address);
+    pending_tcp_reset_all(conn);
     if (conn.retx_count != 0 ||
         other.retx_count != 1 ||
         tcp_retx_live_count() != live_before + 1) {
         return false;
     }
-    pending_tcp_reset_all(other.self_address);
+    pending_tcp_reset_all(other);
     if (tcp_retx_live_count() != live_before) {
         return false;
     }
@@ -2445,7 +2454,7 @@ fn tcp_parse_segment(frame: borrow [u8; 1514..], len: i32) -> TcpSegmentParseRes
 fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
         -> KernelTcpResult !{may_block, unsafe} {
     let mut ready = ready_in;
-    let echo_owner: exists e: usize. TcpConnectionOwner[e] =
+    let echo_owner: exists e_pool: addr. exists e: usize. TcpConnectionOwner[e_pool, e] =
             match tcp_connection_alloc() {
         TcpConnectionAllocResult::Full => {
             return KernelTcpResult::TimedOut(ready);
@@ -2615,7 +2624,7 @@ must_use variant KernelTcpAcceptStep {
 // Start a handshake on this connection, on the requested listening port.
 // Everything the step below needs between calls is written here, so the
 // two together are what the old blocking accept loop used to be.
-fn kernel_tcp_accept_begin(owner: borrow TcpConnectionOwner[connection],
+fn kernel_tcp_accept_begin(owner: borrow TcpConnectionOwner[connection_pool, connection],
                            port: u16) !{unsafe} {
     let conn: *TcpConnection = tcp_connection_of(owner);
     conn.state = ConnState::Listen;
@@ -2625,7 +2634,7 @@ fn kernel_tcp_accept_begin(owner: borrow TcpConnectionOwner[connection],
     // own pending queue synchronously before it ever returns (see that
     // function), so -- unlike before -- this loop no longer needs to
     // opportunistically service leftover pending_tcp state itself.
-    pending_tcp_reset_all(conn.self_address);
+    pending_tcp_reset_all(conn);
     let counter_frequency: i64 = read_cntfrq();
     conn.accept_start_at = read_cntpct();
     conn.accept_deadline_ticks = counter_frequency * 30;
@@ -2652,7 +2661,7 @@ fn kernel_tcp_accept_begin(owner: borrow TcpConnectionOwner[connection],
 // with what the caller should do next. A caller that can afford to hold
 // the machine may loop over it; a caller that cannot returns to userspace
 // between calls and comes back.
-fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection],
+fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection_pool, connection],
                           ready_in: sink NetRxCanAcquire)
         -> KernelTcpAcceptStep !{unsafe} {
     let mut ready = ready_in;
@@ -2914,15 +2923,23 @@ fn tcp_route_received_segment(current_address: usize,
     }
     let ip = frame[14..<34];
     let source_payload_end: usize = 54 + payload_length;
-    let mut cursor: usize = intrusive_pool_first_slot(&tcp_connection_pool);
-    while (cursor != 0) {
-        match intrusive_pool_probe_slot(&tcp_connection_pool, cursor) {
-            IntrusiveSlotProbe::NoPayload => {}
-            IntrusiveSlotProbe::Live(slot_view) => {
-                let generation: usize = intrusive_view_generation(slot_view);
-                let address: usize = intrusive_slot_address_identity(
-                    intrusive_view_slot(slot_view));
-                intrusive_view_drop(slot_view);
+    // Each step takes the pool lock only to find the next Live slot; the
+    // candidate is then pinned and locked by try_take, with no pool lock
+    // held (free takes the connection lock before the pool lock).
+    let start = tcp_connection_pool_lock(&tcp_connection_pool);
+    let mut cursor: RegionHandle(TcpConnection) = region_handle_from(start, 0, 0);
+    tcp_connection_pool_unlock(start);
+    let mut walking: bool = true;
+    while (walking) {
+        let step = tcp_connection_pool_lock(&tcp_connection_pool);
+        let next = region_pool_next(step, cursor);
+        tcp_connection_pool_unlock(step);
+        match next {
+            RegionNext(TcpConnection)::End => { walking = false; }
+            RegionNext(TcpConnection)::Next(handle) => {
+                cursor = handle;
+                let generation: usize = region_handle_generation(handle);
+                let address: usize = region_handle_address(handle);
                 if (address != current_address) {
                     match tcp_connection_try_take(address, generation) {
                         TcpConnectionTryTakeResult::Missing => {}
@@ -3020,12 +3037,11 @@ fn tcp_route_received_segment(current_address: usize,
                 }
             }
         }
-        cursor = intrusive_pool_next_slot(&tcp_connection_pool, cursor);
     }
     return TcpReceiveRouteResult::NoReceiver;
 }
 
-fn kernel_tcp_receive_once(owner: borrow TcpConnectionOwner[connection],
+fn kernel_tcp_receive_once(owner: borrow TcpConnectionOwner[connection_pool, connection],
                            ready_in: sink NetRxCanAcquire,
                            destination: borrow [u8; 1460..])
         -> KernelTcpReceiveResult !{unsafe} {
@@ -3135,12 +3151,12 @@ fn kernel_tcp_receive_once(owner: borrow TcpConnectionOwner[connection],
     }
 }
 
-fn kernel_tcp_received_length(owner: borrow TcpConnectionOwner[connection])
+fn kernel_tcp_received_length(owner: borrow TcpConnectionOwner[connection_pool, connection])
         -> usize !{unsafe} {
     return tcp_connection_of(owner).received_length;
 }
 
-fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection],
+fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection_pool, connection],
                             ready: sink NetRxCanAcquire,
                             source: borrow [u8; 1460..],
                             received_length: usize,
@@ -3248,7 +3264,7 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection],
 // segment still outstanding when close() was called, plus the FIN this
 // call just queued -- to be acknowledged or give up, instead of
 // returning with unfinished business for some later caller to notice.
-fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection],
+fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection_pool, connection],
                            ready_in: sink NetRxCanAcquire)
         -> KernelTcpCloseResult !{may_block} {
     let mut ready = ready_in;

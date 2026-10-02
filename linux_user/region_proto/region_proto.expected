@@ -6,6 +6,10 @@ shared: given back under a second lock
 pool: 40 slots in one chunk
 pool: grew
 pool: gave back 1024 bytes
+pins: by address and generation
+pins: wrong generation refused
+pins: current handle matches
+pins: walk finds 1
 pins: two holders see key 9
 pins: take refused while pinned
 pins: retire waits for the other pin

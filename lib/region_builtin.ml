@@ -470,6 +470,91 @@ fn region_pin(g: borrow @PG@[b], h: @H@) -> @PD@[b] !{unsafe} {
     return @PD@::Stale;
 }
 
+// -- Identities outside the program's types (#672 layer 3) ---------------
+//
+// A kernel table that stores an object's identity as two numbers (the fd
+// table: address and generation) names a slot by them. These turn the two
+// numbers into a handle, and a pin back into them; a handle is checked
+// again by region_pin, so a wrong pair is only ever Stale.
+fn region_handle_from(g: borrow @PG@[b], address: usize, generation: usize)
+        -> @H@ !{unsafe} {
+    let found: usize = pool_chunk_of(g, address);
+    let mut chunk: usize = 0;
+    let mut slot: usize = 0;
+    if (found != 0) {
+        let base: usize = pool_slots_base(found);
+        if ((address - base) % sizeof(@T@) == 0) {
+            chunk = found;
+            slot = (address - base) / sizeof(@T@);
+        }
+    }
+    let mut h: @H@ = { chunk, slot, generation };
+    return h;
+}
+
+// The handle of whatever occupies `address` now, for a caller that kept
+// only an address (a readiness hint): it may be a later occupant, which is
+// the hint's own business; a non-Live slot gives a handle region_pin
+// refuses.
+fn region_handle_current(g: borrow @PG@[b], address: usize) -> @H@ !{unsafe} {
+    let mut h: @H@ = region_handle_from(g, address, 0);
+    if (h.chunk == 0) { return h; }
+    let w: usize = unsafe { atomic_load_acquire(pool_word(h.chunk, 3 + h.slot) as usize) };
+    let mut current: @H@ = { h.chunk, h.slot, w >> @T@__POOL_GEN_SHIFT };
+    return current;
+}
+
+// Whether the pool's lock is held, for a debugger that has stopped every
+// core and must not wait on a lock an interrupted core holds.
+fn region_pool_lock_is_held(p: *@P@ @ b) -> bool !{unsafe} {
+    return unsafe { atomic_load_acquire(p as usize) } != 0;
+}
+
+fn region_handle_address(h: @H@) -> usize !{unsafe} {
+    if (h.chunk == 0) { return 0; }
+    return pool_slots_base(h.chunk) + h.slot * sizeof(@T@);
+}
+
+fn region_handle_generation(h: @H@) -> usize { return h.generation; }
+
+fn region_pin_address(p: borrow @PN@[b, k]) -> usize { return p.address; }
+
+fn region_pin_generation(p: borrow @PN@[b, k]) -> usize !{unsafe} {
+    return unsafe { atomic_load_acquire(p.word) } >> @T@__POOL_GEN_SHIFT;
+}
+
+// A walk over the Live slots: Next(handle) for the first Live slot after
+// `after` in the pool's own order (`region_handle_from(g, 0, 0)` starts
+// it), End when there is none. A walk whose cursor's chunk has left the
+// pool ends there.
+must_use variant @NX@ {
+    End;
+    Next(@H@);
+}
+
+fn region_pool_next(g: borrow @PG@[b], after: @H@) -> @NX@ !{unsafe} {
+    let mut chunk: usize = *pool_word(g.pool, 1);
+    let mut i: usize = 0;
+    if (after.chunk != 0) {
+        while (chunk != 0 && chunk != after.chunk) { chunk = *pool_word(chunk, 0); }
+        i = after.slot + 1;
+    }
+    while (chunk != 0) {
+        let count: usize = *pool_word(chunk, 1);
+        while (i < count) {
+            let w: usize = unsafe { atomic_load_acquire(pool_word(chunk, 3 + i) as usize) };
+            if ((w & 3) == @T@__REGION_LIVE) {
+                let mut h: @H@ = { chunk, i, w >> @T@__POOL_GEN_SHIFT };
+                return @NX@::Next(h);
+            }
+            i = i + 1;
+        }
+        chunk = *pool_word(chunk, 0);
+        i = 0;
+    }
+    return @NX@::End;
+}
+
 // The element; the pointer dies with the borrow of the pin. Several pins
 // of one slot give the same element: what a pinner may touch is the
 // object's own lock's business.
@@ -697,6 +782,7 @@ let instance elem =
   |> replace_all ~sub:"@GR@" ~by:("RegionGrow__" ^ elem)
   |> replace_all ~sub:"@SH@" ~by:("RegionShrink__" ^ elem)
   |> replace_all ~sub:"@PN@" ~by:("RegionPin__" ^ elem)
+  |> replace_all ~sub:"@NX@" ~by:("RegionNext__" ^ elem)
   |> replace_all ~sub:"@PD@" ~by:("RegionPinned__" ^ elem)
   |> replace_all ~sub:"@UP@" ~by:("RegionUnpin__" ^ elem)
   |> replace_all ~sub:"@RT@" ~by:("RegionRetire__" ^ elem)
@@ -756,7 +842,7 @@ let element_types (prog : Ast.toplevel list) claimed =
          "RegionTableOf__"; "RegionTake__"; "RegionAlloc__"; "RegionHandle__";
          "RegionSlot__"; "RegionPool__"; "RegionPoolGuard__"; "RegionGrow__";
          "RegionShrink__"; "RegionAdopt__"; "RegionPin__"; "RegionPinned__";
-         "RegionUnpin__"; "RegionRetire__" ] in
+         "RegionUnpin__"; "RegionRetire__"; "RegionNext__" ] in
   List.iter (fun item -> scan (Ast.show_toplevel item)) prog;
   Hashtbl.fold (fun k () acc -> k :: acc) found [] |> List.sort compare
 

@@ -201,6 +201,48 @@ fn test_pins() {
             return;
         }
     };
+    // The two numbers a kernel table keeps name the same slot again.
+    let address: usize = region_pin_address(first);
+    let generation: usize = region_pin_generation(first);
+    let mut again: RegionHandle(Node) = region_handle_from(pool, address, generation);
+    match region_pin(pool, again) {
+        RegionPinned(Node)::Stale => { uart_puts("pins: by address refused\n"); }
+        RegionPinned(Node)::Pinned(third) => {
+            uart_puts("pins: by address and generation\n");
+            match region_unpin(third) {
+                RegionUnpin(Node)::Unpinned => {}
+                RegionUnpin(Node)::Last(lost) => { region_slot_abandon(lost); }
+            }
+        }
+    }
+    let mut misdated: RegionHandle(Node) = region_handle_from(pool, address, generation + 1);
+    match region_pin(pool, misdated) {
+        RegionPinned(Node)::Stale => { uart_puts("pins: wrong generation refused\n"); }
+        RegionPinned(Node)::Pinned(bad) => {
+            uart_puts("pins: wrong generation accepted\n");
+            match region_unpin(bad) {
+                RegionUnpin(Node)::Unpinned => {}
+                RegionUnpin(Node)::Last(lost) => { region_slot_abandon(lost); }
+            }
+        }
+    }
+    let mut current: RegionHandle(Node) = region_handle_current(pool, address);
+    if (region_handle_generation(current) == generation &&
+        region_handle_address(current) == address) {
+        uart_puts("pins: current handle matches\n");
+    }
+    let mut walked: usize = 0;
+    let mut cursor: RegionHandle(Node) = region_handle_from(pool, 0, 0);
+    let mut walking: bool = true;
+    while (walking) {
+        match region_pool_next(pool, cursor) {
+            RegionNext(Node)::End => { walking = false; }
+            RegionNext(Node)::Next(found) => { walked = walked + 1; cursor = found; }
+        }
+    }
+    uart_puts("pins: walk finds ");
+    uart_print(walked);
+    uart_puts("\n");
     uart_puts("pins: two holders see key ");
     uart_print(region_pin_at(first).key + region_pin_at(second).key - 9);
     uart_puts("\n");

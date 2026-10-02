@@ -1399,7 +1399,7 @@ fn kernel_connected_transport_release(slot: usize, generation: usize)
 // The same release for a caller that already holds the owner. Consumes it:
 // freed on Released and on a capability conflict, put back otherwise.
 fn kernel_connected_transport_release_owned(
-        owner: sink TcpConnectionOwner[connection])
+        owner: sink TcpConnectionOwner[connection_pool, connection])
         -> KernelTransportReleaseResult {
     if (tcp_connection_of(owner).connection_open == false) {
         tcp_connection_put(owner);
