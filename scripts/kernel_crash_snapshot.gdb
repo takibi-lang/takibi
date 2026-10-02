@@ -6,7 +6,22 @@
 # reads CrashSnapshot through those target-layout offsets. It deliberately
 # does not duplicate any ExceptionFrame or CrashSnapshot offsets.
 define takibi-oops
+  # Core 0 records into crash_snapshot, every other core into its element of
+  # crash_snapshot_per_core (exception_evidence.tkb, crash_snapshot_here).
+  # Read the first fault's: the valid record with the lowest sequence. A
+  # fault on a peer core is the ordinary case once a child can run there,
+  # and reading core 0's alone reported it as missing (GitHub issue #664).
   set $snapshot = (unsigned long *)&crash_snapshot
+  set $takibi_core = 1
+  while $takibi_core < 4
+    set $takibi_peer = (unsigned long *)((char *)&crash_snapshot_per_core + $takibi_core * $takibi_crashsnapshot_size)
+    if $takibi_peer[$takibi_crashsnapshot_valid / 8] != 0
+      if $snapshot[$takibi_crashsnapshot_valid / 8] == 0 || $takibi_peer[$takibi_crashsnapshot_sequence / 8] < $snapshot[$takibi_crashsnapshot_sequence / 8]
+        set $snapshot = $takibi_peer
+      end
+    end
+    set $takibi_core = $takibi_core + 1
+  end
   if $snapshot[$takibi_crashsnapshot_valid / 8] == 0
     printf "takibi-oops: no valid crash snapshot\n"
   else

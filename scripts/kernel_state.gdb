@@ -246,7 +246,19 @@ def _tk_read_events():
 
 
 def _tk_read_crash():
+    # Core 0's record is crash_snapshot, every other core's its element of
+    # crash_snapshot_per_core. Read the first fault's: the valid record with
+    # the lowest sequence (GitHub issue #664: a fault on a peer core was
+    # reported as unpublished).
     snapshot = _tk_eval("crash_snapshot")
+    peers = _tk_eval("crash_snapshot_per_core")
+    for cpu in range(1, _tk_constant("KERNEL_MAX_CORES")):
+        peer = _tk_array_item(peers, cpu)
+        if _tk_int(peer["valid"]) == 0:
+            continue
+        if (_tk_int(snapshot["valid"]) == 0 or
+                _tk_int(peer["sequence"]) < _tk_int(snapshot["sequence"])):
+            snapshot = peer
     valid_before = _tk_int(snapshot["valid"])
     if valid_before == 0:
         return ["takibi-kernel: crash status=unpublished"]
