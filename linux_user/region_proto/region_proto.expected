@@ -6,3 +6,9 @@ shared: given back under a second lock
 pool: 40 slots in one chunk
 pool: grew
 pool: gave back 1024 bytes
+pins: two holders see key 9
+pins: take refused while pinned
+pins: retire waits for the other pin
+pins: new pin refused after retire
+pins: last unpin frees it
+pins: live 0

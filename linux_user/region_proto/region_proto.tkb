@@ -168,9 +168,83 @@ fn test_pool() {
     region_pool_unlock(pool);
 }
 
+// Pins: a Live object reached by handle from several holders at once. It
+// is never freed while pinned; retiring it stops new pins, and whoever
+// drops the last pin receives the slot to free.
+private let mut shared_objects: RegionPool(Node);
+private let mut shared_pages: [u8; 1024];
+
+fn test_pins() {
+    let RegionOf(u8)::Taken(pages) = region_of(shared_pages) else {
+        RegionOf(u8)::Gone => { uart_puts("pins: pages taken\n"); return; }
+    };
+    let pool = region_pool_lock(&shared_objects);
+    match region_pool_grow(pool, pages) {
+        RegionGrow(Node)::Grown => {}
+        RegionGrow(Node)::TooSmall(back) => { region_release(back); }
+    }
+    let RegionAlloc(Node)::Allocated(slot) = region_alloc(pool) else {
+        RegionAlloc(Node)::Full => { region_pool_unlock(pool); return; }
+    };
+    region_slot_at(slot).key = 9;
+    let mut h: RegionHandle(Node) = region_give(pool, slot);
+    let RegionPinned(Node)::Pinned(first) = region_pin(pool, h) else {
+        RegionPinned(Node)::Stale => { region_pool_unlock(pool); return; }
+    };
+    let RegionPinned(Node)::Pinned(second) = region_pin(pool, h) else {
+        RegionPinned(Node)::Stale => {
+            region_pool_unlock(pool);
+            match region_unpin(first) {
+                RegionUnpin(Node)::Unpinned => {}
+                RegionUnpin(Node)::Last(lost) => { region_slot_abandon(lost); }
+            }
+            return;
+        }
+    };
+    uart_puts("pins: two holders see key ");
+    uart_print(region_pin_at(first).key + region_pin_at(second).key - 9);
+    uart_puts("\n");
+    match region_take(pool, h) {                       // in use: refused
+        RegionTake(Node)::Stale => { uart_puts("pins: take refused while pinned\n"); }
+        RegionTake(Node)::Taken(wrong) => {
+            uart_puts("pins: take accepted while pinned\n");
+            region_free(pool, wrong);
+        }
+    }
+    match region_retire(first) {
+        RegionRetire(Node)::Retired(early) => {
+            uart_puts("pins: retired with a pin left\n");
+            region_free(pool, early);
+        }
+        RegionRetire(Node)::Pending => { uart_puts("pins: retire waits for the other pin\n"); }
+    }
+    match region_pin(pool, h) {                         // retired: no new pins
+        RegionPinned(Node)::Stale => { uart_puts("pins: new pin refused after retire\n"); }
+        RegionPinned(Node)::Pinned(late) => {
+            uart_puts("pins: new pin accepted after retire\n");
+            match region_unpin(late) {
+                RegionUnpin(Node)::Unpinned => {}
+                RegionUnpin(Node)::Last(lost) => { region_slot_abandon(lost); }
+            }
+        }
+    }
+    match region_unpin(second) {
+        RegionUnpin(Node)::Unpinned => { uart_puts("pins: last unpin got nothing\n"); }
+        RegionUnpin(Node)::Last(freed) => {
+            uart_puts("pins: last unpin frees it\n");
+            region_free(pool, freed);
+        }
+    }
+    uart_puts("pins: live ");
+    uart_print(region_pool_live_count(pool));
+    uart_puts("\n");
+    region_pool_unlock(pool);
+}
+
 fn app_main() {
     test_region();
     test_table();
     test_locked_table();
     test_pool();
+    test_pins();
 }

@@ -256,7 +256,8 @@ fn region_free(t: borrow @TBL@[b, n], s: sink @SL@[b, k]) !{unsafe} {
 //   word 0: the next chunk's address, 0 at the end
 //   word 1: its slot count
 //   word 2: its length in bytes
-//   words 3 .. 3 + count: each slot's state (low two bits) and generation
+//   words 3 .. 3 + count: each slot's word: state (bits 0-1), pin count
+//     (bits 2-17, region_pin below) and generation (bits 18 and up)
 //   then the slots, from the first multiple of 16 after that.
 // Eight bytes per slot (#675).
 struct @P@ {
@@ -369,7 +370,7 @@ fn region_give(g: borrow @PG@[b], s: sink @SL@[b, k]) -> @H@ !{unsafe} {
     let i: usize = (s.address - pool_slots_base(chunk)) / sizeof(@T@);
     let state: *usize = pool_word(chunk, 3 + i);
     *state = (*state & ~(3 as usize)) | @T@__REGION_LIVE;
-    let mut h: @H@ = { chunk, i, *state >> 2 };
+    let mut h: @H@ = { chunk, i, *state >> @T@__POOL_GEN_SHIFT };
     region_slot_discharge(s);
     return h;
 }
@@ -379,7 +380,12 @@ fn region_take(g: borrow @PG@[b], h: @H@) -> @TK@[b] !{unsafe} {
     while (chunk != 0 && chunk != h.chunk) { chunk = *pool_word(chunk, 0); }
     if (chunk == 0 || h.slot >= *pool_word(chunk, 1)) { return @TK@::Stale; }
     let state: *usize = pool_word(chunk, 3 + h.slot);
-    if ((*state & 3) != @T@__REGION_LIVE || (*state >> 2) != h.generation) {
+    // A pinned slot is in use by a pinner; taking it out would take it
+    // from under them. Nothing pins without this lock, so no pin can
+    // arrive between this check and the store.
+    if ((*state & 3) != @T@__REGION_LIVE ||
+        (*state >> @T@__POOL_GEN_SHIFT) != h.generation ||
+        (*state & @T@__POOL_PIN_MASK) != 0) {
         return @TK@::Stale;
     }
     *state = (*state & ~(3 as usize)) | @T@__REGION_OUT;
@@ -391,8 +397,136 @@ fn region_free(g: borrow @PG@[b], s: sink @SL@[b, k]) !{unsafe} {
     let chunk: usize = pool_chunk_of(g, s.address);
     let i: usize = (s.address - pool_slots_base(chunk)) / sizeof(@T@);
     let state: *usize = pool_word(chunk, 3 + i);
-    *state = (((*state >> 2) + 1) << 2) | @T@__REGION_FREE;
+    *state = (((*state >> @T@__POOL_GEN_SHIFT) + 1) << @T@__POOL_GEN_SHIFT)
+             | @T@__REGION_FREE;
     region_slot_discharge(s);
+}
+
+// -- Pins: a Live slot shared by several holders (#672 layer 3) -------------
+//
+// A shared kernel object (a TCP connection, a process record) stays Live in
+// its pool while several cores reach it by handle. A pin is the right to
+// keep it from being freed: region_pin counts one under the pool lock, and
+// the element pointer it gives lives as long as the pin. Exclusion between
+// pinners is the object's own lock, not the pool's. region_unpin needs no
+// pool lock: a pinned slot is never Free, so its chunk cannot be shrunk.
+//
+// Freeing goes through region_retire: the slot stops taking new pins (its
+// generation moves on, so every stored handle is Stale) and whoever drops
+// the last pin -- the retirer or a later unpinner -- receives the Out slot,
+// to free or reuse. A slot is never freed while pinned.
+const @T@__REGION_DYING: usize = 3;
+const @T@__POOL_PIN_ONE: usize = 4;
+const @T@__POOL_PIN_MASK: usize = 0x3fffc;
+const @T@__POOL_GEN_SHIFT: usize = 18;
+
+linear struct @PN@[pool: addr, slot: usize] {
+    private address: usize;
+    private word: usize;
+}
+
+must_use variant @PD@[b: addr] {
+    Stale;
+    Pinned(exists k: usize. @PN@[b, k]);
+}
+
+must_use variant @UP@[b: addr, k: usize] {
+    Unpinned;
+    Last(@SL@[b, k]);
+}
+
+must_use variant @RT@[b: addr, k: usize] {
+    Pending;
+    Retired(@SL@[b, k]);
+}
+
+private fn region_pin_discharge(p: sink @PN@[b, k]) {}
+
+private fn pool_pin(g: borrow @PG@[b], address: usize @ k, word: usize)
+        -> @PN@[b, k] {
+    let mut p: @PN@[b, k] = { address, word };
+    return p;
+}
+
+// A Live slot named by a current handle, pinned. Stale for a freed,
+// retired, taken-out or saturated slot.
+fn region_pin(g: borrow @PG@[b], h: @H@) -> @PD@[b] !{unsafe} {
+    let mut chunk: usize = *pool_word(g.pool, 1);
+    while (chunk != 0 && chunk != h.chunk) { chunk = *pool_word(chunk, 0); }
+    if (chunk == 0 || h.slot >= *pool_word(chunk, 1)) { return @PD@::Stale; }
+    let word: usize = pool_word(chunk, 3 + h.slot) as usize;
+    while (true) {
+        let w: usize = unsafe { atomic_load_acquire(word) };
+        if ((w & 3) != @T@__REGION_LIVE ||
+            (w >> @T@__POOL_GEN_SHIFT) != h.generation ||
+            (w & @T@__POOL_PIN_MASK) == @T@__POOL_PIN_MASK) {
+            return @PD@::Stale;
+        }
+        if (unsafe { atomic_compare_exchange_acq_rel(word, w, w + @T@__POOL_PIN_ONE) }) {
+            return @PD@::Pinned(pool_pin(g,
+                pool_slots_base(chunk) + h.slot * sizeof(@T@), word));
+        }
+    }
+    return @PD@::Stale;
+}
+
+// The element; the pointer dies with the borrow of the pin. Several pins
+// of one slot give the same element: what a pinner may touch is the
+// object's own lock's business.
+fn region_pin_at(p: borrow @PN@[b, k]) -> *@T@ @ b !{unsafe} {
+    return unsafe { p.address as *@T@ };
+}
+
+fn region_unpin(p: sink @PN@[b, k]) -> @UP@[b, k] !{unsafe} {
+    let word: usize = p.word;
+    let address: usize = p.address;
+    region_pin_discharge(p);
+    while (true) {
+        let w: usize = unsafe { atomic_load_acquire(word) };
+        let mut next: usize = w - @T@__POOL_PIN_ONE;
+        let last: bool = (w & 3) == @T@__REGION_DYING &&
+                         (next & @T@__POOL_PIN_MASK) == 0;
+        if (last) { next = (next & ~(3 as usize)) | @T@__REGION_OUT; }
+        if (unsafe { atomic_compare_exchange_acq_rel(word, w, next) }) {
+            if (last) {
+                let mut s: @SL@[b, k] = { address };
+                return @UP@::Last(s);
+            }
+            return @UP@::Unpinned;
+        }
+    }
+    return @UP@::Unpinned;
+}
+
+// Stop new pins and give up this one. Retired: this was the last pin and
+// the Out slot is the caller's. Pending: another pinner's region_unpin
+// will receive it.
+fn region_retire(p: sink @PN@[b, k]) -> @RT@[b, k] !{unsafe} {
+    let word: usize = p.word;
+    let address: usize = p.address;
+    region_pin_discharge(p);
+    while (true) {
+        let w: usize = unsafe { atomic_load_acquire(word) };
+        let held: usize = w & @T@__POOL_PIN_MASK;
+        // A pin is being given up, so the count is at least one; a zero
+        // count would be a pin forged past this file.
+        if (held < @T@__POOL_PIN_ONE) { return @RT@::Pending; }
+        let pins: usize = (w - @T@__POOL_PIN_ONE) & @T@__POOL_PIN_MASK;
+        let generation: usize = (w >> @T@__POOL_GEN_SHIFT) + 1;
+        let mut next: usize = (generation << @T@__POOL_GEN_SHIFT) | pins |
+                              @T@__REGION_DYING;
+        if (pins == 0) {
+            next = (generation << @T@__POOL_GEN_SHIFT) | @T@__REGION_OUT;
+        }
+        if (unsafe { atomic_compare_exchange_acq_rel(word, w, next) }) {
+            if (pins == 0) {
+                let mut s: @SL@[b, k] = { address };
+                return @RT@::Retired(s);
+            }
+            return @RT@::Pending;
+        }
+    }
+    return @RT@::Pending;
 }
 
 // Give back a chunk whose slots are all Free, as the byte region it came
@@ -562,6 +696,10 @@ let instance elem =
   |> replace_all ~sub:"@PG@" ~by:("RegionPoolGuard__" ^ elem)
   |> replace_all ~sub:"@GR@" ~by:("RegionGrow__" ^ elem)
   |> replace_all ~sub:"@SH@" ~by:("RegionShrink__" ^ elem)
+  |> replace_all ~sub:"@PN@" ~by:("RegionPin__" ^ elem)
+  |> replace_all ~sub:"@PD@" ~by:("RegionPinned__" ^ elem)
+  |> replace_all ~sub:"@UP@" ~by:("RegionUnpin__" ^ elem)
+  |> replace_all ~sub:"@RT@" ~by:("RegionRetire__" ^ elem)
   |> replace_all ~sub:"@P@" ~by:("RegionPool__" ^ elem)
   |> replace_all ~sub:"@AD@" ~by:("RegionAdopt__" ^ elem)
   |> replace_all ~sub:"@TO@" ~by:("RegionTableOf__" ^ elem)
@@ -617,7 +755,8 @@ let element_types (prog : Ast.toplevel list) claimed =
       done) [ "region__"; "RegionSplit__"; "RegionOf__"; "RegionTable__";
          "RegionTableOf__"; "RegionTake__"; "RegionAlloc__"; "RegionHandle__";
          "RegionSlot__"; "RegionPool__"; "RegionPoolGuard__"; "RegionGrow__";
-         "RegionShrink__"; "RegionAdopt__" ] in
+         "RegionShrink__"; "RegionAdopt__"; "RegionPin__"; "RegionPinned__";
+         "RegionUnpin__"; "RegionRetire__" ] in
   List.iter (fun item -> scan (Ast.show_toplevel item)) prog;
   Hashtbl.fold (fun k () acc -> k :: acc) found [] |> List.sort compare
 

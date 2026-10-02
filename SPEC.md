@@ -2821,6 +2821,40 @@ bytes)` is the page allocator's boundary: it makes a byte region from an
 address the caller asserts is its alone, carries the `unsafe` effect, and is
 the one way a byte region comes from an address.
 
+**Pins** share a Live slot among several holders, for an object that
+several cores reach by handle at once (a TCP connection, a process record):
+
+```
+let g = region_pool_lock(&connections);
+let pinned = region_pin(g, handle);              // generation-checked
+region_pool_unlock(g);                           // the pin outlives the lock
+let RegionPinned(Node)::Pinned(p) = pinned else {
+    RegionPinned(Node)::Stale => { return; }     // freed or retired since
+};
+region_pin_at(p).key = 1;                        // the object's own lock decides who may
+match region_unpin(p) {                          // no pool lock needed
+    RegionUnpin(Node)::Unpinned => {}
+    RegionUnpin(Node)::Last(slot) => { ... }     // it was retired: free it
+}
+```
+
+- `region_pin` counts a pin on a Live slot under the pool lock; the element
+  pointer from `region_pin_at` dies with the pin. Several pins of one slot
+  give the same element: exclusion between pinners is the object's own
+  lock, not the pool's.
+- `region_take` refuses a pinned slot (`Stale`), so a slot is never taken
+  out from under its pinners.
+- `region_retire(p)` frees through the pins: the slot takes no new pins
+  (every stored handle becomes `Stale` at once) and whoever gives up the
+  last pin -- the retirer (`Retired(slot)`) or a later `region_unpin`
+  (`Last(slot)`) -- receives the Out slot, to free. A slot is never freed
+  while pinned.
+- `region_unpin` and `region_retire` are a compare-exchange on the slot's
+  word with acquire-release ordering (`atomic_compare_exchange_acq_rel`):
+  the last holder sees every other holder's accesses. A slot's word keeps
+  its state in bits 0-1, its pin count in bits 2-17 and its generation
+  above; a slot at the pin limit refuses a new pin as `Stale`.
+
 Overloads are chosen by the name of an indexed type, its static indices
 being settled by unification afterwards, and an integer literal argument
 does not decide between overloads when the other arguments do.

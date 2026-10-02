@@ -2444,6 +2444,21 @@ let frame_hold_use late =
      return true;
    }"
 
+(* A pool with one pin `p` taken by handle; `body` must give it up. *)
+let pin_use body =
+  "struct Node { key: usize; value: usize; }
+   let mut pool: RegionPool(Node);
+   let mut other: RegionPool(Node);
+   fn f(h: RegionHandle(Node)) !{unsafe} {
+     let g = region_pool_lock(&pool);
+     let pinned = region_pin(g, h);
+     region_pool_unlock(g);
+     let RegionPinned(Node)::Pinned(p) = pinned else {
+       RegionPinned(Node)::Stale => { return; }
+     };
+     " ^ body ^ "
+   }"
+
 let table_use body =
   "struct Node { key: usize; value: usize; }
    let mut pool_a: [Node; 4];
@@ -3446,6 +3461,44 @@ let infer_tests = [
          region_release(chunk);
          region_pool_unlock(g);
        }");
+
+  (* #672 layer 3: pins, the shared-object side of a pool. *)
+  Alcotest.test_case "region pool: a pinned element after its unpin" `Quick
+    (expect_region_error "cannot be used after" (pin_use
+      "let node = region_pin_at(p);
+       match region_unpin(p) {
+         RegionUnpin(Node)::Unpinned => {}
+         RegionUnpin(Node)::Last(s) => { region_slot_abandon(s); }
+       }
+       node.key = 1;"));
+
+  Alcotest.test_case "region pool: a pin never given up" `Quick
+    (expect_region_error "is never consumed" (pin_use
+      "region_pin_at(p).key = 1;"));
+
+  Alcotest.test_case "region pool: a last unpin's slot freed into another pool"
+    `Quick
+    (expect_region_error "static value mismatch" (pin_use
+      "match region_unpin(p) {
+         RegionUnpin(Node)::Unpinned => {}
+         RegionUnpin(Node)::Last(s) => {
+           let o = region_pool_lock(&other);
+           region_free(o, s);
+           region_pool_unlock(o);
+         }
+       }"));
+
+  Alcotest.test_case "region pool: pin, read, unpin" `Quick
+    (fun () -> ignore (infer_regions (pin_use
+      "region_pin_at(p).key = 1;
+       match region_retire(p) {
+         RegionRetire(Node)::Pending => {}
+         RegionRetire(Node)::Retired(s) => {
+           let o = region_pool_lock(&pool);
+           region_free(o, s);
+           region_pool_unlock(o);
+         }
+       }")));
 
   Alcotest.test_case "region pool: a saved value comes back with the unlock"
     `Quick
