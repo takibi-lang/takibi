@@ -45,7 +45,10 @@ concurrency:
 jobs:
   hardware-free:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # A hosted runner allows 6 hours; this cap only catches a hung lane. It
+    # was 45 until 2026-10-02, when a green run already took 38m44s and every
+    # longer one on main was cut off at 45m0s with no verdict at all.
+    timeout-minutes: 90
     env:
       OPAMYES: "true"
       # The workflow's own phases. `make cicheck` empties and fills
