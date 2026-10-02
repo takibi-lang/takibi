@@ -3286,6 +3286,34 @@ let infer_tests = [
       "region_free(a, slot);
        region_slot_at(slot).key = 1;"));
 
+  (* The hole the region table first fell into: a position `a + k` with k
+     free used to be solved as the distance between two unrelated regions.
+     A region's identity is its own static now, and takes no arithmetic. *)
+  Alcotest.test_case "built-in region: an element of another region is not one of this"
+    `Quick
+    (expect_region_error "static value mismatch"
+      "struct Node { key: usize; value: usize; }
+       let mut arena_a: [Node; 4];
+       let mut arena_b: [Node; 2];
+       fn inside(whole: borrow region(Node)[a, n],
+                 part: borrow region(Node)[a + k, 1]) {}
+       fn mix() {
+         let RegionOf(Node)::Taken(x) = region_of(arena_a) else {
+           RegionOf(Node)::Gone => { return; }
+         };
+         let RegionOf(Node)::Taken(y) = region_of(arena_b) else {
+           RegionOf(Node)::Gone => { region_release(x); return; }
+         };
+         let (y1, y2) = region_split_static(y, 1);
+         inside(x, y2);
+         region_release(x); region_release(y1); region_release(y2);
+       }");
+
+  Alcotest.test_case "static arithmetic: none on an addr-sorted static" `Quick
+    (expect_type_error "static arithmetic needs an integer sort"
+      "linear struct R[id: addr] { private a: usize; }
+       fn f(r: borrow R[x + 1]) {}");
+
   Alcotest.test_case "static arithmetic: a slot given back to its own index"
     `Quick
     (fun () -> ignore (infer slot_index_fixture));

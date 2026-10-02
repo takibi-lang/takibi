@@ -2762,11 +2762,15 @@ slot given back twice, an element used after its slot was given back or
 freed, do not compile. A stored handle to a freed slot is refused at run
 time (`Stale`). The table is not yet guarded for use from several cores.
 
-A static that appears alone in a parameter's index (`region[b + k, 1]` with
-`k` unconstrained) is solved for whatever the argument needs, including the
-distance between two unrelated regions. That is why a slot is its own type
-rather than a one-element region of the array; a signature that relies on
-such a term has to constrain it (a `where`, or a type that fixes `b`).
+A region's position is two statics inside the compiler: its identity and
+its offset. A program writes one term, `b` or `b + k`, and `b` is read as the
+identity and `b__off + k` as the offset. Identities have sort `addr`, which
+takes no arithmetic (an `addr`-sorted static in an arithmetic term is an
+error), so two regions of different arrays are never made equal by solving
+for a "distance" between their positions: the first version of the table
+accepted another table's slot that way. The same rule holds for any indexed
+type: give an identity its own `addr`-sorted static and keep arithmetic to
+counts and offsets.
 
 Not yet: regions declared from the linker map and the DTB, byte regions for
 the lowest allocator layer, guarded tables, tear-down. The surface is

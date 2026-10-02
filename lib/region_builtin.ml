@@ -26,39 +26,44 @@ let builtin_file = "<builtin region>"
 (* One element type's instance. @T@ is the element type, @R@ the region,
    @S@ and @O@ its split and claim results. *)
 let template = {|
-linear struct @R@[base: usize, count: usize] {
+// Internally a region has three statics: its identity (sort addr, which
+// takes no arithmetic, so two regions' identities are only ever equal or
+// not), its offset within that identity, and its count. A program writes two,
+// `region(T)[b + k, n]`, and the parser reads b as the identity and
+// `b__off + k` as the offset (Parser.region_indices).
+linear struct @R@[id: addr, offset: usize, count: usize] {
     private address: usize;
     private length: usize;
 }
 
-private fn region_discharge(r: sink @R@[b, n]) {}
+private fn region_discharge(r: sink @R@[b, o, n]) {}
 
 // A split whose point is only known at run time: the region comes back
 // whole when it does not fit. No trap.
-must_use variant @S@[b: usize, n: usize, k: usize] {
-    TooShort(@R@[b, n]);
-    Split((@R@[b, k], @R@[b + k, n - k]));
+must_use variant @S@[b: addr, o: usize, n: usize, k: usize] {
+    TooShort(@R@[b, o, n]);
+    Split((@R@[b, o, k], @R@[b, o + k, n - k]));
 }
 
 // A declared array's region, once. A second claim of the same array, by a
 // second call or the same call run again, finds it gone.
-must_use variant @O@[b: usize, n: usize] {
+must_use variant @O@[b: addr, n: usize] {
     Gone;
-    Taken(@R@[b, n]);
+    Taken(@R@[b, 0, n]);
 }
 
-fn __region_claim(address: usize @ b, count: usize @ n, claimed: *bool,
-                  witness: *@T@) -> @O@[b, n] !{unsafe} {
+fn __region_claim(address: usize, count: usize @ n, claimed: *bool,
+                  witness: *@T@ @ b) -> @O@[b, n] !{unsafe} {
     if (*claimed) { return @O@::Gone; }
     *claimed = true;
-    let mut r: @R@[b, n] = { address, count };
+    let mut r: @R@[b, 0, n] = { address, count };
     return @O@::Taken(r);
 }
 
-fn region_split(r: sink @R@[b, n], at: usize @ k) -> @S@[b, n, k] {
+fn region_split(r: sink @R@[b, o, n], at: usize @ k) -> @S@[b, o, n, k] {
     if (at > r.length) { return @S@::TooShort(r); }
-    let mut head: @R@[b, k] = { r.address, at };
-    let mut tail: @R@[b + k, n - k] = {
+    let mut head: @R@[b, o, k] = { r.address, at };
+    let mut tail: @R@[b, o + k, n - k] = {
         r.address + at * sizeof(@T@), r.length - at
     };
     region_discharge(r);
@@ -67,20 +72,22 @@ fn region_split(r: sink @R@[b, n], at: usize @ k) -> @S@[b, n, k] {
 
 // The split point is proved within the count where the call is made
 // (`where k <= n`), so there is no failure to handle.
-fn region_split_static(r: sink @R@[b, n], at: usize @ k)
-        -> (@R@[b, k], @R@[b + k, n - k]) where k <= n {
-    let mut head: @R@[b, k] = { r.address, at };
-    let mut tail: @R@[b + k, n - k] = {
+fn region_split_static(r: sink @R@[b, o, n], at: usize @ k)
+        -> (@R@[b, o, k], @R@[b, o + k, n - k]) where k <= n {
+    let mut head: @R@[b, o, k] = { r.address, at };
+    let mut tail: @R@[b, o + k, n - k] = {
         r.address + at * sizeof(@T@), r.length - at
     };
     region_discharge(r);
     return (head, tail);
 }
 
-// Accepted only when tail starts where head ends: the static terms say so.
-fn region_merge(head: sink @R@[b, k], tail: sink @R@[b + k, m])
-        -> @R@[b, k + m] {
-    let mut whole: @R@[b, k + m] = { head.address, head.length + tail.length };
+// Accepted only when tail is the same region and starts where head ends.
+fn region_merge(head: sink @R@[b, o, k], tail: sink @R@[b, o + k, m])
+        -> @R@[b, o, k + m] {
+    let mut whole: @R@[b, o, k + m] = {
+        head.address, head.length + tail.length
+    };
     region_discharge(head);
     region_discharge(tail);
     return whole;
@@ -88,16 +95,16 @@ fn region_merge(head: sink @R@[b, k], tail: sink @R@[b + k, m])
 
 // Element i, proved below the count where the call is made. The pointer is
 // derived from the borrow of r and dies with it.
-fn region_at(r: borrow @R@[b, n], i: usize @ k) -> *@T@ @ b !{unsafe}
+fn region_at(r: borrow @R@[b, o, n], i: usize @ k) -> *@T@ @ b !{unsafe}
         where k < n {
     return unsafe { (r.address + i * sizeof(@T@)) as *@T@ };
 }
 
-fn region_count(r: borrow @R@[b, n]) -> usize {
+fn region_count(r: borrow @R@[b, o, n]) -> usize {
     return r.length;
 }
 
-fn region_release(r: sink @R@[b, n]) { region_discharge(r); }
+fn region_release(r: sink @R@[b, o, n]) { region_discharge(r); }
 
 // -- region_table: the only way to store permissions (#672, second layer) --
 //
@@ -106,7 +113,7 @@ fn region_release(r: sink @R@[b, n]) { region_discharge(r); }
 // handle) or Out (its region is held by the program). Each slot has a
 // generation, bumped on free, so a stored handle to a freed slot is
 // refused. The state and generation words are a hidden array per table.
-linear struct @TBL@[base: usize, count: usize] {
+linear struct @TBL@[base: addr, count: usize] {
     private address: usize;
     private length: usize;
     private meta: usize;
@@ -116,7 +123,7 @@ linear struct @TBL@[base: usize, count: usize] {
 // the slot index. It is its own type rather than a region of the array, so
 // a slot of another table has another b and nothing solves one for the
 // other -- the static arithmetic would, given region[b + k, 1].
-linear struct @SL@[table: usize, slot: usize] {
+linear struct @SL@[table: addr, slot: usize] {
     private address: usize;
 }
 
@@ -133,17 +140,17 @@ struct @H@ {
     private generation: usize;
 }
 
-must_use variant @TO@[b: usize, n: usize] {
+must_use variant @TO@[b: addr, n: usize] {
     Gone;
     Taken(@TBL@[b, n]);
 }
 
-must_use variant @A@[b: usize] {
+must_use variant @A@[b: addr] {
     Full;
     Allocated(exists k: usize. @SL@[b, k]);
 }
 
-must_use variant @TK@[b: usize] {
+must_use variant @TK@[b: addr] {
     Stale;
     Taken(exists k: usize. @SL@[b, k]);
 }
@@ -173,8 +180,8 @@ private fn region_slot_of(t: borrow @TBL@[b, n], s: borrow @SL@[b, k])
     return (s.address - t.address) / sizeof(@T@);
 }
 
-fn __region_table_claim(address: usize @ b, count: usize @ n, claimed: *bool,
-                        meta: usize, witness: *@T@) -> @TO@[b, n] !{unsafe} {
+fn __region_table_claim(address: usize, count: usize @ n, claimed: *bool,
+                        meta: usize, witness: *@T@ @ b) -> @TO@[b, n] !{unsafe} {
     if (*claimed) { return @TO@::Gone; }
     *claimed = true;
     let mut t: @TBL@[b, n] = { address, count, meta };

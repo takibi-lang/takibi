@@ -88,6 +88,26 @@ let mangle_builtin_instance pos name t =
   in
   name ^ "__" ^ elem
 
+(* A program writes a region's position as one term, `b` or `b + k`; the
+   built-in keeps its identity and its offset apart (#672): identities take
+   no arithmetic, so two unrelated regions can never be made equal by
+   solving for a "distance" between them. `b` becomes identity b and offset
+   b__off; `b + k` becomes identity b and offset b__off + k. *)
+let region_indices pos args =
+  let split_base = function
+    | StaticName b -> (b, StaticName (b ^ "__off"))
+    | StaticAdd (StaticName b, e) -> (b, StaticAdd (StaticName (b ^ "__off"), e))
+    | StaticSub (StaticName b, e) -> (b, StaticSub (StaticName (b ^ "__off"), e))
+    | _ -> raise (Types.TypeError (pos,
+        "a region's position starts with a name: `b`, `b + k` or `b - k`"))
+  in
+  match args with
+  | [ base; count ] ->
+      let (id, offset) = split_base base in
+      [ StaticName id; offset; count ]
+  | _ -> raise (Types.TypeError (pos,
+      "a region takes two indices: its position and its count"))
+
 let narrow_int64 pos what (n : Int64.t) : int =
   match Ast.int_of_intlit n with
   | Some i -> i
@@ -1100,7 +1120,11 @@ base_type_expr:
     (* `region(Node)[b, n]`: a built-in instantiated for an element type and
        carrying static indices (#672). One type argument only. *)
     { match ts with
-      | [ t ] -> TypeIndexed (mangle_builtin_instance $symbolstartpos name t, args)
+      | [ t ] ->
+          let mangled = mangle_builtin_instance $symbolstartpos name t in
+          if name = "region" then
+            TypeIndexed (mangled, region_indices $symbolstartpos args)
+          else TypeIndexed (mangled, args)
       | _ -> raise (Types.TypeError ($symbolstartpos,
                "a built-in instance takes one type argument")) }
   | name = IDENT LPAREN args = separated_nonempty_list(COMMA, type_expr) RPAREN
