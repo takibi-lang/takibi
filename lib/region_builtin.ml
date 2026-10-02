@@ -422,6 +422,82 @@ fn region_pool_shrink(g: borrow @PG@[b]) -> @SH@ !{unsafe} {
     }
     return @SH@::Nothing;
 }
+
+// -- Slots kept in a struct (#672 layer 3) -----------------------------------
+//
+// A struct field's type cannot name a global pool's identity (#370), so a
+// slot parked in one is stored as `exists p, k. RegionSlot(T)[p, k]` and its
+// pool identity is lost. Adopting it back checks, at run time, that its
+// address is an Out slot of this pool, as intrusive_pool_remove validated
+// a rebuilt owner before.
+must_use variant @AD@[b: addr, p: addr, k: usize] {
+    Foreign(@SL@[p, k]);
+    Adopted(exists j: usize. @SL@[b, j]);
+}
+
+fn region_slot_adopt(g: borrow @PG@[b], s: sink @SL@[p, k]) -> @AD@[b, p, k]
+        !{unsafe} {
+    let chunk: usize = pool_chunk_of(g, s.address);
+    if (chunk == 0) { return @AD@::Foreign(s); }
+    let base: usize = pool_slots_base(chunk);
+    if ((s.address - base) % sizeof(@T@) != 0) { return @AD@::Foreign(s); }
+    let i: usize = (s.address - base) / sizeof(@T@);
+    if ((*pool_word(chunk, 3 + i) & 3) != @T@__REGION_OUT) {
+        return @AD@::Foreign(s);
+    }
+    let address: usize = s.address;
+    region_slot_discharge(s);
+    return @AD@::Adopted(pool_slot(g, address));
+}
+
+// A slot that cannot be given back anywhere: dropped, its memory kept.
+// For a refused adoption, which is a kernel bug to report, not a state to
+// continue from.
+fn region_slot_abandon(s: sink @SL@[p, k]) { region_slot_discharge(s); }
+
+// Zero a slot's element: a recycled slot holds its last occupant's bytes.
+fn region_slot_zero(s: borrow @SL@[p, k]) !{unsafe} {
+    let bytes: *u8 = unsafe { s.address as *u8 };
+    let mut i: usize = 0;
+    while (i < sizeof(@T@)) {
+        bytes[i as isize] = 0;
+        i = i + 1;
+    }
+}
+
+// The address, for code that still reaches the element by address (#677).
+fn region_slot_address(s: borrow @SL@[p, k]) -> usize {
+    return s.address;
+}
+
+// Whether an address is an Out slot of this pool: the check the address
+// path makes before it trusts one (#677 removes that path).
+fn region_pool_holds(g: borrow @PG@[b], address: usize) -> bool !{unsafe} {
+    let chunk: usize = pool_chunk_of(g, address);
+    if (chunk == 0) { return false; }
+    let base: usize = pool_slots_base(chunk);
+    if ((address - base) % sizeof(@T@) != 0) { return false; }
+    let i: usize = (address - base) / sizeof(@T@);
+    return (*pool_word(chunk, 3 + i) & 3) == @T@__REGION_OUT;
+}
+
+// Slots not Free, across every chunk.
+fn region_pool_live_count(g: borrow @PG@[b]) -> usize !{unsafe} {
+    let mut live: usize = 0;
+    let mut chunk: usize = *pool_word(g.pool, 1);
+    while (chunk != 0) {
+        let count: usize = *pool_word(chunk, 1);
+        let mut i: usize = 0;
+        while (i < count) {
+            if ((*pool_word(chunk, 3 + i) & 3) != @T@__REGION_FREE) {
+                live = live + 1;
+            }
+            i = i + 1;
+        }
+        chunk = *pool_word(chunk, 0);
+    }
+    return live;
+}
 |}
 
 (* Shared by every instance: a chunk leaving a pool is a byte region again,
@@ -434,6 +510,12 @@ let common_source = {|
 // base counts it.
 must_use variant RegionBytes {
     Assumed(exists c: addr. exists n: usize. region__u8[c, 0, n]);
+}
+
+// A byte region's address and length, for giving its pages back to the
+// page allocator after the region itself is released.
+fn region_bytes_address(r: borrow region__u8[c, o, n]) -> usize {
+    return r.address;
 }
 
 fn region_bytes_assume(address: usize, bytes: usize) -> RegionBytes !{unsafe} {
@@ -481,6 +563,7 @@ let instance elem =
   |> replace_all ~sub:"@GR@" ~by:("RegionGrow__" ^ elem)
   |> replace_all ~sub:"@SH@" ~by:("RegionShrink__" ^ elem)
   |> replace_all ~sub:"@P@" ~by:("RegionPool__" ^ elem)
+  |> replace_all ~sub:"@AD@" ~by:("RegionAdopt__" ^ elem)
   |> replace_all ~sub:"@TO@" ~by:("RegionTableOf__" ^ elem)
   |> replace_all ~sub:"@TK@" ~by:("RegionTake__" ^ elem)
   |> replace_all ~sub:"@A@" ~by:("RegionAlloc__" ^ elem)
@@ -534,7 +617,7 @@ let element_types (prog : Ast.toplevel list) claimed =
       done) [ "region__"; "RegionSplit__"; "RegionOf__"; "RegionTable__";
          "RegionTableOf__"; "RegionTake__"; "RegionAlloc__"; "RegionHandle__";
          "RegionSlot__"; "RegionPool__"; "RegionPoolGuard__"; "RegionGrow__";
-         "RegionShrink__" ] in
+         "RegionShrink__"; "RegionAdopt__" ] in
   List.iter (fun item -> scan (Ast.show_toplevel item)) prog;
   Hashtbl.fold (fun k () acc -> k :: acc) found [] |> List.sort compare
 
@@ -588,38 +671,81 @@ fn __region_table_lock__%s(w: *[%s; %d] @ b) -> RegionTable__%s[b, %d] !{unsafe}
     ("__region_meta__" ^ array)
 let meta_name array = "__region_meta__" ^ array
 
+(* The built-in's source, in two passes. A program's own struct may hold a
+   built-in type (a RegionSlot parked in a field), and a struct is laid out
+   while it is parsed, so the built-in definitions have to be parsed BEFORE
+   the program's files. But which element types they are for is only known
+   from the program. So: plan from a first parse of the program, then parse
+   the planned definitions, then parse the program again and lower it
+   (bin/main.ml). *)
+let plan prog : string list =
+  Monomorphize.region_arrays := global_arrays prog;
+  (* Read off the printed AST rather than lowered: lowering measures types,
+     and a type that holds a built-in one cannot be measured before the
+     built-in is parsed. *)
+  let calls_of fname =
+    List.concat_map (fun item ->
+      let text = Ast.show_toplevel item in
+      let key = "\"" ^ fname ^ "\"," in
+      let found = ref [] in
+      let n = String.length text and m = String.length key in
+      let i = ref 0 in
+      while !i + m <= n do
+        if String.sub text !i m = key then begin
+          let var = "Ast.Var \"" in
+          let j = ref (!i + m) in
+          while !j + String.length var <= n
+                && String.sub text !j (String.length var) <> var do incr j done;
+          let start = !j + String.length var in
+          let stop = ref start in
+          while !stop < n && text.[!stop] <> '"' do incr stop done;
+          if start < n then found := String.sub text start (!stop - start) :: !found;
+          i := !stop
+        end else incr i
+      done;
+      !found) prog in
+  let once = calls_of "region_of" @ calls_of "region_table_of" in
+  let locks = List.sort_uniq compare (calls_of "region_table_lock") in
+  let claims = List.sort_uniq compare (once @ locks) in
+  let lowered = prog in
+  List.iter (fun name ->
+    if List.mem name once then
+      raise (Types.TypeError (Lexing.dummy_pos, Printf.sprintf
+        "'%s' is claimed once and also locked; an array is one or the other"
+        name))) locks;
+  let claimed = List.filter_map (fun name ->
+    Option.map (fun info -> (name, info))
+      (List.assoc_opt name !Monomorphize.region_arrays)) claims in
+  let elems = element_types lowered claimed in
+  (* Every instance's pool takes chunks as regions of u8, so u8's own
+     instance is always there. *)
+  let uses_bytes = elems <> [] || region_bytes_used prog in
+  let elems = if not uses_bytes || List.mem "u8" elems then elems
+              else "u8" :: elems in
+  let defs = if not uses_bytes then []
+    else List.map instance elems @ [ common_source ] in
+  let flags = String.concat "" (List.map (fun (name, (_, n)) ->
+    Printf.sprintf "let mut %s: bool = false;\nlet mut %s: [usize; %d];\n"
+      (flag_name name) (meta_name name) (2 * n)) claimed) in
+  let lock_defs = String.concat "" (List.filter_map (fun name ->
+    Option.map (lock_source name) (List.assoc_opt name !Monomorphize.region_arrays))
+    locks) in
+  defs @ [ flags; lock_defs ]
+
+let parse_planned sources =
+  next_first_line := 1;
+  List.concat_map parse_source sources
+
+let lower prog =
+  Monomorphize.region_arrays := global_arrays prog;
+  Monomorphize.region_claims := [];
+  Monomorphize.region_locks := [];
+  Monomorphize.lower_regions prog
+
+(* One pass, for a program none of whose own structs holds a built-in type
+   (the compiler tests). *)
 let run ~enabled prog =
   if not enabled then prog
-  else begin
-    Monomorphize.region_arrays := global_arrays prog;
-    Monomorphize.region_claims := [];
-    Monomorphize.region_locks := [];
-    next_first_line := 1;
-    let prog = Monomorphize.lower_regions prog in
-    let claims = List.sort_uniq compare (!Monomorphize.region_claims @ !Monomorphize.region_locks) in
-    let locks = List.sort_uniq compare !Monomorphize.region_locks in
-    List.iter (fun name ->
-      if List.mem name !Monomorphize.region_claims then
-        raise (Types.TypeError (Lexing.dummy_pos, Printf.sprintf
-          "'%s' is claimed once and also locked; an array is one or the other"
-          name))) locks;
-    let claimed = List.filter_map (fun name ->
-      Option.map (fun info -> (name, info))
-        (List.assoc_opt name !Monomorphize.region_arrays)) claims in
-    let elems = element_types prog claimed in
-    (* Every instance's pool takes chunks as regions of u8, so u8's own
-       instance is always there. *)
-    let uses_bytes = elems <> [] || region_bytes_used prog in
-    let elems = if not uses_bytes || List.mem "u8" elems then elems
-                else "u8" :: elems in
-    let defs = if not uses_bytes then []
-      else List.concat_map (fun elem -> parse_source (instance elem)) elems
-           @ parse_source common_source in
-    let flags = parse_source (String.concat "" (List.map (fun (name, (_, n)) ->
-      Printf.sprintf "let mut %s: bool = false;\nlet mut %s: [usize; %d];\n"
-        (flag_name name) (meta_name name) (2 * n)) claimed)) in
-    let lock_defs = parse_source (String.concat "" (List.filter_map (fun name ->
-      Option.map (lock_source name) (List.assoc_opt name !Monomorphize.region_arrays))
-      locks)) in
-    defs @ flags @ lock_defs @ prog
-  end
+  else
+    let sources = plan prog in
+    parse_planned sources @ prog

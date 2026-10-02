@@ -1294,7 +1294,7 @@ $(KERNEL_PEER_FORK_ELF): $(KERNEL_PEER_FORK_O)
 
 $(KERNEL_RPI5_MAIN_O): $(KERNEL_RPI5_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_EXT2_MUTATION_LOCK_TKB) $(KERNEL_EXT2_MUTATION_PROBE_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_RPI5_MEMORY_TKB) $(KERNEL_FDT_TKB) \
     $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_INTC_TKB) $(KERNEL_RPI5_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --frame-pointers --forbid-trap $(KERNEL_UNUSED_CHECK_RPI5) --emit-depfile $@.d --emit-raw-deref-audit $@.rawderef.tsv -o $@
+	$(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --frame-pointers --forbid-trap --regions $(KERNEL_UNUSED_CHECK_RPI5) --emit-depfile $@.d --emit-raw-deref-audit $@.rawderef.tsv -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.d
 	python3 scripts/measure_trusted_base.py --check-raw-deref rpi5 $@.rawderef.tsv $@.d
 
@@ -1318,7 +1318,7 @@ $(KERNEL_RPI5_SHELL_ELF): $(KERNEL_RPI5_ELF) $(KERNEL_EXT2_IMAGE) \
 # ordinary image, with DWARF added only to the host ELF. Depending on main.o
 # gives this second compile its complete depfile-backed source boundary.
 $(KERNEL_RPI5_MAIN_DEBUG_O): $(KERNEL_RPI5_MAIN_O)
-	$(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $(KERNEL_RPI5_MAIN_TKB) --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --frame-pointers --forbid-trap $(KERNEL_UNUSED_CHECK_RPI5) -g --emit-depfile $@.d -o $@
+	$(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $(KERNEL_RPI5_MAIN_TKB) --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --frame-pointers --forbid-trap --regions $(KERNEL_UNUSED_CHECK_RPI5) -g --emit-depfile $@.d -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py rpi5 $@.d
 
 -include $(KERNEL_RPI5_MAIN_DEBUG_O).d
@@ -1330,7 +1330,7 @@ $(KERNEL_RPI5_DEBUG_ELF): $(KERNEL_RPI5_ENTRY_O) $(KERNEL_RPI5_USER_ENTRY_O) $(K
 
 $(KERNEL_RPI5_DEBUG_METADATA): $(KERNEL_RPI5_MAIN_O) $(TAKIBI)
 	@mkdir -p $(dir $@)
-	$(TAKIBI) $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $(KERNEL_RPI5_MAIN_TKB) --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --emit-debug-metadata $@
+	$(TAKIBI) --regions $(KERNEL_RPI5_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_MMU_LAYOUT_TKB) $(KERNEL_RPI5_GEM_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_FDT_TKB) $(KERNEL_RPI5_MAIN_TKB) --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --emit-debug-metadata $@
 
 # -- QEMU/AArch64 (GitHub issue #237) -----------------------------------------
 # Reuses the same aarch64-none-elf triple as RPi5 (no --cpu passed to
@@ -1414,7 +1414,7 @@ $(KERNEL_QEMU_PMU_O): $(KERNEL_PMU_S) | $(KERNEL_QEMU_BUILD_DIR)
 # duplicate top-level definition is a compile error by design.
 $(KERNEL_QEMU_MAIN_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_EXT2_MUTATION_LOCK_TKB) $(KERNEL_EXT2_MUTATION_PROBE_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_FDT_TKB) \
     $(KERNEL_QEMU_UART_TKB) $(KERNEL_QEMU_INTC_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile | $(KERNEL_QEMU_BUILD_DIR)
-	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap $(KERNEL_UNUSED_CHECK_QEMU) --emit-depfile $@.d --emit-raw-deref-audit $@.rawderef.tsv -o $@
+	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap --regions $(KERNEL_UNUSED_CHECK_QEMU) --emit-depfile $@.d --emit-raw-deref-audit $@.rawderef.tsv -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.d
 	python3 scripts/measure_trusted_base.py --check-raw-deref qemu $@.rawderef.tsv $@.d
 
@@ -1422,15 +1422,15 @@ $(KERNEL_QEMU_MAIN_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(
 # NetRx scan moved before its process-run lock in the generated overlay.
 $(KERNEL_QEMU_NET_WAKE_CONTROL_O): $(KERNEL_QEMU_MAIN_O) $(KERNEL_PROCESS_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) scripts/build_qemu_net_wake_control.py | $(KERNEL_QEMU_BUILD_DIR)
 	python3 scripts/build_qemu_net_wake_control.py . $(KERNEL_QEMU_NET_WAKE_CONTROL_DIR)
-	cd $(KERNEL_QEMU_NET_WAKE_CONTROL_DIR) && $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/rpi5/usb_xhci.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap $(KERNEL_UNUSED_CHECK_QEMU) --emit-depfile $(abspath $@).d -o $(abspath $@)
+	cd $(KERNEL_QEMU_NET_WAKE_CONTROL_DIR) && $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/rpi5/usb_xhci.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap --regions $(KERNEL_UNUSED_CHECK_QEMU) --emit-depfile $(abspath $@).d -o $(abspath $@)
 
 $(KERNEL_QEMU_BUILD_DIR)/race-%-armed-main.o: $(KERNEL_QEMU_MAIN_O) scripts/build_qemu_race_window.py | $(KERNEL_QEMU_BUILD_DIR)
 	python3 scripts/build_qemu_race_window.py . _build/qemu-race-window-$*-armed $*
-	cd _build/qemu-race-window-$*-armed && $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/rpi5/usb_xhci.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap -o $(abspath $@)
+	cd _build/qemu-race-window-$*-armed && $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/rpi5/usb_xhci.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap --regions -o $(abspath $@)
 
 $(KERNEL_QEMU_BUILD_DIR)/race-%-reverted-main.o: $(KERNEL_QEMU_MAIN_O) scripts/build_qemu_race_window.py | $(KERNEL_QEMU_BUILD_DIR)
 	python3 scripts/build_qemu_race_window.py . _build/qemu-race-window-$*-reverted $* --revert
-	cd _build/qemu-race-window-$*-reverted && $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/rpi5/usb_xhci.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap -o $(abspath $@)
+	cd _build/qemu-race-window-$*-reverted && $(abspath $(TAKIBI)) kernel/platform/qemu/uart.tkb kernel/platform/rpi5/pcie.tkb kernel/platform/rpi5/usb_xhci.tkb kernel/platform/qemu/mmu_layout.tkb kernel/boot/fdt.tkb kernel/platform/qemu/memory.tkb kernel/drivers/net/virtio_net.tkb kernel/drivers/block/virtio_blk.tkb kernel/platform/qemu/init.tkb --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap --regions -o $(abspath $@)
 
 $(KERNEL_QEMU_BUILD_DIR)/kernel-race-%.elf: $(KERNEL_QEMU_BUILD_DIR)/race-%-main.o $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $(KERNEL_QEMU_LINK_LD)
 	$(LLD) -T $(KERNEL_QEMU_LINK_LD) $(KERNEL_QEMU_ENTRY_O) $(KERNEL_QEMU_USER_ENTRY_O) $(KERNEL_QEMU_FPSIMD_O) $(KERNEL_QEMU_PMU_O) $< -o $@
@@ -1470,7 +1470,7 @@ kernelbuild-qemu: build
 # invocation the same source staleness boundary without adding another
 # hand-maintained prerequisite list.
 $(KERNEL_DEBUG_METADATA): $(KERNEL_QEMU_MAIN_O) $(TAKIBI)
-	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --emit-debug-metadata $@
+	$(TAKIBI) --regions $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --emit-debug-metadata $@
 
 # Debug variant: identical inputs to $(KERNEL_QEMU_MAIN_O)/$(KERNEL_QEMU_ELF)
 # above, just with -g added, so GDB would get real DWARF type info --
@@ -1485,7 +1485,7 @@ KERNEL_QEMU_DEBUG_ELF    := $(KERNEL_QEMU_BUILD_DIR)/kernel-debug.elf
 
 $(KERNEL_QEMU_MAIN_DEBUG_O): $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_INIT_TEST_DRIVER_TKB) $(KERNEL_FREELIST_TKB) $(KERNEL_SLOTMAP_TKB) $(KERNEL_REFCOUNT_SLOTMAP_TKB) $(KERNEL_PAGE_TKB) $(KERNEL_ADDRESS_SPACE_TKB) $(KERNEL_USER_MEMORY_TKB) $(KERNEL_PROCESS_IMAGE_TKB) $(KERNEL_PROCESS_TKB) $(KERNEL_SYSCALL_TKB) $(KERNEL_ELF64_TKB) $(KERNEL_MEMORY_BLOCK_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_EXT2_TKB) $(KERNEL_EXT2_MUTATION_LOCK_TKB) $(KERNEL_EXT2_MUTATION_PROBE_TKB) $(KERNEL_LOG_TKB) $(KERNEL_RPI5_MMU_TKB) $(KERNEL_RPI5_ASID_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_RPI5_USER_EXTERN) $(KERNEL_RPI5_BOOT_EXTERN) $(KERNEL_RPI5_FPSIMD_EXTERN) $(KERNEL_PMU_EXTERN) $(KERNEL_EXT2_IMAGE) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_NETCONFIG_TKB) $(KERNEL_ARP_TKB) $(KERNEL_CHECKSUM_TKB) $(KERNEL_ICMP_TKB) $(KERNEL_WIRE_TKB) $(KERNEL_TCP_TKB) $(KERNEL_SOCKET_CAP_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_FDT_TKB) \
     $(KERNEL_QEMU_UART_TKB) $(KERNEL_QEMU_INTC_TKB) $(KERNEL_QEMU_TIMER_IRQ_TKB) $(KERNEL_RPI5_TIMER_TKB) $(KERNEL_RPI5_EXC_EVIDENCE_TKB) $(KERNEL_RPI5_VECTOR_TABLE_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(TAKIBI) Makefile | $(KERNEL_QEMU_BUILD_DIR)
-	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap $(KERNEL_UNUSED_CHECK_QEMU) -g --emit-depfile $@.d -o $@
+	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $< --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --frame-pointers --forbid-trap --regions $(KERNEL_UNUSED_CHECK_QEMU) -g --emit-depfile $@.d -o $@
 	python3 scripts/buildcheck_kernel_unused_coverage.py qemu $@.d
 
 # GitHub issue #306: same depfile fix as $(KERNEL_QEMU_MAIN_O)'s own, for
@@ -1543,7 +1543,7 @@ kernel-lib-check:
 # git-tracked exception_context.inc) -- so there is still no placeholder/
 # fallback path that could silently emit broken assembly.
 $(KERNEL_EXC_CONTEXT_OFFSETS): $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_RPI5_EXC_FRAME_TKB) $(KERNEL_EXT2_IMAGE) $(TAKIBI)
-	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --emit-exception-frame-offsets ExceptionFrame --emit-depfile $@.d -o $@
+	$(TAKIBI) --regions $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --emit-exception-frame-offsets ExceptionFrame --emit-depfile $@.d -o $@
 
 # GitHub issue #306: same depfile fix as $(KERNEL_QEMU_MAIN_O)'s own, for
 # this target's own hand-written prerequisite list above.
@@ -1551,7 +1551,7 @@ $(KERNEL_EXC_CONTEXT_OFFSETS): $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $
 
 $(KERNEL_CRASH_SNAPSHOT_LAYOUT): $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) $(KERNEL_EXT2_IMAGE) $(TAKIBI)
 	@mkdir -p $(dir $@)
-	$(TAKIBI) $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --emit-struct-layout CrashSnapshot --emit-depfile $@.d -o $@
+	$(TAKIBI) --regions $(KERNEL_QEMU_UART_TKB) $(KERNEL_RPI5_PCIE_TKB) $(KERNEL_RPI5_USB_XHCI_TKB) $(KERNEL_QEMU_MMU_LAYOUT_TKB) $(KERNEL_FDT_TKB) $(KERNEL_QEMU_MEMORY_TKB) $(KERNEL_QEMU_VIRTIO_NET_TKB) $(KERNEL_VIRTIO_BLK_TKB) $(KERNEL_QEMU_MAIN_TKB) --target $(QEMU_TARGET) --cpu $(QEMU_CPU) --emit-struct-layout CrashSnapshot --emit-depfile $@.d -o $@
 
 # GitHub issue #306, hit again live while adding CrashSnapshot fields
 # (issue #294): this target's own hand-written prerequisite list above

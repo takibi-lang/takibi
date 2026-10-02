@@ -587,7 +587,7 @@ struct NetFrame {
 // because it is the price of the container, not a surprise.
 variant FrameLink {
     None;
-    Some(exists p: addr. exists a: usize. IntrusiveOwner[p, a]);
+    Some(exists p: addr. exists k: usize. RegionSlot(NetFrame)[p, k]);
 }
 
 // GitHub issue #451: a linear STRUCT, not an erased view any more.
@@ -602,8 +602,51 @@ variant FrameLink {
 private linear struct FrameGuard[lock: addr] {
     private flags: usize;
 }
-private let mut tcp_frame_pool: IntrusivePool(NetFrame);
-private let mut tcp_frame_pool_ready: bool = false;
+// GitHub issue #672 layer 3: the built-in region_pool. A frame is a slot
+// whose permission the connection parks in its FrameLink fields; the pool
+// grows by a chunk of pages when it is full and gives a chunk whose frames
+// are all free straight back to the page allocator. Its lock masks
+// interrupts (tcp_frame_pool_lock), as intrusive_pool's did.
+private let mut tcp_frame_pool: RegionPool(NetFrame);
+
+// Pages per chunk: five 1.5 KiB frames in two pages.
+const TCP_FRAME_CHUNK_PAGES: usize = 2;
+
+// The pool's identity is the global's address, which a signature cannot
+// name (#370), so it comes in through the pointer: callers pass
+// &tcp_frame_pool.
+private fn tcp_frame_pool_lock(pool: *RegionPool(NetFrame) @ frames)
+        -> RegionPoolGuard(NetFrame)[frames] !{unsafe} {
+    let flags: usize = mutex_irq_save();
+    return region_pool_lock_saving(pool, flags);
+}
+
+private fn tcp_frame_pool_unlock(guard: sink RegionPoolGuard(NetFrame)[frames]) {
+    mutex_irq_restore(region_pool_unlock_saved(guard));
+}
+
+fn tcp_frame_live_count() -> usize !{unsafe} {
+    let guard = tcp_frame_pool_lock(&tcp_frame_pool);
+    let live: usize = region_pool_live_count(guard);
+    tcp_frame_pool_unlock(guard);
+    return live;
+}
+
+// Give every chunk whose frames are all free back to the page allocator.
+private fn tcp_frame_pool_return_empty(
+        guard: borrow RegionPoolGuard(NetFrame)[frames]) !{unsafe} {
+    let mut more: bool = true;
+    while (more) {
+        match region_pool_shrink(guard) {
+            RegionShrink(NetFrame)::Nothing => { more = false; }
+            RegionShrink(NetFrame)::Chunk(bytes) => {
+                let address: usize = region_bytes_address(bytes);
+                region_release(bytes);
+                page_run_transferred_release_physical(address, TCP_FRAME_CHUNK_PAGES);
+            }
+        }
+    }
+}
 
 // Reached only when a frame is missing from a connection that should have
 // one -- which the acquire/release pairing below is meant to make
@@ -635,15 +678,21 @@ fn tcp_frame_release_link(link: FrameLink) !{unsafe} {
     match link {
         FrameLink::None => {}
         FrameLink::Some(parked) => {
-            let mut slot: IntrusiveSlotAddress = intrusive_owner_slot(parked);
-            let generation: usize = intrusive_owner_generation(parked);
-            intrusive_owner_drop(parked);
-            let branded = intrusive_owner_new(&tcp_frame_pool, slot, generation);
-            let guard = intrusive_pool_lock(&tcp_frame_pool);
-            tcp_pool_remove_expected(
-                intrusive_pool_remove(&tcp_frame_pool, guard, branded),
-                "parked frame release" as *u8);
-            intrusive_pool_unlock(&tcp_frame_pool, guard);
+            // The parked slot lost its pool identity in the struct field
+            // (#370); adopting it back checks that it is an Out slot of
+            // this pool before it is freed.
+            let guard = tcp_frame_pool_lock(&tcp_frame_pool);
+            match region_slot_adopt(guard, parked) {
+                RegionAdopt(NetFrame)::Foreign(stray) => {
+                    kernel_boot_log("tcp frames: a parked frame is not this pool's\n");
+                    region_slot_abandon(stray);
+                }
+                RegionAdopt(NetFrame)::Adopted(frame) => {
+                    region_free(guard, frame);
+                    tcp_frame_pool_return_empty(guard);
+                }
+            }
+            tcp_frame_pool_unlock(guard);
         }
     }
 }
@@ -680,24 +729,47 @@ private fn tcp_pool_remove_expected(result: IntrusivePoolRemoveResult,
 // wire past the length the caller meant to send -- and the same argument
 // covers a receive buffer read back past its recorded length.
 fn tcp_frame_take() -> (FrameLink, usize) !{unsafe} {
-    let pool_guard = intrusive_pool_lock(&tcp_frame_pool);
-    let inserted = intrusive_pool_insert_zeroed(&tcp_frame_pool, pool_guard);
-    intrusive_pool_unlock(&tcp_frame_pool, pool_guard);
-    match inserted {
-        IntrusivePoolInsertResult::OutOfMemory => {
-            kernel_boot_log_resource_exhausted(
-                "TCP frame pool (out of pages)" as *u8, 0);
-            return (FrameLink::None, 0);
-        }
-        IntrusivePoolInsertResult::Allocated(owner) => {
-            // The address comes back beside the link because a link is
-            // linear: reading it out of the parked handle later would mean
-            // consuming the handle to look at it.
-            let address: usize = intrusive_slot_address_identity(
-                intrusive_owner_slot(owner));
-            return (FrameLink::Some(owner), address);
+    let guard = tcp_frame_pool_lock(&tcp_frame_pool);
+    let mut attempts: usize = 0;
+    while (attempts < 2) {
+        attempts = attempts + 1;
+        match region_alloc(guard) {
+            RegionAlloc(NetFrame)::Allocated(frame) => {
+                region_slot_zero(frame);
+                // The address comes back beside the link: the slice
+                // accessors still reach a frame by address (#677).
+                let address: usize = region_slot_address(frame);
+                tcp_frame_pool_unlock(guard);
+                return (FrameLink::Some(frame), address);
+            }
+            RegionAlloc(NetFrame)::Full => {
+                match page_alloc_contiguous(TCP_FRAME_CHUNK_PAGES,
+                                            PageOwnerTag::PoolChunk) {
+                    PageRunAllocResult::OutOfMemory => { attempts = 2; }
+                    PageRunAllocResult::Allocated(run_owner) => {
+                        let base: usize = page_run_physical_address(run_owner);
+                        let _run_index: usize =
+                            page_run_owner_transfer_index(run_owner) as usize;
+                        let RegionBytes::Assumed(chunk) = region_bytes_assume(
+                            base, TCP_FRAME_CHUNK_PAGES * PAGE_SIZE) else {};
+                        match region_pool_grow(guard, chunk) {
+                            RegionGrow(NetFrame)::Grown => {}
+                            RegionGrow(NetFrame)::TooSmall(back) => {
+                                region_release(back);
+                                page_run_transferred_release_physical(
+                                    base, TCP_FRAME_CHUNK_PAGES);
+                                attempts = 2;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
+    tcp_frame_pool_unlock(guard);
+    kernel_boot_log_resource_exhausted(
+        "TCP frame pool (out of pages)" as *u8, 0);
+    return (FrameLink::None, 0);
 }
 
 // Hands this connection its three frames, or returns false having released
@@ -794,23 +866,20 @@ fn tcp_connection_frames_release(conn: *TcpConnection) !{unsafe} {
 // behind a view it has to spend. So ownership stays linear and access
 // stays cheap, without either one pretending to be the other.
 fn tcp_frame_slice(address: usize) -> [u8; 1514..] !{unsafe} {
-    match intrusive_pool_probe_slot(&tcp_frame_pool, address) {
-        IntrusiveSlotProbe::NoPayload => {
-            kernel_boot_log("tcp frames: frame missing\n");
-            tcp_absent_fallback_note();
-            return tcp_frame_absent_fallback as [u8; 1514..];
-        }
-        IntrusiveSlotProbe::Live(slot_view) => {
-                // GitHub issue #488: this RETURNS the pointer, so it cannot
-                // hold the proof for the pointer's life. The unproven form
-                // names that and counts it in the trusted base; removing it
-                // means migrating this accessor's callers to hold the view
-                // themselves.
-            let frame: *NetFrame =
-                intrusive_pool_payload_unproven_of(&tcp_frame_pool, slot_view);
-            return frame.bytes as [u8; 1514..];
-        }
+    let guard = tcp_frame_pool_lock(&tcp_frame_pool);
+    let held: bool = region_pool_holds(guard, address);
+    tcp_frame_pool_unlock(guard);
+    if (held == false) {
+        kernel_boot_log("tcp frames: frame missing\n");
+        tcp_absent_fallback_note();
+        return tcp_frame_absent_fallback as [u8; 1514..];
     }
+    // GitHub issue #677: the one place a frame is reached by address. The
+    // address was checked to be an Out slot of the pool just above; its
+    // connection keeps the slot's permission parked, which is what keeps it
+    // alive, and #677 replaces this with access through that permission.
+    let frame: *NetFrame = unsafe { address as *NetFrame };
+    return frame.bytes as [u8; 1514..];
 }
 
 fn tcp_connection_tx_slice(owner: borrow TcpConnectionOwner[connection])
@@ -917,12 +986,6 @@ fn tcp_connection_of(owner: borrow TcpConnectionOwner[connection])
 // use for the previous one's unacknowledged segments, and
 // pending_tcp_reset_all returns their pages properly.
 fn tcp_connection_pool_init() !{unsafe} {
-    if (tcp_frame_pool_ready == false) {
-        // Same once-not-per-reset reasoning as the retransmit pool below,
-        // and the same retained_chunks = 0.
-        intrusive_pool_init_retaining(&tcp_frame_pool, 0);
-        tcp_frame_pool_ready = true;
-    }
     if (tcp_retx_pool_ready == false) {
         // No mutex_init: tcp_retx_chain is a global, so its mutex is
         // already free from .bss, and mutex_init FORCE-FREES -- behind a
@@ -1015,9 +1078,6 @@ fn tcp_recycled_handle_count() -> usize !{unsafe} {
     }
     if (tcp_retx_pool_ready) {
         total = total + intrusive_pool_recycled_handle_count(&tcp_retx_pool);
-    }
-    if (tcp_frame_pool_ready) {
-        total = total + intrusive_pool_recycled_handle_count(&tcp_frame_pool);
     }
     return total;
 }
@@ -1348,7 +1408,7 @@ fn tcp_connection_pool_probe() -> bool !{unsafe} {
     // no page any of them stood on.
     let drained: bool =
         intrusive_pool_live_count(&tcp_connection_pool) == 0 &&
-        intrusive_pool_live_count(&tcp_frame_pool) == 0 &&
+        tcp_frame_live_count() == 0 &&
         intrusive_pool_live_count(&tcp_retx_pool) == 0 &&
         page_allocator_live_count() == pages_before &&
         intrusive_pool_probe(&tcp_connection_pool);
@@ -1732,7 +1792,7 @@ fn pending_tcp_chain_probe() -> bool !{unsafe} {
     tcp_connection_free(owner_a);
     tcp_connection_free(owner_b);
     // Every frame and every retransmit entry back where it came from.
-    return ok && intrusive_pool_live_count(&tcp_frame_pool) == 0 &&
+    return ok && tcp_frame_live_count() == 0 &&
            intrusive_pool_live_count(&tcp_retx_pool) == 0;
 }
 

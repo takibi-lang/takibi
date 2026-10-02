@@ -145,7 +145,10 @@ def check_raw_deref_main(args: list[str]) -> int:
             print(f"lowered {line}")
         return 0
     problems = raw_deref_problems(
-        audit, budget, compiled, lambda name: (REPO_ROOT / name).exists())
+        audit, budget, compiled,
+        # The compiler's built-in definitions (#672) are not a file on disk;
+        # their row names them by the file name the compiler gives them.
+        lambda name: name.startswith("<builtin ") or (REPO_ROOT / name).exists())
     for problem in problems:
         print(f"ERROR raw-deref-ratchet: {problem}")
     if problems:

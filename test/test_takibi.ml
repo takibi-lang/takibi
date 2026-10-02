@@ -2397,7 +2397,8 @@ let infer_regions src =
   let prog = Region_builtin.run ~enabled:true (parse src) in
   Type_inf.infer_program
     (Declared_type_resolver.run
-       (Monomorphize.run (Dma_fixed_record.run (Publish_record.run prog))))
+       (Region_builtin.lower
+          (Monomorphize.run (Dma_fixed_record.run (Publish_record.run prog)))))
 
 let expect_region_error fragment src () =
   match infer_regions src with

@@ -237,6 +237,30 @@ let () =
         (List.map fst resolved);
 
     let prog = List.concat_map snd resolved in
+    (* GitHub issue #672: under --regions, the built-in definitions are
+       planned from this first parse, then parsed before the program's own
+       files, which are parsed again (Region_builtin.plan). *)
+    let prog =
+      if not !regions then prog
+      else begin
+        let sources = Region_builtin.plan prog in
+        Const_env.reset ();
+        Type_layout.reset ();
+        Publish_registry.reset ();
+        No_copy_registry.reset ();
+        Dma_fixed_registry.reset ();
+        Generic_scope.reset ();
+        Ast.reset_precedence_errors ();
+        let defs = Region_builtin.parse_planned sources in
+        let again =
+          try Use_resolver.resolve ~parse_file ~prescan:prescan_file input_files
+          with Use_resolver.Use_error msg ->
+            Printf.eprintf "Error: %s\n" msg;
+            exit 1
+        in
+        defs @ List.concat_map snd again
+      end
+    in
 
     if !Ast.precedence_error_sites <> [] then begin
       let sites = List.rev !Ast.precedence_error_sites in
@@ -258,11 +282,14 @@ let () =
        synthesise the linear write token that gates its payload stores.
        Before monomorphization so that everything downstream sees only
        ordinary StructDef/OpaqueStructDef declarations. *)
-    let prog = Region_builtin.run ~enabled:!regions prog in
     let prog = Publish_record.run prog in
     let prog = Dma_fixed_record.run prog in
 
     let prog = Monomorphize.run ~explain_inference:!explain_inference prog in
+    (* After monomorphization: lowering region_of and friends walks every
+       function, and a generic template's symbolic sizes are only resolved
+       here (#672). *)
+    let prog = if !regions then Region_builtin.lower prog else prog in
 
     (* GitHub issue #358: the parser cannot disambiguate `Name[args]`
        between an indexed struct, view, and variant. Resolve that spelling
