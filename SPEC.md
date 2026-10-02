@@ -2760,7 +2760,32 @@ region_table_keep(pool);                            // no tear-down yet
 A slot's permission names its table by `b`, so a slot of another table, a
 slot given back twice, an element used after its slot was given back or
 freed, do not compile. A stored handle to a freed slot is refused at run
-time (`Stale`). The table is not yet guarded for use from several cores.
+time (`Stale`).
+
+A table used from several cores is taken under its lock instead:
+
+```
+private let mut shared_arena: [Node; 4];
+
+let pool = region_table_lock(shared_arena);    // spins until the lock is ours
+match region_alloc(pool) {
+    RegionAlloc(Node)::Full => { region_table_unlock(pool); }
+    RegionAlloc(Node)::Allocated(slot) => {
+        region_table_unlock(pool);             // the slot outlives the lock
+        region_slot_at(slot).key = 5;
+        let again = region_table_lock(shared_arena);
+        let mut handle: RegionHandle(Node) = region_give(again, slot);
+        region_table_unlock(again);
+    }
+}
+```
+
+The table's identity is the array's address, the same on every lock, so a
+slot taken under one lock is given back under a later one. A lock not
+given back, a table used after its unlock, and a slot given to another
+array's lock do not compile; an array is either claimed once or locked,
+not both. Not yet: interrupt masking (the kernel's pool_lock), and nothing
+stops one core from taking the same lock twice.
 
 A region's position is two statics inside the compiler: its identity and
 its offset. A program writes one term, `b` or `b + k`, and `b` is read as the

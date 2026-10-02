@@ -3314,6 +3314,57 @@ let infer_tests = [
       "linear struct R[id: addr] { private a: usize; }
        fn f(r: borrow R[x + 1]) {}");
 
+  Alcotest.test_case "guarded table: a lock not given back" `Quick
+    (expect_region_error "is never consumed"
+      "struct Node { key: usize; value: usize; }
+       let mut shared: [Node; 4];
+       fn f() { let t = region_table_lock(shared); }");
+
+  Alcotest.test_case "guarded table: used after its unlock" `Quick
+    (expect_region_error "already consumed"
+      "struct Node { key: usize; value: usize; }
+       let mut shared: [Node; 4];
+       fn f() {
+         let t = region_table_lock(shared);
+         region_table_unlock(t);
+         match region_alloc(t) {
+           RegionAlloc(Node)::Full => {}
+           RegionAlloc(Node)::Allocated(s) => { region_free(t, s); }
+         }
+       }");
+
+  Alcotest.test_case "guarded table: a slot given to another array's lock"
+    `Quick
+    (expect_region_error "static value mismatch"
+      "struct Node { key: usize; value: usize; }
+       let mut shared: [Node; 4];
+       let mut other: [Node; 4];
+       fn f() {
+         let t = region_table_lock(shared);
+         match region_alloc(t) {
+           RegionAlloc(Node)::Full => { region_table_unlock(t); }
+           RegionAlloc(Node)::Allocated(s) => {
+             region_table_unlock(t);
+             let u = region_table_lock(other);
+             let mut h: RegionHandle(Node) = region_give(u, s);
+             region_table_unlock(u);
+           }
+         }
+       }");
+
+  Alcotest.test_case "guarded table: an array claimed once and locked" `Quick
+    (expect_region_error "claimed once and also locked"
+      "struct Node { key: usize; value: usize; }
+       let mut shared: [Node; 4];
+       fn f() {
+         let t = region_table_lock(shared);
+         region_table_unlock(t);
+         let RegionTableOf(Node)::Taken(u) = region_table_of(shared) else {
+           RegionTableOf(Node)::Gone => { return; }
+         };
+         region_table_keep(u);
+       }");
+
   Alcotest.test_case "static arithmetic: a slot given back to its own index"
     `Quick
     (fun () -> ignore (infer slot_index_fixture));

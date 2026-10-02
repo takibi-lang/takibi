@@ -88,7 +88,33 @@ fn test_table() {
     region_table_keep(pool);
 }
 
+// A guarded table: every use of the table is under its lock, taken by
+// region_table_lock and given back by region_table_unlock. A slot taken out
+// under one lock is the program's until it is given back, under any later
+// lock of the same array: the slot outlives the lock, the lock does not have
+// to be held while the element is used.
+private let mut shared_arena: [Node; 4];
+
+fn test_locked_table() {
+    let pool = region_table_lock(shared_arena);
+    match region_alloc(pool) {
+        RegionAlloc(Node)::Full => {
+            uart_puts("shared: full\n");
+            region_table_unlock(pool);
+        }
+        RegionAlloc(Node)::Allocated(slot) => {
+            region_table_unlock(pool);              // the lock is released here
+            region_slot_at(slot).key = 5;           // the slot is still ours
+            let again = region_table_lock(shared_arena);
+            let mut handle: RegionHandle(Node) = region_give(again, slot);
+            region_table_unlock(again);
+            uart_puts("shared: given back under a second lock\n");
+        }
+    }
+}
+
 fn app_main() {
     test_region();
     test_table();
+    test_locked_table();
 }

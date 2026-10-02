@@ -117,6 +117,9 @@ linear struct @TBL@[base: addr, count: usize] {
     private address: usize;
     private length: usize;
     private meta: usize;
+    // The lock word of a guarded table (region_table_lock), 0 for a table
+    // claimed once (region_table_of).
+    private lock: usize;
 }
 
 // One slot's permission, out of its table: b is the TABLE's position and k
@@ -184,7 +187,7 @@ fn __region_table_claim(address: usize, count: usize @ n, claimed: *bool,
                         meta: usize, witness: *@T@ @ b) -> @TO@[b, n] !{unsafe} {
     if (*claimed) { return @TO@::Gone; }
     *claimed = true;
-    let mut t: @TBL@[b, n] = { address, count, meta };
+    let mut t: @TBL@[b, n] = { address, count, meta, 0 };
     return @TO@::Taken(t);
 }
 
@@ -227,6 +230,12 @@ fn region_take(t: borrow @TBL@[b, n], h: @H@) -> @TK@[b] !{unsafe} {
 // kept rather than released.
 fn region_table_keep(t: sink @TBL@[b, n]) {}
 
+// Give a guarded table back: releases its lock. Every slot taken out under
+// it stays valid and may be given back under a later lock.
+fn region_table_unlock(t: sink @TBL@[b, n]) !{unsafe} {
+    if (t.lock != 0) { unsafe { atomic_store_release(t.lock, 0); } }
+}
+
 // Free an Out slot: every handle to it becomes Stale.
 fn region_free(t: borrow @TBL@[b, n], s: sink @SL@[b, k]) !{unsafe} {
     let slot: usize = region_slot_of(t, s);
@@ -263,9 +272,15 @@ let instance elem =
   |> replace_all ~sub:"@T@" ~by:elem
 
 let parse_source src =
+  if String.trim src = "" then [] else
   let lexbuf = Lexing.from_string src in
   Lexing.set_filename lexbuf builtin_file;
-  Parser.program Lexer.read lexbuf
+  try Parser.program Lexer.read lexbuf
+  with Parser.Error ->
+    let pos = Lexing.lexeme_start_p lexbuf in
+    raise (Types.TypeError (pos, Printf.sprintf
+      "BUG: the built-in region source does not parse at '%s'"
+      (Lexing.lexeme lexbuf)))
 
 (* Element types the program names: `region(T)`, `RegionSplit(T)` and
    `RegionOf(T)` all reach the AST as a mangled name, and a claimed array
@@ -305,6 +320,30 @@ let global_arrays (prog : Ast.toplevel list) =
     | _ -> None) prog
 
 let flag_name array = "__region_claimed__" ^ array
+let lock_name array = "__region_lock__" ^ array
+
+(* A guarded table's lock: one spin lock word per array, taken by an
+   acquire compare-exchange and released by a release store. The table's
+   identity comes from `&array`, which is the same static on every call, so
+   a slot taken under one lock is given back under another. No interrupt
+   masking: that is the kernel's pool_lock, to be tied in when a kernel pool
+   is rebuilt on this. *)
+let lock_source array (elem, n) =
+  Printf.sprintf {|
+let mut %s: usize = 0;
+fn __region_table_lock__%s(w: *[%s; %d] @ b) -> RegionTable__%s[b, %d] !{unsafe} {
+    let word: usize = (&%s) as usize;
+    while (unsafe { atomic_compare_exchange_acquire(word, 0, 1) } == false) {
+        while (unsafe { atomic_load_acquire(word) } != 0) { }
+    }
+    let first: usize = w as usize;
+    let mut t: RegionTable__%s[b, %d] = {
+        first, %d, (%s as *usize) as usize, word
+    };
+    return t;
+}
+|} (lock_name array) array elem n elem n (lock_name array) elem n n
+    ("__region_meta__" ^ array)
 let meta_name array = "__region_meta__" ^ array
 
 let run ~enabled prog =
@@ -312,8 +351,15 @@ let run ~enabled prog =
   else begin
     Monomorphize.region_arrays := global_arrays prog;
     Monomorphize.region_claims := [];
+    Monomorphize.region_locks := [];
     let prog = Monomorphize.lower_regions prog in
-    let claims = List.sort_uniq compare !Monomorphize.region_claims in
+    let claims = List.sort_uniq compare (!Monomorphize.region_claims @ !Monomorphize.region_locks) in
+    let locks = List.sort_uniq compare !Monomorphize.region_locks in
+    List.iter (fun name ->
+      if List.mem name !Monomorphize.region_claims then
+        raise (Types.TypeError (Lexing.dummy_pos, Printf.sprintf
+          "'%s' is claimed once and also locked; an array is one or the other"
+          name))) locks;
     let claimed = List.filter_map (fun name ->
       Option.map (fun info -> (name, info))
         (List.assoc_opt name !Monomorphize.region_arrays)) claims in
@@ -322,5 +368,8 @@ let run ~enabled prog =
     let flags = parse_source (String.concat "" (List.map (fun (name, (_, n)) ->
       Printf.sprintf "let mut %s: bool = false;\nlet mut %s: [usize; %d];\n"
         (flag_name name) (meta_name name) (2 * n)) claimed)) in
-    defs @ flags @ prog
+    let lock_defs = parse_source (String.concat "" (List.filter_map (fun name ->
+      Option.map (lock_source name) (List.assoc_opt name !Monomorphize.region_arrays))
+      locks)) in
+    defs @ flags @ lock_defs @ prog
   end

@@ -2,3 +2,4 @@ taken: 10, keys: 16
 arena: 64 nodes whole again
 pool: key 42
 pool: old handle refused
+shared: given back under a second lock
