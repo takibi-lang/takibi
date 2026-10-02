@@ -266,6 +266,9 @@ struct @P@ {
 
 linear struct @PG@[pool: addr] {
     private pool: usize;
+    // What the caller saved before taking the lock (the kernel's interrupt
+    // mask), handed back by region_pool_unlock_saved. 0 for region_pool_lock.
+    private saved: usize;
 }
 
 must_use variant @GR@[c: addr, o: usize, n: usize] {
@@ -279,16 +282,31 @@ must_use variant @SH@ {
 }
 
 fn region_pool_lock(p: *@P@ @ b) -> @PG@[b] !{unsafe} {
+    return region_pool_lock_saving(p, 0);
+}
+
+// The same lock, carrying a value the caller saved before taking it. The
+// kernel masks interrupts first and passes the previous mask here; the
+// built-in has no CPU-specific code of its own (#672).
+fn region_pool_lock_saving(p: *@P@ @ b, saved: usize) -> @PG@[b] !{unsafe} {
     let word: usize = p as usize;
     while (unsafe { atomic_compare_exchange_acquire(word, 0, 1) } == false) {
         while (unsafe { atomic_load_acquire(word) } != 0) { }
     }
-    let mut g: @PG@[b] = { word };
+    let mut g: @PG@[b] = { word, saved };
     return g;
 }
 
 fn region_pool_unlock(g: sink @PG@[b]) !{unsafe} {
+    let saved: usize = region_pool_unlock_saved(g);
+}
+
+// Releases the lock and gives back what region_pool_lock_saving was handed,
+// for the caller to restore after the lock is gone.
+fn region_pool_unlock_saved(g: sink @PG@[b]) -> usize !{unsafe} {
+    let saved: usize = g.saved;
     unsafe { atomic_store_release(g.pool, 0); }
+    return saved;
 }
 
 // The chunk an address lies in, or 0. Walks the pool's own list, so an
@@ -409,6 +427,19 @@ fn region_pool_shrink(g: borrow @PG@[b]) -> @SH@ !{unsafe} {
 (* Shared by every instance: a chunk leaving a pool is a byte region again,
    with a new identity. Private to the built-in file. *)
 let common_source = {|
+// The page allocator's boundary (#672): the caller asserts that `bytes`
+// bytes at `address` are its alone -- a page run it was just given. The one
+// way a byte region comes from an address rather than a declared array; it
+// carries the `unsafe` effect, so every caller declares it and the trusted
+// base counts it.
+must_use variant RegionBytes {
+    Assumed(exists c: addr. exists n: usize. region__u8[c, 0, n]);
+}
+
+fn region_bytes_assume(address: usize, bytes: usize) -> RegionBytes !{unsafe} {
+    return RegionBytes::Assumed(region_bytes_mint(address, bytes));
+}
+
 private fn pool_word(address: usize, i: usize) -> *usize !{unsafe} {
     return unsafe { (address + i * 8) as *usize };
 }
@@ -519,6 +550,17 @@ let global_arrays (prog : Ast.toplevel list) =
          | _ -> None)
     | _ -> None) prog
 
+(* A program that names RegionBytes or region_bytes_assume without any
+   typed region still needs the u8 instance and the common source. *)
+let region_bytes_used (prog : Ast.toplevel list) =
+  List.exists (fun item ->
+    let text = Ast.show_toplevel item in
+    let contains sub =
+      let n = String.length text and m = String.length sub in
+      let rec go i = i + m <= n && (String.sub text i m = sub || go (i + 1)) in
+      go 0 in
+    contains "region_bytes_assume" || contains "RegionBytes") prog
+
 let flag_name array = "__region_claimed__" ^ array
 let lock_name array = "__region_lock__" ^ array
 
@@ -567,10 +609,12 @@ let run ~enabled prog =
     let elems = element_types prog claimed in
     (* Every instance's pool takes chunks as regions of u8, so u8's own
        instance is always there. *)
-    let elems = if elems = [] || List.mem "u8" elems then elems
+    let uses_bytes = elems <> [] || region_bytes_used prog in
+    let elems = if not uses_bytes || List.mem "u8" elems then elems
                 else "u8" :: elems in
-    let defs = List.concat_map (fun elem -> parse_source (instance elem)) elems
-               @ parse_source common_source in
+    let defs = if not uses_bytes then []
+      else List.concat_map (fun elem -> parse_source (instance elem)) elems
+           @ parse_source common_source in
     let flags = parse_source (String.concat "" (List.map (fun (name, (_, n)) ->
       Printf.sprintf "let mut %s: bool = false;\nlet mut %s: [usize; %d];\n"
         (flag_name name) (meta_name name) (2 * n)) claimed)) in

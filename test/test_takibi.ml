@@ -3401,6 +3401,31 @@ let infer_tests = [
          region_pool_unlock(g);
        }");
 
+  Alcotest.test_case "region pool: a saved value comes back with the unlock"
+    `Quick
+    (fun () -> ignore (infer_regions
+      "struct Node { key: usize; value: usize; }
+       let mut pool: RegionPool(Node);
+       fn f() -> usize {
+         let g = region_pool_lock_saving(&pool, 7);
+         return region_pool_unlock_saved(g);
+       }"));
+
+  Alcotest.test_case "region pool: a byte region from the page allocator boundary"
+    `Quick
+    (fun () -> ignore (infer_regions
+      "struct Node { key: usize; value: usize; }
+       let mut pool: RegionPool(Node);
+       fn f(address: usize) {
+         let RegionBytes::Assumed(chunk) = region_bytes_assume(address, 4096) else {};
+         let g = region_pool_lock(&pool);
+         match region_pool_grow(g, chunk) {
+           RegionGrow(Node)::Grown => {}
+           RegionGrow(Node)::TooSmall(back) => { region_release(back); }
+         }
+         region_pool_unlock(g);
+       }"));
+
   Alcotest.test_case "static arithmetic: a slot given back to its own index"
     `Quick
     (fun () -> ignore (infer slot_index_fixture));

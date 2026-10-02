@@ -2809,6 +2809,14 @@ chunk, slot and generation. Per slot the pool keeps one word: state in the
 low two bits, generation above (#675 for space). A slot of another pool and
 a chunk used after it was given to a pool do not compile.
 
+`region_pool_lock_saving(&pool, saved)` takes the same lock carrying a
+value the caller saved first -- the kernel's interrupt mask -- and
+`region_pool_unlock_saved(guard)` releases it and hands the value back to be
+restored; the built-in has no CPU-specific code. `region_bytes_assume(address,
+bytes)` is the page allocator's boundary: it makes a byte region from an
+address the caller asserts is its alone, carries the `unsafe` effect, and is
+the one way a byte region comes from an address.
+
 Overloads are chosen by the name of an indexed type, its static indices
 being settled by unification afterwards, and an integer literal argument
 does not decide between overloads when the other arguments do.
