@@ -3365,6 +3365,42 @@ let infer_tests = [
          region_table_keep(u);
        }");
 
+  Alcotest.test_case "region pool: a slot given to another pool" `Quick
+    (expect_region_error "static value mismatch"
+      "struct Node { key: usize; value: usize; }
+       let mut pool_a: RegionPool(Node);
+       let mut pool_b: RegionPool(Node);
+       fn f() {
+         let a = region_pool_lock(&pool_a);
+         match region_alloc(a) {
+           RegionAlloc(Node)::Full => { region_pool_unlock(a); }
+           RegionAlloc(Node)::Allocated(s) => {
+             region_pool_unlock(a);
+             let b = region_pool_lock(&pool_b);
+             let mut h: RegionHandle(Node) = region_give(b, s);
+             region_pool_unlock(b);
+           }
+         }
+       }");
+
+  Alcotest.test_case "region pool: a chunk given and still used" `Quick
+    (expect_region_error "already consumed"
+      "struct Node { key: usize; value: usize; }
+       let mut pool: RegionPool(Node);
+       let mut pages: [u8; 1024];
+       fn f() {
+         let RegionOf(u8)::Taken(chunk) = region_of(pages) else {
+           RegionOf(u8)::Gone => { return; }
+         };
+         let g = region_pool_lock(&pool);
+         match region_pool_grow(g, chunk) {
+           RegionGrow(Node)::Grown => {}
+           RegionGrow(Node)::TooSmall(back) => { region_release(back); }
+         }
+         region_release(chunk);
+         region_pool_unlock(g);
+       }");
+
   Alcotest.test_case "static arithmetic: a slot given back to its own index"
     `Quick
     (fun () -> ignore (infer slot_index_fixture));

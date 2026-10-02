@@ -113,8 +113,64 @@ fn test_locked_table() {
     }
 }
 
+// A pool that grows: no fixed capacity. It takes chunks as byte regions --
+// here from an array standing in for the page allocator -- and gives a chunk
+// whose slots are all free back as a byte region.
+private let mut connections: RegionPool(Node);
+private let mut page_arena: [u8; 2048];
+
+fn test_pool() {
+    let RegionOf(u8)::Taken(pages) = region_of(page_arena) else {
+        RegionOf(u8)::Gone => { uart_puts("pages: already taken\n"); return; }
+    };
+    let (first, second) = region_split_static(pages, 1024);
+    let pool = region_pool_lock(&connections);
+    match region_pool_grow(pool, first) {
+        RegionGrow(Node)::Grown => {}
+        RegionGrow(Node)::TooSmall(back) => { region_release(back); }
+    }
+    let mut allocated: usize = 0;
+    let mut full: bool = false;
+    let mut last: usize = 0;
+    while (full == false) {
+        match region_alloc(pool) {
+            RegionAlloc(Node)::Full => { full = true; }
+            RegionAlloc(Node)::Allocated(slot) => {
+                allocated = allocated + 1;
+                region_slot_at(slot).key = allocated;
+                let mut h: RegionHandle(Node) = region_give(pool, slot);
+            }
+        }
+    }
+    uart_puts("pool: ");
+    uart_print(allocated);
+    uart_puts(" slots in one chunk\n");
+    match region_pool_grow(pool, second) {             // a second chunk
+        RegionGrow(Node)::Grown => {}
+        RegionGrow(Node)::TooSmall(back) => { region_release(back); }
+    }
+    match region_alloc(pool) {
+        RegionAlloc(Node)::Full => { uart_puts("pool: still full\n"); }
+        RegionAlloc(Node)::Allocated(slot) => {
+            uart_puts("pool: grew\n");
+            region_free(pool, slot);
+        }
+    }
+    match region_pool_shrink(pool) {                    // the empty chunk
+        RegionShrink(Node)::Nothing => { uart_puts("pool: nothing to give back\n"); }
+        RegionShrink(Node)::Chunk(bytes) => {
+            uart_puts("pool: gave back ");
+            uart_print(region_count(bytes));
+            uart_puts(" bytes\n");
+            region_release(bytes);
+        }
+    }
+    region_pool_unlock(pool);
+}
+
 fn app_main() {
     test_region();
     test_table();
     test_locked_table();
+    test_pool();
 }

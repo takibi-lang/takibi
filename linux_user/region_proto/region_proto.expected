@@ -3,3 +3,6 @@ arena: 64 nodes whole again
 pool: key 42
 pool: old handle refused
 shared: given back under a second lock
+pool: 40 slots in one chunk
+pool: grew
+pool: gave back 1024 bytes

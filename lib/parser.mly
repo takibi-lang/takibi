@@ -1130,7 +1130,7 @@ base_type_expr:
   | name = IDENT LPAREN args = separated_nonempty_list(COMMA, type_expr) RPAREN
     %prec BRACKET_ELSEWHERE
     { match name, args with
-      | ("RegionHandle"), [ t ] ->
+      | ("RegionHandle" | "RegionPool"), [ t ] ->
           (* A built-in instance with no static indices (#672). *)
           TypeNamed (mangle_builtin_instance $symbolstartpos name t)
       | _ -> TypeGenericInst (name, args) }

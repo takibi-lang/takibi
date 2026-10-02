@@ -52,7 +52,7 @@ must_use variant @O@[b: addr, n: usize] {
     Taken(@R@[b, 0, n]);
 }
 
-fn __region_claim(address: usize, count: usize @ n, claimed: *bool,
+fn __region_claim__@T@(address: usize, count: usize @ n, claimed: *bool,
                   witness: *@T@ @ b) -> @O@[b, n] !{unsafe} {
     if (*claimed) { return @O@::Gone; }
     *claimed = true;
@@ -139,6 +139,7 @@ fn region_slot_at(s: borrow @SL@[b, k]) -> *@T@ @ b !{unsafe} {
 
 // What a program may store: a slot and the generation it was handed out in.
 struct @H@ {
+    private chunk: usize;
     private slot: usize;
     private generation: usize;
 }
@@ -183,7 +184,7 @@ private fn region_slot_of(t: borrow @TBL@[b, n], s: borrow @SL@[b, k])
     return (s.address - t.address) / sizeof(@T@);
 }
 
-fn __region_table_claim(address: usize, count: usize @ n, claimed: *bool,
+fn __region_table_claim__@T@(address: usize, count: usize @ n, claimed: *bool,
                         meta: usize, witness: *@T@ @ b) -> @TO@[b, n] !{unsafe} {
     if (*claimed) { return @TO@::Gone; }
     *claimed = true;
@@ -209,7 +210,7 @@ fn region_alloc(t: borrow @TBL@[b, n]) -> @A@[b] !{unsafe} {
 fn region_give(t: borrow @TBL@[b, n], s: sink @SL@[b, k]) -> @H@ !{unsafe} {
     let slot: usize = region_slot_of(t, s);
     *region_table_state(t, slot) = @T@__REGION_LIVE;
-    let mut h: @H@ = { slot, *region_table_generation(t, slot) };
+    let mut h: @H@ = { 0, slot, *region_table_generation(t, slot) };
     region_slot_discharge(s);
     return h;
 }
@@ -243,6 +244,186 @@ fn region_free(t: borrow @TBL@[b, n], s: sink @SL@[b, k]) !{unsafe} {
     *region_table_generation(t, slot) = *region_table_generation(t, slot) + 1;
     region_slot_discharge(s);
 }
+
+// -- region_pool: a table that grows (#672) --------------------------------
+//
+// A pool is declared as a global, so `&pool` gives it the same identity on
+// every lock. It grows by taking a byte region (a chunk, from the page
+// allocator or any region of u8) and shrinks by giving a chunk whose slots
+// are all free back as a byte region. No fixed capacity.
+//
+// A chunk, at its own address:
+//   word 0: the next chunk's address, 0 at the end
+//   word 1: its slot count
+//   word 2: its length in bytes
+//   words 3 .. 3 + count: each slot's state (low two bits) and generation
+//   then the slots, from the first multiple of 16 after that.
+// Eight bytes per slot (#675).
+struct @P@ {
+    private lock: usize;
+    private first: usize;
+}
+
+linear struct @PG@[pool: addr] {
+    private pool: usize;
+}
+
+must_use variant @GR@[c: addr, o: usize, n: usize] {
+    Grown;
+    TooSmall(region__u8[c, o, n]);
+}
+
+must_use variant @SH@ {
+    Nothing;
+    Chunk(exists c: addr. exists o: usize. exists n: usize. region__u8[c, o, n]);
+}
+
+fn region_pool_lock(p: *@P@ @ b) -> @PG@[b] !{unsafe} {
+    let word: usize = p as usize;
+    while (unsafe { atomic_compare_exchange_acquire(word, 0, 1) } == false) {
+        while (unsafe { atomic_load_acquire(word) } != 0) { }
+    }
+    let mut g: @PG@[b] = { word };
+    return g;
+}
+
+fn region_pool_unlock(g: sink @PG@[b]) !{unsafe} {
+    unsafe { atomic_store_release(g.pool, 0); }
+}
+
+// The chunk an address lies in, or 0. Walks the pool's own list, so an
+// address the pool did not hand out is never read through.
+private fn pool_chunk_of(g: borrow @PG@[b], address: usize) -> usize !{unsafe} {
+    let mut chunk: usize = *pool_word(g.pool, 1);
+    while (chunk != 0) {
+        let base: usize = pool_slots_base(chunk);
+        let count: usize = *pool_word(chunk, 1);
+        if (address >= base && address < base + count * sizeof(@T@)) {
+            return chunk;
+        }
+        chunk = *pool_word(chunk, 0);
+    }
+    return 0;
+}
+
+private fn pool_slot(g: borrow @PG@[b], address: usize @ k) -> @SL@[b, k] {
+    let mut s: @SL@[b, k] = { address };
+    return s;
+}
+
+fn region_pool_grow(g: borrow @PG@[b], chunk: sink region__u8[c, o, n])
+        -> @GR@[c, o, n] !{unsafe} {
+    let bytes: usize = region_count(chunk);
+    if (bytes < 64 + sizeof(@T@) + 8) { return @GR@::TooSmall(chunk); }
+    let address: usize = chunk.address;
+    let count: usize = (bytes - 48) / (sizeof(@T@) + 8);
+    *pool_word(address, 1) = count;
+    *pool_word(address, 2) = bytes;
+    let mut i: usize = 0;
+    while (i < count) { *pool_word(address, 3 + i) = 0; i = i + 1; }
+    *pool_word(address, 0) = *pool_word(g.pool, 1);
+    *pool_word(g.pool, 1) = address;
+    region_discharge(chunk);
+    return @GR@::Grown;
+}
+
+fn region_alloc(g: borrow @PG@[b]) -> @A@[b] !{unsafe} {
+    let mut chunk: usize = *pool_word(g.pool, 1);
+    while (chunk != 0) {
+        let count: usize = *pool_word(chunk, 1);
+        let mut i: usize = 0;
+        while (i < count) {
+            let state: *usize = pool_word(chunk, 3 + i);
+            if ((*state & 3) == @T@__REGION_FREE) {
+                *state = (*state & ~(3 as usize)) | @T@__REGION_OUT;
+                return @A@::Allocated(pool_slot(g,
+                    pool_slots_base(chunk) + i * sizeof(@T@)));
+            }
+            i = i + 1;
+        }
+        chunk = *pool_word(chunk, 0);
+    }
+    return @A@::Full;
+}
+
+fn region_give(g: borrow @PG@[b], s: sink @SL@[b, k]) -> @H@ !{unsafe} {
+    let chunk: usize = pool_chunk_of(g, s.address);
+    let i: usize = (s.address - pool_slots_base(chunk)) / sizeof(@T@);
+    let state: *usize = pool_word(chunk, 3 + i);
+    *state = (*state & ~(3 as usize)) | @T@__REGION_LIVE;
+    let mut h: @H@ = { chunk, i, *state >> 2 };
+    region_slot_discharge(s);
+    return h;
+}
+
+fn region_take(g: borrow @PG@[b], h: @H@) -> @TK@[b] !{unsafe} {
+    let mut chunk: usize = *pool_word(g.pool, 1);
+    while (chunk != 0 && chunk != h.chunk) { chunk = *pool_word(chunk, 0); }
+    if (chunk == 0 || h.slot >= *pool_word(chunk, 1)) { return @TK@::Stale; }
+    let state: *usize = pool_word(chunk, 3 + h.slot);
+    if ((*state & 3) != @T@__REGION_LIVE || (*state >> 2) != h.generation) {
+        return @TK@::Stale;
+    }
+    *state = (*state & ~(3 as usize)) | @T@__REGION_OUT;
+    return @TK@::Taken(pool_slot(g,
+        pool_slots_base(chunk) + h.slot * sizeof(@T@)));
+}
+
+fn region_free(g: borrow @PG@[b], s: sink @SL@[b, k]) !{unsafe} {
+    let chunk: usize = pool_chunk_of(g, s.address);
+    let i: usize = (s.address - pool_slots_base(chunk)) / sizeof(@T@);
+    let state: *usize = pool_word(chunk, 3 + i);
+    *state = (((*state >> 2) + 1) << 2) | @T@__REGION_FREE;
+    region_slot_discharge(s);
+}
+
+// Give back a chunk whose slots are all Free, as the byte region it came
+// in as. Its identity is new: the pool owned those bytes, and this is where
+// they leave it.
+fn region_pool_shrink(g: borrow @PG@[b]) -> @SH@ !{unsafe} {
+    let mut previous: usize = 0;
+    let mut chunk: usize = *pool_word(g.pool, 1);
+    while (chunk != 0) {
+        let count: usize = *pool_word(chunk, 1);
+        let mut all_free: bool = true;
+        let mut i: usize = 0;
+        while (i < count) {
+            if ((*pool_word(chunk, 3 + i) & 3) != @T@__REGION_FREE) {
+                all_free = false;
+            }
+            i = i + 1;
+        }
+        if (all_free) {
+            let next: usize = *pool_word(chunk, 0);
+            if (previous == 0) { *pool_word(g.pool, 1) = next; }
+            else { *pool_word(previous, 0) = next; }
+            return @SH@::Chunk(region_bytes_mint(chunk, *pool_word(chunk, 2)));
+        }
+        previous = chunk;
+        chunk = *pool_word(chunk, 0);
+    }
+    return @SH@::Nothing;
+}
+|}
+
+(* Shared by every instance: a chunk leaving a pool is a byte region again,
+   with a new identity. Private to the built-in file. *)
+let common_source = {|
+private fn pool_word(address: usize, i: usize) -> *usize !{unsafe} {
+    return unsafe { (address + i * 8) as *usize };
+}
+
+private fn pool_slots_base(chunk: usize) -> usize !{unsafe} {
+    let count: usize = *pool_word(chunk, 1);
+    return (chunk + (3 + count) * 8 + 15) & ~(15 as usize);
+}
+
+
+private fn region_bytes_mint(address: usize, bytes: usize @ n)
+        -> region__u8[c, 0, n] {
+    let mut r: region__u8[c, 0, n] = { address, bytes };
+    return r;
+}
 |}
 
 let replace_all ~sub ~by s =
@@ -265,16 +446,31 @@ let instance elem =
   |> replace_all ~sub:"@O@" ~by:("RegionOf__" ^ elem)
   |> replace_all ~sub:"@TBL@" ~by:("RegionTable__" ^ elem)
   |> replace_all ~sub:"@SL@" ~by:("RegionSlot__" ^ elem)
+  |> replace_all ~sub:"@PG@" ~by:("RegionPoolGuard__" ^ elem)
+  |> replace_all ~sub:"@GR@" ~by:("RegionGrow__" ^ elem)
+  |> replace_all ~sub:"@SH@" ~by:("RegionShrink__" ^ elem)
+  |> replace_all ~sub:"@P@" ~by:("RegionPool__" ^ elem)
   |> replace_all ~sub:"@TO@" ~by:("RegionTableOf__" ^ elem)
   |> replace_all ~sub:"@TK@" ~by:("RegionTake__" ^ elem)
   |> replace_all ~sub:"@A@" ~by:("RegionAlloc__" ^ elem)
   |> replace_all ~sub:"@H@" ~by:("RegionHandle__" ^ elem)
   |> replace_all ~sub:"@T@" ~by:elem
 
+(* Every instance is parsed from the same template, so without care two
+   instances' calls would sit at the same source position -- and the
+   compiler records which overload a call resolved to by position, so one
+   instance's choice would overwrite the other's. Each parse starts on its
+   own line range instead; the file name stays the same, which keeps the
+   instances' private fields visible to each other. *)
+let next_first_line = ref 1
+
 let parse_source src =
   if String.trim src = "" then [] else
   let lexbuf = Lexing.from_string src in
   Lexing.set_filename lexbuf builtin_file;
+  lexbuf.Lexing.lex_curr_p <-
+    { lexbuf.Lexing.lex_curr_p with Lexing.pos_lnum = !next_first_line };
+  next_first_line := !next_first_line + 100000;
   try Parser.program Lexer.read lexbuf
   with Parser.Error ->
     let pos = Lexing.lexeme_start_p lexbuf in
@@ -306,7 +502,8 @@ let element_types (prog : Ast.toplevel list) claimed =
         end else incr i
       done) [ "region__"; "RegionSplit__"; "RegionOf__"; "RegionTable__";
          "RegionTableOf__"; "RegionTake__"; "RegionAlloc__"; "RegionHandle__";
-         "RegionSlot__" ] in
+         "RegionSlot__"; "RegionPool__"; "RegionPoolGuard__"; "RegionGrow__";
+         "RegionShrink__" ] in
   List.iter (fun item -> scan (Ast.show_toplevel item)) prog;
   Hashtbl.fold (fun k () acc -> k :: acc) found [] |> List.sort compare
 
@@ -315,8 +512,11 @@ let element_types (prog : Ast.toplevel list) claimed =
    records which ones were claimed. *)
 let global_arrays (prog : Ast.toplevel list) =
   List.filter_map (function
-    | Ast.LetDef (name, Some (Ast.TypeArray (Ast.TypeNamed elem, n)),
-                  _, _, _, _, _) -> Some (name, (elem, n))
+    | Ast.LetDef (name, Some (Ast.TypeArray (elem_ty, n)), _, _, _, _, _) ->
+        (match elem_ty with
+         | Ast.TypeNamed elem -> Some (name, (elem, n))
+         | Ast.TypeU8 -> Some (name, ("u8", n))
+         | _ -> None)
     | _ -> None) prog
 
 let flag_name array = "__region_claimed__" ^ array
@@ -352,6 +552,7 @@ let run ~enabled prog =
     Monomorphize.region_arrays := global_arrays prog;
     Monomorphize.region_claims := [];
     Monomorphize.region_locks := [];
+    next_first_line := 1;
     let prog = Monomorphize.lower_regions prog in
     let claims = List.sort_uniq compare (!Monomorphize.region_claims @ !Monomorphize.region_locks) in
     let locks = List.sort_uniq compare !Monomorphize.region_locks in
@@ -364,7 +565,12 @@ let run ~enabled prog =
       Option.map (fun info -> (name, info))
         (List.assoc_opt name !Monomorphize.region_arrays)) claims in
     let elems = element_types prog claimed in
-    let defs = List.concat_map (fun elem -> parse_source (instance elem)) elems in
+    (* Every instance's pool takes chunks as regions of u8, so u8's own
+       instance is always there. *)
+    let elems = if elems = [] || List.mem "u8" elems then elems
+                else "u8" :: elems in
+    let defs = List.concat_map (fun elem -> parse_source (instance elem)) elems
+               @ parse_source common_source in
     let flags = parse_source (String.concat "" (List.map (fun (name, (_, n)) ->
       Printf.sprintf "let mut %s: bool = false;\nlet mut %s: [usize; %d];\n"
         (flag_name name) (meta_name name) (2 * n)) claimed)) in

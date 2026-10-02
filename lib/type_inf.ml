@@ -4521,17 +4521,40 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
             let candidates = List.map (fun (target, ft) ->
               (target, instantiate_static_params ft)) candidates in
             let arg_tys = List.map (infer_expr senv eenv tyenv fenv) args in
-            let exact (_, ft) = match repr ft with
+            (* GitHub issue #672: an indexed type is chosen by its name; its
+               static indices are fresh per candidate and are settled by the
+               unification that follows, not compared here. *)
+            let rec same_shape actual expected =
+              match strip_singleton actual, strip_singleton expected with
+              | TIndexedStruct (a, _), TIndexedStruct (b, _) -> a = b
+              | TView (a, _), TView (b, _) -> a = b
+              | TVariant (a, _), TVariant (b, _) -> a = b
+              | TPtr a, TPtr b -> same_shape a b
+              | a, b -> a = b
+            in
+            let matches ~loose (_, ft) = match repr ft with
               | TFun (ps, _, _) when List.length ps = List.length arg_tys ->
                   List.for_all2 (fun at pt ->
                     match repr at with
-                    | TVar { contents = Unbound _ } -> false
+                    | TVar { contents = Unbound _ } -> loose
                     | TRefinedInt (_, _, base) -> repr base = repr pt
-                    | actual -> actual = repr pt
+                    | actual -> same_shape actual (repr pt)
                   ) arg_tys ps
               | _ -> false
             in
-            (match List.filter exact candidates with
+            (* An argument whose type is not yet determined (an integer
+               literal) does not decide the overload; when the others decide
+               it alone, that candidate is taken (#672: region_split(r, 3)). *)
+            let chosen = match List.filter (matches ~loose:false) candidates with
+              | [] when List.exists (fun t -> match repr t with
+                    | TVar { contents = Unbound _ } -> true | _ -> false) arg_tys
+                    && List.exists (fun t -> match repr t with
+                    | TVar { contents = Unbound _ } -> false | _ -> true) arg_tys ->
+                  (match List.filter (matches ~loose:true) candidates with
+                   | [ one ] -> [ one ]
+                   | _ -> [])
+              | found -> found in
+            (match chosen with
              | [(target, ft)] ->
                  resolved_call_targets := StringMap.add (loc_key e.loc) target !resolved_call_targets;
                  Some ft

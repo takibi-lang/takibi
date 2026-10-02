@@ -2797,9 +2797,25 @@ accepted another table's slot that way. The same rule holds for any indexed
 type: give an identity its own `addr`-sorted static and keep arithmetic to
 counts and offsets.
 
-Not yet: regions declared from the linker map and the DTB, byte regions for
-the lowest allocator layer, guarded tables, tear-down. The surface is
-provisional.
+**region_pool** is a table that grows: no fixed capacity. A pool is a
+global (`private let mut connections: RegionPool(Node);`), taken with
+`region_pool_lock(&connections)` and given back with `region_pool_unlock`.
+`region_pool_grow(pool, chunk)` takes a byte region (`region(u8)`, from the
+page allocator or a declared `[u8; N]`) as a new chunk, or gives it back as
+`TooSmall`; `region_pool_shrink(pool)` gives a chunk whose slots are all
+free back as a byte region. `region_alloc`, `region_give`, `region_take`
+and `region_free` are the table's, overloaded for a pool; a handle names its
+chunk, slot and generation. Per slot the pool keeps one word: state in the
+low two bits, generation above (#675 for space). A slot of another pool and
+a chunk used after it was given to a pool do not compile.
+
+Overloads are chosen by the name of an indexed type, its static indices
+being settled by unification afterwards, and an integer literal argument
+does not decide between overloads when the other arguments do.
+
+Not yet: regions declared from the linker map and the DTB, interrupt
+masking for the locks, tear-down, a per-CPU front for pools (#674 follows).
+The surface is provisional.
 
 ### `where` constraints (GitHub issue #672)
 

@@ -287,9 +287,10 @@ let region_of_lowering ?(table = false) (e : expr) (array_name : string) : expr_
   | Some (elem, count) ->
       region_claims := array_name :: !region_claims;
       let at d = { e with desc = d } in
-      let first = at (Cast (TypePtr (TypeNamed elem), at (Var array_name))) in
+      let elem_ty = if elem = "u8" then TypeU8 else TypeNamed elem in
+      let first = at (Cast (TypePtr elem_ty, at (Var array_name))) in
       if table then
-        Call ("__region_table_claim",
+        Call ("__region_table_claim__" ^ elem,
           [ at (Cast (TypeUsize, first));
             at (IntLit (Int64.of_int count));
             at (AddrOf (at (Var ("__region_claimed__" ^ array_name))));
@@ -297,7 +298,7 @@ let region_of_lowering ?(table = false) (e : expr) (array_name : string) : expr_
               at (Var ("__region_meta__" ^ array_name))))));
             first ])
       else
-      Call ("__region_claim",
+      Call ("__region_claim__" ^ elem,
         [ at (Cast (TypeUsize, first));
           at (IntLit (Int64.of_int count));
           at (AddrOf (at (Var ("__region_claimed__" ^ array_name))));
