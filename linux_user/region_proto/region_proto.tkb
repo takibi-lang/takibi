@@ -1,33 +1,57 @@
-use "linux_user/region_proto/region.tkb";
+// GitHub issue #672: the built-in region (compiled with --regions).
+// A region(T)[b, n] is the right to touch n elements of type T, the first
+// at static position b. It is never copied: it is split into two adjacent
+// regions and merged back. Counts are element counts; no byte sizes appear.
+// What must not compile is in test/test_takibi.ml, "built-in region".
 
-// A LIFO allocator over one region: every node it hands out is split off the
-// front of what is left, and freeing merges it back. Nothing below is
-// trusted -- a free in the wrong order, a second free, or a node read after
-// its free does not compile (test/test_takibi.ml, "region prototype").
-fn test_region_proto() !{unsafe} {
-    match region_arena_take() {
-        ArenaTake::Gone => { uart_puts("arena: gone\n"); }
-        ArenaTake::Taken(heap) => {
-            match region_split(heap, 16) {
-                RegionSplit::TooShort(whole) => {
-                    uart_puts("split: too short\n");
-                    region_arena_give(whole);
-                }
-                RegionSplit::Split(parts) => {
-                    let (first, rest) = parts;
-                    region_node(first).key = 7;
-                    region_node(first).value = 70;
-                    uart_puts("node: ");
-                    uart_print(region_node(first).key + region_node(first).value);
-                    uart_puts("\n");
-                    region_arena_give(region_merge(first, rest));
-                    uart_puts("arena: whole again\n");
-                }
-            }
+struct Node { key: usize; value: usize; }
+
+const NODE_COUNT: usize = 64;
+
+// The axiom: a declared array becomes one region of its own element type
+// and length, once.
+private let mut region_arena: [Node; NODE_COUNT];
+
+// A count known only at run time.
+private let mut region_wanted: usize = 10;
+
+fn test_region() {
+    let RegionOf(Node)::Taken(nodes) = region_of(region_arena) else {
+        RegionOf(Node)::Gone => { uart_puts("arena: already taken\n"); return; }
+    };                                          // region(Node)[b, 64]
+
+    // A split whose point is a constant within the count: proved at
+    // compile time, so there is no failure branch to write.
+    let (first, rest) = region_split_static(nodes, 3);
+                                                // first: region(Node)[b, 3]
+                                                // rest:  region(Node)[b + 3, 61]
+    region_at(first, 0).key = 7;                // index checked against 3
+    region_at(first, 2).key = 9;                // at compile time
+
+    // A split whose point is only known at run time: the region comes back
+    // whole when it does not fit. No trap.
+    match region_split(rest, region_wanted) {
+        RegionSplit(Node)::TooShort(whole) => {
+            uart_puts("too many\n");
+            region_release(region_merge(first, whole));
+        }
+        RegionSplit(Node)::Split(parts) => {
+            let (taken, left) = parts;          // taken: region(Node)[b + 3, k]
+            uart_puts("taken: ");
+            uart_print(region_count(taken));
+            uart_puts(", keys: ");
+            uart_print(region_at(first, 0).key + region_at(first, 2).key);
+            uart_puts("\n");
+            let back = region_merge(taken, left);   // region(Node)[b + 3, 61]
+            let all = region_merge(first, back);    // region(Node)[b, 64]
+            uart_puts("arena: ");
+            uart_print(region_count(all));
+            uart_puts(" nodes whole again\n");
+            region_release(all);
         }
     }
 }
 
 fn app_main() {
-    test_region_proto();
+    test_region();
 }

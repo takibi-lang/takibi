@@ -73,6 +73,21 @@ let make_binop loc op left right =
    value is used directly as a hard requirement (LLVM's set_alignment, an
    enum's discriminant, an array's element count) -- so overflow here is a
    hard TypeError instead. *)
+(* GitHub issue #672: `region(Node)` and `RegionSplit(Node)` name the
+   compiler-generated instance of a built-in for one element type. The
+   generated name is the built-in's name, two underscores, and the element
+   type's name. *)
+let mangle_builtin_instance pos name t =
+  let elem = match t with
+    | TypeNamed s -> s
+    | TypeU8 -> "u8" | TypeU16 -> "u16" | TypeU32 -> "u32" | TypeU64 -> "u64"
+    | TypeI8 -> "i8" | TypeI16 -> "i16" | TypeI32 -> "i32" | TypeI64 -> "i64"
+    | TypeUsize -> "usize" | TypeIsize -> "isize"
+    | _ -> raise (Types.TypeError (pos,
+        "a built-in instance's element type must be a named type or an integer"))
+  in
+  name ^ "__" ^ elem
+
 let narrow_int64 pos what (n : Int64.t) : int =
   match Ast.int_of_intlit n with
   | Some i -> i
@@ -221,7 +236,7 @@ let promote_be_field_type = function
 %token <string> IDENT
 %token <string> STRING
 %token <string> BS_STRING
-%token FN INLINE NOINLINE RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE PUBLISH NO_COPY DMA_FIXED IO ENUM MATCH ALIGN MULTIPLE SIZEOF ALIGNOF CONTAINS_STABLE_OWNER OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
+%token FN INLINE NOINLINE WHERE RETURN CONST LET MUT EXTERN SYMBOL STRUCT OPAQUE AFFINE LINEAR VIEW VARIANT MUST_USE EXISTS BORROW SINK PACKED BE PUBLISH NO_COPY DMA_FIXED IO ENUM MATCH ALIGN MULTIPLE SIZEOF ALIGNOF CONTAINS_STABLE_OWNER OFFSETOF UNSAFE USE PRIVATE VECTOR_TABLE EXCEPTION_ENTRY EXCEPTION_RESTORE EMBED_FILE
 %token TYPE GENERIC
 %token DARROW COLONCOLON UNDERSCORE BANG
 %token LBRACE RBRACE LPAREN RPAREN LBRACKET RBRACKET COMMA SEMI DOTDOTLT DOTDOT AT
@@ -590,24 +605,33 @@ variant_cases:
     { (name, Some payload) :: rest }
 
 func_def:
-  | p = private_flag FN IDENT LPAREN params RPAREN ret_type_opt effects_opt LBRACE stmts RBRACE
+  | p = private_flag FN IDENT LPAREN params RPAREN ret_type_opt effects_opt w = where_opt LBRACE body_stmts = stmts RBRACE
     {
       Ast.{ name = $3; params = $5; ret_type = $7; effects = $8;
-            body = $10; is_inline = false; is_noinline = false; is_private = p;
-            def_loc = $symbolstartpos }
+            body = body_stmts; is_inline = false; is_noinline = false; is_private = p;
+            where_clauses = w; def_loc = $symbolstartpos }
     }
-  | p = private_flag INLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt LBRACE stmts RBRACE
+  | p = private_flag INLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt w = where_opt LBRACE body_stmts = stmts RBRACE
     {
       Ast.{ name = $4; params = $6; ret_type = $8; effects = $9;
-            body = $11; is_inline = true; is_noinline = false; is_private = p;
-            def_loc = $symbolstartpos }
+            body = body_stmts; is_inline = true; is_noinline = false; is_private = p;
+            where_clauses = w; def_loc = $symbolstartpos }
     }
-  | p = private_flag NOINLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt LBRACE stmts RBRACE
+  | p = private_flag NOINLINE FN IDENT LPAREN params RPAREN ret_type_opt effects_opt w = where_opt LBRACE body_stmts = stmts RBRACE
     {
       Ast.{ name = $4; params = $6; ret_type = $8; effects = $9;
-            body = $11; is_inline = false; is_noinline = true; is_private = p;
-            def_loc = $symbolstartpos }
+            body = body_stmts; is_inline = false; is_noinline = true; is_private = p;
+            where_clauses = w; def_loc = $symbolstartpos }
     }
+
+(* `where k < n, k <= m` before a function body (#672). *)
+where_opt:
+  | /* empty */ { [] }
+  | WHERE cs = separated_nonempty_list(COMMA, where_constraint) { cs }
+
+where_constraint:
+  | a = index_static_arg LT b = index_static_arg { (a, WhereLt, b) }
+  | a = index_static_arg LE b = index_static_arg { (a, WhereLe, b) }
 
 param:
   | IDENT { ($1, None) }
@@ -716,12 +740,12 @@ stmt:
     { { desc = LetMatch (false, id, None, disc,
                           validate_arm_bodies $symbolstartpos arms);
         loc = $symbolstartpos } }
-  | LET variant = IDENT COLONCOLON case = IDENT LPAREN id = IDENT RPAREN
+  | LET variant = variant_ref COLONCOLON case = IDENT LPAREN id = IDENT RPAREN
     ASSIGN disc = expr ELSE LBRACE failures = match_arms RBRACE SEMI
     { { desc = LetMatch (false, id, None, disc,
           let_else_arms $symbolstartpos variant case failures);
         loc = $symbolstartpos } }
-  | LET MUT variant = IDENT COLONCOLON case = IDENT LPAREN id = IDENT RPAREN
+  | LET MUT variant = variant_ref COLONCOLON case = IDENT LPAREN id = IDENT RPAREN
     ASSIGN disc = expr ELSE LBRACE failures = match_arms RBRACE SEMI
     { { desc = LetMatch (true, id, None, disc,
           let_else_arms $symbolstartpos variant case failures);
@@ -815,12 +839,12 @@ match_arms:
   | match_arm match_arms { $1 :: $2 }
 
 match_arm:
-  | IDENT COLONCOLON IDENT DARROW LBRACE arm_body RBRACE
-    { ArmVariant ($1, $3, None, $6) }
-  | IDENT COLONCOLON IDENT LPAREN mutable_ = mut_flag binding = IDENT RPAREN DARROW LBRACE arm_body RBRACE
-    { ArmVariant ($1, $3, Some (PayloadBind (binding, mutable_)), $10) }
-  | IDENT COLONCOLON IDENT LPAREN UNDERSCORE RPAREN DARROW LBRACE arm_body RBRACE
-    { ArmVariant ($1, $3, Some PayloadIgnore, $9) }
+  | v = variant_ref COLONCOLON c = IDENT DARROW LBRACE b = arm_body RBRACE
+    { ArmVariant (v, c, None, b) }
+  | v = variant_ref COLONCOLON c = IDENT LPAREN mutable_ = mut_flag binding = IDENT RPAREN DARROW LBRACE b = arm_body RBRACE
+    { ArmVariant (v, c, Some (PayloadBind (binding, mutable_)), b) }
+  | v = variant_ref COLONCOLON c = IDENT LPAREN UNDERSCORE RPAREN DARROW LBRACE b = arm_body RBRACE
+    { ArmVariant (v, c, Some PayloadIgnore, b) }
   | UNDERSCORE DARROW LBRACE arm_body RBRACE
     { ArmWild $4 }
   | ns = match_int_lits DARROW LBRACE body = arm_body RBRACE
@@ -1071,7 +1095,16 @@ base_type_expr:
     { TypeTuple (t1 :: t2 :: ts) }
   | name = IDENT LBRACKET args = separated_nonempty_list(COMMA, index_static_arg) RBRACKET
     { TypeIndexed (name, args) }
+  | name = IDENT LPAREN ts = separated_nonempty_list(COMMA, type_expr) RPAREN
+    LBRACKET args = separated_nonempty_list(COMMA, index_static_arg) RBRACKET
+    (* `region(Node)[b, n]`: a built-in instantiated for an element type and
+       carrying static indices (#672). One type argument only. *)
+    { match ts with
+      | [ t ] -> TypeIndexed (mangle_builtin_instance $symbolstartpos name t, args)
+      | _ -> raise (Types.TypeError ($symbolstartpos,
+               "a built-in instance takes one type argument")) }
   | name = IDENT LPAREN args = separated_nonempty_list(COMMA, type_expr) RPAREN
+    %prec BRACKET_ELSEWHERE
     { TypeGenericInst (name, args) }
     (* GitHub issue #207: Name(T1, T2, ...) -- a generic struct/variant
        instantiated with concrete type arguments, e.g. `Freelist(Page)`.
@@ -1106,6 +1139,14 @@ index_static_arg:
   | a = index_static_arg PLUS b = static_arg { StaticAdd (a, b) }
   | a = index_static_arg MINUS b = static_arg { StaticSub (a, b) }
   | a = index_static_arg TIMES b = static_arg { StaticMul (a, b) }
+
+(* A variant named in a match arm. `Name(T)` names the instantiation of a
+   built-in variant for element type T, e.g. `RegionSplit(Node)` (#672);
+   it is spelled as the mangled name the compiler generates. *)
+variant_ref:
+  | name = IDENT { name }
+  | name = IDENT LPAREN t = type_expr RPAREN
+    { mangle_builtin_instance $symbolstartpos name t }
 
 view_static_args:
   | /* empty */ %prec BRACKET_ELSEWHERE { [] }

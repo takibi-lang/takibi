@@ -2693,6 +2693,66 @@ forcing a hand-written exclusives loop onto the RPi5.
 Any other target rejects all five at code generation, by name -- unlike
 the intrinsics above, which reach the assembler and fail on the mnemonic.
 
+### Built-in Region (GitHub issue #672, `--regions`)
+
+Under `--regions` the compiler adds the built-in `region(T)[b, n]`: a
+linear permission to touch `n` elements of type `T`, the first at static
+position `b`. `b` is a name only the checker uses -- "where this region
+starts" -- so that two regions can be known to be adjacent (`b + 3` follows
+`b` with 3 elements). Programs do not write it except in a signature that
+must say two regions are related. Counts are element counts; no byte size
+appears in a program. The definitions are part of the compiler, one copy per
+element type used; their fields are private to them, so a program cannot
+make a region or read its address.
+
+```
+private let mut arena: [Node; 64];
+
+let RegionOf(Node)::Taken(nodes) = region_of(arena) else {   // region(Node)[b, 64]
+    RegionOf(Node)::Gone => { return; }                       // claimed already
+};
+let (first, rest) = region_split_static(nodes, 3);   // [b, 3] and [b + 3, 61]
+region_at(first, 2).key = 7;                         // index proved below 3
+match region_split(rest, wanted) {                   // run-time split point
+    RegionSplit(Node)::TooShort(whole) => { ... }    // comes back whole, no trap
+    RegionSplit(Node)::Split(parts) => {
+        let (taken, left) = parts;
+        let back = region_merge(taken, left);        // [b + 3, 61] again
+        region_release(region_merge(first, back));   // [b, 64]
+    }
+}
+```
+
+- `region_of(g)` is the one axiom: a global array `g: [T; N]` becomes
+  `region(T)[b, N]`, once; a second claim (another call, or the same one run
+  again) gets `Gone`.
+- `region_split_static(r, k)` requires `k <= n` and `region_at(r, i)`
+  requires `i < n`, shown at the call (see `where` below).
+  `region_split(r, k)` is the run-time checked split.
+- `region_merge(head, tail)` is accepted only when tail starts where head
+  ends (static arithmetic, above).
+- An element pointer from `region_at` is derived from the borrow of the
+  region and refused after the region is consumed.
+- `region(T)`, `RegionSplit(T)` and `RegionOf(T)` name the instance for one
+  element type; the language has no type-generic variants. Names beginning
+  `__region_` are reserved.
+
+Not yet: region_table (stored permissions), regions declared from the
+linker map and the DTB, byte regions for the lowest allocator layer. The
+surface is provisional.
+
+### `where` constraints (GitHub issue #672)
+
+A function may state constraints on its static indices before its body:
+`fn region_at(r: borrow region(T)[b, n], i: usize @ k) -> ... where k < n`.
+`<` and `<=` are supported, separated by commas. Every call is checked with
+built-in fast paths only: constants, and the refinement interval of an
+argument passed to a `usize @ k` parameter. A constraint that is false is an
+error ("requires 3 < 3, which is false here"), and so is one that cannot be
+shown that way ("requires 'i' < 3, which cannot be shown here"); there is no
+solver (GitHub issue #13 records the need) and no run-time fallback.
+`where` is a keyword.
+
 ### Publication Records (GitHub issue #299)
 
 ```

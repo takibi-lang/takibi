@@ -270,6 +270,32 @@ and relocate_arm (mangled : string) (a : match_arm) : match_arm =
    rewrite pass, where every call site's name has already been fixed up by
    the stateful call-resolving walk below. *)
 
+(* GitHub issue #672: the built-in region's one axiom. `region_of(g)`, for
+   a global array `g: [T; N]`, becomes a claim of g's address and length
+   that succeeds once: a hidden flag per array records it. Filled in by
+   Region_builtin.run; only under --regions. *)
+let region_arrays : (string * (string * int)) list ref = ref []
+let region_claims : string list ref = ref []
+
+let region_of_lowering (e : expr) (array_name : string) : expr_desc =
+  match List.assoc_opt array_name !region_arrays with
+  | None ->
+      raise (Types.TypeError (e.loc, Printf.sprintf
+        "region_of needs a global array of a named element type; '%s' is not one"
+        array_name))
+  | Some (elem, count) ->
+      region_claims := array_name :: !region_claims;
+      let at d = { e with desc = d } in
+      let first = at (Cast (TypePtr (TypeNamed elem), at (Var array_name))) in
+      Call ("__region_claim",
+        [ at (Cast (TypeUsize, first));
+          at (IntLit (Int64.of_int count));
+          at (AddrOf (at (Var ("__region_claimed__" ^ array_name))));
+          first ])
+
+let is_reserved_region_name name =
+  String.length name > 9 && String.sub name 0 9 = "__region_"
+
 let rec walk_expr ~subst ~vsubst ~resolve_inst (e : expr) : expr =
   let ty t = transform ~subst ~vsubst ~resolve_inst t in
   let ex e = walk_expr ~subst ~vsubst ~resolve_inst e in
@@ -292,6 +318,11 @@ let rec walk_expr ~subst ~vsubst ~resolve_inst (e : expr) : expr =
          | Some v -> IntLit (Int64.of_int v)
          | None -> Var name)
     | ViewLit (name, args) -> ViewLit (name, args)
+    | Call ("region_of", [ { desc = Var array_name; _ } ]) ->
+        region_of_lowering e array_name
+    | Call (name, _) when is_reserved_region_name name ->
+        raise (Types.TypeError (e.loc, Printf.sprintf
+          "'%s' is reserved for the built-in region" name))
     | Call (name, args) -> Call (name, List.map ex args)
     | VariantCtor (vname, cname, payload) -> VariantCtor (vname, cname, ex payload)
     | BinOp (op, a, b) -> BinOp (op, ex a, ex b)
@@ -515,6 +546,7 @@ type fn_template = {
   fn_is_inline : bool;
   fn_is_noinline : bool;
   fn_is_private : bool;
+  fn_where : where_clause list;
   fn_def_loc : loc;
 }
 
@@ -799,6 +831,7 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
         fn_ret_type = f.ret_type; fn_effects = f.effects;
         fn_body = f.body; fn_is_inline = f.is_inline;
         fn_is_noinline = f.is_noinline; fn_is_private = f.is_private;
+        fn_where = f.where_clauses;
         fn_def_loc = f.def_loc }
   in
   List.iter (function
@@ -1033,6 +1066,11 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
              | Some v -> IntLit (Int64.of_int v)
              | None -> Var name)
         | ViewLit (name, args) -> ViewLit (name, args)
+        | Call ("region_of", [ { desc = Var array_name; _ } ]) ->
+            region_of_lowering e array_name
+        | Call (name, _) when is_reserved_region_name name ->
+            raise (Types.TypeError (e.loc, Printf.sprintf
+              "'%s' is reserved for the built-in region" name))
         | Call (name, args) ->
             let args = List.map ex args in
             (match resolve_call local_types name args with
@@ -1436,6 +1474,7 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
       let def = FuncDef { name = mangled; params; ret_type; effects = tpl.fn_effects;
                           body; is_inline = tpl.fn_is_inline;
                           is_noinline = tpl.fn_is_noinline; is_private = tpl.fn_is_private;
+                          where_clauses = tpl.fn_where;
                           def_loc = tpl.fn_def_loc } in
       let prev = Option.value (Hashtbl.find_opt fn_by_template_name name) ~default:[] in
       Hashtbl.replace fn_by_template_name name (def :: prev)
@@ -1492,3 +1531,11 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
     ) struct_by_template_name;
     List.concat (Array.to_list out)
   end
+
+(* GitHub issue #672: lower the built-in region's typed view everywhere,
+   whether or not the program has generics (run returns early when it has
+   none). Called by Region_builtin.run only under --regions. *)
+let lower_regions (prog : toplevel list) : toplevel list =
+  List.map (walk_toplevel ~subst:no_subst ~vsubst:no_vsubst
+              ~resolve_inst:(fun name args -> TypeGenericInst (name, args)))
+    prog

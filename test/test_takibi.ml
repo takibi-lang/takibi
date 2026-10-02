@@ -2384,47 +2384,41 @@ let slot_index_fixture =
    }
    "
 
-let linear_region_fixture =
-  "struct Node { key: usize; value: usize; }
-   linear struct Region[base: usize, len: usize] {
-     private address: usize;
-     private size: usize;
-   }
-   fn region_drop(r: sink Region[b, l]) {}
-   must_use variant RegionSplit[b: usize, l: usize, k: usize] {
-     TooShort(Region[b, l]);
-     Split((Region[b, k], Region[b + k, l - k]));
-   }
-   fn region_split(r: sink Region[b, l], n: usize @ k)
-       -> RegionSplit[b, l, k] {
-     if (n > r.size) { return RegionSplit::TooShort(r); }
-     let mut head: Region[b, k] = { r.address, n };
-     let mut tail: Region[b + k, l - k] = { r.address + n, r.size - n };
-     region_drop(r);
-     return RegionSplit::Split((head, tail));
-   }
-   fn region_merge(head: sink Region[b, k], tail: sink Region[b + k, m])
-       -> Region[b, k + m] {
-     let mut whole: Region[b, k + m] = { head.address, head.size + tail.size };
-     region_drop(head);
-     region_drop(tail);
-     return whole;
-   }
-   fn region_node(r: borrow Region[b, 16]) -> *Node @ b !{unsafe} {
-     return unsafe { r.address as *Node };
-   }
-   "
+(* GitHub issue #672: the built-in region, enabled as --regions does. *)
+let infer_regions src =
+  Const_env.reset ();
+  Type_layout.reset ();
+  Publish_registry.reset ();
+  No_copy_registry.reset ();
+  Dma_fixed_registry.reset ();
+  Generic_scope.reset ();
+  Ast.reset_precedence_errors ();
+  ignore (Llvm_gen.setup_target ~triple:"x86_64-pc-linux-gnu" ());
+  let prog = Region_builtin.run ~enabled:true (parse src) in
+  Type_inf.infer_program
+    (Declared_type_resolver.run
+       (Monomorphize.run (Dma_fixed_record.run (Publish_record.run prog))))
+
+let expect_region_error fragment src () =
+  match infer_regions src with
+  | _ -> Alcotest.failf "expected an error containing %S" fragment
+  | exception Types.TypeError (_, msg) ->
+      if not (contains_substring msg fragment)
+      then Alcotest.failf "TypeError %S does not contain %S" msg fragment
+  | exception Types.MultiTypeError errors ->
+      if not (List.exists (fun (_, msg) -> contains_substring msg fragment) errors)
+      then Alcotest.failf "no entry contains %S: %s" fragment
+          (String.concat " | " (List.map snd errors))
 
 let region_use body =
-  linear_region_fixture ^
-  "fn use_heap(heap: sink Region[b, l]) -> Region[b, l] !{unsafe} {
-     match region_split(heap, 16) {
-       RegionSplit::TooShort(whole) => { return whole; }
-       RegionSplit::Split(parts) => {
-         let (first, rest) = parts;
+  "struct Node { key: usize; value: usize; }
+   let mut arena: [Node; 64];
+   fn use_arena() {
+     let RegionOf(Node)::Taken(nodes) = region_of(arena) else {
+       RegionOf(Node)::Gone => { return; }
+     };
+     let (first, rest) = region_split_static(nodes, 3);
 " ^ body ^ "
-       }
-     }
    }"
 
 let owner_derived_fixture =
@@ -3188,38 +3182,58 @@ let infer_tests = [
            \  return f.sp;\n\
            }\n" ] ());
 
-  (* GitHub issue #637, fundamental-option prototype
-     (linux_user/region_proto): memory as linear regions. Splitting and
-     merging are checked by static arithmetic on the regions' indices. *)
-  Alcotest.test_case "region prototype: split, use and merge back" `Quick
-    (fun () -> ignore (infer (region_use
-      "region_node(first).key = 7;
-       return region_merge(first, rest);")));
+  (* GitHub issue #672: the built-in region (linux_user/region_proto). *)
+  Alcotest.test_case "built-in region: split, index, merge back" `Quick
+    (fun () -> ignore (infer_regions (region_use
+      "region_at(first, 2).key = 7;
+       region_release(region_merge(first, rest));")));
 
-  Alcotest.test_case "region prototype: merging in the wrong order is rejected"
+  Alcotest.test_case "built-in region: a constant split past the count"
     `Quick
-    (expect_type_error "static value mismatch" (region_use
-      "return region_merge(rest, first);"));
+    (expect_region_error "requires 100 <= 61, which is false" (region_use
+      "let (x, y) = region_split_static(rest, 100);
+       region_release(region_merge(first, region_merge(x, y)));"));
 
-  Alcotest.test_case "region prototype: a region cannot be given back twice"
+  Alcotest.test_case "built-in region: a constant index past the count"
     `Quick
-    (expect_type_error "already consumed" (region_use
-      "region_drop(first);
-       return region_merge(first, rest);"));
+    (expect_region_error "requires 3 < 3, which is false" (region_use
+      "region_at(first, 3).key = 1;
+       region_release(region_merge(first, rest));"));
 
-  Alcotest.test_case "region prototype: a node pointer dies with its region"
+  Alcotest.test_case "built-in region: an index the call cannot bound"
     `Quick
-    (expect_type_error "cannot be used after" (region_use
-      "let p = region_node(first);
+    (expect_region_error "'i' < 3, which cannot be shown" (region_use
+      "let i: usize = region_count(rest);
+       region_at(first, i).key = 1;
+       region_release(region_merge(first, rest));"));
+
+  Alcotest.test_case "built-in region: merging in the wrong order is rejected"
+    `Quick
+    (expect_region_error "static value mismatch" (region_use
+      "region_release(region_merge(rest, first));"));
+
+  Alcotest.test_case "built-in region: a region cannot be given back twice"
+    `Quick
+    (expect_region_error "already consumed" (region_use
+      "region_release(first);
+       region_release(region_merge(first, rest));"));
+
+  Alcotest.test_case "built-in region: an element dies with its region" `Quick
+    (expect_region_error "cannot be used after" (region_use
+      "let node = region_at(first, 0);
        let whole = region_merge(first, rest);
-       p.key = 1;
-       return whole;"));
+       node.key = 1;
+       region_release(whole);"));
 
-  Alcotest.test_case "region prototype: only a region one node long is a node"
-    `Quick
-    (expect_type_error "static value mismatch" (region_use
-      "let p = region_node(rest);
-       return region_merge(first, rest);"));
+  Alcotest.test_case "built-in region: its fields are the compiler's" `Quick
+    (expect_region_error "is private to" (region_use
+      "let a: usize = first.address;
+       region_release(region_merge(first, rest));"));
+
+  Alcotest.test_case "built-in region: the claim is reserved" `Quick
+    (expect_region_error "reserved for the built-in region" (region_use
+      "region_release(region_merge(first, rest));
+       let again = __region_claim(0, 1, &arena[0].key as *bool, &arena[0]);"));
 
   Alcotest.test_case "static arithmetic: a slot given back to its own index"
     `Quick
@@ -3233,19 +3247,11 @@ let infer_tests = [
          give(t, r, j);
        }"));
 
-  Alcotest.test_case "region prototype: a region is not split twice" `Quick
-    (expect_type_error "already consumed" (linear_region_fixture ^
-      "fn twice(heap: sink Region[b, l]) {
-         match region_split(heap, 16) {
-           RegionSplit::TooShort(w) => { region_drop(w); }
-           RegionSplit::Split(p) => { let (x, y) = p; region_drop(x); region_drop(y); }
-         }
-         match region_split(heap, 16) {
-           RegionSplit::TooShort(w) => { region_drop(w); }
-           RegionSplit::Split(p) => { let (x, y) = p; region_drop(x); region_drop(y); }
-         }
-       }"));
-
+  Alcotest.test_case "built-in region: a region is not split twice" `Quick
+    (expect_region_error "already consumed" (region_use
+      "let (x, y) = region_split_static(first, 1);
+       let (p, q) = region_split_static(first, 1);
+       region_release(region_merge(region_merge(x, y), rest));"));
   (* GitHub issue #637 stage 2: a payload pointer derived from a borrowed
      owner is usable while the owner is, refused after the owner is consumed,
      and cannot be handed to a parameter that might retain it. *)

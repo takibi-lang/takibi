@@ -678,9 +678,12 @@ $(COMMON_LINUX_SYSCALL_O): $(COMMON_LINUX_SYSCALL_S) | $(LINUX_USER_BUILD_DIR)
 # build. The ordering is the whole point -- constants resolve as the
 # parser walks the list left to right -- so these go ahead of `$<`.
 LINUX_USER_EXTRA_SRCS :=
+# A per-test compiler flag, such as the built-in region's --regions (#672).
+LINUX_USER_EXTRA_FLAGS :=
+$(LINUX_USER_DIR)/region_proto/region_proto_exe.o: LINUX_USER_EXTRA_FLAGS := --regions
 
 $(LINUX_USER_DIR)/%_exe.o: $(LINUX_USER_DIR)/%.tkb $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(COMMON_LINUX_PRINT_BASE) $(TAKIBI)
-	$(TAKIBI) $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(LINUX_USER_EXTRA_SRCS) $< --target $(LINUX_AMD64_TARGET) -o $@ --forbid-trap $(LINUX_UNUSED_CHECK) --check-unused-file $<
+	$(TAKIBI) $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(LINUX_USER_EXTRA_SRCS) $< --target $(LINUX_AMD64_TARGET) -o $@ --forbid-trap $(LINUX_USER_EXTRA_FLAGS) $(LINUX_UNUSED_CHECK) --check-unused-file $<
 
 $(LINUX_USER_DIR)/%.exe: $(LINUX_USER_DIR)/%_exe.o $(COMMON_LINUX_STARTUP_O) $(COMMON_LINUX_SYSCALL_O)
 	$(LLD) -static -nostdlib -e _start $^ -o $@

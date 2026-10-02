@@ -28,7 +28,7 @@ let int64_of_digits ~(base : int) (s : string) : Int64.t =
    identifier rule calls this only for Language_words.hard_keywords, and this
    match must handle every member or the keyword-inventory test fails. *)
 let hard_keyword_token = function
-  | "fn" -> FN | "inline" -> INLINE | "noinline" -> NOINLINE
+  | "fn" -> FN | "inline" -> INLINE | "noinline" -> NOINLINE | "where" -> WHERE
   | "return" -> RETURN | "const" -> CONST | "let" -> LET | "mut" -> MUT
   | "if" -> IF | "else" -> ELSE | "while" -> WHILE | "for" -> FOR
   | "in" -> IN | "break" -> BREAK | "continue" -> CONTINUE | "as" -> AS

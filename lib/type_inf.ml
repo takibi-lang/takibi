@@ -148,6 +148,51 @@ type senv = ((string * Ast.type_expr) list * bool * int option) StringMap.t
    is checked. Function signatures stored in fenv use a separate rigid
    scope and are instantiated freshly at each call site. *)
 let active_static_scope : static_scope option ref = ref None
+
+(* GitHub issue #672: a function's `where` constraints, by overload key. The
+   template is the function's own type with one more parameter, a TView
+   named "__where" whose static arguments are each clause's two sides,
+   built in the SAME static scope as the parameters. Instantiating the
+   template and unifying its parameters with the call's instantiated ones
+   is what ties the clause's names to the call's statics. *)
+let function_where : (string, Ast.where_cmp list * ty) Hashtbl.t =
+  Hashtbl.create 16
+
+let where_cmp_text = function Ast.WhereLt -> "<" | Ast.WhereLe -> "<="
+
+(* Decide `a cmp b` from what the call shows: constants, and for a static
+   bound by a `usize @ k` parameter, the refinement interval of the argument
+   passed there. Built-in fast paths only (no solver, GitHub issue #13): the
+   difference b - a (minus one for `<`) must have a non-negative lower bound
+   over those intervals. Anything else cannot be shown and is an error. *)
+let check_where_clause loc fname bounds names cmp a b =
+  let describe s = match static_atom_key s with
+    | Some k -> (match Hashtbl.find_opt names k with Some n -> n | None -> static_to_string s)
+    | None -> static_to_string s in
+  let diff = SSub (b, a) in
+  let diff = match cmp with Ast.WhereLt -> SSub (diff, SConst 1) | Ast.WhereLe -> diff in
+  let (poly, _) = static_poly diff in
+  let lower = List.fold_left (fun acc (m, c) ->
+    match acc, m with
+    | None, _ -> None
+    | Some s, [] -> Some (s + c)
+    | Some s, [ k ] ->
+        (match Hashtbl.find_opt bounds k with
+         | Some (lo, hi) -> Some (s + (if c > 0 then c * lo else c * hi))
+         | None -> None)
+    | Some _, _ -> None) (Some 0) poly in
+  match lower with
+  | Some l when l >= 0 -> ()
+  | Some _ when List.for_all (fun (m, _) -> m = []) poly ->
+      raise (TypeError (loc, Printf.sprintf
+        "%s requires %s %s %s, which is false here"
+        fname (describe a) (where_cmp_text cmp) (describe b)))
+  | _ ->
+      raise (TypeError (loc, Printf.sprintf
+        "%s requires %s %s %s, which cannot be shown here; pass a constant, \
+         a value whose refinement proves it, or use the run-time checked form"
+        fname (describe a) (where_cmp_text cmp) (describe b)))
+
 let value_static_identities : static_term StringMap.t ref = ref StringMap.empty
 (* Per-function identities for the stable syntactic places supported by the
    first addr slice: &name and &name.field chains. *)
@@ -4573,11 +4618,56 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               it here would trade a clean, expected TypeError for an
               internal-error codegen crash, so this keeps the exact
               pre-#323 rejection for this one shape instead. *)
-           List.iter2 (fun (arg : Ast.expr) pt ->
+           let arg_tys = List.map2 (fun (arg : Ast.expr) pt ->
              match arg.desc with
-             | StructLit _ -> ignore (infer_expr senv eenv tyenv fenv arg)
-             | _ -> ignore (check_expr senv eenv tyenv fenv arg pt)
-           ) args param_tys;
+             | StructLit _ -> infer_expr senv eenv tyenv fenv arg
+             | _ -> check_expr senv eenv tyenv fenv arg pt
+           ) args param_tys in
+           (match Hashtbl.find_opt function_where target with
+            | None -> ()
+            | Some (cmps, template) ->
+                (match repr (instantiate_static_params template) with
+                 | TFun (wps, wrt, _) ->
+                     let rec split = function
+                       | [ last ] -> ([], last)
+                       | p :: rest -> let (ps, l) = split rest in (p :: ps, l)
+                       | [] -> assert false in
+                     let (wps, phantom) = split wps in
+                     List.iter2 (fun a b -> unify_at e.loc a b) wps param_tys;
+                     unify_at e.loc wrt ret_ty;
+                     let bounds = Hashtbl.create 4 in
+                     let names = Hashtbl.create 4 in
+                     List.iter2 (fun pt (arg : Ast.expr) ->
+                       match repr pt, arg.desc with
+                       | TSingleton (_, s), Var n ->
+                           (match static_atom_key s with
+                            | Some k -> Hashtbl.replace names k ("'" ^ n ^ "'")
+                            | None -> ())
+                       | _ -> ()) param_tys args;
+                     List.iter2 (fun pt at ->
+                       match repr pt, strip_singleton at with
+                       | TSingleton (_, s), TRefinedInt (lo, hi, _) ->
+                           (match static_atom_key s with
+                            | Some k -> Hashtbl.replace bounds k (lo, hi - 1)
+                            | None -> ())
+                       | TSingleton (_, s), _ ->
+                           (match static_repr s with
+                            | SConst n ->
+                                (match static_atom_key s with
+                                 | Some k -> Hashtbl.replace bounds k (n, n)
+                                 | None -> ())
+                            | _ -> ())
+                       | _ -> ()) param_tys arg_tys;
+                     (match repr phantom with
+                      | TView (_, terms) ->
+                          let rec pairs cs ts = match cs, ts with
+                            | c :: cs, a :: b :: ts ->
+                                check_where_clause e.loc fname bounds names c a b;
+                                pairs cs ts
+                            | _ -> () in
+                          pairs cmps terms
+                      | _ -> ())
+                 | _ -> ()));
            ret_ty)
   | Assign (lhs, rhs) ->
       (* GitHub issue #184: relocated verbatim from the 4 old dedicated
@@ -6704,6 +6794,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | _ -> ()) prog;
   Hashtbl.reset indexed_struct_params;
   Hashtbl.reset indexed_struct_kinds;
+  Hashtbl.reset function_where;
   List.iter (function
     | Ast.OwnedStructDef (name, kind, params, _, _, _, _, _, _) ->
         Hashtbl.replace indexed_struct_params name params;
@@ -8400,6 +8491,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         let rt  = ret_of_ast_opt_in_decl_scope scope fdef.ret_type in
         let key = overload_key fdef.name fdef.params in
         register_definition fdef.def_loc key fdef.name;
+        if fdef.where_clauses <> [] then begin
+          let terms = List.concat_map (fun (a, _, b) ->
+            [ static_of_ast scope a; static_of_ast scope b ])
+            fdef.where_clauses in
+          Hashtbl.replace function_where key
+            (List.map (fun (_, c, _) -> c) fdef.where_clauses,
+             TFun (pts @ [ TView ("__where", terms) ], rt, None))
+        end;
         let old = Option.value (StringMap.find_opt fdef.name m) ~default:[] in
         let old = List.filter (fun (k, _) -> k <> key) old in
         let call_effects = Option.map (fun effects ->

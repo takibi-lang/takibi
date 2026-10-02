@@ -38,9 +38,9 @@ private fn terminal_probe_pin(cpu: usize) {
 
 private fn terminal_probe_read(bytes: borrow [u8; 64..], cpu: usize) -> usize {
     let count: usize = svc5(63, 0, bytes as *u8 as usize, 64, 0, 0);
-    let mut where: [u8; 4];
-    if (svc5(168, where as *u8 as usize, 0, 0, 0, 0) != 0 ||
-        where[0] != (cpu as u8) || where[1] != 0 || where[2] != 0 || where[3] != 0) {
+    let mut placement: [u8; 4];
+    if (svc5(168, placement as *u8 as usize, 0, 0, 0, 0) != 0 ||
+        placement[0] != (cpu as u8) || placement[1] != 0 || placement[2] != 0 || placement[3] != 0) {
         terminal_probe_fail();
     }
     return count;

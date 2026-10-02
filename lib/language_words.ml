@@ -5,7 +5,7 @@ module StringSet = Set.Make (String)
    builtins look like calls but have compiler-defined typing/lowering, and
    predeclared names enter an otherwise ordinary identifier namespace. *)
 let hard_keywords = [
-  "fn"; "inline"; "noinline"; "return"; "const"; "let"; "mut";
+  "fn"; "inline"; "noinline"; "where"; "return"; "const"; "let"; "mut";
   "if"; "else"; "while"; "for"; "in"; "break"; "continue"; "as";
   "void"; "extern"; "symbol"; "vector_table"; "exception_entry";
   "exception_restore"; "embed_file"; "struct"; "opaque"; "affine";

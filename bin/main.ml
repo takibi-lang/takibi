@@ -46,6 +46,7 @@ let () =
   let debug_info = ref false in
   let forbid_trap = ref false in
   let forbid_unsafe = ref false in
+  let regions = ref false in
   let reject_unused_functions = ref false in
   let external_entries = ref [] in
   let check_unused_files = ref [] in
@@ -139,6 +140,8 @@ let () =
          forbid_trap := true
      | "--forbid-unsafe" ->
          forbid_unsafe := true
+     | "--regions" ->
+         regions := true
      | "--reject-unused-functions" ->
          reject_unused_functions := true
      | "--external-entry" ->
@@ -177,7 +180,7 @@ let () =
 
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--forbid-trap] [--forbid-unsafe] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--forbid-trap] [--forbid-unsafe] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--version]\n"
       Sys.argv.(0);
     exit 1
   );
@@ -255,6 +258,7 @@ let () =
        synthesise the linear write token that gates its payload stores.
        Before monomorphization so that everything downstream sees only
        ordinary StructDef/OpaqueStructDef declarations. *)
+    let prog = Region_builtin.run ~enabled:!regions prog in
     let prog = Publish_record.run prog in
     let prog = Dma_fixed_record.run prog in
 

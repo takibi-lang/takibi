@@ -541,6 +541,16 @@ and variant_payload_pattern =
   | PayloadIgnore                    (* explicit `_`; never binds a name *)
 [@@deriving show]
 
+(* GitHub issue #672: a static `where` constraint on a function's static
+   indices, e.g. `where k < n`. Checked at every call by
+   Type_inf.check_where_clauses with built-in fast paths only (constants and
+   refinement intervals); what it cannot show is an error. *)
+type where_cmp = WhereLt | WhereLe
+[@@deriving show]
+
+type where_clause = static_arg * where_cmp * static_arg
+[@@deriving show]
+
 type func = {
   name : ident;
   params: (ident * type_expr option) list;
@@ -553,6 +563,7 @@ type func = {
   is_inline : bool;
   is_noinline : bool;
   is_private : bool;
+  where_clauses : where_clause list;
   (* GitHub issue #269: `private fn` restricts every direct call/function-
      pointer reference to the same source file the function was declared
      in, mirroring `private let`'s existing cross-file check (issue #108) --
