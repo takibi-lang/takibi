@@ -34,7 +34,8 @@ allcheck` stops every other piece of work, and Territory B is busy, so the
 lane that meets such a failure analyses and fixes it, whatever territory
 its cause lies in. The goal is to drive the probability of an allcheck
 failure toward zero step by step. A holds the analysis of #604, #556, #603,
-#649, #654, #655, #664 and #665 (its handoff memo) when they next recur.
+#649, #654, #655 (#679 would decide it), #665 (its handoff memo), #670,
+#673, #676 and #678 when they next recur.
 
 Steps 1 and 2 (true multicore support; the multicore workload on RPi5) are
 finished. #584's churn stays a soak run at natural boundaries, and each
@@ -50,10 +51,9 @@ before its issue closes. The steps keep their numbers, which issues cite.
    number going down (EL0 payloads: #660, B's). A holds stage 1's core
    groups in this order; each rung stands on the one before, so effort can
    stop at any of them:
-   - **C, stack and frame:** #662 (a frame indexed by its process, consumed
-     by resume), on the opaque frame handle already in the tree. Deriving a
-     frame from a stack region's ownership token needs stage 2 and is not
-     scheduled.
+   - **C, stack and frame:** done (#662). **Region (#672):** the built-in
+     `region`/`region_table`/`region_pool`; TCP frames are on it. Next #677,
+     then the other pools; #674 and #675 follow.
    - **B, raw atomics:** a typed atomic cell (issue when C is under way);
      the ordering argument stays with #613.
    - **D, F, H** are already single files: declared as mint files in the
