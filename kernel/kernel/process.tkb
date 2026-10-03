@@ -375,7 +375,8 @@ struct ProcessRecord {
     // is not nameable here -- but a function is (functions resolve
     // globally regardless of file order), which is how this file can
     // ensure and release a context it cannot describe.
-    fd_context: IntrusiveSlotAddress;
+    // The fd context's pool address (0: none) and generation (#672).
+    fd_context: usize;
     fd_context_generation: usize;
     // GitHub issue #392: and this process's image record, by the same
     // rule and for the same reason -- kernel/mm/process_image.tkb is
@@ -1897,7 +1898,7 @@ private fn scheduled_process_copy_affinity_mask(parent: ProcessHandle,
 // process's context handle. It cannot hold it itself without a table
 // keyed by process slot, which is the ceiling this is on the way to
 // removing -- so the process record holds it, and fd_table asks.
-fn scheduled_process_fd_context(slot: usize) -> IntrusiveSlotAddress {
+fn scheduled_process_fd_context(slot: usize) -> usize {
     return scheduled_process_record_at(slot).fd_context;
 }
 
@@ -1905,7 +1906,7 @@ fn scheduled_process_fd_context_generation(slot: usize) -> usize {
     return scheduled_process_record_at(slot).fd_context_generation;
 }
 
-fn scheduled_process_set_fd_context(slot: usize, address: IntrusiveSlotAddress,
+fn scheduled_process_set_fd_context(slot: usize, address: usize,
                                     generation: usize) {
     scheduled_process_record_at(slot).fd_context = address;
     scheduled_process_record_at(slot).fd_context_generation = generation;

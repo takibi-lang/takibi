@@ -768,10 +768,6 @@ fn intrusive_slot_address_none() -> IntrusiveSlotAddress {
     return address;
 }
 
-fn intrusive_slot_address_is_none(address: IntrusiveSlotAddress) -> bool {
-    return address.raw == 0;
-}
-
 fn intrusive_slot_address_equal(a: IntrusiveSlotAddress,
                                 b: IntrusiveSlotAddress) -> bool {
     return a.raw == b.raw;

@@ -207,7 +207,8 @@ belongs to one process lifecycle, so two cores operating on different
 chains share no link or entry -- which is what the file's assertion now
 says.
 
-`fd_context_pool`/`fd_context_pool_ready` (issue #392 -- the per-process
+`fd_context_pool` (the built-in `RegionPool(ProcessFdContext)` since #672,
+reached under a pin) (issue #392 -- the per-process
 `ProcessFdContext` array of #264 is now pooled, keyed by a handle in
 `ProcessRecord`), `object_pool` + `object_records` (per-shared-object,
 #305).

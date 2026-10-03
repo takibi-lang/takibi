@@ -80,13 +80,14 @@ else
           break scheduled_process_alloc_finish
           continue
           delete
-          break unified_fd_context_ensure
+          # #672: the context pool is a built-in region_pool; its ensure
+          # answers a bool, forced false on this core's first call.
+          set $alloc_thread = $_thread
+          break unified_fd_context_ensure thread $alloc_thread
           continue
           delete
-          break intrusive_pool_insert_zeroed$ProcessFdContext
-          continue
-          delete
-          takibi-force-variant-return IntrusivePoolInsertResult OutOfMemory
+          return (unsigned char)0
+          printf "takibi-force-variant-return: bool false via registers\n"
           printf "alloc-rollback: forced point=fd-context\n"
         else
           if $alloc_rollback_point == 6

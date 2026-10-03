@@ -50,11 +50,6 @@ FN_RE = re.compile(r"^(?:private )?fn ([A-Za-z_0-9]+)")
 # not merely that the function returns a pointer. A new entry has to find
 # its own answer.
 ALLOWED = {
-    ("kernel/kernel/fd_table.tkb", "fd_context_at"):
-        "a process's fd context is released only when the process is reaped "
-        "(or its creation is rolled back before anyone sees it); until then "
-        "only the process's own syscalls and, after it exits, its reaper reach "
-        "it",
     ("kernel/kernel/fd_table.tkb", "fd_block_at"):
         "descriptor blocks belong to one fd context and are released only "
         "with it, so fd_context_at's lifetime covers them",

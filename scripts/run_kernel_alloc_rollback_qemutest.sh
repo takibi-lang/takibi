@@ -62,7 +62,7 @@ case "$ALLOC_ROLLBACK_POINT" in
         ;;
     fd-context)
         ALLOC_ROLLBACK_POINT_ID=5
-        ALLOC_ROLLBACK_VARIANT='IntrusivePoolInsertResult::OutOfMemory'
+        ALLOC_ROLLBACK_VARIANT='bool false'
         ;;
     address-space-backing)
         # #672: the backing record's own allocation, inside
