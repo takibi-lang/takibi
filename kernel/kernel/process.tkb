@@ -2234,6 +2234,15 @@ fn scheduled_process_exited_state(
     return state;
 }
 
+// GitHub issue #693 step 4: the record an owner stands for, tied to the
+// owner. Whoever holds the owner of a process is what keeps its record from
+// being reaped under it (the run guard is held for every transition that
+// takes or gives one), so the pointer lives no longer than the owner.
+fn scheduled_process_record_owned(owner: borrow ScheduledProcessOwner[process])
+        -> *ProcessRecord @ process !{unsafe} {
+    return scheduled_process_record_at(owner.pool_index);
+}
+
 // The pool slot an owner stands for, for the deliveries that write into the
 // frame of the process the owner names and need its record as well.
 fn scheduled_process_owner_slot(
@@ -2248,7 +2257,7 @@ fn scheduled_process_owner_slot(
 fn scheduled_process_saved_frame(
         owner: borrow ScheduledProcessOwner[process]) -> FrameRef[process] {
     return frame_ref_from_saved(
-        scheduled_process_record_at(owner.pool_index).saved_sp,
+        scheduled_process_record_owned(owner).saved_sp,
         owner.generation);
 }
 
@@ -2676,17 +2685,21 @@ fn scheduled_process_alloc_bootstrap() -> ScheduledBootstrapProcessAllocResult
 private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
                                          runnable_now: bool)
         -> ScheduledProcessAllocResult !{unsafe} {
+    // GitHub issue #693 step 4: the process being created is not yet
+    // visible to anyone else, so this path owns it; its record is read
+    // through that ownership.
+    let creating = scheduled_process_owner_new(slot, generation);
     // A run the last reaped process left behind, before asking the page
     // allocator for another one. This is also what preserves the old
     // "a reused slot reuses its run" behaviour now that there are no
     // slots to reuse: a new process reuses a dead one's run.
-    if (scheduled_process_record_at(slot).stack_run == 0) {
+    if (scheduled_process_record_owned(creating).stack_run == 0) {
         let spare: usize = scheduled_process_take_spare_stack_run();
         if (spare != 0) {
-            scheduled_process_record_at(slot).stack_run = spare;
+            scheduled_process_record_owned(creating).stack_run = spare;
         }
     }
-    if (scheduled_process_record_at(slot).stack_run == 0) {
+    if (scheduled_process_record_owned(creating).stack_run == 0) {
         match page_alloc_contiguous(KERNEL_STACK_RUN_PAGES,
                                   PageOwnerTag::KernelStack) {
             PageRunAllocResult::OutOfMemory => {
@@ -2696,13 +2709,13 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
                 let rollback_guard = process_run_lock();
                 scheduled_process_slot_remove(rollback_guard, slot);
                 process_run_unlock(rollback_guard);
-                return ScheduledProcessAllocResult::Full;
+                { let mut __creating_result: ScheduledProcessAllocResult = ScheduledProcessAllocResult::Full; scheduled_process_owner_drop(creating); return __creating_result; }
             }
             PageRunAllocResult::Allocated(run) => {
                 let base: usize = page_run_physical_address(run);
                 if (kernel_stack_run_usable(base)) {
                     page_run_owner_transfer_index(run);
-                    scheduled_process_record_at(slot).stack_run = base;
+                    scheduled_process_record_owned(creating).stack_run = base;
                 } else {
                     // An unaligned run from an allocator that promises
                     // alignment is an invariant break, not a resource
@@ -2717,7 +2730,7 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
                     let rollback_guard = process_run_lock();
                     scheduled_process_slot_remove(rollback_guard, slot);
                     process_run_unlock(rollback_guard);
-                    return ScheduledProcessAllocResult::Full;
+                    { let mut __creating_result: ScheduledProcessAllocResult = ScheduledProcessAllocResult::Full; scheduled_process_owner_drop(creating); return __creating_result; }
                 }
             }
         }
@@ -2729,7 +2742,7 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
             let rollback_guard = process_run_lock();
             scheduled_process_slot_remove(rollback_guard, slot);
             process_run_unlock(rollback_guard);
-            return ScheduledProcessAllocResult::Full;
+            { let mut __creating_result: ScheduledProcessAllocResult = ScheduledProcessAllocResult::Full; scheduled_process_owner_drop(creating); return __creating_result; }
         }
         AddressSpaceEnsureResult::OutOfMemory => {
             kernel_boot_log_resource_exhausted(
@@ -2746,7 +2759,7 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
             let rollback_guard = process_run_lock();
             scheduled_process_slot_remove(rollback_guard, slot);
             process_run_unlock(rollback_guard);
-            return ScheduledProcessAllocResult::Full;
+            { let mut __creating_result: ScheduledProcessAllocResult = ScheduledProcessAllocResult::Full; scheduled_process_owner_drop(creating); return __creating_result; }
         }
     }
     // GitHub issue #392: the fd context is a per-process resource like
@@ -2765,7 +2778,7 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
         let rollback_guard = process_run_lock();
         scheduled_process_slot_remove(rollback_guard, slot);
         process_run_unlock(rollback_guard);
-        return ScheduledProcessAllocResult::Full;
+        { let mut __creating_result: ScheduledProcessAllocResult = ScheduledProcessAllocResult::Full; scheduled_process_owner_drop(creating); return __creating_result; }
     }
     if (unified_fd_context_ensure(slot) == false) {
         kernel_boot_log_resource_exhausted(
@@ -2777,7 +2790,7 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
         let rollback_guard = process_run_lock();
         scheduled_process_slot_remove(rollback_guard, slot);
         process_run_unlock(rollback_guard);
-        return ScheduledProcessAllocResult::Full;
+        { let mut __creating_result: ScheduledProcessAllocResult = ScheduledProcessAllocResult::Full; scheduled_process_owner_drop(creating); return __creating_result; }
     }
     let bottom: usize = kernel_stack_bottom(slot);
     // Unreachable given the branch above stored only a base
@@ -2792,23 +2805,23 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
         let rollback_guard = process_run_lock();
         scheduled_process_slot_remove(rollback_guard, slot);
         process_run_unlock(rollback_guard);
-        return ScheduledProcessAllocResult::Full;
+        { let mut __creating_result: ScheduledProcessAllocResult = ScheduledProcessAllocResult::Full; scheduled_process_owner_drop(creating); return __creating_result; }
     }
-    scheduled_process_record_at(slot).saved_sp =
+    scheduled_process_record_owned(creating).saved_sp =
         bottom + KERNEL_PROCESS_STACK_SIZE;
-    scheduled_process_record_at(slot).stack_owner_cpu =
+    scheduled_process_record_owned(creating).stack_owner_cpu =
         PROCESS_STACK_UNOWNED;
     // GitHub issue #392: the one place a pid is minted. Past every branch
     // that can still refuse the slot.
-    scheduled_process_record_at(slot).pid = scheduled_process_mint_pid();
-    scheduled_process_record_at(slot).session_id = 0;
+    scheduled_process_record_owned(creating).pid = scheduled_process_mint_pid();
+    scheduled_process_record_owned(creating).session_id = 0;
     let counter_frequency: usize = read_cntfrq() as usize;
     let tick_divisor: usize = counter_frequency / 100;
     if (tick_divisor != 0) {
-        scheduled_process_record_at(slot).start_time_ticks =
+        scheduled_process_record_owned(creating).start_time_ticks =
             (read_cntpct() as usize) / tick_divisor;
     } else {
-        scheduled_process_record_at(slot).start_time_ticks = 0;
+        scheduled_process_record_owned(creating).start_time_ticks = 0;
     }
     scheduled_process_record_reset_syscall_state(slot);
     // GitHub issues #375/#376: a reused run would otherwise inherit the
@@ -2841,13 +2854,13 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
     // The boot then died at the first execve instead. The flag has to name
     // the property rather than the caller.
     if (runnable_now) {
-        scheduled_process_record_at(slot).state = ProcessSlotState::Ready;
+        scheduled_process_record_owned(creating).state = ProcessSlotState::Ready;
     } else {
-        scheduled_process_record_at(slot).state =
+        scheduled_process_record_owned(creating).state =
             ProcessSlotState::Constructing;
     }
     let mut handle: ProcessHandle = { slot, generation };
-    return ScheduledProcessAllocResult::Allocated(handle);
+    { let mut __creating_result: ScheduledProcessAllocResult = ScheduledProcessAllocResult::Allocated(handle); scheduled_process_owner_drop(creating); return __creating_result; }
 }
 
 // GitHub issue #479 Group B: the scheduler's lock. Linux calls it
@@ -3026,9 +3039,9 @@ private fn scheduled_process_finish_clone(
         frame: borrow FrameRef[frame_process])
         -> ScheduledProcessState[process, ProcessState::Running] {
     scheduled_process_state_drop(state);
-    scheduled_process_record_at(owner.pool_index).saved_sp =
+    scheduled_process_record_owned(owner).saved_sp =
         frame_ref_address(frame);
-    scheduled_process_record_at(owner.pool_index).state = ProcessSlotState::Running;
+    scheduled_process_record_owned(owner).state = ProcessSlotState::Running;
     return scheduled_process_running_state(owner);
 }
 
@@ -3037,7 +3050,7 @@ private fn scheduled_process_cancel_clone(
         state: sink ScheduledProcessState[process, ProcessState::Constructing])
         -> ScheduledProcessState[process, ProcessState::Exited] {
     scheduled_process_state_drop(state);
-    scheduled_process_record_at(owner.pool_index).state = ProcessSlotState::Exited;
+    scheduled_process_record_owned(owner).state = ProcessSlotState::Exited;
     return scheduled_process_exited_state(owner);
 }
 
@@ -3144,7 +3157,7 @@ fn scheduled_process_start(
     // surfaced later, far away, as two CPUs' oopses on one slot. No log
     // line: the timer's schedule reaches here from interrupt context.
     let stack_owner: usize =
-        scheduled_process_record_at(owner.pool_index).stack_owner_cpu;
+        scheduled_process_record_owned(owner).stack_owner_cpu;
     if (stack_owner != PROCESS_STACK_UNOWNED && stack_owner != cpu_id()) {
         kernel_activity_set(KernelActivity::StartOnOwnedStack);
         kernel_syscall_fail_stop(0);
@@ -3155,7 +3168,7 @@ fn scheduled_process_start(
     // has run something" is recorded.
     kernel_process_cpus_that_ran =
         kernel_process_cpus_that_ran | (1 << cpu_id());
-    scheduled_process_record_at(owner.pool_index).state =
+    scheduled_process_record_owned(owner).state =
         ProcessSlotState::Running;
     let mut running:
         ScheduledProcessState[process, ProcessState::Running] =
@@ -3168,7 +3181,7 @@ fn scheduled_process_yield(
         state: sink ScheduledProcessState[process, ProcessState::Running])
         -> ScheduledProcessState[process, ProcessState::Ready] {
     scheduled_process_state_drop(state);
-    scheduled_process_record_at(owner.pool_index).state =
+    scheduled_process_record_owned(owner).state =
         ProcessSlotState::Ready;
     let mut ready: ScheduledProcessState[process, ProcessState::Ready] =
         { owner.pool_index };
@@ -3184,11 +3197,11 @@ fn scheduled_process_block(
         reason: ProcessWaitReason)
         -> ScheduledProcessState[process, ProcessState::Blocked] {
     scheduled_process_state_drop(state);
-    scheduled_process_record_at(owner.pool_index).state =
+    scheduled_process_record_owned(owner).state =
         ProcessSlotState::Blocked;
     match process_wait_publish(
-            &scheduled_process_record_at(owner.pool_index).wait, reason,
-            scheduled_process_record_at(owner.pool_index).state) {
+            &scheduled_process_record_owned(owner).wait, reason,
+            scheduled_process_record_owned(owner).state) {
         ProcessWaitPublish::Published => {}
         // Set just above, so this is the record changing under a caller that
         // does not hold the run lock.
@@ -3204,7 +3217,7 @@ fn scheduled_process_block(
 // A wait has ended: the published wait is cleared, and so is the decision
 // that led to it, which a rerun of the syscall reads as "first entry" only
 // when nothing is left of the last one.
-private fn scheduled_process_wait_settle(record: *ProcessRecord) {
+private fn scheduled_process_wait_settle(record: borrow *ProcessRecord) {
     process_wait_clear(&record.wait);
     record.pending_block_reason = ProcessWaitReason::None;
 }
@@ -3215,7 +3228,7 @@ fn scheduled_process_wake(
         state: sink ScheduledProcessState[process, ProcessState::Blocked])
         -> ScheduledProcessState[process, ProcessState::Ready] {
     scheduled_process_wait_settle(
-        scheduled_process_record_at(owner.pool_index));
+        scheduled_process_record_owned(owner));
     return scheduled_process_wake_ready(owner, state);
 }
 
@@ -3229,7 +3242,7 @@ fn scheduled_process_wake_keeping_wait4(
         child_pid: usize)
         -> ScheduledProcessState[process, ProcessState::Ready] {
     process_wait_keep_continuation(
-        &scheduled_process_record_at(owner.pool_index).wait, child_pid);
+        &scheduled_process_record_owned(owner).wait, child_pid);
     return scheduled_process_wake_ready(owner, state);
 }
 
@@ -3238,7 +3251,7 @@ private fn scheduled_process_wake_ready(
         state: sink ScheduledProcessState[process, ProcessState::Blocked])
         -> ScheduledProcessState[process, ProcessState::Ready] {
     scheduled_process_state_drop(state);
-    scheduled_process_record_at(owner.pool_index).state =
+    scheduled_process_record_owned(owner).state =
         ProcessSlotState::Ready;
     workload_profile_note_wakeup(
         scheduled_process_pid_of_slot(owner.pool_index));
@@ -3252,7 +3265,7 @@ fn scheduled_process_exit(
         state: sink ScheduledProcessState[process, ProcessState::Running])
         -> ScheduledProcessState[process, ProcessState::Exited] {
     scheduled_process_state_drop(state);
-    scheduled_process_record_at(owner.pool_index).state =
+    scheduled_process_record_owned(owner).state =
         ProcessSlotState::Exited;
     let mut exited: ScheduledProcessState[process, ProcessState::Exited] =
         { owner.pool_index };
@@ -3299,7 +3312,7 @@ fn scheduled_process_reap_teardown(
     kernel_process_trace_record(
         ProcessTraceReap, scheduled_process_pid_of_slot(owner.pool_index),
         owner.generation, 0, 0, 4, 0, owner.pool_index,
-        scheduled_process_record_at(owner.pool_index).saved_sp, 0);
+        scheduled_process_record_owned(owner).saved_sp, 0);
     unified_fd_context_release(owner.pool_index);
     address_space_release_root(owner.pool_index);
     // GitHub issue #392: a root's image record dies with the process, as
