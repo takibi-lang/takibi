@@ -3797,7 +3797,7 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
             process_run_unlock(guard);
             kernel_syscall_fail_stop(frame_sp);
         }
-        scheduled_process_record_of(outgoing).stack_owner_cpu =
+        scheduled_process_record_of_locked(guard, outgoing).stack_owner_cpu =
             PROCESS_STACK_UNOWNED;
         execution_here().stack_live = false;
         if (scheduled_process_state_of(outgoing) ==
@@ -3813,13 +3813,13 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
     let mut incoming: ProcessHandle = execution_here().current_handle;
     if (scheduled_process_handle_matches(incoming) == false ||
         scheduled_process_state_of(incoming) != ProcessSlotState::Running ||
-        scheduled_process_record_of(incoming).stack_owner_cpu !=
+        scheduled_process_record_of_locked(guard, incoming).stack_owner_cpu !=
             PROCESS_STACK_UNOWNED ||
         kernel_process_frame_belongs_to(incoming, frame) == false) {
         process_run_unlock(guard);
         kernel_syscall_fail_stop(frame_sp);
     }
-    scheduled_process_record_of(incoming).stack_owner_cpu = core;
+    scheduled_process_record_of_locked(guard, incoming).stack_owner_cpu = core;
     execution_here().stack_handle = incoming;
     execution_here().stack_live = true;
     let reap_live: bool = execution_here().deferred_reap_live;
@@ -3869,7 +3869,7 @@ fn kernel_process_stack_idle_complete() {
     // miss faulted fetching its own vector, forever, with IRQs masked:
     // the DDB lane's peer that never answered a world stop.
     address_space_activate_root(0);
-    scheduled_process_record_of(outgoing).stack_owner_cpu =
+    scheduled_process_record_of_locked(guard, outgoing).stack_owner_cpu =
         PROCESS_STACK_UNOWNED;
     execution_here().stack_live = false;
     workload_busy_peer_exit_stack_released(
@@ -3909,7 +3909,7 @@ fn kernel_process_stack_idle_yield() {
     }
     // Leave its root before it can run elsewhere, as an exit does.
     address_space_activate_root(0);
-    scheduled_process_record_of(outgoing).stack_owner_cpu =
+    scheduled_process_record_of_locked(guard, outgoing).stack_owner_cpu =
         PROCESS_STACK_UNOWNED;
     execution_here().stack_live = false;
     if (kernel_process_yield_handle(guard, outgoing) == false) {
@@ -3940,7 +3940,7 @@ fn kernel_process_stack_idle_blocked() {
         kernel_syscall_fail_stop(0);
     }
     address_space_activate_root(0);
-    scheduled_process_record_of(outgoing).stack_owner_cpu =
+    scheduled_process_record_of_locked(guard, outgoing).stack_owner_cpu =
         PROCESS_STACK_UNOWNED;
     execution_here().stack_live = false;
     process_run_unlock(guard);
@@ -4779,7 +4779,7 @@ fn kernel_process_core0_leave_excluded(frame: borrow FrameRef[process])
         process_run_unlock(guard);
         return false;
     }
-    scheduled_process_record_at(slot).saved_sp = frame_ref_address(frame);
+    scheduled_process_record_locked(guard, slot).saved_sp = frame_ref_address(frame);
     execution_here().current_live = false;
     execution_here().scheduler_enabled = false;
     execution_here().reschedule_pending = false;
@@ -4823,7 +4823,7 @@ fn kernel_process_migrate_current(frame: borrow FrameRef[process]) -> bool {
     let slot: usize = execution_here().current_handle.pool_index;
     let syscall_needs_core0: bool =
         kernel_process_cpu_allows_slot(cpu_id(), slot);
-    scheduled_process_record_at(slot).saved_sp = frame_ref_address(frame);
+    scheduled_process_record_locked(guard, slot).saved_sp = frame_ref_address(frame);
     if (syscall_needs_core0) {
         scheduled_process_set_core0_for_call(slot, true);
     }
@@ -4881,14 +4881,14 @@ fn kernel_process_stack_owner_probe(pid: usize) -> usize !{unsafe} {
     let mut handle: ProcessHandle = scheduled_process_handle_of_slot(slot);
     if (slot == 0 ||
         scheduled_process_record_state(slot) != ProcessSlotState::Ready ||
-        scheduled_process_record_at(slot).stack_owner_cpu !=
+        scheduled_process_record_locked(guard, slot).stack_owner_cpu !=
             PROCESS_STACK_UNOWNED) {
         process_run_unlock(guard);
         return 0;
     }
     let mut other_cpu: usize = 0;
     if (cpu_id() == 0) { other_cpu = 1; }
-    scheduled_process_record_at(slot).stack_owner_cpu = other_cpu;
+    scheduled_process_record_locked(guard, slot).stack_owner_cpu = other_cpu;
     let mut refused: bool = true;
     match scheduled_process_ready_take(guard, handle) {
         ScheduledProcessReadyTakeResult::Missing => {}
@@ -4898,7 +4898,7 @@ fn kernel_process_stack_owner_probe(pid: usize) -> usize !{unsafe} {
             refused = false;
         }
     }
-    scheduled_process_record_at(slot).stack_owner_cpu = PROCESS_STACK_UNOWNED;
+    scheduled_process_record_locked(guard, slot).stack_owner_cpu = PROCESS_STACK_UNOWNED;
     let mut accepted: bool = false;
     match scheduled_process_ready_take(guard, handle) {
         ScheduledProcessReadyTakeResult::Missing => {}
@@ -5121,7 +5121,7 @@ private fn kernel_process_secondary_start_reserved(
             let next = scheduled_process_saved_frame(owner);
             if (scheduled_process_wait_reason_of(to) ==
                     ProcessWaitReason::ChildExit) {
-                scheduled_process_wait_settle(scheduled_process_record_of(to));
+                scheduled_process_wait_settle(scheduled_process_record_of_locked(guard, to));
             }
             scheduled_process_release(owner, running);
             process_run_unlock(guard);
@@ -5224,7 +5224,7 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
                         ProcessSlotState::Ready &&
                     kernel_process_cpu_allows_slot(cpu_id(), slot) &&
                     workload_busy_starve_skips(
-                        scheduled_process_record_at(slot).pid) == false) {
+                        scheduled_process_record_locked(guard, slot).pid) == false) {
                     let mut handle: ProcessHandle =
                         scheduled_process_handle_of_slot(slot);
                     match scheduled_process_ready_take(guard, handle) {
@@ -5309,7 +5309,7 @@ private fn kernel_process_schedule_reserved(
                 process_run_unlock(guard);
                 return FrameSwitch::Stay;
             }
-            scheduled_process_record_of(from).saved_sp = frame_ref_address(current);
+            scheduled_process_record_of_locked(guard, from).saved_sp = frame_ref_address(current);
             if (kernel_process_yield_handle(guard, from) == false) {
                 process_image_cancel_activation(prepared);
                 let ready = scheduled_process_yield(owner, running);
@@ -5338,7 +5338,7 @@ private fn kernel_process_schedule_reserved(
             let next = scheduled_process_saved_frame(owner);
             if (scheduled_process_wait_reason_of(to) ==
                     ProcessWaitReason::ChildExit) {
-                scheduled_process_wait_settle(scheduled_process_record_of(to));
+                scheduled_process_wait_settle(scheduled_process_record_of_locked(guard, to));
             }
             scheduled_process_release(owner, running);
             process_run_unlock(guard);
@@ -6252,7 +6252,7 @@ private fn kernel_process_tick_leave_excluded(
         process_run_unlock(guard);
         return false;
     }
-    scheduled_process_record_at(slot).saved_sp = frame_ref_address(frame);
+    scheduled_process_record_locked(guard, slot).saved_sp = frame_ref_address(frame);
     // Leave its root before it can run elsewhere, as every idle entry does.
     address_space_activate_root(0);
     execution_here().current_live = false;
@@ -6564,7 +6564,7 @@ private fn kernel_process_block_reserved(
                 process_run_unlock(guard);
                 return BlockSwitch::Retry;
             }
-            scheduled_process_record_of(from).saved_sp = frame_ref_address(current);
+            scheduled_process_record_of_locked(guard, from).saved_sp = frame_ref_address(current);
             match scheduled_process_running_take(guard, from) {
                 ScheduledProcessRunningTakeResult::Missing => {
                     process_image_cancel_activation(prepared);
@@ -6622,7 +6622,7 @@ private fn kernel_process_block_reserved(
             let next = scheduled_process_saved_frame(owner);
             if (scheduled_process_wait_reason_of(to) ==
                     ProcessWaitReason::ChildExit) {
-                scheduled_process_wait_settle(scheduled_process_record_of(to));
+                scheduled_process_wait_settle(scheduled_process_record_of_locked(guard, to));
             }
             scheduled_process_release(owner, running);
             process_run_unlock(guard);
@@ -8245,9 +8245,9 @@ private fn kernel_process_exit_continuation_probe(parent: ProcessHandle) -> bool
             // A Ready parent that a child's exit woke on a CPU that could not
             // run it: the continuation the probe wants to observe.
             match process_wait_publish(
-                    &scheduled_process_record_of(parent).wait,
+                    &scheduled_process_record_of_locked(guard, parent).wait,
                     ProcessWaitReason::ChildExit,
-                    scheduled_process_record_of(parent).state) {
+                    scheduled_process_record_of_locked(guard, parent).state) {
                 ProcessWaitPublish::Published => {}
                 ProcessWaitPublish::Refused => {
                     scheduled_process_release(owner, ready);
@@ -8256,7 +8256,7 @@ private fn kernel_process_exit_continuation_probe(parent: ProcessHandle) -> bool
                 }
             }
             process_wait_keep_continuation(
-                &scheduled_process_record_of(parent).wait, child_pid);
+                &scheduled_process_record_of_locked(guard, parent).wait, child_pid);
             scheduled_process_release(owner, ready);
         }
     }
@@ -8511,7 +8511,7 @@ fn kernel_process_clone_rollback() -> ProcessCloneRollbackResult {
     }
     let mut child: ProcessHandle = execution_here().current_handle;
     let mut parent: ProcessHandle =
-        scheduled_process_record_of(child).parent;
+        scheduled_process_record_running(running_here).parent;
     let guard = process_run_lock();
     // Only this still-Running parent can insert or reap its children during
     // the non-preemptible clone syscall. Validate the head before mutating
@@ -8535,14 +8535,14 @@ fn kernel_process_clone_rollback() -> ProcessCloneRollbackResult {
             // pool. Clearing has_first_child unconditionally loses every
             // older sibling, including live children and waitable zombies.
             let has_following: bool =
-                scheduled_process_record_of(child).has_next_sibling;
+                scheduled_process_record_of_locked(guard, child).has_next_sibling;
             if (has_following) {
-                scheduled_process_record_of(parent).first_child =
-                    scheduled_process_record_of(child).next_sibling;
+                scheduled_process_record_of_locked(guard, parent).first_child =
+                    scheduled_process_record_of_locked(guard, child).next_sibling;
             }
-            scheduled_process_record_of(parent).has_first_child = has_following;
-            scheduled_process_record_of(child).has_parent = false;
-            scheduled_process_record_of(child).has_next_sibling = false;
+            scheduled_process_record_of_locked(guard, parent).has_first_child = has_following;
+            scheduled_process_record_of_locked(guard, child).has_parent = false;
+            scheduled_process_record_of_locked(guard, child).has_next_sibling = false;
             // We still run on the parent's syscall stack. Restore logical
             // current before releasing any of the failed child's resources.
             execution_here().current_handle = parent;
@@ -8605,7 +8605,7 @@ fn kernel_process_clone_context_install(
             let (owner, constructing) = resources;
             // Publish the parent's saved frame before Ready permits a peer
             // to restore it. The child's VM and FD setup already succeeded.
-            scheduled_process_record_of(parent_handle).saved_sp =
+            scheduled_process_record_of_locked(guard, parent_handle).saved_sp =
                 frame_ref_address(parent);
             if (kernel_process_yield_handle(guard, parent_handle) == false) {
                 scheduled_process_release(owner, constructing);
@@ -8678,7 +8678,7 @@ fn kernel_process_session_get(pid: usize) -> ProcessSessionResult {
             return ProcessSessionResult::Missing;
         }
         ProcessSlotForPidResult::Found(slot) => {
-            let id: usize = scheduled_process_record_at(slot).session_id;
+            let id: usize = scheduled_process_record_locked(guard, slot).session_id;
             process_run_unlock(guard);
             return ProcessSessionResult::Id(id);
         }
@@ -8692,7 +8692,7 @@ fn kernel_process_session_create() -> ProcessSessionResult {
         return ProcessSessionResult::Missing;
     }
     let mut current: ProcessHandle = execution_here().current_handle;
-    let record: *ProcessRecord = scheduled_process_record_of(current);
+    let record: *ProcessRecord = scheduled_process_record_of_locked(guard, current);
     if (record.session_id == record.pid) {
         process_run_unlock(guard);
         return ProcessSessionResult::Leader;
@@ -8932,7 +8932,7 @@ private fn kernel_process_exit_reserved(
             // scheduled_process_ready_take's continuation check.
             if (scheduled_process_wait_reason_of(successor) ==
                     ProcessWaitReason::ChildExit) {
-                scheduled_process_wait_settle(scheduled_process_record_of(successor));
+                scheduled_process_wait_settle(scheduled_process_record_of_locked(guard, successor));
             }
             let successor_frame = scheduled_process_saved_frame(owner);
             if (deliver_wait4 || auto_reap) {
