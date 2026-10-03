@@ -8995,13 +8995,13 @@ fn kernel_process_child_exit(status: usize) -> ExitSwitch {
         execution_here().current_handle.generation);
     let mut child: ProcessHandle = current_process_handle(current);
     let mut parent: ProcessHandle =
-        scheduled_process_record_of(child).parent;
+        scheduled_process_record_running(running_here).parent;
     kernel_process_trace_record(
         ProcessTraceExit, scheduled_process_pid_of_handle(child),
         child.generation,
         scheduled_process_pid_of_handle(parent), parent.generation, 2, 0,
         child.pool_index,
-        scheduled_process_record_of(child).saved_sp, status);
+        scheduled_process_record_running(running_here).saved_sp, status);
     // GitHub issue #248: per-slot (indexed by the WAITING PARENT's own
     // pool_index), not a bare global -- see these fields' own header
     // comment for why a global here breaks a multi-level concurrent
@@ -9052,10 +9052,8 @@ fn kernel_process_child_exit(status: usize) -> ExitSwitch {
             }
         }
     }
-    parent = scheduled_process_record_of(child).parent;
-    let auto_reap: bool =
-        scheduled_process_record_of(parent).sigchld_ignored;
-    scheduled_process_record_of(child).exit_status = status;
+    parent = scheduled_process_record_running(running_here).parent;
+    scheduled_process_record_running(running_here).exit_status = status;
     // GitHub issue #653: this CPU's own record of the child it is exiting,
     // for kernel_process_child_exec_reap right after. It used to be written
     // to the PARENT's record, where a sibling's exit on another CPU could
@@ -9070,6 +9068,10 @@ fn kernel_process_child_exit(status: usize) -> ExitSwitch {
     // deliberately later, after activation commits and the guard is released,
     // because it writes user memory and may fault into the scheduler.
     let exit_guard = process_run_lock();
+    // GitHub issue #693 step 3: the parent's disposition is read under the
+    // run lock, which is what keeps the parent from being reaped under it.
+    let auto_reap: bool =
+        scheduled_process_record_of_locked(exit_guard, parent).sigchld_ignored;
     // Signal state and a possible blocked-to-ready transition are part of
     // the same exit scheduling decision. In particular, a peer scheduler
     // must not observe the parent wake before this CPU has stopped exposing
@@ -9118,8 +9120,8 @@ fn kernel_process_child_exit(status: usize) -> ExitSwitch {
                                     exit_guard, parent_owner, ready) {
                                 ScheduledProcessStartCheck::Startable(startable) => {
                                     scheduled_process_wait_settle(
-                                        scheduled_process_record_at(
-                                            parent_owner.pool_index));
+                                        scheduled_process_record_owned(
+                                            parent_owner));
                                     let parent_running =
                                         scheduled_process_start(
                                             parent_owner, startable);
