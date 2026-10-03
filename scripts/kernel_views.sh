@@ -61,6 +61,19 @@ kernel_views_normalize() {
 #
 # Returns 0 when every view passed, 1 when any mismatched, and 2 for a
 # configuration error it has already reported.
+# GitHub issue #692: views whose verdict is a time or tick bound. Under a
+# QEMU label they are recorded, not gating; the RPi5 views gate them.
+KERNEL_VIEWS_QEMU_TIMING_ONLY="workload_busy_pair"
+
+kernel_views_timing_only() {
+    local label="$1" name="$2" timing
+    case "$label" in *qemu*) ;; *) return 1 ;; esac
+    for timing in $KERNEL_VIEWS_QEMU_TIMING_ONLY; do
+        [ "$timing" = "$name" ] && return 0
+    done
+    return 1
+}
+
 kernel_views_compare() {
     local label="$1" artifact_dir="$2" normalized="$3"
     local common_dir="$4" platform_dir="$5" expected_override="${6:-}"
@@ -104,6 +117,16 @@ kernel_views_compare() {
             return 2
         fi
         LC_ALL=C grep -E -f "$filter" "$normalized" >"$actual" || true
+        if ! cmp -s "$expected" "$actual" &&
+                kernel_views_timing_only "$label" "$name"; then
+            # GitHub issue #692: a verdict decided by ticks is decided on the
+            # RPi5, whose views gate it; under QEMU it is recorded, because
+            # the host's load stretches QEMU's time arbitrarily.
+            echo "RECORDED $label view: $name (QEMU timing verdict, gated on the RPi5; #692)"
+            diff -u "$expected" "$actual" || true
+            kernel_views_passed=$((kernel_views_passed + 1))
+            continue
+        fi
         if ! cmp -s "$expected" "$actual"; then
             # Report and keep going. Stopping at the first mismatch made the
             # output say "one view failed" when seventeen had, because every
