@@ -1188,13 +1188,18 @@ fn kernel_syscall_clone_files_begin(parent_slot: usize, child_slot: usize)
         match unified_fd_clone(parent_slot, child_slot) {
             UnifiedFdResult::Invalid => {
                 let mut failed: CloneFileState = { false };
-                scheduled_process_set_clone_file_state(child_slot, failed);
+                let state_guard = process_run_lock();
+                scheduled_process_set_clone_file_state(state_guard,
+                                                       child_slot, failed);
+                process_run_unlock(state_guard);
                 return UnifiedFdResult::Invalid;
             }
             UnifiedFdResult::Ok => {}
         }
         let mut cloned: CloneFileState = { true };
-        scheduled_process_set_clone_file_state(child_slot, cloned);
+        let state_guard = process_run_lock();
+        scheduled_process_set_clone_file_state(state_guard, child_slot, cloned);
+        process_run_unlock(state_guard);
         return UnifiedFdResult::Ok;
     }
     return UnifiedFdResult::Invalid;
@@ -1517,8 +1522,10 @@ fn kernel_connected_descriptor_close(fd: usize) -> bool {
 fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
     let child_slot: usize = kernel_syscall_process_slot();
     if (scheduled_process_slot_valid(child_slot)) {
+        let state_guard = process_run_lock();
         let mut state: CloneFileState =
-            scheduled_process_clone_file_state(child_slot);
+            scheduled_process_clone_file_state(state_guard, child_slot);
+        process_run_unlock(state_guard);
         if (state.file_state_live == false) {
             return KernelFdReapResult::Failed;
         }
@@ -1547,7 +1554,9 @@ fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
             UnifiedFdResult::Ok => {}
         }
         let mut reaped: CloneFileState = { false };
-        scheduled_process_set_clone_file_state(child_slot, reaped);
+        let state_guard = process_run_lock();
+        scheduled_process_set_clone_file_state(state_guard, child_slot, reaped);
+        process_run_unlock(state_guard);
         return KernelFdReapResult::Reaped;
     }
     return KernelFdReapResult::Failed;

@@ -1509,14 +1509,17 @@ fn scheduled_process_set_uart_block_delivery(
     scheduled_process_record_at(slot).uart_block_delivery = delivery;
 }
 
-fn scheduled_process_clone_file_state(slot: usize) -> CloneFileState
+// GitHub issue #693 step 5: under the run guard its callers take.
+fn scheduled_process_clone_file_state(guard: borrow ProcessRunGuard[lock],
+                                      slot: usize) -> CloneFileState
         !{unsafe} {
-    return scheduled_process_record_at(slot).clone_file_state;
+    return scheduled_process_record_locked(guard, slot).clone_file_state;
 }
 
-fn scheduled_process_set_clone_file_state(slot: usize,
-                                          state: CloneFileState) {
-    scheduled_process_record_at(slot).clone_file_state = state;
+fn scheduled_process_set_clone_file_state(
+        guard: borrow ProcessRunGuard[lock], slot: usize,
+        state: CloneFileState) {
+    scheduled_process_record_locked(guard, slot).clone_file_state = state;
 }
 
 // GitHub issue #693 step 5: these per-process syscall flags are read and
