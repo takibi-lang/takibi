@@ -37,11 +37,11 @@ failure toward zero step by step. A holds the analysis of #604, #556, #603,
 #649, #654, #655 (#679 would decide it), #665 (its handoff memo), #670,
 #673, #676 and #678 when they next recur.
 
-**QEMU's role (maintainer, 2026-10-03, plan A):** QEMU gates functional
-verdicts only; verdicts decided by elapsed time or ticks are recorded under
-QEMU and decided on the RPi5 (#692, next in A, before the remaining pools).
-Hardware-specific defects are hunted on the RPi5 under load (#584's churn).
-#655's deep reproduction is paused; its notes are on the issue.
+**QEMU's role (maintainer, 2026-10-03, plan A, done):** QEMU gates
+functional verdicts only; verdicts decided by elapsed time or ticks print
+RECORDED under QEMU and are decided on the RPi5. Hardware-specific defects
+are hunted on the RPi5 under load (#584's churn). #655's deep reproduction
+is paused; its notes are on the issue.
 
 Steps 1 and 2 (true multicore support; the multicore workload on RPi5) are
 finished. #584's churn stays a soak run at natural boundaries, and each
@@ -62,9 +62,14 @@ before its issue closes. The steps keep their numbers, which issues cite.
      cores reach by handle, and a linear struct holding one owner (#131's
      first slice). On it: the three TCP pools, AddressSpaceBacking,
      ProcessImageRecord, ProcessFdContext, FdBlock and SharedObject.
-     ProcessRecord follows #693's seven steps (step 1 done: lock-held
-     reads through the run guard; next ProcessRunning[p]). #674 and #675
-     follow; #680-#682 (the pin's cost) are measured first.
+     ProcessRecord follows #693: steps 1-4 landed (run guard, ProcessRunning,
+     owners; unguarded record reads 300+ -> 81). Next steps 6-7
+     (diagnostics onto the declared peek, accessor cleanup); step 5 (37
+     slot-keyed getters/setters, 129 call sites of mixed lock state) waits
+     for single-agent work and is made safer by #694 (reject re-acquiring
+     the run lock) and #695 (the guards held at each call). #696 types the
+     ensure-then-write of the per-process pools. #674 and #675 follow; #680-#682 (the pin's cost)
+     are measured first.
    - **B, raw atomics:** a typed atomic cell (issue when C is under way);
      the ordering argument stays with #613.
    - **D, F, H** are already single files: declared as mint files in the
