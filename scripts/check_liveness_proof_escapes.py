@@ -71,9 +71,6 @@ ALLOWED = {
     ("kernel/kernel/process.tkb", "scheduled_process_record_peek"):
         "deliberately tolerates a dead slot for crash and trace paths, and "
         "returns the pointer",
-    ("kernel/mm/process_image.tkb", "process_image_record_at"):
-        "an image record is released only when its process is reaped, and "
-        "only that process's exec and fault paths, or its reaper, reach it",
 }
 
 

@@ -58,7 +58,7 @@ case "$ALLOC_ROLLBACK_POINT" in
         ;;
     image-record)
         ALLOC_ROLLBACK_POINT_ID=4
-        ALLOC_ROLLBACK_VARIANT='IntrusivePoolInsertResult::OutOfMemory'
+        ALLOC_ROLLBACK_VARIANT='bool false'
         ;;
     fd-context)
         ALLOC_ROLLBACK_POINT_ID=5

@@ -66,13 +66,14 @@ else
         break scheduled_process_alloc_finish
         continue
         delete
-        break process_image_record_ensure
+        # #672: the record's pool is a built-in region_pool; its ensure
+        # answers a bool, forced false on this core's first call.
+        set $alloc_thread = $_thread
+        break process_image_record_ensure thread $alloc_thread
         continue
         delete
-        break intrusive_pool_insert_zeroed$ProcessImageRecord
-        continue
-        delete
-        takibi-force-variant-return IntrusivePoolInsertResult OutOfMemory
+        return (unsigned char)0
+        printf "takibi-force-variant-return: bool false via registers\n"
         printf "alloc-rollback: forced point=image-record\n"
       else
         if $alloc_rollback_point == 5

@@ -143,8 +143,10 @@ this week were missing exclusion, and three were not shared at all. A lock
 on either of those would have made two cores agree on something that has
 two correct answers.
 
-`mm/process_image.tkb`'s `process_image_pool`/`_ready` and its counted
-fallback pair `process_image_record_missing`/`_count` (issue #392 -- the
+`mm/process_image.tkb`'s `process_image_pool` (the built-in
+`RegionPool(ProcessImageRecord)` since #672: read as a value copy and
+written one field at a time, each under a pin) and its missing-record
+counter `process_image_record_missing_count` (issue #392 -- the
 per-root `ProcessImageRecord` array of #258/#264 is now pooled, keyed by a
 handle in `ProcessRecord`; `process_image_exec_stores`, the per-root
 parking lot for a linear exec image, is gone the same way
