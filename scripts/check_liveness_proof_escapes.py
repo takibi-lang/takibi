@@ -50,10 +50,6 @@ FN_RE = re.compile(r"^(?:private )?fn ([A-Za-z_0-9]+)")
 # not merely that the function returns a pointer. A new entry has to find
 # its own answer.
 ALLOWED = {
-    ("kernel/kernel/fd_table.tkb", "unified_object_at"):
-        "a shared object is freed only when its reference count reaches zero "
-        "under object_refcount_lock, and every reader reaches it through a "
-        "descriptor that holds one of those references",
     ("kernel/kernel/process.tkb", "scheduled_process_record_at"):
         "a record leaves the pool only through scheduled_process_slot_remove, "
         "which requires the process-run guard (#482); a reader of another "

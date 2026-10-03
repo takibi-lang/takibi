@@ -210,8 +210,8 @@ says.
 `fd_context_pool` (the built-in `RegionPool(ProcessFdContext)` since #672,
 reached under a pin) (issue #392 -- the per-process
 `ProcessFdContext` array of #264 is now pooled, keyed by a handle in
-`ProcessRecord`), `object_pool` + `object_records` (per-shared-object,
-#305).
+`ProcessRecord`), `object_pool` (per-shared-object, #305; the built-in
+`RegionPool(SharedObject)` since #672, reached under a pin).
 
 **Why global:** already record-owned; what changed in #392 is that the
 records are allocations rather than array elements, which is why the

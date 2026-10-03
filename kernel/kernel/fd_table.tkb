@@ -769,20 +769,87 @@ struct SharedObject {
     // core 0's non-preemptible dispatch used to serialize for free.
     listener_busy: GuardedField(usize);
 }
-private let mut object_pool: IntrusivePool(SharedObject);
+private let mut object_pool: RegionPool(SharedObject);
 
-// Initialised exactly once, for the same reason fd_context_pool is: a
-// re-init forgets the pool's pages while live descriptors still name
-// addresses inside them (the hazard issue #257 hit). unified_fd_table_init
-// DRAINS this pool instead, which is what its "write Empty into every
-// record" loop meant back when the records were an array.
-private let mut object_pool_ready: bool = false;
+// GitHub issue #672 layer 3: shared objects live in the built-in
+// region_pool. A descriptor's reference (refs) still decides when an object
+// is freed; what reaches its fields is a pin taken from the descriptor's
+// (address, generation) handle, so a pointer to an object cannot outlive
+// the pin, and an object is never freed under one.
+const OBJECT_CHUNK_PAGES: usize = 1;
 
-fn unified_object_pool_init() {
-    if (object_pool_ready) { return; }
-    object_pool_ready = true;
-    intrusive_pool_init(&object_pool);
+private fn object_pool_lock(pool: *RegionPool(SharedObject) @ objects)
+        -> RegionPoolGuard(SharedObject)[objects] !{unsafe} {
+    let flags: usize = mutex_irq_save();
+    return region_pool_lock_saving(pool, flags);
 }
+
+private fn object_pool_unlock(guard: sink RegionPoolGuard(SharedObject)[objects]) {
+    mutex_irq_restore(region_pool_unlock_saved(guard));
+}
+
+// Keeps one empty chunk, as intrusive_pool's default did (#346).
+private fn object_return_empty(guard: borrow RegionPoolGuard(SharedObject)[objects])
+        !{unsafe} {
+    let mut more: bool = region_pool_empty_chunks(guard) > 1;
+    while (more) {
+        match region_pool_shrink(guard) {
+            RegionShrink(SharedObject)::Nothing => { more = false; }
+            RegionShrink(SharedObject)::Chunk(bytes) => {
+                let address: usize = region_bytes_address(bytes);
+                region_release(bytes);
+                page_run_transferred_release_physical(address, OBJECT_CHUNK_PAGES);
+                more = region_pool_empty_chunks(guard) > 1;
+            }
+        }
+    }
+}
+
+private fn object_slot_free(slot: sink RegionSlot(SharedObject)[p, k]) !{unsafe} {
+    let guard = object_pool_lock(&object_pool);
+    match region_slot_adopt(guard, slot) {
+        RegionAdopt(SharedObject)::Foreign(stray) => {
+            unified_fd_record_missing_count = unified_fd_record_missing_count + 1;
+            region_slot_abandon(stray);
+        }
+        RegionAdopt(SharedObject)::Adopted(mine) => {
+            region_free(guard, mine);
+            object_return_empty(guard);
+        }
+    }
+    object_pool_unlock(guard);
+}
+
+private fn object_unpin(pin: sink RegionPin(SharedObject)[p, k]) !{unsafe} {
+    match region_unpin(pin) {
+        RegionUnpin(SharedObject)::Unpinned => {}
+        RegionUnpin(SharedObject)::Last(slot) => { object_slot_free(slot); }
+    }
+}
+
+// A pin on the object a handle names, or Stale.
+private fn object_pin_handle(pool: *RegionPool(SharedObject) @ objects,
+                             handle: UnifiedObjectHandle)
+        -> RegionPinned(SharedObject)[objects] !{unsafe} {
+    let guard = object_pool_lock(pool);
+    let mut region_handle: RegionHandle(SharedObject) =
+        region_handle_from(guard, handle.slot, handle.generation);
+    let pinned = region_pin(guard, region_handle);
+    object_pool_unlock(guard);
+    return pinned;
+}
+
+fn unified_object_live_count() -> usize !{unsafe} {
+    let guard = object_pool_lock(&object_pool);
+    let live: usize = region_pool_live_count(guard);
+    object_pool_unlock(guard);
+    return live;
+}
+
+// The built-in pool starts empty from .bss; kept for its callers.
+// unified_fd_table_init DRAINS this pool, which is what its "write Empty
+// into every record" loop meant back when the records were an array.
+fn unified_object_pool_init() {}
 
 // GitHub issue #391: how many open file descriptions may exist at once,
 // COMPUTED from the memory this kernel has rather than declared. Linux's
@@ -806,59 +873,40 @@ fn unified_object_max_files() -> usize {
 }
 
 private fn unified_object_matches(handle: UnifiedObjectHandle) -> bool !{unsafe} {
-    return intrusive_pool_matches_untrusted(
-        &object_pool, handle.slot, handle.generation);
-}
-
-// The PAYLOAD of a slot the caller has already matched -- the same split,
-// and the same reason for it, as fd_context_address/fd_context_at above.
-// Every caller in this file tests unified_object_matches first; reading
-// the payload of an address that failed that test is exactly the
-// use-after-free the generation check exists to refuse.
-private fn unified_object_at(handle: UnifiedObjectHandle) -> *SharedObject !{unsafe} {
-    // GitHub issue #492: the handle's generation is COMPARED here, so the
-    // rule stated above -- "every caller in this file tests
-    // unified_object_matches first" -- stops being a rule a reader has to
-    // hold and starts being what this function does. The callers keep their
-    // own test, because it decides their OUTCOME (Invalid, Missing) and this
-    // one only decides which record is read.
-    match intrusive_pool_probe_handle_untrusted(&object_pool, handle.slot,
-                                                handle.generation) {
-        IntrusiveSlotProbe::NoPayload => {
-            unified_fd_record_missing_count =
-                unified_fd_record_missing_count + 1;
-            return &unified_object_missing;
-        }
-        IntrusiveSlotProbe::Live(slot_view) => {
-            // GitHub issue #488: this RETURNS the pointer, so it cannot
-            // hold the proof for the pointer's life. The unproven form
-            // names that and counts it in the trusted base; removing it
-            // means migrating this accessor's callers to hold the view
-            // themselves.
-            return intrusive_pool_payload_unproven_of(&object_pool,
-                                                      slot_view);
+    match object_pin_handle(&object_pool, handle) {
+        RegionPinned(SharedObject)::Stale => { return false; }
+        RegionPinned(SharedObject)::Pinned(pin) => {
+            object_unpin(pin);
+            return true;
         }
     }
 }
 
-// Gives the allocation back. Replaces refcount_pool_abandon (an object
-// allocated but never installed) and the Freed arm of the old release
-// (its last holder went away): with the record no longer an array
-// element, both mean the same thing, and neither has an
-// `object_records[slot].kind = Empty` to write afterwards -- the record
-// stops existing instead.
+// An object's kind, read under a pin; Empty when the handle is stale.
+private fn unified_object_kind(handle: UnifiedObjectHandle) -> UnifiedFdKind !{unsafe} {
+    match object_pin_handle(&object_pool, handle) {
+        RegionPinned(SharedObject)::Stale => { return UnifiedFdKind::Empty; }
+        RegionPinned(SharedObject)::Pinned(pin) => {
+            let kind: UnifiedFdKind = region_pin_at(pin).kind;
+            object_unpin(pin);
+            return kind;
+        }
+    }
+}
+
+// Retires an object; whoever gives up its last pin frees it. Called when
+// its last descriptor reference goes (refs reached 0), or by the drain.
 private fn unified_object_free(slot: usize, generation: usize) !{unsafe} {
-    let mut checked: IntrusiveSlotAddress = intrusive_pool_validated_address(
-        &object_pool, slot, generation);
-    let owner = intrusive_owner_new(&object_pool, checked, generation);
-    let guard = intrusive_pool_lock(&object_pool);
-    let (ok, reason) = intrusive_remove_outcome(
-        intrusive_pool_remove(&object_pool, guard, owner));
-    intrusive_pool_unlock(&object_pool, guard);
-    if (ok == false) {
-        kernel_boot_log("fd table: releasing a shared object -- ");
-        kernel_boot_log(reason);
-        kernel_boot_log("\n");
+    let mut handle: UnifiedObjectHandle = unified_object_handle_new(slot, generation);
+    let RegionPinned(SharedObject)::Pinned(pin) = object_pin_handle(&object_pool, handle) else {
+        RegionPinned(SharedObject)::Stale => {
+            kernel_boot_log("fd table: releasing a stale shared object\n");
+            return;
+        }
+    };
+    match region_retire(pin) {
+        RegionRetire(SharedObject)::Pending => {}
+        RegionRetire(SharedObject)::Retired(slot_owned) => { object_slot_free(slot_owned); }
     }
 }
 
@@ -908,11 +956,15 @@ private fn unified_object_retain_locked(
     if (unified_object_matches(handle) == false) {
         return UnifiedObjectRetainResult::Invalid;
     }
-    let object: *SharedObject = unified_object_at(handle);
+    let RegionPinned(SharedObject)::Pinned(object_pin) =
+            object_pin_handle(&object_pool, handle) else {
+        RegionPinned(SharedObject)::Stale => { return UnifiedObjectRetainResult::Invalid; }
+    };
+    let object: *SharedObject = region_pin_at(object_pin);
     let refs = guarded_usize_value(guard, &object.refs);
-    if (*refs >= limit) { return UnifiedObjectRetainResult::Overflow; }
+    if (*refs >= limit) { { let __object_result: UnifiedObjectRetainResult = UnifiedObjectRetainResult::Overflow; object_unpin(object_pin); return __object_result; } }
     *refs = *refs + 1;
-    return UnifiedObjectRetainResult::Ok;
+    { let __object_result: UnifiedObjectRetainResult = UnifiedObjectRetainResult::Ok; object_unpin(object_pin); return __object_result; }
 }
 
 // A release of a live object that nobody holds is the double release
@@ -978,10 +1030,15 @@ private fn unified_object_refs_of(handle: UnifiedObjectHandle) -> usize
         !{unsafe} {
     if (unified_object_matches(handle) == false) { return 0; }
     let guard = guarded_field_take(&object_refcount_lock);
-    let refs = guarded_usize_value(guard, &unified_object_at(handle).refs);
+    let RegionPinned(SharedObject)::Pinned(held_object_pin) =
+            object_pin_handle(&object_pool, handle) else {
+        RegionPinned(SharedObject)::Stale => { guarded_field_give(guard, &object_refcount_lock); return 0; }
+    };
+    let held_object: *SharedObject = region_pin_at(held_object_pin);
+    let refs = guarded_usize_value(guard, &held_object.refs);
     let held: usize = *refs;
     guarded_field_give(guard, &object_refcount_lock);
-    return held;
+    { let __held_object_result: usize = held; object_unpin(held_object_pin); return __held_object_result; }
 }
 
 // GitHub issue #492: lookups that named one of this file's pool slots with
@@ -990,9 +1047,6 @@ private fn unified_object_refs_of(handle: UnifiedObjectHandle) -> usize
 // recycled slot", not which of the three.
 fn unified_fd_recycled_handle_count() -> usize !{unsafe} {
     let mut total: usize = 0;
-    if (object_pool_ready) {
-        total = total + intrusive_pool_recycled_handle_count(&object_pool);
-    }
     return total;
 }
 
@@ -1017,7 +1071,11 @@ private fn unified_object_release_locked(
     if (unified_object_matches(handle) == false) {
         return UnifiedObjectReleaseResult::Invalid;
     }
-    let object: *SharedObject = unified_object_at(handle);
+    let RegionPinned(SharedObject)::Pinned(object_pin) =
+            object_pin_handle(&object_pool, handle) else {
+        RegionPinned(SharedObject)::Stale => { return UnifiedObjectReleaseResult::Invalid; }
+    };
+    let object: *SharedObject = region_pin_at(object_pin);
     // `held < 1` rather than `held == 1`/`!= 0`, and through a `let`
     // rather than off the field: this file's range narrowing is what
     // proves `held - 1` non-negative below, and it narrows the `<` form
@@ -1027,14 +1085,14 @@ private fn unified_object_release_locked(
     let held: usize = *refs;
     if (held < 1) {
         object_double_release_count = object_double_release_count + 1;
-        return UnifiedObjectReleaseResult::Invalid;
+        { let __object_result: UnifiedObjectReleaseResult = UnifiedObjectReleaseResult::Invalid; object_unpin(object_pin); return __object_result; }
     }
     *refs = held - 1;
     if (held < 2) {
         unified_object_free(handle.slot, handle.generation);
-        return UnifiedObjectReleaseResult::Freed;
+        { let __object_result: UnifiedObjectReleaseResult = UnifiedObjectReleaseResult::Freed; object_unpin(object_pin); return __object_result; }
     }
-    return UnifiedObjectReleaseResult::StillHeld;
+    { let __object_result: UnifiedObjectReleaseResult = UnifiedObjectReleaseResult::StillHeld; object_unpin(object_pin); return __object_result; }
 }
 
 // Gives every live object back. Removing a slot can hand its whole chunk
@@ -1042,20 +1100,17 @@ private fn unified_object_release_locked(
 // this restarts the walk after each removal instead of carrying `next`
 // across it. Both loops are bounded by the live count, which is small.
 private fn unified_object_drain_one() -> bool !{unsafe} {
-    let mut at: usize = intrusive_pool_first_slot(&object_pool);
-    while (at != 0) {
-        match intrusive_pool_probe_slot(&object_pool, at) {
-            IntrusiveSlotProbe::NoPayload => {}
-            IntrusiveSlotProbe::Live(slot_view) => {
-                let generation: usize = intrusive_view_generation(slot_view);
-                intrusive_view_drop(slot_view);
-                unified_object_free(at, generation);
-                return true;
-            }
+    let guard = object_pool_lock(&object_pool);
+    let first = region_pool_next(guard, region_handle_from(guard, 0, 0));
+    object_pool_unlock(guard);
+    match first {
+        RegionNext(SharedObject)::End => { return false; }
+        RegionNext(SharedObject)::Next(found) => {
+            unified_object_free(region_handle_address(found),
+                                region_handle_generation(found));
+            return true;
         }
-        at = intrusive_pool_next_slot(&object_pool, at);
     }
-    return false;
 }
 
 private fn unified_object_pool_drain() !{unsafe} {
@@ -1459,7 +1514,11 @@ fn unified_file_open(process: usize, fd: usize, inode: usize,
             // Straight to the payload with no unified_object_matches
             // first: this handle was minted by the allocation two lines
             // up and nothing has run since that could invalidate it.
-            let object: *SharedObject = unified_object_at(handle);
+            let RegionPinned(SharedObject)::Pinned(object_pin) =
+                    object_pin_handle(&object_pool, handle) else {
+                RegionPinned(SharedObject)::Stale => { return UnifiedOpenResult::Full; }
+            };
+            let object: *SharedObject = region_pin_at(object_pin);
             object.inode = inode;
             object.readable = readable;
             object.writable = writable;
@@ -1467,7 +1526,7 @@ fn unified_file_open(process: usize, fd: usize, inode: usize,
                                      handle.generation) {
                 UnifiedFdInstallResult::Invalid => {
                     unified_object_free(handle.slot, handle.generation);
-                    return UnifiedOpenResult::Invalid;
+                    { let __object_result: UnifiedOpenResult = UnifiedOpenResult::Invalid; object_unpin(object_pin); return __object_result; }
                 }
                 // GitHub issue #393: the descriptor block could not be
                 // allocated. The object this function just created has no
@@ -1477,16 +1536,16 @@ fn unified_file_open(process: usize, fd: usize, inode: usize,
                 // empty.
                 UnifiedFdInstallResult::NoMemory => {
                     unified_object_free(handle.slot, handle.generation);
-                    return UnifiedOpenResult::Full;
+                    { let __object_result: UnifiedOpenResult = UnifiedOpenResult::Full; object_unpin(object_pin); return __object_result; }
                 }
                 // Unreachable: object_pool just allocated this slot fresh,
                 // so its refcount is 0 -- see UnifiedFdInstallResult's own
                 // header comment. Handled the same as Invalid for totality.
                 UnifiedFdInstallResult::RefOverflow => {
                     unified_object_free(handle.slot, handle.generation);
-                    return UnifiedOpenResult::Invalid;
+                    { let __object_result: UnifiedOpenResult = UnifiedOpenResult::Invalid; object_unpin(object_pin); return __object_result; }
                 }
-                UnifiedFdInstallResult::Ok => { return UnifiedOpenResult::Ok; }
+                UnifiedFdInstallResult::Ok => { let __object_result: UnifiedOpenResult = UnifiedOpenResult::Ok; object_unpin(object_pin); return __object_result; }
             }
         }
     }
@@ -1498,7 +1557,11 @@ fn unified_directory_open(process: usize, fd: usize, inode: usize)
         UnifiedObjectResult::Invalid => { return UnifiedOpenResult::Invalid; }
         UnifiedObjectResult::Full => { return UnifiedOpenResult::Full; }
         UnifiedObjectResult::Allocated(handle) => {
-            let object: *SharedObject = unified_object_at(handle);
+            let RegionPinned(SharedObject)::Pinned(object_pin) =
+                    object_pin_handle(&object_pool, handle) else {
+                RegionPinned(SharedObject)::Stale => { return UnifiedOpenResult::Full; }
+            };
+            let object: *SharedObject = region_pin_at(object_pin);
             object.inode = inode;
             object.readable = true;
             object.writable = false;
@@ -1506,7 +1569,7 @@ fn unified_directory_open(process: usize, fd: usize, inode: usize)
                                      handle.generation) {
                 UnifiedFdInstallResult::Invalid => {
                     unified_object_free(handle.slot, handle.generation);
-                    return UnifiedOpenResult::Invalid;
+                    { let __object_result: UnifiedOpenResult = UnifiedOpenResult::Invalid; object_unpin(object_pin); return __object_result; }
                 }
                 // GitHub issue #393: the descriptor block could not be
                 // allocated. The object this function just created has no
@@ -1516,13 +1579,13 @@ fn unified_directory_open(process: usize, fd: usize, inode: usize)
                 // empty.
                 UnifiedFdInstallResult::NoMemory => {
                     unified_object_free(handle.slot, handle.generation);
-                    return UnifiedOpenResult::Full;
+                    { let __object_result: UnifiedOpenResult = UnifiedOpenResult::Full; object_unpin(object_pin); return __object_result; }
                 }
                 UnifiedFdInstallResult::RefOverflow => {
                     unified_object_free(handle.slot, handle.generation);
-                    return UnifiedOpenResult::Invalid;
+                    { let __object_result: UnifiedOpenResult = UnifiedOpenResult::Invalid; object_unpin(object_pin); return __object_result; }
                 }
-                UnifiedFdInstallResult::Ok => { return UnifiedOpenResult::Ok; }
+                UnifiedFdInstallResult::Ok => { let __object_result: UnifiedOpenResult = UnifiedOpenResult::Ok; object_unpin(object_pin); return __object_result; }
             }
         }
     }
@@ -1649,7 +1712,7 @@ fn unified_terminal_is_open(process: usize, fd: usize) -> bool !{unsafe} {
     };
     if (entries.slot[index].kind == UnifiedFdKind::Terminal &&
         unified_object_matches(handle)) {
-        { let __ctx_result: bool = unified_object_at(handle).kind == UnifiedFdKind::Terminal; fd_context_unpin(ctx_pin); { let __entries_result: bool = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
+        { let __ctx_result: bool = unified_object_kind(handle) == UnifiedFdKind::Terminal; fd_context_unpin(ctx_pin); { let __entries_result: bool = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
     }
     { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); { let __entries_result: bool = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
 }
@@ -1669,38 +1732,74 @@ fn unified_object_alloc_first(kind: UnifiedFdKind) -> UnifiedObjectResult !{unsa
     if (kind == UnifiedFdKind::Empty) {
         return UnifiedObjectResult::Invalid;
     }
-    unified_object_pool_init();
-    if (intrusive_pool_live_count(&object_pool) >= unified_object_max_files()) {
+    if (unified_object_live_count() >= unified_object_max_files()) {
         return UnifiedObjectResult::Full;
     }
-    let guard = intrusive_pool_lock(&object_pool);
-    let inserted = intrusive_pool_insert_zeroed(&object_pool, guard);
-    intrusive_pool_unlock(&object_pool, guard);
-    match inserted {
-        IntrusivePoolInsertResult::OutOfMemory => {
-            return UnifiedObjectResult::Full;
+    let guard = object_pool_lock(&object_pool);
+    match region_alloc(guard) {
+        RegionAlloc(SharedObject)::Allocated(fresh) => {
+            object_pool_unlock(guard);
+            return unified_object_publish(&object_pool, kind, fresh);
         }
-        IntrusivePoolInsertResult::Allocated(owner) => {
-            let slot: usize = intrusive_slot_address_identity(
-                intrusive_owner_slot(owner));
-            let generation: usize = intrusive_owner_generation(owner);
-            let object: *SharedObject = intrusive_pool_ref(&object_pool, owner);
-            object.kind = kind;
-            // insert_zeroed already left this 0. Written again through the
-            // guard rather than deleted, so that EVERY write to refs has
-            // one discipline -- a field whose writes are guarded except at
-            // creation is a field a reader has to check the history of.
-            // The pool lock is already released above, so this is
-            // fd-refcount taken alone, not under pool: the measured order
-            // (issue #479) is fd -> pool -> page and this does not reverse
-            // it.
-            let refcount_guard = guarded_field_take(&object_refcount_lock);
-            let refs = guarded_usize_value(refcount_guard, &object.refs);
-            *refs = 0;
-            guarded_field_give(refcount_guard, &object_refcount_lock);
-            intrusive_owner_drop(owner);
-            let mut handle: UnifiedObjectHandle = { slot, generation };
-            return UnifiedObjectResult::Allocated(handle);
+        RegionAlloc(SharedObject)::Full => {}
+    }
+    if (object_pool_grow(guard)) {
+        match region_alloc(guard) {
+            RegionAlloc(SharedObject)::Allocated(fresh) => {
+                object_pool_unlock(guard);
+                return unified_object_publish(&object_pool, kind, fresh);
+            }
+            RegionAlloc(SharedObject)::Full => {}
+        }
+    }
+    object_pool_unlock(guard);
+    return UnifiedObjectResult::Full;
+}
+
+// A fresh, zeroed object of `kind`, made Live. Zeroed is the empty record:
+// UnifiedFdKind::Empty and UnifiedListenerState::Closed are tag zero.
+private fn unified_object_publish(pool: *RegionPool(SharedObject) @ objects,
+                                  kind: UnifiedFdKind,
+                                  fresh: sink RegionSlot(SharedObject)[objects, k])
+        -> UnifiedObjectResult !{unsafe} {
+    region_slot_zero(fresh);
+    let object: *SharedObject = region_slot_at(fresh);
+    object.kind = kind;
+    // Zeroing already left this 0. Written again through the guard so that
+    // EVERY write to refs has one discipline. The pool lock is released
+    // above, so this is fd-refcount taken alone (issue #479's order is
+    // fd -> pool -> page).
+    let refcount_guard = guarded_field_take(&object_refcount_lock);
+    let refs = guarded_usize_value(refcount_guard, &object.refs);
+    *refs = 0;
+    guarded_field_give(refcount_guard, &object_refcount_lock);
+    let opening = object_pool_lock(pool);
+    let mut region_handle: RegionHandle(SharedObject) = region_give(opening, fresh);
+    object_pool_unlock(opening);
+    let mut handle: UnifiedObjectHandle = {
+        region_handle_address(region_handle), region_handle_generation(region_handle)
+    };
+    return UnifiedObjectResult::Allocated(handle);
+}
+
+private fn object_pool_grow(guard: borrow RegionPoolGuard(SharedObject)[objects])
+        -> bool !{unsafe} {
+    match page_alloc_contiguous(OBJECT_CHUNK_PAGES, PageOwnerTag::PoolChunk) {
+        PageRunAllocResult::OutOfMemory => { return false; }
+        PageRunAllocResult::Allocated(run_owner) => {
+            let base: usize = page_run_physical_address(run_owner);
+            let _run_index: usize =
+                page_run_owner_transfer_index(run_owner) as usize;
+            let RegionBytes::Assumed(chunk) = region_bytes_assume(
+                base, OBJECT_CHUNK_PAGES * PAGE_SIZE) else {};
+            match region_pool_grow(guard, chunk) {
+                RegionGrow(SharedObject)::Grown => { return true; }
+                RegionGrow(SharedObject)::TooSmall(back) => {
+                    region_release(back);
+                    page_run_transferred_release_physical(base, OBJECT_CHUNK_PAGES);
+                    return false;
+                }
+            }
         }
     }
 }
@@ -1832,7 +1931,7 @@ fn unified_socket_lookup(process: usize, fd: usize,
         entries.slot[index].object, entries.slot[index].generation
     };
     if (entries.slot[index].kind == kind && unified_object_matches(handle)) {
-        if (unified_object_at(handle).kind == kind) {
+        if (unified_object_kind(handle) == kind) {
             { let __ctx_result: UnifiedSocketResult = UnifiedSocketResult::Found(handle); fd_context_unpin(ctx_pin); { let __entries_result: UnifiedSocketResult = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
         }
     }
@@ -1844,7 +1943,11 @@ fn unified_listener_create(process: usize, fd: usize) -> UnifiedOpenResult {
         UnifiedObjectResult::Invalid => { return UnifiedOpenResult::Invalid; }
         UnifiedObjectResult::Full => { return UnifiedOpenResult::Full; }
         UnifiedObjectResult::Allocated(handle) => {
-            let object: *SharedObject = unified_object_at(handle);
+            let RegionPinned(SharedObject)::Pinned(object_pin) =
+                    object_pin_handle(&object_pool, handle) else {
+                RegionPinned(SharedObject)::Stale => { return UnifiedOpenResult::Full; }
+            };
+            let object: *SharedObject = region_pin_at(object_pin);
             object.listener_state = UnifiedListenerState::Created;
             object.port = 0;
             object.pending_accept_slot = 0;
@@ -1853,7 +1956,7 @@ fn unified_listener_create(process: usize, fd: usize) -> UnifiedOpenResult {
                                      handle.generation) {
                 UnifiedFdInstallResult::Invalid => {
                     unified_object_free(handle.slot, handle.generation);
-                    return UnifiedOpenResult::Invalid;
+                    { let __object_result: UnifiedOpenResult = UnifiedOpenResult::Invalid; object_unpin(object_pin); return __object_result; }
                 }
                 // GitHub issue #393: the descriptor block could not be
                 // allocated. The object this function just created has no
@@ -1863,13 +1966,13 @@ fn unified_listener_create(process: usize, fd: usize) -> UnifiedOpenResult {
                 // empty.
                 UnifiedFdInstallResult::NoMemory => {
                     unified_object_free(handle.slot, handle.generation);
-                    return UnifiedOpenResult::Full;
+                    { let __object_result: UnifiedOpenResult = UnifiedOpenResult::Full; object_unpin(object_pin); return __object_result; }
                 }
                 UnifiedFdInstallResult::RefOverflow => {
                     unified_object_free(handle.slot, handle.generation);
-                    return UnifiedOpenResult::Invalid;
+                    { let __object_result: UnifiedOpenResult = UnifiedOpenResult::Invalid; object_unpin(object_pin); return __object_result; }
                 }
-                UnifiedFdInstallResult::Ok => { return UnifiedOpenResult::Ok; }
+                UnifiedFdInstallResult::Ok => { let __object_result: UnifiedOpenResult = UnifiedOpenResult::Ok; object_unpin(object_pin); return __object_result; }
             }
         }
     }
@@ -1883,14 +1986,18 @@ fn unified_connection_create(process: usize, fd: usize,
         UnifiedObjectResult::Invalid => { return UnifiedOpenResult::Invalid; }
         UnifiedObjectResult::Full => { return UnifiedOpenResult::Full; }
         UnifiedObjectResult::Allocated(handle) => {
-            let object: *SharedObject = unified_object_at(handle);
+            let RegionPinned(SharedObject)::Pinned(object_pin) =
+                    object_pin_handle(&object_pool, handle) else {
+                RegionPinned(SharedObject)::Stale => { return UnifiedOpenResult::Full; }
+            };
+            let object: *SharedObject = region_pin_at(object_pin);
             object.transport_slot = transport_slot;
             object.transport_generation = transport_generation;
             match unified_fd_install(process, fd, handle.slot,
                                      handle.generation) {
                 UnifiedFdInstallResult::Invalid => {
                     unified_object_free(handle.slot, handle.generation);
-                    return UnifiedOpenResult::Invalid;
+                    { let __object_result: UnifiedOpenResult = UnifiedOpenResult::Invalid; object_unpin(object_pin); return __object_result; }
                 }
                 // GitHub issue #393: the descriptor block could not be
                 // allocated. The object this function just created has no
@@ -1900,13 +2007,13 @@ fn unified_connection_create(process: usize, fd: usize,
                 // empty.
                 UnifiedFdInstallResult::NoMemory => {
                     unified_object_free(handle.slot, handle.generation);
-                    return UnifiedOpenResult::Full;
+                    { let __object_result: UnifiedOpenResult = UnifiedOpenResult::Full; object_unpin(object_pin); return __object_result; }
                 }
                 UnifiedFdInstallResult::RefOverflow => {
                     unified_object_free(handle.slot, handle.generation);
-                    return UnifiedOpenResult::Invalid;
+                    { let __object_result: UnifiedOpenResult = UnifiedOpenResult::Invalid; object_unpin(object_pin); return __object_result; }
                 }
-                UnifiedFdInstallResult::Ok => { return UnifiedOpenResult::Ok; }
+                UnifiedFdInstallResult::Ok => { let __object_result: UnifiedOpenResult = UnifiedOpenResult::Ok; object_unpin(object_pin); return __object_result; }
             }
         }
     }
@@ -2014,10 +2121,15 @@ fn unified_fd_close_exec_descriptors(process: usize) !{unsafe} {
 fn unified_object_references(handle: UnifiedObjectHandle) -> usize !{unsafe} {
     if (unified_object_matches(handle) == false) { return 0; }
     let guard = guarded_field_take(&object_refcount_lock);
-    let refs = guarded_usize_value(guard, &unified_object_at(handle).refs);
+    let RegionPinned(SharedObject)::Pinned(held_object_pin) =
+            object_pin_handle(&object_pool, handle) else {
+        RegionPinned(SharedObject)::Stale => { guarded_field_give(guard, &object_refcount_lock); return 0; }
+    };
+    let held_object: *SharedObject = region_pin_at(held_object_pin);
+    let refs = guarded_usize_value(guard, &held_object.refs);
     let held: usize = *refs;
     guarded_field_give(guard, &object_refcount_lock);
-    return held;
+    { let __held_object_result: usize = held; object_unpin(held_object_pin); return __held_object_result; }
 }
 
 // GitHub issue #598: one call at a time on a listener. Linear, so every
@@ -2045,20 +2157,25 @@ fn unified_listener_claim(handle: UnifiedObjectHandle) -> ListenerClaimResult
     if (unified_object_matches(handle) == false) {
         return ListenerClaimResult::Missing;
     }
-    if (unified_object_at(handle).kind != UnifiedFdKind::Listener) {
+    if (unified_object_kind(handle) != UnifiedFdKind::Listener) {
         return ListenerClaimResult::Missing;
     }
     let guard = guarded_field_take(&object_refcount_lock);
+    let RegionPinned(SharedObject)::Pinned(held_object_pin) =
+            object_pin_handle(&object_pool, handle) else {
+        RegionPinned(SharedObject)::Stale => { guarded_field_give(guard, &object_refcount_lock); return ListenerClaimResult::Missing; }
+    };
+    let held_object: *SharedObject = region_pin_at(held_object_pin);
     let busy = guarded_usize_value(guard,
-                                   &unified_object_at(handle).listener_busy);
+                                   &held_object.listener_busy);
     if (*busy != 0) {
         guarded_field_give(guard, &object_refcount_lock);
-        return ListenerClaimResult::Busy;
+        { let __held_object_result: ListenerClaimResult = ListenerClaimResult::Busy; object_unpin(held_object_pin); return __held_object_result; }
     }
     *busy = 1;
     guarded_field_give(guard, &object_refcount_lock);
-    return ListenerClaimResult::Claimed(
-        listener_claim_new(handle.slot, handle.generation));
+    { let __held_object_result: ListenerClaimResult = ListenerClaimResult::Claimed(
+        listener_claim_new(handle.slot, handle.generation)); object_unpin(held_object_pin); return __held_object_result; }
 }
 
 fn unified_listener_release(claim: sink ListenerClaim[object]) !{unsafe} {
@@ -2066,18 +2183,29 @@ fn unified_listener_release(claim: sink ListenerClaim[object]) !{unsafe} {
         unified_object_handle_new(claim.address, claim.generation);
     if (unified_object_matches(handle) == false) { return; }
     let guard = guarded_field_take(&object_refcount_lock);
+    let RegionPinned(SharedObject)::Pinned(held_object_pin) =
+            object_pin_handle(&object_pool, handle) else {
+        RegionPinned(SharedObject)::Stale => { guarded_field_give(guard, &object_refcount_lock); return; }
+    };
+    let held_object: *SharedObject = region_pin_at(held_object_pin);
     let busy = guarded_usize_value(guard,
-                                   &unified_object_at(handle).listener_busy);
+                                   &held_object.listener_busy);
     *busy = 0;
     guarded_field_give(guard, &object_refcount_lock);
+    object_unpin(held_object_pin);
 }
 
 fn unified_listener_state(handle: UnifiedObjectHandle) -> UnifiedListenerState {
     if (unified_object_matches(handle)) {
-        let object: *SharedObject = unified_object_at(handle);
+        let RegionPinned(SharedObject)::Pinned(object_pin) =
+                object_pin_handle(&object_pool, handle) else {
+            RegionPinned(SharedObject)::Stale => { return UnifiedListenerState::Closed; }
+        };
+        let object: *SharedObject = region_pin_at(object_pin);
         if (object.kind == UnifiedFdKind::Listener) {
-            return object.listener_state;
+            { let __object_result: UnifiedListenerState = object.listener_state; object_unpin(object_pin); return __object_result; }
         }
+        object_unpin(object_pin);
     }
     return UnifiedListenerState::Closed;
 }
@@ -2086,19 +2214,29 @@ fn unified_listener_set_state(handle: UnifiedObjectHandle,
                               state: UnifiedListenerState)
         -> UnifiedFdResult {
     if (unified_object_matches(handle)) {
-        let object: *SharedObject = unified_object_at(handle);
+        let RegionPinned(SharedObject)::Pinned(object_pin) =
+                object_pin_handle(&object_pool, handle) else {
+            RegionPinned(SharedObject)::Stale => { return UnifiedFdResult::Invalid; }
+        };
+        let object: *SharedObject = region_pin_at(object_pin);
         if (object.kind == UnifiedFdKind::Listener) {
             object.listener_state = state;
-            return UnifiedFdResult::Ok;
+            { let __object_result: UnifiedFdResult = UnifiedFdResult::Ok; object_unpin(object_pin); return __object_result; }
         }
+        object_unpin(object_pin);
     }
     return UnifiedFdResult::Invalid;
 }
 
 fn unified_listener_port(handle: UnifiedObjectHandle) -> u16 {
     if (unified_object_matches(handle)) {
-        let object: *SharedObject = unified_object_at(handle);
-        if (object.kind == UnifiedFdKind::Listener) { return object.port; }
+        let RegionPinned(SharedObject)::Pinned(object_pin) =
+                object_pin_handle(&object_pool, handle) else {
+            RegionPinned(SharedObject)::Stale => { return 0; }
+        };
+        let object: *SharedObject = region_pin_at(object_pin);
+        if (object.kind == UnifiedFdKind::Listener) { { let __object_result: u16 = object.port; object_unpin(object_pin); return __object_result; } }
+        object_unpin(object_pin);
     }
     return 0;
 }
@@ -2106,11 +2244,16 @@ fn unified_listener_port(handle: UnifiedObjectHandle) -> u16 {
 fn unified_listener_set_port(handle: UnifiedObjectHandle, port: u16)
         -> UnifiedFdResult {
     if (unified_object_matches(handle)) {
-        let object: *SharedObject = unified_object_at(handle);
+        let RegionPinned(SharedObject)::Pinned(object_pin) =
+                object_pin_handle(&object_pool, handle) else {
+            RegionPinned(SharedObject)::Stale => { return UnifiedFdResult::Invalid; }
+        };
+        let object: *SharedObject = region_pin_at(object_pin);
         if (object.kind == UnifiedFdKind::Listener) {
             object.port = port;
-            return UnifiedFdResult::Ok;
+            { let __object_result: UnifiedFdResult = UnifiedFdResult::Ok; object_unpin(object_pin); return __object_result; }
         }
+        object_unpin(object_pin);
     }
     return UnifiedFdResult::Invalid;
 }
@@ -2120,20 +2263,30 @@ fn unified_listener_set_port(handle: UnifiedObjectHandle, port: u16)
 // address no slot has, the same sentinel unified_connection_slot uses.
 fn unified_listener_pending_slot(handle: UnifiedObjectHandle) -> usize {
     if (unified_object_matches(handle)) {
-        let object: *SharedObject = unified_object_at(handle);
+        let RegionPinned(SharedObject)::Pinned(object_pin) =
+                object_pin_handle(&object_pool, handle) else {
+            RegionPinned(SharedObject)::Stale => { return 0; }
+        };
+        let object: *SharedObject = region_pin_at(object_pin);
         if (object.kind == UnifiedFdKind::Listener) {
-            return object.pending_accept_slot;
+            { let __object_result: usize = object.pending_accept_slot; object_unpin(object_pin); return __object_result; }
         }
+        object_unpin(object_pin);
     }
     return 0;
 }
 
 fn unified_listener_pending_generation(handle: UnifiedObjectHandle) -> usize {
     if (unified_object_matches(handle)) {
-        let object: *SharedObject = unified_object_at(handle);
+        let RegionPinned(SharedObject)::Pinned(object_pin) =
+                object_pin_handle(&object_pool, handle) else {
+            RegionPinned(SharedObject)::Stale => { return 0; }
+        };
+        let object: *SharedObject = region_pin_at(object_pin);
         if (object.kind == UnifiedFdKind::Listener) {
-            return object.pending_accept_generation;
+            { let __object_result: usize = object.pending_accept_generation; object_unpin(object_pin); return __object_result; }
         }
+        object_unpin(object_pin);
     }
     return 0;
 }
@@ -2141,22 +2294,32 @@ fn unified_listener_pending_generation(handle: UnifiedObjectHandle) -> usize {
 fn unified_listener_set_pending(handle: UnifiedObjectHandle, slot: usize,
                                 generation: usize) -> UnifiedFdResult {
     if (unified_object_matches(handle)) {
-        let object: *SharedObject = unified_object_at(handle);
+        let RegionPinned(SharedObject)::Pinned(object_pin) =
+                object_pin_handle(&object_pool, handle) else {
+            RegionPinned(SharedObject)::Stale => { return UnifiedFdResult::Invalid; }
+        };
+        let object: *SharedObject = region_pin_at(object_pin);
         if (object.kind == UnifiedFdKind::Listener) {
             object.pending_accept_slot = slot;
             object.pending_accept_generation = generation;
-            return UnifiedFdResult::Ok;
+            { let __object_result: UnifiedFdResult = UnifiedFdResult::Ok; object_unpin(object_pin); return __object_result; }
         }
+        object_unpin(object_pin);
     }
     return UnifiedFdResult::Invalid;
 }
 
 fn unified_connection_slot(handle: UnifiedObjectHandle) -> usize {
     if (unified_object_matches(handle)) {
-        let object: *SharedObject = unified_object_at(handle);
+        let RegionPinned(SharedObject)::Pinned(object_pin) =
+                object_pin_handle(&object_pool, handle) else {
+            RegionPinned(SharedObject)::Stale => { return 0; }
+        };
+        let object: *SharedObject = region_pin_at(object_pin);
         if (object.kind == UnifiedFdKind::Connection) {
-            return object.transport_slot;
+            { let __object_result: usize = object.transport_slot; object_unpin(object_pin); return __object_result; }
         }
+        object_unpin(object_pin);
     }
     // GitHub issue #391: 0, not SHARED_OBJECT_MAX. The old sentinel was
     // "one past the last valid index", which stopped meaning anything
@@ -2168,10 +2331,15 @@ fn unified_connection_slot(handle: UnifiedObjectHandle) -> usize {
 
 fn unified_connection_generation(handle: UnifiedObjectHandle) -> usize {
     if (unified_object_matches(handle)) {
-        let object: *SharedObject = unified_object_at(handle);
+        let RegionPinned(SharedObject)::Pinned(object_pin) =
+                object_pin_handle(&object_pool, handle) else {
+            RegionPinned(SharedObject)::Stale => { return 0; }
+        };
+        let object: *SharedObject = region_pin_at(object_pin);
         if (object.kind == UnifiedFdKind::Connection) {
-            return object.transport_generation;
+            { let __object_result: usize = object.transport_generation; object_unpin(object_pin); return __object_result; }
         }
+        object_unpin(object_pin);
     }
     return 0;
 }
@@ -2197,7 +2365,7 @@ fn unified_file_lookup(process: usize, fd: usize) -> UnifiedFileResult {
     };
     if (entries.slot[index].kind == UnifiedFdKind::OpenFile &&
         unified_object_matches(handle)) {
-        if (unified_object_at(handle).kind == UnifiedFdKind::OpenFile) {
+        if (unified_object_kind(handle) == UnifiedFdKind::OpenFile) {
             { let __ctx_result: UnifiedFileResult = UnifiedFileResult::Found(handle); fd_context_unpin(ctx_pin); { let __entries_result: UnifiedFileResult = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
         }
     }
@@ -2206,8 +2374,13 @@ fn unified_file_lookup(process: usize, fd: usize) -> UnifiedFileResult {
 
 fn unified_file_inode(handle: UnifiedObjectHandle) -> usize {
     if (unified_object_matches(handle)) {
-        let object: *SharedObject = unified_object_at(handle);
-        if (object.kind == UnifiedFdKind::OpenFile) { return object.inode; }
+        let RegionPinned(SharedObject)::Pinned(object_pin) =
+                object_pin_handle(&object_pool, handle) else {
+            RegionPinned(SharedObject)::Stale => { return 0; }
+        };
+        let object: *SharedObject = region_pin_at(object_pin);
+        if (object.kind == UnifiedFdKind::OpenFile) { { let __object_result: usize = object.inode; object_unpin(object_pin); return __object_result; } }
+        object_unpin(object_pin);
     }
     return 0;
 }
@@ -2236,7 +2409,7 @@ fn unified_directory_lookup(process: usize, fd: usize)
     };
     if (entries.slot[index].kind == UnifiedFdKind::Directory &&
         unified_object_matches(handle)) {
-        if (unified_object_at(handle).kind == UnifiedFdKind::Directory) {
+        if (unified_object_kind(handle) == UnifiedFdKind::Directory) {
             { let __ctx_result: UnifiedDirectoryResult = UnifiedDirectoryResult::Found(handle); fd_context_unpin(ctx_pin); { let __entries_result: UnifiedDirectoryResult = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
         }
     }
@@ -2245,22 +2418,35 @@ fn unified_directory_lookup(process: usize, fd: usize)
 
 fn unified_directory_inode(handle: UnifiedObjectHandle) -> usize {
     if (unified_object_matches(handle)) {
-        let object: *SharedObject = unified_object_at(handle);
-        if (object.kind == UnifiedFdKind::Directory) { return object.inode; }
+        let RegionPinned(SharedObject)::Pinned(object_pin) =
+                object_pin_handle(&object_pool, handle) else {
+            RegionPinned(SharedObject)::Stale => { return 0; }
+        };
+        let object: *SharedObject = region_pin_at(object_pin);
+        if (object.kind == UnifiedFdKind::Directory) { { let __object_result: usize = object.inode; object_unpin(object_pin); return __object_result; } }
+        object_unpin(object_pin);
     }
     return 0;
 }
 
 fn unified_file_is_readable(handle: UnifiedObjectHandle) -> bool {
     if (unified_object_matches(handle) == false) { return false; }
-    let object: *SharedObject = unified_object_at(handle);
-    return object.kind == UnifiedFdKind::OpenFile && object.readable;
+    let RegionPinned(SharedObject)::Pinned(object_pin) =
+            object_pin_handle(&object_pool, handle) else {
+        RegionPinned(SharedObject)::Stale => { return false; }
+    };
+    let object: *SharedObject = region_pin_at(object_pin);
+    { let __object_result: bool = object.kind == UnifiedFdKind::OpenFile && object.readable; object_unpin(object_pin); return __object_result; }
 }
 
 fn unified_file_is_writable(handle: UnifiedObjectHandle) -> bool {
     if (unified_object_matches(handle) == false) { return false; }
-    let object: *SharedObject = unified_object_at(handle);
-    return object.kind == UnifiedFdKind::OpenFile && object.writable;
+    let RegionPinned(SharedObject)::Pinned(object_pin) =
+            object_pin_handle(&object_pool, handle) else {
+        RegionPinned(SharedObject)::Stale => { return false; }
+    };
+    let object: *SharedObject = region_pin_at(object_pin);
+    { let __object_result: bool = object.kind == UnifiedFdKind::OpenFile && object.writable; object_unpin(object_pin); return __object_result; }
 }
 
 // GitHub issue #401: how many holders one shared object can have, COMPUTED
@@ -2344,30 +2530,34 @@ fn unified_fd_install(process: usize, fd: usize, object_value: usize,
     if (unified_object_matches(handle) == false) {
         { let __ctx_result: UnifiedFdInstallResult = UnifiedFdInstallResult::Invalid; fd_context_unpin(ctx_pin); return __ctx_result; }
     }
-    let object: *SharedObject = unified_object_at(handle);
+    let RegionPinned(SharedObject)::Pinned(object_pin) =
+            object_pin_handle(&object_pool, handle) else {
+        RegionPinned(SharedObject)::Stale => { let __ctx_result: UnifiedFdInstallResult = UnifiedFdInstallResult::Invalid; fd_context_unpin(ctx_pin); return __ctx_result; }
+    };
+    let object: *SharedObject = region_pin_at(object_pin);
     // The block is made here rather than at allocation time, so this is
     // where the page allocator can be empty -- reported as its own variant
     // rather than folded into the bad-argument one, the discipline issue
     // #295 established for every other pool in this file.
     let (block, block_generation) = fd_block_ensure(ctx, fd);
-    if (block == 0) { { let __ctx_result: UnifiedFdInstallResult = UnifiedFdInstallResult::NoMemory; fd_context_unpin(ctx_pin); return __ctx_result; } }
+    if (block == 0) { { let __ctx_result: UnifiedFdInstallResult = UnifiedFdInstallResult::NoMemory; fd_context_unpin(ctx_pin); { let __object_result: UnifiedFdInstallResult = __ctx_result; object_unpin(object_pin); return __object_result; } } }
     let RegionPinned(FdBlock)::Pinned(entries_pin) =
             fd_block_pin(&fd_block_pool, block, block_generation) else {
-        RegionPinned(FdBlock)::Stale => { let __ctx_result: UnifiedFdInstallResult = UnifiedFdInstallResult::NoMemory; fd_context_unpin(ctx_pin); return __ctx_result; }
+        RegionPinned(FdBlock)::Stale => { let __ctx_result: UnifiedFdInstallResult = UnifiedFdInstallResult::NoMemory; fd_context_unpin(ctx_pin); let __object_result: UnifiedFdInstallResult = __ctx_result; object_unpin(object_pin); return __object_result; }
     };
     let entries: *FdBlock = region_pin_at(entries_pin);
     let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
     if (entries.slot[index].kind != UnifiedFdKind::Empty ||
         object.kind == UnifiedFdKind::Empty) {
-        { let __ctx_result: UnifiedFdInstallResult = UnifiedFdInstallResult::Invalid; fd_context_unpin(ctx_pin); { let __entries_result: UnifiedFdInstallResult = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
+        { let __ctx_result: UnifiedFdInstallResult = UnifiedFdInstallResult::Invalid; fd_context_unpin(ctx_pin); { let __entries_result: UnifiedFdInstallResult = __ctx_result; fd_block_unpin(entries_pin); { let __object_result: UnifiedFdInstallResult = __entries_result; object_unpin(object_pin); return __object_result; } } }
     }
     match unified_object_retain(handle) {
         UnifiedObjectRetainResult::Invalid => {
-            { let __ctx_result: UnifiedFdInstallResult = UnifiedFdInstallResult::Invalid; fd_context_unpin(ctx_pin); { let __entries_result: UnifiedFdInstallResult = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
+            { let __ctx_result: UnifiedFdInstallResult = UnifiedFdInstallResult::Invalid; fd_context_unpin(ctx_pin); { let __entries_result: UnifiedFdInstallResult = __ctx_result; fd_block_unpin(entries_pin); { let __object_result: UnifiedFdInstallResult = __entries_result; object_unpin(object_pin); return __object_result; } } }
         }
         UnifiedObjectRetainResult::Overflow => {
             unified_object_ref_bound_break(object_value);
-            { let __ctx_result: UnifiedFdInstallResult = UnifiedFdInstallResult::RefOverflow; fd_context_unpin(ctx_pin); { let __entries_result: UnifiedFdInstallResult = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
+            { let __ctx_result: UnifiedFdInstallResult = UnifiedFdInstallResult::RefOverflow; fd_context_unpin(ctx_pin); { let __entries_result: UnifiedFdInstallResult = __ctx_result; fd_block_unpin(entries_pin); { let __object_result: UnifiedFdInstallResult = __entries_result; object_unpin(object_pin); return __object_result; } } }
         }
         UnifiedObjectRetainResult::Ok => {}
     }
@@ -2375,7 +2565,7 @@ fn unified_fd_install(process: usize, fd: usize, object_value: usize,
     entries.slot[index].object = object_value;
     entries.slot[index].generation = generation;
     entries.slot[index].close_on_exec = false;
-    { let __ctx_result: UnifiedFdInstallResult = UnifiedFdInstallResult::Ok; fd_context_unpin(ctx_pin); { let __entries_result: UnifiedFdInstallResult = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
+    { let __ctx_result: UnifiedFdInstallResult = UnifiedFdInstallResult::Ok; fd_context_unpin(ctx_pin); { let __entries_result: UnifiedFdInstallResult = __ctx_result; fd_block_unpin(entries_pin); { let __object_result: UnifiedFdInstallResult = __entries_result; object_unpin(object_pin); return __object_result; } } }
 }
 
 fn unified_fd_close(process: usize, fd: usize) -> UnifiedFdResult !{unsafe} {
@@ -2567,7 +2757,7 @@ private fn unified_fd_clone_run(parent: usize, child: usize,
                 if (unified_object_matches(parent_handle) == false) {
                     { let __child_ctx_result: UnifiedFdCloneRunResult = UnifiedFdCloneRunResult::Invalid; fd_context_unpin(child_ctx_pin); { let __parent_ctx_result: UnifiedFdCloneRunResult = __child_ctx_result; fd_context_unpin(parent_ctx_pin); { let __entries_result: UnifiedFdCloneRunResult = __parent_ctx_result; fd_block_unpin(entries_pin); return __entries_result; } } }
                 }
-                if (unified_object_at(parent_handle).kind !=
+                if (unified_object_kind(parent_handle) !=
                         entries.slot[index].kind ||
                     unified_object_references(parent_handle) == 0) {
                     { let __child_ctx_result: UnifiedFdCloneRunResult = UnifiedFdCloneRunResult::Invalid; fd_context_unpin(child_ctx_pin); { let __parent_ctx_result: UnifiedFdCloneRunResult = __child_ctx_result; fd_context_unpin(parent_ctx_pin); { let __entries_result: UnifiedFdCloneRunResult = __parent_ctx_result; fd_block_unpin(entries_pin); return __entries_result; } } }
@@ -2713,12 +2903,17 @@ fn unified_fd_set_offset(process: usize, fd: usize, offset: usize)
     if ((entries.slot[index].kind == UnifiedFdKind::OpenFile ||
          entries.slot[index].kind == UnifiedFdKind::Directory) &&
         unified_object_matches(handle)) {
-        let object: *SharedObject = unified_object_at(handle);
+        let RegionPinned(SharedObject)::Pinned(object_pin) =
+                object_pin_handle(&object_pool, handle) else {
+            RegionPinned(SharedObject)::Stale => { let __ctx_result: UnifiedFdResult = UnifiedFdResult::Invalid; fd_block_unpin(entries_pin); fd_context_unpin(ctx_pin); return __ctx_result; }
+        };
+        let object: *SharedObject = region_pin_at(object_pin);
         if (object.kind == UnifiedFdKind::OpenFile ||
             object.kind == UnifiedFdKind::Directory) {
             object.offset = offset;
-            { let __ctx_result: UnifiedFdResult = UnifiedFdResult::Ok; fd_context_unpin(ctx_pin); { let __entries_result: UnifiedFdResult = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
+            { let __ctx_result: UnifiedFdResult = UnifiedFdResult::Ok; fd_context_unpin(ctx_pin); { let __entries_result: UnifiedFdResult = __ctx_result; fd_block_unpin(entries_pin); { let __object_result: UnifiedFdResult = __entries_result; object_unpin(object_pin); return __object_result; } } }
         }
+        object_unpin(object_pin);
     }
     { let __ctx_result: UnifiedFdResult = UnifiedFdResult::Invalid; fd_context_unpin(ctx_pin); { let __entries_result: UnifiedFdResult = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
 }
@@ -2745,11 +2940,16 @@ fn unified_fd_offset(process: usize, fd: usize) -> UnifiedOffsetResult {
     if ((entries.slot[index].kind == UnifiedFdKind::OpenFile ||
          entries.slot[index].kind == UnifiedFdKind::Directory) &&
         unified_object_matches(handle)) {
-        let object: *SharedObject = unified_object_at(handle);
+        let RegionPinned(SharedObject)::Pinned(object_pin) =
+                object_pin_handle(&object_pool, handle) else {
+            RegionPinned(SharedObject)::Stale => { let __ctx_result: UnifiedOffsetResult = UnifiedOffsetResult::Missing; fd_block_unpin(entries_pin); fd_context_unpin(ctx_pin); return __ctx_result; }
+        };
+        let object: *SharedObject = region_pin_at(object_pin);
         if (object.kind == UnifiedFdKind::OpenFile ||
             object.kind == UnifiedFdKind::Directory) {
-            { let __ctx_result: UnifiedOffsetResult = UnifiedOffsetResult::Found(object.offset); fd_context_unpin(ctx_pin); { let __entries_result: UnifiedOffsetResult = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
+            { let __ctx_result: UnifiedOffsetResult = UnifiedOffsetResult::Found(object.offset); fd_context_unpin(ctx_pin); { let __entries_result: UnifiedOffsetResult = __ctx_result; fd_block_unpin(entries_pin); { let __object_result: UnifiedOffsetResult = __entries_result; object_unpin(object_pin); return __object_result; } } }
         }
+        object_unpin(object_pin);
     }
     { let __ctx_result: UnifiedOffsetResult = UnifiedOffsetResult::Missing; fd_context_unpin(ctx_pin); { let __entries_result: UnifiedOffsetResult = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
 }
@@ -2793,7 +2993,7 @@ const OBJECT_POOL_PROBE_COUNT: usize = 24;
 
 fn unified_object_pool_probe() -> bool !{unsafe} {
     unified_fd_table_init();
-    let before: usize = intrusive_pool_live_count(&object_pool);
+    let before: usize = unified_object_live_count();
     let mut handles: [UnifiedObjectHandle; OBJECT_POOL_PROBE_COUNT];
     for i: usize in 0..<OBJECT_POOL_PROBE_COUNT {
         match unified_object_alloc_first(UnifiedFdKind::OpenFile) {
@@ -2807,7 +3007,7 @@ fn unified_object_pool_probe() -> bool !{unsafe} {
             if (i != j && handles[i].slot == handles[j].slot) { return false; }
         }
     }
-    if (intrusive_pool_live_count(&object_pool) !=
+    if (unified_object_live_count() !=
             before + OBJECT_POOL_PROBE_COUNT) {
         return false;
     }
@@ -2821,7 +3021,7 @@ fn unified_object_pool_probe() -> bool !{unsafe} {
     for i: usize in 1..<OBJECT_POOL_PROBE_COUNT {
         unified_object_free(handles[i].slot, handles[i].generation);
     }
-    if (intrusive_pool_live_count(&object_pool) != before) { return false; }
+    if (unified_object_live_count() != before) { return false; }
     unified_fd_table_init();
     return true;
 }
@@ -3038,7 +3238,7 @@ fn unified_fd_table_growth_probe() -> bool !{unsafe} {
         UnifiedFdResult::Invalid => { ok = false; }
         UnifiedFdResult::Ok => {}
     }
-    if (intrusive_pool_live_count(&object_pool) != 0) { ok = false; }
+    if (unified_object_live_count() != 0) { ok = false; }
     unified_fd_table_init();
     return ok;
 }
@@ -3589,7 +3789,7 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
     // GitHub issue #391: "every record is Empty again" is "the pool holds
     // nothing again" now -- an object that nobody references stops
     // existing rather than being marked free in place.
-    if (intrusive_pool_live_count(&object_pool) != 0) {
+    if (unified_object_live_count() != 0) {
         scheduled_process_probe_slot_release(child);
         { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; }
     }
