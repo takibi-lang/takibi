@@ -110,14 +110,14 @@ before its issue closes. The steps keep their numbers, which issues cite.
 **B's window is short (maintainer, 2026-10-03):** B runs for a few days and
 then stops, with no successor. Take only items that finish inside that
 window and that A consumes at once; leave the bands below untouched rather
-than half-done. The short-window queue is exhausted; no item from the bands
+than half-done. The short-window queue, including the maintainer's compiler
+soundness testing extension, is exhausted; no further item from the bands
 below is scheduled for this window.
 #680, #681 and #682 (the pin's cost) stay with A: they need RPi5
 measurements first.
 
 1. **Safe-memory language support that A's route consumes** (nothing here
-   waits for A): #646 (compiler soundness fuzzing, the footing of every
-   static guarantee); #13 for `Phi`, with #216 and #109 as its first examples;
+   waits for A): #13 for `Phi`, with #216 and #109 as its first examples;
    #663's stages S2 to S4 (one console queue under one lock; S1 landed, the
    rest were paused on #665, whose cause (a fixture race with core 0's
    drain) is fixed and under observation; #657 closes with them); #131

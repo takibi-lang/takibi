@@ -172,6 +172,12 @@ run them, and why they sit outside both globs above.
 
 ## Reporting
 
+`make linuxcheck` also runs `scripts/fuzz_compiler.py` through
+`make compiler-fuzz`, so both aggregate gates execute generated native
+programs and a seeded interval-rule defect control. This is an execution
+test, outside the file-reading check globs. See
+[`COMPILER_FUZZING.md`](COMPILER_FUZZING.md) for its bounds and artifacts.
+
 Every check above prints its verdict through `scripts/pass_line.py`, which
 refuses to print PASS when a count the verdict rests on is zero. A new check
 reports the same way: pick the number that is zero when the check did no work

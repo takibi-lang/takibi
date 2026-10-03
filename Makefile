@@ -699,8 +699,22 @@ $(LINUX_USER_DIR)/%.exe: $(LINUX_USER_DIR)/%_exe.o $(COMMON_LINUX_STARTUP_O) $(C
 ## linuxbuild: build linux_user/'s host-native Linux/AMD64 tests (no libc, _start -> app_main)
 linuxbuild: $(LINUX_USER_BINS)
 
+## compiler-fuzz: bounded generated native programs plus a seeded interval defect.
+## Each run keeps its sources, rejection diagnostics and minimized failures.
+.PHONY: compiler-fuzz compiler-fuzz-long
+compiler-fuzz: $(TAKIBI)
+	@python3 scripts/test_compiler_fuzz.py
+	@timeout 180s python3 scripts/fuzz_compiler.py --cases 42 --seconds 60 --control
+
+## compiler-fuzz-long: more generated programs, without rebuilding the control.
+FUZZ_CASES ?= 4000
+FUZZ_SECONDS ?= 600
+FUZZ_SEED ?= 646
+compiler-fuzz-long: $(TAKIBI)
+	@python3 scripts/fuzz_compiler.py --cases $(FUZZ_CASES) --seconds $(FUZZ_SECONDS) --seed $(FUZZ_SEED)
+
 ## linuxcheck: run linux_user/'s tests natively and diff stdout against each .expected
-linuxcheck: linuxbuild
+linuxcheck: linuxbuild compiler-fuzz
 	@bash scripts/lane_timing.sh begin linuxcheck
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" bash -c ' \
 		fail=0; \
