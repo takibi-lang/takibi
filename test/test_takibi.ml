@@ -17631,6 +17631,155 @@ let codegen_tests = [
         }");
 
   Alcotest.test_case
+    "while conditional break retains outer affine consumption" `Quick
+    (expect_type_error "cannot consume an affine/linear value declared outside a loop"
+       "affine view LeOuterToken;
+        fn le_outer_take(t: sink LeOuterToken) {}
+        fn le_outer_loop(n: usize) {
+            let t: LeOuterToken = view LeOuterToken;
+            while (n > 0) {
+                if (n > 1) { le_outer_take(t); break; }
+            }
+            le_outer_take(t);
+        }");
+
+  Alcotest.test_case
+    "while conditional continue retains outer affine consumption" `Quick
+    (expect_type_error "cannot consume an affine/linear value declared outside a loop"
+       "affine view LeOuterToken;
+        fn le_outer_take(t: sink LeOuterToken) {}
+        fn le_outer_loop(n: usize) {
+            let t: LeOuterToken = view LeOuterToken;
+            while (n > 0) {
+                if (n > 1) { le_outer_take(t); continue; }
+            }
+            le_outer_take(t);
+        }");
+
+  Alcotest.test_case
+    "for conditional break retains outer affine consumption" `Quick
+    (expect_type_error "cannot consume an affine/linear value declared outside a loop"
+       "affine view LeOuterToken;
+        fn le_outer_take(t: sink LeOuterToken) {}
+        fn le_outer_loop(n: usize) {
+            let t: LeOuterToken = view LeOuterToken;
+            for i: usize in 0..<n {
+                if (n > 1) { le_outer_take(t); break; }
+            }
+            le_outer_take(t);
+        }");
+
+  Alcotest.test_case
+    "for conditional continue retains outer affine consumption" `Quick
+    (expect_type_error "cannot consume an affine/linear value declared outside a loop"
+       "affine view LeOuterToken;
+        fn le_outer_take(t: sink LeOuterToken) {}
+        fn le_outer_loop(n: usize) {
+            let t: LeOuterToken = view LeOuterToken;
+            for i: usize in 0..<n {
+                if (n > 1) { le_outer_take(t); continue; }
+            }
+            le_outer_take(t);
+        }");
+
+  Alcotest.test_case
+    "foreach conditional break retains outer affine consumption" `Quick
+    (expect_type_error "cannot consume an affine/linear value declared outside a loop"
+       "affine view LeOuterToken;
+        fn le_outer_take(t: sink LeOuterToken) {}
+        fn le_outer_loop(n: usize) {
+            let mut values: [usize; 2];
+            let t: LeOuterToken = view LeOuterToken;
+            for item in (values as []usize) {
+                if (n > 1) { le_outer_take(t); break; }
+            }
+            le_outer_take(t);
+        }");
+
+  Alcotest.test_case
+    "foreach conditional continue retains outer affine consumption" `Quick
+    (expect_type_error "cannot consume an affine/linear value declared outside a loop"
+       "affine view LeOuterToken;
+        fn le_outer_take(t: sink LeOuterToken) {}
+        fn le_outer_loop(n: usize) {
+            let mut values: [usize; 2];
+            let t: LeOuterToken = view LeOuterToken;
+            for item in (values as []usize) {
+                if (n > 1) { le_outer_take(t); continue; }
+            }
+            le_outer_take(t);
+        }");
+
+  Alcotest.test_case "conditional break retains handle invalidation after the loop" `Quick
+    (expect_type_error "may name a destroyed object"
+       "struct LeExitHandle { slot: usize; }
+        fn le_exit_kill() !{invalidates_LeExitHandle} {}
+        fn le_exit_use(h: LeExitHandle) -> usize { return h.slot; }
+        fn f(h: LeExitHandle, n: usize) -> usize {
+            while (n > 0) {
+                if (n > 1) { le_exit_kill(); break; }
+            }
+            return le_exit_use(h);
+        }");
+
+  Alcotest.test_case "conditional continue retains handle invalidation at loop head" `Quick
+    (expect_type_error "may name a destroyed object"
+       "struct LeContinueHandle { slot: usize; }
+        fn le_continue_kill() !{invalidates_LeContinueHandle} {}
+        fn le_continue_use(h: LeContinueHandle) -> usize { return h.slot; }
+        fn f(h: LeContinueHandle, n: usize) {
+            let mut i: usize = 0;
+            while (i < n) {
+                let value: usize = le_continue_use(h);
+                if (i > 1) { le_continue_kill(); continue; }
+                i = i + 1;
+            }
+        }");
+
+  Alcotest.test_case "nested loop break invalidates a handle in its outer body" `Quick
+    (expect_type_error "may name a destroyed object"
+       "struct LeNestedHandle { slot: usize; }
+        fn le_nested_kill() !{invalidates_LeNestedHandle} {}
+        fn le_nested_use(h: LeNestedHandle) -> usize { return h.slot; }
+        fn f(h: LeNestedHandle, n: usize) {
+            while (n > 0) {
+                while (n > 1) {
+                    if (n > 2) { le_nested_kill(); break; }
+                }
+                let value: usize = le_nested_use(h);
+            }
+        }");
+
+  Alcotest.test_case "return consumption does not join a loop exit" `Quick
+    (expect_codegen_ok
+       "affine view LeReturnToken;
+        fn le_return_take(t: sink LeReturnToken) {}
+        fn f(t: LeReturnToken, n: usize) {
+            while (n > 0) {
+                if (n > 1) { le_return_take(t); return; }
+                break;
+            }
+            le_return_take(t);
+        }");
+
+  Alcotest.test_case "nested loop exit collectors preserve fresh local bindings" `Quick
+    (expect_codegen_ok
+       "linear view LeNestedToken;
+        fn le_nested_take(t: sink LeNestedToken) {}
+        fn f(n: usize) {
+            while (n > 0) {
+                while (n > 1) {
+                    let t: LeNestedToken = view LeNestedToken;
+                    le_nested_take(t);
+                    break;
+                }
+                let t: LeNestedToken = view LeNestedToken;
+                le_nested_take(t);
+                break;
+            }
+        }");
+
+  Alcotest.test_case
     "let-else requires failure arms to diverge" `Quick
     (expect_type_error "let-else failure arm must end"
        "variant LeDiverge { Empty; Value(usize); }

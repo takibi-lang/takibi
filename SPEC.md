@@ -1127,8 +1127,10 @@ case binds `value` in the enclosing scope. Every arm in `else` must end in
 `return`, `break`, or `continue`; the ordinary match exhaustiveness and
 payload-consumption rules still apply. A failure arm that exits the loop does
 not contribute ownership state to the successful binding; each iteration
-produces a fresh payload. Values produced before `break` or `continue` must
-still be consumed before that exit. `let mut` also works. For example:
+produces a fresh payload. Consumption and handle invalidation on a loop-exit
+path still reach the matching loop boundary, even when they do not reach the
+statements after that branch. Values produced before `break` or `continue`
+must still be consumed before that exit. `let mut` also works. For example:
 
 ```takibi
 let PageAllocResult::Allocated(page) = page_alloc() else {

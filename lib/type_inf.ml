@@ -10355,6 +10355,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | _ -> false
     and always_terminates ?(loop_exit = false) stmts =
       List.exists (stmt_always_terminates ~loop_exit) stmts in
+    (* A branch exit is absent from statement fallthrough, but break and
+       continue still contribute ownership/authority state at their loop's
+       boundary. Stack the collectors so an inner exit belongs to its own
+       loop; returns do not contribute to a loop that they never rejoin. *)
+    let loop_exits = ref [] in
+    let record_loop_exit moved taints =
+      match !loop_exits with
+      | exits :: _ -> exits := (moved, taints) :: !exits
+      | [] -> ()
+    in
     let rec check_stmts moved declared taints stmts =
       let initial_declared = declared in
       let initial_var_types = !var_types in
@@ -10393,6 +10403,17 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       Hashtbl.reset visible_bindings;
       Hashtbl.iter (Hashtbl.add visible_bindings) initial_visible_bindings;
       (moved, declared, taints)
+    and check_loop_stmts moved declared taints body =
+      let exits = ref [] in
+      let previous = !loop_exits in
+      loop_exits := exits :: previous;
+      Fun.protect ~finally:(fun () -> loop_exits := previous) (fun () ->
+        let (out, declared, out_taints) = check_stmts moved declared taints body in
+        let (out, out_taints) = List.fold_left
+          (fun (acc, acc_taints) (exit, exit_taints) ->
+            (mv_merge acc exit, TaintEnv.join_branches acc_taints exit_taints))
+          (out, out_taints) !exits in
+        (out, declared, out_taints))
     and check_stmt moved declared taints (s : Ast.stmt) =
       match s.desc with
       | Ast.StaticAssert _ ->
@@ -10605,14 +10626,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.While (cond, body) ->
           let moved = check_expr taints moved false cond in
           let (body_moved, _, body_taints) =
-            check_stmts moved declared taints body in
+            check_loop_stmts moved declared taints body in
           let newly_moved_outer = outer_consumed declared moved body_moved in
           if not (PathSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
               "cannot consume an affine/linear value declared outside a loop inside that loop"));
           let moved = carry_handles moved body_moved (fun carried ->
             let carried = check_expr taints carried false cond in
-            ignore (check_stmts carried declared taints body)) in
+            ignore (check_loop_stmts carried declared taints body)) in
           (moved, declared, TaintEnv.join_branches taints body_taints)
       | Ast.For (name, _, lo, hi, body) ->
           require_no_authority_rebind s.loc declared taints name;
@@ -10626,13 +10647,13 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              written_names gives narrowing kills). *)
           let body_taints_in = TaintEnv.set name PathSet.empty taints in
           let (body_moved, _, body_taints) =
-            check_stmts moved declared_body body_taints_in body in
+            check_loop_stmts moved declared_body body_taints_in body in
           let newly_moved_outer = outer_consumed declared moved body_moved in
           if not (PathSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
               "cannot consume an affine/linear value declared outside a loop inside that loop"));
           let moved = carry_handles moved body_moved (fun carried ->
-            ignore (check_stmts carried declared_body body_taints_in body)) in
+            ignore (check_loop_stmts carried declared_body body_taints_in body)) in
           (match old_binding with
            | Some id -> Hashtbl.replace visible_bindings name id
            | None -> Hashtbl.remove visible_bindings name);
@@ -10645,14 +10666,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             (List.nth (Local_bindings.ids_for_stmt binding_resolution s) 1);
           let body_taints_in = TaintEnv.set name PathSet.empty taints in
           let (body_moved, _, body_taints) =
-            check_stmts moved (PathSet.add (pvar name) declared)
+            check_loop_stmts moved (PathSet.add (pvar name) declared)
               body_taints_in body in
           let newly_moved_outer = outer_consumed declared moved body_moved in
           if not (PathSet.is_empty newly_moved_outer) then
             raise (TypeError (s.loc,
               "cannot consume an affine/linear value declared outside a loop inside that loop"));
           let moved = carry_handles moved body_moved (fun carried ->
-            ignore (check_stmts carried (PathSet.add (pvar name) declared)
+            ignore (check_loop_stmts carried (PathSet.add (pvar name) declared)
                       body_taints_in body)) in
           (match old_binding with
            | Some id -> Hashtbl.replace visible_bindings name id
@@ -10766,9 +10787,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           (arm_moved, declared, arm_taints)
       | Ast.Break ->
           require_no_pending_linear s.loc "break" moved declared;
+          record_loop_exit moved taints;
           (moved, declared, taints)
       | Ast.Continue ->
           require_no_pending_linear s.loc "continue" moved declared;
+          record_loop_exit moved taints;
           (moved, declared, taints)
       | Ast.Yield e ->
           (* GitHub issue #184: reached when a plain `match` STATEMENT's
