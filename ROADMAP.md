@@ -9,7 +9,7 @@ history, is archived in `HISTORY.md`.
 
 Live intermittents are listed in `docs/KNOWN_INTERMITTENTS.md`, not here.
 
-## Territories, re-cut 2026-09-25; queues refreshed 2026-10-02
+## Territories, re-cut 2026-09-25; queues refreshed 2026-10-03
 
 A territory is a role, not a set of directories and not a particular agent
 (`AGENTS.md`); which agent holds which is the maintainer's per-session
@@ -51,15 +51,15 @@ before its issue closes. The steps keep their numbers, which issues cite.
    number going down (EL0 payloads: #660, B's). A holds stage 1's core
    groups in this order; each rung stands on the one before, so effort can
    stop at any of them:
-   - **C, stack and frame:** done (#662). **Region (#672):** the built-in
+   - **C, stack and frame:** done. **Region (#672):** the built-in
      `region`/`region_table`/`region_pool`, with pins for objects several
      cores reach by handle, and a linear struct holding one owner (#131's
-     first slice). All three TCP pools are on it (frames with #677,
-     retransmit entries, connections); tcp.tkb has no liveness escape left.
-     Next the other pools, smallest first: AddressSpaceBacking, then
-     ProcessImageRecord, the fd pools (SharedObject, ProcessFdContext,
-     FdBlock) and ProcessRecord (#492's 124 call sites). #674 and #675
-     follow; #680, #681 and #682 are ideas for the pin's cost, to measure first.
+     first slice). All three TCP pools are on it (frames, retransmit entries,
+     connections);
+     tcp.tkb has no liveness escape left. AddressSpaceBacking,
+     ProcessImageRecord and ProcessFdContext are on it too. Next the
+     remaining fd pools (SharedObject and FdBlock), then ProcessRecord.
+     #674 and #675 follow; #680, #681 and #682 are ideas for the pin's cost, to measure first.
    - **B, raw atomics:** a typed atomic cell (issue when C is under way);
      the ordering argument stays with #613.
    - **D, F, H** are already single files: declared as mint files in the
@@ -108,9 +108,11 @@ before its issue closes. The steps keep their numbers, which issues cite.
    #646 (compiler soundness fuzzing, the footing of every static
    guarantee); #13 for `Phi`, with #216 and #109 as its first examples;
    #663's stages S2 to S4 (one console queue under one lock; S1 landed, the
-   the rest were paused on #665, whose cause (a fixture race with core 0's drain) is fixed and under observation; #657 closes with them); #131 and #370 (stored
-   ownership and branded containers, which feed #637 stage 2's option (c)). Once A's route step 2 closes: #637 stage 1's
-   device groups, MMIO and DMA, together with #622 and #623.
+   rest were paused on #665, whose cause (a fixture race with core 0's
+   drain) is fixed and under observation; #657 closes with them); #131
+   and #370 (stored ownership and branded containers, which feed #637
+   stage 2's option (c)). Step 2 is finished, so #637 stage 1's device
+   groups, MMIO and DMA, together with #622 and #623, can proceed.
 2. **Resource use and measured performance:** #658, #220 (telnet; lowered
    2026-09-30 by the maintainer, not urgent, and it waits on PTY and
    `pselect6` scoping), #389, #422, #497, #520, #553,
