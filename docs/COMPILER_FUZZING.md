@@ -25,6 +25,9 @@ family must have an accepted, executed case; accepting nothing cannot pass.
 `scripts/test_compiler_fuzz.py` runs native controls for acceptance, wrong
 results, signals, timeouts, rejection logs, malformed generation, reduction
 diagnosis preservation, and zero executed programs before the short campaign.
+The execution-timeout control requires a linked executable and checks that
+the timed-out command is that executable; a separate negative control ensures
+that a compiler timeout cannot satisfy it.
 
 ## Detection control
 

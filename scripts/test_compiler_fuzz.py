@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import fuzz_compiler as fuzz
 
@@ -39,9 +40,16 @@ class ExecutionControls(unittest.TestCase):
         self.assertIn("exit=-", detail)
 
     def test_execution_is_bounded(self):
-        status, detail = self.evaluate(harness="int main(void) { for (;;) {} }\n", timeout=0.2)
+        status, detail = self.evaluate(harness="int main(void) { for (;;) {} }\n")
         self.assertEqual(status, "timeout")
-        self.assertIn("timed out", detail)
+        executable = self.directory / "case/case.exe"
+        self.assertTrue(executable.exists(), "control must reach native execution")
+        self.assertEqual(detail, f"command timed out: ['{executable}']")
+
+    def test_compile_timeout_cannot_satisfy_execution_control(self):
+        with patch.object(self, "evaluate", return_value=("timeout", "command timed out: ['compiler']")):
+            with self.assertRaises(AssertionError):
+                self.test_execution_is_bounded()
 
     def test_rejection_is_logged(self):
         import random
