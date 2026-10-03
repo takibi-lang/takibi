@@ -341,8 +341,13 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         ! grep -q '^ddb: continuing$' "$UART_LOG" ||
         ! grep -q '^ddb: console tx=queued$' "$UART_LOG" ||
         { [ "$BREAK_SOURCE" = uart ] && ! grep -q '^ddb: peer console=pending$' "$UART_LOG"; } ||
-        { [ "$BREAK_SOURCE" = uart ] && ! grep -Eq $'^peer user console: queued before DDB, delivered after continue\r?$' "$UART_LOG"; } ||
+        { [ "$BREAK_SOURCE" = uart ] && ! grep -Eq $'peer user console: queued before DDB, delivered after continue\r?$' "$UART_LOG"; } ||
         ! grep -Eq $'^init: ash bootstrap\r?$' "$UART_LOG"; then
+    # GitHub issues #676/#692: the peer's line is matched without its start
+    # anchor. What this lane asserts is that the line queued before DDB is
+    # delivered after continue; a byte of another core's output landing in
+    # front of it ("ppeer user console: ...", seen under host load) is line
+    # atomicity across cores, which is #663's, not a failure to resume.
     echo "FAIL kernel/qemu ddb: BREAK inspection did not resume boot" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1
