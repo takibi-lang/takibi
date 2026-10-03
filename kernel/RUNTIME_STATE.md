@@ -152,8 +152,10 @@ parking lot for a linear exec image, is gone the same way
 path asks of an installed image), the ext2-image-loading staging fields
 (`process_image_ext2_*`/`process_image_pair_ext2_*`), and
 `clone_last_reaped_count`; `mm/address_space.tkb`'s
-`address_space_backing_pool`/`_ready`, its counted fallback pair
-`address_space_backing_missing`/`_count`, the static
+`address_space_backing_pool` (the built-in
+`RegionPool(AddressSpaceBacking)` since #672: read and written as value
+copies under a pin), its missing-backing counter
+`address_space_backing_missing_count`, the static
 `address_space_backing_root0`, and `address_space_active_slot`;
 `mm/page.tkb`'s `boot_page_pool`;
 `arch/arm64/mm/asid.tkb`'s `asid_pool`.

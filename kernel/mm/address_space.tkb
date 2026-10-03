@@ -53,17 +53,20 @@ struct AddressSpaceBacking {
     asid_generation: usize;
 }
 
-// GitHub issue #392: pooled, not an array keyed by process slot. Third of
-// the four per-process tables to stop being one; see
-// kernel/kernel/fd_table.tkb and kernel/mm/process_image.tkb for the same
-// move and what each cost. The handle lives in ProcessRecord.
-private let mut address_space_backing_pool: IntrusivePool(AddressSpaceBacking);
-private let mut address_space_backing_ready: bool = false;
-// Genuine allocation failure has nowhere to be reported from thirty-odd
-// field accesses, so it lands here and is COUNTED. Printed at the end of
-// the boot suite; 0 on a healthy kernel.
-private let mut address_space_backing_missing:
-    [AddressSpaceBacking; KERNEL_MAX_CORES];
+// GitHub issue #392: pooled, not an array keyed by process slot. The
+// handle -- the backing's pool address and generation -- lives in
+// ProcessRecord. GitHub issue #672 layer 3: the pool is the built-in
+// region_pool, and a backing is read and written as a value copy under a
+// pin (address_space_backing_read/_write), so no pointer to it outlives
+// the access and none is handed out.
+private let mut address_space_backing_pool: RegionPool(AddressSpaceBacking);
+
+// One page per chunk: a backing is five words.
+const ADDRESS_SPACE_BACKING_CHUNK_PAGES: usize = 1;
+
+// A backing that is missing (allocation failed, or the handle is stale) has
+// nowhere to be reported from the thirty-odd accesses, so it is COUNTED.
+// Printed at the end of the boot suite; 0 on a healthy kernel.
 private let mut address_space_backing_missing_count:
     [usize; KERNEL_MAX_CORES];
 // GitHub issue #479: WHICH ADDRESS SPACE IS ACTIVE is a property of a
@@ -112,8 +115,10 @@ private fn address_space_set_active_slot_here(slot: usize) {
 // page can be mapped into an address space at most once, so it cannot be
 // mapped into more address spaces than exist.
 fn address_space_live_count() -> usize !{unsafe} {
-    address_space_backing_pool_init_before_secondary();
-    return intrusive_pool_live_count(&address_space_backing_pool) + 1;
+    let guard = address_space_backing_pool_lock(&address_space_backing_pool);
+    let live: usize = region_pool_live_count(guard);
+    address_space_backing_pool_unlock(guard);
+    return live + 1;
 }
 
 // GitHub issue #406: one MORE live address space, for a probe that needs
@@ -151,14 +156,6 @@ fn address_space_backing_missing_uses() -> usize {
     return total;
 }
 
-private fn address_space_backing_missing_here() -> *AddressSpaceBacking {
-    let core: usize = cpu_id();
-    if (core >= KERNEL_MAX_CORES) {
-        return &address_space_backing_missing[0];
-    }
-    return &address_space_backing_missing[core];
-}
-
 private fn address_space_backing_missing_note() {
     let core: usize = cpu_id();
     if (core >= KERNEL_MAX_CORES) {
@@ -170,102 +167,187 @@ private fn address_space_backing_missing_note() {
         address_space_backing_missing_count[core] + 1;
 }
 
-// GitHub issue #492: lookups that named a backing slot with the previous
-// occupant's generation.
-fn address_space_backing_recycled_handle_count() -> usize !{unsafe} {
-    if (address_space_backing_ready == false) { return 0; }
-    return intrusive_pool_recycled_handle_count(&address_space_backing_pool);
+// GitHub issue #492 counted lookups that named a backing slot with the
+// previous occupant's generation. A pin is refused for those and nothing is
+// read through them, so there is nothing left to count.
+fn address_space_backing_recycled_handle_count() -> usize { return 0; }
+
+// The built-in pool starts empty from .bss and needs no construction. Kept
+// for its callers' ordering before secondary startup.
+fn address_space_backing_pool_init_before_secondary() {}
+
+private fn address_space_backing_pool_lock(
+        pool: *RegionPool(AddressSpaceBacking) @ backings)
+        -> RegionPoolGuard(AddressSpaceBacking)[backings] !{unsafe} {
+    let flags: usize = mutex_irq_save();
+    return region_pool_lock_saving(pool, flags);
 }
 
-// Core 0 may reach this lazily before secondary startup. The common PSCI
-// preparation path also calls it before core 1 becomes visible, after which
-// the ready flag is immutable and cannot race.
-fn address_space_backing_pool_init_before_secondary() {
-    if (address_space_backing_ready) { return; }
-    address_space_backing_ready = true;
-    intrusive_pool_init(&address_space_backing_pool);
+private fn address_space_backing_pool_unlock(
+        guard: sink RegionPoolGuard(AddressSpaceBacking)[backings]) {
+    mutex_irq_restore(region_pool_unlock_saved(guard));
 }
 
-// GitHub issue #414: gives a slot's backing record back to the pool.
-//
-// It used to keep it for the life of the kernel -- "Nothing releases",
-// this file said, inherited from the array this pool replaced in #392 --
-// and that stopped being tenable when process creation itself stopped
-// having a ceiling: one AddressSpaceBacking per process ever created,
-// unreachable the moment the ProcessRecord naming it is recycled.
-//
-// It was found by measurement, not by reading: the end-of-run pooled-record
-// baseline added for #414 reported 51 live backings against a baseline of
-// 34 on one QEMU boot. The page check could not see it, and that is the
-// point of having both -- `resources: pages=0` was true the whole time,
-// because address_space_release_root frees the L1/L2 pages either way and
-// a pool keeps its chunk page whether or not the record inside it came
-// back.
-//
-// Root 0 is exempt: its backing is a static, not a pool allocation, for
-// the MMU-off reason stated above.
-fn address_space_backing_release(slot: usize) !{unsafe} {
-    if (slot == 0) { return; }
-    let mut address: IntrusiveSlotAddress =
-        scheduled_process_address_space_backing(slot);
-    if (intrusive_slot_address_is_none(address)) { return; }
-    // Read the generation BEFORE clearing the handle, the same ordering
-    // process_image_record_release states: an owner rebuilt afterwards
-    // would name the right slot with the wrong occupant, and the pool
-    // would correctly refuse it.
+private fn address_space_backing_return_empty(
+        guard: borrow RegionPoolGuard(AddressSpaceBacking)[backings]) !{unsafe} {
+    let mut more: bool = true;
+    while (more) {
+        match region_pool_shrink(guard) {
+            RegionShrink(AddressSpaceBacking)::Nothing => { more = false; }
+            RegionShrink(AddressSpaceBacking)::Chunk(bytes) => {
+                let address: usize = region_bytes_address(bytes);
+                region_release(bytes);
+                page_run_transferred_release_physical(
+                    address, ADDRESS_SPACE_BACKING_CHUNK_PAGES);
+            }
+        }
+    }
+}
+
+private fn address_space_backing_slot_free(
+        slot: sink RegionSlot(AddressSpaceBacking)[p, k]) !{unsafe} {
+    let guard = address_space_backing_pool_lock(&address_space_backing_pool);
+    match region_slot_adopt(guard, slot) {
+        RegionAdopt(AddressSpaceBacking)::Foreign(stray) => {
+            // Counted, not logged: a last unpin can land here from the
+            // IRQ-reachable context-switch reads, which may not log.
+            address_space_backing_missing_note();
+            region_slot_abandon(stray);
+        }
+        RegionAdopt(AddressSpaceBacking)::Adopted(mine) => {
+            region_free(guard, mine);
+            address_space_backing_return_empty(guard);
+        }
+    }
+    address_space_backing_pool_unlock(guard);
+}
+
+private fn address_space_backing_unpin(
+        pin: sink RegionPin(AddressSpaceBacking)[p, k]) !{unsafe} {
+    match region_unpin(pin) {
+        RegionUnpin(AddressSpaceBacking)::Unpinned => {}
+        RegionUnpin(AddressSpaceBacking)::Last(slot) => {
+            address_space_backing_slot_free(slot);
+        }
+    }
+}
+
+// A pin on the backing a process slot's handle names, or Stale.
+private fn address_space_backing_pin(
+        pool: *RegionPool(AddressSpaceBacking) @ backings, slot: usize)
+        -> RegionPinned(AddressSpaceBacking)[backings] !{unsafe} {
+    let address: usize = scheduled_process_address_space_backing(slot);
     let generation: usize =
         scheduled_process_address_space_backing_generation(slot);
-    scheduled_process_set_address_space_backing(
-        slot, intrusive_slot_address_none(), 0);
-    let owner =
-        intrusive_owner_new(&address_space_backing_pool, address, generation);
-    let guard = intrusive_pool_lock(&address_space_backing_pool);
-    let (ok, reason) = intrusive_remove_outcome(
-        intrusive_pool_remove(&address_space_backing_pool, guard, owner));
-    intrusive_pool_unlock(&address_space_backing_pool, guard);
-    if (ok == false) {
-        kernel_boot_log("address spaces: releasing a backing record -- ");
-        kernel_boot_log(reason);
-        kernel_boot_log("\n");
+    let guard = address_space_backing_pool_lock(pool);
+    let mut handle: RegionHandle(AddressSpaceBacking) =
+        region_handle_from(guard, address, generation);
+    let pinned = region_pin(guard, handle);
+    address_space_backing_pool_unlock(guard);
+    return pinned;
+}
+
+// GitHub issue #414: gives a slot's backing record back to the pool. The
+// handle is cleared first, so nothing pins it again by this slot; then the
+// backing is retired, and whoever gives up the last pin frees it.
+//
+// Root 0 is exempt: its backing is a static, not a pool allocation, for
+// the MMU-off reason stated below.
+fn address_space_backing_release(slot: usize) !{unsafe} {
+    if (slot == 0) { return; }
+    if (scheduled_process_address_space_backing(slot) == 0) { return; }
+    let pinned = address_space_backing_pin(&address_space_backing_pool, slot);
+    scheduled_process_set_address_space_backing(slot, 0, 0);
+    match pinned {
+        RegionPinned(AddressSpaceBacking)::Stale => {
+            kernel_boot_log("address spaces: releasing a stale backing handle\n");
+        }
+        RegionPinned(AddressSpaceBacking)::Pinned(pin) => {
+            match region_retire(pin) {
+                RegionRetire(AddressSpaceBacking)::Pending => {}
+                RegionRetire(AddressSpaceBacking)::Retired(backing) => {
+                    address_space_backing_slot_free(backing);
+                }
+            }
+        }
     }
 }
 
 // Acquired on demand rather than only at process creation: a slot here is
 // not always a live scheduler slot, exactly as issue #392's image-record
-// stage found (1648 such accesses on one boot there). Idempotent.
+// stage found. Idempotent.
 fn address_space_backing_ensure(slot: usize) -> bool !{unsafe} {
     // See address_space_backing_root0: slot 0 needs no allocation, and
     // must not attempt one, because it is created with the MMU off.
     if (slot == 0) { return true; }
-    address_space_backing_pool_init_before_secondary();
-    let mut address: IntrusiveSlotAddress =
-        scheduled_process_address_space_backing(slot);
-    let generation: usize =
-        scheduled_process_address_space_backing_generation(slot);
-    if (intrusive_slot_address_is_none(address) == false && intrusive_pool_matches(
-            &address_space_backing_pool, address, generation)) {
-        return true;
-    }
-    let guard = intrusive_pool_lock(&address_space_backing_pool);
-    let result = intrusive_pool_insert_zeroed(&address_space_backing_pool, guard);
-    intrusive_pool_unlock(&address_space_backing_pool, guard);
-    match result {
-        IntrusivePoolInsertResult::OutOfMemory => { return false; }
-        IntrusivePoolInsertResult::Allocated(owner) => {
-            let mut address_new: IntrusiveSlotAddress =
-                intrusive_owner_slot(owner);
-            let stamp: usize = intrusive_owner_generation(owner);
-            intrusive_owner_drop(owner);
-            scheduled_process_set_address_space_backing(slot, address_new, stamp);
+    match address_space_backing_pin(&address_space_backing_pool, slot) {
+        RegionPinned(AddressSpaceBacking)::Pinned(pin) => {
+            address_space_backing_unpin(pin);
             return true;
+        }
+        RegionPinned(AddressSpaceBacking)::Stale => {}
+    }
+    let guard = address_space_backing_pool_lock(&address_space_backing_pool);
+    match region_alloc(guard) {
+        RegionAlloc(AddressSpaceBacking)::Allocated(fresh) => {
+            address_space_backing_pool_unlock(guard);
+            return address_space_backing_publish(
+                &address_space_backing_pool, slot, fresh);
+        }
+        RegionAlloc(AddressSpaceBacking)::Full => {}
+    }
+    if (address_space_backing_grow(guard)) {
+        match region_alloc(guard) {
+            RegionAlloc(AddressSpaceBacking)::Allocated(fresh) => {
+                address_space_backing_pool_unlock(guard);
+                return address_space_backing_publish(
+                    &address_space_backing_pool, slot, fresh);
+            }
+            RegionAlloc(AddressSpaceBacking)::Full => {}
+        }
+    }
+    address_space_backing_pool_unlock(guard);
+    return false;
+}
+
+// A fresh backing, zeroed and made Live; its handle goes into the process
+// record.
+private fn address_space_backing_publish(
+        pool: *RegionPool(AddressSpaceBacking) @ backings, slot: usize,
+        fresh: sink RegionSlot(AddressSpaceBacking)[backings, k]) -> bool !{unsafe} {
+    region_slot_zero(fresh);
+    let guard = address_space_backing_pool_lock(pool);
+    let mut handle: RegionHandle(AddressSpaceBacking) = region_give(guard, fresh);
+    address_space_backing_pool_unlock(guard);
+    scheduled_process_set_address_space_backing(
+        slot, region_handle_address(handle), region_handle_generation(handle));
+    return true;
+}
+
+private fn address_space_backing_grow(
+        guard: borrow RegionPoolGuard(AddressSpaceBacking)[backings]) -> bool !{unsafe} {
+    match page_alloc_contiguous(ADDRESS_SPACE_BACKING_CHUNK_PAGES,
+                                PageOwnerTag::PoolChunk) {
+        PageRunAllocResult::OutOfMemory => { return false; }
+        PageRunAllocResult::Allocated(run_owner) => {
+            let base: usize = page_run_physical_address(run_owner);
+            let _run_index: usize =
+                page_run_owner_transfer_index(run_owner) as usize;
+            let RegionBytes::Assumed(chunk) = region_bytes_assume(
+                base, ADDRESS_SPACE_BACKING_CHUNK_PAGES * PAGE_SIZE) else {};
+            match region_pool_grow(guard, chunk) {
+                RegionGrow(AddressSpaceBacking)::Grown => { return true; }
+                RegionGrow(AddressSpaceBacking)::TooSmall(back) => {
+                    region_release(back);
+                    page_run_transferred_release_physical(
+                        base, ADDRESS_SPACE_BACKING_CHUNK_PAGES);
+                    return false;
+                }
+            }
         }
     }
 }
 
-// The backing for a slot, allocating one if it has none.
-// address_space_backing_release below gives one back; see its own comment
-// for why "nothing releases" -- what this note said until GitHub issue
-// #414 -- stopped being tenable.
 // Root 0's backing is a plain static, NOT a pool slot.
 //
 // kernel_mmu_init creates root 0 with the MMU still OFF -- entry.S calls
@@ -283,80 +365,74 @@ fn address_space_backing_ensure(slot: usize) -> bool !{unsafe} {
 // allocator does is the same fact, one layer down.
 private let mut address_space_backing_root0: AddressSpaceBacking;
 
-private fn address_space_backing_at(slot: usize)
-        -> *AddressSpaceBacking !{unsafe} {
-    if (slot == 0) { return &address_space_backing_root0; }
-    if (address_space_backing_ensure(slot) == false) {
+// A slot's backing, allocating one if it has none (process construction).
+private fn address_space_backing_read(slot: usize) -> AddressSpaceBacking !{unsafe} {
+    if (slot != 0 && address_space_backing_ensure(slot) == false) {
         address_space_backing_missing_note();
-        return address_space_backing_missing_here();
+        let mut none: AddressSpaceBacking = { false, 0, 0, 0, 0 };
+        return none;
     }
-    let mut address: IntrusiveSlotAddress =
-        scheduled_process_address_space_backing(slot);
-    if (intrusive_slot_address_is_none(address)) {
-        address_space_backing_missing_note();
-        return address_space_backing_missing_here();
-    }
-    let generation: usize =
-        scheduled_process_address_space_backing_generation(slot);
-    // GitHub issue #492: the generation is COMPARED, which it was not.
-    // This read a slot address and a generation out of the process record
-    // and handed both to intrusive_owner_new, which stores two words and
-    // validates nothing, then dereferenced through the unproven ref, which
-    // by its own contract does not re-validate either. So a backing whose
-    // slot had been freed and handed out again was read as though it were
-    // still this process's -- and the sibling three lines down,
-    // address_space_backing_existing_at, already checked. Two accessors
-    // over the same pair disagreeing about whether to check is the state
-    // this replaces.
-    match intrusive_pool_probe_handle(&address_space_backing_pool, address,
-                                      generation) {
-        IntrusiveSlotProbe::NoPayload => {
-            address_space_backing_missing_note();
-            return address_space_backing_missing_here();
-        }
-        IntrusiveSlotProbe::Live(slot_view) => {
-            // GitHub issue #488: this RETURNS the pointer, so it cannot
-            // hold the proof for the pointer's life. The unproven form says
-            // that in its name and in the trusted-base count, instead of
-            // the pool silently allowing it for every caller. Removing it
-            // means migrating address_space_backing_at's 36 call sites to
-            // hold the view themselves -- filed, not done here.
-            return intrusive_pool_payload_unproven_of(
-                &address_space_backing_pool, slot_view);
-        }
-    }
+    return address_space_backing_read_existing(slot);
 }
 
-// Lookup-only counterpart for IRQ-reachable context-switch paths. A missing
-// backing is an invariant failure there, not permission to grow the pool: all
-// allocation belongs to process/address-space construction before scheduling.
-private fn address_space_backing_existing_at(slot: usize)
-        -> *AddressSpaceBacking !{unsafe} {
-    if (slot == 0) { return &address_space_backing_root0; }
-    let mut address: IntrusiveSlotAddress =
-        scheduled_process_address_space_backing(slot);
-    if (intrusive_slot_address_is_none(address)) {
-        address_space_backing_missing_note();
-        return address_space_backing_missing_here();
+// A slot's backing, as a value copy made under a pin. Never allocates: a
+// missing backing is an invariant failure on the IRQ-reachable
+// context-switch paths, which must not grow the pool. It reads as not live
+// and is counted.
+private fn address_space_backing_read_existing(slot: usize)
+        -> AddressSpaceBacking !{unsafe} {
+    let mut value: AddressSpaceBacking = { false, 0, 0, 0, 0 };
+    if (slot == 0) {
+        value.live = address_space_backing_root0.live;
+        value.l1_physical = address_space_backing_root0.l1_physical;
+        value.l2_physical = address_space_backing_root0.l2_physical;
+        value.asid = address_space_backing_root0.asid;
+        value.asid_generation = address_space_backing_root0.asid_generation;
+        return value;
     }
-    let generation: usize =
-        scheduled_process_address_space_backing_generation(slot);
-    // GitHub issue #492: one lookup, not two. This checked with
-    // intrusive_pool_matches and then re-derived the payload from the same
-    // pair, which is the check-then-use split probe_handle exists to fuse:
-    // the comparison and the read are now the same call and cannot drift
-    // apart.
-    match intrusive_pool_probe_handle(&address_space_backing_pool, address,
-                                      generation) {
-        IntrusiveSlotProbe::NoPayload => {
+    match address_space_backing_pin(&address_space_backing_pool, slot) {
+        RegionPinned(AddressSpaceBacking)::Stale => {
             address_space_backing_missing_note();
-            return address_space_backing_missing_here();
         }
-        IntrusiveSlotProbe::Live(slot_view) => {
-            // GitHub issue #488: this RETURNS the pointer, so it cannot
-            // hold the proof for the pointer's life. See the sibling above.
-            return intrusive_pool_payload_unproven_of(
-                &address_space_backing_pool, slot_view);
+        RegionPinned(AddressSpaceBacking)::Pinned(pin) => {
+            let backing: *AddressSpaceBacking = region_pin_at(pin);
+            value.live = backing.live;
+            value.l1_physical = backing.l1_physical;
+            value.l2_physical = backing.l2_physical;
+            value.asid = backing.asid;
+            value.asid_generation = backing.asid_generation;
+            address_space_backing_unpin(pin);
+        }
+    }
+    return value;
+}
+
+// Writes a whole backing back. Writers are serialized by process ownership
+// (this file's header), so a read, a change and this write are not raced by
+// another writer of the same backing. Never allocates: a backing that is
+// written was made by address_space_backing_ensure first.
+private fn address_space_backing_write(slot: usize, value: AddressSpaceBacking)
+        !{unsafe} {
+    if (slot == 0) {
+        address_space_backing_root0.live = value.live;
+        address_space_backing_root0.l1_physical = value.l1_physical;
+        address_space_backing_root0.l2_physical = value.l2_physical;
+        address_space_backing_root0.asid = value.asid;
+        address_space_backing_root0.asid_generation = value.asid_generation;
+        return;
+    }
+    match address_space_backing_pin(&address_space_backing_pool, slot) {
+        RegionPinned(AddressSpaceBacking)::Stale => {
+            address_space_backing_missing_note();
+        }
+        RegionPinned(AddressSpaceBacking)::Pinned(pin) => {
+            let backing: *AddressSpaceBacking = region_pin_at(pin);
+            backing.live = value.live;
+            backing.l1_physical = value.l1_physical;
+            backing.l2_physical = value.l2_physical;
+            backing.asid = value.asid;
+            backing.asid_generation = value.asid_generation;
+            address_space_backing_unpin(pin);
         }
     }
 }
@@ -364,7 +440,7 @@ private fn address_space_backing_existing_at(slot: usize)
 fn address_space_is_live(slot: usize) -> bool {
     if (scheduled_process_slot_valid(slot)) {
         let checked: usize = slot;
-        return address_space_backing_at(checked).live;
+        return address_space_backing_read(checked).live;
     }
     return false;
 }
@@ -387,8 +463,8 @@ fn address_space_root_slot(root: AddressSpaceRoot) -> usize {
 fn address_space_l1_physical(slot: usize) -> usize {
     if (scheduled_process_slot_valid(slot)) {
         let checked: usize = slot;
-        if (address_space_backing_at(checked).live) {
-            return address_space_backing_at(checked).l1_physical;
+        if (address_space_backing_read(checked).live) {
+            return address_space_backing_read(checked).l1_physical;
         }
     }
     return 0;
@@ -397,8 +473,8 @@ fn address_space_l1_physical(slot: usize) -> usize {
 fn address_space_l2_physical(slot: usize) -> usize {
     if (scheduled_process_slot_valid(slot)) {
         let checked: usize = slot;
-        if (address_space_backing_at(checked).live) {
-            return address_space_backing_at(checked).l2_physical;
+        if (address_space_backing_read(checked).live) {
+            return address_space_backing_read(checked).l2_physical;
         }
     }
     return 0;
@@ -407,8 +483,8 @@ fn address_space_l2_physical(slot: usize) -> usize {
 fn address_space_asid(slot: usize) -> usize {
     if (scheduled_process_slot_valid(slot)) {
         let checked: usize = slot;
-        if (address_space_backing_at(checked).live) {
-            return address_space_backing_at(checked).asid;
+        if (address_space_backing_read(checked).live) {
+            return address_space_backing_read(checked).asid;
         }
     }
     return 0;
@@ -426,7 +502,7 @@ struct AddressSpaceDiagnosticSnapshot {
 // return a value copy that owns no pool reference.
 fn address_space_diagnostic_snapshot(slot: usize)
         -> AddressSpaceDiagnosticSnapshot !{unsafe} {
-    let backing: *AddressSpaceBacking = address_space_backing_existing_at(slot);
+    let mut backing: AddressSpaceBacking = address_space_backing_read_existing(slot);
     let mut snapshot: AddressSpaceDiagnosticSnapshot = { false, 0, 0, 0 };
     if (backing.live) {
         snapshot.live = true;
@@ -452,11 +528,11 @@ fn address_space_record_backing(
     // Build before dropping the fine-grained owners into this coarser
     // record. mmu_init_root has no allocation or fallible operation.
     mmu_init_root(l1_physical, l2_physical);
-    address_space_backing_at(slot).l1_physical = l1_physical;
-    address_space_backing_at(slot).l2_physical = l2_physical;
-    address_space_backing_at(slot).asid = 0;
-    address_space_backing_at(slot).asid_generation = 0;
-    address_space_backing_at(slot).live = true;
+    let mut recorded: AddressSpaceBacking = { true, l1_physical, l2_physical, 0, 0 };
+    if (address_space_backing_ensure(slot) == false) {
+        address_space_backing_missing_note();
+    }
+    address_space_backing_write(slot, recorded);
     page_owner_transfer_index(l1);
     page_owner_transfer_index(l2);
 }
@@ -572,7 +648,7 @@ fn address_space_ensure_root(slot: usize) -> AddressSpaceEnsureResult {
         return AddressSpaceEnsureResult::SlotOutOfRange;
     }
     let checked: usize = slot;
-    if (address_space_backing_at(checked).live) {
+    if (address_space_backing_read(checked).live) {
         return AddressSpaceEnsureResult::Ok;
     }
     match address_space_allocate_root(checked) {
@@ -600,6 +676,7 @@ private fn address_space_refresh_asid(
     let (value, generation) = asid_assign();
     backing.asid = value;
     backing.asid_generation = generation;
+    address_space_backing_write(slot, *backing);
 }
 
 // The half of activation that may discover global ASID work. A scheduler can
@@ -628,8 +705,7 @@ fn address_space_prepare_activation(slot: usize)
         return AddressSpaceActivationPrepareResult::Invalid;
     }
     let checked: usize = slot;
-    let backing: *AddressSpaceBacking =
-        address_space_backing_existing_at(checked);
+    let mut backing: AddressSpaceBacking = address_space_backing_read_existing(checked);
     if (backing.live == false) {
         return AddressSpaceActivationPrepareResult::Invalid;
     }
@@ -643,6 +719,7 @@ fn address_space_prepare_activation(slot: usize)
                 let (value, generation) = assignment;
                 backing.asid = value;
                 backing.asid_generation = generation;
+                address_space_backing_write(checked, backing);
             }
         }
     }
@@ -663,8 +740,7 @@ fn address_space_commit_activation(
         return AddressSpaceActivationCommitResult::Invalid;
     }
     let checked: usize = slot;
-    let backing: *AddressSpaceBacking =
-        address_space_backing_existing_at(checked);
+    let mut backing: AddressSpaceBacking = address_space_backing_read_existing(checked);
     if (backing.live == false) {
         return AddressSpaceActivationCommitResult::Invalid;
     }
@@ -683,10 +759,9 @@ fn address_space_cancel_activation(
 fn address_space_activate_root(slot: usize) {
     if (scheduled_process_slot_valid(slot)) {
         let checked: usize = slot;
-        let backing: *AddressSpaceBacking =
-            address_space_backing_existing_at(checked);
+        let mut backing: AddressSpaceBacking = address_space_backing_read_existing(checked);
         if (backing.live) {
-            address_space_refresh_asid(checked, backing);
+            address_space_refresh_asid(checked, &backing);
             mmu_activate_root(backing.l1_physical, backing.asid);
             address_space_set_active_slot_here(checked);
             return;
@@ -695,8 +770,7 @@ fn address_space_activate_root(slot: usize) {
     // Root 0 is permanently retained as the bootstrap/fallback root, so an
     // invalid or already-released slot never reaches TTBR0_EL1.
     let fallback: usize = 0;
-    let fallback_backing: *AddressSpaceBacking =
-        address_space_backing_existing_at(fallback);
+    let mut fallback_backing: AddressSpaceBacking = address_space_backing_read_existing(fallback);
     mmu_activate_root(fallback_backing.l1_physical, fallback_backing.asid);
     address_space_set_active_slot_here(0);
 }
@@ -712,8 +786,8 @@ fn address_space_l3_physical_for_branch(slot: usize, branch: usize) -> usize {
         return 0;
     }
     let checked: usize = slot;
-    if (address_space_backing_at(checked).live == false) { return 0; }
-    return mmu_user_l3_physical(address_space_backing_at(checked).l2_physical,
+    if (address_space_backing_read(checked).live == false) { return 0; }
+    return mmu_user_l3_physical(address_space_backing_read(checked).l2_physical,
                                 branch);
 }
 
@@ -732,12 +806,12 @@ fn address_space_pte_write(slot: usize, index: usize, value: usize)
         return AddressSpacePteWriteResult::Invalid;
     }
     let checked: usize = slot;
-    if (address_space_backing_at(checked).live == false) {
+    if (address_space_backing_read(checked).live == false) {
         return AddressSpacePteWriteResult::Invalid;
     }
     let branch: usize = index / USER_L3_PAGE_COUNT;
     let entry: usize = index % USER_L3_PAGE_COUNT;
-    let l2_physical: usize = address_space_backing_at(checked).l2_physical;
+    let l2_physical: usize = address_space_backing_read(checked).l2_physical;
     let mut l3_physical: usize =
         mmu_user_l3_physical(l2_physical, branch);
     if (l3_physical == 0) {
@@ -756,7 +830,7 @@ fn address_space_pte_write(slot: usize, index: usize, value: usize)
         }
     }
     mmu_pte_update(l3_physical, entry, value,
-                   address_space_backing_at(checked).asid,
+                   address_space_backing_read(checked).asid,
                    USER_TEXT_VA + index * PAGE_SIZE);
     return AddressSpacePteWriteResult::Written;
 }
@@ -897,8 +971,8 @@ fn address_space_resolve_cow(slot: usize, index: usize) -> bool !{unsafe} {
 fn address_space_release_user_mappings(slot: usize) {
     if (scheduled_process_slot_valid(slot) == false) { return; }
     let checked: usize = slot;
-    if (address_space_backing_at(checked).live == false) { return; }
-    let l2_physical: usize = address_space_backing_at(checked).l2_physical;
+    if (address_space_backing_read(checked).live == false) { return; }
+    let l2_physical: usize = address_space_backing_read(checked).l2_physical;
     for branch: usize in 0..<USER_L2_BRANCH_COUNT {
         let l3_physical: usize = mmu_user_l3_physical(l2_physical, branch);
         if (l3_physical != 0) {
@@ -907,7 +981,7 @@ fn address_space_release_user_mappings(slot: usize) {
                 if (pte != 0) {
                     mmu_pte_update(
                         l3_physical, entry, 0,
-                        address_space_backing_at(checked).asid,
+                        address_space_backing_read(checked).asid,
                         USER_TEXT_VA +
                             (branch * USER_L3_PAGE_COUNT + entry) * PAGE_SIZE);
                     page_mapping_release_physical(pte & USER_PAGE_PHYS_MASK);
@@ -918,7 +992,7 @@ fn address_space_release_user_mappings(slot: usize) {
             page_transferred_release_physical(l3_physical);
         }
     }
-    let asid: usize = address_space_backing_at(checked).asid;
+    let asid: usize = address_space_backing_read(checked).asid;
     if (asid != 0) { mmu_tlb_invalidate_asid(asid); }
 }
 
@@ -941,8 +1015,8 @@ fn address_space_clear_root(slot: usize) {
 // visible.
 fn address_space_user_window_is_clear(slot: usize) -> bool !{unsafe} {
     if (scheduled_process_slot_valid(slot) == false) { return true; }
-    if (address_space_backing_at(slot).live == false) { return true; }
-    let l2_physical: usize = address_space_backing_at(slot).l2_physical;
+    if (address_space_backing_read(slot).live == false) { return true; }
+    let l2_physical: usize = address_space_backing_read(slot).l2_physical;
     for branch: usize in 0..<USER_L2_BRANCH_COUNT {
         let l3_physical: usize = mmu_user_l3_physical(l2_physical, branch);
         if (l3_physical != 0) {
@@ -964,18 +1038,17 @@ fn address_space_l3_branch_physical(slot: usize, branch: usize) -> usize {
 fn address_space_release_root(slot: usize) {
     if (slot == 0 || scheduled_process_slot_valid(slot) == false) { return; }
     let checked: usize = slot;
-    if (address_space_backing_at(checked).live == false) { return; }
+    if (address_space_backing_read(checked).live == false) { return; }
     if (address_space_active_slot_here() == checked) {
         address_space_activate_root(0);
     }
-    let l1_physical: usize = address_space_backing_at(checked).l1_physical;
-    let l2_physical: usize = address_space_backing_at(checked).l2_physical;
-    let asid: usize = address_space_backing_at(checked).asid;
+    let l1_physical: usize = address_space_backing_read(checked).l1_physical;
+    let l2_physical: usize = address_space_backing_read(checked).l2_physical;
+    let asid: usize = address_space_backing_read(checked).asid;
     address_space_release_user_mappings(checked);
-    address_space_backing_at(checked).live = false;
-    address_space_backing_at(checked).l1_physical = 0;
-    address_space_backing_at(checked).l2_physical = 0;
-    address_space_backing_at(checked).asid = 0;
+    let mut cleared: AddressSpaceBacking = { false, 0, 0, 0,
+        address_space_backing_read(checked).asid_generation };
+    address_space_backing_write(checked, cleared);
     page_transferred_release_physical(l2_physical);
     page_transferred_release_physical(l1_physical);
     // GitHub issue #402: nothing gives an ASID back any more. The number
@@ -1325,13 +1398,13 @@ fn address_space_asid_rollover_probe() -> bool {
         }
     }
     let active: usize = address_space_active_slot_here();
-    let running: *AddressSpaceBacking = address_space_backing_existing_at(active);
+    let mut running: AddressSpaceBacking = address_space_backing_read_existing(active);
     if (active != 0 &&
         asid_generation_is_current(running.asid_generation) == false) {
         ok = false;
     }
     if (running.asid == 0 || running.asid > last) { ok = false; }
-    let bootstrap: *AddressSpaceBacking = address_space_backing_existing_at(0);
+    let mut bootstrap: AddressSpaceBacking = address_space_backing_read_existing(0);
     if (bootstrap.asid != 1 || bootstrap.asid_generation != 1) { ok = false; }
     return ok;
 }

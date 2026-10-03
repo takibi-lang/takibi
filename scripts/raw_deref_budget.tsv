@@ -27,7 +27,7 @@ kernel/kernel/tcp_connection_contention_evidence.tkb	2	0	a two-core boot probe (
 kernel/lib/diagnostic_ring.tkb	6	0	per-CPU log rings published by atomics (#637 B)
 kernel/lib/intrusive_pool.tkb	93	0	the pool's own chunk carving, the mint of every payload pointer (#637 F)
 kernel/lib/locked_cell.tkb	1	0	a lock-guarded cell's payload (#637 F)
-kernel/mm/address_space.tkb	67	0	address-space backing records reached through liveness escapes (#637 D, F)
+kernel/mm/address_space.tkb	24	0	address-space backing records reached through liveness escapes (#637 D, F)
 kernel/mm/page.tkb	157	0	physical pages and page metadata (#637 D)
 kernel/mm/process_image.tkb	159	0	process image records reached through liveness escapes (#637 F)
 kernel/mm/user_memory.tkb	11	0	the user-range mint site: user addresses become slices here (#637 D)

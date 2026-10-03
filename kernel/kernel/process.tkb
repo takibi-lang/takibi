@@ -388,7 +388,8 @@ struct ProcessRecord {
     // handle rather than an embedded field, because taking the address of
     // a field of an array element is not expressible (issue #385) and
     // that file needs a pointer to work through.
-    address_space_backing: IntrusiveSlotAddress;
+    // The backing's pool address (0: none) and generation (#672).
+    address_space_backing: usize;
     address_space_backing_generation: usize;
 }
 
@@ -1942,7 +1943,7 @@ fn scheduled_process_slot_valid(slot: usize) -> bool !{unsafe} {
     }
 }
 
-fn scheduled_process_address_space_backing(slot: usize) -> IntrusiveSlotAddress {
+fn scheduled_process_address_space_backing(slot: usize) -> usize {
     return scheduled_process_record_at(slot).address_space_backing;
 }
 
@@ -1951,8 +1952,7 @@ fn scheduled_process_address_space_backing_generation(slot: usize) -> usize {
 }
 
 fn scheduled_process_set_address_space_backing(
-        slot: usize, address: IntrusiveSlotAddress,
-                                               generation: usize) {
+        slot: usize, address: usize, generation: usize) {
     scheduled_process_record_at(slot).address_space_backing = address;
     scheduled_process_record_at(slot).address_space_backing_generation =
         generation;

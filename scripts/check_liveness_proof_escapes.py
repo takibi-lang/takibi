@@ -71,12 +71,6 @@ ALLOWED = {
     ("kernel/kernel/process.tkb", "scheduled_process_record_peek"):
         "deliberately tolerates a dead slot for crash and trace paths, and "
         "returns the pointer",
-    ("kernel/mm/address_space.tkb", "address_space_backing_at"):
-        "a backing is released only when its process is reaped, and only a "
-        "process holding a Running token (or its reaper) activates or edits "
-        "it",
-    ("kernel/mm/address_space.tkb", "address_space_backing_existing_at"):
-        "the same lifetime as address_space_backing_at",
     ("kernel/mm/process_image.tkb", "process_image_record_at"):
         "an image record is released only when its process is reaped, and "
         "only that process's exec and fault paths, or its reaper, reach it",
