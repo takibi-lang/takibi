@@ -1910,10 +1910,10 @@ fn scheduled_process_command_line(slot: usize) -> [u8; 512..] {
 // a ScheduledProcessOwner from the allocation that just produced it, and an
 // owner is a linear proof of THAT allocation -- strictly stronger than a
 // generation compare, so record_at is the right read for it.
-private fn scheduled_process_copy_command_line(parent: ProcessHandle,
-                                               child: usize) !{unsafe} {
-    let source: *ProcessRecord = scheduled_process_record_of(parent);
-    let destination: *ProcessRecord = scheduled_process_record_at(child);
+private fn scheduled_process_copy_command_line(parent: borrow ProcessRunning[p],
+        child: borrow ScheduledProcessOwner[c]) !{unsafe} {
+    let source: *ProcessRecord = scheduled_process_record_running(parent);
+    let destination: *ProcessRecord = scheduled_process_record_owned(child);
     destination.command_line_length = source.command_line_length &
                                       PROCESS_COMMAND_LENGTH_MASK;
     for index: usize in 0..<512 {
@@ -1921,29 +1921,29 @@ private fn scheduled_process_copy_command_line(parent: ProcessHandle,
     }
 }
 
-private fn scheduled_process_copy_signal_mask(parent: ProcessHandle,
-                                              child: usize) !{unsafe} {
-    scheduled_process_record_at(child).signal_mask =
-        scheduled_process_record_of(parent).signal_mask;
-    scheduled_process_record_at(child).sigchld_ignored =
-        scheduled_process_record_of(parent).sigchld_ignored;
+private fn scheduled_process_copy_signal_mask(parent: borrow ProcessRunning[p],
+        child: borrow ScheduledProcessOwner[c]) !{unsafe} {
+    scheduled_process_record_owned(child).signal_mask =
+        scheduled_process_record_running(parent).signal_mask;
+    scheduled_process_record_owned(child).sigchld_ignored =
+        scheduled_process_record_running(parent).sigchld_ignored;
     // Linux: a forked child inherits its parent's handlers.
-    scheduled_process_record_at(child).sigchld_handler =
-        scheduled_process_record_of(parent).sigchld_handler;
-    scheduled_process_record_at(child).sigchld_flags =
-        scheduled_process_record_of(parent).sigchld_flags;
-    scheduled_process_record_at(child).sigchld_restorer =
-        scheduled_process_record_of(parent).sigchld_restorer;
-    scheduled_process_record_at(child).sigchld_action_mask =
-        scheduled_process_record_of(parent).sigchld_action_mask;
+    scheduled_process_record_owned(child).sigchld_handler =
+        scheduled_process_record_running(parent).sigchld_handler;
+    scheduled_process_record_owned(child).sigchld_flags =
+        scheduled_process_record_running(parent).sigchld_flags;
+    scheduled_process_record_owned(child).sigchld_restorer =
+        scheduled_process_record_running(parent).sigchld_restorer;
+    scheduled_process_record_owned(child).sigchld_action_mask =
+        scheduled_process_record_running(parent).sigchld_action_mask;
 }
 
 // Linux: a child inherits its parent's affinity mask across fork, and
 // execve keeps it, which this record does by surviving the exec.
-private fn scheduled_process_copy_affinity_mask(parent: ProcessHandle,
-                                                child: usize) !{unsafe} {
-    scheduled_process_record_at(child).affinity_mask =
-        scheduled_process_record_of(parent).affinity_mask;
+private fn scheduled_process_copy_affinity_mask(parent: borrow ProcessRunning[p],
+        child: borrow ScheduledProcessOwner[c]) !{unsafe} {
+    scheduled_process_record_owned(child).affinity_mask =
+        scheduled_process_record_running(parent).affinity_mask;
 }
 
 // GitHub issue #392: where kernel/kernel/fd_table.tkb keeps this
@@ -8445,9 +8445,18 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
         ScheduledPooledProcessAllocResult::Allocated(pooled) => {
             let mut child: ProcessHandle =
                 scheduled_pooled_process_handle(pooled);
-            scheduled_process_copy_command_line(parent, child.pool_index);
-            scheduled_process_copy_signal_mask(parent, child.pool_index);
-            scheduled_process_copy_affinity_mask(parent, child.pool_index);
+            // GitHub issue #693 steps 2/4: the parent is the process running
+            // here, and the child is not visible to anyone else until the
+            // publish below, so this path owns it.
+            let ProcessRunningHere::Running(parent_running) =
+                process_running_here() else {};
+            let child_owner =
+                scheduled_process_owner_new(child.pool_index, child.generation);
+            scheduled_process_copy_command_line(parent_running, child_owner);
+            scheduled_process_copy_signal_mask(parent_running, child_owner);
+            scheduled_process_copy_affinity_mask(parent_running, child_owner);
+            scheduled_process_owner_drop(child_owner);
+            process_running_end(parent_running);
             // GitHub issue #437: push at the HEAD of the sibling list.
             // O(1), and with one child it leaves first_child naming that
             // child and no sibling -- the shape every existing view was
@@ -8482,6 +8491,8 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
             // GitHub issue #611: clones run on any CPU now, so the count
             // moves under the lock that orders them.
             process_test_evidence_record_clone();
+            let child_saved_sp: usize =
+                scheduled_process_record_of_locked(publish_guard, child).saved_sp;
             process_run_unlock(publish_guard);
             workload_busy_note_selected(
                 scheduled_process_pid_of_handle(child));
@@ -8490,9 +8501,7 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
                 ProcessTraceFork, scheduled_process_pid_of_handle(child),
                 child.generation,
                 scheduled_process_pid_of_handle(parent), parent.generation,
-                5, 0, child.pool_index,
-                scheduled_process_record_of(child).saved_sp,
-                flags);
+                5, 0, child.pool_index, child_saved_sp, flags);
             return ProcessCloneResult::ChildConstructing(
                 scheduled_process_pid_of_handle(child));
         }
