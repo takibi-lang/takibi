@@ -103,6 +103,20 @@ before its issue closes. The steps keep their numbers, which issues cite.
 
 ### Territory B: everything else, ordered by current priority
 
+**B's window is short (maintainer, 2026-10-03):** B runs for a few days and
+then stops, with no successor. Take only items that finish inside that
+window and that A consumes at once, in this order; leave the bands below
+untouched rather than half-done.
+- #684: a let-else whose failure arm breaks out of a loop reports its
+  linear binding as already consumed (A works around it with `match` in
+  fd_table.tkb). A checker fix plus Alcotest cases; small.
+- #683: a field assignment to a call's struct result is an internal BUG
+  with no location; make it a located type error. Small.
+- #660: the raw-dereference audit for the EL0 payloads, only if both above
+  are done.
+#680, #681 and #682 (the pin's cost) stay with A: they need RPi5
+measurements first.
+
 1. **Safe-memory language support that A's route consumes** (nothing here
    waits for A): #660 (the raw-dereference audit for the EL0 payloads);
    #646 (compiler soundness fuzzing, the footing of every static

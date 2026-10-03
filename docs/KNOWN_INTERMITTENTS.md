@@ -30,6 +30,7 @@ whether a row has gone quiet or has merely stopped being looked for.
 
 | Symptom | Rate | Issue | Last seen |
 | --- | --- | --- | --- |
+| `passed, so the window was not crossed` | 1 land.sh allcheck on 660efe01 (race-window 609's reverted run); 0 of 3 standalone | #685 | 2026-10-03 |
 | `the payload never asked for its input` | 1 of 9 cicheck runs after the alloc-rollback split | #607 | 2026-09-26 |
 | `workload: peer read 98304 pattern bytes` | line MISSING from peer_filesystem.actual: 2 of 7 local cicheck runs; 0 of 47 standalone. The uart-wake lane reports the same stall as `the peer console writer never delivered its last record`: 1 of 1 cicheck, 0 of 4 standalone, 0 of 30 peer-suites run six at a time | #604 | 2026-09-29 |
 | `retired different work in their cold and warm passes` | 1 of 4 local RPi5 runs on 2026-09-29, every warm pass on CPU 2; 1 of 3 on 2026-09-30 in land.sh (4 of 8 rounds disturbed) | #649 | 2026-09-30 |
