@@ -1767,14 +1767,17 @@ private fn scheduled_process_diagnostic_fill(
         ProcessSlotForPidResult::Missing => { return false; }
         ProcessSlotForPidResult::Found(found) => { found }
     };
-    let record: *ProcessRecord = scheduled_process_record_at(slot);
-    snapshot.pid = record.pid;
-    snapshot.session_id = record.session_id;
+    // GitHub issue #693 step 6: a diagnostic read. procfs holds the run
+    // lock across the whole fill; the monitor runs with every other CPU
+    // stopped. Neither is the counted accessor's question.
+    snapshot.pid = scheduled_process_record_peek(slot).pid;
+    snapshot.session_id = scheduled_process_record_peek(slot).session_id;
     snapshot.ppid = 0;
-    if (record.has_parent) {
-        snapshot.ppid = scheduled_process_pid_of_handle(record.parent);
+    if (scheduled_process_record_peek(slot).has_parent) {
+        snapshot.ppid = scheduled_process_pid_of_handle(
+            scheduled_process_record_peek(slot).parent);
     }
-    match record.state {
+    match scheduled_process_record_peek(slot).state {
         ProcessSlotState::Free => { snapshot.state = 0x3F; }
         ProcessSlotState::Ready => { snapshot.state = 0x52; }
         ProcessSlotState::Running => { snapshot.state = 0x52; }
@@ -1783,11 +1786,14 @@ private fn scheduled_process_diagnostic_fill(
         ProcessSlotState::Constructing => { snapshot.state = 0x49; }
     }
     snapshot.resident_pages = process_image_active_page_count(slot);
-    snapshot.start_time_ticks = record.start_time_ticks;
-    snapshot.command_line_length = record.command_line_length &
-                                   PROCESS_COMMAND_LENGTH_MASK;
+    snapshot.start_time_ticks =
+        scheduled_process_record_peek(slot).start_time_ticks;
+    snapshot.command_line_length =
+        scheduled_process_record_peek(slot).command_line_length &
+        PROCESS_COMMAND_LENGTH_MASK;
     for index: usize in 0..<512 {
-        snapshot.command_line[index] = record.command_line[index];
+        snapshot.command_line[index] =
+            scheduled_process_record_peek(slot).command_line[index];
     }
     return true;
 }
@@ -1802,7 +1808,7 @@ fn scheduled_process_diagnostic_next_pid(after: usize) -> usize !{unsafe} {
         match cursor {
             ProcessSlotCursor::Done => { walking = false; }
             ProcessSlotCursor::At(slot) => {
-                let pid: usize = scheduled_process_record_at(slot).pid;
+                let pid: usize = scheduled_process_pid_of_slot(slot);
                 if (pid > after && (next == 0 || pid < next)) { next = pid; }
                 cursor = scheduled_process_next_slot(slot);
             }
@@ -3384,10 +3390,14 @@ fn scheduled_process_reap_remove(
 private fn scheduled_process_probe_publish_ready(handle: ProcessHandle)
         !{unsafe} {
     if (scheduled_process_handle_matches(handle) == false) { return; }
-    scheduled_process_set_affinity_mask(handle.pool_index,
-                                        1 << KERNEL_MAX_CORES);
-    scheduled_process_record_at(handle.pool_index).state =
+    // GitHub issue #693 step 6: the record is already in the pool, so a
+    // peer can see it; written under the run guard. No caller holds it.
+    let guard = process_run_lock();
+    scheduled_process_record_locked(guard, handle.pool_index).affinity_mask =
+        1 << KERNEL_MAX_CORES;
+    scheduled_process_record_locked(guard, handle.pool_index).state =
         ProcessSlotState::Ready;
+    process_run_unlock(guard);
 }
 
 // The other half of the same statement, asked rather than asserted by the
@@ -5899,7 +5909,7 @@ private fn kernel_stack_owner_name(sp: usize) -> *u8 {
             ProcessSlotCursor::Done => { walking = false; }
             ProcessSlotCursor::At(slot) => {
                 let base: usize =
-                    scheduled_process_record_at(slot).stack_run;
+                    scheduled_process_record_peek(slot).stack_run;
                 if (base != 0 && sp >= base &&
                     sp < base + KERNEL_STACK_RUN_BYTES) {
                     return "below a process kernel stack" as *u8;
@@ -7952,18 +7962,30 @@ fn kernel_process_fanout_probe() -> bool !{unsafe} {
     // read is: first_child is only readable when has_first_child says it
     // is, and a probe that assumes an invariant it does not state is how
     // the unguarded read in kernel_process_reap_zombie survived.
-    if (scheduled_process_record_of(parent_handle)
-            .has_first_child == false) { return false; }
+    // GitHub issue #693 step 6: the links and the status are read and
+    // written under the run guard, dropped before each run-to-exit, which
+    // takes it itself.
+    let head_guard = process_run_lock();
+    let has_head: bool =
+        scheduled_process_record_of_locked(head_guard, parent_handle)
+            .has_first_child;
     let mut cursor: ProcessHandle =
-        scheduled_process_record_of(parent_handle).first_child;
+        scheduled_process_record_of_locked(head_guard, parent_handle)
+            .first_child;
+    process_run_unlock(head_guard);
+    if (has_head == false) { return false; }
     for i: usize in 0..<3 {
-        let mut following: ProcessHandle =
-            scheduled_process_record_of(cursor).next_sibling;
+        let link_guard = process_run_lock();
         let has_following: bool =
-            scheduled_process_record_of(cursor).has_next_sibling;
+            scheduled_process_record_of_locked(link_guard, cursor)
+                .has_next_sibling;
+        let mut following: ProcessHandle =
+            scheduled_process_record_of_locked(link_guard, cursor).next_sibling;
         // Head insertion means the list runs newest-first, so the pid
         // stamped here is pids[2 - i].
-        scheduled_process_record_of(cursor).exit_status = 42 - i;
+        scheduled_process_record_of_locked(link_guard, cursor).exit_status =
+            42 - i;
+        process_run_unlock(link_guard);
         if (kernel_process_probe_run_to_exit(cursor) == false) {
             return false;
         }
@@ -8227,11 +8249,18 @@ fn kernel_process_scheduler_probe() -> bool {
 // Ready take must still succeed. The fixture never restores its synthetic
 // frame, just like the timer and block scheduler probes above.
 private fn kernel_process_exit_continuation_probe(parent: ProcessHandle) -> bool {
-    if (scheduled_process_record_of(parent).has_first_child == false ||
+    // GitHub issue #693 step 6: the parent's links are read under the run
+    // guard, released before the stack-depart probe, which takes it itself.
+    let link_guard = process_run_lock();
+    let has_child: bool =
+        scheduled_process_record_of_locked(link_guard, parent).has_first_child;
+    let mut child: ProcessHandle =
+        scheduled_process_record_of_locked(link_guard, parent).first_child;
+    process_run_unlock(link_guard);
+    if (has_child == false ||
         kernel_process_scheduler_probe_stack_depart() == false) {
         return false;
     }
-    let mut child: ProcessHandle = scheduled_process_record_of(parent).first_child;
     let child_pid: usize = scheduled_process_pid_of_handle(child);
     let guard = process_run_lock();
     match scheduled_process_ready_take(guard, child) {
@@ -8788,7 +8817,7 @@ fn kernel_process_current_pending_block_reason() -> ProcessWaitReason {
 fn kernel_process_crash_parent_pid() -> usize {
     if (execution_here().current_live == false) { return 0; }
     let slot: usize = execution_here().current_handle.pool_index;
-    if (scheduled_process_record_at(slot).has_parent == false) { return 0; }
+    if (scheduled_process_record_peek(slot).has_parent == false) { return 0; }
     return scheduled_process_pid_of_handle(
         scheduled_process_record_peek(slot).parent);
 }
@@ -8840,7 +8869,7 @@ fn kernel_process_crash_root_slot() -> usize {
 fn kernel_process_crash_image_kind() -> usize {
     if (execution_here().current_live == false) { return 0; }
     let slot: usize = execution_here().current_handle.pool_index;
-    if (scheduled_process_record_at(slot).exec_image_live) { return 1; }
+    if (scheduled_process_record_peek(slot).exec_image_live) { return 1; }
     return 0;
 }
 
