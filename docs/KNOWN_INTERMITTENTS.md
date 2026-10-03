@@ -37,7 +37,7 @@ whether a row has gone quiet or has merely stopped being looked for.
 | `ARP while HTTPd is listening` | 1 of 30 standalone samples; again in a local allcheck on 8f289250, beside the settings_wake failure below | #605 | 2026-09-30 |
 | `the scripted BREAK never fired` | 1 CI run of the DDB lane since e824b030 (run 36207501077); 0 of 10 locally | #603 | 2026-09-26 |
 | `fd refcount contention: failed` | 1 local allcheck aggregate on cf83193d, in race-window 609's armed run (host load 18), secondary one cycle ahead of its limit; 0 of 3 standalone | #670 | 2026-10-01 |
-| `BREAK inspection did not resume boot` | 1 local allcheck aggregate on 16fecc62 (kernels byte-identical to a green b0ce543c), after `ddb: continuing` and further guest output; 0 of 3 standalone | #676 | 2026-10-02 |
+| `BREAK inspection did not resume boot` | 2 local allcheck aggregates (16fecc62, becb8ea6), each after `ddb: continuing` and further guest output; 0 of 3 standalone | #676 | 2026-10-03 |
 | `freelist contention: failed` | 1 kernel/qemu-debug run on 2026-09-06 (3 reruns green); 1 land.sh allcheck on 83e66bf7, in race-window 609's armed run (host load 16.75), stage `incomplete` | #678 | 2026-10-02 |
 | `network init contention: failed` | 1 of 2 local allcheck aggregates on 563cb5f0, in `pool_contention`, with no counts line; 0 of 3 standalone | #654 | 2026-09-30 |
 | `/bin/peer-tty never said it was reading the terminal` | 2 of the last 3 full allcheck aggregates on 2026-10-01 (one on a docs-only commit), in kernelcheck-uart-wake-qemu; the same stall as race-window 603's armed run; 0 of 2 standalone. Cause found and fixed in ac5a6b46 (the writer's first write raced core 0's drain); kept until a few aggregates stay clean | #665 | 2026-10-01 |
