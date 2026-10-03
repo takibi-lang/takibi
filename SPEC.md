@@ -1123,7 +1123,10 @@ To bind one payload and handle the other cases without repeating its type,
 write `let Name::Case(value) = expression else { arms };`. The successful
 case binds `value` in the enclosing scope. Every arm in `else` must end in
 `return`, `break`, or `continue`; the ordinary match exhaustiveness and
-payload-consumption rules still apply. `let mut` also works. For example:
+payload-consumption rules still apply. A failure arm that exits the loop does
+not contribute ownership state to the successful binding; each iteration
+produces a fresh payload. Values produced before `break` or `continue` must
+still be consumed before that exit. `let mut` also works. For example:
 
 ```takibi
 let PageAllocResult::Allocated(page) = page_alloc() else {

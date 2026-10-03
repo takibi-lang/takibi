@@ -17469,6 +17469,120 @@ let codegen_tests = [
             return value;
         }");
 
+  (* Loop exits leave the branch just as return does, but still owe every
+     linear value that was produced before the exit. *)
+  Alcotest.test_case
+    "let-else linear payload remains fresh with break" `Quick
+    (expect_codegen_ok
+       "struct LeNode { next: usize; }
+        let mut le_nodes: [LeNode; 4];
+        linear struct LeTok[k: usize] { private v: usize; }
+        must_use variant LeGot { None; Some(exists k: usize. LeTok[k]); }
+        fn le_get_loop() -> LeGot { return LeGot::None; }
+        fn le_at(t: borrow LeTok[k]) -> *LeNode @ k { return &le_nodes[0]; }
+        fn le_give(t: sink LeTok[k]) {}
+        fn le_loop(n: usize) -> usize {
+            let mut i: usize = 0;
+            let mut a: usize = 0;
+            while (i < n) {
+                let LeGot::Some(t) = le_get_loop() else {
+                    LeGot::None => { break; }
+                };
+                let node: *LeNode = le_at(t);
+                a = node.next;
+                i = i + 1;
+                le_give(t);
+            }
+            return a;
+        }");
+
+  Alcotest.test_case
+    "let-else break refuses a pending linear value" `Quick
+    (expect_type_error "is still pending at this break"
+       "linear view LePending;
+        must_use variant LePendingGot { None; Some(LePending); }
+        fn le_pending_get() -> LePendingGot { return LePendingGot::None; }
+        fn le_pending_give(t: sink LePending) {}
+        fn le_pending_loop(n: usize) {
+            while (n > 0) {
+                let owed: LePending = view LePending;
+                let LePendingGot::Some(t) = le_pending_get() else {
+                    LePendingGot::None => { break; }
+                };
+                le_pending_give(t);
+                le_pending_give(owed);
+            }
+        }");
+
+  Alcotest.test_case
+    "let-else linear payload remains fresh with continue" `Quick
+    (expect_codegen_ok
+       "struct LeNode { next: usize; }
+        let mut le_nodes: [LeNode; 4];
+        linear struct LeTok[k: usize] { private v: usize; }
+        must_use variant LeGot { None; Some(exists k: usize. LeTok[k]); }
+        fn le_get_loop() -> LeGot { return LeGot::None; }
+        fn le_at(t: borrow LeTok[k]) -> *LeNode @ k { return &le_nodes[0]; }
+        fn le_give(t: sink LeTok[k]) {}
+        fn le_loop(n: usize) -> usize {
+            let mut i: usize = 0;
+            let mut a: usize = 0;
+            while (i < n) {
+                let LeGot::Some(t) = le_get_loop() else {
+                    LeGot::None => { continue; }
+                };
+                let node: *LeNode = le_at(t);
+                a = node.next;
+                i = i + 1;
+                le_give(t);
+            }
+            return a;
+        }");
+
+  Alcotest.test_case
+    "let-else continue refuses a pending linear value" `Quick
+    (expect_type_error "is still pending at this continue"
+       "linear view LePending;
+        must_use variant LePendingGot { None; Some(LePending); }
+        fn le_pending_get() -> LePendingGot { return LePendingGot::None; }
+        fn le_pending_give(t: sink LePending) {}
+        fn le_pending_loop(n: usize) {
+            while (n > 0) {
+                let owed: LePending = view LePending;
+                let LePendingGot::Some(t) = le_pending_get() else {
+                    LePendingGot::None => { continue; }
+                };
+                le_pending_give(t);
+                le_pending_give(owed);
+            }
+        }");
+
+  Alcotest.test_case
+    "linear if break excludes the exiting path from fallthrough" `Quick
+    (expect_codegen_ok
+       "linear view LeIfToken;
+        fn le_if_give(t: sink LeIfToken) {}
+        fn le_if_loop(n: usize) {
+            while (n > 0) {
+                let t: LeIfToken = view LeIfToken;
+                if (n > 1) { le_if_give(t); break; }
+                le_if_give(t);
+            }
+        }");
+
+  Alcotest.test_case
+    "linear if continue excludes the exiting path from fallthrough" `Quick
+    (expect_codegen_ok
+       "linear view LeIfToken;
+        fn le_if_give(t: sink LeIfToken) {}
+        fn le_if_loop(n: usize) {
+            while (n > 0) {
+                let t: LeIfToken = view LeIfToken;
+                if (n > 1) { le_if_give(t); continue; }
+                le_if_give(t);
+            }
+        }");
+
   Alcotest.test_case
     "let-else requires failure arms to diverge" `Quick
     (expect_type_error "let-else failure arm must end"

@@ -10311,20 +10311,24 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        unioned into maybe-consumed, not intersected into must-be-consumed).
        Deliberately
        conservative in the safe direction: loops are never treated as
-       terminators here. *)
-    let rec stmt_always_terminates (s : Ast.stmt) = match s.desc with
+       terminators here. Branch merging also excludes break/continue,
+       which leave the branch but do not return from the function. *)
+    let rec stmt_always_terminates ~loop_exit (s : Ast.stmt) = match s.desc with
       | Ast.Return _ -> true
+      | Ast.Break | Ast.Continue -> loop_exit
       | Ast.Expr { desc = Ast.Call (name, _); _ }
         when StringSet.mem name noreturn_functions -> true
-      | Ast.If (_, yes, no) -> always_terminates yes && always_terminates no
+      | Ast.If (_, yes, no) ->
+          always_terminates ~loop_exit yes && always_terminates ~loop_exit no
       | Ast.Match (_, arms) -> List.for_all (fun arm ->
           let body = match arm with
             | Ast.ArmVariant (_, _, _, b) | Ast.ArmWild b | Ast.ArmIntLit (_, b)
             | Ast.ArmByteSliceLit (_, b) -> b in
-          always_terminates body) arms
-      | Ast.Block body | Ast.UnsafeBlock body -> always_terminates body
+          always_terminates ~loop_exit body) arms
+      | Ast.Block body | Ast.UnsafeBlock body -> always_terminates ~loop_exit body
       | _ -> false
-    and always_terminates stmts = List.exists stmt_always_terminates stmts in
+    and always_terminates ?(loop_exit = false) stmts =
+      List.exists (stmt_always_terminates ~loop_exit) stmts in
     let rec check_stmts moved declared taints stmts =
       let initial_declared = declared in
       let initial_var_types = !var_types in
@@ -10563,8 +10567,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           let (ym, _, yt) = check_stmts moved declared taints yes in
           let (nm, _, nt) = check_stmts moved declared taints no in
           let (combined, combined_taints) =
-            match always_terminates yes, always_terminates no with
-            | true, false -> (nm, nt)  (* "yes" always returns: only "no" continues past this `if` *)
+            match always_terminates ~loop_exit:true yes,
+                  always_terminates ~loop_exit:true no with
+            | true, false -> (nm, nt)  (* Only "no" continues past this `if`. *)
             | false, true -> (ym, yt)  (* symmetric case *)
             | _, _ -> (mv_merge ym nm, TaintEnv.join_branches yt nt)
               (* neither terminates, or BOTH do (nothing continues past
@@ -10717,7 +10722,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              | Some (Ast.PayloadBind (name, _)), None ->
                  Hashtbl.remove visible_bindings name
              | (None | Some Ast.PayloadIgnore), _ -> ());
-            (always_terminates body, out, out_taints)
+            (always_terminates ~loop_exit:true body, out, out_taints)
           ) arms in
           (* Same reasoning as `If` above: a terminating arm never reaches
              code after the `match`, so its consumption must not be merged
