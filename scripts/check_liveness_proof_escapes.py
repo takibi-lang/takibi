@@ -50,9 +50,6 @@ FN_RE = re.compile(r"^(?:private )?fn ([A-Za-z_0-9]+)")
 # not merely that the function returns a pointer. A new entry has to find
 # its own answer.
 ALLOWED = {
-    ("kernel/kernel/fd_table.tkb", "fd_block_at"):
-        "descriptor blocks belong to one fd context and are released only "
-        "with it, so fd_context_at's lifetime covers them",
     ("kernel/kernel/fd_table.tkb", "unified_object_at"):
         "a shared object is freed only when its reference count reaches zero "
         "under object_refcount_lock, and every reader reaches it through a "

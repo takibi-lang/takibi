@@ -2893,6 +2893,8 @@ match region_unpin(p) {                          // no pool lock needed
   `End`; start from `region_handle_from(guard, 0, 0)`).
   `region_pool_lock_is_held(&pool)` lets a debugger that has stopped every
   core avoid waiting on a lock an interrupted core holds.
+  `region_pool_empty_chunks(guard)` counts the chunks `region_pool_shrink`
+  could give back, for a pool that keeps one against allocation churn.
 
 Overloads are chosen by the name of an indexed type, its static indices
 being settled by unification afterwards, and an integer literal argument

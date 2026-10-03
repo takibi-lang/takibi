@@ -700,6 +700,28 @@ fn region_pool_holds(g: borrow @PG@[b], address: usize) -> bool !{unsafe} {
     return (*pool_word(chunk, 3 + i) & 3) == @T@__REGION_OUT;
 }
 
+// Chunks whose slots are all Free: what region_pool_shrink could give back.
+// A pool that keeps one empty chunk against allocation churn (#346) shrinks
+// only while this is above one.
+fn region_pool_empty_chunks(g: borrow @PG@[b]) -> usize !{unsafe} {
+    let mut empty: usize = 0;
+    let mut chunk: usize = *pool_word(g.pool, 1);
+    while (chunk != 0) {
+        let count: usize = *pool_word(chunk, 1);
+        let mut all_free: bool = true;
+        let mut i: usize = 0;
+        while (i < count) {
+            if ((*pool_word(chunk, 3 + i) & 3) != @T@__REGION_FREE) {
+                all_free = false;
+            }
+            i = i + 1;
+        }
+        if (all_free) { empty = empty + 1; }
+        chunk = *pool_word(chunk, 0);
+    }
+    return empty;
+}
+
 // Slots not Free, across every chunk.
 fn region_pool_live_count(g: borrow @PG@[b]) -> usize !{unsafe} {
     let mut live: usize = 0;
