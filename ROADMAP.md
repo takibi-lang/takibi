@@ -61,9 +61,10 @@ before its issue closes. The steps keep their numbers, which issues cite.
      `region`/`region_table`/`region_pool`, with pins for objects several
      cores reach by handle, and a linear struct holding one owner (#131's
      first slice). On it: the three TCP pools, AddressSpaceBacking,
-     ProcessImageRecord, ProcessFdContext and FdBlock. Next SharedObject,
-     then ProcessRecord; #674 and #675 follow; #680-#682 (the pin's cost)
-     are measured first.
+     ProcessImageRecord, ProcessFdContext, FdBlock and SharedObject.
+     ProcessRecord follows #693's seven steps (step 1 done: lock-held
+     reads through the run guard; next ProcessRunning[p]). #674 and #675
+     follow; #680-#682 (the pin's cost) are measured first.
    - **B, raw atomics:** a typed atomic cell (issue when C is under way);
      the ordering argument stays with #613.
    - **D, F, H** are already single files: declared as mint files in the
