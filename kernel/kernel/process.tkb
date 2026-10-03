@@ -6362,16 +6362,16 @@ private fn kernel_process_block_would_miss(
             // collectable, but it has exited: its exit has already looked
             // for a Blocked parent and found none, so sleeping now would
             // sleep past it (#609).
-            if (kernel_process_child_zombie_stack_held(from, requested)) {
+            if (kernel_process_child_zombie_stack_held(guard, from, requested)) {
                 return true;
             }
             if (requested == 0xFFFFFFFFFFFFFFFF) {
-                match kernel_process_first_zombie_of(from) {
+                match kernel_process_first_zombie_of(guard, from) {
                     ProcessNextReadyResult::Missing => { return false; }
                     ProcessNextReadyResult::Next(zombie) => { return true; }
                 }
             }
-            match kernel_process_zombie_of_pid(from, requested) {
+            match kernel_process_zombie_of_pid(guard, from, requested) {
                 ProcessNextReadyResult::Missing => { return false; }
                 ProcessNextReadyResult::Next(zombie) => { return true; }
             }
@@ -7958,15 +7958,15 @@ fn kernel_process_fanout_probe() -> bool !{unsafe} {
         if (has_following == false && i != 2) { return false; }
         cursor = following;
     }
-    if (kernel_process_child_waitable_pid(pids[1]) == false) { return false; }
+    if (kernel_process_child_waitable_pid_probe(pids[1]) == false) { return false; }
     if (kernel_process_child_wait_status_pid(pids[1]) != 41) { return false; }
     if (kernel_process_last_reaped_pid() != pids[1]) { return false; }
     // The other two are untouched and still carry their own statuses --
     // the property a single parent-side field could not have.
-    if (kernel_process_child_waitable_pid(pids[1])) { return false; }
+    if (kernel_process_child_waitable_pid_probe(pids[1])) { return false; }
     if (kernel_process_child_wait_status_pid(pids[0]) != 40) { return false; }
     if (kernel_process_child_wait_status_pid(pids[2]) != 42) { return false; }
-    if (kernel_process_child_waitable()) { return false; }
+    if (kernel_process_child_waitable_probe()) { return false; }
     return true;
 }
 
@@ -9044,7 +9044,10 @@ fn kernel_process_child_exit(status: usize) -> ExitSwitch {
     let mut draining: usize = scheduled_process_pool_live_count() + 1;
     while (draining != 0) {
         draining = draining - 1;
-        match kernel_process_first_zombie_of(child) {
+        let drain_guard = process_run_lock();
+        let next_zombie = kernel_process_first_zombie_of(drain_guard, child);
+        process_run_unlock(drain_guard);
+        match next_zombie {
             ProcessNextReadyResult::Missing => { draining = 0; }
             ProcessNextReadyResult::Next(grandchild) => {
                 let orphan_status: usize =
@@ -9219,13 +9222,13 @@ fn kernel_process_child_exit(status: usize) -> ExitSwitch {
 // and not yet been reaped. Walks the sibling list, so a parent with
 // several children finds whichever one is waitable rather than the one a
 // single field happened to remember.
-private fn kernel_process_first_zombie_of(parent: ProcessHandle)
+private fn kernel_process_first_zombie_of(guard: borrow ProcessRunGuard[lock], parent: ProcessHandle)
         -> ProcessNextReadyResult {
-    if (scheduled_process_record_of(parent).has_first_child == false) {
+    if (scheduled_process_record_of_locked(guard, parent).has_first_child == false) {
         return ProcessNextReadyResult::Missing;
     }
     let mut cursor: ProcessHandle =
-        scheduled_process_record_of(parent).first_child;
+        scheduled_process_record_of_locked(guard, parent).first_child;
     let mut remaining: usize = scheduled_process_pool_live_count() + 1;
     while (remaining != 0) {
         remaining = remaining - 1;
@@ -9234,15 +9237,15 @@ private fn kernel_process_first_zombie_of(parent: ProcessHandle)
         }
         if (scheduled_process_state_of(cursor) ==
                 ProcessSlotState::Exited &&
-            scheduled_process_record_of(cursor).stack_owner_cpu ==
+            scheduled_process_record_of_locked(guard, cursor).stack_owner_cpu ==
                 PROCESS_STACK_UNOWNED) {
             return ProcessNextReadyResult::Next(cursor);
         }
-        if (scheduled_process_record_of(cursor).has_next_sibling
+        if (scheduled_process_record_of_locked(guard, cursor).has_next_sibling
                 == false) {
             return ProcessNextReadyResult::Missing;
         }
-        cursor = scheduled_process_record_of(cursor).next_sibling;
+        cursor = scheduled_process_record_of_locked(guard, cursor).next_sibling;
     }
     return ProcessNextReadyResult::Missing;
 }
@@ -9498,13 +9501,13 @@ fn kernel_process_current_has_child_pid(pid: usize) -> bool {
 // The zombie carrying this pid, if this slot has one. wait4(pid) reaps
 // through here so that a specific child can be collected while its
 // siblings keep running.
-private fn kernel_process_zombie_of_pid(parent: ProcessHandle, pid: usize)
+private fn kernel_process_zombie_of_pid(guard: borrow ProcessRunGuard[lock], parent: ProcessHandle, pid: usize)
         -> ProcessNextReadyResult {
-    if (scheduled_process_record_of(parent).has_first_child == false) {
+    if (scheduled_process_record_of_locked(guard, parent).has_first_child == false) {
         return ProcessNextReadyResult::Missing;
     }
     let mut cursor: ProcessHandle =
-        scheduled_process_record_of(parent).first_child;
+        scheduled_process_record_of_locked(guard, parent).first_child;
     let mut remaining: usize = scheduled_process_pool_live_count() + 1;
     while (remaining != 0) {
         remaining = remaining - 1;
@@ -9514,15 +9517,15 @@ private fn kernel_process_zombie_of_pid(parent: ProcessHandle, pid: usize)
         if (scheduled_process_pid_of_handle(cursor) == pid &&
             scheduled_process_state_of(cursor) ==
                 ProcessSlotState::Exited &&
-            scheduled_process_record_of(cursor).stack_owner_cpu ==
+            scheduled_process_record_of_locked(guard, cursor).stack_owner_cpu ==
                 PROCESS_STACK_UNOWNED) {
             return ProcessNextReadyResult::Next(cursor);
         }
-        if (scheduled_process_record_of(cursor).has_next_sibling
+        if (scheduled_process_record_of_locked(guard, cursor).has_next_sibling
                 == false) {
             return ProcessNextReadyResult::Missing;
         }
-        cursor = scheduled_process_record_of(cursor).next_sibling;
+        cursor = scheduled_process_record_of_locked(guard, cursor).next_sibling;
     }
     return ProcessNextReadyResult::Missing;
 }
@@ -9539,13 +9542,13 @@ private fn kernel_process_zombie_of_pid(parent: ProcessHandle, pid: usize)
 // CPUs fail-stopped, one with its current record already reset.
 //
 // `pid` is wait4's pid; all ones means any child.
-fn kernel_process_child_zombie_stack_held(parent: ProcessHandle, pid: usize)
+fn kernel_process_child_zombie_stack_held(guard: borrow ProcessRunGuard[lock], parent: ProcessHandle, pid: usize)
         -> bool {
-    if (scheduled_process_record_of(parent).has_first_child == false) {
+    if (scheduled_process_record_of_locked(guard, parent).has_first_child == false) {
         return false;
     }
     let mut cursor: ProcessHandle =
-        scheduled_process_record_of(parent).first_child;
+        scheduled_process_record_of_locked(guard, parent).first_child;
     let mut remaining: usize = scheduled_process_pool_live_count() + 1;
     while (remaining != 0) {
         remaining = remaining - 1;
@@ -9555,34 +9558,49 @@ fn kernel_process_child_zombie_stack_held(parent: ProcessHandle, pid: usize)
         if ((pid == 0xFFFFFFFFFFFFFFFF ||
              scheduled_process_pid_of_handle(cursor) == pid) &&
             scheduled_process_state_of(cursor) == ProcessSlotState::Exited &&
-            scheduled_process_record_of(cursor).stack_owner_cpu !=
+            scheduled_process_record_of_locked(guard, cursor).stack_owner_cpu !=
                 PROCESS_STACK_UNOWNED) {
             return true;
         }
-        if (scheduled_process_record_of(cursor).has_next_sibling
+        if (scheduled_process_record_of_locked(guard, cursor).has_next_sibling
                 == false) {
             return false;
         }
-        cursor = scheduled_process_record_of(cursor).next_sibling;
+        cursor = scheduled_process_record_of_locked(guard, cursor).next_sibling;
     }
     return false;
 }
 
 // The same question about the current process's children, for wait4.
-fn kernel_process_current_child_zombie_stack_held(pid: usize) -> bool {
+fn kernel_process_current_child_zombie_stack_held(guard: borrow ProcessRunGuard[lock], pid: usize) -> bool {
     if (execution_here().current_live == false) { return false; }
-    return kernel_process_child_zombie_stack_held(
+    return kernel_process_child_zombie_stack_held(guard,
         execution_here().current_handle, pid);
 }
 
 // wait4(pid): is THAT child collectable, rather than any of them?
-fn kernel_process_child_waitable_pid(pid: usize) -> bool {
+fn kernel_process_child_waitable_pid(guard: borrow ProcessRunGuard[lock], pid: usize) -> bool {
     if (execution_here().current_live == false) { return false; }
-    match kernel_process_zombie_of_pid(
+    match kernel_process_zombie_of_pid(guard,
             execution_here().current_handle, pid) {
         ProcessNextReadyResult::Missing => { return false; }
         ProcessNextReadyResult::Next(zombie) => { return true; }
     }
+}
+
+// The two questions above for a probe that holds no run lock.
+private fn kernel_process_child_waitable_pid_probe(pid: usize) -> bool {
+    let probe_guard = process_run_lock();
+    let waitable: bool = kernel_process_child_waitable_pid(probe_guard, pid);
+    process_run_unlock(probe_guard);
+    return waitable;
+}
+
+private fn kernel_process_child_waitable_probe() -> bool {
+    let probe_guard = process_run_lock();
+    let waitable: bool = kernel_process_child_waitable(probe_guard);
+    process_run_unlock(probe_guard);
+    return waitable;
 }
 
 // wait4(pid)'s reap. Returns the status; the reaped pid is readable
@@ -9590,7 +9608,14 @@ fn kernel_process_child_waitable_pid(pid: usize) -> bool {
 fn kernel_process_child_wait_status_pid(pid: usize) -> usize !{unsafe} {
     if (execution_here().current_live == false) { return 0; }
     let mut parent: ProcessHandle = execution_here().current_handle;
-    match kernel_process_zombie_of_pid(parent, pid) {
+    // GitHub issue #693 step 3: the search walks other processes' records,
+    // so it runs under the run lock; the reap takes that lock itself, so it
+    // runs after. Only the parent reaps its own zombies, so the one found is
+    // still there.
+    let search_guard = process_run_lock();
+    let found = kernel_process_zombie_of_pid(search_guard, parent, pid);
+    process_run_unlock(search_guard);
+    match found {
         ProcessNextReadyResult::Missing => { return 0; }
         ProcessNextReadyResult::Next(zombie) => {
             return kernel_process_reap_zombie(parent, zombie);
@@ -9615,14 +9640,22 @@ fn kernel_process_current_zombie_pick(selecting: bool, pid: usize)
         return ProcessChildZombieResult::Missing;
     }
     let mut parent: ProcessHandle = execution_here().current_handle;
+    // GitHub issue #693 step 3: the children's records are read under the
+    // run lock.
+    let pick_guard = process_run_lock();
     if (selecting) {
-        return kernel_process_zombie_named(
-            kernel_process_zombie_of_pid(parent, pid));
+        let by_pid: ProcessChildZombieResult = kernel_process_zombie_named(
+            pick_guard, kernel_process_zombie_of_pid(pick_guard, parent, pid));
+        process_run_unlock(pick_guard);
+        return by_pid;
     }
-    return kernel_process_zombie_named(kernel_process_first_zombie_of(parent));
+    let first: ProcessChildZombieResult = kernel_process_zombie_named(
+        pick_guard, kernel_process_first_zombie_of(pick_guard, parent));
+    process_run_unlock(pick_guard);
+    return first;
 }
 
-private fn kernel_process_zombie_named(found: ProcessNextReadyResult)
+private fn kernel_process_zombie_named(guard: borrow ProcessRunGuard[lock], found: ProcessNextReadyResult)
         -> ProcessChildZombieResult {
     match found {
         ProcessNextReadyResult::Missing => {
@@ -9631,7 +9664,7 @@ private fn kernel_process_zombie_named(found: ProcessNextReadyResult)
         ProcessNextReadyResult::Next(zombie) => {
             return ProcessChildZombieResult::Found((
                 scheduled_process_pid_of_handle(zombie),
-                scheduled_process_record_of(zombie).exit_status));
+                scheduled_process_record_of_locked(guard, zombie).exit_status));
         }
     }
 }
@@ -9640,9 +9673,9 @@ fn kernel_process_current_reap_pid(pid: usize) -> usize !{unsafe} {
     return kernel_process_child_wait_status_pid(pid);
 }
 
-fn kernel_process_child_waitable() -> bool {
+fn kernel_process_child_waitable(guard: borrow ProcessRunGuard[lock]) -> bool {
     if (execution_here().current_live == false) { return false; }
-    match kernel_process_first_zombie_of(
+    match kernel_process_first_zombie_of(guard,
             execution_here().current_handle) {
         ProcessNextReadyResult::Missing => { return false; }
         ProcessNextReadyResult::Next(zombie) => { return true; }

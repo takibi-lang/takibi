@@ -6194,15 +6194,17 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // exist: Running means block, exactly as before, and Exited means
         // reap. No case that used to block answers differently.
         let decision_guard = process_run_lock();
-        let mut collectable: bool = kernel_process_child_waitable();
+        let mut collectable: bool = kernel_process_child_waitable(decision_guard);
         if (selecting) {
-            collectable = kernel_process_child_waitable_pid(requested_pid);
+            collectable = kernel_process_child_waitable_pid(decision_guard,
+                                                            requested_pid);
         }
         let has_live_child: bool = kernel_process_current_has_live_child();
         let mut requested_for_held: usize = 0xFFFFFFFFFFFFFFFF;
         if (selecting) { requested_for_held = requested_pid; }
         let zombie_stack_held: bool =
-            kernel_process_current_child_zombie_stack_held(requested_for_held);
+            kernel_process_current_child_zombie_stack_held(decision_guard,
+                                                           requested_for_held);
         process_run_unlock(decision_guard);
         // GitHub issue #609: the awaited child has exited, but its CPU has
         // not yet left its stack. Neither collectable nor worth sleeping
