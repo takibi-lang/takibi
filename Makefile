@@ -1547,6 +1547,7 @@ kernel-lib-check:
 	python3 scripts/check_lock_discipline.py
 	python3 scripts/check_ext2_mutation_guard.py
 	python3 scripts/check_liveness_proof_escapes.py
+	python3 scripts/check_process_running_mints.py
 	python3 scripts/check_invariant_lines_unviewed.py
 	python3 scripts/check_fallback_counters.py
 	python3 scripts/check_dead_slot_peek_not_retained.py

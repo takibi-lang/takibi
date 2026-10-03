@@ -87,6 +87,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_legacy_dma_rx_scope.py` | legacy receive cache calls in maintained code remain only the audited GEM data-buffer calls |
 | `check_legacy_dma_rx_scope_controls.py` | Controls for new, changed, and removed legacy RX calls |
 | `check_liveness_proof_escapes.py` | every place that drops a pool's liveness proof is declared with a reason |
+| `check_process_running_mints.py` | every caller of `process_running_here`, the mint of a process's evidence that it is running, is declared (#693) |
 | `check_lock_discipline.py` | global mutexes are not force-reset and raw atomics stay allowlisted |
 | `check_measure_kernel_tcp_throughput_controls.py` | Controls for the wire-throughput measurement, with a scripted curl |
 | `check_measure_trusted_base_controls.py` | Lexical controls for the trusted-base unsafe-block inventory, and for the raw-pointer dereference ratchet: a file with no row, over, under, gone or zero is refused, another target's files are not checked, and `--lower` lowers, never raises and drops a zero row; a zero-site compiled source passes but an empty depfile is refused |
