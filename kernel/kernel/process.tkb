@@ -4590,17 +4590,17 @@ fn kernel_process_schedulable_count() -> usize {
 // so the tree branches and the rotation is a pre-order walk of it -- see
 // kernel_process_next_successor. The root is still the root; only the
 // shape below it changed.
-private fn kernel_process_chain_root(from: ProcessHandle) -> ProcessHandle {
+private fn kernel_process_chain_root(guard: borrow ProcessRunGuard[lock], from: ProcessHandle) -> ProcessHandle {
     let mut root: ProcessHandle = from;
     let mut remaining: usize = scheduled_process_pool_live_count() + 1;
     let mut climbing: bool = true;
     while (climbing && remaining != 0) {
         remaining = remaining - 1;
-        if (scheduled_process_record_of(root).has_parent == false) {
+        if (scheduled_process_record_of_locked(guard, root).has_parent == false) {
             climbing = false;
         } else {
             let mut parent: ProcessHandle =
-                scheduled_process_record_of(root).parent;
+                scheduled_process_record_of_locked(guard, root).parent;
             if (scheduled_process_handle_matches(parent) == false) {
                 climbing = false;
             } else {
@@ -4647,12 +4647,12 @@ must_use variant ProcessNextReadyResult { Missing; Next(ProcessHandle); }
 // than by descent, which every view that pins a switch sequence would
 // have noticed. Keeping parent/child locality is worth more than dropping
 // a dependency the tree walk handles correctly anyway.
-private fn kernel_process_next_successor(from: ProcessHandle,
+private fn kernel_process_next_successor(guard: borrow ProcessRunGuard[lock], from: ProcessHandle,
                                          root: ProcessHandle)
         -> ProcessHandle {
-    if (scheduled_process_record_of(from).has_first_child) {
+    if (scheduled_process_record_of_locked(guard, from).has_first_child) {
         let mut child: ProcessHandle =
-            scheduled_process_record_of(from).first_child;
+            scheduled_process_record_of_locked(guard, from).first_child;
         if (scheduled_process_handle_matches(child)) { return child; }
     }
     // No child: the next sibling, and failing that the nearest ancestor
@@ -4663,16 +4663,16 @@ private fn kernel_process_next_successor(from: ProcessHandle,
     let mut climbing: usize = scheduled_process_pool_live_count() + 1;
     while (climbing != 0) {
         climbing = climbing - 1;
-        if (scheduled_process_record_of(cursor).has_next_sibling) {
+        if (scheduled_process_record_of_locked(guard, cursor).has_next_sibling) {
             let mut sibling: ProcessHandle =
-                scheduled_process_record_of(cursor).next_sibling;
+                scheduled_process_record_of_locked(guard, cursor).next_sibling;
             if (scheduled_process_handle_matches(sibling)) { return sibling; }
         }
-        if (scheduled_process_record_of(cursor).has_parent == false) {
+        if (scheduled_process_record_of_locked(guard, cursor).has_parent == false) {
             return root;
         }
         let mut parent: ProcessHandle =
-            scheduled_process_record_of(cursor).parent;
+            scheduled_process_record_of_locked(guard, cursor).parent;
         if (scheduled_process_handle_matches(parent) == false) { return root; }
         if (scheduled_process_same_slot(parent, root)) { return root; }
         cursor = parent;
@@ -4971,16 +4971,16 @@ fn kernel_process_affinity_set(pid: usize, requested: usize)
     return ProcessAffinityResult::Mask(mask);
 }
 
-private fn kernel_process_next_ready(from: ProcessHandle, cpu: usize)
+private fn kernel_process_next_ready(guard: borrow ProcessRunGuard[lock], from: ProcessHandle, cpu: usize)
         -> ProcessNextReadyResult {
     let activity_before: KernelActivity =
         kernel_activity_enter(KernelActivity::NextReady);
-    let mut root: ProcessHandle = kernel_process_chain_root(from);
+    let mut root: ProcessHandle = kernel_process_chain_root(guard, from);
     let mut cursor: ProcessHandle = from;
     let mut remaining: usize = scheduled_process_pool_live_count() + 1;
     while (remaining != 0) {
         remaining = remaining - 1;
-        cursor = kernel_process_next_successor(cursor, root);
+        cursor = kernel_process_next_successor(guard, cursor, root);
         if (scheduled_process_same_slot(cursor, from) == false &&
             scheduled_process_state_of(cursor) == ProcessSlotState::Ready &&
             kernel_process_cpu_allows_slot(cpu, cursor.pool_index) &&
@@ -5022,7 +5022,7 @@ fn kernel_process_schedule(current: borrow FrameRef[process]) -> FrameSwitch {
     if (execution_here().current_live == false) { return FrameSwitch::Stay; }
     let mut from: ProcessHandle = execution_here().current_handle;
     let guard = process_run_lock();
-    match kernel_process_next_ready(from, cpu_id()) {
+    match kernel_process_next_ready(guard, from, cpu_id()) {
         ProcessNextReadyResult::Missing => {
             process_run_unlock(guard);
             return FrameSwitch::Stay;
@@ -5511,13 +5511,15 @@ fn kernel_process_rollover_backoff() {
 // GitHub issue #244: distinguishes "no child at all" (wait4 should fail
 // with -ECHILD immediately, same as always) from "a child exists but
 // hasn't exited yet" (wait4 should block instead).
-fn kernel_process_current_has_live_child() -> bool {
+// Called inside wait4's decision hold, whose guard it borrows (#693 step 3).
+fn kernel_process_current_has_live_child(guard: borrow ProcessRunGuard[lock])
+        -> bool {
     // GitHub issue #437: LIVE, which a zombie is not. This decides
     // -ECHILD versus blocking in wait4, and counting an exited-but-
     // unreaped child as live would block a parent that has one waiting to
     // be collected.
     if (execution_here().current_live == false) { return false; }
-    return kernel_process_has_live_child_of(
+    return kernel_process_has_live_child_of(guard,
         execution_here().current_handle.pool_index);
 }
 
@@ -5532,10 +5534,18 @@ fn kernel_process_current_has_live_child() -> bool {
 // is the whole machine.
 fn kernel_process_other_ready() -> bool {
     if (execution_here().current_live == false) { return false; }
-    match kernel_process_next_ready(execution_here().current_handle, cpu_id()) {
-        ProcessNextReadyResult::Missing => { return false; }
-        ProcessNextReadyResult::Next(next) => { return true; }
+    // GitHub issue #693 step 3: the walk reads other processes' records,
+    // so it runs under the run lock. Its answer is a hint; the block path
+    // decides again under the lock.
+    let ready_guard = process_run_lock();
+    let mut other: bool = false;
+    match kernel_process_next_ready(ready_guard,
+                                    execution_here().current_handle, cpu_id()) {
+        ProcessNextReadyResult::Missing => {}
+        ProcessNextReadyResult::Next(next) => { other = true; }
     }
+    process_run_unlock(ready_guard);
+    return other;
 }
 
 // Is the current process itself the event that can make a blocked parent
@@ -6472,7 +6482,7 @@ private fn kernel_process_block_current(current: borrow FrameRef[process],
     }
     let mut from: ProcessHandle = execution_here().current_handle;
     let guard = process_run_lock();
-    match kernel_process_next_ready(from, cpu_id()) {
+    match kernel_process_next_ready(guard, from, cpu_id()) {
         ProcessNextReadyResult::Missing => {
             let idle: bool = kernel_process_block_to_idle(
                 guard, from, current, reason, trace_aux);
@@ -7628,7 +7638,7 @@ fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[lock], value: usize)
     // against, and this only decides cases that used to drop the byte.
     if (found == false && live) {
         let mut root: ProcessHandle =
-            kernel_process_chain_root(execution_here().current_handle);
+            kernel_process_chain_root(guard, execution_here().current_handle);
         let mut cursor: ProcessHandle = root;
         let mut steps: usize = scheduled_process_pool_live_count() + 1;
         while (steps != 0 && found == false) {
@@ -7640,7 +7650,7 @@ fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[lock], value: usize)
                 waiter = cursor;
                 found = true;
             } else {
-                cursor = kernel_process_next_successor(cursor, root);
+                cursor = kernel_process_next_successor(guard, cursor, root);
             }
         }
     }
@@ -8339,7 +8349,7 @@ private fn kernel_process_clone_unselectable_locked(
             excluded = false;
         }
     }
-    match kernel_process_next_ready(parent, cpu_id()) {
+    match kernel_process_next_ready(guard, parent, cpu_id()) {
         ProcessNextReadyResult::Missing => {}
         ProcessNextReadyResult::Next(next) => { excluded = false; }
     }
@@ -9162,7 +9172,7 @@ fn kernel_process_child_exit(status: usize) -> ExitSwitch {
             }
             // GitHub issue #448: a background child's parent may be blocked
             // elsewhere. Reserve the scheduler's next Ready process instead.
-            match kernel_process_next_ready(child, cpu_id()) {
+            match kernel_process_next_ready(exit_guard, child, cpu_id()) {
                 ProcessNextReadyResult::Missing => {}
                 ProcessNextReadyResult::Next(successor) => {
                     match scheduled_process_ready_take(exit_guard, successor) {
@@ -9450,12 +9460,13 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
 // Does this slot have a child that has not exited? The zombie walk's
 // complement, and what "may I fork" asks now that a link can name a
 // record whose process is already gone.
-private fn kernel_process_has_live_child_of(slot: usize) -> bool {
-    if (scheduled_process_record_at(slot).has_first_child == false) {
+private fn kernel_process_has_live_child_of(guard: borrow ProcessRunGuard[lock],
+                                         slot: usize) -> bool {
+    if (scheduled_process_record_locked(guard, slot).has_first_child == false) {
         return false;
     }
     let mut cursor: ProcessHandle =
-        scheduled_process_record_at(slot).first_child;
+        scheduled_process_record_locked(guard, slot).first_child;
     let mut remaining: usize = scheduled_process_pool_live_count() + 1;
     while (remaining != 0) {
         remaining = remaining - 1;
@@ -9464,11 +9475,11 @@ private fn kernel_process_has_live_child_of(slot: usize) -> bool {
                 ProcessSlotState::Exited) {
             return true;
         }
-        if (scheduled_process_record_of(cursor).has_next_sibling
+        if (scheduled_process_record_of_locked(guard, cursor).has_next_sibling
                 == false) {
             return false;
         }
-        cursor = scheduled_process_record_of(cursor).next_sibling;
+        cursor = scheduled_process_record_of_locked(guard, cursor).next_sibling;
     }
     return false;
 }
