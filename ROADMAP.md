@@ -54,12 +54,10 @@ before its issue closes. The steps keep their numbers, which issues cite.
    - **C, stack and frame:** done. **Region (#672):** the built-in
      `region`/`region_table`/`region_pool`, with pins for objects several
      cores reach by handle, and a linear struct holding one owner (#131's
-     first slice). All three TCP pools are on it (frames, retransmit entries,
-     connections);
-     tcp.tkb has no liveness escape left. AddressSpaceBacking,
-     ProcessImageRecord and ProcessFdContext are on it too. Next the
-     remaining fd pools (SharedObject and FdBlock), then ProcessRecord.
-     #674 and #675 follow; #680, #681 and #682 are ideas for the pin's cost, to measure first.
+     first slice). On it: the three TCP pools, AddressSpaceBacking,
+     ProcessImageRecord, ProcessFdContext and FdBlock. Next SharedObject,
+     then ProcessRecord; #674 and #675 follow; #680-#682 (the pin's cost)
+     are measured first.
    - **B, raw atomics:** a typed atomic cell (issue when C is under way);
      the ordering argument stays with #613.
    - **D, F, H** are already single files: declared as mint files in the
