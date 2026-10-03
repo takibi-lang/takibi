@@ -35,6 +35,9 @@ use "kernel/kernel/signal_contention_evidence.tkb";
 use "kernel/kernel/console_contention_evidence.tkb";
 
 fn contention_probes() !{unsafe} {
+    if (kernel_log_peer_console_probe() == false) {
+        kernel_boot_log("peer console probe: failed\n");
+    }
     if (console_contention_probe()) {
         kernel_boot_log("console contention: peer entry observed with bypass, excluded while held and completed after release ok\n");
     } else {

@@ -12,6 +12,7 @@ def sources() -> dict[str, str]:
     names = [
         "Makefile",
         "kernel/printk/log.tkb",
+        "kernel/init/contention_probes.tkb",
         "kernel/tests/common/views/console_order.expected",
         "kernel/tests/common/views/console_order.filter",
         "kernel/arch/arm64/kernel/peer_read.tkb",
@@ -156,6 +157,13 @@ def problems(tree: dict[str, str]) -> list[str]:
         result.append("view does not fix migrating and two-process write order")
     if tree["kernel/tests/common/views/console_order.filter"].strip() != "^console order:":
         result.append("ordering view lost its exact selection")
+    if "if (atomic_word_load(&kernel_log_peer_console_probe_armed) == 0) { return; }" not in log:
+        result.append("idle terminal probe can run before init starts it")
+    if "atomic_word_store(&kernel_log_peer_console_probe_done, sent + 1);" not in log:
+        result.append("idle terminal probe does not publish actual admission")
+    init = tree["kernel/init/contention_probes.tkb"]
+    if "if (kernel_log_peer_console_probe() == false) {" not in init:
+        result.append("init does not wait for the terminal prefix after SMP bringup")
     return result
 
 
@@ -242,6 +250,17 @@ def main() -> int:
         "qemu stop": ("scripts/run_kernel_qemutest.sh", "--stop-marker",
                       "--old-stop-marker"),
     }
+    mutations.update({
+        "early idle terminal probe": ("kernel/printk/log.tkb",
+                                      "if (atomic_word_load(&kernel_log_peer_console_probe_armed) == 0) { return; }",
+                                      ""),
+        "terminal prefix completion": ("kernel/printk/log.tkb",
+                                       "atomic_word_store(&kernel_log_peer_console_probe_done, sent + 1);",
+                                       ""),
+        "init waits for terminal prefix": ("kernel/init/contention_probes.tkb",
+                                           "if (kernel_log_peer_console_probe() == false) {",
+                                           "if (false) {"),
+    })
     mutations.update({
         "all ordering steps": ("kernel/kernel/workload_evidence.tkb",
                                "workload_busy_pair.peer_console_order_step != 6",
