@@ -1761,7 +1761,10 @@ fn syscall_io_action(result: SyscallIoResult) -> SyscallAction {
         }
         SyscallIoResult::UartWait => {
             let process_slot: usize = kernel_syscall_process_slot();
-            scheduled_process_set_uart_block_delivery(process_slot, UartBlockDelivery::Read);
+            let delivery_guard = process_run_lock();
+            scheduled_process_set_uart_block_delivery(
+                delivery_guard, process_slot, UartBlockDelivery::Read);
+            process_run_unlock(delivery_guard);
             kernel_process_current_set_pending_block(ProcessWaitReason::UartRx, 0);
             return SyscallAction::Block;
         }
@@ -2632,8 +2635,11 @@ fn syscall_ppoll_dispatch(fds_address: usize, raw_nfds: usize,
                 {
                     let process_slot: usize = kernel_syscall_process_slot();
                     if (scheduled_process_slot_valid(process_slot)) {
+                        let delivery_guard = process_run_lock();
                         scheduled_process_set_uart_block_delivery(
-                            process_slot, UartBlockDelivery::Read);
+                            delivery_guard, process_slot,
+                            UartBlockDelivery::Read);
+                        process_run_unlock(delivery_guard);
                         kernel_process_current_set_pending_block(
                             ProcessWaitReason::UartRx, 0);
                         // The ash lane's /bin/ppoll-probe types its byte
@@ -3075,19 +3081,20 @@ must_use variant KernelUartDeliveryResult { Consumed; RetryRead; }
 // byte directly into x0. Keeping the IRQ path away from user memory also
 // preserves its no-unsafe effect contract.
 fn kernel_syscall_uart_deliver(
+        guard: borrow ProcessRunGuard[lock],
         waiter: borrow ScheduledProcessOwner[process],
         frame: borrow FrameRef[process], value: usize)
         -> KernelUartDeliveryResult !{interrupt} {
     let process_slot: usize = scheduled_process_owner_slot(waiter);
     if (scheduled_process_slot_valid(process_slot)) {
-        match scheduled_process_uart_block_delivery(process_slot) {
+        match scheduled_process_uart_block_delivery(guard, process_slot) {
             UartBlockDelivery::Scalar => {
                 el0_context_set_x0(frame, value);
                 return KernelUartDeliveryResult::Consumed;
             }
             UartBlockDelivery::Read => {
                 scheduled_process_set_uart_block_delivery(
-                    process_slot, UartBlockDelivery::Scalar);
+                    guard, process_slot, UartBlockDelivery::Scalar);
                 return KernelUartDeliveryResult::RetryRead;
             }
         }
@@ -3099,7 +3106,11 @@ fn kernel_syscall_uart_deliver(
 fn kernel_syscall_uart_block_prepare(frame: borrow FrameRef[process]) {
     let process_slot: usize = kernel_syscall_process_slot();
     if (scheduled_process_slot_valid(process_slot)) {
-        match scheduled_process_uart_block_delivery(process_slot) {
+        let guard = process_run_lock();
+        let delivery: UartBlockDelivery =
+            scheduled_process_uart_block_delivery(guard, process_slot);
+        process_run_unlock(guard);
+        match delivery {
             UartBlockDelivery::Scalar => {}
             UartBlockDelivery::Read => {
                 el0_context_retry_syscall(frame);
@@ -3211,11 +3222,15 @@ fn kernel_syscall_block_return(frame_sp: usize) {
             // syscall instead of treating an ordinary multicore race as fatal.
             // A terminal read was already rewound by uart_block_prepare above;
             // every other blocker still needs the rewind here.
+            let retry_slot: usize = kernel_syscall_process_slot();
+            let retry_guard = process_run_lock();
+            let retry_delivery: UartBlockDelivery =
+                scheduled_process_uart_block_delivery(retry_guard, retry_slot);
+            process_run_unlock(retry_guard);
             let uart_read_prepared: bool =
                 kernel_process_current_pending_block_reason() ==
                     ProcessWaitReason::UartRx &&
-                scheduled_process_uart_block_delivery(
-                    kernel_syscall_process_slot()) == UartBlockDelivery::Read;
+                retry_delivery == UartBlockDelivery::Read;
             // Rewound above: rt_sigsuspend, accept and a blocked write.
             if (uart_read_prepared == false && rewound == false) {
                 el0_context_retry_syscall(frame);

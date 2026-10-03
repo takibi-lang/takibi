@@ -1500,13 +1500,17 @@ fn scheduled_process_wait_reason_of(handle: ProcessHandle) -> ProcessWaitReason
 // values, asked for by slot. Out of range answers with the same default a
 // fresh record has, so a caller that cannot name a process is never handed
 // another process's state.
-fn scheduled_process_uart_block_delivery(slot: usize) -> UartBlockDelivery {
-    return scheduled_process_record_at(slot).uart_block_delivery;
+// GitHub issue #693 step 5: the UART delivery kind is read and written under
+// the run guard; the wake paths that consult it already hold it.
+fn scheduled_process_uart_block_delivery(guard: borrow ProcessRunGuard[lock], slot: usize)
+        -> UartBlockDelivery {
+    return scheduled_process_record_locked(guard, slot).uart_block_delivery;
 }
 
 fn scheduled_process_set_uart_block_delivery(
-        slot: usize, delivery: UartBlockDelivery) {
-    scheduled_process_record_at(slot).uart_block_delivery = delivery;
+        guard: borrow ProcessRunGuard[lock], slot: usize, delivery: UartBlockDelivery) {
+    scheduled_process_record_locked(guard, slot).uart_block_delivery =
+        delivery;
 }
 
 // GitHub issue #693 step 5: under the run guard its callers take.
@@ -7164,7 +7168,8 @@ fn kernel_process_terminal_settings_wake(
                 let next = scheduled_process_next_slot(slot);
                 if (scheduled_process_record_state(slot) == ProcessSlotState::Blocked &&
                     scheduled_process_record_wait_reason(slot) == ProcessWaitReason::UartRx &&
-                    scheduled_process_uart_block_delivery(slot) == UartBlockDelivery::Read) {
+                    scheduled_process_uart_block_delivery(guard, slot) ==
+                        UartBlockDelivery::Read) {
                     match scheduled_process_blocked_take(guard,
                             scheduled_process_handle_of_slot(slot)) {
                         ScheduledProcessBlockedTakeResult::Missing => { }
@@ -7172,7 +7177,7 @@ fn kernel_process_terminal_settings_wake(
                             let (owner, blocked) = resources;
                             let parked = scheduled_process_saved_frame(owner);
                             match kernel_syscall_uart_deliver(
-                                    owner, parked, 0) {
+                                    guard, owner, parked, 0) {
                                 KernelUartDeliveryResult::Consumed => { }
                                 KernelUartDeliveryResult::RetryRead => { }
                             }
@@ -7204,7 +7209,7 @@ fn kernel_process_pid_blocked_in_uart_read(
                         ProcessSlotState::Blocked &&
                     scheduled_process_record_wait_reason(slot) ==
                         ProcessWaitReason::UartRx &&
-                    scheduled_process_uart_block_delivery(slot) ==
+                    scheduled_process_uart_block_delivery(guard, slot) ==
                         UartBlockDelivery::Read) {
                     return true;
                 }
@@ -7236,7 +7241,7 @@ fn kernel_process_pid_log_wait(
             uart_put_udec(kernel_process_protocol_reason(
                 scheduled_process_record_wait_reason(slot)));
             kernel_boot_log(" delivery=");
-            match scheduled_process_uart_block_delivery(slot) {
+            match scheduled_process_uart_block_delivery(guard, slot) {
                 UartBlockDelivery::Read => { uart_put_udec(1); }
                 UartBlockDelivery::Scalar => { uart_put_udec(0); }
             }
@@ -7470,13 +7475,16 @@ fn kernel_process_block_uart(current: borrow FrameRef[process])
     // accident. They are not any more -- on RPi5 the interactive shell got
     // here first and printed the payload's marker into the middle of the
     // ash transcript -- so the fixture says which block it means.
+    // No caller holds the run lock; kernel_process_block_current takes it.
     let mut fixture_block: bool = true;
     if (execution_here().current_live) {
-        if (scheduled_process_uart_block_delivery(
+        let kind_guard = process_run_lock();
+        if (scheduled_process_uart_block_delivery(kind_guard,
                 execution_here().current_handle.pool_index) ==
             UartBlockDelivery::Read) {
             fixture_block = false;
         }
+        process_run_unlock(kind_guard);
     }
     let blocked: BlockSwitch = kernel_process_block_current(
         current, ProcessWaitReason::UartRx, 1);
@@ -7707,7 +7715,7 @@ fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[lock], value: usize)
         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
             let (owner, blocked) = resources;
             let parked = scheduled_process_saved_frame(owner);
-            match kernel_syscall_uart_deliver(owner, parked, value) {
+            match kernel_syscall_uart_deliver(guard, owner, parked, value) {
                 KernelUartDeliveryResult::Consumed => {}
                 KernelUartDeliveryResult::RetryRead => { retry_read = true; }
             }
