@@ -37,6 +37,12 @@ failure toward zero step by step. A holds the analysis of #604, #556, #603,
 #649, #654, #655 (#679 would decide it), #665 (its handoff memo), #670,
 #673, #676 and #678 when they next recur.
 
+**QEMU's role (maintainer, 2026-10-03, plan A):** QEMU gates functional
+verdicts only; verdicts decided by elapsed time or ticks are recorded under
+QEMU and decided on the RPi5 (#692, next in A, before the remaining pools).
+Hardware-specific defects are hunted on the RPi5 under load (#584's churn).
+#655's deep reproduction is paused; its notes are on the issue.
+
 Steps 1 and 2 (true multicore support; the multicore workload on RPi5) are
 finished. #584's churn stays a soak run at natural boundaries, and each
 defect it finds gets a deterministic lane (`kernelcheck-race-window-*-qemu`)
