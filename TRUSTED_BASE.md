@@ -175,12 +175,17 @@ Raw-pointer dereferences are counted apart from `unsafe` blocks, because
 be dereferenced anywhere. The compiler lists every such site with
 `--emit-raw-deref-audit <path>` (`p.field`, `*p`, `p[i]`, and a store through
 each; `*io T` and `*align(N) T` are marked; references, slices and arrays are
-not raw pointers and are not listed). Each kernel object's build holds the
-list to the per-file budget in `scripts/raw_deref_budget.tsv` with
+not raw pointers and are not listed). Each kernel object and standalone
+EL0 Takibi payload object's build holds the list to the per-file budget in
+`scripts/raw_deref_budget.tsv` with
 `python3 scripts/measure_trusted_base.py --check-raw-deref`: a file with no
 row, over its row or under its row fails, so the number moves down only by an
-edit made on purpose (`--lower` makes it). The budget names a reason for each
-file. It counts sites, not distinct pointers, and it does not say which are
+edit made on purpose (`--lower` makes it). A zero-site source has no row:
+its first raw dereference is refused until declared. A successful audit must
+still name a nonempty compiled source set in its depfile. The shared EL0
+compile recipe and `check_el0_raw_deref_audit.py` keep every Takibi object
+linked into a PIE on this gate. The budget names a reason for each file. It
+counts sites, not distinct pointers, and it does not say which are
 safe; choosing which files are mint sites is the later stages of the design.
 
 A saved exception frame is a `FrameRef` (`kernel/arch/arm64/kernel/frame_ref.tkb`),

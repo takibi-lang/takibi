@@ -9,7 +9,7 @@ cannot be counted.
 (GitHub issue #639, #637 stage 0). It holds a kernel build's raw-pointer
 dereference sites, which the compiler lists with --emit-raw-deref-audit, to
 the per-file budget in scripts/raw_deref_budget.tsv, and is run by the rules
-that link each kernel object. A ratchet: a file with no row, over its row or
+that compile each kernel or standalone EL0 object. A ratchet: a file with no row, over its row or
 UNDER its row fails, so the number only moves down by an edit made on purpose.
 """
 
@@ -130,9 +130,9 @@ def lower_raw_deref_budget(path: Path, audit: dict[str, list[int]],
 def check_raw_deref_main(args: list[str]) -> int:
     lower = "--lower" in args
     args = [arg for arg in args if arg != "--lower"]
-    if len(args) != 3 or args[0] not in ("qemu", "rpi5"):
+    if len(args) != 3 or args[0] not in ("qemu", "rpi5", "el0"):
         sys.exit("usage: measure_trusted_base.py --check-raw-deref "
-                 "qemu|rpi5 AUDIT DEPFILE [--lower]")
+                 "qemu|rpi5|el0 AUDIT DEPFILE [--lower]")
     target, audit_path, depfile = args[0], Path(args[1]), Path(args[2])
     audit = read_raw_deref_audit(audit_path)
     budget = read_raw_deref_budget(RAW_DEREF_BUDGET)
@@ -153,15 +153,15 @@ def check_raw_deref_main(args: list[str]) -> int:
         print(f"ERROR raw-deref-ratchet: {problem}")
     if problems:
         print(f"FAIL raw-deref-ratchet: {len(problems)} problem(s) in the "
-              f"{target} kernel's raw-pointer dereferences")
+              f"{target} build's raw-pointer dereferences")
         return 1
-    checked = sorted(name for name in budget if name in compiled)
     report_pass(
         "raw-deref-ratchet",
         f"{target}: {sum(a[0] for a in audit.values())} plain and "
         f"{sum(a[1] for a in audit.values())} io dereference site(s) in "
-        f"{len(audit)} file(s), each equal to its recorded budget",
-        files=len(audit))
+        f"{len(audit)} file(s), checked across {len(compiled)} compiled source(s), "
+        f"each equal to its recorded budget",
+        files=len(compiled))
     return 0
 
 

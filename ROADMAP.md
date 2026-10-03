@@ -48,8 +48,8 @@ before its issue closes. The steps keep their numbers, which issues cite.
    four stages, baseline `docs/UNSAFE_INVENTORY.md`. Stage 0 is done: the
    compiler lists raw-pointer dereferences and every kernel file is held to
    a budget (`scripts/raw_deref_budget.tsv`), so each step below shows as a
-   number going down (EL0 payloads: #660, B's). A holds stage 1's core
-   groups in this order; each rung stands on the one before, so effort can
+   number going down, including the standalone EL0 payloads. A holds stage 1's
+   core groups in this order; each rung stands on the one before, so effort can
    stop at any of them:
    - **C, stack and frame:** done. **Region (#672):** the built-in
      `region`/`region_table`/`region_pool`, with pins for objects several
@@ -103,19 +103,15 @@ before its issue closes. The steps keep their numbers, which issues cite.
 
 **B's window is short (maintainer, 2026-10-03):** B runs for a few days and
 then stops, with no successor. Take only items that finish inside that
-window and that A consumes at once, in this order; leave the bands below
-untouched rather than half-done.
-- #683: a field assignment to a call's struct result is an internal BUG
-  with no location; make it a located type error. Small.
-- #660: the raw-dereference audit for the EL0 payloads, only if the above
-  is done.
+window and that A consumes at once; leave the bands below untouched rather
+than half-done. The short-window queue is exhausted; no item from the bands
+below is scheduled for this window.
 #680, #681 and #682 (the pin's cost) stay with A: they need RPi5
 measurements first.
 
 1. **Safe-memory language support that A's route consumes** (nothing here
-   waits for A): #660 (the raw-dereference audit for the EL0 payloads);
-   #646 (compiler soundness fuzzing, the footing of every static
-   guarantee); #13 for `Phi`, with #216 and #109 as its first examples;
+   waits for A): #646 (compiler soundness fuzzing, the footing of every
+   static guarantee); #13 for `Phi`, with #216 and #109 as its first examples;
    #663's stages S2 to S4 (one console queue under one lock; S1 landed, the
    rest were paused on #665, whose cause (a fixture race with core 0's
    drain) is fixed and under observation; #657 closes with them); #131

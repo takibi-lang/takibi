@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Lexical controls for the trusted-base unsafe-block inventory."""
 
+import io
 import tempfile
+from contextlib import redirect_stderr, redirect_stdout
+
+import measure_trusted_base as inventory
 from pathlib import Path
 
 from measure_trusted_base import (
@@ -144,9 +148,47 @@ with tempfile.TemporaryDirectory() as temporary:
     if "b.src" in read_raw_deref_budget(budget_file):
         raise SystemExit("ratchet control: --lower kept a row of zero")
 
+# A valid compiled source with no raw accesses is still examined. An empty
+# depfile is not evidence that the compiler examined any source at all.
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    (root / "zero.tkb").write_text("// No raw dereferences.\n", encoding="ascii")
+    audit_file = root / "audit.tsv"
+    audit_file.write_text("file\tline\tcolumn\tfunction\tform\tpointer\n",
+                          encoding="ascii")
+    depfile = root / "zero.o.d"
+    depfile.write_text(f"zero.o: {root / 'zero.tkb'}\n", encoding="ascii")
+    budget_file = root / "budget.tsv"
+    budget_file.write_text("# No budget row needed for zero sites.\n", encoding="ascii")
+    old_root, old_budget = inventory.REPO_ROOT, inventory.RAW_DEREF_BUDGET
+    inventory.REPO_ROOT, inventory.RAW_DEREF_BUDGET = root, budget_file
+    try:
+        CASES.note()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            status = inventory.check_raw_deref_main(
+                ["el0", str(audit_file), str(depfile)])
+        if status != 0 or "0 plain and 0 io" not in output.getvalue():
+            raise SystemExit("a compiled zero-dereference payload was refused")
+        depfile.write_text("zero.o:\n", encoding="ascii")
+        CASES.note()
+        error_output = io.StringIO()
+        try:
+            with redirect_stderr(error_output):
+                inventory.check_raw_deref_main(["el0", str(audit_file), str(depfile)])
+        except SystemExit as error:
+            if error.code != 1 or "examined nothing" not in error_output.getvalue():
+                raise SystemExit(f"empty depfile failed with wrong status/diagnostic: "
+                                 f"{error}: {error_output.getvalue()}")
+        else:
+            raise SystemExit("an empty payload depfile reported PASS")
+    finally:
+        inventory.REPO_ROOT, inventory.RAW_DEREF_BUDGET = old_root, old_budget
+
 report_pass(
     "trusted-base lexical controls",
     "verified; the raw-deref ratchet refuses a file with no row, over, under, "
     "gone or zero, is not held to another target's files, and --lower "
-    "lowers, never raises and drops a zero row",
+    "lowers, never raises and drops a zero row; a compiled zero-site "
+    "payload passes but an empty depfile cannot report PASS",
     cases=CASES.ran)

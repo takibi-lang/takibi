@@ -45,6 +45,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_documented_counts.py` | a count transcribed into documentation still matches the tree it counts |
 | `check_documented_counts_controls.py` | Controls for the documented-count check |
 | `check_elf_symbol_alignment_controls.py` | Positive and faithful negative controls for the ELF alignment guard |
+| `check_el0_raw_deref_audit.py` | Every Takibi object linked into an EL0 PIE uses the shared audit recipe and rebuilds when the budget or checker changes |
+| `check_el0_raw_deref_audit_controls.py` | A bypassed recipe, missing audit/gate/depfile/rebuild dependency, and empty EL0 coverage are refused |
 | `check_execution_model_coverage.py` | mutable kernel state declares its execution model |
 | `check_ext2_image_free_blocks.py` | the fixture ext2 image keeps at least 128 free blocks, so a program added to it cannot silently push a boot into the exhaustion stall of #658 |
 | `check_ext2_mutation_guard.py` | every ext2 mutation is reached under the filesystem lock's guard, or its file is named with the reason it cannot race a peer |
@@ -87,7 +89,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_liveness_proof_escapes.py` | every place that drops a pool's liveness proof is declared with a reason |
 | `check_lock_discipline.py` | global mutexes are not force-reset and raw atomics stay allowlisted |
 | `check_measure_kernel_tcp_throughput_controls.py` | Controls for the wire-throughput measurement, with a scripted curl |
-| `check_measure_trusted_base_controls.py` | Lexical controls for the trusted-base unsafe-block inventory, and for the raw-pointer dereference ratchet: a file with no row, over, under, gone or zero is refused, another target's files are not checked, and `--lower` lowers, never raises and drops a zero row |
+| `check_measure_trusted_base_controls.py` | Lexical controls for the trusted-base unsafe-block inventory, and for the raw-pointer dereference ratchet: a file with no row, over, under, gone or zero is refused, another target's files are not checked, and `--lower` lowers, never raises and drops a zero row; a zero-site compiled source passes but an empty depfile is refused |
 | `check_net_link_wait_controls.py` | Controls for the shared host-side reachability wait |
 | `check_no_conflict_markers.py` | no tracked file is left mid-merge, where a pattern-scanning check would answer about the half above the marker |
 | `check_no_conflict_markers_controls.py` | Positive and faithful negative controls for the conflict-marker check |
@@ -163,7 +165,7 @@ run them, and why they sit outside both globs above.
 | `buildcheck_kernel_asm_invariants.py` | TODO |
 | `buildcheck_kernel_memory_map.py` | Fail the build when kernel/MEMORY_MAP.md and the build disagree |
 | `buildcheck_kernel_unused_coverage.py` | every kernel file a target compiles is checked for unused functions or exempt for a stated reason |
-| `measure_trusted_base.py --check-raw-deref` | the raw-pointer dereference ratchet (#639): run by each kernel object's rule on the compiler's `--emit-raw-deref-audit`, it holds every file's dereference count to `raw_deref_budget.tsv`, so the count can only go down on purpose. Also the trusted-boundary inventory of `make trustedbasecheck` |
+| `measure_trusted_base.py --check-raw-deref` | the raw-pointer dereference ratchet (#639): run by each kernel object's rule on the compiler's `--emit-raw-deref-audit`, including standalone EL0 payload objects, it holds every file's dereference count to `raw_deref_budget.tsv`, so the count can only go down on purpose. Also the trusted-boundary inventory of `make trustedbasecheck` |
 | `buildcheck_suite_output.py` | Split a batched UART stream and compare each case with its fixture |
 | `buildcheck_user_payload_no_rw_globals.py` | TODO |
 | `buildcheck_wont_compile_samples.py` | every program the defect catalog prints is rejected with the diagnostic beside it, or accepted, by the built compiler |

@@ -132,8 +132,18 @@ compiler proved is a raw pointer, where the type scan matched text. The five
 largest files hold 1,632 of the 2,377 plain sites: `process.tkb` (750),
 `tcp.tkb` (337), `fd_table.tkb` (209), `process_image.tkb` (159) and
 `page.tkb` (157), which is the pool-payload reach that point 2 above
-describes, seen from the dereference side. The EL0 test payloads are not
-audited yet.
+describes, seen from the dereference side. The EL0 test payloads were not included in this
+2026-09-30 measurement.
+
+## EL0 raw dereference baseline (measured 2026-10-03)
+
+The 16 standalone Takibi payload objects have 2 plain raw-pointer access
+sites and no `*io` access sites. Both are in `user_payload.tkb`:
+`payload_read_u64` and `payload_write_u64` load and store the byte encoding
+of `rlimit64` fields. This file has one budget row; the other 15 sources
+have zero sites and no row. Every payload compile emits and checks its
+own audit, including the zero-site programs. These are syntactic site
+counts, not a proof of buffer bounds or lifetimes.
 
 ## Outside the blocks
 

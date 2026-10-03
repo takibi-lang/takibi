@@ -1097,6 +1097,16 @@ $(KERNEL_RPI5_FPSIMD_O): $(KERNEL_RPI5_FPSIMD_S) | $(KERNEL_BUILD_DIR)
 $(KERNEL_RPI5_PMU_O): $(KERNEL_PMU_S) | $(KERNEL_BUILD_DIR)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
 
+# Every standalone EL0 Takibi object emits an audit and passes the same
+# per-file raw-dereference ratchet as the kernel objects. Entry points are
+# the only per-payload compilation option.
+KERNEL_RAW_DEREF_DEPS := Makefile scripts/measure_trusted_base.py scripts/raw_deref_budget.tsv
+
+define KERNEL_EL0_COMPILE
+	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions $(foreach entry,$(1),--external-entry $(entry)) --emit-depfile $@.d --emit-raw-deref-audit $@.rawderef.tsv -o $@
+	python3 scripts/measure_trusted_base.py --check-raw-deref el0 $@.rawderef.tsv $@.d
+endef
+
 # GitHub issue #241: the EL0 syscall-ABI test payload, compiled/linked
 # standalone (never linked into kernel.elf itself) as a real static-PIE ELF
 # and placed in the ext2 fixture image (KERNEL_EXT2_IMAGE below), loaded
@@ -1106,8 +1116,8 @@ $(KERNEL_RPI5_PMU_O): $(KERNEL_PMU_S) | $(KERNEL_BUILD_DIR)
 # writable globals (enforced by buildcheck_user_payload_no_rw_globals.py below),
 # so the resulting ET_DYN ELF has zero dynamic relocations -- verified
 # empirically before this rule existed (see HISTORY.md's #241 entry).
-$(KERNEL_RPI5_USER_PAYLOAD_TKB_O): $(KERNEL_RPI5_USER_PAYLOAD_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry initial_user_payload --emit-depfile $@.d -o $@
+$(KERNEL_RPI5_USER_PAYLOAD_TKB_O): $(KERNEL_RPI5_USER_PAYLOAD_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
+	$(call KERNEL_EL0_COMPILE,initial_user_payload)
 
 $(KERNEL_RPI5_USER_PAYLOAD_ASM_O): $(KERNEL_RPI5_USER_PAYLOAD_ASM_S) | $(KERNEL_BUILD_DIR)
 	$(LLVM_MC) --triple=$(RPI5_TARGET) --filetype=obj $< -o $@
@@ -1121,8 +1131,8 @@ $(KERNEL_RPI5_USER_PAYLOAD_ELF): $(KERNEL_RPI5_USER_PAYLOAD_TKB_O) $(KERNEL_RPI5
 # and /bin/busy-b are separate images that need no argv parsing to know
 # which of the two inittab entries they are. Same static-PIE shape and same
 # no-writable-globals rule as the payload above.
-$(KERNEL_BUSY_LOOP_O): $(KERNEL_BUSY_LOOP_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry busy_loop_a --external-entry busy_loop_b --external-entry busy_loop_placement_report --external-entry busy_loop_placement_guard --external-entry busy_loop_peer_spin --external-entry busy_loop_peer_net_wake --emit-depfile $@.d -o $@
+$(KERNEL_BUSY_LOOP_O): $(KERNEL_BUSY_LOOP_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
+	$(call KERNEL_EL0_COMPILE,busy_loop_a busy_loop_b busy_loop_placement_report busy_loop_placement_guard busy_loop_peer_spin busy_loop_peer_net_wake)
 
 -include $(KERNEL_BUSY_LOOP_O).d
 
@@ -1150,8 +1160,8 @@ $(KERNEL_BUSY_LOOP_PEER_NET_WAKE_ELF): $(KERNEL_BUSY_LOOP_O)
 	$(LLD) -pie --no-dynamic-linker -e busy_loop_peer_net_wake $< -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
-$(KERNEL_PEER_READ_O): $(KERNEL_PEER_READ_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry peer_read --external-entry core_read --external-entry peer_console --external-entry peer_tty --emit-depfile $@.d -o $@
+$(KERNEL_PEER_READ_O): $(KERNEL_PEER_READ_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
+	$(call KERNEL_EL0_COMPILE,peer_read core_read peer_console peer_tty)
 
 -include $(KERNEL_PEER_READ_O).d
 
@@ -1171,8 +1181,8 @@ $(KERNEL_PEER_TTY_ELF): $(KERNEL_PEER_READ_O)
 	$(LLD) -pie --no-dynamic-linker -e peer_tty $< -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
-$(KERNEL_PEER_SETTINGS_O): $(KERNEL_PEER_SETTINGS_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry peer_settings --emit-depfile $@.d -o $@
+$(KERNEL_PEER_SETTINGS_O): $(KERNEL_PEER_SETTINGS_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
+	$(call KERNEL_EL0_COMPILE,peer_settings)
 
 -include $(KERNEL_PEER_SETTINGS_O).d
 
@@ -1180,8 +1190,8 @@ $(KERNEL_PEER_SETTINGS_ELF): $(KERNEL_PEER_SETTINGS_O)
 	$(LLD) -pie --no-dynamic-linker -e peer_settings $< -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
-$(KERNEL_CLOEXEC_O): $(KERNEL_CLOEXEC_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry cloexec_probe --external-entry cloexec_check --emit-depfile $@.d -o $@
+$(KERNEL_CLOEXEC_O): $(KERNEL_CLOEXEC_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
+	$(call KERNEL_EL0_COMPILE,cloexec_probe cloexec_check)
 
 -include $(KERNEL_CLOEXEC_O).d
 
@@ -1193,8 +1203,8 @@ $(KERNEL_CLOEXEC_CHECK_ELF): $(KERNEL_CLOEXEC_O)
 	$(LLD) -pie --no-dynamic-linker -e cloexec_check $< -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
-$(KERNEL_PPOLL_PROBE_O): $(KERNEL_PPOLL_PROBE_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry ppoll_probe --emit-depfile $@.d -o $@
+$(KERNEL_PPOLL_PROBE_O): $(KERNEL_PPOLL_PROBE_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
+	$(call KERNEL_EL0_COMPILE,ppoll_probe)
 
 -include $(KERNEL_PPOLL_PROBE_O).d
 
@@ -1202,8 +1212,8 @@ $(KERNEL_PPOLL_PROBE_ELF): $(KERNEL_PPOLL_PROBE_O)
 	$(LLD) -pie --no-dynamic-linker -e ppoll_probe $< -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
-$(KERNEL_AFFINITY_O): $(KERNEL_AFFINITY_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry affinity_probe --emit-depfile $@.d -o $@
+$(KERNEL_AFFINITY_O): $(KERNEL_AFFINITY_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
+	$(call KERNEL_EL0_COMPILE,affinity_probe)
 
 -include $(KERNEL_AFFINITY_O).d
 
@@ -1211,8 +1221,8 @@ $(KERNEL_AFFINITY_ELF): $(KERNEL_AFFINITY_O)
 	$(LLD) -pie --no-dynamic-linker -e affinity_probe $< -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
-$(KERNEL_SPREAD_O): $(KERNEL_SPREAD_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry spread_probe --emit-depfile $@.d -o $@
+$(KERNEL_SPREAD_O): $(KERNEL_SPREAD_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
+	$(call KERNEL_EL0_COMPILE,spread_probe)
 
 -include $(KERNEL_SPREAD_O).d
 
@@ -1220,8 +1230,8 @@ $(KERNEL_SPREAD_ELF): $(KERNEL_SPREAD_O)
 	$(LLD) -pie --no-dynamic-linker -e spread_probe $< -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
-$(KERNEL_MOVECOST_O): $(KERNEL_MOVECOST_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry movecost_probe --emit-depfile $@.d -o $@
+$(KERNEL_MOVECOST_O): $(KERNEL_MOVECOST_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
+	$(call KERNEL_EL0_COMPILE,movecost_probe)
 
 -include $(KERNEL_MOVECOST_O).d
 
@@ -1229,8 +1239,8 @@ $(KERNEL_MOVECOST_ELF): $(KERNEL_MOVECOST_O)
 	$(LLD) -pie --no-dynamic-linker -e movecost_probe $< -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
-$(KERNEL_PEER_MUTATE_O): $(KERNEL_PEER_MUTATE_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry peer_mutate --emit-depfile $@.d -o $@
+$(KERNEL_PEER_MUTATE_O): $(KERNEL_PEER_MUTATE_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
+	$(call KERNEL_EL0_COMPILE,peer_mutate)
 
 -include $(KERNEL_PEER_MUTATE_O).d
 
@@ -1238,8 +1248,8 @@ $(KERNEL_PEER_MUTATE_ELF): $(KERNEL_PEER_MUTATE_O)
 	$(LLD) -pie --no-dynamic-linker -e peer_mutate $< -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
-$(KERNEL_PROTOCOL_TRACE_O): $(KERNEL_PROTOCOL_TRACE_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry protocol_trace_probe --emit-depfile $@.d -o $@
+$(KERNEL_PROTOCOL_TRACE_O): $(KERNEL_PROTOCOL_TRACE_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
+	$(call KERNEL_EL0_COMPILE,protocol_trace_probe)
 
 -include $(KERNEL_PROTOCOL_TRACE_O).d
 
@@ -1247,8 +1257,8 @@ $(KERNEL_PROTOCOL_TRACE_ELF): $(KERNEL_PROTOCOL_TRACE_O)
 	$(LLD) -pie --no-dynamic-linker -e protocol_trace_probe $< -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
-$(KERNEL_PEER_EXEC_O): $(KERNEL_PEER_EXEC_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry peer_exec --external-entry peer_exec_image --emit-depfile $@.d -o $@
+$(KERNEL_PEER_EXEC_O): $(KERNEL_PEER_EXEC_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
+	$(call KERNEL_EL0_COMPILE,peer_exec peer_exec_image)
 
 -include $(KERNEL_PEER_EXEC_O).d
 
@@ -1260,8 +1270,8 @@ $(KERNEL_PEER_EXEC_IMAGE_ELF): $(KERNEL_PEER_EXEC_O)
 	$(LLD) -pie --no-dynamic-linker -e peer_exec_image $< -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
-$(KERNEL_TERMINAL_O): $(KERNEL_TERMINAL_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry terminal_probe --emit-depfile $@.d -o $@
+$(KERNEL_TERMINAL_O): $(KERNEL_TERMINAL_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
+	$(call KERNEL_EL0_COMPILE,terminal_probe)
 
 -include $(KERNEL_TERMINAL_O).d
 
@@ -1269,8 +1279,8 @@ $(KERNEL_TERMINAL_ELF): $(KERNEL_TERMINAL_O)
 	$(LLD) -pie --no-dynamic-linker -e terminal_probe $< -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
-$(KERNEL_SESSION_O): $(KERNEL_SESSION_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry session_probe --external-entry session_check --emit-depfile $@.d -o $@
+$(KERNEL_SESSION_O): $(KERNEL_SESSION_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
+	$(call KERNEL_EL0_COMPILE,session_probe session_check)
 
 -include $(KERNEL_SESSION_O).d
 
@@ -1282,8 +1292,8 @@ $(KERNEL_SESSION_CHECK_ELF): $(KERNEL_SESSION_O)
 	$(LLD) -pie --no-dynamic-linker -e session_check $< -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
-$(KERNEL_NESTED_EXEC_O): $(KERNEL_NESTED_EXEC_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry nested_exec_probe --emit-depfile $@.d -o $@
+$(KERNEL_NESTED_EXEC_O): $(KERNEL_NESTED_EXEC_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
+	$(call KERNEL_EL0_COMPILE,nested_exec_probe)
 
 -include $(KERNEL_NESTED_EXEC_O).d
 
@@ -1291,8 +1301,8 @@ $(KERNEL_NESTED_EXEC_ELF): $(KERNEL_NESTED_EXEC_O)
 	$(LLD) -pie --no-dynamic-linker -e nested_exec_probe $< -o $@
 	python3 scripts/buildcheck_user_payload_no_rw_globals.py $@
 
-$(KERNEL_PEER_FORK_O): $(KERNEL_PEER_FORK_TKB) $(TAKIBI) | $(KERNEL_BUILD_DIR)
-	$(TAKIBI) $< --target $(RPI5_TARGET) --cpu $(RPI5_CPU) --forbid-trap --reject-unused-functions --external-entry peer_fork --emit-depfile $@.d -o $@
+$(KERNEL_PEER_FORK_O): $(KERNEL_PEER_FORK_TKB) $(TAKIBI) $(KERNEL_RAW_DEREF_DEPS) | $(KERNEL_BUILD_DIR)
+	$(call KERNEL_EL0_COMPILE,peer_fork)
 
 -include $(KERNEL_PEER_FORK_O).d
 

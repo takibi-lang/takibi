@@ -7,6 +7,7 @@
 # compiled); raising one, or adding a row, is a decision about a new
 # dereference and is made by hand with the reason written here.
 # Measured 2026-09-30. Columns: file, plain, io, reason (tab separated).
+kernel/arch/arm64/kernel/user_payload.tkb	2	0	EL0 syscall-ABI fixture: byte loads and stores for little-endian rlimit64 fields in syscall buffers
 kernel/arch/arm64/kernel/exception_evidence.tkb	141	0	DDB and the crash reporter read process records and stacks through raw pointers (#637 C, F)
 kernel/arch/arm64/kernel/frame_ref.tkb	2	0	the exception-frame mint site: a FrameRef's words are read and written here and nowhere else (#637 C)
 kernel/arch/arm64/mm/asid.tkb	25	0	the ASID allocator's records, reached through pool pointers (#637 F)

@@ -391,6 +391,14 @@ like any other external command) and runs
 check that a top-level mutable global in that file is not guaranteed to be
 writable at its runtime address, so writes into it can silently fail.
 
+All standalone EL0 Takibi objects use one audited compile recipe:
+`--emit-raw-deref-audit` lists their raw-pointer accesses, and
+`measure_trusted_base.py --check-raw-deref el0` holds each source to
+`scripts/raw_deref_budget.tsv`. A payload with no raw dereferences needs no
+budget row; introducing its first access fails the build until a reason and
+count are recorded. `check_el0_raw_deref_audit.py` derives the objects from
+the PIE link rules and rejects a compile rule that bypasses this gate.
+
 ## Raspberry Pi 5 hardware integration
 
 ### Destructive-test warning

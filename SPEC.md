@@ -575,11 +575,9 @@ linear struct Name[n: usize] { field: T; }   // indexed runtime obligation
   returned struct with `let mut` before modifying it. `arr[i].field
   = v` also works (bounds-checked element GEP, then field GEP);
   `ptr[i].field = v` on a raw pointer skips the array bounds check. The
-  reverse nesting is **not** supported: `s.field[i] = v`, assigning into
-  an indexed array/slice *field* reached through a struct (value or
-  pointer), is a syntax error -- only whole-field assignment (`s.field =
-  whole_array`) or reading the field to pass/index elsewhere (`let p: *u8
-  = s.field; p[i] = v;`) work.
+  reverse nesting `s.field[i] = v` also works for array/slice fields of
+  struct storage, with checked indexing. A shared reference still forbids
+  writes; an exclusive `&mut` reference permits them.
 - `&s` -- address of a struct variable, type `*Name`.
 - **A field's declared `type` may itself be a refined `{lo..<hi as
   base}`** (GitHub issue #100), e.g. `struct Name { idx: {0..<8 as
