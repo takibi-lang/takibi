@@ -87,6 +87,8 @@ and tv =
 
 and static_term =
   | SConst of int
+  | SGlobal of string
+    (* Nominal global storage identity, never instantiated as a parameter. *)
   | SEnum of string * string
     (* Nominal finite-enum state. The runtime discriminant is deliberately
        not used as its identity: A::Ready and B::Ready remain distinct even
@@ -182,6 +184,7 @@ let rec static_repr = function
 let rec static_to_string t =
   match static_repr t with
   | SConst n -> string_of_int n
+  | SGlobal name -> "&" ^ name
   | SEnum (name, case) -> Printf.sprintf "%s::%s" name case
   | SParam (_, name) -> name
   | SVar { contents = SUnbound id } -> Printf.sprintf "__static%d" id
@@ -661,6 +664,7 @@ and unify_static s1 s2 =
              unify_static a1 a2; unify_static b1 b2
          | _ -> raise poly_error)
   | SConst a, SConst b when a = b -> ()
+  | SGlobal a, SGlobal b when a = b -> ()
   | SEnum (enum1, case1), SEnum (enum2, case2)
       when enum1 = enum2 && case1 = case2 -> ()
   | SParam (a, _), SParam (b, _) when a = b -> ()
@@ -703,6 +707,8 @@ and static_poly t : ((int * int) list * int) list * (int * int, static_term) Has
   let rec go t =
     match static_repr t with
     | SConst n -> norm [([], n)]
+    | SGlobal name -> raise (Unify_error (Printf.sprintf
+        "global address &%s cannot take part in static arithmetic" name))
     | (SParam _ | SVar { contents = SUnbound _ }) as a ->
         (match static_atom_key a with
          | Some k -> Hashtbl.replace atoms k a; [([k], 1)]
@@ -766,6 +772,7 @@ and unify_static_poly s1 s2 =
 
 let rec static_of_ast scope = function
   | Ast.StaticName name -> static_in_scope scope name
+  | Ast.StaticGlobal (name, _) -> SGlobal name
   | Ast.StaticInt n -> SConst n
   | Ast.StaticEnum (name, case) -> SEnum (name, case)
   | Ast.StaticAdd (a, b) -> SAdd (static_of_ast scope a, static_of_ast scope b)
@@ -876,7 +883,7 @@ let instantiate_static_params ty =
   let subst : (int, static_term) Hashtbl.t = Hashtbl.create 8 in
   let rec inst_static t =
     match static_repr t with
-    | (SConst _ | SEnum _) as t -> t
+    | (SConst _ | SEnum _ | SGlobal _) as t -> t
     | SVar _ as t -> t
     | SAdd (a, b) -> SAdd (inst_static a, inst_static b)
     | SSub (a, b) -> SSub (inst_static a, inst_static b)
@@ -948,6 +955,7 @@ let rec to_ast t =
 and static_to_ast t =
   match static_repr t with
   | SConst n -> Ast.StaticInt n
+  | SGlobal name -> Ast.StaticGlobal (name, Lexing.dummy_pos)
   | SEnum (name, case) -> Ast.StaticEnum (name, case)
   | SParam (_, name) -> Ast.StaticName name
   | SVar { contents = SUnbound id } -> Ast.StaticName (Printf.sprintf "__static%d" id)

@@ -1,0 +1,98 @@
+// A Cell allocated in a different pool preserves the connection pool's brand.
+// The verdict is ownership transfer and payload content, independent of timing.
+use "kernel/lib/intrusive_pool.tkb";
+
+struct Connection { value: usize; }
+private let mut connections: IntrusivePool(Connection);
+variant CellLink[p: addr] {
+    Empty;
+    Held(exists a: usize. IntrusiveOwner[p, a]);
+}
+struct Cell[p: addr] {
+    private mutex: Mutex;
+    private owner: CellLink[p];
+}
+private let mut cells: IntrusivePool(Cell[&connections]);
+linear struct CellGuard[lock: addr] { private flags: usize; }
+fn cell_lock(mutex: *Mutex @ lock) -> CellGuard[lock] {
+    let mut guard: CellGuard[lock] = { mutex_acquire(mutex) };
+    return guard;
+}
+fn cell_unlock(mutex: *Mutex @ lock, guard: sink CellGuard[lock]) {
+    mutex_release(mutex, guard.flags);
+}
+fn cell_exchange(cell: borrow *Cell[p], next: CellLink[p]) -> CellLink[p] {
+    let guard = cell_lock(&cell.mutex);
+    let old = stable_replace(guard, &cell.mutex, cell.owner, next);
+    cell_unlock(&cell.mutex, guard);
+    return old;
+}
+fn report_empty(link: CellLink[p]) {
+    match link {
+        CellLink::Empty => { uart_puts("empty\n"); }
+        CellLink::Held(owner) => {
+            uart_puts("unexpected occupied cell\n");
+            intrusive_owner_drop(owner);
+        }
+    }
+}
+fn report_remove(result: IntrusivePoolRemoveResult) {
+    match result {
+        IntrusivePoolRemoveResult::Removed => { uart_puts("removed\n"); }
+        IntrusivePoolRemoveResult::ForeignAddress => { uart_puts("foreign owner\n"); }
+        IntrusivePoolRemoveResult::StaleHandle => { uart_puts("stale owner\n"); }
+    }
+}
+fn app_main() !{unsafe} {
+    page_allocator_init();
+    intrusive_pool_init(&connections);
+    intrusive_pool_init(&cells);
+    uart_puts("branded_cell\n");
+    let guard = intrusive_pool_lock(&connections);
+    let result = intrusive_pool_insert_zeroed(&connections, guard);
+    intrusive_pool_unlock(&connections, guard);
+    match result {
+        IntrusivePoolInsertResult::OutOfMemory => { uart_puts("connection allocation failed\n"); }
+        IntrusivePoolInsertResult::Allocated(owner) => {
+            let connection: *Connection = intrusive_pool_ref(&connections, owner);
+            connection.value = 42;
+            let guard = intrusive_pool_lock(&cells);
+            let result = intrusive_pool_insert_zeroed(&cells, guard);
+            intrusive_pool_unlock(&cells, guard);
+            match result {
+                IntrusivePoolInsertResult::OutOfMemory => {
+                    uart_puts("cell allocation failed\n");
+                    intrusive_owner_drop(owner);
+                }
+                IntrusivePoolInsertResult::Allocated(cell_owner) => {
+                    let cell: *Cell[&connections] = intrusive_pool_ref(&cells, cell_owner);
+                    uart_puts("displaced: ");
+                    report_empty(cell_exchange(cell, CellLink::Held(owner)));
+                    let recovered = cell_exchange(cell, CellLink::Empty);
+                    match recovered {
+                        CellLink::Empty => { uart_puts("recovery failed\n"); }
+                        CellLink::Held(recovered_owner) => {
+                            let connection: *Connection = intrusive_pool_ref(&connections, recovered_owner);
+                            uart_puts("recovered payload: ");
+                            uart_print(connection.value);
+                            uart_puts("\n");
+                            let guard = intrusive_pool_lock(&connections);
+                            let result = intrusive_pool_remove(&connections, guard, recovered_owner);
+                            intrusive_pool_unlock(&connections, guard);
+                            uart_puts("connection: ");
+                            report_remove(result);
+                        }
+                    }
+                    uart_puts("second recovery: ");
+                    report_empty(cell_exchange(cell, CellLink::Empty));
+                    let guard = intrusive_pool_lock(&cells);
+                    let result = intrusive_pool_remove(&cells, guard, cell_owner);
+                    intrusive_pool_unlock(&cells, guard);
+                    uart_puts("cell: ");
+                    report_remove(result);
+                }
+            }
+        }
+    }
+    pool_lock_check_verdict();
+}

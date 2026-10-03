@@ -47,6 +47,9 @@ type binop =
 
 type static_arg =
   | StaticName of string
+  | StaticGlobal of string * (loc [@printer pp_loc])
+    (* &G -- the erased identity of a global storage object. Keep its use
+       location when generic substitution moves it into another file. *)
   | StaticInt of int
   | StaticEnum of string * string
     (* Enum::Case -- a nominal finite-state constant used only by the

@@ -450,14 +450,38 @@ let walk_toplevel ~subst ~vsubst ~resolve_inst (t : toplevel) : toplevel =
    `$` is outside the lexer's IDENT character class (confirmed in
    lib/lexer.mll), so it can never collide with a user-written identifier,
    and LLVM/ARM symbol conventions already permit it (see the approved
-   generics plan). V1 only supports primitive/named-struct type arguments;
+   generics plan). Concrete indexed structs include their erased indices;
    anything else is rejected with a clear error rather than silently
    producing a colliding or unreadable mangled name. A value argument (const
    generics follow-up) mangles as its own decimal digits. *)
 
+module GlobalMap = Map.Make (String)
+let concrete_global_files = ref GlobalMap.empty
+
+let mangle_concrete_static = function
+  | StaticGlobal (name, loc) ->
+      (* Validate every request before cache lookup can erase its source
+         reference by replacing the generic type with a generated name. *)
+      (match GlobalMap.find_opt name !concrete_global_files with
+       | None -> raise (Types.TypeError (loc, Printf.sprintf
+           "global address '&%s' must name a global let declaration" name))
+       | Some (Some file) when file <> Ast.source_file_of_loc loc ->
+           raise (Types.TypeError (loc, Printf.sprintf
+             "'%s' is a private global declared in '%s'" name file))
+       | _ -> ());
+      Printf.sprintf "g%d_%s" (String.length name) name
+  | StaticInt n -> "i" ^ string_of_int n
+  | StaticEnum (name, case) ->
+      Printf.sprintf "e%d_%s%d_%s" (String.length name) name (String.length case) case
+  | _ -> raise (Types.TypeError (Lexing.dummy_pos,
+      "an indexed generic type argument requires concrete static arguments"))
+
 let rec mangle_arg (t : type_expr) : string =
   match t with
   | TypeNamed s -> s
+  | TypeIndexed (name, args) ->
+      name ^ "$indexed" ^ String.concat "" (List.map (fun arg ->
+        "$" ^ mangle_concrete_static arg) args)
   | TypeBool -> "bool"
   | TypeI8 -> "i8" | TypeI16 -> "i16" | TypeI32 -> "i32" | TypeI64 -> "i64"
   | TypeU8 -> "u8" | TypeU16 -> "u16" | TypeU32 -> "u32" | TypeU64 -> "u64"
@@ -466,7 +490,7 @@ let rec mangle_arg (t : type_expr) : string =
   | TypePtr t -> "ptr_" ^ mangle_arg t
   | _ -> raise (Types.TypeError (Lexing.dummy_pos,
       "a generic type argument is not supported yet (only primitive \
-       integer types, bool, plain struct names, and plain pointers to \
+       integer types, bool, plain or concrete indexed structs, and pointers to \
        those are -- GitHub issue #207)"))
 
 let mangle_generic_arg = function
@@ -724,7 +748,7 @@ let rec unify_arg ?(trace = fun _ -> ())
     match template_ty with
   | TypeNamed n when List.mem n type_params ->
       (match Hashtbl.find_opt bindings n with
-       | Some existing when existing <> concrete_ty ->
+       | Some existing when mangle_arg existing <> mangle_arg concrete_ty ->
            raise (Types.TypeError (Lexing.dummy_pos, Printf.sprintf
              "conflicting inference for generic type parameter '%s'" n))
        | _ ->
@@ -829,6 +853,11 @@ let rec unify_arg ?(trace = fun _ -> ())
       occurrences (call names were already fixed in step 3). *)
 
 let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
+  concrete_global_files := List.fold_left (fun globals -> function
+    | LetDef (name, _, _, _, _, private_, loc) ->
+        GlobalMap.add name
+          (if private_ then Some (Ast.source_file_of_loc loc) else None) globals
+    | _ -> globals) GlobalMap.empty prog;
   let struct_templates : (string, struct_template) Hashtbl.t = Hashtbl.create 8 in
   List.iter (function
     | GenericStructDef (name, tps, fields, packed, align, priv, loc) ->

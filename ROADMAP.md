@@ -118,15 +118,16 @@ then stops, with no successor. Take only items that finish inside that
 window and that A consumes at once; leave the bands below untouched rather
 than half-done. The shared terminal queue, ordered migration and two-writer
 fixtures, finite lock-held BREAK fixture, and board lock measurements complete
-the extended short-window queue. #13 remains conditional on the solver threshold in `TAKIBI_CORE.md`; its recorded examples do not yet
-justify an implementation. No other item below is scheduled for this window.
+the extended short-window queue. #13 remains conditional on the solver
+threshold in `TAKIBI_CORE.md`; its recorded examples do not yet justify an
+implementation. The maintainer also selected concrete global Cell brands
+for this window.
 #680, #681 and #682 (the pin's cost) stay with A: they need RPi5
 measurements first.
 
 1. **Safe-memory language support that A's route consumes** (nothing here
-   waits for A): #131
-   and #370 (stored ownership and branded containers, which feed #637
-   stage 2's option (c)). Step 2 is finished, so #637 stage 1's device
+   waits for A): #131 (stored ownership, which feeds #637 stage 2's
+   option (c)). Step 2 is finished, so #637 stage 1's device
    groups, MMIO and DMA, together with #622 and #623, can proceed.
 2. **Resource use and measured performance:** #658, #220 (telnet; lowered
    2026-09-30 by the maintainer, not urgent, and it waits on PTY and

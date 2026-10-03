@@ -540,12 +540,33 @@ linear struct Name[n: usize] { field: T; }   // indexed runtime obligation
   they erase exactly as elsewhere. The field restrictions an owned struct
   carries (no nested variant, view, or indexed owner) do NOT apply: those
   exist because an owned aggregate tracks its fields' ownership, which an
-  ordinary one does not. **A static argument is a name bound by the
-  enclosing signature, an integer, or an enum case** -- there is no form
-  for a concrete address, so a GLOBAL cannot pin such a parameter to a
-  particular object (`let mut c: Cell[&pool];` does not parse). Static
-  identity therefore travels through signatures and cannot yet be
-  anchored in durable storage (GitHub issue #368).
+  ordinary one does not. A static argument is a name bound by the
+  enclosing signature, an integer, an enum case, or `&global`. The last
+  form has sort `addr` and identifies a top-level `let` object, including
+  one declared later in the file. It always names a global, even when a
+  local binding shadows its name; a runtime address of that local does
+  not match the global identity. Private globals may be named only from
+  their declaring file. Generic substitution preserves that reference's
+  original source location and identity.
+- `private let mut cell: Cell[&pool];` anchors a container to one global
+  pool. A handle inferred from `&pool` matches that identity; a handle
+  from another pool is a type error. The identity is erased: no runtime
+  address, tag, or layout change is introduced. An ordinary indexed struct
+  can be a pointed-to pool payload and a concrete generic type argument.
+  Its private stable owner fields retain the usual copy and exchange rules.
+  Reinterpreting a pointer into a different branded container requires
+  `unsafe`, including integer or untyped-pointer minting. Such raw mint
+  sites remain trusted; the brand does not prove allocation, lifetime,
+  mutual exclusion, or memory ordering. Synchronization still requires
+  the corresponding lock/view and ownership protocol.
+- A self-storing pool such as `nodes: IntrusivePool(Node[&nodes])` is
+  supported when its node links contain owner handles rather than inline
+  nodes. Global identity is resolved independently of the object's type,
+  and the erased index adds no recursive runtime layout. Actual recursive
+  by-value payload layouts are not enabled by this syntax. Local or
+  dynamically chosen pool identities cannot be named with this concrete
+  syntax. Region-return authority contracts still require a bound static
+  parameter, rather than `&global`.
 - **Inside an index list, an integer static argument may be a sum,
   difference or product** of names and integers: `Region[b + k * S, S]`.
   Two such arguments are equal when their polynomial normal forms are equal
@@ -555,7 +576,7 @@ linear struct Name[n: usize] { field: T; }   // indexed runtime obligation
   Nothing beyond that is attempted: no division, no solver call, and no check that a
   difference is non-negative -- the function that builds such a value
   states that with a run-time test (`linux_user/region_proto`). After `@`
-  a static argument is still a single name, integer or enum case.
+  a static argument is still a single name, integer, enum case or `&global`.
 - `struct no_copy Name` declares a struct whose storage identity matters, such
   as a lock. Whole-value assignment and copying an existing value through an
   initializer, argument, return, or containing aggregate are compile errors.

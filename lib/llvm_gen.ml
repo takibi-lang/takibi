@@ -670,6 +670,7 @@ let record_unnecessary_unsafe loc what =
    raw constructor dump is too noisy for a user-facing compile error). *)
 let rec static_arg_str = function
   | StaticName n -> n
+  | StaticGlobal (n, _) -> "&" ^ n
   | StaticInt n -> string_of_int n
   | StaticEnum (name, case) -> name ^ "::" ^ case
   | StaticAdd (a, b) -> static_arg_str a ^ " + " ^ static_arg_str b
@@ -2329,6 +2330,11 @@ let struct_name_of_type (ty : Ast.type_expr) : string option =
   match Ast.strip_singleton ty with
   | TypeNamed s | TypePtr (TypeNamed s) | TypeAlignedPtr (_, TypeNamed s)
   | TypeRef (TypeNamed s) | TypeRefMut (TypeNamed s) -> Some (resolve s)
+  | TypeIndexed (s, _) | TypePtr (TypeIndexed (s, _))
+  | TypePtr (TypeIo (TypeIndexed (s, _)))
+  | TypeAlignedPtr (_, TypeIndexed (s, _))
+  | TypeRef (TypeIndexed (s, _)) | TypeRefMut (TypeIndexed (s, _)) ->
+      Some (resolve s)
   | _ -> None
 
 (* Look up a struct field by name; returns (field_index, field_ast_type) *)

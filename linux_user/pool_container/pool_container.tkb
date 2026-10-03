@@ -12,18 +12,17 @@
 //
 // The node below is that container living in pool memory instead:
 //
-//   variant NodeLink { End; More(exists p: addr. exists a: usize. ...); }
-//   struct Node { private mutex: i32; private link: NodeLink; }
+//   variant NodeLink[p: addr] { End; More(exists a: usize. ...); }
+//   struct Node[p: addr] { private mutex: i32; private link: NodeLink[p]; }
 //
 // Two things had to be true for it to work, and one of them was not.
 //
-// EXPRESSIBLE: a variant cannot name a free static, so the pool brand is
-// existentially quantified. The node knows it holds SOME pool's handle,
-// not this one's -- so `static value mismatch` no longer catches a
-// cross-pool mixup on this path, and the runtime check
-// (intrusive_pool_slot_is_valid plus the generation) is what remains.
-// That is a real guarantee given up in exchange for the container, and it
-// is stated here rather than discovered later.
+// EXPRESSIBLE: the concrete global brand &nodes identifies storage by
+// name, independently of the pool's payload type. Node[&nodes] therefore
+// needs no recursive runtime layout: the link holds an owner handle, not
+// an inline node. Every link preserves this pool's identity, so the checker
+// rejects a foreign-pool handle before the runtime generation check.
+// branded_cell separately demonstrates cells storing another pool's owners.
 //
 // SOUND: it was not. The language's empty state for a stable owner field
 // is "declaration-order tag zero", inherited from a zero-initialized
@@ -34,19 +33,19 @@
 // premise true, and the reuse case below is the regression test for it.
 use "kernel/lib/intrusive_pool.tkb";
 
-variant NodeLink {
+variant NodeLink[p: addr] {
     End;
-    More(exists p: addr. exists a: usize. IntrusiveOwner[p, a]);
+    More(exists a: usize. IntrusiveOwner[p, a]);
 }
 
-struct Node {
+struct Node[p: addr] {
     private mutex: i32;
-    private link: NodeLink;
+    private link: NodeLink[p];
     value: usize;
 }
 
 private linear view NodeGuard[lock: addr];
-private let mut nodes: IntrusivePool(Node);
+private let mut nodes: IntrusivePool(Node[&nodes]);
 
 fn node_lock(m: *i32 @ address) -> NodeGuard[address] {
     return view NodeGuard[address];
@@ -54,7 +53,7 @@ fn node_lock(m: *i32 @ address) -> NodeGuard[address] {
 fn node_unlock(g: sink NodeGuard[address], m: *i32 @ address) {}
 
 // Discharges a link, reporting whether it held anything.
-fn link_was_occupied(l: NodeLink) -> bool {
+fn link_was_occupied(l: NodeLink[p]) -> bool {
     match l {
         NodeLink::End => { return false; }
         NodeLink::More(o) => { intrusive_owner_drop(o); return true; }
@@ -67,7 +66,7 @@ fn app_main() !{unsafe} {
     uart_puts("pool_container\n");
 
     // -- Build a chain. Each new node parks the old head inside itself.
-    let mut head: NodeLink = NodeLink::End;
+    let mut head: NodeLink[&nodes] = NodeLink::End;
     let mut built: usize = 0;
     let mut sum: usize = 0;
     let mut going: bool = true;
@@ -77,11 +76,11 @@ fn app_main() !{unsafe} {
         intrusive_pool_unlock(&nodes, g);
         match r {
             IntrusivePoolInsertResult::Allocated(o) => {
-                let node: *Node = intrusive_pool_ref(&nodes, o);
+                let node: *Node[&nodes] = intrusive_pool_ref(&nodes, o);
                 node.mutex = 0;
                 node.value = built + 1;
                 let ng = node_lock(&node.mutex);
-                let displaced: NodeLink =
+                let displaced: NodeLink[&nodes] =
                     stable_replace(ng, &node.mutex, node.link, head);
                 node_unlock(ng, &node.mutex);
                 // A freshly zeroed node's slot must have been empty. If

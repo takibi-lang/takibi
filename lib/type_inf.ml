@@ -197,6 +197,8 @@ let value_static_identities : static_term StringMap.t ref = ref StringMap.empty
 (* Per-function identities for the stable syntactic places supported by the
    first addr slice: &name and &name.field chains. *)
 let place_static_identities : static_term StringMap.t ref = ref StringMap.empty
+let global_address_names : StringSet.t ref = ref StringSet.empty
+let locally_bound_names : StringSet.t ref = ref StringSet.empty
 let active_readonly_borrows : StringSet.t ref = ref StringSet.empty
 let function_param_modes : Ast.type_expr option list StringMap.t ref =
   ref StringMap.empty
@@ -431,6 +433,11 @@ let struct_instance ty = match strip_singleton ty with
   | TPtr (TStruct s) | TPtr (TIo (TStruct s))
   | TAlignedPtr (_, TStruct s)
   | TRef (TStruct s) | TRefMut (TStruct s) -> Some (s, [])
+  | TPtr (TIndexedStruct (s, args)) | TPtr (TIo (TIndexedStruct (s, args)))
+  | TAlignedPtr (_, TIndexedStruct (s, args))
+  | TRef (TIndexedStruct (s, args)) | TRefMut (TIndexedStruct (s, args))
+    when Hashtbl.find_opt indexed_struct_kinds s = Some Ast.KindPlain ->
+      Some (s, args)
   | _ -> None
 
 (* sizeof(T)/offsetof(T, field) are only ever a genuine OCaml-computable
@@ -664,7 +671,11 @@ let rec static_place_key (e : Ast.expr) =
   | _ -> None
 
 let static_identity_for_place place =
-  match static_place_key place with
+  match place.Ast.desc with
+  | Ast.Var name when StringSet.mem name !global_address_names
+                      && not (StringSet.mem name !locally_bound_names) ->
+      SGlobal name
+  | _ -> match static_place_key place with
   | None -> fresh_rigid_static ()
   | Some key ->
       (match StringMap.find_opt key !place_static_identities with
@@ -1542,7 +1553,10 @@ let rec is_linear_payload_ty t = match repr t with
   | _ -> false
 
 let rec is_indexed_owner_ty t = match repr t with
-  | TIndexedStruct _ -> true
+  | TIndexedStruct (name, _) ->
+      (match Hashtbl.find_opt indexed_struct_kinds name with
+       | Some (Ast.KindAffine | Ast.KindLinear) -> true
+       | _ -> false)
   | TSingleton (base, _) -> is_indexed_owner_ty base
   | TTuple ts -> List.exists is_indexed_owner_ty ts
   | _ -> false
@@ -1677,7 +1691,6 @@ let private_globals : (string, string) Hashtbl.t = Hashtbl.create 8
    any infer_func call) never see a stale set from a previous compilation
    unit test. Consulted, never itself driving type inference, by
    check_private_global_access below. *)
-let locally_bound_names : StringSet.t ref = ref StringSet.empty
 
 (* Known limitation: this checks by NAME only, not by resolved binding, so a
    local variable/parameter in a different file that happens to share a
@@ -1773,7 +1786,7 @@ let rec type_contains_stable_owner (ty : Ast.type_expr) : bool =
    one is the intended API surface, but wrapping the value in another runtime
    aggregate must not turn whole-container copies back on. *)
 let rec contains_stable_owner_value_ty t = match repr t with
-  | TStruct name -> Hashtbl.mem stable_owner_structs name
+  | TStruct name | TIndexedStruct (name, _) -> Hashtbl.mem stable_owner_structs name
   | TIo t | TArray (t, _) | TSlice (t, _) | TSingleton (t, _)
   | TExists (_, _, _, t) -> contains_stable_owner_value_ty t
   | TTuple ts -> List.exists contains_stable_owner_value_ty ts
@@ -1906,7 +1919,8 @@ let check_private_type_construction (loc : Ast.loc) (target : Ast.type_expr) =
     | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeSingleton (t, _)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) -> walk t
-    | Ast.TypeIndexed (n, _) ->
+    | Ast.TypeIndexed (n, _) when
+        Hashtbl.find_opt indexed_struct_kinds n <> Some Ast.KindPlain ->
         (match Hashtbl.find_opt private_struct_lit n with
          | Some file when file <> Ast.source_file_of_loc loc ->
              raise (TypeError (loc, Printf.sprintf
@@ -2935,6 +2949,23 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            raise (TypeError (e.loc, "cannot cast a tuple to anything"))
        | _ -> ());
       let tgt_ty = of_ast target_ty in
+      (* Reinterpreting a branded container pointer is a raw mint boundary,
+         rather than evidence that two erased pool identities are equal. *)
+      let indexed_pointee t = match repr t with
+        | TPtr (TIndexedStruct (n, args))
+        | TAlignedPtr (_, TIndexedStruct (n, args)) -> Some (n, args)
+        | _ -> None in
+      (match indexed_pointee tgt_ty with
+       | None -> ()
+       | Some (n, args) ->
+           let same = match indexed_pointee src_ty with
+             | Some (m, actual) when n = m ->
+                 List.map static_repr actual = List.map static_repr args
+             | _ -> false in
+           if not same then
+             if !unsafe_depth > 0 then note_type_checker_unsafe_use ()
+             else raise (TypeError (e.loc,
+               "casting to a branded container pointer requires unsafe; a cast cannot prove its pool identity")));
       (match target_ty with
        | Ast.TypeRefined (lo, hi, base) ->
            record_refined_cast_proof lo hi src_ty (of_ast base) e e.loc
@@ -5083,11 +5114,9 @@ and infer_addrof_wrapped senv eenv tyenv fenv (e : Ast.expr) (inner : Ast.expr)
        let bt = infer_expr senv eenv tyenv fenv base_expr in
        check_no_temporary_field_place ~operation:"take the address of"
          senv eenv tyenv fenv base_expr bt;
-       let sname = match repr bt with
-         | TStruct s | TPtr (TStruct s) | TPtr (TIo (TStruct s))
-         | TAlignedPtr (_, TStruct s)
-         | TRef (TStruct s) | TRefMut (TStruct s) -> s
-         | _ -> raise (TypeError (base_expr.loc,
+       let (sname, static_args) = match struct_instance bt with
+         | Some instance -> instance
+         | None -> raise (TypeError (base_expr.loc,
              Printf.sprintf "field address '.%s' on non-struct type '%s'"
                fname (to_string bt)))
        in
@@ -5114,7 +5143,7 @@ and infer_addrof_wrapped senv eenv tyenv fenv (e : Ast.expr) (inner : Ast.expr)
            sname fname));
        (match List.assoc_opt fname fields with
         | Some ft ->
-            let ft_ty = of_ast ft in
+            let ft_ty = field_type_for_instance sname static_args ft in
             (match wrap with
              | `Ptr -> check_no_nested_ptr_mint e.loc ft_ty; TPtr ft_ty
              | `Ref -> TRef ft_ty
@@ -6650,6 +6679,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   resolved_function_values := StringMap.empty;
   resolved_indirect_call_effects := StringMap.empty;
   live_dma_global_defs := StringMap.empty;
+  global_address_names := StringSet.empty;
   (* Reset every module-scoped per-program table up front. Some are reset
      again immediately before their population below; this single preamble
      plus the assertions makes omission visible instead of allowing a table
@@ -6815,6 +6845,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | Ast.ExceptionEntryDef (n, _, _) -> claim_toplevel_name n "function"
     | Ast.ExceptionRestoreDef (n, _, _) -> claim_toplevel_name n "function"
   ) prog;
+  global_address_names := List.fold_left (fun names -> function
+    | Ast.LetDef (name, _, _, _, _, _, _) -> StringSet.add name names
+    | _ -> names) StringSet.empty prog;
   (* GitHub issue #227 item 2: at most one `vector_table` declaration per
      program. Unlike every other toplevel item, `vector_table` claims no
      name in toplevel_names above (it is anonymous -- nothing else could
@@ -7106,7 +7139,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | _ -> ()
   ) prog;
   let ast_is_stable_owner_struct = function
-    | Ast.TypeNamed name -> Hashtbl.mem stable_owner_structs name
+    | Ast.TypeNamed name | Ast.TypeIndexed (name, _) ->
+        Hashtbl.mem stable_owner_structs name
     | _ -> false
   in
   (* GitHub issue #158 (OWNERSHIP_KERNEL.md #131/#132, "indexed owners
@@ -7128,12 +7162,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
      MAX_PROCESS_PAGES entries) actually needs, and the one this feature
      was implemented against. *)
   let ast_is_stable_owner_array = function
-    | Ast.TypeArray (Ast.TypeNamed name, _) -> Hashtbl.mem stable_owner_structs name
+    | Ast.TypeArray ((Ast.TypeNamed name | Ast.TypeIndexed (name, _)), _) ->
+        Hashtbl.mem stable_owner_structs name
     | _ -> false
   in
   let rec ast_contains_stable_owner_value ty =
     match ty with
-    | Ast.TypeNamed name -> Hashtbl.mem stable_owner_structs name
+    | Ast.TypeNamed name | Ast.TypeIndexed (name, _) ->
+        Hashtbl.mem stable_owner_structs name
     | Ast.TypeIo t | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _)
     | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
     | Ast.TypeSingleton (t, _) | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t)
@@ -7204,6 +7240,19 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       "static integer %d does not fit its declared sort" n))
   in
   let rec check_static_arg loc sort = function
+    | Ast.StaticGlobal (name, use_loc) ->
+        if sort <> Ast.TypeNamed "addr" then
+          raise (TypeError (loc,
+            "a global address static argument requires sort addr"));
+        if not (StringSet.mem name !global_address_names) then
+          raise (TypeError (loc, Printf.sprintf
+            "global address '&%s' must name a global let declaration" name));
+        (match Hashtbl.find_opt private_globals name with
+         | Some file when file <> Ast.source_file_of_loc use_loc ->
+             raise (TypeError (use_loc, Printf.sprintf
+               "'%s' is a private global declared in '%s'; it may only be referenced from that same file"
+               name file))
+         | _ -> ())
     | Ast.StaticInt n -> check_static_const loc sort n
     | Ast.StaticAdd (a, b) | Ast.StaticSub (a, b) | Ast.StaticMul (a, b) ->
         (match sort with
@@ -7508,7 +7557,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | _ -> false
   in
   let rec type_mentions_indexed_owner = function
-    | Ast.TypeIndexed (name, _) -> Hashtbl.mem indexed_struct_kinds name
+    | Ast.TypeIndexed (name, _) ->
+        (match Hashtbl.find_opt indexed_struct_kinds name with
+         | Some (Ast.KindAffine | Ast.KindLinear) -> true
+         | _ -> false)
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeBorrow t | Ast.TypeBorrowMut t
     | Ast.TypeSink t
     | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeSingleton (t, _)
@@ -7547,7 +7599,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     | _ -> false
   in
   let rec indexed_owner_under_indirection inside = function
-    | Ast.TypeIndexed (name, _) -> inside && Hashtbl.mem indexed_struct_kinds name
+    | Ast.TypeIndexed (name, _) -> inside &&
+        (match Hashtbl.find_opt indexed_struct_kinds name with
+         | Some (Ast.KindAffine | Ast.KindLinear) -> true
+         | _ -> false)
     | Ast.TypePtr t | Ast.TypeIo t | Ast.TypeAlignedPtr (_, t)
     | Ast.TypeArray (t, _) | Ast.TypeSlice (t, _) ->
         indexed_owner_under_indirection true t
@@ -7903,6 +7958,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          | Some (base, arg, kind) ->
              let value_kind = region_kind_word kind in
              (match arg with
+              | Ast.StaticGlobal _ ->
+                  raise (TypeError (f.def_loc,
+                    "a region return annotation must name a borrowed authority's static parameter, not a global address"))
               | Ast.StaticInt n ->
                   raise (TypeError (f.def_loc, Printf.sprintf
                     "%s return annotation '@ %d': a region annotation \

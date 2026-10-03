@@ -1154,6 +1154,7 @@ base_type_expr:
 
 static_arg:
   | name = IDENT { StaticName name }
+  | AMP name = IDENT { StaticGlobal (name, $symbolstartpos) }
   | n = INT { StaticInt (narrow_int64 $symbolstartpos "static integer" n) }
   | enum_name = IDENT COLONCOLON case_name = IDENT
     { StaticEnum (enum_name, case_name) }

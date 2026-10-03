@@ -474,7 +474,7 @@ COMMON_LINUX_PRINT_BASE  := $(LINUX_USER_DIR)/common/print.tkb $(LINUX_USER_DIR)
 # adding new linux_user/ tests for a new algorithm or data structure.
 LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump percpu page_pool \
                              freelist_pool freelist_generic slotmap refcount_slotmap growable_pool \
-                             intrusive_pool intrusive_pool_portable pool_container page_run tcp_pool_shape \
+                             intrusive_pool intrusive_pool_portable pool_container branded_cell page_run tcp_pool_shape \
                              hello print_int print_hex print_ptr mem array struct struct_refined \
                              nonexhaustive refined narrow enum align packed struct_align const_global \
                              sizeof_offsetof int64 bitops indexed_view tcp_conn_view \
@@ -642,6 +642,8 @@ $(LINUX_USER_DIR)/growable_pool/growable_pool_exe.o: $(LINUX_USER_DIR)/growable_
 $(LINUX_USER_DIR)/intrusive_pool/intrusive_pool_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
 $(LINUX_USER_DIR)/pool_container/pool_container_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
 $(LINUX_USER_DIR)/pool_container/pool_container_exe.o: kernel/lib/intrusive_pool.tkb kernel/lib/freelist.tkb kernel/lib/slotmap.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
+$(LINUX_USER_DIR)/branded_cell/branded_cell_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
+$(LINUX_USER_DIR)/branded_cell/branded_cell_exe.o: kernel/lib/intrusive_pool.tkb kernel/lib/freelist.tkb kernel/lib/slotmap.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
 $(LINUX_USER_DIR)/tcp_pool_shape/tcp_pool_shape_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
 $(LINUX_USER_DIR)/tcp_pool_shape/tcp_pool_shape_exe.o: kernel/lib/intrusive_pool.tkb kernel/lib/freelist.tkb kernel/lib/slotmap.tkb $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
 $(LINUX_USER_DIR)/intrusive_pool_portable/intrusive_pool_portable_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb

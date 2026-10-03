@@ -277,6 +277,7 @@ let rec show_type = function
   | Ast.TypeView (s, args) ->
       let arg = function
         | Ast.StaticName n -> n
+        | Ast.StaticGlobal (n, _) -> "&" ^ n
         | Ast.StaticInt n -> string_of_int n
         | Ast.StaticEnum (name, case) -> name ^ "::" ^ case
         | (Ast.StaticAdd _ | Ast.StaticSub _ | Ast.StaticMul _) as a -> Llvm_gen.static_arg_str a
@@ -287,6 +288,7 @@ let rec show_type = function
   | Ast.TypeVariant (s, args) ->
       let arg = function
         | Ast.StaticName n -> n
+        | Ast.StaticGlobal (n, _) -> "&" ^ n
         | Ast.StaticInt n -> string_of_int n
         | Ast.StaticEnum (name, case) -> name ^ "::" ^ case
         | (Ast.StaticAdd _ | Ast.StaticSub _ | Ast.StaticMul _) as a -> Llvm_gen.static_arg_str a
@@ -298,6 +300,7 @@ let rec show_type = function
   | Ast.TypeIndexed (s, args) ->
       let arg = function
         | Ast.StaticName n -> n
+        | Ast.StaticGlobal (n, _) -> "&" ^ n
         | Ast.StaticInt n -> string_of_int n
         | Ast.StaticEnum (name, case) -> name ^ "::" ^ case
         | (Ast.StaticAdd _ | Ast.StaticSub _ | Ast.StaticMul _) as a -> Llvm_gen.static_arg_str a
@@ -306,6 +309,7 @@ let rec show_type = function
   | Ast.TypeSingleton (t, n) ->
       let n = match n with
         | Ast.StaticName n -> n
+        | Ast.StaticGlobal (n, _) -> "&" ^ n
         | Ast.StaticInt n -> string_of_int n
         | Ast.StaticEnum (name, case) -> name ^ "::" ^ case
         | (Ast.StaticAdd _ | Ast.StaticSub _ | Ast.StaticMul _) as a -> Llvm_gen.static_arg_str a
@@ -2644,6 +2648,34 @@ let async_tx_fixture =
      return view AsyncReady;
    }
    "
+
+(* Issue #370: a durable cell preserves one concrete global pool brand. *)
+let issue370_cell_fixture = {|
+  linear struct CellOwner[p: addr] { private value: usize; }
+  variant CellLink[p: addr] { Empty; Held(CellOwner[p]); }
+  struct BrandCell[p: addr] {
+    private mutex: usize;
+    private slot: CellLink[p];
+    bytes: [u8; 4];
+  }
+  private let mut brand_pool: usize;
+  private let mut other_pool: usize;
+  private let mut brand_cell: BrandCell[&brand_pool];
+  private linear view CellGuard[l: addr];
+  fn brand_lock(m: *usize @ l) -> CellGuard[l] { return view CellGuard[l]; }
+  fn brand_unlock(g: sink CellGuard[l]) {}
+  fn brand_owner(pool: *usize @ p) -> CellOwner[p] {
+    let mut owner: CellOwner[p] = { 42 };
+    return owner;
+  }
+  fn brand_drop(owner: sink CellOwner[p]) {}
+  fn brand_discharge(link: CellLink[p]) {
+    match link {
+      CellLink::Empty => {}
+      CellLink::Held(owner) => { brand_drop(owner); }
+    }
+  }
+|}
 
 let infer_tests = [
   Alcotest.test_case "effect matrix contains every checker rule exactly once" `Quick
@@ -11699,6 +11731,126 @@ let codegen_tests = [
        Alcotest.(check bool)
          "an align(N) struct's alignof still equals where it is embedded" true
          (agrees "declared_align" "declared_offset"));
+
+  Alcotest.test_case "concrete global Cell stores and recovers its pool owner" `Quick
+    (expect_trap_sites 0 (issue370_cell_fixture ^ {|
+      fn concrete_cell() -> u8 {
+        let g = brand_lock(&brand_cell.mutex);
+        let old = stable_replace(g, &brand_cell.mutex, brand_cell.slot,
+                                CellLink::Held(brand_owner(&brand_pool)));
+        brand_unlock(g);
+        brand_discharge(old);
+        let g = brand_lock(&brand_cell.mutex);
+        let recovered = stable_replace(g, &brand_cell.mutex, brand_cell.slot,
+                                      CellLink::Empty);
+        brand_unlock(g);
+        brand_discharge(recovered);
+        brand_cell.bytes[0] = 11;
+        return brand_cell.bytes[0];
+      }
+    |}));
+  Alcotest.test_case "concrete Cell rejects a different pool at exchange" `Quick
+    (expect_type_error "static value mismatch" (issue370_cell_fixture ^ {|
+      fn wrong_cell() {
+        let g = brand_lock(&brand_cell.mutex);
+        let old = stable_replace(g, &brand_cell.mutex, brand_cell.slot,
+                                CellLink::Held(brand_owner(&other_pool)));
+        brand_unlock(g);
+        brand_discharge(old);
+      }
+    |}));
+  Alcotest.test_case "a fixed global brand is not freshened at a call" `Quick
+    (expect_type_error "static value mismatch" (issue370_cell_fixture ^ {|
+      fn fixed_other() -> CellOwner[&other_pool] { return brand_owner(&other_pool); }
+      fn wrong_fixed() {
+        let g = brand_lock(&brand_cell.mutex);
+        let old = stable_replace(g, &brand_cell.mutex, brand_cell.slot,
+                                CellLink::Held(fixed_other()));
+        brand_unlock(g);
+        brand_discharge(old);
+      }
+    |}));
+  Alcotest.test_case "a local shadow is not the global pool's address" `Quick
+    (expect_type_error "static value mismatch" (issue370_cell_fixture ^ {|
+      fn shadowed() {
+        let mut brand_pool: usize = 0;
+        let g = brand_lock(&brand_cell.mutex);
+        let old = stable_replace(g, &brand_cell.mutex, brand_cell.slot,
+                                CellLink::Held(brand_owner(&brand_pool)));
+        brand_unlock(g);
+        brand_discharge(old);
+      }
+    |}));
+  Alcotest.test_case "a concrete global address is not an integer index" `Quick
+    (expect_type_error "requires sort addr"
+      "struct IntCell[n: usize] { value: usize; } let mut pool: usize; let mut cell: IntCell[&pool];");
+  Alcotest.test_case "a static address cannot name a local-only pool" `Quick
+    (expect_type_error "must name a global let declaration"
+      "struct LocalCell[p: addr] { value: usize; } fn f() { let mut pool: usize = 0; let mut cell: LocalCell[&pool] = {0}; }");
+  Alcotest.test_case "a static address cannot name a function" `Quick
+    (expect_type_error "must name a global let declaration"
+      "struct FnCell[p: addr] { value: usize; } fn pool() {} let mut cell: FnCell[&pool];");
+  Alcotest.test_case "a branded stable cell cannot be copied" `Quick
+    (expect_type_error "stable owner container" (issue370_cell_fixture ^
+      "fn copied() { let mut copy: BrandCell[&brand_pool] = brand_cell; }"));
+  Alcotest.test_case "a branded stable cell's field cannot bypass exchange" `Quick
+    (expect_type_error "cannot be read directly" (issue370_cell_fixture ^
+      "fn direct() { let old = brand_cell.slot; brand_discharge(old); }"));
+  Alcotest.test_case "a concrete indexed Cell can be a generic pool payload" `Quick
+    (expect_codegen_ok (issue370_cell_fixture ^ {|
+      generic struct CellPool(T: type) { count: usize; }
+      private let mut cells: CellPool(BrandCell[&brand_pool]);
+      fn cell_pool_size() -> usize { return sizeof(CellPool(BrandCell[&brand_pool])); }
+    |}));
+
+  Alcotest.test_case "a safe pointer cast cannot change a Cell brand" `Quick
+    (expect_type_error "branded container pointer requires unsafe"
+      (issue370_cell_fixture ^ "fn forged() -> *BrandCell[&other_pool] { return &brand_cell as *BrandCell[&other_pool]; }"));
+  Alcotest.test_case "an untyped pointer cannot mint a Cell brand without unsafe" `Quick
+    (expect_type_error "branded container pointer requires unsafe"
+      (issue370_cell_fixture ^ "fn forged(p: *u8) -> *BrandCell[&brand_pool] { return p as *BrandCell[&brand_pool]; }"));
+  Alcotest.test_case "an unchanged Cell pointer preserves its brand" `Quick
+    (expect_codegen_ok (issue370_cell_fixture ^ "fn preserved() -> *BrandCell[&brand_pool] { return &brand_cell as *BrandCell[&brand_pool]; }"));
+  Alcotest.test_case "generic payloads keep distinct concrete global brands" `Quick
+    (expect_type_error "type mismatch" (issue370_cell_fixture ^ {|
+      generic struct CellPool(T: type) { count: usize; }
+      private let mut first: CellPool(BrandCell[&brand_pool]);
+      private let mut second: CellPool(BrandCell[&other_pool]);
+      fn accepts(p: *CellPool(BrandCell[&brand_pool])) {}
+      fn wrong_payload() { accepts(&second); }
+    |}));
+  Alcotest.test_case "static global addresses respect declaring-file privacy" `Quick
+    (fun () ->
+      match infer_files [
+        "pool.tkb", "private let mut pool: usize; struct Cell[p: addr] { value: usize; }";
+        "client.tkb", "let mut cell: Cell[&pool];";
+      ] with
+      | _ -> Alcotest.fail "expected a private global rejection"
+      | exception Types.TypeError (_, msg) ->
+          Alcotest.(check bool) "privacy diagnostic" true
+            (contains_substring msg "private"));
+  Alcotest.test_case "generic inference ignores a global brand's source location" `Quick
+    (expect_codegen_ok (issue370_cell_fixture ^ {|
+      fn same_cells(T: type, a: *T, b: *T) -> usize { return sizeof(T); }
+      private let mut another: BrandCell[&brand_pool];
+      fn same_brand() -> usize { return same_cells(&brand_cell, &another); }
+    |}));
+  Alcotest.test_case "generic caching cannot hide a private global reference" `Quick
+    (fun () ->
+      match infer_files [
+        "template.tkb", "generic struct Wrapper(T: type) { value: T; }";
+        "pool.tkb", "private let mut pool: usize; struct Cell[p: addr] { value: usize; } private let mut first: Wrapper(Cell[&pool]);";
+        "client.tkb", "private let mut second: Wrapper(Cell[&pool]);";
+      ] with
+      | _ -> Alcotest.fail "expected a private global rejection through generic caching"
+      | exception Types.TypeError (_, msg) ->
+          Alcotest.(check bool) "privacy diagnostic" true
+            (contains_substring msg "private"));
+  Alcotest.test_case "a private global brand survives generic substitution into another file" `Quick
+    (fun () -> ignore (infer_files [
+      "template.tkb", "generic struct Wrapper(T: type) { value: T; }";
+      "client.tkb", "private let mut pool: usize; struct Cell[p: addr] { value: usize; } private let mut cell: Wrapper(Cell[&pool]);";
+    ]));
 
   (* GitHub issue #368: an ORDINARY struct can carry static parameters, so
      a container can name the identity of what it stores rather than

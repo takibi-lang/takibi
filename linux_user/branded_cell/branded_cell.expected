@@ -1,0 +1,7 @@
+branded_cell
+displaced: empty
+recovered payload: 42
+connection: removed
+second recovery: empty
+cell: removed
+lock checker: every acquire tracked, so the counts above are about the whole program
