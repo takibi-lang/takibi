@@ -93,6 +93,10 @@ the only writer of them today; a peer's terminal output still goes through its
 console ring and core 0 moves it in at moments of its own, so its bytes can be
 ordered after later bytes written on core 0 until peers take the same lock
 (GitHub issue #663, `kernel/models/ConsoleTx.tla`).
+The room recheck before blocking and the column, pending-output and writer
+counter queries take that same lock. Calls already inside a section pass its
+guard to the locked helpers. Per-core log publication and emergency capture
+bypass the lock; the retained log's reader protocol remains release/acquire.
 One operation represents a byte, a caret pair, an entire erasure, or CR/LF.
 This fits a full canonical line and its kill without spinning inside the RX
 interrupt while output is stopped. An operation beyond capacity is rejected

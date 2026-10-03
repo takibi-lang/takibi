@@ -197,7 +197,7 @@ private fn kernel_log_start_line() {
 // Keeping the active flag set across a fragment without '\n' captures
 // uart_put_udec/uart_put_hex output between fragments in the same line.
 fn kernel_log_begin_fragment() {
-    if (kernel_log_core_here().emergency) { return; }
+    if (kernel_log_core_is_emergency()) { return; }
     // The current record arrays and UART line assembly have one writer.
     // Admitting secondary-core ordinary text would create silent retained-log
     // corruption and split physical UART lines.
@@ -213,7 +213,7 @@ fn kernel_log_begin_fragment() {
 // "\n") is still one record. Only a fragment that leaves no partial line
 // behind lets the peer's later direct bytes through again.
 fn kernel_log_end_fragment() {
-    if (kernel_log_core_here().emergency) { return; }
+    if (kernel_log_core_is_emergency()) { return; }
     if (cpu_id() == 0) { return; }
     if (kernel_log_core_here().peer_length == 0) {
         kernel_log_core_here().suppressed = false;
@@ -432,11 +432,11 @@ fn kernel_log_tx_resume(previous: KernelLogTxStandDown) {
     }
 }
 
-fn kernel_log_tx_pending() -> bool {
+private fn kernel_log_tx_pending(guard: borrow ConsoleGuard[console_tx_lock]) -> bool {
     return kernel_log_tx_count != 0;
 }
 
-fn kernel_log_tx_full() -> bool {
+private fn kernel_log_tx_full(guard: borrow ConsoleGuard[console_tx_lock]) -> bool {
     return kernel_log_tx_count >= KERNEL_LOG_TX_QUEUE_BYTES;
 }
 
@@ -485,7 +485,12 @@ private fn kernel_log_terminal_column_byte(
     }
 }
 
-fn uart_terminal_column() -> usize { return kernel_log_terminal_column; }
+fn uart_terminal_column() -> usize {
+    let guard = console_lock();
+    let column: usize = kernel_log_terminal_column;
+    console_unlock(guard);
+    return column;
+}
 
 // CPU 0, IRQs masked. Input signals flush terminal output, while kernel
 // records survive. A peer publishes whole records with release ordering;
@@ -557,7 +562,11 @@ private fn uart_tx_spin_store(c: u8) !{unsafe} {
     while (uart_tx_fifo_full()) { }
     kernel_log_note_tx_spin(read_cntpct() - spin_from);
     uart_tx_store(c);
-    if (cpu_id() == 0) { kernel_log_wire_last = c; }
+    if (cpu_id() == 0) {
+        let guard = console_lock();
+        kernel_log_wire_last = c;
+        console_unlock(guard);
+    }
 }
 
 // Only CPU 0 sends UART input-flow requests. Readers on other CPUs publish
@@ -611,14 +620,22 @@ fn uart_terminal_echo(operation: TerminalEchoOperation) {
 }
 
 fn uart_terminal_output_pending() -> bool {
-    return kernel_log_tx_pending() || terminal_echo_pending();
+    let guard = console_lock();
+    let pending: bool = uart_terminal_output_pending_locked(guard);
+    console_unlock(guard);
+    return pending;
+}
+
+private fn uart_terminal_output_pending_locked(
+        guard: borrow ConsoleGuard[console_tx_lock]) -> bool {
+    return kernel_log_tx_pending(guard) || terminal_echo_pending();
 }
 
 fn uart_terminal_resume_output() !{unsafe} {
     let guard = console_lock();
     if (terminal_output_paused() == false) {
         uart_tx_drain_into_fifo(guard);
-        if (uart_terminal_output_pending()) { uart_tx_irq_enable(); }
+        if (uart_terminal_output_pending_locked(guard)) { uart_tx_irq_enable(); }
     }
     console_unlock(guard);
 }
@@ -641,7 +658,7 @@ private fn uart_tx_drain_into_fifo(
 fn uart_tx_service() !{unsafe} {
     let guard = console_lock();
     uart_tx_drain_into_fifo(guard);
-    if (terminal_output_paused() || uart_terminal_output_pending() == false) {
+    if (terminal_output_paused() || uart_terminal_output_pending_locked(guard) == false) {
         uart_tx_irq_disable();
     }
     console_unlock(guard);
@@ -650,7 +667,7 @@ fn uart_tx_service() !{unsafe} {
 // Fatal/DDB flushes must remain available even after a user sent XOFF.
 private fn uart_tx_drain_into_fifo_force(
         guard: borrow ConsoleGuard[console_tx_lock]) !{unsafe} {
-    while (uart_terminal_output_pending() && uart_tx_fifo_full() == false) {
+    while (uart_terminal_output_pending_locked(guard) && uart_tx_fifo_full() == false) {
         match kernel_log_tx_pop(guard) {
             KernelLogTxByte::Empty => {
                 match terminal_echo_read() {
@@ -664,6 +681,10 @@ private fn uart_tx_drain_into_fifo_force(
 }
 
 fn uart_putc(c: u8) !{logs, unsafe} {
+    if (kernel_log_core_is_emergency()) {
+        uart_debug_putc(c);
+        return;
+    }
     if (kernel_log_capture_uart_byte(c) == false) { return; }
     // The IRQ-owned TX queue is still core-0-only. A peer's direct byte
     // must not mutate it; ordinary peer log fragments are suppressed above.
@@ -671,10 +692,11 @@ fn uart_putc(c: u8) !{logs, unsafe} {
         uart_tx_spin_store(c);
         return;
     }
-    if (kernel_log_wire_break_due) {
-        kernel_log_wire_break_due = false;
-        uart_wire_byte(10);
-    }
+    let guard = console_lock();
+    let break_due: bool = kernel_log_wire_break_due;
+    kernel_log_wire_break_due = false;
+    console_unlock(guard);
+    if (break_due) { uart_wire_byte(10); }
     uart_wire_byte(c);
 }
 
@@ -713,7 +735,7 @@ private fn uart_wire_byte(c: u8) !{logs, unsafe} {
     let mut done: bool = false;
     while (done == false) {
         let guard = console_lock();
-        if (kernel_log_tx_full()) {
+        if (kernel_log_tx_full(guard)) {
             console_unlock(guard);
             while (uart_tx_fifo_full()) { }
             let drain = console_lock();
@@ -722,7 +744,7 @@ private fn uart_wire_byte(c: u8) !{logs, unsafe} {
         } else {
             queued = kernel_log_tx_push(guard, c);
             uart_tx_drain_into_fifo(guard);
-            let still_pending: bool = uart_terminal_output_pending();
+            let still_pending: bool = uart_terminal_output_pending_locked(guard);
             console_unlock(guard);
             if (queued && still_pending) { uart_tx_irq_enable(); }
             done = true;
@@ -794,8 +816,11 @@ fn uart_user_write_room() -> usize {
 
 // Whether the TX interrupt should wake sleeping writers.
 fn kernel_log_tx_writer_room() -> bool {
-    return terminal_output_paused() == false && terminal_echo_pending() == false &&
+    let guard = console_lock();
+    let room: bool = terminal_output_paused() == false && terminal_echo_pending() == false &&
            kernel_log_tx_count <= KERNEL_LOG_TX_WRITER_LOW_WATER;
+    console_unlock(guard);
+    return room;
 }
 
 // GitHub issue #657: how long a peer's console record waits before core 0
@@ -911,11 +936,11 @@ private fn uart_user_write_locked(
     for index: usize in 0..<KERNEL_LOG_TX_QUEUE_BYTES {
         if (room) {
             if (index < bytes.len) {
-                if (kernel_log_tx_full()) {
+                if (kernel_log_tx_full(guard)) {
                     room = false;
                 } else {
                     let value: u8 = bytes[index];
-                    if (kernel_log_capture_uart_byte(value)) {
+                    if (kernel_log_capture_uart_byte_locked(guard, value)) {
                         kernel_log_note_tx_byte();
                         if (kernel_log_tx_push_terminal(guard, value) == false) { room = false; }
                     }
@@ -925,7 +950,7 @@ private fn uart_user_write_locked(
         }
     }
     uart_tx_drain_into_fifo(guard);
-    return (taken, uart_terminal_output_pending());
+    return (taken, uart_terminal_output_pending_locked(guard));
 }
 
 // Queue what fits of a user write and return how many bytes that was. Each
@@ -954,20 +979,30 @@ fn uart_user_write(bytes: borrow []u8) -> usize !{logs, unsafe} {
 
 fn uart_user_write_note_wait() {
     if (cpu_id() != 0) { return; }
+    let guard = console_lock();
     uart_user_write_waits = uart_user_write_waits + 1;
+    console_unlock(guard);
 }
 
 fn uart_user_write_wait_total() -> usize {
-    return uart_user_write_waits;
+    let guard = console_lock();
+    let total: usize = uart_user_write_waits;
+    console_unlock(guard);
+    return total;
 }
 
 fn uart_user_write_note_sleep() {
     if (cpu_id() != 0) { return; }
+    let guard = console_lock();
     uart_user_write_sleeps = uart_user_write_sleeps + 1;
+    console_unlock(guard);
 }
 
 fn uart_user_write_sleep_total() -> usize {
-    return uart_user_write_sleeps;
+    let guard = console_lock();
+    let total: usize = uart_user_write_sleeps;
+    console_unlock(guard);
+    return total;
 }
 
 // Everything queued reaches the wire before this returns. Called before the
@@ -976,7 +1011,7 @@ fn uart_user_write_sleep_total() -> usize {
 // while the queue still holds earlier output would arrive out of order.
 fn uart_tx_flush() !{unsafe} {
     let guard = console_lock();
-    while (uart_terminal_output_pending()) {
+    while (uart_terminal_output_pending_locked(guard)) {
         while (uart_tx_fifo_full()) { }
         uart_tx_drain_into_fifo_force(guard);
     }
@@ -985,8 +1020,51 @@ fn uart_tx_flush() !{unsafe} {
 }
 
 fn kernel_log_capture_uart_byte(value: u8) -> bool {
-    if (kernel_log_core_here().emergency) { return true; }
-    if (kernel_log_core_here().suppressed) {
+    // Per-core publication and emergency reporters do not wait for a lock.
+    if (kernel_log_capture_is_unshared()) {
+        return kernel_log_capture_unshared_byte(value);
+    }
+    let guard = console_lock();
+    let visible: bool = kernel_log_capture_uart_byte_locked(guard, value);
+    console_unlock(guard);
+    return visible;
+}
+
+private fn kernel_log_capture_uart_byte_locked(
+        guard: borrow ConsoleGuard[console_tx_lock], value: u8) -> bool {
+    if (kernel_log_capture_is_unshared()) {
+        return kernel_log_capture_unshared_byte(value);
+    }
+    if (kernel_log_capture_enabled == false) { return true; }
+    if (kernel_log_active == false) {
+        if (value == 10) {
+            kernel_log_capture_enabled = false;
+            return true;
+        }
+        kernel_log_start_line();
+        if (kernel_log_wire_last != 10) { kernel_log_wire_break_due = true; }
+    }
+    return kernel_log_capture_retained_byte(value);
+}
+
+// Read-only per-core mode queries share the one checked selection of the
+// current core. Writes remain at the explicit fragment and emergency sites.
+private fn kernel_log_core_is_emergency() -> bool {
+    return kernel_log_core_here().emergency;
+}
+
+private fn kernel_log_core_is_suppressed() -> bool {
+    return kernel_log_core_here().suppressed;
+}
+
+private fn kernel_log_capture_is_unshared() -> bool {
+    return cpu_id() != 0 || kernel_log_core_is_emergency() ||
+           kernel_log_core_is_suppressed();
+}
+
+private fn kernel_log_capture_unshared_byte(value: u8) -> bool {
+    if (kernel_log_core_is_emergency()) { return true; }
+    if (kernel_log_core_is_suppressed()) {
         let length: usize = kernel_log_core_here().peer_length;
         if (length < KERNEL_LOG_PEER_LINE_BYTES) {
             let safe_length: {0..<KERNEL_LOG_PEER_LINE_BYTES as usize} = length;
@@ -1005,16 +1083,13 @@ fn kernel_log_capture_uart_byte(value: u8) -> bool {
     }
     // A peer's direct UART byte is not part of core 0's partially assembled
     // retained line, even if the core-0 capture flag happens to be set.
-    if (cpu_id() != 0) { return true; }
-    if (kernel_log_capture_enabled == false) { return true; }
-    if (kernel_log_active == false) {
-        if (value == 10) {
-            kernel_log_capture_enabled = false;
-            return true;
-        }
-        kernel_log_start_line();
-        if (kernel_log_wire_last != 10) { kernel_log_wire_break_due = true; }
-    }
+    return true;
+}
+
+// Core 0's retained ring is a separate publication stream. Only the wire
+// boundary decision above needs the console guard; its release stores keep
+// the reader protocol independent of terminal writers.
+private fn kernel_log_capture_retained_byte(value: u8) -> bool {
     if (kernel_log_active == false) { return true; }
     let slot: usize = kernel_log_active_slot;
     if (slot >= KERNEL_LOG_RECORD_COUNT) {
@@ -1139,7 +1214,7 @@ private fn kernel_log_peer_console_probe_step(
 // No `logs`, no `locks`: the interrupt dispatcher calls it.
 fn kernel_log_peer_console_drain() {
     if (cpu_id() != 0 || terminal_output_paused() || terminal_echo_pending()) { return; }
-    if (kernel_log_core_here().emergency || kernel_log_tx_is_live() == false) {
+    if (kernel_log_core_is_emergency() || kernel_log_tx_is_live() == false) {
         return;
     }
     let mut record: PeerConsoleRecord;
@@ -1167,7 +1242,7 @@ fn kernel_log_peer_console_drain() {
                                 }
                             }
                             uart_tx_drain_into_fifo(guard);
-                            let still_pending: bool = uart_terminal_output_pending();
+                            let still_pending: bool = uart_terminal_output_pending_locked(guard);
                             if (still_pending) { uart_tx_irq_enable(); }
                             let waited: usize = kernel_log_peer_note_drained(cpu);
                             if (waited > kernel_log_peer_worst_ticks) {

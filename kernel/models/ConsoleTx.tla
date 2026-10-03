@@ -137,7 +137,7 @@ BlockWriter ==
          ELSE pc' = "asleep"
     /\ UNCHANGED <<nextChunk, loc, runLock, conLock, wakePending, queue, ring, wire>>
 
-\* uart_tx_isr: take the oldest chunk off the queue onto the wire under the
+\* uart_tx_service: take the oldest chunk off the queue onto the wire under the
 \* console lock, and note that there is room. Fixed, the console lock is let
 \* go here; NESTED, it is kept until the wake has run.
 TxTake ==

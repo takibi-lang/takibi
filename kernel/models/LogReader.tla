@@ -89,7 +89,7 @@ WriterStart ==
     /\ wbyte' = 0
     /\ UNCHANGED <<slot, rstate, rrecord, rlen, rbyte, copy, tornReturned>>
 
-\* kernel_log_capture_uart_byte: one byte of the current record, then --
+\* kernel_log_capture_retained_byte: one byte of the current record, then --
 \* ordered by the release -- its length.
 WriterByte ==
     /\ started > 0

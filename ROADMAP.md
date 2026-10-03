@@ -111,15 +111,15 @@ before its issue closes. The steps keep their numbers, which issues cite.
 **B's window is short (maintainer, 2026-10-03):** B runs for a few days and
 then stops, with no successor. Take only items that finish inside that
 window and that A consumes at once; leave the bands below untouched rather
-than half-done. The short-window queue, including the maintainer's compiler
-soundness testing extension, is exhausted; no further item from the bands
-below is scheduled for this window.
+than half-done. The maintainer extended the completed short-window queue to
+the next actionable item: #663's stages S2 to S4. #13 remains conditional on
+the solver threshold in `TAKIBI_CORE.md`; its recorded examples do not yet
+justify an implementation. No other item below is scheduled for this window.
 #680, #681 and #682 (the pin's cost) stay with A: they need RPi5
 measurements first.
 
 1. **Safe-memory language support that A's route consumes** (nothing here
-   waits for A): #13 for `Phi`, with #216 and #109 as its first examples;
-   #663's stages S2 to S4 (one console queue under one lock; S1 landed, the
+   waits for A): #663's stages S2 to S4 (one console queue under one lock; S1 landed, the
    rest were paused on #665, whose cause (a fixture race with core 0's
    drain) is fixed and under observation; #657 closes with them); #131
    and #370 (stored ownership and branded containers, which feed #637
@@ -134,7 +134,8 @@ measurements first.
 4. **Toolchain, portability and hardware-lane support:** #599, #576, #568, #123,
    #124, #122, #95, #51, #50, #85, #268, #636, #666.
 5. **Deferred or not a scheduled work item:** #432, #555, #250, #444, #429,
-   #149, #567, #539, #536, #624, #132.
+   #149, #567, #539, #536, #624, #132; #13 for `Phi`, with #216 and #109 as
+   candidate examples, only after the solver threshold is met.
 
 Items are ordered within each band as well as between bands. The deferred
 items stay listed so a changed premise can bring them back into the queue.
