@@ -30,9 +30,10 @@ test only its STM32 side with `make -f examples/Makefile allcheck`. Do not add
 features or parity updates there unless the user explicitly requests a change
 to a historical artifact; its nested `AGENTS.md` contains the detailed policy.
 
-Do not expand a kernel task into compiler, root build-system, or other
-non-`kernel/` and non-`linux_user/` work without a separate concrete
-requirement and explicit user direction.
+Do not silently expand a kernel implementation task into compiler, root
+build-system, or other non-`kernel/` and non-`linux_user/` implementation work
+without a separate concrete requirement and explicit user direction. This
+scope rule does not restrict proposing compiler or language changes.
 
 ## Always-on project rules
 
@@ -42,6 +43,15 @@ requirement and explicit user direction.
 - Do not record a class of defect as permanently beyond compile-time checking.
   Re-examine each new instance on its own merits, even when a superficially
   similar one was previously judged out of reach.
+- Proactively propose compiler and language capabilities when a concrete
+  kernel defect or repeated runtime invariant reveals a missing static
+  guarantee (maintainer, 2026-10-03). Earlier caution about compiler changes
+  is not a reason to withhold a proposal. For each candidate, show the bad
+  program that should be rejected, the smallest type, ownership, or effect
+  rule that rejects it, what existing features already express, what remains
+  trusted, and the annotation and migration cost. Discuss realistic options
+  with the maintainer before implementing a new capability unless that work
+  is already authorized. A proposal is not a commitment to implement it.
 - Not every prevention has to become a compile-time error. Ask what a
   build-time check under `scripts/` would catch and what it would miss; ship
   that when it catches the instance that actually occurred, and pursue the
