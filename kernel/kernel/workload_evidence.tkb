@@ -1085,7 +1085,7 @@ private fn workload_busy_record_progress_locked(
                     // exit cannot provide the peer stack-release evidence.
                     // Hold its placement through the actual exit, under the
                     // same run guard that chose this peer.
-                    scheduled_process_set_affinity_mask(
+                    scheduled_process_set_affinity_mask(guard,
                         kernel_syscall_process_slot(), 1 << cpu_id());
                     workload_busy_pair.peer_exit_cpu = cpu_id();
                     return WorkloadBusyProgressResult::Value(2);

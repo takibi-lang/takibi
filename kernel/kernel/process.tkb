@@ -1537,20 +1537,26 @@ fn scheduled_process_set_inetd_mode(guard: borrow ProcessRunGuard[lock], slot: u
     scheduled_process_record_locked(guard, slot).inetd_mode = enabled;
 }
 
-fn scheduled_process_affinity_mask(slot: usize) -> usize {
-    return scheduled_process_record_at(slot).affinity_mask;
+fn scheduled_process_affinity_mask(guard: borrow ProcessRunGuard[lock],
+        slot: usize) -> usize {
+    return scheduled_process_record_locked(guard, slot).affinity_mask;
 }
 
-fn scheduled_process_set_affinity_mask(slot: usize, mask: usize) {
-    scheduled_process_record_at(slot).affinity_mask = mask;
+fn scheduled_process_set_affinity_mask(guard: borrow ProcessRunGuard[lock],
+        slot: usize,
+        mask: usize) {
+    scheduled_process_record_locked(guard, slot).affinity_mask = mask;
 }
 
-fn scheduled_process_core0_for_call(slot: usize) -> bool {
-    return scheduled_process_record_at(slot).core0_for_call;
+fn scheduled_process_core0_for_call(guard: borrow ProcessRunGuard[lock],
+        slot: usize) -> bool {
+    return scheduled_process_record_locked(guard, slot).core0_for_call;
 }
 
-fn scheduled_process_set_core0_for_call(slot: usize, value: bool) {
-    scheduled_process_record_at(slot).core0_for_call = value;
+fn scheduled_process_set_core0_for_call(guard: borrow ProcessRunGuard[lock],
+        slot: usize,
+        value: bool) {
+    scheduled_process_record_locked(guard, slot).core0_for_call = value;
 }
 
 fn scheduled_process_init_signal_wait_logged(
@@ -3433,7 +3439,12 @@ private fn scheduled_process_probe_publish_ready(handle: ProcessHandle)
 fn scheduled_process_probe_cpu_allows(cpu: usize, handle: ProcessHandle)
         -> bool {
     if (scheduled_process_handle_matches(handle) == false) { return false; }
-    return kernel_process_cpu_allows_slot(cpu, handle.pool_index);
+    // Its one caller, the schedule contention probe, holds no run lock.
+    let probe_guard = process_run_lock();
+    let allowed: bool =
+        kernel_process_cpu_allows_slot(probe_guard, cpu, handle.pool_index);
+    process_run_unlock(probe_guard);
+    return allowed;
 }
 
 fn scheduled_process_probe_slot_acquire() -> usize !{unsafe} {
@@ -4742,7 +4753,8 @@ fn kernel_process_peer_dispatch_enable() {
 
 // One placement answer for a real process. A syscall the gate sent to core
 // 0 pins the process there until the call completes.
-fn kernel_process_cpu_allows_slot(cpu: usize, slot: usize) -> bool {
+fn kernel_process_cpu_allows_slot(guard: borrow ProcessRunGuard[lock], cpu: usize, slot: usize)
+        -> bool {
     if (cpu >= KERNEL_MAX_CORES) { return false; }
     let bit: {0..<KERNEL_MAX_CORES as usize} = cpu;
     // Slot 0 is the permanent bootstrap record. Unlike an ordinary task, it
@@ -4750,8 +4762,8 @@ fn kernel_process_cpu_allows_slot(cpu: usize, slot: usize) -> bool {
     // that owns the bootstrap execution context. Unset affinity on every
     // pooled process still means every online CPU.
     if (slot == 0) { return cpu == 0; }
-    if (scheduled_process_core0_for_call(slot)) { return cpu == 0; }
-    let mask: usize = scheduled_process_affinity_mask(slot);
+    if (scheduled_process_core0_for_call(guard, slot)) { return cpu == 0; }
+    let mask: usize = scheduled_process_affinity_mask(guard, slot);
     if (mask == 0) {
         return (kernel_process_online_mask() & (1 << bit)) != 0;
     }
@@ -4773,7 +4785,7 @@ fn kernel_process_cpu_allows_slot(cpu: usize, slot: usize) -> bool {
 fn kernel_process_current_cpu_allows(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock]) -> bool {
     if (execution_here().current_live == false) { return true; }
-    return kernel_process_cpu_allows_slot(
+    return kernel_process_cpu_allows_slot(guard, 
         cpu_id(), execution_here().current_handle.pool_index);
 }
 
@@ -4801,7 +4813,7 @@ fn kernel_process_core0_leave_excluded(frame: borrow FrameRef[process])
         return false;
     }
     let slot: usize = execution_here().current_handle.pool_index;
-    if (slot == 0 || kernel_process_cpu_allows_slot(0, slot)) {
+    if (slot == 0 || kernel_process_cpu_allows_slot(guard, 0, slot)) {
         process_run_unlock(guard);
         return false;
     }
@@ -4859,10 +4871,10 @@ fn kernel_process_migrate_current(frame: borrow FrameRef[process]) -> bool {
     }
     let slot: usize = execution_here().current_handle.pool_index;
     let syscall_needs_core0: bool =
-        kernel_process_cpu_allows_slot(cpu_id(), slot);
+        kernel_process_cpu_allows_slot(guard, cpu_id(), slot);
     scheduled_process_record_locked(guard, slot).saved_sp = frame_ref_address(frame);
     if (syscall_needs_core0) {
-        scheduled_process_set_core0_for_call(slot, true);
+        scheduled_process_set_core0_for_call(guard, slot, true);
     }
     execution_here().current_live = false;
     execution_here().scheduler_enabled = false;
@@ -4875,7 +4887,7 @@ fn kernel_process_migrate_current(frame: borrow FrameRef[process]) -> bool {
 fn kernel_process_clear_core0_for_call(slot: usize) {
     if (scheduled_process_slot_valid(slot) == false) { return; }
     let guard = process_run_lock();
-    scheduled_process_set_core0_for_call(slot, false);
+    scheduled_process_set_core0_for_call(guard, slot, false);
     process_run_unlock(guard);
 }
 
@@ -4963,7 +4975,7 @@ fn kernel_process_affinity_get(pid: usize) -> ProcessAffinityResult
         }
         ProcessSlotForPidResult::Found(found) => { found }
     };
-    let mask: usize = scheduled_process_affinity_mask(slot);
+    let mask: usize = scheduled_process_affinity_mask(guard, slot);
     process_run_unlock(guard);
     if (mask == 0) {
         return ProcessAffinityResult::Mask(kernel_process_online_mask());
@@ -4995,12 +5007,12 @@ fn kernel_process_affinity_set(pid: usize, requested: usize)
         process_run_unlock(guard);
         return ProcessAffinityResult::Invalid;
     }
-    scheduled_process_set_affinity_mask(slot, mask);
+    scheduled_process_set_affinity_mask(guard, slot, mask);
     let mut leave_this_cpu: bool = false;
     if (execution_here().current_live) {
         if (execution_here().current_handle.pool_index == slot) {
             leave_this_cpu =
-                kernel_process_cpu_allows_slot(cpu_id(), slot) == false;
+                kernel_process_cpu_allows_slot(guard, cpu_id(), slot) == false;
         }
     }
     process_run_unlock(guard);
@@ -5020,7 +5032,7 @@ private fn kernel_process_next_ready(guard: borrow ProcessRunGuard[lock], from: 
         cursor = kernel_process_next_successor(guard, cursor, root);
         if (scheduled_process_same_slot(cursor, from) == false &&
             scheduled_process_state_of(cursor) == ProcessSlotState::Ready &&
-            kernel_process_cpu_allows_slot(cpu, cursor.pool_index) &&
+            kernel_process_cpu_allows_slot(guard, cpu, cursor.pool_index) &&
             workload_busy_starve_skips(
                 scheduled_process_pid_of_handle(cursor)) == false) {
             kernel_activity_leave(activity_before);
@@ -5198,7 +5210,7 @@ private fn kernel_process_idle_starvation_note(
                 if (left == 0 &&
                     scheduled_process_record_state(slot) ==
                         ProcessSlotState::Ready &&
-                    kernel_process_cpu_allows_slot(raw_cpu, slot) &&
+                    kernel_process_cpu_allows_slot(guard, raw_cpu, slot) &&
                     scheduled_process_record_locked(guard, slot).stack_owner_cpu ==
                         PROCESS_STACK_UNOWNED) {
                     left = scheduled_process_record_locked(guard, slot).pid;
@@ -5259,7 +5271,7 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
                 // every boot a debugger did not arm.
                 if (scheduled_process_record_state(slot) ==
                         ProcessSlotState::Ready &&
-                    kernel_process_cpu_allows_slot(cpu_id(), slot) &&
+                    kernel_process_cpu_allows_slot(guard, cpu_id(), slot) &&
                     workload_busy_starve_skips(
                         scheduled_process_record_locked(guard, slot).pid) == false) {
                     let mut handle: ProcessHandle =
@@ -6296,7 +6308,7 @@ private fn kernel_process_tick_leave_excluded(
     }
     let mut outgoing: ProcessHandle = execution_here().current_handle;
     let slot: usize = outgoing.pool_index;
-    if (slot == 0 || kernel_process_cpu_allows_slot(cpu_id(), slot) ||
+    if (slot == 0 || kernel_process_cpu_allows_slot(guard, cpu_id(), slot) ||
         kernel_process_frame_belongs_to(outgoing, frame) == false) {
         process_run_unlock(guard);
         return false;
@@ -8061,9 +8073,12 @@ private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
     // The synthetic parent is explicitly pinned to core 0. Exit may wake it
     // there, but its affinity must keep it from becoming a successor on core
     // 1 now that an unset mask means every online CPU.
-    scheduled_process_set_affinity_mask(parent.pool_index, 1);
+    let probe_guard = process_run_lock();
+    scheduled_process_set_affinity_mask(probe_guard, parent.pool_index, 1);
     let peer_wait_parent_rejected: bool =
-        kernel_process_cpu_allows_slot(1, parent.pool_index) == false;
+        kernel_process_cpu_allows_slot(probe_guard, 1, parent.pool_index) ==
+            false;
+    process_run_unlock(probe_guard);
     // The exit-strand answers this probe also asserted went with the check
     // itself in #609: an exit with no successor now idles on every CPU.
     let restore_guard = process_run_lock();
@@ -8152,14 +8167,17 @@ fn kernel_process_scheduler_probe() -> bool {
     // The bootstrap is architectural state, not an ordinary affinity-zero
     // process: its saved frame may be absent while the boot probes run.
     // Prove no peer selector can take slot 0 before exercising normal tasks.
+    let probe_guard = process_run_lock();
     let mut bootstrap_peer_refused: bool =
         root_handle.pool_index == 0 &&
-        kernel_process_cpu_allows_slot(0, root_handle.pool_index);
+        kernel_process_cpu_allows_slot(probe_guard, 0, root_handle.pool_index);
     for cpu: usize in 1..<KERNEL_MAX_CORES {
-        if (kernel_process_cpu_allows_slot(cpu, root_handle.pool_index)) {
+        if (kernel_process_cpu_allows_slot(probe_guard, cpu,
+                                           root_handle.pool_index)) {
             bootstrap_peer_refused = false;
         }
     }
+    process_run_unlock(probe_guard);
     if (bootstrap_peer_refused == false) { return false; }
     match kernel_process_clone_begin(0x11, 0) {
         ProcessCloneResult::Invalid => { return false; }
@@ -8169,16 +8187,16 @@ fn kernel_process_scheduler_probe() -> bool {
             // drives the scheduler by direct calls. Keep that test-only
             // Ready frame away from the live peer idle loop.
             let child_guard = process_run_lock();
-            scheduled_process_set_affinity_mask(
+            scheduled_process_set_affinity_mask(child_guard,
                 execution_here().current_handle.pool_index, 1);
-            process_run_unlock(child_guard);
             let mut synthetic_child_peer_refused: bool = true;
             for cpu: usize in 1..<KERNEL_MAX_CORES {
-                if (kernel_process_cpu_allows_slot(
+                if (kernel_process_cpu_allows_slot(child_guard,
                         cpu, execution_here().current_handle.pool_index)) {
                     synthetic_child_peer_refused = false;
                 }
             }
+            process_run_unlock(child_guard);
             if (kernel_process_clone_unselectable_probe(root_handle) == false ||
                 synthetic_child_peer_refused == false ||
                 child_pid != root_pid + 1 ||
@@ -8789,7 +8807,7 @@ fn kernel_process_session_create() -> ProcessSessionResult {
 fn kernel_process_current_affinity_mask(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock]) -> usize {
     if (execution_here().current_live == false) { return 0; }
-    return scheduled_process_affinity_mask(
+    return scheduled_process_affinity_mask(guard,
         execution_here().current_handle.pool_index);
 }
 
@@ -9198,7 +9216,7 @@ fn kernel_process_child_exit(status: usize) -> ExitSwitch {
                         // Blocked before that peer leaves the stack
                         // (kernel_process_stack_idle_blocked), and starting
                         // it here ran it on a stack two CPUs used at once.
-                        if (kernel_process_cpu_allows_slot(
+                        if (kernel_process_cpu_allows_slot(exit_guard, 
                                 cpu_id(), parent.pool_index)) {
                             match scheduled_process_start_check(
                                     exit_guard, parent_owner, ready) {
@@ -9226,7 +9244,7 @@ fn kernel_process_child_exit(status: usize) -> ExitSwitch {
                     }
                 }
             }
-            if (kernel_process_cpu_allows_slot(
+            if (kernel_process_cpu_allows_slot(exit_guard, 
                     cpu_id(), parent.pool_index)) {
             match scheduled_process_ready_take(exit_guard, parent) {
                 ScheduledProcessReadyTakeResult::Missing => {}
