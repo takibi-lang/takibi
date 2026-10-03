@@ -336,8 +336,11 @@ interleaving.
 Ordinary peer log lines use a bounded per-CPU publication ring. A peer builds
 one complete line locally and publishes its sequence with release ordering;
 core 0 copies a stable record with acquire ordering and alone updates the
-retained log. The shared UART queue is separately locked. Overwrite and truncation are
-reported. Fatal and DDB paths bypass this channel and never wait for its
+retained log. Before admitting that complete record to the shared UART queue,
+core 0 reserves room for its bytes, optional wire boundary and truncation suffix,
+then enqueues them under one console guard. A terminal chunk cannot enter in
+the middle of that record. Core-0 diagnostics assembled across separate calls
+still have separate admission boundaries. Overwrite and truncation are reported. Fatal and DDB paths bypass this channel and never wait for its
 consumer.
 
 Userspace terminal output on every CPU appends to one queue under the console

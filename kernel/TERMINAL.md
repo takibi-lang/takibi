@@ -94,7 +94,9 @@ Each bounded chunk is admitted in lock order; successive writes by one process
 preserve their order across CPU migration. A large write may admit multiple
 chunks, so concurrent writers may interleave at chunk boundaries. Whole CR/LF
 pairs are admitted together. TX interrupt mask updates remain under the same
-guard, preventing a peer's enable from racing core 0's disable.
+guard, preventing a peer's enable from racing core 0's disable. Complete peer
+diagnostic records reserve queue capacity and append under one guard too,
+including their optional boundary newline and truncation suffix.
 The room recheck before blocking and the column, pending-output and writer
 counter queries take that same lock. Calls already inside a section pass its
 guard to the locked helpers. Per-core log publication and emergency capture

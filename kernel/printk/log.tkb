@@ -1278,6 +1278,67 @@ fn kernel_log_peer_console_drain() {
     }
 }
 
+// A complete peer diagnostic shares the terminal queue as one admission.
+// Reserve room before retaining or enqueuing any byte, then keep the guard
+// through the whole record and truncation suffix. This is the same ordering
+// boundary as a bounded terminal chunk, not one hold per diagnostic byte.
+private fn kernel_log_peer_record_emit(
+        bytes: borrow [u8; KERNEL_LOG_PEER_LINE_BYTES..],
+        length: {0..<KERNEL_LOG_PEER_LINE_BYTES + 1 as usize}, truncated: bool) {
+    static_assert(KERNEL_LOG_PEER_LINE_BYTES + 28 <= KERNEL_LOG_TX_QUEUE_BYTES,
+                  "a peer diagnostic and suffix must fit in one queue hold");
+    let suffix = bs"... [peer line truncated]\n";
+    let mut required: usize = length + 2;
+    if (truncated) { required = required + suffix.len; }
+    while (kernel_log_tx_is_live() && terminal_output_paused() == false) {
+        let guard = console_lock();
+        let count: usize = kernel_log_tx_count;
+        if (count <= KERNEL_LOG_TX_QUEUE_BYTES &&
+            KERNEL_LOG_TX_QUEUE_BYTES - count >= required) {
+            for index: usize in 0..<KERNEL_LOG_PEER_LINE_BYTES {
+                if (index < length) {
+                    kernel_log_peer_record_byte_locked(guard, bytes[index]);
+                }
+            }
+            if (truncated) {
+                kernel_log_begin_fragment();
+                for index: usize in 0..<26 {
+                    kernel_log_peer_record_byte_locked(guard, suffix[index]);
+                }
+            }
+            uart_tx_drain_into_fifo(guard);
+            if (uart_terminal_output_pending_locked(guard)) { uart_tx_irq_enable(); }
+            console_unlock(guard);
+            return;
+        }
+        console_unlock(guard);
+        // Do not hold the console lock while waiting for physical room.
+        while (uart_tx_fifo_full()) { }
+        let drain = console_lock();
+        uart_tx_drain_into_fifo(drain);
+        console_unlock(drain);
+    }
+    // Polling/emergency reporting remains independent of ordinary queue
+    // admission. Paused terminal writers cannot append in this mode.
+    for index: usize in 0..<KERNEL_LOG_PEER_LINE_BYTES {
+        if (index < length) { uart_putc(bytes[index]); }
+    }
+    if (truncated) { kernel_boot_log("... [peer line truncated]\n"); }
+}
+
+private fn kernel_log_peer_record_byte_locked(
+        guard: borrow ConsoleGuard[console_tx_lock], value: u8) {
+    if (kernel_log_capture_uart_byte_locked(guard, value)) {
+        if (kernel_log_wire_break_due) {
+            kernel_log_wire_break_due = false;
+            kernel_log_note_tx_byte();
+            let prefix: bool = kernel_log_tx_push(guard, 10);
+        }
+        kernel_log_note_tx_byte();
+        let queued: bool = kernel_log_tx_push(guard, value);
+    }
+}
+
 fn kernel_log_peer_drain() !{unsafe} {
     if (cpu_id() != 0) { return; }
     kernel_log_terminal_flow_poll();
@@ -1322,12 +1383,10 @@ fn kernel_log_peer_drain() !{unsafe} {
             kernel_log_deferred_tick = peer_tick;
             kernel_log_deferred = true;
             kernel_log_begin_fragment();
-            for index: usize in 0..<KERNEL_LOG_PEER_LINE_BYTES {
-                if (index < length) { uart_putc(copy[index]); }
-            }
-            if (truncated) {
-                kernel_boot_log("... [peer line truncated]\n");
-            }
+            if (length <= KERNEL_LOG_PEER_LINE_BYTES) {
+                kernel_log_peer_record_emit(copy as [u8; KERNEL_LOG_PEER_LINE_BYTES..],
+                                            length, truncated);
+            } else { return; }
             kernel_log_deferred = false;
             kernel_log_peer_consumed[cpu] = expected;
             expected = expected + 1;

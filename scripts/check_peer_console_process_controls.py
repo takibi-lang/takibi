@@ -164,6 +164,14 @@ def problems(tree: dict[str, str]) -> list[str]:
     init = tree["kernel/init/contention_probes.tkb"]
     if "if (kernel_log_peer_console_probe() == false) {" not in init:
         result.append("init does not wait for the terminal prefix after SMP bringup")
+    drain = log.split("fn kernel_log_peer_drain()", 1)[1].split("// Terminal exception paths", 1)[0]
+    if "kernel_log_peer_record_emit(copy as" not in drain or "uart_putc(copy[index])" in drain:
+        result.append("peer diagnostics still release the lock between bytes")
+    emit = log.split("private fn kernel_log_peer_record_emit(", 1)[1].split("private fn kernel_log_peer_record_byte_locked(", 1)[0]
+    if "KERNEL_LOG_TX_QUEUE_BYTES - count >= required" not in emit:
+        result.append("peer diagnostic admission does not reserve the whole record")
+    if "kernel_log_peer_record_byte_locked(guard, bytes[index]);" not in emit:
+        result.append("peer diagnostic bytes do not borrow one console guard")
     return result
 
 
@@ -250,6 +258,17 @@ def main() -> int:
         "qemu stop": ("scripts/run_kernel_qemutest.sh", "--stop-marker",
                       "--old-stop-marker"),
     }
+    mutations.update({
+        "peer diagnostic byte holds": ("kernel/printk/log.tkb",
+                                      "kernel_log_peer_record_emit(copy as",
+                                      "uart_putc(copy[index]); kernel_log_peer_record_emit(copy as"),
+        "peer diagnostic reservation": ("kernel/printk/log.tkb",
+                                        "KERNEL_LOG_TX_QUEUE_BYTES - count >= required",
+                                        "KERNEL_LOG_TX_QUEUE_BYTES - count != 0"),
+        "one peer diagnostic guard": ("kernel/printk/log.tkb",
+                                      "kernel_log_peer_record_byte_locked(guard, bytes[index]);",
+                                      "uart_putc(bytes[index]);"),
+    })
     mutations.update({
         "early idle terminal probe": ("kernel/printk/log.tkb",
                                       "if (atomic_word_load(&kernel_log_peer_console_probe_armed) == 0) { return; }",
