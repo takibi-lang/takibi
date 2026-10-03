@@ -1610,34 +1610,40 @@ fn scheduled_process_set_exec_inode(slot: usize, inode: usize) {
 // while processes already exist. It walks rather than sweeping an index
 // range, because there is no index range.
 fn scheduled_process_reset_syscall_state_everywhere() !{unsafe} {
+    // No caller holds the run lock (kernel_syscall_process_configure).
+    let guard = process_run_lock();
     let mut cursor = scheduled_process_first_slot();
     let mut walking: bool = true;
     while (walking) {
         match cursor {
             ProcessSlotCursor::Done => { walking = false; }
             ProcessSlotCursor::At(slot) => {
-                scheduled_process_record_reset_syscall_state(slot);
+                scheduled_process_record_reset_syscall_state(
+                    scheduled_process_record_locked(guard, slot));
                 cursor = scheduled_process_next_slot(slot);
             }
         }
     }
+    process_run_unlock(guard);
 }
 
 // Fresh syscall-owned process state in one place, so a slot handed out again
 // does not inherit the previous occupant's blocking, clone, or policy state.
-private fn scheduled_process_record_reset_syscall_state(slot: usize)
-        !{unsafe} {
-    scheduled_process_set_uart_block_delivery(slot,
-                                              UartBlockDelivery::Scalar);
+// GitHub issue #693 step 5: written through the record the caller already
+// holds an authority for (the run guard, the creating owner, or the reset
+// of a record being removed), not looked up again by slot.
+private fn scheduled_process_record_reset_syscall_state(
+        record: borrow *ProcessRecord) {
+    record.uart_block_delivery = UartBlockDelivery::Scalar;
     let mut fresh: CloneFileState = { false };
-    scheduled_process_set_clone_file_state(slot, fresh);
-    scheduled_process_set_inetd_mode(slot, false);
-    scheduled_process_set_init_signal_wait_logged(slot, false);
-    scheduled_process_set_affinity_mask(slot, 0);
-    scheduled_process_set_core0_for_call(slot, false);
-    scheduled_process_set_exec_pending(slot, false);
-    scheduled_process_set_exec_argc(slot, 0);
-    scheduled_process_set_exec_inode(slot, 0);
+    record.clone_file_state = fresh;
+    record.inetd_mode = false;
+    record.init_signal_wait_logged = false;
+    record.affinity_mask = 0;
+    record.core0_for_call = false;
+    record.command_line_length = record.command_line_length &
+        ~(PROCESS_EXEC_PENDING | PROCESS_EXEC_ARGC_MASK |
+          PROCESS_EXEC_INODE_MASK);
 }
 
 // GitHub issue #392: both directions between a pid and a slot, asked
@@ -2360,7 +2366,7 @@ private fn scheduled_process_record_reset(slot: usize) !{unsafe} {
     record.last_reaped_pid = 0;
     record.exit_status = 0;
     record.exec_image_live = false;
-    scheduled_process_record_reset_syscall_state(slot);
+    scheduled_process_record_reset_syscall_state(record);
 }
 
 // Everything scheduled_process_reap does for one process, done for every
@@ -2829,7 +2835,8 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
     } else {
         scheduled_process_record_owned(creating).start_time_ticks = 0;
     }
-    scheduled_process_record_reset_syscall_state(slot);
+    scheduled_process_record_reset_syscall_state(
+        scheduled_process_record_owned(creating));
     // GitHub issues #375/#376: a reused run would otherwise inherit the
     // previous occupant's marks. Re-poison BOTH halves here so the guard,
     // the high-water measurement and the overflow depth all answer about
