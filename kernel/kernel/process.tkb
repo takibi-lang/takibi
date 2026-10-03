@@ -1519,12 +1519,15 @@ fn scheduled_process_set_clone_file_state(slot: usize,
     scheduled_process_record_at(slot).clone_file_state = state;
 }
 
-fn scheduled_process_inetd_mode(slot: usize) -> bool {
-    return scheduled_process_record_at(slot).inetd_mode;
+// GitHub issue #693 step 5: these per-process syscall flags are read and
+// written under the run guard, which their callers take.
+fn scheduled_process_inetd_mode(guard: borrow ProcessRunGuard[lock], slot: usize) -> bool {
+    return scheduled_process_record_locked(guard, slot).inetd_mode;
 }
 
-fn scheduled_process_set_inetd_mode(slot: usize, enabled: bool) {
-    scheduled_process_record_at(slot).inetd_mode = enabled;
+fn scheduled_process_set_inetd_mode(guard: borrow ProcessRunGuard[lock], slot: usize,
+                                    enabled: bool) {
+    scheduled_process_record_locked(guard, slot).inetd_mode = enabled;
 }
 
 fn scheduled_process_affinity_mask(slot: usize) -> usize {
@@ -1543,12 +1546,16 @@ fn scheduled_process_set_core0_for_call(slot: usize, value: bool) {
     scheduled_process_record_at(slot).core0_for_call = value;
 }
 
-fn scheduled_process_init_signal_wait_logged(slot: usize) -> bool {
-    return scheduled_process_record_at(slot).init_signal_wait_logged;
+fn scheduled_process_init_signal_wait_logged(
+        guard: borrow ProcessRunGuard[lock], slot: usize) -> bool {
+    return scheduled_process_record_locked(guard, slot)
+        .init_signal_wait_logged;
 }
 
-fn scheduled_process_set_init_signal_wait_logged(slot: usize, logged: bool) {
-    scheduled_process_record_at(slot).init_signal_wait_logged = logged;
+fn scheduled_process_set_init_signal_wait_logged(
+        guard: borrow ProcessRunGuard[lock], slot: usize, logged: bool) {
+    scheduled_process_record_locked(guard, slot).init_signal_wait_logged =
+        logged;
 }
 
 // command_line_length needs ten bits for 0..512. Its remaining bits carry the
@@ -1563,8 +1570,8 @@ const PROCESS_EXEC_PENDING: usize = 0x4000;
 const PROCESS_EXEC_INODE_SHIFT: usize = 32;
 const PROCESS_EXEC_INODE_MASK: usize = 0xFFFFFFFF00000000;
 
-fn scheduled_process_exec_pending(slot: usize) -> bool {
-    return (scheduled_process_record_at(slot).command_line_length &
+fn scheduled_process_exec_pending(guard: borrow ProcessRunGuard[lock], slot: usize) -> bool {
+    return (scheduled_process_record_locked(guard, slot).command_line_length &
             PROCESS_EXEC_PENDING) != 0;
 }
 
@@ -1579,8 +1586,8 @@ fn scheduled_process_set_exec_pending(guard: borrow ProcessRunGuard[lock],
     }
 }
 
-fn scheduled_process_exec_argc(slot: usize) -> usize {
-    return (scheduled_process_record_at(slot).command_line_length &
+fn scheduled_process_exec_argc(guard: borrow ProcessRunGuard[lock], slot: usize) -> usize {
+    return (scheduled_process_record_locked(guard, slot).command_line_length &
             PROCESS_EXEC_ARGC_MASK) >> PROCESS_EXEC_ARGC_SHIFT;
 }
 
@@ -1594,8 +1601,8 @@ fn scheduled_process_set_exec_argc(
         ((argc << PROCESS_EXEC_ARGC_SHIFT) & PROCESS_EXEC_ARGC_MASK);
 }
 
-fn scheduled_process_exec_inode(slot: usize) -> usize {
-    return (scheduled_process_record_at(slot).command_line_length &
+fn scheduled_process_exec_inode(guard: borrow ProcessRunGuard[lock], slot: usize) -> usize {
+    return (scheduled_process_record_locked(guard, slot).command_line_length &
             PROCESS_EXEC_INODE_MASK) >> PROCESS_EXEC_INODE_SHIFT;
 }
 

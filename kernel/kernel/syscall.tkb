@@ -349,10 +349,18 @@ fn kernel_syscall_daemon_start() {
 }
 
 fn kernel_syscall_exec_pending() -> bool {
-    return scheduled_process_exec_pending(kernel_syscall_process_slot());
+    let slot: usize = kernel_syscall_process_slot();
+    let guard = process_run_lock();
+    let value: bool = scheduled_process_exec_pending(guard, slot);
+    process_run_unlock(guard);
+    return value;
 }
 fn kernel_syscall_exec_argc() -> usize {
-    return scheduled_process_exec_argc(kernel_syscall_process_slot());
+    let slot: usize = kernel_syscall_process_slot();
+    let guard = process_run_lock();
+    let value: usize = scheduled_process_exec_argc(guard, slot);
+    process_run_unlock(guard);
+    return value;
 }
 fn kernel_syscall_exec_argv() -> []u8 {
     return scheduled_process_command_line(kernel_syscall_process_slot());
@@ -384,11 +392,18 @@ private fn syscall_script_line_here() -> [u8; 256..] {
 }
 
 private fn kernel_syscall_inetd_mode() -> bool {
-    return scheduled_process_inetd_mode(kernel_syscall_process_slot());
+    let slot: usize = kernel_syscall_process_slot();
+    let guard = process_run_lock();
+    let value: bool = scheduled_process_inetd_mode(guard, slot);
+    process_run_unlock(guard);
+    return value;
 }
 
 private fn kernel_syscall_set_inetd_mode(enabled: bool) {
-    scheduled_process_set_inetd_mode(kernel_syscall_process_slot(), enabled);
+    let slot: usize = kernel_syscall_process_slot();
+    let guard = process_run_lock();
+    scheduled_process_set_inetd_mode(guard, slot, enabled);
+    process_run_unlock(guard);
 }
 
 // GitHub issue #591: the inode execve resolved its pathname to, which is
@@ -396,7 +411,11 @@ private fn kernel_syscall_set_inetd_mode(enabled: bool) {
 // `/bin/httpd`. Zero when no ELF inode was resolved (no filesystem yet, or
 // a `#!` script, whose image is the interpreter argv[0] names).
 fn kernel_syscall_exec_inode() -> usize {
-    return scheduled_process_exec_inode(kernel_syscall_process_slot());
+    let slot: usize = kernel_syscall_process_slot();
+    let guard = process_run_lock();
+    let value: usize = scheduled_process_exec_inode(guard, slot);
+    process_run_unlock(guard);
+    return value;
 }
 
 // A `#!` script is executed by naming an interpreter, so the image execve(2)
@@ -2511,9 +2530,18 @@ fn syscall_signal_wait(wait_set: usize, timeout_address: usize)
     }
     kernel_process_current_prepare_signal_wait(wait_set);
     let process_slot: usize = kernel_syscall_process_slot();
-    if (kernel_process_current_pid() == 1 &&
-        scheduled_process_init_signal_wait_logged(process_slot) == false) {
-        scheduled_process_set_init_signal_wait_logged(process_slot, true);
+    let mut first_init_wait: bool = false;
+    if (kernel_process_current_pid() == 1) {
+        let logged_guard = process_run_lock();
+        if (scheduled_process_init_signal_wait_logged(logged_guard,
+                                                      process_slot) == false) {
+            scheduled_process_set_init_signal_wait_logged(logged_guard,
+                                                          process_slot, true);
+            first_init_wait = true;
+        }
+        process_run_unlock(logged_guard);
+    }
+    if (first_init_wait) {
         kernel_boot_log(
             "signal: BusyBox init blocked in rt_sigtimedwait for SIGCHLD\n");
     }
