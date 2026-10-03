@@ -1568,8 +1568,9 @@ fn scheduled_process_exec_pending(slot: usize) -> bool {
             PROCESS_EXEC_PENDING) != 0;
 }
 
-fn scheduled_process_set_exec_pending(slot: usize, pending: bool) {
-    let record: *ProcessRecord = scheduled_process_record_at(slot);
+fn scheduled_process_set_exec_pending(guard: borrow ProcessRunGuard[lock],
+                                      slot: usize, pending: bool) {
+    let record = scheduled_process_record_locked(guard, slot);
     record.command_line_length = record.command_line_length &
                                  ~PROCESS_EXEC_PENDING;
     if (pending) {
@@ -1584,8 +1585,9 @@ fn scheduled_process_exec_argc(slot: usize) -> usize {
 }
 
 fn scheduled_process_set_exec_argc(
+        guard: borrow ProcessRunGuard[lock],
         slot: usize, argc: {0..<16 as usize}) {
-    let record: *ProcessRecord = scheduled_process_record_at(slot);
+    let record = scheduled_process_record_locked(guard, slot);
     record.command_line_length = record.command_line_length &
                                  ~PROCESS_EXEC_ARGC_MASK;
     record.command_line_length = record.command_line_length |
@@ -1597,8 +1599,9 @@ fn scheduled_process_exec_inode(slot: usize) -> usize {
             PROCESS_EXEC_INODE_MASK) >> PROCESS_EXEC_INODE_SHIFT;
 }
 
-fn scheduled_process_set_exec_inode(slot: usize, inode: usize) {
-    let record: *ProcessRecord = scheduled_process_record_at(slot);
+fn scheduled_process_set_exec_inode(guard: borrow ProcessRunGuard[lock],
+                                    slot: usize, inode: usize) {
+    let record = scheduled_process_record_locked(guard, slot);
     record.command_line_length = record.command_line_length &
                                  ~PROCESS_EXEC_INODE_MASK;
     record.command_line_length = record.command_line_length |
@@ -1901,9 +1904,12 @@ fn kernel_process_monitor_proc(pid: usize) !{unsafe} {
     kernel_boot_log("\n");
 }
 
-fn scheduled_process_set_command_line(slot: usize, value: []u8,
+// GitHub issue #693 step 5: the exec staging setters take the run guard
+// their callers hold (#618's one critical section for a procfs reader).
+fn scheduled_process_set_command_line(guard: borrow ProcessRunGuard[lock],
+                                      slot: usize, value: []u8,
                                       requested: usize) !{unsafe} {
-    let record: *ProcessRecord = scheduled_process_record_at(slot);
+    let record = scheduled_process_record_locked(guard, slot);
     let mut length: usize = requested;
     if (length > value.len) { length = value.len; }
     if (length > 512) { length = 512; }

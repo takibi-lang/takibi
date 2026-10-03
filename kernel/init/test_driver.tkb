@@ -1424,8 +1424,10 @@ irq_uart_rx_unmask();
                 // the kernel rather than by execve, so nothing else records
                 // a command line for it, and procfs fell back to naming it
                 // as a kernel thread.
-                scheduled_process_set_command_line(
+                let init_name_guard = process_run_lock();
+                scheduled_process_set_command_line(init_name_guard,
                     0, bs"init\0" as []u8, 5);
+                process_run_unlock(init_name_guard);
                 let (script_heap_start, script_heap_limit) =
                     process_image_heap_range(script_pages);
                 kernel_syscall_process_configure(

@@ -358,7 +358,11 @@ fn kernel_syscall_exec_argv() -> []u8 {
     return scheduled_process_command_line(kernel_syscall_process_slot());
 }
 fn kernel_syscall_exec_clear() {
-    scheduled_process_set_exec_pending(kernel_syscall_process_slot(), false);
+    // No caller holds the run lock (test_driver's exec handoff).
+    let guard = process_run_lock();
+    scheduled_process_set_exec_pending(guard, kernel_syscall_process_slot(),
+                                       false);
+    process_run_unlock(guard);
 }
 
 private fn syscall_exec_argv_here() -> [u8; 512..] {
@@ -6030,14 +6034,15 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // another CPU copies the old command line or the new one, never
         // half of each.
         let exec_guard = process_run_lock();
-        scheduled_process_set_command_line(
+        scheduled_process_set_command_line(exec_guard,
             kernel_syscall_process_slot(),
             diagnostic_argv, output_offset);
-        scheduled_process_set_exec_argc(
+        scheduled_process_set_exec_argc(exec_guard,
             kernel_syscall_process_slot(), packed_argc);
-        scheduled_process_set_exec_inode(
+        scheduled_process_set_exec_inode(exec_guard,
             kernel_syscall_process_slot(), exec_inode);
-        scheduled_process_set_exec_pending(kernel_syscall_process_slot(), true);
+        scheduled_process_set_exec_pending(exec_guard,
+            kernel_syscall_process_slot(), true);
         process_run_unlock(exec_guard);
         if (kernel_process_is_child()) { return SyscallAction::ChildExec; }
         return SyscallAction::Exec;
