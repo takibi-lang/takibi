@@ -2995,7 +2995,7 @@ fn scheduled_process_ready_take(guard: borrow ProcessRunGuard[lock],
     // child's kernel stack.
     if (scheduled_process_wait_reason_of(handle) ==
             ProcessWaitReason::ChildExit) {
-        match kernel_process_pending_wait4_child(handle) {
+        match kernel_process_pending_wait4_child(guard, handle) {
             ProcessNextReadyResult::Missing => {
                 return ScheduledProcessReadyTakeResult::Missing;
             }
@@ -5560,21 +5560,23 @@ fn kernel_process_other_ready() -> bool {
 // Child exit wakes its direct parent, so this asks about that exact edge
 // rather than treating every blocked process as a reason to yield.
 fn kernel_process_current_exit_has_waiter() -> bool {
-    if (execution_here().current_live == false) { return false; }
+    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
+    if (execution_here().current_live == false) { { let __running_result: bool = false; process_running_end(running_here); return __running_result; } }
     let slot: usize = execution_here().current_handle.pool_index;
-    if (scheduled_process_record_at(slot).has_parent == false) { return false; }
-    let mut parent: ProcessHandle = scheduled_process_record_at(slot).parent;
-    return scheduled_process_handle_matches(parent) &&
+    if (scheduled_process_record_running(running_here).has_parent == false) { { let __running_result: bool = false; process_running_end(running_here); return __running_result; } }
+    let mut parent: ProcessHandle = scheduled_process_record_running(running_here).parent;
+    { let __running_result: bool = scheduled_process_handle_matches(parent) &&
            scheduled_process_state_of(parent) == ProcessSlotState::Blocked &&
            scheduled_process_wait_reason_of(parent) ==
-               ProcessWaitReason::ChildExit;
+               ProcessWaitReason::ChildExit; process_running_end(running_here); return __running_result; }
 }
 
 fn kernel_process_current_has_relative() -> bool {
-    if (execution_here().current_live == false) { return false; }
+    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
+    if (execution_here().current_live == false) { { let __running_result: bool = false; process_running_end(running_here); return __running_result; } }
     let slot: usize = execution_here().current_handle.pool_index;
-    return scheduled_process_record_at(slot).has_first_child ||
-           scheduled_process_record_at(slot).has_parent;
+    { let __running_result: bool = scheduled_process_record_running(running_here).has_first_child ||
+           scheduled_process_record_running(running_here).has_parent; process_running_end(running_here); return __running_result; }
 }
 
 // GitHub issue #375: make a kernel stack overflow LOUD.
@@ -9264,15 +9266,15 @@ private fn kernel_process_first_zombie_of(guard: borrow ProcessRunGuard[lock], p
 // continuation marker while Ready. Its wait cell names the exact zombie
 // whose exit woke it, and whose wait4 result still has to be delivered after
 // that parent's address space is active.
-private fn kernel_process_pending_wait4_child(parent: ProcessHandle)
+private fn kernel_process_pending_wait4_child(guard: borrow ProcessRunGuard[lock], parent: ProcessHandle)
         -> ProcessNextReadyResult {
-    if (scheduled_process_record_of(parent).has_first_child == false) {
+    if (scheduled_process_record_of_locked(guard, parent).has_first_child == false) {
         return ProcessNextReadyResult::Missing;
     }
     let wanted: usize =
-        process_wait_woken_by(&scheduled_process_record_of(parent).wait);
+        process_wait_woken_by(&scheduled_process_record_of_locked(guard, parent).wait);
     let mut cursor: ProcessHandle =
-        scheduled_process_record_of(parent).first_child;
+        scheduled_process_record_of_locked(guard, parent).first_child;
     let mut remaining: usize = scheduled_process_pool_live_count() + 1;
     while (remaining != 0) {
         remaining = remaining - 1;
@@ -9283,10 +9285,10 @@ private fn kernel_process_pending_wait4_child(parent: ProcessHandle)
             scheduled_process_pid_of_handle(cursor) == wanted) {
             return ProcessNextReadyResult::Next(cursor);
         }
-        if (scheduled_process_record_of(cursor).has_next_sibling == false) {
+        if (scheduled_process_record_of_locked(guard, cursor).has_next_sibling == false) {
             return ProcessNextReadyResult::Missing;
         }
-        cursor = scheduled_process_record_of(cursor).next_sibling;
+        cursor = scheduled_process_record_of_locked(guard, cursor).next_sibling;
     }
     return ProcessNextReadyResult::Missing;
 }
@@ -9487,24 +9489,34 @@ private fn kernel_process_has_live_child_of(guard: borrow ProcessRunGuard[lock],
 // GitHub issue #437: does this slot have a child with this pid, live or
 // zombie? wait4(pid) used to be checked against first_child's pid alone,
 // which was the only child there could be. It is a search now.
+// GitHub issue #693 step 3: the children's records are read under the run
+// lock. A caller already holding it uses the _locked form.
 fn kernel_process_current_has_child_pid(pid: usize) -> bool {
+    let child_guard = process_run_lock();
+    let found: bool = kernel_process_current_has_child_pid_locked(child_guard, pid);
+    process_run_unlock(child_guard);
+    return found;
+}
+
+fn kernel_process_current_has_child_pid_locked(guard: borrow ProcessRunGuard[lock],
+                                               pid: usize) -> bool {
     if (execution_here().current_live == false || pid == 0) { return false; }
     let slot: usize = execution_here().current_handle.pool_index;
-    if (scheduled_process_record_at(slot).has_first_child == false) {
+    if (scheduled_process_record_locked(guard, slot).has_first_child == false) {
         return false;
     }
     let mut cursor: ProcessHandle =
-        scheduled_process_record_at(slot).first_child;
+        scheduled_process_record_locked(guard, slot).first_child;
     let mut remaining: usize = scheduled_process_pool_live_count() + 1;
     while (remaining != 0) {
         remaining = remaining - 1;
         if (scheduled_process_handle_matches(cursor) == false) { return false; }
         if (scheduled_process_pid_of_handle(cursor) == pid) { return true; }
-        if (scheduled_process_record_of(cursor).has_next_sibling
+        if (scheduled_process_record_of_locked(guard, cursor).has_next_sibling
                 == false) {
             return false;
         }
-        cursor = scheduled_process_record_of(cursor).next_sibling;
+        cursor = scheduled_process_record_of_locked(guard, cursor).next_sibling;
     }
     return false;
 }
@@ -9701,24 +9713,35 @@ fn kernel_process_child_waitable(guard: borrow ProcessRunGuard[lock]) -> bool {
 // searches skip such a zombie (#609), which is right for a reap and wrong
 // for this read.
 fn kernel_process_child_exit_status_for(slot: usize, pid: usize) -> usize {
+    // GitHub issue #693 step 3: the children's records are read under the
+    // run lock; kernel_syscall_wait4_deliver holds none.
+    let status_guard = process_run_lock();
+    let status: usize =
+        kernel_process_child_exit_status_for_locked(status_guard, slot, pid);
+    process_run_unlock(status_guard);
+    return status;
+}
+
+private fn kernel_process_child_exit_status_for_locked(
+        guard: borrow ProcessRunGuard[lock], slot: usize, pid: usize) -> usize {
     let mut parent: ProcessHandle = scheduled_process_handle_of_slot(slot);
-    if (scheduled_process_record_of(parent).has_first_child == false) {
+    if (scheduled_process_record_of_locked(guard, parent).has_first_child == false) {
         return 0;
     }
     let mut cursor: ProcessHandle =
-        scheduled_process_record_of(parent).first_child;
+        scheduled_process_record_of_locked(guard, parent).first_child;
     let mut remaining: usize = scheduled_process_pool_live_count() + 1;
     while (remaining != 0) {
         remaining = remaining - 1;
         if (scheduled_process_handle_matches(cursor) == false) { return 0; }
         if (scheduled_process_pid_of_handle(cursor) == pid &&
             scheduled_process_state_of(cursor) == ProcessSlotState::Exited) {
-            return scheduled_process_record_of(cursor).exit_status;
+            return scheduled_process_record_of_locked(guard, cursor).exit_status;
         }
-        if (scheduled_process_record_of(cursor).has_next_sibling == false) {
+        if (scheduled_process_record_of_locked(guard, cursor).has_next_sibling == false) {
             return 0;
         }
-        cursor = scheduled_process_record_of(cursor).next_sibling;
+        cursor = scheduled_process_record_of_locked(guard, cursor).next_sibling;
     }
     return 0;
 }

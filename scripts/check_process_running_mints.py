@@ -31,6 +31,8 @@ ALLOWED = {
     "kernel_process_current_arm_deadline",
     "kernel_process_current_clear_deadline",
     "kernel_process_current_deadline_ticks",
+    "kernel_process_current_exit_has_waiter",
+    "kernel_process_current_has_relative",
     "kernel_process_current_pending_block_reason",
     "kernel_process_current_prepare_signal_wait",
     "kernel_process_current_set_pending_block",
