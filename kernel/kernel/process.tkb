@@ -9338,13 +9338,20 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
     if (has_resume_root) {
         kernel_process_activate_stable_root(resume_root);
     }
+    // GitHub issue #693 step 3: the child's record is read under the run
+    // lock, like every other read of another process's record. Its exit
+    // status is settled by now, but its stack owner is cleared by the CPU
+    // that leaves its stack, under this lock.
+    let read_guard = process_run_lock();
     let status: usize =
-        scheduled_process_record_of(child).exit_status;
+        scheduled_process_record_of_locked(read_guard, child).exit_status;
+    let stack_unowned: bool =
+        scheduled_process_record_of_locked(read_guard, child).stack_owner_cpu ==
+            PROCESS_STACK_UNOWNED;
+    process_run_unlock(read_guard);
     let pid: usize = scheduled_process_pid_of_handle(child);
     workload_busy_peer_exit_reaped(
-        pid, scheduled_process_pid_of_handle(parent),
-        scheduled_process_record_of(child).stack_owner_cpu ==
-            PROCESS_STACK_UNOWNED);
+        pid, scheduled_process_pid_of_handle(parent), stack_unowned);
     // GitHub issue #589: the unlink and the Exited take under the
     // process-run lock. Peer schedulers walk these same sibling links under
     // it, and the take now requires its guard. The teardown itself
