@@ -1887,7 +1887,7 @@ kernelcheck-alloc-rollback-qemu: kernelbuild-check
 ## every other lane had finished. Under TAKIBI_JOBS=1 (CI) they still run one
 ## at a time. process-record keeps the runner's default ports.
 ALLOC_ROLLBACK_POINTS := process-record stack-run address-space-root \
-	image-record fd-context
+	image-record fd-context address-space-backing
 _kernelcheck-alloc-rollback-qemu: \
 	$(addprefix _kernelcheck-alloc-rollback-,$(ALLOC_ROLLBACK_POINTS))
 
@@ -1902,6 +1902,8 @@ _kernelcheck-alloc-rollback-image-record:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_ALLOC_ROLLBACK_POINT=image-record KERNEL_QEMU_ALLOC_ROLLBACK_SERIAL_PORT=18650 KERNEL_QEMU_ALLOC_ROLLBACK_GDB_PORT=18651 KERNEL_QEMU_ALLOC_ROLLBACK_QMP_PORT=18652 KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_LOCAL_PORT=18653 KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_REMOTE_PORT=18654 bash scripts/run_kernel_alloc_rollback_qemutest.sh
 _kernelcheck-alloc-rollback-fd-context:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_ALLOC_ROLLBACK_POINT=fd-context KERNEL_QEMU_ALLOC_ROLLBACK_SERIAL_PORT=18655 KERNEL_QEMU_ALLOC_ROLLBACK_GDB_PORT=18656 KERNEL_QEMU_ALLOC_ROLLBACK_QMP_PORT=18657 KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_LOCAL_PORT=18658 KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_REMOTE_PORT=18659 bash scripts/run_kernel_alloc_rollback_qemutest.sh
+_kernelcheck-alloc-rollback-address-space-backing:
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_ALLOC_ROLLBACK_POINT=address-space-backing KERNEL_QEMU_ALLOC_ROLLBACK_SERIAL_PORT=18631 KERNEL_QEMU_ALLOC_ROLLBACK_GDB_PORT=18632 KERNEL_QEMU_ALLOC_ROLLBACK_QMP_PORT=18633 KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_LOCAL_PORT=18634 KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_REMOTE_PORT=18635 bash scripts/run_kernel_alloc_rollback_qemutest.sh
 
 ## kernelsh-qemu: boot the standalone kernel, attach the current terminal to
 ## its TCP-backed UART console, and forward localhost:18080 to guest httpd.

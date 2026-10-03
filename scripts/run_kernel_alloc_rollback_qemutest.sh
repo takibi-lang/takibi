@@ -64,9 +64,15 @@ case "$ALLOC_ROLLBACK_POINT" in
         ALLOC_ROLLBACK_POINT_ID=5
         ALLOC_ROLLBACK_VARIANT='IntrusivePoolInsertResult::OutOfMemory'
         ;;
+    address-space-backing)
+        # #672: the backing record's own allocation, inside
+        # address_space_allocate_root. It returns a bool, not a variant.
+        ALLOC_ROLLBACK_POINT_ID=6
+        ALLOC_ROLLBACK_VARIANT='bool false'
+        ;;
     *)
         echo "error: unknown allocation rollback point '$ALLOC_ROLLBACK_POINT'" >&2
-        echo 'expected process-record, stack-run, address-space-root, image-record, or fd-context' >&2
+        echo 'expected process-record, stack-run, address-space-root, image-record, fd-context, or address-space-backing' >&2
         exit 2
         ;;
 esac

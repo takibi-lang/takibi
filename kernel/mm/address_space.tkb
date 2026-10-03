@@ -560,6 +560,13 @@ must_use variant AddressSpaceAllocateResult {
 // process-slot allocation cannot leave an unreachable table or ASID live.
 fn address_space_allocate_root(slot: usize)
         -> AddressSpaceAllocateResult {
+    // The backing record first: a root whose tables have nowhere to be
+    // recorded is not a root. Since #672 the record's pool grows through
+    // page_alloc_contiguous, so this can genuinely run out, and it has to
+    // say so rather than build tables into a record that does not exist.
+    if (address_space_backing_ensure(slot) == false) {
+        return AddressSpaceAllocateResult::OutOfMemory;
+    }
     match page_alloc(PageOwnerTag::PageTable) {
         PageAllocResult::OutOfMemory => {
             return AddressSpaceAllocateResult::OutOfMemory;

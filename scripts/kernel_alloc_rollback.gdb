@@ -8,7 +8,7 @@
 #
 # $alloc_rollback_point is selected by the runner:
 #   1 process record, 2 kernel stack run, 3 address-space root,
-#   4 image record, 5 fd context.
+#   4 image record, 5 fd context, 6 address-space backing record.
 #
 # Every point arms after the process-pool baseline and inside the first
 # process-table probe. That probe reports a failed allocation and continues,
@@ -35,7 +35,13 @@ else
     break scheduled_process_alloc_finish
     continue
     delete
-    break page_alloc_contiguous
+    # Only this core's kernel stack run: the region_pools (#672) grow
+    # through page_alloc_contiguous too (owner PoolChunk), and a reused
+    # spare run means alloc_finish asks for no stack at all on some boots,
+    # which forced the address-space backing's chunk instead.
+    # PageOwnerTag::KernelStack is 5.
+    set $alloc_thread = $_thread
+    break page_alloc_contiguous thread $alloc_thread if (int)owner == 5
     continue
     delete
     takibi-force-variant-return PageRunAllocResult OutOfMemory
@@ -48,7 +54,8 @@ else
       break address_space_allocate_root
       continue
       delete
-      break page_alloc
+      set $alloc_thread = $_thread
+      break page_alloc thread $alloc_thread
       ignore $bpnum 1
       continue
       delete
@@ -81,7 +88,26 @@ else
           takibi-force-variant-return IntrusivePoolInsertResult OutOfMemory
           printf "alloc-rollback: forced point=fd-context\n"
         else
-          error "unknown alloc-rollback point; expected 1 through 5"
+          if $alloc_rollback_point == 6
+            # #672: the backing record's pool grows through the page
+            # allocator, and a refused backing used to be built into as if
+            # it existed. Fail the record itself inside allocate_root.
+            break scheduled_process_alloc_finish
+            continue
+            delete
+            set $alloc_thread = $_thread
+            break address_space_allocate_root thread $alloc_thread
+            continue
+            delete
+            break address_space_backing_ensure thread $alloc_thread
+            continue
+            delete
+            return (unsigned char)0
+            printf "takibi-force-variant-return: bool false via registers\n"
+            printf "alloc-rollback: forced point=address-space-backing\n"
+          else
+            error "unknown alloc-rollback point; expected 1 through 6"
+          end
         end
       end
     end
