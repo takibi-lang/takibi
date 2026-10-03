@@ -45,14 +45,12 @@ BANNER_HEAD = b"\nddb: interrupt-safe UART debugger\n"
 BANNER_TAIL = (b"ddb: world-stop complete mask=0x000000000000000e\n"
                b"ddb: break seq=1 cpu=0 elr=0x00000000400103a0 "
                b"sp_el0=0x000000007ffffdf0\n")
-# GitHub issue #534: the loader arms /bin/peer-console to hold one record
-# undrained for this BREAK, and the kernel names it at entry and delivers it
-# once `continue` lets the peer run.
-PEER_PENDING = b"ddb: peer console=pending\n"
+# Synthetic witness for the physical held-console BREAK and its release.
+PEER_PENDING = b"ddb: console lock probe phase=2 release=2 entry-held=no\n"
 WAKE_EVENT = b"id=0x0000000000000201"
-PEER_EMPTY = b"ddb: peer console=empty\n"
-PEER_RECORD = (b"peer user console: queued before DDB, delivered after "
-               b"continue\r\n")
+PEER_EMPTY = b"ddb: console lock probe phase=0 release=0 entry-held=no\n"
+PEER_RECORD = b""
+HOLD_MARKER = b"console lock probe: held for UART BREAK\n"
 
 # The exact lines the driver asserts on, taken from a real capture so a
 # change to either side shows up here rather than only on the board.
@@ -118,7 +116,7 @@ def scripted_board(master: int, proc, answer_on_attempt: int, budget: float,
     it needs a control -- a lane that cannot fail on it is a lane that could
     not have seen the defect.
 
-    `hold_peer=False` plays a boot whose peer record was never held, and
+    `hold_peer=False` omits the console hold observation, and
     `deliver_peer=False` one that held it but lost it across `continue`
     (GitHub issue #534).
 
@@ -126,7 +124,7 @@ def scripted_board(master: int, proc, answer_on_attempt: int, budget: float,
     debugger banner follows the acknowledgement by a short delay instead --
     the same ordering a real board produces.
     """
-    banner = (BANNER_HEAD + (PEER_PENDING if hold_peer else PEER_EMPTY) +
+    banner = (BANNER_HEAD + (PEER_PENDING if hold_peer and deliver_peer else PEER_EMPTY) +
               BANNER_TAIL)
     pending = b""
     resume_seen = 0
@@ -139,7 +137,7 @@ def scripted_board(master: int, proc, answer_on_attempt: int, budget: float,
         readable, _, _ = select.select([master], [], [], 0.05)
         if announce_at is not None and not announced \
                 and time.monotonic() >= announce_at:
-            os.write(master, banner + PROMPT)
+            os.write(master, HOLD_MARKER + (banner + PROMPT if answer_break else b""))
             announced = True
         if not readable:
             continue
@@ -150,13 +148,11 @@ def scripted_board(master: int, proc, answer_on_attempt: int, budget: float,
         if not acked:
             acked = True
             if not answer_wake:
-                if answer_break:
-                    text = DRIVER.read_text(encoding="ascii")
-                    wait = re.search(r"^WAKE_RESPONSE_SECONDS = ([0-9.]+)$",
-                                     text, re.M)
-                    if wait is None:
-                        raise RuntimeError("missing wake response bound")
-                    announce_at = time.monotonic() + float(wait[1]) + 0.2
+                text = DRIVER.read_text(encoding="ascii")
+                wait = re.search(r"^WAKE_RESPONSE_SECONDS = ([0-9.]+)$", text, re.M)
+                if wait is None:
+                    raise RuntimeError("missing wake response bound")
+                announce_at = time.monotonic() + float(wait[1]) + 0.2
                 pending = b""
                 continue
             # What a shell answers an empty command line with.
@@ -312,15 +308,12 @@ def main() -> int:
                 restore_console=False) is None:
         return 1
 
-    # GitHub issue #534: a BREAK that found no held peer record proves
-    # nothing about queued peer output, and a held record that never reaches
-    # the wire after `continue` is the loss the contract forbids.
-    if run_case("a break with no held peer record", 1, 6.0, False,
-                ["did not observe the held peer console record"],
+    if run_case("a break with no held console guard", 1, 6.0, False,
+                ["BREAK was not observed during a held console guard"],
                 hold_peer=False) is None:
         return 1
-    if run_case("a held peer record lost across continue", 1, 6.0, False,
-                ["peer console record did not follow DDB continue"],
+    if run_case("a console guard not released", 1, 6.0, False,
+                ["BREAK was not observed during a held console guard"],
                 deliver_peer=False) is None:
         return 1
 
@@ -362,7 +355,7 @@ def main() -> int:
         "command, a dropped first command is retried during silence, a "
         "workload that never answers fails with the attempt count, a "
         "resume that leaves the console spinning fails, a break with no "
-        "held peer record or one that loses it across continue fails, and "
+        "held console guard or one without its release witness fails, and "
         "a wait view missing its header or its summary fails",
         cases=CASES.ran)
     return 0

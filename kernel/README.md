@@ -272,6 +272,13 @@ rather than overwritten. The transcript can contain typed shell commands,
 command output, addresses, and other sensitive session data, so review it
 before sharing.
 
+DDB entry through UART BREAK and the peer stop SGI depends on IRQ delivery.
+A finite console critical section may delay entry until its guard is released;
+the maintained UART-BREAK lanes exercise this case on QEMU and RPi5. A CPU
+permanently masking IRQs may prevent entry or a complete world-stop. DDB does
+not inspect shared state without the required acknowledgements; use external
+SWD or QEMU host diagnostics in that case.
+
 To stop a live kernel in DDB from either `make kernelsh-qemu` or
 `make kernelsh-rpi5`, press Ctrl-T and then the ordinary lowercase `b` key.
 Neither key is forwarded to ash. On RPi5 the host sends one automatically

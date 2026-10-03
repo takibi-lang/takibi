@@ -78,6 +78,7 @@ trap cleanup EXIT INT TERM HUP
 python3 "$REPO_ROOT/scripts/run_kernel_ddb_driver.py" \
     --serial-port "$SERIAL_PORT" --qmp-port "$QMP_PORT" \
     --break-source "$BREAK_SOURCE" \
+    --gdb-port "$GDB_PORT" --elf "$ELF" \
     --kernel-address "$KERNEL_READ_ADDRESS" \
     --log "$UART_LOG" \
     --snapshot-ready-file "$SNAPSHOT_READY" \
@@ -111,10 +112,9 @@ if [ "$BREAK_SOURCE" = software ]; then
         -ex "set *(char *)&kernel_ddb_breakpoint_test_enabled = 1"
     )
 else
-    # GitHub issue #534: the BREAK must land while a peer record is held.
+    # Retain the peer writer; the driver arms its actual guard hold late.
     GDB_COMMANDS+=(
-        -ex "set *(char *)&kernel_ddb_peer_console_test_enabled = 1"
-        -ex "set *(char *)&kernel_ddb_peer_console_hold_armed = 1"
+        -ex "set *(char *)&kernel_ddb_console_test_enabled = 1"
         -ex "source $REPO_ROOT/scripts/kernel_peer_exit_check.py"
     )
 fi
@@ -340,35 +340,15 @@ if ! grep -q '^ddb: interrupt-safe UART debugger$' "$UART_LOG" ||
         ! grep -q '^ddb: waittest ps pid=10 ppid=0 state=3 wait=1 waker=uart-rx queued=1 root=0 sp=0x0000000000000000 pending=none masked=none owner=none mask=0x0000000000000000 core0=0$' "$UART_LOG" ||
         ! grep -q '^ddb: continuing$' "$UART_LOG" ||
         ! grep -q '^ddb: console tx=queued$' "$UART_LOG" ||
-        { [ "$BREAK_SOURCE" = uart ] && ! grep -q '^ddb: peer console=pending$' "$UART_LOG"; } ||
-        { [ "$BREAK_SOURCE" = uart ] && ! grep -Eq $'peer user console: queued before DDB, delivered after continue\r?$' "$UART_LOG"; } ||
+        { [ "$BREAK_SOURCE" = uart ] && ! grep -Eq '^ddb: console lock probe phase=2 release=[123] entry-held=(yes|no)$' "$UART_LOG"; } ||
         ! grep -Eq $'^init: ash bootstrap\r?$' "$UART_LOG"; then
-    # GitHub issues #676/#692: the peer's line is matched without its start
-    # anchor. What this lane asserts is that the line queued before DDB is
-    # delivered after continue; a byte of another core's output landing in
-    # front of it ("ppeer user console: ...", seen under host load) is line
-    # atomicity across cores, which is #663's, not a failure to resume.
     echo "FAIL kernel/qemu ddb: BREAK inspection did not resume boot" >&2
     sed 's/^/  /' "$UART_LOG" >&2 || true
     exit 1
 fi
 
-if [ "$BREAK_SOURCE" = uart ] && ! python3 - "$UART_LOG" <<'PY'
-from pathlib import Path
-import sys
-
-text = Path(sys.argv[1]).read_text(errors="replace").replace("\r", "")
-pending = text.find("workload: peer console record pending for DDB\n")
-ddb = text.find("ddb: peer console=pending\n", pending)
-continuing = text.find("ddb: continuing\n", ddb)
-delivered = text.find(
-    "peer user console: queued before DDB, delivered after continue\n",
-    continuing,
-)
-raise SystemExit(0 if min(pending, ddb, continuing, delivered) >= 0 else 1)
-PY
-then
-    echo "FAIL kernel/qemu ddb: peer console pending/resume order was not preserved" >&2
+if [ "$BREAK_SOURCE" = uart ] && ! grep -q '^PASS console BREAK injection: peer guard and phase are held$' "$UART_LOG.hold-gdb.log"; then
+    echo "FAIL kernel/qemu ddb: UART BREAK did not land under an observed peer guard" >&2
     exit 1
 fi
 

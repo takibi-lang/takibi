@@ -45,5 +45,4 @@ kernel/platform/rpi5/timer_irq.tkb	0	2	GIC registers (#637 A)
 kernel/platform/rpi5/uart.tkb	0	28	PL011 registers (#637 A)
 kernel/platform/rpi5/usb_xhci.tkb	46	42	xHCI registers and DMA rings (#637 A, E)
 kernel/printk/log.tkb	46	0	the kernel log's ring and staging buffers (#637 B)
-kernel/printk/peer_console.tkb	6	0	the peer console rings (#637 B)
 <builtin region>	113	0	the compiler's built-in region definitions (#672): every dereference is a slot, chunk header or byte in memory the built-in hands out, and its trust is the compiler's, not the kernel's

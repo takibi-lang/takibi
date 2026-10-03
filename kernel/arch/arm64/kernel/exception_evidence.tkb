@@ -297,18 +297,11 @@ let mut kernel_ddb_breakpoint_test_enabled: bool;
 let mut kernel_ddb_memory_fault_test_enabled: bool;
 let mut kernel_ddb_backtrace_test_enabled: bool;
 let mut kernel_ddb_wait_test_enabled: bool;
-// GitHub issue #534: set by the UART-BREAK DDB lanes before init starts. It
-// keeps /bin/peer-console alive after its view, holding one record published
-// but undrained until a debugger entry releases it.
-let mut kernel_ddb_peer_console_test_enabled: bool;
-// GitHub issue #657: WHEN the hold begins. The record is held for the whole
-// interval between the two settings, and everything a process on the same CPU
-// writes to the terminal waits behind it -- including the shell's echo, which
-// showed as characters going missing and arriving after `continue`. So a lane
-// whose debugger half comes late sets this only then, and the first half has
-// an ordinary console. The QEMU lane, whose BREAK lands in the middle of the
-// boot, sets both at the start.
-let mut kernel_ddb_peer_console_hold_armed: bool;
+// DDB lanes retain the peer writer after its ordinary ordering verdict.
+// The host arms the finite console hold only after its UART wake and other
+// prerequisites; ordinary boots never take that fixture hold.
+let mut kernel_ddb_console_test_enabled: bool;
+let mut kernel_ddb_console_hold_armed: bool;
 // GitHub issue #456: the guarded read's arming, per core.
 //
 // It used to be three machine-global words, and DDB's world stop was the
@@ -2299,14 +2292,13 @@ private fn kernel_ddb_enter_stopped(
     // bytes that nothing would drain.
     let console: KernelLogTxStandDown = kernel_log_tx_stand_down();
     ddb_puts("\nddb: interrupt-safe UART debugger\n");
-    if (peer_console_ddb_any_pending()) {
-        ddb_puts("ddb: peer console=pending\n");
-    } else {
-        ddb_puts("ddb: peer console=empty\n");
-    }
-    // A held record stays published and undrained while the debugger runs;
-    // each peer sees this release only once `continue` lets it run again.
-    if (cpu_id() == 0) { peer_console_ddb_release_all(); }
+    ddb_puts("ddb: console lock probe phase=");
+    ddb_put_udec(console_ddb_probe_phase());
+    ddb_puts(" release=");
+    ddb_put_udec(console_ddb_probe_release_reason());
+    ddb_puts(" entry-held=");
+    if (console_ddb_probe_entry_held()) { ddb_puts("yes\n"); }
+    else { ddb_puts("no\n"); }
     ddb_puts("ddb: world-stop complete mask=");
     ddb_put_hex(world_stopped_mask(stopped_world));
     ddb_puts("\n");
@@ -2496,6 +2488,7 @@ fn ddb_render_world_stop_holder() !{interrupt, unsafe} {
 // and return without inspecting shared state.
 fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
         !{interrupt, unsafe} {
+    console_ddb_note_entry();
     match world_stop_begin(
             &kernel_world_stop, kernel_online_core_count(),
             DDB_WORLD_STOP_SPINS) {

@@ -7,6 +7,13 @@ in slowcheck_run_kernel_ddb_rpi5_driver.py.
 """
 
 import importlib.util
+import contextlib
+import io
+import os
+import runpy
+import sys
+import tempfile
+from types import SimpleNamespace
 from pathlib import Path
 
 from pass_line import CaseCount, report_pass
@@ -43,13 +50,12 @@ def main():
         ("CRLF record", healthy, None),
         ("LF record", healthy.replace(b"\r", b""), None),
         ("all CRLF", healthy.replace(b"\r", b"").replace(b"\n", b"\r\n"), None),
-        ("missing delivery", healthy.replace(marker, b""), "record did not follow"),
-        ("delivery before continue", prefix + marker + continuing + fixture.RESUME_ECHO,
-         "record did not follow"),
-        ("duplicated delivery", prefix + continuing + marker + marker + fixture.RESUME_ECHO,
-         "record did not follow"),
-        ("delivery before and after", prefix + marker + continuing + marker + fixture.RESUME_ECHO,
-         "record did not follow"),
+        ("missing guard witness", healthy.replace(fixture.PEER_PENDING, b""),
+         "BREAK was not observed during a held console guard"),
+        ("unreleased guard", healthy.replace(b"phase=2", b"phase=1"),
+         "BREAK was not observed during a held console guard"),
+        ("timeout without observed BREAK", healthy.replace(b"release=2", b"release=3"),
+         "BREAK was not observed during a held console guard"),
         ("echoed command only", healthy.replace(fixture.RESUME_ECHO, b"echo ddb-resume-ok\r\n"),
          "workload did not resume"),
         ("output before continue", fixture.RESUME_ECHO + healthy.replace(fixture.RESUME_ECHO, b""),
@@ -70,6 +76,41 @@ def main():
         else:
             if expected is not None:
                 raise SystemExit(f"FAIL ddb-rpi5 capture control {name}: accepted invalid evidence")
+    # A published phase alone is not proof of an actual held guard. Execute
+    # the GDB injection observer against independent phase/mutex controls.
+    with tempfile.TemporaryDirectory() as temp:
+        ready = Path(temp) / "ready"
+        release = Path(temp) / "release"
+        release.touch()
+        saved = {name: os.environ.get(name) for name in
+                 ("KERNEL_CONSOLE_HOLD_READY", "KERNEL_CONSOLE_HOLD_RELEASE")}
+        previous_gdb = sys.modules.get("gdb")
+        os.environ["KERNEL_CONSOLE_HOLD_READY"] = str(ready)
+        os.environ["KERNEL_CONSOLE_HOLD_RELEASE"] = str(release)
+        try:
+            for phase, held, valid in ((1, 1, True), (1, 0, False), (0, 1, False)):
+                count.note()
+                ready.unlink(missing_ok=True)
+                sys.modules["gdb"] = SimpleNamespace(
+                    execute=lambda command: None,
+                    parse_and_eval=lambda expression: phase if "console_ddb_phase" in expression else held,
+                    GdbError=RuntimeError)
+                accepted = True
+                try:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        runpy.run_path(str(ROOT / "scripts/kernel_console_hold_check.py"))
+                except RuntimeError:
+                    accepted = False
+                if accepted != valid or ready.exists() != valid:
+                    raise SystemExit("FAIL console BREAK observer accepted an unheld phase or mutex")
+        finally:
+            if previous_gdb is None:
+                sys.modules.pop("gdb", None)
+            else:
+                sys.modules["gdb"] = previous_gdb
+            for name, value in saved.items():
+                if value is None: os.environ.pop(name, None)
+                else: os.environ[name] = value
     software = load("run_kernel_ddb_rpi5_software_driver")
     continued = b"ddb: continuing\n"
     for capture, expected in (
@@ -83,7 +124,7 @@ def main():
         count.note()
         if software.shell_resumed(capture) != expected:
             raise SystemExit("FAIL software DDB capture control: prompt or output ordering")
-    report_pass("ddb-rpi5 capture controls", "LF/CRLF pass; early, duplicate and missing delivery, echoed commands and invalid stopped-world evidence fail",
+    report_pass("ddb-rpi5 capture controls", "LF/CRLF pass; missing hold, missing release, timeout-only evidence, unheld mutex or phase, echoed commands and invalid stopped-world evidence fail",
                 cases=count.ran)
     return 0
 

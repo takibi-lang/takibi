@@ -125,7 +125,7 @@ peer_console_ddb_test_address=""
 peer_console_ddb_checkpoint_address=""
 if [ "${RPI5_ARM_PEER_CONSOLE_DDB:-0}" = "1" ]; then
     peer_console_ddb_test_address="0x$(llvm-nm-19 "$ELF" |
-        awk '$3=="kernel_ddb_peer_console_test_enabled" && !seen{print $1; seen = 1 }')"
+        awk '$3=="kernel_ddb_console_test_enabled" && !seen{print $1; seen = 1 }')"
     peer_console_ddb_checkpoint_address="0x$(llvm-nm-19 "$ELF" |
         awk '$3=="kernel_boot_prologue" && !seen{print $1; seen = 1 }')"
     if [ -z "${peer_console_ddb_test_address#0x}" ] ||

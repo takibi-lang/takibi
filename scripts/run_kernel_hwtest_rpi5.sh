@@ -645,19 +645,9 @@ RPI5_SWD_SPEED="${RPI5_SWD_SPEED:-}" \
     "$REPO_ROOT/scripts/rpi5_set_kernel_byte.sh" "$ELF" \
     kernel_ddb_memory_fault_test_enabled 1 \
     >>"$ARTIFACT_DIR/ddb-openocd.log" 2>&1
-# GitHub issue #657: hold the peer console record only now. It used to be held
-# from the end of the console chain, so everything a process on the peer CPU
-# wrote to the terminal during the whole first half -- the shell's echo among
-# it -- waited behind it and reached the wire only after `continue`. The
-# writer has been sleeping in its poll; it publishes the held record within a
-# tick of this write, long before the BREAK below.
-RPI5_SWD_SPEED="${RPI5_SWD_SPEED:-}" \
-    "$REPO_ROOT/scripts/rpi5_set_kernel_byte.sh" "$ELF" \
-    kernel_ddb_peer_console_hold_armed 1 \
-    >>"$ARTIFACT_DIR/ddb-openocd.log" 2>&1
 ddb_status=0
 python3 "$REPO_ROOT/scripts/run_kernel_ddb_rpi5_driver.py" \
-    --port "$SERIAL_DEV" --log "$DDB_LOG" || ddb_status=$?
+    --port "$SERIAL_DEV" --log "$DDB_LOG" --elf "$ELF" || ddb_status=$?
 
 # Stop only after DDB has resumed the shell on this same boot.
 stop_status=0

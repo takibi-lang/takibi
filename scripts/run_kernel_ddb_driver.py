@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import re
 import socket
+import os
+import subprocess
 import time
 
 from run_kernel_uart_driver import (
@@ -87,6 +89,8 @@ def main() -> int:
     parser.add_argument("--serial-port", type=int, required=True)
     parser.add_argument("--qmp-port", type=int, required=True)
     parser.add_argument("--break-source", choices=("uart", "software"), default="uart")
+    parser.add_argument("--gdb-port", type=int)
+    parser.add_argument("--elf")
     parser.add_argument("--kernel-address", required=True)
     parser.add_argument("--log", required=True)
     parser.add_argument("--snapshot-ready-file")
@@ -172,9 +176,8 @@ def main() -> int:
 
             if (args.break_source == "uart" and peer_alias_queries is None and
                     b"persistent shell: uart blocked\n" in received):
-                # The held peer record deliberately stops draining this
-                # CPU's output. Prepare a short command while draining is
-                # still live, so line-editor echoes fit beside that record.
+                # Prepare the peer reader while the ordinary console is
+                # live. The late guard hold begins only before BREAK.
                 peer_alias_queries = queries
                 send_paced(serial, b"alias p=/bin/peer-tty\n")
 
@@ -222,11 +225,6 @@ def main() -> int:
                 b"workload: busy pair migrated across both cpus with stack "
                 b"handoff intact\n" in received
             )
-            # The runner armed the held peer record at the checkpoint, so
-            # this line means one is published and undrained right now.
-            peer_console_pending = (
-                b"workload: peer console record pending for DDB\n" in received
-            )
             # GitHub issue #547: the BREAK must also find the peer terminal
             # reader asleep, so DDB can name it. The kernel admits the reader
             # once the console writer's verdict is out. The shell then waits
@@ -260,7 +258,7 @@ def main() -> int:
                 missing = [name for name, ready in (
                     ("the first shell's exit", wake_byte_sent),
                     ("the busy-pair migration", migration_ready),
-                    ("the held peer console record", peer_console_pending),
+                    ("the terminal ordering verdict", peer_console_viewed),
                     ("the peer terminal reader asleep", peer_tty_asleep),
                 ) if not ready]
                 stall_reason = ", ".join(missing) or "nothing it waits for"
@@ -285,8 +283,29 @@ def main() -> int:
                     break
                 continue
 
-            if (wake_byte_sent and migration_ready and peer_console_pending
+            if (wake_byte_sent and migration_ready and peer_console_viewed
                     and peer_tty_asleep and not break_sent):
+                hold_ready = Path(args.log + ".hold-ready")
+                hold_release = Path(args.log + ".hold-release")
+                hold_ready.unlink(missing_ok=True)
+                hold_release.unlink(missing_ok=True)
+                hold_env = os.environ.copy()
+                hold_env["KERNEL_CONSOLE_HOLD_READY"] = str(hold_ready)
+                hold_env["KERNEL_CONSOLE_HOLD_RELEASE"] = str(hold_release)
+                hold_log = open(args.log + ".hold-gdb.log", "wb")
+                hold = subprocess.Popen([
+                    "gdb-multiarch", "-q", "-batch", args.elf,
+                    "-ex", f"target remote 127.0.0.1:{args.gdb_port}",
+                    "-ex", "source " + str(Path(__file__).with_name("kernel_console_hold_check.py")),
+                ], env=hold_env, stdout=hold_log, stderr=subprocess.STDOUT)
+                hold_deadline = min(deadline, time.monotonic() + 15.0)
+                while not hold_ready.exists() and hold.poll() is None and time.monotonic() < hold_deadline:
+                    time.sleep(0.01)
+                if not hold_ready.exists():
+                    hold.kill()
+                    hold.wait()
+                    hold_log.close()
+                    raise SystemExit("peer console guard was not held before UART BREAK; see .hold-gdb.log")
                 with connect(args.qmp_port, deadline) as qmp:
                     qmp_file = qmp.makefile("rwb", buffering=0)
                     # Say what arrived instead of naming only what did
@@ -321,6 +340,10 @@ def main() -> int:
                         b'"arguments":{"id":"debug_uart"}}\n')
                     if "return" not in json.loads(qmp_file.readline()):
                         raise SystemExit("QMP could not send the serial BREAK")
+                hold_release.touch()
+                if hold.wait(timeout=10) != 0:
+                    raise SystemExit("held console BREAK rendezvous failed; see .hold-gdb.log")
+                hold_log.close()
                 break_sent = True
 
             found = received.count(b"ddb> ")
@@ -335,8 +358,7 @@ def main() -> int:
 
             peer_delivery_ready = (
                 args.break_source == "software" or
-                b"peer user console: queued before DDB, delivered after "
-                b"continue\n" in received
+                b"ddb: console lock probe phase=2 release=" in received
             )
             # The reader DDB saw asleep takes its line once DDB has let go.
             if (args.break_source == "uart" and peer_tty_sent and

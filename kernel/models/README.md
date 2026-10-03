@@ -374,15 +374,16 @@ modelcheck` requires each to fail:
 | `BlockWriter` | `kernel_process_block_uart_tx` | the writer publishes itself asleep under the run lock; `RECHECK` is the room re-check there | successor choice and the switch -- modelled elsewhere: `Wait4Block.Wait4Block` | `626ecddbdacc` |
 | `TxTake` | `uart_tx_service`, `uart_tx_drain_into_fifo` | one chunk leaves the queue onto the wire under the console lock and makes room; `NESTED` keeps the lock | the FIFO's capacity and the byte-by-byte drain -- irrelevant to `ProgramOrder`: bytes leave the queue in order, so a chunk taken whole is the same order | `c682c0a9957c` |
 | `TxWake` | `kernel_process_uart_tx_wake_all` | under the run lock, a writer asleep on room becomes runnable | which other processes wait on UartTx -- irrelevant to `NoLostWakeup`: the model has one writer, and each waiter is woken by the same scan | `d28c4a94b108` |
-| `Drain` | `kernel_log_peer_console_drain` | the old terminal route moves the oldest ring chunk at a moment of its own; the maintained caller uses this only for the debug fixture | the DDB hold that leaves a ring undrained -- irrelevant to `ProgramOrder`: it only delays a drain, and the model already lets a drain be delayed indefinitely | `fd11b3667d1a` |
+| `Drain` | Retired terminal ring; negative variant only | the former route delays peer chunks independently of the shared queue | the retired implementation -- irrelevant to `ProgramOrder`: this action is reachable only in the unfixed variant and remains its negative control | `e3b0c44298fc` |
 | `Migrate` | `kernel_process_timer_schedule` | the process changes CPU between writes, never inside one (`KERNEL_PREEMPTIBLE` is 0) | affinity -- irrelevant to `ProgramOrder`: it only forbids some moves, and the model already allows each one it forbids | `a398af79d438` |
 
 Where the kernel stands against the model: terminal writers on every CPU,
 the shared queue and FIFO drain use the console lock, with order run -> console.
 The TX interrupt (`uart_tx_service`) releases it before the wake. Writer-room
 rechecks also take the console lock. The maintained terminal follows
-`LOCKED = TRUE`, `RECHECK = TRUE`, `NESTED = FALSE`. `Drain` remains only for an
-explicit held-record debug fixture; ordinary terminal writes do not use it.
+`LOCKED = TRUE`, `RECHECK = TRUE`, `NESTED = FALSE`. The terminal ring and
+its DDB rendezvous are retired; `Drain` remains only in the unfixed model
+variant to demonstrate the old reordering.
 The retained kernel-log publication stream is separate from terminal ordering.
 
 Properties:

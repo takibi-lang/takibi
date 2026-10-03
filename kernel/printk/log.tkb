@@ -11,7 +11,6 @@
 use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/printk/number.tkb";
-use "kernel/printk/peer_console.tkb";
 use "kernel/drivers/serial/terminal.tkb";
 use "kernel/drivers/serial/terminal_echo.tkb";
 use "kernel/printk/console_lock.tkb";
@@ -493,8 +492,7 @@ fn uart_terminal_column() -> usize {
 }
 
 // CPU 0, IRQs masked. Input signals flush terminal output, while kernel
-// records survive. A peer publishes whole records with release ordering;
-// retiring the currently visible prefix cannot remove a future publication.
+// records survive. All terminal producers share this queue and guard.
 fn uart_terminal_flush_output() {
     let guard = console_lock();
     terminal_echo_reset();
@@ -517,15 +515,6 @@ fn uart_terminal_flush_output() {
     }
     kernel_log_tx_count = kept;
     kernel_log_tx_tail = (head + kept) % KERNEL_LOG_TX_QUEUE_BYTES;
-    let mut record: PeerConsoleRecord;
-    for cpu: usize in 1..<KERNEL_MAX_CORES {
-        for step: usize in 0..<PEER_CONSOLE_RECORDS {
-            match peer_console_peek(cpu, &record) {
-                PeerConsolePeek::Empty => { }
-                PeerConsolePeek::Ready(length) => { peer_console_retire(cpu); }
-            }
-        }
-    }
     console_unlock(guard);
 }
 
@@ -820,20 +809,8 @@ fn kernel_log_tx_writer_room() -> bool {
     return room;
 }
 
-// GitHub issue #657: how long a peer's console record waits before core 0
-// moves it to the transmit queue. A peer's output reaches the wire only when
-// core 0 drains its ring (a syscall entry, a timer interrupt from EL0, or a
-// wake of core 0's idle loop), so a record can be reordered against core 0's
-// own output by however long that takes. The characters that once seemed to
-// go missing from an echo were records waiting here. This is the number that
-// says so directly the next time it looks like that.
-//
-// The producer stamps the slots it is about to fill BEFORE it publishes them,
-// and core 0 reads a slot's stamp only after it has seen the record, so the
-// publication's ordering covers the plain array. Core 0 alone writes the
-// statistics.
-private let mut kernel_log_peer_stamp:
-    [usize; KERNEL_MAX_CORES * PEER_CONSOLE_RECORDS];
+// Core 0 accounts for completed peer diagnostic records using their
+// publication ticks. Terminal chunks no longer have a separate drain ring.
 private let mut kernel_log_peer_drained: usize;
 private let mut kernel_log_peer_late: usize;
 private let mut kernel_log_peer_worst_ticks: usize;
@@ -841,60 +818,7 @@ private let mut kernel_log_peer_worst_cpu: usize;
 private let mut kernel_log_peer_worst_length: usize;
 private let mut kernel_log_peer_worst_first: [u8; 8];
 
-private fn kernel_log_peer_stamp_slot(cpu: {0..<KERNEL_MAX_CORES as usize},
-                                      index: usize)
-        -> {0..<KERNEL_MAX_CORES * PEER_CONSOLE_RECORDS as usize} {
-    let within: {0..<PEER_CONSOLE_RECORDS as usize} =
-        index % PEER_CONSOLE_RECORDS;
-    return cpu * PEER_CONSOLE_RECORDS + within;
-}
-
-private fn kernel_log_peer_stamp_records(cpu: usize, length: usize) !{unsafe} {
-    if (cpu >= KERNEL_MAX_CORES) { return; }
-    let here: {0..<KERNEL_MAX_CORES as usize} = cpu;
-    let now: usize = read_cntpct() as usize;
-    let first: usize = peer_console_published_count(cpu);
-    let mut records: usize = (length + PEER_CONSOLE_RECORD_BYTES - 1) /
-                             PEER_CONSOLE_RECORD_BYTES;
-    let room: usize = peer_console_room(cpu) / PEER_CONSOLE_RECORD_BYTES;
-    if (records > room) { records = room; }
-    for step: usize in 0..<PEER_CONSOLE_RECORDS {
-        if (step < records) {
-            kernel_log_peer_stamp[kernel_log_peer_stamp_slot(here, first + step)] = now;
-        }
-    }
-}
-
-// Core 0, just before it retires the record it moved: count it and answer how
-// long it waited. The caller keeps the worst one's bytes, from its own copy of
-// the record, so this takes no pointer to it.
-private fn kernel_log_peer_note_drained(cpu: usize) -> usize !{unsafe} {
-    if (cpu >= KERNEL_MAX_CORES) { return 0; }
-    let here: {0..<KERNEL_MAX_CORES as usize} = cpu;
-    let index: usize = peer_console_consumed_count(cpu);
-    let stamp: usize = kernel_log_peer_stamp[kernel_log_peer_stamp_slot(here, index)];
-    let now: usize = read_cntpct() as usize;
-    kernel_log_peer_drained = kernel_log_peer_drained + 1;
-    if (now < stamp) { return 0; }
-    let waited: usize = now - stamp;
-    // Late is about 30 ms: many times a normal wait, which ends at core 0's
-    // next syscall, timer interrupt or idle wake.
-    if (waited > ((read_cntfrq() >> 5) as usize)) {
-        kernel_log_peer_late = kernel_log_peer_late + 1;
-    }
-    return waited;
-}
-
-// Publish the DDB fixture through its held record channel. Ordinary terminal
-// writes use the shared console queue on every CPU.
-fn kernel_log_peer_console_ddb_fixture() -> usize !{unsafe} {
-    let record = bs"peer user console: queued before DDB, delivered after continue\n";
-    let cpu: usize = cpu_id();
-    kernel_log_peer_stamp_records(cpu, record.len);
-    return peer_console_publish(cpu, record);
-}
-
-// Printed once, near the end of the boot. `worst` names the debug record that
+// Printed once, near the end of the boot. `worst` names the diagnostic record that
 // waited longest, by its CPU, its length and its first bytes as numbers.
 fn kernel_log_peer_console_report() !{logs, unsafe} {
     kernel_boot_log("console: peer records drained=");
@@ -1224,60 +1148,6 @@ private fn kernel_log_peer_console_probe_step(
 // stays there until the queue is live again.
 //
 // No `logs`, no `locks`: the interrupt dispatcher calls it.
-fn kernel_log_peer_console_drain() {
-    if (cpu_id() != 0 || terminal_output_paused() || terminal_echo_pending()) { return; }
-    if (kernel_log_core_is_emergency() || kernel_log_tx_is_live() == false) {
-        return;
-    }
-    let mut record: PeerConsoleRecord;
-    for cpu: usize in 1..<KERNEL_MAX_CORES {
-        let mut draining: bool = true;
-        for step: usize in 0..<PEER_CONSOLE_RECORDS {
-            if (draining) {
-                if (peer_console_ddb_held(cpu)) { draining = false; }
-            }
-            if (draining) {
-                let guard = console_lock();
-                match peer_console_peek(cpu, &record) {
-                    PeerConsolePeek::Empty => { draining = false; }
-                    PeerConsolePeek::Ready(length) => {
-                        let count: usize = kernel_log_tx_count;
-                        if (count > KERNEL_LOG_TX_QUEUE_BYTES ||
-                            KERNEL_LOG_TX_QUEUE_BYTES - count < length) {
-                            draining = false;
-                        } else {
-                            for i: usize in 0..<PEER_CONSOLE_RECORD_BYTES {
-                                if (i < length) {
-                                    kernel_log_note_tx_byte();
-                                    let pushed: bool =
-                                        kernel_log_tx_push_terminal(guard, record.bytes[i]);
-                                }
-                            }
-                            uart_tx_drain_into_fifo(guard);
-                            let still_pending: bool = uart_terminal_output_pending_locked(guard);
-                            if (still_pending) { uart_tx_irq_enable(); }
-                            let waited: usize = kernel_log_peer_note_drained(cpu);
-                            if (waited > kernel_log_peer_worst_ticks) {
-                                kernel_log_peer_worst_ticks = waited;
-                                kernel_log_peer_worst_cpu = cpu;
-                                kernel_log_peer_worst_length = length;
-                                for first: usize in 0..<8 {
-                                    if (first < length) {
-                                        kernel_log_peer_worst_first[first] =
-                                            record.bytes[first];
-                                    } else { kernel_log_peer_worst_first[first] = 0; }
-                                }
-                            }
-                            peer_console_retire(cpu);
-                        }
-                    }
-                }
-                console_unlock(guard);
-            }
-        }
-    }
-}
-
 // A complete peer diagnostic shares the terminal queue as one admission.
 // Reserve room before retaining or enqueuing any byte, then keep the guard
 // through the whole record and truncation suffix. This is the same ordering
@@ -1342,7 +1212,6 @@ private fn kernel_log_peer_record_byte_locked(
 fn kernel_log_peer_drain() !{unsafe} {
     if (cpu_id() != 0) { return; }
     kernel_log_terminal_flow_poll();
-    kernel_log_peer_console_drain();
     for cpu: usize in 1..<KERNEL_MAX_CORES {
         let mut expected: usize = kernel_log_peer_consumed[cpu] + 1;
         let latest: usize = kernel_log_observe(&kernel_log_peer_latest[cpu]);
@@ -1388,6 +1257,23 @@ fn kernel_log_peer_drain() !{unsafe} {
                                             length, truncated);
             } else { return; }
             kernel_log_deferred = false;
+            kernel_log_peer_drained = kernel_log_peer_drained + 1;
+            let now: i64 = read_cntpct();
+            if (now >= peer_tick) {
+                let waited: usize = (now - peer_tick) as usize;
+                if (waited > (read_cntfrq() >> 5) as usize) {
+                    kernel_log_peer_late = kernel_log_peer_late + 1;
+                }
+                if (waited > kernel_log_peer_worst_ticks) {
+                    kernel_log_peer_worst_ticks = waited;
+                    kernel_log_peer_worst_cpu = cpu;
+                    kernel_log_peer_worst_length = length;
+                    for first: usize in 0..<8 {
+                        if (first < length) { kernel_log_peer_worst_first[first] = copy[first]; }
+                        else { kernel_log_peer_worst_first[first] = 0; }
+                    }
+                }
+            }
             kernel_log_peer_consumed[cpu] = expected;
             expected = expected + 1;
         }

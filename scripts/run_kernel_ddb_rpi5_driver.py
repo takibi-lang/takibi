@@ -40,6 +40,7 @@ that a single un-retried write had no recovery path at all.
 """
 
 import argparse
+import subprocess
 import re
 from pathlib import Path
 import time
@@ -51,8 +52,8 @@ MILESTONES = ("wake-sent", "wake-acked", "break-sent", "first-prompt",
               "continuing", "resume-sent", "resume-echoed")
 
 # A response is useful pacing, but not required: the DDB peer-console
-# fixture holds CPU 1's whole output ring until continue. An ash running on
-# that CPU consumes input and queues its prompt without answering here.
+# fixture is armed after this wake. The retained events, rather than a
+# prompt's timing, establish the newline-before-BREAK order.
 # The event sequence below, not terminal output, proves input preceded BREAK.
 WAKE_RESPONSE_SECONDS = 3.0
 
@@ -226,19 +227,10 @@ def validate_capture(received: bytes, prompt_count: int, timeline: Timeline) -> 
     if "ddb: console tx=queued\n" not in text:
         raise timeline.bail(
             "RPi5 DDB did not restore the console transmit queue on continue")
-    # GitHub issue #534. The loader armed this boot's peer console hold, so
-    # the peer published one record that core 0 left undrained for this
-    # BREAK; it must still be there at entry and reach the wire after
-    # `continue`, not before and not never.
-    if "ddb: peer console=pending\n" not in text:
-        raise timeline.bail(
-            "RPi5 DDB did not observe the held peer console record")
-    continuing = text.find("ddb: continuing\n")
-    marker = "peer user console: queued before DDB, delivered after continue\n"
-    delivered = text.find(marker)
-    if not 0 <= continuing < delivered or text.count(marker) != 1:
-        raise timeline.bail(
-            "RPi5 peer console record did not follow DDB continue")
+    probe = re.search(r"^ddb: console lock probe phase=2 release=([123]) entry-held=(yes|no)$",
+                      text, re.MULTILINE)
+    if probe is None or not (probe[1] == "2" or probe[2] == "yes"):
+        raise timeline.bail("RPi5 BREAK was not observed during a held console guard")
     if not resumed(bytes(received).replace(b"\r", b"")):
         raise timeline.bail(
             f"RPi5 workload did not resume after DDB continue: "
@@ -252,6 +244,7 @@ def main() -> int:
     source.add_argument("--port")
     source.add_argument("--validate-log", type=Path)
     parser.add_argument("--log")
+    parser.add_argument("--elf")
     parser.add_argument("--timeout", type=float, default=20.0)
     args = parser.parse_args()
 
@@ -274,7 +267,7 @@ def main() -> int:
         args.log, "ab"
     ) as log:
         # Generate one newline UART-wake. A visible response can pace BREAK,
-        # but the held peer ring may hide it until continue. Always verify
+        # before arming the finite console hold. Always verify
         # the retained IRQ-event order before accepting this exercise.
         uart.reset_input_buffer()
         uart.write(b"\n")
@@ -291,6 +284,18 @@ def main() -> int:
                 break
         if "wake-acked" not in timeline.at:
             commands = SILENT_POSTMORTEM_COMMANDS + commands
+        if args.elf is not None:
+            subprocess.run([str(Path(__file__).with_name("rpi5_set_kernel_byte.sh")),
+                            args.elf, "kernel_ddb_console_hold_armed", "1"],
+                           check=True, timeout=20)
+        while (b"console lock probe: held for UART BREAK\n" not in received
+               and time.monotonic() < deadline):
+            chunk = uart.read(4096)
+            received.extend(chunk)
+            log.write(chunk)
+            log.flush()
+        if b"console lock probe: held for UART BREAK\n" not in received:
+            raise timeline.bail("peer did not confirm its held console guard")
         uart.send_break(0.25)
         timeline.mark("break-sent")
         while time.monotonic() < deadline:

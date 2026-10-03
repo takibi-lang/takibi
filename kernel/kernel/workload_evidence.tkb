@@ -53,6 +53,7 @@
 use "kernel/arch/arm64/kernel/timer.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/occupancy.tkb";
+use "kernel/kernel/console_contention_evidence.tkb";
 use "kernel/kernel/profile_samples.tkb";
 use "kernel/arch/arm64/kernel/pmu_extern.tkb";
 use "kernel/kernel/profile_timeline.tkb";
@@ -199,8 +200,6 @@ struct WorkloadBusyPair {
     peer_console_first_count: usize;
     peer_console_first_seen: bool;
     peer_console_initial_reported: bool;
-    peer_console_holding: bool;
-    peer_console_pending: bool;
     peer_console_reported: bool;
     // GitHub issue #547: the terminal reader the persistent shell starts
     // after the whole chain. Its pid is fixed by its first tag-5 report, and
@@ -1360,17 +1359,12 @@ fn workload_peer_net_wake_progress(step: usize)
     return WorkloadPeerNetWakeResult::Refused;
 }
 
-// Tag 4 belongs to /bin/peer-console. Registration happens before its first
-// write, and the process then stays off core 0. The first write is exactly
-// seventeen 63-byte input lines while the ring holds sixteen 64-byte records.
-// ONLCR adds a CR before each LF: 1008 input bytes plus sixteen CRs fill the
-// 1024-byte ring. That exact short count proves the full-ring path. The
-// payload reports that count at once, retries the remaining bytes and reports
-// all 1071 only after write(2) has accepted them. Core 0 does not drain this
-// ring until the first report, so the count cannot depend on its timing.
-//
-// Returns 0 for a refused report, 1 to keep polling, 2 to exit, and 3 to
-// write the one record a UART-BREAK DDB lane holds.
+// Tag 4 belongs to /bin/peer-console. Registration follows the filesystem
+// reader verdict. Strict reports validate the migrating writer and its child,
+// then the actual first count and full retry of seventeen 63-byte input lines.
+// Every CPU uses the same terminal queue; the count depends on current room.
+// A DDB lane retains the writer until a late finite console-guard hold.
+// Returns 0 for refusal, 1 to poll, 2 to exit, or 4 to sleep before late arm.
 fn workload_peer_console_progress(first: usize, total: usize) -> usize {
     let guard = process_run_lock();
     let pid: usize = kernel_process_current_pid();
@@ -1390,10 +1384,6 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
             return 0;
         }
         workload_busy_pair.peer_console_pid = pid;
-        // The legacy ring stays held through the ordering fixture. Shared
-        // terminal writes ignore it; restoring the old peer route reorders
-        // the migrating writer's lines. The first count report releases it.
-        peer_console_ddb_hold(SECONDARY_CORE_ID);
         process_run_unlock(guard);
         return SECONDARY_CORE_ID;
     }
@@ -1438,7 +1428,6 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
         // all 1071 input bytes have been admitted. Queue drain timing can
         // change that count without changing the terminal's ordering.
         if (workload_busy_pair.peer_console_first_seen == false) {
-            peer_console_ddb_clear(SECONDARY_CORE_ID);
             if (workload_busy_pair.peer_read_reported == false ||
                 first == 0 || first > 1071 || total != 0 ||
                 workload_busy_pair.peer_console_order_step != 6) {
@@ -1462,7 +1451,7 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
         // GitHub issue #640: the boot's last stretch, so a number any earlier
         // stage reached is in the table by now.
         syscall_unimplemented_report();
-        if (kernel_ddb_peer_console_test_enabled == false) {
+        if (kernel_ddb_console_test_enabled == false) {
             workload_busy_pair.peer_console_reported = true;
             process_run_unlock(guard);
             return 2;
@@ -1470,57 +1459,22 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
         process_run_unlock(guard);
         return 1;
     }
-    // The DDB phase. Hold only once core 0 has drained every earlier
-    // record, so the hold covers the DDB record alone and the view's
-    // seventeen records reach the wire whether or not a debugger follows.
-    if (workload_busy_pair.peer_console_holding == false) {
-        if (first != 0 || total != 0) {
-            workload_busy_pair.refused = workload_busy_pair.refused + 1;
-            process_run_unlock(guard);
-            return 0;
-        }
-        if (peer_console_drained(SECONDARY_CORE_ID) == false) {
-            process_run_unlock(guard);
-            return 1;
-        }
-        // Not armed yet (GitHub issue #657): 4 tells the writer to wait by
-        // sleeping, so a debugger half that is still a minute away costs the
-        // peer CPU nothing and holds nothing back.
-        if (kernel_ddb_peer_console_hold_armed == false) {
-            process_run_unlock(guard);
-            return 4;
-        }
-        workload_busy_pair.peer_console_holding = true;
-        peer_console_ddb_hold(SECONDARY_CORE_ID);
-        process_run_unlock(guard);
-        return 3;
-    }
+    // A late host arm cannot hold up the ordinary boot or UART wake.
     if (first != 0 || total != 0) {
-        if (workload_busy_pair.peer_console_pending ||
-            first != 63 || total != 63) {
-            workload_busy_pair.refused = workload_busy_pair.refused + 1;
-            process_run_unlock(guard);
-            return 0;
-        }
-        if (kernel_log_peer_console_ddb_fixture() != 63) {
-            process_run_unlock(guard);
-            return 0;
-        }
-        workload_busy_pair.peer_console_pending = true;
-        peer_console_ddb_note_pending(SECONDARY_CORE_ID);
-        kernel_boot_log("workload: peer console record pending for DDB\n");
+        workload_busy_pair.refused = workload_busy_pair.refused + 1;
         process_run_unlock(guard);
-        return 1;
+        return 0;
     }
-    if (workload_busy_pair.peer_console_pending &&
-        peer_console_ddb_released_since_hold(SECONDARY_CORE_ID)) {
-        peer_console_ddb_clear(SECONDARY_CORE_ID);
-        workload_busy_pair.peer_console_reported = true;
+    if (kernel_ddb_console_hold_armed == false) {
         process_run_unlock(guard);
-        return 2;
+        return 4;
     }
+    workload_busy_pair.peer_console_reported = true;
     process_run_unlock(guard);
-    return 1;
+    // Console is innermost. No run guard may survive this hold: the BREAK
+    // and its world-stop must be able to inspect and wake the workload.
+    console_ddb_peer_hold();
+    return 2;
 }
 
 // The line scripts/run_kernel_uart_driver.py types, "peer-tty-line-ok\n":

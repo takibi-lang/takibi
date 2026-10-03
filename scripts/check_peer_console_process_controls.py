@@ -13,6 +13,7 @@ def sources() -> dict[str, str]:
         "Makefile",
         "kernel/printk/log.tkb",
         "kernel/init/contention_probes.tkb",
+        "kernel/kernel/console_contention_evidence.tkb",
         "kernel/tests/common/views/console_order.expected",
         "kernel/tests/common/views/console_order.filter",
         "kernel/arch/arm64/kernel/peer_read.tkb",
@@ -55,14 +56,14 @@ def problems(tree: dict[str, str]) -> list[str]:
             result.append(f"verdict no longer rejects missing {condition}")
     # The DDB lanes keep the writer past its view; every other boot must
     # release it at its first verdict, or it spins on the peer forever.
-    if "if (kernel_ddb_peer_console_test_enabled == false) {" not in evidence:
+    if "if (kernel_ddb_console_test_enabled == false) {" not in evidence:
         result.append("writer outlives its view on boots without a DDB lane")
-    if "kernel_ddb_peer_console_test_enabled = 1" not in \
+    if "kernel_ddb_console_test_enabled = 1" not in \
             tree["scripts/run_kernel_ddb_qemutest.sh"]:
-        result.append("QEMU DDB lane no longer holds a peer record")
+        result.append("QEMU DDB lane no longer retains the peer lock fixture")
     if "RPI5_ARM_PEER_CONSOLE_DDB=1" not in \
             tree["scripts/run_kernel_hwtest_rpi5.sh"]:
-        result.append("RPi5 DDB half no longer holds a peer record")
+        result.append("RPi5 DDB half no longer retains the peer lock fixture")
     # GitHub issue #9: the writer's placement is no longer an admission rule
     # naming its pid. It asks its progress handler for a CPU and pins itself
     # there with sched_setaffinity, so the property to guard is that handout
@@ -71,24 +72,14 @@ def problems(tree: dict[str, str]) -> list[str]:
     # The handout also carries the writer's TURN, which the rule used to
     # carry: the CPU is named only once the filesystem reader has reported,
     # and asking earlier is not counted as a refusal.
-    if "        peer_console_ddb_hold(SECONDARY_CORE_ID);\n" \
+    if "        workload_busy_pair.peer_console_pid = pid;\n" \
        "        process_run_unlock(guard);\n" \
        "        return SECONDARY_CORE_ID;" not in evidence:
         result.append("registration no longer hands the writer its peer CPU")
-    # Holding the old ring makes regression to separate peer admission
-    # reorder the migration fixture rather than pass by drain timing.
-    if "        workload_busy_pair.peer_console_pid = pid;\n" \
-       "        // The legacy ring stays held through the ordering fixture" not in evidence:
-        result.append("registration no longer holds core 0's drain of the "
-                      "writer's ring for its first write")
     if "svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG, first, 0, 0, 0) == 0" \
             not in tree["kernel/arch/arm64/kernel/peer_read.tkb"]:
         result.append("the writer no longer reports its first write before "
                       "it retries")
-    if "peer_console_first_seen == false) {\n" \
-       "            peer_console_ddb_clear(SECONDARY_CORE_ID);" not in evidence:
-        result.append("the writer's first report no longer releases the "
-                      "drain it was held under")
     if "if (workload_busy_pair.peer_read_reported == false) {" not in evidence:
         result.append("writer is named a CPU before the reader's verdict")
     if "return svc5(SETAFFINITY_SYSCALL, 0, 8, mask as *u8 as usize, 0, 0) == 0;" \
@@ -172,6 +163,18 @@ def problems(tree: dict[str, str]) -> list[str]:
         result.append("peer diagnostic admission does not reserve the whole record")
     if "kernel_log_peer_record_byte_locked(guard, bytes[index]);" not in emit:
         result.append("peer diagnostic bytes do not borrow one console guard")
+    probe = tree["kernel/kernel/console_contention_evidence.tkb"]
+    release = "atomic_word_store(&console_ddb_release_reason, reason);\n" \
+              "    atomic_word_store(&console_ddb_phase, 2);\n" \
+              "    console_unlock(guard);"
+    if "for byte in marker { uart_debug_putc(byte); }" not in probe:
+        result.append("DDB held notification can omit its terminating newline")
+    if release not in probe:
+        result.append("DDB hold restores IRQs before publishing its release decision")
+    if "while (reason == 0 && read_cntpct() - start < budget)" not in probe:
+        result.append("DDB console hold has no bounded recovery")
+    if "process_run_unlock(guard);\n    // Console is innermost." not in evidence:
+        result.append("DDB console hold retains the outer run guard")
     return result
 
 
@@ -192,18 +195,6 @@ def main() -> int:
         "first count report": ("kernel/kernel/workload_evidence.tkb",
                                "first == 0 || first > 1071 || total != 0",
                                "first != 1071 || total != 0"),
-        "drain held for the first write": (
-            "kernel/kernel/workload_evidence.tkb",
-            "        peer_console_ddb_hold(SECONDARY_CORE_ID);\n"
-            "        process_run_unlock(guard);\n"
-            "        return SECONDARY_CORE_ID;",
-            "        process_run_unlock(guard);\n"
-            "        return SECONDARY_CORE_ID;"),
-        "drain released after the first write": (
-            "kernel/kernel/workload_evidence.tkb",
-            "peer_console_first_seen == false) {\n"
-            "            peer_console_ddb_clear(SECONDARY_CORE_ID);",
-            "peer_console_first_seen == false) {"),
         "writer reports its first write": (
             "kernel/arch/arm64/kernel/peer_read.tkb",
             "svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG, first, 0, 0, 0) == 0",
@@ -214,11 +205,11 @@ def main() -> int:
                       "        workload_busy_pair.peer_console_reported ||\n"
                       "        cpu_id() == SECONDARY_CORE_ID"),
         "ddb gate": ("kernel/kernel/workload_evidence.tkb",
-                     "kernel_ddb_peer_console_test_enabled == false",
-                     "kernel_ddb_peer_console_test_enabled == true"),
+                     "kernel_ddb_console_test_enabled == false",
+                     "kernel_ddb_console_test_enabled == true"),
         "qemu ddb hold": ("scripts/run_kernel_ddb_qemutest.sh",
-                          "kernel_ddb_peer_console_test_enabled = 1",
-                          "kernel_ddb_peer_console_test_enabled = 0"),
+                          "kernel_ddb_console_test_enabled = 1",
+                          "kernel_ddb_console_test_enabled = 0"),
         "rpi5 ddb hold": ("scripts/run_kernel_hwtest_rpi5.sh",
                           "RPI5_ARM_PEER_CONSOLE_DDB=1",
                           "RPI5_ARM_PEER_CONSOLE_DDB=0"),
@@ -227,10 +218,10 @@ def main() -> int:
         # rewrite a sibling fixture's handout and prove nothing.
         "peer cpu handout": (
             "kernel/kernel/workload_evidence.tkb",
-            "        peer_console_ddb_hold(SECONDARY_CORE_ID);\n"
+            "        workload_busy_pair.peer_console_pid = pid;\n"
             "        process_run_unlock(guard);\n"
             "        return SECONDARY_CORE_ID;",
-            "        peer_console_ddb_hold(SECONDARY_CORE_ID);\n"
+            "        workload_busy_pair.peer_console_pid = pid;\n"
             "        process_run_unlock(guard);\n"
             "        return 0;"),
         "turn before the reader": ("kernel/kernel/workload_evidence.tkb",
@@ -258,6 +249,20 @@ def main() -> int:
         "qemu stop": ("scripts/run_kernel_qemutest.sh", "--stop-marker",
                       "--old-stop-marker"),
     }
+    mutations.update({
+        "truncated held notification": ("kernel/kernel/console_contention_evidence.tkb",
+                                         "for byte in marker { uart_debug_putc(byte); }",
+                                         "for index: usize in 0..<39 { uart_debug_putc(marker[index]); }"),
+        "release after IRQ restore": ("kernel/kernel/console_contention_evidence.tkb",
+                                     "    atomic_word_store(&console_ddb_phase, 2);\n    console_unlock(guard);",
+                                     "    console_unlock(guard);\n    atomic_word_store(&console_ddb_phase, 2);"),
+        "unbounded DDB holder": ("kernel/kernel/console_contention_evidence.tkb",
+                                "reason == 0 && read_cntpct() - start < budget",
+                                "reason == 0"),
+        "run guard kept across DDB hold": ("kernel/kernel/workload_evidence.tkb",
+                                           "process_run_unlock(guard);\n    // Console is innermost.",
+                                           "// Console is innermost."),
+    })
     mutations.update({
         "peer diagnostic byte holds": ("kernel/printk/log.tkb",
                                       "kernel_log_peer_record_emit(copy as",

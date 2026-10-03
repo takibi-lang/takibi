@@ -319,28 +319,24 @@ image cannot be mounted (94f1c36).
 `kernel/printk/log.tkb`'s `uart_user_write_waits` and
 `uart_user_write_sleeps` (GitHub issue #544) count terminal writes that
 found no room in the transmit queue, and those of them that slept. They are
-written only on core 0, the queue's owner.
+updated on every CPU under the console guard.
 
-`kernel/printk/peer_console.tkb` (GitHub issue #534) holds one ring per CPU
-for a peer's terminal output: sixteen 64-byte publication records, the
-producer's published and last-seen counts, and core 0's consumed count and
-the cursor that publishes it. Each CPU writes only its own records and
-counts; core 0 writes only the consumed counts and cursors. What crosses
-between them is a publication record in both directions.
+`kernel/kernel/workload_evidence.tkb` retains the peer-console parent PID,
+ordering step, actual first write count and completion flags. The process
+registers after the peer-filesystem verdict and explicitly pins itself to its
+chosen CPU. One writer migrates peer/core0/peer; its child on core0 alternates
+with the parent on the peer. Progress reports validate identity, CPU and order.
+The writer then retries its seventeen records until all 1071 input bytes have
+been accepted by the shared console queue.
 
-`kernel/kernel/workload_evidence.tkb` retains the one admitted peer-console
-PID until its bounded writer has proved the 1008-of-1071 short write, CPU
-placement, and final retry. The process registers before writing, is excluded
-from core 0, and is admitted to the secondary only after the peer-filesystem
-verdict. When a UART-BREAK DDB lane has set the debugger-written
-`kernel_ddb_peer_console_test_enabled`, it keeps that PID for one more
-held record, through its holding and pending flags, until a debugger entry
-releases it; `kernel_ddb_peer_console_hold_armed`, written by the same lane
-when the hold is wanted, keeps the writer asleep until then. `kernel/printk/peer_console.tkb` carries that rendezvous in two
-more publication records per CPU: a state the peer writes (Clear, Holding,
-Pending) and a release sequence core 0's debugger entry writes. Each side
-keeps its own sequence counter. After its first verdict the writer shares the
-secondary instead of holding it alone.
+DDB lanes retain that writer using `kernel_ddb_console_test_enabled`; a late
+`kernel_ddb_console_hold_armed` starts the finite hold only after normal UART
+prerequisites. `kernel/kernel/console_contention_evidence.tkb` holds atomic
+phase, release-reason and held-at-entry observations. The writer releases the
+run guard before taking the console guard and publishes its release decision before unlocking the latter restores IRQs.
+The complete stopped-world snapshot confirms actual release. The old terminal ring and its publication rendezvous
+are gone. `kernel/printk/log.tkb` retains peer diagnostic publication separately,
+and core0 accounts for the completed diagnostic records and their wait times.
 
 The same file retains the one admitted peer-tty PID (GitHub issue #547). The
 persistent shell starts `/bin/peer-tty`, which registers before its first

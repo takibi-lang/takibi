@@ -124,10 +124,9 @@ justify an implementation. No other item below is scheduled for this window.
 measurements first.
 
 1. **Safe-memory language support that A's route consumes** (nothing here
-   waits for A): #663's stages S3 and S4 (S2's shared queue, migration and
-   two-writer ordering fixtures are implemented; next replace the DDB ring
-   rendezvous with a lock-held BREAK fixture, then measure lock contention
-   and hold time on the board; #657 closes with them); #131
+   waits for A): #663's stage S4 (the shared queue, migration, two-writer ordering
+   and finite lock-held BREAK fixtures are implemented; next measure lock
+   contention and hold time on the board; #657 closes with them); #131
    and #370 (stored ownership and branded containers, which feed #637
    stage 2's option (c)). Step 2 is finished, so #637 stage 1's device
    groups, MMIO and DMA, together with #622 and #623, can proceed.

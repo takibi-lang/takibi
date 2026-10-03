@@ -10,7 +10,7 @@ migrate to CPU 0 because transmitter drain checks touch device registers.
 `TCGETS` copies the 36-byte Linux arm64 kernel termios structure: four 32-bit
 flag words, one line-discipline byte, and nineteen control bytes. It does not
 copy libc's larger userspace structure. `TCSETS` applies immediately;
-`TCSETSW` waits for terminal output, peer console records and the UART FIFO
+`TCSETSW` waits for terminal output and the UART FIFO
 to drain; `TCSETSF` additionally discards pending input. Invalid settings
 return `EINVAL` before waiting, leave the old settings intact, and work the
 same way through fd aliases. Bad user ranges return `EFAULT`.

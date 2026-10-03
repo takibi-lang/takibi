@@ -8,6 +8,7 @@
 use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/printk/console_lock.tkb";
+use "kernel/lib/occupancy.tkb";
 
 private let mut console_probe_armed: AtomicWord;
 private let mut console_probe_phase: AtomicWord;
@@ -93,4 +94,73 @@ fn console_contention_probe() -> bool {
 fn console_contention_execution_model_assumption() {
     static_assert(KERNEL_ACTIVE_CORES >= 2,
                   "console contention evidence needs a primary and a peer");
+}
+
+// DDB lanes arm this only after their ordinary UART workload is complete.
+// The host checks the held phase before injecting the real BREAK. A bounded
+// holder is deliberate: world-stop cannot acknowledge a permanently masked
+// peer. The deadline is recovery, not a timing verdict.
+let mut console_ddb_phase: AtomicWord;
+private let mut console_ddb_release_reason: AtomicWord;
+private let mut console_ddb_entry_held: AtomicWord;
+
+fn console_ddb_peer_hold() {
+    atomic_word_store(&console_ddb_phase, 0);
+    atomic_word_store(&console_ddb_release_reason, 0);
+    atomic_word_store(&console_ddb_entry_held, 0);
+    let guard = console_lock();
+    if (console_lock_is_held() == false) {
+        console_unlock(guard);
+        atomic_word_store(&console_ddb_phase, 3);
+        return;
+    }
+    atomic_word_store(&console_ddb_phase, 1);
+    console_ddb_hold_checkpoint();
+    // A polling-only fixture marker bypasses the tested lock, as DDB does.
+    // It is emitted before the bounded hold waits for the real BREAK.
+    let marker = bs"console lock probe: held for UART BREAK\n";
+    for byte in marker { uart_debug_putc(byte); }
+    let start: i64 = read_cntpct();
+    let budget: i64 = read_cntfrq() * 5;
+    let mut reason: usize = 0;
+    while (reason == 0 && read_cntpct() - start < budget) {
+        // The request is observable even while this CPU masks its stop SGI.
+        // Releasing the guard restores IRQs and lets the normal pen run.
+        if (world_stop_reporter_word(2) != 0) { reason = 1; }
+        else if (uart_break_flagged()) { reason = 2; }
+    }
+    if (reason == 0) { reason = 3; }
+    // Publish the release decision before restoring IRQs: the pending stop
+    // may park us inside console_unlock, before the next statement runs.
+    // A complete world-stop and an unlocked mutex confirm actual release.
+    atomic_word_store(&console_ddb_release_reason, reason);
+    atomic_word_store(&console_ddb_phase, 2);
+    console_unlock(guard);
+}
+
+// Read-only observation before requesting world-stop. Never acquire a
+// console guard here: the whole purpose is entry with a peer holding it.
+fn console_ddb_note_entry() {
+    if (cpu_id() == 0 && atomic_word_load(&console_ddb_phase) == 1 &&
+        console_lock_is_held()) {
+        atomic_word_store(&console_ddb_entry_held, 1);
+    }
+}
+
+fn console_ddb_probe_phase() -> usize {
+    return atomic_word_load(&console_ddb_phase);
+}
+fn console_ddb_probe_release_reason() -> usize {
+    return atomic_word_load(&console_ddb_release_reason);
+}
+fn console_ddb_probe_entry_held() -> bool {
+    return atomic_word_load(&console_ddb_entry_held) == 1;
+}
+
+// A real call boundary for GDB's host-held BREAK injection; the check also
+// makes restoring a detached observation fail rather than report a hold.
+fn console_ddb_hold_checkpoint() {
+    if (console_lock_is_held() == false) {
+        atomic_word_store(&console_ddb_phase, 3);
+    }
 }

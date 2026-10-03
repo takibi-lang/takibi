@@ -2730,9 +2730,6 @@ fn syscall_terminal_ioctl(fd: usize, request: usize, address: usize)
     let guard = process_run_lock();
     if (command != 0x5402) {
         let mut pending: bool = uart_terminal_output_pending() || uart_tx_busy();
-        for cpu: usize in 1..<KERNEL_MAX_CORES {
-            if (peer_console_drained(cpu) == false) { pending = true; }
-        }
         if (pending) {
             process_run_unlock(guard);
             return syscall_terminal_write_wait();

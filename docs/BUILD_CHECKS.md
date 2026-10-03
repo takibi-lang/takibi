@@ -33,7 +33,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_compiler_sync_rules.py` | declared compiler counterpart changes stay synchronized |
 | `check_ddb_command_inventory.py` | DDB dispatch, help, documentation, classification, and coverage agree |
 | `check_ddb_command_inventory_controls.py` | Positive and build-faithful negative controls for the DDB inventory check |
-| `check_ddb_rpi5_capture_controls.py` | Live and offline DDB verdicts accept LF/CRLF and refuse early, duplicate or missing delivery, echoed commands, and invalid peer-stop evidence |
+| `check_ddb_rpi5_capture_controls.py` | Live and offline DDB verdicts accept LF/CRLF and refuse missing console-hold/release evidence, unheld mutex/phase, echoed commands, and invalid peer-stop evidence |
 | `check_ddb_signal_names.py` | DDB's process view names every signal kill(2) accepts, spelled from the ABI constant, and subtracts the named bits from its hex remainder; both QEMU runner gates accept the rendered sets |
 | `check_ddb_signal_names_controls.py` | Controls for the DDB signal-vocabulary check |
 | `check_ddb_wait_reason_names.py` | DDB's wait view names every process state and wait reason the kernel encodes for the debugger snapshot, spelled from the enum case |
@@ -108,7 +108,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_platform_view_parity.py` | a view compared on one lane only says why it is not shared |
 | `check_platform_view_parity_controls.py` | Controls for the platform-view parity check |
 | `check_peer_filesystem_controls.py` | the peer filesystem verdict requires CPU-1 reads, failed first lock attempts on both CPUs, and capture completion on both platforms; controls remove each link |
-| `check_peer_console_process_controls.py` | the peer-console verdict remains tied to a real CPU-1 EL0 writer, a forced 16-record full ring, retry of the final record, and capture completion on both platforms |
+| `check_peer_console_process_controls.py` | the peer-console verdict requires real EL0 writes, CPU migration, alternating parent/child order, actual short counts, all 1071 bytes, bounded DDB hold and release publication before IRQ restore |
 | `check_pool_release_paths.py` | every kernel pool has a release path or explicit exemption |
 | `check_pool_zero_before_stamp.py` | a pool slot's storage is cleared before the generation that makes it answer Live is stamped, so a lockless walker cannot read the free-chain link as a payload (#514) |
 | `check_pool_zero_before_stamp_controls.py` | Controls for the pool clear-before-stamp check, in both directions |
@@ -150,7 +150,7 @@ for several rounds it gated `allbuild` so no kernel lane ran at all.
 | `slowcheck_qemu_session_ports.sh` | Regression controls for the per-session QEMU port block claim |
 | `slowcheck_resource_lease.sh` | Regression controls for cross-container board and aggregate-suite leases |
 | `slowcheck_run_kernel_build_locked.sh` | Regression controls for the cross-Make kernel build lock |
-| `slowcheck_run_kernel_ddb_rpi5_driver.py` | PTY controls for held output, a newline wake before BREAK on CPU 0, and the RPi5 DDB driver's resume retry |
+| `slowcheck_run_kernel_ddb_rpi5_driver.py` | PTY controls for console-hold and release evidence, a newline wake before BREAK on CPU 0, and the RPi5 DDB driver's resume retry |
 | `slowcheck_run_lane.sh` | Controls for the lane timing receipts and the summary built from them |
 | `slowcheck_run_tlc.py` | Parallel TLC jobs use private standard-module files, preserve JVM exit statuses, and clean temporary directories on success and failure |
 

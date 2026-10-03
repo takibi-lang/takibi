@@ -342,11 +342,6 @@ fn peer_console() {
             svc5(NANOSLEEP_SYSCALL, nap as *u8 as usize, 0, 0, 0, 0);
             action = svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG,
                           0, 0, spin, 0);
-        } else if (action == 3) {
-            // S2 keeps this as an explicit held-record fixture request;
-            // the write syscall itself always uses the shared queue.
-            action = svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG,
-                          63, 63, 0, 0);
         } else {
             for pause: usize in 0..<PEER_CONSOLE_POLL_PAUSE {
                 spin = spin ^ (spin << 13);

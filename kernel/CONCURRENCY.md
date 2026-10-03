@@ -359,29 +359,33 @@ ordering sequence, all seventeen lines and the completion verdict on both
 platforms. A kernel log verdict crosses a separate channel and need not follow
 the last terminal record physically.
 
-The UART-BREAK DDB lanes also make a BREAK land while a peer record is
-published but undrained. Their runner sets `kernel_ddb_peer_console_test_enabled`
-at the load checkpoint, and `kernel_ddb_peer_console_hold_armed` when the hold
-is wanted: at the start on QEMU, where the BREAK lands mid-boot, and only
-before the debugger half on the board, to exercise the explicit held-record
-debug fixture. Until it is armed the writer sleeps. The same process then waits until core 0 has drained
-the legacy test channel, publishes a Holding state, requests one debug record, and
-reports it Pending. Core 0's drain leaves a CPU's ring alone while its state is
-not Clear. DDB entry reports `ddb: peer console=pending` and publishes a
-release to every peer. The peer acts on that release only after `continue`
-lets it run again; it clears its state, and core 0 drains the record into the
-restored queue. Both directions cross publication records, and no lock is
-taken. This record is published by the fixture handler, not by write(2).
-The legacy ring is also held during the ordering fixture so restoring the old
-terminal route reorders its lines deterministically. On every other boot the flag is clear and the process exits at its
-first verdict, as before.
+The UART-BREAK DDB lanes retain the peer writer with
+`kernel_ddb_console_test_enabled`, then arm `kernel_ddb_console_hold_armed`
+only after the ordinary UART wake and other prerequisites. The writer sleeps
+until that late arm. Outside the process-run guard it takes the real console
+guard, publishes its held phase, and waits for a world-stop request, the
+physical UART BREAK flag, or a five-second recovery deadline. The release decision is published before unlocking restores its IRQ state,
+so a pending stop can park it without hiding that decision. Complete world-stop
+and the actual unlocked mutex confirm the release.
+The deadline prevents a fixture from abandoning a lock; it is not a latency
+verdict. Ordinary boots exit the writer after its ordering verdict.
 
-The hold covers the whole CPU's output ring, including a shell prompt when
-the UART reader runs on CPU 1. The RPi5 driver therefore permits silence
-after its input newline and sends BREAK after a bounded response wait. It
-requires the CPU 0 trace to retain that newline's UART-wake event before the
-BREAK event. After `continue`, both the held peer record and the resumed
-shell's response must arrive.
+QEMU stops at the peer's hold checkpoint and independently reads both the
+phase and actual mutex word before injecting a real serial BREAK while the
+CPUs remain stopped. It then resumes the CPUs and requires complete world-stop,
+DDB inspection, queue restoration and workload resume. The board arms after
+its newline wake, waits for the holder's polling UART marker, and requires
+either the holder's physical BREAK observation or DDB's held-at-entry
+observation, as well as release and resume. A deadline-only release does not
+satisfy the board witness. No ordinary terminal ring or DDB ring rendezvous
+remains. The retained peer kernel-log ring stays a separate publication stream;
+its completed records now supply the peer drain count and wait statistics.
+
+This tests a finite holder. UART BREAK and the stop SGI are IRQ-dependent:
+a permanently IRQ-masked CPU can prevent entry or complete world-stop. DDB
+refuses shared-state inspection without all required acknowledgements. Such
+failures need the existing external SWD or QEMU host diagnostics; an independent
+exception-based entry route is outside the maintained debugger guarantee.
 
 Terminal input (GitHub issue #547) goes the other way: the RX interrupt is
 routed to core 0, and the reader may be on another CPU. One lock orders it,
