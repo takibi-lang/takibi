@@ -567,8 +567,12 @@ linear struct Name[n: usize] { field: T; }   // indexed runtime obligation
   keyword used to declare it, matching how array variables work).
 - `s.field` -- field read (works uniformly whether `s: Name` or `s:
   *Name`, Zig-style).
-- `s.field = v` -- field write (direct dot-assignment to a bare variable
-  name; not valid as the left side of a larger expression). `arr[i].field
+- `s.field = v` -- field write to struct storage. A struct-valued call
+  result is a temporary: assigning its field, including an embedded struct
+  field such as `get().inner.field`, is a located compile error. Taking
+  that temporary field's address is also rejected. A pointer-valued call
+  denotes storage and permits field assignment and address-taking. Bind a
+  returned struct with `let mut` before modifying it. `arr[i].field
   = v` also works (bounds-checked element GEP, then field GEP);
   `ptr[i].field = v` on a raw pointer skips the array bounds check. The
   reverse nesting is **not** supported: `s.field[i] = v`, assigning into

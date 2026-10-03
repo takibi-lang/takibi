@@ -4855,6 +4855,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            TVoid
        | FieldGet (base_expr, fname) ->
            let bt = infer_expr senv eenv tyenv fenv base_expr in
+           check_no_temporary_field_place ~operation:"assign to"
+             senv eenv tyenv fenv base_expr bt;
            record_raw_deref e.loc "store-field" bt;
            (match repr bt with
             | TIndexedStruct _ ->
@@ -4973,6 +4975,28 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ ->
            raise (TypeError (lhs.loc, "not an assignable expression")))
 
+(* A by-value call produces an SSA aggregate, not writable storage.
+   Follow embedded struct fields back to that root, but stop at pointers:
+   a pointer-valued accessor denotes storage even when reached from a value. *)
+and check_no_temporary_field_place ~operation senv eenv tyenv fenv
+    (base : Ast.expr) base_ty : unit =
+  match strip_singleton base_ty with
+  | TStruct _ | TIndexedStruct _ ->
+      (match base.desc with
+       | Ast.Call _ ->
+           raise (TypeError (base.loc, Printf.sprintf
+             "cannot %s a field of a call's result: it is a temporary" operation))
+       | Ast.FieldGet (parent, _) ->
+           let parent_ty = infer_expr senv eenv tyenv fenv parent in
+           check_no_temporary_field_place ~operation
+             senv eenv tyenv fenv parent parent_ty
+       | Ast.Cast (_, inner) ->
+           let inner_ty = infer_expr senv eenv tyenv fenv inner in
+           check_no_temporary_field_place ~operation
+             senv eenv tyenv fenv inner inner_ty
+       | _ -> ())
+  | _ -> ()
+
 (* GitHub issue #314/#319 follow-up: index-assignment through an array
    FIELD reached via a shared &T was not gated the way a direct
    `.field = v` write or a `*r = v` write already are -- struct_instance/
@@ -5057,6 +5081,8 @@ and infer_addrof_wrapped senv eenv tyenv fenv (e : Ast.expr) (inner : Ast.expr)
              | None -> TPtr t))
    | FieldGet (base_expr, fname) ->
        let bt = infer_expr senv eenv tyenv fenv base_expr in
+       check_no_temporary_field_place ~operation:"take the address of"
+         senv eenv tyenv fenv base_expr bt;
        let sname = match repr bt with
          | TStruct s | TPtr (TStruct s) | TPtr (TIo (TStruct s))
          | TAlignedPtr (_, TStruct s)

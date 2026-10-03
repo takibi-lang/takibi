@@ -5889,6 +5889,53 @@ let infer_tests = [
             return sum(proc);
         }");
 
+  Alcotest.test_case "struct call result field assignment is a located type error" `Quick
+    (expect_type_error_at 3 10 "call's result: it is a temporary"
+       "struct TempRecord { a: usize; }
+fn temp_record() -> TempRecord { let mut r: TempRecord = {0}; return r; }
+fn f() { temp_record().a = 1; }");
+
+  Alcotest.test_case "nested struct call result field assignment is located" `Quick
+    (expect_type_error_at 4 10 "call's result: it is a temporary"
+       "struct TempInner { a: usize; }
+struct TempOuter { r: TempInner; }
+fn temp_outer() -> TempOuter { let mut r: TempOuter = {{0}}; return r; }
+fn f() { temp_outer().r.a = 1; }");
+
+  Alcotest.test_case "struct call result field address is a located type error" `Quick
+    (expect_type_error_at 3 28 "cannot take the address of a field of a call's result"
+       "struct TempAddressRecord { a: usize; }
+fn temp_address_record() -> TempAddressRecord { let mut r: TempAddressRecord = {0}; return r; }
+fn f() -> *usize { return &temp_address_record().a; }");
+
+  Alcotest.test_case "nested struct call result field address is located" `Quick
+    (expect_type_error_at 4 28 "cannot take the address of a field of a call's result"
+       "struct TempAddressInner { a: usize; }
+struct TempAddressOuter { r: TempAddressInner; }
+fn temp_address_outer() -> TempAddressOuter { let mut r: TempAddressOuter = {{0}}; return r; }
+fn f() -> *usize { return &temp_address_outer().r.a; }");
+
+  Alcotest.test_case "pointer call result field address still codegens" `Quick
+    (expect_codegen_ok
+       "struct TempAddressPointed { a: usize; }
+        let mut temp_address_pointed: TempAddressPointed;
+        fn temp_address_ptr() -> *TempAddressPointed { return &temp_address_pointed; }
+        fn f() -> *usize { return &temp_address_ptr().a; }");
+
+  Alcotest.test_case "pointer call result field assignments still codegen" `Quick
+    (expect_codegen_ok
+       "struct TempPointerInner { a: usize; }
+        struct TempPointerOuter { r: TempPointerInner; }
+        let mut temp_storage: TempPointerOuter;
+        fn temp_ptr() -> *TempPointerOuter { return &temp_storage; }
+        fn f() { temp_ptr().r.a = 1; }");
+
+  Alcotest.test_case "storing a call result in a mutable struct allows field assignment" `Quick
+    (expect_codegen_ok
+       "struct TempStored { a: usize; }
+        fn temp_stored() -> TempStored { let mut r: TempStored = {0}; return r; }
+        fn f() { let mut r: TempStored = temp_stored(); r.a = 1; }");
+
   (* The second half of the same bug: an IMMUTABLE `let` has no alloca
      (see llvm_gen.ml's Let(false, ...) case), so a struct-typed
      immutable binding has no address for later field access to GEP into
