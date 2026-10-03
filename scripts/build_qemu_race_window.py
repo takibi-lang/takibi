@@ -52,7 +52,7 @@ WINDOWS = {
                  "    let core: usize = cpu_id();\n",
                  True),
         "check": ("kernel/process.tkb",
-                  "    if (scheduled_process_record_at(owner.pool_index).stack_owner_cpu !=\n"
+                  "    if (scheduled_process_record_locked(guard, owner.pool_index).stack_owner_cpu !=\n"
                   "            PROCESS_STACK_UNOWNED) {\n"
                   "        return ScheduledProcessStartCheck::Standing(state);\n"
                   "    }\n"

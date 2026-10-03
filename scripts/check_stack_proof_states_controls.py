@@ -84,7 +84,7 @@ def main() -> int:
         "a start check that stopped reading the stack owner",
         replace_once(
             source,
-            "    if (scheduled_process_record_at(owner.pool_index).stack_owner_cpu !=\n"
+            "    if (scheduled_process_record_locked(guard, owner.pool_index).stack_owner_cpu !=\n"
             "            PROCESS_STACK_UNOWNED) {\n"
             "        return ScheduledProcessStartCheck::Standing(state);",
             "    if (false) {\n"
