@@ -9846,26 +9846,29 @@ private fn kernel_process_child_exit_status_for_locked(
 // Called from kernel_process_child_exec_prepare() right after that
 // process's own execve() succeeds -- execution_here().current_handle still
 // names it directly, no switch has happened yet.
+// GitHub issue #693 step 5: the execing process's own record, reached
+// through ProcessRunning.
 fn kernel_process_child_exec_mark() {
     workload_exec_commit_note();
+    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
     if (execution_here().current_live) {
-        let slot: usize = execution_here().current_handle.pool_index;
-        scheduled_process_record_at(slot).exec_image_live = true;
+        scheduled_process_record_running(running_here).exec_image_live = true;
         // Linux: execve resets every caught signal to SIG_DFL, because the
         // handler address named the image that has just been replaced. An
         // ignored signal stays ignored (sigchld_ignored is left alone).
-        scheduled_process_record_at(slot).sigchld_handler = 0;
-        scheduled_process_record_at(slot).sigchld_flags = 0;
-        scheduled_process_record_at(slot).sigchld_restorer = 0;
-        scheduled_process_record_at(slot).sigchld_action_mask = 0;
+        scheduled_process_record_running(running_here).sigchld_handler = 0;
+        scheduled_process_record_running(running_here).sigchld_flags = 0;
+        scheduled_process_record_running(running_here).sigchld_restorer = 0;
+        scheduled_process_record_running(running_here).sigchld_action_mask = 0;
         let mut current: ProcessHandle = execution_here().current_handle;
         kernel_process_trace_record(
             ProcessTraceExecCommit,
             scheduled_process_pid_of_handle(current), current.generation,
             0, 0, kernel_process_crash_state(), kernel_process_crash_wait_reason(),
-            current.pool_index, scheduled_process_record_of(current).saved_sp,
-            0);
+            current.pool_index,
+            scheduled_process_record_running(running_here).saved_sp, 0);
     }
+    process_running_end(running_here);
 }
 
 // GitHub issue #245 bug fix: this used to be a single no-argument query
@@ -9877,22 +9880,31 @@ fn kernel_process_child_exec_mark() {
 // (after that same call has switched execution_here().current_handle to the
 // parent). Taking an explicit pid removes the ambiguity instead of
 // guessing which one "current" means at the call site.
+// GitHub issue #693 step 5: the lookup and the read under one run-guard
+// hold; neither caller (the exit arm, test_driver's exec reap) holds it.
 fn kernel_process_exec_image_live_for_pid(pid: usize) -> bool !{unsafe} {
-    match scheduled_process_slot_for_pid(pid) {
-        ProcessSlotForPidResult::Missing => { return false; }
-        ProcessSlotForPidResult::Found(slot) => {
-            return scheduled_process_record_at(slot).exec_image_live;
-        }
-    }
-}
-
-fn kernel_process_exec_clear_for_pid(pid: usize) !{unsafe} {
+    let guard = process_run_lock();
+    let mut live: bool = false;
     match scheduled_process_slot_for_pid(pid) {
         ProcessSlotForPidResult::Missing => {}
         ProcessSlotForPidResult::Found(slot) => {
-            scheduled_process_record_at(slot).exec_image_live = false;
+            live = scheduled_process_record_locked(guard, slot).exec_image_live;
         }
     }
+    process_run_unlock(guard);
+    return live;
+}
+
+fn kernel_process_exec_clear_for_pid(pid: usize) !{unsafe} {
+    let guard = process_run_lock();
+    match scheduled_process_slot_for_pid(pid) {
+        ProcessSlotForPidResult::Missing => {}
+        ProcessSlotForPidResult::Found(slot) => {
+            scheduled_process_record_locked(guard, slot).exec_image_live =
+                false;
+        }
+    }
+    process_run_unlock(guard);
 }
 
 // GitHub issue #245: the old execution_process == Parent conjunct asserted

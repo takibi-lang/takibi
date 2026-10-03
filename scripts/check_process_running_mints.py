@@ -24,6 +24,7 @@ DEFINING = "process_running_here"
 
 ALLOWED = {
     "kernel_process_block_wait4",
+    "kernel_process_child_exec_mark",
     "kernel_process_child_exit",
     "kernel_process_clone_begin",
     "kernel_process_clone_context_install",
