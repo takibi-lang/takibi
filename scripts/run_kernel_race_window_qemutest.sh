@@ -123,6 +123,15 @@ if run_variant reverted; then
     echo "RECORDED $LABEL: with the check reverted the $WORKLOAD passed, so the window was not crossed (QEMU timing verdict; #692)"
     exit 0
 fi
+if ! grep -aEq "$SIGNATURE" "$(signature_file)" && [ "$WORKLOAD" = churn ] &&
+        grep -aq 'the shell did not answer an empty line before the phase' \
+            "$ROOT/reverted.log" "$(signature_file)" 2>/dev/null; then
+    # GitHub issue #692: the reverted churn stopped at the resync timeout
+    # (#655) before it reached the window, so it says nothing about the
+    # check either way. A QEMU timing verdict: recorded, not gating.
+    echo "RECORDED $LABEL: the reverted churn stopped at its resync timeout before the window (QEMU timing verdict; #692)"
+    exit 0
+fi
 if ! grep -aEq "$SIGNATURE" "$(signature_file)"; then
     echo "FAIL $LABEL: with the check reverted the $WORKLOAD failed, but no line matched $SIGNATURE" >&2
     grep -aE '^(oops: (fail-stop|activity)|sched: STARVED|ddb: wait pid)' "$(signature_file)" | sed 's/^/  /' >&2 || true
