@@ -1676,3 +1676,25 @@ fn uart_terminal_write_chunk(bytes: borrow []u8, convert: bool) -> usize {
     console_unlock(guard);
     return accepted;
 }
+
+// Snapshot first, then print: reporters must not recursively acquire console.
+fn kernel_console_measure_report() !{logs} {
+    let mut sample: ConsoleLockMeasurement = console_measure_end();
+    if (sample.acquisitions > 0 && sample.contended <= sample.acquisitions &&
+        sample.acquire_max <= sample.acquire_ticks &&
+        sample.hold_max <= sample.hold_ticks && sample.hold_max > 0 &&
+        (sample.cpus & 3) == 3) {
+        kernel_boot_log("console lock measurement: both CPUs and consistent counters ok\n");
+    } else {
+        kernel_boot_log("console lock measurement: inconsistent counters\n");
+    }
+    kernel_boot_log("console lock: acquisitions="); uart_put_udec(sample.acquisitions);
+    kernel_boot_log(" contended="); uart_put_udec(sample.contended);
+    kernel_boot_log(" acquire_ticks="); uart_put_udec(sample.acquire_ticks);
+    kernel_boot_log(" acquire_max="); uart_put_udec(sample.acquire_max);
+    kernel_boot_log(" hold_ticks="); uart_put_udec(sample.hold_ticks);
+    kernel_boot_log(" hold_max="); uart_put_udec(sample.hold_max);
+    kernel_boot_log(" cpus="); uart_put_udec(sample.cpus);
+    kernel_boot_log(" tickfreq="); uart_put_udec(read_cntfrq() as usize);
+    kernel_boot_log("\n");
+}

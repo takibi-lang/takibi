@@ -120,3 +120,13 @@ background init actions use `/dev/null` for standard I/O so they cannot reset
 the interactive UART or change the probe's settings. The peer-console writer
 starts once with UART output; it does not respawn. The existing raw peer-terminal reader still
 runs after network integration.
+
+## Console lock measurements
+
+The bounded boot workload reports acquisition count, actual first-attempt
+contention, acquisition and hold ticks (totals and sampled maxima), CPU mask,
+and timer frequency. Both platforms check counter consistency and participation
+by CPUs 0 and 1. Physical timing evidence comes from RPi5; QEMU durations are
+observations only. Startup contention probes and the late artificial DDB hold
+are excluded. `CONCURRENCY.md`, "Console lock measurements", defines the exact
+measurement boundaries. Sampled maxima are not worst-case bounds.

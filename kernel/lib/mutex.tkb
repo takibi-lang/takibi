@@ -120,3 +120,17 @@ fn mutex_release(m: *Mutex @ id, flags: usize) !{locks, unsafe} {
 fn mutex_is_held(m: *Mutex @ id) -> bool !{unsafe} {
     return spin_lock_is_held(m as usize);
 }
+
+// The console's measurement records an actual failed first acquisition, not
+// an unlocked observation that could race with another CPU's acquisition.
+// Current limitations (2026-10-03): only the console uses this result; its
+// linear guard still owns the obligation to release flags exactly once.
+struct MutexAcquisition { flags: usize; contended: bool; }
+fn mutex_acquire_measured(m: *Mutex @ id) -> MutexAcquisition
+        !{locks, unsafe, acquires_lock_40_mutex} {
+    let flags: usize = mutex_irq_save();
+    let contended: bool = spin_trylock(m as usize) == false;
+    if (contended) { spin_lock(m as usize); }
+    let mut result: MutexAcquisition = { flags, contended };
+    return result;
+}

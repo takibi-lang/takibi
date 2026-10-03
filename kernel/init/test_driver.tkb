@@ -732,6 +732,7 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
     }
     if (listed == false) { kernel_boot_log("none"); }
     kernel_boot_log("\n");
+    kernel_console_measure_report();
     kernel_log_peer_console_report();
     if (page_allocator_live_count() == page_baseline) {
         kernel_boot_log("resources: pages=0\n");
@@ -1169,6 +1170,7 @@ let mut kernel_test_rpi5_extended: bool;
 let mut kernel_test_init_script: bool;
 
 fn kernel_test_driver_run() {
+    console_measure_begin();
     // GitHub issue #414: the same baseline idea, one layer up, and
     // deliberately taken BEFORE the probes rather than after them like the
     // page baseline below.

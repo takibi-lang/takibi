@@ -87,11 +87,9 @@ def main() -> int:
     failures += case(
         "the console unmasks under its caller",
         planted("kernel/printk/console_lock.tkb",
-                "    let mut guard: ConsoleGuard[console_tx_lock] =\n"
-                "        { mutex_acquire(&console_tx_lock) };",
+                "    let mut acquisition: MutexAcquisition = mutex_acquire_measured(&console_tx_lock);",
                 "    enable_irq();\n"
-                "    let mut guard: ConsoleGuard[console_tx_lock] =\n"
-                "        { mutex_acquire(&console_tx_lock) };"),
+                "    let mut acquisition: MutexAcquisition = mutex_acquire_measured(&console_tx_lock);"),
         "kernel/printk/console_lock.tkb")
 
     # Replacing the shared restore helper with its absolute inner operation is

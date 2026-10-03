@@ -116,17 +116,15 @@ before its issue closes. The steps keep their numbers, which issues cite.
 **B's window is short (maintainer, 2026-10-03):** B runs for a few days and
 then stops, with no successor. Take only items that finish inside that
 window and that A consumes at once; leave the bands below untouched rather
-than half-done. The maintainer extended the completed short-window queue to
-the next actionable item: #663's stages S2 to S4. #13 remains conditional on
-the solver threshold in `TAKIBI_CORE.md`; its recorded examples do not yet
+than half-done. The shared terminal queue, ordered migration and two-writer
+fixtures, finite lock-held BREAK fixture, and board lock measurements complete
+the extended short-window queue. #13 remains conditional on the solver threshold in `TAKIBI_CORE.md`; its recorded examples do not yet
 justify an implementation. No other item below is scheduled for this window.
 #680, #681 and #682 (the pin's cost) stay with A: they need RPi5
 measurements first.
 
 1. **Safe-memory language support that A's route consumes** (nothing here
-   waits for A): #663's stage S4 (the shared queue, migration, two-writer ordering
-   and finite lock-held BREAK fixtures are implemented; next measure lock
-   contention and hold time on the board; #657 closes with them); #131
+   waits for A): #131
    and #370 (stored ownership and branded containers, which feed #637
    stage 2's option (c)). Step 2 is finished, so #637 stage 1's device
    groups, MMIO and DMA, together with #622 and #623, can proceed.

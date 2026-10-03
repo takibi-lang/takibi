@@ -592,3 +592,24 @@ on QEMU. That measurement is gone rather than merely old: `df06fc8` made that
 probe force the collision at a rendezvous, so it now reports 4096 on both and
 no longer measures the gap at all.
 - MMU-off exclusives are not enforced by QEMU at all.
+
+## Console lock measurements
+
+The bounded boot workload reports `console lock: acquisitions=... contended=...
+acquire_ticks=... acquire_max=... hold_ticks=... hold_max=... cpus=...
+tickfreq=...`. Counters are protected by the same console lock. A contended
+acquisition means its first atomic try actually failed; it is not a racy
+observation of a busy word, nor a count of every retry. Acquisition duration
+runs from the clock read before IRQ masking to the clock read after acquiring
+the word, including the helper and clock overhead. Hold duration runs from
+that latter read to the read before release bookkeeping and unlock; release
+and IRQ restoration overhead are excluded.
+
+The window starts at the shared test driver, after startup contention probes,
+and ends after the bounded interactive workload. Starting the window's own
+hold is excluded. The ending snapshot acquisition is counted, but its hold
+is excluded; reporting takes place after releasing the guard. The late
+artificial DDB hold is outside the window. The CPU mask and counter consistency
+are functional checks on both platforms. Durations are observations only on
+QEMU; physical timing evidence comes from RPi5. Maxima are observed samples,
+not worst-case bounds or a guarantee of IRQ-independent debugger entry.

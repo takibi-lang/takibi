@@ -46,6 +46,8 @@ let mut console_tx_lock: Mutex;
 // through a critical section can leave it held.
 linear struct ConsoleGuard[lock: addr] {
     private flags: usize;
+    private started: i64;
+    private measured: bool;
 }
 
 // mutex_acquire masks interrupts, then takes the word, and returns the state
@@ -54,14 +56,62 @@ linear struct ConsoleGuard[lock: addr] {
 fn console_lock() -> ConsoleGuard[console_tx_lock]
         !{acquires_lock_50_console, lock_guard_50_console,
           irq_masking_guard} {
+    let before: i64 = read_cntpct();
+    let mut acquisition: MutexAcquisition = mutex_acquire_measured(&console_tx_lock);
+    let started: i64 = read_cntpct();
+    let measured: bool = console_measure_enabled;
+    if (measured) {
+        console_measure.acquisitions += 1;
+        console_measure.cpus |= 1 << cpu_id();
+        if (acquisition.contended) { console_measure.contended += 1; }
+        let ticks: usize = (started - before) as usize;
+        console_measure.acquire_ticks += ticks;
+        if (ticks > console_measure.acquire_max) {
+            console_measure.acquire_max = ticks;
+        }
+    }
     let mut guard: ConsoleGuard[console_tx_lock] =
-        { mutex_acquire(&console_tx_lock) };
+        { acquisition.flags, started, measured };
     return guard;
 }
 
 fn console_unlock(guard: sink ConsoleGuard[console_tx_lock]) {
+    if (guard.measured && console_measure_enabled) {
+        let ticks: usize = (read_cntpct() - guard.started) as usize;
+        console_measure.hold_ticks += ticks;
+        if (ticks > console_measure.hold_max) { console_measure.hold_max = ticks; }
+    }
     mutex_release(&console_tx_lock, guard.flags);
 }
 
 // Observation for the contention detector; this does not acquire the lock.
 fn console_lock_is_held() -> bool { return mutex_is_held(&console_tx_lock); }
+
+// All measurement state is protected by console_tx_lock. The bounded boot
+// window excludes startup contention probes and the late artificial DDB hold.
+// No logging occurs while the guard is held. Maxima are samples, not bounds.
+struct ConsoleLockMeasurement {
+    acquisitions: usize;
+    contended: usize;
+    acquire_ticks: usize;
+    acquire_max: usize;
+    hold_ticks: usize;
+    hold_max: usize;
+    cpus: usize;
+}
+private let mut console_measure: ConsoleLockMeasurement;
+private let mut console_measure_enabled: bool;
+fn console_measure_begin() {
+    let mut guard = console_lock();
+    let mut empty: ConsoleLockMeasurement = { 0, 0, 0, 0, 0, 0, 0 };
+    console_measure = empty;
+    console_measure_enabled = true;
+    console_unlock(guard);
+}
+fn console_measure_end() -> ConsoleLockMeasurement {
+    let mut guard = console_lock();
+    let mut result: ConsoleLockMeasurement = console_measure;
+    console_measure_enabled = false;
+    console_unlock(guard);
+    return result;
+}

@@ -155,8 +155,8 @@ EXEMPT = {
     "kernel/syscall_test_lifecycle.tkb":
         "test-driver lifecycle state, driven from core 0 only",
     "printk/console_lock.tkb":
-        "the lock word itself; it is what serializes every writer of the "
-        "transmit path, so it asserts no core count",
+        "the lock word serializes every transmit writer and protects the "
+        "measurement counters and window flag, so no core count is assumed",
     "kernel/syscall_unimplemented.tkb":
         "every slot is claimed by an atomic compare-exchange and read by an "
         "atomic load, so no core count is assumed",
