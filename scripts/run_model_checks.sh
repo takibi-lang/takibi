@@ -40,7 +40,7 @@ EXPECT="$OUT/expect.list"
 # Apalache run gets its own --out-dir, since concurrent runs sharing one
 # would write into each other's.
 queue_tlc() {  # model variant
-    echo "$OUT/$1-$2.tlc.log java -XX:+UseParallelGC -cp $TLA_JAR tlc2.TLC -workers 1 -config $1_$2.cfg -metadir $OUT/$1-$2.states $1.tla" >>"$QUEUE"
+    echo "$OUT/$1-$2.tlc.log bash $REPO_ROOT/scripts/run_tlc.sh -XX:+UseParallelGC -cp $TLA_JAR tlc2.TLC -workers 1 -config $1_$2.cfg -metadir $OUT/$1-$2.states $1.tla" >>"$QUEUE"
 }
 queue_typecheck() {  # model
     echo "$OUT/$1.typecheck.log $APALACHE typecheck --out-dir=$OUT/apalache/$1-typecheck $1.tla" >>"$QUEUE"

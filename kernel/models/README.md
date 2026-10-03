@@ -14,6 +14,10 @@ make modelcheck
 
 It fetches the pinned tools on first use (`scripts/fetch_model_tools.sh`,
 Java 21 required). It is a lane of `make allcheck` and `make cicheck`.
+TLC jobs run concurrently with a private JVM temporary directory per job
+(`scripts/run_tlc.sh`), because the pinned resolver extracts standard
+modules to fixed basenames and deletes them on JVM exit. Apalache jobs
+likewise have separate output directories.
 
 ## How the models are written
 
