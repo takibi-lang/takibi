@@ -200,6 +200,9 @@ enum PageOwnerTag: u8 {
     KernelStack;
     // Runtime-sized PageMeta storage reserved from discovered RAM.
     AllocatorMetadata;
+    // An execve's own copy of its argv, held for the exec's duration
+    // (kernel_process_child_exec_prepare, GitHub issue #693).
+    ExecArgs;
 }
 
 struct PageMeta {
@@ -1722,6 +1725,9 @@ private fn page_owner_description_locked(pool: borrow *BootPagePool,
     }
     if (owner == PageOwnerTag::AllocatorMetadata) {
         return "physical page allocator metadata" as *u8;
+    }
+    if (owner == PageOwnerTag::ExecArgs) {
+        return "an exec's argv copy" as *u8;
     }
     return "occupied but UNTAGGED (invariant break)" as *u8;
 }

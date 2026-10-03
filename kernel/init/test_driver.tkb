@@ -98,39 +98,6 @@ private let mut init_boot_fixture_reported: bool;
 private let mut init_boot_fixture_pending: bool;
 private let mut clone_growth_probe_ok: bool;
 
-must_use variant ExecArgv0NameResult { Invalid; Name([]u8); }
-
-// GitHub issue #249: argv[0] is the same path ash passes to execve() for
-// an ordinary external-command invocation -- the only path information
-// this function needs, from kernel_syscall_exec_argv() (the existing
-// argv buffer already carries it). Requires a leading
-// '/' (relative paths unsupported, same as every existing scenario) and
-// returns the name with that slash stripped, ready for ext2_lookup_path().
-fn kernel_exec_argv0_name() -> ExecArgv0NameResult !{unsafe} {
-    let argv: []u8 = kernel_syscall_exec_argv();
-    if (argv.len < 2) {
-        return ExecArgv0NameResult::Invalid;
-    }
-    let first_byte: u8 = argv[0];
-    if (first_byte != 0x2F) {
-        return ExecArgv0NameResult::Invalid;
-    }
-    let name_bytes: []u8 = argv[1..<argv.len];
-    let mut end: usize = name_bytes.len;
-    for position: usize in 0..<name_bytes.len {
-        let current: u8 = name_bytes[position];
-        if (current == 0) {
-            end = position;
-            break;
-        }
-    }
-    if (end < name_bytes.len) {
-        let name: []u8 = name_bytes[0..<end];
-        return ExecArgv0NameResult::Name(name);
-    }
-    return ExecArgv0NameResult::Invalid;
-}
-
 struct Ext2ExecImage {
     plan: DistroElfLoadPlan;
     inode: usize;
@@ -153,7 +120,7 @@ must_use variant DynamicExecResolveResult {
 // process_image_map_ext2_in_root(). Any failure at any step (name not
 // found, read failure, or invalid ELF) returns NotFound and preserves the
 // static-BusyBox fallback.
-fn kernel_exec_resolve_ext2_name_at(mount: Ext2Mount, name: []u8,
+fn kernel_exec_resolve_ext2_name_at(mount: Ext2Mount, name: borrow []u8,
                                     metadata: [u8; EXEC_METADATA_SIZE..])
         -> ExecResolveResult !{unsafe} {
     match ext2_lookup_path(mount, name) {
@@ -198,7 +165,7 @@ fn kernel_exec_resolve_ext2_inode_at(mount: Ext2Mount, inode: usize,
     }
 }
 
-fn kernel_exec_resolve_ext2_name(mount: Ext2Mount, name: []u8)
+fn kernel_exec_resolve_ext2_name(mount: Ext2Mount, name: borrow []u8)
         -> ExecResolveResult !{unsafe} {
     return kernel_exec_resolve_ext2_name_at(
         mount, name, exec_scratch_here().resolve_image as []u8);
@@ -300,13 +267,30 @@ fn kernel_exec_interpreter_bias(primary: DistroElfLoadPlan) -> usize {
     return (primary.extent + 0xFFFF) & ~0xFFFF;
 }
 
-fn kernel_exec_resolve_argv0(mount: Ext2Mount) -> ExecResolveResult !{unsafe} {
-    match kernel_exec_argv0_name() {
-        ExecArgv0NameResult::Invalid => { return ExecResolveResult::NotFound; }
-        ExecArgv0NameResult::Name(name) => {
-            return kernel_exec_resolve_ext2_name(mount, name);
+// GitHub issue #249: argv[0] is the same path ash passes to execve() for
+// an ordinary external-command invocation -- the only path information
+// this needs, from the exec's own argv copy. Requires a leading '/'
+// (relative paths unsupported, same as every existing scenario) and looks
+// the name up with that slash stripped. The name stays a local slice of
+// argv: it is tied to the exec's argv page and cannot ride in a variant.
+fn kernel_exec_resolve_argv0(mount: Ext2Mount, argv: borrow []u8)
+        -> ExecResolveResult !{unsafe} {
+    if (argv.len < 2) { return ExecResolveResult::NotFound; }
+    let first_byte: u8 = argv[0];
+    if (first_byte != 0x2F) { return ExecResolveResult::NotFound; }
+    let name_bytes: []u8 = argv[1..<argv.len];
+    let mut end: usize = name_bytes.len;
+    for position: usize in 0..<name_bytes.len {
+        let current: u8 = name_bytes[position];
+        if (current == 0) {
+            end = position;
+            break;
         }
     }
+    if (end < name_bytes.len) {
+        return kernel_exec_resolve_ext2_name(mount, name_bytes[0..<end]);
+    }
+    return ExecResolveResult::NotFound;
 }
 
 fn kernel_process_child_exec_map_result(
@@ -754,7 +738,7 @@ fn kernel_initial_process_map(rootfs_ready: bool,
                               rootfs_inode: usize,
                               rootfs_length: usize,
                               fallback_plan: DistroElfLoadPlan,
-                              argv: []u8,
+                              argv: borrow []u8,
                               argc: usize) -> ProcessImageMapResult {
     if (rootfs_ready) {
         return process_image_map_ext2(
@@ -764,11 +748,33 @@ fn kernel_initial_process_map(rootfs_ready: bool,
     return process_image_map(fallback_plan, argv, argc);
 }
 
+// GitHub issue #693 step 5: the exec owns a page holding its argv for its
+// whole duration, allocated before anything is torn down. The map path
+// takes the run lock, so argv cannot be the process record's command line
+// read under a guard held across it.
 fn kernel_process_child_exec_prepare() -> KernelChildExecPrepareResult {
     if (kernel_process_is_child() == false ||
         kernel_syscall_exec_pending() == false) {
         return KernelChildExecPrepareResult::NotChildOrPending;
     }
+    match page_alloc(PageOwnerTag::ExecArgs) {
+        PageAllocResult::OutOfMemory => {
+            return KernelChildExecPrepareResult::ArgvOutOfMemory;
+        }
+        PageAllocResult::Allocated(args_page) => {
+            let args: [u8; PAGE_SIZE..] = page_bytes(args_page);
+            let argv: [u8; 512..] = args[0..<512];
+            kernel_syscall_exec_argv_copy(argv);
+            let result: KernelChildExecPrepareResult =
+                kernel_process_child_exec_prepare_with(argv);
+            page_free(args_page);
+            return result;
+        }
+    }
+}
+
+private fn kernel_process_child_exec_prepare_with(argv: borrow []u8)
+        -> KernelChildExecPrepareResult {
     kernel_process_trace_exec_prepare();
     if (kernel_syscall_persistent_shell_active()) {
         kernel_syscall_persistent_shell_checkpoint_exec_prepare(
@@ -784,7 +790,7 @@ fn kernel_process_child_exec_prepare() -> KernelChildExecPrepareResult {
     let mut target_ext2_inode: usize = saved_rootfs_inode;
     let mut target_ext2_length: usize = saved_rootfs_length;
     if (ext2_mount_ready) {
-        match kernel_exec_resolve_argv0(saved_ext2_mount) {
+        match kernel_exec_resolve_argv0(saved_ext2_mount, argv) {
             ExecResolveResult::NotFound => {}
             ExecResolveResult::Resolved(image) => {
                 target_plan = image.plan;
@@ -835,7 +841,7 @@ fn kernel_process_child_exec_prepare() -> KernelChildExecPrepareResult {
                         images.interpreter.inode,
                         images.interpreter.file_length,
                         kernel_exec_interpreter_bias(images.primary.plan),
-                        kernel_syscall_exec_argv(),
+                        argv,
                         kernel_syscall_exec_argc(),
                         child_root) {
                     ProcessImagePairProbeResult::Invalid => {
@@ -891,12 +897,12 @@ fn kernel_process_child_exec_prepare() -> KernelChildExecPrepareResult {
         return kernel_process_child_exec_map_result(
             process_image_map_ext2_in_root(
             target_plan, saved_ext2_mount, target_ext2_inode,
-            target_ext2_length, kernel_syscall_exec_argv(),
+            target_ext2_length, argv,
             kernel_syscall_exec_argc(), child_root), child_root);
     } else {
         return kernel_process_child_exec_map_result(
             process_image_map_in_root(
-            target_plan, kernel_syscall_exec_argv(),
+            target_plan, argv,
             kernel_syscall_exec_argc(), child_root), child_root);
     }
 }

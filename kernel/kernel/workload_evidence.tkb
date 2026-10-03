@@ -1795,7 +1795,7 @@ fn workload_ordinary_placement_note_syscall(number: usize) {
     let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
     let guard = process_run_lock();
     let command_line: [u8; 512..] =
-        scheduled_process_command_line(kernel_syscall_process_slot());
+        scheduled_process_command_line(guard, kernel_syscall_process_slot());
     let is_busybox_sleep: bool =
         slice_eq(command_line[0..<11], bs"/bin/sleep\0");
     let parent_pid: usize = kernel_process_current_parent_pid(guard);

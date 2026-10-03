@@ -1524,7 +1524,7 @@ fn process_image_exec_resume_root() {
 // blob contains.
 fn process_image_prepare_stack(page: borrow PageOwner[page],
                                plan: DistroElfLoadPlan,
-                               argv: []u8,
+                               argv: borrow []u8,
                                argc: usize)
         -> ProcessImageStackResult !{unsafe} {
     if (argc < 1 || argc > 32) { return ProcessImageStackResult::Invalid; }
@@ -1624,7 +1624,7 @@ fn process_image_prepare_stack(page: borrow PageOwner[page],
 fn process_dynamic_prepare_stack(page: borrow PageOwner[page],
                                  application: DistroElfLoadPlan,
                                  interpreter_bias: usize,
-                                 argv: []u8,
+                                 argv: borrow []u8,
                                  argc: usize)
         -> ProcessImageStackResult !{unsafe} {
     if (argc < 1 || argc > 32) { return ProcessImageStackResult::Invalid; }
@@ -2109,7 +2109,7 @@ fn process_image_map_segments(plan: DistroElfLoadPlan,
 fn process_image_pair_probe(primary: DistroElfLoadPlan,
                             interpreter: DistroElfLoadPlan,
                             interpreter_bias: usize,
-                            argv: []u8,
+                            argv: borrow []u8,
                             argc: usize)
         -> ProcessImagePairProbeResult {
     // GitHub issue #258 step 2: this path's own layout, seeded before any
@@ -2300,7 +2300,7 @@ fn process_image_pair_map_ext2_in_root(
         interpreter_inode: usize,
         interpreter_length: usize,
         interpreter_bias: usize,
-        argv: []u8,
+        argv: borrow []u8,
         argc: usize,
         root: usize) -> ProcessImagePairProbeResult {
     if (scheduled_process_slot_valid(root) == false ||
@@ -2320,7 +2320,7 @@ fn process_image_pair_map_ext2_in_root(
 }
 
 fn process_image_map_current(plan: DistroElfLoadPlan,
-                             argv: []u8,
+                             argv: borrow []u8,
                              argc: usize) -> ProcessImageMapResult {
     // GitHub issue #516: the same refusal, through this function's own
     // "cannot map" case.
@@ -2424,7 +2424,7 @@ fn process_image_map_current(plan: DistroElfLoadPlan,
 }
 
 fn process_image_map(plan: DistroElfLoadPlan,
-                     argv: []u8,
+                     argv: borrow []u8,
                      argc: usize) -> ProcessImageMapResult {
     process_image_set_target_root_here(0);
     return process_image_map_current(plan, argv, argc);
@@ -2438,7 +2438,7 @@ fn process_image_map_ext2(plan: DistroElfLoadPlan,
                           mount: Ext2Mount,
                           inode: usize,
                           file_length: usize,
-                          argv: []u8,
+                          argv: borrow []u8,
                           argc: usize) -> ProcessImageMapResult {
     process_image_set_target_root_here(0);
     process_image_ext2_source(mount, inode, file_length);
@@ -2451,7 +2451,7 @@ fn process_image_map_ext2_in_root(plan: DistroElfLoadPlan,
                                   mount: Ext2Mount,
                                   inode: usize,
                                   file_length: usize,
-                                  argv: []u8,
+                                  argv: borrow []u8,
                                   argc: usize,
                                   root: usize) -> ProcessImageMapResult {
     if (scheduled_process_slot_valid(root) == false ||
@@ -2466,7 +2466,7 @@ fn process_image_map_ext2_in_root(plan: DistroElfLoadPlan,
 }
 
 fn process_image_map_in_root(plan: DistroElfLoadPlan,
-                             argv: []u8,
+                             argv: borrow []u8,
                              argc: usize,
                              root: usize) -> ProcessImageMapResult {
     if (scheduled_process_slot_valid(root) == false ||

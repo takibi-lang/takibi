@@ -419,7 +419,7 @@ fn ext2_lookup_root(mount: Ext2Mount, name: []u8)
     return ext2_lookup_directory(mount, 2, name);
 }
 
-fn ext2_lookup_path_from(mount: Ext2Mount, start_inode: usize, name: []u8)
+fn ext2_lookup_path_from(mount: Ext2Mount, start_inode: usize, name: borrow []u8)
         -> Ext2LookupResult !{unsafe} {
     if (name.len == 0 || name.len > 255) {
         return Ext2LookupResult::Invalid;
@@ -477,7 +477,7 @@ fn ext2_lookup_path_from(mount: Ext2Mount, start_inode: usize, name: []u8)
     return Ext2LookupResult::Found(current_inode);
 }
 
-fn ext2_lookup_path(mount: Ext2Mount, name: []u8)
+fn ext2_lookup_path(mount: Ext2Mount, name: borrow []u8)
         -> Ext2LookupResult !{unsafe} {
     return ext2_lookup_path_from(mount, 2, name);
 }

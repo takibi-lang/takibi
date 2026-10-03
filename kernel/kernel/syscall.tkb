@@ -362,8 +362,17 @@ fn kernel_syscall_exec_argc() -> usize {
     process_run_unlock(guard);
     return value;
 }
-fn kernel_syscall_exec_argv() -> []u8 {
-    return scheduled_process_command_line(kernel_syscall_process_slot());
+// GitHub issue #693 step 5: the exec's argv, copied under the run guard into
+// a buffer the exec owns, as Linux's linux_binprm and FreeBSD's image_args
+// do. The record's command line stays the ps/procfs cache; the exec's map
+// path takes the run lock itself, so it cannot read the record under a
+// guard held across it.
+fn kernel_syscall_exec_argv_copy(destination: borrow [u8; 512..]) !{unsafe} {
+    let slot: usize = kernel_syscall_process_slot();
+    let guard = process_run_lock();
+    let copied: usize = slice_copy(destination as []u8,
+        scheduled_process_command_line(guard, slot) as []u8);
+    process_run_unlock(guard);
 }
 fn kernel_syscall_exec_clear() {
     // No caller holds the run lock (test_driver's exec handoff).
@@ -2784,7 +2793,7 @@ private fn syscall_terminal_ppoll_probe() -> bool {
     let slot: usize = kernel_syscall_process_slot();
     if (scheduled_process_slot_valid(slot) == false) { return false; }
     let guard = process_run_lock();
-    let command = scheduled_process_command_line(slot);
+    let command = scheduled_process_command_line(guard, slot);
     let expected = bs"/bin/ppoll-probe\0";
     let mut matches: bool = true;
     for index: usize in 0..<17 {
@@ -3382,6 +3391,10 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
         }
         KernelChildExecPrepareResult::StaticMapOutOfMemory => {
             kernel_process_exec_failure_set(KernelChildExecPrepareResult::StaticMapOutOfMemory);
+            kernel_syscall_fail_stop(frame_sp);
+        }
+        KernelChildExecPrepareResult::ArgvOutOfMemory => {
+            kernel_process_exec_failure_set(KernelChildExecPrepareResult::ArgvOutOfMemory);
             kernel_syscall_fail_stop(frame_sp);
         }
     }

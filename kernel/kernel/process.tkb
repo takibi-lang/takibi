@@ -1938,8 +1938,13 @@ fn scheduled_process_set_command_line(guard: borrow ProcessRunGuard[lock],
     record.command_line_length = length;
 }
 
-fn scheduled_process_command_line(slot: usize) -> [u8; 512..] {
-    return scheduled_process_record_at(slot).command_line as [u8; 512..];
+// GitHub issue #693 step 5: the command line is the ps/procfs cache, read
+// under the run guard and gone with it. An exec that needs its argv past the
+// guard copies it into a page it owns (kernel_syscall_exec_argv_copy).
+fn scheduled_process_command_line(guard: borrow ProcessRunGuard[lock],
+                                  slot: usize) -> [u8; 512..] @ lock {
+    return scheduled_process_record_locked(guard, slot).command_line
+        as [u8; 512..];
 }
 
 // The parent as a HANDLE and the child as a slot, which looks asymmetric
@@ -4154,6 +4159,7 @@ enum KernelExecFailureReason: u8 {
     NoImageResolved;
     StaticImageInvalid;
     StaticMapOutOfMemory;
+    ArgvOutOfMemory;
     DebuggerAfterCommit;
 }
 private let mut kernel_process_exec_failure_reason: KernelExecFailureReason;
@@ -4171,6 +4177,8 @@ must_use variant KernelChildExecPrepareResult {
     NoImageResolved;
     StaticImageInvalid;
     StaticMapOutOfMemory;
+    // No page for the exec's own copy of its argv.
+    ArgvOutOfMemory;
 }
 private let mut kernel_process_trace_enabled: bool;
 
@@ -4292,6 +4300,7 @@ fn kernel_process_exec_failure_set(result: KernelChildExecPrepareResult) {
         KernelChildExecPrepareResult::NoImageResolved => { kernel_process_exec_failure_reason = KernelExecFailureReason::NoImageResolved; }
         KernelChildExecPrepareResult::StaticImageInvalid => { kernel_process_exec_failure_reason = KernelExecFailureReason::StaticImageInvalid; }
         KernelChildExecPrepareResult::StaticMapOutOfMemory => { kernel_process_exec_failure_reason = KernelExecFailureReason::StaticMapOutOfMemory; }
+        KernelChildExecPrepareResult::ArgvOutOfMemory => { kernel_process_exec_failure_reason = KernelExecFailureReason::ArgvOutOfMemory; }
     }
 }
 
@@ -4315,6 +4324,7 @@ fn kernel_process_exec_failure_render() {
         KernelExecFailureReason::NoImageResolved => { kernel_boot_log("no-image-resolved\n"); }
         KernelExecFailureReason::StaticImageInvalid => { kernel_boot_log("static-image-invalid\n"); }
         KernelExecFailureReason::StaticMapOutOfMemory => { kernel_boot_log("static-map-out-of-memory\n"); }
+        KernelExecFailureReason::ArgvOutOfMemory => { kernel_boot_log("argv-out-of-memory\n"); }
         KernelExecFailureReason::DebuggerAfterCommit => { kernel_boot_log("debugger-after-commit\n"); }
     }
 }
