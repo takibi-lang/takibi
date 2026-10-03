@@ -190,8 +190,7 @@ The rest of the group, and what each relies on (GitHub issue #598):
   object from the pool, whose lock covers the allocation.
 - **`getpeername`, `setsockopt`** touch only the caller's memory.
 - **`sendfile`** is an ext2 reader (counted at syscall entry, as `read` is).
-  It writes through `uart_user_write`, the queue `write(1)` uses, which on a
-  peer is its console ring. It advances the file position only by the bytes
+  It writes through `uart_user_write`, the queue `write(1)` uses, which is shared by all CPUs under the console lock. It advances the file position only by the bytes
   the queue took.
 - The socket evidence counters in
   `kernel/kernel/syscall_test_evidence.tkb`, and the listener-ready flag in
@@ -337,48 +336,41 @@ interleaving.
 Ordinary peer log lines use a bounded per-CPU publication ring. A peer builds
 one complete line locally and publishes its sequence with release ordering;
 core 0 copies a stable record with acquire ordering and alone updates the
-retained log and interrupt-driven UART queue. Overwrite and truncation are
+retained log. The shared UART queue is separately locked. Overwrite and truncation are
 reported. Fatal and DDB paths bypass this channel and never wait for its
 consumer.
 
-A peer's userspace terminal output (GitHub issue #534) takes the same route
-through its own channel, `kernel/printk/peer_console.tkb`, and never touches
-the PL011. A write on a peer publishes up to sixteen 64-byte records into
-that CPU's ring and returns the count the ring took. Core 0 moves a record
-into its transmit queue only when all of it fits, so a record reaches the
-wire unbroken. It drains at syscall entry and on a timer interrupt taken from
-EL0, and both points lie between its own lines. Core 0's count of consumed
-records travels back as a publication record too, and a slot is reused only
-after that count says so. So a full ring is a short count, never a drop. A
-peer that can hand over nothing retries on its own tick rather than sleeping
-on the TX interrupt. Records from different CPUs interleave only at record
-boundaries. While the queue is stood down for DDB or a fatal report, nothing
-is moved, and published records wait there. The maintained peer process makes
-one write of seventeen 63-byte lines into the sixteen-record ring. ONLCR adds
-sixteen CR bytes to the accepted prefix, so it observes the exact 1008-byte
-short count and retries the remaining bytes. One common view compares
-the seventeen records, in order and byte for byte; a second compares the
-kernel's verdict. The verdict is a peer kernel log line, which crosses a
-different channel, so where it lands among the records is drain timing, not a
-contract: after record 16 on QEMU, and after record 8 on RPi5, where eight
-records fill the 512-byte transmit queue. Other lines land between the
-records too, and every record still arrives whole, so record-boundary
-interleaving is executable on both platforms rather than only specified here.
+Userspace terminal output on every CPU appends to one queue under the console
+lock, with room measurement, ONLCR encoding, enqueue, FIFO drain and TX interrupt
+mask update in the same section. The guard is IRQ-masking and innermost under
+the process-run lock. A process's successive writes preserve their accepted
+chunk order across CPU migration. Concurrent writers may interleave between
+bounded chunks, not inside an admitted chunk or a CR/LF pair. A writer that
+cannot admit any byte waits on UartTx on any CPU; the room recheck and wake scan
+are under the run lock, and the drain releases the console lock before waking.
+The maintained peer writer verifies peer/core0/peer migration and an alternating
+parent/child sequence on distinct CPUs, with getcpu bracketing each real write.
+It then writes seventeen 63-byte lines, reports the actual first count, and
+retries until all 1071 input bytes are accepted. Common views compare the
+ordering sequence, all seventeen lines and the completion verdict on both
+platforms. A kernel log verdict crosses a separate channel and need not follow
+the last terminal record physically.
 
 The UART-BREAK DDB lanes also make a BREAK land while a peer record is
 published but undrained. Their runner sets `kernel_ddb_peer_console_test_enabled`
 at the load checkpoint, and `kernel_ddb_peer_console_hold_armed` when the hold
 is wanted: at the start on QEMU, where the BREAK lands mid-boot, and only
-before the debugger half on the board, because every terminal write a process
-on the peer CPU makes waits behind the held record. Until it is armed the
-writer sleeps. The same process then waits until core 0 has drained
-all seventeen records, publishes a Holding state, writes one more record, and
+before the debugger half on the board, to exercise the explicit held-record
+debug fixture. Until it is armed the writer sleeps. The same process then waits until core 0 has drained
+the legacy test channel, publishes a Holding state, requests one debug record, and
 reports it Pending. Core 0's drain leaves a CPU's ring alone while its state is
 not Clear. DDB entry reports `ddb: peer console=pending` and publishes a
 release to every peer. The peer acts on that release only after `continue`
 lets it run again; it clears its state, and core 0 drains the record into the
 restored queue. Both directions cross publication records, and no lock is
-taken. On every other boot the flag is clear and the process exits at its
+taken. This record is published by the fixture handler, not by write(2).
+The legacy ring is also held during the ordering fixture so restoring the old
+terminal route reorders its lines deterministically. On every other boot the flag is clear and the process exits at its
 first verdict, as before.
 
 The hold covers the whole CPU's output ring, including a shell prompt when
@@ -409,9 +401,8 @@ new interrupt. Whole user-output chunks are admitted under this guard too,
 so TCSETSW cannot apply between a peer's settings snapshot and publication.
 Echo operations and the tagged TX queue are covered by the console lock
 (which masks interrupts, as the bare mask it replaced did); a signal flush
-cannot interrupt a peer-record peek/retire pair. Core 0 is still the only
-writer today: a peer's terminal write still publishes to its ring, until the
-second stage of GitHub issue #663 moves peers onto the same queue. Single-word atomic
+cannot interrupt a debug-record peek/retire pair. Terminal producers on every
+CPU append to the same queue under the guard. Single-word atomic
 publication carries output pause and input-throttle requests to TX paths
 that cannot acquire the process-run lock. See `TERMINAL.md`.
 

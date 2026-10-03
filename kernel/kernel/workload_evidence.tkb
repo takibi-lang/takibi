@@ -195,6 +195,8 @@ struct WorkloadBusyPair {
     // A UART-BREAK DDB lane keeps it for one more record: held, pending,
     // then released by the debugger's entry.
     peer_console_pid: usize;
+    peer_console_order_step: usize;
+    peer_console_first_count: usize;
     peer_console_first_seen: bool;
     peer_console_initial_reported: bool;
     peer_console_holding: bool;
@@ -1388,13 +1390,41 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
             return 0;
         }
         workload_busy_pair.peer_console_pid = pid;
-        // The first write must meet a ring that core 0 is not emptying, or a
-        // drain landing between its chunks makes room and the write is no
-        // longer short -- a host stall on the peer's CPU was enough
-        // (GitHub issue #665). Held until the writer has reported that write.
+        // The legacy ring stays held through the ordering fixture. Shared
+        // terminal writes ignore it; restoring the old peer route reorders
+        // the migrating writer's lines. The first count report releases it.
         peer_console_ddb_hold(SECONDARY_CORE_ID);
         process_run_unlock(guard);
         return SECONDARY_CORE_ID;
+    }
+    // The order fixture reports after each real EL0 write. Steps 1-3 are
+    // one writer moving peer/core0/peer; steps 4-6 alternate parent/child.
+    // The opcode is outside the first-write count range [0, 1071].
+    if (first == 0x663) {
+        let parent: usize = kernel_process_current_parent_pid(guard);
+        let writer: bool = pid == workload_busy_pair.peer_console_pid;
+        let child: bool = parent == workload_busy_pair.peer_console_pid;
+        if (writer == false && child == false) {
+            process_run_unlock(guard);
+            return 0;
+        }
+        if (total == 0) {
+            let step: usize = workload_busy_pair.peer_console_order_step;
+            process_run_unlock(guard);
+            return step;
+        }
+        let mut expected_cpu: usize = SECONDARY_CORE_ID;
+        if (total == 2 || total == 5) { expected_cpu = 0; }
+        let mut expected_writer: bool = writer;
+        if (total == 5) { expected_writer = child; }
+        if (expected_writer == false || cpu_id() != expected_cpu ||
+            total != workload_busy_pair.peer_console_order_step + 1 || total > 6) {
+            process_run_unlock(guard);
+            return 0;
+        }
+        workload_busy_pair.peer_console_order_step = total;
+        process_run_unlock(guard);
+        return total;
     }
     if (pid != workload_busy_pair.peer_console_pid ||
         workload_busy_pair.peer_console_reported ||
@@ -1404,29 +1434,31 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
         return 0;
     }
     if (workload_busy_pair.peer_console_initial_reported == false) {
-        // The first report is (1008, 0), made right after the first write;
-        // it lets core 0 drain again so the writer can retry the rest. The
-        // second is (1008, 1071), once all of it is accepted.
+        // Record the actual first count and require the same count when
+        // all 1071 input bytes have been admitted. Queue drain timing can
+        // change that count without changing the terminal's ordering.
         if (workload_busy_pair.peer_console_first_seen == false) {
             peer_console_ddb_clear(SECONDARY_CORE_ID);
             if (workload_busy_pair.peer_read_reported == false ||
-                first != 1008 || total != 0) {
+                first == 0 || first > 1071 || total != 0 ||
+                workload_busy_pair.peer_console_order_step != 6) {
                 workload_busy_pair.refused = workload_busy_pair.refused + 1;
                 process_run_unlock(guard);
                 return 0;
             }
+            workload_busy_pair.peer_console_first_count = first;
             workload_busy_pair.peer_console_first_seen = true;
             process_run_unlock(guard);
             return 1;
         }
-        if (first != 1008 || total != 1071) {
+        if (first != workload_busy_pair.peer_console_first_count || total != 1071) {
             workload_busy_pair.refused = workload_busy_pair.refused + 1;
             process_run_unlock(guard);
             return 0;
         }
         workload_busy_pair.peer_console_initial_reported = true;
         kernel_boot_log(
-            "workload: peer console short-wrote 1008 of 1071 bytes, then delivered the final record\n");
+            "workload: peer console accepted all 1071 bytes through the shared queue after ordered writes on both CPUs\n");
         // GitHub issue #640: the boot's last stretch, so a number any earlier
         // stage reached is in the table by now.
         syscall_unimplemented_report();
@@ -1467,6 +1499,10 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
         if (workload_busy_pair.peer_console_pending ||
             first != 63 || total != 63) {
             workload_busy_pair.refused = workload_busy_pair.refused + 1;
+            process_run_unlock(guard);
+            return 0;
+        }
+        if (kernel_log_peer_console_ddb_fixture() != 63) {
             process_run_unlock(guard);
             return 0;
         }

@@ -1,0 +1,96 @@
+// Two-core evidence for the production console lock. The peer first bypasses
+// it to demonstrate that the detector observes entry while core 0 holds it;
+// then the same rendezvous takes the real lock and entry waits for release.
+// Detector words are independent atomic cells, not console-path counters.
+// Current limitations (2026-10-03): init runs this once; only core 1
+// participates through the secondary probe dispatcher. This tests exclusion,
+// not physical UART timing or an abandoned lock holder.
+use "kernel/lib/atomic_word.tkb";
+use "kernel/lib/execution_model.tkb";
+use "kernel/printk/console_lock.tkb";
+
+private let mut console_probe_armed: AtomicWord;
+private let mut console_probe_phase: AtomicWord;
+private let mut console_probe_ready: AtomicWord;
+private let mut console_probe_go: AtomicWord;
+private let mut console_probe_arrived: AtomicWord;
+private let mut console_probe_entered: AtomicWord;
+private let mut console_probe_done: AtomicWord;
+
+fn console_contention_is_armed() -> bool {
+    return atomic_word_load(&console_probe_armed) == 1;
+}
+
+fn console_contention_secondary_run() {
+    let phase: usize = atomic_word_load(&console_probe_phase);
+    // Rendezvous outside the lock first: the idle peer may otherwise be
+    // waiting in an unrelated console write before it reaches this probe.
+    atomic_word_store(&console_probe_ready, 1);
+    if (console_probe_wait(&console_probe_go) == false) {
+        atomic_word_store(&console_probe_armed, 0);
+        atomic_word_store(&console_probe_done, 1);
+        return;
+    }
+    // This observation belongs to the detector, before the tested acquire.
+    let held: bool = console_lock_is_held();
+    if (held) { atomic_word_store(&console_probe_arrived, 1); }
+    else { atomic_word_store(&console_probe_arrived, 2); }
+    if (phase == 1) {
+        atomic_word_store(&console_probe_entered, 1);
+    } else {
+        let guard = console_lock();
+        atomic_word_store(&console_probe_entered, 1);
+        console_unlock(guard);
+    }
+    atomic_word_store(&console_probe_armed, 0);
+    atomic_word_store(&console_probe_done, 1);
+}
+
+private fn console_probe_wait(cell: *AtomicWord) -> bool {
+    let start: i64 = read_cntpct();
+    let window: i64 = read_cntfrq() >> 1;
+    while (read_cntpct() - start < window) {
+        if (atomic_word_load(cell) != 0) { return true; }
+    }
+    return false;
+}
+
+private fn console_probe_phase_run(phase: usize) -> bool {
+    atomic_word_store(&console_probe_phase, phase);
+    atomic_word_store(&console_probe_ready, 0);
+    atomic_word_store(&console_probe_go, 0);
+    atomic_word_store(&console_probe_arrived, 0);
+    atomic_word_store(&console_probe_entered, 0);
+    atomic_word_store(&console_probe_done, 0);
+    atomic_word_store(&console_probe_armed, 1);
+    if (console_probe_wait(&console_probe_ready) == false) {
+        atomic_word_store(&console_probe_armed, 0);
+        return false;
+    }
+    let guard = console_lock();
+    atomic_word_store(&console_probe_go, 1);
+    let arrived: bool = console_probe_wait(&console_probe_arrived);
+    let mut expected: bool = false;
+    if (arrived && atomic_word_load(&console_probe_arrived) == 1) {
+        if (phase == 1) {
+            expected = console_probe_wait(&console_probe_entered);
+        } else {
+            expected = atomic_word_load(&console_probe_entered) == 0;
+        }
+    }
+    console_unlock(guard);
+    let done: bool = console_probe_wait(&console_probe_done);
+    atomic_word_store(&console_probe_armed, 0);
+    return arrived && expected && done &&
+        atomic_word_load(&console_probe_entered) == 1;
+}
+
+fn console_contention_probe() -> bool {
+    if (console_probe_phase_run(1) == false) { return false; }
+    return console_probe_phase_run(2);
+}
+
+fn console_contention_execution_model_assumption() {
+    static_assert(KERNEL_ACTIVE_CORES >= 2,
+                  "console contention evidence needs a primary and a peer");
+}

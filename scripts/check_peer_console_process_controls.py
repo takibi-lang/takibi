@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep the peer-console view tied to a real admitted EL0 short write."""
+"""Keep the peer-console view tied to real admitted EL0 shared-queue writes."""
 
 from pathlib import Path
 
@@ -11,6 +11,9 @@ ROOT = Path(__file__).resolve().parent.parent
 def sources() -> dict[str, str]:
     names = [
         "Makefile",
+        "kernel/printk/log.tkb",
+        "kernel/tests/common/views/console_order.expected",
+        "kernel/tests/common/views/console_order.filter",
         "kernel/arch/arm64/kernel/peer_read.tkb",
         "kernel/kernel/process.tkb",
         "kernel/kernel/syscall.tkb",
@@ -41,8 +44,8 @@ def problems(tree: dict[str, str]) -> list[str]:
         if shape not in payload:
             result.append(f"peer payload lost operation: {shape}")
     for condition in (
-        "first != 1008 || total != 1071",
-        "first != 1008 || total != 0",
+        "first != workload_busy_pair.peer_console_first_count || total != 1071",
+        "first == 0 || first > 1071 || total != 0",
         "total != 1071",
         "workload_busy_pair.peer_console_reported ||\n"
         "        cpu_id() != SECONDARY_CORE_ID",
@@ -71,12 +74,10 @@ def problems(tree: dict[str, str]) -> list[str]:
        "        process_run_unlock(guard);\n" \
        "        return SECONDARY_CORE_ID;" not in evidence:
         result.append("registration no longer hands the writer its peer CPU")
-    # GitHub issue #665: the first write's short count is the ring's room only
-    # if core 0 does not drain between its chunks. Registration holds the
-    # drain, and the writer's first report -- made before it retries -- is
-    # what lets core 0 go on.
+    # Holding the old ring makes regression to separate peer admission
+    # reorder the migration fixture rather than pass by drain timing.
     if "        workload_busy_pair.peer_console_pid = pid;\n" \
-       "        // The first write must meet a ring" not in evidence:
+       "        // The legacy ring stays held through the ordering fixture" not in evidence:
         result.append("registration no longer holds core 0's drain of the "
                       "writer's ring for its first write")
     if "svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG, first, 0, 0, 0) == 0" \
@@ -128,16 +129,33 @@ def problems(tree: dict[str, str]) -> list[str]:
             "^peer user console: record=":
         result.append("view no longer selects exactly the numbered records")
     if tree["kernel/tests/common/views/peer_console_verdict.filter"].strip() != \
-            "^workload: peer console short-wrote" or \
-            "1008 of 1071 bytes" not in \
+            "^workload: peer console accepted all" or \
+            "all 1071 bytes through the shared queue" not in \
             tree["kernel/tests/common/views/peer_console_verdict.expected"]:
-        result.append("verdict view no longer fixes the short-write verdict")
+        result.append("verdict view no longer fixes the shared-queue verdict")
     stop = "--stop-marker 'peer user console: record=17/17 " \
            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'"
     for runner in ("scripts/run_kernel_qemutest.sh",
                    "scripts/run_kernel_hwtest_rpi5.sh"):
         if stop not in tree[runner]:
             result.append(f"{runner} can stop before the final record")
+    log = tree["kernel/printk/log.tkb"]
+    writer = log.split("private fn uart_user_write_locked(", 1)[1].split("// Queue what fits", 1)[0]
+    if "peer_console_publish" in writer or "cpu != 0" in writer:
+        result.append("ordinary peer writes still use the separate record ring")
+    if "workload_busy_pair.peer_console_order_step != 6" not in evidence:
+        result.append("verdict does not require every ordering step")
+    if "total != workload_busy_pair.peer_console_order_step + 1" not in evidence:
+        result.append("ordering reports can skip a step")
+    if "parent == workload_busy_pair.peer_console_pid" not in evidence:
+        result.append("second writer is not tied to the first writer's child")
+    order = tree["kernel/tests/common/views/console_order.expected"].splitlines()
+    if order != ["console order: 1 migrating peer", "console order: 2 migrating core0",
+                 "console order: 3 migrating peer", "console order: 4 parent peer",
+                 "console order: 5 child core0", "console order: 6 parent peer"]:
+        result.append("view does not fix migrating and two-process write order")
+    if tree["kernel/tests/common/views/console_order.filter"].strip() != "^console order:":
+        result.append("ordering view lost its exact selection")
     return result
 
 
@@ -153,10 +171,10 @@ def main() -> int:
         "write syscall": ("kernel/arch/arm64/kernel/peer_read.tkb",
                           "const WRITE_SYSCALL", "const OLD_WRITE_SYSCALL"),
         "short count": ("kernel/kernel/workload_evidence.tkb",
-                        "first != 1008 || total != 1071",
+                        "first != workload_busy_pair.peer_console_first_count || total != 1071",
                         "first != 1071 || total != 1071"),
         "first count report": ("kernel/kernel/workload_evidence.tkb",
-                               "first != 1008 || total != 0",
+                               "first == 0 || first > 1071 || total != 0",
                                "first != 1071 || total != 0"),
         "drain held for the first write": (
             "kernel/kernel/workload_evidence.tkb",
@@ -213,14 +231,8 @@ def main() -> int:
         # counts both, so mutating the first copy is enough here.
         "pin failure ignored": (
             "kernel/arch/arm64/kernel/peer_read.tkb",
-            "if (peer_pin(peer_cpu) == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }\n"
-            "    while (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {}\n"
-            "\n"
-            "    let first: usize = svc5(WRITE_SYSCALL, 1,",
-            "if (peer_pin(peer_cpu) == false) { }\n"
-            "    while (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {}\n"
-            "\n"
-            "    let first: usize = svc5(WRITE_SYSCALL, 1,"),
+            "if (peer_pin(peer_cpu) == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }",
+            "if (peer_pin(peer_cpu) == false) { }"),
         "init entry": ("kernel/tests/ext2/inittab", "::once:/bin/peer-console",
                        "::once:/bin/old-console"),
         "background tty": ("kernel/tests/ext2/inittab",
@@ -230,6 +242,22 @@ def main() -> int:
         "qemu stop": ("scripts/run_kernel_qemutest.sh", "--stop-marker",
                       "--old-stop-marker"),
     }
+    mutations.update({
+        "all ordering steps": ("kernel/kernel/workload_evidence.tkb",
+                               "workload_busy_pair.peer_console_order_step != 6",
+                               "workload_busy_pair.peer_console_order_step != 0"),
+        "ordered reports": ("kernel/kernel/workload_evidence.tkb",
+                            "total != workload_busy_pair.peer_console_order_step + 1",
+                            "total != workload_busy_pair.peer_console_order_step"),
+        "child identity": ("kernel/kernel/workload_evidence.tkb",
+                           "parent == workload_busy_pair.peer_console_pid",
+                           "parent != workload_busy_pair.peer_console_pid"),
+        "shared peer admission": ("kernel/printk/log.tkb",
+                                  "    let mut taken: usize = 0;",
+                                  "    if (cpu_id() != 0) { return (peer_console_publish(cpu_id(), bytes), false); }\n    let mut taken: usize = 0;"),
+        "wire order": ("kernel/tests/common/views/console_order.expected",
+                       "console order: 1 migrating peer", "console order: 1 core0"),
+    })
     for name, (path, old, new) in mutations.items():
         changed = dict(tree)
         changed[path] = changed[path].replace(old, new, 1)

@@ -232,8 +232,8 @@ def main() -> int:
             # once the console writer's verdict is out. The shell then waits
             # in wait4 for it, and it blocks on uart-rx on the secondary.
             peer_console_viewed = (
-                b"workload: peer console short-wrote 1008 of 1071 bytes, "
-                b"then delivered the final record\n" in received
+                b"workload: peer console accepted all 1071 bytes through the shared queue "
+                b"after ordered writes on both CPUs\n" in received
             )
             if (args.break_source == "uart" and migration_context_sent and
                     peer_console_viewed and not peer_tty_sent and

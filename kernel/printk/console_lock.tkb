@@ -62,3 +62,6 @@ fn console_lock() -> ConsoleGuard[console_tx_lock]
 fn console_unlock(guard: sink ConsoleGuard[console_tx_lock]) {
     mutex_release(&console_tx_lock, guard.flags);
 }
+
+// Observation for the contention detector; this does not acquire the lock.
+fn console_lock_is_held() -> bool { return mutex_is_held(&console_tx_lock); }

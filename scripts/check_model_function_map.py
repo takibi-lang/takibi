@@ -48,8 +48,8 @@ from pass_line import report_pass
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 MODELS = ROOT / "kernel" / "models"
 README = MODELS / "README.md"
-NAME_RE = re.compile(
-    r"`((?:kernel|scheduled_process|virtio_blk|usb_bulk|xhci|msc|disk)_[a-z0-9_]+)`")
+# Function identifiers in mapping cells are not restricted to a prefix.
+NAME_RE = re.compile(r"`([a-z][a-z0-9_]*)`")
 SECTION_RE = re.compile(r"^## (\w+)\.tla\b")
 ACTION_RE = re.compile(r"`(\w+)`")
 ELSEWHERE_RE = re.compile(r"^modelled elsewhere: `(?:(\w+)\.)?(\w+)`$")
@@ -106,7 +106,8 @@ def normalised(body: str) -> str:
 
 def stamped_names(cells: list[str]) -> list[str]:
     """The functions a row maps, then the guards its dropped paths rely on."""
-    return NAME_RE.findall(cells[1]) + NAME_RE.findall(cells[3])
+    guards = re.findall(r"guarded: `([a-z][a-z0-9_]*)`", cells[3])
+    return NAME_RE.findall(cells[1]) + guards
 
 
 def row_hash(names: list[str], sources: str) -> str:
@@ -226,6 +227,33 @@ def controls_fail(tla_defs: dict[str, set[str]], sources: str) -> list[str]:
         failed.append("body edit keeps its stamp")
     if row_hash(["f"], body) == row_hash(["f"], string):
         failed.append("string edit keeps its stamp")
+    # Exercise names through table parsing, not row_hash's explicit name list:
+    # the original prefix allowlist silently omitted every uart_ function.
+    uart_body = body.replace("fn f()", "fn uart_model_map_control()")
+    uart_cells = ["`Writer`", "`uart_model_map_control`", "one byte",
+                  "capacity -- irrelevant to `Writer`: bounded", ""]
+    uart_cells[4] = "`" + row_hash(stamped_names(uart_cells), uart_body) + "`"
+    uart_defs = {"Control": {"Writer"}}
+    if row_errors("Control", uart_cells, uart_defs, uart_body):
+        failed.append("UART positive row refused")
+    changed_errors = row_errors("Control", uart_cells, uart_defs,
+                               uart_body.replace("return 1", "return 2"))
+    if not any("a function it maps changed" in error for error in changed_errors):
+        failed.append("UART body edit keeps its table stamp")
+    absent_cells = uart_cells.copy()
+    absent_cells[1] = "`uart_model_map_control_absent`"
+    absent_errors = row_errors("Control", absent_cells, uart_defs, uart_body)
+    if not any("which no kernel .tkb file defines" in error for error in absent_errors):
+        failed.append("absent UART function accepted")
+    # An unrelated prefix must not recreate the same omission later.
+    other_cells = uart_cells.copy()
+    other_cells[1] = "`console_model_map_control`"
+    other_body = uart_body.replace("uart_model_map_control", "console_model_map_control")
+    other_cells[4] = "`" + row_hash(stamped_names(other_cells), other_body) + "`"
+    other_errors = row_errors("Control", other_cells, uart_defs,
+                              other_body.replace("return 1", "return 2"))
+    if not any("a function it maps changed" in error for error in other_errors):
+        failed.append("another prefix keeps its table stamp")
     return failed
 
 

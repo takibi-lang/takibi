@@ -1,0 +1,6 @@
+console order: 1 migrating peer
+console order: 2 migrating core0
+console order: 3 migrating peer
+console order: 4 parent peer
+console order: 5 child core0
+console order: 6 parent peer

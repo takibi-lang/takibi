@@ -3,11 +3,11 @@
 // the monotonic time at which their first byte was emitted. Userspace writes
 // and the direct crash/DDB UART paths do not enter this ring.
 //
-// Core 0 remains the only retained-log and UART-queue writer. Other cores
-// publish complete bounded lines for core 0 to copy and emit; interrupt-safe
-// classified events remain kernel/diagnostic/event.tkb's job. A peer's
-// userspace output takes the same route through its own channel,
-// kernel/printk/peer_console.tkb, and never enters the retained log.
+// Core 0 remains the only retained-log writer. Other cores publish complete
+// bounded kernel lines for core 0 to copy and emit; interrupt-safe classified
+// events remain kernel/diagnostic/event.tkb's job. Userspace terminal output
+// on every CPU appends to one UART queue under the console lock and never
+// enters the retained log.
 use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/printk/number.tkb";
@@ -686,8 +686,8 @@ fn uart_putc(c: u8) !{logs, unsafe} {
         return;
     }
     if (kernel_log_capture_uart_byte(c) == false) { return; }
-    // The IRQ-owned TX queue is still core-0-only. A peer's direct byte
-    // must not mutate it; ordinary peer log fragments are suppressed above.
+    // A bare peer kernel byte is outside ordinary terminal writes. Complete
+    // peer kernel fragments are suppressed and published separately above.
     if (cpu_id() != 0) {
         uart_tx_spin_store(c);
         return;
@@ -745,8 +745,8 @@ private fn uart_wire_byte(c: u8) !{logs, unsafe} {
             queued = kernel_log_tx_push(guard, c);
             uart_tx_drain_into_fifo(guard);
             let still_pending: bool = uart_terminal_output_pending_locked(guard);
-            console_unlock(guard);
             if (queued && still_pending) { uart_tx_irq_enable(); }
+            console_unlock(guard);
             done = true;
         }
     }
@@ -788,16 +788,13 @@ fn kernel_log_tx_writer_low_water() -> usize {
 private let mut uart_user_write_waits: usize = 0;
 private let mut uart_user_write_sleeps: usize = 0;
 
-// Bytes a user write may queue now; zero means wait. On a peer the answer is
-// the room in its console ring (GitHub issue #534). Before core 0's queue is
-// live there is no queue to wait on and the bytes spin as they always have,
+// Bytes a user write may queue now on any CPU; zero means wait. Before the
+// shared queue is live there is no queue to wait on and the bytes spin as they always have,
 // so the answer is the most one call takes.
 private fn uart_user_write_room_locked(
         guard: borrow ConsoleGuard[console_tx_lock]) -> usize {
     if (terminal_output_paused()) { return 0; }
-    if (cpu_id() == 0 && terminal_echo_pending()) { return 0; }
-    let cpu: usize = cpu_id();
-    if (cpu != 0) { return peer_console_room(cpu); }
+    if (terminal_echo_pending()) { return 0; }
     if (kernel_log_tx_is_live() == false) {
         return KERNEL_LOG_TX_QUEUE_BYTES;
     }
@@ -888,7 +885,16 @@ private fn kernel_log_peer_note_drained(cpu: usize) -> usize !{unsafe} {
     return waited;
 }
 
-// Printed once, near the end of the boot. `worst` names the record that
+// Publish the DDB fixture through its held record channel. Ordinary terminal
+// writes use the shared console queue on every CPU.
+fn kernel_log_peer_console_ddb_fixture() -> usize !{unsafe} {
+    let record = bs"peer user console: queued before DDB, delivered after continue\n";
+    let cpu: usize = cpu_id();
+    kernel_log_peer_stamp_records(cpu, record.len);
+    return peer_console_publish(cpu, record);
+}
+
+// Printed once, near the end of the boot. `worst` names the debug record that
 // waited longest, by its CPU, its length and its first bytes as numbers.
 fn kernel_log_peer_console_report() !{logs, unsafe} {
     kernel_boot_log("console: peer records drained=");
@@ -916,21 +922,13 @@ fn kernel_log_peer_console_report() !{logs, unsafe} {
 
 // Under the console lock. Returns how many bytes were taken and whether the
 // queue still holds something, so the caller can arm the transmit interrupt
-// after it lets go. Never called before the queue is live: that case spins
-// byte by byte through uart_putc, which takes the lock itself.
+// while the guard still serializes the IRQ mask. Before the queue is live,
+// the caller spins byte by byte through uart_putc, which takes the lock itself.
 private fn uart_user_write_locked(
         guard: borrow ConsoleGuard[console_tx_lock], bytes: borrow []u8)
         -> (usize, bool) !{unsafe} {
     if (terminal_output_paused()) { return (0, false); }
-    if (cpu_id() == 0 && terminal_echo_pending()) { return (0, false); }
-    // GitHub issue #534: a peer never touches the PL011 or core 0's queue.
-    // What it hands over is published whole records, and the count is only
-    // what the ring took.
-    let cpu: usize = cpu_id();
-    if (cpu != 0) {
-        kernel_log_peer_stamp_records(cpu, bytes.len);
-        return (peer_console_publish(cpu, bytes), false);
-    }
+    if (terminal_echo_pending()) { return (0, false); }
     let mut taken: usize = 0;
     let mut room: bool = true;
     for index: usize in 0..<KERNEL_LOG_TX_QUEUE_BYTES {
@@ -959,8 +957,8 @@ private fn uart_user_write_locked(
 // turns away is counted when the retried write takes it.
 fn uart_user_write(bytes: borrow []u8) -> usize !{logs, unsafe} {
     if (terminal_output_paused()) { return 0; }
-    if (cpu_id() == 0 && terminal_echo_pending()) { return 0; }
-    if (cpu_id() == 0 && kernel_log_tx_is_live() == false) {
+    if (terminal_echo_pending()) { return 0; }
+    if (kernel_log_tx_is_live() == false) {
         let mut spun: usize = 0;
         for index: usize in 0..<KERNEL_LOG_TX_QUEUE_BYTES {
             if (index < bytes.len) {
@@ -972,13 +970,12 @@ fn uart_user_write(bytes: borrow []u8) -> usize !{logs, unsafe} {
     }
     let guard = console_lock();
     let (taken, still_pending) = uart_user_write_locked(guard, bytes);
-    console_unlock(guard);
     if (still_pending) { uart_tx_irq_enable(); }
+    console_unlock(guard);
     return taken;
 }
 
 fn uart_user_write_note_wait() {
-    if (cpu_id() != 0) { return; }
     let guard = console_lock();
     uart_user_write_waits = uart_user_write_waits + 1;
     console_unlock(guard);
@@ -992,7 +989,6 @@ fn uart_user_write_wait_total() -> usize {
 }
 
 fn uart_user_write_note_sleep() {
-    if (cpu_id() != 0) { return; }
     let guard = console_lock();
     uart_user_write_sleeps = uart_user_write_sleeps + 1;
     console_unlock(guard);
@@ -1673,10 +1669,10 @@ fn kernel_log_execution_model_assumption() {
                   "per-core kernel-log line state cannot survive preemption into another writer");
 }
 
-// Encode within the available room before publishing. CPU 0 masks IRQs
-// across the room query and enqueue; a peer has one non-preemptible producer
-// and its consumer can only increase the available space. Thus a CR/LF pair
-// is admitted together, and a short write always counts whole input bytes.
+// Encode within the available room before publishing. Every CPU holds the
+// console guard across the room query, encoding, enqueue and FIFO drain.
+// Thus a CR/LF pair is admitted together, and a short write counts whole
+// input bytes.
 fn uart_terminal_write_chunk(bytes: borrow []u8, convert: bool) -> usize {
     if (convert == false) { return uart_user_write(bytes); }
     let mut encoded: [u8; 512];
@@ -1715,7 +1711,7 @@ fn uart_terminal_write_chunk(bytes: borrow []u8, convert: bool) -> usize {
             }
         }
     }
-    console_unlock(guard);
     if (pending) { uart_tx_irq_enable(); }
+    console_unlock(guard);
     return accepted;
 }

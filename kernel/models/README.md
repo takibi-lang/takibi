@@ -329,7 +329,7 @@ the device may still write.
 | `ResetFailed` | `virtio_blk_reset`, `msc_abort_unobserved_transfer`, `xhci_halt_and_reset` | failure preserves possible device writes and forbids recovery | controller-specific failure codes -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: every failed reset leaves authority with the device | `5303dcfa2399` |
 | `Disabled` | `virtio_blk_submit`, `disk_status` | later requests are refused while Device authority remains stored | error reporting -- irrelevant to `NoCpuAccessWhileDeviceMayWrite`: it does not touch the allocation | `78e15bcf0908` |
 | `Finish` | `virtio_blk_submit_owned`, `msc_csw_receive_attempt`, `msc_data_receive_once`, `xhci_receive_configuration`, `usb_bulk_xfer` | RX finish returns CPU authority after completion or reset; the unfixed variant also permits timeout | cache instructions -- irrelevant to `UniqueAuthority`: they do not create a token | `7ae352561a66` |
-| `CpuAccess` | `virtio_blk_submit_owned`, `msc_csw_receive_attempt`, `disk_read_sectors`, `usb_disk_initialize_stages`, `xhci_configure` | one CPU read or write through the protected allocation, permitted only with CPU authority | alias syntax and provenance -- irrelevant to `UniqueAuthority`: they cannot create another token, while their access safety requires the separate compiler checks | `46354a7287af` |
+| `CpuAccess` | `virtio_blk_submit_owned`, `msc_csw_receive_attempt`, `disk_read_sectors`, `usb_disk_initialize_stages`, `xhci_configure` | one CPU read or write through the protected allocation, permitted only with CPU authority | alias syntax and provenance -- irrelevant to `UniqueAuthority`: they cannot create another token, while their access safety requires the separate compiler checks | `8a257f2b2e7f` |
 
 `UniqueAuthority` checks that the only token is either in the slot or held by
 the request, including a retained Device token after reset failure.
@@ -369,22 +369,21 @@ modelcheck` requires each to fail:
 
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
-| `WriterEnter` | `syscall_write_segment` | a terminal write is admitted whole under the run lock | fd lookup and the user-memory copy -- irrelevant to `ProgramOrder`: they run before the chunk is admitted and change no queue or lock | `e3b0c44298fc` |
-| `WriterAppend` | `uart_user_write`, `uart_terminal_write_chunk` | the append to the queue under the console lock, or the decision that there is no room; on a peer the publication to its ring, and the run lock let go | short counts and partial chunks -- irrelevant to `ProgramOrder`: a partial chunk is a shorter chunk, and the model already appends each whole | `e3b0c44298fc` |
+| `WriterEnter` | `syscall_write_segment` | a terminal write is admitted whole under the run lock | fd lookup and the user-memory copy -- irrelevant to `ProgramOrder`: they run before the chunk is admitted and change no queue or lock | `dcd8cd24a83d` |
+| `WriterAppend` | `uart_user_write`, `uart_terminal_write_chunk`, `uart_user_write_locked`, `uart_user_write_room_locked`, `syscall_write_segment` | the append to the queue under the console lock, or the decision that there is no room; on every CPU the same queue, and the run lock let go | short counts and partial chunks -- irrelevant to `ProgramOrder`: a partial chunk is a shorter chunk, and the model already appends each whole; nonterminal fd paths -- irrelevant to `ProgramOrder`: they do not append terminal bytes | `291da2198602` |
 | `BlockWriter` | `kernel_process_block_uart_tx` | the writer publishes itself asleep under the run lock; `RECHECK` is the room re-check there | successor choice and the switch -- modelled elsewhere: `Wait4Block.Wait4Block` | `626ecddbdacc` |
-| `TxTake` | `uart_tx_service` | one chunk leaves the queue onto the wire under the console lock and makes room; `NESTED` keeps the lock | the FIFO's capacity and the byte-by-byte drain -- irrelevant to `ProgramOrder`: bytes leave the queue in order, so a chunk taken whole is the same order | `e3b0c44298fc` |
+| `TxTake` | `uart_tx_service`, `uart_tx_drain_into_fifo` | one chunk leaves the queue onto the wire under the console lock and makes room; `NESTED` keeps the lock | the FIFO's capacity and the byte-by-byte drain -- irrelevant to `ProgramOrder`: bytes leave the queue in order, so a chunk taken whole is the same order | `c682c0a9957c` |
 | `TxWake` | `kernel_process_uart_tx_wake_all` | under the run lock, a writer asleep on room becomes runnable | which other processes wait on UartTx -- irrelevant to `NoLostWakeup`: the model has one writer, and each waiter is woken by the same scan | `d28c4a94b108` |
-| `Drain` | `kernel_log_peer_console_drain` | core 0 moves the oldest ring chunk into the queue when it has room, at a moment of its own | the DDB hold that leaves a ring undrained -- irrelevant to `ProgramOrder`: it only delays a drain, and the model already lets a drain be delayed indefinitely | `fd11b3667d1a` |
+| `Drain` | `kernel_log_peer_console_drain` | the old terminal route moves the oldest ring chunk at a moment of its own; the maintained caller uses this only for the debug fixture | the DDB hold that leaves a ring undrained -- irrelevant to `ProgramOrder`: it only delays a drain, and the model already lets a drain be delayed indefinitely | `fd11b3667d1a` |
 | `Migrate` | `kernel_process_timer_schedule` | the process changes CPU between writes, never inside one (`KERNEL_PREEMPTIBLE` is 0) | affinity -- irrelevant to `ProgramOrder`: it only forbids some moves, and the model already allows each one it forbids | `a398af79d438` |
 
-Where the kernel stands against the model: the console lock exists
-(`kernel/printk/console_lock.tkb`, order run -> console) and every core 0
-path and the transmit interrupt (`uart_tx_service`, which lets go of the lock
-before the wake) take it, so `TxTake`, `TxWake` and the core 0 half of
-`WriterAppend` are the `LOCKED = TRUE` actions. A peer's terminal write still
-publishes to its ring and core 0's `Drain` still moves it, now taking the lock
-per record, so peers are still the `LOCKED = FALSE` design until they append
-under the lock themselves.
+Where the kernel stands against the model: terminal writers on every CPU,
+the shared queue and FIFO drain use the console lock, with order run -> console.
+The TX interrupt (`uart_tx_service`) releases it before the wake. Writer-room
+rechecks also take the console lock. The maintained terminal follows
+`LOCKED = TRUE`, `RECHECK = TRUE`, `NESTED = FALSE`. `Drain` remains only for an
+explicit held-record debug fixture; ordinary terminal writes do not use it.
+The retained kernel-log publication stream is separate from terminal ordering.
 
 Properties:
 

@@ -233,6 +233,17 @@ private fn peer_console_refused(first: usize) {
 // seventeen records, one more than the ring can hold, and must therefore be
 // short. Retrying from the returned offset proves the byte count names data
 // that has a defined place in the stream rather than data silently dropped.
+// A report is accepted only after a complete real write bracketed by getcpu.
+private fn peer_console_order_write(bytes: borrow []u8, cpu: usize,
+        step: usize, cpu_bytes: borrow [u8; 4..]) -> bool {
+    if (peer_read_cpu(cpu_bytes) != cpu) { return false; }
+    if (svc5(WRITE_SYSCALL, 1, bytes as *u8 as usize, bytes.len, 0, 0) != bytes.len) {
+        return false;
+    }
+    return peer_read_cpu(cpu_bytes) == cpu &&
+        svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG, 0x663, step, 0, 0) == step;
+}
+
 fn peer_console() {
     let mut cpu_bytes: [u8; 4];
     let output = bs"peer user console: record=01/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=02/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=03/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=04/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=05/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=06/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=07/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=08/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=09/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=10/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=11/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=12/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=13/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=14/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=15/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=16/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\npeer user console: record=17/17 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n";
@@ -264,11 +275,44 @@ fn peer_console() {
     if (peer_pin(peer_cpu) == false) { svc5(EXIT_SYSCALL, 1, 0, 0, 0, 0); }
     while (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {}
 
+    // The legacy peer ring stays held through these writes. A regression
+    // to that route puts core 0's second line before the first peer line.
+    if (peer_console_order_write(bs"console order: 1 migrating peer\n", peer_cpu, 1,
+                                 cpu_bytes as [u8; 4..]) == false) { peer_console_refused(0); }
+    if (peer_pin(0) == false) { peer_console_refused(0); }
+    while (peer_read_cpu(cpu_bytes as []u8) != 0) {}
+    if (peer_console_order_write(bs"console order: 2 migrating core0\n", 0, 2,
+                                 cpu_bytes as [u8; 4..]) == false) { peer_console_refused(0); }
+    if (peer_pin(peer_cpu) == false) { peer_console_refused(0); }
+    while (peer_read_cpu(cpu_bytes as []u8) != peer_cpu) {}
+    if (peer_console_order_write(bs"console order: 3 migrating peer\n", peer_cpu, 3,
+                                 cpu_bytes as [u8; 4..]) == false) { peer_console_refused(0); }
+    let child: usize = svc5(220, 17, 0, 0, 0, 0);
+    if (child == 0) {
+        if (peer_pin(0) == false) { peer_console_refused(0); }
+        while (peer_read_cpu(cpu_bytes as []u8) != 0) {}
+        while (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG, 0x663, 0, 0, 0) < 4) {
+            svc5(NANOSLEEP_SYSCALL, nap as *u8 as usize, 0, 0, 0, 0);
+        }
+        if (peer_console_order_write(bs"console order: 5 child core0\n", 0, 5,
+                                     cpu_bytes as [u8; 4..]) == false) { peer_console_refused(0); }
+        svc5(EXIT_SYSCALL, 0, 0, 0, 0, 0);
+    }
+    if (peer_console_order_write(bs"console order: 4 parent peer\n", peer_cpu, 4,
+                                 cpu_bytes as [u8; 4..]) == false) { peer_console_refused(0); }
+    let mut status: [u8; 4];
+    for index: usize in 0..<4 { status[index] = 255; }
+    if (svc5(260, child, status as *u8 as usize, 0, 0, 0) != child ||
+        status[0] != 0 || status[1] != 0 || status[2] != 0 || status[3] != 0) {
+        peer_console_refused(0);
+    }
+    if (peer_console_order_write(bs"console order: 6 parent peer\n", peer_cpu, 6,
+                                 cpu_bytes as [u8; 4..]) == false) { peer_console_refused(0); }
+
     let first: usize = svc5(WRITE_SYSCALL, 1,
                               output as *u8 as usize, output.len, 0, 0);
     let mut total: usize = first;
-    // Core 0 holds this ring until it hears the first write's count, so the
-    // count is the ring's room and not a race with its drain.
+    // The first count is actual shared-queue admission, not ring capacity.
     if (svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG, first, 0, 0, 0) == 0) {
         peer_console_refused(first);
     }
@@ -285,7 +329,6 @@ fn peer_console() {
     // some CPU to be in EL0 when the BREAK lands, and a pause made of
     // getcpu calls kept this CPU in EL1 most of the time. The sum rides
     // in the poll's unused argument so the loop is not optimized away.
-    let ddb_record = bs"peer user console: queued before DDB, delivered after continue\n";
     let mut action: usize = svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG,
                                  first, total, 0, 0);
     while (action != 2) {
@@ -300,11 +343,10 @@ fn peer_console() {
             action = svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG,
                           0, 0, spin, 0);
         } else if (action == 3) {
-            let ddb_written: usize = svc5(
-                WRITE_SYSCALL, 1, ddb_record as *u8 as usize,
-                ddb_record.len, 0, 0);
+            // S2 keeps this as an explicit held-record fixture request;
+            // the write syscall itself always uses the shared queue.
             action = svc5(WORKLOAD_PROGRESS_SYSCALL, PEER_CONSOLE_TAG,
-                          ddb_written, ddb_written, 0, 0);
+                          63, 63, 0, 0);
         } else {
             for pause: usize in 0..<PEER_CONSOLE_POLL_PAUSE {
                 spin = spin ^ (spin << 13);

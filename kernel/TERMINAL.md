@@ -88,11 +88,13 @@ while terminal output is paused.
 
 The 4096-operation echo queue, the transmit queue and the column and
 wire-state words are covered by one console lock (`kernel/printk/console_lock.tkb`,
-innermost: run, then console), which masks IRQs for every access. Core 0 is
-the only writer of them today; a peer's terminal output still goes through its
-console ring and core 0 moves it in at moments of its own, so its bytes can be
-ordered after later bytes written on core 0 until peers take the same lock
-(GitHub issue #663, `kernel/models/ConsoleTx.tla`).
+innermost: run, then console), which masks IRQs for every access. Terminal
+writers on every CPU append to one queue and drain the FIFO under this lock.
+Each bounded chunk is admitted in lock order; successive writes by one process
+preserve their order across CPU migration. A large write may admit multiple
+chunks, so concurrent writers may interleave at chunk boundaries. Whole CR/LF
+pairs are admitted together. TX interrupt mask updates remain under the same
+guard, preventing a peer's enable from racing core 0's disable.
 The room recheck before blocking and the column, pending-output and writer
 counter queries take that same lock. Calls already inside a section pass its
 guard to the locked helpers. Per-core log publication and emergency capture

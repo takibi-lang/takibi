@@ -248,6 +248,9 @@ fn kernel_secondary_main(context: usize) !{unsafe} {
                 if (occupancy_drain_is_armed()) {
                     occupancy_drain_secondary_run();
                 }
+                if (console_contention_is_armed()) {
+                    console_contention_secondary_run();
+                }
                 if (init_once_contention_is_armed()) {
                     init_once_contention_secondary_run();
                 }

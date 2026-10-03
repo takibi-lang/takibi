@@ -32,8 +32,14 @@ use "kernel/kernel/init_once_contention_evidence.tkb";
 use "kernel/kernel/tcp_connection_contention_evidence.tkb";
 use "kernel/kernel/ext2_mutation_contention_evidence.tkb";
 use "kernel/kernel/signal_contention_evidence.tkb";
+use "kernel/kernel/console_contention_evidence.tkb";
 
 fn contention_probes() !{unsafe} {
+    if (console_contention_probe()) {
+        kernel_boot_log("console contention: peer entry observed with bypass, excluded while held and completed after release ok\n");
+    } else {
+        kernel_boot_log("console contention: failed\n");
+    }
     // GitHub issue #445: the first evidence that this kernel's
     // spinlock EXCLUDES. Everything before it was single-threaded
     // exercise and an instruction-level check.

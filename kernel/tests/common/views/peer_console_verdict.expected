@@ -1,1 +1,1 @@
-workload: peer console short-wrote 1008 of 1071 bytes, then delivered the final record
+workload: peer console accepted all 1071 bytes through the shared queue after ordered writes on both CPUs
