@@ -132,6 +132,7 @@ const LINUX_ELOOP: usize = 0xFFFFFFFFFFFFFFD8;
 const LINUX_ENOEXEC: usize = 0xFFFFFFFFFFFFFFF8;
 // Linux's answer for an ELF interpreter that exists but cannot be used.
 const LINUX_ELIBBAD: usize = 0xFFFFFFFFFFFFFFB0;
+const LINUX_ENOSPC: usize = 0xFFFFFFFFFFFFFFE4;
 // A regular file whose bytes cannot be read. Linux answers execve(2) with
 // this when the header read itself fails, rather than with a verdict about a
 // format it never saw.
@@ -3463,6 +3464,16 @@ fn kernel_syscall_clone_parent_return(parent_sp: usize) {
         frame_ref_from_entry(parent_sp, kernel_process_entry_generation()));
 }
 
+// Preserve the filesystem's closed outcome at the Linux ABI boundary.
+private fn syscall_ext2_write_errno(result: Ext2ResizeResult) -> usize {
+    match result {
+        Ext2ResizeResult::NoSpace => { return LINUX_ENOSPC; }
+        Ext2ResizeResult::Invalid => { return LINUX_EINVAL; }
+        Ext2ResizeResult::Fenced => { return LINUX_EROFS; }
+        Ext2ResizeResult::Resized => { return 0; }
+    }
+}
+
 // GitHub issue #9: peer-safety. Since #583 a syscall runs where it is
 // called unless syscall_peer_refused names it or syscall_peer_safe narrows
 // it by descriptor; the migration gate reruns those on core 0. read and
@@ -3499,24 +3510,21 @@ private fn syscall_ext2_write_locked(fd: usize, content: []u8) -> usize {
     let inode: usize = kernel_syscall_file_inode(fd);
     let mut answer: usize = LINUX_EINVAL;
     if (offset == 0) {
-        match ext2_resize_small_file(syscall_ext2_mount, inode, content) {
-            Ext2ResizeResult::Invalid => { }
-            Ext2ResizeResult::Fenced => { answer = LINUX_EROFS; }
-            Ext2ResizeResult::Resized => { answer = 0; }
-        }
+        answer = syscall_ext2_write_errno(
+            ext2_resize_small_file(syscall_ext2_mount, inode, content));
     } else {
-        match ext2_write_regular_file_range(
-                syscall_ext2_mount, inode, offset, content) {
-            Ext2ResizeResult::Invalid => { }
-            Ext2ResizeResult::Fenced => { answer = LINUX_EROFS; }
-            Ext2ResizeResult::Resized => { answer = 0; }
-        }
+        answer = syscall_ext2_write_errno(
+            ext2_write_regular_file_range(syscall_ext2_mount, inode, offset, content));
     }
     if (answer == 0 &&
         kernel_syscall_file_set_offset(fd, offset + length) == false) {
         answer = LINUX_EBADF;
     }
     ext2_mutation_give(guard);
+    if (answer == LINUX_ENOSPC) {
+        kernel_boot_log_resource_exhausted("ext2 blocks" as *u8,
+                                          ext2_block_capacity(syscall_ext2_mount));
+    }
     return answer;
 }
 

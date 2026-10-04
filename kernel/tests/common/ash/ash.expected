@@ -1,6 +1,8 @@
 about.html
 bin
 dev
+enospc-a
+enospc-b
 etc
 hello.txt
 icon.png
@@ -19,6 +21,8 @@ read_indirect.txt
 about.html
 bin
 dev
+enospc-a
+enospc-b
 etc
 hello.txt
 icon.png

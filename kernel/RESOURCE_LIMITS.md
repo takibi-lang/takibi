@@ -133,6 +133,41 @@ initially were not (both had been judged impractical to boundary-test,
 which turned out to be wrong for both -- see the boundary-test section
 below).
 
+## Ext2 block exhaustion
+
+The ext2 block bitmap bounds persistent data and pointer-block allocation.
+A regular-file write returns Linux `ENOSPC` when no free block can be
+claimed and rollback completes, and logs `resource exhausted: ext2 blocks`.
+The diagnostic capacity is the volume's total block count, including
+metadata, rather than its currently free space. Invalid requests retain
+`EINVAL`; a mutation whose consistency cannot be restored fences the mount
+and returns `EROFS` on writes.
+
+Writes retain the old blocks until replacement data and the inode are
+published. Peak space therefore includes both versions; a volume can refuse
+an extension while enough free blocks appear to exist for the final size.
+Failure leaves the descriptor offset unchanged. The fixture image's build
+check maintains a free-space floor, which prevents the observed undersized
+boot image but does not replace runtime exhaustion handling.
+
+On the finite sysinit image, the common boot fixture creates at most two
+ordinary filler files with
+one-byte range writes, leaving thirteen free blocks. It reuses its existing
+13 KiB source to attempt a thirteen-block replacement: data allocation
+succeeds, indirect-block allocation returns `NoSpace`, and the original
+data, sectors, bitmap and counters must remain unchanged. The existing EL0
+syscall fixture then writes seven 1 KiB chunks and requires the eighth to
+return `-28`. It checks the committed data, shrinks and unlinks the fillers,
+and retries on the same descriptor to verify its offset did not advance.
+The existing QEMU lane checks the resulting disk with host `e2fsck`.
+No new guest, lane or persistent source buffer is added. Boot records the
+filler preparation's timer ticks, timer frequency and logical I/O call
+counts; real elapsed time is measured on the RPi5.
+
+Directory growth, creation and inode allocation still merge exhaustion into
+their existing invalid/failure outcomes. Their syscall error contracts do
+not yet distinguish full bitmaps from malformed metadata or I/O failure.
+
 ## Boundary/exhaustion test coverage
 
 Per issue #295's "exhaustion tests exercise each allocator near its

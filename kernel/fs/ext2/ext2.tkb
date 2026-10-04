@@ -55,6 +55,11 @@ struct Ext2Mount {
 
 must_use variant Ext2MountResult { Invalid; Mounted(Ext2Mount); }
 
+// Total on-disk block count, including metadata, for exhaustion diagnostics.
+fn ext2_block_capacity(mount: Ext2Mount) -> usize {
+    return mount.filesystem_blocks;
+}
+
 // The device a mount reads, so the boot can say which one the root is on.
 fn ext2_mount_device(mount: Ext2Mount) -> KernelBlockDevice {
     return mount.device;
@@ -62,16 +67,17 @@ fn ext2_mount_device(mount: Ext2Mount) -> KernelBlockDevice {
 must_use variant Ext2InodeResult { Invalid; Inode(Ext2Inode); }
 must_use variant Ext2LookupResult { Invalid; NotFound; Found(usize); }
 must_use variant Ext2ReadResult { Invalid; Read(usize); }
+// NoSpace: allocation exhausted the block bitmap and rollback completed.
 // Invalid: the mutation did not happen, and the repair writes that put the
 // bitmaps and counters back all completed. Resized: it happened.
 // Fenced: it could not be rolled back or finished and the counters could not
 // be made to agree with the bitmaps, so the mount refuses every further write
 // until ext2_recover establishes consistency (GitHub issue #595).
-must_use variant Ext2ResizeResult { Invalid; Resized; Fenced; }
+must_use variant Ext2ResizeResult { Invalid; NoSpace; Resized; Fenced; }
 must_use variant Ext2RecoverResult { Failed; Recovered; }
 must_use variant Ext2SymlinkResult { Invalid; Read(usize); }
 must_use variant Ext2CounterResult { Invalid; Updated; }
-must_use variant Ext2BitmapClaimResult { Invalid; Claimed(usize); }
+must_use variant Ext2BitmapClaimResult { Invalid; Full; Claimed(usize); }
 must_use variant Ext2BitmapReleaseResult { Invalid; Released; }
 must_use variant Ext2BitmapProbeResult { Invalid; Verified; }
 must_use variant Ext2FreeCountsResult {
@@ -102,6 +108,7 @@ linear struct Ext2InodeOwner[inode: usize] {
 
 must_use variant Ext2BlockAllocResult {
     Failed;
+    NoSpace;
     Allocated(exists block: usize. Ext2BlockOwner[block]);
 }
 
@@ -1140,7 +1147,7 @@ fn ext2_bitmap_claim(mount: Ext2Mount, inode_bitmap: bool,
         }
         index = index + 1;
     }
-    return Ext2BitmapClaimResult::Invalid;
+    return Ext2BitmapClaimResult::Full;
 }
 
 fn ext2_bitmap_release(mount: Ext2Mount, inode_bitmap: bool,
@@ -1195,6 +1202,9 @@ fn ext2_bitmap_roundtrip_check(mount: Ext2Mount)
     match ext2_bitmap_claim(
             mount, false, mount.inode_table_block + 16,
             mount.filesystem_blocks - 1) {
+        Ext2BitmapClaimResult::Full => {
+            return Ext2BitmapProbeResult::Invalid;
+        }
         Ext2BitmapClaimResult::Invalid => {
             return Ext2BitmapProbeResult::Invalid;
         }
@@ -1202,6 +1212,13 @@ fn ext2_bitmap_roundtrip_check(mount: Ext2Mount)
     }
     let mut inode_index: usize = 0;
     match ext2_bitmap_claim(mount, true, 11, mount.inode_count) {
+        Ext2BitmapClaimResult::Full => {
+            match ext2_bitmap_release(mount, false, block_index) {
+                Ext2BitmapReleaseResult::Invalid => { }
+                Ext2BitmapReleaseResult::Released => { }
+            }
+            return Ext2BitmapProbeResult::Invalid;
+        }
         Ext2BitmapClaimResult::Invalid => {
             match ext2_bitmap_release(mount, false, block_index) {
                 Ext2BitmapReleaseResult::Invalid => { }
@@ -1279,6 +1296,7 @@ fn ext2_allocate_block(mount: Ext2Mount) -> Ext2BlockAllocResult {
     // volume. This mount contract already requires first_data_block == 1.
     match ext2_bitmap_claim(
             mount, false, first_block - 1, mount.filesystem_blocks - 1) {
+        Ext2BitmapClaimResult::Full => { return Ext2BlockAllocResult::NoSpace; }
         Ext2BitmapClaimResult::Invalid => {
             return Ext2BlockAllocResult::Failed;
         }
@@ -1307,6 +1325,9 @@ fn ext2_allocate_inode(mount: Ext2Mount) -> Ext2InodeAllocResult {
     // Inodes 1..10 are ext2 reserved in revision 1. Bitmap index 10 is
     // therefore the first allocatable inode (inode number 11).
     match ext2_bitmap_claim(mount, true, 10, mount.inode_count) {
+        Ext2BitmapClaimResult::Full => {
+            return Ext2InodeAllocResult::Failed;
+        }
         Ext2BitmapClaimResult::Invalid => {
             return Ext2InodeAllocResult::Failed;
         }
@@ -1473,6 +1494,18 @@ private fn ext2_write_abort(mount: Ext2Mount,
     return Ext2ResizeResult::Invalid;
 }
 
+// Exhaustion keeps its reason only after rollback has proved consistency.
+private fn ext2_write_no_space_abort(mount: Ext2Mount,
+                                    allocations: sink Ext2WriteAllocations[0])
+        -> Ext2ResizeResult !{unsafe} {
+    match ext2_write_abort(mount, allocations) {
+        Ext2ResizeResult::Invalid => { return Ext2ResizeResult::NoSpace; }
+        Ext2ResizeResult::NoSpace => { return Ext2ResizeResult::NoSpace; }
+        Ext2ResizeResult::Fenced => { return Ext2ResizeResult::Fenced; }
+        Ext2ResizeResult::Resized => { return Ext2ResizeResult::Invalid; }
+    }
+}
+
 private fn ext2_write_allocations_published(
         allocations: sink Ext2WriteAllocations[0]) {}
 
@@ -1577,6 +1610,9 @@ private fn ext2_update_regular_file(mount: Ext2Mount, inode_number: usize,
                         return ext2_write_abort(mount, allocations);
                     }
                     match ext2_allocate_block(mount) {
+                        Ext2BlockAllocResult::NoSpace => {
+                            return ext2_write_no_space_abort(mount, allocations);
+                        }
                         Ext2BlockAllocResult::Failed => {
                             return ext2_write_abort(mount, allocations);
                         }
@@ -1644,6 +1680,9 @@ private fn ext2_update_regular_file(mount: Ext2Mount, inode_number: usize,
                     return ext2_write_abort(mount, allocations);
                 }
                 match ext2_allocate_block(mount) {
+                    Ext2BlockAllocResult::NoSpace => {
+                        return ext2_write_no_space_abort(mount, allocations);
+                    }
                     Ext2BlockAllocResult::Failed => {
                         return ext2_write_abort(mount, allocations);
                     }
@@ -1816,6 +1855,13 @@ fn ext2_write_allocations_roundtrip_check(mount: Ext2Mount)
         ext2_write_allocations_begin();
     for step: usize in 0..<2 {
         match ext2_allocate_block(mount) {
+            Ext2BlockAllocResult::NoSpace => {
+                match ext2_write_allocations_rollback(mount, allocations) {
+                    Ext2WriteFinishResult::Invalid => { }
+                    Ext2WriteFinishResult::Finished => { }
+                }
+                return Ext2BitmapProbeResult::Invalid;
+            }
             Ext2BlockAllocResult::Failed => {
                 match ext2_write_allocations_rollback(mount, allocations) {
                     Ext2WriteFinishResult::Invalid => { }
@@ -1907,6 +1953,9 @@ fn ext2_release_inode(mount: Ext2Mount,
 
 fn ext2_owner_roundtrip_check(mount: Ext2Mount) -> Ext2BitmapProbeResult {
     match ext2_allocate_block(mount) {
+        Ext2BlockAllocResult::NoSpace => {
+            return Ext2BitmapProbeResult::Invalid;
+        }
         Ext2BlockAllocResult::Failed => {
             return Ext2BitmapProbeResult::Invalid;
         }
@@ -2081,6 +2130,7 @@ private fn ext2_directory_grow(mount: Ext2Mount, directory: Ext2Inode,
         return Ext2DirectoryResult::Invalid;
     }
     match ext2_allocate_block(mount) {
+        Ext2BlockAllocResult::NoSpace => { return Ext2DirectoryResult::Invalid; }
         Ext2BlockAllocResult::Failed => { return Ext2DirectoryResult::Invalid; }
         Ext2BlockAllocResult::Allocated(owner) => {
             match ext2_directory_grow_publish(mount, directory, blocks,
@@ -2421,6 +2471,11 @@ fn ext2_linked_file_new(block_owner: sink Ext2BlockOwner[block],
 // this kernel's choice.
 const EXT2_ROOT_INODE: usize = 2;
 
+// Transfer a linked file's authority to its directory entry. A later
+// pathname unlink derives the current blocks from the inode, including
+// replacements made after publication, rather than this initial owner.
+fn ext2_linked_file_keep(linked: sink Ext2LinkedFile[inode, block]) {}
+
 fn ext2_create_root_file(mount: Ext2Mount, name: []u8, content: []u8)
         -> Ext2CreateResult {
     return ext2_create_file_in(mount, EXT2_ROOT_INODE, name, content);
@@ -2440,6 +2495,7 @@ fn ext2_create_file_in(mount: Ext2Mount, directory_inode: usize,
         Ext2LookupResult::NotFound => { }
     }
     match ext2_allocate_block(mount) {
+        Ext2BlockAllocResult::NoSpace => { return Ext2CreateResult::Invalid; }
         Ext2BlockAllocResult::Failed => { return Ext2CreateResult::Invalid; }
         Ext2BlockAllocResult::Allocated(block_owner) => {
             match ext2_allocate_inode(mount) {
@@ -2705,6 +2761,7 @@ fn ext2_make_directory_in(mount: Ext2Mount, parent_inode: usize,
         Ext2LookupResult::NotFound => { }
     }
     match ext2_allocate_block(mount) {
+        Ext2BlockAllocResult::NoSpace => { return Ext2MkdirResult::Invalid; }
         Ext2BlockAllocResult::Failed => { return Ext2MkdirResult::Invalid; }
         Ext2BlockAllocResult::Allocated(block_owner) => {
             match ext2_allocate_inode(mount) {

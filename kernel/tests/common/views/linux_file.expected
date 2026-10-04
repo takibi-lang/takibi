@@ -1,1 +1,3 @@
 userspace file syscalls: open/write/read/close and truncate+extend ok
+resource exhausted: ext2 blocks capacity=2816
+userspace ext2 exhaustion: ENOSPC data+offset unchanged, unlink+retry ok

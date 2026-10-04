@@ -1231,8 +1231,10 @@ run, not a specification.
   the repair itself could not complete (`EROFS`). In the last case the mount
   is fenced: every further ext2 write is refused until `ext2_recover` clears
   the blocks the failed operation had staged or was releasing and rewrites the
-  free counts from the bitmaps. Bitmaps are the truth and the counters are
-  derived from them. A rejected write is assumed to leave its block as it
+  free counts from the bitmaps. Allocation exhaustion with successful rollback
+  instead returns `ENOSPC` and logs the ext2 block pool. The old allocation
+  stays live until publication, so peak space includes both versions.
+  Bitmaps are the truth and the counters are derived from them. A rejected write is assumed to leave its block as it
   was; a torn sector or power loss is not covered. The boot fixture moves one
   failed access across every device write and read of a two-block
   replacement, and across the pointer-block, inode and release writes of a

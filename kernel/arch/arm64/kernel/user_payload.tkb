@@ -23,6 +23,7 @@ extern fn busy_spin(count: usize);
 
 const EBADF_RC: usize = 0xFFFFFFFFFFFFFFF7;
 const EFAULT_RC: usize = 0xFFFFFFFFFFFFFFF2;
+const ENOSPC_RC: usize = 0xFFFFFFFFFFFFFFE4;
 const EINVAL_RC: usize = 0xFFFFFFFFFFFFFFEA;
 const EACCES_RC: usize = 0xFFFFFFFFFFFFFFF3;
 const EAGAIN_RC: usize = 0xFFFFFFFFFFFFFFF5;
@@ -490,6 +491,75 @@ fn initial_user_payload() {
          * uses the ordinary read(2) offset path to compare every byte. */
         let mut write_block: [u8; 1024];
         let mut read_block: [u8; 1024];
+        // The boot fixture leaves thirteen free blocks in ordinary files.
+        // Seven sequential replacements fit; the eighth cannot stage its
+        // data. This is the real write(2) path, with a nonzero fd offset.
+        let exhaustion_fd: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);
+        fail_if(exhaustion_fd >= 64);
+        for block: usize in 0..<8 {
+            for byte: usize in 0..<1024 {
+                write_block[byte] =
+                    (((block * 1024 + byte) * 37 + 11) % 251) as u8;
+            }
+            let answer: usize = svc5(64, exhaustion_fd,
+                                      write_block as *u8 as usize, 1024, 0, 0);
+            if (block < 7) { fail_if(answer != 1024); }
+            else { fail_if(answer != ENOSPC_RC); }
+        }
+        // Reopening sees only the committed prefix, byte for byte.
+        let exhaustion_read: usize = svc5(56, 0, mutable_path as usize, 0, 0, 0);
+        fail_if(exhaustion_read >= 64);
+        for block: usize in 0..<7 {
+            fail_if(svc5(63, exhaustion_read, read_block as *u8 as usize,
+                         1024, 0, 0) != 1024);
+            for byte: usize in 0..<1024 {
+                fail_if(read_block[byte] !=
+                    (((block * 1024 + byte) * 37 + 11) % 251) as u8);
+            }
+        }
+        fail_if(svc5(63, exhaustion_read, read_block as *u8 as usize,
+                     1, 0, 0) != 0);
+        fail_if(svc5(57, exhaustion_read, 0, 0, 0, 0) != 0);
+        // Last-link unlink supports direct files today. Shrink both fillers
+        // through write(2) first: replacement releases their indirect blocks,
+        // and unlinkat then releases the one remaining block and inode.
+        write_block[0] = 0x78;
+        let filler_a: usize = svc5(56, 0, "/enospc-a" as *u8 as usize, 1, 0, 0);
+        fail_if(filler_a >= 64);
+        fail_if(svc5(64, filler_a, write_block as *u8 as usize, 1, 0, 0) != 1);
+        fail_if(svc5(57, filler_a, 0, 0, 0, 0) != 0);
+        let filler_b: usize = svc5(56, 0, "/enospc-b" as *u8 as usize, 1, 0, 0);
+        fail_if(filler_b >= 64);
+        fail_if(svc5(64, filler_b, write_block as *u8 as usize, 1, 0, 0) != 1);
+        fail_if(svc5(57, filler_b, 0, 0, 0, 0) != 0);
+        fail_if(svc5(35, 0xFFFFFFFFFFFFFF9C,
+                     "/enospc-a" as *u8 as usize, 0, 0, 0) != 0);
+        fail_if(svc5(35, 0xFFFFFFFFFFFFFF9C,
+                     "/enospc-b" as *u8 as usize, 0, 0, 0) != 0);
+        // Retrying on the SAME fd appends at 7168. A failure that moved its
+        // offset would create a zero-filled gap, caught by the read and EOF.
+        write_block[0] = 0x21;
+        fail_if(svc5(64, exhaustion_fd, write_block as *u8 as usize,
+                     1, 0, 0) != 1);
+        fail_if(svc5(57, exhaustion_fd, 0, 0, 0, 0) != 0);
+        let retry_read: usize = svc5(56, 0, mutable_path as usize, 0, 0, 0);
+        fail_if(retry_read >= 64);
+        for block: usize in 0..<7 {
+            fail_if(svc5(63, retry_read, read_block as *u8 as usize,
+                         1024, 0, 0) != 1024);
+            for byte: usize in 0..<1024 {
+                fail_if(read_block[byte] !=
+                    (((block * 1024 + byte) * 37 + 11) % 251) as u8);
+            }
+        }
+        fail_if(svc5(63, retry_read, read_block as *u8 as usize, 1, 0, 0) != 1);
+        fail_if(read_block[0] != 0x21);
+        fail_if(svc5(63, retry_read, read_block as *u8 as usize, 1, 0, 0) != 0);
+        fail_if(svc5(57, retry_read, 0, 0, 0, 0) != 0);
+        let exhaustion_message: []u8 =
+            bs"userspace ext2 exhaustion: ENOSPC data+offset unchanged, unlink+retry ok\n";
+        fail_if(svc5(64, 1, exhaustion_message as *u8 as usize,
+                     exhaustion_message.len, 0, 0) != exhaustion_message.len);
         let write_fd: usize = svc5(56, 0, mutable_path as usize, 1, 0, 0);
         fail_if(write_fd >= 64);
         for block: usize in 0..<13 {
@@ -497,8 +567,13 @@ fn initial_user_payload() {
                 write_block[byte] =
                     (((block * 1024 + byte) * 37 + 11) % 251) as u8;
             }
-            fail_if(svc5(64, write_fd, write_block as *u8 as usize,
-                         1024, 0, 0) != 1024);
+            let answer: usize = svc5(64, write_fd, write_block as *u8 as usize,
+                                      1024, 0, 0);
+            if (answer == ENOSPC_RC) {
+                let message: []u8 = bs"userspace ext2 write: ENOSPC\n";
+                svc5(64, 2, message as *u8 as usize, message.len, 0, 0);
+            }
+            fail_if(answer != 1024);
         }
         fail_if(svc5(57, write_fd, 0, 0, 0, 0) != 0);
         let read_fd: usize = svc5(56, 0, mutable_path as usize, 0, 0, 0);
@@ -525,6 +600,10 @@ fn initial_user_payload() {
 }
 
 fn fail_halt() {
+    let message: []u8 = bs"userspace syscall fixture: failed\n";
+    svc5(64, 2, message as *u8 as usize, message.len, 0, 0);
+    svc5(93, 1, 0, 0, 0, 0);
+    // The exit syscall cannot return; retain a visible fail-stop if it does.
     while (true) {
     }
 }

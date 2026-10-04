@@ -20,6 +20,7 @@
 // common view rather than a QEMU-only one.
 use "kernel/fs/ext2/ext2.tkb";
 use "kernel/printk/log.tkb";
+use "kernel/arch/arm64/kernel/timer.tkb";
 
 const EXT2_WRITE_FIXTURE_BYTES: usize = 13 * KERNEL_BLOCK_SIZE;
 // This fixture runs once in boot on core 0, before userspace or peers can
@@ -54,6 +55,143 @@ private fn ext2_write_fixture_sectors_match(mount: Ext2Mount,
             return sectors == expected;
         }
     }
+}
+
+must_use variant Ext2ExhaustionMode { Invalid; Interactive; Integration; }
+
+// Only the finite sysinit image runs user_payload and releases the fillers.
+// Interactive images skip sysinit, so they must retain their normal space.
+private fn ext2_exhaustion_mode(mount: Ext2Mount) -> Ext2ExhaustionMode {
+    let mut inode: usize = 0;
+    match ext2_lookup_path(mount, bs"etc/inittab") {
+        Ext2LookupResult::Invalid => { return Ext2ExhaustionMode::Invalid; }
+        Ext2LookupResult::NotFound => { return Ext2ExhaustionMode::Invalid; }
+        Ext2LookupResult::Found(found) => { inode = found; }
+    }
+    let mut length: usize = 0;
+    match ext2_read_small_file(mount, inode,
+                               ext2_write_fixture_readback as []u8) {
+        Ext2ReadResult::Invalid => { return Ext2ExhaustionMode::Invalid; }
+        Ext2ReadResult::Read(found) => { length = found; }
+    }
+    let marker: []u8 = bs"::sysinit:/etc/init.sh\n";
+    for start: usize in 0..<KERNEL_BLOCK_SIZE {
+        let mut line_start: bool = start == 0;
+        if (start > 0) {
+            line_start = ext2_write_fixture_readback[start - 1] == 0x0A;
+        }
+        if (line_start) {
+            let mut matches: bool = true;
+            for byte: usize in 0..<marker.len {
+                let index: usize = start + byte;
+                if (index < KERNEL_BLOCK_SIZE && index < length) {
+                    if (ext2_write_fixture_readback[index] != marker[byte]) {
+                        matches = false;
+                    }
+                } else { matches = false; }
+            }
+            if (matches) { return Ext2ExhaustionMode::Integration; }
+        }
+    }
+    return Ext2ExhaustionMode::Interactive;
+}
+
+// Fillers are ordinary linked files. A one-byte range write fills the gap
+// through the production allocator without a volume-sized source buffer.
+// EL0 shrinks and removes both after observing ENOSPC; no test syscall or
+// unowned bitmap reservation is carried across userspace execution.
+private fn ext2_exhaustion_filler(mount: Ext2Mount, name: []u8,
+                                  blocks: usize) -> bool {
+    if (blocks == 0 || blocks > EXT2_MAX_SINGLE_FILE_BLOCKS) { return false; }
+    match ext2_create_root_file(mount, name, bs"x") {
+        Ext2CreateResult::Invalid => { return false; }
+        Ext2CreateResult::Created(linked) => { ext2_linked_file_keep(linked); }
+    }
+    match ext2_lookup_root(mount, name) {
+        Ext2LookupResult::Invalid => { return false; }
+        Ext2LookupResult::NotFound => { return false; }
+        Ext2LookupResult::Found(inode) => {
+            match ext2_write_regular_file_range(
+                    mount, inode, (blocks * KERNEL_BLOCK_SIZE - 1) as usize, bs"x") {
+                Ext2ResizeResult::Resized => { return true; }
+                Ext2ResizeResult::Invalid => { return false; }
+                Ext2ResizeResult::NoSpace => { return false; }
+                Ext2ResizeResult::Fenced => { return false; }
+            }
+        }
+    }
+}
+
+// Leave thirteen real free blocks: the thirteen data blocks can be staged,
+// but the fourteenth claim, for the indirect block, must roll them back.
+// The original file and the complete bitmap must survive before EL0 runs.
+private fn ext2_write_exhaustion_check(mount: Ext2Mount) -> bool {
+    ext2_write_fixture_execution_model_assumption();
+    let mut free: usize = 0;
+    let mut inodes: usize = 0;
+    match ext2_free_counts(mount) {
+        Ext2FreeCountsResult::Invalid => { return false; }
+        Ext2FreeCountsResult::Counts(counts) => {
+            let (blocks, inode_count) = counts;
+            free = blocks;
+            inodes = inode_count;
+        }
+    }
+    // Stay within the maintained single-group fixture, with at most two
+    // singly-indirect fillers. Leave room to create the second file.
+    if (free < 32 || free > 540 ||
+        ext2_fixture_geometry_is_expected(mount) == false) { return false; }
+    let mut first: usize = free - 16;
+    if (first > EXT2_MAX_SINGLE_FILE_BLOCKS) {
+        first = EXT2_MAX_SINGLE_FILE_BLOCKS;
+    }
+    // A singly-indirect file jumps from twelve allocations to fourteen;
+    // thirteen cannot be represented. Shift one block to the second file
+    // when the first file would leave that gap in the remaining budget.
+    if (free - first == 27) { first = first - 1; }
+    if (ext2_exhaustion_filler(mount, bs"enospc-a", first) == false) {
+        return false;
+    }
+    match ext2_free_counts(mount) {
+        Ext2FreeCountsResult::Invalid => { return false; }
+        Ext2FreeCountsResult::Counts(counts) => {
+            let (blocks, inode_count) = counts;
+            free = blocks;
+        }
+    }
+    // Creation uses one block. Replacement stages data (+ one pointer when
+    // needed) and returns that old block, so the net allocation is data+ptr.
+    if (free <= 13) { return false; }
+    let mut second: usize = free - 13;
+    if (second > EXT2_MAX_DIRECT_BLOCKS) { second = second - 1; }
+    if (ext2_exhaustion_filler(mount, bs"enospc-b", second) == false ||
+        ext2_write_fixture_counts_match(mount, 13, inodes - 2) == false) {
+        return false;
+    }
+    let mut inode: usize = 0;
+    match ext2_lookup_root(mount, bs"mutable.txt") {
+        Ext2LookupResult::Invalid => { return false; }
+        Ext2LookupResult::NotFound => { return false; }
+        Ext2LookupResult::Found(found) => { inode = found; }
+    }
+    if (ext2_io_file_is(mount, inode, false, false) == false) { return false; }
+    match ext2_block_bitmap_snapshot(
+            mount, ext2_write_fixture_bitmap as [u8; KERNEL_BLOCK_SIZE..]) {
+        Ext2ReadResult::Invalid => { return false; }
+        Ext2ReadResult::Read(length) => {
+            if (length != KERNEL_BLOCK_SIZE) { return false; }
+        }
+    }
+    match ext2_resize_small_file(mount, inode, ext2_write_fixture_source as []u8) {
+        Ext2ResizeResult::NoSpace => { }
+        Ext2ResizeResult::Invalid => { return false; }
+        Ext2ResizeResult::Resized => { return false; }
+        Ext2ResizeResult::Fenced => { return false; }
+    }
+    return ext2_io_file_is(mount, inode, false, false) &&
+           ext2_io_bitmap_matches(mount) &&
+           ext2_write_fixture_counts_match(mount, 13, inodes - 2) &&
+           ext2_counters_match_bitmaps(mount);
 }
 
 private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
@@ -105,6 +243,7 @@ private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
             mount, inode_number, ext2_write_fixture_source as []u8, 3) {
         Ext2ResizeResult::Resized => { return false; }
         Ext2ResizeResult::Fenced => { return false; }
+        Ext2ResizeResult::NoSpace => { return false; }
         Ext2ResizeResult::Invalid => { }
     }
     if (ext2_write_fixture_counts_match(
@@ -139,6 +278,7 @@ private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
     }
     match ext2_resize_small_file(
             mount, inode_number, ext2_write_fixture_source as []u8) {
+        Ext2ResizeResult::NoSpace => { return false; }
         Ext2ResizeResult::Invalid => { return false; }
         Ext2ResizeResult::Fenced => { return false; }
         Ext2ResizeResult::Resized => { }
@@ -175,6 +315,7 @@ private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
         }
     }
     match ext2_resize_small_file(mount, inode_number, bs"") {
+        Ext2ResizeResult::NoSpace => { return false; }
         Ext2ResizeResult::Invalid => { return false; }
         Ext2ResizeResult::Fenced => { return false; }
         Ext2ResizeResult::Resized => { }
@@ -187,6 +328,7 @@ private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
     }
     match ext2_resize_small_file(
             mount, inode_number, ext2_write_fixture_source as []u8) {
+        Ext2ResizeResult::NoSpace => { return false; }
         Ext2ResizeResult::Invalid => { return false; }
         Ext2ResizeResult::Fenced => { return false; }
         Ext2ResizeResult::Resized => { }
@@ -199,6 +341,7 @@ private fn ext2_write_indirect_check(mount: Ext2Mount) -> bool {
         return false;
     }
     match ext2_resize_small_file(mount, inode_number, bs"before\n") {
+        Ext2ResizeResult::NoSpace => { return false; }
         Ext2ResizeResult::Invalid => { return false; }
         Ext2ResizeResult::Fenced => { return false; }
         Ext2ResizeResult::Resized => { }
@@ -413,6 +556,7 @@ private fn ext2_io_case(mount: Ext2Mount, inode: usize, large: bool,
                 mount, inode, ext2_write_fixture_source as []u8,
                 EXT2_MAX_WRITE_ALLOCATIONS) {
             Ext2ResizeResult::Resized => { outcome = 0; }
+            Ext2ResizeResult::NoSpace => { outcome = 1; }
             Ext2ResizeResult::Invalid => { outcome = 1; }
             Ext2ResizeResult::Fenced => { outcome = 2; }
         }
@@ -421,6 +565,7 @@ private fn ext2_io_case(mount: Ext2Mount, inode: usize, large: bool,
                 mount, inode, ext2_write_fixture_source[0..<EXT2_IO_SMALL_BYTES],
                 EXT2_MAX_WRITE_ALLOCATIONS) {
             Ext2ResizeResult::Resized => { outcome = 0; }
+            Ext2ResizeResult::NoSpace => { outcome = 1; }
             Ext2ResizeResult::Invalid => { outcome = 1; }
             Ext2ResizeResult::Fenced => { outcome = 2; }
         }
@@ -477,6 +622,7 @@ private fn ext2_io_restore(mount: Ext2Mount, inode: usize,
         }
     }
     match ext2_resize_small_file(mount, inode, bs"before\n") {
+        Ext2ResizeResult::NoSpace => { return false; }
         Ext2ResizeResult::Invalid => { return false; }
         Ext2ResizeResult::Fenced => { return false; }
         Ext2ResizeResult::Resized => { }
@@ -528,6 +674,7 @@ private fn ext2_io_fence(mount: Ext2Mount, inode: usize, skip: usize,
             mount, inode, ext2_write_fixture_source[0..<EXT2_IO_SMALL_BYTES],
             EXT2_MAX_WRITE_ALLOCATIONS) {
         Ext2ResizeResult::Fenced => { }
+        Ext2ResizeResult::NoSpace => { return false; }
         Ext2ResizeResult::Invalid => { return false; }
         Ext2ResizeResult::Resized => { return false; }
     }
@@ -737,6 +884,33 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
     } else {
         kernel_boot_log("ext2 io failure: failed\n");
     }
+    match ext2_exhaustion_mode(mount) {
+        Ext2ExhaustionMode::Invalid => {
+            kernel_boot_log("ext2 exhaustion: invalid inittab\n");
+            return;
+        }
+        Ext2ExhaustionMode::Interactive => { return; }
+        Ext2ExhaustionMode::Integration => { }
+    }
+    let exhaustion_start: usize = read_cntpct() as usize;
+    let exhaustion_reads: usize = block_read_call_total();
+    let exhaustion_writes: usize = block_write_call_total();
+    if (ext2_write_exhaustion_check(mount)) {
+        kernel_boot_log("ext2 exhaustion: indirect NoSpace rollback, EL0 fillers ready\n");
+    } else {
+        kernel_boot_log("ext2 exhaustion: failed\n");
+    }
+    let exhaustion_ticks: usize = (read_cntpct() as usize) - exhaustion_start;
+    kernel_boot_log("ext2 exhaustion cost: ticks=");
+    uart_put_udec(exhaustion_ticks);
+    kernel_boot_log(" frequency=");
+    uart_put_udec(read_cntfrq() as usize);
+    kernel_boot_log(" reads=");
+    uart_put_udec(block_read_call_total() - exhaustion_reads);
+    kernel_boot_log(" writes=");
+    uart_put_udec(block_write_call_total() - exhaustion_writes);
+    kernel_boot_log("\n");
+
 }
 
 // Mounting the fixture image and running it, which both platforms reached the
