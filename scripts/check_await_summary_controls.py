@@ -64,7 +64,13 @@ def main():
         # Run the actual wrapper, so exporting the lane is verified through
         # the same process boundary as the maintained aggregate.
         CASES.note()
-        env = dict(os.environ, TAKIBI_AWAIT_TIMING_DIR=str(aggregate))
+        parent_receipts = root / 'parent-lane-timing'
+        parent_receipts.mkdir()
+        env = dict(os.environ, TAKIBI_AWAIT_TIMING_DIR=str(aggregate),
+                   TAKIBI_LANE_TIMING_DIR=str(parent_receipts))
+        # A simulated lane must never append to the parent aggregate's real
+        # duration receipts, even when langcheck runs inside allcheck.
+        env.pop('TAKIBI_LANE_TIMING_DIR', None)
         program = ("import sys; sys.path.insert(0, sys.argv[1]); "
                    "from await_timing import AwaitTiming; "
                    "t=AwaitTiming(None, 0, 10, [], [], connection=False); t.finish(10)")
@@ -72,6 +78,7 @@ def main():
                                   'control-lane', sys.executable, '-c', program,
                                   str(ROOT / 'scripts')], env=env, capture_output=True, text=True)
         assert wrapper.returncode == 0, wrapper.stderr
+        assert not list(parent_receipts.iterdir()), 'control polluted parent lane receipts'
         assert 'control-lane: kernel/oops' in summarize(aggregate).stdout
         empty = root / 'empty'
         empty.mkdir()
