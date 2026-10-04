@@ -2990,7 +2990,7 @@ fn kernel_syscall_wait4_deliver(
         frame: borrow FrameRef[process], reaped_pid: usize) !{unsafe} {
     let parent_slot: usize = scheduled_process_owner_slot(parent);
     let wait4_status_ptr: usize =
-        scheduled_process_record_wait4_status_ptr(parent_slot);
+        scheduled_process_record_wait4_status_ptr_owned(parent);
     if (wait4_status_ptr != 0) {
         // The status buffer belongs to the parent being resumed.
         // user_write_u32 dereferences the user VA directly. The waking exit

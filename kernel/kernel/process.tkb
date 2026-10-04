@@ -2196,8 +2196,11 @@ fn scheduled_process_set_address_space_backing(
     process_run_unlock(guard);
 }
 
-fn scheduled_process_record_wait4_status_ptr(slot: usize) -> usize {
-    return scheduled_process_record_at(slot).wait4_status_ptr;
+// The status pointer a blocked wait4 left, read through the parent's owner;
+// the crash report reads it with the peek.
+fn scheduled_process_record_wait4_status_ptr_owned(
+        owner: borrow ScheduledProcessOwner[process]) -> usize !{unsafe} {
+    return scheduled_process_record_owned(owner).wait4_status_ptr;
 }
 // One half of a run, named as a struct purely so that the poison fill,
 // the guard and the watermark scan keep ordinary checked indexing over a
@@ -3171,7 +3174,7 @@ fn scheduled_process_ready_take(guard: borrow ProcessRunGuard[lock],
     if (scheduled_process_handle_matches(handle) == false) {
         return ScheduledProcessReadyTakeResult::Missing;
     }
-    if (scheduled_process_record_of(handle).stack_owner_cpu !=
+    if (scheduled_process_record_of_locked(guard, handle).stack_owner_cpu !=
             PROCESS_STACK_UNOWNED) {
         return ScheduledProcessReadyTakeResult::Missing;
     }
@@ -3186,7 +3189,7 @@ fn scheduled_process_ready_take(guard: borrow ProcessRunGuard[lock],
                 return ScheduledProcessReadyTakeResult::Missing;
             }
             ProcessNextReadyResult::Next(child) => {
-                if (scheduled_process_record_of(child).stack_owner_cpu !=
+                if (scheduled_process_record_of_locked(guard, child).stack_owner_cpu !=
                         PROCESS_STACK_UNOWNED) {
                     return ScheduledProcessReadyTakeResult::Missing;
                 }
@@ -5681,9 +5684,8 @@ fn kernel_process_activate_stable_root(root: AddressSpaceRoot) {
     while (activating) {
         match process_image_prepare_activation(root) {
             AddressSpaceActivationPrepareResult::Invalid => {
-                kernel_syscall_fail_stop(
-                    scheduled_process_record_of(
-                        execution_here().current_handle).saved_sp);
+                let failing: usize = execution_here().current_handle.pool_index;
+                kernel_syscall_fail_stop(scheduled_process_record_peek(failing).saved_sp);
             }
             AddressSpaceActivationPrepareResult::RolloverNeeded => {
                 if (kernel_process_rollover_busy_injections != 0) {
@@ -5715,9 +5717,8 @@ fn kernel_process_activate_stable_root(root: AddressSpaceRoot) {
             }
             AddressSpaceActivationPrepareResult::Prepared(prepared) => {
                 if (process_image_commit_activation(prepared) == false) {
-                    kernel_syscall_fail_stop(
-                        scheduled_process_record_of(
-                            execution_here().current_handle).saved_sp);
+                    let failing: usize = execution_here().current_handle.pool_index;
+                    kernel_syscall_fail_stop(scheduled_process_record_peek(failing).saved_sp);
                 }
                 activating = false;
                 if (injected_busy != 0) {
@@ -9104,8 +9105,8 @@ fn kernel_process_crash_wait_reason() -> usize !{unsafe} {
 // of a blocked wait4()'s continuation state invisible.
 fn kernel_process_crash_wait4_status_ptr() -> usize {
     if (execution_here().current_live == false) { return 0; }
-    return scheduled_process_record_wait4_status_ptr(
-        execution_here().current_handle.pool_index);
+    let current: usize = execution_here().current_handle.pool_index;
+    return scheduled_process_record_peek(current).wait4_status_ptr;
 }
 
 fn kernel_process_crash_root_slot() -> usize {
