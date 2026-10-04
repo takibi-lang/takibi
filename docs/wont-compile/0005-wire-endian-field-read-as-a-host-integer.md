@@ -3,6 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Status | Enforced |
+| Compared against | Linux sparse __bitwise, Rust zerocopy 0.8.57 byteorder U16 (2026-10-04) |
 | Check | type error, wire-endian operators (`lib/type_inf.ml`) |
 | Test case | `u16be: ordering comparison is rejected without a cast` |
 | Introduced | 2026-08-03, commit `0cf743c9` ("Add u16be, a type-checked big-endian integer type") |
@@ -42,16 +43,22 @@ a `u16` again.
 
 **Rust: with a library, if you chose one.** Rust has no language-level
 distinction between a wire integer and a host integer. Crates such as
-`zerocopy` provide `U16<BigEndian>` newtypes that do prevent arithmetic and
-comparison, and they work well. But it is a per-project decision, applied per
-field, and a plain `u16` in a `#[repr(C)]` header struct is accepted by the
-compiler with no complaint.
+`zerocopy` provide `U16<BigEndian>` types that preserve the byte order and
+offer explicit `new` and `get` conversions. The compared version also
+implements arithmetic and comparisons, including operations with native
+`u16` operands; it does not prohibit those operators as Takibi does.
+Choosing an endian-aware field type is a per-project decision, and a plain
+`u16` in a `#[repr(C)]` header struct is accepted without an endian check.
 
-So both ecosystems can express this and neither language does. That is a
-weaker claim than the rest of this catalog makes, and it is worth stating
-precisely: the difference here is not capability, it is where the check lives.
-In Takibi it is in the field type of a packed struct, so it applies to every
-program the compiler builds, with nothing to opt into and nothing to install.
+Sources: [Linux sparse](https://docs.kernel.org/dev-tools/sparse.html),
+[sparse annotations](https://sparse.docs.kernel.org/en/latest/annotations.html), and
+[zerocopy U16](https://docs.rs/zerocopy/latest/zerocopy/byteorder/struct.U16.html).
+
+Both ecosystems can express endian-aware fields. The operator policy differs
+between the compared tools: sparse checks annotated uses when run, zerocopy
+supports arithmetic with conversions, and Takibi rejects arithmetic and
+ordering until an explicit conversion. Takibi's rule follows a declared
+wire-endian field type in every compiler build.
 
 ## What Takibi does
 

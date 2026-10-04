@@ -46,6 +46,14 @@ the exact case name in `test/test_takibi.ml`. This is what makes the catalog
 auditable rather than decorative: a compiler regression turns a test red
 instead of quietly turning a documented guarantee into fiction.
 
+**Compared against.** Every entry names the systems or tools inspected and
+the last external-comparison date, as `Tool A, System B (YYYY-MM-DD)`.
+The date records an actual review, not the date the article was edited.
+Recheck the named sources when their behavior changes or the comparison is
+reused. The check requires names and a valid date no later than today in UTC;
+it does not verify external claims or the completeness of the comparison.
+An old date tells the reader that the comparison may need a new review.
+
 `make langcheck` enforces all of it, in two members that are each insufficient
 alone. `scripts/check_wont_compile_catalog.py` reads tracked files: it refuses
 an entry whose named test case is not in the suite, whose status is invented,

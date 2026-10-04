@@ -3,6 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Status | Enforced |
+| Compared against | GCC extended asm, Rust global_asm, repr(C), offset_of (2026-10-04) |
 | Check | type error, `exception_entry` validation (`lib/type_inf.ml`) |
 | Test case | `exception_entry rejects a frame struct missing a register field` |
 | Introduced | 2026-08-06, commit `50092487` ("Add exception_entry signature checking and exception_resume") |
@@ -34,15 +35,20 @@ flaky hardware.
 
 ## What C and Rust do about it
 
-**Neither language can check it**, and for the same reason: in both, the
-frame layout is a contract between a `struct` in one file and a hand-written
-assembly stub in another, and the compiler is never shown both. In C the stub
+**These assembly interfaces do not check the entry contract.** In both, the
+frame layout is a contract between a `struct` and a hand-written assembly
+stub, without a built-in architecture-specific frame check. In C the stub
 is a `.S` file or an `__asm__` block; in Rust it is `global_asm!` next to a
 `#[repr(C)]` struct. Rust's type system is not weaker here than C's -- it is
 simply not in the conversation, because the register saves are not typed
 operations. `offset_of!` lets a Rust programmer *assert* an offset; it does
 not know what the architecture's entry contract is, so it cannot tell you a
 register is missing.
+
+Sources: [GCC extended asm](https://gcc.gnu.org/onlinedocs/gcc/Extended-Asm.html),
+[Rust inline assembly](https://doc.rust-lang.org/reference/inline-assembly.html),
+[type layout](https://doc.rust-lang.org/reference/type-layout.html), and
+[offset_of](https://doc.rust-lang.org/std/mem/macro.offset_of.html).
 
 This is the one defect in this catalog where the difference is not a type
 system feature at all. It is that the entry sequence is a **language

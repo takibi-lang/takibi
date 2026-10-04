@@ -138,8 +138,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_single_dune_invocation.py` | exactly one rule runs `dune build`, so no second make invocation races its lock |
 | `check_validate_kernel_dmesg_timestamps_controls.py` | Controls for dmesg integrity, measurement-only QEMU boot duration, and separately enforced performance bounds |
 | `check_validate_protocol_trace_controls.py` | Controls for the protocol-trace replay: three recorded QEMU windows pass (one with `Nap` in `SwitchAway`'s place), two of them fail without `ChildExitStart` and `InterruptDepart`; a tick leave outside an interrupt, #609's shared-stack start, a lost change, a cut report, an unlocked change, an unsafe snapshot and an unexercised window are refused, and so are Wait4Block.tla's block with a zombie child, lost wakeup and wake of a non-parent, RecordLifetime.tla's unlocked or premature removal, and a wait published on a Running process |
-| `check_wont_compile_catalog.py` | every defect-catalog entry names a test case that exists, shows its figure, and agrees with the index |
-| `check_wont_compile_catalog_controls.py` | Controls for the defect catalog's structure check and for the sample runner's verdicts |
+| `check_wont_compile_catalog.py` | every defect-catalog entry names a test case and external comparison set with a valid nonfuture date, shows its figure, and agrees with the index; external truth is not checked |
+| `check_wont_compile_catalog_controls.py` | Controls for catalog structure, missing/malformed/future comparison dates and a valid leap day, and sample runner verdicts |
 
 ## `slowcheck_*` -- the slow lane
 

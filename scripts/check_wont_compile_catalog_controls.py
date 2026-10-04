@@ -44,6 +44,7 @@ ENTRY = """# 0007. A widget that is not proven
 | Check | type error, widget checker |
 | Test case | `widget: an unproven widget is rejected` |
 | Introduced | 2026-01-01, commit `0000000` ("Widgets") |
+| Compared against | WidgetOS, widgetcrate (2026-01-01) |
 
 ![A widget](assets/0007-an-unproven-widget.svg)
 
@@ -211,6 +212,25 @@ def main() -> int:
             entry.write_text(original)
             index.write_text(INDEX)
             suite.write_text(SUITE)
+
+        comparison = "| Compared against | WidgetOS, widgetcrate (2026-01-01) |"
+        entry.write_text(original.replace(comparison + "\n", ""))
+        controls.expect_fail("a missing comparison", run_catalog(root),
+                             "has no `Compared against` row")
+        restore()
+        for value, diagnostic in [
+                ("WidgetOS", "followed by (YYYY-MM-DD)"),
+                ("WidgetOS (2026-1-01)", "followed by (YYYY-MM-DD)"),
+                ("123 (2026-01-01)", "must name a system or tool"),
+                ("WidgetOS (2026-02-30)", "invalid calendar date"),
+                ("WidgetOS (9999-01-01)", "date is in the future")]:
+            entry.write_text(original.replace(comparison, f"| Compared against | {value} |"))
+            controls.expect_fail(f"invalid comparison {value}", run_catalog(root), diagnostic)
+            restore()
+        entry.write_text(original.replace(comparison,
+                                         "| Compared against | WidgetOS (2000-02-29) |"))
+        controls.expect_pass("a valid leap-day comparison", run_catalog(root))
+        restore()
 
         suite.write_text(SUITE.replace(
             "an unproven widget is rejected", "a renamed case"))
@@ -389,7 +409,9 @@ def main() -> int:
     report_pass(
         "wont-compile-catalog controls",
         f"{controls.cases.ran} claims -- the repository and a valid fixture "
-        "pass; a renamed test case, an invented status, a missing field, a "
+        "pass, including a valid leap-day comparison; missing, malformed, "
+        "nameless and future comparisons are refused; a renamed test case, "
+        "an invented status, a missing field, a "
         "misnumbered heading, an unpinned sample, an entry that never shows "
         "acceptance, a missing figure, a figure without its source, an "
         "unclaimed figure, a rank constraint that would silently empty a "

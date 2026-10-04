@@ -143,7 +143,7 @@ measurements first.
    #386, #502.
 3. **Compiler safety and language research:** #203, #252, #200, #201,
    #282, #129, #374, #417, #155, #28, #8.
-4. **Toolchain, portability and hardware-lane support:** #568, #123,
+4. **Toolchain, portability and hardware-lane support:** #123,
    #124, #122, #95, #51, #50, #85, #268, #666.
 5. **Deferred or not a scheduled work item:** #432, #555, #250, #444, #429,
    #149, #567, #539, #536, #624, #132; #13 for `Phi`, with #216 and #109 as

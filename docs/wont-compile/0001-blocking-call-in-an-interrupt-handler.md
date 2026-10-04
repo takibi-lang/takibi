@@ -3,6 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Status | Enforced |
+| Compared against | Linux might_sleep, Rust Send/Sync, Rust for Linux klint (2026-10-04) |
 | Check | type error, effect checker (`lib/type_inf.ml`) |
 | Test case | `Slice 4: interrupt root rejects a transitive blocking call` |
 | Introduced | 2026-07-16, commit `2c7a436b` ("Slice 4: runtime mutable owners and effects") |
@@ -31,11 +32,11 @@ what reading a single function cannot show you.
 
 ## What C and Rust do about it
 
-**C: nothing at compile time.** Linux detects this at run time, with
+**C: Linux's runtime check.** Linux detects this at run time, with
 `might_sleep()` annotations that expand to a check of the preemption count and
 print `BUG: sleeping function called from invalid context`. That is a good
 mechanism and it has three limits: it requires `CONFIG_DEBUG_ATOMIC_SLEEP`,
-which production kernels do not ship; it fires only if the path actually
+without which the check is disabled; it fires only if the path actually
 executes, so a rare error branch in a handler can stay undetected for years;
 and it is a convention maintained by hand, so a function that starts sleeping
 after a refactor does not automatically gain the annotation its callers relied
@@ -53,6 +54,11 @@ not a case of Rust being level with C. What it is not is part of the language:
 the property lives in a separate analysis rather than in any function's
 published type, so it does not travel with a signature, does not compose
 through a function-pointer row, and is only enforced where that tool is run.
+
+Sources: [Linux might_sleep](https://github.com/torvalds/linux/blob/master/include/linux/kernel.h),
+[Send](https://doc.rust-lang.org/std/marker/trait.Send.html),
+[Sync](https://doc.rust-lang.org/std/marker/trait.Sync.html), and
+[klint atomic context](https://github.com/Rust-for-Linux/klint/blob/master/doc/atomic_context.md).
 
 Takibi's claim here is narrow and worth stating precisely: the property is in
 the function type, the compiler that produces the kernel binary enforces it,

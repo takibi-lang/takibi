@@ -28,6 +28,7 @@ Usage: check_wont_compile_catalog.py [repo_root]
 from __future__ import annotations
 
 import pathlib
+import datetime
 import re
 import sys
 
@@ -51,7 +52,7 @@ INDEX_ROW = re.compile(
 # Four digits, assigned in order, never reused. The number is a permanent
 # handle that appears in talks and commit messages, so a renumbering would
 # silently repoint a citation at a different defect.
-REQUIRED_FIELDS = ("Status", "Check", "Test case", "Introduced")
+REQUIRED_FIELDS = ("Status", "Check", "Test case", "Introduced", "Compared against")
 STATUS = re.compile(r"^(Enforced|Partial|Withdrawn|Superseded by \d{4})$")
 
 # Some defects are only defects under a compiler flag: an unproven index is a
@@ -179,6 +180,22 @@ def load_entries(catalog: pathlib.Path, errors: list[str]) -> list[Entry]:
         for field in REQUIRED_FIELDS:
             if field not in entry.fields:
                 errors.append(f"{name}: the header table has no `{field}` row")
+
+        comparison = entry.fields.get("Compared against", "")
+        if comparison:
+            match = re.fullmatch(r"(.+?)\s+\((\d{4}-\d{2}-\d{2})\)", comparison)
+            if not match or not re.search(r"[A-Za-z]", match.group(1)):
+                errors.append(f"{name}: Compared against must name a system or tool "
+                              "followed by (YYYY-MM-DD)")
+            else:
+                try:
+                    checked = datetime.date.fromisoformat(match.group(2))
+                except ValueError:
+                    errors.append(f"{name}: Compared against has an invalid calendar date")
+                else:
+                    today = datetime.datetime.now(datetime.timezone.utc).date()
+                    if checked > today:
+                        errors.append(f"{name}: Compared against date is in the future")
 
         entry.status = entry.fields.get("Status", "")
         if entry.status and not STATUS.match(entry.status):

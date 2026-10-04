@@ -3,6 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Status | Enforced |
+| Compared against | GCC array-bounds diagnostics, Rust indexing, unconditional_panic, get_unchecked (2026-10-04) |
 | Check | `--forbid-trap`, over the codegen trap-site accounting (`lib/llvm_gen.ml`) |
 | Test case | `every runtime-trap lowering records one site and emits one llvm.trap call` |
 | Introduced | 2026-07-04, commit `feea9a74` ("Introduce --forbid-trap option") |
@@ -34,7 +35,8 @@ nothing to check and nothing to trap.
 
 ## What C and Rust do about it
 
-**C: no check at all.** The index is an integer, the array is an address.
+**C: no automatic runtime bounds check.** A dynamic index need not be
+checked before an array access. A compiler may diagnose a known bad index.
 
 **Rust: mostly the second answer.** Safe Rust prevents the memory corruption,
 and this is not a case where Rust is level with C.
@@ -50,13 +52,19 @@ For that index the check is emitted, and on bare metal its failure path is the
 end of the core -- `panic = "abort"` has nothing above it to unwind into. The
 elision an optimizer might perform is a best effort, not a guarantee you can
 build a policy on: nothing fails the build when it does not happen. And the
-one way to delete the check on purpose is `get_unchecked`, which does not
+explicit unchecked slice-access API is `get_unchecked`, which does not
 answer the question but moves it into `unsafe`, asserting the bound without
 recording why anyone believes it.
 
 So the honest comparison is not "Rust is unsafe here". It is that Rust offers
-a runtime check or an unchecked access, and a kernel that wants neither has
-nowhere to stand.
+these checked and unchecked APIs without a built-in policy that rejects
+every remaining bounds-check failure path. This comparison does not survey
+external verification tools or libraries that encode narrower invariants.
+
+Sources: [GCC array-bounds diagnostics](https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html#index-Warray-bounds),
+[Rust indexing](https://doc.rust-lang.org/reference/expressions/array-expr.html),
+[unconditional_panic](https://doc.rust-lang.org/rustc/lints/listing/deny-by-default.html#unconditional-panic), and
+[get_unchecked](https://doc.rust-lang.org/std/primitive.slice.html#method.get_unchecked).
 
 ## What Takibi does
 
@@ -99,7 +107,7 @@ Error: --forbid-trap: 1 runtime trap site(s) remain (listed above)
 
 Without `--forbid-trap` this program compiles, and the binary contains the
 check and the trap. That is the outcome the flag exists to refuse, and it is
-the outcome Rust has no way to refuse.
+the outcome the compared Rust indexing APIs do not themselves forbid.
 
 ## Code that does compile
 
