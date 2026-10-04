@@ -54,8 +54,9 @@ ALLOWED = {
         "a record leaves the pool only through scheduled_process_slot_remove, "
         "which requires the process-run guard (#482); a reader of another "
         "process's record holds that lock, and a reader of its own is not "
-        "yet reaped. Returns the pointer to 77 call sites that still take a "
-        "bare slot (#492)",
+        "yet reaped. Returns the pointer to the bare call sites #693 has not "
+        "yet moved onto an authority, counted by "
+        "scripts/check_process_record_bare_uses.py",
     ("kernel/kernel/process.tkb", "scheduled_process_record_peek"):
         "deliberately tolerates a dead slot for crash and trace paths, and "
         "returns the pointer",

@@ -62,12 +62,14 @@ before its issue closes. The steps keep their numbers, which issues cite.
      cores reach by handle, and a linear struct holding one owner (#131's
      first slice). On it: the three TCP pools, AddressSpaceBacking,
      ProcessImageRecord, ProcessFdContext, FdBlock and SharedObject.
-     ProcessRecord follows #693: steps 1-4 landed (run guard, ProcessRunning,
-     owners; unguarded record reads 300+ -> 81). Next steps 6-7
-     (diagnostics onto the declared peek, accessor cleanup); step 5 (37
-     slot-keyed getters/setters, 129 call sites of mixed lock state) waits
-     for single-agent work and is made safer by #694 (reject re-acquiring
-     the run lock) and #695 (the guards held at each call). #696 types the
+     ProcessRecord follows #693: steps 1-4 and 6 landed, step 5 mostly
+     (bare record lookups 300+ -> 30, held to that number by
+     `scripts/check_process_record_bare_uses.py`). Left in step 5: the
+     per-process pool handles read by the region pin helpers (38 calls,
+     some under reap's guard) and the scheduler's state getters; they
+     wait for #695 (the guards held at each call) and #694 (reject
+     re-acquiring the run lock). Then step 7. #700 moves the exec's argv
+     page before the Exec decision so a shortage returns ENOMEM. #696 types the
      ensure-then-write of the per-process pools. #674 and #675 follow; #680-#682 (the pin's cost)
      are measured first.
    - **B, raw atomics:** a typed atomic cell (issue when C is under way);
