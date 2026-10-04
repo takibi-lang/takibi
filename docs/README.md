@@ -10,6 +10,9 @@ after the issue or development session which produced it has ended.
   and the evidence ordering that applies to hardware bring-up as well.
 - `BUILD_CHECKS.md` is the complete inventory of repository policy checks
   executed by `make langcheck`.
+- `SOAK_BACKLOG.md` collects the situations only a long-running soak can
+  meet naturally, each beside what the short suite does instead, for the
+  continuous soak on dedicated hardware.
 - `UNSAFE_INVENTORY.md` is a dated snapshot of the kernel's `unsafe` blocks
   and raw-pointer reach, grouped by the language mechanism that could remove
   them. It is the baseline for the safe-memory design, not a maintained

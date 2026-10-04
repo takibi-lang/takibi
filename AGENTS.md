@@ -177,6 +177,16 @@ Findings belong on the GitHub issue they concern, not only in `ROADMAP.md`.
 `ROADMAP.md` is a dated snapshot that is rewritten when priorities move, and
 what it said last week is gone from it.
 
+### Situations only a long soak can meet
+
+When a lane has to approximate a situation it cannot produce naturally --
+by stopping a core in GDB, setting a flag, or forcing an ordering -- or a
+failure turns out to need hours of load to recur, add a row to
+`docs/SOAK_BACKLOG.md` and leave a one-line comment on GitHub issue #702.
+Keep both current: drop or reword a row whose lane or premise has changed.
+When #702 is carried out is the maintainer's decision; do not propose or
+schedule it (maintainer, 2026-10-04).
+
 ### Cross-platform and shared-file conventions
 
 The `kernel/` paths below have conventions that prevent the two platform
