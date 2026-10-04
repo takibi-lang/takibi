@@ -38,7 +38,8 @@ RAW_ARGS = sys.argv[1:]
 FAST_MODE = "--fast" in RAW_ARGS
 FILE_FLAGS = ("--interactive-ready-file", "--daemon-ready-file",
               "--init-ready-file", "--network-ready-file",
-              "--httpd-peer-guard-file", "--postmortem-request-file")
+              "--httpd-peer-guard-file", "--postmortem-request-file",
+              "--uart-progress-file")
 
 
 def path_argument(flag):
@@ -61,6 +62,7 @@ DAEMON_READY_FILE = path_argument("--daemon-ready-file")
 INIT_READY_FILE = path_argument("--init-ready-file")
 NETWORK_READY_FILE = path_argument("--network-ready-file")
 HTTPD_GUARD_FILE = path_argument("--httpd-peer-guard-file")
+UART_PROGRESS_FILE = path_argument("--uart-progress-file")
 # GitHub issue #593: a step that fails while the guest is still running
 # leaves no evidence of where the guest was -- the lane takes a DDB walk only
 # when the guest goes silent. Touching this asks the UART driver to BREAK in
@@ -97,8 +99,9 @@ def guard_httpd_peer(seconds: float) -> None:
 # what a person needs, and exactly what would be lost.
 #
 # GitHub issue #620: each wait gets its own budget, counted from when it
-# starts, not one budget from this process's start. The single budget failed
-# guests that were merely slow: under allcheck's load a boot took 49 s where
+# starts and is renewed when the shared UART capture gains bytes. The outer
+# ceiling still bounds a guest that emits forever without the required marker.
+# The single budget failed guests that were merely slow: under allcheck's load a boot took 49 s where
 # it takes 31 s alone, and the 31 s HTTPd idle then ran the peer past 90 s
 # with the kernel answering every request. A wait still gives up short of the
 # ceiling by MARKER_SAFETY_SECONDS, whatever its own budget says.
@@ -115,24 +118,48 @@ MARKER_SAFETY_SECONDS = 10.0
 MARKER_BUDGET_SECONDS = max(5.0, PHASE_BUDGET_SECONDS - MARKER_SAFETY_SECONDS)
 
 
-def wait_for_marker(marker, label):
-    """Wait for the driver to touch `marker`; report rather than be killed.
+def uart_progress_stamp():
+    """Only captured bytes count as guest progress, not a touched log."""
+    if UART_PROGRESS_FILE is None:
+        return None
+    try:
+        stat = UART_PROGRESS_FILE.stat()
+    except FileNotFoundError:
+        return None  # The UART driver may not have opened its capture yet.
+    except OSError as error:
+        raise RuntimeError(f"cannot observe UART progress at "
+                           f"{UART_PROGRESS_FILE}: {error}") from error
+    return (stat.st_dev, stat.st_ino, stat.st_size) if stat.st_size else None
 
-    Returns True if it appeared. On False the caller must print what the
-    absence means and fail, which is the only reason this budget is bounded
-    the way it is.
-    """
+
+def wait_for_marker(marker, label):
+    """Renew a readiness wait on UART progress, bounded by the outer ceiling."""
     began = time.monotonic()
-    deadline = min(began + MARKER_BUDGET_SECONDS,
-                   STARTED_AT + OUTER_BUDGET_SECONDS - MARKER_SAFETY_SECONDS)
-    while not marker.exists() and time.monotonic() < deadline:
+    last_progress = began
+    stamp = uart_progress_stamp()
+    guarded_deadline = None
+    ceiling = STARTED_AT + OUTER_BUDGET_SECONDS - MARKER_SAFETY_SECONDS
+    while not marker.exists():
+        now = time.monotonic()
+        updated = uart_progress_stamp()
+        if updated is not None and updated != stamp:
+            last_progress = now
+        stamp = updated
+        deadline = min(last_progress + MARKER_BUDGET_SECONDS, ceiling)
+        if now >= deadline:
+            reason = ("outer ceiling reached" if now >= ceiling else
+                      "no UART progress for %.1fs" % (now - last_progress))
+            print("  waited %.1fs for the %s marker and it never arrived "
+                  "(%s; no-progress budget %.1fs)" %
+                  (now - began, label, reason, MARKER_BUDGET_SECONDS))
+            return False
+        if deadline != guarded_deadline:
+            # Share this finite wait with the UART watchdog. Renew only on
+            # captured guest bytes; a silent peer cannot keep DDB suppressed.
+            guard_httpd_peer(deadline - now)
+            guarded_deadline = deadline
         time.sleep(0.1)
-    if marker.exists():
-        return True
-    print("  waited %.1fs of a %.1fs budget for the %s marker and it never "
-          "arrived" % (time.monotonic() - began, MARKER_BUDGET_SECONDS,
-                       label))
-    return False
+    return True
 
 
 POSITIONAL_ARGS = [

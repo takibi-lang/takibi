@@ -72,6 +72,7 @@ QEMU_PID=$!
 
 python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" "$NETDEV_LOCAL_PORT" "$NETDEV_REMOTE_PORT" --fast \
     --init-ready-file "$INIT_LISTENER" \
+    --uart-progress-file "${KERNEL_QEMU_ASH_UART_LOG:-$ARTIFACT_DIR/uart.log}" \
     --network-ready-file "$NETWORK_READY" \
     >"${KERNEL_QEMU_ASH_NETWORK_LOG:-/tmp/takibi-kernel-qemu-ash-network.log}" 2>&1 &
 PEER_PID=$!

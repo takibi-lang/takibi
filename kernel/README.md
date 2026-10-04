@@ -1090,6 +1090,16 @@ and no wrapper shell. The UART driver publishes HTTP readiness from the
 service's own `listen(2)` marker and shell readiness from ash's UART block;
 neither one depends on the shell launching the other.
 
+The QEMU network peer observes the same UART capture as the console driver.
+Each readiness wait renews its no-progress deadline only when that capture
+receives bytes; touching the file does not renew it. The process ceiling
+still bounds a guest that prints without reaching the required marker, and
+the wait leaves ten seconds to report its failure before the outer kill.
+Readiness waits publish their finite deadline through the existing HTTP peer
+guard so the UART watchdog does not interrupt a progressing wait. A silent
+wait expires, allowing the normal DDB postmortem. Packet retry windows and
+the deliberate HTTP idle interval retain their existing bounds.
+
 ### What this verifies
 
 `kernelcheck-qemu` boots the kernel once and projects that single UART

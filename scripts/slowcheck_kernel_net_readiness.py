@@ -127,7 +127,8 @@ def main() -> int:
             return all(flag in line for line in calls for flag in flags)
 
         if not wired("kernel_net_test.py",
-                     ("--init-ready-file", "--network-ready-file")):
+                     ("--init-ready-file", "--network-ready-file",
+                      "--uart-progress-file")):
             print(f"FAIL net-readiness control: {runner.name} does not "
                   "wire readiness into kernel_net_test.py")
             return 1

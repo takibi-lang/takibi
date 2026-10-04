@@ -99,6 +99,7 @@ python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" \
     "$NETDEV_LOCAL_PORT" "$NETDEV_REMOTE_PORT" \
     --daemon-ready-file "$FOREGROUND_LISTENER" \
     --init-ready-file "$INIT_LISTENER" \
+    --uart-progress-file "$UART_LOG" \
     --network-ready-file "$NETWORK_READY" >"$PEER_LOG" 2>&1 &
 peer_pid=$!
 
