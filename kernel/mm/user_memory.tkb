@@ -107,7 +107,7 @@ fn user_page_allows(pte: usize, mode: UserAccessMode) -> bool {
 // this used to always read root 0 via user_pte_read regardless of which
 // process's buffer was actually being validated.
 fn user_page_class_at(root: AddressSpaceRoot, index: usize) -> usize {
-    let pte: usize = address_space_pte_read(address_space_root_slot(root), index);
+    let pte: usize = address_space_pte_read(root, index);
     if (pte == 0) { return 0; }
     let masked: usize = pte & USER_PTE_PERMISSION_MASK;
     if (masked == USER_TEXT_RX_FLAGS) { return 1; }
@@ -140,7 +140,7 @@ fn user_range_span_ok(root: AddressSpaceRoot, address: usize, length: usize,
     if (span_ok == false) { return false; }
     let mut index: usize = first;
     while (index <= last) {
-        let pte: usize = address_space_pte_read(address_space_root_slot(root), index);
+        let pte: usize = address_space_pte_read(root, index);
         if (index >= USER_SPACE_PAGE_COUNT ||
             (user_page_allows(pte, mode) == false &&
              (mode != UserAccessMode::Write ||
@@ -203,10 +203,10 @@ fn user_range_resolve_cow(range: UserWriteRange) -> bool !{unsafe} {
     let mut index: usize = first;
     while (index <= last) {
         let pte: usize = address_space_pte_read(
-            address_space_root_slot(range.root), index);
+            range.root, index);
         if (address_space_pte_is_cow(pte) &&
             address_space_resolve_cow(
-                address_space_root_slot(range.root), index) == false) {
+                range.root, index) == false) {
             return false;
         }
         index = index + 1;
@@ -347,9 +347,9 @@ fn user_range_reprotect(root: AddressSpaceRoot, first_l3: usize, last_l3: usize,
     let mut index: usize = first_l3;
     while (index <= last_l3) {
         let root_slot: usize = address_space_root_slot(root);
-        let old_pte: usize = address_space_pte_read(root_slot, index);
+        let old_pte: usize = address_space_pte_read(address_space_root_for_slot(root_slot), index);
         let phys: usize = old_pte & USER_PAGE_PHYS_MASK;
-        match address_space_pte_write(root_slot, index, phys | new_flags) {
+        match address_space_pte_write(address_space_root_for_slot(root_slot), index, phys | new_flags) {
             AddressSpacePteWriteResult::Invalid => { return; }
             AddressSpacePteWriteResult::OutOfMemory => { return; }
             AddressSpacePteWriteResult::Written => {}
@@ -394,7 +394,7 @@ fn user_memory_boundary_probe_run(base: usize,
                                   data_page: sink PageOwner[data],
                                   text_page: sink PageOwner[text]) -> bool {
     let mut root: AddressSpaceRoot = address_space_boot_root();
-    match address_space_map_page(0, base, data_page, USER_RW_XN_FLAGS) {
+    match address_space_map_page(address_space_boot_root(), base, data_page, USER_RW_XN_FLAGS) {
         AddressSpacePteWriteResult::Invalid => {
             page_free(text_page);
             return false;
@@ -405,7 +405,7 @@ fn user_memory_boundary_probe_run(base: usize,
         }
         AddressSpacePteWriteResult::Written => {}
     }
-    match address_space_map_page(0, base + 2, text_page, USER_TEXT_RX_FLAGS) {
+    match address_space_map_page(address_space_boot_root(), base + 2, text_page, USER_TEXT_RX_FLAGS) {
         AddressSpacePteWriteResult::Invalid => {
             user_pte_clear(base);
             return false;
@@ -502,7 +502,7 @@ fn user_memory_root_isolation_probe() -> bool !{unsafe} {
     let root_a: usize = scheduled_process_probe_slot_acquire();
     let root_b: usize = scheduled_process_probe_slot_acquire();
     if (root_a == 0 || root_b == 0 ||
-        address_space_is_live(root_a) || address_space_is_live(root_b)) {
+        address_space_is_live(address_space_root_for_slot(root_a)) || address_space_is_live(address_space_root_for_slot(root_b))) {
         scheduled_process_probe_slot_release(root_b);
         scheduled_process_probe_slot_release(root_a);
         return false;
@@ -521,8 +521,8 @@ fn user_memory_root_isolation_probe() -> bool !{unsafe} {
         }
     }
     if (roots_ok == false) {
-        address_space_release_root(root_b);
-        address_space_release_root(root_a);
+        address_space_release_root(address_space_root_for_slot(root_b));
+        address_space_release_root(address_space_root_for_slot(root_a));
         scheduled_process_probe_slot_release(root_b);
         scheduled_process_probe_slot_release(root_a);
         return false;
@@ -530,8 +530,8 @@ fn user_memory_root_isolation_probe() -> bool !{unsafe} {
     let va: usize = USER_TEXT_VA + index * PAGE_SIZE;
     match page_alloc(PageOwnerTag::UserPage) {
         PageAllocResult::OutOfMemory => {
-            address_space_release_root(root_b);
-            address_space_release_root(root_a);
+            address_space_release_root(address_space_root_for_slot(root_b));
+            address_space_release_root(address_space_root_for_slot(root_a));
             scheduled_process_probe_slot_release(root_b);
             scheduled_process_probe_slot_release(root_a);
             return false;
@@ -540,8 +540,8 @@ fn user_memory_root_isolation_probe() -> bool !{unsafe} {
             match page_alloc(PageOwnerTag::UserPage) {
                 PageAllocResult::OutOfMemory => {
                     page_free(page_a);
-                    address_space_release_root(root_b);
-                    address_space_release_root(root_a);
+                    address_space_release_root(address_space_root_for_slot(root_b));
+                    address_space_release_root(address_space_root_for_slot(root_a));
                     scheduled_process_probe_slot_release(root_b);
                     scheduled_process_probe_slot_release(root_a);
                     return false;
@@ -549,8 +549,8 @@ fn user_memory_root_isolation_probe() -> bool !{unsafe} {
                 PageAllocResult::Allocated(page_b) => {
                     let ok: bool = user_memory_root_isolation_probe_run(
                         root_a, root_b, index, va, page_a, page_b);
-                    address_space_release_root(root_b);
-                    address_space_release_root(root_a);
+                    address_space_release_root(address_space_root_for_slot(root_b));
+                    address_space_release_root(address_space_root_for_slot(root_a));
                     scheduled_process_probe_slot_release(root_b);
                     scheduled_process_probe_slot_release(root_a);
                     return ok;
@@ -570,7 +570,7 @@ fn user_memory_root_isolation_probe_run(root_a: usize, root_b: usize,
         address_space_root_for_slot(root_b);
     // root_a: writable (RW+XN). root_b: read-only (rodata-R). root 0: left
     // unmapped (0) at this same index the whole time.
-    match address_space_map_page(root_a, index, page_a, USER_RW_XN_FLAGS) {
+    match address_space_map_page(address_space_root_for_slot(root_a), index, page_a, USER_RW_XN_FLAGS) {
         AddressSpacePteWriteResult::Invalid => {
             page_free(page_b);
             return false;
@@ -581,13 +581,13 @@ fn user_memory_root_isolation_probe_run(root_a: usize, root_b: usize,
         }
         AddressSpacePteWriteResult::Written => {}
     }
-    match address_space_map_page(root_b, index, page_b, USER_RODATA_R_FLAGS) {
+    match address_space_map_page(address_space_root_for_slot(root_b), index, page_b, USER_RODATA_R_FLAGS) {
         AddressSpacePteWriteResult::Invalid => {
-            address_space_pte_clear(root_a, index);
+            address_space_pte_clear(address_space_root_for_slot(root_a), index);
             return false;
         }
         AddressSpacePteWriteResult::OutOfMemory => {
-            address_space_pte_clear(root_a, index);
+            address_space_pte_clear(address_space_root_for_slot(root_a), index);
             return false;
         }
         AddressSpacePteWriteResult::Written => {}
@@ -609,7 +609,7 @@ fn user_memory_root_isolation_probe_run(root_a: usize, root_b: usize,
     if (user_page_class_at(checked_root_a, index) != 3) { ok = false; }
     if (user_page_class_at(checked_root_b, index) != 2) { ok = false; }
 
-    address_space_pte_clear(root_a, index);
-    address_space_pte_clear(root_b, index);
+    address_space_pte_clear(address_space_root_for_slot(root_a), index);
+    address_space_pte_clear(address_space_root_for_slot(root_b), index);
     return ok;
 }

@@ -802,7 +802,7 @@ fn process_image_target_root_peek() -> ProcessImageTargetRootResult {
 }
 
 fn process_image_pte_read(index: usize) -> usize {
-    return address_space_pte_read(process_image_target_root_here(), index);
+    return address_space_pte_read(address_space_root_for_slot(process_image_target_root_here()), index);
 }
 
 // Do not transfer PageOwner until the lazy-L3 allocation and PTE write have
@@ -811,7 +811,7 @@ fn process_image_pte_read(index: usize) -> usize {
 fn process_image_install_page(page: sink PageOwner[page_id],
                               index: usize, flags: usize) -> bool {
     match address_space_map_page(
-            process_image_target_root_here(), index, page, flags) {
+            address_space_root_for_slot(process_image_target_root_here()), index, page, flags) {
         AddressSpacePteWriteResult::Invalid => {
             return false;
         }
@@ -914,7 +914,7 @@ fn process_stack_load_word(stack: borrow [u8; PROCESS_STACK_LAYOUT_BYTES..],
 // root describing no clone. Safe to call on a root whose clone never got
 // far enough to be recorded: the fields it clears are already clear.
 fn process_clone_vm_rollback(dest: usize) {
-    address_space_release_user_mappings(dest);
+    address_space_release_user_mappings(address_space_root_for_slot(dest));
     if (scheduled_process_slot_valid(dest)) {
         let root: usize =
             process_image_narrow_root(dest);
@@ -941,7 +941,7 @@ fn process_image_narrow_root(value: usize) -> usize !{unsafe} {
 fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsafe} {
     if (scheduled_process_slot_valid(dest_root) == false ||
         dest_root == process_image_target_root_here() ||
-        address_space_is_live(dest_root) == false) {
+        address_space_is_live(address_space_root_for_slot(dest_root)) == false) {
         return ProcessCloneVmResult::OutOfMemory;
     }
     let dest: usize =
@@ -957,7 +957,7 @@ fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsa
     process_image_set_clone_vm_source_root(dest, source);
     process_image_set_clone_vm_page_count(dest, 0);
     let mut clone_page_count: usize = 0;
-    address_space_clear_root(dest_root);
+    address_space_clear_root(address_space_root_for_slot(dest_root));
     // Reset the destination root's demand-stack metadata before rebuilding
     // it below, the same way process_image_map_current() resets its own
     // root's before mapping a fresh image -- otherwise a reaped child's
@@ -986,12 +986,12 @@ fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsa
     // reads per fork, and forks are what this kernel does most. Same
     // answer, same order (l3_index still ascends), ~200x less of it.
     for branch: usize in 0..<USER_L2_BRANCH_COUNT {
-      if (address_space_l3_branch_physical(source, branch) == 0) {
+      if (address_space_l3_branch_physical(address_space_root_for_slot(source), branch) == 0) {
         continue;
       }
       for entry: usize in 0..<USER_L3_PAGE_COUNT {
         let l3_index: usize = branch * USER_L3_PAGE_COUNT + entry;
-        let parent_pte: usize = address_space_pte_read(source, l3_index);
+        let parent_pte: usize = address_space_pte_read(address_space_root_for_slot(source), l3_index);
         if (parent_pte != 0) {
             let parent_physical: usize = parent_pte & USER_PAGE_PHYS_MASK;
             match page_mapping_retain_physical(parent_physical,
@@ -1017,7 +1017,7 @@ fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsa
             if (address_space_pte_is_writable(parent_pte)) {
                 child_pte = address_space_pte_cow_value(parent_pte);
             }
-            match address_space_pte_write(dest_root, l3_index, child_pte) {
+            match address_space_pte_write(address_space_root_for_slot(dest_root), l3_index, child_pte) {
                 AddressSpacePteWriteResult::Invalid => {
                     page_mapping_release_physical(parent_physical);
                     process_clone_vm_rollback(dest_root);
@@ -1031,7 +1031,7 @@ fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsa
                 AddressSpacePteWriteResult::Written => {
                     if (address_space_pte_is_writable(parent_pte)) {
                         match address_space_pte_write(
-                                source, l3_index,
+                                address_space_root_for_slot(source), l3_index,
                                 address_space_pte_cow_value(parent_pte)) {
                             AddressSpacePteWriteResult::Invalid => {
                                 process_clone_vm_rollback(dest_root);
@@ -1088,7 +1088,7 @@ fn process_image_activate_root(root: usize) {
     // boot-fixture callers outside the scheduler handoff paths.
     if (root == 0) {
         process_image_set_target_root_here(root);
-        address_space_activate_root(root);
+        address_space_activate_root(address_space_root_for_slot(root));
         kernel_process_trace_address_space_activate(root);
         return;
     }
@@ -1100,7 +1100,7 @@ fn process_image_activate_root(root: usize) {
 // changes both only after the caller has revalidated its reserved process.
 fn process_image_prepare_activation(root: usize)
         -> AddressSpaceActivationPrepareResult {
-    return address_space_prepare_activation(root);
+    return address_space_prepare_activation(address_space_root_for_slot(root));
 }
 
 fn process_image_commit_activation(
@@ -1220,7 +1220,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     // process to have a root of its own.
     let child_root: usize = scheduled_process_probe_slot_acquire();
     if (child_root == 0) { return false; }
-    if (address_space_is_live(child_root)) {
+    if (address_space_is_live(address_space_root_for_slot(child_root))) {
         scheduled_process_probe_slot_release(child_root);
         return false;
     }
@@ -1237,20 +1237,20 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     }
     match page_alloc(PageOwnerTag::UserPage) {
         PageAllocResult::OutOfMemory => {
-            address_space_release_root(child_root);
+            address_space_release_root(address_space_root_for_slot(child_root));
             scheduled_process_probe_slot_release(child_root);
             return false;
         }
         PageAllocResult::Allocated(stack_page) => {
             match address_space_map_page(
-                    0, process_stack_top_page(), stack_page, USER_RW_XN_FLAGS) {
+                    address_space_boot_root(), process_stack_top_page(), stack_page, USER_RW_XN_FLAGS) {
                 AddressSpacePteWriteResult::Invalid => {
-                    address_space_release_root(child_root);
+                    address_space_release_root(address_space_root_for_slot(child_root));
                     scheduled_process_probe_slot_release(child_root);
                     return false;
                 }
                 AddressSpacePteWriteResult::OutOfMemory => {
-                    address_space_release_root(child_root);
+                    address_space_release_root(address_space_root_for_slot(child_root));
                     scheduled_process_probe_slot_release(child_root);
                     return false;
                 }
@@ -1282,7 +1282,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     process_image_clear_target_root_here();
     process_image_unmap_pages(1);
     if (*fallback_count != fallback_before + 1 ||
-        address_space_pte_read(0, process_stack_top_page()) == 0 ||
+        address_space_pte_read(address_space_boot_root(), process_stack_top_page()) == 0 ||
         process_image_record_read(0).stack_growth_active == false ||
         process_image_record_read(0).active_page_count != 1 ||
         process_image_record_read(0).stack_lowest_l3 != process_stack_top_page()) {
@@ -1303,8 +1303,8 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
         // only root 1 a private writable page while root 0 retains the
         // original shared frame.
         let top_page: usize = process_stack_top_page();
-        let parent_before: usize = address_space_pte_read(0, top_page);
-        let child_before: usize = address_space_pte_read(child_root, top_page);
+        let parent_before: usize = address_space_pte_read(address_space_boot_root(), top_page);
+        let child_before: usize = address_space_pte_read(address_space_root_for_slot(child_root), top_page);
         if ((parent_before & USER_PAGE_PHYS_MASK) !=
                     (child_before & USER_PAGE_PHYS_MASK) ||
             address_space_pte_is_cow(parent_before) == false ||
@@ -1317,10 +1317,10 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
         let cow_esr: usize = 0x9000004F;
         let cow_fault: usize = USER_TEXT_VA + top_page * PAGE_SIZE;
         if (ok && (process_image_handle_data_abort(cow_esr, cow_fault) == false ||
-            address_space_pte_is_cow(address_space_pte_read(child_root, top_page)) ||
-            address_space_pte_is_writable(address_space_pte_read(child_root, top_page)) == false ||
-            (address_space_pte_read(0, top_page) & USER_PAGE_PHYS_MASK) ==
-                (address_space_pte_read(child_root, top_page) & USER_PAGE_PHYS_MASK))) {
+            address_space_pte_is_cow(address_space_pte_read(address_space_root_for_slot(child_root), top_page)) ||
+            address_space_pte_is_writable(address_space_pte_read(address_space_root_for_slot(child_root), top_page)) == false ||
+            (address_space_pte_read(address_space_boot_root(), top_page) & USER_PAGE_PHYS_MASK) ==
+                (address_space_pte_read(address_space_root_for_slot(child_root), top_page) & USER_PAGE_PHYS_MASK))) {
             ok = false;
         }
         // EC=0x24 (data abort from a lower EL), DFSC=0x07 (translation
@@ -1330,7 +1330,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
         let first_page: usize = process_stack_top_page() - 11;
         let first_fault: usize = USER_TEXT_VA + first_page * PAGE_SIZE;
         if (process_image_handle_data_abort(l3_esr, first_fault) == false ||
-            address_space_pte_read(child_root, first_page) == 0) {
+            address_space_pte_read(address_space_root_for_slot(child_root), first_page) == 0) {
             ok = false;
         }
         // Crossing into branch 510 finds no L3 descriptor at all, producing
@@ -1340,9 +1340,9 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
         let second_page: usize = process_stack_top_page() - 512;
         let second_fault: usize = USER_TEXT_VA + second_page * PAGE_SIZE;
         if (ok && (process_image_handle_data_abort(l2_esr, second_fault) == false ||
-            address_space_pte_read(child_root, second_page) == 0 ||
-            address_space_pte_read(child_root, second_page + 1) == 0 ||
-            address_space_pte_read(child_root, first_page - 1) == 0)) {
+            address_space_pte_read(address_space_root_for_slot(child_root), second_page) == 0 ||
+            address_space_pte_read(address_space_root_for_slot(child_root), second_page + 1) == 0 ||
+            address_space_pte_read(address_space_root_for_slot(child_root), first_page - 1) == 0)) {
             ok = false;
         }
         process_image_activate_root(0);
@@ -1356,21 +1356,21 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     // page alone. Resolving it must restore write permission in place rather
     // than allocate another page under memory pressure.
     let parent_after_reap: usize =
-        address_space_pte_read(0, process_stack_top_page());
+        address_space_pte_read(address_space_boot_root(), process_stack_top_page());
     if (ok && (page_mapping_refcount_physical(cow_parent_physical) != 1 ||
         address_space_pte_is_cow(parent_after_reap) == false ||
-        address_space_resolve_cow(0, process_stack_top_page()) == false ||
+        address_space_resolve_cow(address_space_boot_root(), process_stack_top_page()) == false ||
         address_space_pte_is_writable(
-            address_space_pte_read(0, process_stack_top_page())) == false ||
-        (address_space_pte_read(0, process_stack_top_page()) &
+            address_space_pte_read(address_space_boot_root(), process_stack_top_page())) == false ||
+        (address_space_pte_read(address_space_boot_root(), process_stack_top_page()) &
             USER_PAGE_PHYS_MASK) != cow_parent_physical)) {
         ok = false;
     }
-    address_space_pte_clear(0, process_stack_top_page());
+    address_space_pte_clear(address_space_boot_root(), process_stack_top_page());
     process_image_set_stack_growth_active(0, false);
     process_image_set_active_page_count(0, 0);
     process_image_set_stack_lowest_l3(0, process_stack_top_page());
-    address_space_release_root(child_root);
+    address_space_release_root(address_space_root_for_slot(child_root));
     scheduled_process_probe_slot_release(child_root);
     return ok;
 }
@@ -1488,7 +1488,7 @@ private let mut process_image_exec_reap_stack_growth_count: usize;
 
 fn process_image_root_window_is_clear(
         root: usize) -> bool !{unsafe} {
-    return address_space_user_window_is_clear(root);
+    return address_space_user_window_is_clear(address_space_root_for_slot(root));
 }
 
 fn process_image_exec_reap_evidence() -> (usize, usize, usize) {
@@ -1545,7 +1545,7 @@ fn process_image_exec_teardown(root_index: usize,
                 }
                 // process_image_unmap_pages for this root, whose resets
                 // process_image_cleanup_root repeats unconditionally.
-                address_space_release_user_mappings(root_index);
+                address_space_release_user_mappings(address_space_root_for_slot(root_index));
                 process_image_set_active_page_count_pinned(
                     process_image_record_pin_words(&process_image_pool, words), 0);
                 process_image_set_stack_growth_active_pinned(
@@ -1959,7 +1959,7 @@ fn process_image_load_page_ext2(page: borrow PageOwner[page],
 // transferred user page and every dynamic L3 table page. It needs no
 // per-image page-index list and scales with populated branches.
 private fn process_image_cleanup_root(root: usize) {
-    address_space_release_user_mappings(root);
+    address_space_release_user_mappings(address_space_root_for_slot(root));
     process_image_set_active_page_count(root, 0);
     process_image_set_stack_growth_active(root, false);
     process_image_set_stack_lowest_l3(root, process_stack_top_page());
@@ -2004,7 +2004,7 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
             return false;
         }
         let index: usize = (fault_address - USER_TEXT_VA) / PAGE_SIZE;
-        return address_space_resolve_cow(process_image_target_root_here(), index);
+        return address_space_resolve_cow(address_space_root_for_slot(process_image_target_root_here()), index);
     }
     // A missing PTE inside an existing L3 is a level-3 translation fault
     // (0x07). A stack expansion into an unpopulated lazy-L3 branch faults
@@ -2371,7 +2371,7 @@ fn process_image_pair_map_ext2_in_root(
         argc: usize,
         root: usize) -> ProcessImagePairProbeResult {
     if (scheduled_process_slot_valid(root) == false ||
-        address_space_is_live(root) == false) {
+        address_space_is_live(address_space_root_for_slot(root)) == false) {
         return ProcessImagePairProbeResult::Invalid;
     }
     process_image_set_target_root_here(root);
@@ -2522,7 +2522,7 @@ fn process_image_map_ext2_in_root(plan: DistroElfLoadPlan,
                                   argc: usize,
                                   root: usize) -> ProcessImageMapResult {
     if (scheduled_process_slot_valid(root) == false ||
-        address_space_is_live(root) == false) {
+        address_space_is_live(address_space_root_for_slot(root)) == false) {
         return ProcessImageMapResult::InvalidImage;
     }
     process_image_set_target_root_here(root);
@@ -2537,7 +2537,7 @@ fn process_image_map_in_root(plan: DistroElfLoadPlan,
                              argc: usize,
                              root: usize) -> ProcessImageMapResult {
     if (scheduled_process_slot_valid(root) == false ||
-        address_space_is_live(root) == false) {
+        address_space_is_live(address_space_root_for_slot(root)) == false) {
         return ProcessImageMapResult::InvalidImage;
     }
     process_image_set_target_root_here(root);
@@ -2585,7 +2585,7 @@ fn process_image_window_is_clear() -> bool !{unsafe} {
         ProcessImageTargetRootResult::Missing => { return false; }
         ProcessImageTargetRootResult::Ready(root) => {
             return address_space_user_window_is_clear(
-                process_image_root_index(root));
+                address_space_root_for_slot(process_image_root_index(root)));
         }
     }
 }

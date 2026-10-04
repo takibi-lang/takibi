@@ -2001,10 +2001,8 @@ private fn scheduled_process_copy_affinity_mask(parent: borrow ProcessRunning[p]
 // concurrent set cannot be seen half-written. Taking the lock here is safe
 // only because a caller already holding the run guard is rejected at
 // compile time (single_instance_lock, #694).
-struct ProcessPoolHandleWords {
-    address: usize;
-    generation: usize;
-}
+// ProcessPoolHandleWords is defined in kernel/mm/address_space.tkb, which
+// is parsed first and holds one in AddressSpaceRoot.
 
 // The one place each pair is read; every authority below passes the
 // record it reached.
@@ -2096,12 +2094,35 @@ fn scheduled_process_slot_valid(slot: usize) -> bool !{unsafe} {
     }
 }
 
-fn scheduled_process_address_space_backing(slot: usize) -> usize {
-    return scheduled_process_record_at(slot).address_space_backing;
+// The backing handle read with no authority, for
+// address_space_root_for_slot alone: the pre-#693 read, kept until its
+// callers move to an authority's mint.
+private fn process_backing_words(record: borrow *ProcessRecord)
+        -> ProcessPoolHandleWords !{unsafe} {
+    let mut words: ProcessPoolHandleWords = {
+        record.address_space_backing, record.address_space_backing_generation };
+    return words;
 }
 
-fn scheduled_process_address_space_backing_generation(slot: usize) -> usize {
-    return scheduled_process_record_at(slot).address_space_backing_generation;
+fn scheduled_process_address_space_backing_handle_bare(slot: usize)
+        -> ProcessPoolHandleWords !{unsafe} {
+    return process_backing_words(scheduled_process_record_at(slot));
+}
+
+// GitHub issue #693 step 5: a process's address-space root, with its
+// backing handle read under an authority over the record. These and
+// address_space_boot_root are the mints scripts/check_address_space_root_mints.py
+// allows besides the transitional address_space_root_for_slot.
+fn scheduled_process_address_space_root_owned(
+        owner: borrow ScheduledProcessOwner[process]) -> AddressSpaceRoot !{unsafe} {
+    return address_space_root_mint(owner.pool_index,
+        process_backing_words(scheduled_process_record_owned(owner)));
+}
+
+fn scheduled_process_address_space_root_running(
+        running: borrow ProcessRunning[process]) -> AddressSpaceRoot !{unsafe} {
+    return address_space_root_mint(running.handle.pool_index,
+        process_backing_words(scheduled_process_record_running(running)));
 }
 
 fn scheduled_process_set_address_space_backing(
@@ -2494,10 +2515,10 @@ private fn scheduled_process_release_every_process() !{unsafe} {
 // that no process performed.
 private fn scheduled_process_release_slot_resources(slot: usize) !{unsafe} {
     unified_fd_context_release(slot);
-    address_space_release_root(slot);
+    address_space_release_root(address_space_root_for_slot(slot));
     // GitHub issue #414: the ROOT's pages and the RECORD that named them
     // are two things, and only the first was being given back.
-    address_space_backing_release(slot);
+    address_space_backing_release(address_space_root_for_slot(slot));
     process_image_record_release(slot);
 }
 
@@ -2837,7 +2858,7 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
     match address_space_ensure_root(slot) {
         AddressSpaceEnsureResult::Ok => {}
         AddressSpaceEnsureResult::SlotOutOfRange => {
-            address_space_backing_release(slot);
+            address_space_backing_release(scheduled_process_address_space_root_owned(creating));
             let rollback_guard = process_run_lock();
             scheduled_process_slot_remove(rollback_guard, slot);
             process_run_unlock(rollback_guard);
@@ -2854,7 +2875,7 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
             // refused allocation that costs nothing and one that costs a
             // pool slot per attempt. It must come before the process
             // record goes, because the handle naming it lives there.
-            address_space_backing_release(slot);
+            address_space_backing_release(scheduled_process_address_space_root_owned(creating));
             let rollback_guard = process_run_lock();
             scheduled_process_slot_remove(rollback_guard, slot);
             process_run_unlock(rollback_guard);
@@ -2872,8 +2893,8 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
         kernel_boot_log_resource_exhausted(
             "physical page allocator" as *u8,
             page_allocator_total_count());
-        address_space_release_root(slot);
-        address_space_backing_release(slot);
+        address_space_release_root(scheduled_process_address_space_root_owned(creating));
+        address_space_backing_release(scheduled_process_address_space_root_owned(creating));
         let rollback_guard = process_run_lock();
         scheduled_process_slot_remove(rollback_guard, slot);
         process_run_unlock(rollback_guard);
@@ -2884,8 +2905,8 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
             "physical page allocator" as *u8,
             page_allocator_total_count());
         process_image_record_release(slot);
-        address_space_release_root(slot);
-        address_space_backing_release(slot);
+        address_space_release_root(scheduled_process_address_space_root_owned(creating));
+        address_space_backing_release(scheduled_process_address_space_root_owned(creating));
         let rollback_guard = process_run_lock();
         scheduled_process_slot_remove(rollback_guard, slot);
         process_run_unlock(rollback_guard);
@@ -2899,8 +2920,8 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
     if (bottom == 0) {
         unified_fd_context_release(slot);
         process_image_record_release(slot);
-        address_space_release_root(slot);
-        address_space_backing_release(slot);
+        address_space_release_root(scheduled_process_address_space_root_owned(creating));
+        address_space_backing_release(scheduled_process_address_space_root_owned(creating));
         let rollback_guard = process_run_lock();
         scheduled_process_slot_remove(rollback_guard, slot);
         process_run_unlock(rollback_guard);
@@ -3416,7 +3437,7 @@ fn scheduled_process_reap_teardown(
         scheduled_process_record_owned(owner).saved_sp, 0);
     unified_fd_context_release_words(owner.pool_index,
         scheduled_process_fd_context_handle_owned(owner));
-    address_space_release_root(owner.pool_index);
+    address_space_release_root(scheduled_process_address_space_root_owned(owner));
     // GitHub issue #392: a root's image record dies with the process, as
     // the fd context above already does -- so this is the last moment its
     // installed exec image can be torn down and accounted for, and the
@@ -3428,7 +3449,7 @@ fn scheduled_process_reap_teardown(
         scheduled_process_image_record_handle_owned(owner));
     // GitHub issue #414: last, because process_image_exec_teardown above
     // still resolves against this root.
-    address_space_backing_release(owner.pool_index);
+    address_space_backing_release(scheduled_process_address_space_root_owned(owner));
     // Read the watermark before the run is recycled -- see
     // scheduled_process_stack_deepest_reaped.
     let used: usize = kernel_stack_used_bytes(owner.pool_index);
@@ -3522,7 +3543,7 @@ fn scheduled_process_probe_slot_acquire() -> usize !{unsafe} {
             slot = handle.pool_index;
         }
     }
-    address_space_release_root(slot);
+    address_space_release_root(address_space_root_for_slot(slot));
     return slot;
 }
 
@@ -3844,7 +3865,7 @@ const TTBR0_BADDR_MASK: usize = 0x0000FFFFFFFFFFFE;
 private fn kernel_process_root_authorities_check(incoming: ProcessHandle,
                                                  frame: borrow FrameRef[process]) {
     let slot: usize = incoming.pool_index;
-    let record_l1: usize = address_space_l1_physical(slot);
+    let record_l1: usize = address_space_l1_physical(address_space_root_for_slot(slot));
     let hardware_l1: usize = crash_snapshot_read_ttbr0_el1() & TTBR0_BADDR_MASK;
     let mut target: usize = 0xFFFFFFFFFFFFFFFF;
     match process_image_target_root_peek() {
@@ -3868,7 +3889,7 @@ private fn kernel_process_root_authorities_check(incoming: ProcessHandle,
         kernel_boot_log(" target_slot=");
         uart_put_udec(target);
         kernel_boot_log(" target_l1=");
-        uart_put_hex(address_space_l1_physical(target));
+        uart_put_hex(address_space_l1_physical(address_space_root_for_slot(target)));
         kernel_boot_log("\n");
     }
     kernel_syscall_fail_stop(frame_ref_address(frame));
@@ -3981,7 +4002,7 @@ fn kernel_process_stack_idle_complete() {
     // freed root, ran on cached global kernel entries, and at the first
     // miss faulted fetching its own vector, forever, with IRQs masked:
     // the DDB lane's peer that never answered a world stop.
-    address_space_activate_root(0);
+    address_space_activate_root(address_space_boot_root());
     scheduled_process_record_of_locked(guard, outgoing).stack_owner_cpu =
         PROCESS_STACK_UNOWNED;
     execution_here().stack_live = false;
@@ -4021,7 +4042,7 @@ fn kernel_process_stack_idle_yield() {
         kernel_syscall_fail_stop(0);
     }
     // Leave its root before it can run elsewhere, as an exit does.
-    address_space_activate_root(0);
+    address_space_activate_root(address_space_boot_root());
     scheduled_process_record_of_locked(guard, outgoing).stack_owner_cpu =
         PROCESS_STACK_UNOWNED;
     execution_here().stack_live = false;
@@ -4052,7 +4073,7 @@ fn kernel_process_stack_idle_blocked() {
         process_run_unlock(guard);
         kernel_syscall_fail_stop(0);
     }
-    address_space_activate_root(0);
+    address_space_activate_root(address_space_boot_root());
     scheduled_process_record_of_locked(guard, outgoing).stack_owner_cpu =
         PROCESS_STACK_UNOWNED;
     execution_here().stack_live = false;
@@ -6386,7 +6407,7 @@ private fn kernel_process_tick_leave_excluded(
     }
     scheduled_process_record_locked(guard, slot).saved_sp = frame_ref_address(frame);
     // Leave its root before it can run elsewhere, as every idle entry does.
-    address_space_activate_root(0);
+    address_space_activate_root(address_space_boot_root());
     execution_here().current_live = false;
     execution_here().scheduler_enabled = false;
     execution_here().reschedule_pending = false;
@@ -8998,10 +9019,16 @@ fn kernel_process_crash_image_kind() -> usize {
 // clone, before process_image_activate_root() replaces the old fixed
 // process_image_activate_child() -- read it here rather than reaching
 // into execution_here().current_handle directly.
-fn kernel_process_current_root() -> AddressSpaceRoot {
+fn kernel_process_current_root() -> AddressSpaceRoot !{unsafe} {
     if (execution_here().current_live) {
-        return address_space_root_for_slot(
-            execution_here().current_handle.pool_index);
+        match process_running_here() {
+            ProcessRunningHere::Running(running) => {
+                let mut root: AddressSpaceRoot =
+                    scheduled_process_address_space_root_running(running);
+                process_running_end(running);
+                return root;
+            }
+        }
     }
     return address_space_boot_root();
 }

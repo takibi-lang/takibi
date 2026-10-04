@@ -2236,7 +2236,7 @@ private fn kernel_ddb_enter_stopped(
     ddb_snapshot.wait_reason = kernel_process_crash_wait_reason();
     ddb_snapshot.root_slot = kernel_process_crash_root_slot();
     let mut vm: AddressSpaceDiagnosticSnapshot =
-        address_space_diagnostic_snapshot(ddb_snapshot.root_slot);
+        address_space_diagnostic_snapshot(address_space_root_for_slot(ddb_snapshot.root_slot));
     ddb_snapshot.root_live = 0;
     if (vm.live) { ddb_snapshot.root_live = 1; }
     ddb_snapshot.root_l1 = vm.l1_physical;
@@ -2264,7 +2264,7 @@ private fn kernel_ddb_enter_stopped(
         if (index < ddb_snapshot.process_count) {
             let mut process_vm: AddressSpaceDiagnosticSnapshot =
                 address_space_diagnostic_snapshot(
-                    ddb_snapshot.processes[index].root_slot);
+                    address_space_root_for_slot(ddb_snapshot.processes[index].root_slot));
             if (process_vm.live) {
                 ddb_snapshot.process_l2[index] = process_vm.l2_physical;
             }
@@ -2911,7 +2911,7 @@ private fn crash_snapshot_put_page_owner(what: *u8, address: usize,
         return;
     }
     let physical: usize =
-        address_space_user_physical(root_slot, address);
+        address_space_user_physical(address_space_root_for_slot(root_slot), address);
     if (physical == 0) {
         kernel_boot_log("is ");
         kernel_boot_log(page_owner_description_reporter(address));
@@ -2960,12 +2960,12 @@ fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
     crash_snapshot_here().wait4_status_ptr = kernel_process_crash_wait4_status_ptr();
     crash_snapshot_here().root_slot = kernel_process_crash_root_slot();
     crash_snapshot_here().activity = kernel_activity_code_here();
-    crash_snapshot_here().root_l1 = address_space_l1_physical(crash_snapshot_here().root_slot);
-    crash_snapshot_here().root_asid = address_space_asid(crash_snapshot_here().root_slot);
+    crash_snapshot_here().root_l1 = address_space_l1_physical(address_space_root_for_slot(crash_snapshot_here().root_slot));
+    crash_snapshot_here().root_asid = address_space_asid(address_space_root_for_slot(crash_snapshot_here().root_slot));
     // Slot 0 through the same two accessors the line above uses, so the pair
     // is captured the same way and at the same moment (GitHub issue #468).
-    crash_snapshot_here().root0_l1 = address_space_l1_physical(0);
-    crash_snapshot_here().root0_asid = address_space_asid(0);
+    crash_snapshot_here().root0_l1 = address_space_l1_physical(address_space_boot_root());
+    crash_snapshot_here().root0_asid = address_space_asid(address_space_boot_root());
     crash_snapshot_here().image_kind = kernel_process_crash_image_kind();
     for fd: usize in 0..<CRASH_FD_SNAPSHOT_SLOTS {
         crash_snapshot_here().fd_kind[fd] =

@@ -37,6 +37,7 @@ ALLOWED = {
     "kernel_process_current_has_relative",
     "kernel_process_current_pending_block_reason",
     "kernel_process_current_prepare_signal_wait",
+    "kernel_process_current_root",
     "kernel_process_current_set_pending_block",
     "kernel_process_current_set_sigchld_action",
     "kernel_process_current_set_sigchld_ignored",

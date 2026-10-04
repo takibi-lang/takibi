@@ -1110,7 +1110,7 @@ fn syscall_munmap_pages(address: usize, length: usize) {
     let slot: usize = address_space_root_slot(kernel_process_current_root());
     let mut index: usize = first;
     while (index <= last) {
-        if (user_page_writable(address_space_pte_read(slot, index))) {
+        if (user_page_writable(address_space_pte_read(address_space_root_for_slot(slot), index))) {
             unified_process_mmap_release_page(
                 kernel_syscall_process_slot(),
                 USER_TEXT_VA + index * PAGE_SIZE);
@@ -7412,7 +7412,7 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
         PageAllocResult::OutOfMemory => { return false; }
         PageAllocResult::Allocated(page) => {
             match address_space_map_page(
-                    0, probe_index, page, USER_RW_XN_FLAGS) {
+                    address_space_boot_root(), probe_index, page, USER_RW_XN_FLAGS) {
                 AddressSpacePteWriteResult::Invalid => {
                     return false;
                 }
