@@ -1060,8 +1060,17 @@ drives all inspection commands over its UART socket, and verifies that boot
 continues afterward. A second lane executes Takibi's reserved deliberate
 `brk #0x544b`, enters through a compiler-generated Current-EL synchronous
 `ExceptionFrame`, advances ELR past that instruction, and proves the same
-resume behavior. Other Current-EL synchronous exceptions remain fatal. The
-RPi5 implementation uses the same PL011 DR.BE/BEIM
+resume behavior. Other Current-EL synchronous exceptions remain fatal.
+
+The QEMU DDB capture renews its UART inactivity budget when bytes arrive, with a
+total ceiling of three budgets. `KERNEL_QEMU_DDB_TIMEOUT` selects the inactivity
+budget (180 seconds by default); network and snapshot helpers share the total
+ceiling. Before an unfulfilled UART BREAK, the end of the remaining budget is
+reserved for a bounded read-only postmortem. Postmortem output cannot renew
+that diagnostic budget. Await timing records use the total capture ceiling,
+and postmortem observations use their separate start and budget.
+
+The RPi5 implementation uses the same PL011 DR.BE/BEIM
 path. The normal RPi5 integration enables the test-only ring byte over SWD
 after its ordinary workload together with the test-only guarded-fault command,
 then sends an ordinary byte followed by timed CDC BREAK. It runs the guarded

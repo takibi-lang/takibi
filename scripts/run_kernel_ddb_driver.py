@@ -100,9 +100,10 @@ def main() -> int:
     parser.add_argument("--network-ready-file", required=True)
     parser.add_argument("--foreground-listener-file", required=True)
     parser.add_argument("--init-listener-file", required=True)
-    parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--timeout", type=float, default=30.0,
+                        help="UART inactivity budget; total capture is bounded by three budgets")
     parser.add_argument("--await-timing-log",
-                        help="JSONL UART observations against the existing driver deadline")
+                        help="JSONL UART observations against the capture ceiling")
     args = parser.parse_args()
     if ((args.snapshot_ready_file is None)
             != (args.snapshot_release_file is None)):
@@ -164,14 +165,16 @@ def drive(args, started, deadline):
             b"ddb: console lock probe phase=2 release=",
             b"workload: peer tty read its 17-byte line",
         ]
-    timing = AwaitTiming(args.await_timing_log, started, args.timeout, awaited,
-                         commands[:-1], label="kernel/qemu ddb")
+    ceiling = started + 3 * args.timeout
+    timing = AwaitTiming(args.await_timing_log, started, 3 * args.timeout, awaited,
+                         commands[:-1], label="kernel/qemu ddb",
+                         origin=f"capture ceiling (UART inactivity limit {args.timeout:g}s)")
     observers = [timing]
     try:
         serial = connect(args.serial_port, deadline)
         timing.record("UART connection", True, time.monotonic())
         serial.settimeout(0.25)
-        return capture_loop(args, serial, deadline, ready_file, release_file,
+        return capture_loop(args, serial, deadline, ceiling, ready_file, release_file,
                        network_ready_file, foreground_listener_file, init_listener_file,
                        awaited, commands, timing, observers)
     finally:
@@ -179,7 +182,7 @@ def drive(args, started, deadline):
             observer.finish(time.monotonic())
 
 
-def capture_loop(args, serial, deadline, ready_file, release_file, network_ready_file,
+def capture_loop(args, serial, deadline, ceiling, ready_file, release_file, network_ready_file,
                  foreground_listener_file, init_listener_file, awaited, commands, timing, observers):
     received = bytearray()
     break_sent = args.break_source == "software"
@@ -208,6 +211,11 @@ def capture_loop(args, serial, deadline, ready_file, release_file, network_ready
                 break
             if chunk is not None:
                 arrived_at = time.monotonic()
+                # Match the ordinary UART capture: slow but advancing boot
+                # renews its inactivity budget, bounded by a total ceiling.
+                # Postmortem output never renews the diagnostic walk.
+                if stall_break_at is None:
+                    deadline = max(deadline, min(arrived_at + args.timeout, ceiling))
                 received.extend(chunk.replace(b"\r", b""))
                 log.write(chunk)
                 log.flush()
@@ -298,8 +306,8 @@ def capture_loop(args, serial, deadline, ready_file, release_file, network_ready
                 args.break_source != "uart" or
                 (peer_tty_reading_at is not None and
                  time.monotonic() - peer_tty_reading_at >= 1.0))
-            # The lane is inside the last of its budget and the scripted BREAK
-            # never fired, so it has already failed. Ask the debugger why. The
+            # Reserve the end of an exhausted inactivity budget or capture
+            # ceiling for a postmortem if the scripted BREAK never fired. The
             # snapshot-ready file stays untouched: the runner's GDB comparison
             # belongs to the scripted stop, not to this one.
             if (args.break_source == "uart" and not break_sent and

@@ -35,6 +35,9 @@ FOREGROUND_LISTENER="$ARTIFACT_DIR/foreground-httpd.listener"
 INIT_LISTENER="$ARTIFACT_DIR/init.listener"
 PEER_LOG="$ARTIFACT_DIR/net-peer.log"
 TIMEOUT_SECS="${KERNEL_QEMU_DDB_TIMEOUT:-180}"
+# The UART driver renews its inactivity budget on output. Its helpers must
+# remain alive up to the same three-budget outer ceiling.
+CEILING_SECS="$((TIMEOUT_SECS * 3))"
 KERNEL_READ_ADDRESS="$(llvm-nm-19 "$ELF" | awk '$3 == "kernel_ddb_breakpoint_test_enabled" && !seen { print $1; seen = 1 }')"
 if [ -z "$KERNEL_READ_ADDRESS" ]; then
     echo "kernel DDB read-test symbol not found" >&2
@@ -94,7 +97,7 @@ python3 "$REPO_ROOT/scripts/run_kernel_ddb_driver.py" \
     --timeout "$TIMEOUT_SECS" &
 driver_pid=$!
 
-KERNEL_QEMU_TIMEOUT="$TIMEOUT_SECS" \
+KERNEL_QEMU_TIMEOUT="$TIMEOUT_SECS" KERNEL_QEMU_CEILING="$CEILING_SECS" \
 python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" \
     "$NETDEV_LOCAL_PORT" "$NETDEV_REMOTE_PORT" \
     --daemon-ready-file "$FOREGROUND_LISTENER" \
@@ -124,7 +127,7 @@ else
         -ex "source $REPO_ROOT/scripts/kernel_peer_exit_check.py"
     )
 fi
-KERNEL_PEER_EXIT_TIMEOUT="$TIMEOUT_SECS" \
+KERNEL_PEER_EXIT_TIMEOUT="$CEILING_SECS" \
     timeout "${GDB_BATCH_TIMEOUT:-600}" gdb-multiarch -q -batch "$ELF" "${GDB_COMMANDS[@]}" \
     -ex "detach" >"$ARTIFACT_DIR/peer-exit-gdb.log" 2>&1
 if [ "$BREAK_SOURCE" = uart ]; then
@@ -135,7 +138,7 @@ fi
 # first shell prompt. Give it the driver's full boot budget; the indirect-file
 # fixture alone can consume most of the former 30-second snapshot wait on a
 # loaded host.
-for _wait in $(seq 1 "$((TIMEOUT_SECS * 10))"); do
+for _wait in $(seq 1 "$((CEILING_SECS * 10))"); do
     [ -e "$SNAPSHOT_READY" ] && break
     kill -0 "$driver_pid" 2>/dev/null || break
     sleep 0.1
