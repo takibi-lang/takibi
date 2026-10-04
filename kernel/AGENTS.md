@@ -19,6 +19,19 @@ responsive, use DDB before adding logging to scheduler, exception, IRQ, VM, or
 process paths. QEMU cannot validate physical cache coherence, real interrupt
 timing, or hardware concurrency.
 
+Before porting a wait, poll, or block HAL function, state its return contract
+in a comment at the new function or in the commit description:
+
+- Single-shot: it returns only when the awaited condition is true; the caller
+  need not loop to establish that condition.
+- Wake-and-recheck: unrelated interrupts or spurious wakeups may return it;
+  the caller must loop, recheck the condition, and enforce its own deadline.
+
+For example, both maintained `net_rx_wait()` implementations use the second
+contract. A virtio-net port that retried internally until a real RX interrupt
+swallowed timer wakeups and prevented callers from checking their deadlines.
+Preserve the caller's opportunity to recheck when porting such a wait.
+
 Kernel documentation is authoritative for current behavior:
 `kernel/README.md`, `kernel/SYSCALLS.md`, `kernel/MEMORY_MAP.md`,
 `kernel/RESOURCE_LIMITS.md`, `kernel/RUNTIME_STATE.md`, and
