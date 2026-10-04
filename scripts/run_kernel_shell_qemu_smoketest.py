@@ -6,6 +6,7 @@ import pty
 import re
 import select
 import signal
+import subprocess
 import shutil
 import sys
 import time
@@ -139,7 +140,7 @@ def run_one(command, http_offset):
         # for the second and third HTTP listeners within the same lane block.
         http_base = int(os.environ.get("KERNEL_QEMU_SHELL_HTTP_PORT", "18080"))
         os.environ["KERNEL_QEMU_SHELL_HTTP_PORT"] = str(http_base + http_offset)
-        os.execvp("make", ["make", "-j1", "kernelsh-qemu"])
+        os.execvp("bash", ["bash", "scripts/run_kernel_shell_qemu.sh"])
 
     transcript = bytearray()
     stop_sent = False
@@ -238,6 +239,12 @@ def run_one(command, http_offset):
 
 
 def main():
+    # Build before the PTY deadline: a clean compiler/build-check pass is
+    # host preparation, not guest boot or shell response time. Run the same
+    # console recipe as kernelsh-qemu after its prerequisites have passed.
+    subprocess.run(["make", "-j1", "kernelbuild-qemu",
+                    "kernel/build/user/ext2-shell.img"],
+                   cwd=REPO_ROOT, check=True)
     for http_offset, command in enumerate(("halt", "poweroff", "reboot")):
         run_one(command, http_offset)
 

@@ -99,6 +99,12 @@ def workload_ready(output: bytes, marker: str | None) -> bool:
     return marker is None or marker.encode("ascii") in output
 
 
+def peer_command_ready(output: bytes, stop_marker: str) -> bool:
+    """Wait for the writer's final reports before testing a whole echo line."""
+    return (stop_marker.encode("ascii") in output and
+            b"syscall: no unimplemented number reached\n" in output)
+
+
 def interactive_capture_complete(output: bytes, httpd_ready: bool,
                                  httpd_done: bool, workload_seen: bool,
                                  stop_marker: str) -> bool:
@@ -657,9 +663,9 @@ def main() -> int:
                 # is the terminal's only reader. Its line goes out only once
                 # the kernel says it is reading; typed earlier, it would sit
                 # in the ring, which proves less.
-                # Not before the stop marker: the peer console writer's
-                # records are still arriving until then, the shell's echo of
-                # the command would land in the middle of one, and the kernel
+                # Wait through the stop marker AND its final kernel reports:
+                # an echo begun after the last record can still be split by
+                # the completion reports. The kernel
                 # refuses a reader that registers before that writer's view.
                 # Run termios before the main workload exits. BusyBox init
                 # restores sane terminal settings when respawning a child,
@@ -671,7 +677,7 @@ def main() -> int:
                 # has run, so anything typed after peer-tty waits for that.
                 if (args.peer_settings and terminal_scenario.done and
                         httpd_ready and
-                        args.stop_marker.encode("ascii") in output and
+                        peer_command_ready(output, args.stop_marker) and
                         not peer_settings_sent):
                     write_uart_line(connection, b"/bin/peer-settings")
                     peer_settings_sent = True
@@ -679,7 +685,7 @@ def main() -> int:
                                      PEER_SETTINGS_DONE in output)
                 if (args.peer_tty and terminal_scenario.done and httpd_ready and
                         settings_finished and
-                        args.stop_marker.encode("ascii") in output and not peer_tty_sent):
+                        peer_command_ready(output, args.stop_marker) and not peer_tty_sent):
                     # The full path: ash in this BusyBox looks a bare name
                     # up as an applet first and reports it not found.
                     write_uart_line(connection, b"/bin/peer-tty")

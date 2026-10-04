@@ -32,7 +32,7 @@ whether a row has gone quiet or has merely stopped being looked for.
 | --- | --- | --- | --- |
 | `workload: busy pair STARVED: a wait passed its bound` | 1 land.sh allcheck on 86bf0439 (race-window 609's armed kernel); 0 of 4 standalone | #690 | 2026-10-03 |
 | `passed, so the window was not crossed` | 1 land.sh allcheck on 660efe01 (race-window 609's reverted run); 0 of 3 standalone | #685 | 2026-10-03 |
-| `the payload never asked for its input` | 1 of 9 cicheck runs after the alloc-rollback split | #607 | 2026-09-26 |
+| `the payload never asked for its input` | 1 of 9 cicheck runs after the alloc-rollback split | #607 | 2026-10-04 |
 | `workload: peer read 98304 pattern bytes` | line MISSING from peer_filesystem.actual: 2 of 7 local cicheck runs; 0 of 47 standalone. The uart-wake lane reports the same stall as `the peer console writer never delivered its last record`: 1 of 1 cicheck, 0 of 4 standalone, 0 of 30 peer-suites run six at a time | #604 | 2026-09-29 |
 | `retired different work in their cold and warm passes` | 1 of 4 local RPi5 runs on 2026-09-29, every warm pass on CPU 2; 1 of 3 on 2026-09-30 in land.sh (4 of 8 rounds disturbed); 1 land.sh on d54eda1e (4 of 8) | #649 | 2026-10-03 |
 | `ARP while HTTPd is listening` | 1 of 30 standalone samples; again in a local allcheck on 8f289250, beside the settings_wake failure below | #605 | 2026-09-30 |

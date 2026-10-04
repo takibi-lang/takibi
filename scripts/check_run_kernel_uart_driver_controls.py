@@ -89,6 +89,21 @@ def main() -> int:
     if not driver.workload_ready(before_workload, None):
         failures.append("an ungated lane was made to wait for a workload marker")
 
+    # The last console record is followed by two kernel reports. A capture
+    # from a red aggregate had '/' before those reports and 'bin/peer-settings'
+    # after them: no byte was lost, but the command was sent before quiet.
+    last_record = b"peer user console: record=17/17"
+    report = b"workload: peer console accepted all 1071 bytes through the shared queue after ordered writes on both CPUs\n"
+    final_report = b"syscall: no unimplemented number reached\n"
+    for output, expected in ((last_record, False),
+                             (last_record + report, False),
+                             (last_record + report + final_report[:-1], False),
+                             (last_record + report + final_report, True),
+                             (final_report, False)):
+        CASES.note()
+        if driver.peer_command_ready(output, last_record.decode()) != expected:
+            failures.append("peer command gate ignored a split final report or its stop marker")
+
     # Interactive capture has three independent gates: host-side HTTP work,
     # the workload marker that starts it, and the caller's final stop marker.
     # The last one used to be ignored in this mode, so a new recurrence view
