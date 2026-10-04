@@ -2059,13 +2059,16 @@ fn scheduled_process_image_record_handle_owned(
     return process_image_record_words(scheduled_process_record_owned(owner));
 }
 
-// Still a bare read, unlike the fd context's: kernel/mm/process_image.tkb
-// is keyed by root throughout, and the reap's exec teardown reaches it both
-// with and without the run guard, so a self-locking read here is rejected
-// (#694) until that path carries the owner down.
+// As the fd context's: the slot form reads under the run lock, which a
+// caller already holding the run guard cannot reach (#694); the reap reads
+// through its owner instead.
 fn scheduled_process_image_record_handle(slot: usize) -> ProcessPoolHandleWords
         !{unsafe} {
-    return process_image_record_words(scheduled_process_record_at(slot));
+    let guard = process_run_lock();
+    let mut words: ProcessPoolHandleWords = process_image_record_words(
+        scheduled_process_record_locked(guard, slot));
+    process_run_unlock(guard);
+    return words;
 }
 
 fn scheduled_process_set_image_record(slot: usize, address: usize,
@@ -3419,7 +3422,8 @@ fn scheduled_process_reap_teardown(
     // installed exec image can be torn down and accounted for, and the
     // teardown moved here from the parent's return for exactly that
     // reason. Root 0 is exempt inside the release itself.
-    process_image_exec_teardown(owner.pool_index);
+    process_image_exec_teardown(owner.pool_index,
+        scheduled_process_image_record_handle_owned(owner));
     process_image_record_release_words(owner.pool_index,
         scheduled_process_image_record_handle_owned(owner));
     // GitHub issue #414: last, because process_image_exec_teardown above

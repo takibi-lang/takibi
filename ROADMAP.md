@@ -63,12 +63,14 @@ before its issue closes. The steps keep their numbers, which issues cite.
      first slice). On it: the three TCP pools, AddressSpaceBacking,
      ProcessImageRecord, ProcessFdContext, FdBlock and SharedObject.
      ProcessRecord follows #693: steps 1-4 and 6 landed, step 5 mostly
-     (bare record lookups 300+ -> 30, held to that number by
-     `scripts/check_process_record_bare_uses.py`). Left in step 5: the
-     per-process pool handles read by the region pin helpers (38 calls,
-     some under reap's guard) and the scheduler's state getters; they
-     wait for #695 (the guards held at each call) and #694 (reject
-     re-acquiring the run lock). Then step 7. #700 moves the exec's argv
+     (bare record lookups 300+ -> 26, held to that number by
+     `scripts/check_process_record_bare_uses.py`). #694 landed: the run
+     lock is `single_instance_lock`, so a slot-only reader can take it
+     itself and a caller holding the guard is a compile error. On it, the
+     fd context and image record handles are read by authority (run lock,
+     owner in the reap, peek in crash/diagnostics). Left in step 5:
+     address_space_backing (also read from kernel_mmu_init with the MMU
+     off), the slot-keyed setters, and the scheduler's state getters. Then step 7. #700 moves the exec's argv
      page before the Exec decision so a shortage returns ENOMEM. #696 types the
      ensure-then-write of the per-process pools. #674 and #675 follow; #680-#682 (the pin's cost)
      are measured first.

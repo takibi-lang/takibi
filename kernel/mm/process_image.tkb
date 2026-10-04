@@ -341,8 +341,14 @@ private fn process_image_record_value(
 // One field of a root's record, written under a pin; dropped (and counted)
 // when the record is missing.
 fn process_image_set_active_page_count(root: usize, value: usize) !{unsafe} {
-    let RegionPinned(ProcessImageRecord)::Pinned(pin) =
-            process_image_record_pin_ensured(&process_image_pool, root) else {
+    process_image_set_active_page_count_pinned(
+        process_image_record_pin_ensured(&process_image_pool, root), value);
+}
+
+private fn process_image_set_active_page_count_pinned(
+        pinned: sink RegionPinned(ProcessImageRecord)[images],
+        value: usize) !{unsafe} {
+    let RegionPinned(ProcessImageRecord)::Pinned(pin) = pinned else {
         RegionPinned(ProcessImageRecord)::Stale => {
             process_image_record_missing_note();
             return;
@@ -354,8 +360,14 @@ fn process_image_set_active_page_count(root: usize, value: usize) !{unsafe} {
 }
 
 fn process_image_set_stack_lowest_l3(root: usize, value: usize) !{unsafe} {
-    let RegionPinned(ProcessImageRecord)::Pinned(pin) =
-            process_image_record_pin_ensured(&process_image_pool, root) else {
+    process_image_set_stack_lowest_l3_pinned(
+        process_image_record_pin_ensured(&process_image_pool, root), value);
+}
+
+private fn process_image_set_stack_lowest_l3_pinned(
+        pinned: sink RegionPinned(ProcessImageRecord)[images],
+        value: usize) !{unsafe} {
+    let RegionPinned(ProcessImageRecord)::Pinned(pin) = pinned else {
         RegionPinned(ProcessImageRecord)::Stale => {
             process_image_record_missing_note();
             return;
@@ -367,8 +379,14 @@ fn process_image_set_stack_lowest_l3(root: usize, value: usize) !{unsafe} {
 }
 
 fn process_image_set_stack_growth_active(root: usize, value: bool) !{unsafe} {
-    let RegionPinned(ProcessImageRecord)::Pinned(pin) =
-            process_image_record_pin_ensured(&process_image_pool, root) else {
+    process_image_set_stack_growth_active_pinned(
+        process_image_record_pin_ensured(&process_image_pool, root), value);
+}
+
+private fn process_image_set_stack_growth_active_pinned(
+        pinned: sink RegionPinned(ProcessImageRecord)[images],
+        value: bool) !{unsafe} {
+    let RegionPinned(ProcessImageRecord)::Pinned(pin) = pinned else {
         RegionPinned(ProcessImageRecord)::Stale => {
             process_image_record_missing_note();
             return;
@@ -419,8 +437,14 @@ fn process_image_set_heap_page_count(root: usize, value: usize) !{unsafe} {
 }
 
 fn process_image_set_exec_image_installed(root: usize, value: bool) !{unsafe} {
-    let RegionPinned(ProcessImageRecord)::Pinned(pin) =
-            process_image_record_pin_ensured(&process_image_pool, root) else {
+    process_image_set_exec_image_installed_pinned(
+        process_image_record_pin_ensured(&process_image_pool, root), value);
+}
+
+private fn process_image_set_exec_image_installed_pinned(
+        pinned: sink RegionPinned(ProcessImageRecord)[images],
+        value: bool) !{unsafe} {
+    let RegionPinned(ProcessImageRecord)::Pinned(pin) = pinned else {
         RegionPinned(ProcessImageRecord)::Stale => {
             process_image_record_missing_note();
             return;
@@ -432,8 +456,14 @@ fn process_image_set_exec_image_installed(root: usize, value: bool) !{unsafe} {
 }
 
 fn process_image_set_exec_image_page_count(root: usize, value: usize) !{unsafe} {
-    let RegionPinned(ProcessImageRecord)::Pinned(pin) =
-            process_image_record_pin_ensured(&process_image_pool, root) else {
+    process_image_set_exec_image_page_count_pinned(
+        process_image_record_pin_ensured(&process_image_pool, root), value);
+}
+
+private fn process_image_set_exec_image_page_count_pinned(
+        pinned: sink RegionPinned(ProcessImageRecord)[images],
+        value: usize) !{unsafe} {
+    let RegionPinned(ProcessImageRecord)::Pinned(pin) = pinned else {
         RegionPinned(ProcessImageRecord)::Stale => {
             process_image_record_missing_note();
             return;
@@ -1484,7 +1514,8 @@ fn process_image_exec_reap_evidence() -> (usize, usize, usize) {
 // GitHub issue #516 a CLEARED target refuses the fault outright instead of
 // resolving it against root 0, which is the better of the two failures: it
 // names the fault rather than PID 1's next write.
-fn process_image_exec_teardown(root_index: usize) {
+fn process_image_exec_teardown(root_index: usize,
+                               words: ProcessPoolHandleWords) !{unsafe} {
     process_image_set_target_root_here(root_index);
     match process_image_target_root_result() {
         ProcessImageTargetRootResult::Missing => {
@@ -1493,28 +1524,38 @@ fn process_image_exec_teardown(root_index: usize) {
         }
         ProcessImageTargetRootResult::Ready(root) => {
             let root_index: usize = process_image_root_index(root);
+            // GitHub issue #693 step 5: the record is reached by the handle
+            // the reaper read through its owner, never by the root's slot:
+            // the reap runs both with and without the run guard, so a
+            // self-locking read here would be rejected (#694).
+            let mut before: ProcessImageRecord = process_image_record_value(
+                process_image_record_pin_words(&process_image_pool, words), true);
             // Take before acting, so an image is reaped once even though what
             // says it exists is now a bool rather than a linear value.
-            let installed: bool =
-                process_image_record_read(root_index).exec_image_installed;
-            let count: usize =
-                process_image_record_read(root_index).exec_image_page_count;
-            process_image_set_exec_image_installed(root_index, false);
-            process_image_set_exec_image_page_count(root_index, 0);
+            let installed: bool = before.exec_image_installed;
+            let count: usize = before.exec_image_page_count;
+            process_image_set_exec_image_installed_pinned(
+                process_image_record_pin_words(&process_image_pool, words), false);
+            process_image_set_exec_image_page_count_pinned(
+                process_image_record_pin_words(&process_image_pool, words), 0);
             if (installed) {
-                // `root` is this arm's own proven target. This used to
-                // re-derive the same answer through the root-0 fallback
-                // GitHub issue #516 removed, and would have answered 0 if
-                // the target had gone missing between the two calls.
-                let reaped_root: usize = root_index;
-                if (process_image_stack_grew_pages(reaped_root, count)) {
+                if (before.stack_growth_active && before.active_page_count > count) {
                     process_image_exec_reap_stack_growth_count =
                         process_image_exec_reap_stack_growth_count + 1;
                 }
-                process_image_unmap_pages(count);
+                // process_image_unmap_pages for this root, whose resets
+                // process_image_cleanup_root repeats unconditionally.
+                address_space_release_user_mappings(root_index);
+                process_image_set_active_page_count_pinned(
+                    process_image_record_pin_words(&process_image_pool, words), 0);
+                process_image_set_stack_growth_active_pinned(
+                    process_image_record_pin_words(&process_image_pool, words), false);
+                process_image_set_stack_lowest_l3_pinned(
+                    process_image_record_pin_words(&process_image_pool, words),
+                    process_stack_top_page());
                 process_image_exec_reap_count =
                     process_image_exec_reap_count + 1;
-                if (process_image_root_window_is_clear(reaped_root)) {
+                if (process_image_root_window_is_clear(root_index)) {
                     process_image_exec_reap_clean_count =
                         process_image_exec_reap_clean_count + 1;
                 }
@@ -2519,11 +2560,6 @@ fn process_image_stack_pointer(pages: borrow ProcessImagePages[image]) -> usize 
 // caller already holds a proven target from its own
 // ProcessImageTargetRootResult, so deriving a second answer here could only
 // ever agree with it or silently disagree.
-fn process_image_stack_grew_pages(root: usize, count: usize) -> bool {
-    return process_image_record_read(root).stack_growth_active &&
-           process_image_record_read(root).active_page_count > count;
-}
-
 // A root's resident page count, for a diagnostic that already read the handle (procfs under the
 // run guard, the monitor with every other CPU stopped). It does not allocate
 // a missing record: a report answers 0 rather than changing what it reports.
