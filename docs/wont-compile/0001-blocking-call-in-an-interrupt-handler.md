@@ -50,10 +50,11 @@ whether the callee sleeps.
 Rust for Linux does not simply live with that. It built `klint`, an
 out-of-tree MIR-based lint that tracks preemption count and rejects sleeping
 calls in atomic context -- and that is a **compile-time** check, so this is
-not a case of Rust being level with C. What it is not is part of the language:
-the property lives in a separate analysis rather than in any function's
-published type, so it does not travel with a signature, does not compose
-through a function-pointer row, and is only enforced where that tool is run.
+not a case of Rust being level with C. The property is enforced through
+klint's annotations and analysis rather than an effect in Rust's function
+type, and is checked where that tool is run. Its documented annotations
+express a callee's required and adjusted preemption count; this comparison
+does not claim that external tools cannot check annotated call contracts.
 
 Sources: [Linux might_sleep](https://github.com/torvalds/linux/blob/master/include/linux/kernel.h),
 [Send](https://doc.rust-lang.org/std/marker/trait.Send.html),

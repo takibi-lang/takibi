@@ -65,9 +65,9 @@ Sources: [pidfd_open](https://www.man7.org/linux/man-pages/man2/pidfd_open.2.htm
 [generational-arena](https://docs.rs/generational-arena/latest/generational_arena/), and
 [slab](https://docs.rs/slab/latest/slab/).
 
-Both languages end up detecting this while the kernel runs, if at all. The
-difference is not that Takibi is safer at run time; it is that the question
-is answered before the binary exists.
+With these owned-handle APIs, rejecting a stale key is a runtime decision.
+Takibi's handle-liveness annotations answer the corresponding question
+before the binary exists.
 
 ## What Takibi does
 
