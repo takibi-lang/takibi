@@ -1556,6 +1556,17 @@ private fn ddb_render_intr() !{unsafe} {
     }
 }
 
+private fn ddb_render_blk_timeout(label: *u8,
+                                  shot: VirtioBlkTimeoutSnapshot) {
+    ddb_puts(label);
+    ddb_puts(" avail="); ddb_put_udec(shot.avail);
+    ddb_puts(" used="); ddb_put_udec(shot.used);
+    ddb_puts(" seen="); ddb_put_udec(shot.seen);
+    ddb_puts(" status="); ddb_put_udec(shot.status);
+    ddb_puts(" isr="); ddb_put_udec(shot.interrupt);
+    ddb_puts(" used-at-reset="); ddb_put_udec(shot.used_at_reset);
+}
+
 private fn ddb_render_sched() !{unsafe} {
     let mut ready: usize = 0;
     let mut running: usize = 0;
@@ -1594,6 +1605,17 @@ private fn ddb_render_sched() !{unsafe} {
         ddb_puts(" rollover-partial="); ddb_put_udec(refused_partial);
         ddb_puts(" stable-busy="); ddb_put_udec(retry_busy);
         ddb_puts(" stable-partial="); ddb_put_udec(retry_partial);
+        ddb_puts("\n");
+    }
+    let blk_timeouts: usize = virtio_blk_timeout_count();
+    if (blk_timeouts != 0) {
+        let mut blk_first: VirtioBlkTimeoutSnapshot =
+            virtio_blk_timeout_first_snapshot();
+        let mut blk_last: VirtioBlkTimeoutSnapshot =
+            virtio_blk_timeout_last_snapshot();
+        ddb_puts("ddb: virtio-blk timeouts="); ddb_put_udec(blk_timeouts);
+        ddb_render_blk_timeout(" first", blk_first);
+        ddb_render_blk_timeout(" last", blk_last);
         ddb_puts("\n");
     }
     ddb_render_wait();

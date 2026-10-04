@@ -13,6 +13,7 @@ const VIRTIO_BLK_QUEUE_ALIGN: i32 = 0x3c;
 const VIRTIO_BLK_QUEUE_PFN: i32 = 0x40;
 const VIRTIO_BLK_QUEUE_NOTIFY: i32 = 0x50;
 const VIRTIO_BLK_STATUS: i32 = 0x70;
+const VIRTIO_BLK_INTERRUPT_STATUS: i32 = 0x60;
 const VIRTIO_BLK_PAGE_SIZE: usize = 4096;
 const VIRTIO_QNUM: isize = 8;
 const VIRTIO_BLK_DESC_F_NEXT: i32 = 1;
@@ -23,15 +24,7 @@ const VIRTIO_BLK_T_OUT: u32 = 1;
 // guest instructions. QEMU services the queue on a host thread whose progress
 // is independent of how quickly the vCPU executes this polling loop.
 //
-// It is a liveness backstop -- the device is dead -- and not a latency bound.
-// virtio-blk exists only under QEMU, whose verdicts are functional, and a
-// starved host delays that thread by seconds: at 1 s, every sector of an
-// ext2 write timed out and reset in turn, and the guest went silent until
-// the lane's watchdog stopped it (load average 37, 2026-10-04). 30 s is
-// longer than any delay a starved host has shown, and shorter than the
-// lane's 70 s silence watchdog, so a dead device still ends in that
-// watchdog's DDB walk, with this wait on the stopped CPU's backtrace.
-const VIRTIO_BLK_COMPLETION_SECONDS: i64 = 30;
+const VIRTIO_BLK_COMPLETION_SECONDS: i64 = 1;
 
 struct packed VirtioBlkDesc {
     addr: usize;
@@ -130,6 +123,31 @@ private fn virtio_blk_receive_put(value: sink VirtioBlkReceiveAuthority) {
 // domain keeps the driver shadow at that width and makes comparison with a
 // widened counter a type error before the mandatory 65535 -> 0 wrap.
 let mut virtio_blk_used_seen: VirtioRingIndex;
+
+// What the queue looked like when a completion wait ran out, for DDB: the
+// count, and the first and latest timeout's avail.idx, used.idx, the
+// driver's used_seen, the status and interrupt-status registers, and
+// whether used.idx had moved by the time the reset began (a completion that
+// arrived late rather than never).
+struct VirtioBlkTimeoutSnapshot {
+    avail: usize;
+    used: usize;
+    seen: usize;
+    status: usize;
+    interrupt: usize;
+    used_at_reset: usize;
+}
+let mut virtio_blk_timeouts: usize = 0;
+let mut virtio_blk_timeout_first: VirtioBlkTimeoutSnapshot;
+let mut virtio_blk_timeout_last: VirtioBlkTimeoutSnapshot;
+
+fn virtio_blk_timeout_count() -> usize { return virtio_blk_timeouts; }
+fn virtio_blk_timeout_first_snapshot() -> VirtioBlkTimeoutSnapshot {
+    return virtio_blk_timeout_first;
+}
+fn virtio_blk_timeout_last_snapshot() -> VirtioBlkTimeoutSnapshot {
+    return virtio_blk_timeout_last;
+}
 
 // Keep the 16-bit ring-counter boundary independently testable: a normal
 // BusyBox rootfs boot crosses it through real block I/O, while this small
@@ -266,6 +284,20 @@ private fn virtio_blk_submit_owned(request_type: u32, sector: u32,
                                  as *io VirtioBlkUsed) }.idx) {
         // No used entry was observed. A completed reset, unlike a timeout
         // alone, justifies returning both receive ranges to the CPU.
+        let mut snapshot: VirtioBlkTimeoutSnapshot = {
+            (avail.idx as u16) as usize,
+            (unsafe { ((queue + (VIRTIO_BLK_PAGE_SIZE as isize))
+                       as *io VirtioBlkUsed) }.idx as u16) as usize,
+            (virtio_blk_used_seen as u16) as usize,
+            *(virtio_blk_reg(VIRTIO_BLK_STATUS)) as usize,
+            *(virtio_blk_reg(VIRTIO_BLK_INTERRUPT_STATUS)) as usize,
+            0 };
+        snapshot.used_at_reset =
+            (unsafe { ((queue + (VIRTIO_BLK_PAGE_SIZE as isize))
+                       as *io VirtioBlkUsed) }.idx as u16) as usize;
+        if (virtio_blk_timeouts == 0) { virtio_blk_timeout_first = snapshot; }
+        virtio_blk_timeout_last = snapshot;
+        virtio_blk_timeouts = virtio_blk_timeouts + 1;
         if (virtio_blk_reset() == false) {
             virtio_blk_receive_put(
                 VirtioBlkReceiveAuthority::Device(receive_device));
