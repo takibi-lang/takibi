@@ -64,7 +64,7 @@ before its issue closes. The steps keep their numbers, which issues cite.
      ProcessImageRecord, ProcessFdContext, FdBlock and SharedObject.
      ProcessRecord follows #693: steps 1-4 and 6 landed, step 5 mostly
      (bare record lookups 300+ -> 26, held to that number by
-     `scripts/check_process_record_bare_uses.py`). #694 landed: the run
+     `scripts/check_process_record_bare_uses.py`). The run
      lock is `single_instance_lock`, so a slot-only reader can take it
      itself and a caller holding the guard is a compile error. On it, the
      fd context and image record handles are read by authority (run lock,
@@ -125,15 +125,11 @@ fixtures, finite lock-held BREAK fixture, and board lock measurements complete
 the extended short-window queue. #13 remains conditional on the solver
 threshold in `TAKIBI_CORE.md`; its recorded examples do not yet justify an
 implementation. The maintainer also selected concrete global Cell brands
-for this window. The held-guard TSV report (#695), consumed by A for #693,
-and regular-file exhaustion handling with its shared EL0 regression fixture
-(#658) are finished, as is the settings-wake failure DDB capture (#668).
-Offline QEMU DDB capture validation with individual failed requirements
-(#636) is finished. The oops-lane slice of #666 records await arrivals
-against their timeout and reports consumed margin. The next bounded B unit
-is the QEMU DDB UART-observation slice of #666, with normal and postmortem
-budgets kept separate. Other lanes and the remaining lower bands stay
-untouched.
+for this window. The next bounded B unit is #599: derive the QEMU boot
+view's allocator capacity from the linked image, eliminating the debug-only boot overlay.
+#666 retains work on other console drivers and aggregate reporting; its oops
+and QEMU DDB UART-observation slices are finished. Other lower-band items
+stay outside the short window unless selected by the maintainer.
 #680, #681 and #682 (the pin's cost) stay with A: they need RPi5
 measurements first.
 
@@ -145,15 +141,16 @@ measurements first.
    2026-09-30 by the maintainer, not urgent, and it waits on PTY and
    `pselect6` scoping), #389, #422, #497, #520, #553,
    #386, #502.
-3. **Compiler safety and language research:** #58, #203, #252, #200, #201,
+3. **Compiler safety and language research:** #203, #252, #200, #201,
    #282, #129, #374, #417, #155, #28, #8.
 4. **Toolchain, portability and hardware-lane support:** #599, #576, #568, #123,
-   #124, #122, #95, #51, #50, #85, #268, #636, #666.
+   #124, #122, #95, #51, #50, #85, #268, #666.
 5. **Deferred or not a scheduled work item:** #432, #555, #250, #444, #429,
    #149, #567, #539, #536, #624, #132; #13 for `Phi`, with #216 and #109 as
    candidate examples, only after the solver threshold is met. Also deferred:
-   #698 (metadata mutation exhaustion), #699 (host-side EL0 postmortem
-   symbolization); neither widens the current #658 unit.
+   #58 (static whole-call-path stack bounds; lowered by the maintainer on
+   2026-10-04), #698 (metadata mutation exhaustion), and #699 (host-side EL0
+   postmortem symbolization).
 
 Items are ordered within each band as well as between bands. The deferred
 items stay listed so a changed premise can bring them back into the queue.
