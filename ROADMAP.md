@@ -128,9 +128,11 @@ implementation. The maintainer also selected concrete global Cell brands
 for this window. The held-guard TSV report (#695), consumed by A for #693,
 and regular-file exhaustion handling with its shared EL0 regression fixture
 (#658) are finished, as is the settings-wake failure DDB capture (#668).
-The maintainer selected #636 for the next bounded B unit: offline QEMU DDB
-capture validation with individual failed requirements. The remaining lower
-bands stay untouched.
+Offline QEMU DDB capture validation with individual failed requirements
+(#636) is finished. The maintainer selected the oops-lane slice of #666 for
+the next bounded B unit: record await arrivals against their timeout and
+report consumed margin. Other lanes and the remaining lower bands stay
+untouched.
 #680, #681 and #682 (the pin's cost) stay with A: they need RPi5
 measurements first.
 

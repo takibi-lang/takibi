@@ -854,6 +854,19 @@ that window.
 
 ### Terminal fail-stop diagnostic
 
+Each QEMU oops mode saves `await-timing.jsonl` beside its UART capture.
+It records the UART connection, configured report markers, and each console
+prompt against the same driver-start timeout, including connection and boot
+time. `elapsed_seconds` and `fraction` describe an observed arrival;
+`not-arrived` entries retain a null arrival and the elapsed observation time
+when the driver exits. Prompt times describe received prompt bytes, not a
+separate proof of command-response attribution. A marker may arrive before
+all reports allow the first command to be sent. More than half the common
+timeout used prints `RECORDED kernel/oops await margin` with the awaited item
+and elapsed/timeout; this timing observation does not change the verdict or
+extend the deadline. An unavailable timing artifact is reported without
+replacing the console verdict.
+
 The kernelcheck-oops-qemu target is a focused QEMU regression for the terminal
 exception path. It checks an injected EL0 BRK, an injected EL0 data abort, and
 a fail-stop immediately after a real child exec commit. GDB only arms the

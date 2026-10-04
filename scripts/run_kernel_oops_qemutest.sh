@@ -156,7 +156,8 @@ elif [ "$MODE" = concurrent_fault ]; then
                     --await-line "oops: fail-stop seq=1 cpu=1")
 fi
 python3 "$REPO_ROOT/scripts/run_kernel_crash_console.py" \
-    --port "$SERIAL_PORT" --log "$UART_LOG" "${console_await[@]}" &
+    --port "$SERIAL_PORT" --log "$UART_LOG" \
+    --await-timing-log "$ARTIFACT_DIR/await-timing.jsonl" "${console_await[@]}" &
 console_driver_pid=$!
 
 # Fault injection is the sole GDB role before the oops. It enables the

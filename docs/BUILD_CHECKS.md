@@ -80,6 +80,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_kernel_log_expectations.py` | test runners wait only for logs the kernel can emit |
 | `check_kernel_memory_map_controls.py` | Positive and faithful negative controls for allocator layout fixtures |
 | `check_kernel_views_controls.sh` | Controls for the shared view comparison (GitHub issue #530) |
+| `check_oops_await_timing_controls.py` | Deterministic crash-console arrival, common-deadline and half-budget controls, including partial markers, failures and unavailable artifacts |
 | `check_known_intermittent_issues_controls.py` | Controls for the known-intermittent open-issue gate, with the GitHub answer injected rather than fetched |
 | `check_known_intermittents.py` | every row of the known-intermittent table names one issue and a symptom the tree still produces, and the roadmap points at the table rather than carrying the list |
 | `check_known_intermittents_controls.py` | Controls for the known-intermittent table's rules, in both directions |
