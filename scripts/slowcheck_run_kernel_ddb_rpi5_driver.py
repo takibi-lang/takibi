@@ -26,6 +26,7 @@ wrong-core and out-of-order wake records must still fail.
 """
 
 import os
+import json
 import pty
 import re
 import select
@@ -193,16 +194,26 @@ def run_case(label, answer_on_attempt, timeout, expect_ok, needles,
     master, slave = pty.openpty()
     try:
         port = os.ttyname(slave)
-        with tempfile.NamedTemporaryFile(suffix=".log") as log:
+        with tempfile.TemporaryDirectory() as raw:
+            log = Path(raw) / "uart.log"
+            env = dict(os.environ)
+            env.pop("TAKIBI_AWAIT_TIMING_DIR", None)
             proc = subprocess.Popen(
                 [sys.executable, str(DRIVER), "--port", port,
-                 "--log", log.name, "--timeout", str(timeout)],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                 "--log", str(log), "--timeout", str(timeout)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
             attempts = scripted_board(master, proc, answer_on_attempt,
                                       timeout + 10, answer_wake,
                                       restore_console, hold_peer,
                                       deliver_peer, answer_break)
             stdout, stderr = proc.communicate(timeout=30)
+            timing = [json.loads(line) for line in
+                      Path(str(log) + ".await-timing.jsonl").read_text().splitlines()]
+            assert len(timing) == 4, timing
+            assert all(row["timeout_seconds"] == timeout and
+                       row["budget_origin"] == "DDB session start" for row in timing)
+            if expect_ok:
+                assert next(row for row in timing if row["await"] == "resume-echoed")["status"] == "arrived"
     finally:
         os.close(master)
         os.close(slave)

@@ -1518,6 +1518,11 @@ capture records under `_build/await-timing/`, which is cleared for each
 aggregate. The summary names the lane, original budget phase, latest arrival
 relative to its timeout, waits using more than half the budget, and waits
 that never arrived. Per-lane UART artifacts retain the detailed observations.
+The RPi5 UART DDB driver also contributes its wake acknowledgement, first
+debugger prompt, continue response and resumed-shell response against the
+existing session budget. It saves these under `<ddb-log>.await-timing.jsonl`,
+including unfinished waits on error paths. Archived-capture validation does
+not produce live timing observations.
 Other console drivers do not yet contribute; zero observations do not establish
 that their margins are sufficient. These observations do not alter deadlines
 or functional verdicts.

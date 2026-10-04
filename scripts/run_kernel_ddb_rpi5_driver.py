@@ -46,6 +46,7 @@ from pathlib import Path
 import time
 
 import serial
+from await_timing import AwaitTiming
 
 # The milestones, in the order the session reaches them.
 MILESTONES = ("wake-sent", "wake-acked", "break-sent", "first-prompt",
@@ -89,14 +90,32 @@ RESUME_RETRY_SECONDS = 2.0
 class Timeline:
     """When each milestone happened, in seconds since the session started."""
 
-    def __init__(self, budget: float) -> None:
+    def __init__(self, budget: float, timing_path=None) -> None:
         self.budget = budget
         self.started = time.monotonic()
         self.at: dict[str, float] = {}
         self.resume_attempts = 0
+        self.timing = (AwaitTiming(
+            timing_path, self.started, budget, [], [], label="kernel/rpi5 ddb",
+            origin="DDB session start", milestones=("wake-acked", "first-prompt",
+                                                     "continuing", "resume-echoed"))
+            if timing_path else None)
 
     def mark(self, name: str) -> None:
-        self.at.setdefault(name, time.monotonic() - self.started)
+        now = time.monotonic()
+        self.at.setdefault(name, now - self.started)
+        if self.timing is not None:
+            self.timing.record(name, True, now)
+
+    def finish(self) -> None:
+        if self.timing is not None:
+            self.timing.finish(time.monotonic())
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.finish()
 
     def elapsed(self) -> float:
         return time.monotonic() - self.started
@@ -112,6 +131,7 @@ class Timeline:
                 f"(elapsed {self.elapsed():.1f}s of {self.budget:.1f}s)")
 
     def bail(self, message: str) -> SystemExit:
+        self.finish()
         return SystemExit(f"{message}\n{self.render()}")
 
 
@@ -248,7 +268,8 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=20.0)
     args = parser.parse_args()
 
-    timeline = Timeline(args.timeout)
+    timeline = Timeline(args.timeout,
+                        args.log + ".await-timing.jsonl" if args.port and args.log else None)
     if args.validate_log is not None:
         received = args.validate_log.read_bytes()
         validate_capture(received, received.count(b"ddb> "), timeline)
@@ -263,7 +284,7 @@ def main() -> int:
     last_resume_write = 0.0
     commands = (b"xkfault\n", b"events\n", b"bt\n", b"bt cpu 1\n",
                 b"wait\n", b"continue\n")
-    with serial.Serial(args.port, 115200, timeout=0.25) as uart, open(
+    with timeline, serial.Serial(args.port, 115200, timeout=0.25) as uart, open(
         args.log, "ab"
     ) as log:
         # Generate one newline UART-wake. A visible response can pace BREAK,
@@ -345,6 +366,7 @@ def main() -> int:
                     resume_command_sent = True
 
     validate_capture(received, prompt_count, timeline)
+    timeline.finish()
     print("PASS kernel/rpi5 ddb: guarded fault recovered, inspected, and "
           "resumed")
     print(timeline.render())

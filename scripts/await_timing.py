@@ -1,4 +1,4 @@
-"""Arrival observations for the maintained oops and QEMU DDB drivers.
+"""Arrival observations for maintained console drivers.
 
 Each recorder describes one existing common deadline. Separate driver and
 postmortem phases do not reset or reinterpret each other's timeout.
@@ -13,7 +13,8 @@ class AwaitTiming:
     """Observe the driver's existing common deadline without changing it."""
 
     def __init__(self, path, started, timeout, awaited, commands, *,
-                 label="kernel/oops", origin="driver start", connection=True):
+                 label="kernel/oops", origin="driver start", connection=True,
+                 milestones=None):
         self.started = started
         self.timeout = timeout
         self.label = label
@@ -24,6 +25,8 @@ class AwaitTiming:
         self.pending["console prompt 1"] = "ddb> "
         self.pending.update({f"console prompt {i + 2} (after {command.decode('ascii').strip()})": "ddb> "
                              for i, command in enumerate(commands)})
+        if milestones is not None:
+            self.pending = {name: None for name in milestones}
         self.prompt_names = [name for name in self.pending if name.startswith("console prompt")]
         self.path = path
         self.aggregate_path = None
