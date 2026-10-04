@@ -4,7 +4,7 @@
 GitHub issue #614. StackOwnership.tla's StartsOnFreeStack says a process is
 started, or reaped, only while no other core stands on its kernel stack. The
 type checker enforces half of that: `scheduled_process_start` takes a
-`ProcessState::Startable` token and `scheduled_process_reap` a
+`ProcessState::Startable` token and `scheduled_process_reap_remove` a
 `ProcessState::Reapable` one, and a Ready or Exited token is rejected as a
 static value mismatch. It cannot enforce the other half: the tokens are made
 by a few functions in kernel/kernel/process.tkb, and it is those functions'
@@ -12,7 +12,8 @@ reading of `stack_owner_cpu` that makes the proof true. Nothing stops a later
 edit from loosening a signature back to Ready, or from minting a token in a
 new place without reading the owner. This check pins the shape:
 
-- start takes only Startable, and reap and reap_remove only Reapable;
+- start takes only Startable, and reap_remove only Reapable (the combined
+  reap that also took it is gone, #693 step 5);
 - the state constructors are called only from the named mint functions, and
   a token is never written as a literal anywhere else;
 - every mint function reads `stack_owner_cpu`.
@@ -46,7 +47,6 @@ STARTABLE_MINTS = {"scheduled_process_ready_take",
 REAPABLE_MINTS = {"scheduled_process_exited_take"}
 CONSUMERS = {
     "scheduled_process_start": "Startable",
-    "scheduled_process_reap": "Reapable",
     "scheduled_process_reap_remove": "Reapable",
 }
 CONSTRUCTORS = {"scheduled_process_startable_state": STARTABLE_MINTS,

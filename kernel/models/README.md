@@ -157,7 +157,7 @@ Properties:
   violates it. Apalache's shallow check is given `CoreInvariants`, this and
   `RunningMatchesCores` together.
   In the kernel it is a type before it is a check: `scheduled_process_start`
-  takes a `Startable` token and `scheduled_process_reap` a `Reapable` one,
+  takes a `Startable` token and `scheduled_process_reap_remove` a `Reapable` one,
   made only by `scheduled_process_ready_take`, `scheduled_process_start_check`,
   `scheduled_process_restart_check` and `scheduled_process_exited_take`, each
   after reading the stack owner under the run lock. A path that starts or

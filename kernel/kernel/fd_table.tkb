@@ -29,7 +29,7 @@ use "kernel/lib/locked_cell.tkb";
 //   retained references by hand on any failure path; the compiler will
 //   not catch a forgotten one.
 // - A process's fd context is acquired by scheduled_process_alloc() and
-//   released by scheduled_process_reap()/scheduled_process_table_clear()
+//   released by scheduled_process_reap_teardown()/scheduled_process_table_clear()
 //   (issue #392), EXCEPT for the bootstrap process, which this kernel
 //   sets up directly and which therefore gets its context from
 //   kernel_syscall_process_configure(). A future process created by some

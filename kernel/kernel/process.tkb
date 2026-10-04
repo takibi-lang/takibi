@@ -72,7 +72,7 @@ use "kernel/lib/locked_cell.tkb";
 // proof StackOwnership.tla's StartsOnFreeStack asks for -- no other core
 // stands on the process's kernel stack. Only the functions named in
 // "Where a stack is proved free" below mint them, and only
-// scheduled_process_start and scheduled_process_reap take them, so a path
+// scheduled_process_start and scheduled_process_reap_remove take them, so a path
 // that starts or reaps without asking does not compile.
 enum ProcessState: u8 { Ready; Startable; Running; Blocked; Exited; Reapable;
                         Constructing; }
@@ -2050,10 +2050,17 @@ fn scheduled_process_fd_context_handle(slot: usize) -> ProcessPoolHandleWords
     return words;
 }
 
+// GitHub issue #693 step 5: the three handle setters write both words under
+// the run lock, which is what the self-locking readers above hold: a reader
+// on another CPU sees the pair before or after the write, never half of it.
+// A writer already holding the run guard is rejected at compile time (#694).
 fn scheduled_process_set_fd_context(slot: usize, address: usize,
-                                    generation: usize) {
-    scheduled_process_record_at(slot).fd_context = address;
-    scheduled_process_record_at(slot).fd_context_generation = generation;
+                                    generation: usize) !{unsafe} {
+    let guard = process_run_lock();
+    let record: *ProcessRecord = scheduled_process_record_locked(guard, slot);
+    record.fd_context = address;
+    record.fd_context_generation = generation;
+    process_run_unlock(guard);
 }
 
 // For the crash report and DDB, which must not take a lock: the diagnostic
@@ -2091,9 +2098,12 @@ fn scheduled_process_image_record_handle(slot: usize) -> ProcessPoolHandleWords
 }
 
 fn scheduled_process_set_image_record(slot: usize, address: usize,
-                                      generation: usize) {
-    scheduled_process_record_at(slot).image_record = address;
-    scheduled_process_record_at(slot).image_record_generation = generation;
+                                      generation: usize) !{unsafe} {
+    let guard = process_run_lock();
+    let record: *ProcessRecord = scheduled_process_record_locked(guard, slot);
+    record.image_record = address;
+    record.image_record_generation = generation;
+    process_run_unlock(guard);
 }
 
 // Is this a slot the process table can hold? The question belongs here,
@@ -2170,10 +2180,12 @@ fn scheduled_process_address_space_root_running(
 }
 
 fn scheduled_process_set_address_space_backing(
-        slot: usize, address: usize, generation: usize) {
-    scheduled_process_record_at(slot).address_space_backing = address;
-    scheduled_process_record_at(slot).address_space_backing_generation =
-        generation;
+        slot: usize, address: usize, generation: usize) !{unsafe} {
+    let guard = process_run_lock();
+    let record: *ProcessRecord = scheduled_process_record_locked(guard, slot);
+    record.address_space_backing = address;
+    record.address_space_backing_generation = generation;
+    process_run_unlock(guard);
 }
 
 fn scheduled_process_record_wait4_status_ptr(slot: usize) -> usize {
@@ -2521,7 +2533,7 @@ private fn scheduled_process_record_reset(slot: usize) !{unsafe} {
     scheduled_process_record_reset_syscall_state(record);
 }
 
-// Everything scheduled_process_reap does for one process, done for every
+// Everything a reap does for one process, done for every
 // live one. Slot 0 is visited whether or not the bootstrap is live,
 // because its per-process resources (an fd context from
 // kernel_syscall_process_configure, an image record) can outlive the
@@ -2574,7 +2586,7 @@ private fn scheduled_process_release_slot_resources(slot: usize) !{unsafe} {
 // scheduler walk and the interrupt-side wakes read records they do not own
 // under that lock, through scheduled_process_record_at's escaped pointer;
 // a removal outside it could scrub and free a record between one of those
-// probes and its read. See scheduled_process_reap.
+// probes and its read. See scheduled_process_reap_teardown.
 private fn scheduled_process_slot_remove(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock],
         slot: usize) !{unsafe} {
@@ -3445,7 +3457,9 @@ fn scheduled_process_exit(
 // context, roots, image and backing. Nothing but the process and its reaper
 // reaches those. It can free pages and reach a world stop, which a peer
 // spinning on the IRQ-masking run lock could not acknowledge, so it runs
-// wherever the caller is.
+// outside the run lock. That is now checked rather than stated: the
+// teardown writes the record's pool handles through setters that take the
+// run lock, so a caller holding the guard is a compile error (#694).
 //
 // The removal hands the RECORD back to the pool, and that record is not
 // the exited process's alone. Every CPU's scheduler walk, the timer's wakes
@@ -3457,15 +3471,10 @@ fn scheduled_process_exit(
 // reaps its zombies on that peer. So the removal takes the run lock's
 // guard, and a reader that holds the lock sees the record either whole or
 // already gone.
-fn scheduled_process_reap(
-        guard: borrow ProcessRunGuard[scheduled_process_run_lock],
-        owner: sink ScheduledProcessOwner[process],
-        state: sink ScheduledProcessState[process, ProcessState::Reapable])
-        !{unsafe, invalidates_ProcessHandle} {
-    scheduled_process_reap_teardown(owner);
-    scheduled_process_reap_remove(guard, owner, state);
-}
-
+//
+// Every reaper calls the two itself, releasing the run lock between them
+// (#693 step 5): there is no combined form, because one that took the guard
+// let a caller run the teardown under the lock.
 fn scheduled_process_reap_teardown(
         owner: borrow ScheduledProcessOwner[process]) !{unsafe} {
     // GitHub issue #488: see scheduled_process_reaped_current_count.
@@ -3618,11 +3627,29 @@ fn scheduled_process_same_generation(
 // GitHub issue #479 Group B: one critical section for the whole cycle, so
 // the probe exercises the transitions the same way the scheduler does
 // rather than a looser way of its own.
-fn scheduled_process_probe_cycle(handle: ProcessHandle) -> bool {
+fn scheduled_process_probe_cycle(handle: ProcessHandle) -> bool !{unsafe} {
     let guard = process_run_lock();
-    let ok: bool = scheduled_process_probe_cycle_locked(guard, handle);
-    process_run_unlock(guard);
-    return ok;
+    if (scheduled_process_probe_cycle_locked(guard, handle) == false) {
+        process_run_unlock(guard);
+        return false;
+    }
+    // The reap's two steps, as the scheduler's reapers take them: the
+    // teardown outside the run lock, the removal under it.
+    match scheduled_process_exited_take(guard, handle) {
+        ScheduledProcessExitedTakeResult::Missing => {
+            process_run_unlock(guard);
+            return false;
+        }
+        ScheduledProcessExitedTakeResult::Exited(resources) => {
+            let (owner, exited) = resources;
+            process_run_unlock(guard);
+            scheduled_process_reap_teardown(owner);
+            let remove_guard = process_run_lock();
+            scheduled_process_reap_remove(remove_guard, owner, exited);
+            process_run_unlock(remove_guard);
+            return true;
+        }
+    }
 }
 
 private fn scheduled_process_probe_cycle_locked(
@@ -3646,14 +3673,7 @@ private fn scheduled_process_probe_cycle_locked(
             scheduled_process_release(owner, exited);
         }
     }
-    match scheduled_process_exited_take(guard, handle) {
-        ScheduledProcessExitedTakeResult::Missing => { return false; }
-        ScheduledProcessExitedTakeResult::Exited(resources) => {
-            let (owner, exited) = resources;
-            scheduled_process_reap(guard, owner, exited);
-            return true;
-        }
-    }
+    return true;
 }
 
 // GitHub issue #392: this probe used to prove the OPPOSITE of what it
@@ -8798,18 +8818,27 @@ fn kernel_process_clone_rollback() -> ProcessCloneRollbackResult {
             execution_here().current_handle = parent;
             let exited = scheduled_process_cancel_clone(owner, constructing);
             scheduled_process_release(owner, exited);
+            // The reap's two steps, as every other reaper takes them: the
+            // teardown outside the run lock, the removal under it.
             match scheduled_process_exited_take(guard, child) {
-                ScheduledProcessExitedTakeResult::Missing => {}
+                ScheduledProcessExitedTakeResult::Missing => {
+                    process_test_evidence_release_clone();
+                    process_run_unlock(guard);
+                }
                 ScheduledProcessExitedTakeResult::Exited(done) => {
                     let (exited_owner, exited_state) = done;
-                    scheduled_process_reap(guard, exited_owner, exited_state);
+                    process_run_unlock(guard);
+                    scheduled_process_reap_teardown(exited_owner);
+                    let remove_guard = process_run_lock();
+                    scheduled_process_reap_remove(
+                        remove_guard, exited_owner, exited_state);
+                    process_test_evidence_release_clone();
+                    process_run_unlock(remove_guard);
                     parent = execution_here().current_handle;
                 }
             }
         }
     }
-    process_test_evidence_release_clone();
-    process_run_unlock(guard);
     workload_busy_note_selected(
         scheduled_process_pid_of_handle(parent));
     let activation: CurrentRootActivationResult =
@@ -9557,7 +9586,7 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
         -> usize !{unsafe} {
     let parent_slot: usize = parent.pool_index;
     let parent_generation: usize = parent.generation;
-    // GitHub issue #437: scheduled_process_reap ends in
+    // GitHub issue #437: scheduled_process_reap_teardown ends in
     // process_image_exec_teardown, which used to leave the image target at
     // root 0 and now leaves it unset. While the reap ran inside
     // kernel_process_child_exit that was
@@ -9617,7 +9646,7 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
     // GitHub issue #589: the unlink and the Exited take under the
     // process-run lock. Peer schedulers walk these same sibling links under
     // it, and the take now requires its guard. The teardown itself
-    // (scheduled_process_reap) stays outside: it frees roots and pages, and
+    // (scheduled_process_reap_teardown) stays outside: it frees roots and pages, and
     // a world stop reached from there needs every peer free to acknowledge
     // its SGI, which a peer spinning on this IRQ-masking lock is not.
     let unlink_guard = process_run_lock();
@@ -9687,7 +9716,7 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
             scheduled_process_record_owned(exited_owner).has_next_sibling =
                 false;
             // The teardown outside the lock, as before; the removal under
-            // it (#482, see scheduled_process_reap).
+            // it (#482, see scheduled_process_reap_teardown).
             scheduled_process_reap_teardown(exited_owner);
             let removal_guard = process_run_lock();
             scheduled_process_reap_remove(removal_guard, exited_owner,
@@ -9700,7 +9729,7 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
     scheduled_process_record_of_locked(reaped_guard, parent).last_reaped_pid =
         pid;
     process_run_unlock(reaped_guard);
-    // scheduled_process_reap may clear the per-CPU process-image target while
+    // scheduled_process_reap_teardown may clear the per-CPU process-image target while
     // tearing down the child. Recommit the reaper's root so a later COW fault
     // consults the same address space that TTBR0 already names.
     if (has_resume_root) {

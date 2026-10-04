@@ -54,16 +54,16 @@ def main() -> int:
             "        -> ScheduledProcessState[process, ProcessState::Running] {"),
         "scheduled_process_start must take a ProcessState::Startable")
     failures += case(
-        "reap takes an Exited token again",
+        "reap_remove takes an Exited token again",
         replace_once(
             source,
             "        state: sink ScheduledProcessState[process, ProcessState::Reapable])\n"
             "        !{unsafe, invalidates_ProcessHandle} {\n"
-            "    scheduled_process_reap_teardown(owner);",
+            "    scheduled_process_state_drop(state);",
             "        state: sink ScheduledProcessState[process, ProcessState::Exited])\n"
             "        !{unsafe, invalidates_ProcessHandle} {\n"
-            "    scheduled_process_reap_teardown(owner);"),
-        "scheduled_process_reap must take a ProcessState::Reapable")
+            "    scheduled_process_state_drop(state);"),
+        "scheduled_process_reap_remove must take a ProcessState::Reapable")
     failures += case(
         "a function that is not a mint builds a Startable token",
         source + "\nfn scheduled_process_forge(\n"

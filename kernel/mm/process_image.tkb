@@ -532,7 +532,7 @@ private fn process_image_record_reset(record: borrow *ProcessImageRecord) {
 // kernel_syscall_process_configure for the bootstrap, and on demand by any
 // access to a root that has none. Idempotent.
 //
-// Released by scheduled_process_reap and scheduled_process_table_clear,
+// Released by scheduled_process_reap_teardown and scheduled_process_table_clear,
 // beside the fd context and the address-space root, EXCEPT for root 0 --
 // the permanent bootstrap root, whose record is set up once during boot
 // and read on every later stack fault, exactly the exemption
@@ -1520,7 +1520,7 @@ fn process_image_exec_reap_evidence() -> (usize, usize, usize) {
 // different moments once a root's record dies with its process.
 //
 // The TEARDOWN half is about the child's own image, and now runs from
-// scheduled_process_reap -- immediately after address_space_release_root,
+// scheduled_process_reap_teardown -- immediately after address_space_release_root,
 // so the window-is-clear evidence still measures a fully torn-down root,
 // and before process_image_record_release, which is what makes it the last
 // moment the installed flag and page count still exist.
