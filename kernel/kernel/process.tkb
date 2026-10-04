@@ -1765,7 +1765,12 @@ must_use variant ProcessSlotForPidResult {
     Found(usize);
 }
 
-fn scheduled_process_slot_for_pid(pid: usize) -> ProcessSlotForPidResult
+// GitHub issue #693 step 7: the lookup takes the run guard, so the slot it
+// answers is still that pid's when the caller acts on it. kill() used to
+// look the pid up with no lock and take the lock after: a reap and a fork in
+// between left it signalling whichever process the slot held by then.
+fn scheduled_process_slot_for_pid_locked(guard: borrow ProcessRunGuard[lock],
+                                         pid: usize) -> ProcessSlotForPidResult
         !{unsafe} {
     if (pid == 0) { return ProcessSlotForPidResult::Missing; }
     let mut cursor = scheduled_process_first_slot();
@@ -1774,7 +1779,29 @@ fn scheduled_process_slot_for_pid(pid: usize) -> ProcessSlotForPidResult
         match cursor {
             ProcessSlotCursor::Done => { walking = false; }
             ProcessSlotCursor::At(slot) => {
-                if (scheduled_process_record_at(slot).pid == pid) {
+                if (scheduled_process_record_locked(guard, slot).pid == pid) {
+                    return ProcessSlotForPidResult::Found(slot);
+                }
+                cursor = scheduled_process_next_slot(slot);
+            }
+        }
+    }
+    return ProcessSlotForPidResult::Missing;
+}
+
+// The same walk for a report that must not take a lock (the monitor, with
+// every other CPU stopped) or already reads with the peek (the diagnostic
+// fill): its answer is a report's, not an authority to act on.
+fn scheduled_process_slot_for_pid_peek(pid: usize) -> ProcessSlotForPidResult
+        !{unsafe} {
+    if (pid == 0) { return ProcessSlotForPidResult::Missing; }
+    let mut cursor = scheduled_process_first_slot();
+    let mut walking: bool = true;
+    while (walking) {
+        match cursor {
+            ProcessSlotCursor::Done => { walking = false; }
+            ProcessSlotCursor::At(slot) => {
+                if (scheduled_process_record_peek(slot).pid == pid) {
                     return ProcessSlotForPidResult::Found(slot);
                 }
                 cursor = scheduled_process_next_slot(slot);
@@ -1821,7 +1848,7 @@ private fn scheduled_process_diagnostic_copy(pid: usize)
 private fn scheduled_process_diagnostic_fill(
         pid: usize, snapshot: borrow *ProcessDiagnosticSnapshot) -> bool
         !{unsafe} {
-    let slot: usize = match scheduled_process_slot_for_pid(pid) {
+    let slot: usize = match scheduled_process_slot_for_pid_peek(pid) {
         ProcessSlotForPidResult::Missing => { return false; }
         ProcessSlotForPidResult::Found(found) => { found }
     };
@@ -1920,7 +1947,7 @@ fn kernel_process_monitor_ps() !{unsafe} {
 }
 
 fn kernel_process_monitor_proc(pid: usize) !{unsafe} {
-    let slot: usize = match scheduled_process_slot_for_pid(pid) {
+    let slot: usize = match scheduled_process_slot_for_pid_peek(pid) {
         ProcessSlotForPidResult::Missing => {
             kernel_boot_log("proc: no such pid\n");
             return;
@@ -5065,7 +5092,8 @@ fn kernel_process_clear_core0_for_call(slot: usize) {
 must_use variant ProcessAffinityResult { Missing; Invalid; Mask(usize); }
 
 // Pid 0 is the caller, as in Linux.
-private fn kernel_process_affinity_slot(pid: usize) -> ProcessSlotForPidResult
+private fn kernel_process_affinity_slot(guard: borrow ProcessRunGuard[lock],
+                                         pid: usize) -> ProcessSlotForPidResult
         !{unsafe} {
     if (pid == 0) {
         if (execution_here().current_live == false) {
@@ -5074,7 +5102,7 @@ private fn kernel_process_affinity_slot(pid: usize) -> ProcessSlotForPidResult
         return ProcessSlotForPidResult::Found(
             execution_here().current_handle.pool_index);
     }
-    return scheduled_process_slot_for_pid(pid);
+    return scheduled_process_slot_for_pid_locked(guard, pid);
 }
 
 // GitHub issue #582: every move of a process between CPUs -- an idle CPU's
@@ -5091,7 +5119,7 @@ private fn kernel_process_affinity_slot(pid: usize) -> ProcessSlotForPidResult
 // 2 taken while another CPU owned its stack; 3 refused with none owning it.
 fn kernel_process_stack_owner_probe(pid: usize) -> usize !{unsafe} {
     let guard = process_run_lock();
-    let slot: usize = match scheduled_process_slot_for_pid(pid) {
+    let slot: usize = match scheduled_process_slot_for_pid_locked(guard, pid) {
         ProcessSlotForPidResult::Missing => {
             process_run_unlock(guard);
             return 0;
@@ -5139,7 +5167,7 @@ fn kernel_process_stack_owner_probe(pid: usize) -> usize !{unsafe} {
 fn kernel_process_affinity_get(pid: usize) -> ProcessAffinityResult
         !{unsafe} {
     let guard = process_run_lock();
-    let slot: usize = match kernel_process_affinity_slot(pid) {
+    let slot: usize = match kernel_process_affinity_slot(guard, pid) {
         ProcessSlotForPidResult::Missing => {
             process_run_unlock(guard);
             return ProcessAffinityResult::Missing;
@@ -5164,7 +5192,7 @@ fn kernel_process_affinity_set(pid: usize, requested: usize)
     let mask: usize = requested & kernel_process_online_mask();
     if (mask == 0) { return ProcessAffinityResult::Invalid; }
     let guard = process_run_lock();
-    let slot: usize = match kernel_process_affinity_slot(pid) {
+    let slot: usize = match kernel_process_affinity_slot(guard, pid) {
         ProcessSlotForPidResult::Missing => {
             process_run_unlock(guard);
             return ProcessAffinityResult::Missing;
@@ -7426,7 +7454,7 @@ fn kernel_process_pid_blocked_in_uart_read(
 fn kernel_process_pid_log_wait(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock],
         pid: usize) {
-    match scheduled_process_slot_for_pid(pid) {
+    match scheduled_process_slot_for_pid_locked(guard, pid) {
         ProcessSlotForPidResult::Missing => {
             kernel_boot_log("workload: reader pid is gone\n");
         }
@@ -7473,15 +7501,21 @@ fn kernel_process_terminal_signal(
 }
 
 fn kernel_process_signal_send(pid: usize, signum: usize)
-        -> ProcessSignalSendResult {
-    let slot: usize = match scheduled_process_slot_for_pid(pid) {
+        -> ProcessSignalSendResult !{unsafe} {
+    // From the lookup to the delivery under one hold: see
+    // scheduled_process_slot_for_pid_locked.
+    let guard = process_run_lock();
+    let slot: usize = match scheduled_process_slot_for_pid_locked(guard, pid) {
         ProcessSlotForPidResult::Missing => {
+            process_run_unlock(guard);
             return ProcessSignalSendResult::Missing;
         }
         ProcessSlotForPidResult::Found(found) => { found }
     };
-    if (signum == 0) { return ProcessSignalSendResult::Delivered; }
-    let guard = process_run_lock();
+    if (signum == 0) {
+        process_run_unlock(guard);
+        return ProcessSignalSendResult::Delivered;
+    }
     let result = kernel_process_signal_deliver_to(
         guard, scheduled_process_handle_of_slot(slot), signum);
     process_run_unlock(guard);
@@ -8970,7 +9004,7 @@ fn kernel_process_session_get(pid: usize) -> ProcessSessionResult {
     let guard = process_run_lock();
     let mut selected: usize = pid;
     if (selected == 0) { selected = kernel_process_current_pid(); }
-    match scheduled_process_slot_for_pid(selected) {
+    match scheduled_process_slot_for_pid_locked(guard, selected) {
         ProcessSlotForPidResult::Missing => {
             process_run_unlock(guard);
             return ProcessSessionResult::Missing;
@@ -10086,7 +10120,7 @@ fn kernel_process_child_exec_mark() {
 fn kernel_process_exec_image_live_for_pid(pid: usize) -> bool !{unsafe} {
     let guard = process_run_lock();
     let mut live: bool = false;
-    match scheduled_process_slot_for_pid(pid) {
+    match scheduled_process_slot_for_pid_locked(guard, pid) {
         ProcessSlotForPidResult::Missing => {}
         ProcessSlotForPidResult::Found(slot) => {
             live = scheduled_process_record_locked(guard, slot).exec_image_live;
@@ -10098,7 +10132,7 @@ fn kernel_process_exec_image_live_for_pid(pid: usize) -> bool !{unsafe} {
 
 fn kernel_process_exec_clear_for_pid(pid: usize) !{unsafe} {
     let guard = process_run_lock();
-    match scheduled_process_slot_for_pid(pid) {
+    match scheduled_process_slot_for_pid_locked(guard, pid) {
         ProcessSlotForPidResult::Missing => {}
         ProcessSlotForPidResult::Found(slot) => {
             scheduled_process_record_locked(guard, slot).exec_image_live =

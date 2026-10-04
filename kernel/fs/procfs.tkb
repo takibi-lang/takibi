@@ -78,12 +78,13 @@ fn procfs_lookup(path: []u8) -> ProcfsLookupResult !{unsafe} {
         ProcfsPidResult::Invalid => { return ProcfsLookupResult::Missing; }
         ProcfsPidResult::Parsed(parsed) => { parsed }
     };
-    match scheduled_process_slot_for_pid(pid) {
-        ProcessSlotForPidResult::Missing => {
-            return ProcfsLookupResult::Missing;
-        }
-        ProcessSlotForPidResult::Found(slot) => {}
-    }
+    let lookup_guard = process_run_lock();
+    let present: bool = match scheduled_process_slot_for_pid_locked(lookup_guard, pid) {
+        ProcessSlotForPidResult::Missing => { false }
+        ProcessSlotForPidResult::Found(slot) => { true }
+    };
+    process_run_unlock(lookup_guard);
+    if (present == false) { return ProcfsLookupResult::Missing; }
     if (leaf.len == 0) {
         let mut directory: ProcfsNode = {
             ProcfsNodeKind::ProcessDirectory, pid, procfs_inode(pid, 0)
