@@ -9,6 +9,12 @@ import gdb
 
 ready = Path(os.environ["KERNEL_CONSOLE_HOLD_READY"])
 release = Path(os.environ["KERNEL_CONSOLE_HOLD_RELEASE"])
+# Physical accesses: the stopped CPU may be running EL0 under a user TTBR0,
+# where the kernel's addresses are not mapped and a write to the arm flag
+# fails ("Cannot access memory", #701). The kernel is identity-mapped, so a
+# physical access names the same bytes on every CPU, as
+# run_kernel_ddb_qemutest.sh already does for its checkpoint dump.
+gdb.execute("maintenance packet Qqemu.PhyMemMode:1")
 gdb.execute("break console_ddb_hold_checkpoint")
 gdb.execute("set *(char *)&kernel_ddb_console_hold_armed = 1")
 gdb.execute("continue")
