@@ -185,7 +185,7 @@ class Outcome:
 
 def drive(driver, uart, workdir, *, timeout, qmp_port=None,
           break_reaches_guest=True, break_failure="", peer_settings=False,
-          break_delay=0.0):
+          break_delay=0.0, ash_only=True):
     """Run the driver's own main() against a scripted endpoint.
 
     Returns what the lane would have reported, plus how far the clock moved,
@@ -214,9 +214,11 @@ def drive(driver, uart, workdir, *, timeout, qmp_port=None,
         "--port", "socket://127.0.0.1:1",
         "--log", str(workdir / "uart.log"),
         "--stdin", str(fixture), "--expected", str(expected),
-        "--timeout", str(timeout), "--ash-only", "--validate-ash",
+        "--timeout", str(timeout),
         "--postmortem-log", str(walk_log),
     ]
+    if ash_only:
+        argv += ["--ash-only", "--validate-ash"]
     if peer_settings:
         argv += ["--peer-settings"]
     if qmp_port is not None:

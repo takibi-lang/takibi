@@ -1523,6 +1523,13 @@ debugger prompt, continue response and resumed-shell response against the
 existing session budget. It saves these under `<ddb-log>.await-timing.jsonl`,
 including unfinished waits on error paths. Archived-capture validation does
 not produce live timing observations.
+The common UART driver records its connection against the fixed connection
+budget in `<uart-log>.connection-await.jsonl` and its stop-marker arrival
+against the capture ceiling in `<uart-log>.await-timing.jsonl`. The capture
+record names the separate inactivity limit; elapsed boot time is not divided
+by that progress-renewed limit. Ash-only captures observe the shell-exit
+marker instead. Missing markers remain explicit even when DDB supplies the
+failure diagnosis.
 Other console drivers do not yet contribute; zero observations do not establish
 that their margins are sufficient. These observations do not alter deadlines
 or functional verdicts.

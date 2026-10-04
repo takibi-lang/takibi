@@ -10,6 +10,7 @@ import sys
 import time
 
 import serial
+from await_timing import AwaitTiming
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "kernel/tests/common"))
 from terminal_driver import TerminalScenario
@@ -446,18 +447,33 @@ def main() -> int:
 
     if args.ceiling is None:
         args.ceiling = 3 * args.timeout
-    deadline = time.monotonic() + args.timeout
+    # A failed connection must not leave the preceding run's capture arrival
+    # looking like evidence from this attempt.
+    try:
+        Path(args.log + ".await-timing.jsonl").unlink(missing_ok=True)
+    except OSError as error:
+        print(f"RECORDED kernel/uart await timing cleanup unavailable: {error}", flush=True)
+    connection_started = time.monotonic()
+    deadline = connection_started + args.timeout
+    connection_timing = AwaitTiming(
+        args.log + ".connection-await.jsonl", connection_started, args.timeout,
+        [], [], label="kernel/uart", origin="UART connection start",
+        milestones=("UART connection",))
     connection = None
     last_error = None
-    while time.monotonic() < deadline:
-        try:
-            connection = serial.serial_for_url(
-                args.port, baudrate=args.baud, timeout=0.1,
-                write_timeout=1.0)
-            break
-        except serial.SerialException as error:
-            last_error = error
-            time.sleep(0.1)
+    try:
+        while time.monotonic() < deadline:
+            try:
+                connection = serial.serial_for_url(
+                    args.port, baudrate=args.baud, timeout=0.1,
+                    write_timeout=1.0)
+                connection_timing.record("UART connection", True, time.monotonic())
+                break
+            except serial.SerialException as error:
+                last_error = error
+                time.sleep(0.1)
+    finally:
+        connection_timing.finish(time.monotonic())
     if connection is None:
         raise RuntimeError(f"could not open UART {args.port}: {last_error}")
 
@@ -486,6 +502,14 @@ def main() -> int:
     ppoll_probe_byte_sent = False
     httpd_done_seen_at = None
     capture_started = time.monotonic()
+    capture_marker = (b"busybox interactive shell exit: 0" if args.ash_only
+                      else args.stop_marker.encode("ascii"))
+    capture_await = "capture marker: " + capture_marker.decode("ascii")
+    capture_timing = AwaitTiming(
+        args.log + ".await-timing.jsonl", capture_started, args.ceiling,
+        [], [], label="kernel/uart",
+        origin=f"capture ceiling (UART inactivity limit {args.timeout:g}s)",
+        milestones=(capture_await,))
     last_chunk_at = capture_started
     peer_guard_until = capture_started
     timing_pending = bytearray()
@@ -506,6 +530,8 @@ def main() -> int:
                             last_chunk_at + args.timeout,
                             capture_started + args.ceiling))
                     output.extend(chunk)
+                    if capture_marker in output:
+                        capture_timing.record(capture_await, True, last_chunk_at)
                     capture.write(chunk)
                     capture.flush()
                     if timing_capture is not None:
@@ -770,6 +796,7 @@ def main() -> int:
                       args.stop_marker.encode() in output):
                     break
     finally:
+        capture_timing.finish(time.monotonic())
         connection.close()
         if timing_capture is not None:
             if timing_pending:
