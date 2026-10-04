@@ -924,8 +924,9 @@ fn process_stack_load_word(stack: borrow [u8; PROCESS_STACK_LAYOUT_BYTES..],
 // Give back everything a clone into `dest` had taken, and leave that
 // root describing no clone. Safe to call on a root whose clone never got
 // far enough to be recorded: the fields it clears are already clear.
-fn process_clone_vm_rollback(dest: usize) {
-    address_space_release_user_mappings(address_space_root_for_slot(dest));
+fn process_clone_vm_rollback(dest_space: AddressSpaceRoot) {
+    let dest: usize = address_space_root_slot(dest_space);
+    address_space_release_user_mappings(dest_space);
     if (scheduled_process_slot_valid(dest)) {
         let root: usize =
             process_image_narrow_root(dest);
@@ -1011,7 +1012,7 @@ fn process_image_clone_vm_begin(dest_space: AddressSpaceRoot) -> ProcessCloneVmR
                                                address_space_live_count()) {
                 PageMappingRetainResult::Retained => {}
                 PageMappingRetainResult::NotMapped => {
-                    process_clone_vm_rollback(dest_root);
+                    process_clone_vm_rollback(dest_space);
                     return ProcessCloneVmResult::OutOfMemory;
                 }
                 PageMappingRetainResult::RefCeilingReached => {
@@ -1022,7 +1023,7 @@ fn process_image_clone_vm_begin(dest_space: AddressSpaceRoot) -> ProcessCloneVmR
                     // still rolled back: refusing is what keeps a broken
                     // invariant from becoming a broken address space.
                     page_mapping_ref_bound_break();
-                    process_clone_vm_rollback(dest_root);
+                    process_clone_vm_rollback(dest_space);
                     return ProcessCloneVmResult::OutOfMemory;
                 }
             }
@@ -1033,12 +1034,12 @@ fn process_image_clone_vm_begin(dest_space: AddressSpaceRoot) -> ProcessCloneVmR
             match address_space_pte_write(dest_space, l3_index, child_pte) {
                 AddressSpacePteWriteResult::Invalid => {
                     page_mapping_release_physical(parent_physical);
-                    process_clone_vm_rollback(dest_root);
+                    process_clone_vm_rollback(dest_space);
                     return ProcessCloneVmResult::OutOfMemory;
                 }
                 AddressSpacePteWriteResult::OutOfMemory => {
                     page_mapping_release_physical(parent_physical);
-                    process_clone_vm_rollback(dest_root);
+                    process_clone_vm_rollback(dest_space);
                     return ProcessCloneVmResult::OutOfMemory;
                 }
                 AddressSpacePteWriteResult::Written => {
@@ -1047,11 +1048,11 @@ fn process_image_clone_vm_begin(dest_space: AddressSpaceRoot) -> ProcessCloneVmR
                                 source_space, l3_index,
                                 address_space_pte_cow_value(parent_pte)) {
                             AddressSpacePteWriteResult::Invalid => {
-                                process_clone_vm_rollback(dest_root);
+                                process_clone_vm_rollback(dest_space);
                                 return ProcessCloneVmResult::OutOfMemory;
                             }
                             AddressSpacePteWriteResult::OutOfMemory => {
-                                process_clone_vm_rollback(dest_root);
+                                process_clone_vm_rollback(dest_space);
                                 return ProcessCloneVmResult::OutOfMemory;
                             }
                             AddressSpacePteWriteResult::Written => {
@@ -1144,7 +1145,8 @@ fn process_image_cancel_activation(
 // GitHub issue #448: this used to take no argument and read the one clone
 // the kernel could have in flight out of a global. Naming the root is what
 // lets two of them be outstanding at once.
-fn process_image_clone_vm_reap(dest_root: usize) -> ProcessCloneVmReapResult {
+fn process_image_clone_vm_reap(dest_space: AddressSpaceRoot) -> ProcessCloneVmReapResult !{unsafe} {
+    let dest_root: usize = address_space_root_slot(dest_space);
     if (scheduled_process_slot_valid(dest_root) == false) {
         return ProcessCloneVmReapResult::Missing;
     }
@@ -1157,8 +1159,9 @@ fn process_image_clone_vm_reap(dest_root: usize) -> ProcessCloneVmReapResult {
     // The caller remains the logical current process throughout this
     // non-preemptible EL1 span. Activate the retained source before releasing
     // mappings from a destination that may still be installed in TTBR0.
-    kernel_process_activate_stable_root(address_space_root_for_slot(source));
-    process_clone_vm_rollback(dest_root);
+    kernel_process_activate_stable_root(
+        scheduled_process_address_space_root_lookup(source));
+    process_clone_vm_rollback(dest_space);
     *process_image_counter_here(clone_last_reaped_count) = count;
     return ProcessCloneVmReapResult::Reaped;
 }
@@ -1234,7 +1237,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     // scheduled_process_probe_slot_acquire for why a probe has to be a
     // process to have a root of its own.
     let child_root: usize = scheduled_process_probe_slot_acquire();
-    let mut child_root_root: AddressSpaceRoot = scheduled_process_probe_root(child_root);
+    let mut child_root_root: AddressSpaceRoot = scheduled_process_address_space_root_lookup(child_root);
     if (child_root == 0) { return false; }
     if (address_space_is_live(child_root_root)) {
         scheduled_process_probe_slot_release(child_root);
@@ -1364,7 +1367,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
         process_image_activate_root(address_space_boot_root());
     }
 
-    match process_image_clone_vm_reap(child_root) {
+    match process_image_clone_vm_reap(child_root_root) {
         ProcessCloneVmReapResult::Missing => {}
         ProcessCloneVmReapResult::Reaped => {}
     }
@@ -1503,8 +1506,8 @@ private let mut process_image_exec_reap_clean_count: usize;
 private let mut process_image_exec_reap_stack_growth_count: usize;
 
 fn process_image_root_window_is_clear(
-        root: usize) -> bool !{unsafe} {
-    return address_space_user_window_is_clear(address_space_root_for_slot(root));
+        root: AddressSpaceRoot) -> bool !{unsafe} {
+    return address_space_user_window_is_clear(root);
 }
 
 fn process_image_exec_reap_evidence() -> (usize, usize, usize) {
@@ -1561,7 +1564,7 @@ fn process_image_exec_teardown(target: AddressSpaceRoot,
                 }
                 // process_image_unmap_pages for this root, whose resets
                 // process_image_cleanup_root repeats unconditionally.
-                address_space_release_user_mappings(address_space_root_for_slot(root_index));
+                address_space_release_user_mappings(target);
                 process_image_set_active_page_count_pinned(
                     process_image_record_pin_words(&process_image_pool, words), 0);
                 process_image_set_stack_growth_active_pinned(
@@ -1571,7 +1574,7 @@ fn process_image_exec_teardown(target: AddressSpaceRoot,
                     process_stack_top_page());
                 process_image_exec_reap_count =
                     process_image_exec_reap_count + 1;
-                if (process_image_root_window_is_clear(root_index)) {
+                if (process_image_root_window_is_clear(target)) {
                     process_image_exec_reap_clean_count =
                         process_image_exec_reap_clean_count + 1;
                 }
@@ -1973,8 +1976,9 @@ fn process_image_load_page_ext2(page: borrow PageOwner[page],
 // Address-space cleanup walks the actual L2/L3 tree, releasing every
 // transferred user page and every dynamic L3 table page. It needs no
 // per-image page-index list and scales with populated branches.
-private fn process_image_cleanup_root(root: usize) {
-    address_space_release_user_mappings(address_space_root_for_slot(root));
+private fn process_image_cleanup_root(target: AddressSpaceRoot) {
+    let root: usize = address_space_root_slot(target);
+    address_space_release_user_mappings(target);
     process_image_set_active_page_count(root, 0);
     process_image_set_stack_growth_active(root, false);
     process_image_set_stack_lowest_l3(root, process_stack_top_page());
@@ -1984,7 +1988,7 @@ fn process_image_cleanup() {
     match process_image_target_root_result() {
         ProcessImageTargetRootResult::Missing => { return; }
         ProcessImageTargetRootResult::Ready(root) => {
-            process_image_cleanup_root(process_image_root_index(root));
+            process_image_cleanup_root(process_image_root_space(root));
         }
     }
 }
@@ -2084,7 +2088,7 @@ fn process_image_unmap_pages(count: usize) {
                 process_image_set_stack_lowest_l3(root_index,
         process_stack_top_page());
             }
-            process_image_cleanup_root(root_index);
+            process_image_cleanup_root(process_image_root_space(root));
         }
     }
     process_image_clear_target_root_here();
@@ -2603,7 +2607,7 @@ fn process_image_window_is_clear() -> bool !{unsafe} {
         ProcessImageTargetRootResult::Missing => { return false; }
         ProcessImageTargetRootResult::Ready(root) => {
             return address_space_user_window_is_clear(
-                address_space_root_for_slot(process_image_root_index(root)));
+                process_image_root_space(root));
         }
     }
 }

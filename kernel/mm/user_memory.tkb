@@ -347,9 +347,9 @@ fn user_range_reprotect(root: AddressSpaceRoot, first_l3: usize, last_l3: usize,
     let mut index: usize = first_l3;
     while (index <= last_l3) {
         let root_slot: usize = address_space_root_slot(root);
-        let old_pte: usize = address_space_pte_read(address_space_root_for_slot(root_slot), index);
+        let old_pte: usize = address_space_pte_read(root, index);
         let phys: usize = old_pte & USER_PAGE_PHYS_MASK;
-        match address_space_pte_write(address_space_root_for_slot(root_slot), index, phys | new_flags) {
+        match address_space_pte_write(root, index, phys | new_flags) {
             AddressSpacePteWriteResult::Invalid => { return; }
             AddressSpacePteWriteResult::OutOfMemory => { return; }
             AddressSpacePteWriteResult::Written => {}
@@ -501,8 +501,8 @@ fn user_memory_root_isolation_probe() -> bool !{unsafe} {
     // two processes and uses theirs.
     let root_a: usize = scheduled_process_probe_slot_acquire();
     let root_b: usize = scheduled_process_probe_slot_acquire();
-    let mut root_a_root: AddressSpaceRoot = scheduled_process_probe_root(root_a);
-    let mut root_b_root: AddressSpaceRoot = scheduled_process_probe_root(root_b);
+    let mut root_a_root: AddressSpaceRoot = scheduled_process_address_space_root_lookup(root_a);
+    let mut root_b_root: AddressSpaceRoot = scheduled_process_address_space_root_lookup(root_b);
     if (root_a == 0 || root_b == 0 ||
         address_space_is_live(root_a_root) || address_space_is_live(root_b_root)) {
         scheduled_process_probe_slot_release(root_b);

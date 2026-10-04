@@ -51,9 +51,9 @@ struct ProcessPoolHandleWords {
 // backing, read once where the root was made, so the slot and its handle
 // cannot be paired wrongly and no access below reads the process record
 // again. Made by address_space_root_mint from an authority over the record
-// (kernel/kernel/process.tkb), by address_space_boot_root for root 0, whose
-// backing is a static, or -- until its callers move to an authority -- by
-// address_space_root_for_slot's bare read.
+// (kernel/kernel/process.tkb: the run lock, an owner, the running evidence,
+// or the diagnostic peek), by the backing's publisher, or by
+// address_space_boot_root for root 0, whose backing is a static.
 struct AddressSpaceRoot {
     private slot: usize;
     private backing: ProcessPoolHandleWords;
@@ -163,7 +163,7 @@ fn address_space_probe_root_acquire() -> usize !{unsafe} {
 
 fn address_space_probe_root_release(slot: usize) !{unsafe} {
     if (slot == 0) { return; }
-    address_space_release_root(address_space_root_for_slot(slot));
+    address_space_release_root(scheduled_process_address_space_root_lookup(slot));
     scheduled_process_probe_slot_release(slot);
 }
 
@@ -485,14 +485,6 @@ fn address_space_root_mint(slot: usize, backing: ProcessPoolHandleWords)
     return root;
 }
 
-// Transitional: a root whose handle is read from the record with no
-// authority, as every access read it before #693 step 5. Its callers are
-// held to a number by the same check, and move to an authority's mint.
-fn address_space_root_for_slot(slot: usize) -> AddressSpaceRoot !{unsafe} {
-    return address_space_root_mint(slot,
-        scheduled_process_address_space_backing_handle_bare(slot));
-}
-
 // Root 0's backing is the static below, never the pool, so it needs no
 // handle and no authority.
 fn address_space_boot_root() -> AddressSpaceRoot {
@@ -700,7 +692,7 @@ fn address_space_ensure_root(slot: usize) -> AddressSpaceEnsureResult {
         return AddressSpaceEnsureResult::SlotOutOfRange;
     }
     let mut root: AddressSpaceRoot = match address_space_backing_ensure(
-            address_space_root_for_slot(slot)) {
+            scheduled_process_address_space_root_lookup(slot)) {
         AddressSpaceBackingReady::Missing => {
             return AddressSpaceEnsureResult::OutOfMemory;
         }
@@ -1213,8 +1205,8 @@ fn process_address_space_probe() -> bool !{unsafe} {
     // record now, so the probe allocates two processes and uses theirs.
     let root_a: usize = scheduled_process_probe_slot_acquire();
     let root_b: usize = scheduled_process_probe_slot_acquire();
-    let mut root_a_root: AddressSpaceRoot = scheduled_process_probe_root(root_a);
-    let mut root_b_root: AddressSpaceRoot = scheduled_process_probe_root(root_b);
+    let mut root_a_root: AddressSpaceRoot = scheduled_process_address_space_root_lookup(root_a);
+    let mut root_b_root: AddressSpaceRoot = scheduled_process_address_space_root_lookup(root_b);
     if (root_a == 0 || root_b == 0) {
         scheduled_process_probe_slot_release(root_b);
         scheduled_process_probe_slot_release(root_a);
@@ -1256,7 +1248,7 @@ fn process_address_space_probe() -> bool !{unsafe} {
         address_space_asid(root_a_root) == 0 && address_space_asid(root_b_root) == 0;
     address_space_activate_root(root_a_root);
     address_space_activate_root(root_b_root);
-    address_space_activate_root(address_space_root_for_slot(restore));
+    address_space_activate_root(scheduled_process_address_space_root_lookup(restore));
     let backing_ok: bool =
         unassigned_ok &&
         address_space_l1_physical(root_a_root) != 0 &&
@@ -1464,7 +1456,7 @@ fn address_space_asid_rollover_probe() -> bool {
     if (asid_generation_is_current(generation_before)) { ok = false; }
 
     let active_before: usize = address_space_active_slot_here();
-    match address_space_prepare_activation(address_space_root_for_slot(active_before)) {
+    match address_space_prepare_activation(scheduled_process_address_space_root_lookup(active_before)) {
         AddressSpaceActivationPrepareResult::Invalid => { ok = false; }
         AddressSpaceActivationPrepareResult::RolloverNeeded => { ok = false; }
         AddressSpaceActivationPrepareResult::Prepared(prepared) => {
@@ -1477,7 +1469,7 @@ fn address_space_asid_rollover_probe() -> bool {
         }
     }
     let active: usize = address_space_active_slot_here();
-    let mut running: AddressSpaceBacking = address_space_backing_read_existing(address_space_root_for_slot(active));
+    let mut running: AddressSpaceBacking = address_space_backing_read_existing(scheduled_process_address_space_root_lookup(active));
     if (active != 0 &&
         asid_generation_is_current(running.asid_generation) == false) {
         ok = false;

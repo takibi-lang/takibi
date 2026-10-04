@@ -1107,10 +1107,11 @@ fn kernel_syscall_heap_set(value: usize) -> bool {
 fn syscall_munmap_pages(address: usize, length: usize) {
     let (span_ok, first, last) = user_range_l3_span(address, length);
     if (span_ok == false) { return; }
-    let slot: usize = address_space_root_slot(kernel_process_current_root());
+    let mut root: AddressSpaceRoot = kernel_process_current_root();
+    let slot: usize = address_space_root_slot(root);
     let mut index: usize = first;
     while (index <= last) {
-        if (user_page_writable(address_space_pte_read(address_space_root_for_slot(slot), index))) {
+        if (user_page_writable(address_space_pte_read(root, index))) {
             unified_process_mmap_release_page(
                 kernel_syscall_process_slot(),
                 USER_TEXT_VA + index * PAGE_SIZE);
@@ -2936,9 +2937,7 @@ fn kernel_syscall_exit_current_process(status: usize) -> SyscallAction {
             // INTO this exiting process's own root, which it now has to
             // name -- there is no longer a single clone in flight for the
             // kernel to have meant implicitly.
-            let exiting_root: usize =
-                address_space_root_slot(kernel_process_current_root());
-            match process_image_clone_vm_reap(exiting_root) {
+            match process_image_clone_vm_reap(kernel_process_current_root()) {
                 ProcessCloneVmReapResult::Missing => {
                     return SyscallAction::Unreachable;
                 }
@@ -2999,7 +2998,8 @@ fn kernel_syscall_wait4_deliver(
         // the synchronous wait4 path is already running in the same parent.
         // kernel_process_reap_zombie likewise restores that current root
         // before teardown, so another direct activation here was redundant.
-        match user_range_check_write(address_space_root_for_slot(parent_slot), wait4_status_ptr, 4) {
+        match user_range_check_write(
+                scheduled_process_address_space_root_owned(parent), wait4_status_ptr, 4) {
             UserWriteRangeResult::Fault => {
                 el0_context_set_x0(frame, LINUX_EFAULT);
                 return;
@@ -6194,7 +6194,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         match kernel_syscall_clone_files_begin(
                                 parent_slot, child_slot) {
                             UnifiedFdResult::Invalid => {
-                                match process_image_clone_vm_reap(child_slot) {
+                                match process_image_clone_vm_reap(child_space) {
                                     ProcessCloneVmReapResult::Missing => {}
                                     ProcessCloneVmReapResult::Reaped => {}
                                 }

@@ -2094,9 +2094,8 @@ fn scheduled_process_slot_valid(slot: usize) -> bool !{unsafe} {
     }
 }
 
-// The backing handle read with no authority, for
-// address_space_root_for_slot alone: the pre-#693 read, kept until its
-// callers move to an authority's mint.
+// The backing handle's two words, read from a record reached under an
+// authority by one of the makers below.
 private fn process_backing_words(record: borrow *ProcessRecord)
         -> ProcessPoolHandleWords !{unsafe} {
     let mut words: ProcessPoolHandleWords = {
@@ -2104,15 +2103,10 @@ private fn process_backing_words(record: borrow *ProcessRecord)
     return words;
 }
 
-fn scheduled_process_address_space_backing_handle_bare(slot: usize)
-        -> ProcessPoolHandleWords !{unsafe} {
-    return process_backing_words(scheduled_process_record_at(slot));
-}
-
 // GitHub issue #693 step 5: a process's address-space root, with its
-// backing handle read under an authority over the record. These and
-// address_space_boot_root are the mints scripts/check_address_space_root_mints.py
-// allows besides the transitional address_space_root_for_slot.
+// backing handle read under an authority over the record. These,
+// address_space_boot_root and the backing's publisher are the makers
+// scripts/check_address_space_root_mints.py allows.
 fn scheduled_process_address_space_root_owned(
         owner: borrow ScheduledProcessOwner[process]) -> AddressSpaceRoot !{unsafe} {
     return address_space_root_mint(owner.pool_index,
@@ -2135,11 +2129,12 @@ fn scheduled_process_address_space_root_locked(
         process_backing_words(scheduled_process_record_locked(guard, slot)));
 }
 
-// A boot probe's root, read once under the run lock right after the probe
-// allocated the process: its backing exists from that allocation and keeps
-// its handle until the probe releases the slot, so the root stays valid
-// for the probe's whole run.
-fn scheduled_process_probe_root(slot: usize) -> AddressSpaceRoot !{unsafe} {
+// A root for a caller that has only a slot: the handle is read under the
+// run lock, which keeps the record alive against reap for the read, and a
+// caller already holding the run guard is rejected at compile time (#694).
+// A boot probe reads its root this way once, right after allocating its
+// process: the backing keeps its handle until the probe releases the slot.
+fn scheduled_process_address_space_root_lookup(slot: usize) -> AddressSpaceRoot !{unsafe} {
     let guard = process_run_lock();
     let mut root: AddressSpaceRoot =
         scheduled_process_address_space_root_locked(guard, slot);
@@ -2543,10 +2538,10 @@ private fn scheduled_process_release_every_process() !{unsafe} {
 // that no process performed.
 private fn scheduled_process_release_slot_resources(slot: usize) !{unsafe} {
     unified_fd_context_release(slot);
-    address_space_release_root(address_space_root_for_slot(slot));
+    address_space_release_root(scheduled_process_address_space_root_lookup(slot));
     // GitHub issue #414: the ROOT's pages and the RECORD that named them
     // are two things, and only the first was being given back.
-    address_space_backing_release(address_space_root_for_slot(slot));
+    address_space_backing_release(scheduled_process_address_space_root_lookup(slot));
     process_image_record_release(slot);
 }
 
@@ -3571,7 +3566,7 @@ fn scheduled_process_probe_slot_acquire() -> usize !{unsafe} {
             slot = handle.pool_index;
         }
     }
-    address_space_release_root(address_space_root_for_slot(slot));
+    address_space_release_root(scheduled_process_address_space_root_lookup(slot));
     return slot;
 }
 
@@ -3893,7 +3888,8 @@ const TTBR0_BADDR_MASK: usize = 0x0000FFFFFFFFFFFE;
 private fn kernel_process_root_authorities_check(incoming: ProcessHandle,
                                                  frame: borrow FrameRef[process]) {
     let slot: usize = incoming.pool_index;
-    let record_l1: usize = address_space_l1_physical(address_space_root_for_slot(slot));
+    let record_l1: usize = address_space_l1_physical(
+        scheduled_process_address_space_root_peek(slot));
     let hardware_l1: usize = crash_snapshot_read_ttbr0_el1() & TTBR0_BADDR_MASK;
     let mut target: usize = 0xFFFFFFFFFFFFFFFF;
     match process_image_target_root_peek() {
@@ -3917,7 +3913,8 @@ private fn kernel_process_root_authorities_check(incoming: ProcessHandle,
         kernel_boot_log(" target_slot=");
         uart_put_udec(target);
         kernel_boot_log(" target_l1=");
-        uart_put_hex(address_space_l1_physical(address_space_root_for_slot(target)));
+        uart_put_hex(address_space_l1_physical(
+            scheduled_process_address_space_root_peek(target)));
         kernel_boot_log("\n");
     }
     kernel_syscall_fail_stop(frame_ref_address(frame));

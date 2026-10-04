@@ -91,7 +91,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_legacy_dma_rx_scope_controls.py` | Controls for new, changed, and removed legacy RX calls |
 | `check_liveness_proof_escapes.py` | every place that drops a pool's liveness proof is declared with a reason |
 | `check_process_running_mints.py` | every caller of `process_running_here`, the mint of a process's evidence that it is running, is declared (#693) |
-| `check_address_space_root_mints.py` | every maker of an `AddressSpaceRoot` (which carries its backing handle) is declared, and the bare `address_space_root_for_slot` calls equal a budget that only goes down (#693) |
+| `check_address_space_root_mints.py` | every maker of an `AddressSpaceRoot` (which carries its backing handle) is declared (#693) |
 | `check_process_record_bare_uses.py` | the bare `scheduled_process_record_at`/`_of` calls left in `process.tkb` equal a budget that only goes down (#693) |
 | `check_lock_discipline.py` | global mutexes are not force-reset and raw atomics stay allowlisted |
 | `check_measure_kernel_tcp_throughput_controls.py` | Controls for the wire-throughput measurement, with a scripted curl |

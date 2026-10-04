@@ -818,7 +818,7 @@ private fn kernel_process_child_exec_prepare_with(argv: borrow []u8)
         process_image_exec_teardown(child_space,
             scheduled_process_image_record_handle(child_root));
     } else {
-        match process_image_clone_vm_reap(child_root) {
+        match process_image_clone_vm_reap(child_space) {
             ProcessCloneVmReapResult::Missing => {
                 return KernelChildExecPrepareResult::CloneVmMissing;
             }
@@ -974,10 +974,9 @@ fn kernel_init_script_success_evidence() {
 
 must_use variant HttpdImageMapCheckResult { Invalid; Verified; }
 
-// The root process_image_map_ext2 maps into. Named rather than written as 0
-// at the two sites below, so it is visible that this is that function's
-// choice and not an arbitrary index (GitHub issue #516).
-const PROCESS_IMAGE_EXT2_CHECK_ROOT: usize = 0;
+// process_image_map_ext2 maps into the boot root, which the two checks
+// below name as address_space_boot_root() -- that function's choice, not an
+// arbitrary index (GitHub issue #516).
 
 fn httpd_image_mapping_check(httpd: Ext2ExecImage,
                              musl: Ext2ExecImage)
@@ -1003,7 +1002,7 @@ fn httpd_image_mapping_check(httpd: Ext2ExecImage,
             // the worst way for an assertion to pass.
             if (httpd_count != 157 ||
                 process_image_root_window_is_clear(
-                    PROCESS_IMAGE_EXT2_CHECK_ROOT) == false) {
+                    address_space_boot_root()) == false) {
                 return HttpdImageMapCheckResult::Invalid;
             }
             kernel_boot_log("httpd map: pie pages=157 clean\n");
@@ -1024,7 +1023,7 @@ fn httpd_image_mapping_check(httpd: Ext2ExecImage,
             // The same root, for the same reason as the pie check above.
             if (musl_count != 296 ||
                 process_image_root_window_is_clear(
-                    PROCESS_IMAGE_EXT2_CHECK_ROOT) == false) {
+                    address_space_boot_root()) == false) {
                 return HttpdImageMapCheckResult::Invalid;
             }
             kernel_boot_log("httpd map: musl pages=296 clean\n");
