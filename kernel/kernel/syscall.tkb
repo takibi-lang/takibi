@@ -374,8 +374,10 @@ fn kernel_syscall_exec_argc() -> usize {
 // linux_binprm before begin_new_exec for the same reason). The page crosses
 // the return to user_entry.S's child-exec branch in this stable owner slot:
 // execve puts it, kernel_process_child_exec_prepare takes it, and a slot
-// found full or empty is an invariant break, not a shortage. execve runs on
-// core 0 only (it is not peer-safe), so one slot serves.
+// found full or empty is an invariant break, not a shortage. Execve runs on
+// every active CPU, so each CPU owns a separate slot. Reserve and prepare
+// stay on that CPU in one non-preemptible EL1 action; the page is taken
+// before returning to EL0. This depends on KERNEL_PREEMPTIBLE == 0.
 variant ExecArgsValue {
     Empty;
     Held(exists page: usize. PageOwner[page]);
@@ -386,7 +388,7 @@ struct ExecArgsStore {
     private value: ExecArgsValue;
 }
 
-private let mut exec_args_store: ExecArgsStore;
+private let mut exec_args_store: [ExecArgsStore; KERNEL_MAX_CORES];
 
 private linear struct ExecArgsGuard[lock: addr] {
     private flags: usize;
@@ -403,17 +405,19 @@ private fn exec_args_unlock(guard: sink ExecArgsGuard[address],
     mutex_release(lock, guard.flags);
 }
 
-private fn exec_args_put(page: sink PageOwner[p]) {
-    let guard = exec_args_lock(&exec_args_store.mutex);
+private fn exec_args_put(core: {0..<KERNEL_MAX_CORES as usize},
+                         page: sink PageOwner[p]) {
+    let guard = exec_args_lock(&exec_args_store[core].mutex);
     let previous: ExecArgsValue = stable_replace(
-        guard, &exec_args_store.mutex, exec_args_store.value,
+        guard, &exec_args_store[core].mutex, exec_args_store[core].value,
         ExecArgsValue::Held(page));
-    exec_args_unlock(guard, &exec_args_store.mutex);
+    exec_args_unlock(guard, &exec_args_store[core].mutex);
     match previous {
         ExecArgsValue::Empty => {}
         ExecArgsValue::Held(stale) => {
             // A second ChildExec before the first prepare took its page.
             page_free(stale);
+            kernel_boot_log("exec argv: occupied CPU handoff slot\n");
             kernel_syscall_fail_stop(0);
         }
     }
@@ -425,22 +429,85 @@ must_use variant ExecArgsReserve { OutOfMemory; Reserved; }
 
 private fn kernel_syscall_exec_args_reserve(allocated: sink PageAllocResult)
         -> ExecArgsReserve {
+    let core: usize = cpu_id();
+    if (core < KERNEL_MAX_CORES) {
+        return kernel_syscall_exec_args_reserve_for(core, allocated);
+    }
+    // An inactive CPU must not dispatch a syscall. Keep ownership explicit
+    // even on that invariant failure path.
+    match allocated {
+        PageAllocResult::OutOfMemory => {}
+        PageAllocResult::Allocated(page) => { page_free(page); }
+    }
+    kernel_syscall_fail_stop(0);
+    return ExecArgsReserve::OutOfMemory;
+}
+
+private fn kernel_syscall_exec_args_reserve_for(
+        core: {0..<KERNEL_MAX_CORES as usize}, allocated: sink PageAllocResult)
+        -> ExecArgsReserve {
     match allocated {
         PageAllocResult::OutOfMemory => { return ExecArgsReserve::OutOfMemory; }
         PageAllocResult::Allocated(args_page) => {
-            exec_args_put(args_page);
+            exec_args_put(core, args_page);
             return ExecArgsReserve::Reserved;
         }
     }
 }
 
 fn kernel_syscall_exec_args_take() -> ExecArgsValue {
-    let guard = exec_args_lock(&exec_args_store.mutex);
+    let core: usize = cpu_id();
+    if (core < KERNEL_MAX_CORES) {
+        return kernel_syscall_exec_args_take_for(core);
+    }
+    kernel_syscall_fail_stop(0);
+    return ExecArgsValue::Empty;
+}
+
+private fn kernel_syscall_exec_args_take_for(
+        core: {0..<KERNEL_MAX_CORES as usize}) -> ExecArgsValue {
+    let guard = exec_args_lock(&exec_args_store[core].mutex);
     let taken: ExecArgsValue = stable_replace(
-        guard, &exec_args_store.mutex, exec_args_store.value,
+        guard, &exec_args_store[core].mutex, exec_args_store[core].value,
         ExecArgsValue::Empty);
-    exec_args_unlock(guard, &exec_args_store.mutex);
+    exec_args_unlock(guard, &exec_args_store[core].mutex);
     return taken;
+}
+
+// Hold every CPU's reservation at once, then consume each exact owner.
+// This boot-only control makes a singleton handoff fail deterministically,
+// without depending on two execs reaching the window by chance.
+private fn kernel_syscall_exec_args_overlap_probe() -> bool !{unsafe} {
+    let mut expected: [usize; KERNEL_MAX_CORES];
+    let mut ok: bool = true;
+    for core: usize in 0..<KERNEL_MAX_CORES {
+        expected[core] = 0;
+        match page_alloc(PageOwnerTag::ExecArgs) {
+            PageAllocResult::OutOfMemory => { ok = false; }
+            PageAllocResult::Allocated(page) => {
+                expected[core] = page_physical_address(page);
+                let bytes: [u8; PAGE_SIZE..] = page_bytes(page);
+                bytes[0] = core as u8;
+                exec_args_put(core, page);
+            }
+        }
+    }
+    for core: usize in 0..<KERNEL_MAX_CORES {
+        match kernel_syscall_exec_args_take_for(core) {
+            ExecArgsValue::Empty => { ok = false; }
+            ExecArgsValue::Held(page) => {
+                let bytes: [u8; PAGE_SIZE..] = page_bytes(page);
+                if (page_physical_address(page) != expected[core] ||
+                    bytes[0] != core as u8) { ok = false; }
+                page_free(page);
+            }
+        }
+        match kernel_syscall_exec_args_take_for(core) {
+            ExecArgsValue::Empty => {}
+            ExecArgsValue::Held(stray) => { page_free(stray); ok = false; }
+        }
+    }
+    return ok;
 }
 
 fn kernel_syscall_exec_argv_copy(destination: borrow [u8; 512..]) !{unsafe} {
@@ -7549,6 +7616,8 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
                 }
             }
 
+            if (kernel_syscall_exec_args_overlap_probe() == false) { ok = false; }
+
             // mmap: PROT_EXEC is always rejected.
             let (action1, value1) = kernel_syscall_dispatch(
                 SYSCALL_TRAP_ESR, 222, 0, 4096, 0x4, 0x22,
@@ -7598,5 +7667,5 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
 // kernel preemption would let another handler overwrite that core's scratch.
 fn syscall_execution_model_assumption() {
     static_assert(KERNEL_PREEMPTIBLE == 0,
-                  "per-core syscall scratch cannot survive preemption by another handler");
+                  "per-core syscall scratch and exec argument handoffs cannot survive preemption by another handler");
 }

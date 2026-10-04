@@ -50,6 +50,8 @@ cloexec-check
 core-read
 dmesg
 echo
+exenom0
+exenom1
 httpd
 httpd.sh
 ls

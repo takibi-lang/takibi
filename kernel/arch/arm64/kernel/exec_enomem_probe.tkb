@@ -1,0 +1,54 @@
+/* Real EL0 execve exhaustion and retry, driven by GDB on CPU 0 and CPU 1.
+ * The marker arms one ExecArgs allocation refusal after this image starts.
+ * Returning ENOMEM must preserve this image and its CPU placement; the
+ * unforced retry must replace it. Both entry points share the same body.
+ */
+const EXEC_ENOMEM_RESULT: usize = 0xFFFFFFFFFFFFFFF4;
+const EXEC_ENOMEM_MARKER: usize = 0x700;
+
+private fn exec_enomem_say(line: borrow []u8) {
+    svc5(64, 1, line as *u8 as usize, line.len, 0, 0);
+}
+
+private fn exec_enomem_fail() {
+    exec_enomem_say(bs"exec-enomem: FAIL refused execve did not preserve the caller\n");
+    svc5(93, 1, 0, 0, 0, 0);
+}
+
+private fn exec_enomem_run(cpu: {0..<2 as usize}) {
+    let mut mask: [u8; 8];
+    for index: usize in 0..<8 { mask[index] = 0; }
+    mask[0] = (1 << cpu) as u8;
+    if (svc5(122, 0, 8, mask as *u8 as usize, 0, 0) != 0) {
+        exec_enomem_fail();
+    }
+    let mut before: [u8; 4];
+    if (svc5(168, before as *u8 as usize, 0, 0, 0, 0) != 0 ||
+        before[0] != cpu as u8) { exec_enomem_fail(); }
+    let mut args: [usize; 3];
+    args[0] = "/bin/echo" as *u8 as usize;
+    args[1] = "exec-enomem: cpu 0 retry replaced the image" as *u8 as usize;
+    if (cpu == 1) {
+        args[1] = "exec-enomem: cpu 1 retry replaced the image" as *u8 as usize;
+    }
+    args[2] = 0;
+    svc5(172, EXEC_ENOMEM_MARKER, cpu, 0, 0, 0);
+    if (svc5(221, "/bin/echo" as *u8 as usize,
+             args as *usize as usize, 0, 0, 0) != EXEC_ENOMEM_RESULT) {
+        exec_enomem_fail();
+    }
+    let mut after: [u8; 4];
+    if (svc5(168, after as *u8 as usize, 0, 0, 0, 0) != 0 ||
+        after[0] != before[0]) { exec_enomem_fail(); }
+    if (cpu == 0) {
+        exec_enomem_say(bs"exec-enomem: cpu 0 returned ENOMEM and this image kept running\n");
+    } else {
+        exec_enomem_say(bs"exec-enomem: cpu 1 returned ENOMEM and this image kept running\n");
+    }
+    svc5(221, "/bin/echo" as *u8 as usize, args as *usize as usize, 0, 0, 0);
+    exec_enomem_say(bs"exec-enomem: FAIL the unforced retry returned\n");
+    svc5(93, 1, 0, 0, 0, 0);
+}
+
+fn exec_enomem_cpu0() { exec_enomem_run(0); }
+fn exec_enomem_cpu1() { exec_enomem_run(1); }

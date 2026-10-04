@@ -1,3 +1,4 @@
 syscall subset: mmap prot+fd reject, clone invalid=EINVAL/exhausted=EAGAIN, sigaction signum+oldact ok
 syscall subset: execve argv page refused=ENOMEM before the exec is recorded, granted=held for the prepare
+syscall subset: overlapping CPU exec argv reservations returned their own pages and emptied every slot
 syscall subset: vectored inetd split+partial+short+wait ok

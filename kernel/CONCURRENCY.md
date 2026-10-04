@@ -51,6 +51,23 @@ An assertion message is prose and nothing checks it stays true. Three went
 stale within days of their subject being fixed. Re-read the assertion when you
 change what it is about.
 
+## Exec argument handoff
+
+A child's exec reserves its argv page before committing to ChildExec. The
+linear PageOwner crosses the assembly action boundary through a stable slot
+for the executing CPU; exec is admitted on every active CPU. Each slot has
+its own mutex and owner field, and the compile-time stable-place check ties
+an exchange to that same slot's guard. The slots' distinct identities are
+also exercised by a boot probe that holds all CPU reservations simultaneously
+and checks every page and emptied slot. This is regression evidence rather
+than a static proof that an arbitrary handoff layout separates CPUs.
+
+Reserve and prepare are one non-preemptible EL1 action. Prepare takes the
+page before returning to EL0, so the process cannot migrate while the page
+remains in the slot. KERNEL_PREEMPTIBLE == 0 is asserted for this contract as
+well as the existing per-core syscall scratch. Enabling kernel preemption
+requires revisiting both contracts.
+
 ## Clone publication
 
 A new clone stays `Constructing` while its VM, descriptors and copied frame

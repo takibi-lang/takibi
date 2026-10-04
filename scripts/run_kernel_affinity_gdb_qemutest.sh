@@ -15,6 +15,8 @@
 #                   meet an exhausted ASID counter and Busy world stops; the
 #                   kernel must retry rather than fail-stop. No command is
 #                   typed: the boot's own execs are the subject.
+#   exec-enomem     Force one real exec argv allocation to fail on each of
+#                   CPU 0 and CPU 1; EL0 must observe ENOMEM and retry.
 #   starve          GitHub issue #572's negative control. gdb makes the
 #                   next-ready walks pass over one busy-pair worker for a
 #                   second of its wait; the pair's verdict must say STARVED,
@@ -31,7 +33,12 @@ set -euo pipefail
 trap 'takibi_status=$?; echo "[$(basename "$0")] aborted at line $LINENO with exit $takibi_status: $BASH_COMMAND" >&2' ERR
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ELF="${KERNEL_QEMU_AFFINITY_GDB_ELF:-$REPO_ROOT/kernel/build/qemu/kernel.elf}"
+MODE="${KERNEL_QEMU_AFFINITY_GDB_MODE:-gate}"
+DEFAULT_ELF="$REPO_ROOT/kernel/build/qemu/kernel.elf"
+if [ "$MODE" = exec-enomem ]; then
+    DEFAULT_ELF="$REPO_ROOT/kernel/build/qemu/kernel-debug.elf"
+fi
+ELF="${KERNEL_QEMU_AFFINITY_GDB_ELF:-$DEFAULT_ELF}"
 . "$REPO_ROOT/scripts/kernel_elf_freshness.sh"
 kernel_elf_refuse_stale "$ELF" || exit 1
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
@@ -41,14 +48,14 @@ SERIAL_PORT="${KERNEL_QEMU_AFFINITY_GDB_SERIAL_PORT:-18717}"
 GDB_PORT="${KERNEL_QEMU_AFFINITY_GDB_GDB_PORT:-18718}"
 NETDEV_LOCAL_PORT="${KERNEL_QEMU_AFFINITY_GDB_NETDEV_LOCAL_PORT:-18719}"
 NETDEV_REMOTE_PORT="${KERNEL_QEMU_AFFINITY_GDB_NETDEV_REMOTE_PORT:-18720}"
-MODE="${KERNEL_QEMU_AFFINITY_GDB_MODE:-gate}"
 case "$MODE" in
     gate) CHECK_SCRIPT="$REPO_ROOT/scripts/kernel_affinity_gdb_check.py" ;;
     reap) CHECK_SCRIPT="$REPO_ROOT/scripts/kernel_affinity_reap_check.py" ;;
     rollover) CHECK_SCRIPT="$REPO_ROOT/scripts/kernel_rollover_gdb_check.py" ;;
+    exec-enomem) CHECK_SCRIPT="$REPO_ROOT/scripts/kernel_exec_enomem_check.py" ;;
     starve) CHECK_SCRIPT="$REPO_ROOT/scripts/kernel_starve_gdb_check.py" ;;
     *)
-        echo "error: KERNEL_QEMU_AFFINITY_GDB_MODE must be gate, reap, rollover or starve, not '$MODE'" >&2
+        echo "error: KERNEL_QEMU_AFFINITY_GDB_MODE must be gate, reap, rollover, exec-enomem or starve, not '$MODE'" >&2
         exit 1
         ;;
 esac

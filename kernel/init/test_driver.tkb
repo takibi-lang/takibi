@@ -1076,6 +1076,7 @@ fn kernel_test_common_probes() {
     if (kernel_syscall_subset_probe()) {
         kernel_boot_log("syscall subset: mmap prot+fd reject, clone invalid=EINVAL/exhausted=EAGAIN, sigaction signum+oldact ok\n");
         kernel_boot_log("syscall subset: execve argv page refused=ENOMEM before the exec is recorded, granted=held for the prepare\n");
+        kernel_boot_log("syscall subset: overlapping CPU exec argv reservations returned their own pages and emptied every slot\n");
         kernel_boot_log("syscall subset: vectored inetd split+partial+short+wait ok\n");
     } else {
         kernel_boot_log("syscall subset: failed\n");
