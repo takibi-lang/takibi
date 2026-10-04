@@ -1,0 +1,18 @@
+// RP1 GEM completion wait policy. The driver refreshes the live DMA
+// descriptor in gem_tx_slot_done; this policy does not borrow packet bytes.
+// A short bounded poll covers ordinary wire/DMA latency before sleeping.
+// Measured transfers otherwise paid roughly one timer period per frame;
+// pinning the listener to CPU0 did not remove that delay.
+// After 200 us it retains the existing 1000-wakeup defensive fallback.
+// This is wake-and-recheck: an interrupt need not mean TX has completed.
+fn gem_tx_wait(slot: {0..<2 as usize}) !{may_block} {
+    let started: i64 = read_cntpct();
+    let poll_ticks: i64 = read_cntfrq() * 200 / 1000000;
+    while (read_cntpct() - started < poll_ticks) {
+        if (gem_tx_slot_done(slot)) { return; }
+    }
+    for wake: usize in 0..<1000 {
+        if (gem_tx_slot_done(slot)) { return; }
+        workload_profile_interrupt_wait();
+    }
+}

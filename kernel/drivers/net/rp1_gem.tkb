@@ -5,10 +5,12 @@
 // -driven completion came later (GitHub issue #187: net_rx_wait()/
 // net_tx_complete() wait via interrupt_wait(), woken by a real GEM RX/TX
 // interrupt or kernel/platform/rpi5/timer_irq.tkb's periodic tick, not by
-// polling either ring).
+// continuously polling either ring). Short TX completion polling now covers
+// normal DMA latency before falling back to that interrupt-driven wait.
 
 use "kernel/net/netconfig.tkb";
 use "kernel/lib/init_once.tkb";
+use "kernel/drivers/net/gem_tx_wait.tkb";
 
 const RP1_GEM_BASE: usize = 0x1F00100000;
 const RP1_CLOCKS_BASE: usize = 0x1F00018000;
@@ -375,19 +377,14 @@ fn net_transmit(reply: sink NetRxReplyReady[desc]) -> NetTxInFlight[desc] {
     return in_flight;
 }
 
+fn gem_tx_slot_done(slot: {0..<2 as usize}) -> bool {
+    dma_refresh_live(gem_tx_desc);
+    if (slot == 0) { return (gem_tx_desc[1] & (1 << 31)) != 0; }
+    return (gem_tx_desc[5] & (1 << 31)) != 0;
+}
+
 fn net_tx_complete(in_flight: sink NetTxInFlight[desc]) -> NetRxCanAcquire !{may_block} {
-    // GitHub issue #187: real TCOMP interrupt, or the periodic timer tick,
-    // wakes each interrupt_wait() instead of a tight CPU spin. Bounded at
-    // 1000 wake-ups (each at most one ~15ms timer period apart, so at
-    // least ~15s) to match the old spin's own role as a defensive cap
-    // rather than a real deadline -- TX completion is not expected to
-    // ever genuinely take this long.
-    for i: i32 in 0..<1000 {
-        dma_refresh_live(gem_tx_desc);
-        if (in_flight.slot == 0 && (gem_tx_desc[1] & (1 << 31)) != 0) { break; }
-        if (in_flight.slot == 1 && (gem_tx_desc[5] & (1 << 31)) != 0) { break; }
-        workload_profile_interrupt_wait();
-    }
+    gem_tx_wait(in_flight.slot);
     return view NetRxCanAcquire;
 }
 
@@ -425,15 +422,7 @@ fn net_transmit_ready(ready: sink NetRxCanAcquire,
     }
     dma_prepare_tx(gem_tx_desc as *u8, 64);
     gem_write(0x00, gem_read(0x00) | (1 << 9));
-    // GitHub issue #187: matches net_tx_complete()'s own conversion --
-    // waits via interrupt_wait() (real TCOMP interrupt or the periodic
-    // timer tick) instead of a tight CPU spin, bounded the same way.
-    for i: i32 in 0..<1000 {
-        dma_refresh_live(gem_tx_desc);
-        if (slot == 0 && (gem_tx_desc[1] & (1 << 31)) != 0) { break; }
-        if (slot == 1 && (gem_tx_desc[5] & (1 << 31)) != 0) { break; }
-        workload_profile_interrupt_wait();
-    }
+    gem_tx_wait(slot);
     return view NetRxCanAcquire;
 }
 

@@ -1,0 +1,64 @@
+// Execute the driver's actual wait policy against a deterministic clock and
+// descriptor oracle. This tests the bounded poll and wake-and-recheck rule;
+// it does not model DMA, cache coherence, or hardware interrupt delivery.
+let mut fake_now: i64;
+let mut complete_at: i64;
+let mut wake_ticks: i64;
+let mut waits: usize;
+let mut checked_slot: usize;
+
+fn read_cntpct() -> i64 {
+    fake_now = fake_now + 1;
+    return fake_now;
+}
+
+fn read_cntfrq() -> i64 { return 1000000; }
+
+fn gem_tx_slot_done(slot: {0..<2 as usize}) -> bool {
+    checked_slot = slot;
+    return complete_at >= 0 && fake_now >= complete_at;
+}
+
+fn workload_profile_interrupt_wait() !{may_block} {
+    waits = waits + 1;
+    fake_now = fake_now + wake_ticks;
+}
+
+fn reset(done_at: i64, wake_step: i64) {
+    fake_now = 0;
+    complete_at = done_at;
+    wake_ticks = wake_step;
+    waits = 0;
+    checked_slot = 9;
+}
+
+fn check(ok: bool, label: *u8) {
+    if (ok == false) {
+        uart_puts("FAIL gem-tx-wait: "); uart_puts(label); uart_puts("\r\n");
+        linux_exit(1);
+    }
+}
+
+fn app_main() !{may_block} {
+    reset(0, 15000);
+    gem_tx_wait(0);
+    check(waits == 0 && checked_slot == 0, "already complete");
+
+    reset(100, 15000);
+    gem_tx_wait(1);
+    check(waits == 0 && fake_now < 200 && checked_slot == 1,
+          "wire latency must not become a timer wait");
+
+    reset(500, 15000);
+    gem_tx_wait(0);
+    check(waits == 1 && fake_now >= 500, "slow completion fallback");
+
+    reset(500, 50);
+    gem_tx_wait(1);
+    check(waits > 1 && fake_now >= 500, "unrelated wake must recheck");
+
+    reset(-1, 15000);
+    gem_tx_wait(0);
+    check(waits == 1000, "absent completion keeps the defensive cap");
+    uart_puts("gem-tx-wait: immediate, short poll, slow fallback, unrelated wake, absent completion ok\r\n");
+}
