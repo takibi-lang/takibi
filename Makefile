@@ -2017,16 +2017,20 @@ kernelcheck: $(KERNELCHECK_LANES)
 # previous run's would average two runs into a critical path that neither
 # had. Copy the directory to compare two runs (GitHub issue #471).
 LANE_TIMING_DIR := $(CURDIR)/_build/lane-timing
+AWAIT_TIMING_DIR := $(CURDIR)/_build/await-timing
 
 .PHONY: allcheck
 allcheck:
 	@status=0; . scripts/resource_lease.sh; \
 	rm -rf "$(LANE_TIMING_DIR)"; mkdir -p "$(LANE_TIMING_DIR)"; \
 	export TAKIBI_LANE_TIMING_DIR="$(LANE_TIMING_DIR)"; \
+	rm -rf "$(AWAIT_TIMING_DIR)"; mkdir -p "$(AWAIT_TIMING_DIR)"; \
+	export TAKIBI_AWAIT_TIMING_DIR="$(AWAIT_TIMING_DIR)"; \
 	resource_lease_run_suite allcheck \
 		$(MAKE) langcheck slowcheck test linuxcheck modelcheck kernelcheck || status=$$?; \
 	echo; \
 	python3 scripts/summarize_lane_timing.py "$(LANE_TIMING_DIR)" || true; \
+	python3 scripts/summarize_await_timing.py "$(AWAIT_TIMING_DIR)" || true; \
 	echo "lane timing artifact: $(LANE_TIMING_DIR:$(CURDIR)/%=%)"; \
 	if [ $$status -eq 0 ]; then \
 		echo "PASS allcheck: langcheck slowcheck test linuxcheck modelcheck $(KERNELCHECK_LANES)"; \
@@ -2061,11 +2065,14 @@ cicheck:
 	@status=0; . scripts/resource_lease.sh; \
 	rm -rf "$(LANE_TIMING_DIR)"; mkdir -p "$(LANE_TIMING_DIR)"; \
 	export TAKIBI_LANE_TIMING_DIR="$(LANE_TIMING_DIR)"; \
+	rm -rf "$(AWAIT_TIMING_DIR)"; mkdir -p "$(AWAIT_TIMING_DIR)"; \
+	export TAKIBI_AWAIT_TIMING_DIR="$(AWAIT_TIMING_DIR)"; \
 	resource_lease_run_suite cicheck \
 		$(MAKE) langcheck slowcheck test linuxcheck modelcheck $(KERNELCHECK_QEMU_LANES) \
 		|| status=$$?; \
 	echo; \
 	python3 scripts/summarize_lane_timing.py "$(LANE_TIMING_DIR)" || true; \
+	python3 scripts/summarize_await_timing.py "$(AWAIT_TIMING_DIR)" || true; \
 	echo "lane timing artifact: $(LANE_TIMING_DIR:$(CURDIR)/%=%)"; \
 	if [ $$status -eq 0 ]; then \
 		echo "PASS cicheck: langcheck slowcheck test linuxcheck modelcheck $(KERNELCHECK_QEMU_LANES)"; \

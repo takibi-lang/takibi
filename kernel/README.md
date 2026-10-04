@@ -1509,3 +1509,15 @@ The UART terminal implements the Linux termios subset BusyBox init needs,
 including canonical input, echo, line editing, software flow control and
 input-generated signals. See [TERMINAL.md](TERMINAL.md) for accepted
 attributes, limits and the shared CPU 0/1 UART verification scenario.
+
+### Aggregate await margin observations
+
+`make allcheck` and `make cicheck` print an await-margin summary after the
+lane durations. Instrumented oops and QEMU DDB drivers contribute independent
+capture records under `_build/await-timing/`, which is cleared for each
+aggregate. The summary names the lane, original budget phase, latest arrival
+relative to its timeout, waits using more than half the budget, and waits
+that never arrived. Per-lane UART artifacts retain the detailed observations.
+Other console drivers do not yet contribute; zero observations do not establish
+that their margins are sufficient. These observations do not alter deadlines
+or functional verdicts.

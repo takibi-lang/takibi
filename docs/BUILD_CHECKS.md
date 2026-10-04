@@ -31,6 +31,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_ci_opam_deps.py` | every library the dune files name is provided by a package in dune-project's depends stanza or by the compiler |
 | `check_ci_opam_deps_controls.py` | Controls for the Dune project dependency link, including what it is allowed to read |
 | `check_compiler_sync_rules.py` | declared compiler counterpart changes stay synchronized |
+| `check_await_summary_controls.py` | Aggregate await capture isolation, phase budgets, half-budget boundaries, missing observations and summary wiring |
 | `check_ddb_await_timing_controls.py` | QEMU DDB normal/postmortem await observations retain separate deadlines and preserve split prompts, failures and margin reporting |
 | `check_ddb_command_inventory.py` | DDB dispatch, help, documentation, classification, and coverage agree |
 | `check_ddb_command_inventory_controls.py` | Positive and build-faithful negative controls for the DDB inventory check |

@@ -5,6 +5,8 @@ postmortem phases do not reset or reinterpret each other's timeout.
 """
 
 import json
+import os
+import tempfile
 
 
 class AwaitTiming:
@@ -24,6 +26,16 @@ class AwaitTiming:
                              for i, command in enumerate(commands)})
         self.prompt_names = [name for name in self.pending if name.startswith("console prompt")]
         self.path = path
+        self.aggregate_path = None
+        directory = os.environ.get("TAKIBI_AWAIT_TIMING_DIR")
+        self.lane = os.environ.get("TAKIBI_AWAIT_TIMING_LANE")
+        if directory and self.lane:
+            try:
+                with tempfile.NamedTemporaryFile(prefix="await-", suffix=".jsonl",
+                                                 dir=directory, delete=False) as handle:
+                    self.aggregate_path = handle.name
+            except OSError as error:
+                print(f"RECORDED {self.label} aggregate await timing unavailable: {error}", flush=True)
         if path:
             try:
                 with open(path, "w", encoding="ascii"):
@@ -39,9 +51,17 @@ class AwaitTiming:
         elapsed = now - self.started
         fraction = elapsed / self.timeout if arrived else None
         row = {"await": name, "marker": marker, "budget_origin": self.origin,
+               "driver": self.label, "source": self.path, "lane": self.lane,
                "elapsed_seconds": elapsed if arrived else None,
                "observed_seconds": elapsed, "timeout_seconds": self.timeout,
                "fraction": fraction, "status": "arrived" if arrived else "not-arrived"}
+        if self.aggregate_path:
+            try:
+                with open(self.aggregate_path, "a", encoding="ascii") as handle:
+                    handle.write(json.dumps(row) + "\n")
+            except OSError as error:
+                print(f"RECORDED {self.label} aggregate await timing unavailable: {error}", flush=True)
+                self.aggregate_path = None
         if self.path:
             try:
                 with open(self.path, "a", encoding="ascii") as handle:

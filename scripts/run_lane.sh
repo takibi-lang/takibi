@@ -31,6 +31,8 @@ shift
 timing="$(dirname "$0")/lane_timing.sh"
 started="$(bash "$timing" now)"
 
+export TAKIBI_AWAIT_TIMING_LANE="$lane"
+
 status=0
 "$@" || status=$?
 

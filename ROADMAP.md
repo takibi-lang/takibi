@@ -126,8 +126,8 @@ the extended short-window queue. #13 remains conditional on the solver
 threshold in `TAKIBI_CORE.md`; its recorded examples do not yet justify an
 implementation. The maintainer also selected concrete global Cell brands
 for this window.
-#666 retains work on other console drivers and aggregate reporting; its oops
-and QEMU DDB UART-observation slices are finished. Other lower-band items
+#666 retains work on other console drivers; its oops, QEMU DDB and
+aggregate await-margin reporting slices are finished. Other lower-band items
 stay outside the short window unless selected by the maintainer.
 #680, #681 and #682 (the pin's cost) stay with A: they need RPi5
 measurements first.
