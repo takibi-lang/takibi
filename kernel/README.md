@@ -761,6 +761,13 @@ lowercase `b`. The command inventory and safety rules are documented under
 transcript at the path they print; keep a unique transcript by setting
 `KERNEL_SHELL_TRANSCRIPT` before starting the session.
 
+The physical software-BRK driver writes `uart.log.await-boot.jsonl` for
+the first DDB prompt and `uart.log.await-commands.jsonl` for command prompts,
+continue and same-boot shell resume. The command phase starts after the
+external GDB snapshot is released and records the remaining UART deadline;
+the snapshot hold is not charged to the command budget. Missing arrivals
+are recorded on failure, and a new run removes stale command observations.
+
 The QEMU DDB lane saves `validation.json` beside `uart.log` before boot.
 To replay its final capture predicates without QEMU, a port, or a board:
 
@@ -1121,6 +1128,18 @@ the end of initialization, so this wait covers the remaining boot fixtures.
 Breakpoint steps and command-response waits keep their fixed deadlines.
 Each boot phase writes `uart.log.await-<phase>.jsonl` with arrivals measured
 against the remaining batch ceiling, including an explicit missing arrival.
+The affinity gate, reap and rollover GDB drivers use the same boot-progress
+rule under their existing 600-second batch ceiling. Gate and reap record
+shell readiness against the remaining batch time; gate records its final
+answer against the separate fixed response budget. Rollover and STARVED
+record their required reports against the shared batch ceiling, preserving
+retry ordering and the injected failure verdicts.
+The churn finder records each finite readiness, prompt, DDB and
+heartbeat/verdict wait in `churn-transcript.log.await-<sequence>.jsonl`.
+Each observation uses that wait's existing deadline; deliberate settling
+and post-failure capture intervals are excluded. These records also join
+the aggregate await summary when the finder runs inside a lane. They do not
+change the heartbeat verdict or make QEMU timing a hardware guarantee.
 
 ### What this verifies
 

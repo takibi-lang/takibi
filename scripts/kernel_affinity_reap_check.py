@@ -51,6 +51,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gdb_interrupt import interrupt_after  # noqa: E402
+from progress_timeout import ProgressTimeout  # noqa: E402
+from await_timing import AwaitTiming  # noqa: E402
 
 
 SERIAL_PORT = int(os.environ["AFFINITY_GDB_SERIAL_PORT"])
@@ -60,6 +62,7 @@ VERDICT = os.environ["AFFINITY_GDB_VERDICT"]
 INIT_LISTENER = os.environ["AFFINITY_GDB_INIT_LISTENER"]
 NETWORK_READY = os.environ["AFFINITY_GDB_NETWORK_READY"]
 BOOT_TIMEOUT = float(os.environ.get("AFFINITY_GDB_BOOT_TIMEOUT", "120"))
+BATCH_DEADLINE = time.monotonic() + float(os.environ.get("GDB_BATCH_TIMEOUT", "600")) - 10.0
 STEP_TIMEOUT = 60.0
 # How long CPU1 alone is given to finish an exit that nothing is blocking.
 # Short, because the whole claim of the repaired kernel is that this expires.
@@ -163,13 +166,29 @@ def reader(connection: socket.socket) -> None:
 
 
 def seen(needle: bytes, timeout: float) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        with output_lock:
-            if needle in bytes(output):
+    started = time.monotonic()
+    ceiling = max(0.0, BATCH_DEADLINE - started)
+    timer = ProgressTimeout(timeout, ceiling, started)
+    timing = AwaitTiming(
+        f"{UART_LOG}.await-first-shell.jsonl", started, ceiling, (), (),
+        label=LABEL, origin=f"remaining GDB batch ceiling (UART inactivity {timeout:g}s)",
+        milestones=("first-shell",))
+    with output_lock:
+        previous_size = len(output)
+    try:
+        while not timer.expired(time.monotonic()):
+            with output_lock:
+                size, text = len(output), bytes(output)
+            if size > previous_size:
+                timer.observe(time.monotonic())
+                previous_size = size
+            if needle in text:
+                timing.record("first-shell", True, time.monotonic())
                 return True
-        time.sleep(0.05)
-    return False
+            time.sleep(0.05)
+        return False
+    finally:
+        timing.finish(time.monotonic())
 
 
 def run_bounded(command: str, budget: float = STEP_TIMEOUT) -> bool:

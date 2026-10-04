@@ -32,7 +32,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_ci_opam_deps_controls.py` | Controls for the Dune project dependency link, including what it is allowed to read |
 | `check_compiler_sync_rules.py` | declared compiler counterpart changes stay synchronized |
 | `check_await_summary_controls.py` | Aggregate await capture isolation, phase budgets, half-budget boundaries, missing observations and summary wiring |
-| `check_rpi5_ddb_await_controls.py` | RPi5 DDB first-arrival observations, original session budget, missing milestones and error-path capture |
+| `check_rpi5_ddb_await_controls.py` | RPi5 DDB first-arrival observations; software BRK boot and post-snapshot budgets, delayed release, echoed-only output, missing milestones and unavailable UART |
 | `check_uart_await_timing_controls.py` | Common UART connection budget, capture ceiling, progress-renewed arrivals and unfinished markers remain distinct |
 | `check_ddb_await_timing_controls.py` | QEMU DDB normal/postmortem await observations retain separate deadlines and preserve split prompts, failures and margin reporting |
 | `check_ddb_command_inventory.py` | DDB dispatch, help, documentation, classification, and coverage agree |
@@ -79,7 +79,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_kernel_asm_invariants_controls.py` | Controls for the SCTLR alignment-policy disassembly check |
 | `check_kernel_elf_freshness_controls.sh` | Controls for the stale-kernel guard: a lane refuses to run against a kernel older than its own sources |
 | `check_kernel_ddb_postmortem_controls.py` | Controls for the UART driver's DDB postmortem walk, with no QEMU in the room |
-| `check_console_progress_controls.py` | PTY, STARVED and UART-wake boot waits renew on UART; fixed protocol waits and batch ceilings remain bounded; observations preserve separate budgets and missing arrivals |
+| `check_console_progress_controls.py` | PTY and GDB boot waits renew on UART; fixed protocol waits, injected verdicts, marker ordering and ceilings stay bounded; churn wait observations preserve half-budget flags, EOF, errors and failure priority |
 | `check_rpi5_shell_smoke_controls.py` | Interactive RPi5 shell smoke checks two HTTP responses and fresh HTTPd process snapshots; absent readiness, echoed markers, extra workers and bad responses fail |
 | `check_kernel_net_wait_controls.py` | UART progress renews readiness waits; silence and the outer ceiling still fail, with bounded DDB protection |
 | `check_kernel_interactive_httpd_protocol.py` | interactive HTTP runners avoid listener/request deadlock |

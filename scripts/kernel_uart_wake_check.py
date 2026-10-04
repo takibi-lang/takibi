@@ -163,16 +163,18 @@ def reader(connection: socket.socket) -> None:
                 published_network = True
 
 
-def seen(predicate, timeout: float, *, boot_phase=None) -> bool:
+def seen(predicate, timeout: float, *, boot_phase=None, response_phase=None) -> bool:
     started = time.monotonic()
     remaining = max(0.0, BATCH_DEADLINE - started)
     timer = ProgressTimeout(timeout, remaining if boot_phase else timeout, started)
     timing = None
-    if boot_phase:
+    phase = boot_phase or response_phase
+    if phase:
         timing = AwaitTiming(
-            f"{UART_LOG}.await-{boot_phase}.jsonl", started, remaining, (), (),
-            label=LABEL, origin=f"remaining GDB batch ceiling (UART inactivity {timeout:g}s)",
-            milestones=(boot_phase,))
+            f"{UART_LOG}.await-{phase}.jsonl", started,
+            remaining if boot_phase else timeout, (), (), label=LABEL,
+            origin=(f"remaining GDB batch ceiling (UART inactivity {timeout:g}s)"
+                    if boot_phase else "command response start"), milestones=(phase,))
     with output_lock:
         previous_size = len(output)
     try:
@@ -185,7 +187,7 @@ def seen(predicate, timeout: float, *, boot_phase=None) -> bool:
                 previous_size = size
             if predicate(text):
                 if timing:
-                    timing.record(boot_phase, True, time.monotonic())
+                    timing.record(phase, True, time.monotonic())
                 return True
             time.sleep(0.1)
         return False
@@ -325,7 +327,7 @@ def run_peer(connection: socket.socket) -> None:
             gdb.execute("set scheduler-locking off")
             gdb.execute("detach")
             return
-    if not seen(lambda text: PEER_VERDICT in text, 15.0):
+    if not seen(lambda text: PEER_VERDICT in text, 15.0, response_phase="peer-line-verdict"):
         verdict(False, f"every byte of {PEER_LINE!r} was delivered, but the "
                 "kernel never accepted the line /bin/peer-tty read")
         return
@@ -432,10 +434,10 @@ def run_peer_net_wake(connection: socket.socket) -> None:
         wake.delete()
     gdb.execute("set scheduler-locking off")
     gdb.execute("detach")
-    if not seen(lambda text: PEER_NET_WAKE_READY in text, STEP_TIMEOUT):
+    if not seen(lambda text: PEER_NET_WAKE_READY in text, STEP_TIMEOUT, response_phase="peer-net-ready"):
         verdict(False, "the peer NetRx fixture did not pin itself to CPU1")
         return
-    if not seen(lambda text: PEER_NET_WAKE_VERDICT in text, 5.0):
+    if not seen(lambda text: PEER_NET_WAKE_VERDICT in text, 5.0, response_phase="peer-net-verdict"):
         verdict(False, "the CPU0 timer did not resume the peer's NetRx waiter "
                 "on CPU1")
         return
@@ -597,7 +599,7 @@ def run() -> None:
                 "the lost wakeup: the reader needs something else runnable "
                 "beside it")
         return
-    if not seen(answered, 15.0):
+    if not seen(answered, 15.0, response_phase="shell-answer"):
         verdict(False, f"every byte of {COMMAND!r} was read, but `{ANSWER}` "
                 "never came back from the shell")
         return

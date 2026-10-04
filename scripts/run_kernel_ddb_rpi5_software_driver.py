@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 
 from ddb_software_brk_checks import backtrace_problems
+from await_timing import AwaitTiming
 import time
 
 import serial
@@ -37,7 +38,19 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=180.0)
     args = parser.parse_args()
 
-    deadline = time.monotonic() + args.timeout
+    return drive(args)
+
+
+def drive(args) -> int:
+    started = time.monotonic()
+    deadline = started + args.timeout
+    boot_timing = AwaitTiming(
+        f"{args.log}.await-boot.jsonl", started, args.timeout, (), (),
+        label="kernel/rpi5 software BRK", origin="UART driver start",
+        milestones=("first DDB prompt",))
+    command_timing = None
+    Path(f"{args.log}.await-commands.jsonl").unlink(missing_ok=True)
+
     ready_file = Path(args.snapshot_ready_file)
     release_file = Path(args.snapshot_release_file)
     ready_file.unlink(missing_ok=True)
@@ -50,37 +63,62 @@ def main() -> int:
     )
     shell_probe_sent = False
 
-    with serial.Serial(args.port, 115200, timeout=0.25) as uart, open(
-        args.log, "wb"
-    ) as log:
-        while time.monotonic() < deadline:
-            chunk = uart.read(4096)
-            if chunk:
-                received.extend(chunk)
-                log.write(chunk)
-                log.flush()
+    try:
+        with serial.Serial(args.port, 115200, timeout=0.25) as uart, open(
+            args.log, "wb"
+        ) as log:
+            while time.monotonic() < deadline:
+                chunk = uart.read(4096)
+                if chunk:
+                    received.extend(chunk)
+                    log.write(chunk)
+                    log.flush()
 
-            found = received.count(b"ddb> ")
-            if found > prompt_count:
-                ready_file.touch()
-                if not release_file.exists():
-                    deadline = time.monotonic() + args.timeout
-                    continue
-            while prompt_count < found:
-                if prompt_count < len(commands):
-                    write_line(uart, commands[prompt_count])
-                prompt_count += 1
+                found = received.count(b"ddb> ")
+                if found > prompt_count:
+                    boot_timing.record("first DDB prompt", True, time.monotonic())
+                    ready_file.touch()
+                    if not release_file.exists():
+                        deadline = time.monotonic() + args.timeout
+                        continue
+                    if command_timing is None:
+                        phase_started = time.monotonic()
+                        command_timing = AwaitTiming(
+                            f"{args.log}.await-commands.jsonl", phase_started,
+                            max(0.0, deadline - phase_started), (), (),
+                            label="kernel/rpi5 software BRK",
+                            origin="external snapshot released; remaining UART deadline",
+                            milestones=tuple(f"prompt after {command.decode('ascii')}"
+                                             for command in commands[:-1]) +
+                            ("continuing", "shell prompt", "resume result"))
+                while prompt_count < found:
+                    if 0 < prompt_count < len(commands):
+                        command_timing.record(
+                            f"prompt after {commands[prompt_count - 1].decode('ascii')}",
+                            True, time.monotonic())
+                    if prompt_count < len(commands):
+                        write_line(uart, commands[prompt_count])
+                    prompt_count += 1
 
-            normalized = bytes(received).replace(b"\r", b"")
-            # Wait for the resumed shell before typing. Its echoed input
-            # is not proof of execution: require the exact result and the
-            # following prompt, after continue, with either ash prompt form.
-            if (not shell_probe_sent and b"ddb: continuing\n" in normalized
-                    and b" # " in normalized.partition(b"ddb: continuing\n")[2]):
-                write_line(uart, b"echo ddb-software-resume-ok")
-                shell_probe_sent = True
-            if shell_probe_sent and shell_resumed(normalized):
-                break
+                normalized = bytes(received).replace(b"\r", b"")
+                if command_timing and b"ddb: continuing\n" in normalized:
+                    command_timing.record("continuing", True, time.monotonic())
+                # Echoed input is not proof of execution: require the exact
+                # result and following prompt after continue, as before.
+                if (not shell_probe_sent and b"ddb: continuing\n" in normalized
+                        and b" # " in normalized.partition(b"ddb: continuing\n")[2]):
+                    if command_timing:
+                        command_timing.record("shell prompt", True, time.monotonic())
+                    write_line(uart, b"echo ddb-software-resume-ok")
+                    shell_probe_sent = True
+                if shell_probe_sent and shell_resumed(normalized):
+                    if command_timing:
+                        command_timing.record("resume result", True, time.monotonic())
+                    break
+    finally:
+        boot_timing.finish(time.monotonic())
+        if command_timing:
+            command_timing.finish(time.monotonic())
 
     text = bytes(received).replace(b"\r", b"").decode(
         "ascii", errors="replace"

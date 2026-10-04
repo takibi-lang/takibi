@@ -124,9 +124,9 @@ def pty_case(events, want_pass, ceiling=28.0, exit_delay=0.0):
     return clock.now
 
 
-def starve_case(events, diagnostic):
+def starve_case(events, diagnostic, *, driver="kernel_starve_gdb_check"):
     CASES.note()
-    path = ROOT / "scripts/kernel_starve_gdb_check.py"
+    path = ROOT / f"scripts/{driver}.py"
     source = path.read_text()
     clock = Clock([])
     with tempfile.TemporaryDirectory() as directory:
@@ -139,7 +139,7 @@ def starve_case(events, diagnostic):
             "AFFINITY_GDB_NETWORK_READY": str(root / "net"),
         }
         namespace = {"__file__": str(path), "__name__": "starve_control"}
-        with patch.dict(os.environ, env), patch.dict(
+        with patch.dict(os.environ, env, clear=True), patch.dict(
                 sys.modules, {"gdb": SimpleNamespace(execute=lambda *_: None)}):
             # GDB executes the footer immediately; load its definitions here,
             # then run the actual main with controlled adapters instead.
@@ -157,18 +157,26 @@ def starve_case(events, diagnostic):
                                  namespace["observe_chunk"](data)))
         clock.events.sort(key=lambda event: event[0])
         output = io.StringIO()
-        with patch.dict(os.environ, env), contextlib.redirect_stdout(output):
+        with patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(output):
             namespace["main"]()
         text = (root / "verdict").read_text()
         assert diagnostic in text and diagnostic in output.getvalue(), text
+        phase = "starve" if driver == "kernel_starve_gdb_check" else "rollover"
+        rows = [json.loads(line) for line in
+                (root / f"uart.await-{phase}.jsonl").read_text().splitlines()]
+        assert all(row["timeout_seconds"] == 28.0 for row in rows), rows
+        assert len(rows) == (4 if phase == "starve" else 3), rows
         if text.startswith("PASS "):
-            assert clock.now > 8.0 and sent == [b"exit\n", b"irqtest\n"], sent
+            assert clock.now > 8.0, clock.now
+            assert sent == ([b"exit\n", b"irqtest\n"] if phase == "starve" else []), sent
+            assert all(row["status"] == "arrived" for row in rows), rows
         return clock.now
 
 
-def uart_wake_case(events, expected, *, boot=True, started=0.0):
+def uart_wake_case(events, expected, *, boot=True, started=0.0,
+                   driver="kernel_uart_wake_check"):
     CASES.note()
-    path = ROOT / "scripts/kernel_uart_wake_check.py"
+    path = ROOT / f"scripts/{driver}.py"
     source = path.read_text()
     clock = Clock([])
     clock.now = started
@@ -179,6 +187,9 @@ def uart_wake_case(events, expected, *, boot=True, started=0.0):
                "UART_WAKE_VERDICT": str(root / "verdict"),
                "UART_WAKE_INIT_LISTENER": str(root / "init"),
                "UART_WAKE_NETWORK_READY": str(root / "net")}
+        if driver != "kernel_uart_wake_check":
+            env = {key.replace("UART_WAKE", "AFFINITY_GDB"): value
+                   for key, value in env.items()}
         namespace = {"__file__": str(path), "__name__": "uart_wake_control"}
         with patch.dict(os.environ, env, clear=True), patch.dict(
                 sys.modules, {"gdb": SimpleNamespace(Breakpoint=object)}):
@@ -189,17 +200,76 @@ def uart_wake_case(events, expected, *, boot=True, started=0.0):
             namespace["output"].extend(b"old boot output\n")
             clock.events = [(at, lambda data=data:
                              namespace["output"].extend(data)) for at, data in events]
-            result = namespace["seen"](lambda text: b"ready" in text, 8.0,
-                                       boot_phase="fixture" if boot else None)
+            phase = "fixture"
+            if driver == "kernel_uart_wake_check":
+                result = namespace["seen"](lambda text: b"ready" in text, 8.0,
+                                           boot_phase=phase if boot else None,
+                                           response_phase=None if boot else phase)
+            elif driver == "kernel_affinity_gdb_check":
+                result = namespace["seen"](lambda text: b"ready" in text, 8.0,
+                                           phase=phase, boot=boot)
+            else:
+                phase = "first-shell"
+                result = namespace["seen"](b"ready", 8.0)
         assert result is expected, (result, clock.now)
-        if boot:
-            row = json.loads((root / "uart.await-fixture.jsonl").read_text())
-            assert row["status"] == ("arrived" if expected else "not-arrived"), row
-            assert row["timeout_seconds"] == 28.0 - started, row
+        row = json.loads((root / f"uart.await-{phase}.jsonl").read_text())
+        assert row["status"] == ("arrived" if expected else "not-arrived"), row
+        assert row["timeout_seconds"] == (28.0 - started if boot else 8.0), row
+        return clock.now
+
+
+def churn_wait_case(events, expected, *, broken=False, optional=False):
+    CASES.note()
+    import run_kernel_churn as driver
+    queue = []
+    clock = Clock([(at, lambda data=data: queue.append(data)) for at, data in events])
+
+    def select(*_):
+        if broken:
+            raise OSError("terminal unavailable")
+        clock.sleep(0.25)
+        return ([7] if queue else [], [], [])
+
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        session = driver.Session(42, 7, await_log=str(root / "transcript"))
+        captured = io.StringIO()
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(driver, "time", clock), \
+                patch.object(driver.select, "select", select), \
+                patch.object(driver.os, "read", lambda *_: queue.pop(0)), \
+                contextlib.redirect_stdout(captured):
+            try:
+                result = session.wait_for(lambda text: b"ready" in text, 8.0,
+                                          watch_from=0,
+                                          await_name=None if optional else "fixture response")
+            except OSError as error:
+                result = str(error)
+        if expected == "failure":
+            assert isinstance(result, driver.FailureMarker), result
+        else:
+            assert result == expected, (result, expected)
+        path = root / "transcript.await-0001.jsonl"
+        if optional:
+            assert not path.exists()
+        else:
+            row = json.loads(path.read_text())
+            assert row["status"] == ("arrived" if result is True else "not-arrived"), row
+            assert row["timeout_seconds"] == 8.0 and row["budget_origin"] == "console wait start", row
+            assert row["observed_seconds"] == clock.now, row
+            assert ("await margin" in captured.getvalue()) == (result is True and clock.now > 4.0)
         return clock.now
 
 
 def main():
+    assert churn_wait_case([(4.0, b"ready\n")], True) == 4.0
+    assert churn_wait_case([(6.0, b"ready\n")], True) == 6.0
+    assert churn_wait_case([], None) == 8.0
+    assert churn_wait_case([(1.0, b"")], None) == 1.0
+    assert churn_wait_case([(2.0, b"oops: activity=start-on-owned-stack\nready\n")],
+                           "failure") == 2.0
+    churn_wait_case([], "terminal unavailable", broken=True)
+    assert churn_wait_case([], None, optional=True) == 8.0
     advancing = [(4.0, b"boot\n"), (10.0, b"boot\n"), (16.0, b"boot\n"),
                  (20.0, b"ready\n")]
     assert uart_wake_case(advancing, True) == 20.0
@@ -209,6 +279,33 @@ def main():
     assert uart_wake_case([(24.0, b"boot\n"), (29.0, b"ready\n")],
                           False, started=20.0) == 28.0
     assert uart_wake_case(advancing, False, boot=False) == 8.0
+    assert uart_wake_case([(6.0, b"ready\n")], True, boot=False) == 6.0
+    for driver in ("kernel_affinity_gdb_check", "kernel_affinity_reap_check"):
+        assert uart_wake_case(advancing, True, driver=driver) == 20.0
+        assert uart_wake_case([], False, driver=driver) == 8.0
+        assert uart_wake_case([(4.0, b"boot\n")], False, driver=driver) == 12.0
+        assert uart_wake_case([(at, b"boot\n") for at in range(4, 40, 4)],
+                              False, driver=driver) == 28.0
+        assert uart_wake_case([(24.0, b"boot\n"), (29.0, b"ready\n")],
+                              False, started=20.0, driver=driver) == 28.0
+    assert uart_wake_case(advancing, False, boot=False,
+                          driver="kernel_affinity_gdb_check") == 8.0
+    retried = b"asid rollover: activation retried 2 busy world stops, then rolled over\n"
+    cloned = b"asid rollover: clone activation retried 2 busy world stops, then rolled over\n"
+    shell = b"interactive shell: uart blocked\n"
+    driver = "kernel_rollover_gdb_check"
+    assert starve_case([(4.0, b"boot\n"), (10.0, retried), (16.0, cloned),
+                        (20.0, shell)], "PASS ", driver=driver) == 20.0
+    assert starve_case([], "no exec activation", driver=driver) == 8.0
+    assert starve_case([(4.0, b"boot\n")], "no exec activation", driver=driver) == 12.0
+    assert starve_case([(at, b"boot\n") for at in range(4, 40, 4)],
+                       "no exec activation", driver=driver) == 28.0
+    assert starve_case([(4.0, b"boot\n"), (10.0, retried), (16.0, shell)],
+                       "no fork child activation", driver=driver) == 24.0
+    assert starve_case([(4.0, b"boot\n"), (10.0, shell), (16.0, retried + cloned)],
+                       "the boot did not reach", driver=driver) == 24.0
+    assert starve_case([(4.0, b"oops: activity=start-on-owned-stack\n")],
+                       "fail-stopped", driver=driver) == 4.0
     ready = (b"open in a host browser" + bytes((58, 32))
              + b"http://127.0.0.1:1/\n"
              + b"persistent server: listener ready port=8080\n"
@@ -237,8 +334,8 @@ def main():
     assert starve_case(beginning + [(20.0, verdict.replace(b"62", b"2"))],
                        "the verdict failed for another reason") == 20.0
     report_pass("console progress controls",
-                "PTY, STARVED and UART-wake waits accept advancing UART; silence "
-                "and ceilings fail; stop, DDB and tick verdicts are preserved",
+                "PTY and GDB waits accept advancing UART; silence and ceilings "
+                "fail; fixed responses, marker order and injected verdicts are preserved",
                 cases=CASES.ran)
     return 0
 

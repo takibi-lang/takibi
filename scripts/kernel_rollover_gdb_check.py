@@ -27,8 +27,14 @@ import os
 import socket
 import threading
 import time
+import sys
+from pathlib import Path
 
 import gdb
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from progress_timeout import ProgressTimeout  # noqa: E402
+from await_timing import AwaitTiming  # noqa: E402
 
 
 SERIAL_PORT = int(os.environ["AFFINITY_GDB_SERIAL_PORT"])
@@ -37,6 +43,7 @@ VERDICT = os.environ["AFFINITY_GDB_VERDICT"]
 INIT_LISTENER = os.environ["AFFINITY_GDB_INIT_LISTENER"]
 NETWORK_READY = os.environ["AFFINITY_GDB_NETWORK_READY"]
 BOOT_TIMEOUT = float(os.environ.get("AFFINITY_GDB_BOOT_TIMEOUT", "120"))
+BATCH_CEILING = float(os.environ.get("GDB_BATCH_TIMEOUT", "600")) - 10.0
 
 LABEL = "kernel/qemu affinity-rollover"
 BUSY_STOPS = 2
@@ -53,6 +60,15 @@ FAILED = b"oops: "
 
 output = bytearray()
 output_lock = threading.Lock()
+capture_timeout = None
+
+
+def observe_chunk(chunk):
+    with output_lock:
+        output.extend(chunk)
+        if chunk and capture_timeout is not None:
+            capture_timeout.observe(time.monotonic())
+        return bytes(output)
 
 
 def verdict(ok: bool, message: str) -> None:
@@ -90,9 +106,7 @@ def reader(connection: socket.socket) -> None:
                 return
             log.write(chunk)
             log.flush()
-            with output_lock:
-                output.extend(chunk)
-                text = bytes(output)
+            text = observe_chunk(chunk)
             if (not published_init and
                     b"linux socket: listener ready port=8080\n" in text):
                 open(INIT_LISTENER, "w").close()
@@ -103,20 +117,36 @@ def reader(connection: socket.socket) -> None:
 
 
 def main() -> None:
-    deadline = time.monotonic() + BOOT_TIMEOUT
+    global capture_timeout
+    started = time.monotonic()
+    capture_timeout = ProgressTimeout(BOOT_TIMEOUT, BATCH_CEILING, started)
+    timing = AwaitTiming(
+        f"{UART_LOG}.await-rollover.jsonl", started, BATCH_CEILING, (), (),
+        label=LABEL, origin=f"GDB batch start (UART inactivity {BOOT_TIMEOUT:g}s)",
+        milestones=("exec retry", "clone retry", "shell after retries"))
+    try:
+        run(timing)
+    finally:
+        timing.finish(time.monotonic())
+
+
+def run(timing) -> None:
     # The UART is `wait=on`: QEMU starts when it is connected, and its gdb
     # stub answers from then on. Attaching stops the machine within
     # milliseconds, long before the boot's first stable activation, which
     # comes after its early fixtures.
-    threading.Thread(target=reader, args=(connect(deadline),),
+    threading.Thread(target=reader, args=(connect(capture_timeout.deadline),),
                      daemon=True).start()
     gdb.execute(f"target remote :{os.environ['AFFINITY_GDB_GDB_PORT']}")
     gdb.execute(f"set *(unsigned long *)&kernel_process_rollover_busy_injections = {BUSY_STOPS}")
     gdb.execute(f"set *(unsigned long *)&kernel_process_clone_rollover_busy_injections = {BUSY_STOPS}")
     gdb.execute("detach")
-    while time.monotonic() < deadline:
+    while not capture_timeout.expired(time.monotonic()):
         with output_lock:
             text = bytes(output).replace(b"\r", b"")
+        for name, marker in (("exec retry", RETRIED), ("clone retry", CLONE_RETRIED)):
+            if marker in text:
+                timing.record(name, True, time.monotonic())
         if FAILED in text:
             verdict(False, "an activation that met a Busy world stop "
                            "fail-stopped the kernel instead of retrying")
@@ -124,6 +154,7 @@ def main() -> None:
         if (RETRIED in text and CLONE_RETRIED in text and
                 BOOT_DONE in text.split(RETRIED, 1)[1] and
                 BOOT_DONE in text.split(CLONE_RETRIED, 1)[1]):
+            timing.record("shell after retries", True, time.monotonic())
             verdict(True, f"an exec and a fork child activation each met "
                           f"{BUSY_STOPS} Busy world stops, retried, rolled "
                           "the ASID counter over, and the boot finished")

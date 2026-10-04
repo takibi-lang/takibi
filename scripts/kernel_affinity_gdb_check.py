@@ -36,6 +36,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gdb_interrupt import interrupt_after  # noqa: E402
+from progress_timeout import ProgressTimeout  # noqa: E402
+from await_timing import AwaitTiming  # noqa: E402
 
 
 SERIAL_PORT = int(os.environ["AFFINITY_GDB_SERIAL_PORT"])
@@ -45,6 +47,7 @@ VERDICT = os.environ["AFFINITY_GDB_VERDICT"]
 INIT_LISTENER = os.environ["AFFINITY_GDB_INIT_LISTENER"]
 NETWORK_READY = os.environ["AFFINITY_GDB_NETWORK_READY"]
 BOOT_TIMEOUT = float(os.environ.get("AFFINITY_GDB_BOOT_TIMEOUT", "120"))
+BATCH_DEADLINE = time.monotonic() + float(os.environ.get("GDB_BATCH_TIMEOUT", "600")) - 10.0
 STEP_TIMEOUT = 60.0
 
 LABEL = "kernel/qemu affinity-gdb"
@@ -119,15 +122,30 @@ def reader(connection: socket.socket) -> None:
                 published_network = True
 
 
-def seen(predicate, timeout: float) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        with output_lock:
-            text = bytes(output)
-        if predicate(text):
-            return True
-        time.sleep(0.1)
-    return False
+def seen(predicate, timeout: float, *, phase, boot=False) -> bool:
+    started = time.monotonic()
+    ceiling = max(0.0, BATCH_DEADLINE - started) if boot else timeout
+    timer = ProgressTimeout(timeout, ceiling, started)
+    timing = AwaitTiming(
+        f"{UART_LOG}.await-{phase}.jsonl", started, ceiling, (), (),
+        label=LABEL, origin=(f"remaining GDB batch ceiling (UART inactivity {timeout:g}s)"
+                             if boot else "command response start"), milestones=(phase,))
+    with output_lock:
+        previous_size = len(output)
+    try:
+        while not timer.expired(time.monotonic()):
+            with output_lock:
+                size, text = len(output), bytes(output)
+            if boot and size > previous_size:
+                timer.observe(time.monotonic())
+                previous_size = size
+            if predicate(text):
+                timing.record(phase, True, time.monotonic())
+                return True
+            time.sleep(0.1)
+        return False
+    finally:
+        timing.finish(time.monotonic())
 
 
 def continue_bounded(budget: float = STEP_TIMEOUT) -> None:
@@ -173,7 +191,7 @@ def where() -> str:
 def run() -> None:
     connection = connect(time.monotonic() + 30)
     threading.Thread(target=reader, args=(connection,), daemon=True).start()
-    if not seen(lambda text: SHELL_READY in text, BOOT_TIMEOUT):
+    if not seen(lambda text: SHELL_READY in text, BOOT_TIMEOUT, phase="first-shell", boot=True):
         verdict(False, "the boot never reached the interactive shell's prompt")
         return
 
@@ -244,7 +262,7 @@ def run() -> None:
     rerun.delete()
     gdb.execute("detach")
 
-    if not seen(lambda text: PINNED in text, STEP_TIMEOUT):
+    if not seen(lambda text: PINNED in text, STEP_TIMEOUT, phase="affinity-answer"):
         # Stop the machine again only to say where it is.
         gdb.execute(f"target remote 127.0.0.1:{GDB_PORT}")
         verdict(False, "core 0 reran parent_progress, but /bin/affinity never printed "

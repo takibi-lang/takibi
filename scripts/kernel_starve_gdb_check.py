@@ -33,6 +33,7 @@ import gdb
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from progress_timeout import ProgressTimeout  # noqa: E402
+from await_timing import AwaitTiming  # noqa: E402
 
 
 SERIAL_PORT = int(os.environ["AFFINITY_GDB_SERIAL_PORT"])
@@ -122,8 +123,20 @@ def reader(connection: socket.socket) -> None:
 
 def main() -> None:
     global capture_timeout
+    started = time.monotonic()
     capture_timeout = ProgressTimeout(BOOT_TIMEOUT, BATCH_CEILING,
-                                      time.monotonic())
+                                      started)
+    timing = AwaitTiming(
+        f"{UART_LOG}.await-starve.jsonl", started, BATCH_CEILING, (), (),
+        label=LABEL, origin=f"GDB batch start (UART inactivity {BOOT_TIMEOUT:g}s)",
+        milestones=("first shell", "UART payload ready", "starvation verdict", "pair restart"))
+    try:
+        run(timing)
+    finally:
+        timing.finish(time.monotonic())
+
+
+def run(timing) -> None:
     # The UART is `wait=on`: QEMU starts when it is connected. Attaching
     # stops the machine long before init starts the busy pair.
     connection = connect(capture_timeout.deadline)
@@ -132,13 +145,14 @@ def main() -> None:
     gdb.execute("set *(unsigned long *)&workload_busy_starve_injection_ticks"
                 f" = {STARVE_TICKS}")
     gdb.execute("detach")
-    for marker, answer, missing in (
-            (SHELL_READY, b"exit\n",
+    for name, marker, answer, missing in (
+            ("first shell", SHELL_READY, b"exit\n",
              "the boot never reached the interactive shell's prompt"),
-            (PAYLOAD_READY, PAYLOAD, "the payload never asked for its input")):
+            ("UART payload ready", PAYLOAD_READY, PAYLOAD, "the payload never asked for its input")):
         while True:
             with output_lock:
                 if marker in output:
+                    timing.record(name, True, time.monotonic())
                     break
             if capture_timeout.expired(time.monotonic()):
                 verdict(False, missing)
@@ -148,6 +162,10 @@ def main() -> None:
     while not capture_timeout.expired(time.monotonic()):
         with output_lock:
             text = bytes(output).replace(b"\r", b"")
+        if STARVED in text:
+            timing.record("starvation verdict", True, time.monotonic())
+        if PAIR_DONE in text:
+            timing.record("pair restart", True, time.monotonic())
         if BOUNDED in text:
             verdict(False, f"a worker passed over for {STARVE_TICKS} ticks "
                            "and the verdict still called its waits bounded")
