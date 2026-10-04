@@ -129,9 +129,10 @@ for this window. The held-guard TSV report (#695), consumed by A for #693,
 and regular-file exhaustion handling with its shared EL0 regression fixture
 (#658) are finished, as is the settings-wake failure DDB capture (#668).
 Offline QEMU DDB capture validation with individual failed requirements
-(#636) is finished. The maintainer selected the oops-lane slice of #666 for
-the next bounded B unit: record await arrivals against their timeout and
-report consumed margin. Other lanes and the remaining lower bands stay
+(#636) is finished. The oops-lane slice of #666 records await arrivals
+against their timeout and reports consumed margin. The next bounded B unit
+is the QEMU DDB UART-observation slice of #666, with normal and postmortem
+budgets kept separate. Other lanes and the remaining lower bands stay
 untouched.
 #680, #681 and #682 (the pin's cost) stay with A: they need RPi5
 measurements first.

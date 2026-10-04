@@ -154,6 +154,8 @@ def main():
                 "unfinished awaits were not retained")
         require(all(row['elapsed_seconds'] is None and row['fraction'] is None
                     for row in rows if row['status'] == 'not-arrived'), "timeout recorded as an arrival")
+        require(all(row['observed_seconds'] == elapsed for row in rows
+                    if row['status'] == 'not-arrived'), "unfinished observations used another clock")
         require(elapsed <= 10.55, "measurement restarted or extended the deadline")
     status, rows, sent, elapsed, output = run([(2.0, b"FIRST\nSECOND\nddb> ")], unavailable=True)
     require(status == 0 and 'timing unavailable' in output, "artifact failure replaced the lane verdict")

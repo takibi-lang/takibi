@@ -761,6 +761,16 @@ python3 scripts/validate_kernel_ddb_qemu.py \
   --metadata _build/kernel-ddb-qemu/validation.json
 ```
 
+The QEMU DDB driver also saves `await-timing.jsonl`: UART connection,
+required resume/workload markers and observed prompts use its unchanged
+common driver-start deadline. `continue` expects resumed output rather than
+another prompt. If the scripted BREAK never fires, normal observations end
+at the transition to postmortem; `await-timing.jsonl.postmortem` records the
+read-only walk against its separate existing budget and start time. Missing
+arrivals remain explicit. More than half a phase's budget used prints a
+`RECORDED` margin observation without changing the verdict. These artifacts
+measure UART observations, not the GDB rendezvous or QMP transport waits.
+
 Keep the UART log, metadata, and `uart.log.hold-gdb.log` together for UART
 BREAK captures. Software BREAK uses its recorded generated-text bounds and
 needs no hold log. The metadata records the ELF digest and read-test address;

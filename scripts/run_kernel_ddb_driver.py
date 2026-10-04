@@ -10,6 +10,8 @@ import os
 import subprocess
 import time
 
+from await_timing import AwaitTiming
+
 from run_kernel_uart_driver import (
     QMP_CHARDEV, postmortem_budget, send_serial_break)
 
@@ -99,12 +101,21 @@ def main() -> int:
     parser.add_argument("--foreground-listener-file", required=True)
     parser.add_argument("--init-listener-file", required=True)
     parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--await-timing-log",
+                        help="JSONL UART observations against the existing driver deadline")
     args = parser.parse_args()
     if ((args.snapshot_ready_file is None)
             != (args.snapshot_release_file is None)):
         raise SystemExit(
             "snapshot ready and release files must be supplied together")
-    deadline = time.monotonic() + args.timeout
+    if args.timeout <= 0:
+        parser.error("--timeout must be positive")
+    started = time.monotonic()
+    deadline = started + args.timeout
+    return drive(args, started, deadline)
+
+
+def drive(args, started, deadline):
     ready_file = (
         Path(args.snapshot_ready_file) if args.snapshot_ready_file else None
     )
@@ -121,22 +132,6 @@ def main() -> int:
         ready_file.unlink(missing_ok=True)
         release_file.unlink(missing_ok=True)
 
-    serial = connect(args.serial_port, deadline)
-    serial.settimeout(0.25)
-    received = bytearray()
-    break_sent = args.break_source == "software"
-    wake_byte_sent = args.break_source == "software"
-    prompt_count = 0
-    migration_context_sent = False
-    peer_tty_sent = False
-    peer_alias_queries = None
-    peer_tty_reading_at = None
-    peer_tty_line_sent = False
-    stall_break_at = None
-    stall_sent = 0
-    stall_reason = ""
-    stall_registers = ""
-    payload_sent = False
     commands = [
         b"oops\n", b"regs\n", b"intr\n", b"sched\n",
         b"current\n", b"vm\n", b"fds\n",
@@ -156,6 +151,53 @@ def main() -> int:
         b"continue\n",
     ]
 
+    awaited = [b"ddb: continuing\n", b"init: ash bootstrap\n"]
+    if args.break_source == "uart":
+        awaited += [
+            b"persistent shell: uart blocked\n",
+            b"interactive shell: uart blocked\n",
+            b"workload: busy pair done\n",
+            b"persistent server: listener ready port=8080\n",
+            b"workload: busy pair migrated across both cpus with stack handoff intact\n",
+            b"workload: peer console accepted all 1071 bytes through the shared queue after ordered writes on both CPUs\n",
+            b"workload: peer tty reading the terminal on the secondary cpu\n",
+            b"ddb: console lock probe phase=2 release=",
+            b"workload: peer tty read its 17-byte line",
+        ]
+    timing = AwaitTiming(args.await_timing_log, started, args.timeout, awaited,
+                         commands[:-1], label="kernel/qemu ddb")
+    observers = [timing]
+    try:
+        serial = connect(args.serial_port, deadline)
+        timing.record("UART connection", True, time.monotonic())
+        serial.settimeout(0.25)
+        return capture_loop(args, serial, deadline, ready_file, release_file,
+                       network_ready_file, foreground_listener_file, init_listener_file,
+                       awaited, commands, timing, observers)
+    finally:
+        for observer in observers:
+            observer.finish(time.monotonic())
+
+
+def capture_loop(args, serial, deadline, ready_file, release_file, network_ready_file,
+                 foreground_listener_file, init_listener_file, awaited, commands, timing, observers):
+    received = bytearray()
+    break_sent = args.break_source == "software"
+    wake_byte_sent = args.break_source == "software"
+    prompt_count = 0
+    migration_context_sent = False
+    peer_tty_sent = False
+    peer_alias_queries = None
+    peer_tty_reading_at = None
+    peer_tty_line_sent = False
+    stall_break_at = None
+    stall_sent = 0
+    stall_reason = ""
+    stall_registers = ""
+    payload_sent = False
+    post_timing = None
+    post_prompt_base = 0
+
     with serial, open(args.log, "wb") as log:
         while time.monotonic() < deadline:
             try:
@@ -165,9 +207,18 @@ def main() -> int:
             if chunk == b"":
                 break
             if chunk is not None:
+                arrived_at = time.monotonic()
                 received.extend(chunk.replace(b"\r", b""))
                 log.write(chunk)
                 log.flush()
+                observer = post_timing or timing
+                if post_timing is None:
+                    for i, marker in enumerate(awaited):
+                        if marker in received:
+                            timing.record(f"await-line {i + 1}", True, arrived_at)
+                observed_prompts = received.count(b"ddb> ") - post_prompt_base
+                for name in observer.prompt_names[:observed_prompts]:
+                    observer.record(name, True, arrived_at)
 
             # BusyBox's cursor query (ESC[6n) follows every prompt, so its
             # count marks a new prompt. It is not answered: a late reply
@@ -262,6 +313,7 @@ def main() -> int:
                     ("the peer terminal reader asleep", peer_tty_asleep),
                 ) if not ready]
                 stall_reason = ", ".join(missing) or "nothing it waits for"
+                timing.finish(time.monotonic())
                 dump, stall_registers = sample_cpu_registers(
                     args.qmp_port, 5.0)
                 Path(args.log + ".cpus").write_text(dump)
@@ -269,6 +321,13 @@ def main() -> int:
                     args.qmp_port, QMP_CHARDEV, 5.0)
                 stall_break_at = time.monotonic()
                 deadline = stall_break_at + postmortem_budget(args.timeout)
+                post_path = args.await_timing_log + ".postmortem" if args.await_timing_log else None
+                post_timing = AwaitTiming(post_path, stall_break_at,
+                    postmortem_budget(args.timeout), [], STALL_COMMANDS,
+                    label="kernel/qemu ddb postmortem", origin="postmortem start",
+                    connection=False)
+                post_prompt_base = received.count(b"ddb> ")
+                observers.append(post_timing)
                 print("[kernel/qemu ddb] the scripted BREAK never fired; still "
                       f"missing: {stall_reason}. Breaking in for a postmortem"
                       + (f" -- {failure}" if failure else ""), flush=True)

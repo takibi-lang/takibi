@@ -85,6 +85,7 @@ python3 "$REPO_ROOT/scripts/run_kernel_ddb_driver.py" \
     --gdb-port "$GDB_PORT" --elf "$ELF" \
     --kernel-address "$KERNEL_READ_ADDRESS" \
     --log "$UART_LOG" \
+    --await-timing-log "$ARTIFACT_DIR/await-timing.jsonl" \
     --snapshot-ready-file "$SNAPSHOT_READY" \
     --snapshot-release-file "$SNAPSHOT_RELEASE" \
     --network-ready-file "$NETWORK_READY" \
