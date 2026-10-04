@@ -67,6 +67,14 @@ def audit(sources: dict[Path, str]) -> tuple[list[str], int]:
     found: dict[str, int] = {}
     calls = 0
     for path, source in sorted(sources.items()):
+        # code_only only blanks characters, so it cannot create a callee name
+        # the raw text lacks; a file without either name has no call. Not
+        # CALL itself: blanking a comment between a name and its `(` can
+        # create a match the raw text does not have. Skipping the per-char
+        # scan of every other file is what keeps this inside the fast gate's
+        # bound on a loaded host (#703).
+        if "dma_prepare_rx" not in source and "dma_finish_rx" not in source:
+            continue
         code = code_only(source)
         for match in CALL.finditer(code):
             calls += 1

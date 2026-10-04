@@ -95,9 +95,33 @@ REQUIREMENTS = (
 )
 
 
+_REGEX_META = set(".^$*+?{}[]\\|()")
+
+
+def _count_lines(expression, text, lines):
+    """re.findall(expression, text, re.MULTILINE), counted over only the
+    lines that start with the expression's literal prefix. Exact for an
+    expression anchored at ^ with nothing that can match a newline (no
+    REQUIREMENTS entry has one): its every match starts at a line start with
+    that prefix and ends on the same line. Unanchored ones scan the text.
+    Scanning every line for each of ~80 requirements made this the slowest
+    fast-gate member under load (#703)."""
+    if not expression.startswith("^"):
+        return len(re.findall(expression, text, re.MULTILINE))
+    prefix = []
+    for char in expression[1:]:
+        if char in _REGEX_META:
+            break
+        prefix.append(char)
+    prefix = "".join(prefix)
+    candidates = "\n".join(line for line in lines if line.startswith(prefix))
+    return len(re.findall(expression, candidates, re.MULTILINE))
+
+
 def capture_problems(text, metadata, hold_text=""):
     """Return all failed independent requirements; never contact a guest."""
     text = text.replace("\r", "")
+    lines = text.split("\n")
     source = metadata["break_source"]
     replacements = {
         "entry": "irq" if source == "uart" else "brk",
@@ -111,7 +135,7 @@ def capture_problems(text, metadata, hold_text=""):
             continue
         for key, value in replacements.items():
             expression = expression.replace("{" + key + "}", value)
-        count = len(re.findall(expression, text, re.MULTILINE))
+        count = _count_lines(expression, text, lines)
         if count < minimum or maximum is not None and count > maximum:
             bound = str(minimum) if maximum == minimum else f"at least {minimum}"
             problems.append(f"{name}: expected {bound} matching line(s), found {count}")
