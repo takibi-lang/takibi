@@ -5,6 +5,7 @@ import contextlib
 import importlib.util
 import io
 import sys
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -30,7 +31,7 @@ def write_fixtures(checker, root, qemu_pages, rpi5_pages):
         "kernel/tests/qemu/views/boot.expected",
         "kernel/tests/rpi5/views/boot.expected",
     ]
-    for relative, pages in zip(paths, (qemu_pages, rpi5_pages), strict=True):
+    for relative, pages in zip(paths, ("<allocator_pages>", rpi5_pages), strict=True):
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -55,11 +56,11 @@ def write_fixtures(checker, root, qemu_pages, rpi5_pages):
 CASES = CaseCount()
 
 
-def run_main(checker):
+def run_main(checker, *arguments):
     CASES.note()
     output = io.StringIO()
     saved_argv = sys.argv
-    sys.argv = [str(CHECKER)]
+    sys.argv = [str(CHECKER), *arguments]
     try:
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
             try:
@@ -232,6 +233,105 @@ def layout_controls(checker):
     return 0
 
 
+def qemu_boot_controls():
+    """Link growing images and compare UART through the real shared view loop."""
+    cases = 0
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        template = (ROOT / "kernel/tests/qemu/views/boot.expected").read_text()
+        overlay = root / "overlay"
+        platform = root / "platform"
+        common = root / "common"
+        artifacts = root / "artifacts"
+        for path in (overlay, platform, common, artifacts):
+            path.mkdir()
+        (platform / "boot.filter").write_bytes(
+            (ROOT / "kernel/tests/qemu/views/boot.filter").read_bytes())
+        (platform / "boot.expected").write_text(template)
+        script = root / "layout.ld"
+        script.write_text("SECTIONS { . = 0x40200000; .bss : { *(.bss) } "
+                          "usable_ram_start = ALIGN(0x8000); }\n")
+        captures = []
+        for size, pages in ((0x8000, 261624), (0x9000, 261616), (0x7000, 261624)):
+            asm = root / "image.s"
+            obj = root / "image.o"
+            elf = root / f"image-{size}.elf"
+            asm.write_text(f".bss\n.skip {size}\n")
+            for command in (
+                ["llvm-mc-19", "-triple=aarch64", "-filetype=obj", str(asm),
+                 "-o", str(obj)],
+                ["ld.lld-19", "-T", str(script), str(obj), "-o", str(elf)],
+            ):
+                subprocess.run(command, check=True, capture_output=True)
+            result = subprocess.run(
+                [sys.executable, str(CHECKER), "--qemu-boot-expected", str(elf)],
+                capture_output=True, text=True)
+            assert result.returncode == 0, result.stderr
+            expected = template.replace("<allocator_pages>", str(pages))
+            assert result.stdout == expected, result.stdout
+            assert (platform / "boot.expected").read_text() == template
+            cases += 1
+            captures.append(result.stdout)
+
+        command = ["bash", "-c", 'source "$1"; kernel_views_compare control '
+                   '"$2" "$3" "$4" "$5" "$6"', "control",
+                   str(ROOT / "scripts/kernel_views.sh"), str(artifacts),
+                   str(root / "uart.log"), str(common), str(platform),
+                   str(overlay)]
+        for name, expected, observed, success in (
+            ("release", captures[0], captures[0], True),
+            ("debug growth", captures[1], captures[1], True),
+            ("same granule", captures[2], captures[2], True),
+            ("stale capacity", captures[1], captures[0], False),
+            ("wrong capacity", captures[1],
+             captures[1].replace("261616", "261615"), False),
+            ("wrong inventory", captures[1],
+             captures[1].replace("base_bytes=1073741824", "base_bytes=0"), False),
+            ("missing inventory", captures[1],
+             "\n".join(captures[1].splitlines()[2:]) + "\n", False),
+            ("duplicate inventory", captures[1],
+             captures[1] + captures[1].splitlines()[1] + "\n", False),
+        ):
+            (overlay / "boot.expected").write_text(expected)
+            (root / "uart.log").write_text(observed)
+            result = subprocess.run(command, capture_output=True, text=True)
+            report = result.stdout + result.stderr
+            assert (result.returncode == 0) == success, (name, report)
+            assert ("PASS control view: boot" if success else
+                    "FAIL control view: boot") in report, (name, report)
+            assert result.returncode == (0 if success else 1), (name, report)
+            cases += 1
+
+        checker = load_checker()
+        checker.REPO = root
+        path = root / "kernel/tests/qemu/views/boot.expected"
+        path.parent.mkdir(parents=True)
+        checker.nm_symbols = lambda _elf: {"usable_ram_start": 0x40208000}
+        for bad in (template.replace("<allocator_pages>", "261624"),
+                    template.replace("<allocator_pages>", ""),
+                    template + template.splitlines()[1] + "\n"):
+            path.write_text(bad)
+            status, report = run_main(checker, "--qemu-boot-expected", "image.elf")
+            assert status != 0 and "exactly one memory line" in report, report
+            cases += 1
+        path.write_text(template)
+        for symbols, diagnostic in (
+            ({}, "usable_ram_start is absent"),
+            ({"usable_ram_start": 0x40208001}, "page-aligned span"),
+            ({"usable_ram_start": 0x80000000}, "page-aligned span"),
+            ({"usable_ram_start": 0x00208000}, "outside QEMU RAM"),
+        ):
+            checker.nm_symbols = lambda _elf, symbols=symbols: symbols
+            status, report = run_main(checker, "--qemu-boot-expected", "image.elf")
+            assert status != 0 and diagnostic in report, report
+            cases += 1
+    report_pass("QEMU boot capacity controls",
+                "linked growth renders exact capacity; shared views reject "
+                "stale counts and damaged inventory; invalid templates and "
+                "ELF boundaries fail", cases=cases)
+    return 0
+
+
 def main():
     checker = load_checker()
     qemu_start = 0x40200000
@@ -266,11 +366,11 @@ def main():
             print(positive_output, end="")
             return 1
 
-        write_fixtures(checker, root, qemu_pages - 1, rpi5_pages)
+        write_fixtures(checker, root, qemu_pages, rpi5_pages - 1)
         negative_status, negative_output = run_main(checker)
         expected = (
-            "`kernel/tests/qemu/views/boot.expected` says "
-            f"allocator_pages={qemu_pages - 1}, linked layout requires {qemu_pages}"
+            "`kernel/tests/rpi5/views/boot.expected` says "
+            f"allocator_pages={rpi5_pages - 1}, linked layout requires {rpi5_pages}"
         )
         if negative_status == 0:
             print("FAIL kernel-memory-map control: stale fixture succeeded")
@@ -286,7 +386,8 @@ def main():
         cases=CASES.ran)
     # A fresh module: the allocator control above stubs out the very
     # functions these controls exist to exercise.
-    return layout_controls(load_checker())
+    status = qemu_boot_controls()
+    return status if status else layout_controls(load_checker())
 
 
 if __name__ == "__main__":

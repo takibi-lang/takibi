@@ -4,7 +4,7 @@
 #
 # The repetition, the per-sample directories and the port separation are
 # scripts/repeat_kernel_lane.sh's; this file supplies only what is specific to
-# the debug lane -- which ELF, which expected views, and where its ports start.
+# the debug lane -- which ELF and where its ports start.
 # Merged 2026-09-01: this script and the rate-measuring runner had grown the
 # same machinery from opposite ends, one able to give a verdict and the other
 # able to give a rate.
@@ -30,5 +30,4 @@ exec bash "$REPO_ROOT/scripts/repeat_kernel_lane.sh" \
     "$RUNS" \
     env \
         KERNEL_QEMU_ELF="$REPO_ROOT/kernel/build/qemu/kernel-debug.elf" \
-        KERNEL_QEMU_EXPECTED_VIEW_DIR="$REPO_ROOT/kernel/tests/qemu-debug/views" \
         bash "$REPO_ROOT/scripts/run_kernel_qemutest.sh"

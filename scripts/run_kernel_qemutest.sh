@@ -6,9 +6,9 @@
 # single boot's UART transcript is projected through every kernel/tests/
 # common/views/*.filter plus qemu/views/*.filter are compared exactly
 # against their matching *.expected files. Platform-specific files override
-# common files with the same name; KERNEL_QEMU_EXPECTED_VIEW_DIR may overlay
-# expected output for another build of the same platform, such as the larger
-# DWARF-bearing debug ELF. Unlike the RPi5 runner, this needs no SWD/reset/
+# common files with the same name. The boot allocator capacity is rendered
+# from the ELF this runner loads, for both ordinary and debug builds. Unlike
+# the RPi5 runner, this needs no SWD/reset/
 # external-serial-device machinery at all -- QEMU's TCP serial chardev is
 # opened by the same pyserial driver used for the RPi5 UART, so capture and
 # ash input share one transport implementation.
@@ -47,7 +47,6 @@ ELF="${KERNEL_QEMU_ELF:-$REPO_ROOT/kernel/build/qemu/kernel.elf}"
 kernel_elf_refuse_stale "$ELF" || exit 1
 RUN_LABEL="kernel/${KERNEL_QEMU_LABEL:-qemu}"
 VIEW_DIR="$REPO_ROOT/kernel/tests/qemu/views"
-EXPECTED_VIEW_DIR="${KERNEL_QEMU_EXPECTED_VIEW_DIR:-$VIEW_DIR}"
 COMMON_VIEW_DIR="$REPO_ROOT/kernel/tests/common/views"
 ASH_DIR="$REPO_ROOT/kernel/tests/common/ash"
 ARTIFACT_DIR="${KERNEL_QEMU_HWTEST_ARTIFACT_DIR:-${TAKIBI_LANE_ARTIFACT_ROOT:-$REPO_ROOT/_build}/kernel-hwtest-qemu}"
@@ -99,6 +98,11 @@ if ! flock -n 9; then
     echo "FAIL $RUN_LABEL: another QEMU runner already owns $ARTIFACT_DIR" >&2
     exit 1
 fi
+# Keep generated layout facts beside this capture, after taking its lock.
+EXPECTED_VIEW_DIR="$ARTIFACT_DIR/expected-views"
+mkdir -p "$EXPECTED_VIEW_DIR"
+python3 "$REPO_ROOT/scripts/buildcheck_kernel_memory_map.py" \
+    --qemu-boot-expected "$ELF" >"$EXPECTED_VIEW_DIR/boot.expected"
 # GitHub issue #407: refuse to start if somebody already owns the ports
 # this lane is about to use, and say so in those words. A peer that cannot
 # bind used to surface as "no UART output captured -- kernel did not

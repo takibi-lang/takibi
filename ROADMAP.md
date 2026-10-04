@@ -125,8 +125,7 @@ fixtures, finite lock-held BREAK fixture, and board lock measurements complete
 the extended short-window queue. #13 remains conditional on the solver
 threshold in `TAKIBI_CORE.md`; its recorded examples do not yet justify an
 implementation. The maintainer also selected concrete global Cell brands
-for this window. The next bounded B unit is #599: derive the QEMU boot
-view's allocator capacity from the linked image, eliminating the debug-only boot overlay.
+for this window.
 #666 retains work on other console drivers and aggregate reporting; its oops
 and QEMU DDB UART-observation slices are finished. Other lower-band items
 stay outside the short window unless selected by the maintainer.
@@ -143,7 +142,7 @@ measurements first.
    #386, #502.
 3. **Compiler safety and language research:** #203, #252, #200, #201,
    #282, #129, #374, #417, #155, #28, #8.
-4. **Toolchain, portability and hardware-lane support:** #599, #576, #568, #123,
+4. **Toolchain, portability and hardware-lane support:** #576, #568, #123,
    #124, #122, #95, #51, #50, #85, #268, #666.
 5. **Deferred or not a scheduled work item:** #432, #555, #250, #444, #429,
    #149, #567, #539, #536, #624, #132; #13 for `Phi`, with #216 and #109 as

@@ -1203,6 +1203,15 @@ same-named `.expected` file, using the platform file when present and otherwise
 the common file. A subsystem can therefore gain a focused contract without
 adding another expensive reset and SWD load.
 
+The QEMU boot expectation retains the hand-written machine inventory in
+`kernel/tests/qemu/views/boot.expected`. Its `<allocator_pages>` field is
+rendered from the loaded ELF's `usable_ram_start` and the lane's 1-GiB RAM
+end, then compared exactly against UART. Ordinary and debug builds use the
+same template; image growth requires no debug-only view. The rendered file
+is saved as `expected-views/boot.expected` in each lane's artifact directory.
+RPi5 and the separate QEMU memory-map fixtures keep their fixed capacities,
+checked against their linked layout by the build check.
+
 Stable operator-visible kernel status uses `kernel_boot_log`. Temporary debug
 UART messages are not accepted as expected-file evidence and are removed after
 bring-up. Host-side progress output is separate from kernel UART output.

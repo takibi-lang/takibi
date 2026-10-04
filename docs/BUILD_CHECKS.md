@@ -79,7 +79,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_kernel_interactive_httpd_protocol.py` | interactive HTTP runners avoid listener/request deadlock |
 | `check_kernel_lib_limitations_header.py` | core kernel files state their current limitations |
 | `check_kernel_log_expectations.py` | test runners wait only for logs the kernel can emit |
-| `check_kernel_memory_map_controls.py` | Positive and faithful negative controls for allocator layout fixtures |
+| `check_kernel_memory_map_controls.py` | Linked-image growth, exact QEMU boot views, invalid rendering inputs, and allocator layout controls |
 | `check_kernel_views_controls.sh` | Controls for the shared view comparison (GitHub issue #530) |
 | `check_oops_await_timing_controls.py` | Deterministic crash-console arrival, common-deadline and half-budget controls, including partial markers, failures and unavailable artifacts |
 | `check_known_intermittent_issues_controls.py` | Controls for the known-intermittent open-issue gate, with the GitHub answer injected rather than fetched |
@@ -169,7 +169,7 @@ run them, and why they sit outside both globs above.
 | --- | --- |
 | `buildcheck_elf_symbol_alignment.py` | Reject a linked ELF when a required symbol is under-aligned |
 | `buildcheck_kernel_asm_invariants.py` | TODO |
-| `buildcheck_kernel_memory_map.py` | Fail the build when kernel/MEMORY_MAP.md and the build disagree |
+| `buildcheck_kernel_memory_map.py` | Check kernel/MEMORY_MAP.md and allocator fixtures; render QEMU boot capacity from the loaded ELF |
 | `buildcheck_kernel_unused_coverage.py` | every kernel file a target compiles is checked for unused functions or exempt for a stated reason |
 | `measure_trusted_base.py --check-raw-deref` | the raw-pointer dereference ratchet (#639): run by each kernel object's rule on the compiler's `--emit-raw-deref-audit`, including standalone EL0 payload objects, it holds every file's dereference count to `raw_deref_budget.tsv`, so the count can only go down on purpose. Also the trusted-boundary inventory of `make trustedbasecheck` |
 | `buildcheck_suite_output.py` | Split a batched UART stream and compare each case with its fixture |

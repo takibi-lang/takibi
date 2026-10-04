@@ -47,12 +47,10 @@ def lane_view_count(platform: str) -> int:
 
     Counting `*.expected` instead agrees today and is still the wrong rule. The
     expected file is what a view is compared against; the filter is what makes
-    it exist. `kernel/tests/qemu-debug/views/` holds expected files and no
-    filters at all, because it is an overlay selected by
-    KERNEL_QEMU_EXPECTED_VIEW_DIR rather than a lane of its own -- so a rule
-    that happens to work for two platforms is badly wrong for the third, and it
-    would go wrong for these two the moment a filter and an expected file
-    stopped arriving in pairs.
+    it exist. The QEMU runner also renders an expected boot view from its
+    linked ELF, without adding a filter or another view. Counting expected
+    files would go wrong the moment a filter and an expected file stopped
+    arriving in pairs.
     """
     names = set()
     for directory in ("common", platform):

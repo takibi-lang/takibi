@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Fail the build when kernel/MEMORY_MAP.md and the build disagree.
 
+Run with --qemu-boot-expected ELF to render the maintained QEMU boot
+expectation with allocator capacity derived from that linked image.
+
 Run with --update to rewrite the ELF-symbol rows from the current build
 instead of failing. That is the maintenance action after a change that
 moves the layout, and it is deliberately a separate command rather than
@@ -422,6 +425,24 @@ def expected_boot_pages(path):
     return int(matches[0])
 
 
+def render_qemu_boot_expected(elf):
+    """Keep the hand-written inventory; derive only the linked capacity."""
+    path = REPO / "kernel/tests/qemu/views/boot.expected"
+    text = path.read_text(encoding="ascii")
+    token = "<allocator_pages>"
+    memory = re.findall(r"^memory: .* allocator_pages=(.*)$", text, re.MULTILINE)
+    if memory != [token] or text.count(token) != 1:
+        fail(f"{path.relative_to(REPO)} must contain exactly one memory line "
+             f"ending in allocator_pages={token}")
+    start = nm_symbols(elf).get("usable_ram_start")
+    if start is None:
+        fail(f"usable_ram_start is absent from {elf}")
+    if start < 0x40000000:
+        fail(f"{elf}: usable_ram_start is outside QEMU RAM")
+    pages = page_span(start, QEMU_RAM_END, "QEMU managed RAM")
+    return text.replace(token, str(pages))
+
+
 def expected_python_pages(path, name):
     text = path.read_text()
     match = re.search(
@@ -453,13 +474,12 @@ def check_allocator_expectations(problems, include_debug) -> int:
         starts[platform] = start
 
     expected = {
-        "kernel/tests/qemu/views/boot.expected":
-            page_span(starts["QEMU"], QEMU_RAM_END, "QEMU managed RAM"),
         "kernel/tests/rpi5/views/boot.expected":
             page_span(starts["RPi5"], RPI5_MANAGED_RAM_END,
                       "RPi5 managed RAM"),
     }
-    compared = 0
+    render_qemu_boot_expected(ELFS["QEMU"])
+    compared = 1
     for relative, actual in expected.items():
         compared += 1
         documented = expected_boot_pages(REPO / relative)
@@ -489,35 +509,17 @@ def check_allocator_expectations(problems, include_debug) -> int:
                 f"linked layout requires {actual}")
 
     if include_debug:
-        debug_start = nm_symbols(QEMU_DEBUG_ELF).get("usable_ram_start")
-        if debug_start is None:
-            fail("usable_ram_start is absent from the QEMU debug build")
-        actual = page_span(debug_start, QEMU_RAM_END,
-                           "QEMU debug managed RAM")
-        # The debug lane reads kernel/tests/qemu-debug/views/boot.expected
-        # when that overlay exists and the ordinary QEMU view when it does
-        # not, exactly as scripts/run_kernel_qemutest.sh resolves it. Keep
-        # an overlay only when the larger DWARF-bearing image lands in a
-        # different 32 KiB granule; an identical overlay is a duplicate,
-        # which scripts/check_platform_view_parity.py refuses. So absence
-        # also claims the two builds agree, and this comparison checks it.
-        relative = "kernel/tests/qemu-debug/views/boot.expected"
-        if not (REPO / relative).exists():
-            relative = "kernel/tests/qemu/views/boot.expected"
-        documented = expected_boot_pages(REPO / relative)
-        if documented != actual:
-            problems.append(
-                f"`{relative}` says allocator_pages={documented}, "
-                f"linked layout requires {actual} for the debug build"
-                + ("" if relative.startswith("kernel/tests/qemu-debug")
-                   else " -- the two builds no longer agree, so the debug "
-                        "lane needs kernel/tests/qemu-debug/views/"
-                        "boot.expected back"))
+        render_qemu_boot_expected(QEMU_DEBUG_ELF)
         compared += 1
     return compared
 
 
 def main():
+    if sys.argv[1:2] == ["--qemu-boot-expected"]:
+        if len(sys.argv) != 3:
+            fail("usage: --qemu-boot-expected ELF")
+        sys.stdout.write(render_qemu_boot_expected(Path(sys.argv[2])))
+        return
     if not DOC.exists():
         fail(f"{DOC} does not exist")
     text = DOC.read_text()
