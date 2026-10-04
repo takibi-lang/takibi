@@ -394,20 +394,14 @@ private fn block_run_transfer_locked(
     } else {
         for offset: usize in 0..<BLOCK_RUN_BLOCKS {
             if (offset < count) {
-                // Counted in 512-byte sectors, two to a block, so each
-                // half is an index the compiler can bound.
-                let low: {0..<KERNEL_MAX_CORES * BLOCK_RUN_BLOCKS * 2 as usize} =
-                    (here * BLOCK_RUN_BLOCKS + offset) * 2;
-                let high: {0..<KERNEL_MAX_CORES * BLOCK_RUN_BLOCKS * 2 as usize} =
-                    (here * BLOCK_RUN_BLOCKS + offset) * 2 + 1;
-                let low_base: usize = low * 512;
-                let high_base: usize = high * 512;
+                // One request per block, its index one the compiler can bound.
+                let slot: {0..<KERNEL_MAX_CORES * BLOCK_RUN_BLOCKS as usize} =
+                    here * BLOCK_RUN_BLOCKS + offset;
+                let base: usize = slot * KERNEL_BLOCK_SIZE;
                 let sector: u32 = ((first + offset) * 2) as u32;
-                let first_ok: bool = virtio_blk_read_sector(
-                    sector, block_run_data[low_base..<low_base + 512]);
-                let second_ok: bool = virtio_blk_read_sector(
-                    sector + 1, block_run_data[high_base..<high_base + 512]);
-                if (first_ok == false || second_ok == false) {
+                if (virtio_blk_read_block(
+                        sector,
+                        block_run_data[base..<base + KERNEL_BLOCK_SIZE]) == false) {
                     return false;
                 }
             }
@@ -482,13 +476,9 @@ private fn block_read_device_locked(
             DiskIoResult::Ok => { return BlockIoResult::Ok; }
         }
     } else {
-        let first_sector = destination[0..<512];
-        let second_sector = destination[512..<KERNEL_BLOCK_SIZE];
-        let first_ok: bool = virtio_blk_read_sector((block * 2) as u32,
-                                                     first_sector);
-        let second_ok: bool = virtio_blk_read_sector((block * 2 + 1) as u32,
-                                                      second_sector);
-        if (first_ok == false || second_ok == false) {
+        // One virtio request per block, as the USB backend's one command.
+        if (virtio_blk_read_block((block * 2) as u32,
+                                  destination[0..<KERNEL_BLOCK_SIZE]) == false) {
             return BlockIoResult::Invalid;
         }
         return BlockIoResult::Ok;
@@ -517,13 +507,8 @@ private fn block_write_device_locked(
             DiskIoResult::Ok => { return BlockIoResult::Ok; }
         }
     } else {
-        let first_sector = source[0..<512];
-        let second_sector = source[512..<KERNEL_BLOCK_SIZE];
-        let first_ok: bool = virtio_blk_write_sector((block * 2) as u32,
-                                                      first_sector);
-        let second_ok: bool = virtio_blk_write_sector((block * 2 + 1) as u32,
-                                                       second_sector);
-        if (first_ok == false || second_ok == false) {
+        if (virtio_blk_write_block((block * 2) as u32,
+                                   source[0..<KERNEL_BLOCK_SIZE]) == false) {
             return BlockIoResult::Invalid;
         }
         return BlockIoResult::Ok;

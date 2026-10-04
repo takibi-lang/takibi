@@ -1607,6 +1607,13 @@ private fn ddb_render_sched() !{unsafe} {
         ddb_puts(" stable-partial="); ddb_put_udec(retry_partial);
         ddb_puts("\n");
     }
+    if (virtio_blk_completion_count() != 0) {
+        ddb_puts("ddb: virtio-blk completions="); ddb_put_udec(virtio_blk_completion_count());
+        ddb_puts(" max-ticks="); ddb_put_udec(virtio_blk_completion_max());
+        ddb_puts(" total-ticks="); ddb_put_udec(virtio_blk_completion_total());
+        ddb_puts(" tickfreq="); ddb_put_udec(read_cntfrq() as usize);
+        ddb_puts("\n");
+    }
     let blk_timeouts: usize = virtio_blk_timeout_count();
     if (blk_timeouts != 0) {
         let mut blk_first: VirtioBlkTimeoutSnapshot =

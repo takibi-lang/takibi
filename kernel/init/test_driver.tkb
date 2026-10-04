@@ -475,6 +475,13 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
     kernel_boot_log(" run_hits=");
     uart_put_udec(block_run_hit_total());
     kernel_boot_log("\n");
+    kernel_boot_log("virtio-blk wait: completions=");
+    uart_put_udec(virtio_blk_completion_count());
+    kernel_boot_log(" total_ticks=");
+    uart_put_udec(virtio_blk_completion_total());
+    kernel_boot_log(" max_ticks=");
+    uart_put_udec(virtio_blk_completion_max());
+    kernel_boot_log("\n");
     kernel_boot_log("resources: image target root unset uses=");
     uart_put_udec(process_image_root_unset_uses());
     kernel_boot_log("\n");
