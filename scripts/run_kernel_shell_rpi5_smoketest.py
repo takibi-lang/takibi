@@ -13,6 +13,7 @@ import urllib.request
 
 from await_timing import AwaitTiming
 from run_kernel_churn import Session, FailureMarker, has_prompt, terminate
+from measure_kernel_shell_tcp import measure_bulk
 
 ROOT = Path(__file__).resolve().parent.parent
 LISTENER = b"persistent server: listener ready port=8080"
@@ -76,7 +77,7 @@ def await_console(session, directory, phase, seconds, predicate, watch_from=None
         timing.finish(time.monotonic())
 
 
-def run(session, directory, url, note_phase=lambda _phase: None):
+def run(session, directory, url, note_phase=lambda _phase: None, *, elf_sha256=None):
     phase = "shell-and-listener"
     note_phase(phase)
     print(f"[kernel/rpi5 shell smoke] {phase}", flush=True)
@@ -94,6 +95,15 @@ def run(session, directory, url, note_phase=lambda _phase: None):
         snapshot = await_console(session, directory, phase, COMMAND_SECONDS,
                                  lambda text: process_snapshot(text[start:]), start)
         (directory / f"ps-{number}.log").write_bytes(snapshot)
+    if os.environ.get("KERNEL_RPI5_SHELL_BULK_TCP") == "1":
+        note_phase("bulk-tcp")
+        measure_bulk(url, directory, ROOT, expected_elf_digest=elf_sha256)
+        note_phase("prompt-after-bulk-tcp")
+        start = len(session.normalized())
+        session.send(b"echo __BULK_TCP_DONE__\n")
+        await_console(session, directory, "prompt-after-bulk-tcp", COMMAND_SECONDS,
+                      lambda text: b"\n__BULK_TCP_DONE__\n" in text[start:] and
+                      has_prompt(text[start:]), start)
     return "console-exit"
 
 
@@ -103,7 +113,7 @@ def main():
     directory.mkdir(parents=True, exist_ok=True)
     # The shell launcher truncates its own UART capture. Remove only this
     # driver's previous results so a failed attempt cannot retain old verdicts.
-    for pattern in ("http-*", "ps-*.log", "await-*.jsonl", "result.json",
+    for pattern in ("http-*", "bulk-*", "ps-*.log", "await-*.jsonl", "result.json",
                     "uart-transcript.log", "network-peer.log", "terminal.log"):
         for path in directory.glob(pattern):
             path.unlink()
@@ -132,7 +142,7 @@ def main():
         # Save the current phase even when a callback raises or a wait expires.
         def note_phase(phase):
             result["phase"] = phase
-        run(session, directory, url, note_phase)
+        run(session, directory, url, note_phase, elf_sha256=digest)
         result["phase"] = "console-exit"
         session.send(b"\x1d")
         deadline = time.monotonic() + EXIT_SECONDS

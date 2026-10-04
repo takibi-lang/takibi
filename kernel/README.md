@@ -371,6 +371,19 @@ has a 300-second session ceiling after acquiring the lease. Artifacts are in
 `_build/kernel-shell-smoke-rpi5/`: UART and terminal transcripts, network peer
 log, both HTTP bodies and headers, process snapshots, await timings and
 `result.json` with the failure stage and loaded shell ELF SHA-256.
+
+For a checksum-verified bulk transfer comparison on the same shell ELF, run
+`KERNEL_RPI5_SHELL_BULK_TCP=1 make kernelcheck-shell-rpi5`. After boot and the
+HTTP smoke, it fetches `/bin/busybox-extras` and `/bin/busybox.static` once for
+warm-up and three more times each. `bulk-tcp.json` preserves every transfer's
+host wall time, size, SHA-256 and warm-up flag; each body must match the local
+build's file. The serving ELF must retain its launch digest throughout the
+measurement. The final shell prompt must still answer. Both `bulk-tcp.json`
+and the session's `result.json` must pass before comparing results. Failed
+measurements retain a failed artifact. This is end-to-end
+HTTP wall time, including request and headers, rather than CPU classification.
+There is no throughput threshold in the functional verdict.
+
 The RPi5 shell prints reset and SWD-load durations and reports the same ash
 readiness marker after the UART is attached. It also starts the existing
 physical-Ethernet ARP/ICMP/TCP peer after SWD load, so the kernel does not pay

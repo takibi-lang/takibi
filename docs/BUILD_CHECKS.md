@@ -80,7 +80,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_kernel_elf_freshness_controls.sh` | Controls for the stale-kernel guard: a lane refuses to run against a kernel older than its own sources |
 | `check_kernel_ddb_postmortem_controls.py` | Controls for the UART driver's DDB postmortem walk, with no QEMU in the room |
 | `check_console_progress_controls.py` | PTY and GDB boot waits renew on UART; fixed protocol waits, injected verdicts, marker ordering and ceilings stay bounded; churn wait observations preserve half-budget flags, EOF, errors and failure priority |
-| `check_rpi5_shell_smoke_controls.py` | Interactive RPi5 shell smoke checks two HTTP responses and fresh HTTPd process snapshots; absent readiness, echoed markers, extra workers and bad responses fail |
+| `check_rpi5_shell_smoke_controls.py` | Interactive RPi5 shell smoke checks two HTTP responses, fresh HTTPd process snapshots and optional bulk measurement completion; absent readiness, echoed markers, extra workers and bad responses fail |
 | `check_kernel_net_wait_controls.py` | UART progress renews readiness waits; silence and the outer ceiling still fail, with bounded DDB protection |
 | `check_kernel_interactive_httpd_protocol.py` | interactive HTTP runners avoid listener/request deadlock |
 | `check_kernel_lib_limitations_header.py` | core kernel files state their current limitations |
@@ -103,6 +103,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_process_record_bare_uses.py` | the bare `scheduled_process_record_at`/`_of` calls left in `process.tkb` equal a budget that only goes down (#693) |
 | `check_lock_discipline.py` | global mutexes are not force-reset and raw atomics stay allowlisted |
 | `check_measure_kernel_tcp_throughput_controls.py` | Controls for the wire-throughput measurement, with a scripted curl |
+| `check_kernel_shell_tcp_controls.py` | Controls for checksum-verified bulk HTTP measurements and retained failure artifacts |
 | `check_measure_trusted_base_controls.py` | Lexical controls for the trusted-base unsafe-block inventory, and for the raw-pointer dereference ratchet: a file with no row, over, under, gone or zero is refused, another target's files are not checked, and `--lower` lowers, never raises and drops a zero row; a zero-site compiled source passes but an empty depfile is refused |
 | `check_net_link_wait_controls.py` | Controls for the shared host-side reachability wait |
 | `check_no_conflict_markers.py` | no tracked file is left mid-merge, where a pattern-scanning check would answer about the half above the marker |

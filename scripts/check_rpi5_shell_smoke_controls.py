@@ -34,11 +34,12 @@ class Response:
 
 
 class Session:
-    def __init__(self, ready=True, workers=1, echoed_only=False, silent=False, root=b"."):
+    def __init__(self, ready=True, workers=1, echoed_only=False, silent=False, root=b".", bulk_echoed_only=False):
         self.text = ((driver.LISTENER + b"\n" + driver.SHELL + b"\n # ")
                      if ready else driver.SHELL + b"\n # ")
         self.workers, self.echoed_only, self.silent = workers, echoed_only, silent
         self.root = root
+        self.bulk_echoed_only = bulk_echoed_only
         self.sent = []
 
     def normalized(self):
@@ -49,6 +50,10 @@ class Session:
         if self.silent:
             return
         self.text += command
+        if command == b"echo __BULK_TCP_DONE__\n":
+            if not self.bulk_echoed_only:
+                self.text += b"\n__BULK_TCP_DONE__\n # "
+            return
         if not self.echoed_only:
             # Independent transcript shape from the physical shell run. Do
             # not construct the fixture from the matcher it is meant to test.
@@ -60,7 +65,7 @@ class Session:
         return predicate(self.text) or None
 
 
-def case(*, response=None, expected=None, **options):
+def case(*, response=None, expected=None, bulk=False, bulk_error=False, **options):
     CASES.note()
     session, phases, calls = Session(**options), [], []
 
@@ -71,24 +76,34 @@ def case(*, response=None, expected=None, **options):
 
     with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {}, clear=True):
         directory = Path(temporary)
-        with patch.object(driver.urllib.request, "build_opener", return_value=Opener()), contextlib.redirect_stdout(io.StringIO()):
+        if bulk:
+            os.environ["KERNEL_RPI5_SHELL_BULK_TCP"] = "1"
+        with patch.object(driver.urllib.request, "build_opener", return_value=Opener()), \
+             patch.object(driver, "measure_bulk", side_effect=RuntimeError("bulk failed") if bulk_error else None) as measurement, \
+             contextlib.redirect_stdout(io.StringIO()):
             try:
-                driver.run(session, directory, "http://board/", phases.append)
+                driver.run(session, directory, "http://board/", phases.append, elf_sha256="fixture-elf")
             except RuntimeError as error:
                 assert expected is not None and expected in str(error), (expected, error)
             else:
                 assert expected is None, expected
                 assert calls == [("http://board/", 15)] * 2
-                assert len(session.sent) == 2
+                assert len(session.sent) == (3 if bulk else 2)
                 assert phases == ["shell-and-listener", "http-1", "processes-after-http-1",
-                                  "http-2", "processes-after-http-2"]
+                                  "http-2", "processes-after-http-2"] + (
+                                      ["bulk-tcp", "prompt-after-bulk-tcp"] if bulk else [])
                 assert all((directory / f"http-{number}.body").exists() for number in (1, 2))
                 assert all((directory / f"ps-{number}.log").exists() for number in (1, 2))
+            if bulk:
+                measurement.assert_called_once_with("http://board/", directory, driver.ROOT,
+                                                    expected_elf_digest="fixture-elf")
+            else:
+                measurement.assert_not_called()
         timing = [json.loads(line) for path in directory.glob("await-*.jsonl")
                   for line in path.read_text().splitlines()]
         assert timing and all(row["timeout_seconds"] in (180, 20) for row in timing)
         if expected and (not options.get("ready", True) or options.get("silent")
-                         or options.get("echoed_only")):
+                         or options.get("echoed_only") or options.get("bulk_echoed_only")):
             assert any(row["await"] == phases[-1] and row["status"] == "not-arrived"
                        for row in timing)
         if not options.get("ready", True):
@@ -107,6 +122,9 @@ def main():
     case(response=Response(content_type="application/octet-stream"), expected="text/html")
     case(response=Response(body=b"wrong index"), expected="bounded index body")
     case(response=Response(body=driver.BODY_MARKER + b"x" * 65536), expected="bounded index body")
+    case(bulk=True)
+    case(bulk=True, bulk_echoed_only=True, expected="prompt-after-bulk-tcp")
+    case(bulk=True, bulk_error=True, expected="bulk failed")
     report_pass("rpi5 shell smoke controls",
                 "two HTTP responses and fresh process snapshots pass; missing readiness, "
                 "echoes, silence, workers and invalid HTTP responses fail", cases=CASES.ran)
