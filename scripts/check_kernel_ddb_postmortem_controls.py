@@ -62,6 +62,8 @@ ANSWERS = {
     b"oops": b"ddb: break seq=1 cpu=0 elr=0x0000000040038a74 sp_el0=0x0\r\n",
     b"intr": b"ddb: intr cpu=0 entry=brk source=1 live_daif=0x3c0 saved_daif=0x0\r\n",
     b"bt": b"ddb: bt frame=1 pc=0x0000000040038a74\r\n",
+    b"bt cpu 0": b"ddb: bt source=cpu cpu=0 pid=0 stack=0x4023c000..0x40240000\r\n",
+    b"bt cpu 1": b"ddb: bt source=cpu cpu=1 pid=89 stack=0x4058c000..0x40590000\r\n",
     b"sched": b"ddb: sched enabled=1 pending=1 current=27 ready=0 running=1 blocked=2\r\n",
     b"current": b"ddb: current pid=27 parent=1 state=2 wait=0\r\n",
     b"ps": b"ddb: ps count=3\r\n",
@@ -240,6 +242,9 @@ def check_walk(driver) -> list[str]:
     """A prompt fires the documented walk and ends the lane with its findings."""
     failures = []
     documented = list(driver.POSTMORTEM_COMMANDS)
+    for command in (b"bt cpu 0", b"bt cpu 1"):
+        if documented.count(command) != 1:
+            failures.append("the stall walk must inspect each maintained CPU once")
     budget = 90.0  # the lanes' own default, so the arithmetic is theirs
     with tempfile.TemporaryDirectory() as raw:
         workdir = pathlib.Path(raw)
@@ -606,7 +611,10 @@ def check_read_only(driver) -> list[str]:
     usage = {entry["name"]: entry["usage"] for entry in inventory["public"]}
     hidden = {entry["name"] for entry in inventory["hidden"]}
     for raw in driver.POSTMORTEM_COMMANDS:
-        name = raw.decode("ascii")
+        command = raw.decode("ascii")
+        name = command.split()[0]
+        if command != name and command not in ("bt cpu 0", "bt cpu 1"):
+            failures.append(f"unsupported stall command arguments: {command}")
         if name in hidden:
             failures.append(f"{name} is a hidden test-only command, not a "
                             "read-only view of a stalled guest")

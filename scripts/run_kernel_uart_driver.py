@@ -160,7 +160,8 @@ DDB_PROMPT = b"ddb> "
 #   oops     the break's sequence, cpu, elr and sp_el0.
 #   intr     esr/far and whether the entry was an irq or a brk. An assertion
 #            arrives as brk, which is the 2026-09-07 case.
-#   bt       where it stopped. `bt` and `sched` are what ended #509.
+#   bt       where the debugger CPU stopped.
+#   bt cpu N both maintained CPUs, including a peer stalled in a syscall.
 #   sched    enabled/pending/current and the ready/running/blocked counts.
 #   current  the process the snapshot belongs to.
 #   ps       what else existed, so `current` can be placed among them.
@@ -173,7 +174,8 @@ DDB_PROMPT = b"ddb> "
 # `xk`/`xp`/`xu`/`xkfault`/`bttest` are excluded as not read-only in intent,
 # and `continue` because resuming a guest that stopped for a reason destroys
 # the state the next question would have asked about.
-POSTMORTEM_COMMANDS = (b"oops", b"intr", b"bt", b"sched", b"current", b"ps",
+POSTMORTEM_COMMANDS = (b"oops", b"intr", b"bt", b"bt cpu 0", b"bt cpu 1",
+                       b"sched", b"current", b"ps",
                        b"stacks", b"events")
 
 # What the walk may spend, granted on top of whatever remains of the capture

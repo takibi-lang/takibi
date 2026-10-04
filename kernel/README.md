@@ -902,8 +902,8 @@ it does not reproduce the exception-frame ABI.
 
 The QEMU suite UART driver treats a complete settings-wake fixture failure
 line as a request for diagnostic capture. It sends one serial BREAK, then
-runs the read-only `oops intr bt sched current ps stacks events` walk within
-the existing postmortem budget (including the BREAK request). The lane still
+runs the read-only `oops intr bt`, `bt cpu 0`, `bt cpu 1`, then
+`sched current ps stacks events` walk within the existing postmortem budget (including the BREAK request). The lane still
 fails with the original fixture reason, even if the monitor or debugger
 does not answer. A partial line or echoed command cannot trigger this path.
 On runners without QMP, an existing DDB prompt can still be inspected;
