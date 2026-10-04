@@ -62,15 +62,15 @@ before its issue closes. The steps keep their numbers, which issues cite.
      cores reach by handle, and a linear struct holding one owner (#131's
      first slice). On it: the three TCP pools, AddressSpaceBacking,
      ProcessImageRecord, ProcessFdContext, FdBlock and SharedObject.
-     ProcessRecord follows #693: steps 1-4 and 6 landed, step 5 mostly
-     (bare record lookups 300+ -> 26, held to that number by
-     `scripts/check_process_record_bare_uses.py`). The run
-     lock is `single_instance_lock`, so a slot-only reader can take it
-     itself and a caller holding the guard is a compile error. On it, the
-     fd context and image record handles are read by authority (run lock,
-     owner in the reap, peek in crash/diagnostics). Left in step 5:
-     address_space_backing (also read from kernel_mmu_init with the MMU
-     off), the slot-keyed setters, and the scheduler's state getters. Then step 7. #700 moves the exec's argv
+     ProcessRecord follows #693: steps 1-6 landed, and step 7 as far as it
+     goes before #637 stage 2 -- bare record lookups 300+ -> 5, the five
+     being the authority makers' own bodies, held there by
+     `scripts/check_process_record_bare_uses.py`. #694 made the run lock
+     `single_instance_lock`, so a slot-only reader takes it itself and a
+     caller holding the guard is a compile error; AddressSpaceRoot carries
+     its backing's handle and is made only by declared makers. Removing
+     `scheduled_process_record_at` from the escape list needs the makers to
+     carry the pool's proof, which is stage 2's question. #700 moves the exec's argv
      page before the Exec decision so a shortage returns ENOMEM. #696 types the
      ensure-then-write of the per-process pools. #674 and #675 follow; #680-#682 (the pin's cost)
      are measured first.

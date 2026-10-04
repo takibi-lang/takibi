@@ -2275,9 +2275,13 @@ private fn kernel_stack_run_usable(base: usize) -> bool {
 // The lowest address this slot's stack may occupy: the run's midpoint.
 // 0 for a slot with no usable run, so every caller's existing "0 means
 // there is nothing to look at" test still holds.
+// The run is fixed at allocation and given back only by the reap, and the
+// readers are stack checks on exception and diagnostic paths that cannot
+// take the run lock: the diagnostic peek, which answers 0 -- no usable run --
+// for a slot that is gone.
 private fn kernel_stack_bottom(slot: usize)
-        -> usize {
-    let base: usize = scheduled_process_record_at(slot).stack_run;
+        -> usize !{unsafe} {
+    let base: usize = scheduled_process_record_peek(slot).stack_run;
     if (kernel_stack_run_usable(base) == false) { return 0; }
     return base + KERNEL_PROCESS_STACK_SIZE;
 }
@@ -2536,8 +2540,11 @@ fn scheduled_process_table_init() !{unsafe} {
 // record is destroyed rather than reset, so this is the only one that has
 // to be written back to zero. stack_run is deliberately NOT cleared: the
 // bootstrap keeps its run for the life of the kernel, as it always did.
-private fn scheduled_process_record_reset(slot: usize) !{unsafe} {
-    let record: *ProcessRecord = scheduled_process_record_at(slot);
+// GitHub issue #693 step 7: a whole-record write, so under the run guard a
+// reader of this record holds.
+private fn scheduled_process_record_reset(guard: borrow ProcessRunGuard[lock],
+                                          slot: usize) !{unsafe} {
+    let record: *ProcessRecord = scheduled_process_record_locked(guard, slot);
     record.pid = 0;
     record.session_id = 0;
     record.start_time_ticks = 0;
@@ -2596,7 +2603,9 @@ private fn scheduled_process_release_every_process() !{unsafe} {
         }
     }
     scheduled_process_release_slot_resources(0);
-    scheduled_process_record_reset(0);
+    let reset_guard = process_run_lock();
+    scheduled_process_record_reset(reset_guard, 0);
+    process_run_unlock(reset_guard);
     scheduled_process_boot_live = false;
     // Back to zero minted, so the next process created is pid 1 again.
     scheduled_process_pid_counter_restore(0);
@@ -3559,7 +3568,7 @@ fn scheduled_process_reap_remove(
         state: sink ScheduledProcessState[process, ProcessState::Reapable])
         !{unsafe, invalidates_ProcessHandle} {
     scheduled_process_state_drop(state);
-    scheduled_process_record_reset(owner.pool_index);
+    scheduled_process_record_reset(guard, owner.pool_index);
     scheduled_process_slot_remove(guard, owner.pool_index);
     scheduled_process_owner_drop(owner);
 }
@@ -3640,17 +3649,20 @@ fn scheduled_process_probe_slot_acquire() -> usize !{unsafe} {
 
 fn scheduled_process_probe_slot_release(slot: usize) !{unsafe} {
     scheduled_process_release_slot_resources(slot);
-    scheduled_process_record_reset(slot);
     let removal_guard = process_run_lock();
+    scheduled_process_record_reset(removal_guard, slot);
     scheduled_process_slot_remove(removal_guard, slot);
     process_run_unlock(removal_guard);
 }
 
 fn scheduled_process_stack_top(handle: ProcessHandle) -> usize !{unsafe} {
+    let guard = process_run_lock();
+    let mut top: usize = 0;
     if (scheduled_process_handle_matches(handle)) {
-        return scheduled_process_record_of(handle).saved_sp;
+        top = scheduled_process_record_of_locked(guard, handle).saved_sp;
     }
-    return 0;
+    process_run_unlock(guard);
+    return top;
 }
 
 fn scheduled_process_same_slot(a: ProcessHandle, b: ProcessHandle) -> bool {

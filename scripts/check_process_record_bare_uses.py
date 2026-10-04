@@ -17,8 +17,10 @@ under is progress -- lower the budget in the same commit, so the gain cannot
 be spent later without anyone noticing.
 
 The two accessors' own definitions are not uses; every call is, including
-those inside the authority-taking wrappers (they are the mint sites #693
-step 7 keeps).
+those inside the authority-taking wrappers. Since #693 step 7 those are the
+only five left: record_of's body and the run-guard, owner and running
+makers built on the two. The number is held there, not driven to zero;
+removing them needs the makers to carry the pool's proof (#637 stage 2).
 
 Exit code only (0 = pass, 1 = fail).
 """
@@ -30,7 +32,7 @@ import sys
 from pass_line import report_pass
 
 PATH = pathlib.Path("kernel/kernel/process.tkb")
-BUDGET = 8
+BUDGET = 5
 CALL_RE = re.compile(r"\bscheduled_process_record_(?:at|of)\s*\(")
 DEF_RE = re.compile(r"^(?:private )?fn scheduled_process_record_(?:at|of)\(")
 
