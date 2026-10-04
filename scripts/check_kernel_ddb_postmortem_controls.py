@@ -182,7 +182,8 @@ class Outcome:
 
 
 def drive(driver, uart, workdir, *, timeout, qmp_port=None,
-          break_reaches_guest=True, break_failure=""):
+          break_reaches_guest=True, break_failure="", peer_settings=False,
+          break_delay=0.0):
     """Run the driver's own main() against a scripted endpoint.
 
     Returns what the lane would have reported, plus how far the clock moved,
@@ -194,6 +195,7 @@ def drive(driver, uart, workdir, *, timeout, qmp_port=None,
 
     def send_serial_break(port, chardev, budget):
         breaks.append((port, chardev))
+        clock.sleep(break_delay)
         if break_failure:
             return break_failure
         if break_reaches_guest:
@@ -213,6 +215,8 @@ def drive(driver, uart, workdir, *, timeout, qmp_port=None,
         "--timeout", str(timeout), "--ash-only", "--validate-ash",
         "--postmortem-log", str(walk_log),
     ]
+    if peer_settings:
+        argv += ["--peer-settings"]
     if qmp_port is not None:
         argv += ["--qmp-port", str(qmp_port)]
 
@@ -439,6 +443,59 @@ def check_partial_walk(driver) -> list[str]:
     return failures
 
 
+SETTINGS_FAILURE = (b"workload: settings wake FAILED: the reader is still asleep after the change to raw mode, so the change did not wake it\r\n")
+
+
+def check_fixture_failure(driver) -> list[str]:
+    failures = []
+    for prompt, answers, reaches, transport, delay in (
+            (True, True, True, "", 0.0),
+            (True, False, True, "", 3.0),
+            (False, False, False, "", 0.0),
+            (False, False, False, "monitor unavailable", 3.0)):
+        with tempfile.TemporaryDirectory() as temporary:
+            uart = FakeUart(BOOT_FIRST + SETTINGS_FAILURE,
+                driver.DDB_PROMPT if prompt else None,
+                at_prompt=False, answers=answers)
+            result = drive(driver, uart, pathlib.Path(temporary), timeout=90.0,
+                qmp_port=4444, break_reaches_guest=reaches,
+                break_failure=transport, peer_settings=True, break_delay=delay)
+            if len(result.breaks) != 1:
+                failures.append("fixture failure did not request exactly one BREAK")
+            if not result.verdict.startswith(
+                    "FAIL kernel UART driver: " + SETTINGS_FAILURE.decode().strip()):
+                failures.append("postmortem replaced the original fixture failure")
+            if result.elapsed > driver.postmortem_budget(90.0) + 0.2:
+                failures.append("fixture failure waited for the capture timeout or extended its walk budget")
+            if answers and result.commands != list(driver.POSTMORTEM_COMMANDS):
+                failures.append("fixture failure did not complete the read-only walk")
+            if answers and not result.walk_log.exists():
+                failures.append("fixture failure left no DDB transcript")
+            if transport and transport not in result.verdict:
+                failures.append("failed BREAK lost its transport diagnosis")
+    with tempfile.TemporaryDirectory() as temporary:
+        uart = FakeUart(BOOT_FIRST + SETTINGS_FAILURE, driver.DDB_PROMPT)
+        result = drive(driver, uart, pathlib.Path(temporary), timeout=90.0,
+                       qmp_port=4444, peer_settings=True)
+        if result.breaks or result.commands != list(driver.POSTMORTEM_COMMANDS):
+            failures.append("an existing prompt received another BREAK or lost its walk")
+    with tempfile.TemporaryDirectory() as temporary:
+        uart = FakeUart(BOOT_FIRST + SETTINGS_FAILURE)
+        result = drive(driver, uart, pathlib.Path(temporary), timeout=90.0,
+                       peer_settings=True)
+        if result.breaks or "no QMP port configured" not in result.verdict:
+            failures.append("a missing QMP transport was hidden or used")
+    for output in (SETTINGS_FAILURE[:-2], b"echo " + SETTINGS_FAILURE,
+                   b"peer-settings: " + SETTINGS_FAILURE):
+        with tempfile.TemporaryDirectory() as temporary:
+            uart = FakeUart(BOOT_FIRST + output)
+            result = drive(driver, uart, pathlib.Path(temporary), timeout=90.0,
+                           qmp_port=4444, peer_settings=True)
+            if result.breaks and result.elapsed < 70.0:
+                failures.append("a partial or echoed failure requested an early BREAK")
+    return failures
+
+
 class FakeQmp:
     """QEMU's monitor, far enough to answer one chardev-send-break."""
 
@@ -596,6 +653,7 @@ CHECKS = (
     ("unreachable-monitor", check_unreachable_monitor),
     ("talking-guest", check_talking_guest),
     ("partial-walk", check_partial_walk),
+    ("fixture-failure", check_fixture_failure),
     ("qmp-wire", check_qmp_wire),
     ("read-only", check_read_only),
 )
@@ -629,7 +687,8 @@ def main() -> int:
         "command in it is a read-only view the debugger answers with no "
         "argument, and a guest that stops without reaching the debugger "
         "has a BREAK asked for on its behalf while one still talking "
-        "does not",
+        "does not; a complete settings-wake failure requests one bounded "
+        "walk and retains its original reason",
         cases=CASES.ran)
     return 0
 

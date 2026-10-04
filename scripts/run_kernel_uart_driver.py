@@ -236,6 +236,15 @@ QMP_CHARDEV = "debug_uart"
 STOPPED_FRACTION = 0.25
 
 
+def settings_fixture_failure(output: bytes) -> str | None:
+    """Only a complete kernel failure line requests an early postmortem."""
+    prefix = b"workload: settings wake FAILED: "
+    for line in output.replace(b"\r", b"").split(b"\n")[:-1]:
+        if line.startswith(prefix):
+            return line.decode("ascii", errors="replace")
+    return None
+
+
 def postmortem_break_due(now: float, deadline: float, last_chunk_at: float,
                          timeout: float, peer_guard_until: float) -> bool:
     return (now >= deadline - postmortem_budget(timeout) and
@@ -273,7 +282,8 @@ def send_serial_break(port: int, chardev: str, budget: float) -> str:
     return ""
 
 
-def postmortem_note(before: bytes, answered: int, log_path) -> str:
+def postmortem_note(before: bytes, answered: int, log_path, *,
+                    fixture_requested: bool = False) -> str:
     """What a lane that stopped at a debugger prompt should say instead of a timeout."""
     last_line = next(
         (line for line in reversed(
@@ -290,8 +300,9 @@ def postmortem_note(before: bytes, answered: int, log_path) -> str:
                   f"{len(POSTMORTEM_COMMANDS) - answered} command(s) went "
                   "unanswered)")
     where = f"; transcript in {log_path}" if log_path else ""
-    return (f"the guest stopped at a DDB prompt after {last_line!r} -- this "
-            f"lane never expects one, so it is a stall, not a session. "
+    cause = ("the fixture failure requested this diagnostic stop." if fixture_requested
+             else "this lane never expects one, so it is a stall, not a session.")
+    return (f"the guest stopped at a DDB prompt after {last_line!r} -- {cause} "
             f"Walked: {walked}{where}")
 
 
@@ -453,6 +464,7 @@ def main() -> int:
     postmortem_sent = 0
     break_asked = False
     break_failure = ""
+    fixture_failure = None
     shell_step = 0
     shell_setup_sent = False
     # A tty makes BusyBox select its fancy prompt and column/color ls.
@@ -521,6 +533,24 @@ def main() -> int:
                             float(httpd_guard_file.read_text(encoding="ascii")))
                     except (OSError, ValueError):
                         pass
+                if args.peer_settings and fixture_failure is None:
+                    fixture_failure = settings_fixture_failure(bytes(output))
+                    if fixture_failure is not None and not break_asked:
+                        # This fixture has definitively failed. Unlike a quiet
+                        # boot or planned HTTP idle, no passing run is left to
+                        # spoil. Count the BREAK request inside the walk budget.
+                        budget = postmortem_budget(args.timeout)
+                        deadline = time.monotonic() + budget
+                        if DDB_PROMPT not in output:
+                            if not args.qmp_port:
+                                raise RuntimeError(fixture_failure +
+                                    "; DDB walk unavailable: no QMP port configured")
+                            break_asked = True
+                            print("[kernel/uart] fixture failed; asking QEMU for a "
+                                  "serial BREAK: " + fixture_failure, flush=True)
+                            break_failure = send_serial_break(
+                                args.qmp_port, QMP_CHARDEV, min(5.0, budget))
+
                 if (args.qmp_port and not break_asked and
                         postmortem_at is None and
                         args.postmortem_request_file and
@@ -557,10 +587,11 @@ def main() -> int:
                 if prompts:
                     if postmortem_at is None:
                         postmortem_at = output.index(DDB_PROMPT)
-                        deadline = max(
-                            deadline,
-                            time.monotonic()
-                            + postmortem_budget(args.timeout))
+                        if fixture_failure is None:
+                            deadline = max(
+                                deadline,
+                                time.monotonic()
+                                + postmortem_budget(args.timeout))
                         print("[kernel/uart] guest stopped at a DDB prompt; "
                               "walking "
                               + " ".join(name.decode("ascii")
@@ -575,6 +606,9 @@ def main() -> int:
                     # walk: the last command has been answered.
                     if prompts > len(POSTMORTEM_COMMANDS):
                         break
+                    continue
+
+                if fixture_failure is not None:
                     continue
 
                 # BusyBox's termios-enabled line editor asks where the
@@ -707,8 +741,8 @@ def main() -> int:
                         time.sleep(0.01)
                     peer_settings_bytes_sent = True
                 if peer_settings_sent and (
-                        b"workload: settings wake FAILED" in output or
-                        b"peer-settings: " in output):
+                        b"peer-settings: " in output and
+                        fixture_failure is None):
                     raise RuntimeError(
                         "the terminal settings change did not wake the "
                         "reader asleep in a canonical read on the secondary "
@@ -766,7 +800,7 @@ def main() -> int:
         answered = max(0, walk.count(DDB_PROMPT) - 1)
         note = postmortem_note(
             bytes(output[:postmortem_at]), min(answered, postmortem_sent),
-            args.postmortem_log)
+            args.postmortem_log, fixture_requested=fixture_failure is not None)
         # A walk the host peer asked for is not a stall: the guest was still
         # talking, and the failure is the peer's step, reported above it.
         if (args.postmortem_request_file and
@@ -776,6 +810,8 @@ def main() -> int:
             note = ("the host peer asked for a DDB walk after a failed step "
                     f"({reason}); the walk is the evidence, not a stall. "
                     + note)
+        if fixture_failure is not None:
+            note = fixture_failure + "; " + note
         raise RuntimeError(note)
 
     # Every path out of the loop above breaks on a marker, so reaching the
@@ -793,6 +829,10 @@ def main() -> int:
     # see this file's QMP_CHARDEV comment. Say which of the two it was, since
     # they call for opposite next steps: a kernel stopped in a loop is read
     # with the debugger, and a kernel not running is read on the host.
+    if fixture_failure is not None:
+        detail = ("BREAK failed: " + break_failure if break_failure else
+                  "no DDB prompt within the postmortem budget")
+        raise RuntimeError(fixture_failure + "; DDB evidence unavailable: " + detail)
     if break_asked and postmortem_at is None:
         if break_failure:
             silence += ("; the debugger could not be asked what it was doing: "

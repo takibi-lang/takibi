@@ -125,10 +125,11 @@ fixtures, finite lock-held BREAK fixture, and board lock measurements complete
 the extended short-window queue. #13 remains conditional on the solver
 threshold in `TAKIBI_CORE.md`; its recorded examples do not yet justify an
 implementation. The maintainer also selected concrete global Cell brands
-for this window. The next bounded B unit is #695: emit the ownership checker's held guards at
-call sites as an opt-in TSV report, which A consumes for #693. Program
-acceptance stays unchanged. Regular-file exhaustion handling and the shared
-EL0 regression fixture (#658) are finished.
+for this window. The held-guard TSV report (#695), consumed by A for #693,
+and regular-file exhaustion handling with its shared EL0 regression fixture
+(#658) are finished. The next bounded B unit is #668: retain a DDB walk
+when the settings-wake fixture fails, so A can diagnose #667. The lower
+bands stay untouched.
 #680, #681 and #682 (the pin's cost) stay with A: they need RPi5
 measurements first.
 
