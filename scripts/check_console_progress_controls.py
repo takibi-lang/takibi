@@ -4,6 +4,7 @@
 import contextlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import sys
@@ -32,7 +33,7 @@ class Clock:
             action()
 
 
-def pty_case(events, want_pass, ceiling=28.0):
+def pty_case(events, want_pass, ceiling=28.0, exit_delay=0.0):
     CASES.note()
     path = ROOT / "scripts/run_kernel_shell_qemu_smoketest.py"
     spec = importlib.util.spec_from_file_location("pty_progress_control", path)
@@ -41,12 +42,14 @@ def pty_case(events, want_pass, ceiling=28.0):
     queue, sent, closed = [], [], []
     clock = Clock([(at, lambda data=data: queue.append(data)) for at, data in events])
     done = False
+    done_at = None
 
     def write(_fd, data):
-        nonlocal done
+        nonlocal done, done_at
         sent.append(data)
         if data == b"\x1d":
             done = True
+            done_at = clock.now
             return len(data)
         if data == b"\x14b" or data == b"oops\n":
             answer = b"ddb> "
@@ -71,8 +74,10 @@ def pty_case(events, want_pass, ceiling=28.0):
 
     driver.time = clock
     driver.os = SimpleNamespace(environ={}, path=os.path, write=write,
+                                makedirs=os.makedirs, unlink=os.unlink,
                                 read=lambda *_: queue.pop(0),
-                                waitpid=lambda *_: (123, 0) if done else (0, 0),
+                                waitpid=lambda *_: (123, 0) if done and
+                                clock.now >= done_at + exit_delay else (0, 0),
                                 WNOHANG=1, close=closed.append)
     driver.pty = SimpleNamespace(fork=lambda: (123, 42))
     driver.select = SimpleNamespace(select=select)
@@ -84,12 +89,33 @@ def pty_case(events, want_pass, ceiling=28.0):
     driver.drain_terminal = lambda *_: None
     driver.shutil = SimpleNamespace(copyfile=lambda *_: None)
     status, output = True, io.StringIO()
-    try:
-        with contextlib.redirect_stdout(output):
-            driver.run_one("halt", 0)
-    except RuntimeError as error:
-        status = False
-        assert "timed out waiting for ash command response" in str(error), error
+    with patch.dict(os.environ, {}, clear=True), tempfile.TemporaryDirectory() as directory:
+        driver.ARTIFACT_DIR = directory
+        exit_path = Path(directory) / 'await-halt-exit.jsonl'
+        exit_path.write_text('stale exit timing\n')
+        try:
+            with contextlib.redirect_stdout(output):
+                driver.run_one("halt", 0)
+        except RuntimeError as error:
+            status = False
+            assert ('timed out waiting for ash command response' in str(error)
+                    or 'timed out waiting for Ctrl-] cleanup' in str(error)), error
+        rows = [json.loads(line) for line in
+                (Path(directory) / 'await-halt.jsonl').read_text().splitlines()]
+        assert len(rows) == 3 and all(row['timeout_seconds'] == ceiling for row in rows)
+        assert all(row['budget_origin'] == 'startup ceiling (UART inactivity limit 8s)' for row in rows)
+        if done:
+            assert all(row['status'] == 'arrived' for row in rows)
+            exit_rows = [json.loads(line) for line in exit_path.read_text().splitlines()]
+            assert len(exit_rows) == 1
+            assert exit_rows[0]['timeout_seconds'] == driver.EXIT_TIMEOUT_SECONDS
+            assert exit_rows[0]['budget_origin'] == 'Ctrl-] cleanup start'
+            assert (exit_rows[0]['status'] == 'arrived') == want_pass
+            if want_pass:
+                assert exit_rows[0]['elapsed_seconds'] == exit_delay
+        else:
+            assert not exit_path.exists()
+            assert any(row['status'] == 'not-arrived' for row in rows)
     assert status == want_pass, (status, clock.now, sent, output.getvalue())
     assert closed == [42], closed
     if want_pass:
@@ -147,6 +173,9 @@ def main():
              + b"persistent shell: uart blocked\n"
              + b"interactive shell: uart blocked\n" + b" # ")
     assert pty_case([(4.0, b"boot\n"), (10.0, b"boot\n"), (16.0, ready)], True) < 28.0
+    progress = [(4.0, b"boot\n"), (10.0, b"boot\n"), (16.0, ready)]
+    assert pty_case(progress, True, exit_delay=5.0) > 20
+    assert pty_case(progress, False, exit_delay=20.0) > 30
     assert pty_case([], False) == 8.0
     assert pty_case([(4.0, b"boot\n")], False) == 12.0
     assert pty_case([(at, b"boot\n") for at in range(4, 40, 4)], False) == 28.0

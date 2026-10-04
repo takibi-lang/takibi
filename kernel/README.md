@@ -1530,6 +1530,11 @@ record names the separate inactivity limit; elapsed boot time is not divided
 by that progress-renewed limit. Ash-only captures observe the shell-exit
 marker instead. Missing markers remain explicit even when DDB supplies the
 failure diagnosis.
+The interactive QEMU PTY driver records shell readiness, command response and
+all-core parking against its startup ceiling in `await-<command>.jsonl` under
+the shell smoke artifact directory. `await-<command>-exit.jsonl` records child
+exit against the separate Ctrl-] cleanup budget. A startup failure removes a
+previous exit observation rather than attributing it to the current run.
 Other console drivers do not yet contribute; zero observations do not establish
 that their margins are sufficient. These observations do not alter deadlines
 or functional verdicts.

@@ -13,6 +13,7 @@ import time
 import urllib.request
 
 from progress_timeout import ProgressTimeout
+from await_timing import AwaitTiming
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -132,6 +133,14 @@ def verify_http(url):
 def run_one(command, http_offset):
     name = "restart" if command == "reboot" else command
     stop_marker = f"\nsystem stop: {name} (all cores parked)\n".encode("ascii")
+    startup_path = os.path.join(ARTIFACT_DIR, f"await-{command}.jsonl")
+    exit_path = os.path.join(ARTIFACT_DIR, f"await-{command}-exit.jsonl")
+    try:
+        os.makedirs(ARTIFACT_DIR, exist_ok=True)
+        if os.path.exists(exit_path):
+            os.unlink(exit_path)
+    except OSError as error:
+        print(f"RECORDED kernel/pty await artifact unavailable: {error}", flush=True)
     pid, terminal = pty.fork()
     if pid == 0:
         os.chdir(REPO_ROOT)
@@ -153,8 +162,14 @@ def run_one(command, http_offset):
     reap_check_sent = False
     reap_check_done = False
     http_checked = False
-    startup = ProgressTimeout(START_TIMEOUT_SECONDS, START_CEILING_SECONDS,
-                              time.monotonic())
+    started = time.monotonic()
+    startup = ProgressTimeout(START_TIMEOUT_SECONDS, START_CEILING_SECONDS, started)
+    startup_timing = AwaitTiming(
+        startup_path, started, START_CEILING_SECONDS, [], [],
+        label=f"kernel/pty {command}",
+        origin=f"startup ceiling (UART inactivity limit {START_TIMEOUT_SECONDS:g}s)",
+        milestones=("shell ready", "command response", "all cores parked"))
+    exit_timing = None
 
     try:
         while not startup.expired(time.monotonic()):
@@ -165,7 +180,8 @@ def run_one(command, http_offset):
                 except OSError:
                     data = b""
                 if data:
-                    startup.observe(time.monotonic())
+                    arrived_at = time.monotonic()
+                    startup.observe(arrived_at)
                     transcript.extend(data)
                     normalized = bytes(transcript).replace(b"\r", b"")
                     url_match = HTTP_URL_PATTERN.search(normalized)
@@ -176,6 +192,8 @@ def run_one(command, http_offset):
                             fail(pid, transcript, f"interactive HTTP check failed: {error}")
                         http_checked = True
                     ready = any(marker in normalized for marker in READY_MARKERS)
+                    if ready:
+                        startup_timing.record("shell ready", True, arrived_at)
                     if (not reap_check_sent and http_checked and ready and
                             b" # " in normalized):
                         os.write(terminal, b"ps; echo " + HTTPD_REAP_RESULT + b"\n")
@@ -213,9 +231,11 @@ def run_one(command, http_offset):
                         command_sent = True
                     if (command_sent and not stop_sent and
                             b"\n" + COMMAND_RESULT + b"\n" in normalized):
+                        startup_timing.record("command response", True, arrived_at)
                         os.write(terminal, f"x=; /bin/busybox {command} -f\n".encode("ascii"))
                         stop_sent = True
                     if stop_sent and stop_marker in normalized:
+                        startup_timing.record("all cores parked", True, arrived_at)
                         os.write(terminal, b"\x1d")
                         break
 
@@ -225,10 +245,16 @@ def run_one(command, http_offset):
         else:
             fail(pid, transcript, "timed out waiting for ash command response and system stop")
 
-        deadline = time.monotonic() + EXIT_TIMEOUT_SECONDS
+        startup_timing.finish(time.monotonic())
+        exit_started = time.monotonic()
+        deadline = exit_started + EXIT_TIMEOUT_SECONDS
+        exit_timing = AwaitTiming(exit_path, exit_started, EXIT_TIMEOUT_SECONDS, [], [],
+                                 label=f"kernel/pty {command}", origin="Ctrl-] cleanup start",
+                                 milestones=("child process exit",))
         while time.monotonic() < deadline:
             exited_pid, status = os.waitpid(pid, os.WNOHANG)
             if exited_pid:
+                exit_timing.record("child process exit", True, time.monotonic())
                 if status == 0:
                     drain_terminal(terminal, transcript)
                     verify_uart_transcript(pid, transcript, stop_marker)
@@ -240,6 +266,9 @@ def run_one(command, http_offset):
             time.sleep(0.1)
         fail(pid, transcript, "timed out waiting for Ctrl-] cleanup")
     finally:
+        startup_timing.finish(time.monotonic())
+        if exit_timing is not None:
+            exit_timing.finish(time.monotonic())
         os.close(terminal)
 
 
