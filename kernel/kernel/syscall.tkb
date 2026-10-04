@@ -368,6 +368,81 @@ fn kernel_syscall_exec_argc() -> usize {
 // do. The record's command line stays the ps/procfs cache; the exec's map
 // path takes the run lock itself, so it cannot read the record under a
 // guard held across it.
+// GitHub issue #700: the page a child's exec copies its argv into is taken
+// before execve decides ChildExec, so a shortage is the caller's ENOMEM
+// rather than a fail-stop after the point of no return (Linux allocates
+// linux_binprm before begin_new_exec for the same reason). The page crosses
+// the return to user_entry.S's child-exec branch in this stable owner slot:
+// execve puts it, kernel_process_child_exec_prepare takes it, and a slot
+// found full or empty is an invariant break, not a shortage. execve runs on
+// core 0 only (it is not peer-safe), so one slot serves.
+variant ExecArgsValue {
+    Empty;
+    Held(exists page: usize. PageOwner[page]);
+}
+
+struct ExecArgsStore {
+    private mutex: Mutex;
+    private value: ExecArgsValue;
+}
+
+private let mut exec_args_store: ExecArgsStore;
+
+private linear struct ExecArgsGuard[lock: addr] {
+    private flags: usize;
+}
+
+private fn exec_args_lock(lock: *Mutex @ address) -> ExecArgsGuard[address]
+        !{acquires_lock_40_exec_args, lock_guard_40_exec_args} {
+    let mut guard: ExecArgsGuard[address] = { mutex_acquire(lock) };
+    return guard;
+}
+
+private fn exec_args_unlock(guard: sink ExecArgsGuard[address],
+                            lock: *Mutex @ address) {
+    mutex_release(lock, guard.flags);
+}
+
+private fn exec_args_put(page: sink PageOwner[p]) {
+    let guard = exec_args_lock(&exec_args_store.mutex);
+    let previous: ExecArgsValue = stable_replace(
+        guard, &exec_args_store.mutex, exec_args_store.value,
+        ExecArgsValue::Held(page));
+    exec_args_unlock(guard, &exec_args_store.mutex);
+    match previous {
+        ExecArgsValue::Empty => {}
+        ExecArgsValue::Held(stale) => {
+            // A second ChildExec before the first prepare took its page.
+            page_free(stale);
+            kernel_syscall_fail_stop(0);
+        }
+    }
+}
+
+// The reservation as one step from an allocation result, so the boot probe
+// can hand it a refused allocation without exhausting the page allocator.
+must_use variant ExecArgsReserve { OutOfMemory; Reserved; }
+
+private fn kernel_syscall_exec_args_reserve(allocated: sink PageAllocResult)
+        -> ExecArgsReserve {
+    match allocated {
+        PageAllocResult::OutOfMemory => { return ExecArgsReserve::OutOfMemory; }
+        PageAllocResult::Allocated(args_page) => {
+            exec_args_put(args_page);
+            return ExecArgsReserve::Reserved;
+        }
+    }
+}
+
+fn kernel_syscall_exec_args_take() -> ExecArgsValue {
+    let guard = exec_args_lock(&exec_args_store.mutex);
+    let taken: ExecArgsValue = stable_replace(
+        guard, &exec_args_store.mutex, exec_args_store.value,
+        ExecArgsValue::Empty);
+    exec_args_unlock(guard, &exec_args_store.mutex);
+    return taken;
+}
+
 fn kernel_syscall_exec_argv_copy(destination: borrow [u8; 512..]) !{unsafe} {
     let slot: usize = kernel_syscall_process_slot();
     let guard = process_run_lock();
@@ -3394,8 +3469,8 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
             kernel_process_exec_failure_set(KernelChildExecPrepareResult::StaticMapOutOfMemory);
             kernel_syscall_fail_stop(frame_sp);
         }
-        KernelChildExecPrepareResult::ArgvOutOfMemory => {
-            kernel_process_exec_failure_set(KernelChildExecPrepareResult::ArgvOutOfMemory);
+        KernelChildExecPrepareResult::ArgvPageMissing => {
+            kernel_process_exec_failure_set(KernelChildExecPrepareResult::ArgvPageMissing);
             kernel_syscall_fail_stop(frame_sp);
         }
     }
@@ -6099,6 +6174,18 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         if (exec_path_absolute == false) { return SyscallAction::Resume(LINUX_ENOENT); }
         if (argc >= 16) { return SyscallAction::Resume(LINUX_EINVAL); }
         let packed_argc: {0..<16 as usize} = argc;
+        // GitHub issue #700: the last fallible step, before anything below
+        // records the exec as pending.
+        let child_exec: bool = kernel_process_is_child();
+        if (child_exec) {
+            match kernel_syscall_exec_args_reserve(
+                    page_alloc(PageOwnerTag::ExecArgs)) {
+                ExecArgsReserve::OutOfMemory => {
+                    return SyscallAction::Resume(LINUX_ENOMEM);
+                }
+                ExecArgsReserve::Reserved => {}
+            }
+        }
         let diagnostic_argv: []u8 = syscall_exec_argv_here();
         // GitHub issue #618: one critical section, so a procfs snapshot on
         // another CPU copies the old command line or the new one, never
@@ -6114,7 +6201,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         scheduled_process_set_exec_pending(exec_guard,
             kernel_syscall_process_slot(), true);
         process_run_unlock(exec_guard);
-        if (kernel_process_is_child()) { return SyscallAction::ChildExec; }
+        if (child_exec) { return SyscallAction::ChildExec; }
         return SyscallAction::Exec;
     }
 
@@ -7438,6 +7525,28 @@ fn kernel_syscall_subset_probe() -> bool !{unsafe} {
                 exhausted_clone_action != 1 ||
                 exhausted_clone_value != LINUX_EAGAIN) {
                 ok = false;
+            }
+
+            // GitHub issue #700: a refused argv page is ENOMEM before the
+            // exec is recorded -- the slot stays empty -- and a granted one
+            // is held for the prepare to take.
+            match kernel_syscall_exec_args_reserve(PageAllocResult::OutOfMemory) {
+                ExecArgsReserve::OutOfMemory => {}
+                ExecArgsReserve::Reserved => { ok = false; }
+            }
+            match kernel_syscall_exec_args_take() {
+                ExecArgsValue::Empty => {}
+                ExecArgsValue::Held(stray) => { page_free(stray); ok = false; }
+            }
+            match kernel_syscall_exec_args_reserve(
+                    page_alloc(PageOwnerTag::ExecArgs)) {
+                ExecArgsReserve::OutOfMemory => { ok = false; }
+                ExecArgsReserve::Reserved => {
+                    match kernel_syscall_exec_args_take() {
+                        ExecArgsValue::Empty => { ok = false; }
+                        ExecArgsValue::Held(args_page) => { page_free(args_page); }
+                    }
+                }
             }
 
             // mmap: PROT_EXEC is always rejected.

@@ -4356,7 +4356,7 @@ enum KernelExecFailureReason: u8 {
     NoImageResolved;
     StaticImageInvalid;
     StaticMapOutOfMemory;
-    ArgvOutOfMemory;
+    ArgvPageMissing;
     DebuggerAfterCommit;
 }
 private let mut kernel_process_exec_failure_reason: KernelExecFailureReason;
@@ -4375,7 +4375,7 @@ must_use variant KernelChildExecPrepareResult {
     StaticImageInvalid;
     StaticMapOutOfMemory;
     // No page for the exec's own copy of its argv.
-    ArgvOutOfMemory;
+    ArgvPageMissing;
 }
 private let mut kernel_process_trace_enabled: bool;
 
@@ -4497,7 +4497,7 @@ fn kernel_process_exec_failure_set(result: KernelChildExecPrepareResult) {
         KernelChildExecPrepareResult::NoImageResolved => { kernel_process_exec_failure_reason = KernelExecFailureReason::NoImageResolved; }
         KernelChildExecPrepareResult::StaticImageInvalid => { kernel_process_exec_failure_reason = KernelExecFailureReason::StaticImageInvalid; }
         KernelChildExecPrepareResult::StaticMapOutOfMemory => { kernel_process_exec_failure_reason = KernelExecFailureReason::StaticMapOutOfMemory; }
-        KernelChildExecPrepareResult::ArgvOutOfMemory => { kernel_process_exec_failure_reason = KernelExecFailureReason::ArgvOutOfMemory; }
+        KernelChildExecPrepareResult::ArgvPageMissing => { kernel_process_exec_failure_reason = KernelExecFailureReason::ArgvPageMissing; }
     }
 }
 
@@ -4521,7 +4521,7 @@ fn kernel_process_exec_failure_render() {
         KernelExecFailureReason::NoImageResolved => { kernel_boot_log("no-image-resolved\n"); }
         KernelExecFailureReason::StaticImageInvalid => { kernel_boot_log("static-image-invalid\n"); }
         KernelExecFailureReason::StaticMapOutOfMemory => { kernel_boot_log("static-map-out-of-memory\n"); }
-        KernelExecFailureReason::ArgvOutOfMemory => { kernel_boot_log("argv-out-of-memory\n"); }
+        KernelExecFailureReason::ArgvPageMissing => { kernel_boot_log("argv-page-missing\n"); }
         KernelExecFailureReason::DebuggerAfterCommit => { kernel_boot_log("debugger-after-commit\n"); }
     }
 }

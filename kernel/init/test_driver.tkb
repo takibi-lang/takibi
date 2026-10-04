@@ -756,7 +756,8 @@ fn kernel_initial_process_map(rootfs_ready: bool,
 }
 
 // GitHub issue #693 step 5: the exec owns a page holding its argv for its
-// whole duration, allocated before anything is torn down. The map path
+// whole duration, allocated before anything is torn down -- by execve itself
+// since #700, before it decides ChildExec. The map path
 // takes the run lock, so argv cannot be the process record's command line
 // read under a guard held across it.
 fn kernel_process_child_exec_prepare() -> KernelChildExecPrepareResult {
@@ -764,11 +765,14 @@ fn kernel_process_child_exec_prepare() -> KernelChildExecPrepareResult {
         kernel_syscall_exec_pending() == false) {
         return KernelChildExecPrepareResult::NotChildOrPending;
     }
-    match page_alloc(PageOwnerTag::ExecArgs) {
-        PageAllocResult::OutOfMemory => {
-            return KernelChildExecPrepareResult::ArgvOutOfMemory;
+    // GitHub issue #700: execve allocated this page before deciding
+    // ChildExec and returned ENOMEM if it could not; finding none is an
+    // invariant break.
+    match kernel_syscall_exec_args_take() {
+        ExecArgsValue::Empty => {
+            return KernelChildExecPrepareResult::ArgvPageMissing;
         }
-        PageAllocResult::Allocated(args_page) => {
+        ExecArgsValue::Held(args_page) => {
             let args: [u8; PAGE_SIZE..] = page_bytes(args_page);
             let argv: [u8; 512..] = args[0..<512];
             kernel_syscall_exec_argv_copy(argv);
@@ -1071,6 +1075,7 @@ fn kernel_test_common_probes() {
     }
     if (kernel_syscall_subset_probe()) {
         kernel_boot_log("syscall subset: mmap prot+fd reject, clone invalid=EINVAL/exhausted=EAGAIN, sigaction signum+oldact ok\n");
+        kernel_boot_log("syscall subset: execve argv page refused=ENOMEM before the exec is recorded, granted=held for the prepare\n");
         kernel_boot_log("syscall subset: vectored inetd split+partial+short+wait ok\n");
     } else {
         kernel_boot_log("syscall subset: failed\n");
