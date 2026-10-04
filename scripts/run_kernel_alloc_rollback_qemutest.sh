@@ -95,6 +95,7 @@ INIT_LISTENER="$ARTIFACT_POINT_DIR/init.listener"
 NETWORK_READY="$ARTIFACT_POINT_DIR/network.ready"
 INTERACTIVE_HTTPD_READY="$ARTIFACT_POINT_DIR/interactive-httpd.ready"
 INTERACTIVE_HTTPD_DONE="$ARTIFACT_POINT_DIR/interactive-httpd.done"
+HTTPD_GUARD_FILE="$ARTIFACT_POINT_DIR/httpd-peer-guard.until"
 EXT2_IMAGE="$REPO_ROOT/kernel/build/user/ext2.img"
 QEMU_EXT2_IMAGE="$ARTIFACT_POINT_DIR/ext2.img"
 # Every kernelcheck-*-qemu lane can run CONCURRENTLY (`make kernelcheck`
@@ -123,7 +124,7 @@ mkdir -p "$ARTIFACT_POINT_DIR"
 POSTMORTEM_REQUEST="$ARTIFACT_POINT_DIR/postmortem.request"
 rm -f "$INTERACTIVE_HTTPD_LISTENER" "$INTERACTIVE_HTTPD_READY" \
     "$INTERACTIVE_HTTPD_DONE" "$INIT_LISTENER" "$NETWORK_READY" "$FOREGROUND_HTTPD_LISTENER" \
-    "$POSTMORTEM_REQUEST"
+    "$HTTPD_GUARD_FILE" "$POSTMORTEM_REQUEST"
 cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
 exec 9>"$ARTIFACT_POINT_DIR/runner.lock"
 if ! flock -n 9; then
@@ -203,6 +204,7 @@ python3 "$REPO_ROOT/scripts/run_kernel_uart_driver.py" \
     --interactive-httpd-ready-file "$INTERACTIVE_HTTPD_READY" \
     --interactive-httpd-done-file "$INTERACTIVE_HTTPD_DONE" \
     --qmp-port "$QMP_PORT" \
+    --httpd-peer-guard-file "$HTTPD_GUARD_FILE" \
     --postmortem-request-file "$POSTMORTEM_REQUEST" \
     >"$UART_DRIVER_LOG" 2>&1 &
 uart_driver_pid=$!
@@ -254,6 +256,7 @@ timeout "$CEILING_SECS" python3 -u "$REPO_ROOT/scripts/kernel_net_test.py" \
     --init-ready-file "$INIT_LISTENER" \
     --uart-progress-file "$UART_LOG" \
     --network-ready-file "$NETWORK_READY" \
+    --httpd-peer-guard-file "$HTTPD_GUARD_FILE" \
     --postmortem-request-file "$POSTMORTEM_REQUEST" \
     >"$PEER_LOG" 2>&1 || peer_status=$?
 sed 's/^/  /' "$PEER_LOG"

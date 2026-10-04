@@ -150,6 +150,14 @@ def main():
         CASES.note()
         text = (ROOT / "scripts" / name).read_text()
         assert text.count("--uart-progress-file " + argument) == 1, name
+    # Both sides must share the finite wait guard: otherwise the UART driver
+    # asks for BREAK while the network peer is still legitimately waiting.
+    for name in ("run_kernel_qemutest.sh",
+                 "run_kernel_alloc_rollback_qemutest.sh"):
+        CASES.note()
+        text = (ROOT / "scripts" / name).read_text()
+        assert text.count('--httpd-peer-guard-file "$HTTPD_GUARD_FILE"') == 2, name
+        assert '"$HTTPD_GUARD_FILE" "$POSTMORTEM_REQUEST"' in text, name
     report_pass("kernel-net readiness controls",
                 "guest bytes renew waits; touches and silence do not; the "
                 "outer ceiling, finite watchdog guard and runner wiring hold",
