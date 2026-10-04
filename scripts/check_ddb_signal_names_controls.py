@@ -23,7 +23,7 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 CHECK = "scripts/check_ddb_signal_names.py"
 SYSCALL = "kernel/kernel/syscall.tkb"
 DEBUGGER = "kernel/arch/arm64/kernel/exception_evidence.tkb"
-RUNNER = "scripts/run_kernel_ddb_qemutest.sh"
+RUNNER = "scripts/ddb_qemu_checks.py"
 
 
 def run(root):
@@ -151,8 +151,8 @@ def main() -> int:
 
     failures += case(
         "a stale first signal alternative in the runner",
-        edit(RUNNER, "sigset='(none|(sigint|sigquit|sigterm|sigchld|sigtstp)",
-             "sigset='(none|(sigquit|sigterm|sigchld|sigtstp)"),
+        edit(RUNNER, 'SIGNALS = (r"(none|(sigint|sigquit|sigterm|sigchld|sigtstp)',
+             'SIGNALS = (r"(none|(sigquit|sigterm|sigchld|sigtstp)'),
         "runner signal vocabulary rejects")
     failures += case(
         "a stale real-state mask gate",

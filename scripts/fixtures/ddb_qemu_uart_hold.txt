@@ -1,0 +1,11 @@
+0x000000004001412c in read_cntpct () at /workspaces/takibi-codex/kernel/arch/arm64/kernel/timer.tkb:20
+20	    return mrs_cntpct_el0() as i64;
+sending: Qqemu.PhyMemMode:1
+received: "OK"
+Breakpoint 1 at 0x40065e18: file /workspaces/takibi-codex/kernel/kernel/console_contention_evidence.tkb, line 163.
+[Switching to Thread 1.2]
+
+Thread 2 hit Breakpoint 1, console_ddb_hold_checkpoint () at /workspaces/takibi-codex/kernel/kernel/console_contention_evidence.tkb:163
+163	    if (console_lock_is_held() == false) {
+PASS console BREAK injection: peer guard and phase are held
+[Inferior 1 (process 1) detached]

@@ -127,8 +127,9 @@ threshold in `TAKIBI_CORE.md`; its recorded examples do not yet justify an
 implementation. The maintainer also selected concrete global Cell brands
 for this window. The held-guard TSV report (#695), consumed by A for #693,
 and regular-file exhaustion handling with its shared EL0 regression fixture
-(#658) are finished. The next bounded B unit is #668: retain a DDB walk
-when the settings-wake fixture fails, so A can diagnose #667. The lower
+(#658) are finished, as is the settings-wake failure DDB capture (#668).
+The maintainer selected #636 for the next bounded B unit: offline QEMU DDB
+capture validation with individual failed requirements. The remaining lower
 bands stay untouched.
 #680, #681 and #682 (the pin's cost) stay with A: they need RPi5
 measurements first.

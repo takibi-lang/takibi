@@ -752,6 +752,24 @@ lowercase `b`. The command inventory and safety rules are documented under
 transcript at the path they print; keep a unique transcript by setting
 `KERNEL_SHELL_TRANSCRIPT` before starting the session.
 
+The QEMU DDB lane saves `validation.json` beside `uart.log` before boot.
+To replay its final capture predicates without QEMU, a port, or a board:
+
+```bash
+python3 scripts/validate_kernel_ddb_qemu.py \
+  --log _build/kernel-ddb-qemu/uart.log \
+  --metadata _build/kernel-ddb-qemu/validation.json
+```
+
+Keep the UART log, metadata, and `uart.log.hold-gdb.log` together for UART
+BREAK captures. Software BREAK uses its recorded generated-text bounds and
+needs no hold log. The metadata records the ELF digest and read-test address;
+it must come from the capture's original ELF. For an older capture without
+metadata, pass `--elf ORIGINAL_ELF --break-source uart` (or `software`)
+instead of `--metadata`. Each missing or invalid requirement is reported
+separately. A replay checks retained output and ordering; it does not repeat
+interrupt timing or the live GDB comparison.
+
 The checked-in GDB commands are deliberately read-only unless their filename
 identifies a focused injection test. Start GDB with the ELF that is running,
 connect to the QEMU gdbstub or OpenOCD server, and then source only the helper

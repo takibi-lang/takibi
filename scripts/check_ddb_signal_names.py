@@ -26,6 +26,7 @@ bits it named: a named bit missing from it is printed twice, and an unnamed
 bit inside it is dropped from a view whose whole claim is that nothing is.
 """
 
+import ast
 import pathlib
 import re
 import sys
@@ -36,7 +37,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SYSCALL = ROOT / "kernel" / "kernel" / "syscall.tkb"
 DEBUGGER = ROOT / "kernel" / "arch" / "arm64" / "kernel" / "exception_evidence.tkb"
 
-RUNNER = ROOT / "scripts" / "run_kernel_ddb_qemutest.sh"
+RUNNER = ROOT / "scripts" / "ddb_qemu_checks.py"
 RENDERER = "ddb_put_signal_set"
 
 
@@ -94,22 +95,32 @@ def renderer(text: str) -> tuple[dict[str, str], dict[str, str], list[str]]:
 
 def runner_problems(text: str, numbers: dict[str, int]) -> list[str]:
     """Use rendered sets, so a stale alternative in either gate cannot pass."""
-    shape = re.search(r"^sigset='([^']+)'$", text, re.MULTILINE)
-    real = re.search(r"! grep -Eq '([^']* masked=[^']+)'", text)
-    if shape is None or real is None:
+    tree = ast.parse(text)
+    shapes = [ast.literal_eval(node.value) for node in ast.walk(tree)
+              if isinstance(node, ast.Assign) and any(
+                  isinstance(target, ast.Name) and target.id == "SIGNALS"
+                  for target in node.targets)]
+    real_patterns = [node.args[0].value for node in ast.walk(tree)
+                     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                     and node.func.id == "has" and node.args
+                     and isinstance(node.args[0], ast.Constant)
+                     and isinstance(node.args[0].value, str)
+                     and node.args[0].value.startswith("^ddb: ps pid=1 ppid=0 .* masked=")]
+    if len(shapes) != 1 or len(real_patterns) != 1:
         return ["runner signal vocabulary predicates are missing or reshaped"]
+    shape, real = shapes[0], real_patterns[0]
     names = [name.lower() for name in sorted(numbers, key=numbers.get)]
     for subset in range(1 << len(names)):
         rendered = ",".join(name for bit, name in enumerate(names) if subset & (1 << bit))
         for value in ((rendered, rendered + "+0x0000000020000000") if rendered else
                       ("none", "0x0000000020000000")):
-            if re.fullmatch(shape[1], value) is None:
+            if re.fullmatch(shape, value) is None:
                 return [f"runner signal vocabulary rejects the real DDB set {value}"]
     for name in names:
         line = f"ddb: ps pid=1 ppid=0 state=3 masked={name}+0x0000000020000000 owner=none"
-        if re.search(real[1], line) is None:
+        if re.search(real, line) is None:
             return [f"runner signal vocabulary does not exercise PID 1 mask {name}"]
-    if re.fullmatch(shape[1], "sigunknown") is not None:
+    if re.fullmatch(shape, "sigunknown") is not None:
         return ["runner signal vocabulary accepts an unknown named signal"]
     return []
 
@@ -176,7 +187,7 @@ def main() -> int:
 
     try:
         problems.extend(runner_problems(RUNNER.read_text(encoding="ascii"), numbers))
-    except (OSError, re.error) as error:
+    except (OSError, re.error, SyntaxError, ValueError) as error:
         problems.append(f"runner signal vocabulary: {error}")
 
     if problems:

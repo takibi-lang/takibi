@@ -16,7 +16,7 @@ DEFAULTS = {
     "readme": ROOT / "kernel/README.md",
     "debug_skill": ROOT / ".agents/skills/debug-kernel/references/ddb.md",
     "driver": ROOT / "scripts/run_kernel_ddb_driver.py",
-    "qemu_test": ROOT / "scripts/run_kernel_ddb_qemutest.sh",
+    "qemu_checks": ROOT / "scripts/ddb_qemu_checks.py",
 }
 
 
@@ -187,7 +187,7 @@ def check(paths: dict[str, Path]) -> int:
     covered = driver_commands(paths["driver"].read_text(encoding="ascii"))
     if set(covered) != set(all_names):
         fail("QEMU integration driver", all_names, covered)
-    check_waker_fixture(paths["qemu_test"].read_text(encoding="ascii"))
+    check_waker_fixture(paths["qemu_checks"].read_text(encoding="ascii"))
     return len(all_names)
 
 

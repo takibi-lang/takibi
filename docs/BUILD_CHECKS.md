@@ -33,6 +33,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_compiler_sync_rules.py` | declared compiler counterpart changes stay synchronized |
 | `check_ddb_command_inventory.py` | DDB dispatch, help, documentation, classification, and coverage agree |
 | `check_ddb_command_inventory_controls.py` | Positive and build-faithful negative controls for the DDB inventory check |
+| `check_ddb_qemu_capture_controls.py` | Retained UART/software BREAK captures exercise the shared live/offline predicates; missing evidence, wrong values and ordering violations fail with individual diagnoses |
 | `check_ddb_rpi5_capture_controls.py` | Live and offline DDB verdicts accept LF/CRLF and refuse missing console-hold/release evidence, unheld mutex/phase, echoed commands, and invalid peer-stop evidence |
 | `check_ddb_signal_names.py` | DDB's process view names every signal kill(2) accepts, spelled from the ABI constant, and subtracts the named bits from its hex remainder; both QEMU runner gates accept the rendered sets |
 | `check_ddb_signal_names_controls.py` | Controls for the DDB signal-vocabulary check |

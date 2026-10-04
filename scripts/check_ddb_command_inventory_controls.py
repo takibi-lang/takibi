@@ -64,9 +64,9 @@ with tempfile.TemporaryDirectory() as temporary:
     )
     negative = run("--source", str(changed))
 
-    qemu_test = ROOT / "scripts/run_kernel_ddb_qemutest.sh"
-    qemu_source = qemu_test.read_text(encoding="ascii")
-    qemu_changed = Path(temporary) / "run_kernel_ddb_qemutest.sh"
+    qemu_checks = ROOT / "scripts/ddb_qemu_checks.py"
+    qemu_source = qemu_checks.read_text(encoding="ascii")
+    qemu_changed = Path(temporary) / "ddb_qemu_checks.py"
     qemu_changed.write_text(
         qemu_source.replace(
             "^ddb: wait pid=10 state=blocked waits-for event=uart-rx queued=1$",
@@ -75,7 +75,7 @@ with tempfile.TemporaryDirectory() as temporary:
         ),
         encoding="ascii",
     )
-    qemu_negative = run("--qemu_test", str(qemu_changed))
+    qemu_negative = run("--qemu_checks", str(qemu_changed))
 
 if negative.returncode == 0:
     raise SystemExit("negative DDB inventory control unexpectedly succeeded")

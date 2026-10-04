@@ -1,0 +1,127 @@
+# Retained DDB evidence from the cfb2936b QEMU control, with unrelated boot and repeated event lines omitted.
+ddb: interrupt-safe UART debugger
+ddb: console lock probe phase=0 release=0 entry-held=no
+ddb: world-stop complete mask=0x0000000000000002
+ddb: break seq=1 cpu=0 elr=0x000000004008c050 sp_el0=0x0000000000000000
+ddb: break seq=1 cpu=0 elr=0x000000004008c050 sp_el0=0x0000000000000000
+ddb: x0=0x0000000000000000 x1=0x0000000000000000 x2=0x0000000000000001 x3=0x000000000000000a
+ddb: x4=0x0000000080123000 x5=0x00000000801a3000 x6=0x00000000801a3000 x7=0x0000000000000007
+ddb: x8=0x0000000000000001 x9=0x00000000401008b8 x10=0x000000000017af1e x11=0x0000000000003a7b
+ddb: x12=0x00000000000001fc x13=0x0000000000000000 x14=0x0000000000000002 x15=0x0000000000000000
+ddb: x16=0x0000000000000000 x17=0x000000000000000c x18=0x0000000000004857 x19=0x0000000000000000
+ddb: x20=0x0000000000000191 x21=0x0000000080004524 x22=0x00000000bffffe00 x23=0x0000000080123000
+ddb: x24=0x00000000801a3000 x25=0x0000000080183000 x26=0x00000000401d93c0 x27=0x0000000000000001
+ddb: x28=0x000000000000014b x29=0x00000000401e7be0 x30=0x00000000400799a0
+ddb: sp_el0=0x0000000000000000 elr=0x000000004008c050 spsr=0x0000000060000345 tpidr_el0=0x0000000000000000
+ddb: intr cpu=0 entry=brk source=21579 live_daif=0x00000000000003c0 saved_daif=0x0000000000000340
+ddb: intr esr=0x00000000f200544b far=0x0000000000000000
+ddb: sched enabled=1 pending=1 current=1 ready=0 running=1 blocked=0 exited=0 truncated=0
+ddb: wait current=1 state=running reason=none awaited=0
+ddb: wait edges=0 blocked=0 unknown=0 truncated=0
+ddb: current pid=1 parent=0 state=2 wait=0
+ddb: activity cpu=0 syscall current=1 stack=1
+ddb: activity cpu=1 idle-loop current=0 stack=0
+ddb: vm pid=1 root=0 live=1 asid=1 l1=0x0000000040248000
+ddb: vm-global asid-width=16 asid-generation=2 asid-next=3 asid-rollovers=1 pages-live=2472 pages-total=261560
+ddb: fds pid=1 slots=16
+ddb: ps count=1 truncated=0
+ddb: ps pid=1 ppid=0 state=2 wait=0 root=0 sp=0x0000000040348000 pending=none masked=none owner=0 mask=0x0000000000000000 core0=0
+ddb: stacks cpus=2 processes=1 truncated=0
+ddb: stack cpu=0 pid=1 stack=0x00000000401e4000..0x00000000401e8000 owner=0 record=match
+ddb: stack cpu=1 status=idle
+ddb: stacks roots=1 matched=1 missing=0 duplicate-process=0 owner-mismatch=0 range-mismatch=0 duplicate-pid=0 duplicate-stack=0
+ddb: wait current=1 state=running reason=none awaited=0
+ddb: wait edges=0 blocked=0 unknown=0 truncated=0
+ddb: wait current=3 state=running reason=net-rx frame-pending=no connection-pending=unknown awaited=1
+ddb: wait pid=1 state=blocked waits-for child pid=2 state=blocked
+ddb: wait pid=2 state=blocked waits-for child pid=3 state=running
+ddb: wait pid=3 state=running waits-for event=net-rx frame-pending=no connection-pending=unknown
+ddb: wait pid=9 state=blocked waits-for child unknown
+ddb: wait pid=10 state=blocked waits-for event=uart-rx queued=1
+ddb: wait pid=11 state=blocked waits-for event=deadline
+ddb: wait pid=12 state=blocked waits-for event=signal
+ddb: wait pid=13 state=blocked waits-for unknown
+ddb: wait pid=14 state=blocked waits-for event=uart-tx queued=320 low-water=256
+ddb: wait pid=15 state=blocked waits-for event=net-rx frame-pending=no connection-pending=unknown
+ddb: wait edges=8 blocked=9 unknown=2 truncated=1
+ddb: waittest ps pid=10 ppid=0 state=3 wait=1 waker=uart-rx queued=1 root=0 sp=0x0000000000000000 pending=none masked=none owner=none mask=0x0000000000000000 core0=0
+ddb: proc pid=1 ppid=0 state=2 wait=0 root=0 sp=0x0000000040348000 pending=none masked=none owner=0 mask=0x0000000000000000 core0=0
+ddb: bt source=cpu cpu=0 pid=1 stack=0x00000000401e4000..0x00000000401e8000
+ddb: bt frame=0 pc=0x000000004008c050 boundary=assembly-bridge
+ddb: bt frame=1 pc=0x00000000400799a0 fp=0x00000000401e7be0
+ddb: bt frame=2 pc=0x000000004008290c fp=0x00000000401e7bf0
+ddb: bt frame=3 pc=0x000000004008bcf4 fp=0x00000000401e7f90
+ddb: bt frame=4 pc=0x0000000040000070 fp=0x00000000401e7ff0 boundary=assembly
+ddb: bt stop=assembly-boundary fp=0x00000000401e7ff0
+ddb: bt source=cpu cpu=0 pid=1 stack=0x00000000401e4000..0x00000000401e8000
+ddb: bt frame=0 pc=0x000000004008c050 boundary=assembly-bridge
+ddb: bt frame=1 pc=0x00000000400799a0 fp=0x00000000401e7be0
+ddb: bt frame=2 pc=0x000000004008290c fp=0x00000000401e7bf0
+ddb: bt frame=3 pc=0x000000004008bcf4 fp=0x00000000401e7f90
+ddb: bt frame=4 pc=0x0000000040000070 fp=0x00000000401e7ff0 boundary=assembly
+ddb: bt stop=assembly-boundary fp=0x00000000401e7ff0
+ddb: usage: bt [PID|cpu N]
+ddb: bt pid not captured
+ddb: bt source=stopped cpu=1 pid=0 stack=0x00000000401ec000..0x00000000401f0000
+ddb: bt source=cpu cpu=1 pid=0 stack=0x00000000401ec000..0x00000000401f0000
+ddb: bt frame=0 pc=0x000000004000e8ac boundary=exception
+ddb: bt frame=1 pc=0x0000000040000110 fp=0x00000000401effe0 boundary=assembly
+ddb: bt stop=assembly-boundary fp=0x00000000401effe0
+ddb: bt cpu=9 not stopped here
+ddb: usage: bt [PID|cpu N]
+ddb: bt source=cpu cpu=0 pid=1 stack=0x00000000401e4000..0x00000000401e8000
+ddb: bt stop=unsupported-pc fp=0x00000000401e7be0
+ddb: bt source=cpu cpu=0 pid=1 stack=0x00000000401e4000..0x00000000401e8000
+ddb: bt stop=misaligned-pc fp=0x00000000401e7be0
+ddb: bt source=cpu cpu=0 pid=1 stack=0x00000000401e4000..0x00000000401e8000
+ddb: bt frame=0 pc=0x0000000040001000 boundary=exception
+ddb: bt stop=misaligned-frame fp=0x0000000000000003
+ddb: bt source=cpu cpu=0 pid=1 stack=0x00000000401e4000..0x00000000401e8000
+ddb: bt frame=0 pc=0x0000000040001000 boundary=exception
+ddb: bt stop=out-of-range fp=0x00000000401e8000
+ddb: bt source=cpu cpu=0 pid=1 stack=0x00000000401e4000..0x00000000401e8000
+ddb: bt frame=0 pc=0x0000000040001000 boundary=exception
+ddb: bt stop=depth-limit fp=0x00000000401e7be0
+ddb: bt test invalid saved contexts rejected
+ddb: bt test stopped-root unheld verdict=not-stopped
+ddb: bt test stopped-root publishing verdict=not-stopped
+ddb: bt test stopped-root moved verdict=changed
+ddb: bt test stopped-root retired verdict=not-stopped
+ddb: bt test stopped-root settled verdict=usable
+ddb: trace count=0
+ddb: events cpu=0 count=0 damaged=0 overwritten=0
+ddb: events cpu=1 count=0 damaged=0 overwritten=0
+ddb: events cpu=2 count=0 damaged=0 overwritten=0
+ddb: events cpu=3 count=0 damaged=0 overwritten=0
+ddb: unimpl count=0
+ddb: xk address=0x00000000401d5078 count=2
+ddb: xk byte address=0x00000000401d5078 value=0x0000000000000001
+ddb: xk byte address=0x00000000401d5079 value=0x0000000000000001
+ddb: usage: xk|xp HEX_ADDRESS [COUNT_1_TO_64]
+ddb: usage: xk|xp HEX_ADDRESS [COUNT_1_TO_64]
+ddb: xk denied (not ordinary kernel RAM) address=0x0000001000000000 count=1
+ddb: xk address=0x0000000800000000 count=1
+ddb: xk fault address=0x0000000800000000
+ddb: xk guarded-fault armed-match ours=yes
+ddb: xk guarded-fault armed-other-address ours=no
+ddb: xk guarded-fault armed-other-class ours=no
+ddb: xk guarded-fault unarmed ours=no
+ddb: xp physical=0x00000000401d5078 count=2
+ddb: xp byte physical=0x00000000401d5078 value=0x0000000000000001
+ddb: xp byte physical=0x00000000401d5079 value=0x0000000000000001
+ddb: xp denied (not ordinary physical RAM) address=0x0000001000000000 count=1
+ddb: xu pid=1 root=0 address=0x0000000080000000 count=2
+ddb: xu byte address=0x0000000080000000 physical=0x0000000040250000 value=0x000000000000007f
+ddb: xu byte address=0x0000000080000001 physical=0x0000000040250001 value=0x0000000000000045
+ddb: xu pid=1 root=0 address=0x0000000080000fff count=2
+ddb: xu byte address=0x0000000080000fff physical=0x0000000040250fff value=0x0000000000000017
+ddb: xu byte address=0x0000000080001000 physical=0x0000000040252000 value=0x00000000000000c7
+ddb: usage: xu PID HEX_ADDRESS [COUNT_1_TO_64]
+ddb: usage: xu PID HEX_ADDRESS [COUNT_1_TO_64]
+ddb: xu pid not captured
+ddb: xu pid=1 root=0 address=0x0000000070000000 count=1
+ddb: xu unmapped address=0x0000000070000000
+commands: oops regs intr sched current vm fds ps stacks wait proc PID bt [PID|cpu N] trace events unimpl xk ADDRESS [COUNT] xp PHYSICAL [COUNT] xu PID ADDRESS [COUNT] help continue
+ddb: continuing
+ddb: console tx=queued
+init: ash bootstrap
