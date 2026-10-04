@@ -362,6 +362,15 @@ The shell kernel overwrites the first 2.75 MiB of the attached USB Mass Storage
 device with its interactive root filesystem, just as `kernelcheck-rpi5`
 provisions the ordinary integration image. Attach only the dedicated
 sacrificial test drive.
+`make kernelcheck-shell-rpi5` is an opt-in smoke test of this same interactive
+shell ELF and rootfs. It takes the board lease, waits for ash and the persistent
+listener, fetches `/` twice with status, content-type and body checks, and checks
+a fresh `ps` response after each request for one HTTPd process. It overwrites
+the dedicated sacrificial USB drive. It is outside the default aggregates and
+has a 300-second session ceiling after acquiring the lease. Artifacts are in
+`_build/kernel-shell-smoke-rpi5/`: UART and terminal transcripts, network peer
+log, both HTTP bodies and headers, process snapshots, await timings and
+`result.json` with the failure stage and loaded shell ELF SHA-256.
 The RPi5 shell prints reset and SWD-load durations and reports the same ash
 readiness marker after the UART is attached. It also starts the existing
 physical-Ethernet ARP/ICMP/TCP peer after SWD load, so the kernel does not pay

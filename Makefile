@@ -1940,6 +1940,15 @@ kernelsh-qemu: kernelbuild-qemu $(KERNEL_SHELL_EXT2_IMAGE)
 kernelsh-rpi5: kernelbuild-rpi5
 	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" bash scripts/run_kernel_shell_rpi5.sh
 
+## kernelcheck-shell-rpi5: opt-in HTTP smoke of the same interactive shell ELF.
+## Overwrites the dedicated sacrificial USB drive; deliberately in no aggregate.
+.PHONY: kernelcheck-shell-rpi5 _kernelcheck-shell-rpi5
+kernelcheck-shell-rpi5: kernelbuild-rpi5
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-shell-rpi5
+
+_kernelcheck-shell-rpi5:
+	@RPI5_SERIAL_DEV="$(RPI5_SERIAL_DEV)" RPI5_SWD_SPEED="$(RPI5_SWD_SPEED)" bash scripts/run_kernel_shell_rpi5_smoketest.sh
+
 ## churn-qemu / hwcheck-churn-rpi5: one sample of the process-churn workload
 ## (/bin/churn.sh through the interactive shell image; GitHub issue #584).
 ## A finder, deliberately in no aggregate: take a rate with
