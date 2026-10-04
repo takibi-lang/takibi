@@ -9512,7 +9512,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     let finfo = StringMap.find (overload_key fdef.Ast.name fdef.params) functions in
     let binding_resolution = finfo.bindings in
     let visible_bindings = Hashtbl.create 16 in
-    let report_declared = ref PathSet.empty in
+    let active_declared = ref PathSet.empty in
     let nonlocal_bindings = Hashtbl.create 16 in
     let next_nonlocal_binding = ref (-1) in
     List.iter2 (fun (name, _) id -> Hashtbl.replace visible_bindings name id)
@@ -10248,6 +10248,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             | Ast.TypeExists (_, _, body) -> guard_annotation body
             | _ -> None
           in
+          (* Source-name visibility is not ownership: a shadowed outer
+             guard stays live until its exact binding is consumed. *)
+          let guard_bindings = List.filter_map (function
+            | PVar (id, name) -> Some (name, id)
+            | PField _ -> None) (PathSet.elements !active_declared) in
           let live_guards bindings = List.filter_map (fun (visible_name, id) ->
             let path = PVar (id, visible_name) in
             match guard_annotation (binding_type id visible_name) with
@@ -10263,9 +10268,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                 { held_binding = binding; held_binding_id = id; held_type = guard_name;
                   held_rank = held.Effect_rules.rank; held_lock = held.label;
                   held_definite = definite })
-                (live_guards (List.filter_map (function
-                  | PVar (id, name) -> Some (name, id)
-                  | PField _ -> None) (PathSet.elements !report_declared))) };
+                (live_guards guard_bindings) };
           (match StringMap.find_opt target !lock_acquire_summaries with
            | None -> ()
            | Some acquired ->
@@ -10274,7 +10277,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                      raise (TypeError (e.loc, Printf.sprintf
                        "lock order violation: cannot acquire '%s' (rank %d) while holding '%s' (rank %d)"
                        acquired.label acquired.rank held.label held.rank)))
-                 (live_guards (List.of_seq (Hashtbl.to_seq visible_bindings))));
+                 (live_guards guard_bindings));
           (match StringMap.find_opt target single_instance_reach with
            | None -> ()
            | Some labels ->
@@ -10283,7 +10286,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                    raise (TypeError (e.loc, Printf.sprintf
                      "lock order violation: '%s' re-acquires single-instance lock '%s' while '%s' holds it"
                      target held.label visible_name)))
-                 (live_guards (List.of_seq (Hashtbl.to_seq visible_bindings))));
+                 (live_guards guard_bindings));
           (* GitHub issue #528; see irq_restorers. A guard passed to this
              call is being handed over -- released, usually -- rather than
              held across it. *)
@@ -10292,9 +10295,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                  && not (StringSet.mem target irq_restore_discharged))
              || StringMap.mem (loc_key e.loc) !resolved_indirect_call_effects
           then begin
-            let passed = List.filter_map (fun (a : Ast.expr) -> match a.desc with
-              | Ast.Var v -> Some v | _ -> None) args in
-            Hashtbl.iter (fun visible_name id ->
+            let passed = List.fold_left (fun paths (a : Ast.expr) -> match a.desc with
+              | Ast.Var v -> PathSet.add (pvar_expr a v) paths
+              | _ -> paths) PathSet.empty args in
+            List.iter (fun (visible_name, id) ->
               let rec irq_guard ty = match strip_borrow ty with
                 | Ast.TypeIndexed (guard_name, _) | Ast.TypeView (guard_name, _)
                 | Ast.TypeNamed guard_name ->
@@ -10306,7 +10310,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               let path = PVar (id, visible_name) in
               match irq_guard (binding_type id visible_name) with
               | Some guard_name
-                when not (List.mem visible_name passed)
+                when not (PathSet.mem path passed)
                      && not (ResourceFlow.is_consumed_on_all_paths path moved) ->
                   let cause = if StringSet.mem target may_call_indirect
                       || StringMap.mem (loc_key e.loc) !resolved_indirect_call_effects
@@ -10322,7 +10326,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                      saved, and '%s'%s. Release the guard first, or restore \
                      through a function marked restores_saved_irq"
                     visible_name guard_name name cause))
-              | _ -> ()) visible_bindings
+              | _ -> ()) guard_bindings
           end;
           let params = Option.value (StringMap.find_opt target call_params) ~default:[] in
           let rec check_args moved args params = match args with
@@ -10542,8 +10546,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | [] -> ()
     in
     let rec check_stmts moved declared taints stmts =
-      let initial_report_declared = !report_declared in
-      report_declared := declared;
+      let initial_active_declared = !active_declared in
+      active_declared := declared;
       let initial_declared = declared in
       let initial_var_types = !var_types in
       let initial_visible_bindings = Hashtbl.copy visible_bindings in
@@ -10580,7 +10584,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       var_types := initial_var_types;
       Hashtbl.reset visible_bindings;
       Hashtbl.iter (Hashtbl.add visible_bindings) initial_visible_bindings;
-      report_declared := initial_report_declared;
+      active_declared := initial_active_declared;
       (moved, declared, taints)
     and check_loop_stmts moved declared taints body =
       let exits = ref [] in
@@ -10594,7 +10598,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           (out, out_taints) !exits in
         (out, declared, out_taints))
     and check_stmt moved declared taints (s : Ast.stmt) =
-      report_declared := declared;
+      active_declared := declared;
       match s.desc with
       | Ast.StaticAssert _ ->
           (* Compile-time only: names nothing at runtime, so it can move,

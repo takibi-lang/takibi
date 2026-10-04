@@ -1673,7 +1673,9 @@ inferred through resolved direct calls. A function returning the linear token
 for a held lock also declares `lock_guard_<rank>_<name>`. While such a token is
 live, calling a function whose minimum acquisition rank is less than the held
 rank is a compile error naming both lock classes. Consuming the linear token
-ends the held-lock fact. Ranks therefore increase with nesting;
+ends the held-lock fact. Shadowing its source name does not end that fact:
+the checker follows the original binding until it is consumed or its scope
+ends. Ranks therefore increase with nesting;
 for example, a connection guard at rank 30 may nest a pool guard at rank 40,
 while the reverse order is rejected. Equal-rank acquisitions are allowed: a
 rank identifies a lock class rather than a particular instance, and the
@@ -1722,7 +1724,9 @@ passing through a `restores_saved_irq` function, is a compile error naming
 the guard. So is calling `msr_daifclr_irq` directly or calling through a
 function pointer whose target may be unknown. This also applies when a direct
 callee contains an indirect call. A guard passed to the
-call is being released rather than held across it, and is not counted. With
+call is being released rather than held across it, and is not counted. This
+exemption uses binding identity: passing a same-named inner variable does not
+exempt a shadowed outer guard. With
 no guard marked, nothing is checked: a local save and conditional restore
 with no outer guard is unaffected. Both words are checker-only.
 

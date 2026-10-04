@@ -15084,6 +15084,80 @@ let codegen_tests = [
             return use558(h);
           }") ());
 
+  Alcotest.test_case "lock order retains shadowed guard owners" `Quick
+    (fun () ->
+      let base = {|linear view ShadowLow[id: usize];
+linear view ShadowHigh[id: usize];
+fn shadow_low(id: usize) -> ShadowLow[id] !{acquires_lock_30_low, lock_guard_30_low} {
+  return view ShadowLow[id];
+}
+fn shadow_high(id: usize) -> ShadowHigh[id] !{acquires_lock_40_high, lock_guard_40_high} {
+  return view ShadowHigh[id];
+}
+fn shadow_put_low(g: sink ShadowLow[id]) {}
+fn shadow_put_high(g: sink ShadowHigh[id]) {}
+fn shadow_middle() !{acquires_lock_35_middle} {}
+fn shadow_wrapper() { shadow_middle(); }
+|} in
+      expect_type_error "cannot acquire 'middle' (rank 35) while holding 'high' (rank 40)"
+        (base ^ {|fn shadow_bad(flag: bool) {
+  let inner = shadow_low(1);
+  let g = shadow_high(2);
+  if (flag) { let g = inner; shadow_wrapper(); shadow_put_low(g); }
+  else { shadow_put_low(inner); }
+  shadow_put_high(g);
+}|}) ();
+      expect_type_error "cannot acquire 'middle' (rank 35) while holding 'high' (rank 40)"
+        (base ^ {|fn shadow_parameter(g: borrow ShadowHigh[id]) {
+  { let g: usize = 0; shadow_middle(); }
+}|}) ();
+      expect_type_error "re-acquires single-instance lock 'high' while 'g' holds it"
+        (base ^ {|fn shadow_single() -> ShadowHigh[1]
+    !{acquires_lock_40_high, lock_guard_40_high, single_instance_lock} {
+  return view ShadowHigh[1];
+}
+fn shadow_single_wrapper() {
+  let g = shadow_single(); shadow_put_high(g);
+}
+fn shadow_single_parameter(g: borrow ShadowHigh[id]) {
+  { let g: usize = 0; shadow_single_wrapper(); }
+}|}) ();
+      expect_ok (base ^ {|fn shadow_released() {
+  let inner = shadow_low(1);
+  let g = shadow_high(2);
+  shadow_put_high(g);
+  { let g = inner; shadow_middle(); shadow_put_low(g); }
+}
+fn shadow_scope_ended() {
+  { let g = shadow_high(2); shadow_put_high(g); }
+  shadow_middle();
+}|}) ());
+
+  Alcotest.test_case "IRQ protection retains shadowed guard identities" `Quick
+    (fun () ->
+      let base = {|linear view ShadowIrq[id: usize];
+fn shadow_irq_take(id: usize) -> ShadowIrq[id] !{irq_masking_guard} {
+  return view ShadowIrq[id];
+}
+fn shadow_irq_put(g: sink ShadowIrq[id]) {}
+fn shadow_irq_enable(value: usize) { msr_daifclr_irq(); }
+|} in
+      expect_type_error "cannot restore IRQs while 'g' (ShadowIrq) is live"
+        (base ^ {|fn shadow_irq_bad() {
+  let g = shadow_irq_take(1);
+  { let g: usize = 0; shadow_irq_enable(g); }
+  shadow_irq_put(g);
+}|}) ();
+      expect_type_error "cannot restore IRQs while 'g' (ShadowIrq) is live"
+        (base ^ {|fn shadow_irq_parameter(g: borrow ShadowIrq[id]) {
+  { let g: usize = 0; shadow_irq_enable(g); }
+}|}) ();
+      expect_ok (base ^ {|fn shadow_irq_released() {
+  let g = shadow_irq_take(1);
+  shadow_irq_put(g);
+  { let g: usize = 0; shadow_irq_enable(g); }
+}|}) ());
+
   Alcotest.test_case "held guard report follows scope, moves and borrowed parameters" `Quick
     (fun () ->
       Type_inf.set_held_guard_audit_enabled true;
