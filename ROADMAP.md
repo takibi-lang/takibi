@@ -9,7 +9,7 @@ history, is archived in `HISTORY.md`.
 
 Live intermittents are listed in `docs/KNOWN_INTERMITTENTS.md`, not here.
 
-## Territories, re-cut 2026-09-25; queues refreshed 2026-10-03
+## Territories, re-cut 2026-09-25; queues refreshed 2026-10-04
 
 A territory is a role, not a set of directories and not a particular agent
 (`AGENTS.md`); which agent holds which is the maintainer's per-session
@@ -121,7 +121,10 @@ fixtures, finite lock-held BREAK fixture, and board lock measurements complete
 the extended short-window queue. #13 remains conditional on the solver
 threshold in `TAKIBI_CORE.md`; its recorded examples do not yet justify an
 implementation. The maintainer also selected concrete global Cell brands
-for this window.
+for this window. The next bounded B unit is #658: finish regular-file
+exhaustion handling and faithful regression coverage without adding a
+concurrently running QEMU guest. Review test memory and RPi5 I/O cost before
+choosing the default fixture.
 #680, #681 and #682 (the pin's cost) stay with A: they need RPi5
 measurements first.
 
@@ -139,7 +142,9 @@ measurements first.
    #124, #122, #95, #51, #50, #85, #268, #636, #666.
 5. **Deferred or not a scheduled work item:** #432, #555, #250, #444, #429,
    #149, #567, #539, #536, #624, #132; #13 for `Phi`, with #216 and #109 as
-   candidate examples, only after the solver threshold is met.
+   candidate examples, only after the solver threshold is met. Also deferred:
+   #698 (metadata mutation exhaustion), #699 (host-side EL0 postmortem
+   symbolization); neither widens the current #658 unit.
 
 Items are ordered within each band as well as between bands. The deferred
 items stay listed so a changed premise can bring them back into the queue.

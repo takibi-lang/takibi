@@ -11806,6 +11806,17 @@ let codegen_tests = [
   Alcotest.test_case "a safe pointer cast cannot change a Cell brand" `Quick
     (expect_type_error "branded container pointer requires unsafe"
       (issue370_cell_fixture ^ "fn forged() -> *BrandCell[&other_pool] { return &brand_cell as *BrandCell[&other_pool]; }"));
+  Alcotest.test_case "a volatile pointer cast cannot change a Cell brand" `Quick
+    (expect_type_error "branded container pointer requires unsafe"
+      (issue370_cell_fixture ^ "fn forged_io() -> *io BrandCell[&other_pool] { return &brand_cell as *io BrandCell[&other_pool]; }"));
+  Alcotest.test_case "an untyped volatile pointer cannot mint a Cell brand" `Quick
+    (expect_type_error "branded container pointer requires unsafe"
+      (issue370_cell_fixture ^ "fn forged_io(p: *io u8) -> *io BrandCell[&brand_pool] { return p as *io BrandCell[&brand_pool]; }"));
+  Alcotest.test_case "a volatile Cell pointer preserves an unchanged brand" `Quick
+    (expect_codegen_ok (issue370_cell_fixture ^ "fn same_io() -> *io BrandCell[&brand_pool] { return &brand_cell as *io BrandCell[&brand_pool]; }"));
+  Alcotest.test_case "a volatile Cell pointer cannot change brand on return to plain" `Quick
+    (expect_type_error "branded container pointer requires unsafe"
+      (issue370_cell_fixture ^ "fn forged_plain(p: *io BrandCell[&brand_pool]) -> *BrandCell[&other_pool] { return p as *BrandCell[&other_pool]; }"));
   Alcotest.test_case "an untyped pointer cannot mint a Cell brand without unsafe" `Quick
     (expect_type_error "branded container pointer requires unsafe"
       (issue370_cell_fixture ^ "fn forged(p: *u8) -> *BrandCell[&brand_pool] { return p as *BrandCell[&brand_pool]; }"));

@@ -2951,9 +2951,12 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       let tgt_ty = of_ast target_ty in
       (* Reinterpreting a branded container pointer is a raw mint boundary,
          rather than evidence that two erased pool identities are equal. *)
-      let indexed_pointee t = match repr t with
-        | TPtr (TIndexedStruct (n, args))
-        | TAlignedPtr (_, TIndexedStruct (n, args)) -> Some (n, args)
+      let rec indexed_inner t = match strip_singleton t with
+        | TIo inner -> indexed_inner inner
+        | TIndexedStruct (n, args) -> Some (n, args)
+        | _ -> None in
+      let indexed_pointee t = match strip_singleton t with
+        | TPtr inner | TAlignedPtr (_, inner) -> indexed_inner inner
         | _ -> None in
       (match indexed_pointee tgt_ty with
        | None -> ()

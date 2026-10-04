@@ -303,6 +303,16 @@ ordinary terminal byte and is not reserved by the debugger. The console
 prints this key reminder when it starts. Miniterm's generic Ctrl-T, Ctrl-B
 indefinite BREAK toggle is intentionally not the Takibi DDB binding.
 
+A backtrace that ends at `boundary=user` reports a captured EL0 PC rather
+than a kernel frame. Resolve that PC against the exact ELF from the captured
+filesystem image: copy `/bin/user_payload` with `e2cp` when that is the
+process, retain its hash, and subtract the verified ELF load bias from the
+reported PC. `llvm-addr2line-19 -f -e ELF ELF_PC` then reports the function
+and any available source location. An ELF rebuilt after a diagnostic change
+can move the symbol; use the captured artifact. Missing debug lines remain
+unknown even when the function symbol is available. Host-side lookup does
+not extend DDB's checked unwind across an untrusted user frame.
+
 The QEMU shell also reports the elapsed time from QEMU launch to the kernel's
 explicit `interactive shell: uart blocked` readiness marker. This is the
 point at which ash is waiting for input, rather than merely the point at which
