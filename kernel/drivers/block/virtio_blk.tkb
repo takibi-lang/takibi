@@ -22,7 +22,16 @@ const VIRTIO_BLK_T_OUT: u32 = 1;
 // GitHub issue #527: this must be elapsed architectural time, not a number of
 // guest instructions. QEMU services the queue on a host thread whose progress
 // is independent of how quickly the vCPU executes this polling loop.
-const VIRTIO_BLK_COMPLETION_SECONDS: i64 = 1;
+//
+// It is a liveness backstop -- the device is dead -- and not a latency bound.
+// virtio-blk exists only under QEMU, whose verdicts are functional, and a
+// starved host delays that thread by seconds: at 1 s, every sector of an
+// ext2 write timed out and reset in turn, and the guest went silent until
+// the lane's watchdog stopped it (load average 37, 2026-10-04). 30 s is
+// longer than any delay a starved host has shown, and shorter than the
+// lane's 70 s silence watchdog, so a dead device still ends in that
+// watchdog's DDB walk, with this wait on the stopped CPU's backtrace.
+const VIRTIO_BLK_COMPLETION_SECONDS: i64 = 30;
 
 struct packed VirtioBlkDesc {
     addr: usize;

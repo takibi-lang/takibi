@@ -96,6 +96,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_legacy_dma_rx_scope.py` | legacy receive cache calls in maintained code remain only the audited GEM data-buffer calls |
 | `check_legacy_dma_rx_scope_controls.py` | Controls for new, changed, and removed legacy RX calls |
 | `check_liveness_proof_escapes.py` | every place that drops a pool's liveness proof is declared with a reason |
+| `check_wall_clock_bounds.py` | every kernel wait bounded by host wall-clock time (`read_cntfrq() * N`) is declared in `scripts/wall_clock_bounds.tsv` with a class; `pending` rows, whose QEMU verdict a starved host can flip, are removed one at a time |
+| `check_wall_clock_bounds_controls.py` | an undeclared bound, a stale row, a wrong count and an unknown class are each refused |
 | `check_process_running_mints.py` | every caller of `process_running_here`, the mint of a process's evidence that it is running, is declared (#693) |
 | `check_address_space_root_mints.py` | every maker of an `AddressSpaceRoot` (which carries its backing handle) is declared (#693) |
 | `check_process_record_bare_uses.py` | the bare `scheduled_process_record_at`/`_of` calls left in `process.tkb` equal a budget that only goes down (#693) |

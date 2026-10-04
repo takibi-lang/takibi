@@ -1,0 +1,33 @@
+# Every kernel site that bounds a wait by host wall-clock time
+# (`read_cntfrq() * N`), declared by file and enclosing function.
+# scripts/check_wall_clock_bounds.py holds the tree to this list: a site with
+# no row, a row with no site, or a different count fails.
+#
+# QEMU gates functional verdicts only (ROADMAP, 2026-10-03); a verdict that a
+# starved host can flip is not functional. `pending` rows are such sites and
+# are removed one at a time -- replaced by a bound on progress, or moved
+# behind a RECORDED verdict decided on the RPi5 -- never added without a
+# reason here. `protocol` is a timeout the protocol itself defines against a
+# real peer. `backstop` detects a dead device and is far above any delay a
+# starved host has shown.
+# Columns: file, function, sites, class, reason (tab separated).
+kernel/drivers/block/virtio_blk.tkb	virtio_blk_reset	1	backstop	reset completion: a device that never reports reset is disabled
+kernel/drivers/block/virtio_blk.tkb	virtio_blk_submit_owned	1	backstop	30 s completion: a starved host delayed 1 s completions into a stall (2026-10-04)
+kernel/kernel/asid_contention_evidence.tkb	asid_contention_probe	1	pending	two-core probe finish window (2 s)
+kernel/kernel/console_contention_evidence.tkb	console_ddb_peer_hold	1	pending	DDB peer hold budget (5 s)
+kernel/kernel/fd_table.tkb	fd_refcount_contention_probe	1	pending	two-core probe finish window (2 s); #670
+kernel/kernel/freelist_contention_evidence.tkb	freelist_contention_phase	1	pending	two-core probe finish window (2 s); #678
+kernel/kernel/freelist_contention_evidence.tkb	freelist_probe_rendezvous	1	pending	two-core rendezvous deadline (2 s); #678
+kernel/kernel/page_contention_evidence.tkb	page_contention_probe	1	pending	two-core probe finish window (2 s)
+kernel/kernel/pid_contention_evidence.tkb	pid_contention_phase	1	pending	two-core probe finish window (2 s)
+kernel/kernel/pid_contention_evidence.tkb	pid_probe_disarm_and_quiesce	1	pending	two-core quiesce deadline (2 s)
+kernel/kernel/pid_contention_evidence.tkb	pid_probe_rendezvous	1	pending	two-core rendezvous deadline (2 s)
+kernel/kernel/pool_contention_evidence.tkb	pool_contention_probe	1	pending	two-core probe finish window (2 s)
+kernel/kernel/pool_walk_contention_evidence.tkb	pool_walk_window_open	1	pending	rendezvous backstop
+kernel/kernel/schedule_contention_evidence.tkb	schedule_contention_probe	1	pending	two-core probe finish window (2 s)
+kernel/kernel/schedule_contention_evidence.tkb	schedule_contention_run_phase	1	pending	per-attempt window
+kernel/kernel/tag_contention_evidence.tkb	tag_contention_probe	1	pending	two-core probe finish window (2 s)
+kernel/net/arp.tkb	kernel_arp_reply_once	1	protocol	waits for the host peer's ARP request (15 s)
+kernel/net/icmp.tkb	kernel_icmp_reply_once	1	protocol	waits for the host peer's echo request (15 s)
+kernel/net/tcp.tkb	kernel_tcp_echo_check	1	protocol	waits for the host peer's connection (30 s)
+kernel/net/tcp.tkb	kernel_tcp_receive_once	1	protocol	receive timeout (30 s)
