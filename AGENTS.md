@@ -242,8 +242,11 @@ entrypoint under `.agents/skills/`; Claude Code has a matching entrypoint under
   without being asked each time an issue is finished.
 - `defect-followup`: right after fixing any defect, before landing it --
   root cause, regression test, and prevention of the class.
-- `session-audit`: before a session ends; propose it yourself when the
-  context grows large or several issues have closed.
+
+At the end of a session the maintainer asks for the wrap-up in plain
+language as a follow-up comment; answer that comment. There is no
+end-of-session skill, and none is to be run or proposed (maintainer,
+2026-10-04).
 
 If UART remains responsive during a kernel failure, use DDB before adding
 prints to scheduler, exception, IRQ, VM, or process paths. QEMU cannot validate

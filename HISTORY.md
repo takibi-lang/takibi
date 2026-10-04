@@ -15,6 +15,16 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-10-04: the session-audit skill is retired
+
+The `session-audit` skill (a fixed end-of-session checklist an agent ran or
+proposed on its own) was removed at the maintainer's request. The maintainer
+found the earlier practice more convenient: at the end of a session they ask
+for the wrap-up in plain language as a follow-up comment, and the agent
+answers that comment. AGENTS.md now says so in place of the skill's routing
+entry. The per-defect checks stay in `defect-followup`, and publishing stays
+in `land`.
+
 ## 2026-09-29: "Lightweight by design" becomes the stated policy
 
 Until this date the stated aim was only "lift runtime errors into compile-time
