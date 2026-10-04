@@ -9533,8 +9533,10 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
         ScheduledProcessExitedTakeResult::Missing => {}
         ScheduledProcessExitedTakeResult::Exited(done) => {
             let (exited_owner, exited_state) = done;
-            scheduled_process_record_of(child).has_parent = false;
-            scheduled_process_record_of(child).has_next_sibling =
+            // GitHub issue #693 step 5: through the owner the take handed
+            // back, not looked up again.
+            scheduled_process_record_owned(exited_owner).has_parent = false;
+            scheduled_process_record_owned(exited_owner).has_next_sibling =
                 false;
             // The teardown outside the lock, as before; the removal under
             // it (#482, see scheduled_process_reap).
@@ -9546,7 +9548,10 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
             parent = process_handle_new(parent_slot, parent_generation);
         }
     }
-    scheduled_process_record_of(parent).last_reaped_pid = pid;
+    let reaped_guard = process_run_lock();
+    scheduled_process_record_of_locked(reaped_guard, parent).last_reaped_pid =
+        pid;
+    process_run_unlock(reaped_guard);
     // scheduled_process_reap may clear the per-CPU process-image target while
     // tearing down the child. Recommit the reaper's root so a later COW fault
     // consults the same address space that TTBR0 already names.
@@ -10041,13 +10046,22 @@ fn kernel_process_reap_own_zombies() !{unsafe} {
                     // sites are scoped by relationship (a process's own
                     // children) and cannot reach the current record, so
                     // they need nothing.
-                    if (found == false &&
+                    // GitHub issue #693 step 5: the state and the parent
+                    // link are read under the run guard, released before
+                    // the reap, which takes it itself.
+                    let sweep_guard = process_run_lock();
+                    let exited: bool = found == false &&
                         execution_here().current_handle.pool_index != slot &&
                         scheduled_process_record_state(slot) ==
-                            ProcessSlotState::Exited) {
+                            ProcessSlotState::Exited;
+                    let mut owner_slot: usize = slot;
+                    if (exited) {
+                        owner_slot =
+                            kernel_process_owner_slot_of(sweep_guard, slot);
+                    }
+                    process_run_unlock(sweep_guard);
+                    if (exited) {
                         found = true;
-                        let owner_slot: usize =
-                            kernel_process_owner_slot_of(slot);
                         let mut victim: ProcessHandle =
                             scheduled_process_handle_of_slot(slot);
                         let collected: usize =
@@ -10072,10 +10086,11 @@ fn kernel_process_reap_own_zombies() !{unsafe} {
 // collect it either way rather than leave a record nobody can name.
 // Answering "itself" makes the unlink in kernel_process_reap_zombie a
 // no-op, which is what a record outside every list needs.
-private fn kernel_process_owner_slot_of(slot: usize) -> usize {
-    if (scheduled_process_record_at(slot).has_parent) {
+private fn kernel_process_owner_slot_of(guard: borrow ProcessRunGuard[lock],
+                                       slot: usize) -> usize {
+    if (scheduled_process_record_locked(guard, slot).has_parent) {
         let mut parent: ProcessHandle =
-            scheduled_process_record_at(slot).parent;
+            scheduled_process_record_locked(guard, slot).parent;
         if (scheduled_process_handle_matches(parent)) {
             return parent.pool_index;
         }
