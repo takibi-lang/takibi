@@ -2119,6 +2119,34 @@ fn scheduled_process_address_space_root_owned(
         process_backing_words(scheduled_process_record_owned(owner)));
 }
 
+// For the crash report and DDB, which must not take a lock: the diagnostic
+// peek, as their other record reads use. A dead slot reads the absent
+// record's zero handle, which pins nothing.
+fn scheduled_process_address_space_root_peek(slot: usize) -> AddressSpaceRoot !{unsafe} {
+    let mut words: ProcessPoolHandleWords = {
+        scheduled_process_record_peek(slot).address_space_backing,
+        scheduled_process_record_peek(slot).address_space_backing_generation };
+    return address_space_root_mint(slot, words);
+}
+
+fn scheduled_process_address_space_root_locked(
+        guard: borrow ProcessRunGuard[lock], slot: usize) -> AddressSpaceRoot !{unsafe} {
+    return address_space_root_mint(slot,
+        process_backing_words(scheduled_process_record_locked(guard, slot)));
+}
+
+// A boot probe's root, read once under the run lock right after the probe
+// allocated the process: its backing exists from that allocation and keeps
+// its handle until the probe releases the slot, so the root stays valid
+// for the probe's whole run.
+fn scheduled_process_probe_root(slot: usize) -> AddressSpaceRoot !{unsafe} {
+    let guard = process_run_lock();
+    let mut root: AddressSpaceRoot =
+        scheduled_process_address_space_root_locked(guard, slot);
+    process_run_unlock(guard);
+    return root;
+}
+
 fn scheduled_process_address_space_root_running(
         running: borrow ProcessRunning[process]) -> AddressSpaceRoot !{unsafe} {
     return address_space_root_mint(running.handle.pool_index,

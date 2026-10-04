@@ -27,13 +27,15 @@ from pass_line import report_pass
 ROOT = pathlib.Path("kernel")
 MINT = "address_space_root_mint"
 BARE = "address_space_root_for_slot"
-BARE_BUDGET = 107
+BARE_BUDGET = 33
 
 ALLOWED = {
     "address_space_backing_publish",
     "address_space_boot_root",
     "address_space_root_for_slot",
+    "scheduled_process_address_space_root_locked",
     "scheduled_process_address_space_root_owned",
+    "scheduled_process_address_space_root_peek",
     "scheduled_process_address_space_root_running",
 }
 

@@ -1219,8 +1219,9 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     // scheduled_process_probe_slot_acquire for why a probe has to be a
     // process to have a root of its own.
     let child_root: usize = scheduled_process_probe_slot_acquire();
+    let mut child_root_root: AddressSpaceRoot = scheduled_process_probe_root(child_root);
     if (child_root == 0) { return false; }
-    if (address_space_is_live(address_space_root_for_slot(child_root))) {
+    if (address_space_is_live(child_root_root)) {
         scheduled_process_probe_slot_release(child_root);
         return false;
     }
@@ -1237,7 +1238,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     }
     match page_alloc(PageOwnerTag::UserPage) {
         PageAllocResult::OutOfMemory => {
-            address_space_release_root(address_space_root_for_slot(child_root));
+            address_space_release_root(child_root_root);
             scheduled_process_probe_slot_release(child_root);
             return false;
         }
@@ -1245,12 +1246,12 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
             match address_space_map_page(
                     address_space_boot_root(), process_stack_top_page(), stack_page, USER_RW_XN_FLAGS) {
                 AddressSpacePteWriteResult::Invalid => {
-                    address_space_release_root(address_space_root_for_slot(child_root));
+                    address_space_release_root(child_root_root);
                     scheduled_process_probe_slot_release(child_root);
                     return false;
                 }
                 AddressSpacePteWriteResult::OutOfMemory => {
-                    address_space_release_root(address_space_root_for_slot(child_root));
+                    address_space_release_root(child_root_root);
                     scheduled_process_probe_slot_release(child_root);
                     return false;
                 }
@@ -1304,7 +1305,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
         // original shared frame.
         let top_page: usize = process_stack_top_page();
         let parent_before: usize = address_space_pte_read(address_space_boot_root(), top_page);
-        let child_before: usize = address_space_pte_read(address_space_root_for_slot(child_root), top_page);
+        let child_before: usize = address_space_pte_read(child_root_root, top_page);
         if ((parent_before & USER_PAGE_PHYS_MASK) !=
                     (child_before & USER_PAGE_PHYS_MASK) ||
             address_space_pte_is_cow(parent_before) == false ||
@@ -1317,10 +1318,10 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
         let cow_esr: usize = 0x9000004F;
         let cow_fault: usize = USER_TEXT_VA + top_page * PAGE_SIZE;
         if (ok && (process_image_handle_data_abort(cow_esr, cow_fault) == false ||
-            address_space_pte_is_cow(address_space_pte_read(address_space_root_for_slot(child_root), top_page)) ||
-            address_space_pte_is_writable(address_space_pte_read(address_space_root_for_slot(child_root), top_page)) == false ||
+            address_space_pte_is_cow(address_space_pte_read(child_root_root, top_page)) ||
+            address_space_pte_is_writable(address_space_pte_read(child_root_root, top_page)) == false ||
             (address_space_pte_read(address_space_boot_root(), top_page) & USER_PAGE_PHYS_MASK) ==
-                (address_space_pte_read(address_space_root_for_slot(child_root), top_page) & USER_PAGE_PHYS_MASK))) {
+                (address_space_pte_read(child_root_root, top_page) & USER_PAGE_PHYS_MASK))) {
             ok = false;
         }
         // EC=0x24 (data abort from a lower EL), DFSC=0x07 (translation
@@ -1330,7 +1331,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
         let first_page: usize = process_stack_top_page() - 11;
         let first_fault: usize = USER_TEXT_VA + first_page * PAGE_SIZE;
         if (process_image_handle_data_abort(l3_esr, first_fault) == false ||
-            address_space_pte_read(address_space_root_for_slot(child_root), first_page) == 0) {
+            address_space_pte_read(child_root_root, first_page) == 0) {
             ok = false;
         }
         // Crossing into branch 510 finds no L3 descriptor at all, producing
@@ -1340,9 +1341,9 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
         let second_page: usize = process_stack_top_page() - 512;
         let second_fault: usize = USER_TEXT_VA + second_page * PAGE_SIZE;
         if (ok && (process_image_handle_data_abort(l2_esr, second_fault) == false ||
-            address_space_pte_read(address_space_root_for_slot(child_root), second_page) == 0 ||
-            address_space_pte_read(address_space_root_for_slot(child_root), second_page + 1) == 0 ||
-            address_space_pte_read(address_space_root_for_slot(child_root), first_page - 1) == 0)) {
+            address_space_pte_read(child_root_root, second_page) == 0 ||
+            address_space_pte_read(child_root_root, second_page + 1) == 0 ||
+            address_space_pte_read(child_root_root, first_page - 1) == 0)) {
             ok = false;
         }
         process_image_activate_root(0);
@@ -1370,7 +1371,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     process_image_set_stack_growth_active(0, false);
     process_image_set_active_page_count(0, 0);
     process_image_set_stack_lowest_l3(0, process_stack_top_page());
-    address_space_release_root(address_space_root_for_slot(child_root));
+    address_space_release_root(child_root_root);
     scheduled_process_probe_slot_release(child_root);
     return ok;
 }
