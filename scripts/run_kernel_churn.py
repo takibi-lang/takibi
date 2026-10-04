@@ -33,6 +33,9 @@ import select
 import signal
 import sys
 import time
+from pathlib import Path
+
+from await_timing import AwaitTiming
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -89,10 +92,13 @@ def terminate(pid):
 class Session:
     """The pty around the shell runner, and what has arrived through it."""
 
-    def __init__(self, pid, terminal):
+    def __init__(self, pid, terminal, *, await_log=None, label="kernel/churn"):
         self.pid = pid
         self.terminal = terminal
         self.transcript = bytearray()
+        self.await_log = await_log
+        self.label = label
+        self.await_sequence = 0
 
     def normalized(self):
         return HOST_NOTICE.sub(
@@ -104,32 +110,46 @@ class Session:
     def send(self, data):
         os.write(self.terminal, data)
 
-    def wait_for(self, done, seconds, watch_from=None):
+    def wait_for(self, done, seconds, watch_from=None, *, await_name=None):
         """Read until done(normalized) returns something, and return it.
 
         None on a deadline or an exited runner. With watch_from, kernel
         failure text after that offset ends the wait with a FailureMarker.
         """
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            readable, _, _ = select.select([self.terminal], [], [], 0.25)
-            if readable:
-                try:
-                    data = os.read(self.terminal, 4096)
-                except OSError:
-                    data = b""
-                if not data:
-                    return None
-                self.transcript.extend(data)
-            normalized = self.normalized()
-            if watch_from is not None:
-                for marker in FAILURE_MARKERS:
-                    if marker in normalized[watch_from:]:
-                        return FailureMarker(marker)
-            answer = done(normalized)
-            if answer:
-                return answer
-        return None
+        started = time.monotonic()
+        deadline = started + seconds
+        timing = None
+        if self.await_log and await_name:
+            self.await_sequence += 1
+            timing = AwaitTiming(
+                f"{self.await_log}.await-{self.await_sequence:04d}.jsonl",
+                started, seconds, (), (), label=self.label,
+                origin="console wait start", milestones=(await_name,))
+        try:
+            while time.monotonic() < deadline:
+                readable, _, _ = select.select([self.terminal], [], [], 0.25)
+                if readable:
+                    try:
+                        data = os.read(self.terminal, 4096)
+                    except OSError:
+                        data = b""
+                    if not data:
+                        return None
+                    self.transcript.extend(data)
+                normalized = self.normalized()
+                if watch_from is not None:
+                    for marker in FAILURE_MARKERS:
+                        if marker in normalized[watch_from:]:
+                            return FailureMarker(marker)
+                answer = done(normalized)
+                if answer:
+                    if timing:
+                        timing.record(await_name, True, time.monotonic())
+                    return answer
+            return None
+        finally:
+            if timing:
+                timing.finish(time.monotonic())
 
 
 class PromptWithoutVerdict:
@@ -195,13 +215,15 @@ def ddb_read_vm(session):
     start = len(session.normalized())
     # Ctrl-T then b: the shell console's serial BREAK, on both platforms.
     session.send(b"\x14b")
-    if session.wait_for(lambda n: n.count(b"ddb> ", start) > 0, 20) is None:
+    if session.wait_for(lambda n: n.count(b"ddb> ", start) > 0, 20,
+                        await_name="DDB prompt for VM reading") is None:
         return None
     session.send(b"vm\n")
     found = session.wait_for(
-        lambda n: VM_GLOBAL.search(n, start), 20)
+        lambda n: VM_GLOBAL.search(n, start), 20, await_name="DDB VM reading")
     session.send(b"continue\n")
-    if session.wait_for(lambda n: DDB_CONTINUED in n[start:], 20) is None:
+    if session.wait_for(lambda n: DDB_CONTINUED in n[start:], 20,
+                        await_name="DDB continue after VM reading") is None:
         return None
     if found is None:
         return None
@@ -228,7 +250,7 @@ def shell_resync(session):
     sent_at = time.monotonic()
     session.send(b"\n")
     answer = session.wait_for(lambda n: has_prompt(n[start:]),
-                              RESYNC_SECONDS)
+                              RESYNC_SECONDS, await_name="fresh shell prompt")
     print(f"[churn resync] start={start} prompt_before_start={prompt_before} "
           f"answered={answer is not None} "
           f"after={time.monotonic() - sent_at:.1f}s "
@@ -282,7 +304,8 @@ def ddb_walk_hang(session):
         session.send(b"\x14b")
         session.wait_for(
             lambda n: b"ddb> " in n[start:] or
-                      b"inspection refused" in n[start:], 20)
+                      b"inspection refused" in n[start:], 20,
+            await_name="DDB postmortem prompt or refusal")
         if b"ddb> " in session.normalized()[start:]:
             break
         session.wait_for(lambda n: False, 10)
@@ -291,7 +314,8 @@ def ddb_walk_hang(session):
     for command in HANG_COMMANDS:
         seen = session.normalized().count(b"ddb> ")
         session.send(command + b"\n")
-        session.wait_for(lambda n: n.count(b"ddb> ") > seen, 20)
+        session.wait_for(lambda n: n.count(b"ddb> ") > seen, 20,
+                         await_name=f"DDB prompt after {command.decode('ascii')}")
 
 
 def run_phase(session, rounds):
@@ -311,7 +335,7 @@ def run_phase(session, rounds):
                        PromptWithoutVerdict()) or
                       (n.count(PROGRESS, start) > heartbeats and "beat"),
             min(STALL_SECONDS, max(1.0, deadline - time.monotonic())),
-            watch_from=start)
+            watch_from=start, await_name="churn heartbeat, verdict or returned prompt")
         if answer == "beat":
             heartbeats = session.normalized().count(PROGRESS, start)
             answer = None
@@ -368,6 +392,8 @@ def main():
     artifact_dir = os.path.join(root, f"kernel-{kind}-{args.platform}")
     os.makedirs(artifact_dir, exist_ok=True)
     transcript_path = os.path.join(artifact_dir, "churn-transcript.log")
+    for stale in Path(artifact_dir).glob("churn-transcript.log.await-*.jsonl"):
+        stale.unlink()
     label = f"[kernel/{args.platform} {kind}]"
 
     pid, terminal = pty.fork()
@@ -386,7 +412,8 @@ def main():
         os.environ["KERNEL_RPI5_SHELL_NETWORK_PEER"] = "0"
         os.execvp("make", ["make", "-j1", "kernelsh-rpi5"])
 
-    session = Session(pid, terminal)
+    session = Session(pid, terminal, await_log=transcript_path,
+                      label=f"kernel/{args.platform} {kind}")
 
     # A runner stopped from outside (a timeout, a person) still leaves its
     # transcript: SIGTERM becomes an exception, so the `finally` below runs.
@@ -398,7 +425,7 @@ def main():
     try:
         ready = session.wait_for(
             lambda n: any(marker in n for marker in READY_MARKERS),
-            BOOT_TIMEOUT_SECONDS[args.platform])
+            BOOT_TIMEOUT_SECONDS[args.platform], await_name="shell readiness")
         if ready is None:
             failure = "the shell never became ready"
         phases = 2 if args.long else 1
