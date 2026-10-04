@@ -12,6 +12,8 @@ import sys
 import time
 import urllib.request
 
+from progress_timeout import ProgressTimeout
+
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 READY_MARKERS = (
@@ -29,6 +31,7 @@ HTTPD_REAP_RESULT = b"__KERNELSH_HTTPD_REAP__"
 ARTIFACT_DIR = os.path.join(REPO_ROOT, "_build", "kernelcheck-shell-qemu")
 TRANSCRIPT_PATH = os.path.join(ARTIFACT_DIR, "uart-transcript.log")
 START_TIMEOUT_SECONDS = 45
+START_CEILING_SECONDS = float(os.environ.get("KERNEL_QEMU_CEILING", "270"))
 EXIT_TIMEOUT_SECONDS = 15
 
 
@@ -150,10 +153,11 @@ def run_one(command, http_offset):
     reap_check_sent = False
     reap_check_done = False
     http_checked = False
-    deadline = time.monotonic() + START_TIMEOUT_SECONDS
+    startup = ProgressTimeout(START_TIMEOUT_SECONDS, START_CEILING_SECONDS,
+                              time.monotonic())
 
     try:
-        while time.monotonic() < deadline:
+        while not startup.expired(time.monotonic()):
             readable, _, _ = select.select([terminal], [], [], 0.25)
             if readable:
                 try:
@@ -161,6 +165,7 @@ def run_one(command, http_offset):
                 except OSError:
                     data = b""
                 if data:
+                    startup.observe(time.monotonic())
                     transcript.extend(data)
                     normalized = bytes(transcript).replace(b"\r", b"")
                     url_match = HTTP_URL_PATTERN.search(normalized)

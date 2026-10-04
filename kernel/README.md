@@ -1099,6 +1099,12 @@ Readiness waits publish their finite deadline through the existing HTTP peer
 guard so the UART watchdog does not interrupt a progressing wait. A silent
 wait expires, allowing the normal DDB postmortem. Packet retry windows and
 the deliberate HTTP idle interval retain their existing bounds.
+The interactive PTY smoke driver likewise measures its 45-second silence
+budget from the last received bytes, capped by `KERNEL_QEMU_CEILING` (270
+seconds by default). The STARVED injection driver renews its existing
+120-second UART budget under the runner's `GDB_BATCH_TIMEOUT` ceiling (600
+seconds by default), leaving ten seconds to report. The STARVED verdict
+still requires the injected tick excess and the later restart report.
 
 ### What this verifies
 

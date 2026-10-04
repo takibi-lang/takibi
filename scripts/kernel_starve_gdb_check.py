@@ -26,8 +26,13 @@ import re
 import socket
 import threading
 import time
+import sys
+from pathlib import Path
 
 import gdb
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from progress_timeout import ProgressTimeout  # noqa: E402
 
 
 SERIAL_PORT = int(os.environ["AFFINITY_GDB_SERIAL_PORT"])
@@ -36,6 +41,8 @@ VERDICT = os.environ["AFFINITY_GDB_VERDICT"]
 INIT_LISTENER = os.environ["AFFINITY_GDB_INIT_LISTENER"]
 NETWORK_READY = os.environ["AFFINITY_GDB_NETWORK_READY"]
 BOOT_TIMEOUT = float(os.environ.get("AFFINITY_GDB_BOOT_TIMEOUT", "120"))
+# Report before the runner's existing gdb batch kill, even with ongoing UART.
+BATCH_CEILING = float(os.environ.get("GDB_BATCH_TIMEOUT", "600")) - 10.0
 
 LABEL = "kernel/qemu affinity-starve"
 # One second at QEMU's 64 ticks per second: far past the tick bound, and
@@ -56,6 +63,7 @@ PAIR_DONE = b"workload: busy pair done\n"
 
 output = bytearray()
 output_lock = threading.Lock()
+capture_timeout = None
 
 
 def verdict(ok: bool, message: str) -> None:
@@ -76,6 +84,14 @@ def connect(deadline: float) -> socket.socket:
     raise RuntimeError(f"could not reach the UART on port {SERIAL_PORT}: {last}")
 
 
+def observe_chunk(chunk):
+    with output_lock:
+        if chunk:
+            capture_timeout.observe(time.monotonic())
+            output.extend(chunk)
+        return bytes(output)
+
+
 def reader(connection: socket.socket) -> None:
     # The ash lane's two handshakes, for the same network peer. BusyBox's
     # cursor query is not answered (GitHub issue #644).
@@ -94,9 +110,7 @@ def reader(connection: socket.socket) -> None:
                 return
             log.write(chunk)
             log.flush()
-            with output_lock:
-                output.extend(chunk)
-                text = bytes(output)
+            text = observe_chunk(chunk)
             if (not published_init and
                     b"linux socket: listener ready port=8080\n" in text):
                 open(INIT_LISTENER, "w").close()
@@ -107,10 +121,12 @@ def reader(connection: socket.socket) -> None:
 
 
 def main() -> None:
-    deadline = time.monotonic() + BOOT_TIMEOUT
+    global capture_timeout
+    capture_timeout = ProgressTimeout(BOOT_TIMEOUT, BATCH_CEILING,
+                                      time.monotonic())
     # The UART is `wait=on`: QEMU starts when it is connected. Attaching
     # stops the machine long before init starts the busy pair.
-    connection = connect(deadline)
+    connection = connect(capture_timeout.deadline)
     threading.Thread(target=reader, args=(connection,), daemon=True).start()
     gdb.execute(f"target remote :{os.environ['AFFINITY_GDB_GDB_PORT']}")
     gdb.execute("set *(unsigned long *)&workload_busy_starve_injection_ticks"
@@ -124,12 +140,12 @@ def main() -> None:
             with output_lock:
                 if marker in output:
                     break
-            if time.monotonic() >= deadline:
+            if capture_timeout.expired(time.monotonic()):
                 verdict(False, missing)
                 return
             time.sleep(0.1)
         connection.sendall(answer)
-    while time.monotonic() < deadline:
+    while not capture_timeout.expired(time.monotonic()):
         with output_lock:
             text = bytes(output).replace(b"\r", b"")
         if BOUNDED in text:
