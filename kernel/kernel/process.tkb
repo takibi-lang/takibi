@@ -475,6 +475,27 @@ private let mut scheduled_process_reaped_current_count: usize = 0;
 // matches the slot's occupant. Must be zero; see
 // scheduled_process_record_of.
 private let mut scheduled_process_stale_handle_reads: usize = 0;
+// How often a CPU took a Ready process to start it and gave it back
+// unstarted, by reason: its root's activation was refused, or the ASID
+// rollover it needed could not stop the world (Busy, Partial). Each gives
+// the process back silently and the next tick takes it again, so a process
+// that is refused every time is Ready forever on an idle machine. Read by
+// DDB's sched view, which prints them only when one is nonzero.
+private let mut kernel_process_start_refused_invalid: usize = 0;
+private let mut kernel_process_start_refused_busy: usize = 0;
+private let mut kernel_process_start_refused_partial: usize = 0;
+// The same two rollover refusals where the activating CPU waits and retries
+// in place instead (kernel_process_activate_stable_root).
+private let mut kernel_process_stable_retry_busy: usize = 0;
+private let mut kernel_process_stable_retry_partial: usize = 0;
+
+fn kernel_process_start_refusals() -> (usize, usize, usize, usize, usize) {
+    return (kernel_process_start_refused_invalid,
+            kernel_process_start_refused_busy,
+            kernel_process_start_refused_partial,
+            kernel_process_stable_retry_busy,
+            kernel_process_stable_retry_partial);
+}
 private let mut scheduled_process_stale_first_slot: usize = 0;
 private let mut scheduled_process_stale_first_generation: usize = 0;
 
@@ -5226,6 +5247,8 @@ private fn kernel_process_secondary_start_reserved(
     match process_image_prepare_activation(
         scheduled_process_address_space_root_owned(owner)) {
         AddressSpaceActivationPrepareResult::Invalid => {
+            kernel_process_start_refused_invalid =
+                kernel_process_start_refused_invalid + 1;
             let guard = process_run_lock();
             let ready = scheduled_process_yield(owner, running);
             scheduled_process_release(owner, ready);
@@ -5236,6 +5259,8 @@ private fn kernel_process_secondary_start_reserved(
             match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
                                    SCHEDULER_WORLD_STOP_SPINS) {
                 WorldStopResult::Busy => {
+                    kernel_process_start_refused_busy =
+                        kernel_process_start_refused_busy + 1;
                     let guard = process_run_lock();
                     let ready = scheduled_process_yield(owner, running);
                     scheduled_process_release(owner, ready);
@@ -5244,6 +5269,8 @@ private fn kernel_process_secondary_start_reserved(
                 }
                 WorldStopResult::Partial(partial) => {
                     world_stop_partial_release(partial, &kernel_world_stop);
+                    kernel_process_start_refused_partial =
+                        kernel_process_start_refused_partial + 1;
                     let guard = process_run_lock();
                     let ready = scheduled_process_yield(owner, running);
                     scheduled_process_release(owner, ready);
@@ -5640,10 +5667,14 @@ fn kernel_process_activate_stable_root(root: AddressSpaceRoot) {
                                        kernel_online_core_count(),
                                        SCHEDULER_WORLD_STOP_SPINS) {
                     WorldStopResult::Busy => {
+                        kernel_process_stable_retry_busy =
+                            kernel_process_stable_retry_busy + 1;
                         kernel_process_rollover_backoff();
                     }
                     WorldStopResult::Partial(partial) => {
                         world_stop_partial_release(partial, &kernel_world_stop);
+                        kernel_process_stable_retry_partial =
+                            kernel_process_stable_retry_partial + 1;
                         kernel_process_rollover_backoff();
                     }
                     WorldStopResult::Complete(stopped) => {

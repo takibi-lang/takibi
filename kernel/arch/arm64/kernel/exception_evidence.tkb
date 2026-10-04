@@ -1585,6 +1585,17 @@ private fn ddb_render_sched() !{unsafe} {
     }
     ddb_puts(" truncated="); ddb_put_udec(ddb_snapshot.process_truncated);
     ddb_puts("\n");
+    let (refused_invalid, refused_busy, refused_partial, retry_busy,
+         retry_partial) = kernel_process_start_refusals();
+    if (refused_invalid != 0 || refused_busy != 0 || refused_partial != 0 ||
+        retry_busy != 0 || retry_partial != 0) {
+        ddb_puts("ddb: start-refused invalid="); ddb_put_udec(refused_invalid);
+        ddb_puts(" rollover-busy="); ddb_put_udec(refused_busy);
+        ddb_puts(" rollover-partial="); ddb_put_udec(refused_partial);
+        ddb_puts(" stable-busy="); ddb_put_udec(retry_busy);
+        ddb_puts(" stable-partial="); ddb_put_udec(retry_partial);
+        ddb_puts("\n");
+    }
     ddb_render_wait();
 }
 
