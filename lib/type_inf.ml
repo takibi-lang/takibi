@@ -104,6 +104,57 @@ let raw_deref_sites () =
 
 let active_audit_function : string ref = ref "<global>"
 
+(* Optional source report from the ownership flow used by lock-order checking.
+   Include shadowed owners through declared paths, not only visible names.
+   Keep empty sites too: absence of a row must not mean "no guard held".
+   Revisited sites join conservatively, as loop/branch analysis may visit one
+   source call with more than one incoming ownership state. *)
+type held_guard = {
+  held_binding : string;
+  held_binding_id : int;
+  held_type : string;
+  held_rank : int;
+  held_lock : string;
+  held_definite : bool;
+}
+
+type held_guard_site = {
+  held_loc : Lexing.position;
+  held_caller : string;
+  held_callee : string;
+  held_guards : held_guard list;
+}
+
+module HeldGuardSites = Map.Make (struct
+  type t = string * int * int * string * string
+  let compare = Stdlib.compare
+end)
+
+let held_guard_audit_enabled = ref false
+let set_held_guard_audit_enabled enabled = held_guard_audit_enabled := enabled
+let held_guard_table = ref HeldGuardSites.empty
+let held_guard_sites () = List.map snd (HeldGuardSites.bindings !held_guard_table)
+
+let record_held_guard_site site =
+  let loc = site.held_loc in
+  let key = (Ast.source_file_of_loc loc, loc.pos_lnum, loc.pos_cnum,
+             site.held_caller, site.held_callee) in
+  let guard_key g = (g.held_binding_id, g.held_binding, g.held_type,
+                     g.held_rank, g.held_lock) in
+  let guards = match HeldGuardSites.find_opt key !held_guard_table with
+    | None -> site.held_guards
+    | Some previous ->
+        let all = List.sort_uniq (fun a b -> compare (guard_key a) (guard_key b))
+          (previous.held_guards @ site.held_guards) in
+        List.map (fun g ->
+          let definite in_guards = List.exists (fun other ->
+            guard_key other = guard_key g && other.held_definite) in_guards in
+          { g with held_definite = definite previous.held_guards
+                                   && definite site.held_guards }) all
+  in
+  held_guard_table := HeldGuardSites.add key
+    { site with held_guards = guards } !held_guard_table
+
 let merge_overflow_audit_facts left right =
   match left, right with
   | Some a, Some b
@@ -6668,6 +6719,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset slice_cast_len;     (* GitHub issue #372, same lifetime *)
   Hashtbl.reset overflow_audit_table;
   Hashtbl.reset raw_deref_table;
+  held_guard_table := HeldGuardSites.empty;
   active_audit_function := "<global>";
   Hashtbl.reset divisor_proven_nonzero_at;
   Hashtbl.reset signed_division_overflow_proven_safe_at;
@@ -9423,6 +9475,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     let finfo = StringMap.find (overload_key fdef.Ast.name fdef.params) functions in
     let binding_resolution = finfo.bindings in
     let visible_bindings = Hashtbl.create 16 in
+    let report_declared = ref PathSet.empty in
     let nonlocal_bindings = Hashtbl.create 16 in
     let next_nonlocal_binding = ref (-1) in
     List.iter2 (fun (name, _) id -> Hashtbl.replace visible_bindings name id)
@@ -10150,25 +10203,41 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Call (name, args) ->
           let target = Option.value
             (StringMap.find_opt (loc_key e.loc) !resolved_call_targets) ~default:name in
+          let rec guard_annotation ty = match strip_borrow ty with
+            | Ast.TypeIndexed (guard_name, _) | Ast.TypeView (guard_name, _)
+            | Ast.TypeNamed guard_name ->
+                Option.map (fun annotation -> guard_name, annotation)
+                  (StringMap.find_opt guard_name lock_guard_types)
+            | Ast.TypeExists (_, _, body) -> guard_annotation body
+            | _ -> None
+          in
+          let live_guards bindings = List.filter_map (fun (visible_name, id) ->
+            let path = PVar (id, visible_name) in
+            match guard_annotation (binding_type id visible_name) with
+            | Some (guard_name, held)
+              when not (ResourceFlow.is_consumed_on_all_paths path moved) ->
+                Some (visible_name, id, guard_name, held,
+                      not (ResourceFlow.may_be_consumed path moved))
+            | _ -> None) bindings in
+          if !held_guard_audit_enabled then
+            record_held_guard_site {
+              held_loc = e.loc; held_caller = fdef.name; held_callee = target;
+              held_guards = List.map (fun (binding, id, guard_name, held, definite) ->
+                { held_binding = binding; held_binding_id = id; held_type = guard_name;
+                  held_rank = held.Effect_rules.rank; held_lock = held.label;
+                  held_definite = definite })
+                (live_guards (List.filter_map (function
+                  | PVar (id, name) -> Some (name, id)
+                  | PField _ -> None) (PathSet.elements !report_declared))) };
           (match StringMap.find_opt target !lock_acquire_summaries with
            | None -> ()
            | Some acquired ->
-               Hashtbl.iter (fun visible_name id ->
-                 let rec guard_annotation ty = match strip_borrow ty with
-                   | Ast.TypeIndexed (guard_name, _) | Ast.TypeView (guard_name, _)
-                   | Ast.TypeNamed guard_name ->
-                       StringMap.find_opt guard_name lock_guard_types
-                   | Ast.TypeExists (_, _, body) -> guard_annotation body
-                   | _ -> None
-                 in
-                 let path = PVar (id, visible_name) in
-                 match guard_annotation (binding_type id visible_name) with
-                 | Some held when not (ResourceFlow.is_consumed_on_all_paths path moved)
-                                  && acquired.Effect_rules.rank < held.Effect_rules.rank ->
+               List.iter (fun (_, _, _, held, _) ->
+                 if acquired.Effect_rules.rank < held.Effect_rules.rank then
                      raise (TypeError (e.loc, Printf.sprintf
                        "lock order violation: cannot acquire '%s' (rank %d) while holding '%s' (rank %d)"
-                       acquired.label acquired.rank held.label held.rank))
-                 | _ -> ()) visible_bindings);
+                       acquired.label acquired.rank held.label held.rank)))
+                 (live_guards (List.of_seq (Hashtbl.to_seq visible_bindings))));
           (* GitHub issue #528; see irq_restorers. A guard passed to this
              call is being handed over -- released, usually -- rather than
              held across it. *)
@@ -10427,6 +10496,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | [] -> ()
     in
     let rec check_stmts moved declared taints stmts =
+      let initial_report_declared = !report_declared in
+      report_declared := declared;
       let initial_declared = declared in
       let initial_var_types = !var_types in
       let initial_visible_bindings = Hashtbl.copy visible_bindings in
@@ -10463,6 +10534,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       var_types := initial_var_types;
       Hashtbl.reset visible_bindings;
       Hashtbl.iter (Hashtbl.add visible_bindings) initial_visible_bindings;
+      report_declared := initial_report_declared;
       (moved, declared, taints)
     and check_loop_stmts moved declared taints body =
       let exits = ref [] in
@@ -10476,6 +10548,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           (out, out_taints) !exits in
         (out, declared, out_taints))
     and check_stmt moved declared taints (s : Ast.stmt) =
+      report_declared := declared;
       match s.desc with
       | Ast.StaticAssert _ ->
           (* Compile-time only: names nothing at runtime, so it can move,

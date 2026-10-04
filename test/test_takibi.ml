@@ -15084,6 +15084,136 @@ let codegen_tests = [
             return use558(h);
           }") ());
 
+  Alcotest.test_case "held guard report follows scope, moves and borrowed parameters" `Quick
+    (fun () ->
+      Type_inf.set_held_guard_audit_enabled true;
+      Fun.protect ~finally:(fun () -> Type_inf.set_held_guard_audit_enabled false)
+        (fun () ->
+          ignore (infer_files ["guards.tkb", {|
+linear view ReportGuard[id: usize];
+fn take(id: usize) -> ReportGuard[id]
+    !{acquires_lock_30_report, lock_guard_30_report} {
+  return view ReportGuard[id];
+}
+fn leaf() {}
+fn put(g: sink ReportGuard[id]) { leaf(); }
+fn borrowed(g: borrow ReportGuard[id]) { leaf(); }
+fn caller(stop: bool) {
+  leaf();
+  let outer = take(1);
+  borrowed(outer);
+  if (stop) { put(outer); return; }
+  for i: usize in 0..<2 {
+    let outer = take(2);
+    leaf();
+    put(outer);
+  }
+  leaf();
+  put(outer);
+  leaf();
+}
+|}]);
+          let sites = Type_inf.held_guard_sites () in
+          let leaf_sites = List.filter (fun s -> s.Type_inf.held_callee = "leaf") sites in
+          let summary = List.map (fun s ->
+            (s.Type_inf.held_caller,
+             List.map (fun g -> g.Type_inf.held_binding) s.held_guards)) leaf_sites
+            |> List.sort compare in
+          Alcotest.(check (list (pair string (list string)))) "source calls, including empty sites"
+            ["borrowed", ["g"]; "caller", []; "caller", [];
+             "caller", ["outer"]; "caller", ["outer"; "outer"]; "put", ["g"]] summary;
+          let shadowed = List.find (fun s -> List.length s.Type_inf.held_guards = 2)
+            leaf_sites in
+          let ids = List.map (fun g -> g.Type_inf.held_binding_id) shadowed.held_guards in
+          Alcotest.(check int) "shadowed owners retain distinct binding identities" 2
+            (List.length (List.sort_uniq compare ids));
+          List.iter (fun s ->
+            Alcotest.(check string) "source file" "guards.tkb"
+              s.Type_inf.held_loc.Lexing.pos_fname;
+            List.iter (fun g ->
+              Alcotest.(check string) "guard type" "ReportGuard" g.Type_inf.held_type;
+              Alcotest.(check int) "rank" 30 g.held_rank;
+              Alcotest.(check string) "lock" "report" g.held_lock;
+              Alcotest.(check bool) "definite on surviving paths" true g.held_definite
+            ) s.held_guards
+          ) sites;
+          ignore (infer "fn empty() {}");
+          Alcotest.(check int) "fresh compilation resets sites" 0
+            (List.length (Type_inf.held_guard_sites ()))));
+
+  Alcotest.test_case "held guard CLI emits deterministic complete TSV" `Quick
+    (fun () ->
+      let source = Filename.temp_file "takibi-held-guards-" ".tkb" in
+      let object_file = Filename.temp_file "takibi-held-guards-" ".o" in
+      let report = Filename.temp_file "takibi-held-guards-" ".tsv" in
+      Fun.protect ~finally:(fun () -> List.iter (fun path ->
+        try Unix.unlink path with Unix.Unix_error _ -> ())
+        [source; object_file; report]) (fun () ->
+        let oc = open_out source in
+        output_string oc {|linear view CliGuard[id: usize];
+fn take(id: usize) -> CliGuard[id] !{lock_guard_30_cli} { return view CliGuard[id]; }
+fn put(g: sink CliGuard[id]) {}
+fn leaf() {}
+fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
+|};
+        close_out oc;
+        let compiler = takibi_cli_path () in
+        let run args =
+          let stdout, stdin, stderr = Unix.open_process_args_full compiler
+            (Array.of_list (compiler :: args)) (Unix.environment ()) in
+          close_out_noerr stdin;
+          let out = read_all stdout and err = read_all stderr in
+          Unix.close_process_full (stdout, stdin, stderr), out ^ err in
+        let emit () =
+          let status, output = run [source; "--emit-held-guards"; report;
+            "-o"; object_file] in
+          if status <> Unix.WEXITED 0 then Alcotest.failf "report CLI failed: %s" output;
+          let ic = open_in report in
+          Fun.protect ~finally:(fun () -> close_in ic) (fun () -> read_all ic) in
+        let first = emit () in
+        Alcotest.(check string) "repeat compilation has identical TSV" first (emit ());
+        let rows = String.split_on_char '\n' first |> List.filter ((<>) "")
+          |> List.map (String.split_on_char '\t') in
+        Alcotest.(check (list string)) "header"
+          ["file"; "line"; "column"; "caller"; "callee"; "guard";
+           "binding_id"; "guard_type"; "rank"; "lock"; "state"] (List.hd rows);
+        let calls = List.tl rows in
+        Alcotest.(check int) "all five calls, including empty sites" 5 (List.length calls);
+        List.iter (fun row ->
+          Alcotest.(check int) "fixed TSV width" 11 (List.length row);
+          Alcotest.(check string) "source" source (List.nth row 0);
+          Alcotest.(check int) "line" 5 (int_of_string (List.nth row 1));
+          Alcotest.(check bool) "positive column" true (int_of_string (List.nth row 2) > 0);
+          Alcotest.(check string) "caller" "caller" (List.nth row 3)) calls;
+        let summary = List.map (fun row ->
+          List.nth row 4, List.nth row 5, List.nth row 10) calls in
+        Alcotest.(check (list (triple string string string))) "pre-transfer ownership"
+          ["leaf", "", "none"; "take", "", "none";
+           "leaf", "g", "held"; "put", "g", "held"; "leaf", "", "none"] summary;
+        let oc = open_out source in
+        output_string oc "fn leaf() {} fn report_generic(T: type, x: T) { leaf(); } fn caller() { let x: usize = 1; let y: bool = true; report_generic(x); report_generic(y); }";
+        close_out oc;
+        let generic_rows = emit () |> String.split_on_char '\n'
+          |> List.filter ((<>) "") |> List.tl
+          |> List.map (String.split_on_char '\t') in
+        List.iter (fun row -> Alcotest.(check string)
+          "generic locations retain the real source path" source (List.hd row)) generic_rows;
+        let generic_callers = generic_rows |> List.filter (fun row -> List.nth row 4 = "leaf")
+          |> List.map (fun row -> List.nth row 3) |> List.sort_uniq compare in
+        Alcotest.(check int) "both generic instantiations retain separate sites" 2
+          (List.length generic_callers);
+        let status, output = run ["--emit-held-guards"] in
+        Alcotest.(check bool) "missing path exits nonzero" true (status <> Unix.WEXITED 0);
+        Alcotest.(check bool) "missing path names the expected diagnostic" true
+          (contains_substring output "--emit-held-guards requires a path")));
+
+  Alcotest.test_case "held guard report is opt-in" `Quick
+    (fun () ->
+      Type_inf.set_held_guard_audit_enabled false;
+      ignore (infer "fn leaf() {} fn caller() { leaf(); }");
+      Alcotest.(check int) "disabled audit records nothing" 0
+        (List.length (Type_inf.held_guard_sites ())));
+
   Alcotest.test_case
     "issue #466: live lock guards enforce transitive rank order"
     `Quick

@@ -19,7 +19,7 @@ File extension: `.tkb`. Compiler invocation: `takibi <file1.tkb>
 [file2.tkb ...] [-o out.o] [--target <triple>] [--cpu <cpu>] [--features
 <features>] [-g] [--forbid-trap] [--forbid-unsafe] [--reject-unused-functions]
 [--external-entry <function>] [--check-unused-file <path>] [--explain-inference]
-[--emit-effect-matrix] [--version]`. Multiple `.tkb` files are
+[--emit-effect-matrix] [--emit-held-guards <path>] [--version]`. Multiple `.tkb` files are
 concatenated (flat global namespace) before compilation -- there is no
 module/import system beyond `use` (see "Known Limitations" below).
 
@@ -1680,6 +1680,29 @@ rank identifies a lock class rather than a particular instance, and the
 kernel deliberately holds several independent connections in its pool probe.
 These annotations are checker-only and do not appear in function-pointer
 effect rows.
+
+`--emit-held-guards <path>` writes an optional TSV report after type checking,
+without changing program acceptance. The columns are `file`, `line`, `column`,
+`caller`, `callee`, `guard`, `binding_id`, `guard_type`, `rank`, `lock`, and
+`state`. Locations are one-based; caller and callee use the checked function
+names (including lowered generic names); an unresolved indirect callee keeps
+its source binding name. Sites and guards have deterministic
+ordering. Each ordinary named-call expression in a checked function body gets
+one row per live annotated
+guard binding, or a row with empty guard columns and state `none`. Compiler
+intrinsics handled separately by the ownership checker are not included.
+
+The snapshot precedes argument ownership transfer: a guard passed to a release
+function is still listed at that call, and disappears at subsequent calls.
+Borrowed guard parameters and shadowed outer owners are included; `binding_id`
+distinguishes same-named bindings within the caller and is compilation-local.
+The report lists annotated bindings, not guards stored inside aggregates or
+locks acquired without an annotated token. It does not propagate a caller's
+held guard into an unannotated callee's body. `held` means live on every incoming
+ownership path; `maybe-held` means some incoming path or repeated analysis
+lacks that live binding. A build assertion requiring a guard must check `held`,
+not just a matching guard name. This is a static ownership report, not evidence
+of physical lock state or arbitrary control-flow reachability.
 
 IRQ restoration under an IRQ-masking guard is checked the same way (GitHub
 issue #528). A function returning the linear token of a guard whose acquire

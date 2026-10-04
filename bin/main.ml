@@ -60,6 +60,7 @@ let () =
   let emit_depfile = ref "" in
   let emit_overflow_audit = ref "" in
   let emit_raw_deref_audit = ref "" in
+  let emit_held_guards = ref "" in
   let emit_effect_matrix = ref false in
   let i = ref 1 in
   while !i < Array.length Sys.argv do
@@ -110,6 +111,13 @@ let () =
          emit_raw_deref_audit := Sys.argv.(!i)
      | "--emit-effect-matrix" ->
          emit_effect_matrix := true
+     | "--emit-held-guards" ->
+         incr i;
+         if !i >= Array.length Sys.argv then (
+           Printf.eprintf "Error: --emit-held-guards requires a path\n";
+           exit 1
+         );
+         emit_held_guards := Sys.argv.(!i)
      | "-o" ->
          incr i;
          if !i >= Array.length Sys.argv then (
@@ -180,7 +188,7 @@ let () =
 
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--forbid-trap] [--forbid-unsafe] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--forbid-trap] [--forbid-unsafe] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-held-guards <path>] [--version]\n"
       Sys.argv.(0);
     exit 1
   );
@@ -298,6 +306,7 @@ let () =
     let prog = Declared_type_resolver.run prog in
 
     (* HM type inference -- catches type errors and produces resolved types *)
+    Type_inf.set_held_guard_audit_enabled (!emit_held_guards <> "");
     let prog_types = Typechecker.infer_program prog in
 
     if !reject_unused_functions then begin
@@ -396,6 +405,26 @@ let () =
           site.raw_file loc.pos_lnum (loc.pos_cnum - loc.pos_bol + 1)
           site.raw_function site.raw_form site.raw_pointer
       ) sites;
+      close_out out
+    end;
+
+    if !emit_held_guards <> "" then begin
+      let out = open_out !emit_held_guards in
+      Printf.fprintf out "file\tline\tcolumn\tcaller\tcallee\tguard\tbinding_id\tguard_type\trank\tlock\tstate\n";
+      List.iter (fun site ->
+        let loc = site.Type_inf.held_loc in
+        let prefix () = Printf.fprintf out "%s\t%d\t%d\t%s\t%s\t"
+          (Ast.source_file_of_loc loc) loc.pos_lnum (loc.pos_cnum - loc.pos_bol + 1)
+          site.held_caller site.held_callee in
+        match List.sort compare site.held_guards with
+        | [] -> prefix (); Printf.fprintf out "\t\t\t\t\tnone\n"
+        | guards -> List.iter (fun guard ->
+            prefix ();
+            Printf.fprintf out "%s\t%d\t%s\t%d\t%s\t%s\n"
+              guard.Type_inf.held_binding guard.held_binding_id guard.held_type guard.held_rank
+              guard.held_lock (if guard.held_definite then "held" else "maybe-held")
+          ) guards
+      ) (Type_inf.held_guard_sites ());
       close_out out
     end;
 

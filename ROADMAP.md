@@ -123,10 +123,10 @@ fixtures, finite lock-held BREAK fixture, and board lock measurements complete
 the extended short-window queue. #13 remains conditional on the solver
 threshold in `TAKIBI_CORE.md`; its recorded examples do not yet justify an
 implementation. The maintainer also selected concrete global Cell brands
-for this window. The next bounded B unit is #658: finish regular-file
-exhaustion handling and faithful regression coverage without adding a
-concurrently running QEMU guest. Review test memory and RPi5 I/O cost before
-choosing the default fixture.
+for this window. The next bounded B unit is #695: emit the ownership checker's held guards at
+call sites as an opt-in TSV report, which A consumes for #693. Program
+acceptance stays unchanged. Regular-file exhaustion handling and the shared
+EL0 regression fixture (#658) are finished.
 #680, #681 and #682 (the pin's cost) stay with A: they need RPi5
 measurements first.
 
@@ -134,7 +134,7 @@ measurements first.
    waits for A): #131 (stored ownership, which feeds #637 stage 2's
    option (c)). Step 2 is finished, so #637 stage 1's device
    groups, MMIO and DMA, together with #622 and #623, can proceed.
-2. **Resource use and measured performance:** #658, #220 (telnet; lowered
+2. **Resource use and measured performance:** #220 (telnet; lowered
    2026-09-30 by the maintainer, not urgent, and it waits on PTY and
    `pselect6` scoping), #389, #422, #497, #520, #553,
    #386, #502.
