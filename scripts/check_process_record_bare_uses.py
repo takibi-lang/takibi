@@ -30,7 +30,7 @@ import sys
 from pass_line import report_pass
 
 PATH = pathlib.Path("kernel/kernel/process.tkb")
-BUDGET = 30
+BUDGET = 27
 CALL_RE = re.compile(r"\bscheduled_process_record_(?:at|of)\s*\(")
 DEF_RE = re.compile(r"^(?:private )?fn scheduled_process_record_(?:at|of)\(")
 

@@ -336,15 +336,22 @@ private fn fd_context_unpin(pin: sink RegionPin(ProcessFdContext)[p, k]) !{unsaf
     }
 }
 
-// A pin on the context a process slot's handle names, or Stale.
+// A pin on the context a process slot's handle names, or Stale. The slot
+// form reads the handle under the run lock; a caller that already holds an
+// authority over the record reads it there and pins by the words.
 private fn fd_context_pin(pool: *RegionPool(ProcessFdContext) @ contexts,
                           process: usize)
         -> RegionPinned(ProcessFdContext)[contexts] !{unsafe} {
-    let address: usize = scheduled_process_fd_context(process);
-    let generation: usize = scheduled_process_fd_context_generation(process);
+    return fd_context_pin_words(pool,
+        scheduled_process_fd_context_handle(process));
+}
+
+private fn fd_context_pin_words(pool: *RegionPool(ProcessFdContext) @ contexts,
+                                words: ProcessPoolHandleWords)
+        -> RegionPinned(ProcessFdContext)[contexts] !{unsafe} {
     let guard = fd_context_pool_lock(pool);
     let mut handle: RegionHandle(ProcessFdContext) =
-        region_handle_from(guard, address, generation);
+        region_handle_from(guard, words.address, words.generation);
     let pinned = region_pin(guard, handle);
     fd_context_pool_unlock(guard);
     return pinned;
@@ -656,8 +663,16 @@ private fn fd_context_pool_grow(
 // context back is what makes this a pool rather than a differently-spelled
 // array.
 fn unified_fd_context_release(process: usize) !{unsafe} {
+    unified_fd_context_release_words(process,
+        scheduled_process_fd_context_handle(process));
+}
+
+// The same, with the handle already read under the caller's authority over
+// the record (the reap's owner, which may run under the run guard).
+fn unified_fd_context_release_words(process: usize,
+                                    words: ProcessPoolHandleWords) !{unsafe} {
     let RegionPinned(ProcessFdContext)::Pinned(pin) =
-            fd_context_pin(&fd_context_pool, process) else {
+            fd_context_pin_words(&fd_context_pool, words) else {
         RegionPinned(ProcessFdContext)::Stale => { return; }
     };
     // The descriptor blocks go first: they are a separate pool, and the
@@ -3812,12 +3827,15 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
 // #294's last acceptance criterion), mirroring kernel/kernel/process.tkb's
 // own kernel_process_crash_*() accessors: reads plain ProcessFdContext data
 // only, never object_pool's RefcountSlotMap internals -- a crash report
-// must not acquire a lock after a fatal exception.
+// must not acquire a lock after a fatal exception. The record's handle is
+// read with the diagnostic peek for the same reason: the crashing CPU may
+// hold the run lock.
 fn kernel_fd_table_crash_kind(process: usize, fd: usize) -> usize !{unsafe} {
-    let ctx_address: usize = fd_context_address(process);
-    if (ctx_address == 0) { return 0; }
+    let mut words: ProcessPoolHandleWords =
+        scheduled_process_fd_context_handle_peek(process);
+    if (words.address == 0) { return 0; }
     let RegionPinned(ProcessFdContext)::Pinned(ctx_pin) =
-            fd_context_pin(&fd_context_pool, process) else {
+            fd_context_pin_words(&fd_context_pool, words) else {
         RegionPinned(ProcessFdContext)::Stale => { return 0; }
     };
     let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
@@ -3840,10 +3858,11 @@ fn kernel_fd_table_crash_kind(process: usize, fd: usize) -> usize !{unsafe} {
 }
 
 fn kernel_fd_table_crash_object(process: usize, fd: usize) -> usize !{unsafe} {
-    let ctx_address: usize = fd_context_address(process);
-    if (ctx_address == 0) { return 0; }
+    let mut words: ProcessPoolHandleWords =
+        scheduled_process_fd_context_handle_peek(process);
+    if (words.address == 0) { return 0; }
     let RegionPinned(ProcessFdContext)::Pinned(ctx_pin) =
-            fd_context_pin(&fd_context_pool, process) else {
+            fd_context_pin_words(&fd_context_pool, words) else {
         RegionPinned(ProcessFdContext)::Stale => { return 0; }
     };
     let ctx: *ProcessFdContext = region_pin_at(ctx_pin);

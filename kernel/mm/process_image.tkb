@@ -262,15 +262,23 @@ private fn process_image_record_unpin(
     }
 }
 
-// A pin on the record a root's handle names, or Stale.
+// A pin on the record a root's handle names, or Stale. As fd_context_pin:
+// the root form reads the handle under the run lock, the words form takes
+// one its caller read under its own authority.
 private fn process_image_record_pin(
         pool: *RegionPool(ProcessImageRecord) @ images, root: usize)
         -> RegionPinned(ProcessImageRecord)[images] !{unsafe} {
-    let address: usize = scheduled_process_image_record(root);
-    let generation: usize = scheduled_process_image_record_generation(root);
+    return process_image_record_pin_words(pool,
+        scheduled_process_image_record_handle(root));
+}
+
+private fn process_image_record_pin_words(
+        pool: *RegionPool(ProcessImageRecord) @ images,
+        words: ProcessPoolHandleWords)
+        -> RegionPinned(ProcessImageRecord)[images] !{unsafe} {
     let guard = process_image_pool_lock(pool);
     let mut handle: RegionHandle(ProcessImageRecord) =
-        region_handle_from(guard, address, generation);
+        region_handle_from(guard, words.address, words.generation);
     let pinned = region_pin(guard, handle);
     process_image_pool_unlock(guard);
     return pinned;
@@ -295,12 +303,21 @@ private fn process_image_record_pin_ensured(
 
 // A root's record as a value copy; all zero when it is missing (counted).
 fn process_image_record_read(root: usize) -> ProcessImageRecord !{unsafe} {
+    return process_image_record_value(
+        process_image_record_pin_ensured(&process_image_pool, root), true);
+}
+
+// The copy itself, from a pin however it was obtained; a missing record is
+// counted only when the caller asked for one to exist.
+private fn process_image_record_value(
+        pinned: sink RegionPinned(ProcessImageRecord)[images],
+        note_missing: bool) -> ProcessImageRecord !{unsafe} {
     let mut value: ProcessImageRecord = {
         0, 0, false, 0, 0, 0, false, 0, false, 0, 0
     };
-    match process_image_record_pin_ensured(&process_image_pool, root) {
+    match pinned {
         RegionPinned(ProcessImageRecord)::Stale => {
-            process_image_record_missing_note();
+            if (note_missing) { process_image_record_missing_note(); }
         }
         RegionPinned(ProcessImageRecord)::Pinned(pin) => {
             let record: *ProcessImageRecord = region_pin_at(pin);
@@ -561,8 +578,17 @@ private fn process_image_pool_grow(
 // is cleared first, then the record is retired; the last pin frees it.
 fn process_image_record_release(root: usize) !{unsafe} {
     if (root == 0) { return; }
-    if (scheduled_process_image_record(root) == 0) { return; }
-    let pinned = process_image_record_pin(&process_image_pool, root);
+    process_image_record_release_words(root,
+        scheduled_process_image_record_handle(root));
+}
+
+// The same, with the handle read under the caller's authority (the reap's
+// owner).
+fn process_image_record_release_words(root: usize,
+                                      words: ProcessPoolHandleWords) !{unsafe} {
+    if (root == 0) { return; }
+    if (words.address == 0) { return; }
+    let pinned = process_image_record_pin_words(&process_image_pool, words);
     scheduled_process_set_image_record(root, 0, 0);
     match pinned {
         RegionPinned(ProcessImageRecord)::Stale => {
@@ -2498,9 +2524,14 @@ fn process_image_stack_grew_pages(root: usize, count: usize) -> bool {
            process_image_record_read(root).active_page_count > count;
 }
 
-fn process_image_active_page_count(root: usize) -> usize !{unsafe} {
-    if (scheduled_process_slot_valid(root) == false) { return 0; }
-    return process_image_record_read(root).active_page_count;
+// A root's resident page count, for a diagnostic that already read the handle (procfs under the
+// run guard, the monitor with every other CPU stopped). It does not allocate
+// a missing record: a report answers 0 rather than changing what it reports.
+fn process_image_active_page_count_words(words: ProcessPoolHandleWords)
+        -> usize !{unsafe} {
+    return process_image_record_value(
+        process_image_record_pin_words(&process_image_pool, words),
+        false).active_page_count;
 }
 
 fn process_image_heap_range(pages: borrow ProcessImagePages[image])

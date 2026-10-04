@@ -1814,7 +1814,10 @@ private fn scheduled_process_diagnostic_fill(
         ProcessSlotState::Exited => { snapshot.state = 0x5A; }
         ProcessSlotState::Constructing => { snapshot.state = 0x49; }
     }
-    snapshot.resident_pages = process_image_active_page_count(slot);
+    let mut image_words: ProcessPoolHandleWords = {
+        scheduled_process_record_peek(slot).image_record,
+        scheduled_process_record_peek(slot).image_record_generation };
+    snapshot.resident_pages = process_image_active_page_count_words(image_words);
     snapshot.start_time_ticks =
         scheduled_process_record_peek(slot).start_time_ticks;
     snapshot.command_line_length =
@@ -1993,12 +1996,39 @@ private fn scheduled_process_copy_affinity_mask(parent: borrow ProcessRunning[p]
 // process's context handle. It cannot hold it itself without a table
 // keyed by process slot, which is the ceiling this is on the way to
 // removing -- so the process record holds it, and fd_table asks.
-fn scheduled_process_fd_context(slot: usize) -> usize {
-    return scheduled_process_record_at(slot).fd_context;
+// GitHub issue #693 step 5: the handle is read under the run lock, which is
+// what keeps the record alive against reap, and both words in one hold so a
+// concurrent set cannot be seen half-written. Taking the lock here is safe
+// only because a caller already holding the run guard is rejected at
+// compile time (single_instance_lock, #694).
+struct ProcessPoolHandleWords {
+    address: usize;
+    generation: usize;
 }
 
-fn scheduled_process_fd_context_generation(slot: usize) -> usize {
-    return scheduled_process_record_at(slot).fd_context_generation;
+// The one place each pair is read; every authority below passes the
+// record it reached.
+private fn process_fd_context_words(record: borrow *ProcessRecord)
+        -> ProcessPoolHandleWords !{unsafe} {
+    let mut words: ProcessPoolHandleWords =
+        { record.fd_context, record.fd_context_generation };
+    return words;
+}
+
+private fn process_image_record_words(record: borrow *ProcessRecord)
+        -> ProcessPoolHandleWords !{unsafe} {
+    let mut words: ProcessPoolHandleWords =
+        { record.image_record, record.image_record_generation };
+    return words;
+}
+
+fn scheduled_process_fd_context_handle(slot: usize) -> ProcessPoolHandleWords
+        !{unsafe} {
+    let guard = process_run_lock();
+    let mut words: ProcessPoolHandleWords = process_fd_context_words(
+        scheduled_process_record_locked(guard, slot));
+    process_run_unlock(guard);
+    return words;
 }
 
 fn scheduled_process_set_fd_context(slot: usize, address: usize,
@@ -2007,12 +2037,35 @@ fn scheduled_process_set_fd_context(slot: usize, address: usize,
     scheduled_process_record_at(slot).fd_context_generation = generation;
 }
 
-fn scheduled_process_image_record(slot: usize) -> usize {
-    return scheduled_process_record_at(slot).image_record;
+// For the crash report and DDB, which must not take a lock: the diagnostic
+// peek, as the rest of their record reads use.
+fn scheduled_process_fd_context_handle_peek(slot: usize)
+        -> ProcessPoolHandleWords !{unsafe} {
+    let mut words: ProcessPoolHandleWords = {
+        scheduled_process_record_peek(slot).fd_context,
+        scheduled_process_record_peek(slot).fd_context_generation };
+    return words;
 }
 
-fn scheduled_process_image_record_generation(slot: usize) -> usize {
-    return scheduled_process_record_at(slot).image_record_generation;
+fn scheduled_process_fd_context_handle_owned(
+        owner: borrow ScheduledProcessOwner[process])
+        -> ProcessPoolHandleWords !{unsafe} {
+    return process_fd_context_words(scheduled_process_record_owned(owner));
+}
+
+fn scheduled_process_image_record_handle_owned(
+        owner: borrow ScheduledProcessOwner[process])
+        -> ProcessPoolHandleWords !{unsafe} {
+    return process_image_record_words(scheduled_process_record_owned(owner));
+}
+
+// Still a bare read, unlike the fd context's: kernel/mm/process_image.tkb
+// is keyed by root throughout, and the reap's exec teardown reaches it both
+// with and without the run guard, so a self-locking read here is rejected
+// (#694) until that path carries the owner down.
+fn scheduled_process_image_record_handle(slot: usize) -> ProcessPoolHandleWords
+        !{unsafe} {
+    return process_image_record_words(scheduled_process_record_at(slot));
 }
 
 fn scheduled_process_set_image_record(slot: usize, address: usize,
@@ -3358,7 +3411,8 @@ fn scheduled_process_reap_teardown(
         ProcessTraceReap, scheduled_process_pid_of_slot(owner.pool_index),
         owner.generation, 0, 0, 4, 0, owner.pool_index,
         scheduled_process_record_owned(owner).saved_sp, 0);
-    unified_fd_context_release(owner.pool_index);
+    unified_fd_context_release_words(owner.pool_index,
+        scheduled_process_fd_context_handle_owned(owner));
     address_space_release_root(owner.pool_index);
     // GitHub issue #392: a root's image record dies with the process, as
     // the fd context above already does -- so this is the last moment its
@@ -3366,7 +3420,8 @@ fn scheduled_process_reap_teardown(
     // teardown moved here from the parent's return for exactly that
     // reason. Root 0 is exempt inside the release itself.
     process_image_exec_teardown(owner.pool_index);
-    process_image_record_release(owner.pool_index);
+    process_image_record_release_words(owner.pool_index,
+        scheduled_process_image_record_handle_owned(owner));
     // GitHub issue #414: last, because process_image_exec_teardown above
     // still resolves against this root.
     address_space_backing_release(owner.pool_index);
