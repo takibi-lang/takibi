@@ -9301,6 +9301,43 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           changed := true
       | None, _ -> ()) lock_callees
   done;
+  (* GitHub issue #694: single-instance lock classes reachable from each
+     function. A class is single-instance when an acquisition function
+     declares `single_instance_lock` beside its `acquires_lock_<rank>_<name>`;
+     the claim is trusted at that one function. The set is a transitive
+     summary over resolved direct calls, like the minimum rank above. *)
+  let single_instance_reach =
+    let seeds = List.fold_left (fun acc item -> match item with
+      | Ast.FuncDef f ->
+          let words = Option.value f.effects ~default:[] in
+          if not (List.mem Effect_rules.single_instance_lock_annotation words)
+          then acc
+          else (match lock_annotation f.effects
+                        Effect_rules.lock_acquire_annotation with
+            | Some annotation ->
+                StringMap.add (overload_key f.name f.params)
+                  (StringSet.singleton annotation.Effect_rules.label) acc
+            | None -> raise (TypeError (f.def_loc,
+                "single_instance_lock annotation requires an acquires_lock annotation")))
+      | _ -> acc) StringMap.empty prog in
+    let reach = ref seeds in
+    let changed = ref true in
+    while !changed do
+      changed := false;
+      StringMap.iter (fun caller callees ->
+        let own = Option.value (StringMap.find_opt caller !reach)
+          ~default:StringSet.empty in
+        let found = StringSet.fold (fun callee acc ->
+          match StringMap.find_opt callee !reach with
+          | Some labels -> StringSet.union labels acc
+          | None -> acc) callees own in
+        if not (StringSet.equal found own) then begin
+          reach := StringMap.add caller found !reach;
+          changed := true
+        end) lock_callees
+    done;
+    !reach
+  in
   (* GitHub issue #528: IRQ delivery must not be restored while a live guard
      whose acquire masked IRQs still owns the prior interrupt state.
 
@@ -10237,6 +10274,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                      raise (TypeError (e.loc, Printf.sprintf
                        "lock order violation: cannot acquire '%s' (rank %d) while holding '%s' (rank %d)"
                        acquired.label acquired.rank held.label held.rank)))
+                 (live_guards (List.of_seq (Hashtbl.to_seq visible_bindings))));
+          (match StringMap.find_opt target single_instance_reach with
+           | None -> ()
+           | Some labels ->
+               List.iter (fun (visible_name, _, _, held, _) ->
+                 if StringSet.mem held.Effect_rules.label labels then
+                   raise (TypeError (e.loc, Printf.sprintf
+                     "lock order violation: '%s' re-acquires single-instance lock '%s' while '%s' holds it"
+                     target held.label visible_name)))
                  (live_guards (List.of_seq (Hashtbl.to_seq visible_bindings))));
           (* GitHub issue #528; see irq_restorers. A guard passed to this
              call is being handed over -- released, usually -- rather than

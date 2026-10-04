@@ -15282,6 +15282,58 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
           }" ());
 
   Alcotest.test_case
+    "issue #694: a single-instance lock is not re-acquired while held"
+    `Quick
+    (fun () ->
+       let prelude =
+         "linear view Issue694RunGuard[id: usize];
+          linear view Issue694PoolGuard[id: usize];
+          fn issue694_run_lock() -> Issue694RunGuard[0]
+              !{acquires_lock_40_run, single_instance_lock,
+                lock_guard_40_run} {
+            return view Issue694RunGuard[0];
+          }
+          fn issue694_run_unlock(g: sink Issue694RunGuard[0]) {}
+          fn issue694_pool_take(id: usize) -> Issue694PoolGuard[id]
+              !{acquires_lock_40_pool, lock_guard_40_pool} {
+            return view Issue694PoolGuard[id];
+          }
+          fn issue694_pool_put(g: sink Issue694PoolGuard[id]) {}
+          fn issue694_helper() {
+            let g = issue694_run_lock();
+            issue694_run_unlock(g);
+          }
+          fn issue694_pool_helper() {
+            let p = issue694_pool_take(3);
+            issue694_pool_put(p);
+          }\n" in
+       (* Other classes at the same rank, and multi-instance classes nested
+          in themselves, keep the equal-rank exemption; the lock is free
+          again once its guard is consumed. *)
+       expect_ok (prelude ^
+         "fn issue694_allowed() {
+            let g = issue694_run_lock();
+            let p = issue694_pool_take(1);
+            issue694_pool_helper();
+            issue694_pool_put(p);
+            issue694_run_unlock(g);
+            issue694_helper();
+          }") ();
+       (* The shape #693 step 3 nearly wrote: a helper reached while the
+          caller already holds the one run lock. *)
+       expect_type_error
+         "'issue694_helper' re-acquires single-instance lock 'run' while 'g' holds it"
+         (prelude ^
+         "fn issue694_self_deadlock() {
+            let g = issue694_run_lock();
+            issue694_helper();
+            issue694_run_unlock(g);
+          }") ();
+       expect_type_error
+         "single_instance_lock annotation requires an acquires_lock annotation"
+         "fn issue694_unranked() !{single_instance_lock} {}" ());
+
+  Alcotest.test_case
     "issue #226: zero-argument register/barrier intrinsics take no arguments"
     `Quick
     (fun () ->

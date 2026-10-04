@@ -1678,6 +1678,13 @@ for example, a connection guard at rank 30 may nest a pool guard at rank 40,
 while the reverse order is rejected. Equal-rank acquisitions are allowed: a
 rank identifies a lock class rather than a particular instance, and the
 kernel deliberately holds several independent connections in its pool probe.
+A lock class with exactly one instance is declared by adding
+`single_instance_lock` to its acquisition function. For such a class there is
+no exemption: while its guard is live, calling a function from which that
+class's acquisition is reachable through resolved direct calls is a compile
+error naming the callee, the lock, and the guard binding, because the only
+instance is already held and the lock is not recursive. The single-instance
+claim is trusted at that one annotation.
 These annotations are checker-only and do not appear in function-pointer
 effect rows.
 

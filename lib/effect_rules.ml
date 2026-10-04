@@ -47,6 +47,11 @@ let lock_guard_annotation =
    trusted boundary the rule stops at. Like the lock annotations, neither
    appears in a function-pointer row. *)
 let irq_masking_guard_annotation = "irq_masking_guard"
+
+(* GitHub issue #694: an acquisition function whose lock class has exactly
+   one instance. Re-acquiring such a class while its guard is live is a
+   self-deadlock, so the equal-rank exemption does not apply to it. *)
+let single_instance_lock_annotation = "single_instance_lock"
 let restores_saved_irq_annotation = "restores_saved_irq"
 
 (* GitHub issue #493: the two checker-only words of effect-indexed
@@ -71,6 +76,7 @@ let dynamic_rule name =
     lock_acquire_annotation name <> None
     || lock_guard_annotation name <> None
     || name = irq_masking_guard_annotation
+    || name = single_instance_lock_annotation
     || name = restores_saved_irq_annotation
     || invalidation_annotation name <> None
     || name = handle_of_witness_annotation in
