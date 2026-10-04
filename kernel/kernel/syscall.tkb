@@ -6178,9 +6178,9 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     kernel_process_parent_is_root() == false) {
                     kernel_syscall_persistent_shell_checkpoint_fork(child_pid);
                 }
-                let child_slot: usize =
-                    address_space_root_slot(kernel_process_current_root());
-                match process_image_clone_vm_begin(child_slot) {
+                let mut child_space: AddressSpaceRoot = kernel_process_current_root();
+                let child_slot: usize = address_space_root_slot(child_space);
+                match process_image_clone_vm_begin(child_space) {
                     ProcessCloneVmResult::OutOfMemory => {
                         match kernel_process_clone_rollback() {
                             ProcessCloneRollbackResult::Invalid => {

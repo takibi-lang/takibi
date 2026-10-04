@@ -27,7 +27,7 @@ from pass_line import report_pass
 ROOT = pathlib.Path("kernel")
 MINT = "address_space_root_mint"
 BARE = "address_space_root_for_slot"
-BARE_BUDGET = 33
+BARE_BUDGET = 20
 
 ALLOWED = {
     "address_space_backing_publish",

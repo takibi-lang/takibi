@@ -652,21 +652,25 @@ fn process_image_record_release_words(root: usize,
 // state is not shared, it is per-core state that was stored as though it
 // were global, and making two cores agree on it would be agreeing on the
 // wrong thing.
-private let mut process_image_target_root: [usize; KERNEL_MAX_CORES];
+//
+// GitHub issue #693 step 5: the target is held as the AddressSpaceRoot the
+// operation was given, handle and all, so what an operation acts on is the
+// root its caller made from an authority, not a slot re-read later.
+private let mut process_image_target_root: [AddressSpaceRoot; KERNEL_MAX_CORES];
 // Root 0 is a real target, so zero-initialization cannot also mean that no
 // image operation has selected a target. Keep that state separately and
 // make teardown open the result before it can touch any mappings.
 private let mut process_image_target_root_set: [bool; KERNEL_MAX_CORES];
 
-private fn process_image_target_root_here() -> usize {
-    let base: *usize = process_image_target_root;
+private fn process_image_target_root_here() -> AddressSpaceRoot {
+    let base: *AddressSpaceRoot = process_image_target_root;
     let core: usize = cpu_id();
     if (core >= KERNEL_MAX_CORES) { return *base; }
     return *(base + (core as isize));
 }
 
-private fn process_image_set_target_root_here(root: usize) {
-    let base: *usize = process_image_target_root;
+private fn process_image_set_target_root_here(root: AddressSpaceRoot) {
+    let base: *AddressSpaceRoot = process_image_target_root;
     let set_base: *bool = process_image_target_root_set;
     let core: usize = cpu_id();
     if (core >= KERNEL_MAX_CORES) {
@@ -679,15 +683,15 @@ private fn process_image_set_target_root_here(root: usize) {
 }
 
 private fn process_image_clear_target_root_here() {
-    let base: *usize = process_image_target_root;
+    let base: *AddressSpaceRoot = process_image_target_root;
     let set_base: *bool = process_image_target_root_set;
     let core: usize = cpu_id();
     if (core >= KERNEL_MAX_CORES) {
-        *base = 0;
+        *base = address_space_boot_root();
         *set_base = false;
         return;
     }
-    *(base + (core as isize)) = 0;
+    *(base + (core as isize)) = address_space_boot_root();
     *(set_base + (core as isize)) = false;
 }
 
@@ -751,14 +755,21 @@ fn process_image_recycled_handle_count() -> usize { return 0; }
 // non-exhaustive enum retains the full usize representation while requiring
 // an explicit cast at every domain boundary. Root 0 remains valid; absence is
 // represented only by ProcessImageTargetRootResult::Missing.
-enum ProcessImageRoot : usize { _; }
+struct ProcessImageRoot {
+    private root: AddressSpaceRoot;
+}
 
-private fn process_image_root(index: usize) -> ProcessImageRoot {
-    return index as ProcessImageRoot;
+private fn process_image_root(root: AddressSpaceRoot) -> ProcessImageRoot {
+    let mut wrapped: ProcessImageRoot = { root };
+    return wrapped;
 }
 
 fn process_image_root_index(root: ProcessImageRoot) -> usize {
-    return root as usize;
+    return address_space_root_slot(root.root);
+}
+
+fn process_image_root_space(root: ProcessImageRoot) -> AddressSpaceRoot {
+    return root.root;
 }
 
 must_use variant ProcessImageTargetRootResult {
@@ -778,8 +789,8 @@ fn process_image_target_root_result()
         *unset_count = *unset_count + 1;
         return ProcessImageTargetRootResult::Missing;
     }
-    if (scheduled_process_slot_valid(
-            process_image_target_root_here()) == false) {
+    if (scheduled_process_slot_valid(address_space_root_slot(
+            process_image_target_root_here())) == false) {
         let stale_count: *usize =
             process_image_counter_here(process_image_root_stale_count);
         *stale_count = *stale_count + 1;
@@ -802,7 +813,7 @@ fn process_image_target_root_peek() -> ProcessImageTargetRootResult {
 }
 
 fn process_image_pte_read(index: usize) -> usize {
-    return address_space_pte_read(address_space_root_for_slot(process_image_target_root_here()), index);
+    return address_space_pte_read(process_image_target_root_here(), index);
 }
 
 // Do not transfer PageOwner until the lazy-L3 allocation and PTE write have
@@ -811,7 +822,7 @@ fn process_image_pte_read(index: usize) -> usize {
 fn process_image_install_page(page: sink PageOwner[page_id],
                               index: usize, flags: usize) -> bool {
     match address_space_map_page(
-            address_space_root_for_slot(process_image_target_root_here()), index, page, flags) {
+            process_image_target_root_here(), index, page, flags) {
         AddressSpacePteWriteResult::Invalid => {
             return false;
         }
@@ -938,15 +949,17 @@ fn process_image_narrow_root(value: usize) -> usize !{unsafe} {
     return 0;
 }
 
-fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsafe} {
+fn process_image_clone_vm_begin(dest_space: AddressSpaceRoot) -> ProcessCloneVmResult !{unsafe} {
+    let dest_root: usize = address_space_root_slot(dest_space);
+    let mut source_space: AddressSpaceRoot = process_image_target_root_here();
     if (scheduled_process_slot_valid(dest_root) == false ||
-        dest_root == process_image_target_root_here() ||
-        address_space_is_live(address_space_root_for_slot(dest_root)) == false) {
+        dest_root == address_space_root_slot(source_space) ||
+        address_space_is_live(dest_space) == false) {
         return ProcessCloneVmResult::OutOfMemory;
     }
     let dest: usize =
         process_image_narrow_root(dest_root);
-    let source: usize = process_image_target_root_here();
+    let source: usize = address_space_root_slot(source_space);
     // GitHub issue #448: a clone already owed back on this root would be
     // leaked by overwriting its bookkeeping. It cannot happen (a root
     // belongs to one process, and that process cannot fork into itself),
@@ -957,7 +970,7 @@ fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsa
     process_image_set_clone_vm_source_root(dest, source);
     process_image_set_clone_vm_page_count(dest, 0);
     let mut clone_page_count: usize = 0;
-    address_space_clear_root(address_space_root_for_slot(dest_root));
+    address_space_clear_root(dest_space);
     // Reset the destination root's demand-stack metadata before rebuilding
     // it below, the same way process_image_map_current() resets its own
     // root's before mapping a fresh image -- otherwise a reaped child's
@@ -986,12 +999,12 @@ fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsa
     // reads per fork, and forks are what this kernel does most. Same
     // answer, same order (l3_index still ascends), ~200x less of it.
     for branch: usize in 0..<USER_L2_BRANCH_COUNT {
-      if (address_space_l3_branch_physical(address_space_root_for_slot(source), branch) == 0) {
+      if (address_space_l3_branch_physical(source_space, branch) == 0) {
         continue;
       }
       for entry: usize in 0..<USER_L3_PAGE_COUNT {
         let l3_index: usize = branch * USER_L3_PAGE_COUNT + entry;
-        let parent_pte: usize = address_space_pte_read(address_space_root_for_slot(source), l3_index);
+        let parent_pte: usize = address_space_pte_read(source_space, l3_index);
         if (parent_pte != 0) {
             let parent_physical: usize = parent_pte & USER_PAGE_PHYS_MASK;
             match page_mapping_retain_physical(parent_physical,
@@ -1017,7 +1030,7 @@ fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsa
             if (address_space_pte_is_writable(parent_pte)) {
                 child_pte = address_space_pte_cow_value(parent_pte);
             }
-            match address_space_pte_write(address_space_root_for_slot(dest_root), l3_index, child_pte) {
+            match address_space_pte_write(dest_space, l3_index, child_pte) {
                 AddressSpacePteWriteResult::Invalid => {
                     page_mapping_release_physical(parent_physical);
                     process_clone_vm_rollback(dest_root);
@@ -1031,7 +1044,7 @@ fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsa
                 AddressSpacePteWriteResult::Written => {
                     if (address_space_pte_is_writable(parent_pte)) {
                         match address_space_pte_write(
-                                address_space_root_for_slot(source), l3_index,
+                                source_space, l3_index,
                                 address_space_pte_cow_value(parent_pte)) {
                             AddressSpacePteWriteResult::Invalid => {
                                 process_clone_vm_rollback(dest_root);
@@ -1081,26 +1094,27 @@ fn process_image_clone_vm_begin(dest_root: usize) -> ProcessCloneVmResult !{unsa
 // root they mean, since with more than one live clone in the tree "the
 // child" and "the parent" are relative to whoever is switching, not fixed
 // numbers.
-fn process_image_activate_root(root: usize) {
+fn process_image_activate_root(target: AddressSpaceRoot) {
+    let root: usize = address_space_root_slot(target);
     if (scheduled_process_slot_valid(root) == false) { return; }
     // Root 0 owns permanent ASID 1 and never participates in rollover. Every
     // dynamic root uses the stopped preparation boundary, including exec and
     // boot-fixture callers outside the scheduler handoff paths.
     if (root == 0) {
-        process_image_set_target_root_here(root);
-        address_space_activate_root(address_space_root_for_slot(root));
+        process_image_set_target_root_here(target);
+        address_space_activate_root(target);
         kernel_process_trace_address_space_activate(root);
         return;
     }
-    kernel_process_activate_stable_root(root);
+    kernel_process_activate_stable_root(target);
 }
 
 // Split activation for scheduler handoffs that may need an ASID rollover.
 // Preparation changes neither this CPU's target-root record nor TTBR0; commit
 // changes both only after the caller has revalidated its reserved process.
-fn process_image_prepare_activation(root: usize)
+fn process_image_prepare_activation(root: AddressSpaceRoot)
         -> AddressSpaceActivationPrepareResult {
-    return address_space_prepare_activation(address_space_root_for_slot(root));
+    return address_space_prepare_activation(root);
 }
 
 fn process_image_commit_activation(
@@ -1109,7 +1123,8 @@ fn process_image_commit_activation(
         AddressSpaceActivationCommitResult::Invalid => { return false; }
         AddressSpaceActivationCommitResult::Activated(target) => {
             process_image_set_target_root_here(target);
-            kernel_process_trace_address_space_activate(target);
+            kernel_process_trace_address_space_activate(
+                address_space_root_slot(target));
             return true;
         }
     }
@@ -1142,7 +1157,7 @@ fn process_image_clone_vm_reap(dest_root: usize) -> ProcessCloneVmReapResult {
     // The caller remains the logical current process throughout this
     // non-preemptible EL1 span. Activate the retained source before releasing
     // mappings from a destination that may still be installed in TTBR0.
-    kernel_process_activate_stable_root(source);
+    kernel_process_activate_stable_root(address_space_root_for_slot(source));
     process_clone_vm_rollback(dest_root);
     *process_image_counter_here(clone_last_reaped_count) = count;
     return ProcessCloneVmReapResult::Reaped;
@@ -1177,12 +1192,12 @@ const PROCESS_IMAGE_PROBE_ABORT_ESR: usize = 0x92000007;
 const PROCESS_IMAGE_PROBE_ABORT_ADDRESS: usize = 0x0000FFFFFFFFE000;
 
 fn process_image_no_target_probe() -> bool !{unsafe} {
-    let mut restore_root: usize = 0;
+    let mut restore_root: AddressSpaceRoot = address_space_boot_root();
     let mut had_root: bool = false;
     match process_image_target_root_result() {
         ProcessImageTargetRootResult::Missing => {}
         ProcessImageTargetRootResult::Ready(target) => {
-            restore_root = process_image_root_index(target);
+            restore_root = process_image_root_space(target);
             had_root = true;
         }
     }
@@ -1213,7 +1228,7 @@ fn process_image_no_target_probe() -> bool !{unsafe} {
 }
 
 fn process_image_clone_growth_probe() -> bool !{unsafe} {
-    process_image_set_target_root_here(0);
+    process_image_set_target_root_here(address_space_boot_root());
     // GitHub issue #392: the child root is a live process's record now,
     // not the bare number 1 -- see
     // scheduled_process_probe_slot_acquire for why a probe has to be a
@@ -1290,15 +1305,15 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
         ok = false;
     }
     *fallback_count = fallback_before;
-    process_image_set_target_root_here(0);
+    process_image_set_target_root_here(address_space_boot_root());
     let mut cow_parent_physical: usize = 0;
-    match process_image_clone_vm_begin(child_root) {
+    match process_image_clone_vm_begin(child_root_root) {
         ProcessCloneVmResult::OutOfMemory => { ok = false; }
         ProcessCloneVmResult::Copied => {}
     }
 
     if (ok) {
-        process_image_activate_root(child_root);
+        process_image_activate_root(child_root_root);
         // fork must initially share the parent's top stack page, with both
         // PTEs marked COW. A simulated EL0 write-permission fault then gives
         // only root 1 a private writable page while root 0 retains the
@@ -1346,7 +1361,7 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
             address_space_pte_read(child_root_root, first_page - 1) == 0)) {
             ok = false;
         }
-        process_image_activate_root(0);
+        process_image_activate_root(address_space_boot_root());
     }
 
     match process_image_clone_vm_reap(child_root) {
@@ -1515,9 +1530,9 @@ fn process_image_exec_reap_evidence() -> (usize, usize, usize) {
 // GitHub issue #516 a CLEARED target refuses the fault outright instead of
 // resolving it against root 0, which is the better of the two failures: it
 // names the fault rather than PID 1's next write.
-fn process_image_exec_teardown(root_index: usize,
+fn process_image_exec_teardown(target: AddressSpaceRoot,
                                words: ProcessPoolHandleWords) !{unsafe} {
-    process_image_set_target_root_here(root_index);
+    process_image_set_target_root_here(target);
     match process_image_target_root_result() {
         ProcessImageTargetRootResult::Missing => {
             process_image_clear_target_root_here();
@@ -1581,8 +1596,7 @@ fn process_image_exec_teardown(root_index: usize,
 // kernel_process_current_root() is already correct here, not a fixed
 // root 0.
 fn process_image_exec_resume_root() {
-    kernel_process_activate_stable_root(
-        address_space_root_slot(kernel_process_current_root()));
+    kernel_process_activate_stable_root(kernel_process_current_root());
 }
 
 // A flat, NUL-terminated argv blob is deliberately used instead of an array
@@ -2005,7 +2019,7 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
             return false;
         }
         let index: usize = (fault_address - USER_TEXT_VA) / PAGE_SIZE;
-        return address_space_resolve_cow(address_space_root_for_slot(process_image_target_root_here()), index);
+        return address_space_resolve_cow(process_image_target_root_here(), index);
     }
     // A missing PTE inside an existing L3 is a level-3 translation fault
     // (0x07). A stack expansion into an unpopulated lazy-L3 branch faults
@@ -2370,12 +2384,13 @@ fn process_image_pair_map_ext2_in_root(
         interpreter_bias: usize,
         argv: borrow []u8,
         argc: usize,
-        root: usize) -> ProcessImagePairProbeResult {
+        target: AddressSpaceRoot) -> ProcessImagePairProbeResult {
+    let root: usize = address_space_root_slot(target);
     if (scheduled_process_slot_valid(root) == false ||
-        address_space_is_live(address_space_root_for_slot(root)) == false) {
+        address_space_is_live(target) == false) {
         return ProcessImagePairProbeResult::Invalid;
     }
-    process_image_set_target_root_here(root);
+    process_image_set_target_root_here(target);
     process_image_ext2_source(
         primary_mount, primary_inode, primary_length);
     process_image_pair_ext2_source(
@@ -2494,7 +2509,7 @@ fn process_image_map_current(plan: DistroElfLoadPlan,
 fn process_image_map(plan: DistroElfLoadPlan,
                      argv: borrow []u8,
                      argc: usize) -> ProcessImageMapResult {
-    process_image_set_target_root_here(0);
+    process_image_set_target_root_here(address_space_boot_root());
     return process_image_map_current(plan, argv, argc);
 }
 
@@ -2508,7 +2523,7 @@ fn process_image_map_ext2(plan: DistroElfLoadPlan,
                           file_length: usize,
                           argv: borrow []u8,
                           argc: usize) -> ProcessImageMapResult {
-    process_image_set_target_root_here(0);
+    process_image_set_target_root_here(address_space_boot_root());
     process_image_ext2_source(mount, inode, file_length);
     let result = process_image_map_current(plan, argv, argc);
     process_image_ext2_source_clear();
@@ -2521,12 +2536,13 @@ fn process_image_map_ext2_in_root(plan: DistroElfLoadPlan,
                                   file_length: usize,
                                   argv: borrow []u8,
                                   argc: usize,
-                                  root: usize) -> ProcessImageMapResult {
+                                  target: AddressSpaceRoot) -> ProcessImageMapResult {
+    let root: usize = address_space_root_slot(target);
     if (scheduled_process_slot_valid(root) == false ||
-        address_space_is_live(address_space_root_for_slot(root)) == false) {
+        address_space_is_live(target) == false) {
         return ProcessImageMapResult::InvalidImage;
     }
-    process_image_set_target_root_here(root);
+    process_image_set_target_root_here(target);
     process_image_ext2_source(mount, inode, file_length);
     let result = process_image_map_current(plan, argv, argc);
     process_image_ext2_source_clear();
@@ -2536,12 +2552,13 @@ fn process_image_map_ext2_in_root(plan: DistroElfLoadPlan,
 fn process_image_map_in_root(plan: DistroElfLoadPlan,
                              argv: borrow []u8,
                              argc: usize,
-                             root: usize) -> ProcessImageMapResult {
+                             target: AddressSpaceRoot) -> ProcessImageMapResult {
+    let root: usize = address_space_root_slot(target);
     if (scheduled_process_slot_valid(root) == false ||
-        address_space_is_live(address_space_root_for_slot(root)) == false) {
+        address_space_is_live(target) == false) {
         return ProcessImageMapResult::InvalidImage;
     }
-    process_image_set_target_root_here(root);
+    process_image_set_target_root_here(target);
     return process_image_map_current(plan, argv, argc);
 }
 

@@ -791,7 +791,7 @@ fn address_space_prepare_activation(root: AddressSpaceRoot)
 
 must_use variant AddressSpaceActivationCommitResult {
     Invalid;
-    Activated(usize);
+    Activated(AddressSpaceRoot);
 }
 
 fn address_space_commit_activation(
@@ -813,7 +813,7 @@ fn address_space_commit_activation(
     }
     mmu_activate_root(backing.l1_physical, backing.asid);
     address_space_set_active_slot_here(checked);
-    return AddressSpaceActivationCommitResult::Activated(checked);
+    return AddressSpaceActivationCommitResult::Activated(root);
 }
 
 fn address_space_cancel_activation(
@@ -1471,7 +1471,7 @@ fn address_space_asid_rollover_probe() -> bool {
             match address_space_commit_activation(prepared) {
                 AddressSpaceActivationCommitResult::Invalid => { ok = false; }
                 AddressSpaceActivationCommitResult::Activated(root) => {
-                    if (root != active_before) { ok = false; }
+                    if (address_space_root_slot(root) != active_before) { ok = false; }
                 }
             }
         }

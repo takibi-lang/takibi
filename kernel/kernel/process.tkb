@@ -2720,7 +2720,7 @@ private fn scheduled_process_take_spare_stack_run() -> usize !{unsafe} {
 fn scheduled_process_table_clear() !{unsafe} {
     // Reset can enter while a child root is in TTBR0_EL1. Select the
     // permanent bootstrap root before releasing any nonzero backing record.
-    process_image_activate_root(0);
+    process_image_activate_root(address_space_boot_root());
     scheduled_process_release_every_process();
 }
 
@@ -3471,7 +3471,7 @@ fn scheduled_process_reap_teardown(
     // installed exec image can be torn down and accounted for, and the
     // teardown moved here from the parent's return for exactly that
     // reason. Root 0 is exempt inside the release itself.
-    process_image_exec_teardown(owner.pool_index,
+    process_image_exec_teardown(scheduled_process_address_space_root_owned(owner),
         scheduled_process_image_record_handle_owned(owner));
     process_image_record_release_words(owner.pool_index,
         scheduled_process_image_record_handle_owned(owner));
@@ -5226,7 +5226,8 @@ private fn kernel_process_secondary_start_reserved(
         owner: sink ScheduledProcessOwner[process],
         running: sink ScheduledProcessState[process, ProcessState::Running])
         -> ProcessSecondaryStart {
-    match process_image_prepare_activation(owner.pool_index) {
+    match process_image_prepare_activation(
+        scheduled_process_address_space_root_owned(owner)) {
         AddressSpaceActivationPrepareResult::Invalid => {
             let guard = process_run_lock();
             let ready = scheduled_process_yield(owner, running);
@@ -5432,7 +5433,8 @@ private fn kernel_process_schedule_reserved(
         owner: sink ScheduledProcessOwner[process],
         running: sink ScheduledProcessState[process, ProcessState::Running],
         current: borrow FrameRef[from_process]) -> FrameSwitch {
-    match process_image_prepare_activation(owner.pool_index) {
+    match process_image_prepare_activation(
+        scheduled_process_address_space_root_owned(owner)) {
         AddressSpaceActivationPrepareResult::Invalid => {
             kernel_process_schedule_cancel_reserved(owner, running);
             return FrameSwitch::Stay;
@@ -5538,7 +5540,7 @@ fn kernel_process_activate_current_root() -> CurrentRootActivationResult {
     }
     let mut injected_busy: usize = 0;
     while (true) {
-    match process_image_prepare_activation(current.pool_index) {
+    match process_image_prepare_activation(kernel_process_current_root()) {
         AddressSpaceActivationPrepareResult::Invalid => {
             return CurrentRootActivationResult::Invalid;
         }
@@ -5616,7 +5618,7 @@ fn kernel_process_activate_current_root() -> CurrentRootActivationResult {
 // with them masked the other core ends with Partial and releases, and this
 // core's next claim succeeds. The wait differs per core so two cores that
 // both retry do not keep meeting.
-fn kernel_process_activate_stable_root(root: usize) {
+fn kernel_process_activate_stable_root(root: AddressSpaceRoot) {
     let mut activating: bool = true;
     let mut injected_busy: usize = 0;
     if (kernel_process_rollover_busy_injections != 0) {
@@ -6685,7 +6687,8 @@ private fn kernel_process_block_reserved(
         running: sink ScheduledProcessState[process, ProcessState::Running],
         current: borrow FrameRef[from_process], reason: ProcessWaitReason,
         trace_aux: usize) -> BlockSwitch {
-    match process_image_prepare_activation(owner.pool_index) {
+    match process_image_prepare_activation(
+        scheduled_process_address_space_root_owned(owner)) {
         AddressSpaceActivationPrepareResult::Invalid => {
             kernel_process_schedule_cancel_reserved(owner, running);
             return BlockSwitch::Retry;
@@ -9094,7 +9097,8 @@ private fn kernel_process_exit_reserved(
         owner: sink ScheduledProcessOwner[process],
         running: sink ScheduledProcessState[process, ProcessState::Running],
         deliver_wait4: bool, auto_reap: bool) -> ExitSwitch {
-    match process_image_prepare_activation(owner.pool_index) {
+    match process_image_prepare_activation(
+        scheduled_process_address_space_root_owned(owner)) {
         AddressSpaceActivationPrepareResult::Invalid => {
             kernel_process_schedule_cancel_reserved(owner, running);
             return ExitSwitch::Idle;
@@ -9548,7 +9552,7 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
     // invisible here -- it activated PID 1's live image and only the next
     // COW fault said so. With no target there is nothing to move away from
     // and nothing to recommit, so both activations below are skipped.
-    let mut resume_root: usize = 0;
+    let mut resume_root: AddressSpaceRoot = address_space_boot_root();
     let mut has_resume_root: bool = false;
     // A secondary may arrive here from stack_idle_complete after it moved to
     // the IRQ stack and cleared current_live. It has already activated root
@@ -9558,7 +9562,7 @@ private fn kernel_process_reap_zombie(parent: ProcessHandle,
         match process_image_target_root_result() {
             ProcessImageTargetRootResult::Missing => {}
             ProcessImageTargetRootResult::Ready(target) => {
-                resume_root = process_image_root_index(target);
+                resume_root = process_image_root_space(target);
                 has_resume_root = true;
             }
         }

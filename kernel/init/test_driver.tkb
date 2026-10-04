@@ -294,7 +294,7 @@ fn kernel_exec_resolve_argv0(mount: Ext2Mount, argv: borrow []u8)
 }
 
 fn kernel_process_child_exec_map_result(
-        pages_result: ProcessImageMapResult, child_root: usize)
+        pages_result: ProcessImageMapResult, child_root: AddressSpaceRoot)
         -> KernelChildExecPrepareResult {
     match pages_result {
         ProcessImageMapResult::InvalidImage => {
@@ -805,8 +805,8 @@ private fn kernel_process_child_exec_prepare_with(argv: borrow []u8)
     // child running deeper than one level under its own parent (e.g.
     // user_payload's own fork of a UART-block/scheduler-preempt child)
     // needs its own current root here instead.
-    let child_root: usize =
-        address_space_root_slot(kernel_process_current_root());
+    let mut child_space: AddressSpaceRoot = kernel_process_current_root();
+    let child_root: usize = address_space_root_slot(child_space);
     // Which VM this exec replaces depends on how the process got the one it
     // has. A forked child is still running on the clone of its parent's, so
     // that clone is what gets reaped. A process execing for the SECOND time
@@ -815,7 +815,7 @@ private fn kernel_process_child_exec_prepare_with(argv: borrow []u8)
     // mapped over the same window, because afterwards the old image's page
     // table entries are gone and its physical pages are unreachable.
     if (process_image_exec_image_installed(child_root)) {
-        process_image_exec_teardown(child_root,
+        process_image_exec_teardown(child_space,
             scheduled_process_image_record_handle(child_root));
     } else {
         match process_image_clone_vm_reap(child_root) {
@@ -844,7 +844,7 @@ private fn kernel_process_child_exec_prepare_with(argv: borrow []u8)
                         kernel_exec_interpreter_bias(images.primary.plan),
                         argv,
                         kernel_syscall_exec_argc(),
-                        child_root) {
+                        child_space) {
                     ProcessImagePairProbeResult::Invalid => {
                         return KernelChildExecPrepareResult::DynamicPairInvalid;
                     }
@@ -882,7 +882,7 @@ private fn kernel_process_child_exec_prepare_with(argv: borrow []u8)
                             kernel_syscall_persistent_shell_checkpoint_exec_commit(
                                 kernel_process_current_pid());
                         }
-                        process_image_activate_root(child_root);
+                        process_image_activate_root(child_space);
                         kernel_process_child_exec_mark();
                         kernel_syscall_exec_clear();
                         return KernelChildExecPrepareResult::Prepared;
@@ -899,12 +899,12 @@ private fn kernel_process_child_exec_prepare_with(argv: borrow []u8)
             process_image_map_ext2_in_root(
             target_plan, saved_ext2_mount, target_ext2_inode,
             target_ext2_length, argv,
-            kernel_syscall_exec_argc(), child_root), child_root);
+            kernel_syscall_exec_argc(), child_space), child_space);
     } else {
         return kernel_process_child_exec_map_result(
             process_image_map_in_root(
             target_plan, argv,
-            kernel_syscall_exec_argc(), child_root), child_root);
+            kernel_syscall_exec_argc(), child_space), child_space);
     }
 }
 
@@ -1339,7 +1339,7 @@ irq_uart_rx_unmask();
                             images.interpreter.inode,
                             images.interpreter.file_length,
                             kernel_exec_interpreter_bias(images.primary.plan),
-                            bs"check\0", 1, 0) {
+                            bs"check\0", 1, address_space_boot_root()) {
                         ProcessImagePairProbeResult::Invalid => {
                             kernel_boot_log("httpd map: combined invalid\n");
                         }
