@@ -4567,13 +4567,14 @@ fn kernel_process_execution_reset() {
             let start_guard = process_run_lock();
             execution_here().current_live =
                 kernel_process_start_handle(start_guard, root);
+            let root_saved_sp: usize =
+                scheduled_process_record_of_locked(start_guard, root).saved_sp;
             process_run_unlock(start_guard);
             if (execution_here().current_live) {
                 kernel_process_trace_record(
                     ProcessTraceResume,
                     scheduled_process_pid_of_handle(root), root.generation,
-                    0, 0, 2, 0, root.pool_index,
-                    scheduled_process_record_of(root).saved_sp, 0);
+                    0, 0, 2, 0, root.pool_index, root_saved_sp, 0);
             }
         }
     }
@@ -7780,7 +7781,7 @@ fn kernel_process_uart_record_parent_progress()
     }
     let mut parent: ProcessHandle = execution_here().current_handle;
     let mut child: ProcessHandle =
-        scheduled_process_record_of(parent).first_child;
+        scheduled_process_record_running(running_here).first_child;
     if (scheduled_process_state_of(parent) !=
             ProcessSlotState::Running ||
         scheduled_process_state_of(child) !=
@@ -8701,7 +8702,7 @@ fn kernel_process_clone_context_install(
             .has_parent == false) { { let mut __running_result: CloneInstall = CloneInstall::Failed; process_running_end(running_here); return __running_result; } }
     let mut child_handle: ProcessHandle = execution_here().current_handle;
     let mut parent_handle: ProcessHandle =
-        scheduled_process_record_of(child_handle).parent;
+        scheduled_process_record_running(running_here).parent;
     // The copied child frame becomes Running in the same section that
     // publishes the parent's frame and makes that parent Ready.
     let guard = process_run_lock();
