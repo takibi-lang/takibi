@@ -317,6 +317,13 @@ PEER_SETTINGS_DONE = (
     b"its queued bytes in order\n")
 
 
+def peer_settings_shell_ready(output: bytes, setup: str) -> bool:
+    """A probe result precedes ash's prompt; wait for its fresh input boundary."""
+    at = output.rfind(PEER_SETTINGS_DONE)
+    return (at >= 0 and shell_prompt_ready(
+        output[at + len(PEER_SETTINGS_DONE):], setup))
+
+
 def write_uart_line(connection, line: bytes) -> None:
     # The kernel UART ISR currently drains one byte per interrupt. Pace the
     # synthetic console like typed input so a command longer than a 16-byte
@@ -744,7 +751,7 @@ def main() -> int:
                     write_uart_line(connection, b"/bin/peer-settings")
                     peer_settings_sent = True
                 settings_finished = (not args.peer_settings or
-                                     PEER_SETTINGS_DONE in output)
+                                     peer_settings_shell_ready(output, shell_setup))
                 if (args.peer_tty and terminal_scenario.done and httpd_ready and
                         settings_finished and
                         peer_command_ready(output, args.stop_marker) and not peer_tty_sent):

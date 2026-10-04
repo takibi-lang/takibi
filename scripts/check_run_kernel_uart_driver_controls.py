@@ -108,6 +108,25 @@ def main() -> int:
     # the workload marker that starts it, and the caller's final stop marker.
     # The last one used to be ignored in this mode, so a new recurrence view
     # could be truncated even though the runner explicitly named its line.
+    # Physical/aggregate capture: the probe's report arrived before ash's
+    # new prompt. Sending here interleaved '/bin/peer' with that prompt.
+    setup = "PS1='/ # '"
+    previous_prompt = b" # \x1b[6n/bin/peer-settings\n"
+    completion = (b"workload: settings change woke the blocked peer reader, which read "
+                  b"its queued bytes in order\n")
+    for suffix, expected in ((b"", False), (b" # ", False),
+                             (b" # \x1b[6", False), (b" # \x1b[6n", True),
+                             (b"/ # \x1b[6n", True)):
+        CASES.note()
+        if driver.peer_settings_shell_ready(previous_prompt + completion + suffix, setup) != expected:
+            failures.append("settings completion admitted a stale or unfinished shell input boundary")
+    CASES.note()
+    if driver.peer_settings_shell_ready(previous_prompt + b" # \x1b[6n", setup):
+        failures.append("the next peer command skipped the settings verdict")
+    CASES.note()
+    if driver.peer_settings_shell_ready(previous_prompt + completion[:-1] + b" # \x1b[6n", setup):
+        failures.append("the next peer command skipped the settings report newline")
+
     stop_marker = ("workload: peer exit stack released before init collected "
                    "on core 0")
     before_stop = after_workload + b"httpd-background-ok\n"
@@ -174,7 +193,7 @@ def main() -> int:
         "uart-driver-silence",
         "a timed-out capture says whether the guest stopped or merely "
         "ran late and names its last line; an interactive command waits "
-        "for its requested workload and stop boundaries; exact wrapped echoes "
+        "for its workload, stop and fresh post-settings prompt boundaries; exact wrapped echoes "
         "and dynamic ps PIDs normalize while wrong and incomplete output stays",
         cases=CASES.ran)
     return 0
