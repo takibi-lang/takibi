@@ -93,19 +93,20 @@ else
           if $alloc_rollback_point == 6
             # #672: the backing record's pool grows through the page
             # allocator, and a refused backing used to be built into as if
-            # it existed. Fail the record itself inside allocate_root.
+            # it existed. Fail the record itself: since #693 step 5,
+            # address_space_ensure_root allocates it before allocate_root,
+            # and the answer is a variant whose Missing has no payload.
             break scheduled_process_alloc_finish
             continue
             delete
             set $alloc_thread = $_thread
-            break address_space_allocate_root thread $alloc_thread
+            break address_space_ensure_root thread $alloc_thread
             continue
             delete
             break address_space_backing_ensure thread $alloc_thread
             continue
             delete
-            return (unsigned char)0
-            printf "takibi-force-variant-return: bool false via registers\n"
+            takibi-force-variant-return AddressSpaceBackingReady Missing
             printf "alloc-rollback: forced point=address-space-backing\n"
           else
             error "unknown alloc-rollback point; expected 1 through 6"

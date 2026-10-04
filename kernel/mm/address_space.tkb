@@ -607,16 +607,11 @@ must_use variant AddressSpaceAllocateResult {
 fn address_space_allocate_root(root: AddressSpaceRoot)
         -> AddressSpaceAllocateResult {
     let slot: usize = root.slot;
-    // The backing record first: a root whose tables have nowhere to be
-    // recorded is not a root. Since #672 the record's pool grows through
-    // page_alloc_contiguous, so this can genuinely run out, and it has to
-    // say so rather than build tables into a record that does not exist.
-    let mut ready: AddressSpaceRoot = match address_space_backing_ensure(root) {
-        AddressSpaceBackingReady::Missing => {
-            return AddressSpaceAllocateResult::OutOfMemory;
-        }
-        AddressSpaceBackingReady::Ready(fresh) => { fresh }
-    };
+    // The backing record exists already: address_space_ensure_root made it
+    // and passes the root naming it. Since #672 the record's pool grows
+    // through page_alloc_contiguous, so that step can genuinely run out,
+    // and it says so there rather than building tables into a record that
+    // does not exist.
     match page_alloc(PageOwnerTag::PageTable) {
         PageAllocResult::OutOfMemory => {
             return AddressSpaceAllocateResult::OutOfMemory;
@@ -628,7 +623,7 @@ fn address_space_allocate_root(root: AddressSpaceRoot)
                     return AddressSpaceAllocateResult::OutOfMemory;
                 }
                 PageAllocResult::Allocated(l2) => {
-                    address_space_record_backing(ready, l1, l2);
+                    address_space_record_backing(root, l1, l2);
                     return AddressSpaceAllocateResult::Ok;
                 }
             }

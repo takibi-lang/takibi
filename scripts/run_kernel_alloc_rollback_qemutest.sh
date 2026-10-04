@@ -66,9 +66,9 @@ case "$ALLOC_ROLLBACK_POINT" in
         ;;
     address-space-backing)
         # #672: the backing record's own allocation, inside
-        # address_space_allocate_root. It returns a bool, not a variant.
+        # address_space_ensure_root (#693 step 5).
         ALLOC_ROLLBACK_POINT_ID=6
-        ALLOC_ROLLBACK_VARIANT='bool false'
+        ALLOC_ROLLBACK_VARIANT='AddressSpaceBackingReady::Missing'
         ;;
     *)
         echo "error: unknown allocation rollback point '$ALLOC_ROLLBACK_POINT'" >&2
