@@ -62,6 +62,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gdb_interrupt import interrupt_after  # noqa: E402
+from progress_timeout import ProgressTimeout  # noqa: E402
+from await_timing import AwaitTiming  # noqa: E402
 
 
 SERIAL_PORT = int(os.environ["UART_WAKE_SERIAL_PORT"])
@@ -71,6 +73,8 @@ VERDICT = os.environ["UART_WAKE_VERDICT"]
 INIT_LISTENER = os.environ["UART_WAKE_INIT_LISTENER"]
 NETWORK_READY = os.environ["UART_WAKE_NETWORK_READY"]
 BOOT_TIMEOUT = float(os.environ.get("UART_WAKE_BOOT_TIMEOUT", "120"))
+BATCH_DEADLINE = time.monotonic() + float(
+    os.environ.get("GDB_BATCH_TIMEOUT", str(BOOT_TIMEOUT * 6))) - 10.0
 STEP_TIMEOUT = 10.0
 
 WINDOW = "syscall_test_evidence_record_read_uart_wait"
@@ -159,15 +163,35 @@ def reader(connection: socket.socket) -> None:
                 published_network = True
 
 
-def seen(predicate, timeout: float) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        with output_lock:
-            text = bytes(output).replace(b"\r\n", b"\n")
-        if predicate(text):
-            return True
-        time.sleep(0.1)
-    return False
+def seen(predicate, timeout: float, *, boot_phase=None) -> bool:
+    started = time.monotonic()
+    remaining = max(0.0, BATCH_DEADLINE - started)
+    timer = ProgressTimeout(timeout, remaining if boot_phase else timeout, started)
+    timing = None
+    if boot_phase:
+        timing = AwaitTiming(
+            f"{UART_LOG}.await-{boot_phase}.jsonl", started, remaining, (), (),
+            label=LABEL, origin=f"remaining GDB batch ceiling (UART inactivity {timeout:g}s)",
+            milestones=(boot_phase,))
+    with output_lock:
+        previous_size = len(output)
+    try:
+        while not timer.expired(time.monotonic()):
+            with output_lock:
+                size = len(output)
+                text = bytes(output).replace(b"\r\n", b"\n")
+            if boot_phase and size > previous_size:
+                timer.observe(time.monotonic())
+                previous_size = size
+            if predicate(text):
+                if timing:
+                    timing.record(boot_phase, True, time.monotonic())
+                return True
+            time.sleep(0.1)
+        return False
+    finally:
+        if timing:
+            timing.finish(time.monotonic())
 
 
 def answered(text: bytes) -> bool:
@@ -210,10 +234,10 @@ def run_peer(connection: socket.socket) -> None:
     # which ends with its seventeenth record. That chain starts with the busy
     # pair migrating, which waits for a third runnable context. The persistent
     # HTTPd may be asleep in accept, so it cannot provide that context.
-    if not seen(lambda text: BUSY_PAIR_DONE in text, BOOT_TIMEOUT):
+    if not seen(lambda text: BUSY_PAIR_DONE in text, BOOT_TIMEOUT, boot_phase="busy-pair-done"):
         verdict(False, "the busy pair never finished before the peer chain")
         return
-    if not seen(lambda text: PEER_CONSOLE_DONE in text, BOOT_TIMEOUT):
+    if not seen(lambda text: PEER_CONSOLE_DONE in text, BOOT_TIMEOUT, boot_phase="peer-console-done"):
         verdict(False, "the peer console writer never delivered its last record")
         return
     # The wake window is reached only when another Ready process competes
@@ -223,11 +247,11 @@ def run_peer(connection: socket.socket) -> None:
     for value in PEER_SPINNER:
         connection.sendall(bytes((value,)))
         time.sleep(0.01)
-    if not seen(lambda text: PEER_SPINNER_READY in text, BOOT_TIMEOUT):
+    if not seen(lambda text: PEER_SPINNER_READY in text, BOOT_TIMEOUT, boot_phase="peer-spinner-ready"):
         verdict(False, "/bin/peer-spin never pinned itself to CPU 1")
         return
     connection.sendall(PEER_COMMAND)
-    if not seen(lambda text: PEER_READING in text, BOOT_TIMEOUT):
+    if not seen(lambda text: PEER_READING in text, BOOT_TIMEOUT, boot_phase="peer-reader-ready"):
         verdict(False, "/bin/peer-tty never said it was reading the terminal "
                 "on the secondary cpu")
         return
@@ -478,7 +502,7 @@ def run_scalar_buffering(connection: socket.socket) -> bool:
     scalar.delete()
     gdb.execute("detach")
     if not seen(lambda text: b"uart rx: scheduler block+wake ok" in text,
-                BOOT_TIMEOUT):
+                BOOT_TIMEOUT, boot_phase="scalar-boot-report"):
         verdict(False, "the scalar reader did not consume its queued suffix in order")
         return False
     print(f"PASS {LABEL}: scalar IRQ delivery followed by queued prefix "
@@ -497,16 +521,16 @@ def run() -> None:
     # pair. Both stalls were at that shell's prompt. So the first shell is
     # sent away, and so is the payload that follows it, the way the ash
     # lane's driver does.
-    if not seen(lambda text: SHELL_READY in text, BOOT_TIMEOUT):
+    if not seen(lambda text: SHELL_READY in text, BOOT_TIMEOUT, boot_phase="first-shell"):
         verdict(False, "the boot never reached the interactive shell's prompt")
         return
     connection.sendall(b"exit\n")
-    if not seen(lambda text: PAYLOAD_READY in text, BOOT_TIMEOUT):
+    if not seen(lambda text: PAYLOAD_READY in text, BOOT_TIMEOUT, boot_phase="payload-ready"):
         verdict(False, "the payload never asked for its input")
         return
     if not run_scalar_buffering(connection):
         return
-    if not seen(lambda text: PERSISTENT_READY in text, BOOT_TIMEOUT):
+    if not seen(lambda text: PERSISTENT_READY in text, BOOT_TIMEOUT, boot_phase="persistent-shell"):
         verdict(False, "the persistent shell never reached its prompt")
         return
     # The marker is printed on the read's way to sleep; let it get there.

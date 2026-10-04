@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run real PTY and STARVED driver flows under deterministic UART clocks."""
+"""Run console driver waits under deterministic UART clocks."""
 
 import contextlib
 import importlib.util
@@ -166,7 +166,49 @@ def starve_case(events, diagnostic):
         return clock.now
 
 
+def uart_wake_case(events, expected, *, boot=True, started=0.0):
+    CASES.note()
+    path = ROOT / "scripts/kernel_uart_wake_check.py"
+    source = path.read_text()
+    clock = Clock([])
+    clock.now = started
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        env = {"UART_WAKE_SERIAL_PORT": "1", "UART_WAKE_GDB_PORT": "2",
+               "UART_WAKE_UART_LOG": str(root / "uart"),
+               "UART_WAKE_VERDICT": str(root / "verdict"),
+               "UART_WAKE_INIT_LISTENER": str(root / "init"),
+               "UART_WAKE_NETWORK_READY": str(root / "net")}
+        namespace = {"__file__": str(path), "__name__": "uart_wake_control"}
+        with patch.dict(os.environ, env, clear=True), patch.dict(
+                sys.modules, {"gdb": SimpleNamespace(Breakpoint=object)}):
+            exec(compile(source[:source.rindex("\ntry:\n    run()")],
+                         str(path), "exec"), namespace)
+            namespace["time"] = clock
+            namespace["BATCH_DEADLINE"] = 28.0
+            namespace["output"].extend(b"old boot output\n")
+            clock.events = [(at, lambda data=data:
+                             namespace["output"].extend(data)) for at, data in events]
+            result = namespace["seen"](lambda text: b"ready" in text, 8.0,
+                                       boot_phase="fixture" if boot else None)
+        assert result is expected, (result, clock.now)
+        if boot:
+            row = json.loads((root / "uart.await-fixture.jsonl").read_text())
+            assert row["status"] == ("arrived" if expected else "not-arrived"), row
+            assert row["timeout_seconds"] == 28.0 - started, row
+        return clock.now
+
+
 def main():
+    advancing = [(4.0, b"boot\n"), (10.0, b"boot\n"), (16.0, b"boot\n"),
+                 (20.0, b"ready\n")]
+    assert uart_wake_case(advancing, True) == 20.0
+    assert uart_wake_case([], False) == 8.0
+    assert uart_wake_case([(4.0, b"boot\n")], False) == 12.0
+    assert uart_wake_case([(at, b"boot\n") for at in range(4, 40, 4)], False) == 28.0
+    assert uart_wake_case([(24.0, b"boot\n"), (29.0, b"ready\n")],
+                          False, started=20.0) == 28.0
+    assert uart_wake_case(advancing, False, boot=False) == 8.0
     ready = (b"open in a host browser" + bytes((58, 32))
              + b"http://127.0.0.1:1/\n"
              + b"persistent server: listener ready port=8080\n"
@@ -195,7 +237,7 @@ def main():
     assert starve_case(beginning + [(20.0, verdict.replace(b"62", b"2"))],
                        "the verdict failed for another reason") == 20.0
     report_pass("console progress controls",
-                "real PTY and STARVED flows accept advancing UART; silence "
+                "PTY, STARVED and UART-wake waits accept advancing UART; silence "
                 "and ceilings fail; stop, DDB and tick verdicts are preserved",
                 cases=CASES.ran)
     return 0

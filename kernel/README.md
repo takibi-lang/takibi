@@ -1114,6 +1114,13 @@ seconds by default). The STARVED injection driver renews its existing
 120-second UART budget under the runner's `GDB_BATCH_TIMEOUT` ceiling (600
 seconds by default), leaving ten seconds to report. The STARVED verdict
 still requires the injected tick excess and the later restart report.
+The UART-wake GDB driver also renews its 120-second boot-readiness waits
+on new UART bytes, under its existing 720-second batch ceiling with ten
+seconds left for reporting. The scalar buffering success report arrives at
+the end of initialization, so this wait covers the remaining boot fixtures.
+Breakpoint steps and command-response waits keep their fixed deadlines.
+Each boot phase writes `uart.log.await-<phase>.jsonl` with arrivals measured
+against the remaining batch ceiling, including an explicit missing arrival.
 
 ### What this verifies
 

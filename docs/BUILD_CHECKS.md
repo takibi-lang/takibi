@@ -79,7 +79,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_kernel_asm_invariants_controls.py` | Controls for the SCTLR alignment-policy disassembly check |
 | `check_kernel_elf_freshness_controls.sh` | Controls for the stale-kernel guard: a lane refuses to run against a kernel older than its own sources |
 | `check_kernel_ddb_postmortem_controls.py` | Controls for the UART driver's DDB postmortem walk, with no QEMU in the room |
-| `check_console_progress_controls.py` | PTY and STARVED driver flows renew on UART; PTY startup and exit observations preserve separate budgets, missing arrivals and cleanup verdicts |
+| `check_console_progress_controls.py` | PTY, STARVED and UART-wake boot waits renew on UART; fixed protocol waits and batch ceilings remain bounded; observations preserve separate budgets and missing arrivals |
 | `check_rpi5_shell_smoke_controls.py` | Interactive RPi5 shell smoke checks two HTTP responses and fresh HTTPd process snapshots; absent readiness, echoed markers, extra workers and bad responses fail |
 | `check_kernel_net_wait_controls.py` | UART progress renews readiness waits; silence and the outer ceiling still fail, with bounded DDB protection |
 | `check_kernel_interactive_httpd_protocol.py` | interactive HTTP runners avoid listener/request deadlock |

@@ -73,6 +73,7 @@ fi
 
 mkdir -p "$ARTIFACT_DIR"
 rm -f "$INIT_LISTENER" "$NETWORK_READY" "$VERDICT"
+rm -f "$ARTIFACT_DIR"/uart.log.await-*.jsonl
 cp "$EXT2_IMAGE" "$QEMU_EXT2_IMAGE"
 
 . "$REPO_ROOT/scripts/qemu_session_ports.sh"
@@ -122,6 +123,7 @@ UART_WAKE_UART_LOG="$ARTIFACT_DIR/uart.log" UART_WAKE_VERDICT="$VERDICT" \
 UART_WAKE_METADATA="$REPO_ROOT/_build/kernel-debug-metadata.json" \
 UART_WAKE_INIT_LISTENER="$INIT_LISTENER" UART_WAKE_NETWORK_READY="$NETWORK_READY" \
 UART_WAKE_BOOT_TIMEOUT="${KERNEL_QEMU_TIMEOUT:-120}" UART_WAKE_MODE="$MODE" \
+GDB_BATCH_TIMEOUT="$GDB_CHECK_TIMEOUT" \
     timeout "$GDB_CHECK_TIMEOUT" \
     gdb-multiarch -q -batch "$ELF" -x "$REPO_ROOT/scripts/kernel_uart_wake_check.py" \
     >"$ARTIFACT_DIR/gdb.log" 2>&1 || true
