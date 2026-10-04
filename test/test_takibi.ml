@@ -14850,6 +14850,39 @@ let codegen_tests = [
            Alcotest.failf "expected two errors, got one: %s" msg
        | _ -> Alcotest.fail "expected two linear errors");
 
+  Alcotest.test_case "handle invalidation survives source-name shadowing" `Quick
+    (fun () ->
+      let base = {|struct HiddenHandle { slot: usize; }
+fn hidden_destroy() !{invalidates_HiddenHandle} {}
+fn hidden_wrapper() { hidden_destroy(); }
+fn hidden_inspect(h: HiddenHandle) -> usize { return h.slot; }
+linear view HiddenWitness[id: usize];
+fn hidden_derive(w: borrow HiddenWitness[id]) -> HiddenHandle !{handle_of_witness} {
+  let mut h: HiddenHandle = { 1 }; return h;
+}
+fn hidden_put(w: sink HiddenWitness[id]) {}
+|} in
+      expect_type_error "may name a destroyed object" (base ^ {|fn hidden_bad(h: HiddenHandle) -> usize {
+  { let h: usize = 0; hidden_wrapper(); }
+  return hidden_inspect(h);
+}|}) ();
+      expect_type_error "may name a destroyed object" (base ^ {|fn hidden_local() -> usize {
+  let mut h: HiddenHandle = { 1 };
+  { let h: usize = 0; hidden_destroy(); }
+  return h.slot;
+}|}) ();
+      expect_ok (base ^ {|fn hidden_fresh() -> usize {
+  let mut h: HiddenHandle = { 1 };
+  { let h: usize = 0; hidden_destroy(); }
+  h = { 2 }; return hidden_inspect(h);
+}
+fn hidden_witnessed() -> usize {
+  let w = view HiddenWitness[1];
+  let mut h: HiddenHandle = hidden_derive(w);
+  { let h: usize = 0; hidden_destroy(); }
+  let n = hidden_inspect(h); hidden_put(w); return n;
+}|}) ());
+
   Alcotest.test_case
     "issue #493: a handle is dead after a call that may destroy its object"
     `Quick

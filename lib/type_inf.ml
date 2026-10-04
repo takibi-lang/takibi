@@ -9758,8 +9758,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         then kind :: acc else acc)
         invalidators [] in
       if kinds = [] then moved
-      else Hashtbl.fold (fun visible_name id moved ->
-        let path = PVar (id, visible_name) in
+      else PathSet.fold (fun path moved -> match path with
+        | PField _ -> moved
+        | PVar (id, visible_name) ->
         match handle_kind (binding_type id visible_name) with
         | Some kind when List.mem kind kinds
                          && not (ResourceFlow.may_be_consumed path moved) ->
@@ -9771,7 +9772,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               Hashtbl.replace handle_killer path (name, target, loc);
               mv_consume path moved
             end
-        | _ -> moved) visible_bindings moved
+        | _ -> moved) !active_declared moved
     in
     (* A handle a loop body invalidates is still invalidated when the next
        iteration starts and after the loop. The body is walked once more

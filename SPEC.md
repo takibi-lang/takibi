@@ -1738,7 +1738,8 @@ copyable structs that name a pooled object by slot and generation.
   may invalidate every marked handle kind, including when a direct callee
   contains the indirect call.
 - After a call to any of them, every local binding of type `T` is dead.
-  Reading one is a compile error naming the call.
+  Reading one is a compile error naming the call. Shadowing a binding
+  does not protect it from invalidation; the rule follows its binding identity.
 - A use on any path that may follow the call counts, including the next
   iteration of a loop.
 - Assigning the binding, or binding a fresh value, makes it live again.
