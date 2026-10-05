@@ -1071,7 +1071,12 @@ private fn kernel_record_existence_probe() -> bool {
         page_allocator_live_count() == pages;
 }
 
-fn kernel_test_common_probes() {
+fn kernel_test_common_probes() !{unsafe} {
+    if (kernel_syscall_filesystem_unconfigured_probe()) {
+        kernel_boot_log("filesystem context: unconfigured entries refused\n");
+    } else {
+        kernel_boot_log("filesystem context: unconfigured failed\n");
+    }
     if (kernel_record_existence_probe()) {
         kernel_boot_log("record existence: invalid slots refused without allocation\n");
     } else {

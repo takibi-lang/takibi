@@ -549,7 +549,7 @@ probe/board setup. A successful run includes:
 [kernel/rpi5] BusyBox httpd curl passed
 [kernel/rpi5] second BusyBox httpd curl passed
 [kernel/rpi5] userspace connected I/O passed
-PASS kernel/rpi5 (66 views, one boot)
+PASS kernel/rpi5 (67 views, one boot)
 ```
 
 It tests negative and positive ARP/ICMP behavior, TCP lifecycle, USB ext2

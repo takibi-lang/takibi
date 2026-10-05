@@ -1,6 +1,6 @@
 # Kernel global-state review
 
-This is the first survey and migration proposal, dated 2026-10-05. It is
+This records the first survey and filesystem migration, dated 2026-10-05. It is
 not a completed synchronization audit or an authorization to move every
 object into one context. The declaration snapshot is
 [KERNEL_GLOBALS_2026-10-05.tsv](KERNEL_GLOBALS_2026-10-05.tsv).
@@ -47,7 +47,7 @@ under synchronization rather than direct pool storage.
 | syscall_scratch and exec_args_store | checked per-CPU access, stable owner exchange for argv, non-preemptible EL1 assumption | keep their storage partition explicit; grouping cannot replace a CPU-separation/non-migration guarantee |
 | process_image_ext2_state, target root and target-set flag | per-CPU mapping operation and process ownership | a candidate private per-CPU image context after its access contract is stated; preserve root/set consistency and refusal outcomes |
 | block-cache data, tags, validity and epochs | per-CPU cache lines and cross-CPU AtomicWord invalidation publication | consider per-CPU cache contexts only with layout and ordering evidence; neither combine CPUs nor silently change release/acquire publication |
-| syscall_ext2_mount and syscall_ext2_ready | mount setup plus later syscall reads; readiness guards access | candidate small filesystem-service context; readiness stays explicit and separate from mutable cache state |
+| syscall_filesystem | boot configures one private context; syscall boundaries match its closed readiness result | mount and readiness are one state; mutation locking and per-CPU scratch stay separate |
 | Driver queue/buffer and ready/disabled state | MMIO, DMA handoff, IRQ paths and linked alignment contracts | retain device-specific contexts and initialization phases; no platform-independent giant context or relocation of named DMA storage by default |
 | log, crash snapshot and DDB state | lockless publication, world-stop inspection and retained assembly-visible evidence | preserve diagnostics availability during failure; context conversion follows their protocol/ABI review |
 | contention fixtures and accounting | ready/go/done publication and fixture-specific ownership | keep distinct from production topology; reducing fixture global names is not a production performance result |
@@ -55,12 +55,11 @@ under synchronization rather than direct pool storage.
 
 ## What existing language features establish
 
-The filesystem candidate has one assignment site for each of
+The surveyed filesystem candidate had one assignment site for each of
 syscall_ext2_mount and syscall_ext2_ready, in kernel_syscall_ext2_configure.
 Its only maintained caller is kernel_ext2_fixture_run in shared boot setup.
-That is evidence for initialization followed by reads in the current tree,
-not a type-level write-once guarantee. A first migration should consider a
-closed unconfigured/configured state before merely nesting the ready flag.
+The first migration below retains that initialization/read contract; it does
+not establish type-level write-once publication.
 
 A minimal compiler probe declares two RegionPool(Item) fields in an ordinary
 Context and one private global context. Locking &context.first, allocating a
@@ -91,9 +90,10 @@ are a separate requirement from grouping ordinary fields.
 
 ## Recommended sequence and decision boundaries
 
-1. Finish the authority/writer review of the proposed filesystem and
-   process-image context candidates. Choose one small private subsystem as
-   the first migration; preserve its exported functions and failure results.
+1. Review the process-image context candidate next. The filesystem
+   mount/readiness migration below establishes the first small boundary;
+   preserve the image mapping operation's per-CPU ownership and refusal
+   outcomes before grouping its fields.
 2. Keep the shared pools and their lock/pin contracts while relocating only
    the chosen pool's storage. Compare annotation count, raw-access budget,
    linked layout and representative workload results on both targets.
@@ -113,3 +113,35 @@ The current pool implementation has one lock and chunk-list head per pool;
 it has no per-CPU allocation front. The prior blanket prerequisite that a
 front must exist before any global survey is stronger than this survey
 needs. It remains a design choice before an allocation-policy change.
+
+
+## First migration: syscall filesystem context
+
+Two independent globals become one private SyscallFilesystemContext. Its
+private state is Unconfigured or Configured(Ext2Mount); the zero-initialized
+first tag is Unconfigured. A separate must-use SyscallFilesystemReady result
+is returned by the private lookup because stored plain variants and
+must-check API results serve different ownership roles.
+
+The exec, pathname-mutation and filesystem I/O boundaries match that result.
+Lower helpers receive the extracted Ext2Mount rather than reading a bare
+mount global. Streaming loops use one descriptor snapshot. Existing
+unconfigured exec/open/access/mutation outcomes are preserved, and ext2
+read/write/stat/directory/sendfile paths explicitly refuse an unconfigured
+context before their first filesystem operation. Procfs and UART paths keep
+their independent early handling.
+
+The common filesystem_context view observes both zero-initialized refusal
+through the real exec-format entry and a lookup/read of etc/init.sh through
+the published descriptor. Existing syscall, shell and peer-filesystem lanes
+exercise the configured paths. Compiler controls check acceptance of a
+matched descriptor and rejection of a missing descriptor argument, ignored
+readiness result and an unmatched readiness result used as Ext2Mount.
+
+No new compiler rule, lock, raw dereference or CPU-local layout is introduced.
+The state is still boot-written and later read-only by the current call graph;
+configure is not statically write-once, and the context is not atomically
+replaceable while readers run. Boot publication before EL0 filesystem users,
+mount-device lifetime and ext2 mutation/reader exclusion remain trusted
+contracts. Other independently stored mount/readiness pairs in the boot
+fixture and process-image mapper remain separate candidates.

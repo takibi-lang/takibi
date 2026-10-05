@@ -236,8 +236,26 @@ const POLL_MAX: usize = 1024;
 // numerically, #409 removed the second name, and #393 removed the number
 // itself: what is left cannot disagree with anything.
 
-private let mut syscall_ext2_mount: Ext2Mount;
-private let mut syscall_ext2_ready: bool;
+// Boot configures this context before EL0 dispatch is enabled. The zero tag
+// is Unconfigured; a mount can only be extracted from the Configured case.
+// This combines readiness and its descriptor, not filesystem mutation locking.
+variant SyscallFilesystemState { Unconfigured; Configured(Ext2Mount); }
+struct SyscallFilesystemContext {
+    private state: SyscallFilesystemState;
+}
+private let mut syscall_filesystem: SyscallFilesystemContext;
+must_use variant SyscallFilesystemReady { Unconfigured; Configured(Ext2Mount); }
+
+private fn syscall_filesystem_lookup() -> SyscallFilesystemReady {
+    match syscall_filesystem.state {
+        SyscallFilesystemState::Unconfigured => {
+            return SyscallFilesystemReady::Unconfigured;
+        }
+        SyscallFilesystemState::Configured(mount) => {
+            return SyscallFilesystemReady::Configured(mount);
+        }
+    }
+}
 const SYSCALL_SCRIPT_LINE_MAX: usize = 256;
 // Scratch that lives only for one non-preemptible syscall invocation. Per
 // core rather than global: two cores may dispatch concurrently, but one core
@@ -631,15 +649,16 @@ private fn syscall_inode_mode_allows(inode_mode: usize, requested: usize)
 // directory or a device node is refused for being the wrong kind of object,
 // and a regular file with no execute bit is refused for being unexecutable,
 // neither of which is a statement about its contents.
-private fn syscall_exec_target(name: []u8) -> SyscallExecTargetResult
+private fn syscall_exec_target(mount: Ext2Mount, name: []u8) -> SyscallExecTargetResult
         !{unsafe} {
-    match ext2_lookup_path(syscall_ext2_mount, name) {
+
+    match ext2_lookup_path(mount, name) {
         Ext2LookupResult::Invalid => { return SyscallExecTargetResult::Absent; }
         Ext2LookupResult::NotFound => {
             return SyscallExecTargetResult::Absent;
         }
         Ext2LookupResult::Found(inode) => {
-            let mode: usize = ext2_inode_mode(syscall_ext2_mount, inode);
+            let mode: usize = ext2_inode_mode(mount, inode);
             if ((mode & 0xF000) != 0x8000) {
                 return SyscallExecTargetResult::NotPermitted;
             }
@@ -898,14 +917,14 @@ private fn syscall_exec_script_prefix(path_length: usize, previous_argc: usize,
 // judged here.
 const SYSCALL_EXEC_INTERPRETER_MAX: usize = 64;
 
-private fn syscall_exec_elf_interpreter(inode: usize)
+private fn syscall_exec_elf_interpreter(mount: Ext2Mount, inode: usize)
         -> SyscallExecFormatResult !{unsafe} {
     // ELF probing must not overwrite the collected script argv or path.
     let window: [u8; KERNEL_BLOCK_SIZE..] =
         syscall_scratch_here().elf_buffer as [u8; KERNEL_BLOCK_SIZE..];
-    let file_length: usize = ext2_regular_file_size(syscall_ext2_mount, inode);
+    let file_length: usize = ext2_regular_file_size(mount, inode);
     let length: usize = match ext2_read_file_chunk(
-            syscall_ext2_mount, inode, 0, window) {
+            mount, inode, 0, window) {
         Ext2ReadResult::Invalid => {
             return SyscallExecFormatResult::Unreadable;
         }
@@ -964,7 +983,7 @@ private fn syscall_exec_elf_interpreter(inode: usize)
     let bounded_name: {0..<SYSCALL_EXEC_INTERPRETER_MAX + 1 as usize} =
         name_length;
     let relative: []u8 = name[0..<bounded_name];
-    match ext2_lookup_path(syscall_ext2_mount, relative) {
+    match ext2_lookup_path(mount, relative) {
         Ext2LookupResult::Invalid => {
             return SyscallExecFormatResult::InterpreterAbsent;
         }
@@ -981,9 +1000,10 @@ private fn syscall_exec_elf_interpreter(inode: usize)
 
 private fn syscall_exec_format(path_length: usize)
         -> SyscallExecFormatResult !{unsafe} {
-    if (syscall_ext2_ready == false) {
-        return SyscallExecFormatResult::NotMounted;
-    }
+    let mount: Ext2Mount = match syscall_filesystem_lookup() {
+        SyscallFilesystemReady::Unconfigured => { return SyscallExecFormatResult::NotMounted; }
+        SyscallFilesystemReady::Configured(found) => { found }
+    };
     let mut current_length: usize = path_length;
     let mut argc: usize = 0;
     let mut prefix_length: usize = 0;
@@ -995,7 +1015,7 @@ private fn syscall_exec_format(path_length: usize)
         }
         let full = path[0..<pathname_length];
         if (full.len < 2) { return SyscallExecFormatResult::Absent; }
-        match syscall_exec_target(full[1..<full.len]) {
+        match syscall_exec_target(mount, full[1..<full.len]) {
             SyscallExecTargetResult::Absent => {
                 return SyscallExecFormatResult::Absent;
             }
@@ -1007,7 +1027,7 @@ private fn syscall_exec_format(path_length: usize)
                 for index: usize in 0..<SYSCALL_SCRIPT_LINE_MAX {
                     line[index] = 0;
                 }
-                match ext2_read_file_chunk(syscall_ext2_mount, inode, 0, line) {
+                match ext2_read_file_chunk(mount, inode, 0, line) {
                     Ext2ReadResult::Invalid => {
                         // The kind and the permission were already settled above,
                         // so what is left is a read that failed on a file this
@@ -1022,7 +1042,7 @@ private fn syscall_exec_format(path_length: usize)
                         }
                         if (line[0] == 0x7F && line[1] == 0x45 &&
                             line[2] == 0x4C && line[3] == 0x46) {
-                            match syscall_exec_elf_interpreter(inode) {
+                            match syscall_exec_elf_interpreter(mount, inode) {
                                 SyscallExecFormatResult::Executable(executable) => {
                                     if (argc == 0) {
                                         return SyscallExecFormatResult::Executable(executable);
@@ -1741,9 +1761,37 @@ fn kernel_syscall_clone_files_reap() -> KernelFdReapResult {
     return KernelFdReapResult::Failed;
 }
 
+// Exercise the actual entry refusal before boot publishes a root filesystem.
+fn kernel_syscall_filesystem_unconfigured_probe() -> bool !{unsafe} {
+    match syscall_filesystem_lookup() {
+        SyscallFilesystemReady::Unconfigured => {}
+        SyscallFilesystemReady::Configured(mount) => { return false; }
+    }
+    match syscall_exec_format(0) {
+        SyscallExecFormatResult::NotMounted => {}
+        _ => { return false; }
+    }
+    return true;
+}
+
+// Read the published descriptor through its closed result, including a real
+// directory lookup, rather than only checking the stored tag.
+fn kernel_syscall_filesystem_configured_probe() -> bool !{unsafe} {
+    let mount: Ext2Mount = match syscall_filesystem_lookup() {
+        SyscallFilesystemReady::Unconfigured => { return false; }
+        SyscallFilesystemReady::Configured(found) => { found }
+    };
+    match ext2_lookup_path(mount, bs"etc/init.sh") {
+        Ext2LookupResult::Invalid => { return false; }
+        Ext2LookupResult::NotFound => { return false; }
+        Ext2LookupResult::Found(inode) => {
+            return ext2_regular_file_size(mount, inode) != 0;
+        }
+    }
+}
+
 fn kernel_syscall_ext2_configure(mount: Ext2Mount) {
-    syscall_ext2_mount = mount;
-    syscall_ext2_ready = true;
+    syscall_filesystem.state = SyscallFilesystemState::Configured(mount);
 }
 
 // GitHub issue #257 step 5: this used to assert on connection slots 0 and
@@ -1836,7 +1884,7 @@ struct SyscallParent {
 
 must_use variant SyscallParentResult { Errno(usize); Found(SyscallParent); }
 
-fn kernel_syscall_parent_of(dirfd: usize, absolute: bool, path_name: []u8)
+fn kernel_syscall_parent_of(mount: Ext2Mount, dirfd: usize, absolute: bool, path_name: []u8)
         -> SyscallParentResult !{unsafe} {
     // Trailing slashes name the same directory entry (`mkdir a/` is `a`).
     let mut end: usize = path_name.len;
@@ -1868,7 +1916,7 @@ fn kernel_syscall_parent_of(dirfd: usize, absolute: bool, path_name: []u8)
             return SyscallParentResult::Errno(LINUX_EINVAL);
         }
         let parent_path = path_name[0..<parent_end];
-        match ext2_lookup_path_from(syscall_ext2_mount, start_inode,
+        match ext2_lookup_path_from(mount, start_inode,
                                     parent_path) {
             Ext2LookupResult::Invalid => {
                 return SyscallParentResult::Errno(LINUX_ENOENT);
@@ -1879,7 +1927,7 @@ fn kernel_syscall_parent_of(dirfd: usize, absolute: bool, path_name: []u8)
             Ext2LookupResult::Found(found) => { parent_inode = found; }
         }
     }
-    if ((ext2_inode_mode(syscall_ext2_mount, parent_inode) & 0xF000) !=
+    if ((ext2_inode_mode(mount, parent_inode) & 0xF000) !=
         0x4000) {
         return SyscallParentResult::Errno(LINUX_ENOTDIR);
     }
@@ -2461,6 +2509,10 @@ fn syscall_read_segment(fd: usize, address: usize, requested: usize)
             }
             return SyscallIoResult::Transferred(amount);
         }
+        let mount: Ext2Mount = match syscall_filesystem_lookup() {
+            SyscallFilesystemReady::Unconfigured => { return SyscallIoResult::Errno(LINUX_EBADF); }
+            SyscallFilesystemReady::Configured(found) => { found }
+        };
         // Do not turn the requested length into a kernel allocation. Each
         // iteration obtains one ext2 block and copies it into the next
         // validated portion of the user range, matching the bounded
@@ -2477,7 +2529,7 @@ fn syscall_read_segment(fd: usize, address: usize, requested: usize)
             }
             let staging = staging_buffer[0..<chunk_limit];
             match ext2_read_file_chunk(
-                    syscall_ext2_mount, kernel_syscall_file_inode(fd),
+                    mount, kernel_syscall_file_inode(fd),
                     kernel_syscall_file_offset(fd),
                     staging) {
                 Ext2ReadResult::Invalid => {
@@ -3672,6 +3724,11 @@ private fn syscall_ext2_write_errno(result: Ext2ResizeResult) -> usize {
 // dispatch is not preemptible. A reader's position update is not under
 // this guard; see kernel/CONCURRENCY.md.
 private fn syscall_ext2_write_locked(fd: usize, content: []u8) -> usize {
+    let mount: Ext2Mount = match syscall_filesystem_lookup() {
+        SyscallFilesystemReady::Unconfigured => { return LINUX_EBADF; }
+        SyscallFilesystemReady::Configured(found) => { found }
+    };
+
     let guard = ext2_mutation_take();
     let offset: usize = kernel_syscall_file_offset(fd);
     let length: usize = content.len;
@@ -3683,10 +3740,10 @@ private fn syscall_ext2_write_locked(fd: usize, content: []u8) -> usize {
     let mut answer: usize = LINUX_EINVAL;
     if (offset == 0) {
         answer = syscall_ext2_write_errno(
-            ext2_resize_small_file(syscall_ext2_mount, inode, content));
+            ext2_resize_small_file(mount, inode, content));
     } else {
         answer = syscall_ext2_write_errno(
-            ext2_write_regular_file_range(syscall_ext2_mount, inode, offset, content));
+            ext2_write_regular_file_range(mount, inode, offset, content));
     }
     if (answer == 0 &&
         kernel_syscall_file_set_offset(fd, offset + length) == false) {
@@ -3695,16 +3752,16 @@ private fn syscall_ext2_write_locked(fd: usize, content: []u8) -> usize {
     ext2_mutation_give(guard);
     if (answer == LINUX_ENOSPC) {
         kernel_boot_log_resource_exhausted("ext2 blocks" as *u8,
-                                          ext2_block_capacity(syscall_ext2_mount));
+                                          ext2_block_capacity(mount));
     }
     return answer;
 }
 
-private fn syscall_ext2_mkdir_under(
+private fn syscall_ext2_mkdir_under(mount: Ext2Mount,
         guard: borrow Ext2MutationGuard[ext2_mutation_lock],
         parent_inode: usize, leaf: borrow []u8) -> usize {
     let mut answer: usize = 0;
-    match ext2_lookup_directory(syscall_ext2_mount, parent_inode, leaf) {
+    match ext2_lookup_directory(mount, parent_inode, leaf) {
         Ext2LookupResult::Found(existing) => { answer = LINUX_EEXIST; }
         Ext2LookupResult::Invalid => { answer = LINUX_EIO; }
         Ext2LookupResult::NotFound => { }
@@ -3712,7 +3769,7 @@ private fn syscall_ext2_mkdir_under(
     if (answer == 0) {
         // The directory stays, so its owner ends here: the tree names it
         // from now on, and a later rmdir claims it back from the tree.
-        match ext2_make_directory_in(syscall_ext2_mount, parent_inode, leaf) {
+        match ext2_make_directory_in(mount, parent_inode, leaf) {
             Ext2MkdirResult::Invalid => { answer = LINUX_EIO; }
             Ext2MkdirResult::Created(directory) => {
                 ext2_directory_keep(directory);
@@ -3725,11 +3782,11 @@ private fn syscall_ext2_mkdir_under(
 // Unsupported is a symlink or a file reaching an indirect block, which the
 // ext2 layer does not release; EPERM is Linux's word for a filesystem that
 // does not allow the unlink.
-private fn syscall_ext2_unlink_under(
+private fn syscall_ext2_unlink_under(mount: Ext2Mount,
         guard: borrow Ext2MutationGuard[ext2_mutation_lock],
         parent_inode: usize, leaf: borrow []u8) -> usize {
     let answer: usize = match ext2_unlink_name(
-            syscall_ext2_mount, parent_inode, leaf) {
+            mount, parent_inode, leaf) {
         Ext2UnlinkNameResult::Unlinked => { 0 }
         Ext2UnlinkNameResult::NotFound => { LINUX_ENOENT }
         Ext2UnlinkNameResult::IsDirectory => { LINUX_EISDIR }
@@ -3742,16 +3799,16 @@ private fn syscall_ext2_unlink_under(
 // The claim and the removal are one section: the owner minted from the tree
 // lives across both, and handing it back is what ext2_directory_keep does on
 // every path that does not remove.
-private fn syscall_ext2_rmdir_under(
+private fn syscall_ext2_rmdir_under(mount: Ext2Mount,
         guard: borrow Ext2MutationGuard[ext2_mutation_lock],
         parent_inode: usize, leaf: borrow []u8) -> usize {
     let mut answer: usize = 0;
-    match ext2_claim_directory(syscall_ext2_mount, parent_inode, leaf) {
+    match ext2_claim_directory(mount, parent_inode, leaf) {
         Ext2ClaimResult::Invalid => { answer = LINUX_EIO; }
         Ext2ClaimResult::NotFound => { answer = LINUX_ENOENT; }
         Ext2ClaimResult::NotDirectory => { answer = LINUX_ENOTDIR; }
         Ext2ClaimResult::Claimed(directory) => {
-            match ext2_remove_directory_in(syscall_ext2_mount,
+            match ext2_remove_directory_in(mount,
                                            parent_inode, directory, leaf) {
                 Ext2RmdirResult::Removed => { }
                 Ext2RmdirResult::Invalid => { answer = LINUX_EIO; }
@@ -3772,14 +3829,14 @@ private fn syscall_ext2_rmdir_under(
 // Unsupported is a directory moved to another parent, which the ext2 layer
 // does not do; EPERM is Linux's word for a filesystem that does not allow
 // the rename.
-private fn syscall_ext2_rename_under(
+private fn syscall_ext2_rename_under(mount: Ext2Mount,
         guard: borrow Ext2MutationGuard[ext2_mutation_lock],
         old_directory: usize,
                                       old_name: borrow []u8,
                                       new_parent_inode: usize,
                                       new_leaf: borrow []u8) -> usize {
     let answer: usize = match ext2_rename_in(
-            syscall_ext2_mount, old_directory, old_name,
+            mount, old_directory, old_name,
             new_parent_inode, new_leaf) {
         Ext2RenameResult::Renamed => { 0 }
         Ext2RenameResult::NotFound => { LINUX_ENOENT }
@@ -3801,9 +3858,10 @@ private fn syscall_mkdirat_under(guard: borrow Ext2MutationGuard[ext2_mutation_l
     // mkdirat(dirfd, pathname, mode), GitHub issue #538. The mode is not
     // applied: every directory is 0755 and every process is root, which
     // is the whole of this kernel's permission model today.
-    if (syscall_ext2_ready == false) {
-        return LINUX_EBADF;
-    }
+    let mount: Ext2Mount = match syscall_filesystem_lookup() {
+        SyscallFilesystemReady::Unconfigured => { return LINUX_EBADF; }
+        SyscallFilesystemReady::Configured(found) => { found }
+    };
     let path_name: []u8 = match kernel_syscall_path_name(x1) {
         SyscallPathResult::Fault => { return LINUX_EFAULT; }
         SyscallPathResult::Invalid => { return LINUX_ENOENT; }
@@ -3811,7 +3869,7 @@ private fn syscall_mkdirat_under(guard: borrow Ext2MutationGuard[ext2_mutation_l
     };
     let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
     let absolute: bool = path_view[0] == 0x2F;
-    let parent: SyscallParent = match kernel_syscall_parent_of(
+    let parent: SyscallParent = match kernel_syscall_parent_of(mount,
             x0, absolute, path_name) {
         SyscallParentResult::Errno(errno) => {
             return errno;
@@ -3825,7 +3883,7 @@ private fn syscall_mkdirat_under(guard: borrow Ext2MutationGuard[ext2_mutation_l
         return LINUX_EEXIST;
     }
     return 
-        syscall_ext2_mkdir_under(guard, parent.inode, leaf);
+        syscall_ext2_mkdir_under(mount, guard, parent.inode, leaf);
 }
 
 // GitHub issue #597: unlinkat's whole arm, lookup included, under the
@@ -3840,9 +3898,10 @@ private fn syscall_unlinkat_under(guard: borrow Ext2MutationGuard[ext2_mutation_
     if (x2 != 0 && x2 != LINUX_AT_REMOVEDIR) {
         return LINUX_EINVAL;
     }
-    if (syscall_ext2_ready == false) {
-        return LINUX_EBADF;
-    }
+    let mount: Ext2Mount = match syscall_filesystem_lookup() {
+        SyscallFilesystemReady::Unconfigured => { return LINUX_EBADF; }
+        SyscallFilesystemReady::Configured(found) => { found }
+    };
     let path_name: []u8 = match kernel_syscall_path_name(x1) {
         SyscallPathResult::Fault => { return LINUX_EFAULT; }
         SyscallPathResult::Invalid => { return LINUX_ENOENT; }
@@ -3850,7 +3909,7 @@ private fn syscall_unlinkat_under(guard: borrow Ext2MutationGuard[ext2_mutation_
     };
     let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
     let absolute: bool = path_view[0] == 0x2F;
-    let parent: SyscallParent = match kernel_syscall_parent_of(
+    let parent: SyscallParent = match kernel_syscall_parent_of(mount,
             x0, absolute, path_name) {
         SyscallParentResult::Errno(errno) => {
             return errno;
@@ -3861,7 +3920,7 @@ private fn syscall_unlinkat_under(guard: borrow Ext2MutationGuard[ext2_mutation_
     if (leaf.len == 0) { return LINUX_ENOENT; }
     if (x2 == 0) {
         return 
-            syscall_ext2_unlink_under(guard, parent.inode, leaf);
+            syscall_ext2_unlink_under(mount, guard, parent.inode, leaf);
     }
     // Linux's own answers: rmdir(".") is EINVAL, rmdir("..") ENOTEMPTY.
     if (kernel_syscall_leaf_is_dot(leaf)) {
@@ -3871,7 +3930,7 @@ private fn syscall_unlinkat_under(guard: borrow Ext2MutationGuard[ext2_mutation_
         return LINUX_ENOTEMPTY;
     }
     return 
-        syscall_ext2_rmdir_under(guard, parent.inode, leaf);
+        syscall_ext2_rmdir_under(mount, guard, parent.inode, leaf);
 }
 
 // GitHub issue #597: renameat's whole arm, lookup included, under the
@@ -3885,9 +3944,10 @@ private fn syscall_renameat_under(guard: borrow Ext2MutationGuard[ext2_mutation_
     // Both paths are read through the one per-core path buffer, so the
     // old path's directory is resolved and its last component copied out
     // before the new path is read over it.
-    if (syscall_ext2_ready == false) {
-        return LINUX_EBADF;
-    }
+    let mount: Ext2Mount = match syscall_filesystem_lookup() {
+        SyscallFilesystemReady::Unconfigured => { return LINUX_EBADF; }
+        SyscallFilesystemReady::Configured(found) => { found }
+    };
     let old_path: []u8 = match kernel_syscall_path_name(x1) {
         SyscallPathResult::Fault => { return LINUX_EFAULT; }
         SyscallPathResult::Invalid => { return LINUX_ENOENT; }
@@ -3895,7 +3955,7 @@ private fn syscall_renameat_under(guard: borrow Ext2MutationGuard[ext2_mutation_
     };
     let old_view: []u8 = syscall_scratch_here().path_buffer as []u8;
     let old_absolute: bool = old_view[0] == 0x2F;
-    let old_parent: SyscallParent = match kernel_syscall_parent_of(
+    let old_parent: SyscallParent = match kernel_syscall_parent_of(mount,
             x0, old_absolute, old_path) {
         SyscallParentResult::Errno(errno) => {
             return errno;
@@ -3926,7 +3986,7 @@ private fn syscall_renameat_under(guard: borrow Ext2MutationGuard[ext2_mutation_
     };
     let new_view: []u8 = syscall_scratch_here().path_buffer as []u8;
     let new_absolute: bool = new_view[0] == 0x2F;
-    let new_parent: SyscallParent = match kernel_syscall_parent_of(
+    let new_parent: SyscallParent = match kernel_syscall_parent_of(mount,
             x2, new_absolute, new_path) {
         SyscallParentResult::Errno(errno) => {
             return errno;
@@ -3940,7 +4000,7 @@ private fn syscall_renameat_under(guard: borrow Ext2MutationGuard[ext2_mutation_
         return LINUX_EBUSY;
     }
     return 
-        syscall_ext2_rename_under(guard, old_directory, old_name,
+        syscall_ext2_rename_under(mount, guard, old_directory, old_name,
                                    new_parent.inode, new_leaf);
 }
 
@@ -5238,9 +5298,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // openat(dirfd, pathname, flags): absolute paths start at the ext2
         // root; relative paths use an open directory fd (or AT_FDCWD, whose
         // unsigned value lies outside the descriptor namespace).
-        if (syscall_ext2_ready == false) {
-            return SyscallAction::Resume(LINUX_EBADF);
-        }
+        let mount: Ext2Mount = match syscall_filesystem_lookup() {
+            SyscallFilesystemReady::Unconfigured => { return SyscallAction::Resume(LINUX_EBADF); }
+            SyscallFilesystemReady::Configured(found) => { found }
+        };
         let path_name: []u8 = match kernel_syscall_path_name(x1) {
             SyscallPathResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             SyscallPathResult::Invalid => { return SyscallAction::Resume(LINUX_ENOENT); }
@@ -5272,7 +5333,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             lookup_inode = kernel_syscall_directory_inode(x0);
         }
         match ext2_lookup_path_from(
-            syscall_ext2_mount,
+            mount,
             lookup_inode,
             path_name) {
             Ext2LookupResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
@@ -5290,7 +5351,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     }
                     UnifiedFdAllocResult::Allocated(fd) => {
                         let inode_mode: usize = ext2_inode_mode(
-                            syscall_ext2_mount, inode_number);
+                            mount, inode_number);
                         if ((inode_mode & 0xF000) == 0x4000) {
                             match unified_directory_open(
                                     kernel_syscall_process_slot(), fd,
@@ -5419,9 +5480,13 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     }
                     return SyscallAction::Resume(written);
                 }
+                let mount: Ext2Mount = match syscall_filesystem_lookup() {
+                    SyscallFilesystemReady::Unconfigured => { return SyscallAction::Resume(LINUX_EBADF); }
+                    SyscallFilesystemReady::Configured(found) => { found }
+                };
                 while (written < x2) {
                     match ext2_read_directory_chunk(
-                            syscall_ext2_mount, inode_number,
+                            mount, inode_number,
                             directory_offset,
                             syscall_scratch_here().file_buffer as []u8) {
                         Ext2ReadResult::Invalid => {
@@ -5522,9 +5587,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // Real and effective identities are identical in this kernel, so
         // AT_EACCESS selects the same mode check. Other flags require path
         // behavior (such as no-follow or empty-path) that is not supported.
-        if (syscall_ext2_ready == false) {
-            return SyscallAction::Resume(LINUX_EBADF);
-        }
+        let mount: Ext2Mount = match syscall_filesystem_lookup() {
+            SyscallFilesystemReady::Unconfigured => { return SyscallAction::Resume(LINUX_EBADF); }
+            SyscallFilesystemReady::Configured(found) => { found }
+        };
         let mut path_address: usize = x1;
         let mut requested_mode: usize = x2;
         let mut dirfd: usize = x0;
@@ -5551,14 +5617,14 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             lookup_inode = kernel_syscall_directory_inode(dirfd);
         }
         match ext2_lookup_path_from(
-                syscall_ext2_mount,
+                mount,
                 lookup_inode,
                 path_name) {
             Ext2LookupResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
             Ext2LookupResult::NotFound => { return SyscallAction::Resume(LINUX_ENOENT); }
             Ext2LookupResult::Found(inode_number) => {
                 let inode_mode: usize =
-                    ext2_inode_mode(syscall_ext2_mount, inode_number);
+                    ext2_inode_mode(mount, inode_number);
                 if (syscall_inode_mode_allows(inode_mode, requested_mode)) {
                     return SyscallAction::Resume(0);
                 }
@@ -5611,15 +5677,19 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             UserWriteRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
             UserWriteRangeResult::Ok(precheck) => {}
         }
+        let mount: Ext2Mount = match syscall_filesystem_lookup() {
+            SyscallFilesystemReady::Unconfigured => { return SyscallAction::Resume(LINUX_EBADF); }
+            SyscallFilesystemReady::Configured(found) => { found }
+        };
         match ext2_lookup_path_from(
-                syscall_ext2_mount,
+                mount,
                 lookup_inode,
                 path_name) {
             Ext2LookupResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
             Ext2LookupResult::NotFound => { return SyscallAction::Resume(LINUX_ENOENT); }
             Ext2LookupResult::Found(inode_number) => {
                 let inode_mode: usize = ext2_inode_mode(
-                    syscall_ext2_mount, inode_number);
+                    mount, inode_number);
                 if ((inode_mode & 0xF000) == 0x4000) {
                     match user_range_check_write(kernel_process_current_root(), x2, 128) {
                         UserWriteRangeResult::Fault => {
@@ -5634,14 +5704,14 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                                 range,
                                 48,
                                 ext2_inode_size(
-                                    syscall_ext2_mount,
+                                    mount,
                                     inode_number) as u64);
                             return SyscallAction::Resume(0);
                         }
                     }
                 }
                 if (ext2_inode_is_symlink(
-                        syscall_ext2_mount, inode_number)) {
+                        mount, inode_number)) {
                     match user_range_check_write(kernel_process_current_root(), x2, 128) {
                         UserWriteRangeResult::Fault => {
                             return SyscallAction::Resume(LINUX_EFAULT);
@@ -5668,7 +5738,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         user_write_u32(range, 20, 1);
                         user_write_u64(range, 48,
                                        ext2_inode_size(
-                                           syscall_ext2_mount,
+                                           mount,
                                            inode_number) as u64);
                         user_write_u32(range, 56, 1024);
                         user_write_u64(range, 64, 2);
@@ -5924,6 +5994,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             return SyscallAction::Resume(LINUX_EBADF);
         }
         if (offset_address != 0) { return SyscallAction::Resume(LINUX_EINVAL); }
+        let mount: Ext2Mount = match syscall_filesystem_lookup() {
+            SyscallFilesystemReady::Unconfigured => { return SyscallAction::Resume(LINUX_EBADF); }
+            SyscallFilesystemReady::Configured(found) => { found }
+        };
         let mut copied: usize = 0;
         while (copied < requested) {
             let mut chunk_limit: usize = requested - copied;
@@ -5936,7 +6010,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
             let staging = staging_buffer[0..<chunk_limit];
             match ext2_read_file_chunk(
-                    syscall_ext2_mount, kernel_syscall_file_inode(input_fd),
+                    mount, kernel_syscall_file_inode(input_fd),
                     kernel_syscall_file_offset(input_fd),
                     staging) {
                 Ext2ReadResult::Invalid => {

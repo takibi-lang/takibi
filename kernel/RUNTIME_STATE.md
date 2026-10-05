@@ -21,6 +21,22 @@ already record-owned per-slot (just implemented as an array of structs,
 not a single scalar) or genuinely singleton by nature (one physical
 core, one UART, one boot-time filesystem mount).
 
+## Syscall filesystem service
+
+The syscall path holds one private `SyscallFilesystemContext` in
+`kernel/kernel/syscall.tkb`. Its state is `Unconfigured` or
+`Configured(Ext2Mount)`; there is no separate ready flag or bare mount global.
+A private lookup returns a must-use closed result. Filesystem boundaries
+match it before using a descriptor, and lower pathname/exec helpers receive
+the extracted descriptor explicitly. UART and procfs handling remain
+independent of this context where their existing entry paths allow it.
+
+Shared boot setup calls `kernel_syscall_ext2_configure` before EL0 filesystem
+users are admitted. The current call graph writes during boot and reads
+thereafter; the type does not enforce write-once setup or concurrent
+replacement. The context does not hold the ext2 mutation lock or per-CPU
+scratch, whose existing ownership and exclusion rules still apply.
+
 ## Consolidated behind an explicit owner (#302-#307)
 
 | Issue | What moved | New owner | Why it mattered |

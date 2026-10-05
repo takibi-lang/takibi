@@ -15,6 +15,31 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-10-05: first private syscall filesystem context
+
+The #674 declaration survey led to a deliberately small first migration:
+syscall mount and readiness are one private context state, Unconfigured or
+Configured(Ext2Mount), rather than independently mutable globals. Its
+private lookup returns a must-use closed result. Exec/path mutation boundaries
+extract once and pass the descriptor to lower helpers; transfer loops also
+reuse a snapshot. Ext2 I/O paths without a prior readiness check now refuse
+an unconfigured context explicitly. Existing procfs/UART branches retain
+their independent handling and no filesystem mutation locking is changed.
+
+A common view checks zero-initialized refusal through the exec-format entry
+and a real etc/init.sh lookup/read through the published descriptor. Actual
+kernel compiler controls accept the matched descriptor and reject omitted
+mount arguments, ignored readiness and use of an unmatched result as a mount.
+There is no new language capability or raw-pointer access. Boot publication,
+mount lifetime and the one-writer initialization call graph remain trusted;
+this state representation does not prove write-once setup or concurrent
+replacement. Process-image per-CPU context review is the next small candidate.
+
+The dispatcher-wide model stamps for Wait4Block.Wait4Decide,
+StackOwnership.Wait4Block and RecordLifetime.ExecWrite/ExecWriteEnd are
+reviewed again: only filesystem descriptor acquisition changed, while wait4
+publication, stack ownership and command-line replacement remain unchanged.
+
 ## 2026-10-05: indexed FD-context authority and valid record minting
 
 The final #696 slice makes FD ensure return a must-use indexed ready/missing

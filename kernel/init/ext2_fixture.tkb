@@ -789,9 +789,14 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
     ext2_mount_ready = true;
     // This mount is the root filesystem every process runs
     // from. Configure the syscall path from it; otherwise
-    // openat(2) observes syscall_ext2_ready == false and
+    // openat(2) observes an unconfigured filesystem and
     // reports EBADF for /etc/init.sh.
     kernel_syscall_ext2_configure(mount);
+    if (kernel_syscall_filesystem_configured_probe()) {
+        kernel_boot_log("filesystem context: configured root readable\n");
+    } else {
+        kernel_boot_log("filesystem context: configured failed\n");
+    }
     // Which device the root is on, for each platform's storage
     // view to compare: the board's is the USB stick and QEMU's
     // the virtio disk, and a root that drifts to any other
