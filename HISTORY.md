@@ -15,6 +15,29 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-10-05: backing-record evidence at the write boundary
+
+The address-space slice of #696 replaces a bare root at allocation and
+record-write boundaries with borrowed `AddressSpaceBackingExists[slot]`.
+Successful publication or a checked read supplies this opaque affine packet
+containing the exact root handle and its value snapshot. The existing
+existential struct machinery carries the dynamic slot without changing the
+compiler or reintroducing a process-record lookup below `AddressSpaceRoot`.
+Creation, ASID refresh, activation preparation and release all pass this
+evidence. Release uses the validated snapshot rather than repeated reads.
+
+This is a static write-authority boundary, not a lifetime proof. Private
+minting binds the packet to the checked record; process ownership still
+prevents release between the check and mutation, and each write revalidates
+the saved handle under a pool pin. The packet is runtime data, unlike an
+erased view. Read-only fallback behavior and permanent root 0 remain intact.
+
+The regression controls type-check overlays of the actual maintained kernel:
+borrowed evidence can be used twice, a bare root cannot call the writer or
+allocator, and another file cannot construct the private packet. Each
+negative checks exit status and its specific type/privacy diagnostic
+independently. A copied signature fixture would miss a weakened real API.
+
 ## 2026-10-05: boot snapshot before the variable-length protocol report
 
 Hosted CI run 37264954670 failed the #609 armed lane on ab420a7b:

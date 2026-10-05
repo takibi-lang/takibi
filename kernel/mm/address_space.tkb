@@ -292,24 +292,40 @@ fn address_space_backing_release(root: AddressSpaceRoot) !{unsafe} {
 
 // Acquired on demand rather than only at process creation: a slot here is
 // not always a live scheduler slot, exactly as issue #392's image-record
-// stage found. Idempotent. Ready carries the root with the handle that is
+// stage found. Idempotent. Ready carries evidence with the handle that is
 // now published, which the caller's root may predate.
+// Successful validation/publication carries the exact root and its value
+// copy. A bare AddressSpaceRoot can name an absent backing and is not write
+// evidence. Process ownership still prevents release between this snapshot
+// and a write; each write revalidates the saved handle under a fresh pin.
+affine struct AddressSpaceBackingExists[slot: usize] {
+    private slot: usize @ slot;
+    private target: AddressSpaceRoot;
+    private value: AddressSpaceBacking;
+}
+
 must_use variant AddressSpaceBackingReady {
     Missing;
-    Ready(AddressSpaceRoot);
+    Ready(exists slot: usize. AddressSpaceBackingExists[slot]);
+}
+
+private fn address_space_backing_exists(slot: usize @ identity,
+                                        root: AddressSpaceRoot,
+                                        value: AddressSpaceBacking)
+        -> AddressSpaceBackingReady {
+    let mut evidence: AddressSpaceBackingExists[identity] = { slot, root, value };
+    return AddressSpaceBackingReady::Ready(evidence);
 }
 
 private fn address_space_backing_ensure(root: AddressSpaceRoot)
         -> AddressSpaceBackingReady !{unsafe} {
-    // See address_space_backing_root0: slot 0 needs no allocation, and
-    // must not attempt one, because it is created with the MMU off.
-    if (root.slot == 0) { return AddressSpaceBackingReady::Ready(root); }
-    match address_space_backing_pin(&address_space_backing_pool, root) {
-        RegionPinned(AddressSpaceBacking)::Pinned(pin) => {
-            address_space_backing_unpin(pin);
-            return AddressSpaceBackingReady::Ready(root);
+    // Lookup success and allocation success return the same write evidence.
+    // Root 0's permanent static backing never needs allocation.
+    match address_space_backing_read_checked(root) {
+        AddressSpaceBackingReady::Ready(evidence) => {
+            return AddressSpaceBackingReady::Ready(evidence);
         }
-        RegionPinned(AddressSpaceBacking)::Stale => {}
+        AddressSpaceBackingReady::Missing => {}
     }
     let guard = address_space_backing_pool_lock(&address_space_backing_pool);
     match region_alloc(guard) {
@@ -349,7 +365,9 @@ private fn address_space_backing_publish(
         region_handle_address(handle), region_handle_generation(handle) };
     scheduled_process_set_address_space_backing(
         slot, words.address, words.generation);
-    return AddressSpaceBackingReady::Ready(address_space_root_mint(slot, words));
+    let mut empty: AddressSpaceBacking = { false, 0, 0, 0, 0 };
+    return address_space_backing_exists(
+        slot, address_space_root_mint(slot, words), empty);
 }
 
 private fn address_space_backing_grow(
@@ -408,6 +426,20 @@ private fn address_space_backing_read(root: AddressSpaceRoot) -> AddressSpaceBac
 // and is counted.
 private fn address_space_backing_read_existing(root: AddressSpaceRoot)
         -> AddressSpaceBacking !{unsafe} {
+    match address_space_backing_read_checked(root) {
+        AddressSpaceBackingReady::Missing => {
+            address_space_backing_missing_note();
+            let mut empty: AddressSpaceBacking = { false, 0, 0, 0, 0 };
+            return empty;
+        }
+        AddressSpaceBackingReady::Ready(evidence) => { return evidence.value; }
+    }
+}
+
+// A successful lookup supplies write evidence without allocating. Activation
+// and release use this path, so a missing backing cannot grow in IRQ context.
+private fn address_space_backing_read_checked(root: AddressSpaceRoot)
+        -> AddressSpaceBackingReady !{unsafe} {
     let slot: usize = root.slot;
     let mut value: AddressSpaceBacking = { false, 0, 0, 0, 0 };
     if (slot == 0) {
@@ -416,11 +448,11 @@ private fn address_space_backing_read_existing(root: AddressSpaceRoot)
         value.l2_physical = address_space_backing_root0.l2_physical;
         value.asid = address_space_backing_root0.asid;
         value.asid_generation = address_space_backing_root0.asid_generation;
-        return value;
+        return address_space_backing_exists(slot, root, value);
     }
     match address_space_backing_pin(&address_space_backing_pool, root) {
         RegionPinned(AddressSpaceBacking)::Stale => {
-            address_space_backing_missing_note();
+            return AddressSpaceBackingReady::Missing;
         }
         RegionPinned(AddressSpaceBacking)::Pinned(pin) => {
             let backing: *AddressSpaceBacking = region_pin_at(pin);
@@ -430,18 +462,20 @@ private fn address_space_backing_read_existing(root: AddressSpaceRoot)
             value.asid = backing.asid;
             value.asid_generation = backing.asid_generation;
             address_space_backing_unpin(pin);
+            return address_space_backing_exists(slot, root, value);
         }
     }
-    return value;
 }
 
 // Writes a whole backing back. Writers are serialized by process ownership
 // (this file's header), so a read, a change and this write are not raced by
 // another writer of the same backing. Never allocates: a backing that is
-// written was made by address_space_backing_ensure first.
-private fn address_space_backing_write(root: AddressSpaceRoot, value: AddressSpaceBacking)
+// written was validated by a checked read or published by ensure first.
+private fn address_space_backing_write(
+        evidence: borrow AddressSpaceBackingExists[slot], value: AddressSpaceBacking)
         !{unsafe} {
-    let slot: usize = root.slot;
+    let mut root: AddressSpaceRoot = evidence.target;
+    let slot: usize = evidence.slot;
     if (slot == 0) {
         address_space_backing_root0.live = value.live;
         address_space_backing_root0.l1_physical = value.l1_physical;
@@ -560,9 +594,9 @@ fn address_space_diagnostic_snapshot(root: AddressSpaceRoot)
 // asid_assign's own comment for what assigning at creation time would
 // alias.
 fn address_space_record_backing(
-        root: AddressSpaceRoot,
+        evidence: borrow AddressSpaceBackingExists[slot],
         l1: sink PageOwner[l1_page], l2: sink PageOwner[l2_page]) {
-    let slot: usize = root.slot;
+    let slot: usize = evidence.slot;
     let l1_physical: usize = page_physical_address(l1);
     let l2_physical: usize = page_physical_address(l2);
 
@@ -570,7 +604,7 @@ fn address_space_record_backing(
     // record. mmu_init_root has no allocation or fallible operation.
     mmu_init_root(l1_physical, l2_physical);
     let mut recorded: AddressSpaceBacking = { true, l1_physical, l2_physical, 0, 0 };
-    address_space_backing_write(root, recorded);
+    address_space_backing_write(evidence, recorded);
     page_owner_transfer_index(l1);
     page_owner_transfer_index(l2);
 }
@@ -596,11 +630,11 @@ must_use variant AddressSpaceAllocateResult {
 // Allocate one complete root atomically from the caller's perspective. Any
 // partial page allocation is returned before reporting failure, so a failed
 // process-slot allocation cannot leave an unreachable table or ASID live.
-fn address_space_allocate_root(root: AddressSpaceRoot)
+fn address_space_allocate_root(evidence: borrow AddressSpaceBackingExists[slot])
         -> AddressSpaceAllocateResult {
-    let slot: usize = root.slot;
+    let slot: usize = evidence.slot;
     // The backing record exists already: address_space_ensure_root made it
-    // and passes the root naming it. Since #672 the record's pool grows
+    // and passes evidence naming it. Since #672 the record's pool grows
     // through page_alloc_contiguous, so that step can genuinely run out,
     // and it says so there rather than building tables into a record that
     // does not exist.
@@ -615,7 +649,7 @@ fn address_space_allocate_root(root: AddressSpaceRoot)
                     return AddressSpaceAllocateResult::OutOfMemory;
                 }
                 PageAllocResult::Allocated(l2) => {
-                    address_space_record_backing(root, l1, l2);
+                    address_space_record_backing(evidence, l1, l2);
                     return AddressSpaceAllocateResult::Ok;
                 }
             }
@@ -691,17 +725,17 @@ fn address_space_ensure_root(slot: usize) -> AddressSpaceEnsureResult {
     if (scheduled_process_slot_valid(slot) == false) {
         return AddressSpaceEnsureResult::SlotOutOfRange;
     }
-    let mut root: AddressSpaceRoot = match address_space_backing_ensure(
+    let evidence = match address_space_backing_ensure(
             scheduled_process_address_space_root_lookup(slot)) {
         AddressSpaceBackingReady::Missing => {
             return AddressSpaceEnsureResult::OutOfMemory;
         }
         AddressSpaceBackingReady::Ready(ready) => { ready }
     };
-    if (address_space_backing_read_existing(root).live) {
+    if (evidence.value.live) {
         return AddressSpaceEnsureResult::Ok;
     }
-    match address_space_allocate_root(root) {
+    match address_space_allocate_root(evidence) {
         AddressSpaceAllocateResult::OutOfMemory => {
             return AddressSpaceEnsureResult::OutOfMemory;
         }
@@ -720,14 +754,14 @@ fn address_space_ensure_root(slot: usize) -> AddressSpaceEnsureResult {
 // number available to another root and these shared fields never need a
 // cross-core write. Every other backing remains protected by its pool guard.
 private fn address_space_refresh_asid(
-        root: AddressSpaceRoot, backing: *AddressSpaceBacking) {
-    let slot: usize = root.slot;
+        evidence: borrow AddressSpaceBackingExists[slot], backing: *AddressSpaceBacking) {
+    let slot: usize = evidence.slot;
     if (slot == 0) { return; }
     if (asid_generation_is_current(backing.asid_generation)) { return; }
     let (value, generation) = asid_assign();
     backing.asid = value;
     backing.asid_generation = generation;
-    address_space_backing_write(root, *backing);
+    address_space_backing_write(evidence, *backing);
 }
 
 // The half of activation that may discover global ASID work. A scheduler can
@@ -759,7 +793,14 @@ fn address_space_prepare_activation(root: AddressSpaceRoot)
         return AddressSpaceActivationPrepareResult::Invalid;
     }
     let checked: usize = slot;
-    let mut backing: AddressSpaceBacking = address_space_backing_read_existing(root);
+    let evidence = match address_space_backing_read_checked(root) {
+        AddressSpaceBackingReady::Missing => {
+            address_space_backing_missing_note();
+            return AddressSpaceActivationPrepareResult::Invalid;
+        }
+        AddressSpaceBackingReady::Ready(value) => { value }
+    };
+    let mut backing: AddressSpaceBacking = evidence.value;
     if (backing.live == false) {
         return AddressSpaceActivationPrepareResult::Invalid;
     }
@@ -773,7 +814,7 @@ fn address_space_prepare_activation(root: AddressSpaceRoot)
                 let (value, generation) = assignment;
                 backing.asid = value;
                 backing.asid_generation = generation;
-                address_space_backing_write(root, backing);
+                address_space_backing_write(evidence, backing);
             }
         }
     }
@@ -815,12 +856,17 @@ fn address_space_activate_root(root: AddressSpaceRoot) {
     let slot: usize = root.slot;
     if (scheduled_process_slot_valid(slot)) {
         let checked: usize = slot;
-        let mut backing: AddressSpaceBacking = address_space_backing_read_existing(root);
-        if (backing.live) {
-            address_space_refresh_asid(root, &backing);
-            mmu_activate_root(backing.l1_physical, backing.asid);
-            address_space_set_active_slot_here(checked);
-            return;
+        match address_space_backing_read_checked(root) {
+            AddressSpaceBackingReady::Missing => { address_space_backing_missing_note(); }
+            AddressSpaceBackingReady::Ready(evidence) => {
+                let mut backing: AddressSpaceBacking = evidence.value;
+                if (backing.live) {
+                    address_space_refresh_asid(evidence, &backing);
+                    mmu_activate_root(backing.l1_physical, backing.asid);
+                    address_space_set_active_slot_here(checked);
+                    return;
+                }
+            }
         }
     }
     // Root 0 is permanently retained as the bootstrap/fallback root, so an
@@ -1107,17 +1153,24 @@ fn address_space_release_root(root: AddressSpaceRoot) {
     let slot: usize = root.slot;
     if (slot == 0 || scheduled_process_slot_valid(slot) == false) { return; }
     let checked: usize = slot;
-    if (address_space_backing_read(root).live == false) { return; }
+    let evidence = match address_space_backing_read_checked(root) {
+        AddressSpaceBackingReady::Missing => {
+            address_space_backing_missing_note();
+            return;
+        }
+        AddressSpaceBackingReady::Ready(value) => { value }
+    };
+    if (evidence.value.live == false) { return; }
     if (address_space_active_slot_here() == checked) {
         address_space_activate_root(address_space_boot_root());
     }
-    let l1_physical: usize = address_space_backing_read(root).l1_physical;
-    let l2_physical: usize = address_space_backing_read(root).l2_physical;
-    let asid: usize = address_space_backing_read(root).asid;
+    let l1_physical: usize = evidence.value.l1_physical;
+    let l2_physical: usize = evidence.value.l2_physical;
+    let asid: usize = evidence.value.asid;
     address_space_release_user_mappings(root);
     let mut cleared: AddressSpaceBacking = { false, 0, 0, 0,
-        address_space_backing_read(root).asid_generation };
-    address_space_backing_write(root, cleared);
+        evidence.value.asid_generation };
+    address_space_backing_write(evidence, cleared);
     page_transferred_release_physical(l2_physical);
     page_transferred_release_physical(l1_physical);
     // GitHub issue #402: nothing gives an ASID back any more. The number

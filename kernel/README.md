@@ -50,6 +50,15 @@ pointer live sends the next errno write into an unrelated mapping. Process
 exit returns to the owning EL1 call frame so the complete address space can be
 unmapped and reclaimed.
 
+Address-space backing writes require a borrowed
+`AddressSpaceBackingExists[slot]` produced by successful lookup or publication.
+The evidence carries the exact root handle and a value snapshot; a bare
+`AddressSpaceRoot` cannot allocate page tables or write the record. Its fields
+are private to `mm/address_space.tkb`. Process ownership remains responsible
+for preventing record release between validation and a write, and the writer
+revalidates the handle under a pool pin. The evidence does not prove lifetime
+across release. Activation and release never allocate a missing record.
+
 ### AArch64 alignment contract
 
 After stage-1 translation is enabled, kernel Normal memory runs with
