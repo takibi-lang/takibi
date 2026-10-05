@@ -1,0 +1,641 @@
+file	line	name	binding	storage_shape	type
+kernel/arch/arm64/kernel/exception_evidence.tkb	95	crash_snapshot	mutable	other-state	CrashSnapshot
+kernel/arch/arm64/kernel/exception_evidence.tkb	96	crash_snapshot_capturing	mutable	other-state	bool
+kernel/arch/arm64/kernel/exception_evidence.tkb	97	crash_snapshot_per_core	mutable	cpu-shaped	[CrashSnapshot; KERNEL_MAX_CORES]
+kernel/arch/arm64/kernel/exception_evidence.tkb	98	crash_snapshot_capturing_per_core	mutable	cpu-shaped	[bool; KERNEL_MAX_CORES]
+kernel/arch/arm64/kernel/exception_evidence.tkb	117	crash_fault_order	mutable	other-state	usize
+kernel/arch/arm64/kernel/exception_evidence.tkb	161	crash_console_owner	mutable	other-state	usize
+kernel/arch/arm64/kernel/exception_evidence.tkb	190	crash_report_owner	mutable	other-state	usize
+kernel/arch/arm64/kernel/exception_evidence.tkb	204	crash_report_contended	mutable	other-state	usize
+kernel/arch/arm64/kernel/exception_evidence.tkb	205	crash_report_abandoned	mutable	other-state	usize
+kernel/arch/arm64/kernel/exception_evidence.tkb	289	ddb_snapshot	mutable	other-state	DdbSnapshot
+kernel/arch/arm64/kernel/exception_evidence.tkb	295	ddb_snapshot_published_sequence	mutable	other-state	usize
+kernel/arch/arm64/kernel/exception_evidence.tkb	296	kernel_ddb_breakpoint_test_enabled	mutable	other-state	bool
+kernel/arch/arm64/kernel/exception_evidence.tkb	297	kernel_ddb_memory_fault_test_enabled	mutable	other-state	bool
+kernel/arch/arm64/kernel/exception_evidence.tkb	298	kernel_ddb_backtrace_test_enabled	mutable	other-state	bool
+kernel/arch/arm64/kernel/exception_evidence.tkb	299	kernel_ddb_wait_test_enabled	mutable	other-state	bool
+kernel/arch/arm64/kernel/exception_evidence.tkb	303	kernel_ddb_console_test_enabled	mutable	other-state	bool
+kernel/arch/arm64/kernel/exception_evidence.tkb	304	kernel_ddb_console_hold_armed	mutable	other-state	bool
+kernel/arch/arm64/kernel/exception_evidence.tkb	326	kernel_ddb_memory_access	mutable	cpu-shaped	[DdbGuardedRead; KERNEL_MAX_CORES]
+kernel/arch/arm64/kernel/exception_evidence.tkb	1058	ddb_stopped_root	mutable	cpu-shaped	[DdbStoppedRoot; KERNEL_MAX_CORES]
+kernel/arch/arm64/kernel/exception_evidence.tkb	2172	ddb_wait_test_records	mutable	other-state	[ProcessDdbRecord; DDB_PROCESS_RECORDS]
+kernel/arch/arm64/kernel/platform_uart_common.tkb	4	uart_rx_handler	mutable	other-state	fn !{unsafe}(u8) -> void
+kernel/arch/arm64/kernel/secondary.tkb	47	kernel_secondary_boot_state	mutable	cpu-shaped	[AtomicWord; KERNEL_MAX_CORES]
+kernel/arch/arm64/kernel/secondary.tkb	54	kernel_online_cores	mutable	other-state	io usize
+kernel/arch/arm64/kernel/secondary.tkb	64	secondary_tick_count	mutable	cpu-shaped	[AtomicWord; KERNEL_MAX_CORES]
+kernel/arch/arm64/mm/asid.tkb	80	asid_bits	mutable	other-state	usize
+kernel/arch/arm64/mm/asid.tkb	84	asid_last	mutable	other-state	usize
+kernel/arch/arm64/mm/asid.tkb	85	asid_ready	mutable	other-state	bool
+kernel/arch/arm64/mm/asid.tkb	121	asid_cell	mutable	synchronization	LockedCell(AsidState)
+kernel/drivers/block/block_cache.tkb	50	block_cache_data	mutable	cpu-shaped	[u8; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS * BLOCK_CACHE_BYTES]
+kernel/drivers/block/block_cache.tkb	52	block_cache_backend	mutable	cpu-shaped	[u8; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS]
+kernel/drivers/block/block_cache.tkb	53	block_cache_block	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS]
+kernel/drivers/block/block_cache.tkb	54	block_cache_valid	mutable	cpu-shaped	[bool; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS]
+kernel/drivers/block/block_cache.tkb	55	block_cache_epoch	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS]
+kernel/drivers/block/block_cache.tkb	56	block_cache_used	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES * BLOCK_CACHE_SLOTS]
+kernel/drivers/block/block_cache.tkb	57	block_cache_tick	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/drivers/block/block_cache.tkb	58	block_cache_hits	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/drivers/block/block_cache.tkb	59	block_cache_writes	mutable	cpu-shaped	[AtomicWord; KERNEL_MAX_CORES]
+kernel/drivers/block/memory.tkb	82	block_read_calls	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/drivers/block/memory.tkb	83	block_write_calls	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/drivers/block/memory.tkb	84	block_device_waits	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/drivers/block/memory.tkb	138	block_device_lock	mutable	synchronization	TaskMutex
+kernel/drivers/block/memory.tkb	179	block_fault_armed	mutable	other-state	bool
+kernel/drivers/block/memory.tkb	180	block_fault_on_write	mutable	other-state	bool
+kernel/drivers/block/memory.tkb	181	block_fault_skip	mutable	other-state	usize
+kernel/drivers/block/memory.tkb	182	block_fault_sticky	mutable	other-state	bool
+kernel/drivers/block/memory.tkb	183	block_fault_injected	mutable	other-state	usize
+kernel/drivers/block/memory.tkb	282	block_run_data	mutable	cpu-shaped	[u8; KERNEL_MAX_CORES * BLOCK_RUN_BLOCKS * KERNEL_BLOCK_SIZE]
+kernel/drivers/block/memory.tkb	284	block_run_backend	mutable	cpu-shaped	[u8; KERNEL_MAX_CORES]
+kernel/drivers/block/memory.tkb	285	block_run_first	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/drivers/block/memory.tkb	286	block_run_count	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/drivers/block/memory.tkb	287	block_run_epoch	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/drivers/block/memory.tkb	290	block_run_next	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/drivers/block/memory.tkb	291	block_run_next_backend	mutable	cpu-shaped	[u8; KERNEL_MAX_CORES]
+kernel/drivers/block/memory.tkb	292	block_run_reads	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/drivers/block/memory.tkb	293	block_run_hits	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/drivers/block/virtio_blk.tkb	55	virtio_blk_base	mutable	other-state	i32
+kernel/drivers/block/virtio_blk.tkb	56	virtio_blk_ready	mutable	other-state	bool
+kernel/drivers/block/virtio_blk.tkb	59	virtio_blk_disabled	mutable	other-state	bool
+kernel/drivers/block/virtio_blk.tkb	60	virtio_blk_queue	mutable	other-state	[u8; 2 * VIRTIO_BLK_PAGE_SIZE] align(4096)
+kernel/drivers/block/virtio_blk.tkb	70	virtio_blk_data_buf	mutable	other-state	[u8; 1024] align(64)
+kernel/drivers/block/virtio_blk.tkb	71	virtio_blk_request_buf	mutable	other-state	[u8; 16] align(64)
+kernel/drivers/block/virtio_blk.tkb	74	virtio_blk_receive	mutable	other-state	VirtioBlkReceive align(64)
+kernel/drivers/block/virtio_blk.tkb	131	virtio_blk_used_seen	mutable	other-state	VirtioRingIndex
+kernel/drivers/block/virtio_blk.tkb	146	virtio_blk_timeouts	mutable	other-state	usize
+kernel/drivers/block/virtio_blk.tkb	150	virtio_blk_completion_max_ticks	mutable	other-state	usize
+kernel/drivers/block/virtio_blk.tkb	151	virtio_blk_completions	mutable	other-state	usize
+kernel/drivers/block/virtio_blk.tkb	152	virtio_blk_completion_total_ticks	mutable	other-state	usize
+kernel/drivers/block/virtio_blk.tkb	156	virtio_blk_timeout_first	mutable	other-state	VirtioBlkTimeoutSnapshot
+kernel/drivers/block/virtio_blk.tkb	157	virtio_blk_timeout_last	mutable	other-state	VirtioBlkTimeoutSnapshot
+kernel/drivers/net/rp1_gem.tkb	51	gem_rx_desc	mutable	other-state	[u32; 16] align(64)
+kernel/drivers/net/rp1_gem.tkb	52	gem_tx_desc	mutable	other-state	[u32; 16] align(64)
+kernel/drivers/net/rp1_gem.tkb	53	gem_rx_buf	mutable	other-state	[u8; 2048] align(64)
+kernel/drivers/net/rp1_gem.tkb	54	gem_tx_buf	mutable	other-state	[u8; 1536] align(64)
+kernel/drivers/net/rp1_gem.tkb	55	net_init_once	mutable	synchronization	InitOnce
+kernel/drivers/net/rp1_gem.tkb	56	rp1_gem_net_ready	mutable	other-state	bool
+kernel/drivers/net/rp1_gem.tkb	57	gem_tx_next	mutable	other-state	i32
+kernel/drivers/net/rp1_gem.tkb	58	rp1_gem_base	mutable	other-state	usize
+kernel/drivers/net/rp1_gem.tkb	59	rp1_clocks_base	mutable	other-state	usize
+kernel/drivers/net/rp1_gem.tkb	60	rp1_gpio_ctrl_base	mutable	other-state	usize
+kernel/drivers/net/rp1_gem.tkb	61	rp1_gpio_rio_base	mutable	other-state	usize
+kernel/drivers/net/rp1_gem.tkb	62	rp1_gpio_pads_base	mutable	other-state	usize
+kernel/drivers/net/rp1_gem.tkb	63	rp1_gem_dtb_status	mutable	other-state	usize
+kernel/drivers/net/virtio_net.tkb	121	virtio_base	mutable	other-state	i32
+kernel/drivers/net/virtio_net.tkb	125	virtio_net_gic_intid	mutable	other-state	i32
+kernel/drivers/net/virtio_net.tkb	126	net_init_once	mutable	synchronization	InitOnce
+kernel/drivers/net/virtio_net.tkb	127	virtio_rx_irq_flag	mutable	other-state	io u32
+kernel/drivers/net/virtio_net.tkb	128	virtio_tx_irq_flag	mutable	other-state	io u32
+kernel/drivers/net/virtio_net.tkb	129	virtio_net_ready	mutable	other-state	bool
+kernel/drivers/net/virtio_net.tkb	135	rx_queue_mem	mutable	other-state	[u8; 2 * VIRTIO_PAGE_SIZE] align(4096)
+kernel/drivers/net/virtio_net.tkb	136	tx_queue_mem	mutable	other-state	[u8; 2 * VIRTIO_PAGE_SIZE] align(4096)
+kernel/drivers/net/virtio_net.tkb	137	rx_bufs	mutable	other-state	[u8; QNUM * RX_BUF_SIZE]
+kernel/drivers/net/virtio_net.tkb	147	tx_ready_buf	mutable	other-state	[u8; VIRTIO_NET_HDR_LEN + 1514] align(4096)
+kernel/drivers/net/virtio_net.tkb	152	rx_used_seen	mutable	other-state	VirtioRingIndex
+kernel/drivers/net/virtio_net.tkb	154	tx_used_seen	mutable	other-state	VirtioRingIndex
+kernel/drivers/net/virtio_net.tkb	156	rx_avail_idx	mutable	other-state	VirtioRingIndex
+kernel/drivers/net/virtio_net.tkb	158	tx_avail_idx	mutable	other-state	VirtioRingIndex
+kernel/drivers/serial/terminal.tkb	21	terminal_settings	mutable	other-state	[u8; TERMINAL_TERMIOS_BYTES]
+kernel/drivers/serial/terminal.tkb	22	terminal_settings_initialized	mutable	other-state	bool
+kernel/drivers/serial/terminal.tkb	23	terminal_literal_next	mutable	other-state	bool
+kernel/drivers/serial/terminal.tkb	26	terminal_output_stop_word	mutable	synchronization	AtomicWord
+kernel/drivers/serial/terminal.tkb	27	terminal_input_stop_word	mutable	synchronization	AtomicWord
+kernel/drivers/serial/terminal_echo.tkb	12	terminal_echo_operations	mutable	other-state	[u32; TERMINAL_ECHO_OPERATIONS]
+kernel/drivers/serial/terminal_echo.tkb	13	terminal_echo_head	mutable	other-state	usize
+kernel/drivers/serial/terminal_echo.tkb	14	terminal_echo_tail	mutable	other-state	usize
+kernel/drivers/serial/terminal_echo.tkb	15	terminal_echo_count	mutable	other-state	usize
+kernel/drivers/serial/terminal_echo.tkb	16	terminal_echo_phase	mutable	other-state	u8
+kernel/drivers/serial/terminal_echo.tkb	17	terminal_echo_dropped	mutable	other-state	usize
+kernel/drivers/serial/uart_rx_ring.tkb	36	kernel_uart_rx_buf	mutable	other-state	[u8; KERNEL_UART_RX_CAPACITY]
+kernel/drivers/serial/uart_rx_ring.tkb	37	kernel_uart_rx_head	mutable	other-state	io usize
+kernel/drivers/serial/uart_rx_ring.tkb	38	kernel_uart_rx_tail	mutable	other-state	io usize
+kernel/drivers/serial/uart_rx_ring.tkb	39	kernel_uart_rx_dropped	mutable	other-state	io usize
+kernel/drivers/serial/uart_rx_ring.tkb	40	kernel_uart_rx_marks	mutable	other-state	[u8; KERNEL_UART_RX_CAPACITY]
+kernel/drivers/serial/uart_rx_ring.tkb	41	kernel_uart_rx_columns	mutable	other-state	[u8; KERNEL_UART_RX_CAPACITY]
+kernel/drivers/serial/uart_rx_ring.tkb	42	kernel_uart_rx_lines	mutable	other-state	io usize
+kernel/drivers/serial/uart_rx_ring.tkb	43	kernel_uart_rx_canonical	mutable	other-state	io bool
+kernel/drivers/serial/uart_rx_ring.tkb	44	kernel_uart_rx_line_columns	mutable	other-state	usize
+kernel/fs/elf64.tkb	36	ELF_HEADER_SIZE	immutable	immutable-binding	usize
+kernel/fs/elf64.tkb	37	ELF_PROGRAM_HEADER_SIZE	immutable	immutable-binding	usize
+kernel/fs/elf64.tkb	57	ELF_IDENT_MAGIC	mutable	other-state	[u8; 7]
+kernel/fs/ext2/ext2.tkb	34	ext2_scratch	mutable	cpu-shaped	[Ext2Scratch; KERNEL_MAX_CORES]
+kernel/fs/ext2/ext2.tkb	35	ext2_write_blocks	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES * EXT2_MAX_WRITE_ALLOCATIONS]
+kernel/fs/ext2/ext2.tkb	926	ext2_fenced	mutable	other-state	bool
+kernel/fs/ext2/ext2.tkb	929	ext2_fence_pending	mutable	other-state	[usize; EXT2_FENCE_PENDING_MAX]
+kernel/fs/ext2/ext2.tkb	930	ext2_fence_pending_count	mutable	other-state	usize
+kernel/fs/ext2/mutation_lock.tkb	92	ext2_mutation_lock	mutable	synchronization	TaskMutex
+kernel/fs/ext2/mutation_lock.tkb	112	ext2_readers	mutable	synchronization	AtomicWord
+kernel/init/ext2_fixture.tkb	28	ext2_write_fixture_source	mutable	other-state	[u8; EXT2_WRITE_FIXTURE_BYTES]
+kernel/init/ext2_fixture.tkb	29	ext2_write_fixture_readback	mutable	other-state	[u8; KERNEL_BLOCK_SIZE]
+kernel/init/ext2_fixture.tkb	30	ext2_write_fixture_bitmap	mutable	other-state	[u8; KERNEL_BLOCK_SIZE]
+kernel/init/test_driver.tkb	33	ext2_read_fixture	mutable	other-state	[u8; 32]
+kernel/init/test_driver.tkb	34	ext2_symlink_fixture	mutable	other-state	[u8; 64]
+kernel/init/test_driver.tkb	41	saved_ext2_mount	mutable	other-state	Ext2Mount
+kernel/init/test_driver.tkb	42	ext2_mount_ready	mutable	other-state	bool
+kernel/init/test_driver.tkb	49	rootfs_metadata	mutable	other-state	[u8; EXEC_METADATA_SIZE]
+kernel/init/test_driver.tkb	63	exec_scratch	mutable	cpu-shaped	[ExecScratch; KERNEL_MAX_CORES]
+kernel/init/test_driver.tkb	81	kernel_init_socket_evidence	mutable	other-state	bool
+kernel/init/test_driver.tkb	82	saved_rootfs_plan	mutable	other-state	DistroElfLoadPlan
+kernel/init/test_driver.tkb	83	rootfs_plan_ready	mutable	other-state	bool
+kernel/init/test_driver.tkb	84	saved_rootfs_inode	mutable	other-state	usize
+kernel/init/test_driver.tkb	85	saved_rootfs_length	mutable	other-state	usize
+kernel/init/test_driver.tkb	92	process_pool_baseline	mutable	other-state	usize
+kernel/init/test_driver.tkb	93	address_space_baseline	mutable	other-state	usize
+kernel/init/test_driver.tkb	94	image_record_baseline	mutable	other-state	usize
+kernel/init/test_driver.tkb	95	fd_context_baseline	mutable	other-state	usize
+kernel/init/test_driver.tkb	96	page_baseline	mutable	other-state	usize
+kernel/init/test_driver.tkb	97	init_boot_fixture_reported	mutable	other-state	bool
+kernel/init/test_driver.tkb	98	init_boot_fixture_pending	mutable	other-state	bool
+kernel/init/test_driver.tkb	99	clone_growth_probe_ok	mutable	other-state	bool
+kernel/init/test_driver.tkb	1221	kernel_test_rpi5_extended	mutable	other-state	bool
+kernel/init/test_driver.tkb	1222	kernel_test_init_script	mutable	other-state	bool
+kernel/kernel/asid_contention_evidence.tkb	46	asid_probe_armed	mutable	other-state	usize
+kernel/kernel/asid_contention_evidence.tkb	47	asid_probe_primary	mutable	other-state	usize
+kernel/kernel/asid_contention_evidence.tkb	48	asid_probe_secondary	mutable	other-state	usize
+kernel/kernel/asid_contention_evidence.tkb	49	asid_probe_active	mutable	other-state	usize
+kernel/kernel/asid_contention_evidence.tkb	50	asid_probe_overlap	mutable	other-state	usize
+kernel/kernel/console_contention_evidence.tkb	13	console_probe_armed	mutable	synchronization	AtomicWord
+kernel/kernel/console_contention_evidence.tkb	14	console_probe_phase	mutable	synchronization	AtomicWord
+kernel/kernel/console_contention_evidence.tkb	15	console_probe_ready	mutable	synchronization	AtomicWord
+kernel/kernel/console_contention_evidence.tkb	16	console_probe_go	mutable	synchronization	AtomicWord
+kernel/kernel/console_contention_evidence.tkb	17	console_probe_arrived	mutable	synchronization	AtomicWord
+kernel/kernel/console_contention_evidence.tkb	18	console_probe_entered	mutable	synchronization	AtomicWord
+kernel/kernel/console_contention_evidence.tkb	19	console_probe_done	mutable	synchronization	AtomicWord
+kernel/kernel/console_contention_evidence.tkb	103	console_ddb_phase	mutable	synchronization	AtomicWord
+kernel/kernel/console_contention_evidence.tkb	104	console_ddb_release_reason	mutable	synchronization	AtomicWord
+kernel/kernel/console_contention_evidence.tkb	105	console_ddb_entry_held	mutable	synchronization	AtomicWord
+kernel/kernel/ext2_mutation_contention_evidence.tkb	62	ext2_mutation_probe_armed	mutable	other-state	usize
+kernel/kernel/ext2_mutation_contention_evidence.tkb	63	ext2_mutation_probe_phase	mutable	other-state	usize
+kernel/kernel/ext2_mutation_contention_evidence.tkb	68	ext2_mutation_probe_clear_seen	mutable	other-state	usize
+kernel/kernel/ext2_mutation_contention_evidence.tkb	69	ext2_mutation_probe_held_seen	mutable	other-state	usize
+kernel/kernel/ext2_mutation_contention_evidence.tkb	70	ext2_mutation_probe_asked	mutable	other-state	usize
+kernel/kernel/ext2_mutation_contention_evidence.tkb	76	ext2_mutation_probe_inside	mutable	other-state	usize
+kernel/kernel/ext2_mutation_contention_evidence.tkb	77	ext2_mutation_probe_trying	mutable	other-state	usize
+kernel/kernel/ext2_mutation_contention_evidence.tkb	78	ext2_mutation_probe_taken	mutable	other-state	usize
+kernel/kernel/ext2_mutation_contention_evidence.tkb	79	ext2_mutation_probe_overlapped	mutable	other-state	usize
+kernel/kernel/ext2_mutation_contention_evidence.tkb	80	ext2_mutation_probe_left	mutable	other-state	usize
+kernel/kernel/fd_table.tkb	138	fd_block_pool	mutable	pool	RegionPool(FdBlock)
+kernel/kernel/fd_table.tkb	222	fd_block_missing	mutable	other-state	FdBlock
+kernel/kernel/fd_table.tkb	223	fd_context_missing	mutable	other-state	ProcessFdContext
+kernel/kernel/fd_table.tkb	224	unified_object_missing	mutable	other-state	SharedObject
+kernel/kernel/fd_table.tkb	225	unified_fd_record_missing_count	mutable	other-state	usize
+kernel/kernel/fd_table.tkb	239	fd_slot_total	mutable	synchronization	GuardedField(usize)
+kernel/kernel/fd_table.tkb	283	fd_context_pool	mutable	pool	RegionPool(ProcessFdContext)
+kernel/kernel/fd_table.tkb	821	object_pool	mutable	pool	RegionPool(SharedObject)
+kernel/kernel/fd_table.tkb	1022	object_double_release_count	mutable	other-state	usize
+kernel/kernel/fd_table.tkb	1039	object_refcount_lock	mutable	synchronization	Mutex
+kernel/kernel/fd_table.tkb	2548	unified_object_ref_bound_breaks	mutable	other-state	usize
+kernel/kernel/fd_table.tkb	3359	fd_refcount_probe_handle	mutable	other-state	UnifiedObjectHandle
+kernel/kernel/fd_table.tkb	3360	fd_refcount_probe_ready	mutable	other-state	bool
+kernel/kernel/fd_table.tkb	3361	fd_refcount_probe_armed	mutable	other-state	usize
+kernel/kernel/fd_table.tkb	3362	fd_refcount_probe_primary	mutable	other-state	usize
+kernel/kernel/fd_table.tkb	3363	fd_refcount_probe_secondary	mutable	other-state	usize
+kernel/kernel/fd_table.tkb	3364	fd_refcount_probe_refused	mutable	other-state	usize
+kernel/kernel/fd_table.tkb	3365	fd_refcount_probe_active	mutable	other-state	usize
+kernel/kernel/fd_table.tkb	3366	fd_refcount_probe_overlap	mutable	other-state	usize
+kernel/kernel/fd_table.tkb	3398	fd_refcount_probe_entries	mutable	other-state	usize
+kernel/kernel/freelist_contention_evidence.tkb	52	freelist_probe	mutable	other-state	FreelistCore(FREELIST_CONTENTION_SLOTS)
+kernel/kernel/freelist_contention_evidence.tkb	53	freelist_probe_ready	mutable	other-state	bool
+kernel/kernel/freelist_contention_evidence.tkb	58	freelist_probe_held	mutable	other-state	[usize; FREELIST_CONTENTION_SLOTS]
+kernel/kernel/freelist_contention_evidence.tkb	64	freelist_probe_lock	mutable	synchronization	Mutex
+kernel/kernel/freelist_contention_evidence.tkb	66	freelist_probe_locked_phase	mutable	other-state	usize
+kernel/kernel/freelist_contention_evidence.tkb	68	freelist_probe_armed	mutable	other-state	usize
+kernel/kernel/freelist_contention_evidence.tkb	69	freelist_probe_primary	mutable	other-state	usize
+kernel/kernel/freelist_contention_evidence.tkb	70	freelist_probe_secondary	mutable	other-state	usize
+kernel/kernel/freelist_contention_evidence.tkb	71	freelist_probe_duplicates	mutable	other-state	usize
+kernel/kernel/freelist_contention_evidence.tkb	72	freelist_probe_empty	mutable	other-state	usize
+kernel/kernel/freelist_contention_evidence.tkb	73	freelist_probe_active	mutable	other-state	usize
+kernel/kernel/freelist_contention_evidence.tkb	74	freelist_probe_overlap	mutable	other-state	usize
+kernel/kernel/freelist_contention_evidence.tkb	75	freelist_probe_primary_arrived	mutable	other-state	usize
+kernel/kernel/freelist_contention_evidence.tkb	76	freelist_probe_secondary_arrived	mutable	other-state	usize
+kernel/kernel/freelist_contention_evidence.tkb	77	freelist_probe_primary_marked	mutable	other-state	usize
+kernel/kernel/freelist_contention_evidence.tkb	78	freelist_probe_secondary_marked	mutable	other-state	usize
+kernel/kernel/freelist_contention_evidence.tkb	120	freelist_probe_entries	mutable	other-state	usize
+kernel/kernel/init_once_contention_evidence.tkb	11	init_once_probe_gate	mutable	synchronization	InitOnce
+kernel/kernel/init_once_contention_evidence.tkb	12	init_once_probe_armed	mutable	other-state	usize
+kernel/kernel/init_once_contention_evidence.tkb	13	init_once_probe_phase	mutable	other-state	usize
+kernel/kernel/init_once_contention_evidence.tkb	14	init_once_probe_arrived	mutable	other-state	usize
+kernel/kernel/init_once_contention_evidence.tkb	15	init_once_probe_release	mutable	other-state	usize
+kernel/kernel/init_once_contention_evidence.tkb	16	init_once_probe_primary_won	mutable	other-state	usize
+kernel/kernel/init_once_contention_evidence.tkb	17	init_once_probe_secondary_won	mutable	other-state	usize
+kernel/kernel/init_once_contention_evidence.tkb	18	init_once_probe_secondary_active	mutable	other-state	usize
+kernel/kernel/init_once_contention_evidence.tkb	19	init_once_probe_naive_complete	mutable	other-state	usize
+kernel/kernel/occupancy_drain_evidence.tkb	65	occupancy_probe_region	mutable	other-state	Occupancy
+kernel/kernel/occupancy_drain_evidence.tkb	66	occupancy_probe_armed	mutable	other-state	usize
+kernel/kernel/occupancy_drain_evidence.tkb	71	occupancy_probe_entered	mutable	other-state	usize
+kernel/kernel/occupancy_drain_evidence.tkb	72	occupancy_probe_release	mutable	other-state	usize
+kernel/kernel/occupancy_drain_evidence.tkb	73	occupancy_probe_left	mutable	other-state	usize
+kernel/kernel/occupancy_drain_evidence.tkb	74	occupancy_probe_teardowns	mutable	other-state	usize
+kernel/kernel/occupancy_drain_evidence.tkb	75	world_stop_probe_inspections	mutable	other-state	usize
+kernel/kernel/occupancy_drain_evidence.tkb	76	world_stop_stale_probe_controller	mutable	other-state	WorldStop
+kernel/kernel/occupancy_drain_evidence.tkb	378	world_stop_peer_probe_armed	mutable	other-state	usize
+kernel/kernel/occupancy_drain_evidence.tkb	380	world_stop_peer_probe_result	mutable	other-state	usize
+kernel/kernel/page_contention_evidence.tkb	36	page_probe_armed	mutable	other-state	usize
+kernel/kernel/page_contention_evidence.tkb	37	page_probe_primary	mutable	other-state	usize
+kernel/kernel/page_contention_evidence.tkb	38	page_probe_secondary	mutable	other-state	usize
+kernel/kernel/page_contention_evidence.tkb	39	page_probe_failed	mutable	other-state	usize
+kernel/kernel/page_contention_evidence.tkb	40	page_probe_active	mutable	other-state	usize
+kernel/kernel/page_contention_evidence.tkb	41	page_probe_overlap	mutable	other-state	usize
+kernel/kernel/pid_contention_evidence.tkb	42	pid_probe_armed	mutable	other-state	usize
+kernel/kernel/pid_contention_evidence.tkb	43	pid_probe_primary	mutable	other-state	usize
+kernel/kernel/pid_contention_evidence.tkb	44	pid_probe_secondary	mutable	other-state	usize
+kernel/kernel/pid_contention_evidence.tkb	45	pid_probe_active	mutable	other-state	usize
+kernel/kernel/pid_contention_evidence.tkb	46	pid_probe_overlap	mutable	other-state	usize
+kernel/kernel/pid_contention_evidence.tkb	47	pid_probe_primary_arrived	mutable	other-state	usize
+kernel/kernel/pid_contention_evidence.tkb	48	pid_probe_secondary_arrived	mutable	other-state	usize
+kernel/kernel/pid_contention_evidence.tkb	49	pid_probe_primary_committed	mutable	other-state	usize
+kernel/kernel/pid_contention_evidence.tkb	50	pid_probe_secondary_committed	mutable	other-state	usize
+kernel/kernel/pid_contention_evidence.tkb	51	pid_probe_locked_phase	mutable	other-state	usize
+kernel/kernel/pid_contention_evidence.tkb	85	pid_probe_entries	mutable	other-state	usize
+kernel/kernel/pool_contention_evidence.tkb	75	contention_pool	mutable	pool	IntrusivePool(ContentionItem)
+kernel/kernel/pool_contention_evidence.tkb	76	contention_pool_ready	mutable	other-state	bool
+kernel/kernel/pool_contention_evidence.tkb	81	contention_armed	mutable	other-state	usize
+kernel/kernel/pool_contention_evidence.tkb	82	contention_primary_cycles	mutable	other-state	usize
+kernel/kernel/pool_contention_evidence.tkb	83	contention_secondary_cycles	mutable	other-state	usize
+kernel/kernel/pool_contention_evidence.tkb	84	contention_failed_removes	mutable	other-state	usize
+kernel/kernel/pool_contention_evidence.tkb	89	contention_secondary_active	mutable	other-state	usize
+kernel/kernel/pool_contention_evidence.tkb	91	contention_overlap	mutable	other-state	usize
+kernel/kernel/pool_walk_contention_evidence.tkb	149	pool_walk_pool	mutable	pool	IntrusivePool(PoolWalkItem)
+kernel/kernel/pool_walk_contention_evidence.tkb	150	pool_walk_ready	mutable	other-state	bool
+kernel/kernel/pool_walk_contention_evidence.tkb	155	pool_walk_floor_address	mutable	other-state	[IntrusiveSlotAddress; POOL_WALK_FLOOR]
+kernel/kernel/pool_walk_contention_evidence.tkb	156	pool_walk_floor_generation	mutable	other-state	[usize; POOL_WALK_FLOOR]
+kernel/kernel/pool_walk_contention_evidence.tkb	157	pool_walk_floor_held	mutable	other-state	usize
+kernel/kernel/pool_walk_contention_evidence.tkb	161	pool_walk_floor_base	mutable	other-state	usize
+kernel/kernel/pool_walk_contention_evidence.tkb	162	pool_walk_floor_end	mutable	other-state	usize
+kernel/kernel/pool_walk_contention_evidence.tkb	164	pool_walk_armed	mutable	other-state	usize
+kernel/kernel/pool_walk_contention_evidence.tkb	165	pool_walk_active	mutable	other-state	usize
+kernel/kernel/pool_walk_contention_evidence.tkb	172	pool_walk_seq	mutable	other-state	usize
+kernel/kernel/pool_walk_contention_evidence.tkb	173	pool_walk_held_seq	mutable	other-state	usize
+kernel/kernel/pool_walk_contention_evidence.tkb	174	pool_walk_released_seq	mutable	other-state	usize
+kernel/kernel/pool_walk_contention_evidence.tkb	175	pool_walk_probed_seq	mutable	other-state	usize
+kernel/kernel/pool_walk_contention_evidence.tkb	176	pool_walk_stale	mutable	other-state	usize
+kernel/kernel/pool_walk_contention_evidence.tkb	181	pool_view_request	mutable	other-state	usize
+kernel/kernel/pool_walk_contention_evidence.tkb	182	pool_view_held	mutable	other-state	usize
+kernel/kernel/pool_walk_contention_evidence.tkb	183	pool_view_release	mutable	other-state	usize
+kernel/kernel/pool_walk_contention_evidence.tkb	184	pool_view_done	mutable	other-state	usize
+kernel/kernel/pool_walk_contention_evidence.tkb	185	pool_view_payload_ok	mutable	other-state	usize
+kernel/kernel/pool_walk_contention_evidence.tkb	187	pool_walk_rounds_met	mutable	other-state	usize
+kernel/kernel/pool_walk_contention_evidence.tkb	188	pool_walk_refused	mutable	other-state	usize
+kernel/kernel/pool_walk_contention_evidence.tkb	189	pool_walk_admitted	mutable	other-state	usize
+kernel/kernel/pool_walk_contention_evidence.tkb	190	pool_walk_floor_bad	mutable	other-state	usize
+kernel/kernel/pool_walk_contention_evidence.tkb	191	pool_walk_steps	mutable	other-state	usize
+kernel/kernel/pool_walk_contention_evidence.tkb	208	pool_walk_entries	mutable	other-state	usize
+kernel/kernel/process.tkb	429	scheduled_process_pool	mutable	pool	IntrusivePool(ProcessRecord)
+kernel/kernel/process.tkb	430	scheduled_process_pool_ready	mutable	other-state	bool
+kernel/kernel/process.tkb	442	scheduled_process_boot_record	mutable	other-state	ProcessRecord
+kernel/kernel/process.tkb	443	scheduled_process_boot_live	mutable	other-state	bool
+kernel/kernel/process.tkb	444	scheduled_process_boot_generation	mutable	other-state	usize
+kernel/kernel/process.tkb	449	scheduled_process_peer_dispatch_enabled	mutable	other-state	bool
+kernel/kernel/process.tkb	456	scheduled_process_record_absent	mutable	other-state	ProcessRecord
+kernel/kernel/process.tkb	457	scheduled_process_record_missing_count	mutable	other-state	usize
+kernel/kernel/process.tkb	473	scheduled_process_reaped_current_count	mutable	other-state	usize
+kernel/kernel/process.tkb	477	scheduled_process_stale_handle_reads	mutable	other-state	usize
+kernel/kernel/process.tkb	484	kernel_process_start_refused_invalid	mutable	other-state	usize
+kernel/kernel/process.tkb	485	kernel_process_start_refused_busy	mutable	other-state	usize
+kernel/kernel/process.tkb	486	kernel_process_start_refused_partial	mutable	other-state	usize
+kernel/kernel/process.tkb	489	kernel_process_stable_retry_busy	mutable	other-state	usize
+kernel/kernel/process.tkb	490	kernel_process_stable_retry_partial	mutable	other-state	usize
+kernel/kernel/process.tkb	499	scheduled_process_stale_first_slot	mutable	other-state	usize
+kernel/kernel/process.tkb	500	scheduled_process_stale_first_generation	mutable	other-state	usize
+kernel/kernel/process.tkb	533	scheduled_process_spare	mutable	other-state	SpareStackRunCell
+kernel/kernel/process.tkb	566	scheduled_process_stack_deepest_reaped	mutable	other-state	usize
+kernel/kernel/process.tkb	585	scheduled_process_pid_cell	mutable	synchronization	LockedCell(usize)
+kernel/kernel/process.tkb	705	kernel_process_reap_unlinked_count	mutable	other-state	usize
+kernel/kernel/process.tkb	716	kernel_process_cpus_that_ran	mutable	other-state	usize
+kernel/kernel/process.tkb	870	scheduled_process_missing_first_slot	mutable	other-state	usize
+kernel/kernel/process.tkb	871	scheduled_process_missing_reason	mutable	other-state	usize
+kernel/kernel/process.tkb	883	scheduled_process_missing_cpu	mutable	other-state	usize
+kernel/kernel/process.tkb	884	scheduled_process_missing_current	mutable	other-state	usize
+kernel/kernel/process.tkb	933	kernel_activity	mutable	cpu-shaped	[KernelActivity; KERNEL_MAX_CORES]
+kernel/kernel/process.tkb	934	scheduled_process_missing_site	mutable	other-state	KernelActivity
+kernel/kernel/process.tkb	1041	scheduled_process_freed_slot_count	mutable	other-state	usize
+kernel/kernel/process.tkb	1042	scheduled_process_freed_first_slot	mutable	other-state	usize
+kernel/kernel/process.tkb	1043	scheduled_process_freed_cpu	mutable	other-state	usize
+kernel/kernel/process.tkb	1044	scheduled_process_freed_site	mutable	other-state	KernelActivity
+kernel/kernel/process.tkb	3141	scheduled_process_run_lock	mutable	synchronization	Mutex
+kernel/kernel/process.tkb	3917	execution_state	mutable	cpu-shaped	[ExecutionState; KERNEL_MAX_CORES]
+kernel/kernel/process.tkb	4237	kernel_process_trace_probe_parent_frame	mutable	other-state	[usize; KERNEL_PROCESS_TRACE_PROBE_FRAME_WORDS]
+kernel/kernel/process.tkb	4239	kernel_process_trace_probe_child_frame	mutable	other-state	[usize; KERNEL_PROCESS_TRACE_PROBE_FRAME_WORDS]
+kernel/kernel/process.tkb	4330	kernel_crash_trace	mutable	other-state	[usize; KERNEL_CRASH_TRACE_STORAGE_WORDS]
+kernel/kernel/process.tkb	4335	kernel_crash_trace_next	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/kernel/process.tkb	4337	kernel_crash_trace_sequence	mutable	synchronization	AtomicWord
+kernel/kernel/process.tkb	4351	kernel_process_trace_boot_enabled	mutable	other-state	bool
+kernel/kernel/process.tkb	4355	kernel_process_trace_fail_after_exec	mutable	other-state	bool
+kernel/kernel/process.tkb	4360	kernel_process_rollover_busy_injections	mutable	other-state	usize
+kernel/kernel/process.tkb	4363	kernel_process_clone_rollover_busy_injections	mutable	other-state	usize
+kernel/kernel/process.tkb	4382	kernel_process_exec_failure_reason	mutable	other-state	KernelExecFailureReason
+kernel/kernel/process.tkb	4401	kernel_process_trace_enabled	mutable	other-state	bool
+kernel/kernel/process.tkb	5028	kernel_process_core0_idle_seen	mutable	other-state	bool
+kernel/kernel/process.tkb	5134	spread_timer_phase	mutable	other-state	SpreadTimerPhase
+kernel/kernel/process.tkb	5135	spread_timer_parent	mutable	other-state	ProcessHandle
+kernel/kernel/process.tkb	5136	spread_timer_child	mutable	other-state	ProcessHandle
+kernel/kernel/process.tkb	5139	spread_timer_active	mutable	synchronization	AtomicWord
+kernel/kernel/process.tkb	5556	kernel_idle_starvation_pid	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/kernel/process.tkb	5557	kernel_idle_starvation_passes	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/kernel/process.tkb	5558	kernel_idle_starvation_reported	mutable	other-state	bool
+kernel/kernel/process.tkb	7528	terminal_foreground_session	mutable	other-state	usize
+kernel/kernel/process_test_evidence.tkb	38	process_test_evidence	mutable	other-state	ProcessTestEvidence
+kernel/kernel/profile_samples.tkb	85	profile_sample_cores	mutable	cpu-shaped	[ProfileSampleCore; KERNEL_MAX_CORES]
+kernel/kernel/profile_samples.tkb	86	profile_sample_active	mutable	other-state	bool
+kernel/kernel/profile_samples.tkb	90	profile_sample_available	mutable	other-state	bool
+kernel/kernel/profile_samples.tkb	91	profile_sample_checked	mutable	other-state	bool
+kernel/kernel/profile_samples.tkb	97	profile_sample_end_counter	mutable	other-state	usize
+kernel/kernel/profile_samples.tkb	98	profile_sample_end_pending	mutable	other-state	usize
+kernel/kernel/profile_samples.tkb	99	profile_sample_end_state	mutable	other-state	usize
+kernel/kernel/profile_samples.tkb	100	profile_sample_end_gic	mutable	other-state	usize
+kernel/kernel/profile_timeline.tkb	56	profile_timeline_cores	mutable	cpu-shaped	[ProfileTimelineCore; KERNEL_MAX_CORES]
+kernel/kernel/profile_timeline.tkb	58	profile_timeline_active	mutable	other-state	bool
+kernel/kernel/profile_timeline.tkb	59	profile_timeline_pid_a	mutable	other-state	usize
+kernel/kernel/profile_timeline.tkb	60	profile_timeline_pid_b	mutable	other-state	usize
+kernel/kernel/protocol_trace.tkb	73	protocol_trace_active	mutable	other-state	bool
+kernel/kernel/protocol_trace.tkb	74	protocol_trace_sequence	mutable	other-state	usize
+kernel/kernel/protocol_trace.tkb	75	protocol_trace_stored	mutable	other-state	usize
+kernel/kernel/protocol_trace.tkb	76	protocol_trace_lost	mutable	other-state	usize
+kernel/kernel/protocol_trace.tkb	77	protocol_trace_events	mutable	other-state	[ProtocolTraceEvent; PROTOCOL_TRACE_EVENTS]
+kernel/kernel/protocol_trace.tkb	79	protocol_trace_processes	mutable	other-state	[ProtocolTraceProcess; PROTOCOL_TRACE_PROCESSES]
+kernel/kernel/protocol_trace.tkb	81	protocol_trace_process_count	mutable	other-state	usize
+kernel/kernel/protocol_trace.tkb	82	protocol_trace_cores	mutable	cpu-shaped	[ProtocolTraceCore; KERNEL_MAX_CORES]
+kernel/kernel/protocol_trace.tkb	83	protocol_trace_unlocked_pass	mutable	other-state	bool
+kernel/kernel/schedule_contention_evidence.tkb	67	schedule_probe_handle	mutable	other-state	ProcessHandle
+kernel/kernel/schedule_contention_evidence.tkb	68	schedule_probe_ready	mutable	other-state	bool
+kernel/kernel/schedule_contention_evidence.tkb	73	schedule_probe_held	mutable	other-state	usize
+kernel/kernel/schedule_contention_evidence.tkb	76	schedule_probe_phase	mutable	other-state	usize
+kernel/kernel/schedule_contention_evidence.tkb	81	schedule_probe_occupancy	mutable	other-state	Occupancy
+kernel/kernel/schedule_contention_evidence.tkb	90	schedule_probe_armed	mutable	other-state	usize
+kernel/kernel/schedule_contention_evidence.tkb	91	schedule_probe_primary	mutable	other-state	usize
+kernel/kernel/schedule_contention_evidence.tkb	92	schedule_probe_secondary	mutable	other-state	usize
+kernel/kernel/schedule_contention_evidence.tkb	93	schedule_probe_overlap	mutable	other-state	usize
+kernel/kernel/schedule_contention_evidence.tkb	94	schedule_probe_duplicates	mutable	other-state	usize
+kernel/kernel/schedule_contention_evidence.tkb	95	schedule_probe_missing	mutable	other-state	usize
+kernel/kernel/schedule_contention_evidence.tkb	228	schedule_probe_attempts	mutable	other-state	usize
+kernel/kernel/signal_contention_evidence.tkb	46	signal_probe_record	mutable	other-state	ProcessRecord
+kernel/kernel/signal_contention_evidence.tkb	49	signal_probe_phase	mutable	other-state	usize
+kernel/kernel/signal_contention_evidence.tkb	50	signal_probe_armed	mutable	other-state	usize
+kernel/kernel/signal_contention_evidence.tkb	52	signal_probe_go	mutable	other-state	usize
+kernel/kernel/signal_contention_evidence.tkb	53	signal_probe_done	mutable	other-state	usize
+kernel/kernel/syscall.tkb	239	syscall_ext2_mount	mutable	other-state	Ext2Mount
+kernel/kernel/syscall.tkb	240	syscall_ext2_ready	mutable	other-state	bool
+kernel/kernel/syscall.tkb	269	syscall_scratch	mutable	cpu-shaped	[SyscallScratch; KERNEL_MAX_CORES]
+kernel/kernel/syscall.tkb	391	exec_args_store	mutable	cpu-shaped	[ExecArgsStore; KERNEL_MAX_CORES]
+kernel/kernel/syscall.tkb	3252	syscall_syslog_peer_reported	mutable	other-state	bool
+kernel/kernel/syscall_test_evidence.tkb	34	syscall_test_evidence	mutable	other-state	SyscallTestEvidence
+kernel/kernel/syscall_test_lifecycle.tkb	20	syscall_connected_fixture_pending	mutable	other-state	bool
+kernel/kernel/syscall_test_lifecycle.tkb	28	syscall_persistent_shell	mutable	other-state	bool
+kernel/kernel/syscall_test_lifecycle.tkb	38	syscall_persistent_shell_child_pid	mutable	other-state	usize
+kernel/kernel/syscall_test_lifecycle.tkb	39	syscall_persistent_shell_checkpoint_fork_logged	mutable	other-state	bool
+kernel/kernel/syscall_test_lifecycle.tkb	40	syscall_persistent_shell_checkpoint_selected_logged	mutable	other-state	bool
+kernel/kernel/syscall_test_lifecycle.tkb	41	syscall_persistent_shell_checkpoint_exec_prepare_logged	mutable	other-state	bool
+kernel/kernel/syscall_test_lifecycle.tkb	42	syscall_persistent_shell_checkpoint_exec_commit_logged	mutable	other-state	bool
+kernel/kernel/syscall_unimplemented.tkb	31	syscall_unimplemented_first_pid	mutable	synchronization	[AtomicWord; SYSCALL_UNIMPLEMENTED_MAX]
+kernel/kernel/tag_contention_evidence.tkb	38	tag_probe_armed	mutable	other-state	usize
+kernel/kernel/tag_contention_evidence.tkb	39	tag_probe_primary	mutable	other-state	usize
+kernel/kernel/tag_contention_evidence.tkb	40	tag_probe_secondary	mutable	other-state	usize
+kernel/kernel/tag_contention_evidence.tkb	41	tag_probe_active	mutable	other-state	usize
+kernel/kernel/tag_contention_evidence.tkb	42	tag_probe_overlap	mutable	other-state	usize
+kernel/kernel/tcp_connection_contention_evidence.tkb	11	tcp_owner_probe_armed	mutable	other-state	usize
+kernel/kernel/tcp_connection_contention_evidence.tkb	12	tcp_owner_probe_phase	mutable	other-state	usize
+kernel/kernel/tcp_connection_contention_evidence.tkb	13	tcp_owner_probe_slot	mutable	other-state	usize
+kernel/kernel/tcp_connection_contention_evidence.tkb	14	tcp_owner_probe_generation	mutable	other-state	usize
+kernel/kernel/tcp_connection_contention_evidence.tkb	15	tcp_owner_probe_busy	mutable	other-state	usize
+kernel/kernel/tcp_connection_contention_evidence.tkb	16	tcp_owner_probe_advanced	mutable	other-state	usize
+kernel/kernel/tcp_connection_contention_evidence.tkb	17	tcp_owner_probe_active	mutable	other-state	usize
+kernel/kernel/tcp_connection_contention_evidence.tkb	233	tcp_pool_cost_mailboxes	mutable	cpu-shaped	[TcpPoolCostMailbox; KERNEL_MAX_CORES]
+kernel/kernel/tcp_connection_contention_evidence.tkb	234	tcp_pool_cost_round	mutable	synchronization	AtomicWord
+kernel/kernel/tcp_connection_contention_evidence.tkb	235	tcp_pool_cost_go	mutable	synchronization	AtomicWord
+kernel/kernel/tcp_connection_contention_evidence.tkb	236	tcp_pool_cost_mode	mutable	synchronization	AtomicWord
+kernel/kernel/tcp_connection_contention_evidence.tkb	348	tcp_pool_cost_samples	mutable	other-state	[TcpPoolCostSample; 3]
+kernel/kernel/workload_evidence.tkb	227	workload_busy_pair	mutable	other-state	WorkloadBusyPair
+kernel/kernel/workload_evidence.tkb	271	workload_busy_waits	mutable	other-state	[WorkloadBusyWait; 2]
+kernel/kernel/workload_evidence.tkb	290	workload_busy_starve_injection_ticks	mutable	other-state	usize
+kernel/kernel/workload_evidence.tkb	291	workload_busy_starve_armed	mutable	other-state	bool
+kernel/kernel/workload_evidence.tkb	292	workload_busy_starve_worker	mutable	other-state	usize
+kernel/kernel/workload_evidence.tkb	293	workload_busy_starve_remaining	mutable	other-state	usize
+kernel/kernel/workload_evidence.tkb	471	workload_peer_net_wake_pid	mutable	other-state	usize
+kernel/kernel/workload_evidence.tkb	472	workload_peer_net_wake_block_requested	mutable	other-state	bool
+kernel/kernel/workload_evidence.tkb	508	move_cost_open	mutable	cpu-shaped	[MoveCostOpen; KERNEL_MAX_CORES]
+kernel/kernel/workload_evidence.tkb	509	move_cost_records	mutable	other-state	[MoveCostRecord; MOVE_COST_MAX]
+kernel/kernel/workload_evidence.tkb	510	move_cost_stored	mutable	other-state	usize
+kernel/kernel/workload_evidence.tkb	511	move_cost_lost	mutable	other-state	usize
+kernel/kernel/workload_evidence.tkb	512	move_cost_reported	mutable	other-state	bool
+kernel/kernel/workload_evidence.tkb	522	workload_peer_mutation_pid	mutable	other-state	usize
+kernel/kernel/workload_evidence.tkb	526	workload_peer_wait_pid	mutable	other-state	usize
+kernel/kernel/workload_evidence.tkb	527	workload_peer_wait_blocked	mutable	other-state	bool
+kernel/kernel/workload_evidence.tkb	528	workload_peer_wait_reaped	mutable	other-state	bool
+kernel/kernel/workload_evidence.tkb	529	workload_peer_mutation_seen	mutable	other-state	usize
+kernel/kernel/workload_evidence.tkb	533	workload_peer_exec_pid	mutable	other-state	usize
+kernel/kernel/workload_evidence.tkb	534	workload_peer_exec_cpu	mutable	other-state	usize
+kernel/kernel/workload_evidence.tkb	535	workload_peer_exec_control	mutable	other-state	bool
+kernel/kernel/workload_evidence.tkb	538	workload_peer_fork_pid	mutable	other-state	usize
+kernel/kernel/workload_evidence.tkb	539	workload_peer_fork_cpu	mutable	other-state	usize
+kernel/kernel/workload_evidence.tkb	540	workload_peer_fork_control	mutable	other-state	bool
+kernel/kernel/workload_evidence.tkb	565	workload_profile_cores	mutable	cpu-shaped	[WorkloadProfileCore; KERNEL_MAX_CORES]
+kernel/kernel/workload_evidence.tkb	566	workload_profile_active	mutable	other-state	bool
+kernel/kernel/workload_evidence.tkb	1590	workload_settings_wake	mutable	other-state	WorkloadSettingsWake
+kernel/lib/diagnostic_ring.tkb	61	diagnostic_trace_next	mutable	synchronization	[AtomicWord; DIAGNOSTIC_TRACE_CPUS]
+kernel/lib/diagnostic_ring.tkb	62	diagnostic_trace_records	mutable	other-state	[DiagnosticEvent; DIAGNOSTIC_TRACE_SLOTS]
+kernel/lib/diagnostic_ring.tkb	64	diagnostic_trace_test_enabled	mutable	other-state	bool
+kernel/lib/intrusive_pool.tkb	629	intrusive_pool_tag_cell	mutable	synchronization	LockedCell(usize)
+kernel/lib/occupancy.tkb	150	kernel_world_stop	mutable	other-state	WorldStop
+kernel/mm/address_space.tkb	81	address_space_backing_pool	mutable	pool	RegionPool(AddressSpaceBacking)
+kernel/mm/address_space.tkb	89	address_space_backing_missing_count	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/mm/address_space.tkb	112	address_space_active_slot	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/mm/address_space.tkb	412	address_space_backing_root0	mutable	other-state	AddressSpaceBacking
+kernel/mm/page.tkb	273	boot_page_pool_cell	mutable	synchronization	LockedCell(BootPagePool)
+kernel/mm/page.tkb	1373	page_mapping_ref_bound_breaks_cell	mutable	synchronization	LockedCell(usize)
+kernel/mm/process_image.tkb	14	process_image_zero_page	mutable	other-state	[u8; PAGE_SIZE]
+kernel/mm/process_image.tkb	33	process_image_ext2_state	mutable	cpu-shaped	[ProcessImageExt2State; KERNEL_MAX_CORES]
+kernel/mm/process_image.tkb	80	clone_last_reaped_count	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/mm/process_image.tkb	163	process_image_pool	mutable	pool	RegionPool(ProcessImageRecord)
+kernel/mm/process_image.tkb	173	process_image_record_missing_count	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/mm/process_image.tkb	688	process_image_target_root	mutable	cpu-shaped	[AddressSpaceRoot; KERNEL_MAX_CORES]
+kernel/mm/process_image.tkb	692	process_image_target_root_set	mutable	cpu-shaped	[bool; KERNEL_MAX_CORES]
+kernel/mm/process_image.tkb	752	process_image_root_unset_count	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/mm/process_image.tkb	754	process_image_root_stale_count	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/mm/process_image.tkb	1553	process_image_exec_reap_count	mutable	other-state	usize
+kernel/mm/process_image.tkb	1554	process_image_exec_reap_clean_count	mutable	other-state	usize
+kernel/mm/process_image.tkb	1555	process_image_exec_reap_stack_growth_count	mutable	other-state	usize
+kernel/net/arp.tkb	36	ARP_SHA	immutable	immutable-binding	usize
+kernel/net/arp.tkb	37	ARP_SPA	immutable	immutable-binding	usize
+kernel/net/arp.tkb	38	ARP_THA	immutable	immutable-binding	usize
+kernel/net/arp.tkb	39	ARP_TPA	immutable	immutable-binding	usize
+kernel/net/icmp.tkb	32	IPV4_SRC	immutable	immutable-binding	usize
+kernel/net/icmp.tkb	33	IPV4_DST	immutable	immutable-binding	usize
+kernel/net/netconfig.tkb	18	OUR_MAC	immutable	immutable-binding	[u8; 6]
+kernel/net/netconfig.tkb	19	OUR_IP	immutable	immutable-binding	[u8; 4]
+kernel/net/socket_capability.tkb	31	network_capability_store	mutable	other-state	NetworkCapabilityStore
+kernel/net/tcp.tkb	93	our_mac	mutable	other-state	[u8; 6]
+kernel/net/tcp.tkb	317	tcp_connection_pool	mutable	pool	RegionPool(TcpConnection)
+kernel/net/tcp.tkb	396	tcp_absent_fallback_count	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/net/tcp.tkb	414	tcp_completed_handshakes	mutable	other-state	usize
+kernel/net/tcp.tkb	415	tcp_completed_echoes	mutable	other-state	usize
+kernel/net/tcp.tkb	416	tcp_completed_closes	mutable	other-state	usize
+kernel/net/tcp.tkb	417	tcp_drop_next_syn_ack	mutable	other-state	bool
+kernel/net/tcp.tkb	418	tcp_injected_syn_pending	mutable	other-state	bool
+kernel/net/tcp.tkb	419	tcp_injected_syn_retransmitted	mutable	other-state	bool
+kernel/net/tcp.tkb	420	tcp_injected_syn_accepted	mutable	other-state	bool
+kernel/net/tcp.tkb	522	tcp_retx_chain	mutable	other-state	RetxChain
+kernel/net/tcp.tkb	526	tcp_retx_pool	mutable	pool	RegionPool(RetxEntry)
+kernel/net/tcp.tkb	528	tcp_drop_data_segment_index	mutable	other-state	i32
+kernel/net/tcp.tkb	529	tcp_injected_data_retransmitted	mutable	other-state	bool
+kernel/net/tcp.tkb	530	tcp_injected_data_recovery_observed	mutable	other-state	bool
+kernel/net/tcp.tkb	531	tcp_drop_next_fin	mutable	other-state	bool
+kernel/net/tcp.tkb	532	tcp_injected_fin_retransmitted	mutable	other-state	bool
+kernel/net/tcp.tkb	533	tcp_injected_fin_recovery_observed	mutable	other-state	bool
+kernel/net/tcp.tkb	534	tcp_advertised_window	mutable	other-state	u16
+kernel/net/tcp.tkb	535	tcp_ack_each_stream_segment	mutable	other-state	bool
+kernel/net/tcp.tkb	536	tcp_split_request_segments	mutable	other-state	usize
+kernel/net/tcp.tkb	618	tcp_frame_pool	mutable	pool	RegionPool(NetFrame)
+kernel/net/tcp.tkb	1334	pin_sharing_pool	mutable	pool	RegionPool(PinSharingCell)
+kernel/net/tcp.tkb	1335	pin_sharing_page	mutable	other-state	usize
+kernel/net/tcp.tkb	1336	pin_sharing_handles	mutable	other-state	[RegionHandle(PinSharingCell); 32]
+kernel/net/tcp.tkb	2030	pending_tcp_probe_frame	mutable	other-state	[u8; 1514]
+kernel/net/wire.tkb	59	IP_TOTAL_LEN	immutable	immutable-binding	usize
+kernel/net/wire.tkb	60	IP_TTL	immutable	immutable-binding	usize
+kernel/net/wire.tkb	61	IP_PROTOCOL	immutable	immutable-binding	usize
+kernel/net/wire.tkb	62	IP_CHECKSUM	immutable	immutable-binding	usize
+kernel/net/wire.tkb	63	IP_SRC	immutable	immutable-binding	usize
+kernel/net/wire.tkb	64	IP_DST	immutable	immutable-binding	usize
+kernel/net/wire.tkb	66	TCP_SRC_PORT	immutable	immutable-binding	usize
+kernel/net/wire.tkb	67	TCP_DST_PORT	immutable	immutable-binding	usize
+kernel/net/wire.tkb	68	TCP_SEQ	immutable	immutable-binding	usize
+kernel/net/wire.tkb	69	TCP_ACK	immutable	immutable-binding	usize
+kernel/net/wire.tkb	70	TCP_DATA_OFFSET	immutable	immutable-binding	usize
+kernel/net/wire.tkb	71	TCP_FLAGS	immutable	immutable-binding	usize
+kernel/net/wire.tkb	72	TCP_WINDOW	immutable	immutable-binding	usize
+kernel/net/wire.tkb	73	TCP_CHECKSUM	immutable	immutable-binding	usize
+kernel/net/wire.tkb	74	TCP_URGENT	immutable	immutable-binding	usize
+kernel/platform/qemu/intc.tkb	27	qemu_uart_gic_intid	mutable	other-state	u32
+kernel/platform/qemu/intc.tkb	33	qemu_pmu_gic_intid	mutable	other-state	u32
+kernel/platform/qemu/intc.tkb	34	qemu_gicd_base	mutable	other-state	usize
+kernel/platform/qemu/intc.tkb	35	qemu_gicc_base	mutable	other-state	usize
+kernel/platform/qemu/timer_irq.tkb	8	qemu_timer_gic_intid	mutable	other-state	u32
+kernel/platform/qemu/uart.tkb	19	uart_base	mutable	other-state	usize
+kernel/platform/qemu/uart.tkb	145	qemu_psci_use_hvc	mutable	other-state	bool
+kernel/platform/rpi5/pcie.tkb	66	rpi5_pcie2_base	mutable	other-state	usize
+kernel/platform/rpi5/pcie.tkb	67	rpi5_pcie2_dtb_status	mutable	other-state	usize
+kernel/platform/rpi5/pcie.tkb	68	rpi5_pcie_rescal_base	mutable	other-state	usize
+kernel/platform/rpi5/pcie.tkb	69	rpi5_bcm_reset_base	mutable	other-state	usize
+kernel/platform/rpi5/pcie.tkb	70	rpi5_pcie_support_dtb_status	mutable	other-state	usize
+kernel/platform/rpi5/pcie.tkb	71	rpi5_mip0_base	mutable	other-state	usize
+kernel/platform/rpi5/pcie.tkb	72	rpi5_mip0_target	mutable	other-state	usize
+kernel/platform/rpi5/pcie.tkb	73	rpi5_mip0_dtb_status	mutable	other-state	usize
+kernel/platform/rpi5/pcie.tkb	74	rpi5_pcie_outbound_cpu_base	mutable	other-state	usize
+kernel/platform/rpi5/pcie.tkb	75	rp1_dma_pci_offset	mutable	other-state	usize
+kernel/platform/rpi5/pcie.tkb	76	rpi5_pcie_address_map_dtb_status	mutable	other-state	usize
+kernel/platform/rpi5/psci_dtb.tkb	9	rpi5_psci_use_hvc	mutable	other-state	bool
+kernel/platform/rpi5/timer_irq.tkb	30	rpi5_gicd_base	mutable	other-state	usize
+kernel/platform/rpi5/timer_irq.tkb	31	rpi5_gicc_base	mutable	other-state	usize
+kernel/platform/rpi5/timer_irq.tkb	32	rpi5_gic_dtb_status	mutable	other-state	usize
+kernel/platform/rpi5/timer_irq.tkb	35	rpi5_timer_gic_intid	mutable	other-state	u32
+kernel/platform/rpi5/uart.tkb	70	rpi5_uart_base	mutable	other-state	usize
+kernel/platform/rpi5/uart.tkb	71	rpi5_uart_dtb_status	mutable	other-state	usize
+kernel/platform/rpi5/usb_provision.tkb	15	usb_provision_image	mutable	other-state	[u8; KERNEL_EXT2_IMAGE_LEN]
+kernel/platform/rpi5/usb_provision.tkb	23	usb_provision_block	mutable	other-state	[u8; KERNEL_BLOCK_SIZE]
+kernel/platform/rpi5/usb_provision.tkb	27	usb_provision_batch	mutable	other-state	[u8; USB_PROVISION_BATCH_BOUND - 1]
+kernel/platform/rpi5/usb_xhci.tkb	55	rp1_usbhost0_base	mutable	other-state	usize
+kernel/platform/rpi5/usb_xhci.tkb	56	rp1_usbhost0_op	mutable	other-state	usize
+kernel/platform/rpi5/usb_xhci.tkb	57	rp1_usbhost0_doorbell	mutable	other-state	usize
+kernel/platform/rpi5/usb_xhci.tkb	58	rp1_usbhost0_portsc3	mutable	other-state	usize
+kernel/platform/rpi5/usb_xhci.tkb	59	rp1_usbhost0_ir0	mutable	other-state	usize
+kernel/platform/rpi5/usb_xhci.tkb	60	rp1_usbhost0_dtb_status	mutable	other-state	usize
+kernel/platform/rpi5/usb_xhci.tkb	89	xhci_dcbaa	mutable	other-state	[u32; 65 * 2] align(64)
+kernel/platform/rpi5/usb_xhci.tkb	90	xhci_scratchpad_array	mutable	other-state	[u32; 2 * 2] align(64)
+kernel/platform/rpi5/usb_xhci.tkb	91	xhci_scratchpad_buf0	mutable	other-state	[u8; 4096] align(4096)
+kernel/platform/rpi5/usb_xhci.tkb	92	xhci_scratchpad_buf1	mutable	other-state	[u8; 4096] align(4096)
+kernel/platform/rpi5/usb_xhci.tkb	93	xhci_cmd_ring	mutable	other-state	[Trb; CMD_RING_TRBS] align(64)
+kernel/platform/rpi5/usb_xhci.tkb	94	xhci_evt_ring	mutable	other-state	[Trb; EVT_RING_TRBS] align(64)
+kernel/platform/rpi5/usb_xhci.tkb	95	xhci_erst	mutable	other-state	[u32; 4] align(64)
+kernel/platform/rpi5/usb_xhci.tkb	96	xhci_input_ctx	mutable	other-state	[u32; INPUT_CTX_SIZE / 4] align(64)
+kernel/platform/rpi5/usb_xhci.tkb	97	xhci_device_ctx	mutable	other-state	[u32; DEVICE_CTX_SIZE / 4] align(64)
+kernel/platform/rpi5/usb_xhci.tkb	98	xhci_ep0_ring	mutable	other-state	[Trb; EP0_RING_TRBS] align(64)
+kernel/platform/rpi5/usb_xhci.tkb	99	xhci_bulk_in_ring	mutable	other-state	[Trb; BULK_RING_TRBS] align(64)
+kernel/platform/rpi5/usb_xhci.tkb	100	xhci_bulk_out_ring	mutable	other-state	[Trb; BULK_RING_TRBS] align(64)
+kernel/platform/rpi5/usb_xhci.tkb	102	xhci_control_receive	mutable	other-state	XhciControlReceive align(64)
+kernel/platform/rpi5/usb_xhci.tkb	104	xhci_slot_id	mutable	other-state	usize
+kernel/platform/rpi5/usb_xhci.tkb	105	xhci_ep0_enq	mutable	other-state	usize
+kernel/platform/rpi5/usb_xhci.tkb	106	xhci_ep0_cycle	mutable	other-state	u32
+kernel/platform/rpi5/usb_xhci.tkb	107	xhci_evt_idx	mutable	other-state	usize
+kernel/platform/rpi5/usb_xhci.tkb	108	xhci_evt_cycle	mutable	other-state	u32
+kernel/platform/rpi5/usb_xhci.tkb	109	xhci_last_residual	mutable	other-state	u32
+kernel/platform/rpi5/usb_xhci.tkb	110	xhci_last_evt_dw3	mutable	other-state	u32
+kernel/platform/rpi5/usb_xhci.tkb	112	xhci_msc_config_value	mutable	other-state	u32
+kernel/platform/rpi5/usb_xhci.tkb	113	xhci_msc_interface_num	mutable	other-state	u32
+kernel/platform/rpi5/usb_xhci.tkb	114	xhci_msc_bulk_in_ep	mutable	other-state	u32
+kernel/platform/rpi5/usb_xhci.tkb	115	xhci_msc_bulk_in_mps	mutable	other-state	u32
+kernel/platform/rpi5/usb_xhci.tkb	116	xhci_msc_bulk_in_burst	mutable	other-state	u32
+kernel/platform/rpi5/usb_xhci.tkb	117	xhci_msc_bulk_out_ep	mutable	other-state	u32
+kernel/platform/rpi5/usb_xhci.tkb	118	xhci_msc_bulk_out_mps	mutable	other-state	u32
+kernel/platform/rpi5/usb_xhci.tkb	119	xhci_msc_bulk_out_burst	mutable	other-state	u32
+kernel/platform/rpi5/usb_xhci.tkb	121	xhci_bulk_in_enq	mutable	other-state	usize
+kernel/platform/rpi5/usb_xhci.tkb	122	xhci_bulk_in_cycle	mutable	other-state	u32
+kernel/platform/rpi5/usb_xhci.tkb	123	xhci_bulk_in_dci	mutable	other-state	usize
+kernel/platform/rpi5/usb_xhci.tkb	124	xhci_bulk_out_enq	mutable	other-state	usize
+kernel/platform/rpi5/usb_xhci.tkb	125	xhci_bulk_out_cycle	mutable	other-state	u32
+kernel/platform/rpi5/usb_xhci.tkb	126	xhci_bulk_out_dci	mutable	other-state	usize
+kernel/platform/rpi5/usb_xhci.tkb	134	xhci_cmd_enq	mutable	other-state	usize
+kernel/platform/rpi5/usb_xhci.tkb	135	xhci_cmd_cycle	mutable	other-state	u32
+kernel/platform/rpi5/usb_xhci.tkb	198	msc_cbw_buf	mutable	other-state	[u8; 64] align(64)
+kernel/platform/rpi5/usb_xhci.tkb	200	msc_csw_receive	mutable	other-state	MscCswReceive align(64)
+kernel/platform/rpi5/usb_xhci.tkb	335	msc_bounce_buf	mutable	other-state	[u8; MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE] align(64)
+kernel/platform/rpi5/usb_xhci.tkb	337	msc_data_receive	mutable	other-state	MscDataReceive align(64)
+kernel/platform/rpi5/usb_xhci.tkb	338	msc_tag	mutable	other-state	u32
+kernel/platform/rpi5/usb_xhci.tkb	339	msc_write10_command_count	mutable	other-state	usize
+kernel/platform/rpi5/usb_xhci.tkb	341	xhci_ready	mutable	other-state	bool
+kernel/platform/rpi5/usb_xhci.tkb	342	xhci_controller_unusable	mutable	other-state	bool
+kernel/platform/rpi5/usb_xhci.tkb	1662	xhci_init_description	mutable	other-state	UsbInitDescription
+kernel/platform/rpi5/usb_xhci.tkb	1663	xhci_init_attempted	mutable	other-state	bool
+kernel/printk/console_lock.tkb	43	console_tx_lock	mutable	synchronization	Mutex
+kernel/printk/console_lock.tkb	102	console_measure	mutable	other-state	ConsoleLockMeasurement
+kernel/printk/console_lock.tkb	103	console_measure_enabled	mutable	other-state	bool
+kernel/printk/log.tkb	47	kernel_log_text	mutable	synchronization	[AtomicWord; KERNEL_LOG_TEXT_WORDS]
+kernel/printk/log.tkb	48	kernel_log_ticks	mutable	synchronization	[AtomicWord; KERNEL_LOG_RECORD_COUNT]
+kernel/printk/log.tkb	49	kernel_log_lengths	mutable	synchronization	[AtomicWord; KERNEL_LOG_RECORD_COUNT]
+kernel/printk/log.tkb	51	kernel_log_stamps	mutable	synchronization	[AtomicWord; KERNEL_LOG_RECORD_COUNT]
+kernel/printk/log.tkb	52	kernel_log_started	mutable	synchronization	AtomicWord
+kernel/printk/log.tkb	66	kernel_log_cpu	mutable	synchronization	[AtomicWord; KERNEL_LOG_RECORD_COUNT]
+kernel/printk/log.tkb	67	kernel_log_deferred_cpu	mutable	other-state	usize
+kernel/printk/log.tkb	68	kernel_log_deferred_tick	mutable	other-state	i64
+kernel/printk/log.tkb	69	kernel_log_deferred	mutable	other-state	bool
+kernel/printk/log.tkb	70	kernel_log_oldest	mutable	other-state	usize
+kernel/printk/log.tkb	71	kernel_log_count	mutable	other-state	usize
+kernel/printk/log.tkb	72	kernel_log_overwritten	mutable	other-state	usize
+kernel/printk/log.tkb	73	kernel_log_capture_enabled	mutable	other-state	bool
+kernel/printk/log.tkb	74	kernel_log_active	mutable	other-state	bool
+kernel/printk/log.tkb	75	kernel_log_active_slot	mutable	other-state	usize
+kernel/printk/log.tkb	76	kernel_log_boot_tick	mutable	other-state	i64
+kernel/printk/log.tkb	77	kernel_log_frequency	mutable	other-state	i64
+kernel/printk/log.tkb	84	kernel_log_snapshots	mutable	cpu-shaped	[KernelLogSnapshot; KERNEL_MAX_CORES]
+kernel/printk/log.tkb	122	kernel_log_core_state	mutable	cpu-shaped	[KernelLogCoreState; KERNEL_MAX_CORES]
+kernel/printk/log.tkb	123	kernel_log_peer_published	mutable	synchronization	[AtomicWord; KERNEL_LOG_PEER_SLOTS]
+kernel/printk/log.tkb	125	kernel_log_peer_latest	mutable	cpu-shaped	[AtomicWord; KERNEL_MAX_CORES]
+kernel/printk/log.tkb	126	kernel_log_peer_lengths	mutable	other-state	[usize; KERNEL_LOG_PEER_SLOTS]
+kernel/printk/log.tkb	127	kernel_log_peer_truncated	mutable	other-state	[bool; KERNEL_LOG_PEER_SLOTS]
+kernel/printk/log.tkb	130	kernel_log_peer_ticks	mutable	other-state	[i64; KERNEL_LOG_PEER_SLOTS]
+kernel/printk/log.tkb	131	kernel_log_peer_text	mutable	other-state	[u8; KERNEL_LOG_PEER_TEXT_BYTES]
+kernel/printk/log.tkb	132	kernel_log_peer_consumed	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/printk/log.tkb	272	kernel_log_tx_spin_ticks	mutable	other-state	usize
+kernel/printk/log.tkb	273	kernel_log_tx_bytes	mutable	other-state	usize
+kernel/printk/log.tkb	277	kernel_log_tx_spun	mutable	other-state	usize
+kernel/printk/log.tkb	328	kernel_log_tx_queue	mutable	other-state	[u8; KERNEL_LOG_TX_QUEUE_BYTES]
+kernel/printk/log.tkb	329	kernel_log_tx_terminal	mutable	other-state	[bool; KERNEL_LOG_TX_QUEUE_BYTES]
+kernel/printk/log.tkb	330	kernel_log_terminal_column	mutable	other-state	usize
+kernel/printk/log.tkb	331	kernel_log_tx_head	mutable	other-state	usize
+kernel/printk/log.tkb	332	kernel_log_tx_tail	mutable	other-state	usize
+kernel/printk/log.tkb	333	kernel_log_tx_count	mutable	other-state	usize
+kernel/printk/log.tkb	342	kernel_log_wire_last	mutable	other-state	u8
+kernel/printk/log.tkb	343	kernel_log_wire_break_due	mutable	other-state	bool
+kernel/printk/log.tkb	350	kernel_log_tx_live	mutable	other-state	bool
+kernel/printk/log.tkb	564	kernel_log_terminal_input_stopped	mutable	other-state	bool
+kernel/printk/log.tkb	777	uart_user_write_waits	mutable	other-state	usize
+kernel/printk/log.tkb	778	uart_user_write_sleeps	mutable	other-state	usize
+kernel/printk/log.tkb	814	kernel_log_peer_drained	mutable	other-state	usize
+kernel/printk/log.tkb	815	kernel_log_peer_late	mutable	other-state	usize
+kernel/printk/log.tkb	816	kernel_log_peer_worst_ticks	mutable	other-state	usize
+kernel/printk/log.tkb	817	kernel_log_peer_worst_cpu	mutable	other-state	usize
+kernel/printk/log.tkb	818	kernel_log_peer_worst_length	mutable	other-state	usize
+kernel/printk/log.tkb	819	kernel_log_peer_worst_first	mutable	other-state	[u8; 8]
+kernel/printk/log.tkb	1067	kernel_log_peer_probe_emitted	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/printk/log.tkb	1102	kernel_log_peer_console_probe_sent	mutable	cpu-shaped	[usize; KERNEL_MAX_CORES]
+kernel/printk/log.tkb	1103	kernel_log_peer_console_probe_armed	mutable	synchronization	AtomicWord
+kernel/printk/log.tkb	1104	kernel_log_peer_console_probe_done	mutable	synchronization	AtomicWord
+kernel/printk/number.tkb	33	kernel_decimal_places	immutable	immutable-binding	[usize; KERNEL_DECIMAL_PLACES]

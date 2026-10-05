@@ -70,9 +70,10 @@ before its issue closes. The steps keep their numbers, which issues cite.
      caller holding the guard is a compile error; AddressSpaceRoot carries
      its backing's handle and is made only by declared makers. Removing
      `scheduled_process_record_at` from the escape list needs the makers to
-     carry the pool's proof, which is stage 2's question. #696 types the
-     ensure-then-write of the per-process pools. #674 and #675 follow; #680-#682 (the pin's cost)
-     are measured first. The uncontended TCP pin/owner and checksum baseline
+     carry the pool's proof, which is stage 2's question. #674 now reviews
+     global state and context-held values; #675 follows. #680-#682 retain
+     their measured baselines for the optimization decision. The uncontended
+     TCP pin/owner and checksum baseline
      is in the shared boot fixture, followed by runtime-online-core empty pool-lock
      and distinct-connection owner contention samples. A same-chunk, distinct-slot
      pin-state comparison now measures same-line versus separate-line traffic;
