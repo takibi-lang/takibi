@@ -1,0 +1,42 @@
+{
+  "baseline_commit": "dbb2852c5023d1a7e0277fdc0c488aaa60f3639a",
+  "production_fd_source_sha256": "5f6735dbcf44e9d39e7bc2e9211d2447b00d8a4325bd7dbe979d634eb95770b4",
+  "workload_binary_sha256": "53e27857968063711bb6f1fc3f52afc0d4b88b648c62ee56e6574f1aae22e4bf",
+  "builds": {
+    "qemu-retain0": {
+      "fd_source_sha256": "f3e8d2b84d498eb268a2acdf1f2744dd0e6f3922c421697b239c35607c07dc1a",
+      "elf_sha256": "bc16371f395aca0417b973e867eb8bb911210441d13a3e7420ca06526a72003b"
+    },
+    "qemu-retain1": {
+      "fd_source_sha256": "bf323bcca5c330fdab03cd5f9c5ff965a22a2a8b2a4c299f2f42c6fdba92f3d8",
+      "elf_sha256": "5e410645a0d21535ac3e25d026571977149ad041e498f9a4bf089152ddd18b2a"
+    },
+    "rpi5-retain0": {
+      "fd_source_sha256": "f3e8d2b84d498eb268a2acdf1f2744dd0e6f3922c421697b239c35607c07dc1a",
+      "elf_sha256": "38b591a40605a2188d0aabd166b648988690ce26319ef9c7d2dfd04bc5d4ce48"
+    },
+    "rpi5-retain1": {
+      "fd_source_sha256": "bf323bcca5c330fdab03cd5f9c5ff965a22a2a8b2a4c299f2f42c6fdba92f3d8",
+      "elf_sha256": "e0e526a8f084059f7d4dc03b4357e867811215d6b7ceb216b0f81e60516b05ca"
+    }
+  },
+  "rpi5_sequence": [
+    1,
+    0,
+    0,
+    1,
+    1,
+    0
+  ],
+  "batch_rounds": 16,
+  "batches_per_count_per_boot": 7,
+  "counts": [
+    1,
+    32,
+    128
+  ],
+  "qemu": "8.2.2 TCG, two Cortex-A53 vCPUs, 1 GiB",
+  "rpi5": "four Cortex-A76 cores, 54 MHz Generic Timer",
+  "c_compiler": "gcc-aarch64-linux-gnu 13.2.0",
+  "takibi": "OCaml 5.4.0, LLVM 19; --regions --forbid-trap --frame-pointers -g"
+}

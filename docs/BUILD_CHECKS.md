@@ -22,6 +22,7 @@ suffix is description; dispatch reads only the prefix.
 | Check | Enforced invariant |
 | --- | --- |
 | `check_service_space_controls.py` | actual FD/fork phase and actor coverage, open-description sharing, retained capacities, Takibi pool resource identities, repeats, and incomplete/error capture rejection |
+| `check_pool_retention_controls.py` | real-kernel retention accounting, workload completion, repeated counts, platform clock separation, and malformed capture rejection |
 | `check_pool_replay_controls.py` | equal-workload Takibi/SLUB/UMA sample coverage, storage arithmetic, recorded comparison freshness, and failed or incomplete capture controls |
 | `check_pool_space_controls.py` | pool-space capture framing, complete production-pool coverage, allocation accounting, and malformed numeric samples |
 | `check_affinity_probe_migrates.py` | the syscall /bin/affinity uses to make the migration gate fire is the one the gdb watcher waits for, and is still on the refusal list (`syscall_peer_refused`) |

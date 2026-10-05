@@ -1,0 +1,31 @@
+retention stats: phase=boot pool=fd_block retain=1 grows=1 shrinks=0 grow_ticks=213382 shrink_ticks=0 chunks=1 capacity=9 live=1 bytes=4096 frequency=54000000
+retention stats: phase=boot pool=object retain=1 grows=1 shrinks=0 grow_ticks=210820 shrink_ticks=0 chunks=1 capacity=46 live=1 bytes=4096 frequency=54000000
+retention stats: phase=launch pool=fd_block retain=1 grows=1 shrinks=0 grow_ticks=213382 shrink_ticks=0 chunks=1 capacity=9 live=1 bytes=4096 frequency=54000000
+retention stats: phase=launch pool=object retain=1 grows=1 shrinks=0 grow_ticks=210820 shrink_ticks=0 chunks=1 capacity=46 live=1 bytes=4096 frequency=54000000
+retention workload: begin
+retention workload: count=1 batch=0 rounds=16 ns=46197129
+retention workload: count=1 batch=1 rounds=16 ns=42436259
+retention workload: count=1 batch=2 rounds=16 ns=42390334
+retention workload: count=1 batch=3 rounds=16 ns=42355611
+retention workload: count=1 batch=4 rounds=16 ns=42357797
+retention workload: count=1 batch=5 rounds=16 ns=43791611
+retention workload: count=1 batch=6 rounds=16 ns=42461371
+retention workload: count=32 batch=0 rounds=16 ns=657547538
+retention workload: count=32 batch=1 rounds=16 ns=657004055
+retention workload: count=32 batch=2 rounds=16 ns=656571889
+retention workload: count=32 batch=3 rounds=16 ns=656311833
+retention workload: count=32 batch=4 rounds=16 ns=656094389
+retention workload: count=32 batch=5 rounds=16 ns=656281148
+retention workload: count=32 batch=6 rounds=16 ns=656329092
+retention workload: count=128 batch=0 rounds=16 ns=2672039278
+retention workload: count=128 batch=1 rounds=16 ns=2659091833
+retention workload: count=128 batch=2 rounds=16 ns=2661467889
+retention workload: count=128 batch=3 rounds=16 ns=2670391556
+retention workload: count=128 batch=4 rounds=16 ns=2669157222
+retention workload: count=128 batch=5 rounds=16 ns=2668501167
+retention workload: count=128 batch=6 rounds=16 ns=2668091611
+retention workload: done
+retention workload: status=0
+retention stats: phase=bounded_end pool=fd_block retain=1 grows=3 shrinks=1 grow_ticks=640332 shrink_ticks=30 chunks=2 capacity=18 live=1 bytes=8192 frequency=54000000
+retention stats: phase=bounded_end pool=object retain=1 grows=114 shrinks=112 grow_ticks=24497177 shrink_ticks=3744 chunks=2 capacity=92 live=1 bytes=8192 frequency=54000000
+retention workload: teardown

@@ -1,0 +1,11 @@
+count	phase	retain1_fd_block_bytes	retain0_fd_block_bytes	retain1_object_bytes	retain0_object_bytes
+32	baseline	4096	4096	4096	4096
+32	opened	4096	4096	4096	4096
+32	inherited	4096	4096	4096	4096
+32	reaped	4096	4096	4096	4096
+32	closed	4096	4096	4096	4096
+128	baseline	4096	4096	4096	4096
+128	opened	8192	8192	12288	12288
+128	inherited	12288	12288	12288	12288
+128	reaped	12288	8192	12288	12288
+128	closed	12288	8192	8192	4096
