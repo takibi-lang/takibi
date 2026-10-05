@@ -130,11 +130,10 @@ for this window.
 On 2026-10-04 the maintainer authorized autonomous B work in priority order
 where acceptance is settled; leave design investigations and unmet
 implementation gates parked.
-The next bounded B repair is #705: replace spread's sleep-based CPU arrival
-window with the already selected test-only observation of an actual EL0 timer
-ToIdle transition. A passing aggregate alone does not discharge this
-reproduced fixture race. #706 evaluates explicit fail-stop provenance; it is
-not a prerequisite for the #705 repair.
+The spread fixture now observes the actual EL0 timer ToIdle transition
+before wait4, with negative controls for a disabled leave and a missed CPU 0
+arrival window. #706 evaluates explicit fail-stop provenance; it remains a
+design investigation.
 #680, #681 and #682 (the pin's cost) stay with A: they need RPi5
 measurements first.
 

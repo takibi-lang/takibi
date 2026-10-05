@@ -5103,6 +5103,127 @@ fn kernel_process_clear_core0_for_call(slot: usize) {
 
 must_use variant ProcessAffinityResult { Missing; Invalid; Mask(usize); }
 
+// Test-only spread rendezvous. Every access holds the process-run guard.
+// The handles retain generations: neither a recycled child nor another
+// parent can consume a previous run's observation. Only the lower-EL timer
+// changes Armed, and only its no-successor leave completes Changed.
+enum SpreadTimerPhase: u8 { Dormant = 0; Armed = 1; Changed = 2; Left = 3; Observed = 4; }
+private let mut spread_timer_phase: SpreadTimerPhase;
+private let mut spread_timer_parent: ProcessHandle;
+private let mut spread_timer_child: ProcessHandle;
+// A cold timer does one atomic load instead of taking the run lock for a
+// dormant test. This is only a hint; all phase/handle access stays guarded.
+private let mut spread_timer_active: AtomicWord;
+
+must_use variant SpreadTimerResult { Invalid; Armed; Pending; Observed; }
+
+fn kernel_process_spread_timer_progress(pid: usize, arm: bool)
+        -> SpreadTimerResult !{unsafe} {
+    let guard = process_run_lock();
+    if (cpu_id() != 1 || execution_here().current_live == false ||
+        kernel_process_current_has_child_pid_locked(guard, pid) == false) {
+        process_run_unlock(guard);
+        return SpreadTimerResult::Invalid;
+    }
+    let slot: usize = match scheduled_process_slot_for_pid_locked(guard, pid) {
+        ProcessSlotForPidResult::Missing => {
+            process_run_unlock(guard);
+            return SpreadTimerResult::Invalid;
+        }
+        ProcessSlotForPidResult::Found(found) => { found }
+    };
+    let mut child: ProcessHandle = scheduled_process_handle_of_slot(slot);
+    let mut parent: ProcessHandle = execution_here().current_handle;
+    if (arm) {
+        let available: bool = match spread_timer_phase {
+            SpreadTimerPhase::Dormant => { true }
+            SpreadTimerPhase::Armed => { false }
+            SpreadTimerPhase::Changed => { false }
+            SpreadTimerPhase::Left => { false }
+            SpreadTimerPhase::Observed => {
+                scheduled_process_handle_matches(spread_timer_child) == false
+            }
+        };
+        if (available == false || slot == 0 ||
+            scheduled_process_state_of_locked(guard, child) != ProcessSlotState::Ready ||
+            scheduled_process_affinity_mask(guard, slot) != 2 ||
+            scheduled_process_affinity_mask(guard, parent.pool_index) != 2) {
+            process_run_unlock(guard);
+            return SpreadTimerResult::Invalid;
+        }
+        spread_timer_parent = parent;
+        spread_timer_child = child;
+        spread_timer_phase = SpreadTimerPhase::Armed;
+        // Opening CPU 0 and arming are one publication, not two syscalls
+        // with a window in which the child could already have left EL0.
+        scheduled_process_set_affinity_mask(guard, slot, 1);
+        atomic_word_store(&spread_timer_active, 1);
+        process_run_unlock(guard);
+        return SpreadTimerResult::Armed;
+    }
+    if (scheduled_process_same_slot(parent, spread_timer_parent) == false ||
+        scheduled_process_same_generation(parent, spread_timer_parent) == false ||
+        scheduled_process_same_slot(child, spread_timer_child) == false ||
+        scheduled_process_same_generation(child, spread_timer_child) == false) {
+        process_run_unlock(guard);
+        return SpreadTimerResult::Invalid;
+    }
+    let result: SpreadTimerResult = match spread_timer_phase {
+        SpreadTimerPhase::Dormant => { SpreadTimerResult::Invalid }
+        SpreadTimerPhase::Armed => { SpreadTimerResult::Pending }
+        SpreadTimerPhase::Changed => { SpreadTimerResult::Pending }
+        SpreadTimerPhase::Left => {
+            spread_timer_phase = SpreadTimerPhase::Observed;
+            atomic_word_store(&spread_timer_active, 0);
+            SpreadTimerResult::Observed
+        }
+        SpreadTimerPhase::Observed => { SpreadTimerResult::Observed }
+    };
+    process_run_unlock(guard);
+    return result;
+}
+
+private fn kernel_process_spread_timer_enter(frame: borrow FrameRef[process]) {
+    if (atomic_word_load(&spread_timer_active) == 0) { return; }
+    let guard = process_run_lock();
+    match spread_timer_phase {
+        SpreadTimerPhase::Armed => {
+            if (cpu_id() == 0 && execution_here().current_live &&
+                scheduled_process_handle_matches(spread_timer_child) &&
+                scheduled_process_same_slot(execution_here().current_handle,
+                    spread_timer_child) &&
+                scheduled_process_same_generation(execution_here().current_handle,
+                    spread_timer_child) &&
+                kernel_process_frame_belongs_to(spread_timer_child, frame)) {
+                scheduled_process_set_affinity_mask(guard,
+                    spread_timer_child.pool_index, 2);
+                spread_timer_phase = SpreadTimerPhase::Changed;
+            }
+        }
+        SpreadTimerPhase::Dormant => {}
+        SpreadTimerPhase::Changed => {}
+        SpreadTimerPhase::Left => {}
+        SpreadTimerPhase::Observed => {}
+    }
+    process_run_unlock(guard);
+}
+
+private fn kernel_process_spread_timer_left(guard: borrow ProcessRunGuard[lock],
+                                            outgoing: ProcessHandle) {
+    match spread_timer_phase {
+        SpreadTimerPhase::Changed => {
+            if (cpu_id() == 0 && scheduled_process_same_slot(outgoing, spread_timer_child) &&
+                scheduled_process_same_generation(outgoing, spread_timer_child)) {
+                spread_timer_phase = SpreadTimerPhase::Left;
+            }
+        }
+        SpreadTimerPhase::Dormant => {}
+        SpreadTimerPhase::Armed => {}
+        SpreadTimerPhase::Left => {}
+        SpreadTimerPhase::Observed => {}
+    }
+}
+
 // Pid 0 is the caller, as in Linux.
 private fn kernel_process_affinity_slot(guard: borrow ProcessRunGuard[lock],
                                          pid: usize) -> ProcessSlotForPidResult
@@ -6496,6 +6617,7 @@ fn kernel_process_timer_schedule(current: sink FrameRef[process])
         return TimerSwitch::Resume(current);
     }
     execution_here().reschedule_pending = false;
+    kernel_process_spread_timer_enter(current);
     if (kernel_process_current_has_relative()) {
         match kernel_process_schedule(current) {
             FrameSwitch::Stay => {}
@@ -6548,6 +6670,7 @@ private fn kernel_process_tick_leave_excluded(
         process_run_unlock(guard);
         kernel_syscall_fail_stop(frame_ref_address(frame));
     }
+    kernel_process_spread_timer_left(guard, outgoing);
     process_run_unlock(guard);
     return true;
 }

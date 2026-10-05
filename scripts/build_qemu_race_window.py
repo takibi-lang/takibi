@@ -41,6 +41,23 @@ def spin(label: str, peer_only: bool) -> str:
 # the fix removed by construction lists several edits: --revert then puts back
 # the write that made the defect possible as well as removing the check.
 WINDOWS = {
+    # Deliberately never open CPU 0. The finite child may finish on CPU 1,
+    # but its parent must refuse wait4 without a timer leave observation.
+    "705-missed-arrival": {
+        "spin": None,
+        "check": [("kernel/process.tkb",
+                   "        scheduled_process_set_affinity_mask(guard, slot, 1);\n",
+                   "        scheduled_process_set_affinity_mask(guard, slot, 2);\n")],
+    },
+    # The actual timer no-successor leave must be necessary to spread's
+    # observation. Ordinary syscall migration after its finite spin cannot
+    # satisfy this control; it must finish with the missing-ToIdle diagnosis.
+    "705": {
+        "spin": None,
+        "check": [("kernel/process.tkb",
+                   "    if (kernel_process_tick_leave_excluded(current)) {\n",
+                   "    if (false) {\n")],
+    },
     # GitHub issue #609: a peer published its process Blocked in wait4 and
     # still stands on that process's stack until its idle entry releases
     # it. A child exiting on core 0 meanwhile must not start the parent on

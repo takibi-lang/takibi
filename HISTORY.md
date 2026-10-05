@@ -15,6 +15,31 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-10-05: spread observes its actual EL0 timer leave
+
+The spread fixture's 100 ms arrival window could close before its child
+reached CPU 0. The child then spent up to a million getcpu syscalls on CPU
+1; a later parent wait4 could also create a CPU 0 successor and make an
+ordinary timer switch look like the no-successor leave under test (#705).
+
+The fixture now arms its generation-bearing child handle while the parent
+stays on CPU 1. Arming and publishing the CPU 0 mask share the process-run
+guard. The child's actual CPU 0 lower-EL timer changes its mask to CPU 1;
+the successful tick leave records completion after publishing Ready. The
+parent observes that monotonic result before wait4. Child arithmetic is
+finite and contains no arrival syscall loop. Poll naps reduce CPU use,
+while the watchdog reports failure rather than establishing success.
+
+Two deterministic QEMU controls remove the actual tick leave or never open
+CPU 0. Both require the missing-ToIdle diagnosis; an unexpected passing
+control is an error. The existing stack-owner test and three spread output
+lines remain. The Wait4Block, StackOwnership, RecordLifetime and ConsoleTx
+action mappings were reviewed: the syscall dispatcher changes only add the
+test tag, and the timer hook changes affinity and observes existing Ready
+publication without altering stack ownership, wait/wake or console order.
+The generation/phase checks and their guard discipline remain trusted test
+hooks, not a compile-time proof of timer progress.
+
 ## 2026-10-04: the session-audit skill is retired
 
 The `session-audit` skill (a fixed end-of-session checklist an agent ran or

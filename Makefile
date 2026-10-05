@@ -1402,7 +1402,7 @@ KERNEL_QEMU_NET_WAKE_CONTROL_ELF := $(KERNEL_QEMU_BUILD_DIR)/kernel-net-wake-con
 # check it exercises reverted. scripts/build_qemu_race_window.py names them.
 KERNEL_QEMU_RACE_WINDOWS := 609 603 633
 # Controls only: a reverted kernel, and no armed one (the ordinary kernel is it).
-KERNEL_QEMU_RACE_CONTROLS := 635
+KERNEL_QEMU_RACE_CONTROLS := 635 705 705-missed-arrival
 KERNEL_QEMU_RACE_WINDOW_ELFS := $(foreach w,$(KERNEL_QEMU_RACE_WINDOWS),$(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-armed.elf $(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-reverted.elf) $(foreach w,$(KERNEL_QEMU_RACE_CONTROLS),$(KERNEL_QEMU_BUILD_DIR)/kernel-race-$(w)-reverted.elf)
 KERNEL_QEMU_LINK_LD      := $(KERNEL_DIR)/arch/arm64/boot/link_qemu.ld
 KERNEL_QEMU_ELF          := $(KERNEL_QEMU_BUILD_DIR)/kernel.elf
@@ -1862,7 +1862,7 @@ _kernelcheck-stack-overflow-qemu:
 ## it is crossed on every run. Armed, the ordinary suite must pass; with the
 ## check the window exercises reverted, the boot must fail-stop with that
 ## check's activity.
-kernelcheck-race-window-qemu: kernelcheck-race-window-609-qemu kernelcheck-race-window-603-qemu kernelcheck-race-window-633-qemu kernelcheck-race-window-635-qemu
+kernelcheck-race-window-qemu: kernelcheck-race-window-609-qemu kernelcheck-race-window-603-qemu kernelcheck-race-window-633-qemu kernelcheck-race-window-635-qemu kernelcheck-race-window-705-qemu
 
 ## One lane per window, so an aggregate runs them side by side: each is
 ## two boots in sequence, and the two together as one lane were the
@@ -1890,6 +1890,15 @@ kernelcheck-race-window-635-qemu: kernelbuild-check
 
 _kernelcheck-race-window-635-qemu:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=635 KERNEL_QEMU_RACE_WINDOW_ARMED=skip KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^workload: settings wake FAILED: the reader is still asleep' KERNEL_QEMU_SERIAL_PORT=18730 KERNEL_QEMU_QMP_PORT=18731 KERNEL_QEMU_NETDEV_LOCAL_PORT=18732 KERNEL_QEMU_NETDEV_REMOTE_PORT=18733 bash scripts/run_kernel_race_window_qemutest.sh
+
+# A functional negative control: removing ToIdle must be observed as failure.
+.PHONY: kernelcheck-race-window-705-qemu _kernelcheck-race-window-705-qemu
+kernelcheck-race-window-705-qemu: kernelbuild-check
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-race-window-705-qemu
+
+_kernelcheck-race-window-705-qemu:
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=705 KERNEL_QEMU_RACE_WINDOW_ARMED=skip KERNEL_QEMU_RACE_WINDOW_REQUIRE_FAILURE=1 KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^spread: the child never completed EL0 timer ToIdle' KERNEL_QEMU_SERIAL_PORT=18501 KERNEL_QEMU_QMP_PORT=18502 KERNEL_QEMU_NETDEV_LOCAL_PORT=18503 KERNEL_QEMU_NETDEV_REMOTE_PORT=18504 bash scripts/run_kernel_race_window_qemutest.sh
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_RACE_WINDOW=705-missed-arrival KERNEL_QEMU_RACE_WINDOW_ARMED=skip KERNEL_QEMU_RACE_WINDOW_REQUIRE_FAILURE=1 KERNEL_QEMU_RACE_WINDOW_SIGNATURE='^spread: the child never completed EL0 timer ToIdle' KERNEL_QEMU_SERIAL_PORT=18505 KERNEL_QEMU_QMP_PORT=18506 KERNEL_QEMU_NETDEV_LOCAL_PORT=18507 KERNEL_QEMU_NETDEV_REMOTE_PORT=18508 bash scripts/run_kernel_race_window_qemutest.sh
 
 kernelcheck-uart-wake-qemu: kernelbuild-check
 	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-uart-wake-qemu
@@ -2009,7 +2018,7 @@ KERNELCHECK_QEMU_LANES := kernelcheck-qemu kernelcheck-qemu-debug \
 	kernelcheck-alloc-rollback-qemu kernelcheck-uart-wake-qemu \
 	kernelcheck-affinity-gdb-qemu kernelcheck-race-window-609-qemu \
 	kernelcheck-race-window-603-qemu kernelcheck-race-window-633-qemu \
-	kernelcheck-race-window-635-qemu
+	kernelcheck-race-window-635-qemu kernelcheck-race-window-705-qemu
 
 KERNELCHECK_LANES := $(KERNELCHECK_QEMU_LANES) kernelcheck-rpi5
 

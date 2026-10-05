@@ -5085,6 +5085,17 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
     // and the non-zero answer is that file telling the caller the
     // measurement is over.
     if (number == AARCH64_NR_TAKIBI_WORKLOAD_PROGRESS) {
+        // /bin/spread: x1 names the child, x2 selects arm (1) or poll (0).
+        // Integers here are the EL0 wire encoding of the closed result.
+        if (x0 == 21) {
+            if (x2 > 1) { return SyscallAction::Resume(LINUX_EINVAL); }
+            match kernel_process_spread_timer_progress(x1, x2 == 1) {
+                SpreadTimerResult::Invalid => { return SyscallAction::Resume(LINUX_EINVAL); }
+                SpreadTimerResult::Armed => { return SyscallAction::Resume(1); }
+                SpreadTimerResult::Pending => { return SyscallAction::Resume(0); }
+                SpreadTimerResult::Observed => { return SyscallAction::Resume(2); }
+            }
+        }
         if (x0 == 3) {
             return SyscallAction::Resume(workload_peer_read_progress(x1, x2));
         }

@@ -13,22 +13,14 @@
  * differ only if some CPU took one of them off the other's CPU while both
  * were runnable.
  *
- * The second scenario is the tick's leave. A child is started on CPU 0 and
- * spins with no syscall at all; while it does, its parent moves the child's
- * mask to CPU 1 and waits. Nothing but the timer can then take the child
- * off CPU 0, and it has no successor there, so it ends on CPU 1 only if the
- * tick gives a Running process back with nothing in its place.
- *
- * Before it moves the child, the parent asks the kernel's stack-owner probe
- * about it. Both are pinned to CPU 1 and the parent is the one running
- * there, so the child is Ready and off every CPU: the probe names another
- * CPU as its stack's owner and the real ready take must refuse it, then
- * clears the owner and the take must accept it.
- *
- * The parent must not call wait4 while the child spins. wait4 is on the
- * peer refusal list, so it reruns on core 0, and a parent Ready there lets
- * core 0's ordinary tick switch the child out -- which moves it without
- * the path under test. The parent naps past the child's spin first.
+ * The second scenario observes an actual lower-EL timer leave. The parent
+ * stays on CPU 1, checks the Ready child's stack ownership with tag 12,
+ * then arms tag 21. Arming opens CPU 0 for that exact child's generation.
+ * Its next CPU 0 EL0 timer changes its mask to CPU 1 and records the real
+ * no-successor ToIdle transition. Only that observation permits wait4.
+ * Naps bound polling cost and a watchdog bounds failure; neither decides
+ * arrival or success. The child performs finite arithmetic, with no syscall
+ * between its initial EL0 execution and the timer transition.
  */
 
 const WRITE_SYSCALL: usize = 64;
@@ -39,6 +31,7 @@ const GETCPU_SYSCALL: usize = 168;
 const CLONE_SYSCALL: usize = 220;
 const WORKLOAD_PROGRESS_SYSCALL: usize = 453;
 const STACK_OWNER_PROBE_TAG: usize = 12;
+const SPREAD_TIMER_PROBE_TAG: usize = 21;
 const WAIT4_SYSCALL: usize = 260;
 const CLONE_FORK_SIGCHLD: usize = 0x11;
 const SPREAD_ERROR_FLOOR: usize = 0xFFFFFFFFFFFFF000;
@@ -49,16 +42,12 @@ const SPREAD_ERROR_FLOOR: usize = 0xFFFFFFFFFFFFF000;
 const SPREAD_CHUNK: usize = 1048576;
 const SPREAD_CHILD_CHUNKS: usize = 256;
 const SPREAD_PARENT_CHUNKS: usize = 512;
-// The leave scenario's child spins this many chunks with no syscall; long
-// enough that its parent's first nap and mask change land inside it, short
-// enough that it ends inside the parent's second nap.
+// Finite arithmetic covers the first EL0 timer on both targets. A child
+// that missed CPU 0 exits instead of looping through a million syscalls.
 const SPREAD_LEAVE_CHUNKS: usize = 512;
-// Naps of 100 ms: one before the parent moves the child, then enough to
-// outlast the child's spin before the parent's wait4.
-const SPREAD_LEAVE_NAP_NS: usize = 100000000;
-const SPREAD_LEAVE_TAIL_NAPS: usize = 40;
-// getcpu polls the child makes, waiting to be on CPU 0 before it spins.
-const SPREAD_LEAVE_ARRIVAL_POLLS: usize = 1000000;
+const SPREAD_LEAVE_POLL_NS: usize = 1000000;
+const SPREAD_LEAVE_WATCHDOG_POLLS: usize = 2000;
+const SPREAD_PARENT_ARRIVAL_POLLS: usize = 4096;
 // An exit status no CPU number reaches, for a getcpu that failed.
 const SPREAD_NO_CPU: usize = 250;
 
@@ -105,17 +94,10 @@ private fn spread_set_mask(pid: usize, low: u8) -> bool {
     return svc5(SETAFFINITY_SYSCALL, pid, 8, mask as *u8 as usize, 0, 0) == 0;
 }
 
-// The child's exit status: the CPU it started on in the high nibble, the
-// one it ended on in the low nibble.
+// The exit status is its final CPU. The kernel observation, not an early
+// getcpu syscall, establishes that the child really entered CPU 0 EL0.
 private fn spread_leave_child() {
     let mut cpu_bytes: [u8; 4];
-    // Born where fork ran, and possibly started on CPU 1 before its parent
-    // narrowed its mask; each getcpu is a syscall boundary where the gate
-    // sends it on.
-    let mut first: usize = spread_cpu(cpu_bytes as []u8);
-    for poll: usize in 0..<SPREAD_LEAVE_ARRIVAL_POLLS {
-        if (first != 0) { first = spread_cpu(cpu_bytes as []u8); }
-    }
     let mut acc: usize = 1;
     for round: usize in 0..<SPREAD_LEAVE_CHUNKS {
         for step: usize in 0..<SPREAD_CHUNK {
@@ -123,10 +105,10 @@ private fn spread_leave_child() {
         }
     }
     let last: usize = spread_cpu(cpu_bytes as []u8);
-    if (acc == 0 || first > 15 || last > 15) {
+    if (acc == 0 || last > 15) {
         svc5(EXIT_SYSCALL, SPREAD_NO_CPU, 0, 0, 0, 0);
     }
-    svc5(EXIT_SYSCALL, (first << 4) | last, 0, 0, 0, 0);
+    svc5(EXIT_SYSCALL, last, 0, 0, 0, 0);
 }
 
 private fn spread_leave() {
@@ -145,8 +127,9 @@ private fn spread_leave() {
     // only be Ready while this process runs.
     let mut cpu_bytes: [u8; 4];
     let mut here: usize = spread_cpu(cpu_bytes as []u8);
-    for poll: usize in 0..<SPREAD_LEAVE_ARRIVAL_POLLS {
-        if (here != 1) { here = spread_cpu(cpu_bytes as []u8); }
+    for poll: usize in 0..<SPREAD_PARENT_ARRIVAL_POLLS {
+        if (here == 1) { break; }
+        here = spread_cpu(cpu_bytes as []u8);
     }
     if (here != 1) {
         spread_fail(bs"spread: the parent never returned to cpu 1\n");
@@ -163,18 +146,37 @@ private fn spread_leave() {
         spread_fail(bs"spread: a Ready process with an unowned stack was refused\n");
     }
     spread_say(bs"spread: a Ready process was refused while another cpu owned its stack, and taken once it was released\n");
-    if (spread_set_mask(child, 1) == false) {
-        spread_fail(bs"spread: the child could not be moved to cpu 0\n");
+    // Before arming, neither a premature poll nor a non-child can claim
+    // the protocol. A second arm below must also be refused.
+    if (svc5(WORKLOAD_PROGRESS_SYSCALL, SPREAD_TIMER_PROBE_TAG,
+             child, 0, 0, 0) < SPREAD_ERROR_FLOOR ||
+        svc5(WORKLOAD_PROGRESS_SYSCALL, SPREAD_TIMER_PROBE_TAG,
+             0, 1, 0, 0) < SPREAD_ERROR_FLOOR) {
+        spread_fail(bs"spread: the timer observation accepted an invalid request\n");
+    }
+    if (svc5(WORKLOAD_PROGRESS_SYSCALL, SPREAD_TIMER_PROBE_TAG,
+             child, 1, 0, 0) != 1) {
+        spread_fail(bs"spread: the EL0 timer observation could not be armed\n");
+    }
+    if (svc5(WORKLOAD_PROGRESS_SYSCALL, SPREAD_TIMER_PROBE_TAG,
+             child, 1, 0, 0) < SPREAD_ERROR_FLOOR) {
+        spread_fail(bs"spread: the timer observation accepted a repeated arm\n");
     }
     let mut nap: [usize; 2];
     nap[0] = 0;
-    nap[1] = SPREAD_LEAVE_NAP_NS;
-    svc5(NANOSLEEP_SYSCALL, nap as *usize as usize, 0, 0, 0, 0);
-    if (spread_set_mask(child, 2) == false) {
-        spread_fail(bs"spread: the child could not be moved to cpu 1\n");
-    }
-    for round: usize in 0..<SPREAD_LEAVE_TAIL_NAPS {
+    nap[1] = SPREAD_LEAVE_POLL_NS;
+    let mut observed: bool = false;
+    for poll: usize in 0..<SPREAD_LEAVE_WATCHDOG_POLLS {
+        let result: usize = svc5(WORKLOAD_PROGRESS_SYSCALL,
+                                 SPREAD_TIMER_PROBE_TAG, child, 0, 0, 0);
+        if (result == 2) { observed = true; break; }
+        if (result != 0) {
+            spread_fail(bs"spread: the EL0 timer observation was refused\n");
+        }
         svc5(NANOSLEEP_SYSCALL, nap as *usize as usize, 0, 0, 0, 0);
+    }
+    if (observed == false) {
+        spread_fail(bs"spread: the child never completed EL0 timer ToIdle\n");
     }
     let mut status: [u8; 4];
     for index: usize in 0..<4 { status[index] = 0; }
@@ -182,10 +184,7 @@ private fn spread_leave() {
         status[0] != 0) {
         spread_fail(bs"spread: the spinning child was not reaped as an exit\n");
     }
-    if ((status[1] >> 4) != 0) {
-        spread_fail(bs"spread: the spinning child did not start on cpu 0\n");
-    }
-    if ((status[1] & 15) != 1) {
+    if (status[1] != 1) {
         spread_fail(bs"spread: a child spinning without a syscall kept the cpu its mask stopped naming\n");
     }
     spread_say(bs"spread: a child spinning without a syscall left the cpu its mask stopped naming\n");

@@ -18,3 +18,4 @@ ordering -- or when a failure is understood to need hours of load to recur.
 | --- | --- | --- |
 | A peer holds the console lock while it keeps running (IRQs masked), and a UART BREAK arrives; DDB must enter and report without that holder stopping | the DDB lane arms `kernel_ddb_console_hold_armed` from GDB and stops the holder at `console_ddb_hold_checkpoint`, so the holder is frozen rather than running | #701 |
 | Process churn on four cores: fork, exec, exit and reap interleaving with wait4 and signals, for hours | `kernelcheck-race-window-*-qemu` lanes hold one known window each; the churn itself runs only at natural boundaries | #584 |
+| A spread child reaches CPU 0 EL0 late under four-core load while its parent waits on CPU 1, then the real timer makes it leave with no CPU 0 successor | the shared fixture observes the actual timer leave; the missed-arrival negative deliberately keeps CPU 0 closed instead of producing a naturally delayed arrival | #705 |

@@ -141,6 +141,25 @@ idle loop (`kernel_timer_tick_leave`).
 
 ## State transitions and the run guard
 
+The spread fixture observes the timer's no-successor leave through a
+test-only rendezvous. Its parent stays on CPU 1 and arms its Ready child
+under the run guard, publishing the child's CPU 0 mask in the same section.
+The next lower-EL timer for that exact child's generation on CPU 0 changes
+the mask to CPU 1. Only the successful tick leave, after publishing Ready,
+records completion. Parent polling checks both generation-bearing handles
+under the same guard; it permits wait4 only after that observation. Fixed
+sleep durations and ordinary syscall migration cannot establish success.
+The child's arithmetic is finite, and polling has a failure watchdog.
+Premature polls, non-child requests, wrong-CPU requests and repeated arming
+are refused. The observation is idempotent, and a completed rendezvous can
+be reused only after its previous child's handle becomes stale.
+
+This is runtime evidence, not a static proof of timer progress. The trusted
+points are the timer's entry/leave hooks and the private run-guard-protected
+rendezvous state. Both platforms exercise the shared implementation. The
+QEMU negative control removes the actual tick leave and requires the
+fixture's missing-ToIdle diagnosis even if a later syscall migrates the child.
+
 Every take that mints a process's linear state -- Ready, Running,
 Blocked, Exited -- borrows the process-run guard (GitHub issue #589), so a
 transition out of any of them without the lock is a compile error. The
