@@ -10,11 +10,14 @@ FIELDS = {'pid', 'fds', 'regular', 'capacity', 'process', 'fd_body', 'fd_dynamic
 POOL_LAYOUT = {'process': (9, 8192), 'fd_context': (50, 4096), 'fd_block': (7, 4096), 'object': (46, 4096), 'image': (42, 4096), 'backing': (84, 4096)}
 
 
-def validate_pools(sample, actors, regular, teardown=False):
+def validate_pools(sample, actors, regular, teardown=False, fd_block_size=528):
+    if fd_block_size not in (528, 400):
+        raise ValueError('unsupported FD block layout')
+    layout = dict(POOL_LAYOUT, fd_block=(7 if fd_block_size == 528 else 9, 4096))
     pools = sample['pools']
     if set(pools) != set(POOL_LAYOUT):
         raise ValueError('missing or unknown Takibi pool')
-    for key, (slots, chunk) in POOL_LAYOUT.items():
+    for key, (slots, chunk) in layout.items():
         row = pools[key]
         if set(row) != {'live', 'chunks', 'capacity', 'bytes'} or any(type(value) is not int or value < 0 for value in row.values()):
             raise ValueError('malformed Takibi pool sample')
@@ -29,7 +32,7 @@ def validate_pools(sample, actors, regular, teardown=False):
         raise ValueError('Takibi retained a benchmark process after exit')
 
 
-def parse_capture(text, os):
+def parse_capture(text, os, fd_block_size=528):
     rows = []
     phase = None
     parent = None
@@ -70,7 +73,7 @@ def parse_capture(text, os):
             sample = json.loads(line.removeprefix('service pools: '))
             phase['actors'] = sample['actors']
             regular = phase['count'] if phase['phase'] in ('opened', 'inherited', 'reaped') else 0
-            validate_pools(sample, phase['actors'], regular)
+            validate_pools(sample, phase['actors'], regular, fd_block_size=fd_block_size)
             phase['pools'] = sample['pools']
         elif line == 'service replay: done':
             if done or len(rows) != 10 or len(rows[-1]['actors']) != 1:
@@ -84,7 +87,7 @@ def parse_capture(text, os):
             if os != 'takibi' or not status or teardown:
                 raise ValueError('unframed or duplicate teardown')
             sample = json.loads(line.removeprefix('service teardown: '))
-            validate_pools(sample, [], 0, teardown=True)
+            validate_pools(sample, [], 0, teardown=True, fd_block_size=fd_block_size)
             teardown = True
         else:
             raise ValueError('unexpected or failed benchmark output')
@@ -104,6 +107,8 @@ def parse_capture(text, os):
                 raise ValueError('malformed actor data')
             if actor['fds'] != regular+3 or actor['regular'] != regular or actor['capacity'] < actor['fds'] or actor['minrefs'] != refs or actor['maxrefs'] != refs:
                 raise ValueError('FD count, capacity, or file sharing differs from the workload')
+            if os == 'takibi' and (actor['capacity'] % 16 or actor['fd_dynamic'] != actor['capacity']//16*fd_block_size):
+                raise ValueError('FD block payload does not match selected layout')
             layout = tuple(actor[key] for key in ('process', 'fd_body', 'file_body'))
             if min(layout) <= 0 or (sizes is not None and layout != sizes):
                 raise ValueError('record layout changed within the trace')
@@ -139,9 +144,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for os in ('takibi', 'linux', 'freebsd'):
         parser.add_argument('--'+os, type=Path, required=True)
+    parser.add_argument('--takibi-fd-block-size', type=int, choices=(528, 400), default=528)
     args = parser.parse_args()
     try:
-        print(render_tsv({os: parse_capture(getattr(args, os).read_text(), os) for os in ('takibi', 'linux', 'freebsd')}), end='')
+        print(render_tsv({os: parse_capture(getattr(args, os).read_text(), os, args.takibi_fd_block_size) for os in ('takibi', 'linux', 'freebsd')}), end='')
     except (ValueError, KeyError, TypeError) as error:
         parser.exit(1, f'service space: {error}\n')
 

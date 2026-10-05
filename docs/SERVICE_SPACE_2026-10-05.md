@@ -12,6 +12,9 @@ The [reproduction and accounting boundary](../kernel/benchmarks/service_space/RE
 [validated TSV](../kernel/benchmarks/service_space/comparison.tsv) preserve the
 full experiment. It is separate from `POOL_REPLAY_2026-10-05.md`.
 
+The original tables below are the pre-reorder baseline from commit 4c116c7d.
+The adopted change and actual after-change observations follow at the end.
+
 ## FD bookkeeping payload observations
 
 Each cell counts the actor FD-context bodies, requested dynamic FD-table
@@ -117,7 +120,42 @@ pages from that reorder alone. This is capacity arithmetic, not a measured
 candidate implementation or contention result. Caller migration would include
 positional FdEntry construction; no new per-call annotation is proposed.
 
-No production field order, block policy, retention, generation representation
+At the baseline measurement, no production field order, block policy, retention, generation representation
 or per-CPU front changed. Keep those decisions separate from the measured
 workload and choose any adjustment on its own evidence. In particular, this
 trace does not justify narrowing generation bits or adding cache-line padding.
+
+
+## Adopted field reorder and measured effect
+
+The maintainer selected payload reduction as the first adoption criterion.
+Production FdEntry now places close_on_exec next to kind, preserving every
+field, both full-width handle words and all ownership/locking behavior.
+Compile-time assertions require entry size 24 and block size 400 bytes.
+The matching DWARF observer confirmed these sizes in the real kernel.
+
+The same workload completed successfully twice after the change. FD counts,
+capacities, fork sharing/refcounts, wait/close behavior and teardown agree
+with the baseline; only block payload/packing changed. The new captures and
+`packed.tsv` are preserved alongside the baseline.
+
+| Opens | Phase | Baseline FD payload | Adopted FD payload | Reduction |
+|---:|---|---:|---:|---:|
+| 32 | opened | 4,216 | 3,832 | 384 |
+| 32 | inherited | 5,872 | 5,104 | 768 |
+| 32 | closed | 1,656 | 1,272 | 384 |
+| 128 | opened | 15,064 | 13,912 | 1,152 |
+| 128 | inherited | 19,888 | 17,584 | 2,304 |
+| 128 | closed | 4,824 | 3,672 | 1,152 |
+
+At 128 opens the parent FD table/context payload is 3,672 instead of 4,824
+bytes (23.9 percent less); including regular open-description bodies gives
+13,912 instead of 15,064 (7.6 percent less). These are payload reductions,
+not whole-service RAM or throughput gains.
+
+The real FD-block pool now fits nine blocks per chunk instead of seven.
+The observed 19-live-block fork phase still reserves three chunks (12 KiB),
+and post-exit reservation remains two chunks (8 KiB). In the 128-open phase,
+ten live blocks still need two chunks (8 KiB). Thus this workload confirms
+payload reduction without a reduction of FD-block reserved pages. Generation
+width, block length, empty-chunk retention and per-CPU policy are unchanged.

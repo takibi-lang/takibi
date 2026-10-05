@@ -23,7 +23,8 @@ requested storage of its dynamic descriptor tables, plus the bodies of the
 unique regular open file descriptions. Shared descriptions count once at
 fork. Default embedded entries are already included in the context body;
 dynamic-table growth does not remove them. Takibi counts its 72-byte context
-and whole 528-byte blocks (including link/generation fields), with 80-byte
+and whole FD blocks (528 bytes in the baseline, 400 after the adopted
+field reorder, including link/generation fields), with 80-byte
 SharedObject bodies. Linux uses `files_struct`, dynamic `fdtable`/pointer
 arrays/bitmaps, and `struct file`. FreeBSD uses `filedesc0`, dynamic
 filedescent tables/free-table records/maps, and `struct file`.
@@ -78,7 +79,12 @@ file descriptions have two references; after wait they have one again. This
 is evidence for sharing in this trace, not a proof based on a hash. The
 workload's zero exit independently checks every open, fork, wait and close.
 
-`captures/` preserves the primary and repeat observations. Actor PIDs and
+`captures/` preserves the primary and repeat baseline observations from
+commit 4c116c7d. The current observer requires the adopted 24-byte entry and
+400-byte block layout. `takibi-packed.txt` and `takibi-packed-repeat.txt`
+preserve its primary/repeat captures; pass `--takibi-fd-block-size 400` when
+validating those with the parser. `packed.tsv` contains the Takibi-only
+after-change payloads; Linux/FreeBSD baseline captures remain unchanged. Actor PIDs and
 address fingerprints may change on a repeat. All storage/capacity/resource
 observations and Takibi pool rows must agree. `comparison.tsv` is reproduced
 from the three primary captures:

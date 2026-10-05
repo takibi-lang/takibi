@@ -22,6 +22,27 @@ def main():
                     assert x[key] == y[key]
             if os == 'takibi':
                 assert a['pools'] == b['pools']
+    packed_texts = [(root/'captures'/name).read_text() for name in ('takibi-packed.txt', 'takibi-packed-repeat.txt')]
+    packed = [parse_capture(text, 'takibi', 400) for text in packed_texts]
+    assert render_tsv({'takibi': packed[0]}) == (root/'packed.tsv').read_text()
+    assert render_tsv({'takibi': packed[0]}) == render_tsv({'takibi': packed[1]})
+    for before, after, repeat in zip(samples['takibi'], packed[0], packed[1]):
+        for old, new, again in zip(before['actors'], after['actors'], repeat['actors']):
+            for key in ('capacity', 'fds', 'regular', 'fd_body', 'process', 'file_body', 'minrefs', 'maxrefs'):
+                assert old[key] == new[key] == again[key]
+            assert new['fd_dynamic'] == again['fd_dynamic'] == old['fd_dynamic']//528*400
+        assert before['pools']['fd_block']['live'] == after['pools']['fd_block']['live']
+        assert after['pools'] == repeat['pools']
+        for name in before['pools']:
+            if name != 'fd_block':
+                assert before['pools'][name] == after['pools'][name]
+    for text, size in ((packed_texts[0], 528), (texts['takibi'], 400)):
+        try:
+            parse_capture(text, 'takibi', size)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('capture accepted with the wrong FD layout')
     controls = []
     for os, text in texts.items():
         controls += [(os, '\n'.join(text.splitlines()[1:])),
@@ -56,7 +77,7 @@ def main():
         except (ValueError, KeyError, TypeError):
             continue
         raise AssertionError('invalid service capture accepted: '+os)
-    report_pass('service-space-controls', f'60 phase windows, 72 actors including repeats, and {cases.ran} capture rejection controls', cases=cases.ran)
+    report_pass('service-space-controls', f'80 phase windows, 96 actors including baseline and packed repeats, and {cases.ran} capture rejection controls', cases=cases.ran)
 
 
 if __name__ == '__main__':

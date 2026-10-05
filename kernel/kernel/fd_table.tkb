@@ -121,9 +121,9 @@ enum UnifiedListenerState: u8 { Closed; Created; Bound; Listening; }
 // a record cannot.
 struct FdEntry {
     kind: UnifiedFdKind;
+    close_on_exec: bool;
     object: usize;
     generation: usize;
-    close_on_exec: bool;
 }
 
 // A run of FD_BLOCK_SLOTS descriptors, plus the (address, generation) pair
@@ -140,7 +140,8 @@ private let mut fd_block_pool: RegionPool(FdBlock);
 // GitHub issue #672 layer 3: descriptor blocks live in the built-in
 // region_pool and are reached under a pin taken from the (address,
 // generation) pair that names them (a context's block_head, a block's
-// next). Seven 528-byte blocks to a page.
+// next). Nine 400-byte blocks to a page. Keeping the two byte fields
+// adjacent removes padding without narrowing either handle word.
 const FD_BLOCK_CHUNK_PAGES: usize = 1;
 
 private fn fd_block_pool_lock(pool: *RegionPool(FdBlock) @ blocks)
@@ -445,6 +446,8 @@ private fn fd_block_publish(pool: *RegionPool(FdBlock) @ blocks,
 
 private fn fd_block_pool_grow(guard: borrow RegionPoolGuard(FdBlock)[blocks])
         -> bool !{unsafe} {
+    static_assert(sizeof(FdEntry) == 24, "FD entry payload must remain 24 bytes");
+    static_assert(sizeof(FdBlock) == 400, "FD block payload must remain 400 bytes");
     match page_alloc_contiguous(FD_BLOCK_CHUNK_PAGES, PageOwnerTag::PoolChunk) {
         PageRunAllocResult::OutOfMemory => { return false; }
         PageRunAllocResult::Allocated(run_owner) => {

@@ -6,8 +6,8 @@ import gdb,struct,json
 inf=gdb.selected_inferior()
 assert gdb.lookup_type('struct ProcessRecord').sizeof==872
 assert gdb.lookup_type('struct ProcessFdContext').sizeof==72
-assert gdb.lookup_type('struct FdBlock').sizeof==528
-assert gdb.lookup_type('struct FdEntry').sizeof==32
+assert gdb.lookup_type('struct FdBlock').sizeof==400
+assert gdb.lookup_type('struct FdEntry').sizeof==24
 assert gdb.lookup_type('struct SharedObject').sizeof==80
 def words(addr,n):return struct.unpack('<'+'Q'*n,bytes(inf.read_memory(addr,n*8)))
 def address(name):return int(gdb.parse_and_eval('(unsigned long)&'+name))
@@ -44,15 +44,15 @@ while base:
   while fd:
    assert fd not in visited;visited.add(fd);blocks+=1
    for i in range(16):
-    item=gdb.Value(fd+i*32).cast(entry.pointer()).dereference()
+    item=gdb.Value(fd+i*24).cast(entry.pointer()).dereference()
     kind=int(item['kind'])
     if kind:fds+=1
     if kind==2:
      regular+=1;addr=int(item['object']);hashed=(hashed*31+addr)%2**64
      value=gdb.Value(addr).cast(obj.pointer()).dereference()
      refs.append(int(value['refs']['value']))
-   fd=words(fd+512,1)[0]
-  result['actors'].append({'pid':pid,'capacity':blocks*16,'fd_body':72,'fd_dynamic':blocks*528,'process':872,'context':context_addr,'fds':fds,'regular':regular,'file_body':80,'hash':hashed,'minrefs':min(refs) if refs else 0,'maxrefs':max(refs) if refs else 0})
+   fd=words(fd+384,1)[0]
+  result['actors'].append({'pid':pid,'capacity':blocks*16,'fd_body':72,'fd_dynamic':blocks*400,'process':872,'context':context_addr,'fds':fds,'regular':regular,'file_body':80,'hash':hashed,'minrefs':min(refs) if refs else 0,'maxrefs':max(refs) if refs else 0})
  base=header[1]
 print('service pools: '+json.dumps(result,sort_keys=True))
 end
