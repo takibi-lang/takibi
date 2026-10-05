@@ -242,6 +242,11 @@ private fn tcp_pool_cost_work(cpu: {0..<KERNEL_MAX_CORES as usize}, mode: usize)
     if (mode == 0) {
         ticks = tcp_connection_pool_lock_cost();
         completed = 4096;
+    } else if (mode >= 2) {
+        match pin_sharing_cycles(cpu, mode == 3) {
+            TcpPinCostResult::Stale => {}
+            TcpPinCostResult::Measured(value) => { ticks = value; completed = 4096; }
+        }
     } else {
         let address: usize = atomic_word_load(&tcp_pool_cost_mailboxes[cpu].address);
         let generation: usize = atomic_word_load(&tcp_pool_cost_mailboxes[cpu].generation);
@@ -334,6 +339,14 @@ private fn tcp_pool_cost_parallel(round: usize, mode: usize, online: usize)
     return TcpPoolCostResult::Measured(maximum);
 }
 
+// CPU 0 alone records these fields; combine reports with the sharing pair
+// so the finite retained log gains no timing records.
+struct TcpPoolCostSample {
+    lock_serial: usize; lock_parallel: usize;
+    owner_serial: usize; owner_parallel: usize;
+}
+private let mut tcp_pool_cost_samples: [TcpPoolCostSample; 3];
+
 fn tcp_pool_cost_evidence() -> TcpPinCostEvidence !{unsafe} {
     let online: usize = kernel_online_core_count();
     if (online < 2 || online > KERNEL_MAX_CORES) { return TcpPinCostEvidence::Failed; }
@@ -364,14 +377,10 @@ fn tcp_pool_cost_evidence() -> TcpPinCostEvidence !{unsafe} {
             TcpPoolCostResult::Failed => { return TcpPinCostEvidence::Failed; }
             TcpPoolCostResult::Measured(value) => { value }
         };
-        kernel_boot_log("tcp pool cost: sample="); uart_put_udec(sample);
-        kernel_boot_log(" cores="); uart_put_udec(online);
-        kernel_boot_log(" rounds=4096 lock="); uart_put_udec(lock_serial);
-        kernel_boot_log("/"); uart_put_udec(lock_parallel);
-        kernel_boot_log(" owner="); uart_put_udec(owner_serial);
-        kernel_boot_log("/"); uart_put_udec(owner_parallel);
-        kernel_boot_log(" frequency="); uart_put_udec(read_cntfrq() as usize);
-        kernel_boot_log("\n");
+        tcp_pool_cost_samples[sample].lock_serial = lock_serial;
+        tcp_pool_cost_samples[sample].lock_parallel = lock_parallel;
+        tcp_pool_cost_samples[sample].owner_serial = owner_serial;
+        tcp_pool_cost_samples[sample].owner_parallel = owner_parallel;
     }
     atomic_word_store(&tcp_pool_cost_round, 0);
     for cpu: usize in 0..<KERNEL_MAX_CORES {
@@ -385,5 +394,47 @@ fn tcp_pool_cost_evidence() -> TcpPinCostEvidence !{unsafe} {
             tcp_connection_free(owner);
         }
     }
+    return TcpPinCostEvidence::Complete;
+}
+
+// Compare paired layouts in alternating order, keeping the global pool lock,
+// one-chunk validation path and payload-free work identical.
+fn pin_sharing_evidence() -> TcpPinCostEvidence !{unsafe} {
+    let baseline: usize = page_allocator_live_count();
+    match pin_sharing_setup() {
+        PinSharingSetupResult::NoMemory => { return TcpPinCostEvidence::Failed; }
+        PinSharingSetupResult::InvalidLayout => { return TcpPinCostEvidence::Failed; }
+        PinSharingSetupResult::Ready => {}
+    }
+    let online: usize = kernel_online_core_count();
+    for sample: usize in 0..<3 {
+        let mut shared: usize = 0;
+        let mut separate: usize = 0;
+        for order: usize in 0..<2 {
+            let mode: usize = 2 + ((sample + order) & 1);
+            let ticks: usize = match tcp_pool_cost_parallel(7 + sample * 2 + order, mode, online) {
+                TcpPoolCostResult::Failed => { return TcpPinCostEvidence::Failed; }
+                TcpPoolCostResult::Measured(value) => { value }
+            };
+            if (mode == 2) { shared = ticks; } else { separate = ticks; }
+        }
+        kernel_boot_log("tcp pool cost: sample="); uart_put_udec(sample);
+        kernel_boot_log(" cores="); uart_put_udec(online);
+        kernel_boot_log(" rounds=4096 lock="); uart_put_udec(tcp_pool_cost_samples[sample].lock_serial);
+        kernel_boot_log("/"); uart_put_udec(tcp_pool_cost_samples[sample].lock_parallel);
+        kernel_boot_log(" owner="); uart_put_udec(tcp_pool_cost_samples[sample].owner_serial);
+        kernel_boot_log("/"); uart_put_udec(tcp_pool_cost_samples[sample].owner_parallel);
+        kernel_boot_log(" sharing="); uart_put_udec(shared);
+        kernel_boot_log("/"); uart_put_udec(separate);
+        kernel_boot_log(" frequency="); uart_put_udec(read_cntfrq() as usize);
+        kernel_boot_log("\n");
+    }
+    atomic_word_store(&tcp_pool_cost_round, 0);
+    match pin_sharing_cleanup() {
+        PinSharingCleanupResult::Busy => { return TcpPinCostEvidence::Failed; }
+        PinSharingCleanupResult::InvalidChunk => { return TcpPinCostEvidence::Failed; }
+        PinSharingCleanupResult::Released => {}
+    }
+    if (page_allocator_live_count() != baseline) { return TcpPinCostEvidence::Failed; }
     return TcpPinCostEvidence::Complete;
 }

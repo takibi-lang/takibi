@@ -596,6 +596,29 @@ runs with its runtime online prefix, and RPi5 supplies the four-core costs.
 One retained record per sample keeps the measurement inside the boot log's
 fixed capacity; the common view checks completed work, never a timing bound.
 
+The same three records include `sharing=same-line/separate-lines`, each the
+slowest worker's total for 4,096 pin/unpin operations. A private one-page
+`RegionPool(PinSharingCell)` uses one-word payloads that are never accessed.
+Thirty-two live handles stay allocated throughout. Slots 5..8 put distinct
+state words in one 64-byte line; slots 5,13,21,29 put them in four lines of
+the same chunk, avoiding its header line in both cases. The fixture checks
+page alignment and all allocated payload addresses against the packed ABI;
+a changed layout fails rather than silently measuring the wrong locations.
+Both arrangements use the same pool lock, one-chunk validation and pin/unpin
+path. Their order alternates across three pairs. Completion precedes freeing
+all slots, shrinking the chunk, and checking that the page count returned.
+No payload lock or payload traffic enters this comparison.
+
+The first four-core RPi5 run measured same-line/separate-line per-operation
+times of 1302.45/1196.92, 1280.20/1214.90 and 1297.63/1201.71 ns. The paired
+ratios were 1.088, 1.054 and 1.080. This measures packed state-line traffic
+in a highly contended generic pool, with the global lock still included;
+it is not an isolated CAS cost or a TCP-throughput result. Three pairs do
+not establish a production padding policy. The production layout remains
+packed while slot-space costs and representative workloads are evaluated.
+Records combine the earlier lock/owner sample with each sharing pair to
+preserve the bounded retained boot log.
+
 QEMU integration runners also save `busy-pair-profile.json`. It records the
 explicit post-warm-up interval, target, active kernel CPU count, Git commit,
 input size, completed iterations, PIDs, elapsed counter cycles, and xorshift

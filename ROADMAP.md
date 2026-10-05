@@ -74,8 +74,11 @@ before its issue closes. The steps keep their numbers, which issues cite.
      ensure-then-write of the per-process pools. #674 and #675 follow; #680-#682 (the pin's cost)
      are measured first. The uncontended TCP pin/owner and checksum baseline
      is in the shared boot fixture, followed by runtime-online-core empty pool-lock
-     and distinct-connection owner contention samples. Distinct-slot cache-line
-     sharing measurements follow.
+     and distinct-connection owner contention samples. A same-chunk, distinct-slot
+     pin-state comparison now measures same-line versus separate-line traffic;
+     its three RPi5 pairs are 5.4-8.8 percent apart. Production packing stays
+     unchanged; #674 and #675 and representative workload evidence inform the
+     subsequent optimization decision.
    - **B, raw atomics:** a typed atomic cell (issue when C is under way);
      the ordering argument stays with #613.
    - **D, F, H** are already single files: declared as mint files in the

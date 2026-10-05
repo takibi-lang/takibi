@@ -133,6 +133,12 @@ fn contention_probes() !{unsafe} {
         }
         TcpPinCostEvidence::Failed => { kernel_boot_log("tcp pool cost evidence: failed\n"); }
     }
+    match pin_sharing_evidence() {
+        TcpPinCostEvidence::Complete => {
+            kernel_boot_log("pin sharing evidence: same-chunk layouts checked, every online core completed and the page returned ok\n");
+        }
+        TcpPinCostEvidence::Failed => { kernel_boot_log("pin sharing evidence: failed\n"); }
+    }
     // GitHub issues #479 and #482: first hold an ordinary Live view while
     // core 0 observes its read-side lock, then use the explicit unproven
     // path to rendezvous a stale cursor against chunk release.

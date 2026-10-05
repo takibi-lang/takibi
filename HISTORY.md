@@ -15,6 +15,28 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-10-05: packed pin-state false-sharing baseline
+
+The #681 experiment keeps chunk count, payload traffic, and global pool
+locking constant. A private one-page built-in pool holds 32 eight-byte cells.
+Each online CPU repeatedly pins and unpins a distinct handle, either in
+slots 5..8 (one state-word cache line) or 5,13,21,29 (separate lines in the
+same chunk). Alignment and the 32 payload addresses witness the current
+packed ABI without reading private state words or minting raw pointers.
+Worker start publication and completion use the existing contention
+rendezvous. All workers complete before freeing slots and returning the
+page; the common view requires that completion and allocator balance.
+
+The first four-core RPi5 run, three alternating-order pairs of 4,096 operations,
+measured same-line/separate-line slowest-worker times of 1302.45/1196.92,
+1280.20/1214.90 and 1297.63/1201.71 ns per operation. Same-line traffic was
+5.4-8.8 percent slower in these samples. This includes the common global
+lock and validation path, not TCP payload or network throughput, and is not
+a statistically settled padding decision. The production packing remains.
+Measurement rows share the earlier lock/owner records to preserve the
+retained boot log's first marker. No compiler or production slot layout was
+changed. QEMU exercises the runtime two-core prefix, not physical cache cost.
+
 ## 2026-10-05: protocol trace opening during a Running reservation
 
 The QEMU trace checker caught an initial snapshot in which pid 2 was

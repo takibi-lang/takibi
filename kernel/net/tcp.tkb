@@ -1326,6 +1326,137 @@ fn tcp_connection_pin_cost(owner: borrow TcpConnectionOwner[p, connection])
     return TcpPinCostResult::Measured(elapsed);
 }
 
+// Boot-only cache-line comparison using the real built-in pin protocol.
+// Current limitations (2026-10-05): this observes the current packed pool
+// ABI, not TCP payload work. Core 0 alone grows/frees this private pool;
+// peers pin immutable handles only after the round's release publication.
+struct PinSharingCell { unused: usize; }
+private let mut pin_sharing_pool: RegionPool(PinSharingCell);
+private let mut pin_sharing_page: usize;
+private let mut pin_sharing_handles: [RegionHandle(PinSharingCell); 32];
+
+must_use variant PinSharingSetupResult { NoMemory; InvalidLayout; Ready; }
+must_use variant PinSharingCleanupResult { Busy; InvalidChunk; Released; }
+
+private fn pin_sharing_lock() -> RegionPoolGuard(PinSharingCell)[&pin_sharing_pool]
+        !{unsafe} {
+    return region_pool_lock_saving(&pin_sharing_pool, mutex_irq_save());
+}
+
+private fn pin_sharing_unlock(guard: sink RegionPoolGuard(PinSharingCell)[&pin_sharing_pool]) {
+    mutex_irq_restore(region_pool_unlock_saved(guard));
+}
+
+fn pin_sharing_setup() -> PinSharingSetupResult !{unsafe} {
+    static_assert(sizeof(PinSharingCell) == 8, "pin sharing cell must be one word");
+    static_assert(PAGE_SIZE == 4096, "pin sharing layout uses one 4 KiB chunk");
+    let run = match page_alloc_contiguous(1, PageOwnerTag::PoolChunk) {
+        PageRunAllocResult::OutOfMemory => { return PinSharingSetupResult::NoMemory; }
+        PageRunAllocResult::Allocated(owner) => { owner }
+    };
+    let base: usize = page_run_physical_address(run);
+    let transferred: usize = page_run_owner_transfer_index(run) as usize;
+    pin_sharing_page = base;
+    let RegionBytes::Assumed(chunk) = region_bytes_assume(base, PAGE_SIZE) else {};
+    let guard = pin_sharing_lock();
+    match region_pool_grow(guard, chunk) {
+        RegionGrow(PinSharingCell)::TooSmall(back) => {
+            region_release(back);
+            pin_sharing_unlock(guard);
+            page_run_transferred_release_physical(base, 1);
+            return PinSharingSetupResult::InvalidLayout;
+        }
+        RegionGrow(PinSharingCell)::Grown => {}
+    }
+    // ABI witness: one aligned page, 253 packed state words after three
+    // header words, then 16-byte-aligned eight-byte payload slots. Check
+    // actual allocated payload addresses; never read or mint a state pointer.
+    let count: usize = (PAGE_SIZE - 48) / (sizeof(PinSharingCell) + 8);
+    let first: usize = (base + (3 + count) * 8 + 15) & ~(15 as usize);
+    let mut valid: bool = base % 64 == 0;
+    for index: usize in 0..<32 {
+        let slot = match region_alloc(guard) {
+            RegionAlloc(PinSharingCell)::Full => {
+                pin_sharing_unlock(guard);
+                return PinSharingSetupResult::InvalidLayout;
+            }
+            RegionAlloc(PinSharingCell)::Allocated(value) => { value }
+        };
+        let mut handle: RegionHandle(PinSharingCell) = region_give(guard, slot);
+        if (region_handle_address(handle) != first + index * sizeof(PinSharingCell)) {
+            valid = false;
+        }
+        pin_sharing_handles[index] = handle;
+    }
+    valid = valid && region_pool_live_count(guard) == 32;
+    pin_sharing_unlock(guard);
+    if (valid == false) { return PinSharingSetupResult::InvalidLayout; }
+    return PinSharingSetupResult::Ready;
+}
+
+fn pin_sharing_cycles(cpu: {0..<KERNEL_MAX_CORES as usize}, separate: bool)
+        -> TcpPinCostResult !{unsafe} {
+    static_assert(KERNEL_MAX_CORES == 4, "pin sharing layout covers four reserved CPUs");
+    // Words for slots 5..8 lie in line 1, avoiding the chunk header's line.
+    // Slots 5,13,21,29 occupy lines 1,2,3,4 of the SAME chunk instead.
+    let mut index: usize = 5 + cpu;
+    if (separate) { index = 5 + cpu * 8; }
+    let chosen: usize = index;
+    if (chosen >= 32) { return TcpPinCostResult::Stale; }
+    let mut handle: RegionHandle(PinSharingCell) = pin_sharing_handles[chosen];
+    let start: i64 = tcp_pin_cost_clock();
+    for operation: usize in 0..<4096 {
+        let guard = pin_sharing_lock();
+        let pinned = region_pin(guard, handle);
+        pin_sharing_unlock(guard);
+        match pinned {
+            RegionPinned(PinSharingCell)::Stale => { return TcpPinCostResult::Stale; }
+            RegionPinned(PinSharingCell)::Pinned(pin) => {
+                match region_unpin(pin) {
+                    RegionUnpin(PinSharingCell)::Unpinned => {}
+                    RegionUnpin(PinSharingCell)::Last(slot) => {
+                        // No worker retires. Discharge the unexpected slot
+                        // without touching unproven memory, then fail.
+                        region_slot_abandon(slot);
+                        return TcpPinCostResult::Stale;
+                    }
+                }
+            }
+        }
+    }
+    return TcpPinCostResult::Measured(tcp_pin_cost_clock() - start);
+}
+
+fn pin_sharing_cleanup() -> PinSharingCleanupResult !{unsafe} {
+    let guard = pin_sharing_lock();
+    for index: usize in 0..<32 {
+        match region_take(guard, pin_sharing_handles[index]) {
+            RegionTake(PinSharingCell)::Stale => {
+                pin_sharing_unlock(guard);
+                return PinSharingCleanupResult::Busy;
+            }
+            RegionTake(PinSharingCell)::Taken(slot) => { region_free(guard, slot); }
+        }
+    }
+    match region_pool_shrink(guard) {
+        RegionShrink(PinSharingCell)::Nothing => {
+            pin_sharing_unlock(guard);
+            return PinSharingCleanupResult::InvalidChunk;
+        }
+        RegionShrink(PinSharingCell)::Chunk(bytes) => {
+            let base: usize = region_bytes_address(bytes);
+            let count: usize = region_count(bytes);
+            region_release(bytes);
+            pin_sharing_unlock(guard);
+            if (count != PAGE_SIZE || base != pin_sharing_page) {
+                return PinSharingCleanupResult::InvalidChunk;
+            }
+            page_run_transferred_release_physical(base, 1);
+        }
+    }
+    return PinSharingCleanupResult::Released;
+}
+
 // Consumes the owner and the connection with it. What the connection holds
 // goes back first -- its retransmit entries and its frames -- while the
 // owner still makes it reachable. Then it is marked retired, its lock is
