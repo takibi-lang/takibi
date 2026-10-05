@@ -59,6 +59,13 @@ for preventing record release between validation and a write, and the writer
 revalidates the handle under a pool pin. The evidence does not prove lifetime
 across release. Activation and release never allocate a missing record.
 
+Process-image field setters borrow a private erased
+`ProcessImageRecordExists[root]` returned by the indexed, must-use
+`ProcessImageRecordReady[root]` ensure result. A caller cannot substitute a
+different root or skip a failed ensure. Clone, image mapping and teardown
+share one evidence value across their writes; each setter still takes a fresh
+pool pin. Record lifetime while borrowing remains the process owner's duty.
+
 ### AArch64 alignment contract
 
 After stage-1 translation is enabled, kernel Normal memory runs with

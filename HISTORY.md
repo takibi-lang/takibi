@@ -15,6 +15,22 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-10-05: indexed erased authority for process-image writes
+
+The process-image slice of #696 gives successful ensure an erased private
+`ProcessImageRecordExists[root]` view inside a must-use indexed ready/missing
+result. All field setters require its borrow tied to their integer root.
+Clone, mapping, fault growth and cleanup acquire it once for their field
+writes. The process allocator still rolls back all previously allocated
+resources on failure. Exec installation releases its incoming linear image
+before reporting ImageRecordOutOfMemory; committed-exec diagnostics name
+that outcome explicitly. Setters retain checked pins as the lifetime guard,
+and ownership between ensure and mutation remains trusted.
+
+Real-source compiler controls cover every field setter's missing evidence,
+wrong-root evidence and private view minting. This is the existing erased
+view mechanism; it adds no runtime proof packet or compiler capability.
+
 ## 2026-10-05: backing-record evidence at the write boundary
 
 The address-space slice of #696 replaces a bare root at allocation and

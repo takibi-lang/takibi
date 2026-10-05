@@ -139,13 +139,12 @@ struct ProcessImageRecord {
     // What that costs, stated plainly: the singleton could be a LINEAR
     // owner, and linearity is what made "reaped exactly once" a compile
     // error to get wrong. A flag is not that. The trade is not a
-    // preference -- an erased `linear view` cannot be tied to a runtime
-    // address, so there is no way to mint one proof per record and have
-    // the checker know which record it belongs to; the same wall the
-    // slot-overlay investigation hit. exec_image_installed above made the
-    // same trade for the same reason, and the detector that replaces the
-    // proof is also the same: the end-of-boot accounting fails if a page
-    // or a pooled record does not come back.
+    // preference -- that migration did not retain a parked linear owner
+    // inside the pooled record. The erased indexed view used for synchronous
+    // writes below proves record existence, not an obligation surviving
+    // exec or exit. exec_image_installed above made the same trade, and the
+    // detector is also the same: end-of-boot accounting fails if a page or
+    // a pooled record does not come back.
     clone_vm_outstanding: bool;
     clone_vm_source_root: usize;
     clone_vm_page_count: usize;
@@ -295,10 +294,14 @@ private fn process_image_record_pin_words(
 private fn process_image_record_pin_ensured(
         pool: *RegionPool(ProcessImageRecord) @ images, root: usize)
         -> RegionPinned(ProcessImageRecord)[images] !{unsafe} {
-    if (process_image_record_ensure(root) == false) {
-        process_image_record_missing_note();
+    match process_image_record_ensure(root) {
+        ProcessImageRecordReady::Missing => {
+            return process_image_record_pin(pool, root);
+        }
+        ProcessImageRecordReady::Ready(evidence) => {
+            return process_image_record_pin(pool, root);
+        }
     }
-    return process_image_record_pin(pool, root);
 }
 
 // A root's record as a value copy; all zero when it is missing (counted).
@@ -338,11 +341,13 @@ private fn process_image_record_value(
     return value;
 }
 
-// One field of a root's record, written under a pin; dropped (and counted)
-// when the record is missing.
-fn process_image_set_active_page_count(root: usize, value: usize) !{unsafe} {
+// One field of the ensured root's record, written under a fresh pin. The
+// erased evidence prevents unensured calls; a stale pin still detects a
+// violation of process ownership's lifetime contract (and is counted).
+fn process_image_set_active_page_count(root: usize @ identity,
+        evidence: borrow ProcessImageRecordExists[identity], value: usize) !{unsafe} {
     process_image_set_active_page_count_pinned(
-        process_image_record_pin_ensured(&process_image_pool, root), value);
+        process_image_record_pin(&process_image_pool, root), value);
 }
 
 private fn process_image_set_active_page_count_pinned(
@@ -359,9 +364,10 @@ private fn process_image_set_active_page_count_pinned(
     process_image_record_unpin(pin);
 }
 
-fn process_image_set_stack_lowest_l3(root: usize, value: usize) !{unsafe} {
+fn process_image_set_stack_lowest_l3(root: usize @ identity,
+        evidence: borrow ProcessImageRecordExists[identity], value: usize) !{unsafe} {
     process_image_set_stack_lowest_l3_pinned(
-        process_image_record_pin_ensured(&process_image_pool, root), value);
+        process_image_record_pin(&process_image_pool, root), value);
 }
 
 private fn process_image_set_stack_lowest_l3_pinned(
@@ -378,9 +384,10 @@ private fn process_image_set_stack_lowest_l3_pinned(
     process_image_record_unpin(pin);
 }
 
-fn process_image_set_stack_growth_active(root: usize, value: bool) !{unsafe} {
+fn process_image_set_stack_growth_active(root: usize @ identity,
+        evidence: borrow ProcessImageRecordExists[identity], value: bool) !{unsafe} {
     process_image_set_stack_growth_active_pinned(
-        process_image_record_pin_ensured(&process_image_pool, root), value);
+        process_image_record_pin(&process_image_pool, root), value);
 }
 
 private fn process_image_set_stack_growth_active_pinned(
@@ -397,9 +404,10 @@ private fn process_image_set_stack_growth_active_pinned(
     process_image_record_unpin(pin);
 }
 
-fn process_image_set_stack_top_page(root: usize, value: usize) !{unsafe} {
+fn process_image_set_stack_top_page(root: usize @ identity,
+        evidence: borrow ProcessImageRecordExists[identity], value: usize) !{unsafe} {
     let RegionPinned(ProcessImageRecord)::Pinned(pin) =
-            process_image_record_pin_ensured(&process_image_pool, root) else {
+            process_image_record_pin(&process_image_pool, root) else {
         RegionPinned(ProcessImageRecord)::Stale => {
             process_image_record_missing_note();
             return;
@@ -410,9 +418,10 @@ fn process_image_set_stack_top_page(root: usize, value: usize) !{unsafe} {
     process_image_record_unpin(pin);
 }
 
-fn process_image_set_stack_low_page(root: usize, value: usize) !{unsafe} {
+fn process_image_set_stack_low_page(root: usize @ identity,
+        evidence: borrow ProcessImageRecordExists[identity], value: usize) !{unsafe} {
     let RegionPinned(ProcessImageRecord)::Pinned(pin) =
-            process_image_record_pin_ensured(&process_image_pool, root) else {
+            process_image_record_pin(&process_image_pool, root) else {
         RegionPinned(ProcessImageRecord)::Stale => {
             process_image_record_missing_note();
             return;
@@ -423,9 +432,10 @@ fn process_image_set_stack_low_page(root: usize, value: usize) !{unsafe} {
     process_image_record_unpin(pin);
 }
 
-fn process_image_set_heap_page_count(root: usize, value: usize) !{unsafe} {
+fn process_image_set_heap_page_count(root: usize @ identity,
+        evidence: borrow ProcessImageRecordExists[identity], value: usize) !{unsafe} {
     let RegionPinned(ProcessImageRecord)::Pinned(pin) =
-            process_image_record_pin_ensured(&process_image_pool, root) else {
+            process_image_record_pin(&process_image_pool, root) else {
         RegionPinned(ProcessImageRecord)::Stale => {
             process_image_record_missing_note();
             return;
@@ -436,9 +446,10 @@ fn process_image_set_heap_page_count(root: usize, value: usize) !{unsafe} {
     process_image_record_unpin(pin);
 }
 
-fn process_image_set_exec_image_installed(root: usize, value: bool) !{unsafe} {
+fn process_image_set_exec_image_installed(root: usize @ identity,
+        evidence: borrow ProcessImageRecordExists[identity], value: bool) !{unsafe} {
     process_image_set_exec_image_installed_pinned(
-        process_image_record_pin_ensured(&process_image_pool, root), value);
+        process_image_record_pin(&process_image_pool, root), value);
 }
 
 private fn process_image_set_exec_image_installed_pinned(
@@ -455,9 +466,10 @@ private fn process_image_set_exec_image_installed_pinned(
     process_image_record_unpin(pin);
 }
 
-fn process_image_set_exec_image_page_count(root: usize, value: usize) !{unsafe} {
+fn process_image_set_exec_image_page_count(root: usize @ identity,
+        evidence: borrow ProcessImageRecordExists[identity], value: usize) !{unsafe} {
     process_image_set_exec_image_page_count_pinned(
-        process_image_record_pin_ensured(&process_image_pool, root), value);
+        process_image_record_pin(&process_image_pool, root), value);
 }
 
 private fn process_image_set_exec_image_page_count_pinned(
@@ -474,9 +486,10 @@ private fn process_image_set_exec_image_page_count_pinned(
     process_image_record_unpin(pin);
 }
 
-fn process_image_set_clone_vm_outstanding(root: usize, value: bool) !{unsafe} {
+fn process_image_set_clone_vm_outstanding(root: usize @ identity,
+        evidence: borrow ProcessImageRecordExists[identity], value: bool) !{unsafe} {
     let RegionPinned(ProcessImageRecord)::Pinned(pin) =
-            process_image_record_pin_ensured(&process_image_pool, root) else {
+            process_image_record_pin(&process_image_pool, root) else {
         RegionPinned(ProcessImageRecord)::Stale => {
             process_image_record_missing_note();
             return;
@@ -487,9 +500,10 @@ fn process_image_set_clone_vm_outstanding(root: usize, value: bool) !{unsafe} {
     process_image_record_unpin(pin);
 }
 
-fn process_image_set_clone_vm_source_root(root: usize, value: usize) !{unsafe} {
+fn process_image_set_clone_vm_source_root(root: usize @ identity,
+        evidence: borrow ProcessImageRecordExists[identity], value: usize) !{unsafe} {
     let RegionPinned(ProcessImageRecord)::Pinned(pin) =
-            process_image_record_pin_ensured(&process_image_pool, root) else {
+            process_image_record_pin(&process_image_pool, root) else {
         RegionPinned(ProcessImageRecord)::Stale => {
             process_image_record_missing_note();
             return;
@@ -500,9 +514,10 @@ fn process_image_set_clone_vm_source_root(root: usize, value: usize) !{unsafe} {
     process_image_record_unpin(pin);
 }
 
-fn process_image_set_clone_vm_page_count(root: usize, value: usize) !{unsafe} {
+fn process_image_set_clone_vm_page_count(root: usize @ identity,
+        evidence: borrow ProcessImageRecordExists[identity], value: usize) !{unsafe} {
     let RegionPinned(ProcessImageRecord)::Pinned(pin) =
-            process_image_record_pin_ensured(&process_image_pool, root) else {
+            process_image_record_pin(&process_image_pool, root) else {
         RegionPinned(ProcessImageRecord)::Stale => {
             process_image_record_missing_note();
             return;
@@ -537,11 +552,21 @@ private fn process_image_record_reset(record: borrow *ProcessImageRecord) {
 // the permanent bootstrap root, whose record is set up once during boot
 // and read on every later stack fault, exactly the exemption
 // address_space_release_root already makes one layer down.
-fn process_image_record_ensure(root: usize) -> bool !{unsafe} {
+// Minted only after successful publication or validation. Process ownership
+// prevents release while a caller borrows this erased write authority.
+private affine view ProcessImageRecordExists[root: usize];
+
+must_use variant ProcessImageRecordReady[root: usize] {
+    Missing;
+    Ready(ProcessImageRecordExists[root]);
+}
+
+fn process_image_record_ensure(root: usize @ identity)
+        -> ProcessImageRecordReady[identity] !{unsafe} {
     match process_image_record_pin(&process_image_pool, root) {
         RegionPinned(ProcessImageRecord)::Pinned(pin) => {
             process_image_record_unpin(pin);
-            return true;
+            return ProcessImageRecordReady::Ready(view ProcessImageRecordExists[identity]);
         }
         RegionPinned(ProcessImageRecord)::Stale => {}
     }
@@ -563,12 +588,12 @@ fn process_image_record_ensure(root: usize) -> bool !{unsafe} {
         }
     }
     process_image_pool_unlock(guard);
-    return false;
+    return ProcessImageRecordReady::Missing;
 }
 
 private fn process_image_record_publish(
-        pool: *RegionPool(ProcessImageRecord) @ images, root: usize,
-        fresh: sink RegionSlot(ProcessImageRecord)[images, k]) -> bool !{unsafe} {
+        pool: *RegionPool(ProcessImageRecord) @ images, root: usize @ identity,
+        fresh: sink RegionSlot(ProcessImageRecord)[images, k]) -> ProcessImageRecordReady[identity] !{unsafe} {
     region_slot_zero(fresh);
     process_image_record_reset(region_slot_at(fresh));
     let guard = process_image_pool_lock(pool);
@@ -576,7 +601,7 @@ private fn process_image_record_publish(
     process_image_pool_unlock(guard);
     scheduled_process_set_image_record(
         root, region_handle_address(handle), region_handle_generation(handle));
-    return true;
+    return ProcessImageRecordReady::Ready(view ProcessImageRecordExists[identity]);
 }
 
 private fn process_image_pool_grow(
@@ -930,11 +955,18 @@ fn process_clone_vm_rollback(dest_space: AddressSpaceRoot) {
     if (scheduled_process_slot_valid(dest)) {
         let root: usize =
             process_image_narrow_root(dest);
-        process_image_set_active_page_count(root, 0);
-        process_image_set_stack_growth_active(root, false);
-        process_image_set_stack_lowest_l3(root, process_stack_top_page());
-        process_image_set_clone_vm_outstanding(root, false);
-        process_image_set_clone_vm_page_count(root, 0);
+        let evidence = match process_image_record_ensure(root) {
+            ProcessImageRecordReady::Missing => {
+                process_image_record_missing_note();
+                return;
+            }
+            ProcessImageRecordReady::Ready(ready) => { ready }
+        };
+        process_image_set_active_page_count(root, evidence, 0);
+        process_image_set_stack_growth_active(root, evidence, false);
+        process_image_set_stack_lowest_l3(root, evidence, process_stack_top_page());
+        process_image_set_clone_vm_outstanding(root, evidence, false);
+        process_image_set_clone_vm_page_count(root, evidence, 0);
     }
 }
 
@@ -968,25 +1000,29 @@ fn process_image_clone_vm_begin(dest_space: AddressSpaceRoot) -> ProcessCloneVmR
     if (process_image_record_read(dest).clone_vm_outstanding) {
         return ProcessCloneVmResult::OutOfMemory;
     }
-    process_image_set_clone_vm_source_root(dest, source);
-    process_image_set_clone_vm_page_count(dest, 0);
+    let evidence = match process_image_record_ensure(dest) {
+        ProcessImageRecordReady::Missing => { return ProcessCloneVmResult::OutOfMemory; }
+        ProcessImageRecordReady::Ready(ready) => { ready }
+    };
+    process_image_set_clone_vm_source_root(dest, evidence, source);
+    process_image_set_clone_vm_page_count(dest, evidence, 0);
     let mut clone_page_count: usize = 0;
     address_space_clear_root(dest_space);
     // Reset the destination root's demand-stack metadata before rebuilding
     // it below, the same way process_image_map_current() resets its own
     // root's before mapping a fresh image -- otherwise a reaped child's
     // stale counts would leak into the next fork.
-    process_image_set_stack_growth_active(dest, false);
-    process_image_set_active_page_count(dest, 0);
-    process_image_set_stack_lowest_l3(dest, process_stack_top_page());
+    process_image_set_stack_growth_active(dest, evidence, false);
+    process_image_set_active_page_count(dest, evidence, 0);
+    process_image_set_stack_lowest_l3(dest, evidence, process_stack_top_page());
     // GitHub issue #258 step 2: a child inherits the parent's layout, not a
     // global constant -- which is the whole point of the layout being data.
     let clone_src: usize =
         process_image_narrow_root(source);
-    process_image_set_stack_top_page(dest, process_stack_top_page());
-    process_image_set_stack_low_page(dest,
+    process_image_set_stack_top_page(dest, evidence, process_stack_top_page());
+    process_image_set_stack_low_page(dest, evidence,
         process_image_record_read(clone_src).stack_low_page);
-    process_image_set_heap_page_count(dest,
+    process_image_set_heap_page_count(dest, evidence,
         process_image_record_read(clone_src).heap_page_count);
     // Tracks the lowest growth-region L3 index actually copied below, so the
     // child's watermark reflects its real page table rather than being
@@ -1080,11 +1116,11 @@ fn process_image_clone_vm_begin(dest_space: AddressSpaceRoot) -> ProcessCloneVmR
     // derived from what was actually copied. Without this, a forked child
     // fail-stops the instant it grows its stack past whatever was already
     // mapped at fork time (issue #219).
-    process_image_set_active_page_count(dest, clone_page_count);
-    process_image_set_stack_growth_active(dest, true);
-    process_image_set_stack_lowest_l3(dest, clone_stack_lowest_l3);
-    process_image_set_clone_vm_page_count(dest, clone_page_count);
-    process_image_set_clone_vm_outstanding(dest, true);
+    process_image_set_active_page_count(dest, evidence, clone_page_count);
+    process_image_set_stack_growth_active(dest, evidence, true);
+    process_image_set_stack_lowest_l3(dest, evidence, clone_stack_lowest_l3);
+    process_image_set_clone_vm_page_count(dest, evidence, clone_page_count);
+    process_image_set_clone_vm_outstanding(dest, evidence, true);
     return ProcessCloneVmResult::Copied;
 }
 
@@ -1231,6 +1267,10 @@ fn process_image_no_target_probe() -> bool !{unsafe} {
 }
 
 fn process_image_clone_growth_probe() -> bool !{unsafe} {
+    let evidence = match process_image_record_ensure(0) {
+        ProcessImageRecordReady::Missing => { return false; }
+        ProcessImageRecordReady::Ready(ready) => { ready }
+    };
     process_image_set_target_root_here(address_space_boot_root());
     // GitHub issue #392: the child root is a live process's record now,
     // not the bare number 1 -- see
@@ -1281,12 +1321,12 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     // Mirrors exactly the metadata process_image_map_current() sets after
     // mapping a fresh image's single top stack page: growth enabled, one
     // page active, nothing yet grown below the top.
-    process_image_set_stack_growth_active(0, true);
-    process_image_set_active_page_count(0, 1);
-    process_image_set_stack_lowest_l3(0, process_stack_top_page());
-    process_image_set_stack_top_page(0, process_stack_top_page());
-    process_image_set_stack_low_page(0, PROCESS_STACK_LOW_STATIC);
-    process_image_set_heap_page_count(0, PROCESS_HEAP_PAGES_DEFAULT);
+    process_image_set_stack_growth_active(0, evidence, true);
+    process_image_set_active_page_count(0, evidence, 1);
+    process_image_set_stack_lowest_l3(0, evidence, process_stack_top_page());
+    process_image_set_stack_top_page(0, evidence, process_stack_top_page());
+    process_image_set_stack_low_page(0, evidence, PROCESS_STACK_LOW_STATIC);
+    process_image_set_heap_page_count(0, evidence, PROCESS_HEAP_PAGES_DEFAULT);
 
     let mut ok: bool = true;
     // GitHub issue #438: unset is distinct from selecting the real root 0.
@@ -1386,9 +1426,9 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
         ok = false;
     }
     address_space_pte_clear(address_space_boot_root(), process_stack_top_page());
-    process_image_set_stack_growth_active(0, false);
-    process_image_set_active_page_count(0, 0);
-    process_image_set_stack_lowest_l3(0, process_stack_top_page());
+    process_image_set_stack_growth_active(0, evidence, false);
+    process_image_set_active_page_count(0, evidence, 0);
+    process_image_set_stack_lowest_l3(0, evidence, process_stack_top_page());
     address_space_release_root(child_root_root);
     scheduled_process_probe_slot_release(child_root);
     return ok;
@@ -1463,6 +1503,7 @@ must_use variant ProcessImageExecInstallResult {
     Installed;
     AlreadyInstalled;
     NoTarget;
+    OutOfMemory;
 }
 
 fn process_image_exec_install(
@@ -1486,9 +1527,13 @@ fn process_image_exec_install(
         process_image_unmap(pages);
         return ProcessImageExecInstallResult::AlreadyInstalled;
     }
-    process_image_set_exec_image_page_count(root,
+    let evidence = match process_image_record_ensure(root) {
+        ProcessImageRecordReady::Missing => { process_image_unmap(pages); return ProcessImageExecInstallResult::OutOfMemory; }
+        ProcessImageRecordReady::Ready(ready) => { ready }
+    };
+    process_image_set_exec_image_page_count(root, evidence,
         process_image_page_count(pages));
-    process_image_set_exec_image_installed(root, true);
+    process_image_set_exec_image_installed(root, evidence, true);
     process_image_pages_discard(pages);
     return ProcessImageExecInstallResult::Installed;
 }
@@ -1979,9 +2024,13 @@ fn process_image_load_page_ext2(page: borrow PageOwner[page],
 private fn process_image_cleanup_root(target: AddressSpaceRoot) {
     let root: usize = address_space_root_slot(target);
     address_space_release_user_mappings(target);
-    process_image_set_active_page_count(root, 0);
-    process_image_set_stack_growth_active(root, false);
-    process_image_set_stack_lowest_l3(root, process_stack_top_page());
+    let evidence = match process_image_record_ensure(root) {
+        ProcessImageRecordReady::Missing => { process_image_record_missing_note(); return; }
+        ProcessImageRecordReady::Ready(ready) => { ready }
+    };
+    process_image_set_active_page_count(root, evidence, 0);
+    process_image_set_stack_growth_active(root, evidence, false);
+    process_image_set_stack_lowest_l3(root, evidence, process_stack_top_page());
 }
 
 fn process_image_cleanup() {
@@ -2045,6 +2094,10 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
         fault_index >= process_image_record_read(root).stack_lowest_l3) {
         return false;
     }
+    let evidence = match process_image_record_ensure(root) {
+        ProcessImageRecordReady::Missing => { return false; }
+        ProcessImageRecordReady::Ready(ready) => { ready }
+    };
     for l3_index: usize in
             fault_index..<process_image_record_read(root).stack_lowest_l3 {
         if (process_image_record_read(root).active_page_count >= USER_SPACE_PAGE_COUNT ||
@@ -2060,12 +2113,12 @@ fn process_image_handle_data_abort(esr: usize, fault_address: usize) -> bool {
                         stack_page, l3_index, USER_RW_XN_FLAGS) == false) {
                     return false;
                 }
-                process_image_set_active_page_count(root,
+                process_image_set_active_page_count(root, evidence,
         process_image_record_read(root).active_page_count + 1);
             }
         }
     }
-    process_image_set_stack_lowest_l3(root, fault_index);
+    process_image_set_stack_lowest_l3(root, evidence, fault_index);
     return true;
 }
 
@@ -2081,11 +2134,19 @@ fn process_image_unmap_pages(count: usize) {
         }
         ProcessImageTargetRootResult::Ready(root) => {
             let root_index: usize = process_image_root_index(root);
+            let evidence = match process_image_record_ensure(root_index) {
+                ProcessImageRecordReady::Missing => {
+                    process_image_cleanup_root(process_image_root_space(root));
+                    process_image_clear_target_root_here();
+                    return;
+                }
+                ProcessImageRecordReady::Ready(ready) => { ready }
+            };
             if (process_image_record_read(root_index).stack_growth_active ||
                 process_image_record_read(root_index).active_page_count > count) {
-                process_image_set_stack_growth_active(root_index, false);
-                process_image_set_active_page_count(root_index, 0);
-                process_image_set_stack_lowest_l3(root_index,
+                process_image_set_stack_growth_active(root_index, evidence, false);
+                process_image_set_active_page_count(root_index, evidence, 0);
+                process_image_set_stack_lowest_l3(root_index, evidence,
         process_stack_top_page());
             }
             process_image_cleanup_root(process_image_root_space(root));
@@ -2217,9 +2278,13 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
     if (interpreter_bias < primary.extent) {
         return ProcessImagePairProbeResult::Invalid;
     }
-    process_image_set_stack_top_page(root, process_stack_top_page());
-    process_image_set_stack_low_page(root, PROCESS_STACK_LOW_DYNAMIC);
-    process_image_set_heap_page_count(root, PROCESS_HEAP_PAGES_DEFAULT);
+    let evidence = match process_image_record_ensure(root) {
+        ProcessImageRecordReady::Missing => { return ProcessImagePairProbeResult::Invalid; }
+        ProcessImageRecordReady::Ready(ready) => { ready }
+    };
+    process_image_set_stack_top_page(root, evidence, process_stack_top_page());
+    process_image_set_stack_low_page(root, evidence, PROCESS_STACK_LOW_DYNAMIC);
+    process_image_set_heap_page_count(root, evidence, PROCESS_HEAP_PAGES_DEFAULT);
     match process_image_map_segments(primary, 0, 0) {
         ProcessImageSegmentsResult::Invalid => {
             return ProcessImagePairProbeResult::Invalid;
@@ -2360,8 +2425,8 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
                             image, mapped, entry, stack_pointer,
                             heap_start, heap_limit
                         };
-                        process_image_set_active_page_count(root, mapped);
-                        process_image_set_stack_growth_active(root, true);
+                        process_image_set_active_page_count(root, evidence, mapped);
+                        process_image_set_stack_growth_active(root, evidence, true);
                         return ProcessImagePairProbeResult::Ready(pages);
                     }
                     process_image_cleanup();
@@ -2419,12 +2484,16 @@ fn process_image_map_current(plan: DistroElfLoadPlan,
             process_image_root_index(target)
         }
     };
-    process_image_set_stack_growth_active(root, false);
-    process_image_set_active_page_count(root, 0);
-    process_image_set_stack_lowest_l3(root, process_stack_top_page());
-    process_image_set_stack_top_page(root, process_stack_top_page());
-    process_image_set_stack_low_page(root, PROCESS_STACK_LOW_STATIC);
-    process_image_set_heap_page_count(root, PROCESS_HEAP_PAGES_DEFAULT);
+    let evidence = match process_image_record_ensure(root) {
+        ProcessImageRecordReady::Missing => { return ProcessImageMapResult::OutOfMemory; }
+        ProcessImageRecordReady::Ready(ready) => { ready }
+    };
+    process_image_set_stack_growth_active(root, evidence, false);
+    process_image_set_active_page_count(root, evidence, 0);
+    process_image_set_stack_lowest_l3(root, evidence, process_stack_top_page());
+    process_image_set_stack_top_page(root, evidence, process_stack_top_page());
+    process_image_set_stack_low_page(root, evidence, PROCESS_STACK_LOW_STATIC);
+    process_image_set_heap_page_count(root, evidence, PROCESS_HEAP_PAGES_DEFAULT);
     if (plan.extent > USER_SPACE_BYTES) {
         return ProcessImageMapResult::OutOfMemory;
     }
@@ -2505,8 +2574,8 @@ fn process_image_map_current(plan: DistroElfLoadPlan,
     let mut pages: ProcessImagePages[0] = {
         image, mapped, entry, stack_pointer, heap_start, heap_limit
     };
-    process_image_set_active_page_count(root, mapped);
-    process_image_set_stack_growth_active(root, true);
+    process_image_set_active_page_count(root, evidence, mapped);
+    process_image_set_stack_growth_active(root, evidence, true);
     return ProcessImageMapResult::Mapped(pages);
 }
 

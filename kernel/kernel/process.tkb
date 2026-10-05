@@ -3000,16 +3000,19 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
     // always has one, which is what lets every entry point there test
     // "does this process have an fd table" instead of "is this index in
     // range".
-    if (process_image_record_ensure(slot) == false) {
-        kernel_boot_log_resource_exhausted(
-            "physical page allocator" as *u8,
-            page_allocator_total_count());
-        address_space_release_root(scheduled_process_address_space_root_owned(creating));
-        address_space_backing_release(scheduled_process_address_space_root_owned(creating));
-        let rollback_guard = process_run_lock();
-        scheduled_process_slot_remove(rollback_guard, slot);
-        process_run_unlock(rollback_guard);
-        { let mut __creating_result: ScheduledProcessAllocResult = ScheduledProcessAllocResult::Full; scheduled_process_owner_drop(creating); return __creating_result; }
+    match process_image_record_ensure(slot) {
+        ProcessImageRecordReady::Ready(evidence) => {}
+        ProcessImageRecordReady::Missing => {
+            kernel_boot_log_resource_exhausted(
+                "physical page allocator" as *u8,
+                page_allocator_total_count());
+            address_space_release_root(scheduled_process_address_space_root_owned(creating));
+            address_space_backing_release(scheduled_process_address_space_root_owned(creating));
+            let rollback_guard = process_run_lock();
+            scheduled_process_slot_remove(rollback_guard, slot);
+            process_run_unlock(rollback_guard);
+            { let mut __creating_result: ScheduledProcessAllocResult = ScheduledProcessAllocResult::Full; scheduled_process_owner_drop(creating); return __creating_result; }
+        }
     }
     if (unified_fd_context_ensure(slot) == false) {
         kernel_boot_log_resource_exhausted(
@@ -4371,6 +4374,7 @@ enum KernelExecFailureReason: u8 {
     StaticMapOutOfMemory;
     ArgvPageMissing;
     DebuggerAfterCommit;
+    ImageRecordOutOfMemory;
 }
 private let mut kernel_process_exec_failure_reason: KernelExecFailureReason;
 
@@ -4389,6 +4393,7 @@ must_use variant KernelChildExecPrepareResult {
     StaticMapOutOfMemory;
     // No page for the exec's own copy of its argv.
     ArgvPageMissing;
+    ImageRecordOutOfMemory;
 }
 private let mut kernel_process_trace_enabled: bool;
 
@@ -4511,6 +4516,7 @@ fn kernel_process_exec_failure_set(result: KernelChildExecPrepareResult) {
         KernelChildExecPrepareResult::StaticImageInvalid => { kernel_process_exec_failure_reason = KernelExecFailureReason::StaticImageInvalid; }
         KernelChildExecPrepareResult::StaticMapOutOfMemory => { kernel_process_exec_failure_reason = KernelExecFailureReason::StaticMapOutOfMemory; }
         KernelChildExecPrepareResult::ArgvPageMissing => { kernel_process_exec_failure_reason = KernelExecFailureReason::ArgvPageMissing; }
+        KernelChildExecPrepareResult::ImageRecordOutOfMemory => { kernel_process_exec_failure_reason = KernelExecFailureReason::ImageRecordOutOfMemory; }
     }
 }
 
@@ -4535,6 +4541,7 @@ fn kernel_process_exec_failure_render() {
         KernelExecFailureReason::StaticImageInvalid => { kernel_boot_log("static-image-invalid\n"); }
         KernelExecFailureReason::StaticMapOutOfMemory => { kernel_boot_log("static-map-out-of-memory\n"); }
         KernelExecFailureReason::ArgvPageMissing => { kernel_boot_log("argv-page-missing\n"); }
+        KernelExecFailureReason::ImageRecordOutOfMemory => { kernel_boot_log("image-record-out-of-memory\n"); }
         KernelExecFailureReason::DebuggerAfterCommit => { kernel_boot_log("debugger-after-commit\n"); }
     }
 }

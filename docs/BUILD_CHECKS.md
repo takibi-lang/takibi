@@ -180,7 +180,7 @@ run them, and why they sit outside both globs above.
 | Check | Enforced invariant |
 | --- | --- |
 | `buildcheck_elf_symbol_alignment.py` | Reject a linked ELF when a required symbol is under-aligned |
-| `buildcheck_backing_exists.py` | Real kernel overlays accept borrowed backing evidence and reject bare-root writes, allocations and foreign construction |
+| `buildcheck_backing_exists.py` | Real kernel overlays accept borrowed backing/image evidence and reject unensured writers, wrong-root image evidence and foreign minting |
 | `buildcheck_kernel_asm_invariants.py` | TODO |
 | `buildcheck_kernel_memory_map.py` | Check kernel/MEMORY_MAP.md and allocator fixtures; render QEMU boot capacity from the loaded ELF |
 | `buildcheck_kernel_unused_coverage.py` | every kernel file a target compiles is checked for unused functions or exempt for a stated reason |

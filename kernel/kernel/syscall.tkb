@@ -1302,9 +1302,12 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize)
         kernel_boot_log_resource_exhausted(
             "physical page allocator" as *u8, page_allocator_total_count());
     }
-    if (process_image_record_ensure(0) == false) {
-        kernel_boot_log_resource_exhausted(
-            "physical page allocator" as *u8, page_allocator_total_count());
+    match process_image_record_ensure(0) {
+        ProcessImageRecordReady::Ready(evidence) => {}
+        ProcessImageRecordReady::Missing => {
+            kernel_boot_log_resource_exhausted(
+                "physical page allocator" as *u8, page_allocator_total_count());
+        }
     }
     match unified_terminal_stdio_open(0) {
         UnifiedOpenResult::Invalid => {}
@@ -3534,6 +3537,10 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
         }
         KernelChildExecPrepareResult::StaticMapOutOfMemory => {
             kernel_process_exec_failure_set(KernelChildExecPrepareResult::StaticMapOutOfMemory);
+            kernel_syscall_fail_stop(frame_sp);
+        }
+        KernelChildExecPrepareResult::ImageRecordOutOfMemory => {
+            kernel_process_exec_failure_set(KernelChildExecPrepareResult::ImageRecordOutOfMemory);
             kernel_syscall_fail_stop(frame_sp);
         }
         KernelChildExecPrepareResult::ArgvPageMissing => {
