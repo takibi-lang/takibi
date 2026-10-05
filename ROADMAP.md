@@ -9,7 +9,7 @@ history, is archived in `HISTORY.md`.
 
 Live intermittents are listed in `docs/KNOWN_INTERMITTENTS.md`, not here.
 
-## Territories, re-cut 2026-09-25; queues refreshed 2026-10-04
+## Territories, re-cut 2026-09-25; queues refreshed 2026-10-05
 
 A territory is a role, not a set of directories and not a particular agent
 (`AGENTS.md`); which agent holds which is the maintainer's per-session
@@ -65,13 +65,12 @@ before its issue closes. The steps keep their numbers, which issues cite.
      ProcessRecord follows #693: steps 1-6 landed, and step 7 as far as it
      goes before #637 stage 2 -- bare record lookups 300+ -> 5, the five
      being the authority makers' own bodies, held there by
-     `scripts/check_process_record_bare_uses.py`. #694 made the run lock
+     `scripts/check_process_record_bare_uses.py`. The run lock is now
      `single_instance_lock`, so a slot-only reader takes it itself and a
      caller holding the guard is a compile error; AddressSpaceRoot carries
      its backing's handle and is made only by declared makers. Removing
      `scheduled_process_record_at` from the escape list needs the makers to
-     carry the pool's proof, which is stage 2's question. #700 moves the exec's argv
-     page before the Exec decision so a shortage returns ENOMEM. #696 types the
+     carry the pool's proof, which is stage 2's question. #696 types the
      ensure-then-write of the per-process pools. #674 and #675 follow; #680-#682 (the pin's cost)
      are measured first.
    - **B, raw atomics:** a typed atomic cell (issue when C is under way);
@@ -92,7 +91,9 @@ before its issue closes. The steps keep their numbers, which issues cite.
    #638 sets the preemption target this step designs for: full kernel
    preemption. Its typed preparation belongs here: a preemption-disabled
    authority, with per-CPU access derived from it in place of the 17
-   `KERNEL_PREEMPTIBLE == 0` asserts.
+   `KERNEL_PREEMPTIBLE == 0` asserts. #704 evaluates CPU-local owner
+   storage separation and non-migrating access; its design must distinguish
+   matching caller indices from trusted storage/authority mint sites.
    Alongside, not blocking: #641 (a TLA+ model of the world stop), #642 (a
    boundary fixture for signal frames and mmap reuse), #643 (gdb stall dump
    and ASID jump for QEMU churn), #651 (probe rendezvous bounded by peer
@@ -129,6 +130,11 @@ for this window.
 On 2026-10-04 the maintainer authorized autonomous B work in priority order
 where acceptance is settled; leave design investigations and unmet
 implementation gates parked.
+The next bounded B repair is #705: replace spread's sleep-based CPU arrival
+window with the already selected test-only observation of an actual EL0 timer
+ToIdle transition. A passing aggregate alone does not discharge this
+reproduced fixture race. #706 evaluates explicit fail-stop provenance; it is
+not a prerequisite for the #705 repair.
 #680, #681 and #682 (the pin's cost) stay with A: they need RPi5
 measurements first.
 
@@ -139,10 +145,12 @@ measurements first.
 2. **Resource use and measured performance:** #220 (telnet; lowered
    2026-09-30 by the maintainer, not urgent, and it waits on PTY and
    `pselect6` scoping), #389, #422, #497, #520, #553,
-   #386, #502.
+   #386, #502. #707 is a separate GEM TX completion/reuse safety follow-up;
+   its authority and failed-device behavior need a design choice before
+   implementation.
 3. **Compiler safety and language research:** #203, #252, #200, #201,
    #282, #129, #374, #417, #155, #28, #8.
-4. **Toolchain, portability and hardware-lane support:** #123,
+4. **Toolchain, portability and hardware-lane support:** #706, #123,
    #124, #122, #95, #51, #50, #85.
 5. **Deferred or not a scheduled work item:** #432, #555, #250, #444, #429,
    #149, #567, #539, #536, #624, #132; #13 for `Phi`, with #216 and #109 as
