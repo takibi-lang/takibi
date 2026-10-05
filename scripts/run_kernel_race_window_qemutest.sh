@@ -117,6 +117,10 @@ elif ! run_variant armed; then
     fi
 fi
 if run_variant reverted; then
+    if [ "${KERNEL_QEMU_RACE_WINDOW_REQUIRE_FAILURE:-0}" = 1 ]; then
+        echo "FAIL $LABEL: the required negative control passed" >&2
+        exit 1
+    fi
     # GitHub issue #692: whether a widened window is crossed in time is a
     # timing verdict; under host load QEMU sometimes does not cross it (#685).
     # Recorded, not gating: the armed run above is the functional half.
