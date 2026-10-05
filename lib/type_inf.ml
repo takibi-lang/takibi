@@ -9382,6 +9382,26 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | _ -> (discharged, guards))
       (StringSet.empty, StringMap.empty) prog
   in
+  (* A supported linear holder carries its single stored owner's guard
+     contract. Moving the original owner into the holder must not hide a
+     live lock or IRQ mask from the call checks or held-guard report. *)
+  let inherit_stored_guard_types guards =
+    List.fold_left (fun guards -> function
+      | Ast.OwnedStructDef (name, Ast.KindLinear, _, fields, _, _, _, _, loc) ->
+          List.fold_left (fun guards (field, ty) ->
+            if not (Hashtbl.mem stored_owner_fields (name, field)) then guards
+            else match ty with
+              | Ast.TypeIndexed (owner, _) ->
+                  (match StringMap.find_opt owner guards with
+                   | Some annotation ->
+                       add_lock_guard_types loc (Ast.TypeIndexed (name, []))
+                         annotation guards
+                   | None -> guards)
+              | _ -> guards) guards fields
+      | _ -> guards) guards prog
+  in
+  let lock_guard_types = inherit_stored_guard_types lock_guard_types in
+  let irq_guard_types = inherit_stored_guard_types irq_guard_types in
   let irq_restorers =
     let restores = ref (StringMap.fold (fun caller callees acc ->
         if StringSet.mem "msr_daifclr_irq" callees
@@ -10420,7 +10440,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           check_expr taints moved false a
       | Ast.StructLit xs ->
           require_no_taint_aggregate e.loc taints "struct value" xs;
-          List.fold_left (fun m x -> check_expr taints m false x) moved xs
+          (* Construction transfers a stored owner just as a consumed
+             tuple transfers its components; it never creates a second
+             obligation while leaving the original binding available. *)
+          List.fold_left (fun m x -> check_expr taints m consume x) moved xs
       | Ast.TupleLit xs ->
           require_no_taint_aggregate e.loc taints "tuple" xs;
           (* A tracked component moves into the tuple exactly when the

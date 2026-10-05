@@ -3550,6 +3550,35 @@ let infer_tests = [
          return o.pin;
        }")));
 
+  Alcotest.test_case "stored owner: construction transfers the original local" `Quick
+    (fun () ->
+      let base = {|linear struct StoredToken[k: usize] { private flags: usize; }
+linear struct StoredHolder[k: usize] { private token: StoredToken[k]; }
+fn stored_token(k: usize) -> StoredToken[k] {
+  let mut token: StoredToken[k] = { 0 }; return token;
+}
+fn stored_drop(token: sink StoredToken[k]) {}
+fn stored_release(holder: sink StoredHolder[k]) { stored_drop(holder.token); }
+|} in
+      expect_codegen_ok (base ^ {|fn stored_good() {
+  let token = stored_token(2);
+  let mut holder: StoredHolder[2] = { token };
+  stored_release(holder);
+}|}) ();
+      expect_type_error "already consumed" (base ^ {|fn stored_double() {
+  let token = stored_token(2);
+  let mut holder: StoredHolder[2] = { token };
+  stored_drop(token);
+  stored_release(holder);
+}|}) ();
+      expect_type_error "cannot move borrowed value" (base ^ {|fn stored_borrowed(token: borrow StoredToken[k]) {
+  let mut holder: StoredHolder[k] = { token };
+  stored_release(holder);
+}|}) ();
+      expect_codegen_ok (base ^ {|fn stored_return(token: sink StoredToken[k]) -> StoredHolder[k] {
+  let mut holder: StoredHolder[k] = { token }; return holder;
+}|}) ());
+
   Alcotest.test_case "stored owner: moved out through a borrow" `Quick
     (expect_region_error "out of a borrowed" (stored_owner_use
       "fn f(o: borrow Owner[b, k]) -> RegionPin(Node)[b, k] { return o.pin; }"));
@@ -15116,6 +15145,70 @@ fn hidden_witnessed() -> usize {
             call558(f);
             return use558(h);
           }") ());
+
+  Alcotest.test_case "stored guard holder retains lock and IRQ contracts" `Quick
+    (fun () ->
+      let base = {|linear struct StoredHigh[k: usize] { private flags: usize; }
+linear struct StoredHighHolder[k: usize] { private guard: StoredHigh[k]; }
+fn stored_high(k: usize) -> StoredHigh[k] !{acquires_lock_40_high, lock_guard_40_high} {
+  let mut guard: StoredHigh[k] = { 0 }; return guard;
+}
+fn stored_high_drop(guard: sink StoredHigh[k]) {}
+fn stored_high_release(holder: sink StoredHighHolder[k]) { stored_high_drop(holder.guard); }
+fn stored_middle() !{acquires_lock_35_middle} {}
+|} in
+      expect_type_error "cannot acquire 'middle'" (base ^ {|fn stored_lock_bad() {
+  let guard = stored_high(2);
+  let mut holder: StoredHighHolder[2] = { guard };
+  stored_middle(); stored_high_release(holder);
+}|}) ();
+      expect_type_error "cannot acquire 'middle'" (base ^ {|fn stored_lock_borrowed(holder: borrow StoredHighHolder[k]) {
+  stored_middle();
+}|}) ();
+      expect_codegen_ok (base ^ {|fn stored_lock_good() {
+  let guard = stored_high(2);
+  let mut holder: StoredHighHolder[2] = { guard };
+  stored_high_release(holder); stored_middle();
+}|}) ();
+      let irq = {|linear struct StoredIrq[k: usize] { private flags: usize; }
+linear struct StoredIrqHolder[k: usize] { private guard: StoredIrq[k]; }
+fn stored_irq(k: usize) -> StoredIrq[k] !{irq_masking_guard} {
+  let mut guard: StoredIrq[k] = { 0 }; return guard;
+}
+fn stored_irq_drop(guard: sink StoredIrq[k]) {}
+fn stored_irq_release(holder: sink StoredIrqHolder[k]) { stored_irq_drop(holder.guard); }
+|} in
+      expect_type_error "cannot restore IRQs" (irq ^ {|fn stored_irq_bad() {
+  let guard = stored_irq(2);
+  let mut holder: StoredIrqHolder[2] = { guard };
+  msr_daifclr_irq(); stored_irq_release(holder);
+}|}) ();
+      expect_codegen_ok (irq ^ {|fn stored_irq_good() {
+  let guard = stored_irq(2);
+  let mut holder: StoredIrqHolder[2] = { guard };
+  stored_irq_release(holder); msr_daifclr_irq();
+}|}) ();
+      expect_type_error "conflicting lock annotations" (base ^ {|fn stored_conflict(guard: sink StoredHigh[k]) -> StoredHighHolder[k]
+    !{lock_guard_20_other} {
+  let mut holder: StoredHighHolder[k] = { guard }; return holder;
+}|}) ();
+      Type_inf.set_held_guard_audit_enabled true;
+      Fun.protect ~finally:(fun () -> Type_inf.set_held_guard_audit_enabled false)
+        (fun () ->
+          ignore (infer_files ["stored-guards.tkb", base ^ {|fn stored_leaf() {}
+fn stored_report() {
+  let guard = stored_high(2);
+  let mut holder: StoredHighHolder[2] = { guard };
+  stored_leaf(); stored_high_release(holder); stored_leaf();
+}|}]);
+          let sites = Type_inf.held_guard_sites () |> List.filter
+            (fun s -> s.Type_inf.held_callee = "stored_leaf") in
+          let held = List.map (fun s -> List.map
+            (fun g -> g.Type_inf.held_binding, g.Type_inf.held_type)
+            s.Type_inf.held_guards) sites |> List.sort compare in
+          Alcotest.(check (list (list (pair string string))))
+            "report follows the holder and clears it on release"
+            [[]; ["holder", "StoredHighHolder"]] held));
 
   Alcotest.test_case "lock order retains shadowed guard owners" `Quick
     (fun () ->

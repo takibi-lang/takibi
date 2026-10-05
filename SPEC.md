@@ -1434,6 +1434,12 @@ fn owner_release(o: sink Owner[b, k]) -> RegionPin(Conn)[b, k] {
 }
 ```
 
+- Constructing an owning struct literal moves its tracked components into
+  the new owner. The original binding cannot then be consumed or used again;
+  a discarded literal does not discharge an obligation.
+- A holder's single stored lock or IRQ guard retains that guard's contract.
+  Call checks and the held-guard report follow the holder while it lives,
+  including through a borrow, and stop treating it as held after release.
 - Through a `borrow` of the struct the field can only be borrowed; moving
   it out is an error.
 - Moving the field out consumes the whole struct: it moves once, and the
