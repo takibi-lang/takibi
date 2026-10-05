@@ -5147,7 +5147,11 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
         // /bin/protocol-trace's window (GitHub issue #606).
         if (x0 == 16) {
-            return SyscallAction::Resume(kernel_process_protocol_trace_open());
+            match kernel_process_protocol_trace_open() {
+                ProtocolTraceOpenResult::Opened => { return SyscallAction::Resume(1); }
+                ProtocolTraceOpenResult::ReservationPending => { return SyscallAction::Resume(0); }
+                ProtocolTraceOpenResult::Invalid => { return SyscallAction::Resume(0xFFFFFFFFFFFFFFFF); }
+            }
         }
         if (x0 == 17) {
             return SyscallAction::Resume(kernel_process_protocol_trace_close());

@@ -1378,11 +1378,19 @@ private fn kernel_process_protocol_observe(unlocked: bool) !{unsafe} {
 // opening pass records the whole protocol state as sequence 0; the closing
 // hold is the window's last step, and the report is printed after it,
 // outside the lock.
-fn kernel_process_protocol_trace_open() -> usize {
+fn kernel_process_protocol_trace_open() -> ProtocolTraceOpenResult {
     let guard = process_run_lock();
-    protocol_trace_open();
-    process_run_unlock(guard);
-    return 1;
+    if (protocol_trace_open_probe() == false) {
+        process_run_unlock(guard);
+        return ProtocolTraceOpenResult::Invalid;
+    }
+    protocol_trace_prepare_open();
+    kernel_process_protocol_observe(false);
+    let result = protocol_trace_commit_open();
+    // The opening hold already observed exactly once. Ordinary unlock would
+    // diff a second time and count two observations for one critical section.
+    process_run_unlock_observed(guard);
+    return result;
 }
 
 fn kernel_process_protocol_trace_close() -> usize {
@@ -3164,6 +3172,11 @@ fn process_run_lock() -> ProcessRunGuard[scheduled_process_run_lock]
         kernel_process_protocol_observe(true);
     }
     return guard;
+}
+
+// Release an opening hold whose snapshot was already observed once.
+private fn process_run_unlock_observed(guard: sink ProcessRunGuard[scheduled_process_run_lock]) {
+    mutex_release(&scheduled_process_run_lock, guard.flags);
 }
 
 fn process_run_unlock(guard: sink ProcessRunGuard[scheduled_process_run_lock]) {

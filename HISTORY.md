@@ -15,6 +15,32 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-10-05: protocol trace opening during a Running reservation
+
+The QEMU trace checker caught an initial snapshot in which pid 2 was
+Running without a visible current or stood-on core. The scheduler legitimately
+reserves Ready -> Running under its lock, then prepares activation outside
+it before publishing the core slot. The replay infers reservations from
+later transitions, but initializes its reservation slots empty. Opening
+inside that interval therefore omitted a holder from sequence zero.
+
+Opening now prepares an inactive candidate under the process-run lock and
+publishes it only when every Running process has a visible core holder.
+The closed result distinguishes a retry from an invalid regression fixture;
+the EL0 caller yields before retrying. The opening observation releases its
+guard without a duplicate trace pass. A deterministic fixture uses the failed
+snapshot, rejects its pending reservation, and accepts the completed core
+publication through the same gate. Earlier passing runs depended on where
+the opening landed; the existing replay did catch the actual occurrence.
+
+This is a dynamic completeness gate using existing types, not a new static
+scheduler proof. No raw authority, liveness escape, or scheduler reservation
+storage was added. The model already represents reservations. Explicit
+reservation records in the trace format would be a larger alternative;
+closing merely freezes an existing window and has no initial-state problem.
+The checker's sequence-zero diagnostic and saved UART snapshot identified
+the issue without scheduler prints. The finding belongs to #606.
+
 ## 2026-10-05: TCP pool-lock contention baseline
 
 The next measurement for #680 uses one private TCP connection per online CPU

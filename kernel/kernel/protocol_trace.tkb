@@ -109,7 +109,7 @@ private fn protocol_trace_record(kind: ProtocolTraceKind, first: usize,
 
 // Opening: forget every earlier window. The caller then observes every
 // process and core, which records them all, as sequence 0.
-fn protocol_trace_open() {
+fn protocol_trace_prepare_open() {
     protocol_trace_sequence = 0;
     protocol_trace_stored = 0;
     protocol_trace_lost = 0;
@@ -119,7 +119,54 @@ fn protocol_trace_open() {
         protocol_trace_cores[core].stands = 0;
     }
     protocol_trace_unlocked_pass = false;
+    protocol_trace_active = false;
+}
+
+must_use variant ProtocolTraceOpenResult { Opened; ReservationPending; Invalid; }
+
+// The wire format has no explicit per-CPU reservation. A snapshot may start
+// only when every Running process is visible as current or stood-on. Later
+// Ready -> Running holds let the replay infer reservations normally.
+fn protocol_trace_commit_open() -> ProtocolTraceOpenResult {
+    let count: usize = protocol_trace_process_count;
+    for index: usize in 0..<PROTOCOL_TRACE_PROCESSES {
+        if (index < count && protocol_trace_processes[index].state == 2) {
+            let pid: usize = protocol_trace_processes[index].pid;
+            let mut held: bool = false;
+            for core: usize in 0..<KERNEL_MAX_CORES {
+                if (protocol_trace_cores[core].current == pid ||
+                    protocol_trace_cores[core].stands == pid) { held = true; }
+            }
+            if (held == false) { return ProtocolTraceOpenResult::ReservationPending; }
+        }
+    }
     protocol_trace_active = true;
+    return ProtocolTraceOpenResult::Opened;
+}
+
+// Deterministic regression for the real failed snapshot: Running pid 2 is
+// reserved off-core while CPU 1 holds pid 85. Publishing that candidate must
+// be refused, and a later candidate with CPU 0 holding pid 2 must open.
+fn protocol_trace_open_probe() -> bool {
+    protocol_trace_prepare_open();
+    protocol_trace_pass_begin(false);
+    protocol_trace_observe_process(2, 2, PROTOCOL_TRACE_NONE, 0, 1);
+    protocol_trace_observe_process(85, 2, 1, 0, 2);
+    protocol_trace_observe_core(0, PROTOCOL_TRACE_NONE, PROTOCOL_TRACE_NONE);
+    protocol_trace_observe_core(1, 85, 85);
+    protocol_trace_pass_end(false);
+    match protocol_trace_commit_open() {
+        ProtocolTraceOpenResult::Opened => { protocol_trace_close(); return false; }
+        ProtocolTraceOpenResult::Invalid => { return false; }
+        ProtocolTraceOpenResult::ReservationPending => {}
+    }
+    if (protocol_trace_is_active()) { protocol_trace_close(); return false; }
+    protocol_trace_observe_core(0, 2, PROTOCOL_TRACE_NONE);
+    match protocol_trace_commit_open() {
+        ProtocolTraceOpenResult::Opened => { protocol_trace_close(); return true; }
+        ProtocolTraceOpenResult::ReservationPending => { return false; }
+        ProtocolTraceOpenResult::Invalid => { return false; }
+    }
 }
 
 fn protocol_trace_close() { protocol_trace_active = false; }

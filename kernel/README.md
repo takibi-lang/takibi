@@ -714,7 +714,14 @@ diffs each process's state and stack owner, and each core's current and
 stood-on process, at every hold of the process-run lock, and prints the
 changes at the close. `scripts/validate_protocol_trace.py` fails the lane
 on a hold no model action describes, a lost change, or a model action the
-window never exercised. The same steps are held to `Wait4Block.tla` and
+window never exercised. Opening returns 0 while a Running reservation has
+not yet appeared in a core's current or stood-on slot; the EL0 probe yields
+and retries up to 64 times. It returns 1 only after recording a complete
+initial snapshot under the process-run lock. A deterministic candidate
+check rejects an off-core reservation before each real opening, and checks
+that its subsequent publication permits opening. Later reservations are
+inferred from Ready-to-Running transitions as before.
+The same steps are held to `Wait4Block.tla` and
 `RecordLifetime.tla` on the parent pid each process line carries;
 `kernel/models/README.md` says what that does and does not prove.
 
