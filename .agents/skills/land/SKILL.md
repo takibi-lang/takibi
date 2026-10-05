@@ -14,6 +14,10 @@ combination nobody tested.
 - Every change is committed and the working tree is clean. If it is not,
   stop and say so. Never stash or auto-stash: the uncommitted change may be
   the maintainer's.
+- Space review is current under [the milestone policy](../../../docs/SPACE_REVIEW.md).
+  The source-bound checkpoint is required for production changes; a feature
+  or stage milestone measures, while an unchanged small correction may reuse
+  evidence with a reason. `land.sh` checks it after rebasing and before allcheck.
 - The unit is finished. For every defect fixed in it, the `defect-followup`
   skill has been completed.
 
@@ -41,7 +45,7 @@ Act on its exit status:
 | --- | --- | --- |
 | 0 | pushed, or nothing to push | report |
 | 1 | allcheck red | see below |
-| 2 | precondition failed | fix it (commit, check out `main`) and rerun |
+| 2 | precondition failed | fix the tree/branch or current space checkpoint, then rerun |
 | 3 | `origin/main` moved | rerun; the whole allcheck runs again. After two such rounds, stop and report |
 | 4 | rebase stopped | usually a conflict: resolve it if you understand it, otherwise stop and ask; then rerun. The script supplies a committer identity for the rebase itself, so a missing git identity is not a cause |
 

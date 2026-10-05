@@ -127,6 +127,26 @@ A board that stops answering SWD needs a power cycle, which nothing here can
 perform. The lease counts consecutive reset or load failures and says so;
 report that to the maintainer rather than retrying.
 
+## Space reviews at milestones
+
+At a completed kernel feature, roadmap stage, or memory-layout/allocator
+milestone, measure space before publishing. Follow `docs/SPACE_REVIEW.md` and
+commit `docs/SPACE_CHECKPOINT.json` with the workload, evidence, assessment and
+next measurement trigger. Use existing workloads first; repeat Linux/FreeBSD
+only when the comparison boundary changes or the decision needs fresh OS
+observations. Do not optimize to an arbitrary minimum or weaken safety merely
+to reduce a number. Adopt cheap measured improvements, and discuss structural
+tradeoffs with the maintainer.
+
+A small correction that does not alter the storage or allocation workload can
+reuse evidence, with its reason recorded as an incremental review. A feature
+or stage completion cannot be relabeled incremental to skip measurement.
+`scripts/land.sh` checks the record against the production source tree after
+rebasing; a missing or stale checkpoint stops publication. This is a review
+at a natural boundary, not a hardware run per commit. Code/image reservation,
+payload, pool metadata, retained pages and workload occupancy are separate
+accounting boundaries; compare each at its actual strength.
+
 ## Concurrent agents and the working tree
 
 More than one agent, plus the maintainer, may work in this repository at the

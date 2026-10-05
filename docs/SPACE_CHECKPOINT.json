@@ -1,0 +1,16 @@
+{
+  "date": "2026-10-05",
+  "event": "milestone",
+  "decision": "measured",
+  "source_sha256": "9ae0757419ee13c2fff7ea37521e5c7a2d0b0aac1152a3b13364a35493b44706",
+  "workload": "FD open/fork/wait/close with 32 and 128 files; equal-object nine-pool replay; standard linked images and bounded QEMU boot endpoints. Payload, pool reservation and fixed image are separate boundaries.",
+  "evidence": [
+    "docs/SERVICE_SPACE_2026-10-05.md",
+    "docs/POOL_RETENTION_2026-10-05.md",
+    "docs/REGION_POOL_GENERATIONS.md",
+    "docs/REGION_POOL_LAYOUT_2026-10-05.tsv",
+    "docs/REGION_POOL_ENDPOINT_2026-10-05.tsv"
+  ],
+  "assessment": "Adopt packed FD entries and the nonrepeating pool counter with release-only retirement ownership. Nine FD blocks save 1152 payload bytes; eight production pool bodies add 64 bytes. No FD page saving in this workload; RPi5 fixed image reservation adds 32768 bytes. Keep empty-chunk retention 1. Accept the safety cost and avoid exhaustive tuning before feature workloads exist.",
+  "next_trigger": "Before publishing the next completed kernel feature or roadmap stage, especially new pooled objects, process/thread lifetimes, VM or socket behavior, or an allocator/retention/layout change. Use the new feature workload plus existing baselines; repeat cross-OS measurements only if that boundary changes."
+}

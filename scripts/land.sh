@@ -10,7 +10,7 @@
 # Exit status:
 #   0  pushed (or nothing to push)
 #   1  allcheck failed; the log path is printed
-#   2  precondition failed: dirty tree, detached HEAD, or not on main
+#   2  precondition failed: dirty tree, wrong branch, or missing space review
 #   3  origin/main moved during the check; run again from the start
 #   4  the rebase stopped on a conflict; resolve it, then run again
 #
@@ -52,6 +52,13 @@ tested=$(git rev-parse HEAD)
 if [ "$tested" = "$(git rev-parse origin/main)" ]; then
     echo "land: nothing to push; HEAD is origin/main ($tested)"
     exit 0
+fi
+
+# Review space at a completed unit, before taking hardware time. A source
+# fingerprint prevents an earlier assessment from silently covering new code.
+if ! python3 scripts/space_checkpoint.py --base origin/main --head "$tested"; then
+    echo "land: current space checkpoint required; see docs/SPACE_REVIEW.md" >&2
+    exit 2
 fi
 
 log_dir=".git/takibi-land"

@@ -21,6 +21,7 @@ suffix is description; dispatch reads only the prefix.
 
 | Check | Enforced invariant |
 | --- | --- |
+| `check_space_checkpoint_controls.py` | milestone measurement, justified incremental reuse, source fingerprint freshness, tracked evidence, and the mandatory pre-allcheck publication hook |
 | `check_service_space_controls.py` | actual FD/fork phase and actor coverage, open-description sharing, retained capacities, Takibi pool resource identities, repeats, and incomplete/error capture rejection |
 | `check_pool_retention_controls.py` | real-kernel retention accounting, workload completion, repeated counts, platform clock separation, and malformed capture rejection |
 | `check_pool_replay_controls.py` | equal-workload Takibi/SLUB/UMA sample coverage, storage arithmetic, recorded comparison freshness, and failed or incomplete capture controls |
@@ -214,3 +215,11 @@ The scripts themselves are authoritative for exact mechanics. This table is
 maintained by hand and generated from nothing, which is why
 `check_agents_paths.py` refuses a check that is missing from it: a complete
 inventory that nothing enforces is the one that goes stale first.
+
+## Publication boundary
+
+`scripts/space_checkpoint.py` is invoked by `scripts/land.sh`, after rebase
+and before clean allcheck. It reads the exact Git source tree and refuses a
+missing/stale space checkpoint, malformed classification, absent evidence or
+reuse at a milestone. It is not a fast/build lane: it checks the actual
+publication range. Its pure controls run in langcheck.
