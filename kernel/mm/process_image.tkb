@@ -18,58 +18,50 @@ private let mut process_image_zero_page: [u8; PAGE_SIZE];
 // A dynamic ELF pair changes backing files between the application's and
 // interpreter's PT_LOAD passes. These fields carry that second source only
 // for the synchronous pair mapper below.
-struct ProcessImageExt2State {
-    active: bool;
+struct ProcessImageExt2Source {
     mount: Ext2Mount;
     inode: usize;
     length: usize;
-    block: [u8; KERNEL_BLOCK_SIZE];
-    pair_active: bool;
-    pair_mount: Ext2Mount;
-    pair_inode: usize;
-    pair_length: usize;
 }
+variant ProcessImageSourceState { Absent; Ext2(ProcessImageExt2Source); }
+variant ProcessImageTargetState { Unset; Set(AddressSpaceRoot); }
 
-private let mut process_image_ext2_state:
-    [ProcessImageExt2State; KERNEL_MAX_CORES];
+// One synchronous operation per CPU under the non-preemptible execution
+// contract below. Each closed state keeps presence and its value together.
+struct ProcessImageContext {
+    private target: ProcessImageTargetState;
+    private source: ProcessImageSourceState;
+    private pair_source: ProcessImageSourceState;
+    block: [u8; KERNEL_BLOCK_SIZE];
+}
+private let mut process_image_contexts: [ProcessImageContext; KERNEL_MAX_CORES];
 
-private fn process_image_ext2_here() -> *ProcessImageExt2State {
-    let base: *ProcessImageExt2State = process_image_ext2_state;
+private fn process_image_context_here() -> *ProcessImageContext {
     let core: usize = cpu_id();
-    if (core >= KERNEL_MAX_CORES) { return base; }
-    return base + (core as isize);
+    if (core >= KERNEL_MAX_CORES) { return &process_image_contexts[0]; }
+    return &process_image_contexts[core];
 }
 
 fn process_image_ext2_source(mount: Ext2Mount, inode: usize,
                              length: usize) {
-    let state: *ProcessImageExt2State = process_image_ext2_here();
-    state.mount = mount;
-    state.inode = inode;
-    state.length = length;
-    state.active = true;
+    let context: *ProcessImageContext = process_image_context_here();
+    let mut source: ProcessImageExt2Source = { mount, inode, length };
+    context.source = ProcessImageSourceState::Ext2(source);
 }
 
 fn process_image_ext2_source_clear() {
-    let state: *ProcessImageExt2State = process_image_ext2_here();
-    state.active = false;
-    state.inode = 0;
-    state.length = 0;
+    process_image_context_here().source = ProcessImageSourceState::Absent;
 }
 
 fn process_image_pair_ext2_source(mount: Ext2Mount, inode: usize,
                                   length: usize) {
-    let state: *ProcessImageExt2State = process_image_ext2_here();
-    state.pair_mount = mount;
-    state.pair_inode = inode;
-    state.pair_length = length;
-    state.pair_active = true;
+    let context: *ProcessImageContext = process_image_context_here();
+    let mut source: ProcessImageExt2Source = { mount, inode, length };
+    context.pair_source = ProcessImageSourceState::Ext2(source);
 }
 
 fn process_image_pair_ext2_source_clear() {
-    let state: *ProcessImageExt2State = process_image_ext2_here();
-    state.pair_active = false;
-    state.pair_inode = 0;
-    state.pair_length = 0;
+    process_image_context_here().pair_source = ProcessImageSourceState::Absent;
 }
 // GitHub issue #448: how many pages the LAST reap gave back, which is a
 // report about an event rather than about a process, so it stays here.
@@ -676,7 +668,7 @@ fn process_image_record_release_words(root: usize,
 // to find, with only one writer. Two writers would reach the same class of
 // wrong root without needing the fast path's help.
 //
-// An array indexed by cpu_id(), sized by KERNEL_MAX_CORES, the same shape
+// A context array indexed by cpu_id(), sized by KERNEL_MAX_CORES, the same shape
 // execution_state and address_space_active_slot have. Not a lock: the
 // state is not shared, it is per-core state that was stored as though it
 // were global, and making two cores agree on it would be agreeing on the
@@ -685,50 +677,21 @@ fn process_image_record_release_words(root: usize,
 // GitHub issue #693 step 5: the target is held as the AddressSpaceRoot the
 // operation was given, handle and all, so what an operation acts on is the
 // root its caller made from an authority, not a slot re-read later.
-private let mut process_image_target_root: [AddressSpaceRoot; KERNEL_MAX_CORES];
-// Root 0 is a real target, so zero-initialization cannot also mean that no
-// image operation has selected a target. Keep that state separately and
-// make teardown open the result before it can touch any mappings.
-private let mut process_image_target_root_set: [bool; KERNEL_MAX_CORES];
-
+// Root 0 is a real target. The closed Unset case distinguishes absence
+// without an independently mutable flag or another root array.
 private fn process_image_target_root_here() -> AddressSpaceRoot {
-    let base: *AddressSpaceRoot = process_image_target_root;
-    let core: usize = cpu_id();
-    if (core >= KERNEL_MAX_CORES) { return *base; }
-    return *(base + (core as isize));
+    match process_image_context_here().target {
+        ProcessImageTargetState::Unset => { return address_space_boot_root(); }
+        ProcessImageTargetState::Set(root) => { return root; }
+    }
 }
 
 private fn process_image_set_target_root_here(root: AddressSpaceRoot) {
-    let base: *AddressSpaceRoot = process_image_target_root;
-    let set_base: *bool = process_image_target_root_set;
-    let core: usize = cpu_id();
-    if (core >= KERNEL_MAX_CORES) {
-        *base = root;
-        *set_base = true;
-        return;
-    }
-    *(base + (core as isize)) = root;
-    *(set_base + (core as isize)) = true;
+    process_image_context_here().target = ProcessImageTargetState::Set(root);
 }
 
 private fn process_image_clear_target_root_here() {
-    let base: *AddressSpaceRoot = process_image_target_root;
-    let set_base: *bool = process_image_target_root_set;
-    let core: usize = cpu_id();
-    if (core >= KERNEL_MAX_CORES) {
-        *base = address_space_boot_root();
-        *set_base = false;
-        return;
-    }
-    *(base + (core as isize)) = address_space_boot_root();
-    *(set_base + (core as isize)) = false;
-}
-
-private fn process_image_target_root_is_set_here() -> bool {
-    let base: *bool = process_image_target_root_set;
-    let core: usize = cpu_id();
-    if (core >= KERNEL_MAX_CORES) { return *base; }
-    return *(base + (core as isize));
+    process_image_context_here().target = ProcessImageTargetState::Unset;
 }
 
 // GitHub issue #392: a root is a process slot, and a process slot is a
@@ -812,21 +775,24 @@ must_use variant ProcessImageTargetRootResult {
 // asking it is not free and why callers ask once and carry the answer.
 fn process_image_target_root_result()
         -> ProcessImageTargetRootResult !{unsafe} {
-    if (process_image_target_root_is_set_here() == false) {
-        let unset_count: *usize =
-            process_image_counter_here(process_image_root_unset_count);
-        *unset_count = *unset_count + 1;
-        return ProcessImageTargetRootResult::Missing;
-    }
+    let root: AddressSpaceRoot = match process_image_context_here().target {
+        ProcessImageTargetState::Unset => {
+            let unset_count: *usize =
+                process_image_counter_here(process_image_root_unset_count);
+            *unset_count = *unset_count + 1;
+            return ProcessImageTargetRootResult::Missing;
+        }
+        ProcessImageTargetState::Set(selected) => { selected }
+    };
     if (scheduled_process_slot_valid(address_space_root_slot(
-            process_image_target_root_here())) == false) {
+            root)) == false) {
         let stale_count: *usize =
             process_image_counter_here(process_image_root_stale_count);
         *stale_count = *stale_count + 1;
         return ProcessImageTargetRootResult::Missing;
     }
     return ProcessImageTargetRootResult::Ready(
-        process_image_root(process_image_target_root_here()));
+        process_image_root(root));
 }
 
 // GitHub issue #468: this CPU's target root for a check, WITHOUT counting.
@@ -834,11 +800,14 @@ fn process_image_target_root_result()
 // asserts those counts, so a check asked on every EL0 return must not move
 // them.
 fn process_image_target_root_peek() -> ProcessImageTargetRootResult {
-    if (process_image_target_root_is_set_here() == false) {
-        return ProcessImageTargetRootResult::Missing;
+    match process_image_context_here().target {
+        ProcessImageTargetState::Unset => {
+            return ProcessImageTargetRootResult::Missing;
+        }
+        ProcessImageTargetState::Set(root) => {
+            return ProcessImageTargetRootResult::Ready(process_image_root(root));
+        }
     }
-    return ProcessImageTargetRootResult::Ready(
-        process_image_root(process_image_target_root_here()));
 }
 
 fn process_image_pte_read(index: usize) -> usize {
@@ -1244,12 +1213,25 @@ fn process_image_no_target_probe() -> bool !{unsafe} {
             had_root = true;
         }
     }
+    let mut refused: bool = true;
+    // Root 0 is a selected target, not the zero-initialized Unset state.
+    // Peek avoids changing the established missing/stale evidence counts.
+    process_image_set_target_root_here(address_space_boot_root());
+    match process_image_target_root_peek() {
+        ProcessImageTargetRootResult::Missing => { refused = false; }
+        ProcessImageTargetRootResult::Ready(target) => {
+            if (process_image_root_index(target) != 0) { refused = false; }
+        }
+    }
     process_image_clear_target_root_here();
+    match process_image_target_root_peek() {
+        ProcessImageTargetRootResult::Missing => {}
+        ProcessImageTargetRootResult::Ready(target) => { refused = false; }
+    }
     let installed_before: bool =
         process_image_record_read(0).exec_image_installed;
     let pages_before: usize =
         process_image_record_read(0).exec_image_page_count;
-    let mut refused: bool = true;
     // A cleared target cannot say the user window is clear. Before #516 this
     // answered about root 0's window.
     if (process_image_window_is_clear()) { refused = false; }
@@ -1865,9 +1847,12 @@ fn process_image_load_page(page: borrow PageOwner[page],
                            load_bias: usize,
                            l3_index: usize)
         -> ProcessImagePageLoadResult !{unsafe} {
-    if (process_image_ext2_here().active) {
-        return process_image_load_page_ext2(
-            page, plan, header, load_bias, l3_index);
+    match process_image_context_here().source {
+        ProcessImageSourceState::Absent => {}
+        ProcessImageSourceState::Ext2(source) => {
+            return process_image_load_page_ext2(
+                page, plan, header, load_bias, l3_index);
+        }
     }
     let bytes = page_bytes(page);
     for i: usize in 0..<4096 { bytes[i] = 0; }
@@ -1945,7 +1930,13 @@ fn process_image_load_page_ext2(page: borrow PageOwner[page],
                                 load_bias: usize,
                                 l3_index: usize)
         -> ProcessImagePageLoadResult !{unsafe} {
-    let source_state: *ProcessImageExt2State = process_image_ext2_here();
+    let context: *ProcessImageContext = process_image_context_here();
+    let source: ProcessImageExt2Source = match context.source {
+        ProcessImageSourceState::Absent => {
+            return ProcessImagePageLoadResult::Invalid;
+        }
+        ProcessImageSourceState::Ext2(selected) => { selected }
+    };
     let bytes = page_bytes(page);
     for i: usize in 0..<4096 { bytes[i] = 0; }
     let page_start: usize = l3_index * PAGE_SIZE;
@@ -1969,12 +1960,12 @@ fn process_image_load_page_ext2(page: borrow PageOwner[page],
                                        (copy_start - segment_start);
         let mut remaining: usize = copy_end - copy_start;
         while (remaining != 0) {
-            if (source_offset >= source_state.length) {
+            if (source_offset >= source.length) {
                 return ProcessImagePageLoadResult::Invalid;
             }
             match ext2_read_file_chunk(
-                    source_state.mount, source_state.inode,
-                    source_offset, source_state.block as []u8) {
+                    source.mount, source.inode,
+                    source_offset, context.block as []u8) {
                 Ext2ReadResult::Invalid => {
                     return ProcessImagePageLoadResult::Invalid;
                 }
@@ -1984,7 +1975,7 @@ fn process_image_load_page_ext2(page: borrow PageOwner[page],
                     }
                     let mut take: usize = read_length;
                     if (take > remaining) { take = remaining; }
-                    let block_bytes = source_state.block as []u8;
+                    let block_bytes = context.block as []u8;
                     let destination_start: usize = destination_offset;
                     if (take > block_bytes.len ||
                         destination_start > bytes.len) {
@@ -2297,13 +2288,12 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
             return ProcessImagePairProbeResult::Invalid;
         }
         ProcessImageSegmentsResult::Mapped(primary_count) => {
-            let source_state: *ProcessImageExt2State =
-                process_image_ext2_here();
-            if (source_state.pair_active) {
-                process_image_ext2_source(
-                    source_state.pair_mount,
-                    source_state.pair_inode,
-                    source_state.pair_length);
+            match process_image_context_here().pair_source {
+                ProcessImageSourceState::Absent => {}
+                ProcessImageSourceState::Ext2(source) => {
+                    process_image_ext2_source(
+                        source.mount, source.inode, source.length);
+                }
             }
             match process_image_map_segments(
                     interpreter, interpreter_bias, primary_count) {

@@ -152,7 +152,13 @@ section's entries stopped being plain unsynchronized globals:
 | `page.tkb`'s `boot_page_pool` | one acquire of `page_allocator_lock` covers each allocator entry point; `page_alloc_boot`/`page_free_boot` are the MMU-off window's lock-free path, because AArch64 has no exclusives on Device memory |
 | `asid.tkb`'s `asid_next`/`asid_generation` | minted under `asid_lock`; the file's execution-model assertion was deleted, since nothing there is left to assert |
 | `address_space.tkb`'s `address_space_active_slot` | now `[usize; KERNEL_MAX_CORES]` indexed by `cpu_id()` -- it was never shared state, it was PER-CORE state stored as one global |
-| `process_image.tkb`'s `process_image_target_root` and explicit set flag | same, and the same shape: per-operation state, which on two cores means per-core; the flag distinguishes selecting bootstrap root 0 from having no teardown target |
+| `process_image.tkb`'s `process_image_contexts` | per-CPU synchronous operation contexts hold closed target/source states and block scratch; Set(root 0) differs from Unset without a separate flag |
+
+The image context combines target and ext2 staging storage, preserving one
+context per CPU. Target/source readers match the closed stored state before
+extracting its descriptor. `KERNEL_PREEMPTIBLE == 0` still protects the
+synchronous operation from same-core interleaving; this representation does
+not establish CPU separation or non-migration as a static guarantee.
 
 The last two are the distinction this section should keep: five subsystems
 this week were missing exclusion, and three were not shared at all. A lock
@@ -168,7 +174,7 @@ handle in `ProcessRecord`; `process_image_exec_stores`, the per-root
 parking lot for a linear exec image, is gone the same way
 `tcp_connection_store` went -- the root's own record holds what the reap
 path asks of an installed image), the ext2-image-loading staging fields
-(`process_image_ext2_*`/`process_image_pair_ext2_*`), and
+(the source and pair_source states in `process_image_contexts`), and
 `clone_last_reaped_count`; `mm/address_space.tkb`'s
 `address_space_backing_pool` (the built-in
 `RegionPool(AddressSpaceBacking)` since #672: read and written as value

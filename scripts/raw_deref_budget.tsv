@@ -30,7 +30,7 @@ kernel/lib/intrusive_pool.tkb	93	0	the pool's own chunk carving, the mint of eve
 kernel/lib/locked_cell.tkb	1	0	a lock-guarded cell's payload (#637 F)
 kernel/mm/address_space.tkb	24	0	address-space backing records reached through liveness escapes (#637 D, F)
 kernel/mm/page.tkb	157	0	physical pages and page metadata (#637 D)
-kernel/mm/process_image.tkb	94	0	process image records reached through liveness escapes (#637 F)
+kernel/mm/process_image.tkb	72	0	process image records reached through liveness escapes (#637 F)
 kernel/mm/user_memory.tkb	11	0	the user-range mint site: user addresses become slices here (#637 D)
 kernel/net/arp.tkb	7	0	frames and the ARP table (#637 F)
 kernel/net/icmp.tkb	13	0	frames (#637 F)

@@ -15,6 +15,26 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-10-05: per-CPU image context with closed target/source states
+
+The second #674 migration combines ext2 staging and target-root/set arrays
+in one private ProcessImageContext array. Target is Unset or
+Set(AddressSpaceRoot); each source is Absent or Ext2 with its mount/inode/
+length metadata. Set and clear replace the entire state. Root 0 remains a
+selected value rather than an empty sentinel. Public checked target readers
+match once without changing Missing or the existing missing/stale accounting;
+the streaming loader uses one matched source snapshot.
+
+The existing no-target probe also observes selected root 0 and a subsequent
+clear through the noncounting API, preserving the established evidence counts.
+A checked array-element address replaces the accessor's raw pointer
+arithmetic. Both target audits reduce process_image.tkb from 94 to 72 raw
+dereference sites, and the ratchet is lowered. Public mapping and rollback
+interfaces are unchanged, including process-ownership and pin lifetimes.
+No new compiler feature or lock is added. CPU selection, synchronous
+non-preemptible operation and the existing invalid-CPU fallback remain
+trusted; grouping is not a proof of non-migration or same-core exclusion.
+
 ## 2026-10-05: first private syscall filesystem context
 
 The #674 declaration survey led to a deliberately small first migration:

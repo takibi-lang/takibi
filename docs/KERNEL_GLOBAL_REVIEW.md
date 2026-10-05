@@ -1,6 +1,6 @@
 # Kernel global-state review
 
-This records the first survey and filesystem migration, dated 2026-10-05. It is
+This records the first survey and filesystem/image migrations, dated 2026-10-05. It is
 not a completed synchronization audit or an authorization to move every
 object into one context. The declaration snapshot is
 [KERNEL_GLOBALS_2026-10-05.tsv](KERNEL_GLOBALS_2026-10-05.tsv).
@@ -45,7 +45,7 @@ under synchronization rather than direct pool storage.
 | Scheduler pool and bootstrap record | run guard, running/owner makers, permanent root 0; assembly and debugger consumers | migrate last, together with the stored-authority boundary; preserve the bootstrap and named entry ABI |
 | Boot page pool and root-0 backing | allocator LockedCell; early pre-MMU initialization; permanent fallback root | keep explicit boot mint/storage sites; do not move these as cosmetic grouping |
 | syscall_scratch and exec_args_store | checked per-CPU access, stable owner exchange for argv, non-preemptible EL1 assumption | keep their storage partition explicit; grouping cannot replace a CPU-separation/non-migration guarantee |
-| process_image_ext2_state, target root and target-set flag | per-CPU mapping operation and process ownership | a candidate private per-CPU image context after its access contract is stated; preserve root/set consistency and refusal outcomes |
+| process_image_contexts | one synchronous mapping operation per CPU under non-preemptible EL1; process-owned record mutation | target and ext2 source presence are closed states in a private context per CPU; CPU/storage separation remains a caller contract |
 | block-cache data, tags, validity and epochs | per-CPU cache lines and cross-CPU AtomicWord invalidation publication | consider per-CPU cache contexts only with layout and ordering evidence; neither combine CPUs nor silently change release/acquire publication |
 | syscall_filesystem | boot configures one private context; syscall boundaries match its closed readiness result | mount and readiness are one state; mutation locking and per-CPU scratch stay separate |
 | Driver queue/buffer and ready/disabled state | MMIO, DMA handoff, IRQ paths and linked alignment contracts | retain device-specific contexts and initialization phases; no platform-independent giant context or relocation of named DMA storage by default |
@@ -90,10 +90,9 @@ are a separate requirement from grouping ordinary fields.
 
 ## Recommended sequence and decision boundaries
 
-1. Review the process-image context candidate next. The filesystem
-   mount/readiness migration below establishes the first small boundary;
-   preserve the image mapping operation's per-CPU ownership and refusal
-   outcomes before grouping its fields.
+1. The filesystem and process-image migrations below establish the first
+   small boundaries. Keep their boot-publication and non-preemptible
+   per-CPU ownership contracts explicit; grouping does not prove them.
 2. Keep the shared pools and their lock/pin contracts while relocating only
    the chosen pool's storage. Compare annotation count, raw-access budget,
    linked layout and representative workload results on both targets.
@@ -143,5 +142,61 @@ The state is still boot-written and later read-only by the current call graph;
 configure is not statically write-once, and the context is not atomically
 replaceable while readers run. Boot publication before EL0 filesystem users,
 mount-device lifetime and ext2 mutation/reader exclusion remain trusted
-contracts. Other independently stored mount/readiness pairs in the boot
-fixture and process-image mapper remain separate candidates.
+contracts. The boot fixture's independently stored mount/readiness pair remains a
+separate candidate; the process-image context below has its own lifecycle.
+
+
+## Second migration: per-CPU image operation context
+
+ProcessImageContext holds a target state, an ext2 source state, an optional
+interpreter source state and the block scratch buffer. One checked context
+array replaces the ext2 staging array and the independent target-root and
+set-flag arrays. The target state is Unset or Set(AddressSpaceRoot); source
+states are Absent or Ext2(mount, inode, length), packaged in a concrete
+metadata struct. Root 0 is a real Set value, never the empty tag.
+
+Set/clear operations replace the whole state. Checked target readers match
+one snapshot, preserving Missing and the existing missing/stale counters.
+The ext2 page loader matches its source before reading metadata and reuses
+that snapshot through the transfer loop. The interpreter switch matches the
+second source explicitly. Existing public mapping APIs and their refusal,
+allocation rollback and lifetime outcomes remain unchanged.
+
+The existing no-target boot probe now also checks Set(root 0), then Unset,
+through the noncounting API before its existing refusal/no-mutation checks.
+Both target builds report 72 raw dereference sites in process_image.tkb,
+down from 94; the budget is lowered to 72. Taking the address of a checked
+context element replaces unchecked pointer arithmetic in the accessor.
+
+These are plain stored variants, not new ownership capabilities. The global
+context is private; its CPU index and one-operation-per-core contract remain
+trusted, with the existing KERNEL_PREEMPTIBLE == 0 assertion. Invalid CPU IDs
+retain the old CPU 0 fallback. The context does not prove non-migration,
+prevent same-core reentrancy or carry an owner across a preemptible operation.
+The mapper's existing process lifetime and checked pool-pin contracts remain.
+
+## Remaining pool-placement decision
+
+The FD service is a concrete next grouping candidate: fd_block_pool,
+fd_context_pool and object_pool already use helpers parameterized by the pool
+pointer's inferred identity. Their current APIs do not require new durable
+field-brand syntax. Each linked RPi5 pool occupies 16 bytes. The three locks
+currently occupy two 64-byte cache lines: the FD-context and shared-object
+locks share one, while the block-pool lock is elsewhere. That is a linked
+placement observation, not an intentional cache-separation contract.
+
+A compiler layout probe for three RegionPool fields reports offsets
+0/16/32 and size 48. Wrapping each pool in a struct with align(64) reports
+0/64/128 and size 192. The compact candidate can change which locks share a
+line. The isolated candidate adds 144 bytes and changes the present packing.
+Neither has a representative FD-service workload comparison. The prior
+pin-sharing measurement is evidence about pin-state traffic, not a measured
+FD-lock improvement.
+
+Before relocating these pools, choose between compact storage, explicit
+cache-line separation, or measuring current pool space/live occupancy first
+with storage unchanged. The latter is the recommended next step: retain the
+current allocation and packing baseline while collecting the space evidence.
+A per-CPU allocation front and generation/state compression remain separate
+policy decisions. No pool placement or padding is changed by the two context
+migrations above.
