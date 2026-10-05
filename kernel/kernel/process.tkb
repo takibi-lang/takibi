@@ -10505,3 +10505,16 @@ private fn scheduled_process_handle_of_slot(slot: usize) -> ProcessHandle {
         }
     }
 }
+
+// Coherent allocator metadata, independent of the process run-lock snapshot.
+fn scheduled_process_pool_space_stats()
+        -> (usize, usize, usize, usize, usize, usize) !{unsafe} {
+    let guard = intrusive_pool_lock(&scheduled_process_pool);
+    let chunks: usize = intrusive_pool_chunk_count(&scheduled_process_pool);
+    let capacity: usize = chunks * intrusive_pool_slots_per_chunk(&scheduled_process_pool);
+    let live: usize = intrusive_pool_live_count(&scheduled_process_pool);
+    let chunk_bytes: usize = intrusive_pool_chunk_bytes(&scheduled_process_pool);
+    intrusive_pool_unlock(&scheduled_process_pool, guard);
+    return (chunks, capacity, live, chunks * chunk_bytes,
+            sizeof(IntrusiveSlot(ProcessRecord)), chunk_bytes);
+}

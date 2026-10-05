@@ -1552,3 +1552,11 @@ fn address_space_asid_rollover_probe() -> bool {
 // reusing dynamic ASIDs from 2 onward. Concurrent fallback activation therefore
 // reads one permanent page-table/ASID tuple and writes only per-core state.
 // Consequently this file no longer requires a KERNEL_ACTIVE_CORES assertion.
+
+// Samples allocator metadata while holding only this pool allocation guard.
+fn address_space_pool_space_stats() -> (usize, usize, usize, usize) !{unsafe} {
+    let guard = address_space_backing_pool_lock(&address_space_backing_pool);
+    let sample = region_pool_space_stats(guard);
+    address_space_backing_pool_unlock(guard);
+    return sample;
+}

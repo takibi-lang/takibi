@@ -350,6 +350,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/init/boot_prologue.tkb \
 	kernel/init/contention_probes.tkb \
 	kernel/init/ext2_fixture.tkb \
+	kernel/init/pool_space.tkb \
 	kernel/init/secondary_boot.tkb \
 	kernel/init/test_driver.tkb \
 	kernel/kernel/asid_contention_evidence.tkb \

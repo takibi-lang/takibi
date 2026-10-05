@@ -15,6 +15,24 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-10-05: current-layout production pool space baseline
+
+The maintainer chose to measure before moving pool locks, padding contexts,
+compressing generations, or adding per-CPU fronts (#674/#675). The nine direct
+production pools now expose read-only allocation-guard samples. A shared boot
+body records two workload endpoints; printing happens after each guard is
+released. No production pool body, chunk policy, or allocator state changed.
+The shared view runner validates numeric accounting and retains a TSV artifact.
+Missing rows or impossible counts fail even when all phase markers are present.
+
+QEMU and RPi5 each passed 68 integration views. Both observations on both
+platforms contained 24576 allocated chunk bytes plus 232 static pool-body
+bytes: 768 occupied object bytes, 21752 free object bytes, 1232 per-slot words,
+224 reserved header bytes, 24 alignment bytes, and 576 tail bytes. The dated
+report and TSV preserve the accounting boundary. These observations are not
+workload peaks and do not establish a Linux SLUB or FreeBSD UMA comparison;
+that still needs a matching workload and matching accounting categories.
+
 ## 2026-10-05: guarded pool space observation
 
 The #675 measurement baseline needs total chunk bytes and capacity, which

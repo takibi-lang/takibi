@@ -2719,3 +2719,11 @@ fn process_image_execution_model_assumption() {
     static_assert(KERNEL_PREEMPTIBLE == 0,
                   "process-image operation state is per-core, not per-process; kernel preemption would let two operations share one core's slot");
 }
+
+// Samples allocator metadata while holding only this pool allocation guard.
+fn process_image_pool_space_stats() -> (usize, usize, usize, usize) !{unsafe} {
+    let guard = process_image_pool_lock(&process_image_pool);
+    let sample = region_pool_space_stats(guard);
+    process_image_pool_unlock(guard);
+    return sample;
+}

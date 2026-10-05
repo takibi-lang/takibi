@@ -549,7 +549,7 @@ probe/board setup. A successful run includes:
 [kernel/rpi5] BusyBox httpd curl passed
 [kernel/rpi5] second BusyBox httpd curl passed
 [kernel/rpi5] userspace connected I/O passed
-PASS kernel/rpi5 (67 views, one boot)
+PASS kernel/rpi5 (68 views, one boot)
 ```
 
 It tests negative and positive ARP/ICMP behavior, TCP lifecycle, USB ext2
@@ -1697,3 +1697,36 @@ previous exit observation rather than attributing it to the current run.
 Other console drivers do not yet contribute; zero observations do not establish
 that their margins are sufficient. These observations do not alter deadlines
 or functional verdicts.
+
+## Pool space observations
+
+The shared boot driver samples all nine production object pools at `boot`
+(after the permanent root-0 FD/image records exist, before common probes) and
+`bounded_end` (after bounded user fixtures and zombie collection, before the
+persistent demo shell). Each sample holds only its pool allocation guard and
+releases it before printing. These are separate-pool observations, not an
+atomic global snapshot, a peak measurement, or caller payload-byte usage.
+Root-0 records outside the pools, physical pages, and fixture-only pools are
+excluded. Pool allocation policy and placement are unchanged.
+
+The common `pool_space` view requires both phases and validates all numeric
+rows. The runner writes `pool-space.tsv` beside its UART capture; every chunk
+byte is accounted for as occupied/free object storage, slot metadata, reserved
+headers, alignment padding, or unused tail. `total` adds the static pool body.
+The intrusive header column includes its entire 128-byte reservation, not just
+the 72-byte header fields. The built-in pool state word is eight bytes and
+packs state, pin count, and generation; it is not eight bytes of generation
+alone. The parser describes the current AArch64 allocator layouts explicitly
+and refuses a changed layout until its accounting is reviewed.
+
+Recompute from a captured bounded boot:
+
+```bash
+python3 scripts/measure_kernel_pool_space.py _build/kernel-hwtest-qemu/uart.log
+python3 scripts/measure_kernel_pool_space.py _build/kernel-hwtest-rpi5/uart.log
+```
+
+The native region fixture separately exercises empty, grown, shrunken, Out,
+Dying, and retained-free samples. Linux SLUB and FreeBSD UMA measurements must
+use a declared matching workload and accounting boundary before their totals
+can be compared with these observations.

@@ -1,0 +1,4 @@
+pool space: begin=boot
+pool space: end=boot
+pool space: begin=bounded_end
+pool space: end=bounded_end

@@ -3543,3 +3543,27 @@ fn tcp_execution_model_assumption() {
     static_assert(KERNEL_PREEMPTIBLE == 0,
                   "a preempted TaskMutex holder and its same-core waiter cannot both make progress");
 }
+
+// Samples allocator metadata while holding only this pool allocation guard.
+fn tcp_connection_pool_space_stats() -> (usize, usize, usize, usize) !{unsafe} {
+    let guard = tcp_connection_pool_lock(&tcp_connection_pool);
+    let sample = region_pool_space_stats(guard);
+    tcp_connection_pool_unlock(guard);
+    return sample;
+}
+
+// Samples allocator metadata while holding only this pool allocation guard.
+fn tcp_retx_pool_space_stats() -> (usize, usize, usize, usize) !{unsafe} {
+    let guard = tcp_retx_pool_lock(&tcp_retx_pool);
+    let sample = region_pool_space_stats(guard);
+    tcp_retx_pool_unlock(guard);
+    return sample;
+}
+
+// Samples allocator metadata while holding only this pool allocation guard.
+fn tcp_frame_pool_space_stats() -> (usize, usize, usize, usize) !{unsafe} {
+    let guard = tcp_frame_pool_lock(&tcp_frame_pool);
+    let sample = region_pool_space_stats(guard);
+    tcp_frame_pool_unlock(guard);
+    return sample;
+}

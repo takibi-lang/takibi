@@ -132,4 +132,17 @@ kernel_views_compare control "$artifacts" "$log.normalized" \
     "$common" "$platform" >/dev/null 2>&1 || status=$?
 [ "$status" -eq 2 ] && claim || fail "a filter with no expected file returned $status, expected 2"
 
+# Matching phase markers cannot hide missing or invalid numeric samples.
+mkdir -p "$tmp_dir/pool-common" "$tmp_dir/pool-platform"
+cp "$repo_root/kernel/tests/common/views/pool_space.filter" "$tmp_dir/pool-common/"
+cp "$repo_root/kernel/tests/common/views/pool_space.expected" "$tmp_dir/pool-common/"
+cp "$tmp_dir/pool-common/pool_space.expected" "$tmp_dir/pool-incomplete.log"
+status=0
+kernel_views_compare control "$artifacts" "$tmp_dir/pool-incomplete.log" \
+    "$tmp_dir/pool-common" "$tmp_dir/pool-platform" >"$report" 2>&1 || status=$?
+[ "$status" -eq 1 ] && claim || fail "phase markers without samples returned $status"
+[ "$kernel_views_failed" = " pool_space" ] && claim || fail "invalid pool sample was not named"
+grep -q "invalid allocation accounting" "$report" && claim ||
+    fail "the numeric pool validator did not decide the view"
+
 echo "PASS kernel-views controls: $cases claims -- normalization strips the prompt, the CR, the dmesg timestamp and the minted pid; every mismatch is named rather than the first; a stale .actual is purged; platform and overlay lookup win in that order; and comparing nothing fails"

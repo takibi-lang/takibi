@@ -2,6 +2,7 @@
 // hardware setup and the platform-specific storage/network scenarios.
 
 use "kernel/kernel/process.tkb";
+use "kernel/init/pool_space.tkb";
 use "kernel/drivers/serial/terminal_io.tkb";
 use "kernel/kernel/syscall.tkb";
 use "kernel/fs/elf64.tkb";
@@ -739,6 +740,7 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
     } else {
         kernel_boot_log("resources: pages leaked\n");
     }
+    kernel_pool_space_report("bounded_end");
     kernel_syscall_persistent_shell_start();
     kernel_process_trace_enable();
 }
@@ -1274,6 +1276,7 @@ fn kernel_test_driver_run() {
     // this baseline is about -- and an open descriptor legitimately holds
     // one at the end of the run (the bootstrap opens its stdio after this
     // point), which would make an equality here mean nothing.
+    kernel_pool_space_report("boot");
     kernel_test_common_probes();
     // Root 0 permanently owns its L1/L2 backing pages, and the probes above
     // leave a kernel stack RUN parked for reuse -- measured: one is still

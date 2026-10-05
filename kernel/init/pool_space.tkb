@@ -1,0 +1,85 @@
+// Read-only pool snapshots of the bounded boot workload. Different pools are
+// sampled separately; these are observations, not global peaks or payload use.
+use "kernel/kernel/process.tkb";
+use "kernel/kernel/fd_table.tkb";
+use "kernel/mm/address_space.tkb";
+use "kernel/mm/process_image.tkb";
+use "kernel/net/tcp.tkb";
+use "kernel/printk/log.tkb";
+
+private fn kernel_pool_space_row(name: *u8, object_bytes: usize,
+                                pool_bytes: usize, slot_bytes: usize,
+                                chunk_bytes: usize, chunks: usize,
+                                capacity: usize, nonfree: usize, bytes: usize) {
+    kernel_boot_log("pool space: name=");
+    kernel_boot_log(name);
+    kernel_boot_log(" object="); uart_put_udec(object_bytes);
+    kernel_boot_log(" pool="); uart_put_udec(pool_bytes);
+    kernel_boot_log(" slot="); uart_put_udec(slot_bytes);
+    kernel_boot_log(" chunk="); uart_put_udec(chunk_bytes);
+    kernel_boot_log(" chunks="); uart_put_udec(chunks);
+    kernel_boot_log(" capacity="); uart_put_udec(capacity);
+    kernel_boot_log(" nonfree="); uart_put_udec(nonfree);
+    kernel_boot_log(" bytes="); uart_put_udec(bytes);
+    kernel_boot_log("\n");
+}
+
+fn kernel_pool_space_report(phase: *u8) !{unsafe} {
+    kernel_boot_log("pool space: begin="); kernel_boot_log(phase);
+    kernel_boot_log("\n");
+    let (chunks, capacity, live, bytes, stride, chunk_bytes) =
+        scheduled_process_pool_space_stats();
+    kernel_pool_space_row("process", sizeof(ProcessRecord),
+        sizeof(IntrusivePool(ProcessRecord)), stride, chunk_bytes,
+        chunks, capacity, live, bytes);
+    {
+        let (chunks, capacity, live, bytes) = tcp_connection_pool_space_stats();
+        kernel_pool_space_row("tcp", sizeof(TcpConnection),
+            sizeof(RegionPool(TcpConnection)), sizeof(TcpConnection), TCP_CONNECTION_CHUNK_PAGES * PAGE_SIZE,
+            chunks, capacity, live, bytes);
+    }
+    {
+        let (chunks, capacity, live, bytes) = tcp_retx_pool_space_stats();
+        kernel_pool_space_row("retx", sizeof(RetxEntry),
+            sizeof(RegionPool(RetxEntry)), sizeof(RetxEntry), TCP_RETX_CHUNK_PAGES * PAGE_SIZE,
+            chunks, capacity, live, bytes);
+    }
+    {
+        let (chunks, capacity, live, bytes) = tcp_frame_pool_space_stats();
+        kernel_pool_space_row("frame", sizeof(NetFrame),
+            sizeof(RegionPool(NetFrame)), sizeof(NetFrame), TCP_FRAME_CHUNK_PAGES * PAGE_SIZE,
+            chunks, capacity, live, bytes);
+    }
+    {
+        let (chunks, capacity, live, bytes) = address_space_pool_space_stats();
+        kernel_pool_space_row("backing", sizeof(AddressSpaceBacking),
+            sizeof(RegionPool(AddressSpaceBacking)), sizeof(AddressSpaceBacking), ADDRESS_SPACE_BACKING_CHUNK_PAGES * PAGE_SIZE,
+            chunks, capacity, live, bytes);
+    }
+    {
+        let (chunks, capacity, live, bytes) = process_image_pool_space_stats();
+        kernel_pool_space_row("image", sizeof(ProcessImageRecord),
+            sizeof(RegionPool(ProcessImageRecord)), sizeof(ProcessImageRecord), PROCESS_IMAGE_CHUNK_PAGES * PAGE_SIZE,
+            chunks, capacity, live, bytes);
+    }
+    {
+        let (chunks, capacity, live, bytes) = fd_context_pool_space_stats();
+        kernel_pool_space_row("fd_context", sizeof(ProcessFdContext),
+            sizeof(RegionPool(ProcessFdContext)), sizeof(ProcessFdContext), FD_CONTEXT_CHUNK_PAGES * PAGE_SIZE,
+            chunks, capacity, live, bytes);
+    }
+    {
+        let (chunks, capacity, live, bytes) = fd_block_pool_space_stats();
+        kernel_pool_space_row("fd_block", sizeof(FdBlock),
+            sizeof(RegionPool(FdBlock)), sizeof(FdBlock), FD_BLOCK_CHUNK_PAGES * PAGE_SIZE,
+            chunks, capacity, live, bytes);
+    }
+    {
+        let (chunks, capacity, live, bytes) = object_pool_space_stats();
+        kernel_pool_space_row("object", sizeof(SharedObject),
+            sizeof(RegionPool(SharedObject)), sizeof(SharedObject), OBJECT_CHUNK_PAGES * PAGE_SIZE,
+            chunks, capacity, live, bytes);
+    }
+    kernel_boot_log("pool space: end="); kernel_boot_log(phase);
+    kernel_boot_log("\n");
+}

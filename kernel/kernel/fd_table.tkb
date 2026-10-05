@@ -3947,3 +3947,27 @@ fn kernel_fd_table_crash_object(process: usize, fd: usize) -> usize !{unsafe} {
 // different chains without sharing their links or entries. Crash diagnostics
 // remain lockless under the separate world-stop execution-model blocker.
 // This file consequently has no KERNEL_ACTIVE_CORES dependency today.
+
+// Samples allocator metadata while holding only this pool allocation guard.
+fn fd_context_pool_space_stats() -> (usize, usize, usize, usize) !{unsafe} {
+    let guard = fd_context_pool_lock(&fd_context_pool);
+    let sample = region_pool_space_stats(guard);
+    fd_context_pool_unlock(guard);
+    return sample;
+}
+
+// Samples allocator metadata while holding only this pool allocation guard.
+fn fd_block_pool_space_stats() -> (usize, usize, usize, usize) !{unsafe} {
+    let guard = fd_block_pool_lock(&fd_block_pool);
+    let sample = region_pool_space_stats(guard);
+    fd_block_pool_unlock(guard);
+    return sample;
+}
+
+// Samples allocator metadata while holding only this pool allocation guard.
+fn object_pool_space_stats() -> (usize, usize, usize, usize) !{unsafe} {
+    let guard = object_pool_lock(&object_pool);
+    let sample = region_pool_space_stats(guard);
+    object_pool_unlock(guard);
+    return sample;
+}

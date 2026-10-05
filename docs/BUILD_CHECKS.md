@@ -21,6 +21,7 @@ suffix is description; dispatch reads only the prefix.
 
 | Check | Enforced invariant |
 | --- | --- |
+| `check_pool_space_controls.py` | pool-space capture framing, complete production-pool coverage, allocation accounting, and malformed numeric samples |
 | `check_affinity_probe_migrates.py` | the syscall /bin/affinity uses to make the migration gate fire is the one the gdb watcher waits for, and is still on the refusal list (`syscall_peer_refused`) |
 | `check_affinity_probe_migrates_controls.py` | Controls for the affinity-probe premise check |
 | `check_boot_log_snapshot.py` | the boot dmesg snapshot precedes the variable-length protocol report |

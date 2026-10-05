@@ -140,6 +140,16 @@ kernel_views_compare() {
             kernel_views_failed="$kernel_views_failed $name"
             continue
         fi
+        if [ "$name" = "pool_space" ]; then
+            # Validate all nine numeric rows, not just the phase markers.
+            # Preserve the accounting beside the capture for comparisons.
+            if ! python3 "${BASH_SOURCE[0]%/*}/measure_kernel_pool_space.py" \
+                    "$normalized" >"$artifact_dir/pool-space.tsv"; then
+                echo "FAIL $label view: $name (invalid allocation accounting)" >&2
+                kernel_views_failed="$kernel_views_failed $name"
+                continue
+            fi
+        fi
         echo "PASS $label view: $name"
         kernel_views_passed=$((kernel_views_passed + 1))
     done <<<"$view_names"
