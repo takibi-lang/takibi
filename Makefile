@@ -480,7 +480,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              hello print_int print_hex print_ptr mem array struct struct_refined \
                              nonexhaustive refined narrow enum align packed struct_align const_global \
                              sizeof_offsetof int64 bitops indexed_view tcp_conn_view \
-                             affine_escape_via_index align_ptr_proof linear_obligation tuple_pair region_proto \
+                             affine_escape_via_index align_ptr_proof linear_obligation tuple_pair region_proto pool_space_replay \
                              field_lease match_int_lit \
                              callstack ringbuf crc8 djb2 slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
                              bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report uart_rx_ring block_cache gem_tx_wait
@@ -690,6 +690,12 @@ LINUX_USER_EXTRA_SRCS :=
 # A per-test compiler flag, such as the built-in region's --regions (#672).
 LINUX_USER_EXTRA_FLAGS :=
 $(LINUX_USER_DIR)/region_proto/region_proto_exe.o: LINUX_USER_EXTRA_FLAGS := --regions
+_build/pool_space_replay_regions.tkb: scripts/generate_pool_space_replay.py kernel/benchmarks/pool_space/workload.tsv $(LINUX_USER_DIR)/pool_space_replay/region_replay.tkb.in
+	python3 scripts/generate_pool_space_replay.py $@
+$(LINUX_USER_DIR)/pool_space_replay/pool_space_replay_exe.o: _build/pool_space_replay_regions.tkb
+$(LINUX_USER_DIR)/pool_space_replay/pool_space_replay_exe.o: LINUX_USER_EXTRA_FLAGS := --regions
+$(LINUX_USER_DIR)/pool_space_replay/pool_space_replay_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb
+$(LINUX_USER_DIR)/pool_space_replay/pool_space_replay_exe.o: $(LINUX_USER_DIR)/growable_pool/fake_page_provider.tkb kernel/lib/spinlock.tkb kernel/lib/mutex.tkb $(LINUX_USER_DIR)/intrusive_pool/pool_lock_check.tkb kernel/lib/intrusive_pool.tkb kernel/lib/freelist.tkb kernel/lib/slotmap.tkb
 
 $(LINUX_USER_DIR)/%_exe.o: $(LINUX_USER_DIR)/%.tkb $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(COMMON_LINUX_PRINT_BASE) $(TAKIBI)
 	$(TAKIBI) $(COMMON_LINUX_UART) $(COMMON_LINUX_PRINT) $(LINUX_USER_EXTRA_SRCS) $< --target $(LINUX_AMD64_TARGET) -o $@ --forbid-trap $(LINUX_USER_EXTRA_FLAGS) $(LINUX_UNUSED_CHECK) --check-unused-file $<

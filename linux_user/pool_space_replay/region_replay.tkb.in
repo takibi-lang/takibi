@@ -1,0 +1,115 @@
+// Concrete region replay body; specialized from the tracked workload table.
+private fn replay_region_row(T: type, guard: borrow RegionPoolGuard(T)[identity],
+                             name: *u8, count: usize, phase: *u8) {
+    let (chunks, capacity, live, bytes) = region_pool_space_stats(guard);
+    replay_row(name, count, phase, sizeof(T), sizeof(RegionPool(T)),
+               chunks, capacity, live, bytes);
+}
+
+private fn replay_region_trim(T: type, guard: borrow RegionPoolGuard(T)[identity],
+                             pages: usize, retain: usize) {
+    let mut trimming: bool = region_pool_empty_chunks(guard) > retain;
+    while (trimming) {
+        match region_pool_shrink(guard) {
+            RegionShrink(T)::Nothing => { trimming = false; }
+            RegionShrink(T)::Chunk(chunk) => {
+                let address: usize = region_bytes_address(chunk);
+                region_release(chunk);
+                page_run_transferred_release_physical(address, pages);
+                trimming = region_pool_empty_chunks(guard) > retain;
+            }
+        }
+    }
+}
+
+private fn replay_region_allocate(T: type,
+        guard: borrow RegionPoolGuard(T)[identity], pages: usize)
+        -> ReplayAllocation {
+    let allocated = region_alloc(guard);
+    match allocated {
+        RegionAlloc(T)::Allocated(slot) => {
+            let mut handle: RegionHandle(T) = region_give(guard, slot);
+            let mut words: ReplayWords = {region_handle_address(handle),
+                                          region_handle_generation(handle)};
+            return ReplayAllocation::Ready(words);
+        }
+        RegionAlloc(T)::Full => {}
+    }
+    match page_alloc_contiguous(pages, PageOwnerTag::PoolChunk) {
+        PageRunAllocResult::OutOfMemory => { return ReplayAllocation::Failed; }
+        PageRunAllocResult::Allocated(owner) => {
+            let address: usize = page_run_physical_address(owner);
+            let index: usize = page_run_owner_transfer_index(owner);
+            let RegionBytes::Assumed(chunk) =
+                region_bytes_assume(address, pages * PAGE_SIZE) else {};
+            match region_pool_grow(guard, chunk) {
+                RegionGrow(T)::TooSmall(back) => {
+                    region_release(back);
+                    page_run_transferred_release_physical(address, pages);
+                    return ReplayAllocation::Failed;
+                }
+                RegionGrow(T)::Grown => {}
+            }
+        }
+    }
+    match region_alloc(guard) {
+        RegionAlloc(T)::Full => { return ReplayAllocation::Failed; }
+        RegionAlloc(T)::Allocated(slot) => {
+            let mut handle: RegionHandle(T) = region_give(guard, slot);
+            let mut words: ReplayWords = {region_handle_address(handle),
+                                          region_handle_generation(handle)};
+            return ReplayAllocation::Ready(words);
+        }
+    }
+}
+
+private fn replay_region_free(T: type, guard: borrow RegionPoolGuard(T)[identity],
+                             words: ReplayWords, pages: usize, retain: usize) {
+    match region_take(guard, region_handle_from(guard, words.address, words.generation)) {
+        RegionTake(T)::Stale => { uart_puts("replay FAILED: stale handle\n"); }
+        RegionTake(T)::Taken(slot) => { region_free(guard, slot); }
+    }
+    replay_region_trim(T, guard, pages, retain);
+}
+
+fn replay_region(T: type, pool: *RegionPool(T) @ identity,
+                        name: *u8, count: usize, pages: usize, retain: usize) {
+    let guard = region_pool_lock(pool);
+    replay_region_row(T, guard, name, count, "empty");
+    for index: usize in 0..<REPLAY_MAX {
+        if (index < count) {
+            match replay_region_allocate(T, guard, pages) {
+                ReplayAllocation::Failed => { uart_puts("replay FAILED: allocate\n"); }
+                ReplayAllocation::Ready(words) => { replay_words[index] = words; }
+            }
+        }
+    }
+    replay_region_row(T, guard, name, count, "full");
+    for index: usize in 0..<REPLAY_MAX {
+        if (index < count && index % 2 == 0) {
+            replay_region_free(T, guard, replay_words[index], pages, retain);
+        }
+    }
+    replay_region_row(T, guard, name, count, "half");
+    for index: usize in 0..<REPLAY_MAX {
+        if (index < count && index % 2 == 0) {
+            match replay_region_allocate(T, guard, pages) {
+                ReplayAllocation::Failed => { uart_puts("replay FAILED: refill\n"); }
+                ReplayAllocation::Ready(words) => { replay_words[index] = words; }
+            }
+        }
+    }
+    replay_region_row(T, guard, name, count, "refill");
+    for step: usize in 0..<REPLAY_MAX {
+        if (step < count) {
+            let index: usize = count - 1 - step;
+            if (index < REPLAY_MAX) {
+                replay_region_free(T, guard, replay_words[index], pages, retain);
+            }
+        }
+    }
+    replay_region_row(T, guard, name, count, "free");
+    // Teardown after the measured sequence, rather than a policy change.
+    replay_region_trim(T, guard, pages, 0);
+    region_pool_unlock(guard);
+}

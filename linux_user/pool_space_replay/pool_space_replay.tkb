@@ -1,0 +1,123 @@
+// Serial allocation replay of the current kernel object sizes. The actual
+// built-in region pool and maintained intrusive pool run on the native page
+// stand-in; page-provider storage and this fixture's handle array are excluded.
+use "kernel/lib/intrusive_pool.tkb";
+
+use "_build/pool_space_replay_regions.tkb";
+private let mut replay_tcp: RegionPool(Replay_tcp);
+private let mut replay_retx: RegionPool(Replay_retx);
+private let mut replay_frame: RegionPool(Replay_frame);
+private let mut replay_backing: RegionPool(Replay_backing);
+private let mut replay_image: RegionPool(Replay_image);
+private let mut replay_fd_context: RegionPool(Replay_fd_context);
+private let mut replay_fd_block: RegionPool(Replay_fd_block);
+private let mut replay_object: RegionPool(Replay_object);
+private let mut replay_process: IntrusivePool(Replay_process);
+private let mut replay_process_words: [IntrusiveOwnerParts; REPLAY_MAX];
+must_use variant ReplayProcessAllocation { Failed; Ready(IntrusiveOwnerParts); }
+
+fn replay_row(name: *u8, count: usize, phase: *u8, object_bytes: usize,
+                     pool_bytes: usize, chunks: usize, capacity: usize,
+                     live: usize, bytes: usize) {
+    uart_puts("pool replay: name="); uart_puts(name);
+    uart_puts(" count="); uart_print(count);
+    uart_puts(" phase="); uart_puts(phase);
+    uart_puts(" object="); uart_print(object_bytes);
+    uart_puts(" pool="); uart_print(pool_bytes);
+    uart_puts(" chunks="); uart_print(chunks);
+    uart_puts(" capacity="); uart_print(capacity);
+    uart_puts(" live="); uart_print(live);
+    uart_puts(" bytes="); uart_print(bytes);
+    uart_puts("\n");
+}
+
+private fn replay_process_row(count: usize, phase: *u8) {
+    let chunks: usize = intrusive_pool_chunk_count(&replay_process);
+    replay_row("process", count, phase, sizeof(Replay_process),
+        sizeof(IntrusivePool(Replay_process)), chunks,
+        chunks * intrusive_pool_slots_per_chunk(&replay_process),
+        intrusive_pool_live_count(&replay_process),
+        chunks * intrusive_pool_chunk_bytes(&replay_process));
+}
+
+private fn replay_process_allocate() -> ReplayProcessAllocation {
+    let guard = intrusive_pool_lock(&replay_process);
+    let result = intrusive_pool_insert(&replay_process, guard);
+    intrusive_pool_unlock(&replay_process, guard);
+    match result {
+        IntrusivePoolInsertResult::OutOfMemory => { return ReplayProcessAllocation::Failed; }
+        IntrusivePoolInsertResult::Allocated(owner) => {
+            let mut parts: IntrusiveOwnerParts = intrusive_owner_into_parts(&replay_process, owner);
+            return ReplayProcessAllocation::Ready(parts);
+        }
+    }
+}
+
+private fn replay_process_free(words: IntrusiveOwnerParts) {
+    let guard = intrusive_pool_lock(&replay_process);
+    let removed: bool = intrusive_remove_succeeded(intrusive_pool_remove(&replay_process,
+        guard, intrusive_owner_new(&replay_process, words.address, words.generation)));
+    intrusive_pool_unlock(&replay_process, guard);
+    if (removed == false) { uart_puts("replay FAILED: remove\n"); }
+}
+
+private fn replay_process_run(count: usize) {
+    intrusive_pool_init(&replay_process);
+    replay_process_row(count, "empty");
+    for index: usize in 0..<REPLAY_MAX {
+        if (index < count) {
+            match replay_process_allocate() {
+                ReplayProcessAllocation::Failed => { uart_puts("replay FAILED: process allocate\n"); }
+                ReplayProcessAllocation::Ready(words) => { replay_process_words[index] = words; }
+            }
+        }
+    }
+    replay_process_row(count, "full");
+    for index: usize in 0..<REPLAY_MAX {
+        if (index < count && index % 2 == 0) { replay_process_free(replay_process_words[index]); }
+    }
+    replay_process_row(count, "half");
+    for index: usize in 0..<REPLAY_MAX {
+        if (index < count && index % 2 == 0) {
+            match replay_process_allocate() {
+                ReplayProcessAllocation::Failed => { uart_puts("replay FAILED: process refill\n"); }
+                ReplayProcessAllocation::Ready(words) => { replay_process_words[index] = words; }
+            }
+        }
+    }
+    replay_process_row(count, "refill");
+    for step: usize in 0..<REPLAY_MAX {
+        if (step < count) {
+            let index: usize = count - 1 - step;
+            if (index < REPLAY_MAX) { replay_process_free(replay_process_words[index]); }
+        }
+    }
+    replay_process_row(count, "free");
+    let guard = intrusive_pool_lock(&replay_process);
+    let released: usize = intrusive_pool_reclaim(&replay_process, guard);
+    intrusive_pool_unlock(&replay_process, guard);
+}
+
+fn app_main() !{unsafe} {
+    page_allocator_init();
+    replay_process_run(32);
+    replay_region_tcp(&replay_tcp, "tcp", 32, 1, 0);
+    replay_region_retx(&replay_retx, "retx", 32, 2, 0);
+    replay_region_frame(&replay_frame, "frame", 32, 2, 0);
+    replay_region_backing(&replay_backing, "backing", 32, 1, 0);
+    replay_region_image(&replay_image, "image", 32, 1, 0);
+    replay_region_fd_context(&replay_fd_context, "fd_context", 32, 1, 0);
+    replay_region_fd_block(&replay_fd_block, "fd_block", 32, 1, 1);
+    replay_region_object(&replay_object, "object", 32, 1, 1);
+    replay_process_run(128);
+    replay_region_tcp(&replay_tcp, "tcp", 128, 1, 0);
+    replay_region_retx(&replay_retx, "retx", 128, 2, 0);
+    replay_region_frame(&replay_frame, "frame", 128, 2, 0);
+    replay_region_backing(&replay_backing, "backing", 128, 1, 0);
+    replay_region_image(&replay_image, "image", 128, 1, 0);
+    replay_region_fd_context(&replay_fd_context, "fd_context", 128, 1, 0);
+    replay_region_fd_block(&replay_fd_block, "fd_block", 128, 1, 1);
+    replay_region_object(&replay_object, "object", 128, 1, 1);
+    uart_puts("replay provider pages after teardown=");
+    uart_print(page_allocator_live_count()); uart_puts("\n");
+}

@@ -1,0 +1,10 @@
+name	object_bytes	alignment	chunk_pages	retain_empty
+process	872	8	2	1
+tcp	224	8	1	0
+retx	1592	8	2	0
+frame	1528	8	2	0
+backing	40	8	1	0
+image	88	8	1	0
+fd_context	72	8	1	0
+fd_block	528	8	1	1
+object	80	8	1	1

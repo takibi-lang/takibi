@@ -193,10 +193,12 @@ Neither has a representative FD-service workload comparison. The prior
 pin-sharing measurement is evidence about pin-state traffic, not a measured
 FD-lock improvement.
 
-Before relocating these pools, choose between compact storage, explicit
-cache-line separation, or measuring current pool space/live occupancy first
-with storage unchanged. The latter is the recommended next step: retain the
-current allocation and packing baseline while collecting the space evidence.
-A per-CPU allocation front and generation/state compression remain separate
-policy decisions. No pool placement or padding is changed by the two context
+The selected baseline keeps allocation and packing unchanged while measuring
+current pool space and live occupancy first. The endpoint record is in
+`KERNEL_POOL_SPACE_2026-10-05.md`; the separate equal-allocation replay against
+Linux SLUB and FreeBSD UMA is in `POOL_REPLAY_2026-10-05.md`. These experiments
+support retaining the current pool layout while gathering representative
+service evidence; they do not measure false sharing or throughput. A per-CPU
+allocation front and generation/state compression remain separate policy
+decisions. No pool placement or padding is changed by the two context
 migrations above.

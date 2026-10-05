@@ -1,0 +1,10 @@
+#!/bin/busybox sh
+# Run the observation module in a disposable initramfs, then shut down.
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+/bin/busybox mount -t devtmpfs devtmpfs /dev
+/bin/busybox uname -a
+/bin/busybox insmod /linux_module.ko
+status=$?
+echo "pool replay: module_status=$status"
+/bin/busybox poweroff -f
