@@ -793,9 +793,11 @@ python3 scripts/validate_kernel_ddb_qemu.py \
 ```
 
 The QEMU DDB driver also saves `await-timing.jsonl`: UART connection,
-required resume/workload markers and observed prompts use its unchanged
-common driver-start deadline. `continue` expects resumed output rather than
-another prompt. If the scripted BREAK never fires, normal observations end
+required resume/workload markers and observed prompts are measured against
+the total capture ceiling of three inactivity budgets, starting when the
+driver starts. UART bytes renew the inactivity deadline within that ceiling;
+connection itself retains its original fixed budget. `continue` expects
+resumed output rather than another prompt. If the scripted BREAK never fires, normal observations end
 at the transition to postmortem; `await-timing.jsonl.postmortem` records the
 read-only walk against its separate existing budget and start time. Missing
 arrivals remain explicit. More than half a phase's budget used prints a
