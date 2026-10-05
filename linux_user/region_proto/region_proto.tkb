@@ -119,12 +119,23 @@ fn test_locked_table() {
 private let mut connections: RegionPool(Node);
 private let mut page_arena: [u8; 2048];
 
+// Observe the allocator's real headers under the same guard as its callers.
+fn print_pool_space(pool: borrow RegionPoolGuard(Node)[identity]) {
+    let (chunks, capacity, live, bytes) = region_pool_space_stats(pool);
+    uart_puts("space: chunks="); uart_print(chunks);
+    uart_puts(" capacity="); uart_print(capacity);
+    uart_puts(" nonfree="); uart_print(live);
+    uart_puts(" bytes="); uart_print(bytes);
+    uart_puts("\n");
+}
+
 fn test_pool() {
     let RegionOf(u8)::Taken(pages) = region_of(page_arena) else {
         RegionOf(u8)::Gone => { uart_puts("pages: already taken\n"); return; }
     };
     let (first, second) = region_split_static(pages, 1024);
     let pool = region_pool_lock(&connections);
+    print_pool_space(pool);
     match region_pool_grow(pool, first) {
         RegionGrow(Node)::Grown => {}
         RegionGrow(Node)::TooSmall(back) => { region_release(back); }
@@ -145,10 +156,12 @@ fn test_pool() {
     uart_puts("pool: ");
     uart_print(allocated);
     uart_puts(" slots in one chunk\n");
+    print_pool_space(pool);
     match region_pool_grow(pool, second) {             // a second chunk
         RegionGrow(Node)::Grown => {}
         RegionGrow(Node)::TooSmall(back) => { region_release(back); }
     }
+    print_pool_space(pool);
     match region_alloc(pool) {
         RegionAlloc(Node)::Full => { uart_puts("pool: still full\n"); }
         RegionAlloc(Node)::Allocated(slot) => {
@@ -165,6 +178,7 @@ fn test_pool() {
             region_release(bytes);
         }
     }
+    print_pool_space(pool);
     region_pool_unlock(pool);
 }
 
@@ -187,6 +201,7 @@ fn test_pins() {
         RegionAlloc(Node)::Full => { region_pool_unlock(pool); return; }
     };
     region_slot_at(slot).key = 9;
+    print_pool_space(pool);
     let mut h: RegionHandle(Node) = region_give(pool, slot);
     let RegionPinned(Node)::Pinned(first) = region_pin(pool, h) else {
         RegionPinned(Node)::Stale => { region_pool_unlock(pool); return; }
@@ -260,6 +275,7 @@ fn test_pins() {
         }
         RegionRetire(Node)::Pending => { uart_puts("pins: retire waits for the other pin\n"); }
     }
+    print_pool_space(pool);
     match region_pin(pool, h) {                         // retired: no new pins
         RegionPinned(Node)::Stale => { uart_puts("pins: new pin refused after retire\n"); }
         RegionPinned(Node)::Pinned(late) => {
@@ -280,6 +296,12 @@ fn test_pins() {
     uart_puts("pins: live ");
     uart_print(region_pool_live_count(pool));
     uart_puts("\n");
+    print_pool_space(pool);
+    match region_pool_shrink(pool) {
+        RegionShrink(Node)::Nothing => { uart_puts("space: final shrink missing\n"); }
+        RegionShrink(Node)::Chunk(bytes) => { region_release(bytes); }
+    }
+    print_pool_space(pool);
     region_pool_unlock(pool);
 }
 

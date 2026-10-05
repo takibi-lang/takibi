@@ -2964,6 +2964,11 @@ match region_unpin(p) {                          // no pool lock needed
   core avoid waiting on a lock an interrupted core holds.
   `region_pool_empty_chunks(guard)` counts the chunks `region_pool_shrink`
   could give back, for a pool that keeps one against allocation churn.
+  `region_pool_space_stats(guard)` returns `(chunks, capacity, nonfree, bytes)`:
+  total chunk count, slot capacity, non-Free slots (including Out and Dying),
+  and allocated chunk bytes. It borrows the allocation guard and changes no
+  state. Samples from different pools do not form one atomic snapshot; this
+  is neither a peak count nor a count of user payload bytes.
 
 Overloads are chosen by the name of an indexed type, its static indices
 being settled by unification afterwards, and an integer literal argument

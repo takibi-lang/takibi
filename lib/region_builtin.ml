@@ -739,6 +739,26 @@ fn region_pool_live_count(g: borrow @PG@[b]) -> usize !{unsafe} {
     }
     return live;
 }
+
+// Read-only space sample under the allocation guard. Returns chunk count,
+// total slot capacity, non-Free slots (including Out/Dying), and chunk bytes.
+// This neither changes the pool nor makes samples of different pools atomic.
+fn region_pool_space_stats(g: borrow @PG@[b])
+        -> (usize, usize, usize, usize) !{unsafe} {
+    let live: usize = region_pool_live_count(g);
+    let mut chunks: usize = 0;
+    let mut capacity: usize = 0;
+    let mut bytes: usize = 0;
+    let mut chunk: usize = *pool_word(g.pool, 1);
+    while (chunk != 0) {
+        chunks = chunks + 1;
+        capacity = capacity + *pool_word(chunk, 1);
+        bytes = bytes + *pool_word(chunk, 2);
+        chunk = *pool_word(chunk, 0);
+    }
+    return (chunks, capacity, live, bytes);
+}
+
 |}
 
 (* Shared by every instance: a chunk leaving a pool is a byte region again,

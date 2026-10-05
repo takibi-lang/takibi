@@ -3486,6 +3486,25 @@ let infer_tests = [
          }
        }");
 
+  Alcotest.test_case "region pool space: wrong guard type" `Quick
+    (expect_region_error "no overload has exactly matching parameter types"
+      "struct Node { key: usize; value: usize; }
+       let mut pool: RegionPool(Node);
+       fn f() {
+         let value: usize = 0;
+         let stats = region_pool_space_stats(value);
+       }");
+
+  Alcotest.test_case "region pool space: released guard" `Quick
+    (expect_region_error "already consumed"
+      "struct Node { key: usize; value: usize; }
+       let mut pool: RegionPool(Node);
+       fn f() {
+         let g = region_pool_lock(&pool);
+         region_pool_unlock(g);
+         let stats = region_pool_space_stats(g);
+       }");
+
   Alcotest.test_case "region pool: a chunk given and still used" `Quick
     (expect_region_error "already consumed"
       "struct Node { key: usize; value: usize; }

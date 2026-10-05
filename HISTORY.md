@@ -15,6 +15,21 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-10-05: guarded pool space observation
+
+The #675 measurement baseline needs total chunk bytes and capacity, which
+live/empty counts alone cannot supply. A read-only region_pool_space_stats
+borrows the existing allocation guard and returns chunk count, total slot
+capacity, non-Free slots and chunk bytes. It changes no layout, generation
+bits, allocation policy or per-CPU front. Different pools are separate samples,
+not one atomic global snapshot or a peak measurement.
+
+The native region prototype checks empty, full, two-chunk, shrunk, allocated,
+retire-pending and freed/shrunk samples against exact expected output. Compiler
+rejection tests cover a wrong guard type and use after unlock. The ordinary
+current pool representation and guarded traversal remain the trusted base;
+no new ownership rule is introduced.
+
 ## 2026-10-05: per-CPU image context with closed target/source states
 
 The second #674 migration combines ext2 staging and target-root/set arrays

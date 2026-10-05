@@ -3,9 +3,14 @@ arena: 64 nodes whole again
 pool: key 42
 pool: old handle refused
 shared: given back under a second lock
+space: chunks=0 capacity=0 nonfree=0 bytes=0
 pool: 40 slots in one chunk
+space: chunks=1 capacity=40 nonfree=40 bytes=1024
+space: chunks=2 capacity=80 nonfree=40 bytes=2048
 pool: grew
 pool: gave back 1024 bytes
+space: chunks=1 capacity=40 nonfree=40 bytes=1024
+space: chunks=1 capacity=40 nonfree=1 bytes=1024
 pins: by address and generation
 pins: wrong generation refused
 pins: current handle matches
@@ -13,6 +18,9 @@ pins: walk finds 1
 pins: two holders see key 9
 pins: take refused while pinned
 pins: retire waits for the other pin
+space: chunks=1 capacity=40 nonfree=1 bytes=1024
 pins: new pin refused after retire
 pins: last unpin frees it
 pins: live 0
+space: chunks=1 capacity=40 nonfree=0 bytes=1024
+space: chunks=0 capacity=0 nonfree=0 bytes=0
