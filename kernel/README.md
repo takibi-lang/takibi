@@ -31,8 +31,9 @@ and the development container verifies the response with real `curl`.
   CPU/device token handoff for allocations declared with `dma_fixed`.
 - A pooled scheduler table (`ProcessRecord`) gives each live process a
   dedicated address-space root, ASID, and unified descriptor table. There is
-  no process-count constant: a record is a pool allocation, so the page
-  allocator is the only limit (`RESOURCE_LIMITS.md` carries the full table). Kernel
+  no process-count constant: records grow with page capacity, while required
+  built-in pools also have finite lifetime generation budgets
+  (`RESOURCE_LIMITS.md` carries the full table). Kernel
   stacks are 16 KiB, allocated on a slot's first use as the upper half of a
   32 KiB-aligned page run whose lower half contains an overflow instead of
   letting it reach a neighbour; page-table pages are directly owned by each

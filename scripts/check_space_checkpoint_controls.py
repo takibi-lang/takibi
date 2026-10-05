@@ -4,14 +4,14 @@ import copy
 from pathlib import Path
 import sys
 sys.dont_write_bytecode = True
-from space_checkpoint import production_source, source_digest, validate_review
+from space_checkpoint import REVIEW, production_source, source_digest, validate_review
 from pass_line import CaseCount, report_pass
 
 
 def main():
     entries = {'kernel/kernel/fd_table.tkb': '1' * 40,
                'lib/region_builtin.ml': '2' * 40,
-               'docs/result.tsv': '3' * 40}
+               'docs/result.tsv': '3' * 40, REVIEW: '5' * 40}
     digest = source_digest(entries)
     good = dict(date='2026-10-05', event='milestone', decision='measured',
                 source_sha256=digest, workload='open/fork/close live and teardown',
@@ -43,7 +43,7 @@ def main():
                        ('workload', ''), ('next_trigger', ''),
                        ('evidence', []), ('evidence', ['docs/missing.tsv']),
                        ('evidence', ['../result.tsv']), ('evidence', [3]),
-                       ('evidence', 'docs/result.tsv')]:
+                       ('evidence', 'docs/result.tsv'), ('evidence', [REVIEW])]:
         item = copy.deepcopy(good)
         item[key] = value
         bad.append(item)

@@ -163,8 +163,9 @@ measurements first.
    #149, #567, #539, #536, #624, #132; #13 for `Phi`, with #216 and #109 as
    candidate examples, only after the solver threshold is met. Also deferred:
    #58 (static whole-call-path stack bounds; lowered by the maintainer on
-   2026-10-04), #698 (metadata mutation exhaustion), and #699 (host-side EL0
-   postmortem symbolization).
+   2026-10-04), #698 (metadata mutation exhaustion), #699 (host-side EL0
+   postmortem symbolization), #709 (permanent table generation exhaustion),
+   and #710 (intrusive pool generation exhaustion).
 
 Items are ordered within each band as well as between bands. The deferred
 items stay listed so a changed premise can bring them back into the queue.
