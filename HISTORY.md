@@ -15,6 +15,30 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-10-05: indexed FD-context authority and valid record minting
+
+The final #696 slice makes FD ensure return a must-use indexed ready/missing
+result carrying a private erased `ProcessFdContextExists[process]` view.
+Heap range/break configuration and mmap take/release borrow that authority.
+Ordinary syscalls obtain it through a nonallocating checked lookup; creation
+and probes retain explicit allocation and rollback. Other FD writes already
+match a checked pool pin before touching the context. No compiler capability
+is added, and record lifetime between validation and mutation still relies
+on process ownership.
+
+Image ensure and FD ensure/lookup refuse invalid process slots before reading
+their handles, because a dead-slot fallback must not mint evidence for the
+requested slot. A failed image ensure pins explicitly absent handle words
+for its read-only fallback rather than querying that invalid slot again.
+A common boot probe checks all three refusals and unchanged image-record,
+FD-context and physical-page counts. Real-source compiler controls cover
+unensured writes, wrong-record views and external minting for all three pools.
+
+The syscall dispatch edit affects only anonymous mmap's evidence lookup.
+Re-read and restamp Wait4Block.Wait4Decide, StackOwnership.Wait4Block and
+RecordLifetime.ExecWrite/ExecWriteEnd: wait4 publication, stack ownership and
+the run-lock command-line update remain the same protocol actions.
+
 ## 2026-10-05: indexed erased authority for process-image writes
 
 The process-image slice of #696 gives successful ensure an erased private

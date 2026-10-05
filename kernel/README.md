@@ -66,6 +66,15 @@ different root or skip a failed ensure. Clone, image mapping and teardown
 share one evidence value across their writes; each setter still takes a fresh
 pool pin. Record lifetime while borrowing remains the process owner's duty.
 
+FD heap/brk configuration and mmap bitmap mutation similarly borrow
+`ProcessFdContextExists[process]`. `unified_fd_context_ensure` allocates when
+needed, while `unified_fd_context_lookup` validates an existing record without
+allocation. Both return the indexed, must-use `ProcessFdContextReady` result.
+Other FD writers already require a successfully matched pool pin before
+accessing the context. Image/FD evidence cannot be minted for an invalid
+process slot. A common boot probe checks that these refusals allocate no
+records or pages on either platform.
+
 ### AArch64 alignment contract
 
 After stage-1 translation is enabled, kernel Normal memory runs with
@@ -540,7 +549,7 @@ probe/board setup. A successful run includes:
 [kernel/rpi5] BusyBox httpd curl passed
 [kernel/rpi5] second BusyBox httpd curl passed
 [kernel/rpi5] userspace connected I/O passed
-PASS kernel/rpi5 (65 views, one boot)
+PASS kernel/rpi5 (66 views, one boot)
 ```
 
 It tests negative and positive ARP/ICMP behavior, TCP lifecycle, USB ext2

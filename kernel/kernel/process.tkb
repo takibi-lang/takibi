@@ -3014,17 +3014,20 @@ private fn scheduled_process_alloc_finish(slot: usize, generation: usize,
             { let mut __creating_result: ScheduledProcessAllocResult = ScheduledProcessAllocResult::Full; scheduled_process_owner_drop(creating); return __creating_result; }
         }
     }
-    if (unified_fd_context_ensure(slot) == false) {
-        kernel_boot_log_resource_exhausted(
-            "physical page allocator" as *u8,
-            page_allocator_total_count());
-        process_image_record_release(slot);
-        address_space_release_root(scheduled_process_address_space_root_owned(creating));
-        address_space_backing_release(scheduled_process_address_space_root_owned(creating));
-        let rollback_guard = process_run_lock();
-        scheduled_process_slot_remove(rollback_guard, slot);
-        process_run_unlock(rollback_guard);
-        { let mut __creating_result: ScheduledProcessAllocResult = ScheduledProcessAllocResult::Full; scheduled_process_owner_drop(creating); return __creating_result; }
+    match unified_fd_context_ensure(slot) {
+        ProcessFdContextReady::Ready(evidence) => {}
+        ProcessFdContextReady::Missing => {
+            kernel_boot_log_resource_exhausted(
+                "physical page allocator" as *u8,
+                page_allocator_total_count());
+            process_image_record_release(slot);
+            address_space_release_root(scheduled_process_address_space_root_owned(creating));
+            address_space_backing_release(scheduled_process_address_space_root_owned(creating));
+            let rollback_guard = process_run_lock();
+            scheduled_process_slot_remove(rollback_guard, slot);
+            process_run_unlock(rollback_guard);
+            { let mut __creating_result: ScheduledProcessAllocResult = ScheduledProcessAllocResult::Full; scheduled_process_owner_drop(creating); return __creating_result; }
+        }
     }
     let bottom: usize = kernel_stack_bottom(slot);
     // Unreachable given the branch above stored only a base

@@ -1237,7 +1237,12 @@ fn kernel_syscall_heap_break() -> usize {
 }
 
 fn kernel_syscall_heap_set(value: usize) -> bool {
-    match unified_process_heap_configure(kernel_syscall_process_slot(), value) {
+    let process: usize = kernel_syscall_process_slot();
+    let evidence = match unified_fd_context_lookup(process) {
+        ProcessFdContextReady::Missing => { return false; }
+        ProcessFdContextReady::Ready(ready) => { ready }
+    };
+    match unified_process_heap_configure(process, evidence, value) {
         UnifiedFdResult::Invalid => { return false; }
         UnifiedFdResult::Ok => { return true; }
     }
@@ -1249,13 +1254,18 @@ fn kernel_syscall_heap_set(value: usize) -> bool {
 fn syscall_munmap_pages(address: usize, length: usize) {
     let (span_ok, first, last) = user_range_l3_span(address, length);
     if (span_ok == false) { return; }
+    let process: usize = kernel_syscall_process_slot();
+    let evidence = match unified_fd_context_lookup(process) {
+        ProcessFdContextReady::Missing => { return; }
+        ProcessFdContextReady::Ready(ready) => { ready }
+    };
     let mut root: AddressSpaceRoot = kernel_process_current_root();
     let slot: usize = address_space_root_slot(root);
     let mut index: usize = first;
     while (index <= last) {
         if (user_page_writable(address_space_pte_read(root, index))) {
             unified_process_mmap_release_page(
-                kernel_syscall_process_slot(),
+                process, evidence,
                 USER_TEXT_VA + index * PAGE_SIZE);
         }
         index = index + 1;
@@ -1281,8 +1291,13 @@ fn kernel_syscall_heap_limit() -> usize {
 // parent shell's descriptors or global TCP state.
 fn kernel_syscall_process_configure_current(
         heap_start: usize, heap_limit: usize) {
+    let process: usize = kernel_syscall_process_slot();
+    let evidence = match unified_fd_context_lookup(process) {
+        ProcessFdContextReady::Missing => { return; }
+        ProcessFdContextReady::Ready(ready) => { ready }
+    };
     match unified_process_heap_range_configure(
-            kernel_syscall_process_slot(), heap_start, heap_limit) {
+            process, evidence, heap_start, heap_limit) {
         UnifiedFdResult::Invalid => {}
         UnifiedFdResult::Ok => {}
     }
@@ -1298,9 +1313,12 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize)
     // get an fd context from the allocation path, and has to be given one
     // here. It got one for free while contexts were an array with an entry
     // per slot whether or not a process occupied it.
-    if (unified_fd_context_ensure(0) == false) {
-        kernel_boot_log_resource_exhausted(
-            "physical page allocator" as *u8, page_allocator_total_count());
+    match unified_fd_context_ensure(0) {
+        ProcessFdContextReady::Ready(evidence) => {}
+        ProcessFdContextReady::Missing => {
+            kernel_boot_log_resource_exhausted(
+                "physical page allocator" as *u8, page_allocator_total_count());
+        }
     }
     match process_image_record_ensure(0) {
         ProcessImageRecordReady::Ready(evidence) => {}
@@ -1317,9 +1335,14 @@ fn kernel_syscall_process_configure(heap_start: usize, heap_limit: usize)
         }
         UnifiedOpenResult::Ok => {}
     }
-    match unified_process_heap_range_configure(0, heap_start, heap_limit) {
-        UnifiedFdResult::Invalid => {}
-        UnifiedFdResult::Ok => {}
+    match unified_fd_context_lookup(0) {
+        ProcessFdContextReady::Missing => {}
+        ProcessFdContextReady::Ready(evidence) => {
+            match unified_process_heap_range_configure(0, evidence, heap_start, heap_limit) {
+                UnifiedFdResult::Invalid => {}
+                UnifiedFdResult::Ok => {}
+            }
+        }
     }
     syscall_test_evidence_reset_read_uart_waits();
     syscall_test_lifecycle_persistent_shell_clear();
@@ -7008,7 +7031,14 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         // to advance the break itself and munmap did nothing, so every
         // mapping was permanent and a long-lived process ran out of arena
         // with almost nothing live.
-        match unified_process_mmap_take(kernel_syscall_process_slot(),
+        let process: usize = kernel_syscall_process_slot();
+        let evidence = match unified_fd_context_lookup(process) {
+            ProcessFdContextReady::Missing => {
+                return SyscallAction::Resume(LINUX_ENOMEM);
+            }
+            ProcessFdContextReady::Ready(ready) => { ready }
+        };
+        match unified_process_mmap_take(process, evidence,
                                         rounded / PAGE_SIZE) {
             UnifiedMmapResult::Full => {
                 return SyscallAction::Resume(LINUX_ENOMEM);
@@ -7429,7 +7459,12 @@ fn syscall_vectored_prefix_wait_probe(address: usize, slot: usize,
 fn syscall_vectored_inetd_probe(address: usize) -> bool !{unsafe} {
     let process: usize = kernel_syscall_process_slot();
     // The preceding process-table probe may have released root 0's context.
-    if (unified_fd_context_ensure(process) == false) { return false; }
+    match unified_fd_context_ensure(process) {
+        ProcessFdContextReady::Ready(evidence) => {}
+        ProcessFdContextReady::Missing => {
+            return false;
+        }
+    }
     let saved_fd: usize = match unified_fd_alloc(process, 3) {
         UnifiedFdAllocResult::Full => { return false; }
         UnifiedFdAllocResult::Allocated(fd) => { fd }

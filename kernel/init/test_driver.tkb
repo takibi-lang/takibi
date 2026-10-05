@@ -1049,7 +1049,34 @@ fn httpd_image_mapping_check(httpd: Ext2ExecImage,
     return HttpdImageMapCheckResult::Verified;
 }
 
+private fn kernel_record_existence_probe() -> bool {
+    let invalid: usize = 0xFFFFFFFFFFFFFFFF;
+    let images: usize = process_image_record_live_count();
+    let contexts: usize = unified_fd_context_live_count();
+    let pages: usize = page_allocator_live_count();
+    match process_image_record_ensure(invalid) {
+        ProcessImageRecordReady::Missing => {}
+        ProcessImageRecordReady::Ready(evidence) => { return false; }
+    }
+    match unified_fd_context_ensure(invalid) {
+        ProcessFdContextReady::Missing => {}
+        ProcessFdContextReady::Ready(evidence) => { return false; }
+    }
+    match unified_fd_context_lookup(invalid) {
+        ProcessFdContextReady::Missing => {}
+        ProcessFdContextReady::Ready(evidence) => { return false; }
+    }
+    return process_image_record_live_count() == images &&
+        unified_fd_context_live_count() == contexts &&
+        page_allocator_live_count() == pages;
+}
+
 fn kernel_test_common_probes() {
+    if (kernel_record_existence_probe()) {
+        kernel_boot_log("record existence: invalid slots refused without allocation\n");
+    } else {
+        kernel_boot_log("record existence: failed\n");
+    }
     if (scheduled_process_table_probe()) {
         // Printed from the constant rather than written into the string:
         // the previous version said 3968 for as long as that was true and
@@ -1221,7 +1248,10 @@ fn kernel_test_driver_run() {
     // bootstrap legitimately holds both for the life of the kernel, and
     // "the bootstrap has them from boot" is what every entry point in
     // kernel/kernel/fd_table.tkb already assumes.
-    let fd_context_ready: bool = unified_fd_context_ensure(0);
+    let fd_context_ready: bool = match unified_fd_context_ensure(0) {
+        ProcessFdContextReady::Missing => { false }
+        ProcessFdContextReady::Ready(evidence) => { true }
+    };
     let image_record_ready: bool = match process_image_record_ensure(0) {
         ProcessImageRecordReady::Missing => { false }
         ProcessImageRecordReady::Ready(evidence) => { true }

@@ -592,8 +592,42 @@ private fn fd_blocks_release(ctx: borrow *ProcessFdContext) !{unsafe} {
 
 // Called from scheduled_process_alloc, which owns the rollback if this
 // fails. Idempotent: a slot that already has a live context keeps it.
-fn unified_fd_context_ensure(process: usize) -> bool !{unsafe} {
-    if (fd_context_address(process) != 0) { return true; }
+// Successful validation/publication mints only this process's erased authority.
+// Process ownership keeps the record live while the caller borrows it.
+private affine view ProcessFdContextExists[process: usize];
+
+must_use variant ProcessFdContextReady[process: usize] {
+    Missing;
+    Ready(ProcessFdContextExists[process]);
+}
+
+fn unified_fd_context_lookup(process: usize @ identity)
+        -> ProcessFdContextReady[identity] !{unsafe} {
+    if (scheduled_process_slot_valid(process) == false) {
+        return ProcessFdContextReady::Missing;
+    }
+    match fd_context_pin(&fd_context_pool, process) {
+        RegionPinned(ProcessFdContext)::Stale => {
+            return ProcessFdContextReady::Missing;
+        }
+        RegionPinned(ProcessFdContext)::Pinned(pin) => {
+            fd_context_unpin(pin);
+            return ProcessFdContextReady::Ready(view ProcessFdContextExists[identity]);
+        }
+    }
+}
+
+fn unified_fd_context_ensure(process: usize @ identity)
+        -> ProcessFdContextReady[identity] !{unsafe} {
+    if (scheduled_process_slot_valid(process) == false) {
+        return ProcessFdContextReady::Missing;
+    }
+    match unified_fd_context_lookup(process) {
+        ProcessFdContextReady::Ready(evidence) => {
+            return ProcessFdContextReady::Ready(evidence);
+        }
+        ProcessFdContextReady::Missing => {}
+    }
     let guard = fd_context_pool_lock(&fd_context_pool);
     match region_alloc(guard) {
         RegionAlloc(ProcessFdContext)::Allocated(fresh) => {
@@ -612,16 +646,16 @@ fn unified_fd_context_ensure(process: usize) -> bool !{unsafe} {
         }
     }
     fd_context_pool_unlock(guard);
-    return false;
+    return ProcessFdContextReady::Missing;
 }
 
 // A fresh, zeroed context made Live; its handle goes into the process
 // record. Zeroed is the empty table: UnifiedFdKind::Empty is tag zero and
 // the heap fields start at 0.
 private fn fd_context_publish(pool: *RegionPool(ProcessFdContext) @ contexts,
-                              process: usize,
+                              process: usize @ identity,
                               fresh: sink RegionSlot(ProcessFdContext)[contexts, k])
-        -> bool !{unsafe} {
+        -> ProcessFdContextReady[identity] !{unsafe} {
     region_slot_zero(fresh);
     let ctx: *ProcessFdContext = region_slot_at(fresh);
     // GitHub issue #393: a process starts with Linux's own RLIMIT_NOFILE
@@ -634,7 +668,7 @@ private fn fd_context_publish(pool: *RegionPool(ProcessFdContext) @ contexts,
     fd_context_pool_unlock(guard);
     scheduled_process_set_fd_context(
         process, region_handle_address(handle), region_handle_generation(handle));
-    return true;
+    return ProcessFdContextReady::Ready(view ProcessFdContextExists[identity]);
 }
 
 private fn fd_context_pool_grow(
@@ -1328,7 +1362,8 @@ fn unified_fd_table_init() !{unsafe} {
 fn unified_fd_context_pool_init() {}
 
 fn unified_process_heap_range_configure(
-        process: usize, start: usize, limit: usize) -> UnifiedFdResult {
+        process: usize @ identity,
+        evidence: borrow ProcessFdContextExists[identity], start: usize, limit: usize) -> UnifiedFdResult {
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address != 0 && start <= limit) {
         let RegionPinned(ProcessFdContext)::Pinned(ctx_pin) =
@@ -1346,7 +1381,8 @@ fn unified_process_heap_range_configure(
     return UnifiedFdResult::Invalid;
 }
 
-fn unified_process_heap_configure(process: usize, value: usize)
+fn unified_process_heap_configure(process: usize @ identity,
+        evidence: borrow ProcessFdContextExists[identity], value: usize)
         -> UnifiedFdResult {
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address != 0) {
@@ -1412,7 +1448,8 @@ must_use variant UnifiedMmapResult {
 // Take `pages` contiguous free pages above the break, as high as they fit,
 // so brk keeps the room below. The caller zeroes them: a page given back
 // by munmap still holds what its last mapping wrote.
-fn unified_process_mmap_take(process: usize, pages: usize)
+fn unified_process_mmap_take(process: usize @ identity,
+        evidence: borrow ProcessFdContextExists[identity], pages: usize)
         -> UnifiedMmapResult {
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0 || pages == 0) { return UnifiedMmapResult::Full; }
@@ -1446,7 +1483,8 @@ fn unified_process_mmap_take(process: usize, pages: usize)
 
 // munmap of one page, by address. A page outside the arena, or one no
 // mapping holds, is left alone, as Linux leaves an unmapped hole.
-fn unified_process_mmap_release_page(process: usize, address: usize) {
+fn unified_process_mmap_release_page(process: usize @ identity,
+        evidence: borrow ProcessFdContextExists[identity], address: usize) {
     let ctx_address: usize = fd_context_address(process);
     if (ctx_address == 0) { return; }
     let RegionPinned(ProcessFdContext)::Pinned(ctx_pin) =
@@ -3059,7 +3097,12 @@ fn unified_object_pool_probe() -> bool !{unsafe} {
 fn unified_object_ref_ceiling_probe() -> bool !{unsafe} {
     unified_fd_table_init();
     unified_fd_context_release(0);
-    if (unified_fd_context_ensure(0) == false) { return false; }
+    match unified_fd_context_ensure(0) {
+        ProcessFdContextReady::Ready(evidence) => {}
+        ProcessFdContextReady::Missing => {
+            return false;
+        }
+    }
     if (unified_object_ref_bound() != 0) { return false; }
     match unified_object_alloc_first(UnifiedFdKind::OpenFile) {
         UnifiedObjectResult::Invalid => { return false; }
@@ -3105,7 +3148,10 @@ fn unified_object_ref_ceiling_probe() -> bool !{unsafe} {
             if (extra == 0) { ok = false; }
             if (ok) {
                 unified_fd_context_release(extra);
-                if (unified_fd_context_ensure(extra) == false) { ok = false; }
+                match unified_fd_context_ensure(extra) {
+                    ProcessFdContextReady::Ready(evidence) => {}
+                    ProcessFdContextReady::Missing => { ok = false; }
+                }
             }
             if (ok) {
                 match unified_object_alloc_first(UnifiedFdKind::OpenFile) {
@@ -3177,7 +3223,12 @@ const FD_TABLE_PROBE_COUNT: usize = 40;
 fn unified_fd_table_growth_probe() -> bool !{unsafe} {
     unified_fd_table_init();
     unified_fd_context_release(0);
-    if (unified_fd_context_ensure(0) == false) { return false; }
+    match unified_fd_context_ensure(0) {
+        ProcessFdContextReady::Ready(evidence) => {}
+        ProcessFdContextReady::Missing => {
+            return false;
+        }
+    }
     match unified_object_alloc_first(UnifiedFdKind::OpenFile) {
         UnifiedObjectResult::Invalid => { return false; }
         UnifiedObjectResult::Full => { return false; }
@@ -3489,9 +3540,12 @@ fn fd_refcount_contention_probe() -> bool !{unsafe} {
         // correctly refused by the bound it was ignoring. Installing the
         // object is also the more faithful arrangement: a shared object
         // with a descriptor pointing at it is what the counter is for.
-        if (unified_fd_context_ensure(0) == false) {
-            fd_refcount_contention_report("no-context" as *u8, 0, 0);
-            return false;
+        match unified_fd_context_ensure(0) {
+            ProcessFdContextReady::Ready(evidence) => {}
+            ProcessFdContextReady::Missing => {
+                fd_refcount_contention_report("no-context" as *u8, 0, 0);
+                return false;
+            }
         }
         match unified_fd_install(0, FD_REFCOUNT_PROBE_FD,
                                  fd_refcount_probe_handle.slot,
@@ -3651,7 +3705,12 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
     // Released first, so this is a fresh zeroed table rather than
     // whatever an earlier probe stage left in the slot.
     unified_fd_context_release(0);
-    if (unified_fd_context_ensure(0) == false) { return false; }
+    match unified_fd_context_ensure(0) {
+        ProcessFdContextReady::Ready(evidence) => {}
+        ProcessFdContextReady::Missing => {
+            return false;
+        }
+    }
     // ...and a second process's, which the clone stage below writes into.
     // It used to be the bare slot `1`, which named a process only while
     // every index below the ceiling did; a slot is a live process's record
@@ -3659,10 +3718,13 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
     let child: usize = scheduled_process_probe_slot_acquire();
     if (child == 0) { return false; }
     unified_fd_context_release(child);
-    if (unified_fd_context_ensure(child) == false) {
-        scheduled_process_probe_slot_release(child);
-        return false;
-    }
+    let child_context = match unified_fd_context_ensure(child) {
+        ProcessFdContextReady::Ready(evidence) => { evidence }
+        ProcessFdContextReady::Missing => {
+            scheduled_process_probe_slot_release(child);
+            return false;
+        }
+    };
     let probe_address: usize = fd_context_address(0);
     if (probe_address == 0) { scheduled_process_probe_slot_release(child);
  return false; }
@@ -3769,7 +3831,7 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
  { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; } }
         UnifiedFdResult::Ok => {}
     }
-    match unified_process_heap_configure(child, 0x50001000) {
+    match unified_process_heap_configure(child, child_context, 0x50001000) {
         UnifiedFdResult::Invalid => { scheduled_process_probe_slot_release(child);
  { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; } }
         UnifiedFdResult::Ok => {}

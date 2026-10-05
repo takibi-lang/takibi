@@ -92,6 +92,47 @@ private fn image_exists_control() -> ProcessImageRecordExists[0] {
         cases.append((f"image {field} without evidence", image,
                       f"\nprivate fn image_exists_control() {{ process_image_set_{field}(0, {value}); }}\n",
                       (f"process_image_set_{field} expects 3 argument(s), got 2",)))
+    fd = Path("kernel/kernel/fd_table.tkb")
+    cases.extend([
+        ("FD borrowed evidence", fd, """
+private fn fd_exists_control() {
+    let evidence = match unified_fd_context_ensure(0) {
+        ProcessFdContextReady::Missing => { return; }
+        ProcessFdContextReady::Ready(ready) => { ready }
+    };
+    match unified_process_heap_configure(0, evidence, 0) {
+        UnifiedFdResult::Invalid => {}
+        UnifiedFdResult::Ok => {}
+    }
+    unified_process_mmap_release_page(0, evidence, 0);
+}
+""", None),
+        ("FD wrong process", fd, """
+private fn fd_exists_control() {
+    let evidence = match unified_fd_context_ensure(0) {
+        ProcessFdContextReady::Missing => { return; }
+        ProcessFdContextReady::Ready(ready) => { ready }
+    };
+    unified_process_mmap_release_page(1, evidence, 0);
+}
+""", ("static value mismatch",)),
+        ("foreign FD view mint", Path(args.sources[-1]), """
+private fn fd_exists_control() -> ProcessFdContextExists[0] {
+    return view ProcessFdContextExists[0];
+}
+""", ("private", "ProcessFdContextExists")),
+    ])
+    for function, extra, result in [
+            ("unified_process_heap_range_configure", "0, 0", "UnifiedFdResult"),
+            ("unified_process_heap_configure", "0", "UnifiedFdResult"),
+            ("unified_process_mmap_take", "1", "UnifiedMmapResult"),
+            ("unified_process_mmap_release_page", "0", None)]:
+        count = 4 if "range" in function else 3
+        signature = "" if result is None else f" -> {result}"
+        statement = "" if result is None else "return "
+        cases.append((f"FD {function} without evidence", fd,
+                      f"\nprivate fn fd_exists_control(){signature} {{ {statement}{function}(0, {extra}); }}\n",
+                      (f"{function} expects {count} argument(s), got {count - 1}",)))
     ran = CaseCount()
     with tempfile.TemporaryDirectory(prefix="takibi-backing-exists-") as tmp:
         overlay = Path(tmp)
@@ -124,7 +165,7 @@ private fn image_exists_control() -> ProcessImageRecordExists[0] {
                 return 1
             target.unlink()
             target.symlink_to(repo / edited)
-    report_pass("backing-exists", "real kernel accepts borrowed evidence and rejects unensured writes, wrong-root image evidence and foreign minting", cases=ran.ran)
+    report_pass("backing-exists", f"{ran.ran} real-kernel cases accept borrowed evidence and reject unensured writes, wrong-record evidence and foreign minting", cases=ran.ran)
     return 0
 
 

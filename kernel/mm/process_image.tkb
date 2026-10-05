@@ -296,7 +296,8 @@ private fn process_image_record_pin_ensured(
         -> RegionPinned(ProcessImageRecord)[images] !{unsafe} {
     match process_image_record_ensure(root) {
         ProcessImageRecordReady::Missing => {
-            return process_image_record_pin(pool, root);
+            let mut absent: ProcessPoolHandleWords = { 0, 0 };
+            return process_image_record_pin_words(pool, absent);
         }
         ProcessImageRecordReady::Ready(evidence) => {
             return process_image_record_pin(pool, root);
@@ -563,6 +564,9 @@ must_use variant ProcessImageRecordReady[root: usize] {
 
 fn process_image_record_ensure(root: usize @ identity)
         -> ProcessImageRecordReady[identity] !{unsafe} {
+    if (scheduled_process_slot_valid(root) == false) {
+        return ProcessImageRecordReady::Missing;
+    }
     match process_image_record_pin(&process_image_pool, root) {
         RegionPinned(ProcessImageRecord)::Pinned(pin) => {
             process_image_record_unpin(pin);
