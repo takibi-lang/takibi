@@ -577,6 +577,25 @@ paths and is retained with all subsequent samples. No timing threshold is a
 verdict on either platform: the common view checks completed work, and only
 RPi5 timings inform performance decisions.
 
+`tcp pool cost:` adds three 4,096-operation samples. Each online core owns a
+distinct private connection. `lock=serial/parallel` compares empty production
+pool-lock acquisition/release on CPU 0 alone with the slowest worker's total
+when all online CPUs start through a release/acquire rendezvous.
+`owner=serial/parallel` compares full production owner take/put in the same
+way. All workers must complete every acquisition before CPU 0 frees the
+connections. Worker mailboxes have a full cache line of unused padding
+between their active fields. The rendezvous bounds progress by peer timer
+ticks, and failure retains the connections rather than freeing storage a
+late worker might still use.
+
+These tight-loop samples isolate contention on the pool lock only in the
+empty-lock interval. Owner intervals also include handle validation, pins,
+and object locks; their state words can share cache lines. They do not
+isolate false sharing or establish a network-throughput improvement. QEMU
+runs with its runtime online prefix, and RPi5 supplies the four-core costs.
+One retained record per sample keeps the measurement inside the boot log's
+fixed capacity; the common view checks completed work, never a timing bound.
+
 QEMU integration runners also save `busy-pair-profile.json`. It records the
 explicit post-warm-up interval, target, active kernel CPU count, Git commit,
 input size, completed iterations, PIDs, elapsed counter cycles, and xorshift

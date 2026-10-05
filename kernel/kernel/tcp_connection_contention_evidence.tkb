@@ -6,6 +6,7 @@
 // online. It tests exclusion and handoff, not network-device timing.
 use "kernel/lib/execution_model.tkb";
 use "kernel/net/tcp.tkb";
+use "kernel/lib/atomic_word.tkb";
 
 private let mut tcp_owner_probe_armed: usize;
 private let mut tcp_owner_probe_phase: usize;
@@ -210,5 +211,179 @@ fn tcp_pin_cost_evidence() -> TcpPinCostEvidence !{unsafe} {
     uart_put_udec(digest);
     kernel_boot_log("\n");
     if (digest != 13525568) { return TcpPinCostEvidence::Failed; }
+    return TcpPinCostEvidence::Complete;
+}
+
+// Current limitations (2026-10-05): online cores use distinct private
+// connections, but their packed state words may share cache lines. Only the
+// empty pool-lock interval isolates the global lock; owner timing includes
+// validation, pin/unpin and the uncontended per-connection lock.
+// Execution model: CPU 0 publishes each round; each CPU writes only its own
+// mailbox. A release completion follows every result store. Padding separates
+// CPU mailboxes by more than one physical cache line, even without alignment.
+struct no_copy TcpPoolCostMailbox {
+    address: AtomicWord;
+    generation: AtomicWord;
+    ready: AtomicWord;
+    done: AtomicWord;
+    ticks: AtomicWord;
+    completed: AtomicWord;
+    padding: [usize; 8];
+}
+private let mut tcp_pool_cost_mailboxes: [TcpPoolCostMailbox; KERNEL_MAX_CORES];
+private let mut tcp_pool_cost_round: AtomicWord;
+private let mut tcp_pool_cost_go: AtomicWord;
+private let mut tcp_pool_cost_mode: AtomicWord;
+
+private fn tcp_pool_cost_work(cpu: {0..<KERNEL_MAX_CORES as usize}, mode: usize)
+        !{unsafe} {
+    let mut completed: usize = 0;
+    let mut ticks: i64 = 0;
+    if (mode == 0) {
+        ticks = tcp_connection_pool_lock_cost();
+        completed = 4096;
+    } else {
+        let address: usize = atomic_word_load(&tcp_pool_cost_mailboxes[cpu].address);
+        let generation: usize = atomic_word_load(&tcp_pool_cost_mailboxes[cpu].generation);
+        let start: i64 = tcp_pin_cost_clock();
+        for operation: usize in 0..<4096 {
+            match tcp_connection_take(address, generation) {
+                TcpConnectionTakeResult::Missing => {}
+                TcpConnectionTakeResult::Ready(owner) => {
+                    completed = completed + 1;
+                    tcp_connection_put(owner);
+                }
+            }
+        }
+        ticks = tcp_pin_cost_clock() - start;
+    }
+    atomic_word_store(&tcp_pool_cost_mailboxes[cpu].ticks, ticks as usize);
+    atomic_word_store(&tcp_pool_cost_mailboxes[cpu].completed, completed);
+}
+
+fn tcp_pool_cost_secondary_poll(raw_cpu: usize) !{unsafe} {
+    if (raw_cpu >= KERNEL_MAX_CORES || raw_cpu == 0) { return; }
+    let cpu: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
+    let round: usize = atomic_word_load(&tcp_pool_cost_round);
+    if (round == 0 || atomic_word_load(&tcp_pool_cost_mailboxes[cpu].done) == round) {
+        return;
+    }
+    let mode: usize = atomic_word_load(&tcp_pool_cost_mode);
+    atomic_word_store(&tcp_pool_cost_mailboxes[cpu].ready, round);
+    let start_ticks: usize = kernel_tick_count_of(0);
+    while (atomic_word_load(&tcp_pool_cost_go) != round) {
+        if (kernel_tick_count_of(0) - start_ticks > 200) {
+            atomic_word_store(&tcp_pool_cost_mailboxes[cpu].completed, 0);
+            atomic_word_store(&tcp_pool_cost_mailboxes[cpu].done, round);
+            return;
+        }
+    }
+    tcp_pool_cost_work(cpu, mode);
+    atomic_word_store(&tcp_pool_cost_mailboxes[cpu].done, round);
+}
+
+must_use variant TcpPoolCostResult { Failed; Measured(usize); }
+
+// Wake-and-recheck rendezvous, bounded by peer timer progress. Failure
+// retains connections: it never frees storage a late participant may use.
+private fn tcp_pool_cost_parallel(round: usize, mode: usize, online: usize)
+        -> TcpPoolCostResult !{unsafe} {
+    atomic_word_store(&tcp_pool_cost_mode, mode);
+    atomic_word_store(&tcp_pool_cost_round, round);
+    let mut peer_ticks: [usize; KERNEL_MAX_CORES];
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        peer_ticks[cpu] = kernel_tick_count_of(cpu);
+    }
+    let mut arrived: bool = false;
+    while (arrived == false) {
+        arrived = true;
+        for cpu: usize in 1..<KERNEL_MAX_CORES {
+            if (cpu < online && atomic_word_load(&tcp_pool_cost_mailboxes[cpu].ready) != round) {
+                arrived = false;
+                if (kernel_tick_count_of(cpu) - peer_ticks[cpu] > 200) {
+                    return TcpPoolCostResult::Failed;
+                }
+            }
+        }
+    }
+    atomic_word_store(&tcp_pool_cost_go, round);
+    tcp_pool_cost_work(0, mode);
+    atomic_word_store(&tcp_pool_cost_mailboxes[0].done, round);
+    let mut joined: bool = false;
+    while (joined == false) {
+        joined = true;
+        for cpu: usize in 1..<KERNEL_MAX_CORES {
+            if (cpu < online && atomic_word_load(&tcp_pool_cost_mailboxes[cpu].done) != round) {
+                joined = false;
+                if (kernel_tick_count_of(cpu) - peer_ticks[cpu] > 500) {
+                    return TcpPoolCostResult::Failed;
+                }
+            }
+        }
+    }
+    let mut maximum: usize = 0;
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if (cpu < online) {
+            let ticks: usize = atomic_word_load(&tcp_pool_cost_mailboxes[cpu].ticks);
+            if (atomic_word_load(&tcp_pool_cost_mailboxes[cpu].completed) != 4096 || ticks == 0) {
+                return TcpPoolCostResult::Failed;
+            }
+            if (ticks > maximum) { maximum = ticks; }
+        }
+    }
+    return TcpPoolCostResult::Measured(maximum);
+}
+
+fn tcp_pool_cost_evidence() -> TcpPinCostEvidence !{unsafe} {
+    let online: usize = kernel_online_core_count();
+    if (online < 2 || online > KERNEL_MAX_CORES) { return TcpPinCostEvidence::Failed; }
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if (cpu < online) {
+            let owner = match tcp_connection_alloc() {
+                TcpConnectionAllocResult::Full => { return TcpPinCostEvidence::Failed; }
+                TcpConnectionAllocResult::Allocated(value) => { value }
+            };
+            atomic_word_store(&tcp_pool_cost_mailboxes[cpu].address, tcp_connection_slot(owner));
+            atomic_word_store(&tcp_pool_cost_mailboxes[cpu].generation, tcp_connection_identity(owner));
+            tcp_connection_put(owner);
+        }
+    }
+    for sample: usize in 0..<3 {
+        tcp_pool_cost_work(0, 0);
+        let lock_serial: usize = atomic_word_load(&tcp_pool_cost_mailboxes[0].ticks);
+        let lock_parallel: usize = match tcp_pool_cost_parallel(sample * 2 + 1, 0, online) {
+            TcpPoolCostResult::Failed => { return TcpPinCostEvidence::Failed; }
+            TcpPoolCostResult::Measured(value) => { value }
+        };
+        tcp_pool_cost_work(0, 1);
+        if (atomic_word_load(&tcp_pool_cost_mailboxes[0].completed) != 4096) {
+            return TcpPinCostEvidence::Failed;
+        }
+        let owner_serial: usize = atomic_word_load(&tcp_pool_cost_mailboxes[0].ticks);
+        let owner_parallel: usize = match tcp_pool_cost_parallel(sample * 2 + 2, 1, online) {
+            TcpPoolCostResult::Failed => { return TcpPinCostEvidence::Failed; }
+            TcpPoolCostResult::Measured(value) => { value }
+        };
+        kernel_boot_log("tcp pool cost: sample="); uart_put_udec(sample);
+        kernel_boot_log(" cores="); uart_put_udec(online);
+        kernel_boot_log(" rounds=4096 lock="); uart_put_udec(lock_serial);
+        kernel_boot_log("/"); uart_put_udec(lock_parallel);
+        kernel_boot_log(" owner="); uart_put_udec(owner_serial);
+        kernel_boot_log("/"); uart_put_udec(owner_parallel);
+        kernel_boot_log(" frequency="); uart_put_udec(read_cntfrq() as usize);
+        kernel_boot_log("\n");
+    }
+    atomic_word_store(&tcp_pool_cost_round, 0);
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if (cpu < online) {
+            let owner = match tcp_connection_take(
+                atomic_word_load(&tcp_pool_cost_mailboxes[cpu].address),
+                atomic_word_load(&tcp_pool_cost_mailboxes[cpu].generation)) {
+                TcpConnectionTakeResult::Missing => { return TcpPinCostEvidence::Failed; }
+                TcpConnectionTakeResult::Ready(value) => { value }
+            };
+            tcp_connection_free(owner);
+        }
+    }
     return TcpPinCostEvidence::Complete;
 }

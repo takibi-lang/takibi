@@ -26,6 +26,7 @@ network init contention: unlocked check-set minted twice, typed one-shot gate ad
 tcp owner contention counts: busy=1 advanced=1
 tcp owner contention: peer excluded while held and one state transition completed after release ok
 tcp pin cost evidence: 7 samples of 4096 operations and checksums consumed ok
+tcp pool cost evidence: all online cores completed every lock and owner sample ok
 pool walk stage: complete
 pool walk: a Live view holds the read lock through payload use, and a stale released-chunk cursor is refused ok
 ext2 mutation contention reader: control-overlap=1 waited-overlap=0

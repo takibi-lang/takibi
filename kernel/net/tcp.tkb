@@ -1293,6 +1293,16 @@ fn tcp_pin_cost_clock() -> i64 {
     return ticks;
 }
 
+// Empty critical-section cost, separate from handle and object-lock work.
+fn tcp_connection_pool_lock_cost() -> i64 !{unsafe} {
+    let start: i64 = tcp_pin_cost_clock();
+    for round: usize in 0..<4096 {
+        let guard = tcp_connection_pool_lock(&tcp_connection_pool);
+        tcp_connection_pool_unlock(guard);
+    }
+    return tcp_pin_cost_clock() - start;
+}
+
 fn tcp_connection_pin_cost(owner: borrow TcpConnectionOwner[p, connection])
         -> TcpPinCostResult !{unsafe} {
     let address: usize = tcp_connection_slot(owner);

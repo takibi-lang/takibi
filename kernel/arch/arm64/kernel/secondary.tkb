@@ -189,6 +189,7 @@ fn kernel_secondary_main(context: usize) !{unsafe} {
             enable_irq();
         }
         while (true) {
+            tcp_pool_cost_secondary_poll(core_id);
             // Core 1 alone. Each probe below, and the peer log and console
             // probes, is written for exactly two participants and its view
             // counts one peer's lines; a third core in the same round would

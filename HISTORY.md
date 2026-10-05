@@ -15,6 +15,28 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-10-05: TCP pool-lock contention baseline
+
+The next measurement for #680 uses one private TCP connection per online CPU
+and a common release/acquire start rendezvous, with three samples of 4,096
+operations. The first four-core RPi5 run measured median per-operation times
+of 17.31 ns for an empty pool lock/unlock alone and 466.49 ns for the slowest
+worker under four-core contention. Full owner take/put measured 86.55 ns
+alone and 1254.81 ns for the slowest worker under contention. These are
+high-contention tight-loop costs, not network throughput. Empty-lock samples
+isolate the global lock; owner samples include validation and pin state-word
+cache traffic, so they do not decide #681's false-sharing question.
+
+Worker mailboxes separate active fields with at least one cache line of
+padding. Every worker's completed count and completion publication precede
+cleanup. Rendezvous limits count peer timer progress, not host wall time;
+the existing wall-clock inventory check rejected the initial elapsed-time
+limits. A failure retains the connections rather than freeing memory before
+a late worker has stopped. No production pool algorithm or slot layout was
+changed. Code growth moved the QEMU reserved layout by eight pages, which
+the existing FDT memory fixtures detected; their expected page counts were
+updated after checking the linked image.
+
 ## 2026-10-05: uncontended TCP pin cost baseline
 
 The first measurement for #682 uses the real TcpConnection pool and owner
