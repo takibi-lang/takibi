@@ -200,6 +200,14 @@ RECONNECT_CLIENT_PORT = 43211
 RECONNECT_CLIENT_ISN = 900
 HTTP_CLIENT_PORTS = (43300, 43301, 43302, 43303)
 HTTP_CLIENT_ISNS = (1200, 2200, 3200, 4200)
+# A phase must not reuse a previous phase's TCP tuple: delayed responses
+# and retransmissions would then pass the port filter for a new handshake.
+# Explicit echo reconnect coverage above remains separate from these HTTP
+# body/content-type and concurrent-worker checks.
+HTTP_CONCURRENT_CLIENT_PORTS = (43304, 43305)
+HTTP_CONCURRENT_CLIENT_ISNS = (5200, 6200)
+HTTP_FIXTURE_CLIENT_PORTS = (43306, 43307)
+HTTP_FIXTURE_CLIENT_ISNS = (7200, 8200)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HTTP_ASSETS = (
     ("/", REPO_ROOT / "kernel/tests/ext2/index.html", "text/html"),
@@ -703,7 +711,7 @@ def concurrent_http_requests(sock: socket.socket, expected_body: bytes,
     """Keep one HTTP worker reading while the listener accepts another."""
     peers = {}
     for index, (client_port, client_isn) in enumerate(
-            zip(HTTP_CLIENT_PORTS[:2], HTTP_CLIENT_ISNS[:2])):
+            zip(HTTP_CONCURRENT_CLIENT_PORTS, HTTP_CONCURRENT_CLIENT_ISNS)):
         syn = build_tcp_frame(client_port, client_isn, 0, FLAG_SYN,
                               server_port=HTTP_SERVER_PORT)
         reply = send_and_wait(sock, syn)
@@ -732,8 +740,8 @@ def concurrent_http_requests(sock: socket.socket, expected_body: bytes,
 
     request_a = b"GET / HTTP/1.0\r\nHost: 192.168.20.2\r\n\r\n"
     request_b = request_a
-    for client_port, request in ((HTTP_CLIENT_PORTS[1], request_b),
-                                 (HTTP_CLIENT_PORTS[0], request_a)):
+    for client_port, request in ((HTTP_CONCURRENT_CLIENT_PORTS[1], request_b),
+                                 (HTTP_CONCURRENT_CLIENT_PORTS[0], request_a)):
         state = peers[client_port]
         # GitHub issue #593: kept for retransmission. The guest leaves a
         # segment unacknowledged when the connection it belongs to is busy
@@ -750,7 +758,7 @@ def concurrent_http_requests(sock: socket.socket, expected_body: bytes,
             FLAG_ACK | FLAG_PSH, data=request,
             server_port=HTTP_SERVER_PORT), (QEMU_HOST, QEMU_PORT))
         state["client_seq"] += len(request)
-        if client_port == HTTP_CLIENT_PORTS[1]:
+        if client_port == HTTP_CONCURRENT_CLIENT_PORTS[1]:
             # B arrives while A's child is already waiting in read() and the
             # parent has returned to accept() after B's handshake.
             time.sleep(0.05)
@@ -956,7 +964,7 @@ def main() -> int:
             sock, root_body, "text/html")
         http_ok = concurrent_http_ok and all(
             http_request(sock, port, isn, "/", root_body, "text/html")
-            for port, isn in zip(HTTP_CLIENT_PORTS[:2], HTTP_CLIENT_ISNS[:2])
+            for port, isn in zip(HTTP_FIXTURE_CLIENT_PORTS, HTTP_FIXTURE_CLIENT_ISNS)
         )
 
     normal_ok = ok_reconnect and http_ok
