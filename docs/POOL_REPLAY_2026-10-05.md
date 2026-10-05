@@ -81,8 +81,9 @@ contract rather than treating four bytes as free savings. The current full
 sample's slot-word bytes are small relative to chunk and cache policy, so keep
 the current safety and allocation baseline for now.
 
-The later service-level comparison is deliberately separate. A small
-Takibi/Linux/FreeBSD FD/process workload can expose live resource counts and
-end-to-end retained memory, but it includes different object graphs and
-subsystems and must not be pooled with this allocator-only dataset. No other
-OS is part of the requested comparison.
+The separate small FD/process service comparison is recorded in
+`SERVICE_SPACE_2026-10-05.md`. It observes real resource counts, FD capacities,
+and stated bookkeeping payloads through open/fork/wait/close phases. Its
+internal object graphs and accounting boundary differ from this equal-size
+allocator replay; do not pool the two datasets. Neither experiment ranks
+whole-OS RAM consumption. Only Takibi, Linux and FreeBSD are compared.

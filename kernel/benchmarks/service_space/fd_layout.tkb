@@ -1,0 +1,6 @@
+// Layout-only sensitivity probe; production fields and generations stay intact.
+enum LayoutFdKind: u8 { Empty; Terminal; OpenFile; Directory; Listener; Connection; }
+struct CurrentEntry { kind: LayoutFdKind; object: usize; generation: usize; close_on_exec: bool; }
+struct ReorderedEntry { kind: LayoutFdKind; close_on_exec: bool; object: usize; generation: usize; }
+struct CurrentBlock { slot: [CurrentEntry; 16]; next: usize; generation: usize; }
+struct ReorderedBlock { slot: [ReorderedEntry; 16]; next: usize; generation: usize; }

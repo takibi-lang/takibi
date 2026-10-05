@@ -1,0 +1,11 @@
+#!/bin/busybox sh
+# Observe through a separate serial channel; the workload never opens it.
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+/bin/busybox mount -t devtmpfs devtmpfs /dev
+/bin/busybox insmod /linux_observer.ko || exit 1
+(while true; do while read -r pid; do echo "$pid" > /sys/module/linux_observer/parameters/target; done < /dev/ttyS1; done) &
+/service-replay
+status=$?
+echo "service replay: status=$status"
+/bin/busybox poweroff -f

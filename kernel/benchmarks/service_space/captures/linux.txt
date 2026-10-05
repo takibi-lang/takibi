@@ -1,0 +1,24 @@
+service replay: count=32 phase=baseline pid=445
+service space: pid=445 fds=3 regular=0 capacity=64 process=11520 fd_body=704 fd_dynamic=0 fd_dynamic_usable=0 file_body=184 hash=0 minrefs=0 maxrefs=0
+service replay: count=32 phase=opened pid=445
+service space: pid=445 fds=35 regular=32 capacity=64 process=11520 fd_body=704 fd_dynamic=0 fd_dynamic_usable=0 file_body=184 hash=3649812310930545344 minrefs=1 maxrefs=1
+service replay: count=32 phase=inherited pid=446
+service space: pid=445 fds=35 regular=32 capacity=64 process=11520 fd_body=704 fd_dynamic=0 fd_dynamic_usable=0 file_body=184 hash=3649812310930545344 minrefs=2 maxrefs=2
+service space: pid=446 fds=35 regular=32 capacity=64 process=11520 fd_body=704 fd_dynamic=0 fd_dynamic_usable=0 file_body=184 hash=3649812310930545344 minrefs=2 maxrefs=2
+service replay: count=32 phase=reaped pid=445
+service space: pid=445 fds=35 regular=32 capacity=64 process=11520 fd_body=704 fd_dynamic=0 fd_dynamic_usable=0 file_body=184 hash=3649812310930545344 minrefs=1 maxrefs=1
+service replay: count=32 phase=closed pid=445
+service space: pid=445 fds=3 regular=0 capacity=64 process=11520 fd_body=704 fd_dynamic=0 fd_dynamic_usable=0 file_body=184 hash=0 minrefs=0 maxrefs=0
+service replay: count=128 phase=baseline pid=445
+service space: pid=445 fds=3 regular=0 capacity=64 process=11520 fd_body=704 fd_dynamic=0 fd_dynamic_usable=0 file_body=184 hash=0 minrefs=0 maxrefs=0
+service replay: count=128 phase=opened pid=445
+service space: pid=445 fds=131 regular=128 capacity=256 process=11520 fd_body=704 fd_dynamic=2176 fd_dynamic_usable=2208 file_body=184 hash=2639288434727472640 minrefs=1 maxrefs=1
+service replay: count=128 phase=inherited pid=447
+service space: pid=445 fds=131 regular=128 capacity=256 process=11520 fd_body=704 fd_dynamic=2176 fd_dynamic_usable=2208 file_body=184 hash=2639288434727472640 minrefs=2 maxrefs=2
+service space: pid=447 fds=131 regular=128 capacity=256 process=11520 fd_body=704 fd_dynamic=2176 fd_dynamic_usable=2208 file_body=184 hash=2639288434727472640 minrefs=2 maxrefs=2
+service replay: count=128 phase=reaped pid=445
+service space: pid=445 fds=131 regular=128 capacity=256 process=11520 fd_body=704 fd_dynamic=2176 fd_dynamic_usable=2208 file_body=184 hash=2639288434727472640 minrefs=1 maxrefs=1
+service replay: count=128 phase=closed pid=445
+service space: pid=445 fds=3 regular=0 capacity=256 process=11520 fd_body=704 fd_dynamic=2176 fd_dynamic_usable=2208 file_body=184 hash=0 minrefs=0 maxrefs=0
+service replay: done
+service replay: status=0

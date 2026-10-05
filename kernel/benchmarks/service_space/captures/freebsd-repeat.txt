@@ -1,0 +1,24 @@
+service replay: count=32 phase=baseline pid=1618
+service space: pid=1618 fds=3 regular=0 capacity=20 process=3192 fd_body=1072 fd_dynamic=0 fd_dynamic_usable=0 file_body=80 hash=0 minrefs=0 maxrefs=0 threads=1 retired=0
+service replay: count=32 phase=opened pid=1618
+service space: pid=1618 fds=35 regular=32 capacity=64 process=3192 fd_body=1072 fd_dynamic=3096 fd_dynamic_usable=4096 file_body=80 hash=520965869973440224 minrefs=1 maxrefs=1 threads=1 retired=0
+service replay: count=32 phase=inherited pid=1629
+service space: pid=1618 fds=35 regular=32 capacity=64 process=3192 fd_body=1072 fd_dynamic=3096 fd_dynamic_usable=4096 file_body=80 hash=520965869973440224 minrefs=2 maxrefs=2 threads=1 retired=0
+service space: pid=1629 fds=35 regular=32 capacity=64 process=3192 fd_body=1072 fd_dynamic=3096 fd_dynamic_usable=4096 file_body=80 hash=520965869973440224 minrefs=2 maxrefs=2 threads=1 retired=0
+service replay: count=32 phase=reaped pid=1618
+service space: pid=1618 fds=35 regular=32 capacity=64 process=3192 fd_body=1072 fd_dynamic=3096 fd_dynamic_usable=4096 file_body=80 hash=520965869973440224 minrefs=1 maxrefs=1 threads=1 retired=0
+service replay: count=32 phase=closed pid=1618
+service space: pid=1618 fds=3 regular=0 capacity=64 process=3192 fd_body=1072 fd_dynamic=3096 fd_dynamic_usable=4096 file_body=80 hash=0 minrefs=0 maxrefs=0 threads=1 retired=0
+service replay: count=128 phase=baseline pid=1618
+service space: pid=1618 fds=3 regular=0 capacity=64 process=3192 fd_body=1072 fd_dynamic=3096 fd_dynamic_usable=4096 file_body=80 hash=0 minrefs=0 maxrefs=0 threads=1 retired=0
+service replay: count=128 phase=opened pid=1618
+service space: pid=1618 fds=131 regular=128 capacity=256 process=3192 fd_body=1072 fd_dynamic=12344 fd_dynamic_usable=16416 file_body=80 hash=11937380625193806800 minrefs=1 maxrefs=1 threads=1 retired=0
+service replay: count=128 phase=inherited pid=1660
+service space: pid=1618 fds=131 regular=128 capacity=256 process=3192 fd_body=1072 fd_dynamic=12344 fd_dynamic_usable=16416 file_body=80 hash=11937380625193806800 minrefs=2 maxrefs=2 threads=1 retired=0
+service space: pid=1660 fds=131 regular=128 capacity=192 process=3192 fd_body=1072 fd_dynamic=9264 fd_dynamic_usable=16416 file_body=80 hash=11937380625193806800 minrefs=2 maxrefs=2 threads=1 retired=0
+service replay: count=128 phase=reaped pid=1618
+service space: pid=1618 fds=131 regular=128 capacity=256 process=3192 fd_body=1072 fd_dynamic=12344 fd_dynamic_usable=16416 file_body=80 hash=11937380625193806800 minrefs=1 maxrefs=1 threads=1 retired=0
+service replay: count=128 phase=closed pid=1618
+service space: pid=1618 fds=3 regular=0 capacity=256 process=3192 fd_body=1072 fd_dynamic=12344 fd_dynamic_usable=16416 file_body=80 hash=0 minrefs=0 maxrefs=0 threads=1 retired=0
+service replay: done
+service replay: status=0
