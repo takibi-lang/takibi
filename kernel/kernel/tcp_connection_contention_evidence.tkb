@@ -5,6 +5,7 @@
 // peer. secondary.tkb admits only core 1 to this probe even when more CPUs are
 // online. It tests exclusion and handoff, not network-device timing.
 use "kernel/lib/execution_model.tkb";
+use "kernel/net/tcp.tkb";
 
 private let mut tcp_owner_probe_armed: usize;
 private let mut tcp_owner_probe_phase: usize;
@@ -102,4 +103,112 @@ fn tcp_connection_contention_probe() -> bool !{unsafe} {
     kernel_boot_log("\n");
     return held_phase && released_phase && busy == 1 && advanced == 1 &&
            after == before + 1;
+}
+
+// Warm, single-CPU cost samples from real TCP ownership and checksum APIs.
+// Current limitations (2026-10-05): uncontended, one connection in the
+// current pool; no cache-line contention or network I/O is measured.
+// Execution model: core 0 owns the private connection; peers never receive
+// its handle. IRQs retain their normal state except inside the pool guard.
+// Timings are observations, never performance pass/fail limits. QEMU proves
+// the operations and counts only; physical timing comes from the RPi5 lane.
+
+// One record per sample keeps the boot's first marker in the bounded log.
+private fn tcp_pin_cost_report(sample: usize, pin_ticks: i64,
+        owner_ticks: i64, small_ticks: i64, large_ticks: i64) {
+    kernel_boot_log("tcp pin cost: sample=");
+    uart_put_udec(sample);
+    kernel_boot_log(" rounds=4096 pin=");
+    uart_put_udec(pin_ticks as usize);
+    kernel_boot_log(" owner=");
+    uart_put_udec(owner_ticks as usize);
+    kernel_boot_log(" checksum20=");
+    uart_put_udec(small_ticks as usize);
+    kernel_boot_log(" checksum1480=");
+    uart_put_udec(large_ticks as usize);
+    kernel_boot_log(" frequency=");
+    uart_put_udec(read_cntfrq() as usize);
+    kernel_boot_log("\n");
+}
+
+must_use variant TcpPinCostEvidence { Failed; Complete; }
+
+fn tcp_pin_cost_evidence() -> TcpPinCostEvidence !{unsafe} {
+    let first = match tcp_connection_alloc() {
+        TcpConnectionAllocResult::Full => { return TcpPinCostEvidence::Failed; }
+        TcpConnectionAllocResult::Allocated(owner) => { owner }
+    };
+    let address: usize = tcp_connection_slot(first);
+    let generation: usize = tcp_connection_identity(first);
+    tcp_connection_put(first);
+    let mut ip: [u8; 20];
+    let mut segment: [u8; 1480];
+    for index: usize in 0..<20 { ip[index] = index as u8; }
+    for index: usize in 0..<1480 { segment[index] = index as u8; }
+    let mut digest: usize = 0;
+    // Sample 0 also warms the paths; retain every sample rather than choosing
+    // the fastest. Vary sequence bytes and consume every checksum to keep the
+    // real packet work inside the loop even under LLVM optimization.
+    for sample: usize in 0..<7 {
+        let held = match tcp_connection_take(address, generation) {
+            TcpConnectionTakeResult::Missing => { return TcpPinCostEvidence::Failed; }
+            TcpConnectionTakeResult::Ready(owner) => { owner }
+        };
+        let pin_ticks: i64 = match tcp_connection_pin_cost(held) {
+            TcpPinCostResult::Stale => {
+                tcp_connection_free(held);
+                return TcpPinCostEvidence::Failed;
+            }
+            TcpPinCostResult::Measured(ticks) => { ticks }
+        };
+        tcp_connection_put(held);
+        let start: i64 = tcp_pin_cost_clock();
+        let mut completed: usize = 0;
+        for round: usize in 0..<4096 {
+            match tcp_connection_take(address, generation) {
+                TcpConnectionTakeResult::Missing => {}
+                TcpConnectionTakeResult::Ready(owner) => {
+                    completed = completed + 1;
+                    tcp_connection_put(owner);
+                }
+            }
+        }
+        let owner_ticks: i64 = tcp_pin_cost_clock() - start;
+        let small_start: i64 = tcp_pin_cost_clock();
+        for round: usize in 0..<4096 {
+            segment[4] = round as u8;
+            segment[5] = (round >> 8) as u8;
+            fix_tcp_checksum(ip[0..<20], segment[0..<20]);
+            digest = digest + (segment[16] as usize) + (segment[17] as usize);
+        }
+        let small_ticks: i64 = tcp_pin_cost_clock() - small_start;
+        let large_start: i64 = tcp_pin_cost_clock();
+        for round: usize in 0..<4096 {
+            segment[4] = round as u8;
+            segment[5] = (round >> 8) as u8;
+            fix_tcp_checksum(ip[0..<20], segment[0..<1480]);
+            digest = digest + (segment[16] as usize) + (segment[17] as usize);
+        }
+        let large_ticks: i64 = tcp_pin_cost_clock() - large_start;
+        if (completed != 4096 || pin_ticks <= 0 || owner_ticks <= 0 ||
+                small_ticks <= 0 || large_ticks <= 0) {
+            let final_owner = match tcp_connection_take(address, generation) {
+                TcpConnectionTakeResult::Missing => { return TcpPinCostEvidence::Failed; }
+                TcpConnectionTakeResult::Ready(owner) => { owner }
+            };
+            tcp_connection_free(final_owner);
+            return TcpPinCostEvidence::Failed;
+        }
+        tcp_pin_cost_report(sample, pin_ticks, owner_ticks, small_ticks, large_ticks);
+    }
+    let final_owner = match tcp_connection_take(address, generation) {
+        TcpConnectionTakeResult::Missing => { return TcpPinCostEvidence::Failed; }
+        TcpConnectionTakeResult::Ready(owner) => { owner }
+    };
+    tcp_connection_free(final_owner);
+    kernel_boot_log("tcp pin cost digest: ");
+    uart_put_udec(digest);
+    kernel_boot_log("\n");
+    if (digest != 13525568) { return TcpPinCostEvidence::Failed; }
+    return TcpPinCostEvidence::Complete;
 }

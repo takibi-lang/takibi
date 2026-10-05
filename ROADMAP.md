@@ -72,7 +72,9 @@ before its issue closes. The steps keep their numbers, which issues cite.
      `scheduled_process_record_at` from the escape list needs the makers to
      carry the pool's proof, which is stage 2's question. #696 types the
      ensure-then-write of the per-process pools. #674 and #675 follow; #680-#682 (the pin's cost)
-     are measured first.
+     are measured first. The uncontended TCP pin/owner and checksum baseline
+     is in the shared boot fixture; four-core lock contention and distinct-slot
+     cache-line sharing measurements follow.
    - **B, raw atomics:** a typed atomic cell (issue when C is under way);
      the ordering argument stays with #613.
    - **D, F, H** are already single files: declared as mint files in the

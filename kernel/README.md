@@ -556,6 +556,27 @@ RPI5_KERNEL_HWTEST_ARTIFACT_DIR
 Default logs and projected actual files are written under
 `_build/kernel-hwtest-rpi5/`. Load, reset, UART, ARP, ICMP, TCP, curl, and
 userspace-socket evidence remain separate for diagnosis. The RPi5 and main
+The shared boot fixture also emits `tcp pin cost:` samples: seven passes of
+4,096 operations on one private TCP connection on core 0. The
+`pin` interval holds the pool guard and reuses a constructed
+handle; it includes region_pin validation and pin/unpin, but excludes handle
+reconstruction and pool-lock acquisition. `owner` uses the complete
+production ownership path, including both locks and handle reconstruction.
+The `checksum20` and `checksum1480` intervals call the production TCP
+checksum helper with changing sequence bytes and consume every result. Their
+combined digest must be 13525568, and every owner acquisition must succeed.
+One retained line carries each sample, preserving the boot markers in the
+bounded dmesg ring. Counter reads are bracketed by instruction barriers; output is outside the
+measured intervals. Raw ticks, counter frequency and round counts remain in
+`_build/kernel-hwtest-rpi5/uart.log` or the QEMU lane's UART capture.
+
+These are warm, uncontended CPU costs, not network throughput or a cache-line
+contention experiment. The pin-only interval masks local IRQs through the
+pool guard; the other intervals keep normal IRQ state. Sample 0 warms the
+paths and is retained with all subsequent samples. No timing threshold is a
+verdict on either platform: the common view checks completed work, and only
+RPi5 timings inform performance decisions.
+
 QEMU integration runners also save `busy-pair-profile.json`. It records the
 explicit post-warm-up interval, target, active kernel CPU count, Git commit,
 input size, completed iterations, PIDs, elapsed counter cycles, and xorshift

@@ -1281,6 +1281,41 @@ fn tcp_connection_probe_step(slot_value: usize, generation: usize)
     }
 }
 
+// Boot-only timing of validation and pin/unpin with an already-held pool
+// guard. The caller retains an owner, so the slot cannot become retired here.
+// This includes handle validation, not just the two compare-exchanges.
+must_use variant TcpPinCostResult { Stale; Measured(i64); }
+
+fn tcp_pin_cost_clock() -> i64 {
+    isb();
+    let ticks: i64 = read_cntpct();
+    isb();
+    return ticks;
+}
+
+fn tcp_connection_pin_cost(owner: borrow TcpConnectionOwner[p, connection])
+        -> TcpPinCostResult !{unsafe} {
+    let address: usize = tcp_connection_slot(owner);
+    let generation: usize = tcp_connection_identity(owner);
+    let guard = tcp_connection_pool_lock(&tcp_connection_pool);
+    let mut handle = region_handle_from(guard, address, generation);
+    let start: i64 = tcp_pin_cost_clock();
+    for round: usize in 0..<4096 {
+        match region_pin(guard, handle) {
+            RegionPinned(TcpConnection)::Stale => {
+                tcp_connection_pool_unlock(guard);
+                return TcpPinCostResult::Stale;
+            }
+            RegionPinned(TcpConnection)::Pinned(pin) => {
+                tcp_connection_unpin(pin);
+            }
+        }
+    }
+    let elapsed: i64 = tcp_pin_cost_clock() - start;
+    tcp_connection_pool_unlock(guard);
+    return TcpPinCostResult::Measured(elapsed);
+}
+
 // Consumes the owner and the connection with it. What the connection holds
 // goes back first -- its retransmit entries and its frames -- while the
 // owner still makes it reachable. Then it is marked retired, its lock is

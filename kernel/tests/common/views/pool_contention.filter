@@ -22,6 +22,7 @@
 ^network init contention:
 ^tcp owner contention counts:
 ^tcp owner contention:
+^tcp pin cost evidence:
 ^pool walk stage: 
 ^pool walk: 
 ^ext2 mutation contention stage: 

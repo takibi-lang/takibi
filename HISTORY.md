@@ -15,6 +15,32 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-10-05: uncontended TCP pin cost baseline
+
+The first measurement for #682 uses the real TcpConnection pool and owner
+path, with seven samples of 4,096 operations on a private connection on CPU 0.
+On the four-core RPi5, median per-operation times were 29.49 ns for validation
+plus pin/unpin with the pool guard held, 87.21 ns for full owner take/put,
+50.67 ns for a 20-byte TCP checksum, and 1816.77 ns for a 1,480-byte checksum.
+The first interval reuses a constructed handle and masks local IRQs; the
+others retain normal IRQ state. These are CPU costs, not TCP operation totals
+or a measurement of just the two CAS instructions.
+
+The fixture varies checksum input and consumes every result; an independent
+RFC 1071 calculation gives the required digest 13525568. The linked-code
+inspection confirmed that every measured loop retained its production API
+calls. The initial four-lines-per-sample report displaced 15 old records from the
+256-record dmesg ring; both platform validators refused the missing first
+boot marker. Combining the four timings into one record per sample removes
+21 records without enlarging the ring or bypassing capture. The existing
+first-marker assertion is the faithful regression check for this instance.
+Fixed common-view evidence checks completed work on both targets;
+there is no timing pass/fail threshold. The pin interval is about 58 percent
+of the short checksum and 1.62 percent of the long checksum, so a task
+confinement capability cannot be justified by large-packet checksum cost
+alone. The separate questions of contended pool locking (#680) and packed
+state-word cache-line sharing (#681) still need a four-core experiment.
+
 ## 2026-10-05: spread observes its actual EL0 timer leave
 
 The spread fixture's 100 ms arrival window could close before its child
