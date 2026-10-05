@@ -49,6 +49,21 @@ fn app_main() !{may_block} {
     check(waits == 0 && fake_now < 200 && checked_slot == 1,
           "wire latency must not become a timer wait");
 
+    // Pin both sides of the exact 200-tick poll boundary. Completion at
+    // the first fallback check still needs no interrupt; one tick later
+    // does need a wake and a fresh descriptor check.
+    reset(200, 50);
+    gem_tx_wait(0);
+    check(waits == 0 && fake_now == 200, "last poll completion");
+
+    reset(201, 50);
+    gem_tx_wait(1);
+    check(waits == 0 && fake_now == 201, "first fallback completion");
+
+    reset(202, 50);
+    gem_tx_wait(0);
+    check(waits == 1 && fake_now == 251, "just beyond first fallback check");
+
     reset(500, 15000);
     gem_tx_wait(0);
     check(waits == 1 && fake_now >= 500, "slow completion fallback");

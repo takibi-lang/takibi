@@ -20,7 +20,8 @@ and the development container verifies the response with real `curl`.
 - RPi5 UART RX, RP1 Cadence GEM Ethernet, and RP1 xHCI USB are all dispatched
   through GIC-400 and RP1 MIP0/MSI-X interrupts; the ARM generic timer (PPI
   #30) provides a periodic wake source so Ethernet's retry loops keep their
-  bounded-timeout behavior without polling.
+  bounded retry behavior. GEM TX first polls completion for up to 200 us,
+  then falls back to interrupt wakeups and rechecks the descriptor.
 - Linux-compatible processes run at EL0 with RX text and RW+XN data, heap, and
   stack mappings.
 - Ordinary kernel services do not use EL2 HVC as an internal service layer.

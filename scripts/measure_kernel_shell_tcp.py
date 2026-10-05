@@ -16,13 +16,14 @@ def measure_bulk(url, directory, root, *, repetitions=3, expected_elf_digest=Non
     directory = Path(directory)
     root = Path(root)
     elf = root / "kernel/build/rpi5/kernel-shell.elf"
-    elf_digest = hashlib.sha256(elf.read_bytes()).hexdigest()
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     runs = []
     artifact = {"name": "bulk-tcp", "target": "rpi5",
                 "timing": "host HTTP wall time including request and headers",
-                "elf_sha256": elf_digest, "status": "FAIL", "runs": runs}
+                "elf_sha256": None, "status": "FAIL", "runs": runs}
     try:
+        elf_digest = hashlib.sha256(elf.read_bytes()).hexdigest()
+        artifact["elf_sha256"] = elf_digest
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         if expected_elf_digest is not None and elf_digest != expected_elf_digest:
             raise RuntimeError("bulk TCP: serving ELF changed after launch")
         for remote, local in (("busybox-extras", "busybox-extras"),

@@ -28,6 +28,8 @@ def scenario(kind):
         elf = root / "kernel/build/rpi5/kernel-shell.elf"
         elf.parent.mkdir(parents=True)
         elf.write_bytes(b"ELF")
+        if kind == "missing-elf": elf.unlink()
+        if kind == "missing-reference": (user / "busybox-extras").unlink()
         ticks = iter(range(0, 100000000000, 1000000000))
 
         class Opener:
@@ -51,7 +53,9 @@ def scenario(kind):
                              expected_elf_digest="wrong" if kind == "changed-after-launch" else None)
             except (OSError, RuntimeError):
                 failed = True
-        artifact = json.loads((root / "bulk-tcp.json").read_text())
+        artifact_path = root / "bulk-tcp.json"
+        assert artifact_path.exists(), "bulk TCP input failure lost its failed artifact"
+        artifact = json.loads(artifact_path.read_text())
         if kind == "healthy":
             assert not failed and artifact["status"] == "PASS"
             assert len(artifact["runs"]) == 8
@@ -62,12 +66,15 @@ def scenario(kind):
         else:
             assert failed and artifact["status"] == "FAIL" and artifact["error"]
             if kind == "changed-elf": assert len(artifact["runs"]) == 8
+            if kind == "missing-elf": assert artifact["elf_sha256"] is None and not artifact["runs"]
+            if kind == "missing-reference": assert artifact["elf_sha256"] and not artifact["runs"]
 
 
 def main():
     cases = CaseCount()
     for kind in ("healthy", "corrupt", "short", "long", "http-error",
-                 "transport", "zero-time", "changed-elf", "changed-after-launch"):
+                 "transport", "zero-time", "changed-elf", "changed-after-launch",
+                 "missing-elf", "missing-reference"):
         cases.note()
         scenario(kind)
     report_pass("kernel-shell-tcp controls",
