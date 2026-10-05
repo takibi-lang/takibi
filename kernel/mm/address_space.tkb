@@ -224,16 +224,16 @@ private fn address_space_backing_return_empty(
 }
 
 private fn address_space_backing_slot_free(
-        slot: sink RegionSlot(AddressSpaceBacking)[p, k]) !{unsafe} {
+        slot: sink RegionReleaseSlot(AddressSpaceBacking)[p, k]) !{unsafe} {
     let guard = address_space_backing_pool_lock(&address_space_backing_pool);
     match region_slot_adopt(guard, slot) {
-        RegionAdopt(AddressSpaceBacking)::Foreign(stray) => {
+        RegionReleaseAdopt(AddressSpaceBacking)::Foreign(stray) => {
             // Counted, not logged: a last unpin can land here from the
             // IRQ-reachable context-switch reads, which may not log.
             address_space_backing_missing_note();
             region_slot_abandon(stray);
         }
-        RegionAdopt(AddressSpaceBacking)::Adopted(mine) => {
+        RegionReleaseAdopt(AddressSpaceBacking)::Adopted(mine) => {
             region_free(guard, mine);
             address_space_backing_return_empty(guard);
         }
@@ -329,21 +329,23 @@ private fn address_space_backing_ensure(root: AddressSpaceRoot)
     }
     let guard = address_space_backing_pool_lock(&address_space_backing_pool);
     match region_alloc(guard) {
-        RegionAlloc(AddressSpaceBacking)::Allocated(fresh) => {
+        RegionPoolAlloc(AddressSpaceBacking)::Allocated(fresh) => {
             address_space_backing_pool_unlock(guard);
             return address_space_backing_publish(
                 &address_space_backing_pool, root.slot, fresh);
         }
-        RegionAlloc(AddressSpaceBacking)::Full => {}
+        RegionPoolAlloc(AddressSpaceBacking)::Exhausted => { address_space_backing_pool_unlock(guard); return AddressSpaceBackingReady::Missing; }
+        RegionPoolAlloc(AddressSpaceBacking)::Full => {}
     }
     if (address_space_backing_grow(guard)) {
         match region_alloc(guard) {
-            RegionAlloc(AddressSpaceBacking)::Allocated(fresh) => {
+            RegionPoolAlloc(AddressSpaceBacking)::Allocated(fresh) => {
                 address_space_backing_pool_unlock(guard);
                 return address_space_backing_publish(
                     &address_space_backing_pool, root.slot, fresh);
             }
-            RegionAlloc(AddressSpaceBacking)::Full => {}
+            RegionPoolAlloc(AddressSpaceBacking)::Exhausted => { address_space_backing_pool_unlock(guard); return AddressSpaceBackingReady::Missing; }
+            RegionPoolAlloc(AddressSpaceBacking)::Full => {}
         }
     }
     address_space_backing_pool_unlock(guard);

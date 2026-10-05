@@ -27,13 +27,14 @@ private fn replay_region_allocate(T: type,
         -> ReplayAllocation {
     let allocated = region_alloc(guard);
     match allocated {
-        RegionAlloc(T)::Allocated(slot) => {
+        RegionPoolAlloc(T)::Allocated(slot) => {
             let mut handle: RegionHandle(T) = region_give(guard, slot);
             let mut words: ReplayWords = {region_handle_address(handle),
                                           region_handle_generation(handle)};
             return ReplayAllocation::Ready(words);
         }
-        RegionAlloc(T)::Full => {}
+        RegionPoolAlloc(T)::Exhausted => { return ReplayAllocation::Failed; }
+        RegionPoolAlloc(T)::Full => {}
     }
     match page_alloc_contiguous(pages, PageOwnerTag::PoolChunk) {
         PageRunAllocResult::OutOfMemory => { return ReplayAllocation::Failed; }
@@ -53,8 +54,9 @@ private fn replay_region_allocate(T: type,
         }
     }
     match region_alloc(guard) {
-        RegionAlloc(T)::Full => { return ReplayAllocation::Failed; }
-        RegionAlloc(T)::Allocated(slot) => {
+        RegionPoolAlloc(T)::Exhausted => { return ReplayAllocation::Failed; }
+        RegionPoolAlloc(T)::Full => { return ReplayAllocation::Failed; }
+        RegionPoolAlloc(T)::Allocated(slot) => {
             let mut handle: RegionHandle(T) = region_give(guard, slot);
             let mut words: ReplayWords = {region_handle_address(handle),
                                           region_handle_generation(handle)};

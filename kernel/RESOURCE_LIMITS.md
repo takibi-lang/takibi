@@ -29,6 +29,14 @@ exists (memory, descriptor slots, address spaces). Physical-page capacity is
 the normalized usable-memory inventory supplied by the boot DTB; no
 compile-time constant sizes the runtime page pool.
 
+Built-in `RegionPool(T)` allocators also have a lifetime allocation budget of
+`2^46 - 1` successful allocations per pool on the 64-bit kernel. Their
+24-byte body stores a durable counter, and generations never wrap. The
+builtin returns `RegionPoolAlloc(T)::Exhausted` at that limit even when free
+slots or pages remain; maintained callers map this to their existing resource
+failure and do not grow another chunk. Chunk release does not reset the
+budget. The intrusive process pool uses its own generation representation.
+
 | Resource | Constant | Value | Scope | Alloc / release | Exhaustion result |
 |---|---|---|---|---|---|
 | Terminal echo operations | `TERMINAL_ECHO_OPERATIONS` | 4096 compact operations (16 KiB) | One UART, CPU 0 | `terminal_echo_push` / `terminal_echo_read`, IRQs masked | `Full`, with a saturating drop count reported by the terminal-echo view; a whole canonical-line kill occupies one operation |

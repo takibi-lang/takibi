@@ -260,9 +260,24 @@ fn region_free(t: borrow @TBL@[b, n], s: sink @SL@[b, k]) !{unsafe} {
 //     (bits 2-17, region_pin below) and generation (bits 18 and up)
 //   then the slots, from the first multiple of 16 after that.
 // Eight bytes per slot (#675).
-struct @P@ {
+struct no_copy @P@ {
     private lock: usize;
     private first: usize;
+    // Last allocation stamp issued by this pool; survives chunk recycling.
+    private generation: usize;
+}
+
+// A retired slot can only be released, never published again. This uses
+// the existing indexed linear ownership rules and has no extra runtime word.
+linear struct @RS@[pool: addr, slot: usize] {
+    private address: usize;
+}
+private fn region_release_slot_discharge(s: sink @RS@[b, k]) {}
+
+must_use variant @PA@[b: addr] {
+    Full;
+    Exhausted;
+    Allocated(exists k: usize. @SL@[b, k]);
 }
 
 linear struct @PG@[pool: addr] {
@@ -346,7 +361,10 @@ fn region_pool_grow(g: borrow @PG@[b], chunk: sink region__u8[c, o, n])
     return @GR@::Grown;
 }
 
-fn region_alloc(g: borrow @PG@[b]) -> @A@[b] !{unsafe} {
+fn region_alloc(g: borrow @PG@[b]) -> @PA@[b] !{unsafe} {
+    let generation: usize = *pool_word(g.pool, 2);
+    // 46 generation bits on the supported 64-bit targets. Never wrap.
+    if (generation >= 0x3fffffffffff) { return @PA@::Exhausted; }
     let mut chunk: usize = *pool_word(g.pool, 1);
     while (chunk != 0) {
         let count: usize = *pool_word(chunk, 1);
@@ -354,15 +372,17 @@ fn region_alloc(g: borrow @PG@[b]) -> @A@[b] !{unsafe} {
         while (i < count) {
             let state: *usize = pool_word(chunk, 3 + i);
             if ((*state & 3) == @T@__REGION_FREE) {
-                *state = (*state & ~(3 as usize)) | @T@__REGION_OUT;
-                return @A@::Allocated(pool_slot(g,
+                let next: usize = generation + 1;
+                *pool_word(g.pool, 2) = next;
+                *state = (next << @T@__POOL_GEN_SHIFT) | @T@__REGION_OUT;
+                return @PA@::Allocated(pool_slot(g,
                     pool_slots_base(chunk) + i * sizeof(@T@)));
             }
             i = i + 1;
         }
         chunk = *pool_word(chunk, 0);
     }
-    return @A@::Full;
+    return @PA@::Full;
 }
 
 fn region_give(g: borrow @PG@[b], s: sink @SL@[b, k]) -> @H@ !{unsafe} {
@@ -393,13 +413,21 @@ fn region_take(g: borrow @PG@[b], h: @H@) -> @TK@[b] !{unsafe} {
         pool_slots_base(chunk) + h.slot * sizeof(@T@)));
 }
 
+private fn pool_free(g: borrow @PG@[b], address: usize) !{unsafe} {
+    let chunk: usize = pool_chunk_of(g, address);
+    let i: usize = (address - pool_slots_base(chunk)) / sizeof(@T@);
+    *pool_word(chunk, 3 + i) = 0;
+}
+
+// Free state invalidates handles; the next allocation issues a fresh stamp.
 fn region_free(g: borrow @PG@[b], s: sink @SL@[b, k]) !{unsafe} {
-    let chunk: usize = pool_chunk_of(g, s.address);
-    let i: usize = (s.address - pool_slots_base(chunk)) / sizeof(@T@);
-    let state: *usize = pool_word(chunk, 3 + i);
-    *state = (((*state >> @T@__POOL_GEN_SHIFT) + 1) << @T@__POOL_GEN_SHIFT)
-             | @T@__REGION_FREE;
+    pool_free(g, s.address);
     region_slot_discharge(s);
+}
+
+fn region_free(g: borrow @PG@[b], s: sink @RS@[b, k]) !{unsafe} {
+    pool_free(g, s.address);
+    region_release_slot_discharge(s);
 }
 
 // -- Pins: a Live slot shared by several holders (#672 layer 3) -------------
@@ -412,9 +440,9 @@ fn region_free(g: borrow @PG@[b], s: sink @SL@[b, k]) !{unsafe} {
 // pool lock: a pinned slot is never Free, so its chunk cannot be shrunk.
 //
 // Freeing goes through region_retire: the slot stops taking new pins (its
-// generation moves on, so every stored handle is Stale) and whoever drops
+// state becomes Dying/Out, so every stored handle is Stale) and whoever drops
 // the last pin -- the retirer or a later unpinner -- receives the Out slot,
-// to free or reuse. A slot is never freed while pinned.
+// as release-only ownership. A slot is never freed while pinned.
 const @T@__REGION_DYING: usize = 3;
 const @T@__POOL_PIN_ONE: usize = 4;
 const @T@__POOL_PIN_MASK: usize = 0x3fffc;
@@ -432,12 +460,12 @@ must_use variant @PD@[b: addr] {
 
 must_use variant @UP@[b: addr, k: usize] {
     Unpinned;
-    Last(@SL@[b, k]);
+    Last(@RS@[b, k]);
 }
 
 must_use variant @RT@[b: addr, k: usize] {
     Pending;
-    Retired(@SL@[b, k]);
+    Retired(@RS@[b, k]);
 }
 
 private fn region_pin_discharge(p: sink @PN@[b, k]) {}
@@ -574,7 +602,7 @@ fn region_unpin(p: sink @PN@[b, k]) -> @UP@[b, k] !{unsafe} {
         if (last) { next = (next & ~(3 as usize)) | @T@__REGION_OUT; }
         if (unsafe { atomic_compare_exchange_acq_rel(word, w, next) }) {
             if (last) {
-                let mut s: @SL@[b, k] = { address };
+                let mut s: @RS@[b, k] = { address };
                 return @UP@::Last(s);
             }
             return @UP@::Unpinned;
@@ -597,7 +625,7 @@ fn region_retire(p: sink @PN@[b, k]) -> @RT@[b, k] !{unsafe} {
         // count would be a pin forged past this file.
         if (held < @T@__POOL_PIN_ONE) { return @RT@::Pending; }
         let pins: usize = (w - @T@__POOL_PIN_ONE) & @T@__POOL_PIN_MASK;
-        let generation: usize = (w >> @T@__POOL_GEN_SHIFT) + 1;
+        let generation: usize = w >> @T@__POOL_GEN_SHIFT;
         let mut next: usize = (generation << @T@__POOL_GEN_SHIFT) | pins |
                               @T@__REGION_DYING;
         if (pins == 0) {
@@ -605,7 +633,7 @@ fn region_retire(p: sink @PN@[b, k]) -> @RT@[b, k] !{unsafe} {
         }
         if (unsafe { atomic_compare_exchange_acq_rel(word, w, next) }) {
             if (pins == 0) {
-                let mut s: @SL@[b, k] = { address };
+                let mut s: @RS@[b, k] = { address };
                 return @RT@::Retired(s);
             }
             return @RT@::Pending;
@@ -654,16 +682,18 @@ must_use variant @AD@[b: addr, p: addr, k: usize] {
     Adopted(exists j: usize. @SL@[b, j]);
 }
 
+private fn pool_adoptable(g: borrow @PG@[b], address: usize) -> bool !{unsafe} {
+    let chunk: usize = pool_chunk_of(g, address);
+    if (chunk == 0) { return false; }
+    let base: usize = pool_slots_base(chunk);
+    if ((address - base) % sizeof(@T@) != 0) { return false; }
+    let i: usize = (address - base) / sizeof(@T@);
+    return (*pool_word(chunk, 3 + i) & 3) == @T@__REGION_OUT;
+}
+
 fn region_slot_adopt(g: borrow @PG@[b], s: sink @SL@[p, k]) -> @AD@[b, p, k]
         !{unsafe} {
-    let chunk: usize = pool_chunk_of(g, s.address);
-    if (chunk == 0) { return @AD@::Foreign(s); }
-    let base: usize = pool_slots_base(chunk);
-    if ((s.address - base) % sizeof(@T@) != 0) { return @AD@::Foreign(s); }
-    let i: usize = (s.address - base) / sizeof(@T@);
-    if ((*pool_word(chunk, 3 + i) & 3) != @T@__REGION_OUT) {
-        return @AD@::Foreign(s);
-    }
+    if (pool_adoptable(g, s.address) == false) { return @AD@::Foreign(s); }
     let address: usize = s.address;
     region_slot_discharge(s);
     return @AD@::Adopted(pool_slot(g, address));
@@ -673,6 +703,30 @@ fn region_slot_adopt(g: borrow @PG@[b], s: sink @SL@[p, k]) -> @AD@[b, p, k]
 // For a refused adoption, which is a kernel bug to report, not a state to
 // continue from.
 fn region_slot_abandon(s: sink @SL@[p, k]) { region_slot_discharge(s); }
+
+private fn pool_release_slot(g: borrow @PG@[b], address: usize @ k)
+        -> @RS@[b, k] {
+    let mut s: @RS@[b, k] = { address };
+    return s;
+}
+
+must_use variant @RAD@[b: addr, p: addr, k: usize] {
+    Foreign(@RS@[p, k]);
+    Adopted(exists j: usize. @RS@[b, j]);
+}
+
+fn region_slot_adopt(g: borrow @PG@[b], s: sink @RS@[p, k]) -> @RAD@[b, p, k]
+        !{unsafe} {
+    if (pool_adoptable(g, s.address) == false) { return @RAD@::Foreign(s); }
+    let address: usize = s.address;
+    region_release_slot_discharge(s);
+    return @RAD@::Adopted(pool_release_slot(g, address));
+}
+
+// A slot that cannot be given back anywhere: dropped, its memory kept.
+// For a refused adoption, which is a kernel bug to report, not a state to
+// continue from.
+fn region_slot_abandon(s: sink @RS@[p, k]) { region_release_slot_discharge(s); }
 
 // Zero a slot's element: a recycled slot holds its last occupant's bytes.
 fn region_slot_zero(s: borrow @SL@[p, k]) !{unsafe} {
@@ -819,6 +873,9 @@ let instance elem =
   |> replace_all ~sub:"@S@" ~by:("RegionSplit__" ^ elem)
   |> replace_all ~sub:"@O@" ~by:("RegionOf__" ^ elem)
   |> replace_all ~sub:"@TBL@" ~by:("RegionTable__" ^ elem)
+  |> replace_all ~sub:"@RS@" ~by:("RegionReleaseSlot__" ^ elem)
+  |> replace_all ~sub:"@RAD@" ~by:("RegionReleaseAdopt__" ^ elem)
+  |> replace_all ~sub:"@PA@" ~by:("RegionPoolAlloc__" ^ elem)
   |> replace_all ~sub:"@SL@" ~by:("RegionSlot__" ^ elem)
   |> replace_all ~sub:"@PG@" ~by:("RegionPoolGuard__" ^ elem)
   |> replace_all ~sub:"@GR@" ~by:("RegionGrow__" ^ elem)
@@ -882,6 +939,7 @@ let element_types (prog : Ast.toplevel list) claimed =
         end else incr i
       done) [ "region__"; "RegionSplit__"; "RegionOf__"; "RegionTable__";
          "RegionTableOf__"; "RegionTake__"; "RegionAlloc__"; "RegionHandle__";
+         "RegionReleaseSlot__"; "RegionReleaseAdopt__"; "RegionPoolAlloc__";
          "RegionSlot__"; "RegionPool__"; "RegionPoolGuard__"; "RegionGrow__";
          "RegionShrink__"; "RegionAdopt__"; "RegionPin__"; "RegionPinned__";
          "RegionUnpin__"; "RegionRetire__"; "RegionNext__" ] in

@@ -1,0 +1,15 @@
+{
+  "baseline_commits": [
+    "4c116c7d",
+    "eba92f10"
+  ],
+  "implementation_sha256": {
+    "lib/region_builtin.ml": "2e0c2bd4aebbbb25792e272410d710bc2201c3f748526c70dfe7812b305b0abe",
+    "kernel/kernel/fd_table.tkb": "2af5afde92a550dbd009f12097b942417a554b89299fd41f1562f821a0ddb683",
+    "kernel/net/tcp.tkb": "3882b14430d583d763204cb2c6e9950104ceb2fc82056ec892fa94b6218ebf37",
+    "kernel/mm/address_space.tkb": "85a03e60fa81ad778b6a2587762d242c2bfc5606fcbdfdccb6da74b12ca030e9",
+    "kernel/mm/process_image.tkb": "58e79dadd93f19e91b5da75687b3321133add64c8087ef5a872a23613b956c44"
+  },
+  "method": "Standard kernelbuild, same toolchain and page geometry, llvm-size-19 -A and llvm-nm-19 --defined-only. RPi5 values are linked-layout observations, not a new hardware boot.",
+  "table": "REGION_POOL_LAYOUT_2026-10-05.tsv"
+}

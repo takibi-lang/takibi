@@ -72,7 +72,7 @@ def validate_layout(name, data):
     else:
         # Built-in region layout: 24-byte header, eight-byte state words,
         # payload aligned to 16, and the current conservative 48-byte bound.
-        if pool != 16 or stride != obj or chunk % 4096:
+        if pool not in (16, 24) or stride != obj or chunk % 4096:
             raise ValueError('unexpected built-in region pool layout')
         slots = (chunk - 48) // (obj + 8)
     if slots <= 0 or capacity != chunks * slots:

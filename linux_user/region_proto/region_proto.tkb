@@ -145,8 +145,9 @@ fn test_pool() {
     let mut last: usize = 0;
     while (full == false) {
         match region_alloc(pool) {
-            RegionAlloc(Node)::Full => { full = true; }
-            RegionAlloc(Node)::Allocated(slot) => {
+            RegionPoolAlloc(Node)::Exhausted => { full = true; uart_puts("pool: exhausted unexpectedly\n"); }
+            RegionPoolAlloc(Node)::Full => { full = true; }
+            RegionPoolAlloc(Node)::Allocated(slot) => {
                 allocated = allocated + 1;
                 region_slot_at(slot).key = allocated;
                 let mut h: RegionHandle(Node) = region_give(pool, slot);
@@ -163,8 +164,9 @@ fn test_pool() {
     }
     print_pool_space(pool);
     match region_alloc(pool) {
-        RegionAlloc(Node)::Full => { uart_puts("pool: still full\n"); }
-        RegionAlloc(Node)::Allocated(slot) => {
+        RegionPoolAlloc(Node)::Exhausted => { uart_puts("pool: exhausted unexpectedly\n"); }
+        RegionPoolAlloc(Node)::Full => { uart_puts("pool: still full\n"); }
+        RegionPoolAlloc(Node)::Allocated(slot) => {
             uart_puts("pool: grew\n");
             region_free(pool, slot);
         }
@@ -197,8 +199,9 @@ fn test_pins() {
         RegionGrow(Node)::Grown => {}
         RegionGrow(Node)::TooSmall(back) => { region_release(back); }
     }
-    let RegionAlloc(Node)::Allocated(slot) = region_alloc(pool) else {
-        RegionAlloc(Node)::Full => { region_pool_unlock(pool); return; }
+    let RegionPoolAlloc(Node)::Allocated(slot) = region_alloc(pool) else {
+        RegionPoolAlloc(Node)::Exhausted => { region_pool_unlock(pool); uart_puts("pool: exhausted unexpectedly\n"); return; }
+        RegionPoolAlloc(Node)::Full => { region_pool_unlock(pool); return; }
     };
     region_slot_at(slot).key = 9;
     print_pool_space(pool);
@@ -305,10 +308,150 @@ fn test_pins() {
     region_pool_unlock(pool);
 }
 
+// Native allocator lifetime regressions: the same exclusive page is returned
+// and reclaimed, never simultaneously owned by two regions or pools.
+struct PoolCounterInjection { words: [usize; 3]; }
+struct RecyclingPage align(64) { bytes: [u8; 4096]; }
+private let mut recycling_page: RecyclingPage;
+private let mut recycling_pool: RegionPool(Node);
+private let mut exhaustion_pool: RegionPool(Node);
+
+fn test_chunk_regrow() !{unsafe} {
+    static_assert(sizeof(RegionPool(Node)) == 24, "one durable generation word per pool");
+    static_assert(sizeof(RegionReleaseSlot(Node)[p, k]) == 8, "release ownership adds no word");
+    let address: usize = &recycling_page.bytes[0] as usize;
+    let guard = region_pool_lock(&recycling_pool);
+    let mut previous_address: usize = 0;
+    let mut previous_generation: usize = 0;
+    for cycle: usize in 0..<4 {
+        let RegionBytes::Assumed(bytes) = region_bytes_assume(address, 4096) else {};
+        match region_pool_grow(guard, bytes) {
+            RegionGrow(Node)::TooSmall(back) => {
+                region_release(back); region_pool_unlock(guard);
+                uart_puts("regrow: growth failed\n"); return;
+            }
+            RegionGrow(Node)::Grown => {}
+        }
+        let RegionPoolAlloc(Node)::Allocated(slot) = region_alloc(guard) else {
+            RegionPoolAlloc(Node)::Full => { region_pool_unlock(guard); uart_puts("regrow: full\n"); return; }
+            RegionPoolAlloc(Node)::Exhausted => { region_pool_unlock(guard); uart_puts("regrow: exhausted\n"); return; }
+        };
+        let mut handle: RegionHandle(Node) = region_give(guard, slot);
+        let current_address: usize = region_handle_address(handle);
+        let current_generation: usize = region_handle_generation(handle);
+        if (cycle != 0) {
+            let mut old: RegionHandle(Node) = region_handle_from(guard, previous_address, previous_generation);
+            match region_take(guard, old) {
+                RegionTake(Node)::Stale => {}
+                RegionTake(Node)::Taken(wrong) => {
+                    region_free(guard, wrong); region_pool_unlock(guard);
+                    uart_puts("regrow: old take accepted\n"); return;
+                }
+            }
+            match region_pin(guard, old) {
+                RegionPinned(Node)::Stale => {}
+                RegionPinned(Node)::Pinned(wrong) => {
+                    match region_unpin(wrong) {
+                        RegionUnpin(Node)::Unpinned => {}
+                        RegionUnpin(Node)::Last(lost) => { region_slot_abandon(lost); }
+                    }
+                    region_pool_unlock(guard); uart_puts("regrow: old pin accepted\n"); return;
+                }
+            }
+        }
+        if (cycle != 0 && (current_generation <= previous_generation ||
+                            current_address != previous_address)) {
+            region_pool_unlock(guard); uart_puts("regrow: identity mismatch\n"); return;
+        }
+        let RegionTake(Node)::Taken(current) = region_take(guard, handle) else {
+            RegionTake(Node)::Stale => { region_pool_unlock(guard); uart_puts("regrow: current refused\n"); return; }
+        };
+        region_free(guard, current);
+        let RegionShrink(Node)::Chunk(detached) = region_pool_shrink(guard) else {
+            RegionShrink(Node)::Nothing => { region_pool_unlock(guard); uart_puts("regrow: shrink failed\n"); return; }
+        };
+        if (region_bytes_address(detached) != address || region_count(detached) != 4096) {
+            region_release(detached); region_pool_unlock(guard);
+            uart_puts("regrow: wrong returned page\n"); return;
+        }
+        region_release(detached);
+        previous_address = current_address;
+        previous_generation = current_generation;
+    }
+    if (region_pool_live_count(guard) != 0) {
+        region_pool_unlock(guard); uart_puts("regrow: leaked slot\n"); return;
+    }
+    region_pool_unlock(guard);
+    uart_puts("regrow: four incarnations reject old take and pin\n");
+}
+
+fn test_generation_exhaustion() !{unsafe} {
+    let guard = region_pool_lock(&exhaustion_pool);
+    // Test-only fault injection at the compiler's trusted layout boundary.
+    // There are no issued handles or owned slots. Narrow the raw cast to this
+    // three-word pool (statically sized above) and a checked index, then put
+    // the last-issued counter one allocation before its 46-bit limit.
+    static_assert(sizeof(RegionPool(Node)) == 24, "generation injection needs three words");
+    let metadata: *PoolCounterInjection = (&exhaustion_pool) as *PoolCounterInjection;
+    metadata.words[2] = 0x3ffffffffffe;
+    match region_alloc(guard) {
+        RegionPoolAlloc(Node)::Full => {}
+        RegionPoolAlloc(Node)::Exhausted => { region_pool_unlock(guard); uart_puts("exhaustion: full burned a stamp\n"); return; }
+        RegionPoolAlloc(Node)::Allocated(wrong) => { region_free(guard, wrong); region_pool_unlock(guard); uart_puts("exhaustion: unexpected slot\n"); return; }
+    }
+    let address: usize = &recycling_page.bytes[0] as usize;
+    let RegionBytes::Assumed(bytes) = region_bytes_assume(address, 4096) else {};
+    match region_pool_grow(guard, bytes) {
+        RegionGrow(Node)::TooSmall(back) => { region_release(back); region_pool_unlock(guard); uart_puts("exhaustion: growth failed\n"); return; }
+        RegionGrow(Node)::Grown => {}
+    }
+    let RegionPoolAlloc(Node)::Allocated(slot) = region_alloc(guard) else {
+        RegionPoolAlloc(Node)::Full => { region_pool_unlock(guard); uart_puts("exhaustion: full early\n"); return; }
+        RegionPoolAlloc(Node)::Exhausted => { region_pool_unlock(guard); uart_puts("exhaustion: refused final stamp\n"); return; }
+    };
+    let mut handle: RegionHandle(Node) = region_give(guard, slot);
+    if (region_handle_generation(handle) != 0x3fffffffffff) {
+        region_pool_unlock(guard); uart_puts("exhaustion: wrong final stamp\n"); return;
+    }
+    let RegionPinned(Node)::Pinned(pin) = region_pin(guard, handle) else {
+        RegionPinned(Node)::Stale => { region_pool_unlock(guard); uart_puts("exhaustion: final pin refused\n"); return; }
+    };
+    let RegionRetire(Node)::Retired(dead) = region_retire(pin) else {
+        RegionRetire(Node)::Pending => { region_pool_unlock(guard); uart_puts("exhaustion: single pin pending\n"); return; }
+    };
+    match region_take(guard, handle) {
+        RegionTake(Node)::Stale => {}
+        RegionTake(Node)::Taken(wrong) => { region_free(guard, wrong); region_slot_abandon(dead); region_pool_unlock(guard); uart_puts("exhaustion: retired handle accepted\n"); return; }
+    }
+    region_free(guard, dead);
+    let RegionShrink(Node)::Chunk(detached) = region_pool_shrink(guard) else {
+        RegionShrink(Node)::Nothing => { region_pool_unlock(guard); uart_puts("exhaustion: shrink failed\n"); return; }
+    };
+    match region_pool_grow(guard, detached) {
+        RegionGrow(Node)::TooSmall(back) => { region_release(back); region_pool_unlock(guard); uart_puts("exhaustion: regrow failed\n"); return; }
+        RegionGrow(Node)::Grown => {}
+    }
+    for attempt: usize in 0..<2 {
+        match region_alloc(guard) {
+            RegionPoolAlloc(Node)::Exhausted => {}
+            RegionPoolAlloc(Node)::Full => { region_pool_unlock(guard); uart_puts("exhaustion: reported full\n"); return; }
+            RegionPoolAlloc(Node)::Allocated(wrong) => { region_free(guard, wrong); region_pool_unlock(guard); uart_puts("exhaustion: wrapped\n"); return; }
+        }
+    }
+    let RegionShrink(Node)::Chunk(last) = region_pool_shrink(guard) else {
+        RegionShrink(Node)::Nothing => { region_pool_unlock(guard); uart_puts("exhaustion: leaked slot\n"); return; }
+    };
+    region_release(last);
+    region_pool_unlock(guard);
+    uart_puts("exhaustion: final stamp retires safely and regrow stays exhausted\n");
+}
+
 fn app_main() {
     test_region();
     test_table();
     test_locked_table();
     test_pool();
     test_pins();
+    test_chunk_regrow();
+    test_generation_exhaustion();
 }

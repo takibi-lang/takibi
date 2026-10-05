@@ -2907,10 +2907,34 @@ global (`private let mut connections: RegionPool(Node);`), taken with
 page allocator or a declared `[u8; N]`) as a new chunk, or gives it back as
 `TooSmall`; `region_pool_shrink(pool)` gives a chunk whose slots are all
 free back as a byte region. `region_alloc`, `region_give`, `region_take`
-and `region_free` are the table's, overloaded for a pool; a handle names its
-chunk, slot and generation. Per slot the pool keeps one word: state in the
-low two bits, generation above (#675 for space). A slot of another pool and
-a chunk used after it was given to a pool do not compile.
+and `region_free` are overloaded for a pool; a handle names its chunk, slot
+and generation. Pool allocation returns `RegionPoolAlloc(T)::Allocated(slot)`,
+`Full` (no free slot), or `Exhausted` (no allocation stamps remain). Tables
+continue to return `RegionAlloc(T)`. Callers must handle every outcome; growing
+a chunk cannot remedy `Exhausted`.
+
+A pool is `no_copy`: copying or replacing its whole value is a compile error,
+so its lock, membership and generation counter cannot be duplicated or rewound
+through ordinary value operations.
+
+On the supported 64-bit pool targets, the pool body is three words (24 bytes):
+lock, chunk-list head, and last-issued allocation generation. Successful
+allocation issues a fresh stamp from 1 through `2^46 - 1` under the pool guard;
+`Full` does not consume one. The counter survives shrinking every chunk and
+regrowing at the same address, and never wraps. Exhaustion is permanent for
+that pool's lifetime, including after shrink/grow. Existing live handles can
+still be taken, pinned, retired and freed. This is a pool-wide allocation
+budget, rather than a per-slot reuse budget.
+
+Per slot the pool keeps one word: state in bits 0-1, pin count in bits 2-17,
+and generation in bits 18-63. Freeing clears the state word; the next
+allocation supplies a fresh generation. Chunk layout, handle size and pin
+size are unchanged. Freshness is maintained by the trusted builtin; indexed
+linear ownership checks pool identity and consumes permissions, but does not
+prove the counter implementation. Numeric handles are interpreted in the
+pool selected by their caller; generations are scoped to that pool's lifetime.
+A slot of another pool and a chunk used after it was given to a pool do not
+compile.
 
 `region_pool_lock_saving(&pool, saved)` takes the same lock carrying a
 value the caller saved first -- the kernel's interrupt mask -- and
@@ -2946,8 +2970,17 @@ match region_unpin(p) {                          // no pool lock needed
 - `region_retire(p)` frees through the pins: the slot takes no new pins
   (every stored handle becomes `Stale` at once) and whoever gives up the
   last pin -- the retirer (`Retired(slot)`) or a later `region_unpin`
-  (`Last(slot)`) -- receives the Out slot, to free. A slot is never freed
-  while pinned.
+  (`Last(slot)`) -- receives a linear `RegionReleaseSlot(T)[pool, slot]`,
+  to free. This release-only permission is one address word, like `RegionSlot`.
+  It cannot be published with `region_give` or used to access the element.
+  Retirement changes state to Dying/Out without issuing or incrementing a
+  generation, so it remains safe at the allocation limit. A slot is never
+  freed while pinned.
+- `region_free(guard, release_slot)` consumes the release-only permission.
+  For an existential pool identity, `region_slot_adopt(guard, release_slot)`
+  returns `RegionReleaseAdopt(T)::Adopted(slot)` or `Foreign(slot)`, preserving
+  release-only ownership in both outcomes. Adoption cannot restore publication
+  permission. `region_slot_abandon` also accepts it, retaining the memory.
 - `region_unpin` and `region_retire` are a compare-exchange on the slot's
   word with acquire-release ordering (`atomic_compare_exchange_acq_rel`):
   the last holder sees every other holder's accesses. A slot's word keeps

@@ -31,7 +31,12 @@ def main():
     empty = text.replace('chunks=1 capacity=84 nonfree=1 bytes=4096',
                          'chunks=0 capacity=0 nonfree=0 bytes=0')
     assert accounting('backing', parse_capture(empty)['boot']['backing']) == (0, 0, 0, 0, 0, 0, 16)
+    # Preserve archived 16-byte captures, and account for the adopted durable
+    # generation counter without accepting arbitrary body sizes.
+    durable = parse_capture(text.replace('pool=16', 'pool=24'))
+    assert accounting('backing', durable['boot']['backing'])[-1] == 4120
     controls = [
+        text.replace('pool=16', 'pool=32', 1),
         text.replace(' nonfree=1 bytes=4096', ' nonfree=85 bytes=4096', 1),
         text.replace('capacity=84', 'capacity=83', 1),
         text.replace('bytes=4096', 'bytes=4095', 1),

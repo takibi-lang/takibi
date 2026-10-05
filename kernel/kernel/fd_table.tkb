@@ -174,14 +174,14 @@ private fn fd_block_return_empty(guard: borrow RegionPoolGuard(FdBlock)[blocks])
     }
 }
 
-private fn fd_block_slot_free(slot: sink RegionSlot(FdBlock)[p, k]) !{unsafe} {
+private fn fd_block_slot_free(slot: sink RegionReleaseSlot(FdBlock)[p, k]) !{unsafe} {
     let guard = fd_block_pool_lock(&fd_block_pool);
     match region_slot_adopt(guard, slot) {
-        RegionAdopt(FdBlock)::Foreign(stray) => {
+        RegionReleaseAdopt(FdBlock)::Foreign(stray) => {
             unified_fd_record_missing_count = unified_fd_record_missing_count + 1;
             region_slot_abandon(stray);
         }
-        RegionAdopt(FdBlock)::Adopted(mine) => {
+        RegionReleaseAdopt(FdBlock)::Adopted(mine) => {
             region_free(guard, mine);
             fd_block_return_empty(guard);
         }
@@ -314,15 +314,15 @@ private fn fd_context_return_empty(
     }
 }
 
-private fn fd_context_slot_free(slot: sink RegionSlot(ProcessFdContext)[p, k])
+private fn fd_context_slot_free(slot: sink RegionReleaseSlot(ProcessFdContext)[p, k])
         !{unsafe} {
     let guard = fd_context_pool_lock(&fd_context_pool);
     match region_slot_adopt(guard, slot) {
-        RegionAdopt(ProcessFdContext)::Foreign(stray) => {
+        RegionReleaseAdopt(ProcessFdContext)::Foreign(stray) => {
             unified_fd_record_missing_count = unified_fd_record_missing_count + 1;
             region_slot_abandon(stray);
         }
-        RegionAdopt(ProcessFdContext)::Adopted(mine) => {
+        RegionReleaseAdopt(ProcessFdContext)::Adopted(mine) => {
             region_free(guard, mine);
             fd_context_return_empty(guard);
         }
@@ -407,19 +407,21 @@ must_use variant FdBlockAllocResult {
 private fn fd_block_alloc() -> FdBlockAllocResult !{unsafe} {
     let guard = fd_block_pool_lock(&fd_block_pool);
     match region_alloc(guard) {
-        RegionAlloc(FdBlock)::Allocated(fresh) => {
+        RegionPoolAlloc(FdBlock)::Allocated(fresh) => {
             fd_block_pool_unlock(guard);
             return fd_block_publish(&fd_block_pool, fresh);
         }
-        RegionAlloc(FdBlock)::Full => {}
+        RegionPoolAlloc(FdBlock)::Exhausted => { fd_block_pool_unlock(guard); return FdBlockAllocResult::OutOfMemory; }
+        RegionPoolAlloc(FdBlock)::Full => {}
     }
     if (fd_block_pool_grow(guard)) {
         match region_alloc(guard) {
-            RegionAlloc(FdBlock)::Allocated(fresh) => {
+            RegionPoolAlloc(FdBlock)::Allocated(fresh) => {
                 fd_block_pool_unlock(guard);
                 return fd_block_publish(&fd_block_pool, fresh);
             }
-            RegionAlloc(FdBlock)::Full => {}
+            RegionPoolAlloc(FdBlock)::Exhausted => { fd_block_pool_unlock(guard); return FdBlockAllocResult::OutOfMemory; }
+            RegionPoolAlloc(FdBlock)::Full => {}
         }
     }
     fd_block_pool_unlock(guard);
@@ -633,19 +635,21 @@ fn unified_fd_context_ensure(process: usize @ identity)
     }
     let guard = fd_context_pool_lock(&fd_context_pool);
     match region_alloc(guard) {
-        RegionAlloc(ProcessFdContext)::Allocated(fresh) => {
+        RegionPoolAlloc(ProcessFdContext)::Allocated(fresh) => {
             fd_context_pool_unlock(guard);
             return fd_context_publish(&fd_context_pool, process, fresh);
         }
-        RegionAlloc(ProcessFdContext)::Full => {}
+        RegionPoolAlloc(ProcessFdContext)::Exhausted => { fd_context_pool_unlock(guard); return ProcessFdContextReady::Missing; }
+        RegionPoolAlloc(ProcessFdContext)::Full => {}
     }
     if (fd_context_pool_grow(guard)) {
         match region_alloc(guard) {
-            RegionAlloc(ProcessFdContext)::Allocated(fresh) => {
+            RegionPoolAlloc(ProcessFdContext)::Allocated(fresh) => {
                 fd_context_pool_unlock(guard);
                 return fd_context_publish(&fd_context_pool, process, fresh);
             }
-            RegionAlloc(ProcessFdContext)::Full => {}
+            RegionPoolAlloc(ProcessFdContext)::Exhausted => { fd_context_pool_unlock(guard); return ProcessFdContextReady::Missing; }
+            RegionPoolAlloc(ProcessFdContext)::Full => {}
         }
     }
     fd_context_pool_unlock(guard);
@@ -857,14 +861,14 @@ private fn object_return_empty(guard: borrow RegionPoolGuard(SharedObject)[objec
     }
 }
 
-private fn object_slot_free(slot: sink RegionSlot(SharedObject)[p, k]) !{unsafe} {
+private fn object_slot_free(slot: sink RegionReleaseSlot(SharedObject)[p, k]) !{unsafe} {
     let guard = object_pool_lock(&object_pool);
     match region_slot_adopt(guard, slot) {
-        RegionAdopt(SharedObject)::Foreign(stray) => {
+        RegionReleaseAdopt(SharedObject)::Foreign(stray) => {
             unified_fd_record_missing_count = unified_fd_record_missing_count + 1;
             region_slot_abandon(stray);
         }
-        RegionAdopt(SharedObject)::Adopted(mine) => {
+        RegionReleaseAdopt(SharedObject)::Adopted(mine) => {
             region_free(guard, mine);
             object_return_empty(guard);
         }
@@ -1793,19 +1797,21 @@ fn unified_object_alloc_first(kind: UnifiedFdKind) -> UnifiedObjectResult !{unsa
     }
     let guard = object_pool_lock(&object_pool);
     match region_alloc(guard) {
-        RegionAlloc(SharedObject)::Allocated(fresh) => {
+        RegionPoolAlloc(SharedObject)::Allocated(fresh) => {
             object_pool_unlock(guard);
             return unified_object_publish(&object_pool, kind, fresh);
         }
-        RegionAlloc(SharedObject)::Full => {}
+        RegionPoolAlloc(SharedObject)::Exhausted => { object_pool_unlock(guard); return UnifiedObjectResult::Full; }
+        RegionPoolAlloc(SharedObject)::Full => {}
     }
     if (object_pool_grow(guard)) {
         match region_alloc(guard) {
-            RegionAlloc(SharedObject)::Allocated(fresh) => {
+            RegionPoolAlloc(SharedObject)::Allocated(fresh) => {
                 object_pool_unlock(guard);
                 return unified_object_publish(&object_pool, kind, fresh);
             }
-            RegionAlloc(SharedObject)::Full => {}
+            RegionPoolAlloc(SharedObject)::Exhausted => { object_pool_unlock(guard); return UnifiedObjectResult::Full; }
+            RegionPoolAlloc(SharedObject)::Full => {}
         }
     }
     object_pool_unlock(guard);

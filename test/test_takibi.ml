@@ -3476,12 +3476,47 @@ let infer_tests = [
        fn f() {
          let a = region_pool_lock(&pool_a);
          match region_alloc(a) {
-           RegionAlloc(Node)::Full => { region_pool_unlock(a); }
-           RegionAlloc(Node)::Allocated(s) => {
+           RegionPoolAlloc(Node)::Exhausted => { region_pool_unlock(a); }
+           RegionPoolAlloc(Node)::Full => { region_pool_unlock(a); }
+           RegionPoolAlloc(Node)::Allocated(s) => {
              region_pool_unlock(a);
              let b = region_pool_lock(&pool_b);
              let mut h: RegionHandle(Node) = region_give(b, s);
              region_pool_unlock(b);
+           }
+         }
+       }");
+
+  Alcotest.test_case "region pool: cannot copy durable allocator state" `Quick
+    (expect_region_error "cannot be copied by value"
+      "struct Node { key: usize; }
+       let mut pool: RegionPool(Node);
+       fn f() { let snapshot: RegionPool(Node) = pool; }");
+
+  Alcotest.test_case "region pool: cannot rewind durable allocator state" `Quick
+    (expect_region_error "cannot be assigned as a whole"
+      "struct Node { key: usize; }
+       let mut pool: RegionPool(Node);
+       let mut other: RegionPool(Node);
+       fn f() { pool = other; }");
+
+  Alcotest.test_case "region pool: retired slot cannot be published" `Quick
+    (expect_region_error "no overload has exactly matching parameter types"
+      "struct Node { key: usize; value: usize; }
+       fn f(g: borrow RegionPoolGuard(Node)[b],
+            dead: sink RegionReleaseSlot(Node)[b, k]) {
+         let mut h: RegionHandle(Node) = region_give(g, dead);
+       }");
+
+  Alcotest.test_case "region pool: retired adoption cannot restore publication" `Quick
+    (expect_region_error "no overload has exactly matching parameter types"
+      "struct Node { key: usize; value: usize; }
+       fn f(g: borrow RegionPoolGuard(Node)[b],
+            dead: sink RegionReleaseSlot(Node)[p, k]) {
+         match region_slot_adopt(g, dead) {
+           RegionReleaseAdopt(Node)::Foreign(stray) => { region_slot_abandon(stray); }
+           RegionReleaseAdopt(Node)::Adopted(mine) => {
+             let mut h: RegionHandle(Node) = region_give(g, mine);
            }
          }
        }");
@@ -3546,6 +3581,28 @@ let infer_tests = [
            let o = region_pool_lock(&other);
            region_free(o, s);
            region_pool_unlock(o);
+         }
+       }"));
+
+  Alcotest.test_case "region pool: retirement result cannot be published" `Quick
+    (expect_region_error "no overload has exactly matching parameter types" (pin_use
+      "match region_retire(p) {
+         RegionRetire(Node)::Pending => {}
+         RegionRetire(Node)::Retired(dead) => {
+           let g = region_pool_lock(&pool);
+           let mut h: RegionHandle(Node) = region_give(g, dead);
+           region_pool_unlock(g);
+         }
+       }"));
+
+  Alcotest.test_case "region pool: last unpin result cannot be published" `Quick
+    (expect_region_error "no overload has exactly matching parameter types" (pin_use
+      "match region_unpin(p) {
+         RegionUnpin(Node)::Unpinned => {}
+         RegionUnpin(Node)::Last(dead) => {
+           let g = region_pool_lock(&pool);
+           let mut h: RegionHandle(Node) = region_give(g, dead);
+           region_pool_unlock(g);
          }
        }"));
 

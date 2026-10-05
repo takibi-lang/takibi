@@ -228,14 +228,14 @@ private fn process_image_pool_return_empty(
 }
 
 private fn process_image_record_slot_free(
-        slot: sink RegionSlot(ProcessImageRecord)[p, k]) !{unsafe} {
+        slot: sink RegionReleaseSlot(ProcessImageRecord)[p, k]) !{unsafe} {
     let guard = process_image_pool_lock(&process_image_pool);
     match region_slot_adopt(guard, slot) {
-        RegionAdopt(ProcessImageRecord)::Foreign(stray) => {
+        RegionReleaseAdopt(ProcessImageRecord)::Foreign(stray) => {
             process_image_record_missing_note();
             region_slot_abandon(stray);
         }
-        RegionAdopt(ProcessImageRecord)::Adopted(mine) => {
+        RegionReleaseAdopt(ProcessImageRecord)::Adopted(mine) => {
             region_free(guard, mine);
             process_image_pool_return_empty(guard);
         }
@@ -568,19 +568,21 @@ fn process_image_record_ensure(root: usize @ identity)
     }
     let guard = process_image_pool_lock(&process_image_pool);
     match region_alloc(guard) {
-        RegionAlloc(ProcessImageRecord)::Allocated(fresh) => {
+        RegionPoolAlloc(ProcessImageRecord)::Allocated(fresh) => {
             process_image_pool_unlock(guard);
             return process_image_record_publish(&process_image_pool, root, fresh);
         }
-        RegionAlloc(ProcessImageRecord)::Full => {}
+        RegionPoolAlloc(ProcessImageRecord)::Exhausted => { process_image_pool_unlock(guard); return ProcessImageRecordReady::Missing; }
+        RegionPoolAlloc(ProcessImageRecord)::Full => {}
     }
     if (process_image_pool_grow(guard)) {
         match region_alloc(guard) {
-            RegionAlloc(ProcessImageRecord)::Allocated(fresh) => {
+            RegionPoolAlloc(ProcessImageRecord)::Allocated(fresh) => {
                 process_image_pool_unlock(guard);
                 return process_image_record_publish(&process_image_pool, root, fresh);
             }
-            RegionAlloc(ProcessImageRecord)::Full => {}
+            RegionPoolAlloc(ProcessImageRecord)::Exhausted => { process_image_pool_unlock(guard); return ProcessImageRecordReady::Missing; }
+            RegionPoolAlloc(ProcessImageRecord)::Full => {}
         }
     }
     process_image_pool_unlock(guard);

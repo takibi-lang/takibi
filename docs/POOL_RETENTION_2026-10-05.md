@@ -108,3 +108,11 @@ anti-thrash reserve by default. A different workload or an explicit tighter
 memory requirement could change the decision; neither was measured here.
 Address the independent recycled-chunk handle gap before another retention
 optimization. Full-width fields and unchanged pin rules alone do not fix it.
+
+## Generation follow-up
+
+The same-address finding motivated a durable pool-wide allocation counter and
+release-only retirement ownership. The [generation lifetime document](REGION_POOL_GENERATIONS.md)
+states the current contract, regression evidence and linked space observations.
+Its fixed image cost is separate from the historical retention measurements
+above; unchanged handle fields do not imply unchanged total kernel storage.

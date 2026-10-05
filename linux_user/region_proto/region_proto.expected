@@ -24,3 +24,5 @@ pins: last unpin frees it
 pins: live 0
 space: chunks=1 capacity=40 nonfree=0 bytes=1024
 space: chunks=0 capacity=0 nonfree=0 bytes=0
+regrow: four incarnations reject old take and pin
+exhaustion: final stamp retires safely and regrow stays exhausted
