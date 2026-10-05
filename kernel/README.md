@@ -729,8 +729,11 @@ This is an explicit profiling command, not a performance threshold in
 `make allcheck`.
 
 Both runners also replay a window of the stack-ownership protocol against
-`kernel/models/StackOwnership.tla`. `/bin/protocol-trace` runs from init.sh:
-it opens the window (workload tag 16), clones a napping child and waits for
+`kernel/models/StackOwnership.tla`. `/bin/protocol-trace` runs from init.sh
+after the boot dmesg snapshot, so its variable-length report cannot evict
+the first marker used by boot validation. The complete live UART report is
+the replay input; timestamped retained-log copies are not replayed. It opens
+the window (workload tag 16), clones a napping child and waits for
 it twice -- once free to run anywhere, once pinned to CPU 1 with the child
 on CPU 0 -- and closes it (tag 17) from CPU 0. Inside the window the kernel
 diffs each process's state and stack owner, and each core's current and

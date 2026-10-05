@@ -15,6 +15,31 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-10-05: boot snapshot before the variable-length protocol report
+
+Hosted CI run 37264954670 failed the #609 armed lane on ab420a7b:
+"first kernel marker is absent". The live UART still contained that marker,
+and its protocol replay passed all three models. The 256-record retained
+ring held 100 trace lines (98 events plus begin/end) and 156 other lines;
+the boot needed 157 other lines, so the first alone had been evicted. A
+local passing run used 86 events and retained all 245 records. The extra
+pin-sharing completion line tipped this sample over the capacity, while
+the real defect was budgeting for one run's variable trace size.
+
+Sysinit now takes the boot dmesg snapshot before running protocol-trace.
+The complete live trace remains available to the same replay. This keeps
+boot evidence independent of the trace's 512-event maximum rather than
+increasing the ring or weakening its first-marker check. A fast build check
+holds the two canonical commands in that order. Its controls reject the old
+order and missing, duplicate or commented commands. The scope is the current
+script's bare commands, not arbitrary shell control flow. Compiler types do
+not express this shell ordering; the build check enforces the concrete
+boundary without adding a language feature, raw authority or liveness escape.
+Peer dmesg discards its text and tests concurrent syslog reads, so it stays
+after the report. No second protocol-trace caller exists in the fixture.
+The saved raw UART, trace replay and retained record count supplied the
+necessary independent witnesses without added kernel instrumentation.
+
 ## 2026-10-05: packed pin-state false-sharing baseline
 
 The #681 experiment keeps chunk count, payload traffic, and global pool
