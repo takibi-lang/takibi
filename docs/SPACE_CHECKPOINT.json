@@ -2,13 +2,13 @@
   "date": "2026-10-06",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "659c315a147334ec53ff0ddefa77a2e24addfab19f371ec09d0ab7ec6b55b913",
-  "workload": "Standard linked QEMU and RPi5 kernels before/after FD dead-payload removal and closed boot state migration; existing bounded boot and exec workload. Symbol payload, ELF sections and reserved image span are separate boundaries.",
+  "source_sha256": "fb461b4af695638429f0fe4bc6bddc80a3e2a10cf8a959436ac48848c2b86a1c",
+  "workload": "Standard linked QEMU and RPi5 kernels before/after ProcessRecord destructive loan contracts; existing bounded boot/process workload and native three-authority/stale/teardown fixture. ELF sections, generated instructions/relocations and image reservation are separate boundaries.",
   "evidence": [
-    "docs/KERNEL_GLOBAL_MIGRATION_2026-10-06.md",
+    "docs/PROCESS_RECORD_LOANS_SPACE_2026-10-06.md",
     "docs/REGION_POOL_GENERATIONS.md",
     "docs/REGION_POOL_ENDPOINT_2026-10-05.tsv"
   ],
-  "assessment": "Adopt removal of 552 bytes of dead FD payload and closed boot states (14 bytes larger than old boot symbols). Net targeted payload reduction 538 bytes; QEMU BSS decreases 560 bytes, RPi5 BSS and both image reservations unchanged. No allocator capacity or retention change. Retain remaining global categories as YAGNI for current functionality.",
-  "next_trigger": "Before publishing the next completed kernel feature/stage, or a new mount/device lifetime, pooled resource or cache/allocator layout change. Repeat cross-OS measurements only if the comparison boundary changes."
+  "assessment": "Adopt checker-only contracts. Both generated kernel main objects have byte-identical executable/relocation sections; text/data/BSS and image reservations are unchanged on both platforms. No new pin, lock operation, payload field, pool capacity or retention policy. This is static local-loan exclusion and unchanged code generation, not a multicore throughput measurement.",
+  "next_trigger": "Before publishing the next completed kernel feature/stage, or a process lifetime, pool representation, allocation workload or retention change. Repeat cross-OS measurements only if the comparison boundary changes."
 }
