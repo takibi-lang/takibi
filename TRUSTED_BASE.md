@@ -86,6 +86,16 @@ Without these flags, a program may contain generated traps or explicit unsafe
 operations. That permissive mode is useful for early bring-up, but it is not
 the maintained kernel's trap policy.
 
+## Destructive record lifetime boundaries
+
+The compiler rejects overlapping local authority-derived loans at
+`record_mutates_<Authority>` calls, including wrappers and argument temporaries.
+Unknown record identities and cross-authority aliases remain conservative.
+The marker and its indexed authority contract erase; they add no runtime pin
+or synchronization. Existing builtin pool pins retain their independent runtime
+lifetime guarantee. Record mints, destructor footprint/completeness, and the
+remote-free protocol remain trusted. This does not prove field-race exclusion.
+
 ## Explicit trusted boundaries
 
 Every `unsafe` block is lexically scoped and must justify at least one operation

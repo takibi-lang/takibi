@@ -71,6 +71,14 @@ let invalidation_annotation name =
 
 let handle_of_witness_annotation = "handle_of_witness"
 
+(* Checker-only destructive boundary, keyed by an indexed authority kind. *)
+let record_mutation_annotation name =
+  let prefix = "record_mutates_" in
+  if String.starts_with ~prefix name && String.length name > String.length prefix
+  then Some (String.sub name (String.length prefix)
+      (String.length name - String.length prefix))
+  else None
+
 let dynamic_rule name =
   let checker_only =
     lock_acquire_annotation name <> None
@@ -79,7 +87,8 @@ let dynamic_rule name =
     || name = single_instance_lock_annotation
     || name = restores_saved_irq_annotation
     || invalidation_annotation name <> None
-    || name = handle_of_witness_annotation in
+    || name = handle_of_witness_annotation
+    || record_mutation_annotation name <> None in
   if not checker_only then None else Some {
       name; declaration = Required; declaration_role = false;
       function_pointer = false; propagates = false;

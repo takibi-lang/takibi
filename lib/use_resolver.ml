@@ -114,6 +114,10 @@ let resolve
   let in_progress = Hashtbl.create 16 in
   let order = ref [] in
   let rec visit path =
+    let source_loc = { Lexing.dummy_pos with Lexing.pos_fname = path } in
+    if Ast.source_file_of_loc source_loc = Ast.builtin_region_file then
+      raise (Types.TypeError (source_loc,
+        "source file name is reserved for compiler-generated region authorities"));
     if Hashtbl.mem visited path || Hashtbl.mem in_progress path then ()
     else begin
       Hashtbl.add in_progress path ();

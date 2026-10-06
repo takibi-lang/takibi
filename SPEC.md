@@ -71,6 +71,11 @@ one recovery unit at its enclosing function-body boundary. One error is
 reported as the ordinary single type error, while two or more are emitted
 together.
 
+The synthetic source name `<builtin region>` is reserved for compiler-generated
+region authorities. User input files resolving to that provenance, including a
+name with an instantiation suffix, are rejected before loading. This prevents
+user code from acquiring builtin-private authority privileges by filename.
+
 Every top-level definition -- `fn`, global `let`, `struct`, `opaque
 struct`, and `enum` -- shares this ONE flat namespace, deliberately.
 Unlike C (which has a separate TAG namespace for `struct`/`union`/`enum`,
@@ -2383,9 +2388,11 @@ one plain pointer and its guard parameter remains erased.
 
 This is a caller-side lifetime contract, not a proved lock invariant. The
 declaring module is responsible for making the accessor return data actually
-protected by that lock. The current checker proves only that callers obtained
+protected by that lock. The return relation establishes that callers obtained
 the pointer through the annotated accessor and cannot use it after consuming
-the particular guard. Representation changes preserve this lifetime tie, and
+the particular guard. Marked destructive calls additionally undergo the loan
+check below, even when the guard stays live. Representation changes preserve
+this lifetime tie, and
 the authority-rebinding and aggregate-storage barriers apply identically to
 guard-derived pointers. Passing one across a direct named call is governed by
 the same verified `borrow` callee boundary as an owner-derived slice.
@@ -2394,6 +2401,65 @@ the same verified `borrow` callee boundary as an owner-derived slice.
 reachable only through `shared_access(g)`. The focused
 `examples/guard_pointer_after_unlock_wrong` fixture consumes the guard and
 then attempts a field read through the old pointer.
+
+## Destructive Record Calls and Authority Loans
+
+`record_mutates_<Authority>` is a checker-only destructive-boundary annotation.
+The function must have a Takibi body and exactly one indexed affine/linear
+parameter of that authority kind; `borrow`, `borrow mut`, owning and `sink`
+forms are supported. Only one such annotation is permitted per function.
+The first static index identifies the affected record incarnation or protected
+record domain (a guard may cover many records). Mints must ensure that distinct
+indices within one authority kind protect disjoint records. Later indices, such
+as lifecycle state, do not establish record separation. The annotation asserts a footprint, not that the compiler
+has inferred a physical free from arbitrary writes or raw-pointer operations.
+
+For example, a destructor may have this signature:
+
+```takibi
+fn release_record(owner: sink RecordOwner[record])
+    !{record_mutates_RecordOwner} { ... }
+```
+
+A local pointer obtained through `record_at(owner) -> *Record @ record` cannot
+remain in scope across `release_record(owner)`. The destructive call is rejected
+even when it merely borrows the authority, or destruction occurs through an
+aliasing owner minted separately. End the pointer's lexical scope before
+releasing the record; copying a scalar out of the record does not retain a loan.
+Pointer/slice aliases and address-preserving casts retain the source authority.
+
+The check includes borrowed pointer/slice parameters, unnamed arguments of the
+destructive call, and earlier argument temporaries while later arguments execute.
+Thus `read(record_at(owner), release_value(owner))` is rejected if the second
+argument can reach a marked destructor. This does not depend on a local pointer
+binding. Existing aggregate-storage and lifetime-escape rejection still apply.
+
+Different literal first indices of the same authority kind establish separation
+under the mint's identity contract. Different symbolic or existential names do
+not; reopening one numeric handle twice must not manufacture physical separation.
+Different authority kinds are conservatively possibly aliased, regardless of the
+pointee type or casts used by their accessors. A guard index naming a lock, a
+Running index naming a slot, and an owner index naming a generation therefore
+cannot be compared as though they were one identity domain.
+
+A built-in `RegionPin(T)` independently keeps its payload allocated until that
+pin is consumed. A loan through such a pin survives destructive calls named for
+other authority kinds, while consuming the pin still invalidates the loan.
+The exception recognizes compiler-generated pin provenance, not a user type
+with a similar name. A call explicitly naming that pin kind as its destructive
+authority still undergoes the ordinary same-kind check.
+
+Direct-call reachability propagates destructive effects into wrappers. Wrapper
+footprints and unknown indirect calls are conservative: while a loan is live,
+they may destroy any relevant record rather than inferring separation from
+parameter names. Precise helper-footprint substitution and general dynamic
+separation witnesses are not implemented.
+
+The checker inserts no pin, counter, branch, ABI operand or lock operation.
+Correct authority mints, complete destructor marking, the allocator/reclamation
+protocol, and cross-core state transitions remain trusted. The rule excludes
+local overlapping lifetime loans at marked boundaries; it is not a proof of
+field-race exclusion or that an arbitrary remote free honors the protocol.
 
 ## Arrays and Pointers
 

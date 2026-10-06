@@ -20349,6 +20349,365 @@ let core_tests = [
 
 (* -- Entry point ----------------------------------------------------------- *)
 
+(* Destructive-call controls over lexical and cross-authority record loans. *)
+let record_loan_fixture = {|// Indexed authority and destructive-call compiler control.
+linear struct Owner[p: usize] { private slot: {0..<2 as usize} @ p; }
+struct Record { value: usize; }
+private let mut records: [Record; 2];
+fn mint(slot: {0..<2 as usize} @ p) -> Owner[p] {
+    let mut owner: Owner[p] = { slot }; return owner;
+}
+fn access(owner: borrow Owner[p]) -> *Record @ p {
+    return &records[owner.slot];
+}
+fn destroy(owner: sink Owner[p]) !{record_mutates_Owner} { records[owner.slot].value = 0; }
+fn require_same(owner: borrow Owner[p], slot: {0..<2 as usize} @ p) {}
+|}
+
+let record_loan_tests = [
+  Alcotest.test_case "positive_other_record" `Quick
+    (fun () -> ignore (infer (record_loan_fixture ^ {|fn probe(flag: bool) -> usize {
+let a = mint(0); let b = mint(1);
+let mut value: usize = 0; { let ptr = access(a); destroy(b); value = ptr.value; }
+destroy(a); return value;
+}
+|})));
+  Alcotest.test_case "negative_same_record" `Quick
+    (expect_type_error "may invalidate live derived value" (record_loan_fixture ^ {|fn probe(flag: bool) -> usize {
+let a = mint(0); let ptr = access(a);
+destroy(a); return ptr.value;
+}
+|}));
+  Alcotest.test_case "negative_pointer_alias" `Quick
+    (expect_type_error "may invalidate live derived value" (record_loan_fixture ^ {|fn probe(flag: bool) -> usize {
+let a = mint(0); let ptr = access(a); let alias = ptr;
+destroy(a); return alias.value;
+}
+|}));
+  Alcotest.test_case "negative_branch" `Quick
+    (expect_type_error "may invalidate live derived value" (record_loan_fixture ^ {|fn probe(flag: bool) -> usize {
+let a = mint(0); let ptr = access(a);
+if (flag) { destroy(a); return ptr.value; }
+let value = ptr.value; destroy(a); return value;
+}
+|}));
+  Alcotest.test_case "negative_wrong_identity" `Quick
+    (expect_type_error "static value mismatch" (record_loan_fixture ^ {|fn probe(flag: bool) -> usize {
+let a = mint(0); require_same(a, 1); destroy(a); return 0;
+}
+|}));
+  Alcotest.test_case "accepted_duplicate_mint" `Quick
+    (expect_type_error "may invalidate live derived value" (record_loan_fixture ^ {|fn probe(flag: bool) -> usize {
+let a = mint(0); let b = mint(0);
+let mut value: usize = 0; { let ptr = access(a); destroy(b); value = ptr.value; }
+destroy(a); return value;
+}
+|}));
+  Alcotest.test_case "scope_end_allows_free" `Quick
+    (fun () -> ignore (infer (record_loan_fixture ^ {|fn probe() -> usize { let a = mint(0); let mut v: usize = 0; { let p = access(a); v = p.value; } destroy(a); return v; }
+|})));
+  Alcotest.test_case "helper_same" `Quick
+    (expect_type_error "may invalidate live derived value" (record_loan_fixture ^ {|fn helper(a: sink Owner[p]) { destroy(a); }
+fn probe() -> usize { let a = mint(0); let p = access(a); helper(a); return p.value; }
+|}));
+  Alcotest.test_case "helper_different_conservative" `Quick
+    (expect_type_error "may invalidate live derived value" (record_loan_fixture ^ {|fn helper(a: sink Owner[p]) { destroy(a); }
+fn probe() -> usize { let a = mint(0); let b = mint(1); let p = access(a); helper(b); let v = p.value; destroy(a); return v; }
+|}));
+  Alcotest.test_case "symbolic_different_unknown" `Quick
+    (expect_type_error "may invalidate live derived value" (record_loan_fixture ^ {|fn probe(a: borrow Owner[x], b: sink Owner[y]) -> usize { let p = access(a); destroy(b); return p.value; }
+|}));
+  Alcotest.test_case "same_slot_borrow_mut" `Quick
+    (expect_type_error "may invalidate live derived value" (record_loan_fixture ^ {|fn reset(a: borrow mut Owner[p]) !{record_mutates_Owner} { records[a.slot].value = 0; }
+fn probe() -> usize { let mut a = mint(0); let p = access(a); reset(a); let v = p.value; destroy(a); return v; }
+|}));
+  Alcotest.test_case "loop_same_record" `Quick
+    (expect_type_error "may invalidate live derived value" (record_loan_fixture ^ {|fn reset(a: borrow mut Owner[p]) !{record_mutates_Owner} { records[a.slot].value = 0; }
+fn probe() -> usize { let mut a = mint(0); let p = access(a); for i: usize in 0..<1 { reset(a); } let v = p.value; destroy(a); return v; }
+|}));
+  Alcotest.test_case "unknown_indirect" `Quick
+    (expect_type_error "may invalidate live derived value" (record_loan_fixture ^ {|fn probe(cb: fn() -> void) -> usize { let a = mint(0); let p = access(a); cb(); let v = p.value; destroy(a); return v; }
+|}));
+]
+
+
+(* Dynamic handles share records across run guards, owners, and Running tokens. *)
+let record_boundary_fixture = {|// Process boundary shape; mints and scheduler state remain trusted.
+struct Record { generation: usize; value: usize; }
+struct Handle { slot: {0..<2 as usize}; generation: usize; }
+linear view RunGuard[lock: addr];
+linear struct Owner[g: usize] {
+    private slot: {0..<2 as usize}; private generation: usize @ g;
+}
+linear struct Running[s: usize] {
+    private slot: {0..<2 as usize} @ s; private generation: usize;
+}
+must_use variant OwnerLookup { Stale; Found(exists g: usize. Owner[g]); }
+private let mut records: [Record; 2];
+private let mut lock_word: usize;
+fn acquire(word: *usize @ lock) -> RunGuard[lock] { return view RunGuard[lock]; }
+fn release(guard: sink RunGuard[lock]) {}
+private fn mint_owner(slot: {0..<2 as usize}, generation: usize @ g) -> Owner[g] {
+    let mut owner: Owner[g] = { slot, generation }; return owner;
+}
+private fn mint_running(slot: {0..<2 as usize} @ s, generation: usize) -> Running[s] {
+    let mut running: Running[s] = { slot, generation }; return running;
+}
+fn lookup(guard: borrow RunGuard[lock], handle: Handle) -> OwnerLookup {
+    if (records[handle.slot].generation != handle.generation) { return OwnerLookup::Stale; }
+    return OwnerLookup::Found(mint_owner(handle.slot, handle.generation));
+}
+fn locked(guard: borrow RunGuard[lock], handle: Handle) -> *Record @ lock {
+    return &records[handle.slot];
+}
+fn owned(owner: borrow Owner[g]) -> *Record @ g { return &records[owner.slot]; }
+fn running_record(running: borrow Running[s]) -> *Record @ s {
+    return &records[running.slot];
+}
+fn remove_slot(guard: borrow RunGuard[lock], slot: {0..<2 as usize}) !{record_mutates_RunGuard} {
+    records[slot].generation = 0;
+}
+fn owner_end(owner: sink Owner[g]) {}
+fn running_end(running: sink Running[s]) {}
+fn remove(guard: borrow RunGuard[lock], owner: sink Owner[g]) !{record_mutates_Owner} {
+    records[owner.slot].generation = 0;
+}
+|}
+
+let record_boundary_tests = [
+  Alcotest.test_case "positive_three_paths" `Quick
+    (fun () -> ignore (infer (record_boundary_fixture ^ {|fn probe(handle: Handle) -> usize {
+let guard = acquire(&lock_word);
+let OwnerLookup::Found(owner) = lookup(guard, handle) else {
+    OwnerLookup::Stale => { release(guard); return 0; }
+};
+let running = mint_running(handle.slot, handle.generation);
+let mut value: usize = 0;
+{ let p = locked(guard, handle); value = value + p.value; }
+{ let p = owned(owner); value = value + p.value; }
+{ let p = running_record(running); value = value + p.value; }
+running_end(running); remove(guard, owner); release(guard); return value;
+}
+|})));
+  Alcotest.test_case "negative_locked_remove" `Quick
+    (expect_type_error "may invalidate live derived value" (record_boundary_fixture ^ {|fn probe(handle: Handle) -> usize {
+let guard = acquire(&lock_word);
+let OwnerLookup::Found(owner) = lookup(guard, handle) else {
+    OwnerLookup::Stale => { release(guard); return 0; }
+};
+let p = locked(guard, handle); remove(guard, owner);
+let value = p.value; release(guard); return value;
+}
+|}));
+  Alcotest.test_case "negative_running_owner_remove" `Quick
+    (expect_type_error "may invalidate live derived value" (record_boundary_fixture ^ {|fn probe(handle: Handle) -> usize {
+let guard = acquire(&lock_word);
+let OwnerLookup::Found(owner) = lookup(guard, handle) else {
+    OwnerLookup::Stale => { release(guard); return 0; }
+};
+let running = mint_running(handle.slot, handle.generation);
+let p = running_record(running); remove(guard, owner);
+let value = p.value; running_end(running); release(guard); return value;
+}
+|}));
+  Alcotest.test_case "negative_reopen_same_handle" `Quick
+    (expect_type_error "may invalidate live derived value" (record_boundary_fixture ^ {|fn probe(handle: Handle) -> usize {
+let guard = acquire(&lock_word);
+let OwnerLookup::Found(a) = lookup(guard, handle) else {
+    OwnerLookup::Stale => { release(guard); return 0; }
+};
+let OwnerLookup::Found(b) = lookup(guard, handle) else {
+    OwnerLookup::Stale => { owner_end(a); release(guard); return 0; }
+};
+let p = owned(a); remove(guard, b);
+let value = p.value; owner_end(a); release(guard); return value;
+}
+|}));
+  Alcotest.test_case "negative_distinct_handles_unknown" `Quick
+    (expect_type_error "may invalidate live derived value" (record_boundary_fixture ^ {|fn probe(handle: Handle) -> usize {
+let guard = acquire(&lock_word);
+let OwnerLookup::Found(a) = lookup(guard, handle) else {
+    OwnerLookup::Stale => { release(guard); return 0; }
+};
+let mut other: Handle = { 1, 8 };
+let OwnerLookup::Found(b) = lookup(guard, other) else {
+    OwnerLookup::Stale => { owner_end(a); release(guard); return 0; }
+};
+let p = owned(a); remove(guard, b);
+let value = p.value; owner_end(a); release(guard); return value;
+}
+|}));
+  Alcotest.test_case "negative_guard_release" `Quick
+    (expect_type_error "consumed" (record_boundary_fixture ^ {|fn probe(handle: Handle) -> usize {
+let guard = acquire(&lock_word);
+let p = locked(guard, handle); release(guard); return p.value;
+}
+|}));
+  Alcotest.test_case "negative_running_end" `Quick
+    (expect_type_error "consumed" (record_boundary_fixture ^ {|fn probe(handle: Handle) -> usize {
+let running = mint_running(handle.slot, handle.generation);
+let p = running_record(running); running_end(running); return p.value;
+}
+|}));
+  Alcotest.test_case "positive_owner_outside_guard" `Quick
+    (fun () -> ignore (infer (record_boundary_fixture ^ {|fn probe(handle: Handle) -> usize {
+let guard = acquire(&lock_word);
+let OwnerLookup::Found(owner) = lookup(guard, handle) else {
+    OwnerLookup::Stale => { release(guard); return 0; }
+};
+release(guard); let mut value: usize = 0;
+{ let p = owned(owner); value = p.value; }
+owner_end(owner); return value;
+}
+|})));
+  Alcotest.test_case "positive_running_without_guard" `Quick
+    (fun () -> ignore (infer (record_boundary_fixture ^ {|fn probe(handle: Handle) -> usize {
+let running = mint_running(handle.slot, handle.generation);
+let mut value: usize = 0; { let p = running_record(running); value = p.value; }
+running_end(running); return value;
+}
+|})));
+  Alcotest.test_case "negative_lower_remove_locked" `Quick
+    (expect_type_error "may invalidate live derived value" (record_boundary_fixture ^ {|fn probe(handle: Handle) -> usize {
+let guard = acquire(&lock_word);
+let p = locked(guard, handle); remove_slot(guard, handle.slot);
+let value = p.value; release(guard); return value;
+}
+|}));
+  Alcotest.test_case "negative_lower_remove_owned" `Quick
+    (expect_type_error "may invalidate live derived value" (record_boundary_fixture ^ {|fn probe(handle: Handle) -> usize {
+let guard = acquire(&lock_word);
+let OwnerLookup::Found(owner) = lookup(guard, handle) else {
+    OwnerLookup::Stale => { release(guard); return 0; }
+};
+let p = owned(owner); remove_slot(guard, handle.slot);
+let value = p.value; owner_end(owner); release(guard); return value;
+}
+|}));
+  Alcotest.test_case "positive_scalar_copy_lower_remove" `Quick
+    (fun () -> ignore (infer (record_boundary_fixture ^ {|fn probe(handle: Handle) -> usize {
+let guard = acquire(&lock_word);
+let value = locked(guard, handle).value;
+remove_slot(guard, handle.slot); release(guard); return value;
+}
+|})));
+]
+
+let record_loan_contract_tests = [
+  Alcotest.test_case "record checking preserves checked indexing and the runtime ABI" `Quick
+    (fun () ->
+      ignore (gen_codegen (record_loan_fixture ^ {|
+        fn probe() -> usize {
+          let a = mint(0); let b = mint(1); let mut value: usize = 0;
+          { let ptr = access(a); destroy(b); ptr.value = 42; value = ptr.value; }
+          destroy(a); return value;
+        }|}));
+      Alcotest.(check int) "no remaining index trap" 0
+        (List.length !Llvm_gen.trap_sites);
+      let destructor = Option.get (Llvm.lookup_function "destroy" !Llvm_gen.the_module) in
+      Alcotest.(check int) "only the existing owner operand" 1
+        (Array.length (Llvm.params destructor));
+      Alcotest.(check bool) "checker contract erased" false
+        (contains_substring (Llvm.string_of_llmodule !Llvm_gen.the_module)
+          "record_mutates_"));
+  Alcotest.test_case "user sources cannot forge builtin authority provenance" `Quick
+    (fun () -> List.iter (fun path ->
+      match Use_resolver.resolve ~parse_file:(fun _ -> [])
+          ~prescan:(fun _ -> []) [path] with
+      | _ -> Alcotest.fail "reserved builtin source name was accepted"
+      | exception Types.TypeError (_, msg) ->
+          Alcotest.(check bool) "specific provenance rejection" true
+            (contains_substring msg "reserved for compiler-generated region authorities"))
+      [Ast.builtin_region_file; Ast.builtin_region_file ^ "#forged"]);
+  Alcotest.test_case "foreign destructive annotation is rejected" `Quick
+    (expect_type_error "record mutation annotations require a Takibi function body"
+      (record_loan_fixture ^ {|extern fn foreign(owner: sink Owner[p]) !{record_mutates_Owner};|}));
+  Alcotest.test_case "builtin pins preserve an independent payload lifetime" `Quick
+    (fun () -> ignore (infer_regions (record_loan_fixture ^ {|
+      struct Node { key: usize; }
+      fn helper(pin: borrow RegionPin(Node)[pool, rec], owner: sink Owner[p]) -> usize {
+        let node = region_pin_at(pin); destroy(owner); return node.key;
+      }|})));
+  Alcotest.test_case "builtin pin consumption still ends its loan" `Quick
+    (expect_region_error "consumed" (record_loan_fixture ^ {|
+      struct Node { key: usize; }
+      fn helper(pin: sink RegionPin(Node)[pool, rec], owner: sink Owner[p]) -> usize !{unsafe} {
+        let node = region_pin_at(pin); destroy(owner);
+        match region_unpin(pin) {
+          RegionUnpin(Node)::Unpinned => {}
+          RegionUnpin(Node)::Last(slot) => { region_slot_abandon(slot); }
+        }
+        return node.key;
+      }|}));
+  Alcotest.test_case "a user type named like a pin gains no independent lifetime" `Quick
+    (expect_type_error "may invalidate live derived value" (record_loan_fixture ^ {|
+      linear struct RegionPin__Fake[p: usize] { private slot: {0..<2 as usize} @ p; }
+      fn pretend(pin: borrow RegionPin__Fake[p]) -> *Record @ p { return &records[pin.slot]; }
+      fn helper(pin: borrow RegionPin__Fake[p], owner: sink Owner[q]) -> usize {
+        let ptr = pretend(pin); destroy(owner); return ptr.value;
+      }|}));
+  Alcotest.test_case "annotation needs one authority" `Quick
+    (expect_type_error "exactly one indexed affine or linear authority parameter"
+      {|fn destroy() !{record_mutates_Missing} {}|});
+  Alcotest.test_case "annotation rejects two matching authorities" `Quick
+    (expect_type_error "exactly one indexed affine or linear authority parameter"
+      (record_loan_fixture ^ {|fn bad(a: sink Owner[p], b: sink Owner[q])
+        !{record_mutates_Owner} {}|}));
+  Alcotest.test_case "annotation rejects copyable authority" `Quick
+    (expect_type_error "exactly one indexed affine or linear authority parameter"
+      {|struct Copy[p: usize] { slot: usize @ p; }
+        fn bad(owner: Copy[p]) !{record_mutates_Copy} {}|});
+  Alcotest.test_case "annotation rejects multiple authority declarations" `Quick
+    (expect_type_error "only one record mutation authority"
+      (record_loan_fixture ^ {|fn bad(owner: sink Owner[p])
+        !{record_mutates_Owner, record_mutates_Other} {}|}));
+  Alcotest.test_case "empty authority name is not an effect" `Quick
+    (expect_type_error "unknown effect 'record_mutates_'"
+      {|fn bad() !{record_mutates_} {}|});
+  Alcotest.test_case "different pointee kinds may refer to one record" `Quick
+    (expect_type_error "may invalidate live derived value"
+      (record_loan_fixture ^ {|
+        linear view Reader[p: usize];
+        fn reader_word(r: borrow Reader[p], slot: {0..<2 as usize} @ p)
+          -> *usize @ p { return &records[slot].value; }
+        fn reader_end(r: sink Reader[p]) {}
+        fn probe() -> usize {
+          let owner = mint(0); let r = view Reader[0];
+          let word = reader_word(r, 0); destroy(owner);
+          let value = *word; reader_end(r); return value;
+        }|}));
+  Alcotest.test_case "a pending argument loan blocks a later argument destructor" `Quick
+    (expect_type_error "may invalidate live derived value"
+      (record_loan_fixture ^ {|
+        fn destroy_value(owner: sink Owner[p]) -> usize { destroy(owner); return 0; }
+        fn read(ptr: borrow *Record, unused: usize) -> usize { return ptr.value; }
+        fn probe() -> usize { let a = mint(0); return read(access(a), destroy_value(a)); }
+      |}));
+  Alcotest.test_case "a pending loan allows a directly known different record" `Quick
+    (fun () -> ignore (infer (record_loan_fixture ^ {|
+        fn destroy_value(owner: sink Owner[p]) -> usize !{record_mutates_Owner} {
+          records[owner.slot].value = 0; return 0;
+        }
+        fn read(ptr: borrow *Record, unused: usize) -> usize { return ptr.value; }
+        fn probe() -> usize {
+          let a = mint(0); let b = mint(1);
+          let value = read(access(a), destroy_value(b)); destroy(a); return value;
+        }|})));
+  Alcotest.test_case "a destructor cannot take a live loan as another argument" `Quick
+    (expect_type_error "may invalidate live derived value"
+      (record_loan_fixture ^ {|
+        fn terminal(ptr: borrow *Record, owner: sink Owner[p]) -> usize
+          !{record_mutates_Owner} { return ptr.value; }
+        fn probe() -> usize { let a = mint(0); return terminal(access(a), a); }
+      |}));
+  Alcotest.test_case "borrowed aligned pointer is a possible record loan" `Quick
+    (expect_type_error "may invalidate live derived value"
+      (record_loan_fixture ^ {|
+        fn helper(ptr: borrow *align(8) Record, owner: sink Owner[p]) -> usize {
+          destroy(owner); return ptr.value;
+        }|}));
+]
+
 let named_groups_unisolated = [
   "core",     core_tests;
   "parser",   parser_tests;
@@ -20356,6 +20715,9 @@ let named_groups_unisolated = [
   "use_resolver", use_resolver_tests;
   "depfile",      depfile_tests;
   "codegen",  codegen_tests;
+  "record-loans", record_loan_tests;
+  "record-loan-contracts", record_loan_contract_tests;
+  "record-loan-boundaries", record_boundary_tests;
 ]
 
 (* Each Alcotest case represents a fresh compiler invocation. In particular,

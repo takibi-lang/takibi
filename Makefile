@@ -481,7 +481,7 @@ LINUX_USER_EXAMPLES      := linux_hello start checked_usize elf64_validate bump 
                              nonexhaustive refined narrow enum align packed struct_align const_global \
                              sizeof_offsetof int64 bitops indexed_view tcp_conn_view \
                              affine_escape_via_index align_ptr_proof linear_obligation tuple_pair region_proto pool_space_replay \
-                             field_lease match_int_lit \
+                             field_lease match_int_lit record_loans \
                              callstack ringbuf crc8 djb2 slice slice_from_field logical_eval foreach for loop fizzbuzz fibonacci \
                              bubblesort inet_checksum ip_parse tcp_parse wire_endian ref_type byte_slice atomic spinlock locked_cell diagnostic_ring publish fdt number usb_config usb_init_report uart_rx_ring block_cache gem_tx_wait
 LINUX_USER_BINS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)/$(e)/$(e).exe)
@@ -687,6 +687,8 @@ $(COMMON_LINUX_SYSCALL_O): $(COMMON_LINUX_SYSCALL_S) | $(LINUX_USER_BUILD_DIR)
 # build. The ordering is the whole point -- constants resolve as the
 # parser walks the list left to right -- so these go ahead of `$<`.
 LINUX_USER_EXTRA_SRCS :=
+$(LINUX_USER_DIR)/record_loans/record_loans_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/record_loans/authority.tkb
+$(LINUX_USER_DIR)/record_loans/record_loans_exe.o: $(LINUX_USER_DIR)/record_loans/authority.tkb
 # A per-test compiler flag, such as the built-in region's --regions (#672).
 LINUX_USER_EXTRA_FLAGS :=
 $(LINUX_USER_DIR)/region_proto/region_proto_exe.o: LINUX_USER_EXTRA_FLAGS := --regions

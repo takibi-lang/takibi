@@ -9488,6 +9488,55 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | _ -> (seeds, accessors))
       (StringMap.empty, StringMap.empty) prog
   in
+  (* Destructive record calls cannot overlap local authority-derived loans.
+     The annotation identifies one indexed affine/linear authority parameter.
+     Its first index describes the affected record/domain; the mint and
+     destructive implementation remain trusted. *)
+  let independently_pinned_records = List.fold_left (fun pins -> function
+    | Ast.OwnedStructDef (name, Ast.KindLinear, _, _, _, _, _, _, loc)
+      when Ast.source_file_of_loc loc = Ast.builtin_region_file
+           && String.starts_with ~prefix:"RegionPin__" name ->
+        StringSet.add name pins
+    | _ -> pins) StringSet.empty prog in
+  let record_mutators = List.fold_left (fun map item -> match item with
+    | Ast.FuncDef f ->
+        let kinds = List.filter_map Effect_rules.record_mutation_annotation
+          (Option.value f.effects ~default:[]) in
+        (match kinds with
+         | [] -> map
+         | [kind] ->
+             let authorities = List.filter_map (fun (_, ty) ->
+               match Option.map strip_borrow ty with
+               | Some (Ast.TypeIndexed (name, (_ :: _ as indices)))
+               | Some (Ast.TypeView (name, (_ :: _ as indices)))
+                 when name = kind && Option.fold ~none:false
+                   ~some:is_tracked_type ty -> Some indices
+               | _ -> None) f.params in
+             if List.length authorities <> 1 then
+               raise (TypeError (f.def_loc,
+                 "record mutation annotation requires exactly one indexed affine or linear authority parameter"));
+             StringMap.add (overload_key f.name f.params) kind map
+         | _ -> raise (TypeError (f.def_loc,
+             "a function may declare only one record mutation authority")))
+    | Ast.ExternFuncDef (_, _, _, Some words)
+      when List.exists (fun word ->
+        Effect_rules.record_mutation_annotation word <> None) words ->
+        raise (TypeError (Lexing.dummy_pos,
+          "record mutation annotations require a Takibi function body"))
+    | _ -> map) StringMap.empty prog in
+  let record_mutation_reach = StringMap.map (fun seed_kind ->
+    let reach = ref (StringMap.fold (fun key kind set ->
+      if kind = seed_kind then StringSet.add key set else set)
+      record_mutators StringSet.empty) in
+    let changed = ref true in
+    while !changed do
+      changed := false;
+      StringMap.iter (fun caller callees ->
+        if not (StringSet.mem caller !reach)
+           && not (StringSet.is_empty (StringSet.inter callees !reach)) then
+          (reach := StringSet.add caller !reach; changed := true)) lock_callees
+    done;
+    !reach) record_mutators in
   let invalidators = StringMap.map (fun seeds ->
     let reach = ref seeds in
     let changed = ref true in
@@ -10172,6 +10221,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
            tracked local binding"
           derived_kind (taint_source_name e)))
     in
+    (* Earlier call arguments remain live temporaries while later arguments
+       execute. Keep their authority paths across recursive argument checking;
+       a nested destructive call must not overlook these unnamed loans. *)
+    let pending_region_arguments = ref [] in
     let rec check_expr taints moved consume (e : Ast.expr) =
       match e.desc with
       | Ast.ViewLit (name, _) ->
@@ -10381,8 +10434,78 @@ let infer_program (prog : Ast.toplevel list) : program_types =
               | _ -> false
             in
             let moved = check_expr taints moved consume_arg arg in
-            check_args moved rest (match params with _ :: ps -> ps | [] -> [])
+            let saved_arguments = !pending_region_arguments in
+            if not (PathSet.is_empty arg_taint) then
+              pending_region_arguments :=
+                (taint_source_name arg, arg_taint) :: saved_arguments;
+            Fun.protect
+              ~finally:(fun () -> pending_region_arguments := saved_arguments)
+              (fun () -> check_args moved rest
+                (match params with _ :: ps -> ps | [] -> []))
           in
+          (* A destructive call cannot overlap a lexical or argument-temporary
+             loan of a possibly identical authority. Other authority kinds may
+             alias even when accessors use different pointee types or casts.
+             Only same-kind literal first indices establish separation. *)
+          let record_kinds = StringMap.fold (fun seed kind kinds ->
+            let reach = StringMap.find seed record_mutation_reach in
+            if StringSet.mem target reach || StringSet.mem target may_call_indirect
+               || StringMap.mem (loc_key e.loc) !resolved_indirect_call_effects
+            then StringSet.add kind kinds else kinds)
+            record_mutators StringSet.empty in
+          StringSet.iter (fun kind ->
+              let rec indexed = function
+                | Ast.TypeBorrow t | Ast.TypeBorrowMut t -> indexed t
+                | Ast.TypeIndexed (k, indices) when k = kind -> Some indices
+                | Ast.TypeView (k, indices) when k = kind -> Some indices
+                | _ -> None in
+              let direct = StringMap.find_opt target record_mutators = Some kind in
+              let subjects = List.filter_map (fun arg ->
+                Option.bind (expr_ast_type arg) indexed) args in
+              if direct && List.length subjects <> 1 then
+                raise (TypeError (e.loc,
+                  "record mutation requires one indexed authority argument"));
+              (* A wrapper/indirect call has unknown footprint in this slice.
+                 Do not infer its mutated identity from its parameter names. *)
+              let subject = if direct then List.hd subjects else [] in
+              let disjoint left right = match left, right with
+                | Ast.StaticInt a :: _, Ast.StaticInt b :: _ -> a <> b
+                | _ -> false in
+              let check_loan dependent sources =
+                PathSet.iter (fun source ->
+                  if not (ResourceFlow.may_be_consumed source moved) then
+                  let conflict = match source with
+                    | PField _ -> true
+                    | PVar (id, authority) ->
+                        match indexed (binding_type id authority) with
+                        | Some identity -> not (disjoint subject identity)
+                        | None ->
+                            (match strip_borrow (binding_type id authority) with
+                             (* A built-in pool pin keeps its payload allocated
+                                until this very authority is consumed. Other
+                                record destructors cannot end that lifetime.
+                                A user type with this spelling is not a pin. *)
+                             | Ast.TypeIndexed (other, _)
+                               when StringSet.mem other independently_pinned_records -> false
+                             | Ast.TypeIndexed _ | Ast.TypeView _
+                             | Ast.TypePtr _ | Ast.TypeAlignedPtr _
+                             | Ast.TypeSlice _ | Ast.TypeSliceSym _ -> true
+                             | _ -> false) in
+                  if conflict then
+                    raise (TypeError (e.loc, Printf.sprintf
+                      "record mutation '%s' may invalidate live derived value '%s' from authority '%s'"
+                      name dependent (path_to_string source)))) sources in
+              PathSet.iter (function
+                | PField _ -> ()
+                | PVar (_, dependent) as path ->
+                    if not (ResourceFlow.may_be_consumed path moved) then
+                      check_loan dependent (TaintEnv.get dependent taints))
+                !active_declared;
+              List.iter (fun (dependent, sources) -> check_loan dependent sources)
+                !pending_region_arguments;
+              List.iter (fun arg ->
+                check_loan (taint_source_name arg) (expr_taint taints arg)) args)
+            record_kinds;
           let invalidation_target =
             if StringMap.mem (loc_key e.loc) !resolved_indirect_call_effects
             then "<indirect call>" else target in

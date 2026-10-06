@@ -11,6 +11,9 @@ ROOT = Path(__file__).resolve().parent.parent
 # Exact source lines are intentional: broad file/function exemptions would let
 # an unrelated future read silently enter the allowlist.
 ALLOWED = {
+    # Initializing a location for the reserved-source check is not a raw read.
+    ("lib/use_resolver.ml",
+     "let source_loc = { Lexing.dummy_pos with Lexing.pos_fname = path } in"),
     ("lib/ast.ml", "match String.index_opt loc.Lexing.pos_fname '#' with"),
     ("lib/ast.ml", "| None -> loc.Lexing.pos_fname"),
     ("lib/ast.ml", "| Some i -> String.sub loc.Lexing.pos_fname 0 i"),

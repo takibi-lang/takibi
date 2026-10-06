@@ -1,5 +1,8 @@
 type loc = Lexing.position
 
+(* Reserved provenance of compiler-generated region authority definitions. *)
+let builtin_region_file = "<builtin region>"
+
 let pp_loc fmt _ = Format.fprintf fmt "<loc>"
 
 (* The real source file a loc came from, with any per-instantiation suffix

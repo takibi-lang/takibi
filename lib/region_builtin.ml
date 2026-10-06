@@ -21,7 +21,7 @@
    This is the first layer. region_table, the only way to store
    permissions, follows; see #672 for the three-layer decision. *)
 
-let builtin_file = "<builtin region>"
+let builtin_file = Ast.builtin_region_file
 
 (* One element type's instance. @T@ is the element type, @R@ the region,
    @S@ and @O@ its split and claim results. *)
