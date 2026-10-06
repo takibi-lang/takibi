@@ -12,6 +12,8 @@ def main() -> int:
                                    "inline fn scheduled_process_record_locked(", 1)
     assert not problems(inline_lookup), "an inline accessor must retain its body identity"
     controls = {
+        "public view mint": source.replace(
+            "private linear view ProcessRunning[", "linear view ProcessRunning[", 1),
         "owner lookup restores raw escape": source.replace(
             "let record = scheduled_process_transfer_owned_loan(live, owner);",
             "let record = scheduled_process_record_at(owner.pool_index);", 1),

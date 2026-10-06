@@ -72,6 +72,9 @@ def problems(text: str) -> list[str]:
     if owners != OWNER_MINTS:
         result.append("scheduled ownership mints differ from the seven "
                       "reviewed allocation/state-transfer bodies")
+    if not re.search(r"^private linear view ProcessRunning\[", "\n".join(
+            line.split("//", 1)[0] for line in text.splitlines()), re.M):
+        result.append("ProcessRunning must remain a private view mint")
     for name in PRIVATE:
         if name not in private:
             result.append(f"{name} must remain private to its mint module")

@@ -1546,10 +1546,14 @@ let run_optimizations machine =
       "function(mem2reg,early-cse,simplifycfg,\
                 correlated-propagation,constraint-elimination,simplifycfg)"
     else
-      "function(mem2reg,early-cse,simplifycfg,\
+      (* Private indexed wrappers retain a real proof through a loan transfer.
+         Scalar replacement before and after inlining removes their stack
+         copies while preserving the ordinary load/store semantics. Keep the
+         debug pipeline unchanged so its local-variable locations stay stable. *)
+      "function(sroa,mem2reg,early-cse,simplifycfg,\
                 correlated-propagation,constraint-elimination,simplifycfg),\
        always-inline,\
-       function(mem2reg,early-cse,simplifycfg,\
+       function(sroa,mem2reg,early-cse,simplifycfg,\
                 correlated-propagation,constraint-elimination,simplifycfg)"
   in
   (match Llvm_passbuilder.run_passes !the_module pipeline machine opts with

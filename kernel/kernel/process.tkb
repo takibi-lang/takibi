@@ -201,26 +201,6 @@ private fn process_handle_new(slot: usize, generation: usize)
     return handle;
 }
 
-// A live token says that this CPU is still executing the Running process
-// whose generation supplies `process`. Handles derived through the accessor
-// below remain valid across calls that may reap some other process. The exit
-// path consumes the token before its own process becomes Exited.
-private linear view CurrentProcess[process: usize];
-
-private fn current_process_new(
-        generation: usize @ process) -> CurrentProcess[process] {
-    return view CurrentProcess[process];
-}
-
-private fn current_process_handle(
-        current: borrow CurrentProcess[process]) -> ProcessHandle
-        !{handle_of_witness} {
-    return execution_here().current_handle;
-}
-
-private fn current_process_exit(
-        current: sink CurrentProcess[process]) {}
-
 // GitHub issue #264 first stage: keep the scheduler/lifecycle bookkeeping
 // for one process slot together. This is deliberately a plain data struct:
 // the linear ScheduledProcessOwner/state protocol, stable store, SlotMap,
@@ -868,7 +848,7 @@ fn scheduled_process_record_of_locked(
 // process_running_here, the one place that turns "this CPU's current
 // process" into the evidence (scripts/check_process_running_mints.py keeps
 // the list of its callers).
-linear view ProcessRunning[process: usize];
+private linear view ProcessRunning[process: usize];
 
 must_use variant ProcessRunningHere {
     Running(exists process: usize. ProcessRunning[process]);
@@ -9551,9 +9531,9 @@ fn kernel_process_child_exit(status: usize) -> ExitSwitch {
     if (execution_here().current_live == false) { { let mut __running_result: ExitSwitch = ExitSwitch::Idle; process_running_end(running_here); return __running_result; } }
     if (scheduled_process_record_running(running_here)
             .has_parent == false) { { let mut __running_result: ExitSwitch = ExitSwitch::Idle; process_running_end(running_here); return __running_result; } }
-    let current = current_process_new(
+    let current = process_running_new(
         execution_here().current_handle.generation);
-    let mut child: ProcessHandle = current_process_handle(current);
+    let mut child: ProcessHandle = process_running_handle(current);
     let mut parent: ProcessHandle =
         scheduled_process_record_running(running_here).parent;
     kernel_process_trace_record(
@@ -9642,13 +9622,13 @@ fn kernel_process_child_exit(status: usize) -> ExitSwitch {
     kernel_process_signal_child_exit(exit_guard, parent);
     match scheduled_process_running_take(exit_guard, child) {
         ScheduledProcessRunningTakeResult::Missing => {
-            current_process_exit(current);
+            process_running_end(current);
             process_run_unlock(exit_guard);
             { let mut __running_result: ExitSwitch = ExitSwitch::Idle; process_running_end(running_here); return __running_result; }
         }
         ScheduledProcessRunningTakeResult::Running(resources) => {
             let (owner, running) = resources;
-            current_process_exit(current);
+            process_running_end(current);
             let exited = scheduled_process_exit(owner, running);
             scheduled_process_release(owner, exited);
             // GitHub issue #244: a parent blocked in wait4 needs both the
