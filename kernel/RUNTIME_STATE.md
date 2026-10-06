@@ -37,6 +37,25 @@ thereafter; the type does not enforce write-once setup or concurrent
 replacement. The context does not hold the ext2 mutation lock or per-CPU
 scratch, whose existing ownership and exclusion rules still apply.
 
+## Boot mount and root image
+
+`kernel/init/test_driver.tkb` holds one private `BootExecutionContext`.
+Its mount is `Unconfigured` or `Mounted(Ext2Mount)`; its saved root image is
+`Unavailable` or `Ready(Ext2ExecImage)`. The image payload carries the plan,
+inode and file length together. A mounted filesystem may lack the root image,
+so these are independent closed states. Readers match before extracting a
+payload; an unresolved exec candidate carries no plan. Rootfs metadata stays
+in permanent static storage because the saved plan contains a slice into it.
+
+Boot configures the mount through `kernel_boot_mount_configure` before EL0
+readers run. The type does not enforce write-once setup, publication or the
+metadata borrow's lifetime. Current callers rely on that boot ordering and
+the single mounted filesystem. No extra lock or general mount registry is
+needed for the current functionality.
+
+The FD service retains its live missing-release counter, but no unused shared
+fallback payload records. Checked lookups return their closed failure cases.
+
 ## Consolidated behind an explicit owner (#302-#307)
 
 | Issue | What moved | New owner | Why it mattered |

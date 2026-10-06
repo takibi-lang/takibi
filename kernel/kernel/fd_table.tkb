@@ -208,21 +208,8 @@ private fn fd_block_pin(pool: *RegionPool(FdBlock) @ blocks, address: usize,
     return pinned;
 }
 
-// GitHub issue #492: where a lookup lands when the (slot, generation) pair
-// it was given does not name a live occupant. Three accessors in this file
-// took such a pair, minted an owner from it without validating anything,
-// and dereferenced -- so a recycled slot was read as though it were still
-// the caller's. They compare now, and a refusal has to go somewhere: one
-// fallback record per pool, and one COUNT, on the pattern
-// kernel/mm/address_space.tkb's backing fallback established.
-//
-// Reachable only by a caller that skipped its own check. Every caller in
-// this file tests first today -- unified_object_at's own comment says so --
-// which is exactly why the count is the interesting part: it says whether
-// that stays true, instead of the file saying it does.
-private let mut fd_block_missing: FdBlock;
-private let mut fd_context_missing: ProcessFdContext;
-private let mut unified_object_missing: SharedObject;
+// Failed release validation is counted; stale lookups return closed failure
+// cases rather than references to shared fallback payloads.
 private let mut unified_fd_record_missing_count: usize = 0;
 
 // Printed by the boot summary when nonzero, like its two siblings in

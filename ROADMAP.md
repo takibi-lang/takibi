@@ -70,10 +70,11 @@ before its issue closes. The steps keep their numbers, which issues cite.
      caller holding the guard is a compile error; AddressSpaceRoot carries
      its backing's handle and is made only by declared makers. Removing
      `scheduled_process_record_at` from the escape list needs the makers to
-     carry the pool's proof, which is stage 2's question. #674 now reviews
-     global state and context-held values across all kernel declarations;
-     the three FD pools retain their placement and their measurement follow-up
-     (#711) is deferred separately. Space is reviewed at completed
+     carry the pool's proof, which is stage 2's question. The global-state
+     review removed dead FD payloads and coupled boot presence to payload;
+     other reductions are YAGNI for current functionality. The three FD pools
+     retain their placement; their measurement follow-up (#711) is deferred.
+     Space is reviewed at completed
      feature/stage boundaries under `docs/SPACE_REVIEW.md`. #680-#682 retain
      their measured baselines for the optimization decision. The uncontended
      TCP pin/owner and checksum baseline
@@ -81,7 +82,7 @@ before its issue closes. The steps keep their numbers, which issues cite.
      and distinct-connection owner contention samples. A same-chunk, distinct-slot
      pin-state comparison now measures same-line versus separate-line traffic;
      its three RPi5 pairs are 5.4-8.8 percent apart. Production packing stays
-     unchanged; #674 and representative workload evidence inform the
+     unchanged; representative workload evidence is required for a
      subsequent optimization decision.
    - **B, raw atomics:** a typed atomic cell (issue when C is under way);
      the ordering argument stays with #613.

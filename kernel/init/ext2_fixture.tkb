@@ -785,8 +785,7 @@ fn kernel_ext2_fixture_run(mount: Ext2Mount) !{logs, unsafe} {
     // GitHub issue #249: save the mount for
     // kernel_exec_resolve_argv0(), which runs later, from
     // a syscall-return path outside fn main()'s own scope.
-    saved_ext2_mount = mount;
-    ext2_mount_ready = true;
+    kernel_boot_mount_configure(mount);
     // This mount is the root filesystem every process runs
     // from. Configure the syscall path from it; otherwise
     // openat(2) observes an unconfigured filesystem and

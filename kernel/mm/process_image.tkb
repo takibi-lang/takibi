@@ -2575,13 +2575,6 @@ fn process_image_map_current(plan: DistroElfLoadPlan,
     return ProcessImageMapResult::Mapped(pages);
 }
 
-fn process_image_map(plan: DistroElfLoadPlan,
-                     argv: borrow []u8,
-                     argc: usize) -> ProcessImageMapResult {
-    process_image_set_target_root_here(address_space_boot_root());
-    return process_image_map_current(plan, argv, argc);
-}
-
 // Map a validated ELF whose bytes live in an ext2 regular file. `plan` must
 // point at a metadata window containing the ELF header and program table;
 // PT_LOAD contents are fetched through ext2_read_file_chunk() while pages
@@ -2616,19 +2609,6 @@ fn process_image_map_ext2_in_root(plan: DistroElfLoadPlan,
     let result = process_image_map_current(plan, argv, argc);
     process_image_ext2_source_clear();
     return result;
-}
-
-fn process_image_map_in_root(plan: DistroElfLoadPlan,
-                             argv: borrow []u8,
-                             argc: usize,
-                             target: AddressSpaceRoot) -> ProcessImageMapResult {
-    let root: usize = address_space_root_slot(target);
-    if (scheduled_process_slot_valid(root) == false ||
-        address_space_is_live(target) == false) {
-        return ProcessImageMapResult::InvalidImage;
-    }
-    process_image_set_target_root_here(target);
-    return process_image_map_current(plan, argv, argc);
 }
 
 fn process_image_page_count(pages: borrow ProcessImagePages[image]) -> usize {

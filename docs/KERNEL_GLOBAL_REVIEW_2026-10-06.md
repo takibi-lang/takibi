@@ -181,7 +181,21 @@ three Takibi allocator bodies into a service struct is not required to match
 their ownership structure. Current RegionPool bodies are 24 bytes; retaining
 them does not depend on the obsolete 16-byte estimate.
 
-## Concrete ordering for a maintainer decision
+## Subsequent implementation assessment
+
+The source inventory above is the pre-migration snapshot and keeps its original
+source hashes. The completed storage/state change is measured in
+[KERNEL_GLOBAL_MIGRATION_2026-10-06.md](KERNEL_GLOBAL_MIGRATION_2026-10-06.md).
+Current ownership is described in `kernel/RUNTIME_STATE.md`.
+
+The maintainer selected deletion of the three dead FD payloads and migration
+of boot mount/image state. Remaining candidates below are review findings,
+not queued implementation: grouping private terminal or cache globals has
+no demonstrated new safety or space benefit; generalized mount/device owners
+are YAGNI under current functionality. Existing machine namespaces, CPU
+partitioning, locks, DMA storage and retained debugger state remain justified.
+
+## Original candidate ordering
 
 1. Validate and remove the three unused FD fallback payload declarations.
    This is actual redundant storage, not name grouping; no performance
