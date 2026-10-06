@@ -2,13 +2,14 @@
   "date": "2026-10-06",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "fb461b4af695638429f0fe4bc6bddc80a3e2a10cf8a959436ac48848c2b86a1c",
-  "workload": "Standard linked QEMU and RPi5 kernels before/after ProcessRecord destructive loan contracts; existing bounded boot/process workload and native three-authority/stale/teardown fixture. ELF sections, generated instructions/relocations and image reservation are separate boundaries.",
+  "source_sha256": "14c570d52603abe965c6f2587728a315c00bbbb5c5ec5593a7cd8e7bf3986dd7",
+  "workload": "Standard production QEMU/RPi5 linked images against published 989184d5; fresh QEMU bounded boot/teardown pool snapshots, 24-process live allocation/cycle/reap/reuse, three-sibling clone/wait4 and two-core protocol replay. Payload, allocator metadata/free capacity, retained chunks, code/data/BSS and image reservation are separate boundaries.",
   "evidence": [
-    "docs/PROCESS_RECORD_LOANS_SPACE_2026-10-06.md",
-    "docs/REGION_POOL_GENERATIONS.md",
+    "docs/PROCESS_RECORD_AUTHORITY_SPACE_2026-10-06.md",
+    "docs/PROCESS_RECORD_AUTHORITY_ENDPOINT_2026-10-06.tsv",
+    "docs/PROCESS_RECORD_AUTHORITY_LIFETIMES_2026-10-06.txt",
     "docs/REGION_POOL_ENDPOINT_2026-10-05.tsv"
   ],
-  "assessment": "Adopt checker-only contracts. Both generated kernel main objects have byte-identical executable/relocation sections; text/data/BSS and image reservations are unchanged on both platforms. No new pin, lock operation, payload field, pool capacity or retention policy. This is static local-loan exclusion and unchanged code generation, not a multicore throughput measurement.",
-  "next_trigger": "Before publishing the next completed kernel feature/stage, or a process lifetime, pool representation, allocation workload or retention change. Repeat cross-OS measurements only if the comparison boundary changes."
+  "assessment": "Adopt authority loan transfers and erased current generation/phase handoffs. Text shrinks by 14696 bytes on QEMU and 14224 on RPi5; data/BSS stays unchanged. QEMU image reservation stays unchanged; RPi5 releases eight pages. Fresh endpoint rows are byte-identical to the existing same-boundary sample, including the 872-byte process payload and one retained 8192-byte chunk with zero nonfree slots after teardown. Live 24-process and clone/reap probes pass. No new pin, runtime witness field, reclamation counter, production lock or retention policy. This is measured storage and static local authority exclusion, not physical multicore throughput evidence; private mints and remote CPU protocols remain trusted.",
+  "next_trigger": "Before the next completed kernel feature/stage, a new process lifetime/resource, or changed pool allocation/retention. Repeat cross-OS measurements only when the normalized comparison boundary changes."
 }
