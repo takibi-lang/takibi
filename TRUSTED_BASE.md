@@ -104,6 +104,18 @@ index equality alone cannot establish a physical lifetime relationship.
 Existing source aliases do not transfer. The contract adds no runtime pin or
 synchronization; ordinary call overhead depends on inlining.
 
+## Logical context lifetime boundaries
+
+The compiler rejects `changes_witness_<View>` calls and inferred direct
+wrappers while a local binding or argument temporary still contains that
+indexed linear erased view kind. Owned arguments transfer the obligation;
+borrows do not. A different generation or phase does not imply a different
+logical context. Runtime function values cannot erase this call summary.
+There is no generated runtime check or synchronization. Truthful mints,
+complete context-change marking, extern/raw-call behavior and the remote
+scheduling/reclamation protocol remain trusted. This is local lifetime
+exclusion at declared boundaries, not inference of physical context writes.
+
 ## Explicit trusted boundaries
 
 Every `unsafe` block is lexically scoped and must justify at least one operation

@@ -1,0 +1,120 @@
+// Mirror the actual logical-current phases of clone, rollback, install and exit.
+// Mints and logical-current selection remain trusted; this is single threaded.
+enum CurrentPhaseState { Running; Constructing; }
+enum PhaseRecordState { Free; Ready; Running; Constructing; Exited; }
+private linear view CurrentPhase[g: usize, state: CurrentPhaseState];
+struct PhaseRecord { value: usize; generation: usize; state: PhaseRecordState; }
+private let mut phase_records: [PhaseRecord; 2];
+private let mut phase_slot: {0..<2 as usize};
+private inline fn phase_running_mint(generation: usize @ g)
+        -> CurrentPhase[g, CurrentPhaseState::Running] {
+    return view CurrentPhase[g, CurrentPhaseState::Running];
+}
+private inline fn phase_child_mint(generation: usize @ g)
+        -> CurrentPhase[g, CurrentPhaseState::Constructing] {
+    return view CurrentPhase[g, CurrentPhaseState::Constructing];
+}
+fn phase_record(current: borrow CurrentPhase[g, state]) -> *PhaseRecord @ g {
+    return &phase_records[phase_slot];
+}
+inline fn phase_end(current: sink CurrentPhase[g, state]) {}
+fn phase_running_value(current: borrow CurrentPhase[g, CurrentPhaseState::Running]) -> usize {
+    return phase_record(current).value;
+}
+must_use variant PhaseClone {
+    Failed(exists g: usize. CurrentPhase[g, CurrentPhaseState::Running]);
+    Child(exists g: usize. CurrentPhase[g, CurrentPhaseState::Constructing]);
+}
+fn phase_clone(current: sink CurrentPhase[g, CurrentPhaseState::Running], success: bool) -> PhaseClone !{changes_witness_CurrentPhase} {
+    if (success == false) { return PhaseClone::Failed(current); }
+    phase_end(current);
+    phase_records[1].state = PhaseRecordState::Constructing;
+    phase_slot = 1;
+    return PhaseClone::Child(phase_child_mint(2));
+}
+must_use variant PhaseRollback {
+    Parent(exists g: usize. CurrentPhase[g, CurrentPhaseState::Running]);
+}
+fn phase_rollback(child: sink CurrentPhase[g, CurrentPhaseState::Constructing]) -> PhaseRollback !{changes_witness_CurrentPhase} {
+    phase_end(child);
+    phase_records[1].value = 0;
+    phase_records[1].generation = 0;
+    phase_records[1].state = PhaseRecordState::Free;
+    phase_slot = 0;
+    return PhaseRollback::Parent(phase_running_mint(1));
+}
+must_use variant PhaseInstall {
+    Failed(exists g: usize. CurrentPhase[g, CurrentPhaseState::Constructing]);
+    Installed(exists g: usize. CurrentPhase[g, CurrentPhaseState::Running]);
+}
+fn phase_install(child: sink CurrentPhase[g, CurrentPhaseState::Constructing], success: bool) -> PhaseInstall !{changes_witness_CurrentPhase} {
+    if (success == false) { return PhaseInstall::Failed(child); }
+    phase_end(child);
+    phase_records[0].state = PhaseRecordState::Ready;
+    phase_records[1].state = PhaseRecordState::Running;
+    return PhaseInstall::Installed(phase_running_mint(2));
+}
+must_use variant PhaseExit {
+    Parent(exists g: usize. CurrentPhase[g, CurrentPhaseState::Running]);
+}
+fn phase_exit(child: sink CurrentPhase[g, CurrentPhaseState::Running]) -> PhaseExit !{changes_witness_CurrentPhase} {
+    phase_end(child);
+    phase_records[1].state = PhaseRecordState::Exited;
+    phase_slot = 0;
+    phase_records[0].state = PhaseRecordState::Running;
+    return PhaseExit::Parent(phase_running_mint(1));
+}
+fn phase_reset() !{changes_witness_CurrentPhase} {
+    phase_slot = 0;
+    phase_records[0].value = 40; phase_records[0].generation = 1;
+    phase_records[0].state = PhaseRecordState::Running;
+    phase_records[1].value = 80; phase_records[1].generation = 2;
+    phase_records[1].state = PhaseRecordState::Free;
+}
+fn phase_demo_rollback() -> usize {
+    phase_reset();
+    let parent = phase_running_mint(1);
+    match phase_clone(parent, true) {
+        PhaseClone::Failed(restored) => { phase_end(restored); return 0; }
+        PhaseClone::Child(child) => {
+            let value: usize = phase_record(child).value;
+            let PhaseRollback::Parent(restored) = phase_rollback(child) else {};
+            let result: usize = value + phase_running_value(restored);
+            phase_end(restored); return result;
+        }
+    }
+}
+fn phase_demo_failure() -> usize {
+    phase_reset();
+    let parent = phase_running_mint(1);
+    match phase_clone(parent, false) {
+        PhaseClone::Failed(restored) => {
+            let value: usize = phase_running_value(restored);
+            phase_end(restored); return value;
+        }
+        PhaseClone::Child(child) => { phase_end(child); return 0; }
+    }
+}
+fn phase_demo_install(success: bool) -> usize {
+    phase_reset();
+    let parent = phase_running_mint(1);
+    match phase_clone(parent, true) {
+        PhaseClone::Failed(restored) => { phase_end(restored); return 0; }
+        PhaseClone::Child(child) => {
+            match phase_install(child, success) {
+                PhaseInstall::Failed(retained) => {
+                    let value: usize = phase_record(retained).value;
+                    let PhaseRollback::Parent(restored) = phase_rollback(retained) else {};
+                    let result: usize = value + phase_running_value(restored);
+                    phase_end(restored); return result;
+                }
+                PhaseInstall::Installed(running) => {
+                    let value: usize = phase_running_value(running);
+                    let PhaseExit::Parent(restored) = phase_exit(running) else {};
+                    let result: usize = value + phase_running_value(restored);
+                    phase_end(restored); return result;
+                }
+            }
+        }
+    }
+}

@@ -9604,6 +9604,74 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     done;
     !reach) invalidation_seeds
   in
+  (* Logical-context witnesses are valid only until a marked replacement.
+     Summaries are inferred through resolved calls; runtime function types do
+     not carry this relation, so changing functions cannot escape as values.
+     Physical context writes and the completeness of the annotations remain
+     trusted. The checker enforces every local ownership boundary. *)
+  let witness_change_seeds = List.fold_left (fun seeds item ->
+    let add key loc words = List.fold_left (fun seeds word ->
+      match Effect_rules.witness_change_annotation word with
+      | None -> seeds
+      | Some kind ->
+          if Hashtbl.find_opt view_kinds kind <> Some Ast.KindLinear
+             || Option.value (Hashtbl.find_opt view_params kind) ~default:[] = []
+          then raise (TypeError (loc,
+            "witness change annotation requires an indexed linear view"));
+          let existing = Option.value (StringMap.find_opt kind seeds)
+            ~default:StringSet.empty in
+          StringMap.add kind (StringSet.add key existing) seeds)
+      seeds words in
+    match item with
+    | Ast.FuncDef f -> add (overload_key f.name f.params) f.def_loc
+        (Option.value f.effects ~default:[])
+    | Ast.ExternFuncDef (name, _, _, words) -> add name Lexing.dummy_pos
+        (Option.value words ~default:[])
+    | _ -> seeds) StringMap.empty prog in
+  let witness_changes = StringMap.map (fun seeds ->
+    let reach = ref seeds in
+    let changed = ref true in
+    while !changed do
+      changed := false;
+      StringMap.iter (fun caller callees ->
+        if not (StringSet.mem caller !reach)
+           && not (StringSet.is_empty (StringSet.inter callees !reach)) then
+          (reach := StringSet.add caller !reach; changed := true)) lock_callees
+    done;
+    !reach) witness_change_seeds in
+  StringMap.iter (fun _ targets ->
+    StringMap.iter (fun _ target ->
+      if StringSet.mem target targets then
+        let loc = Option.value (List.find_map (function
+          | Ast.FuncDef f when overload_key f.name f.params = target -> Some f.def_loc
+          | _ -> None) prog) ~default:Lexing.dummy_pos in
+        raise (TypeError (loc,
+          "witness-changing functions cannot be used as runtime function pointers")))
+      !resolved_function_values) witness_changes;
+  let witness_container_fields = List.fold_left (fun fields -> function
+    | Ast.StructDef (name, members, _, _, _, _)
+    | Ast.OwnedStructDef (name, _, _, members, _, _, _, _, _) ->
+        StringMap.add name members fields
+    | _ -> fields) StringMap.empty prog in
+  let rec contains_witness kind seen ty =
+    let nested name =
+      if StringSet.mem name seen then false else
+      let seen = StringSet.add name seen in
+      match StringMap.find_opt name witness_container_fields with
+      | Some fields -> List.exists (fun (_, ty) -> contains_witness kind seen ty) fields
+      | None -> Option.fold ~none:false ~some:(List.exists (fun (_, payload) ->
+          Option.fold ~none:false ~some:(contains_witness kind seen) payload))
+          (Hashtbl.find_opt variant_defs name) in
+    match ty with
+    | Ast.TypeView (name, _) -> name = kind
+    | Ast.TypeNamed name | Ast.TypeIndexed (name, _)
+    | Ast.TypeVariant (name, _) -> name = kind || nested name
+    | Ast.TypeBorrow ty | Ast.TypeBorrowMut ty | Ast.TypeSink ty
+    | Ast.TypeExists (_, _, ty) | Ast.TypeArray (ty, _)
+    | Ast.TypeArraySym (ty, _) -> contains_witness kind seen ty
+    | Ast.TypeTuple types -> List.exists (contains_witness kind seen) types
+    | _ -> false in
+  let contains_witness kind = contains_witness kind StringSet.empty in
   (* The shortest chain of resolved direct calls from [start] to a function
      [is_goal] accepts, never entering one [blocked] rejects. An error uses it
      to say how a call reaches the thing that makes it dangerous, which is
@@ -10307,6 +10375,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        execute. Keep their authority paths across recursive argument checking;
        a nested destructive call must not overlook these unnamed loans. *)
     let pending_region_arguments = ref [] in
+    let pending_witness_arguments = ref [] in
     let rec check_expr taints moved consume (e : Ast.expr) =
       match e.desc with
       | Ast.ViewLit (name, _) ->
@@ -10532,11 +10601,29 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             in
             let moved = check_expr taints moved consume_arg arg in
             let saved_arguments = !pending_region_arguments in
+            let saved_witnesses = !pending_witness_arguments in
+            let argument_type = match arg.desc with
+              | Ast.Var binding -> (match pvar_expr arg binding with
+                  | PVar (id, _) -> Some (binding_type id binding)
+                  | _ -> expr_ast_type arg)
+              | Ast.Call (callee, _) ->
+                  let callee = Option.value (StringMap.find_opt (loc_key arg.loc)
+                    !resolved_call_targets) ~default:callee in
+                  StringMap.find_opt callee call_returns
+              | Ast.ViewLit (kind, indices) -> Some (Ast.TypeView (kind, indices))
+              | Ast.VariantCtor (kind, _, _) -> Some (Ast.TypeVariant (kind, []))
+              | _ -> expr_ast_type arg in
+            Option.iter (fun ty ->
+              pending_witness_arguments :=
+                (taint_source_name arg, ty) :: saved_witnesses)
+              (match argument_type with Some _ -> argument_type | None -> param);
             if not (PathSet.is_empty arg_taint) then
               pending_region_arguments :=
                 (taint_source_name arg, arg_taint) :: saved_arguments;
             Fun.protect
-              ~finally:(fun () -> pending_region_arguments := saved_arguments)
+              ~finally:(fun () ->
+                pending_region_arguments := saved_arguments;
+                pending_witness_arguments := saved_witnesses)
               (fun () -> check_args moved rest
                 (match params with _ :: ps -> ps | [] -> []))
           in
@@ -10608,6 +10695,23 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             then "<indirect call>" else target in
           let moved = invalidate_handles e.loc name invalidation_target
             (check_args moved args params) in
+          StringMap.iter (fun kind targets ->
+            if StringSet.mem target targets then begin
+              let reject binding ty = if contains_witness kind ty then
+                raise (TypeError (e.loc, Printf.sprintf
+                  "witness change '%s' cannot run while '%s' contains a live %s witness"
+                  name binding kind)) in
+              PathSet.iter (function
+                | PVar (id, binding) as path
+                  when not (ResourceFlow.is_consumed_on_all_paths path moved) ->
+                    reject binding (binding_type id binding)
+                | _ -> ()) !active_declared;
+              List.iter (fun (binding, ty) -> reject binding ty)
+                !pending_witness_arguments;
+              List.iter (fun (binding, sources) -> PathSet.iter (function
+                | PVar (id, source) -> reject binding (binding_type id source)
+                | _ -> ()) sources) !pending_region_arguments
+            end) witness_changes;
           let returns_obligation = match StringMap.find_opt target call_returns with
             | Some ty -> is_linear_type ty || is_must_use_type ty
             | None -> false

@@ -79,6 +79,14 @@ let record_mutation_annotation name =
       (String.length name - String.length prefix))
   else None
 
+(* A logical-context replacement cannot overlap its erased witness kind. *)
+let witness_change_annotation name =
+  let prefix = "changes_witness_" in
+  if String.starts_with ~prefix name && String.length name > String.length prefix
+  then Some (String.sub name (String.length prefix)
+      (String.length name - String.length prefix))
+  else None
+
 (* A private, checked source-loan to destination-authority return boundary. *)
 let loan_transfer_annotation = "loan_transfer"
 
@@ -92,6 +100,7 @@ let dynamic_rule name =
     || invalidation_annotation name <> None
     || name = handle_of_witness_annotation
     || record_mutation_annotation name <> None
+    || witness_change_annotation name <> None
     || name = loan_transfer_annotation in
   if not checker_only then None else Some {
       name; declaration = Required; declaration_role = false;

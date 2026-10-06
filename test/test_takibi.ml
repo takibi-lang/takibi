@@ -20907,6 +20907,95 @@ let loan_transfer_tests = [
     (expect_type_error "derived only from its source" (loan_transfer_fixture ^ {|private fn wrong(source: borrow PoolLive[g], destination: borrow Running[g]) -> *TransferRecord @ g !{loan_transfer} { let source = live_new(1); let ptr = payload(source); let v = ptr.value; live_end(source); return ptr; }|}));
 ]
 
+let witness_change_fixture = {|
+  private linear view Current[g: usize];
+  private linear view Other[g: usize];
+  private fn mint(generation: usize @ g) -> Current[g] { return view Current[g]; }
+  private fn other(generation: usize @ g) -> Other[g] { return view Other[g]; }
+  fn end(current: sink Current[g]) {}
+  fn other_end(current: sink Other[g]) {}
+  fn read(current: borrow Current[g]) -> usize { return 1; }
+  fn replace() !{changes_witness_Current} {}
+  fn forward() { replace(); }
+  fn transfer(current: Current[g]) { end(current); replace(); }
+|}
+
+let witness_change_tests =
+  let bad name code = Alcotest.test_case name `Quick
+    (expect_type_error "contains a live Current witness" (witness_change_fixture ^ code)) in
+  let good name code = Alcotest.test_case name `Quick
+    (fun () -> ignore (infer (witness_change_fixture ^ code))) in
+  [
+    bad "context replacement rejects owned current"
+      {|fn probe(current: Current[g]) { replace(); end(current); }|};
+    bad "context replacement rejects borrowed current"
+      {|fn probe(current: borrow Current[g]) { forward(); }|};
+    bad "sink still contains a live witness until consumed"
+      {|fn probe(current: sink Current[g]) { replace(); }|};
+    good "owned transfer discharges caller before replacement"
+      {|fn probe(current: Current[g]) { transfer(current); }|};
+    good "explicitly consumed current permits replacement"
+      {|fn probe(current: Current[g]) { end(current); forward(); }|};
+    good "different witness kind is independent"
+      {|fn probe(current: Other[g]) { replace(); other_end(current); }|};
+    bad "different generation does not imply different context"
+      {|fn probe() { let current = mint(99); replace(); end(current); }|};
+    bad "owned transfer cannot hide second live witness"
+      {|fn probe() { let a = mint(1); let b = mint(2); transfer(a); end(b); }|};
+    bad "shadowed outer witness remains live"
+      {|fn probe() { let current = mint(1); { let current = mint(2); end(current); replace(); } end(current); }|};
+    bad "existential variant retains the witness"
+      {|must_use variant Hold { Held(exists g: usize. Current[g]); }
+        fn probe() { let held = Hold::Held(mint(1)); replace(); match held { Hold::Held(current) => { end(current); } } }|};
+    Alcotest.test_case "existing tuple rule prevents hiding erased witnesses" `Quick
+      (expect_type_error "erased view cannot be stored in a runtime tuple"
+        (witness_change_fixture ^ {|fn probe() { let held = (mint(1), 2); }|}));
+    Alcotest.test_case "existing field rule prevents hiding erased witnesses" `Quick
+      (expect_type_error "cannot hold a nested erased view"
+        (witness_change_fixture ^ {|linear struct Hold[g: usize] { private current: Current[g]; }|}));
+    bad "earlier owned argument survives later argument evaluation"
+      {|fn take(current: Current[g], value: usize) { end(current); }
+        fn changed() -> usize { replace(); return 0; }
+        fn probe() { take(mint(1), changed()); }|};
+    good "owned forwarding followed by a fresh witness"
+      {|fn probe(current: Current[g]) { transfer(current); let next = mint(2); let v = read(next); end(next); }|};
+    Alcotest.test_case "transitive change cannot escape through callback" `Quick
+      (expect_type_error "witness-changing functions cannot be used as runtime function pointers"
+        (witness_change_fixture ^ {|fn probe() { let callback: fn() -> void = forward; callback(); }|}));
+    Alcotest.test_case "annotation rejects unindexed view" `Quick
+      (expect_type_error "requires an indexed linear view"
+        {|linear view Current; fn replace() !{changes_witness_Current} {}|});
+    Alcotest.test_case "annotation rejects affine view" `Quick
+      (expect_type_error "requires an indexed linear view"
+        {|affine view Current[g: usize]; fn replace() !{changes_witness_Current} {}|});
+    Alcotest.test_case "witness changes add no runtime operand or call" `Quick
+      (fun () ->
+        ignore (gen_codegen (witness_change_fixture ^
+          {|fn probe(current: Current[g], value: usize) -> usize { transfer(current); return value; }|}));
+        let find name = match Hashtbl.find_opt Llvm_gen.functions name with
+          | Some (_, fn) -> fn | None -> Alcotest.failf "%s missing" name in
+        Alcotest.(check int) "transfer has no runtime parameters"
+          0 (Array.length (Llvm.params (find "transfer")));
+        Alcotest.(check int) "caller keeps only scalar parameter"
+          1 (Array.length (Llvm.params (find "probe")));
+        let ir = Llvm.string_of_llvalue (find "probe") in
+        Alcotest.(check bool) "ordinary zero-operand call" true
+          (contains_substring ir "call void @transfer()");
+        Alcotest.(check bool) "no witness storage" false
+          (contains_substring ir "Current"));
+    bad "one branch retaining the witness blocks a later change"
+      {|fn probe(current: sink Current[g], finish: bool) { if (finish) { end(current); } replace(); }|};
+    good "both branches consuming the witness permit change"
+      {|fn probe(current: Current[g], finish: bool) { if (finish) { end(current); } else { end(current); } replace(); }|};
+    bad "an argument variant also retains a fresh temporary witness"
+      {|must_use variant Hold { Held(exists g: usize. Current[g]); }
+        fn take(held: Hold, value: usize) { match held { Hold::Held(current) => { end(current); } } }
+        fn changed() -> usize { replace(); return 0; }
+        fn probe() { take(Hold::Held(mint(1)), changed()); }|};
+    bad "external replacement obeys the same local boundary"
+      {|extern fn foreign() !{changes_witness_Current}; fn probe(current: Current[g]) { foreign(); end(current); }|};
+  ]
+
 let named_groups_unisolated = [
   "core",     core_tests;
   "parser",   parser_tests;
@@ -20916,6 +21005,7 @@ let named_groups_unisolated = [
   "codegen",  codegen_tests;
   "record-loans", record_loan_tests;
   "loan-transfer", loan_transfer_tests;
+  "witness-changes", witness_change_tests;
   "record-loan-contracts", record_loan_contract_tests;
   "record-loan-boundaries", record_boundary_tests;
 ]

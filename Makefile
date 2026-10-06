@@ -687,8 +687,8 @@ $(COMMON_LINUX_SYSCALL_O): $(COMMON_LINUX_SYSCALL_S) | $(LINUX_USER_BUILD_DIR)
 # build. The ordering is the whole point -- constants resolve as the
 # parser walks the list left to right -- so these go ahead of `$<`.
 LINUX_USER_EXTRA_SRCS :=
-$(LINUX_USER_DIR)/record_loans/record_loans_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/record_loans/authority.tkb
-$(LINUX_USER_DIR)/record_loans/record_loans_exe.o: $(LINUX_USER_DIR)/record_loans/authority.tkb
+$(LINUX_USER_DIR)/record_loans/record_loans_exe.o: LINUX_USER_EXTRA_SRCS := $(LINUX_USER_DIR)/record_loans/authority.tkb $(LINUX_USER_DIR)/record_loans/current_phase.tkb
+$(LINUX_USER_DIR)/record_loans/record_loans_exe.o: $(LINUX_USER_DIR)/record_loans/authority.tkb $(LINUX_USER_DIR)/record_loans/current_phase.tkb
 # A per-test compiler flag, such as the built-in region's --regions (#672).
 LINUX_USER_EXTRA_FLAGS :=
 $(LINUX_USER_DIR)/region_proto/region_proto_exe.o: LINUX_USER_EXTRA_FLAGS := --regions

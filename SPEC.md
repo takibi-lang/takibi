@@ -3937,3 +3937,44 @@ investigations behind any of these, see `HISTORY.md`.
   arithmetic instead of a real bounds check). `s.field[i]` now compiles
   directly with a real checked bounds check, for a FieldGet chain of any
   depth (`a.b.c[i]`); only Index-as-a-base remains unsupported.
+
+## Logical Context Changes and Erased Witnesses
+
+`changes_witness_<View>` is a checker-only context-change annotation. `<View>`
+must name an indexed linear erased view. A Takibi or extern function may carry
+it; resolved direct callers inherit its context-change summary automatically.
+The annotation describes replacement of one logical context, not destruction
+of a particular allocation. Different generation or phase indices of that view
+kind therefore do not establish independence.
+
+At a changing call, every live binding containing that witness kind must have
+been consumed. Owned arguments are transferred before this check; a borrowed
+argument retains the caller's witness and cannot cross the boundary. A `sink`
+parameter remains usable in its body until explicitly consumed, so it cannot
+silently survive a nested context change. Shadowed bindings, existential
+variant payloads, and earlier argument temporaries are included. For example:
+
+```takibi
+private linear view Current[g: usize];
+fn end(current: sink Current[g]) {}
+fn replace() !{changes_witness_Current} { ... }
+fn handoff(current: Current[g]) {
+    end(current);
+    replace();
+}
+```
+
+A caller may pass its sole `Current` to `handoff`. It cannot keep another
+`Current`, call `replace` through a wrapper while borrowing one, or evaluate
+`take(current, replace_value())`: the first argument remains a live temporary
+while the second is evaluated. Existing erased-view aggregate rules also
+prevent hiding witnesses in runtime fields or tuples.
+
+Changing functions and their direct callers cannot be used as runtime function
+values: a runtime function type does not carry this ownership boundary. Calls
+to independent callbacks remain permitted. Unsafe manufactured function
+pointers, extern implementations, truthful view mints, completeness of context
+change annotations, and remote context/reclamation protocols remain trusted.
+This rule checks local ownership at declared boundaries; it does not infer
+context replacement from arbitrary writes or prove cross-core exclusion.
+It inserts no runtime operand, pin, branch, lock, or counter.
