@@ -89,3 +89,42 @@ fn loan_distinct_records() -> usize {
     { let ptr = loan_owned(a); loan_remove(guard, b); value = ptr.value; }
     loan_owner_end(a); loan_release(guard); return value;
 }
+
+// Private transfer boundary fixture with independent lifetime authorities.
+struct TransferRecord { value: usize; }
+linear view PoolLive[g: usize];
+linear view Running[g: usize];
+private let mut record: TransferRecord;
+private inline fn live_new(generation: usize @ g) -> PoolLive[g] { return view PoolLive[g]; }
+private inline fn running_new(generation: usize @ g) -> Running[g] { return view Running[g]; }
+inline fn live_end(live: sink PoolLive[g]) {}
+inline fn running_end(running: sink Running[g]) {}
+private inline fn payload(live: borrow PoolLive[g]) -> *TransferRecord @ g { return &record; }
+private inline fn transfer(source: borrow PoolLive[g], destination: borrow Running[g]) -> *TransferRecord @ g !{loan_transfer} {
+    return payload(source);
+}
+fn loan_transferred_after_pool_release() -> usize {
+    record.value = 120;
+    let live = live_new(1); let running = running_new(1);
+    let mut value: usize = 0;
+    { let ptr = transfer(live, running); live_end(live); ptr.value = ptr.value + 1; value = ptr.value; }
+    running_end(running); return value;
+}
+
+// The real caller shape returns the transferred loan after releasing the
+// source inside the accessor. Only the existing Running authority survives.
+private inline fn transferred_running_record(running: borrow Running[g],
+                                              generation: usize @ g)
+        -> *TransferRecord @ g {
+    let live = live_new(generation);
+    let ptr = transfer(live, running);
+    live_end(live);
+    return ptr;
+}
+fn loan_transferred_through_accessor() -> usize {
+    let running = running_new(1);
+    let mut value: usize = 0;
+    { let ptr = transferred_running_record(running, 1);
+      ptr.value = ptr.value + 1; value = ptr.value; }
+    running_end(running); return value;
+}

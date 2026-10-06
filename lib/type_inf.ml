@@ -9111,6 +9111,43 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         StringMap.add name (Option.value ret ~default:Ast.TypeVoid) m
     | _ -> m
   ) StringMap.empty prog in
+  (* A transfer asserts that the destination also protects the source's
+     allocation/domain. The assertion is private and trusted; its signature,
+     source provenance, and resulting caller lifetime are checked. Both
+     borrowed proofs remain live throughout the transfer body. *)
+  let loan_transfers = List.fold_left (fun map item ->
+    let annotated words = List.mem Effect_rules.loan_transfer_annotation
+      (Option.value words ~default:[]) in
+    match item with
+    | Ast.FuncDef f when annotated f.effects ->
+        if not f.is_private then
+          raise (TypeError (f.def_loc, "loan_transfer requires a private function"));
+        if StringMap.exists (fun _ target ->
+            target = overload_key f.name f.params) !resolved_function_values then
+          raise (TypeError (f.def_loc,
+            "loan_transfer functions cannot be used as runtime function pointers"));
+        let authority = function
+          | Some (Ast.TypeBorrow ((Ast.TypeIndexed (_, indices)
+                                  | Ast.TypeView (_, indices)) as ty))
+            when is_tracked_type ty -> Some indices
+          | _ -> None in
+        (match f.params, Option.bind f.ret_type region_return_annotation with
+         | [(source, source_ty); (destination, destination_ty)],
+           Some (_, (Ast.StaticName _ as identity), RegionPointer) ->
+             (match authority source_ty, authority destination_ty with
+              | Some source_indices, Some destination_indices
+                when List.mem identity source_indices
+                     && List.mem identity destination_indices ->
+                  StringMap.add (overload_key f.name f.params)
+                    (source, destination) map
+              | _ -> raise (TypeError (f.def_loc,
+                  "loan_transfer requires two borrowed indexed authorities sharing the return lifetime index")))
+         | _ -> raise (TypeError (f.def_loc,
+             "loan_transfer requires exactly two borrowed authorities and an indexed pointer return")))
+    | Ast.ExternFuncDef (_, _, _, words) when annotated words ->
+        raise (TypeError (Lexing.dummy_pos,
+          "loan_transfer requires a private Takibi function body"))
+    | _ -> map) StringMap.empty prog in
   (* Authority-derived region returns (issues #106/#128): function key ->
      matching parameter indices plus returned value kind. Same overload_key
      keying as call_params, resolved per call site through
@@ -9133,7 +9170,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                           authority_indices := i :: !authority_indices
                     | _ -> ()
                   ) f.params;
-                  (match List.rev !authority_indices with
+                  let indices = match StringMap.find_opt
+                      (overload_key f.name f.params) loan_transfers with
+                    | Some _ -> [1]
+                    | None -> List.rev !authority_indices in
+                  (match indices with
                    | _ :: _ as indices ->
                        StringMap.add (overload_key f.name f.params)
                          (indices, kind) m
@@ -9142,6 +9183,17 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          | _ -> m)
     | _ -> m
   ) StringMap.empty prog in
+  (* Runtime function types do not carry a region-return relation. Do not
+     allow a pointer accessor or wrapper to erase it through a callback. *)
+  List.iter (function
+    | Ast.FuncDef f ->
+        let key = overload_key f.name f.params in
+        if StringMap.mem key region_return_info
+           && StringMap.exists (fun _ target -> target = key)
+                !resolved_function_values then
+          raise (TypeError (f.def_loc,
+            "authority-derived return functions cannot be used as runtime function pointers"))
+    | _ -> ()) prog;
   let noreturn_functions = List.fold_left (fun names -> function
     | Ast.ExternFuncDef (name, _, _, Some effects)
       when List.mem "noreturn" effects -> StringSet.add name names
@@ -9608,6 +9660,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | PVar (id, _) -> PField (id, name, field)
       | PField _ -> assert false
     in
+    let loan_transfer_source = Option.map (fun (source, _) -> pvar source)
+      (StringMap.find_opt (overload_key fdef.name fdef.params) loan_transfers) in
+    let borrowed_pointer_return_authorities =
+      match StringMap.find_opt (overload_key fdef.name fdef.params)
+          region_return_info with
+      | Some (indices, RegionPointer) ->
+          List.fold_left (fun paths index ->
+            let name, _ = List.nth fdef.params index in
+            PathSet.add (pvar name) paths) PathSet.empty indices
+      | _ -> PathSet.empty in
     let var_types = ref finfo.local_types in
     List.iter2 (fun (name, _) (_, ty) ->
       var_types := StringMap.add name ty !var_types
@@ -9980,6 +10042,15 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Some ty -> ast_region_kind ty = None && type_contains_region_alias ty
       | None -> false
     in
+    let authority_argument_path (arg : Ast.expr) = match arg.desc with
+      | Ast.Var name -> Some (pvar_expr arg name)
+      | Ast.FieldGet (({ Ast.desc = Ast.Var base; _ } as base_expr), field) ->
+          (match pvar_expr base_expr base with
+           | PVar (id, _) as path when stored_owner_field_of id base field ->
+               (* Moving the stored linear field consumes the whole holder. *)
+               Some path
+           | _ -> None)
+      | _ -> None in
     let rec expr_taint taints (e : Ast.expr) = match e.desc with
       | Ast.Var n ->
           (match StringMap.find_opt n !var_types with
@@ -10017,9 +10088,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
            | Some (indices, _) ->
                List.fold_left (fun paths i ->
                  match List.nth_opt args i with
-                 | Some { Ast.desc = Ast.Var authority; _ } ->
-                     PathSet.add (pvar authority) paths
-                 | _ -> paths)
+                 | Some arg ->
+                     (match authority_argument_path arg with
+                      | Some path -> PathSet.add path paths | None -> paths)
+                 | None -> paths)
                  PathSet.empty indices
            | None when target = "min" || target = "max" ->
                List.fold_left (fun paths arg ->
@@ -10171,7 +10243,17 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        the narrow indexed-owner handoff described above. *)
     let require_no_taint_escape loc taints escape (e : Ast.expr) =
       let t = expr_taint taints e in
-      if not (PathSet.is_empty t)
+      let transferred = match escape, loan_transfer_source with
+        | `Return, Some source ->
+            if not (PathSet.equal t (PathSet.singleton source)) then
+              raise (TypeError (loc,
+                "loan_transfer must return a pointer derived only from its source authority"));
+            true
+        | _ -> false in
+      let borrowed_return = escape = `Return
+        && not (PathSet.is_empty t)
+        && PathSet.subset t borrowed_pointer_return_authorities in
+      if not transferred && not borrowed_return && not (PathSet.is_empty t)
          && not (PathSet.subset t handoff_authorities) then
         let owner = path_to_string (PathSet.choose t) in
         let stack_derived = PathSet.exists is_stack_origin t in
@@ -10314,6 +10396,21 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Call (name, args) ->
           let target = Option.value
             (StringMap.find_opt (loc_key e.loc) !resolved_call_targets) ~default:name in
+          let return_authority_indices =
+            if StringMap.mem target loan_transfers then [0; 1]
+            else match StringMap.find_opt target region_return_info with
+              | Some (indices, _) -> indices | None -> [] in
+          List.iter (fun index -> match List.nth_opt args index with
+            | Some arg ->
+                let path =
+                  if StringMap.mem target loan_transfers then
+                    match arg.desc with
+                    | Ast.Var name -> Some (pvar_expr arg name) | _ -> None
+                  else authority_argument_path arg in
+                if not (Option.fold ~none:false ~some:is_tracked_path path) then
+                  raise (TypeError (arg.loc,
+                    "authority-derived returns require directly tracked authority bindings"))
+            | None -> ()) return_authority_indices;
           let rec guard_annotation ty = match strip_borrow ty with
             | Ast.TypeIndexed (guard_name, _) | Ast.TypeView (guard_name, _)
             | Ast.TypeNamed guard_name ->

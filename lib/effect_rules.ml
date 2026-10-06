@@ -79,6 +79,9 @@ let record_mutation_annotation name =
       (String.length name - String.length prefix))
   else None
 
+(* A private, checked source-loan to destination-authority return boundary. *)
+let loan_transfer_annotation = "loan_transfer"
+
 let dynamic_rule name =
   let checker_only =
     lock_acquire_annotation name <> None
@@ -88,7 +91,8 @@ let dynamic_rule name =
     || name = restores_saved_irq_annotation
     || invalidation_annotation name <> None
     || name = handle_of_witness_annotation
-    || record_mutation_annotation name <> None in
+    || record_mutation_annotation name <> None
+    || name = loan_transfer_annotation in
   if not checker_only then None else Some {
       name; declaration = Required; declaration_role = false;
       function_pointer = false; propagates = false;

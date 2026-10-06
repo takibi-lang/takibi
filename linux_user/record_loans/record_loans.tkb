@@ -1,6 +1,8 @@
 // Execute positive record-loan cases with the compiler's destructive contracts.
 // Negative lifetime and alias cases belong to the in-process compiler suite.
 fn app_main() {
+    uart_println(loan_transferred_after_pool_release() as u64);
+    uart_println(loan_transferred_through_accessor() as u64);
     loan_fixture_reset();
     let mut live: LoanHandle = loan_fixture_handle(0, 7);
     uart_println(loan_three_paths(live) as u64);

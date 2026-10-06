@@ -2402,6 +2402,58 @@ reachable only through `shared_access(g)`. The focused
 `examples/guard_pointer_after_unlock_wrong` fixture consumes the guard and
 then attempts a field read through the old pointer.
 
+## Explicit Loan Transfer
+
+A private Takibi function annotated `!{loan_transfer}` transfers the returned
+pointer's lifetime from its first borrowed authority to its second:
+
+```takibi
+private inline fn record_transfer(source: borrow PoolLive[g],
+                                  destination: borrow ProcessRunning[g])
+    -> *Record @ g !{loan_transfer} {
+    return pool_payload(source);
+}
+```
+
+The signature must have exactly two `borrow` parameters of indexed affine or
+linear struct/view types and a pointer return annotated with a named static
+index present in both authorities. `sink`, `borrow mut`, plain values, extra
+parameters, public definitions, externs, and slice returns are rejected.
+The body must return a pointer derived only from the original first parameter;
+raw global/stack pointers, pointers derived from the destination, and loans
+of a shadowing binding do not satisfy this obligation. Ordinary retention and
+aggregate barriers still apply. The annotation cannot be carried through a
+runtime function pointer; taking the annotated function as a value is rejected.
+
+Both transfer arguments must be directly tracked local/parameter bindings.
+Ordinary region-returning calls also support the stored linear owner field of
+an indexed holder; the result depends on that whole holder, whose consumption
+moves the field. Temporaries and other projections cannot silently lose the
+lifetime dependency.
+At a direct call, only the second authority becomes the returned pointer's
+lifetime dependency. The first proof may subsequently be consumed, while all
+pre-existing pointer aliases retain their dependency on it. Consuming the
+second authority forbids further use of the transferred pointer. Destructive
+record calls retain their independent overlapping-loan checks.
+
+An ordinary pointer-returning wrapper may return a loan tied only to its
+borrowed authority parameters named by its own `@ index` result. Local proof
+loans cannot escape this way. At its caller the ordinary result remains tied
+to every matching borrowed parameter; only `loan_transfer` selects just the
+second parameter. Functions with authority-derived return contracts cannot
+be used as runtime function pointers, whose types cannot carry that relation.
+Returning a loan does not permit retaining it in a field,
+global, or other durable storage.
+
+The annotation is a reviewed assertion that the destination protects the
+same allocation or domain throughout its lifetime. Equality of an erased
+index does not prove this physical relationship, lock exclusion, or mint
+uniqueness. Private source/destination mints and the transfer boundary must
+establish it. The checker verifies the signature, original source provenance,
+and caller lifetime; it does not infer the scheduler's remote-free protocol.
+The annotation itself adds no runtime operation, pin, or lock. The function
+still has its ordinary runtime arguments and call unless inlined.
+
 ## Destructive Record Calls and Authority Loans
 
 `record_mutates_<Authority>` is a checker-only destructive-boundary annotation.

@@ -20708,6 +20708,128 @@ let record_loan_contract_tests = [
         }|}));
 ]
 
+
+(* A transfer changes the returned loan, never any existing source alias. *)
+let loan_transfer_fixture = {|// Private transfer boundary fixture with independent lifetime authorities.
+struct TransferRecord { value: usize; }
+linear view PoolLive[g: usize];
+linear view Running[g: usize];
+private let mut record: TransferRecord;
+private inline fn live_new(generation: usize @ g) -> PoolLive[g] { return view PoolLive[g]; }
+private inline fn running_new(generation: usize @ g) -> Running[g] { return view Running[g]; }
+inline fn live_end(live: sink PoolLive[g]) {}
+inline fn running_end(running: sink Running[g]) {}
+private inline fn payload(live: borrow PoolLive[g]) -> *TransferRecord @ g { return &record; }
+private inline fn transfer(source: borrow PoolLive[g], destination: borrow Running[g]) -> *TransferRecord @ g !{loan_transfer} {
+    return payload(source);
+}
+|}
+
+let loan_transfer_struct_fixture = {|
+struct TransferRecord { value: usize; }
+linear struct PoolProof[g: usize] { private generation: usize @ g; }
+linear struct RunningProof[g: usize] { private generation: usize @ g; }
+private let mut record: TransferRecord;
+private fn payload(source: borrow PoolProof[g]) -> *TransferRecord @ g { return &record; }
+private fn transfer(source: borrow PoolProof[g], destination: borrow RunningProof[g]) -> *TransferRecord @ g !{loan_transfer} { return payload(source); }
+|}
+
+let loan_transfer_tests = [
+  Alcotest.test_case "stored proof loan dies with the whole holder" `Quick
+    (expect_type_error "cannot be used after"
+      (loan_transfer_struct_fixture ^ {|
+        linear struct Holder[g: usize] { private proof: PoolProof[g]; }
+        fn proof_end(proof: sink PoolProof[g]) {}
+        fn release(holder: sink Holder[g]) -> PoolProof[g] { return holder.proof; }
+        fn probe(holder: sink Holder[g]) -> usize {
+          let ptr = payload(holder.proof); let proof = release(holder);
+          let value = ptr.value; proof_end(proof); return value;
+        }|}));
+  Alcotest.test_case "stored proof accessor returns the holder loan" `Quick
+    (fun () -> ignore (infer (loan_transfer_struct_fixture ^ {|
+        linear struct Holder[g: usize] { private proof: PoolProof[g]; }
+        fn held_record(holder: borrow Holder[g]) -> *TransferRecord @ g { return payload(holder.proof); }
+        fn probe(holder: borrow Holder[g]) -> usize { let ptr = held_record(holder); return ptr.value; }
+      |})));
+  Alcotest.test_case "ordinary accessor temporary cannot lose its loan" `Quick
+    (expect_type_error "directly tracked authority bindings"
+      (loan_transfer_fixture ^ {|fn probe() { let ptr = payload(live_new(1)); }|}));
+  Alcotest.test_case "ordinary wrapper callback cannot erase returned loan" `Quick
+    (expect_type_error "authority-derived return functions cannot be used"
+      (loan_transfer_struct_fixture ^ {|fn probe() { let callback = payload; }|}));
+  Alcotest.test_case "erased transfer lowers to an ordinary pointer return" `Quick
+    (fun () ->
+      ignore (gen_codegen (loan_transfer_fixture ^ {|
+        fn read(source: borrow PoolLive[g], destination: borrow Running[g]) -> usize {
+          let ptr = transfer(source, destination);
+          ptr.value = 121; return ptr.value;
+        }|}));
+      match Llvm.lookup_function "transfer" !Llvm_gen.the_module with
+      | Some fn ->
+          Alcotest.(check int) "no runtime proof arguments" 0
+            (Array.length (Llvm.params fn));
+          Alcotest.(check bool) "plain pointer result" true
+            (contains_substring (Llvm.string_of_llvalue fn) "define ptr @transfer()")
+      | None -> Alcotest.fail "transfer function not generated");
+  Alcotest.test_case "temporary destination cannot lose the returned dependency" `Quick
+    (expect_type_error "directly tracked authority bindings"
+      (loan_transfer_fixture ^ {|fn probe(live: borrow PoolLive[1]) { let ptr = transfer(live, running_new(1)); }|}));
+  Alcotest.test_case "temporary source must have an explicit lifetime" `Quick
+    (expect_type_error "directly tracked authority bindings"
+      (loan_transfer_fixture ^ {|fn probe(running: borrow Running[1]) { let ptr = transfer(live_new(1), running); }|}));
+  Alcotest.test_case "runtime callback cannot erase transfer contract" `Quick
+    (expect_type_error "cannot be used as runtime function pointers"
+      (loan_transfer_struct_fixture ^ {|fn probe() { let callback = transfer; }|}));
+  Alcotest.test_case "different source indices cannot be merged" `Quick
+    (expect_type_error "two borrowed indexed authorities"
+      (loan_transfer_fixture ^ {|private fn wrong(source: borrow PoolLive[a], destination: borrow Running[b]) -> *TransferRecord @ a !{loan_transfer} { return payload(source); }|}));
+  Alcotest.test_case "source proof can end before transferred loan" `Quick
+    (fun () -> ignore (infer (loan_transfer_fixture ^ {|fn probe() -> usize { let live = live_new(1); let running = running_new(1); let mut v: usize = 0; { let ptr = transfer(live, running); live_end(live); v = ptr.value; } running_end(running); return v; }|})));
+  Alcotest.test_case "destination consumed before use" `Quick
+    (expect_type_error "cannot be used after" (loan_transfer_fixture ^ {|fn probe() -> usize { let live = live_new(1); let running = running_new(1); let ptr = transfer(live, running); live_end(live); running_end(running); return ptr.value; }|}));
+  Alcotest.test_case "original alias remains tied to source" `Quick
+    (expect_type_error "cannot be used after" (loan_transfer_fixture ^ {|fn probe() -> usize { let live = live_new(1); let running = running_new(1); let old = payload(live); let ptr = transfer(live, running); live_end(live); let v = old.value; running_end(running); return v; }|}));
+  Alcotest.test_case "different generations" `Quick
+    (expect_type_error "static value mismatch" (loan_transfer_fixture ^ {|fn probe() -> usize { let live = live_new(1); let running = running_new(2); let ptr = transfer(live, running); let v = ptr.value; live_end(live); running_end(running); return v; }|}));
+  Alcotest.test_case "dead source" `Quick
+    (expect_type_error "was already consumed" (loan_transfer_fixture ^ {|fn probe() -> usize { let live = live_new(1); let running = running_new(1); live_end(live); let ptr = transfer(live, running); let v = ptr.value; running_end(running); return v; }|}));
+  Alcotest.test_case "dead destination" `Quick
+    (expect_type_error "was already consumed" (loan_transfer_fixture ^ {|fn probe() -> usize { let live = live_new(1); let running = running_new(1); running_end(running); let ptr = transfer(live, running); let v = ptr.value; live_end(live); return v; }|}));
+  Alcotest.test_case "raw pointer is not a source loan" `Quick
+    (expect_type_error "derived only from its source" (loan_transfer_fixture ^ {|private fn wrong(source: borrow PoolLive[g], destination: borrow Running[g]) -> *TransferRecord @ g !{loan_transfer} { return &record; }|}));
+  Alcotest.test_case "destination pointer is not source loan" `Quick
+    (expect_type_error "derived only from its source" (loan_transfer_fixture ^ {|fn running_payload(running: borrow Running[g]) -> *TransferRecord @ g { return &record; } private fn wrong(source: borrow PoolLive[g], destination: borrow Running[g]) -> *TransferRecord @ g !{loan_transfer} { return running_payload(destination); }|}));
+  Alcotest.test_case "ordinary wrapper retains both declared authorities" `Quick
+    (expect_type_error "cannot be used after" (loan_transfer_fixture ^ {|
+      private fn wrapper(source: borrow PoolLive[g], destination: borrow Running[g]) -> *TransferRecord @ g { return payload(source); }
+      fn probe() -> usize { let live = live_new(1); let running = running_new(1); let ptr = wrapper(live, running); live_end(live); let v = ptr.value; running_end(running); return v; }|}));
+  Alcotest.test_case "caller boundary preserves transferred destination loan" `Quick
+    (fun () -> ignore (infer (loan_transfer_fixture ^ {|
+      private fn wrapper(running: borrow Running[g], generation: usize @ g) -> *TransferRecord @ g {
+        let live = live_new(generation); let ptr = transfer(live, running); live_end(live); return ptr;
+      }
+      fn probe() -> usize { let running = running_new(1); let mut v: usize = 0; { let ptr = wrapper(running, 1); v = ptr.value; } running_end(running); return v; }|})));
+  Alcotest.test_case "wrapper cannot return unrelated local proof loan" `Quick
+    (expect_type_error "cannot be returned" (loan_transfer_fixture ^ {|
+      private fn wrapper(running: borrow Running[g], generation: usize @ g) -> *TransferRecord @ g {
+        let live = live_new(generation); let ptr = payload(live); live_end(live); return ptr;
+      }|}));
+  Alcotest.test_case "public transfer rejected" `Quick
+    (expect_type_error "requires a private function" (loan_transfer_fixture ^ {|fn wrong(source: borrow PoolLive[g], destination: borrow Running[g]) -> *TransferRecord @ g !{loan_transfer} { return payload(source); }|}));
+  Alcotest.test_case "sink source rejected" `Quick
+    (expect_type_error "two borrowed indexed authorities" (loan_transfer_fixture ^ {|private fn wrong(source: sink PoolLive[g], destination: borrow Running[g]) -> *TransferRecord @ g !{loan_transfer} { return &record; }|}));
+  Alcotest.test_case "unrelated return identity" `Quick
+    (expect_type_error "two borrowed indexed authorities" (loan_transfer_fixture ^ {|private fn wrong(source: borrow PoolLive[a], destination: borrow Running[b]) -> *TransferRecord @ b !{loan_transfer} { return payload(source); }|}));
+  Alcotest.test_case "third parameter rejected" `Quick
+    (expect_type_error "exactly two borrowed authorities" (loan_transfer_fixture ^ {|private fn wrong(source: borrow PoolLive[g], destination: borrow Running[g], ptr: borrow *TransferRecord) -> *TransferRecord @ g !{loan_transfer} { return ptr; }|}));
+  Alcotest.test_case "extern transfer rejected" `Quick
+    (expect_type_error "private Takibi function body" (loan_transfer_fixture ^ {|extern fn wrong(source: borrow PoolLive[g], destination: borrow Running[g]) -> *TransferRecord !{loan_transfer};|}));
+  Alcotest.test_case "transfer cannot retain source pointer" `Quick
+    (expect_type_error "cannot be stored" (loan_transfer_fixture ^ {|private let mut escaped: *TransferRecord; private fn wrong(source: borrow PoolLive[g], destination: borrow Running[g]) -> *TransferRecord @ g !{loan_transfer} { let ptr = payload(source); escaped = ptr; return ptr; }|}));
+  Alcotest.test_case "shadowed source is not original proof" `Quick
+    (expect_type_error "derived only from its source" (loan_transfer_fixture ^ {|private fn wrong(source: borrow PoolLive[g], destination: borrow Running[g]) -> *TransferRecord @ g !{loan_transfer} { let source = live_new(1); let ptr = payload(source); let v = ptr.value; live_end(source); return ptr; }|}));
+]
+
 let named_groups_unisolated = [
   "core",     core_tests;
   "parser",   parser_tests;
@@ -20716,6 +20838,7 @@ let named_groups_unisolated = [
   "depfile",      depfile_tests;
   "codegen",  codegen_tests;
   "record-loans", record_loan_tests;
+  "loan-transfer", loan_transfer_tests;
   "record-loan-contracts", record_loan_contract_tests;
   "record-loan-boundaries", record_boundary_tests;
 ]

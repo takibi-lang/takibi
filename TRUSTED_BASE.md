@@ -96,6 +96,14 @@ or synchronization. Existing builtin pool pins retain their independent runtime
 lifetime guarantee. Record mints, destructor footprint/completeness, and the
 remote-free protocol remain trusted. This does not prove field-race exclusion.
 
+A private `loan_transfer` boundary checks the original source-loan provenance
+and binds the returned pointer to the destination authority. Both borrowed
+authorities must share the return lifetime index. The assertion that the
+destination actually protects the source allocation/domain remains trusted:
+index equality alone cannot establish a physical lifetime relationship.
+Existing source aliases do not transfer. The contract adds no runtime pin or
+synchronization; ordinary call overhead depends on inlining.
+
 ## Explicit trusted boundaries
 
 Every `unsafe` block is lexically scoped and must justify at least one operation
