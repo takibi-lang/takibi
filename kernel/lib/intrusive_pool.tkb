@@ -133,10 +133,14 @@ use "kernel/lib/locked_cell.tkb";
 //   no such caveat left: intrusive_pool_probe_slot validates and reads
 //   the generation itself, and its Live view is the only key to the
 //   payload.
-// - A view is a LOCKED SNAPSHOT. It says which occupant was live when probed
-//   and keeps that occupant stable through payload use. A wrapper that returns
-//   only the pointer cannot return that guarantee; it must use the explicitly
-//   unsafe payload_unproven_of escape and assume the caller supplies lifetime.
+// - A view is a LOCKED SNAPSHOT. It keeps the probed occupant stable through
+//   payload use. A wrapper can return the borrowed view's loan, or a private
+//   loan_transfer boundary can bind it to an existing lifetime authority.
+//   The destination's physical protection remains reviewed (2026-10-06).
+//   Allocation probes validate a supplied generation and retain its static
+//   index; reopening a numeric handle does not prove distinct allocation.
+//   Callers without an existing destination still need the explicitly unsafe
+//   payload_unproven_of escape and supply lifetime themselves.
 // - intrusive_pool_probe_slot ANSWERS FOR WHOEVER IS THERE. It takes an
 //   address, so it cannot ask which occupant the caller meant: a slot that
 //   was freed and reallocated is Live, and the payload it returns belongs
@@ -748,6 +752,13 @@ fn intrusive_owner_slot(owner: borrow IntrusiveOwner[pool_id, allocation])
 }
 
 fn intrusive_owner_generation(owner: borrow IntrusiveOwner[pool_id, allocation]) -> usize {
+    return owner.generation;
+}
+
+// Preserve the allocation index when supplying an expected generation to a
+// locked probe. The numeric-only projection above remains for plain handles.
+fn intrusive_owner_generation_indexed(
+        owner: borrow IntrusiveOwner[pool_id, allocation]) -> usize @ allocation {
     return owner.generation;
 }
 
@@ -1804,6 +1815,53 @@ fn intrusive_pool_probe_handle_untrusted(
     return IntrusiveSlotProbe::Live(minted);
 }
 
+// Generation-indexed locked proof for callers transferring allocation lifetime
+// to an existing authority. Its stamp is the caller's checked expectation,
+// not a fresh identity invented by reopening a numeric handle. Every value
+// owns a lock, so unlike IntrusiveSlotView it needs no unlocked-state flag.
+private linear struct IntrusiveAllocationView[pool_id: addr, allocation: usize] {
+    private slot: IntrusiveSlotAddress;
+    private generation: usize @ allocation;
+    private lock_tag: usize;
+    private lock_address: usize;
+    private lock_flags: usize;
+}
+
+must_use variant IntrusiveAllocationProbe[pool_id: addr, allocation: usize] {
+    NoPayload;
+    Live(IntrusiveAllocationView[pool_id, allocation]);
+}
+
+fn intrusive_pool_probe_allocation_untrusted(
+        T: type, pool: &mut IntrusivePool(T) @ pool_id,
+        slot_address: usize, generation: usize @ allocation)
+        -> IntrusiveAllocationProbe[pool_id, allocation]
+        !{unsafe, acquires_lock_40_pool, lock_guard_40_pool} {
+    let flags: usize = pool_lock_acquire(pool.pool_tag, &(*pool).lock);
+    if (intrusive_pool_matches_untrusted(
+            pool, slot_address, generation) == false) {
+        pool_lock_release(pool.pool_tag, &(*pool).lock, flags);
+        return IntrusiveAllocationProbe::NoPayload;
+    }
+    let mut address: IntrusiveSlotAddress = { slot_address };
+    let mut minted: IntrusiveAllocationView[pool_id, allocation] = {
+        address, generation, pool.pool_tag, (&(*pool).lock) as usize, flags
+    };
+    return IntrusiveAllocationProbe::Live(minted);
+}
+
+fn intrusive_pool_allocation_payload_of(
+        T: type, pool: &mut IntrusivePool(T) @ pool_id,
+        live: borrow IntrusiveAllocationView[pool_id, allocation])
+        -> *T @ allocation !{unsafe} {
+    return intrusive_pool_payload_at(pool, live.slot.raw);
+}
+
+fn intrusive_allocation_view_drop(
+        live: sink IntrusiveAllocationView[pool_id, allocation]) {
+    pool_lock_release_address(live.lock_tag, live.lock_address, live.lock_flags);
+}
+
 // The only raw-to-slot conversion: it succeeds only for the exact live
 // occupant named by (address, generation). Legacy numeric identity stores can
 // therefore cross the API boundary without regaining an unchecked cast.
@@ -1993,8 +2051,9 @@ fn intrusive_view_drop(slot_view: sink IntrusiveSlotView[pool_id]) {
 //
 // The view owns the pool lock, so the lifetime relation also excludes another
 // core from freeing or initializing this slot while the pointer is usable.
-// Returning the pointer from a wrapper still requires the explicit unproven
-// escape below, because the wrapper cannot return the view with it.
+// A wrapper may preserve this borrow through its own @ pool_id return.
+// Releasing the view before returning requires a private loan_transfer to an
+// existing authority, or the explicitly unproven escape below.
 fn intrusive_pool_payload_of(T: type, pool: &mut IntrusivePool(T) @ pool_id,
                              slot_view: borrow IntrusiveSlotView[pool_id])
         -> *T @ pool_id !{unsafe} {

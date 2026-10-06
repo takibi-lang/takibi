@@ -20734,7 +20734,44 @@ private fn payload(source: borrow PoolProof[g]) -> *TransferRecord @ g { return 
 private fn transfer(source: borrow PoolProof[g], destination: borrow RunningProof[g]) -> *TransferRecord @ g !{loan_transfer} { return payload(source); }
 |}
 
+(* Match the real pool view: pool brand first, allocation generation second. *)
+let allocation_transfer_fixture = {|
+struct Arena { value: usize; }
+private let mut arena_a: Arena;
+private let mut arena_b: Arena;
+linear struct Live[pool: addr, g: usize] { private generation: usize @ g; }
+linear view Destination[g: usize];
+fn payload_at(pool: &mut Arena @ p, live: borrow Live[p, g]) -> *Arena @ g { return &arena_a; }
+fn live_drop(live: sink Live[p, g]) {}
+fn destination_drop(destination: sink Destination[g]) {}
+private fn transfer_allocation(source: borrow Live[&arena_a, g], destination: borrow Destination[g]) -> *Arena @ g !{unsafe, loan_transfer} {
+  return payload_at(&arena_a, source);
+}
+|}
+
 let loan_transfer_tests = [
+  Alcotest.test_case "allocation index need not be the source first index" `Quick
+    (fun () -> ignore (infer (allocation_transfer_fixture ^ {|
+      fn probe(source: Live[&arena_a, g], destination: Destination[g]) -> usize !{unsafe} {
+        let mut value: usize = 0;
+        { let ptr = transfer_allocation(source, destination); live_drop(source); value = ptr.value; }
+        destination_drop(destination); return value;
+      }|})));
+  Alcotest.test_case "foreign pool cannot enter the private allocation boundary" `Quick
+    (expect_type_error "static value mismatch" (allocation_transfer_fixture ^ {|
+      fn probe(source: borrow Live[&arena_b, g], destination: borrow Destination[g]) !{unsafe} {
+        let ptr = transfer_allocation(source, destination);
+      }|}));
+  Alcotest.test_case "wrong generation cannot enter the allocation boundary" `Quick
+    (expect_type_error "static value mismatch" (allocation_transfer_fixture ^ {|
+      fn probe(source: borrow Live[&arena_a, 1], destination: borrow Destination[2]) !{unsafe} {
+        let ptr = transfer_allocation(source, destination);
+      }|}));
+  Alcotest.test_case "wrong pool cannot supply the source payload" `Quick
+    (expect_type_error "static value mismatch" (allocation_transfer_fixture ^ {|
+      private fn wrong(source: borrow Live[&arena_a, g], destination: borrow Destination[g]) -> *Arena @ g !{unsafe, loan_transfer} {
+        return payload_at(&arena_b, source);
+      }|}));
   Alcotest.test_case "stored proof loan dies with the whole holder" `Quick
     (expect_type_error "cannot be used after"
       (loan_transfer_struct_fixture ^ {|

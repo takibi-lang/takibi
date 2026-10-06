@@ -122,9 +122,75 @@ fn removal_was_stale(result: IntrusivePoolRemoveResult) -> bool {
     }
 }
 
+// Transfer a real locked pool proof to its already-held allocation owner.
+// The stand-in backend observes lock depth; this is not an SMP timing test.
+private let mut allocation_transfer_pool: IntrusivePool(usize);
+private let mut allocation_foreign_pool: IntrusivePool(usize);
+must_use variant AllocationTransferTest { Unavailable; Checked(bool); }
+
+private inline fn allocation_transfer(
+        source: borrow IntrusiveAllocationView[&allocation_transfer_pool, g],
+        destination: borrow IntrusiveOwner[&allocation_transfer_pool, g])
+        -> *usize @ g !{unsafe, loan_transfer} {
+    return intrusive_pool_allocation_payload_of(&allocation_transfer_pool, source);
+}
+
+fn check_allocation_transfer() -> AllocationTransferTest !{unsafe} {
+    intrusive_pool_init_retaining(&allocation_transfer_pool, 0);
+    intrusive_pool_init(&allocation_foreign_pool);
+    let guard = intrusive_pool_lock(&allocation_transfer_pool);
+    let inserted = intrusive_pool_insert_zeroed(&allocation_transfer_pool, guard);
+    intrusive_pool_unlock(&allocation_transfer_pool, guard);
+    let IntrusivePoolInsertResult::Allocated(owner) = inserted else {
+        IntrusivePoolInsertResult::OutOfMemory => { return AllocationTransferTest::Unavailable; }
+    };
+    let slot: usize = intrusive_slot_address_identity(intrusive_owner_slot(owner));
+    let generation = intrusive_owner_generation_indexed(owner);
+    let mut checked: bool = false;
+    match intrusive_pool_probe_allocation_untrusted(&allocation_transfer_pool, slot, generation) {
+        IntrusiveAllocationProbe::NoPayload => {}
+        IntrusiveAllocationProbe::Live(live) => {
+            let ptr = allocation_transfer(live, owner);
+            checked = pool_lock_held_depth_now() == 1;
+            intrusive_allocation_view_drop(live);
+            *ptr = 321;
+            checked = checked && *ptr == 321 && pool_lock_held_depth_now() == 0;
+        }
+    }
+    match intrusive_pool_probe_allocation_untrusted(&allocation_foreign_pool, slot, generation) {
+        IntrusiveAllocationProbe::NoPayload => {}
+        IntrusiveAllocationProbe::Live(live) => {
+            checked = false; intrusive_allocation_view_drop(live);
+        }
+    }
+    match intrusive_pool_probe_allocation_untrusted(&allocation_transfer_pool, slot, generation + 1) {
+        IntrusiveAllocationProbe::NoPayload => {}
+        IntrusiveAllocationProbe::Live(live) => {
+            checked = false; intrusive_allocation_view_drop(live);
+        }
+    }
+    let remove_guard = intrusive_pool_lock(&allocation_transfer_pool);
+    checked = intrusive_remove_succeeded(intrusive_pool_remove(&allocation_transfer_pool, remove_guard, owner)) && checked;
+    intrusive_pool_unlock(&allocation_transfer_pool, remove_guard);
+    match intrusive_pool_probe_allocation_untrusted(&allocation_transfer_pool, slot, generation) {
+        IntrusiveAllocationProbe::NoPayload => {}
+        IntrusiveAllocationProbe::Live(live) => {
+            checked = false; intrusive_allocation_view_drop(live);
+        }
+    }
+    checked = checked && pool_lock_held_depth_now() == 0;
+    return AllocationTransferTest::Checked(checked);
+}
+
 fn app_main() {
     page_allocator_init();
     uart_puts("intrusive_pool\n");
+    uart_puts("allocation proof transfer, unlock, foreign, stale and free: ");
+    match check_allocation_transfer() {
+        AllocationTransferTest::Unavailable => { uart_puts("allocation unavailable"); }
+        AllocationTransferTest::Checked(checked) => { uart_print(checked); }
+    }
+    uart_puts("\n");
 
     // GitHub issue #355: every phase below ends by asking its pool
     // whether its own bookkeeping is still coherent -- free-chain lengths
