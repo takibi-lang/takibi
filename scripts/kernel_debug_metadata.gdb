@@ -163,6 +163,14 @@ class TakibiForceVariantReturn(gdb.Command):
                     part["register"],
                     int.from_bytes(value_bytes[start:end], "little")))
         elif abi["kind"] == "indirect":
+            # The incoming result pointer is caller-saved. Even an unwind
+            # cannot recover it after a prologue or nested call reuses it.
+            frame = gdb.selected_frame()
+            function = frame.function()
+            if (frame.level() != 0 or function is None
+                    or frame.pc() != int(function.value().address)):
+                raise gdb.GdbError(
+                    "indirect forced return requires the innermost frame at its first instruction")
             address = int(gdb.parse_and_eval(f"${abi['pointer_register']}"))
             gdb.selected_inferior().write_memory(address, value_bytes)
         else:

@@ -9,7 +9,7 @@ history, is archived in `HISTORY.md`.
 
 Live intermittents are listed in `docs/KNOWN_INTERMITTENTS.md`, not here.
 
-## Territories, re-cut 2026-09-25; queues refreshed 2026-10-05
+## Territories, re-cut 2026-09-25; queues refreshed 2026-10-06
 
 A territory is a role, not a set of directories and not a particular agent
 (`AGENTS.md`); which agent holds which is the maintainer's per-session
@@ -62,15 +62,18 @@ before its issue closes. The steps keep their numbers, which issues cite.
      cores reach by handle, and a linear struct holding one owner (#131's
      first slice). On it: the three TCP pools, AddressSpaceBacking,
      ProcessImageRecord, ProcessFdContext, FdBlock and SharedObject.
-     ProcessRecord follows #693: steps 1-6 landed, and step 7 as far as it
-     goes before #637 stage 2 -- bare record lookups 300+ -> 5, the five
-     being the authority makers' own bodies, held there by
-     `scripts/check_process_record_bare_uses.py`. The run lock is now
-     `single_instance_lock`, so a slot-only reader takes it itself and a
-     caller holding the guard is a compile error; AddressSpaceRoot carries
-     its backing's handle and is made only by declared makers. Removing
-     `scheduled_process_record_at` from the escape list needs the makers to
-     carry the pool's proof, which is stage 2's question. The global-state
+     ProcessRecord access now derives from a run guard, an indexed current
+     phase, or its indexed owner. Private authority makers transfer the pool
+     loan instead of returning a bare pointer; generation and Running versus
+     Constructing phases are checked at the API boundary. The source gate
+     permits no bare record lookup bodies and fixes the reviewed mint set.
+     State-changing APIs invalidate live current views at compile time,
+     without an added pin, lock, or runtime witness. Private mint sites and
+     the physical link to the current CPU remain trusted; stage 2 can narrow
+     those remaining boundaries. The run lock is `single_instance_lock`, so
+     a slot-only reader takes it itself and nesting is a compile error;
+     AddressSpaceRoot carries its backing handle and has declared makers.
+     The global-state
      review removed dead FD payloads and coupled boot presence to payload;
      other reductions are YAGNI for current functionality. The three FD pools
      retain their placement; their measurement follow-up (#711) is deferred.

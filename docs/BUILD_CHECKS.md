@@ -109,7 +109,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_process_running_mints_controls.py` | mutation controls reject missing context/phase markers, additional mints, public constructors, and unmarked writers |
 | `check_process_running_mints.py` | current-process witness entry and transition mint counts, private constructors, and context/phase writer annotations match the reviewed boundary |
 | `check_address_space_root_mints.py` | every maker of an `AddressSpaceRoot` (which carries its backing handle) is declared (#693) |
-| `check_process_record_bare_uses.py` | five declared raw ProcessRecord lookup bodies, seven ownership mint bodies, private constructors and destructive loan annotations |
+| `check_process_record_bare_uses.py` | no bare ProcessRecord lookup bodies; reviewed authority mints, private constructors, loan transfers and destructive record contracts |
 | `check_process_record_bare_uses_controls.py` | negative controls for changed lookup/mint scopes, constructor visibility and missing destructive annotations |
 | `check_lock_discipline.py` | global mutexes are not force-reset and raw atomics stay allowlisted |
 | `check_measure_kernel_tcp_throughput_controls.py` | Controls for the wire-throughput measurement, with a scripted curl |
@@ -168,6 +168,7 @@ for several rounds it gated `allbuild` so no kernel lane ran at all.
 
 | Check | Enforced invariant |
 | --- | --- |
+| `slowcheck_debug_return_entry.py` | Real GDB accepts an indirect forced return at machine entry and rejects a later PC before writing the result buffer |
 | `slowcheck_known_intermittent_issues.py` | every row of the known-intermittent table names an issue that is still open |
 | `slowcheck_board_link_gate.sh` | Controls for the shared board-link gate |
 | `slowcheck_kernel_net_readiness.py` | Controls for the host peer's readiness waits, with no QEMU in the room |

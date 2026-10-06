@@ -15,6 +15,21 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-10-06: reject late indirect debugger returns
+
+The final authority audit found a remaining misuse of the allocation-failure
+injection helper: its documentation required machine entry for indirect
+returns, but the command accepted a later PC. The incoming result pointer is
+caller-saved and cannot be recovered reliably by unwinding. The helper now
+requires the innermost frame at its function's first instruction before reading
+that pointer or writing the result buffer. A real native GDB control proves
+that a late PC is rejected with the specific diagnostic and a nonzero exit,
+while an entry stop writes the requested result and returns normally. Before
+the guard, the same negative control succeeded. The allocation rollback lane
+continues to check the actual AArch64 return ABI; this native control checks
+only debugger stop-position enforcement. No production kernel storage or
+allocation workload changed.
+
 ## 2026-10-06: current authority at phase-exit primitives
 
 The final local lifetime audit found that an existing Current witness could
