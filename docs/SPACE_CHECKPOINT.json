@@ -1,16 +1,14 @@
 {
-  "date": "2026-10-05",
+  "date": "2026-10-06",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "9ae0757419ee13c2fff7ea37521e5c7a2d0b0aac1152a3b13364a35493b44706",
-  "workload": "FD open/fork/wait/close with 32 and 128 files; equal-object nine-pool replay; standard linked images and bounded QEMU boot endpoints. Payload, pool reservation and fixed image are separate boundaries.",
+  "source_sha256": "659c315a147334ec53ff0ddefa77a2e24addfab19f371ec09d0ab7ec6b55b913",
+  "workload": "Standard linked QEMU and RPi5 kernels before/after FD dead-payload removal and closed boot state migration; existing bounded boot and exec workload. Symbol payload, ELF sections and reserved image span are separate boundaries.",
   "evidence": [
-    "docs/SERVICE_SPACE_2026-10-05.md",
-    "docs/POOL_RETENTION_2026-10-05.md",
+    "docs/KERNEL_GLOBAL_MIGRATION_2026-10-06.md",
     "docs/REGION_POOL_GENERATIONS.md",
-    "docs/REGION_POOL_LAYOUT_2026-10-05.tsv",
     "docs/REGION_POOL_ENDPOINT_2026-10-05.tsv"
   ],
-  "assessment": "Adopt packed FD entries and the nonrepeating pool counter with release-only retirement ownership. Nine FD blocks save 1152 payload bytes; eight production pool bodies add 64 bytes. No FD page saving in this workload; RPi5 fixed image reservation adds 32768 bytes. Keep empty-chunk retention 1. Accept the safety cost and avoid exhaustive tuning before feature workloads exist.",
-  "next_trigger": "Before publishing the next completed kernel feature or roadmap stage, especially new pooled objects, process/thread lifetimes, VM or socket behavior, or an allocator/retention/layout change. Use the new feature workload plus existing baselines; repeat cross-OS measurements only if that boundary changes."
+  "assessment": "Adopt removal of 552 bytes of dead FD payload and closed boot states (14 bytes larger than old boot symbols). Net targeted payload reduction 538 bytes; QEMU BSS decreases 560 bytes, RPi5 BSS and both image reservations unchanged. No allocator capacity or retention change. Retain remaining global categories as YAGNI for current functionality.",
+  "next_trigger": "Before publishing the next completed kernel feature/stage, or a new mount/device lifetime, pooled resource or cache/allocator layout change. Repeat cross-OS measurements only if the comparison boundary changes."
 }
