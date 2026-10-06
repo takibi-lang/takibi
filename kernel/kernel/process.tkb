@@ -2645,7 +2645,7 @@ private fn scheduled_process_record_reset(guard: borrow ProcessRunGuard[lock],
 // because its per-process resources (an fd context from
 // kernel_syscall_process_configure, an image record) can outlive the
 // process the way the static record itself does.
-private fn scheduled_process_release_every_process() !{unsafe} {
+private fn scheduled_process_release_every_process() !{unsafe, changes_witness_ProcessCurrent} {
     let activity_before: KernelActivity =
         kernel_activity_enter(KernelActivity::ReleaseEveryProcess);
     scheduled_process_pool_init();
@@ -3335,7 +3335,7 @@ private fn scheduled_process_finish_clone(
         owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Constructing],
         frame: borrow FrameRef[frame_process])
-        -> ScheduledProcessState[process, ProcessState::Running] {
+        -> ScheduledProcessState[process, ProcessState::Running] !{changes_witness_ProcessCurrent} {
     scheduled_process_state_drop(state);
     scheduled_process_record_owned(owner).saved_sp =
         frame_ref_address(frame);
@@ -3346,7 +3346,7 @@ private fn scheduled_process_finish_clone(
 private fn scheduled_process_cancel_clone(
         owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Constructing])
-        -> ScheduledProcessState[process, ProcessState::Exited] {
+        -> ScheduledProcessState[process, ProcessState::Exited] !{changes_witness_ProcessCurrent} {
     scheduled_process_state_drop(state);
     scheduled_process_record_owned(owner).state = ProcessSlotState::Exited;
     return scheduled_process_exited_state(owner);
@@ -3477,7 +3477,7 @@ fn scheduled_process_start(
 fn scheduled_process_yield(
         owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Running])
-        -> ScheduledProcessState[process, ProcessState::Ready] {
+        -> ScheduledProcessState[process, ProcessState::Ready] !{changes_witness_ProcessCurrent} {
     scheduled_process_state_drop(state);
     scheduled_process_record_owned(owner).state =
         ProcessSlotState::Ready;
@@ -3493,7 +3493,7 @@ fn scheduled_process_block(
         owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Running],
         reason: ProcessWaitReason)
-        -> ScheduledProcessState[process, ProcessState::Blocked] {
+        -> ScheduledProcessState[process, ProcessState::Blocked] !{changes_witness_ProcessCurrent} {
     scheduled_process_state_drop(state);
     scheduled_process_record_owned(owner).state =
         ProcessSlotState::Blocked;
@@ -3561,7 +3561,7 @@ private fn scheduled_process_wake_ready(
 fn scheduled_process_exit(
         owner: borrow ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Running])
-        -> ScheduledProcessState[process, ProcessState::Exited] {
+        -> ScheduledProcessState[process, ProcessState::Exited] !{changes_witness_ProcessCurrent} {
     scheduled_process_state_drop(state);
     scheduled_process_record_owned(owner).state =
         ProcessSlotState::Exited;
@@ -8500,7 +8500,6 @@ fn kernel_process_fanout_probe() -> bool !{changes_witness_ProcessCurrent, unsaf
 // exact Blocked/ChildExit state observed by DDB, assert that the dependency
 // is visible, then restore the parent before the scheduler exercise continues.
 private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
-    let ProcessRunningHere::Running(current_authority) = process_running_here() else {};
     let guard = process_run_lock();
     let mut arranged: bool = false;
     match scheduled_process_ready_take(guard, parent) {
@@ -8515,6 +8514,7 @@ private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
         }
     }
     process_run_unlock(guard);
+    let ProcessRunningHere::Running(current_authority) = process_running_here() else {};
     if (arranged == false ||
         kernel_process_current_exit_has_waiter(current_authority) == false) {
         process_current_end(current_authority); return false;
@@ -8649,7 +8649,15 @@ fn kernel_process_scheduler_probe() -> bool !{changes_witness_ProcessCurrent} {
                 }
             }
             process_run_unlock(child_guard);
-            let unselectable: bool = kernel_process_clone_unselectable_probe(root_handle);
+            let mut unselectable: bool = false;
+            let child_authority = match kernel_process_clone_unselectable_probe(
+                    child_authority, root_handle) {
+                ProcessCloneUnselectable::Refused(retained) => { retained }
+                ProcessCloneUnselectable::Protected(retained) => {
+                    unselectable = true;
+                    retained
+                }
+            };
             let installed: bool = kernel_process_probe_installed(child_authority,
                 frame_ref_from_entry(0x1000, kernel_process_entry_generation()),
                 frame_ref_from_entry(0x2000, kernel_process_entry_generation()));
@@ -8852,7 +8860,17 @@ private fn kernel_process_exit_continuation_probe(parent: ProcessHandle) -> bool
 // Between allocation and frame installation, neither a Ready claim nor a
 // normal successor walk may expose the child to another CPU. This exercises
 // the production selection operations, not just the new state's numeric tag.
-private fn kernel_process_clone_unselectable_probe(parent: ProcessHandle) -> bool {
+must_use variant ProcessCloneUnselectable[process: usize] {
+    Refused(ProcessCurrent[process, ProcessState::Constructing]);
+    Protected(ProcessCurrent[process, ProcessState::Constructing]);
+}
+
+private fn kernel_process_clone_unselectable_probe(
+        current: ProcessCurrent[process, ProcessState::Constructing],
+        parent: ProcessHandle)
+        -> ProcessCloneUnselectable[process]
+        !{changes_witness_ProcessCurrent} {
+    process_current_end(current);
     let guard = process_run_lock();
     let protected: bool = kernel_process_clone_unselectable_locked(guard, parent);
     // Negative control: reproduce the old early-Ready publication under the
@@ -8864,7 +8882,9 @@ private fn kernel_process_clone_unselectable_probe(parent: ProcessHandle) -> boo
     scheduled_process_record_of_locked(guard, execution_here().current_handle).state =
         ProcessSlotState::Constructing;
     process_run_unlock(guard);
-    return protected && detected;
+    let restored = view ProcessCurrent[process, ProcessState::Constructing];
+    if (protected && detected) { return ProcessCloneUnselectable::Protected(restored); }
+    return ProcessCloneUnselectable::Refused(restored);
 }
 
 private fn kernel_process_clone_unselectable_locked(
@@ -9095,7 +9115,6 @@ fn kernel_process_clone_rollback(current_authority: ProcessCurrent[process, Proc
             // current before releasing any of the failed child's resources.
             process_current_end(current_authority);
             execution_here().current_handle = parent;
-            let restored = process_running_new(parent.generation);
             let exited = scheduled_process_cancel_clone(owner, constructing);
             scheduled_process_release(owner, exited);
             // The reap's two steps, as every other reaper takes them: the
@@ -9120,6 +9139,7 @@ fn kernel_process_clone_rollback(current_authority: ProcessCurrent[process, Proc
 
             workload_busy_note_selected(
                 scheduled_process_pid_of_handle(parent));
+            let restored = process_running_new(parent.generation);
             let activation: CurrentRootActivationResult =
                 kernel_process_activate_current_root(restored);
             match activation {
@@ -9169,12 +9189,12 @@ fn kernel_process_clone_context_install(current_authority: ProcessCurrent[proces
             // to restore it. The child's VM and FD setup already succeeded.
             scheduled_process_record_of_locked(guard, parent_handle).saved_sp =
                 frame_ref_address(parent);
+            process_current_end(current_authority);
             if (kernel_process_yield_handle(guard, parent_handle) == false) {
                 scheduled_process_release(owner, constructing);
                 process_run_unlock(guard);
-                return CloneInstall::Failed(current_authority);
+                return CloneInstall::Failed(view ProcessCurrent[process, ProcessState::Constructing]);
             }
-            process_current_end(current_authority);
             let running = scheduled_process_finish_clone(
                 owner, constructing, child);
             scheduled_process_release(owner, running);

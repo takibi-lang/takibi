@@ -211,11 +211,18 @@ witness. Installation preserves the child generation while changing its phase
 to Running. Failure returns the original phase witness. Exit and suspension
 consume the witness before changing logical current or making it reapable.
 The checker-only `changes_witness_ProcessCurrent` contract rejects a context
-change with any remaining live current witness, even without a retained record
-pointer. Boot-only calls with no live process retain the existing current-live
+change or departure from Running/Constructing with any remaining live current
+witness, even without a retained record pointer. Boot-only calls with no live
+process retain the existing current-live
 gates and permanent bootstrap record; the view does not prove a process exists.
 The source check inventories entry and transition mints and requires
-that contract on every current-handle/current-live writer. Private mints,
+that contract on every current-handle/current-live writer and state-writing
+primitive that consumes Running or Constructing. The synthetic early-Ready
+probe consumes and restores its own Constructing witness around the mutation.
+The bulk release boundary carries the same contract, inherited by table reset
+and initialization. Ordinary reap retains its Reapable-owner contract and may
+collect another process while the current witness remains live.
+Private mints,
 complete annotation of physical context changes, and remote CPU protocol
 correctness remain trusted. Kernel preemption must preserve or revise this
 boundary before a witness can survive suspension or migration.

@@ -1,93 +1,92 @@
 process table: 24 concurrent processes past the old ceiling of 16, stacks=16384 (upper half of an aligned run), every record given back
 process fanout: 3 siblings, wait4 by pid collects the middle one, each status its own
-protocol-trace: begin cores=2 stored=87 lost=0 holds=2367
+protocol-trace: begin cores=2 stored=86 lost=0 holds=2395
 protocol-trace: 0 0 l p 1 3 - 2 -
-protocol-trace: 0 0 l p 2 1 - 0 1
+protocol-trace: 0 0 l p 2 3 - 2 1
 protocol-trace: 0 0 l p 86 2 0 0 2
 protocol-trace: 0 0 l c 0 86 86
 protocol-trace: 0 0 l c 1 - -
 protocol-trace: 0 0 l c 2 - -
 protocol-trace: 0 0 l c 3 - -
-protocol-trace: 8 1 l p 2 2 - 0 1
-protocol-trace: 10 1 l c 1 2 -
-protocol-trace: 12 1 l p 2 2 1 0 1
-protocol-trace: 12 1 l c 1 2 2
-protocol-trace: 23 1 l p 87 5 - 0 -
-protocol-trace: 24 0 l p 87 5 - 0 86
-protocol-trace: 24 0 l c 0 87 86
-protocol-trace: 60 1 l p 2 3 1 2 1
-protocol-trace: 60 1 l c 1 - 2
-protocol-trace: 62 1 l p 2 3 - 2 1
-protocol-trace: 62 1 l c 1 - -
-protocol-trace: 364 0 l p 87 2 - 0 86
-protocol-trace: 364 0 l p 86 1 0 0 2
-protocol-trace: 368 0 l p 87 2 0 0 86
-protocol-trace: 368 0 l p 86 1 - 0 2
-protocol-trace: 368 0 l c 0 87 87
-protocol-trace: 380 0 l p 86 2 - 0 2
-protocol-trace: 381 0 l p 87 3 0 4 86
-protocol-trace: 381 0 l c 0 86 87
-protocol-trace: 382 0 l p 87 3 - 4 86
-protocol-trace: 382 0 l p 86 2 0 0 2
-protocol-trace: 382 0 l c 0 86 86
-protocol-trace: 387 0 l p 86 3 0 2 2
-protocol-trace: 387 0 l c 0 - 86
-protocol-trace: 388 0 l p 86 3 - 2 2
-protocol-trace: 388 0 l c 0 - -
-protocol-trace: 411 0 l p 87 1 - 0 86
-protocol-trace: 412 1 l p 87 2 - 0 86
-protocol-trace: 414 1 l c 1 87 -
-protocol-trace: 415 1 l p 87 2 1 0 86
-protocol-trace: 415 1 l c 1 87 87
-protocol-trace: 464 1 l p 87 4 1 0 86
-protocol-trace: 464 1 l p 86 2 - 0 2
-protocol-trace: 465 1 l c 1 86 87
-protocol-trace: 470 1 l p 87 4 - 0 86
-protocol-trace: 470 1 l p 86 2 1 0 2
-protocol-trace: 470 1 l c 1 86 86
-protocol-trace: 473 1 u p 87 4 - 0 -
-protocol-trace: 476 1 l g 87 0 0
-protocol-trace: 495 1 u p 88 5 - 0 -
-protocol-trace: 495 1 l p 88 5 - 0 86
-protocol-trace: 495 1 l c 1 88 86
-protocol-trace: 815 1 l p 88 2 - 0 86
-protocol-trace: 815 1 l p 86 1 1 0 2
-protocol-trace: 818 1 l p 88 2 1 0 86
-protocol-trace: 818 1 l p 86 1 - 0 2
-protocol-trace: 818 1 l c 1 88 88
-protocol-trace: 825 1 l p 86 2 - 0 2
-protocol-trace: 826 1 l p 88 1 1 0 86
-protocol-trace: 826 1 l c 1 86 88
-protocol-trace: 827 1 l p 88 1 - 0 86
-protocol-trace: 827 1 l p 86 2 1 0 2
-protocol-trace: 827 1 l c 1 86 86
-protocol-trace: 835 1 l p 86 3 1 2 2
-protocol-trace: 835 1 l c 1 - 86
-protocol-trace: 836 1 l p 86 3 - 2 2
-protocol-trace: 836 1 l c 1 - -
-protocol-trace: 839 0 l p 88 2 - 0 86
-protocol-trace: 840 0 l c 0 88 -
-protocol-trace: 841 0 l p 88 2 0 0 86
-protocol-trace: 841 0 l c 0 88 88
-protocol-trace: 2314 0 l p 88 4 0 0 86
-protocol-trace: 2314 0 l p 86 1 - 2 2
-protocol-trace: 2314 0 l c 0 - 88
-protocol-trace: 2317 0 l p 88 4 - 0 86
-protocol-trace: 2317 0 l c 0 - -
-protocol-trace: 2319 1 l p 86 2 - 2 2
-protocol-trace: 2320 1 l p 86 2 - 0 2
-protocol-trace: 2320 1 l c 1 86 -
-protocol-trace: 2321 1 l p 86 2 1 0 2
-protocol-trace: 2321 1 l c 1 86 86
-protocol-trace: 2332 1 u p 88 4 - 0 -
-protocol-trace: 2335 1 l g 88 0 0
-protocol-trace: 2351 1 l c 1 - 86
-protocol-trace: 2352 1 l p 86 1 - 0 2
-protocol-trace: 2352 1 l c 1 - -
-protocol-trace: 2355 0 l p 86 2 - 0 2
-protocol-trace: 2356 0 l c 0 86 -
-protocol-trace: 2357 0 l p 86 2 0 0 2
-protocol-trace: 2357 0 l c 0 86 86
+protocol-trace: 16 0 u p 87 5 - 0 -
+protocol-trace: 16 0 l p 87 5 - 0 86
+protocol-trace: 16 0 l c 0 87 86
+protocol-trace: 336 0 l p 87 2 - 0 86
+protocol-trace: 336 0 l p 86 1 0 0 2
+protocol-trace: 340 0 l p 87 2 0 0 86
+protocol-trace: 340 0 l p 86 1 - 0 2
+protocol-trace: 340 0 l c 0 87 87
+protocol-trace: 352 0 l p 86 2 - 0 2
+protocol-trace: 353 0 l p 87 3 0 4 86
+protocol-trace: 353 0 l c 0 86 87
+protocol-trace: 354 0 l p 87 3 - 4 86
+protocol-trace: 354 0 l p 86 2 0 0 2
+protocol-trace: 354 0 l c 0 86 86
+protocol-trace: 359 0 l p 86 3 0 2 2
+protocol-trace: 359 0 l c 0 - 86
+protocol-trace: 360 0 l p 86 3 - 2 2
+protocol-trace: 360 0 l c 0 - -
+protocol-trace: 381 0 l p 87 1 - 0 86
+protocol-trace: 382 0 l p 87 2 - 0 86
+protocol-trace: 383 0 l c 0 87 -
+protocol-trace: 384 0 l p 87 2 0 0 86
+protocol-trace: 384 0 l c 0 87 87
+protocol-trace: 433 0 l p 87 4 0 0 86
+protocol-trace: 433 0 l p 86 2 - 0 2
+protocol-trace: 434 0 l c 0 86 87
+protocol-trace: 439 0 l p 87 4 - 0 86
+protocol-trace: 439 0 l p 86 2 0 0 2
+protocol-trace: 439 0 l c 0 86 86
+protocol-trace: 442 0 u p 87 4 - 0 -
+protocol-trace: 445 0 l g 87 0 0
+protocol-trace: 454 0 l c 0 - 86
+protocol-trace: 455 0 l p 86 1 - 0 2
+protocol-trace: 455 0 l c 0 - -
+protocol-trace: 457 1 l p 86 2 - 0 2
+protocol-trace: 458 1 l c 1 86 -
+protocol-trace: 459 1 l p 86 2 1 0 2
+protocol-trace: 459 1 l c 1 86 86
+protocol-trace: 470 1 u p 88 5 - 0 -
+protocol-trace: 470 1 l p 88 5 - 0 86
+protocol-trace: 470 1 l c 1 88 86
+protocol-trace: 792 1 l p 88 2 - 0 86
+protocol-trace: 792 1 l p 86 1 1 0 2
+protocol-trace: 795 1 l p 88 2 1 0 86
+protocol-trace: 795 1 l p 86 1 - 0 2
+protocol-trace: 795 1 l c 1 88 88
+protocol-trace: 802 1 l p 86 2 - 0 2
+protocol-trace: 803 1 l p 88 1 1 0 86
+protocol-trace: 803 1 l c 1 86 88
+protocol-trace: 804 1 l p 88 1 - 0 86
+protocol-trace: 804 1 l p 86 2 1 0 2
+protocol-trace: 804 1 l c 1 86 86
+protocol-trace: 812 1 l p 86 3 1 2 2
+protocol-trace: 812 1 l c 1 - 86
+protocol-trace: 813 1 l p 86 3 - 2 2
+protocol-trace: 813 1 l c 1 - -
+protocol-trace: 816 0 l p 88 2 - 0 86
+protocol-trace: 817 0 l c 0 88 -
+protocol-trace: 818 0 l p 88 2 0 0 86
+protocol-trace: 818 0 l c 0 88 88
+protocol-trace: 2340 0 l p 88 4 0 0 86
+protocol-trace: 2340 0 l p 86 1 - 2 2
+protocol-trace: 2340 0 l c 0 - 88
+protocol-trace: 2343 0 l p 88 4 - 0 86
+protocol-trace: 2343 0 l c 0 - -
+protocol-trace: 2347 1 l p 86 2 - 2 2
+protocol-trace: 2348 1 l p 86 2 - 0 2
+protocol-trace: 2348 1 l c 1 86 -
+protocol-trace: 2349 1 l p 86 2 1 0 2
+protocol-trace: 2349 1 l c 1 86 86
+protocol-trace: 2360 1 u p 88 4 - 0 -
+protocol-trace: 2363 1 l g 88 0 0
+protocol-trace: 2379 1 l c 1 - 86
+protocol-trace: 2380 1 l p 86 1 - 0 2
+protocol-trace: 2380 1 l c 1 - -
+protocol-trace: 2383 0 l p 86 2 - 0 2
+protocol-trace: 2384 0 l c 0 86 -
+protocol-trace: 2385 0 l p 86 2 0 0 2
+protocol-trace: 2385 0 l c 0 86 86
 protocol-trace: end
 process clone: parent+child exit=42 reaped
 resources: pooled per-process records back to the baseline

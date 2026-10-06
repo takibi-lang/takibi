@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Check the trusted current-process witness mints and context-change markers.
+"""Check current-process witness mints and context/phase-change markers.
 
 The type checker enforces witness consumption. This source check keeps the
-private physical mint boundary and context writer annotation inventory closed.
+private physical mint boundary and context/phase writer annotation inventory closed.
 It does not prove physical generation association or remote CPU protocols.
 """
 
@@ -35,7 +35,8 @@ ALLOWED = {
                                          "kernel_process_clone_begin": 1}),
     "view ProcessCurrent": Counter({"process_running_new": 1,
                                      "process_constructing_new": 1,
-                                     "kernel_process_clone_context_install": 1}),
+                                     "kernel_process_clone_context_install": 2,
+                                     "kernel_process_clone_unselectable_probe": 1}),
 }
 
 
@@ -71,7 +72,7 @@ def problems(sources):
         failures.append("ProcessCurrent must remain private and linear")
     for path, source in sources.items():
         if not re.search(r"\b(?:ProcessCurrent|process_running_here|process_constructing_here|"
-                         r"process_running_new|process_constructing_new)\b|"
+                         r"process_running_new|process_constructing_new|ScheduledProcessState)\b|"
                          r"\.current_(?:handle|live)\s*=", source):
             continue
         code = mask(source)
@@ -88,7 +89,14 @@ def problems(sources):
                            else rf'\b{mint}\s*\(')
                 found[mint][name] += len(re.findall(pattern, body))
             writes = re.search(r'\.current_(?:handle|live)\s*=(?!=)', body)
-            if writes or name == "kernel_process_clone_context_install":
+            leaves_phase = re.search(
+                r'\bsink\s+ScheduledProcessState\[\w+,\s*'
+                r'ProcessState::(?:Running|Constructing)\]', header)
+            changes_state = re.search(r'\.state\s*=(?!=)', body)
+            if (writes or name in {"kernel_process_clone_context_install",
+                                   "kernel_process_clone_unselectable_probe",
+                                   "scheduled_process_release_every_process"}
+                    or (leaves_phase and changes_state)):
                 if "changes_witness_ProcessCurrent" not in header:
                     failures.append(f"{path}: {name} changes current context without its witness marker")
             if name in {"process_running_new", "process_constructing_new"}:

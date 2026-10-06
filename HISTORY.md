@@ -15,6 +15,31 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-10-06: current authority at phase-exit primitives
+
+The final local lifetime audit found that an existing Current witness could
+survive a direct scheduled_process_yield call: context writer markers did not
+cover lower-level Running/Constructing state changes. The existing checker-only
+contract now marks yield, block, exit, clone finish/cancel and whole-table
+release. Table initialization and clear inherit the bulk contract. Clone
+installation consumes its witness before yielding the parent, and rollback
+mints the restored parent witness after child cancellation and cleanup.
+The synthetic early-Ready probe consumes and restores Constructing around its
+temporary state mutation, while ordinary reap keeps its Reapable-owner boundary.
+
+Eight real-kernel compiler controls reject retained authority at the five
+phase transitions and both table resets, and accept consumption before a
+transition. The old yield program compiled, so the controls catch the original
+instance. Sixteen source mutation controls keep phase/context annotations and
+private mint counts closed. Earlier generic contract tests covered enforcement
+after annotation, not completeness of the real producer APIs. The signature
+contracts exclude this local class without a pin, lock or runtime witness;
+physical association and raw private reset/removal protocols remain reviewed
+trust. CloneFinish was re-read against StackOwnership: parent Ready and child
+Running still publish together under the same run guard. Both production
+images and the existing storage workload remain unchanged by the final bulk
+annotation, as confirmed by byte-for-byte ELF comparison.
+
 ## 2026-10-06: AArch64 debugger indirect variant return
 
 The allocation rollback lane exposed an incorrect debugger sidecar: the

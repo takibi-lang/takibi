@@ -8,6 +8,10 @@ consume it. LLVM SROA runs before and after forced inlining in production
 builds so the temporary proof wrappers need not remain aggregate copies.
 
 Both images use the standard production flags and linked kernel workload.
+Fresh final measurements include the phase-exit and bulk-reset contracts.
+Adding the final bulk-reset contract leaves both production ELF files byte
+identical to the version used for the fresh boot capture; that capture
+therefore exercises the final production images.
 Measurements use llvm-size-19 and llvm-nm-19, with a separately built baseline.
 
 | Platform | Boundary | Baseline bytes | Candidate bytes | Change |
@@ -40,8 +44,8 @@ and measured payload size give 20928 live payload bytes; this is calculated
 payload, not total allocator or stack storage. The three-sibling clone/wait4
 probe and the ordinary process-clone workload also pass. The fresh capture
 `PROCESS_RECORD_AUTHORITY_LIFETIMES_2026-10-06.txt` records these verdicts and
-the complete two-core protocol trace: 87 changes at 48 changed hold boundaries, replayed as 43 action steps over
-2367 run-lock holds, with no lost changes. The trace contains three process
+the complete two-core protocol trace: 86 changes at 48 changed hold boundaries, replayed as 43 action steps over
+2395 run-lock holds, with no lost changes. The trace contains three process
 identities initially, four during clone and three after reap; it includes
 the permanent bootstrap process and is not a pool occupancy counter. Replay
 accepts the clone/installation, exit, wake, stack handoff and removal actions.

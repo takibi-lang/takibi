@@ -25,10 +25,26 @@ def main():
         'global mint': original + '\nlet unreviewed = view ProcessCurrent[0, ProcessState::Running];\n',
         'new direct mint': original + '\nfn unreviewed() { view ProcessCurrent[0, ProcessState::Running]; }\n',
         'new unmarked writer': original + '\nfn unreviewed() { execution_here().current_live = false; }\n',
+        'new unmarked phase writer': original + '''
+fn unreviewed(owner: borrow ScheduledProcessOwner[process],
+        state: sink ScheduledProcessState[process, ProcessState::Running]) {
+    scheduled_process_state_drop(state);
+    scheduled_process_record_owned(owner).state = ProcessSlotState::Exited;
+}
+''',
     }
     for name, changed in controls.items():
         assert changed != original, name
         assert problems({**sources, path: changed}), name
+    for function in ['scheduled_process_finish_clone', 'scheduled_process_cancel_clone',
+                     'scheduled_process_yield', 'scheduled_process_block',
+                     'scheduled_process_exit', 'scheduled_process_release_every_process']:
+        start = original.index('fn ' + function + '(')
+        marker = original.index('changes_witness_ProcessCurrent', start)
+        changed = original[:marker] + original[marker:].replace(
+            'changes_witness_ProcessCurrent', '', 1)
+        assert problems({**sources, path: changed}), function
+        controls[function] = changed
     assert not problems({**sources, path: original +
                          '\n// process_running_here(); execution_here().current_live = false;\n'}), 'prose is not code'
     report_pass('process-running-mints controls',
