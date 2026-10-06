@@ -31,7 +31,7 @@ ALLOWED = {
     "scheduled_process_address_space_root_locked",
     "scheduled_process_address_space_root_owned",
     "scheduled_process_address_space_root_peek",
-    "scheduled_process_address_space_root_running",
+    "scheduled_process_address_space_root_current",
 }
 
 FN_RE = re.compile(r"^(?:private )?fn (\w+)\(")

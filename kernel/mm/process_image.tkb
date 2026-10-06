@@ -1632,7 +1632,9 @@ fn process_image_exec_teardown(target: AddressSpaceRoot,
 // kernel_process_current_root() is already correct here, not a fixed
 // root 0.
 fn process_image_exec_resume_root() {
-    kernel_process_activate_stable_root(kernel_process_current_root());
+    let ProcessRunningHere::Running(current_authority) = process_running_here() else {};
+    kernel_process_activate_stable_root(kernel_process_current_root(current_authority));
+    process_current_end(current_authority);
 }
 
 // A flat, NUL-terminated argv blob is deliberately used instead of an array

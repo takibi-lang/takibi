@@ -2274,7 +2274,7 @@ private fn kernel_ddb_enter_stopped(
     ddb_snapshot.parent_pid = kernel_process_crash_parent_pid();
     ddb_snapshot.process_state = kernel_process_crash_state();
     ddb_snapshot.wait_reason = kernel_process_crash_wait_reason();
-    ddb_snapshot.root_slot = kernel_process_crash_root_slot();
+    ddb_snapshot.root_slot = kernel_process_current_slot();
     let mut vm: AddressSpaceDiagnosticSnapshot =
         address_space_diagnostic_snapshot(scheduled_process_address_space_root_peek(ddb_snapshot.root_slot));
     ddb_snapshot.root_live = 0;
@@ -2998,7 +2998,7 @@ fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
     crash_snapshot_here().process_state = kernel_process_crash_state();
     crash_snapshot_here().wait_reason = kernel_process_crash_wait_reason();
     crash_snapshot_here().wait4_status_ptr = kernel_process_crash_wait4_status_ptr();
-    crash_snapshot_here().root_slot = kernel_process_crash_root_slot();
+    crash_snapshot_here().root_slot = kernel_process_current_slot();
     crash_snapshot_here().activity = kernel_activity_code_here();
     crash_snapshot_here().root_l1 = address_space_l1_physical(scheduled_process_address_space_root_peek(crash_snapshot_here().root_slot));
     crash_snapshot_here().root_asid = address_space_asid(scheduled_process_address_space_root_peek(crash_snapshot_here().root_slot));

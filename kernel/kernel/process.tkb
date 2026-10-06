@@ -699,7 +699,7 @@ fn kernel_process_cpus_that_ran_value() -> usize {
     return kernel_process_cpus_that_ran;
 }
 
-fn kernel_process_reap_unlinked_count_value() -> usize { 
+fn kernel_process_reap_unlinked_count_value() -> usize {
     return kernel_process_reap_unlinked_count;
 }
 
@@ -841,69 +841,82 @@ fn scheduled_process_record_of_locked(
     return scheduled_process_record_locked(guard, handle.pool_index);
 }
 
-// GitHub issue #693 step 2: evidence that a process is the one running on
-// this CPU. Its own record is reached through it, and the pointer lives no
-// longer than the evidence. A running process is not reaped
-// (StackOwnership.tla), which is what makes the read sound; the mint is
-// process_running_here, the one place that turns "this CPU's current
-// process" into the evidence (scripts/check_process_running_mints.py keeps
-// the list of its callers).
-private linear view ProcessRunning[process: usize];
+// Logical-current permission is indexed by allocation generation and phase.
+// Running entry mints are confined to real entry/return boundaries and explicit
+// fixture entries. Clone transfers Running into Constructing; rollback restores
+// the parent, and install advances the same child index back to Running. The
+// changes_witness contract excludes replacing current while a grant survives.
+// Slot zero is permanent; non-running boot fixtures keep their existing guards.
+private linear view ProcessCurrent[process: usize, phase: ProcessState];
 
 must_use variant ProcessRunningHere {
-    Running(exists process: usize. ProcessRunning[process]);
+    Running(exists process: usize. ProcessCurrent[process, ProcessState::Running]);
+}
+
+must_use variant ProcessConstructingHere {
+    Constructing(exists process: usize. ProcessCurrent[process, ProcessState::Constructing]);
 }
 
 private inline fn process_running_new(generation: usize @ process)
-        -> ProcessRunning[process] {
-    return view ProcessRunning[process];
+        -> ProcessCurrent[process, ProcessState::Running] {
+    return view ProcessCurrent[process, ProcessState::Running];
 }
 
-fn process_running_here() -> ProcessRunningHere !{unsafe} {
+private inline fn process_constructing_new(generation: usize @ process)
+        -> ProcessCurrent[process, ProcessState::Constructing] {
+    return view ProcessCurrent[process, ProcessState::Constructing];
+}
+
+inline fn process_running_here() -> ProcessRunningHere !{unsafe} {
     return ProcessRunningHere::Running(
         process_running_new(execution_here().current_handle.generation));
 }
 
-private fn process_running_handle(running: borrow ProcessRunning[process])
+inline fn process_constructing_here() -> ProcessConstructingHere !{unsafe} {
+    return ProcessConstructingHere::Constructing(
+        process_constructing_new(kernel_process_entry_generation()));
+}
+
+private fn process_current_handle(running: borrow ProcessCurrent[process, phase])
         -> ProcessHandle !{handle_of_witness} {
     return execution_here().current_handle;
 }
 
-inline fn process_running_end(running: sink ProcessRunning[process]) {}
+inline fn process_current_end(running: sink ProcessCurrent[process, phase]) {}
 
-private linear struct ProcessRecordRunningView[process: usize, pool: addr] {
+private linear struct ProcessRecordCurrentView[process: usize, pool: addr] {
     private live: IntrusiveSlotView[pool];
 }
 
-private inline fn scheduled_process_running_view_new(
+private inline fn scheduled_process_current_view_new(
         live: IntrusiveSlotView[&scheduled_process_pool],
-        running: borrow ProcessRunning[process])
-        -> ProcessRecordRunningView[process, &scheduled_process_pool] {
-    let mut wrapped: ProcessRecordRunningView[process, &scheduled_process_pool] = { live };
+        running: borrow ProcessCurrent[process, phase])
+        -> ProcessRecordCurrentView[process, &scheduled_process_pool] {
+    let mut wrapped: ProcessRecordCurrentView[process, &scheduled_process_pool] = { live };
     return wrapped;
 }
 
-private inline fn scheduled_process_running_view_payload(
-        source: borrow ProcessRecordRunningView[process, &scheduled_process_pool])
+private inline fn scheduled_process_current_view_payload(
+        source: borrow ProcessRecordCurrentView[process, &scheduled_process_pool])
         -> *ProcessRecord @ process !{unsafe} {
     return intrusive_pool_payload_of(&scheduled_process_pool, source.live);
 }
 
-private inline fn scheduled_process_transfer_running_loan(
-        source: borrow ProcessRecordRunningView[process, &scheduled_process_pool],
-        destination: borrow ProcessRunning[process])
+private inline fn scheduled_process_transfer_current_loan(
+        source: borrow ProcessRecordCurrentView[process, &scheduled_process_pool],
+        destination: borrow ProcessCurrent[process, phase])
         -> *ProcessRecord @ process !{unsafe, loan_transfer} {
-    return scheduled_process_running_view_payload(source);
+    return scheduled_process_current_view_payload(source);
 }
 
-private inline fn scheduled_process_running_view_drop(
-        source: sink ProcessRecordRunningView[process, &scheduled_process_pool]) {
+private inline fn scheduled_process_current_view_drop(
+        source: sink ProcessRecordCurrentView[process, &scheduled_process_pool]) {
     intrusive_view_drop(source.live);
 }
 
-fn scheduled_process_record_running(running: borrow ProcessRunning[process])
+fn scheduled_process_record_current(running: borrow ProcessCurrent[process, phase])
         -> *ProcessRecord @ process !{unsafe} {
-    let mut handle: ProcessHandle = process_running_handle(running);
+    let mut handle: ProcessHandle = process_current_handle(running);
     if (handle.pool_index == 0) { return &scheduled_process_boot_record; }
     match intrusive_pool_probe_handle_untrusted(
             &scheduled_process_pool, handle.pool_index, handle.generation) {
@@ -916,9 +929,9 @@ fn scheduled_process_record_running(running: borrow ProcessRunning[process])
             return &scheduled_process_record_absent;
         }
         IntrusiveSlotProbe::Live(live) => {
-            let source = scheduled_process_running_view_new(live, running);
-            let record = scheduled_process_transfer_running_loan(source, running);
-            scheduled_process_running_view_drop(source);
+            let source = scheduled_process_current_view_new(live, running);
+            let record = scheduled_process_transfer_current_loan(source, running);
+            scheduled_process_current_view_drop(source);
             return record;
         }
     }
@@ -2035,9 +2048,9 @@ fn scheduled_process_command_line(guard: borrow ProcessRunGuard[lock],
 // a ScheduledProcessOwner from the allocation that just produced it, and an
 // owner is a linear proof of THAT allocation -- strictly stronger than a
 // generation compare, so record_at is the right read for it.
-private fn scheduled_process_copy_command_line(parent: borrow ProcessRunning[p],
+private fn scheduled_process_copy_command_line(parent: borrow ProcessCurrent[p, ProcessState::Running],
         child: borrow ScheduledProcessOwner[c]) !{unsafe} {
-    let source: *ProcessRecord = scheduled_process_record_running(parent);
+    let source: *ProcessRecord = scheduled_process_record_current(parent);
     let destination: *ProcessRecord = scheduled_process_record_owned(child);
     destination.command_line_length = source.command_line_length &
                                       PROCESS_COMMAND_LENGTH_MASK;
@@ -2046,29 +2059,29 @@ private fn scheduled_process_copy_command_line(parent: borrow ProcessRunning[p],
     }
 }
 
-private fn scheduled_process_copy_signal_mask(parent: borrow ProcessRunning[p],
+private fn scheduled_process_copy_signal_mask(parent: borrow ProcessCurrent[p, ProcessState::Running],
         child: borrow ScheduledProcessOwner[c]) !{unsafe} {
     scheduled_process_record_owned(child).signal_mask =
-        scheduled_process_record_running(parent).signal_mask;
+        scheduled_process_record_current(parent).signal_mask;
     scheduled_process_record_owned(child).sigchld_ignored =
-        scheduled_process_record_running(parent).sigchld_ignored;
+        scheduled_process_record_current(parent).sigchld_ignored;
     // Linux: a forked child inherits its parent's handlers.
     scheduled_process_record_owned(child).sigchld_handler =
-        scheduled_process_record_running(parent).sigchld_handler;
+        scheduled_process_record_current(parent).sigchld_handler;
     scheduled_process_record_owned(child).sigchld_flags =
-        scheduled_process_record_running(parent).sigchld_flags;
+        scheduled_process_record_current(parent).sigchld_flags;
     scheduled_process_record_owned(child).sigchld_restorer =
-        scheduled_process_record_running(parent).sigchld_restorer;
+        scheduled_process_record_current(parent).sigchld_restorer;
     scheduled_process_record_owned(child).sigchld_action_mask =
-        scheduled_process_record_running(parent).sigchld_action_mask;
+        scheduled_process_record_current(parent).sigchld_action_mask;
 }
 
 // Linux: a child inherits its parent's affinity mask across fork, and
 // execve keeps it, which this record does by surviving the exec.
-private fn scheduled_process_copy_affinity_mask(parent: borrow ProcessRunning[p],
+private fn scheduled_process_copy_affinity_mask(parent: borrow ProcessCurrent[p, ProcessState::Running],
         child: borrow ScheduledProcessOwner[c]) !{unsafe} {
     scheduled_process_record_owned(child).affinity_mask =
-        scheduled_process_record_running(parent).affinity_mask;
+        scheduled_process_record_current(parent).affinity_mask;
 }
 
 // GitHub issue #392: where kernel/kernel/fd_table.tkb keeps this
@@ -2231,11 +2244,11 @@ fn scheduled_process_address_space_root_lookup(slot: usize) -> AddressSpaceRoot 
     return root;
 }
 
-fn scheduled_process_address_space_root_running(
-        running: borrow ProcessRunning[process]) -> AddressSpaceRoot !{unsafe} {
-    let mut handle: ProcessHandle = process_running_handle(running);
+fn scheduled_process_address_space_root_current(
+        running: borrow ProcessCurrent[process, phase]) -> AddressSpaceRoot !{unsafe} {
+    let mut handle: ProcessHandle = process_current_handle(running);
     return address_space_root_mint(handle.pool_index,
-        process_backing_words(scheduled_process_record_running(running)));
+        process_backing_words(scheduled_process_record_current(running)));
 }
 
 fn scheduled_process_set_address_space_backing(
@@ -4798,13 +4811,14 @@ must_use variant ProcessCloneFailure {
     ResourceExhausted;
 }
 
-must_use variant ProcessCloneResult {
-    Invalid;
-    ResourceExhausted;
-    ChildConstructing(usize);
+must_use variant ProcessCloneResult[process: usize] {
+    Invalid(ProcessCurrent[process, ProcessState::Running]);
+    ResourceExhausted(ProcessCurrent[process, ProcessState::Running]);
+    ChildConstructing(exists child: usize.
+        ProcessCurrent[child, ProcessState::Constructing]);
 }
 
-fn kernel_process_execution_reset() {
+fn kernel_process_execution_reset() !{changes_witness_ProcessCurrent} {
     // Timer IRQs stay enabled across consecutive EL0 workloads. Close the
     // scheduling gate before invalidating any handle or saved frame: leaving
     // the previous workload enabled until later in this reset allowed an IRQ
@@ -5061,7 +5075,7 @@ fn kernel_process_cpu_allows_slot(guard: borrow ProcessRunGuard[lock], cpu: usiz
 fn kernel_process_current_cpu_allows(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock]) -> bool {
     if (execution_here().current_live == false) { return true; }
-    return kernel_process_cpu_allows_slot(guard, 
+    return kernel_process_cpu_allows_slot(guard,
         cpu_id(), execution_here().current_handle.pool_index);
 }
 
@@ -5081,7 +5095,7 @@ fn kernel_process_core0_idle_was_seen(
 // and keep the frame; kernel_process_stack_idle_yield makes it Ready once
 // core 0 is off its stack.
 fn kernel_process_core0_leave_excluded(frame: borrow FrameRef[process])
-        -> bool {
+        -> bool !{changes_witness_ProcessCurrent} {
     if (cpu_id() != 0) { return false; }
     let guard = process_run_lock();
     if (execution_here().current_live == false) {
@@ -5138,7 +5152,7 @@ fn kernel_process_reschedule_if_excluded_here() {
 // may NOT run it, the reason is the process's own affinity mask, which
 // already names where it may go; pinning it to core 0 would override the
 // mask the process just set and send it to a CPU it excluded.
-fn kernel_process_migrate_current(frame: borrow FrameRef[process]) -> bool {
+fn kernel_process_migrate_current(frame: borrow FrameRef[process]) -> bool !{changes_witness_ProcessCurrent} {
     if (cpu_id() == 0) { return false; }
     let guard = process_run_lock();
     if (execution_here().current_live == false) {
@@ -5503,7 +5517,7 @@ must_use variant ProcessSecondaryStart {
 private fn kernel_process_secondary_start_reserved(
         owner: sink ScheduledProcessOwner[process],
         running: sink ScheduledProcessState[process, ProcessState::Running])
-        -> ProcessSecondaryStart {
+        -> ProcessSecondaryStart !{changes_witness_ProcessCurrent} {
     match process_image_prepare_activation(
         scheduled_process_address_space_root_owned(owner)) {
         AddressSpaceActivationPrepareResult::Invalid => {
@@ -5716,7 +5730,7 @@ private fn kernel_process_schedule_reserved(
         from: ProcessHandle,
         owner: sink ScheduledProcessOwner[process],
         running: sink ScheduledProcessState[process, ProcessState::Running],
-        current: borrow FrameRef[from_process]) -> FrameSwitch {
+        current: borrow FrameRef[from_process]) -> FrameSwitch !{changes_witness_ProcessCurrent} {
     match process_image_prepare_activation(
         scheduled_process_address_space_root_owned(owner)) {
         AddressSpaceActivationPrepareResult::Invalid => {
@@ -5809,7 +5823,7 @@ private fn kernel_process_schedule_reserved(
 // lock and a revalidation immediately before TTBR0 changes.
 must_use variant CurrentRootActivationResult { Invalid; Activated; }
 
-fn kernel_process_activate_current_root() -> CurrentRootActivationResult {
+fn kernel_process_activate_current_root(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) -> CurrentRootActivationResult {
     if (execution_here().current_live == false) {
         return CurrentRootActivationResult::Invalid;
     }
@@ -5824,7 +5838,7 @@ fn kernel_process_activate_current_root() -> CurrentRootActivationResult {
     }
     let mut injected_busy: usize = 0;
     while (true) {
-    match process_image_prepare_activation(kernel_process_current_root()) {
+    match process_image_prepare_activation(kernel_process_current_root(current_authority)) {
         AddressSpaceActivationPrepareResult::Invalid => {
             return CurrentRootActivationResult::Invalid;
         }
@@ -6016,12 +6030,10 @@ fn kernel_process_other_ready() -> bool {
 //
 // Child exit wakes its direct parent, so this asks about that exact edge
 // rather than treating every blocked process as a reason to yield.
-fn kernel_process_current_exit_has_waiter() -> bool {
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
-    if (execution_here().current_live == false) { { let __running_result: bool = false; process_running_end(running_here); return __running_result; } }
-    let slot: usize = execution_here().current_handle.pool_index;
-    if (scheduled_process_record_running(running_here).has_parent == false) { { let __running_result: bool = false; process_running_end(running_here); return __running_result; } }
-    let mut parent: ProcessHandle = scheduled_process_record_running(running_here).parent;
+fn kernel_process_current_exit_has_waiter(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) -> bool {
+    if (execution_here().current_live == false) { return false; }
+    if (scheduled_process_record_current(current_authority).has_parent == false) { return false; }
+    let mut parent: ProcessHandle = scheduled_process_record_current(current_authority).parent;
     // The parent's state and its wait reason, in one hold of the run lock.
     let guard = process_run_lock();
     let waiting: bool = scheduled_process_handle_matches(parent) &&
@@ -6029,15 +6041,13 @@ fn kernel_process_current_exit_has_waiter() -> bool {
            scheduled_process_wait_reason_of_locked(guard, parent) ==
                ProcessWaitReason::ChildExit;
     process_run_unlock(guard);
-    { let __running_result: bool = waiting; process_running_end(running_here); return __running_result; }
+    return waiting;
 }
 
-fn kernel_process_current_has_relative() -> bool {
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
-    if (execution_here().current_live == false) { { let __running_result: bool = false; process_running_end(running_here); return __running_result; } }
-    let slot: usize = execution_here().current_handle.pool_index;
-    { let __running_result: bool = scheduled_process_record_running(running_here).has_first_child ||
-           scheduled_process_record_running(running_here).has_parent; process_running_end(running_here); return __running_result; }
+fn kernel_process_current_has_relative(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) -> bool {
+    if (execution_here().current_live == false) { return false; }
+    return scheduled_process_record_current(current_authority).has_first_child ||
+           scheduled_process_record_current(current_authority).has_parent;
 }
 
 // GitHub issue #375: make a kernel stack overflow LOUD.
@@ -6684,7 +6694,10 @@ fn kernel_process_timer_schedule(current: sink FrameRef[process])
     }
     execution_here().reschedule_pending = false;
     kernel_process_spread_timer_enter(current);
-    if (kernel_process_current_has_relative()) {
+    let ProcessRunningHere::Running(current_authority) = process_running_here() else {};
+    let has_relative: bool = kernel_process_current_has_relative(current_authority);
+    process_current_end(current_authority);
+    if (has_relative) {
         match kernel_process_schedule(current) {
             FrameSwitch::Stay => {}
             FrameSwitch::Switch(next) => {
@@ -6712,7 +6725,7 @@ fn kernel_process_timer_schedule(current: sink FrameRef[process])
 // the Ready published below is immediately takeable, and the frame the
 // taker resumes is the one this entry saved.
 private fn kernel_process_tick_leave_excluded(
-        frame: borrow FrameRef[process]) -> bool !{interrupt} {
+        frame: borrow FrameRef[process]) -> bool !{changes_witness_ProcessCurrent, interrupt} {
     let guard = process_run_lock();
     if (execution_here().current_live == false ||
         execution_here().stack_live) {
@@ -6750,7 +6763,10 @@ fn kernel_process_syscall_return_schedule(current: borrow FrameRef[process])
         return FrameSwitch::Stay;
     }
     execution_here().reschedule_pending = false;
-    if (kernel_process_current_has_relative() == false) {
+    let ProcessRunningHere::Running(current_authority) = process_running_here() else {};
+    let has_relative: bool = kernel_process_current_has_relative(current_authority);
+    process_current_end(current_authority);
+    if (has_relative == false) {
         return FrameSwitch::Stay;
     }
     match kernel_process_schedule(current) {
@@ -6872,13 +6888,11 @@ private fn kernel_process_block_would_miss(
 }
 
 // wait4's requested pid, recorded beside its status pointer when it blocks.
-fn kernel_process_current_set_wait4_pid(pid: usize) {
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
+fn kernel_process_current_set_wait4_pid(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], pid: usize) {
     if (execution_here().current_live) {
-        scheduled_process_record_running(running_here)
+        scheduled_process_record_current(current_authority)
             .wait4_pid = pid;
     }
-    process_running_end(running_here);
 }
 
 // What a block came to. `Retry` is a wait that was not published (a successor
@@ -6912,7 +6926,7 @@ variant BlockSwitch {
 private fn kernel_process_block_to_idle(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock],
         from: ProcessHandle, current: borrow FrameRef[process],
-        reason: ProcessWaitReason, trace_aux: usize) -> bool {
+        reason: ProcessWaitReason, trace_aux: usize) -> bool !{changes_witness_ProcessCurrent} {
     if (execution_here().current_live == false ||
         scheduled_process_same_slot(execution_here().current_handle, from)
             == false ||
@@ -6978,7 +6992,7 @@ private fn kernel_process_block_reserved(
         owner: sink ScheduledProcessOwner[process],
         running: sink ScheduledProcessState[process, ProcessState::Running],
         current: borrow FrameRef[from_process], reason: ProcessWaitReason,
-        trace_aux: usize) -> BlockSwitch {
+        trace_aux: usize) -> BlockSwitch !{changes_witness_ProcessCurrent} {
     match process_image_prepare_activation(
         scheduled_process_address_space_root_owned(owner)) {
         AddressSpaceActivationPrepareResult::Invalid => {
@@ -7117,40 +7131,35 @@ fn kernel_process_block_net(current: borrow FrameRef[process])
         current, ProcessWaitReason::NetRx, 3);
 }
 
-fn kernel_process_current_arm_deadline(deadline_ticks: usize,
+fn kernel_process_current_arm_deadline(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], deadline_ticks: usize,
                                        result: usize) {
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
     if (execution_here().current_live) {
-        scheduled_process_record_running(running_here)
+        scheduled_process_record_current(current_authority)
             .deadline_ticks = deadline_ticks;
-        scheduled_process_record_running(running_here)
+        scheduled_process_record_current(current_authority)
             .deadline_result = result;
-        kernel_process_current_set_pending_block(
+        kernel_process_current_set_pending_block(current_authority,
             ProcessWaitReason::Deadline, 0);
     }
-    process_running_end(running_here);
 }
 
-fn kernel_process_current_deadline_ticks() -> usize {
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
+fn kernel_process_current_deadline_ticks(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) -> usize {
     if (execution_here().current_live) {
-        { let mut __running_result: usize = scheduled_process_record_running(running_here)
-            .deadline_ticks; process_running_end(running_here); return __running_result; }
+        return scheduled_process_record_current(current_authority)
+            .deadline_ticks;
     }
-    { let mut __running_result: usize = 0; process_running_end(running_here); return __running_result; }
+    return 0;
 }
 
-fn kernel_process_current_clear_deadline() {
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
+fn kernel_process_current_clear_deadline(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) {
     if (execution_here().current_live) {
-        scheduled_process_record_running(running_here)
+        scheduled_process_record_current(current_authority)
             .deadline_ticks = 0;
-        scheduled_process_record_running(running_here)
+        scheduled_process_record_current(current_authority)
             .deadline_result = 0;
-        scheduled_process_record_running(running_here)
+        scheduled_process_record_current(current_authority)
             .pending_block_reason = ProcessWaitReason::None;
     }
-    process_running_end(running_here);
 }
 
 // GitHub issue #570: pending_signals and signal_mask are read-modify-written
@@ -7208,23 +7217,20 @@ fn kernel_process_current_set_signal_mask(mask: usize) {
     process_run_unlock(guard);
 }
 
-fn kernel_process_current_sigchld_ignored() -> bool {
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
+fn kernel_process_current_sigchld_ignored(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) -> bool {
     // The syscall subset probe calls rt_sigaction without a live process.
     // Takibi evaluates both sides of &&, so a combined guard would still
     // read the uninitialised current_handle and count a stale handle.
-    if (execution_here().current_live == false) { { let mut __running_result: bool = false; process_running_end(running_here); return __running_result; } }
-    { let mut __running_result: bool = scheduled_process_record_running(running_here)
-        .sigchld_ignored; process_running_end(running_here); return __running_result; }
+    if (execution_here().current_live == false) { return false; }
+    return scheduled_process_record_current(current_authority)
+        .sigchld_ignored;
 }
 
-fn kernel_process_current_set_sigchld_ignored(ignored: bool) {
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
+fn kernel_process_current_set_sigchld_ignored(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], ignored: bool) {
     if (execution_here().current_live) {
-        scheduled_process_record_running(running_here)
+        scheduled_process_record_current(current_authority)
             .sigchld_ignored = ignored;
     }
-    process_running_end(running_here);
 }
 
 // GitHub issue #600: a signal taken off `pending_signals` is a value that
@@ -7330,27 +7336,25 @@ fn kernel_process_current_termination_signal_take()
     return ProcessSignalPendingResult::Missing;
 }
 
-fn kernel_process_current_prepare_signal_wait(wait_set: usize) {
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
+fn kernel_process_current_prepare_signal_wait(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], wait_set: usize) {
     if (execution_here().current_live) {
-        scheduled_process_record_running(running_here)
+        scheduled_process_record_current(current_authority)
             .sigwait_set = wait_set;
-        kernel_process_current_set_pending_block(
+        kernel_process_current_set_pending_block(current_authority,
             ProcessWaitReason::Signal, 0);
     }
-    process_running_end(running_here);
 }
 
 // GitHub issue #627: rt_sigsuspend's wait. The same Signal block as
 // rt_sigtimedwait's, but a wake leaves the signal pending (see
 // kernel_process_signal_deliver_to).
-fn kernel_process_current_prepare_signal_suspend(wait_set: usize) {
+fn kernel_process_current_prepare_signal_suspend(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], wait_set: usize) {
     if (execution_here().current_live) {
         let guard = process_run_lock();
         scheduled_process_record_of_locked(guard, execution_here().current_handle)
             .sigwait_suspend = true;
         process_run_unlock(guard);
-        kernel_process_current_prepare_signal_wait(wait_set);
+        kernel_process_current_prepare_signal_wait(current_authority, wait_set);
     }
 }
 
@@ -7429,31 +7433,28 @@ struct SigchldAction {
     mask: usize;
 }
 
-fn kernel_process_current_sigchld_action() -> SigchldAction {
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
+fn kernel_process_current_sigchld_action(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) -> SigchldAction {
     let mut action: SigchldAction = { 0, 0, 0, 0 };
     if (execution_here().current_live) {
         let record: *ProcessRecord =
-            scheduled_process_record_running(running_here);
+            scheduled_process_record_current(current_authority);
         action.handler = record.sigchld_handler;
         action.flags = record.sigchld_flags;
         action.restorer = record.sigchld_restorer;
         action.mask = record.sigchld_action_mask;
     }
-    { let mut __running_result: SigchldAction = action; process_running_end(running_here); return __running_result; }
+    return action;
 }
 
-fn kernel_process_current_set_sigchld_action(action: SigchldAction) {
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
+fn kernel_process_current_set_sigchld_action(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], action: SigchldAction) {
     if (execution_here().current_live) {
         let record: *ProcessRecord =
-            scheduled_process_record_running(running_here);
+            scheduled_process_record_current(current_authority);
         record.sigchld_handler = action.handler;
         record.sigchld_flags = action.flags;
         record.sigchld_restorer = action.restorer;
         record.sigchld_action_mask = action.mask;
     }
-    process_running_end(running_here);
 }
 
 // Take a pending SIGCHLD the current process has a handler for and does
@@ -7573,7 +7574,7 @@ private let mut terminal_foreground_session: usize;
 fn kernel_process_terminal_reader(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock]) {
     if (execution_here().current_live) {
-        terminal_foreground_session = scheduled_process_record_of_locked(guard, 
+        terminal_foreground_session = scheduled_process_record_of_locked(guard,
             execution_here().current_handle).session_id;
     }
 }
@@ -7944,18 +7945,17 @@ private fn kernel_process_uart_block_published(fixture_block: bool) {
 // GitHub issue #244: the mirror image of kernel_process_block_uart() --
 // blocks current (the parent calling wait4()) so its own child can keep
 // running toward its exit.
-fn kernel_process_block_wait4(current: borrow FrameRef[process])
+fn kernel_process_block_wait4(current_authority: ProcessCurrent[current_process, ProcessState::Running], current: borrow FrameRef[process])
         -> BlockSwitch {
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
     if (execution_here().current_live == false) {
-        { let mut __running_result: BlockSwitch = BlockSwitch::Retry; process_running_end(running_here); return __running_result; }
+        { let mut __running_result: BlockSwitch = BlockSwitch::Retry; process_current_end(current_authority); return __running_result; }
     }
-    if (scheduled_process_record_running(running_here)
+    if (scheduled_process_record_current(current_authority)
             .has_first_child == false) {
-        { let mut __running_result: BlockSwitch = BlockSwitch::Retry; process_running_end(running_here); return __running_result; }
+        { let mut __running_result: BlockSwitch = BlockSwitch::Retry; process_current_end(current_authority); return __running_result; }
     }
-    { let mut __running_result: BlockSwitch = kernel_process_block_current(
-        current, ProcessWaitReason::ChildExit, 2); process_running_end(running_here); return __running_result; }
+    process_current_end(current_authority);
+    return kernel_process_block_current(current, ProcessWaitReason::ChildExit, 2);
 }
 
 // The UART IRQ transfers one byte directly into the suspended syscall frame.
@@ -8030,11 +8030,11 @@ fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[lock], value: usize)
     // right one reads the current record.
     let mut has_child: bool = false;
     if (live) {
-        has_child = scheduled_process_record_of_locked(guard, 
+        has_child = scheduled_process_record_of_locked(guard,
             execution_here().current_handle).has_first_child;
     }
     if (has_child) {
-        let mut candidate: ProcessHandle = scheduled_process_record_of_locked(guard, 
+        let mut candidate: ProcessHandle = scheduled_process_record_of_locked(guard,
             execution_here().current_handle).first_child;
         let mut scanning: usize = scheduled_process_pool_live_count() + 1;
         while (scanning != 0 && found == false) {
@@ -8053,7 +8053,7 @@ fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[lock], value: usize)
                             .has_next_sibling == false) {
                         scanning = 0;
                     } else {
-                        candidate = scheduled_process_record_of_locked(guard, 
+                        candidate = scheduled_process_record_of_locked(guard,
                             candidate).next_sibling;
                     }
                 }
@@ -8179,19 +8179,18 @@ fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[lock], value: usize)
 // suspended on UART RX. "current has a live child" already implies current
 // is playing the parent role (only a parent-role slot has one), so that
 // replaces the old explicit execution_process != Parent check.
-fn kernel_process_uart_record_parent_progress()
+fn kernel_process_uart_record_parent_progress(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running])
         -> ProcessUartProgressResult {
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
     if (execution_here().current_live == false) {
-        { let mut __running_result: ProcessUartProgressResult = ProcessUartProgressResult::Invalid; process_running_end(running_here); return __running_result; }
+        return ProcessUartProgressResult::Invalid;
     }
-    if (scheduled_process_record_running(running_here)
+    if (scheduled_process_record_current(current_authority)
             .has_first_child == false) {
-        { let mut __running_result: ProcessUartProgressResult = ProcessUartProgressResult::Invalid; process_running_end(running_here); return __running_result; }
+        return ProcessUartProgressResult::Invalid;
     }
     let mut parent: ProcessHandle = execution_here().current_handle;
     let mut child: ProcessHandle =
-        scheduled_process_record_running(running_here).first_child;
+        scheduled_process_record_current(current_authority).first_child;
     let guard = process_run_lock();
     let progressed: bool =
         scheduled_process_state_of_locked(guard, parent) ==
@@ -8202,10 +8201,10 @@ fn kernel_process_uart_record_parent_progress()
             ProcessWaitReason::UartRx;
     process_run_unlock(guard);
     if (progressed == false) {
-        { let mut __running_result: ProcessUartProgressResult = ProcessUartProgressResult::Invalid; process_running_end(running_here); return __running_result; }
+        return ProcessUartProgressResult::Invalid;
     }
     process_test_evidence_record_uart_parent_progress();
-    { let mut __running_result: ProcessUartProgressResult = ProcessUartProgressResult::Recorded; process_running_end(running_here); return __running_result; }
+    return ProcessUartProgressResult::Recorded;
 }
 
 fn kernel_process_uart_block_evidence() -> bool {
@@ -8222,12 +8221,12 @@ fn kernel_process_uart_block_evidence() -> bool {
 // progress line locally; this is a structural probe, not a boot milestone.
 // The two probes below stand in frames that are not real ones, so they mint
 // FrameRefs from bare addresses; these three helpers are where they do.
-private fn kernel_process_probe_installed(
+private fn kernel_process_probe_installed(child_authority: ProcessCurrent[child_generation, ProcessState::Constructing],
         parent: borrow FrameRef[parent_process],
         child: borrow FrameRef[child_process]) -> bool {
-    let installed: bool = match kernel_process_clone_context_install(parent, child) {
-        CloneInstall::Failed => { false }
-        CloneInstall::Installed => { true }
+    let installed: bool = match kernel_process_clone_context_install(child_authority, parent, child) {
+        CloneInstall::Failed(retained) => { process_current_end(retained); false }
+        CloneInstall::Installed(running) => { process_current_end(running); true }
     };
     return installed;
 }
@@ -8267,18 +8266,28 @@ fn kernel_process_trace_block_wake_probe() -> bool !{unsafe} {
         (kernel_process_trace_probe_child_frame as *usize) as usize,
         kernel_process_entry_generation());
     let mut setup_ok: bool = false;
-    match kernel_process_clone_begin(0x11, 0) {
-        ProcessCloneResult::Invalid => {}
-        ProcessCloneResult::ResourceExhausted => {}
-        ProcessCloneResult::ChildConstructing(child_pid) => {
+    let ProcessRunningHere::Running(parent_authority) = process_running_here() else {};
+    match kernel_process_clone_begin(parent_authority, 0x11, 0) {
+        ProcessCloneResult::Invalid(retained) => { process_current_end(retained); }
+        ProcessCloneResult::ResourceExhausted(retained) => { process_current_end(retained); }
+        ProcessCloneResult::ChildConstructing(child_authority) => {
+            let child_pid: usize = kernel_process_current_pid();
+            let installed: bool = kernel_process_probe_installed(child_authority, parent_frame, child_frame);
             if (child_pid == 2 &&
-                kernel_process_probe_installed(parent_frame, child_frame) &&
+                installed &&
                 kernel_process_scheduler_probe_stack_depart() &&
                 kernel_process_scheduler_probe_stack_arrive() &&
                 kernel_process_probe_blocks_to(child_frame, parent_frame) &&
                 kernel_process_scheduler_probe_stack_depart() &&
                 kernel_process_scheduler_probe_stack_arrive()) {
-                match kernel_process_uart_record_parent_progress() {
+                let mut progress: ProcessUartProgressResult = match process_running_here() {
+                    ProcessRunningHere::Running(current_authority) => {
+                        let mut result: ProcessUartProgressResult = kernel_process_uart_record_parent_progress(current_authority);
+                        process_current_end(current_authority);
+                        result
+                    }
+                };
+                match progress {
                     ProcessUartProgressResult::Invalid => {}
                     ProcessUartProgressResult::Recorded => {
                         // Under the lock the RX interrupt holds (#547).
@@ -8369,7 +8378,7 @@ private fn kernel_process_probe_run_to_exit_locked(
     return true;
 }
 
-fn kernel_process_fanout_probe() -> bool !{unsafe} {
+fn kernel_process_fanout_probe() -> bool !{changes_witness_ProcessCurrent, unsafe} {
     kernel_process_execution_reset();
     let parent_pid: usize = kernel_process_current_pid();
     let mut pids: [usize; 3] = { 0, 0, 0 };
@@ -8379,10 +8388,14 @@ fn kernel_process_fanout_probe() -> bool !{unsafe} {
     // them siblings rather than a chain, and it is the sequence the old
     // ceiling made impossible to write.
     for i: usize in 0..<3 {
-        match kernel_process_clone_begin(0x11, 0) {
-            ProcessCloneResult::Invalid => { return false; }
-            ProcessCloneResult::ResourceExhausted => { return false; }
-            ProcessCloneResult::ChildConstructing(child_pid) => { pids[i] = child_pid; }
+        let ProcessRunningHere::Running(parent_authority) = process_running_here() else {};
+        match kernel_process_clone_begin(parent_authority, 0x11, 0) {
+            ProcessCloneResult::Invalid(retained) => { process_current_end(retained); return false; }
+            ProcessCloneResult::ResourceExhausted(retained) => { process_current_end(retained); return false; }
+            ProcessCloneResult::ChildConstructing(child_authority) => {
+                pids[i] = kernel_process_current_pid();
+                process_current_end(child_authority);
+            }
         }
         execution_here().current_handle = parent_handle;
         if (kernel_process_current_pid() != parent_pid) { return false; }
@@ -8403,14 +8416,17 @@ fn kernel_process_fanout_probe() -> bool !{unsafe} {
     let live_before_rollback: usize = scheduled_process_pool_live_count();
     let clones_before_rollback: usize = process_test_evidence_clone_calls();
     let mut cancelled_pid: usize = 0;
-    match kernel_process_clone_begin(0x11, 0) {
-        ProcessCloneResult::Invalid => { return false; }
-        ProcessCloneResult::ResourceExhausted => { return false; }
-        ProcessCloneResult::ChildConstructing(pid) => { cancelled_pid = pid; }
-    }
-    match kernel_process_clone_rollback() {
-        ProcessCloneRollbackResult::Invalid => { return false; }
-        ProcessCloneRollbackResult::Restored => {}
+    let ProcessRunningHere::Running(parent_authority) = process_running_here() else {};
+    match kernel_process_clone_begin(parent_authority, 0x11, 0) {
+        ProcessCloneResult::Invalid(retained) => { process_current_end(retained); return false; }
+        ProcessCloneResult::ResourceExhausted(retained) => { process_current_end(retained); return false; }
+        ProcessCloneResult::ChildConstructing(child_authority) => {
+            cancelled_pid = kernel_process_current_pid();
+            match kernel_process_clone_rollback(child_authority) {
+                ProcessCloneRollbackResult::Invalid => { return false; }
+                ProcessCloneRollbackResult::Restored(restored) => { process_current_end(restored); }
+            }
+        }
     }
     parent_handle = execution_here().current_handle;
     if (kernel_process_current_pid() != parent_pid ||
@@ -8462,7 +8478,14 @@ fn kernel_process_fanout_probe() -> bool !{unsafe} {
     }
     if (kernel_process_child_waitable_pid_probe(pids[1]) == false) { return false; }
     if (kernel_process_child_wait_status_pid(pids[1]) != 41) { return false; }
-    if (kernel_process_last_reaped_pid() != pids[1]) { return false; }
+    let reaped_pid: usize = match process_running_here() {
+        ProcessRunningHere::Running(current_authority) => {
+            let value: usize = kernel_process_last_reaped_pid(current_authority);
+            process_current_end(current_authority);
+            value
+        }
+    };
+    if (reaped_pid != pids[1]) { return false; }
     // The other two are untouched and still carry their own statuses --
     // the property a single parent-side field could not have.
     if (kernel_process_child_waitable_pid_probe(pids[1])) { return false; }
@@ -8477,6 +8500,7 @@ fn kernel_process_fanout_probe() -> bool !{unsafe} {
 // exact Blocked/ChildExit state observed by DDB, assert that the dependency
 // is visible, then restore the parent before the scheduler exercise continues.
 private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
+    let ProcessRunningHere::Running(current_authority) = process_running_here() else {};
     let guard = process_run_lock();
     let mut arranged: bool = false;
     match scheduled_process_ready_take(guard, parent) {
@@ -8492,8 +8516,8 @@ private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
     }
     process_run_unlock(guard);
     if (arranged == false ||
-        kernel_process_current_exit_has_waiter() == false) {
-        return false;
+        kernel_process_current_exit_has_waiter(current_authority) == false) {
+        process_current_end(current_authority); return false;
     }
     // The synthetic parent is explicitly pinned to core 0. Exit may wake it
     // there, but its affinity must keep it from becoming a successor on core
@@ -8518,8 +8542,9 @@ private fn kernel_process_exit_waiter_probe(parent: ProcessHandle) -> bool {
         }
     }
     process_run_unlock(restore_guard);
-    return restored && kernel_process_current_exit_has_waiter() == false &&
-        peer_wait_parent_rejected;
+    let clear: bool = kernel_process_current_exit_has_waiter(current_authority) == false;
+    process_current_end(current_authority);
+    return restored && clear && peer_wait_parent_rejected;
 }
 
 // The scheduler probe calls scheduling functions directly instead of entering
@@ -8583,7 +8608,7 @@ private fn kernel_process_scheduler_probe_stack_arrive() -> bool {
     return valid;
 }
 
-fn kernel_process_scheduler_probe() -> bool {
+fn kernel_process_scheduler_probe() -> bool !{changes_witness_ProcessCurrent} {
     kernel_process_execution_reset();
     kernel_process_trace_enable();
     if (scheduled_process_peer_dispatch_enabled) { return false; }
@@ -8604,10 +8629,12 @@ fn kernel_process_scheduler_probe() -> bool {
     }
     process_run_unlock(probe_guard);
     if (bootstrap_peer_refused == false) { return false; }
-    match kernel_process_clone_begin(0x11, 0) {
-        ProcessCloneResult::Invalid => { return false; }
-        ProcessCloneResult::ResourceExhausted => { return false; }
-        ProcessCloneResult::ChildConstructing(child_pid) => {
+    let ProcessRunningHere::Running(parent_authority) = process_running_here() else {};
+    match kernel_process_clone_begin(parent_authority, 0x11, 0) {
+        ProcessCloneResult::Invalid(retained) => { process_current_end(retained); return false; }
+        ProcessCloneResult::ResourceExhausted(retained) => { process_current_end(retained); return false; }
+        ProcessCloneResult::ChildConstructing(child_authority) => {
+            let child_pid: usize = kernel_process_current_pid();
             // This probe later installs synthetic saved stack pointers and
             // drives the scheduler by direct calls. Keep that test-only
             // Ready frame away from the live peer idle loop.
@@ -8622,15 +8649,12 @@ fn kernel_process_scheduler_probe() -> bool {
                 }
             }
             process_run_unlock(child_guard);
-            if (kernel_process_clone_unselectable_probe(root_handle) == false ||
-                synthetic_child_peer_refused == false ||
-                child_pid != root_pid + 1 ||
-                kernel_process_probe_installed(
-                    frame_ref_from_entry(
-                        0x1000, kernel_process_entry_generation()),
-                    frame_ref_from_entry(
-                        0x2000, kernel_process_entry_generation()))
-                    == false) {
+            let unselectable: bool = kernel_process_clone_unselectable_probe(root_handle);
+            let installed: bool = kernel_process_probe_installed(child_authority,
+                frame_ref_from_entry(0x1000, kernel_process_entry_generation()),
+                frame_ref_from_entry(0x2000, kernel_process_entry_generation()));
+            if (unselectable == false || synthetic_child_peer_refused == false ||
+                child_pid != root_pid + 1 || installed == false) {
                 return false;
             }
         }
@@ -8722,7 +8746,7 @@ fn kernel_process_scheduler_probe() -> bool {
 // handoff's ordinary-successor path. After it collects the zombie, a later
 // Ready take must still succeed. The fixture never restores its synthetic
 // frame, just like the timer and block scheduler probes above.
-private fn kernel_process_exit_continuation_probe(parent: ProcessHandle) -> bool {
+private fn kernel_process_exit_continuation_probe(parent: ProcessHandle) -> bool !{changes_witness_ProcessCurrent} {
     // GitHub issue #693 step 6: the parent's links are read under the run
     // guard, released before the stack-depart probe, which takes it itself.
     let link_guard = process_run_lock();
@@ -8913,8 +8937,8 @@ fn kernel_process_crash_trace_ring_probe() -> bool {
 // scheduled_process_alloc, not derived from its slot) is
 // returned directly instead of the literal 2, so a process running on
 // any slot gets a correct child pid back, not just the original root.
-fn kernel_process_clone_begin(flags: usize, child_stack: usize)
-        -> ProcessCloneResult {
+fn kernel_process_clone_begin(current_authority: ProcessCurrent[process, ProcessState::Running], flags: usize, child_stack: usize)
+        -> ProcessCloneResult[process] !{changes_witness_ProcessCurrent} {
     // GitHub issue #245 bug fix: this used to also check a GLOBAL
     // execution_child_live flag, leftover from the old model where it
     // correctly meant "the one single child is still alive". Once any
@@ -8936,14 +8960,14 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
     // process table itself.
     if (flags != 0x11 || child_stack != 0 ||
         execution_here().current_live == false) {
-        return ProcessCloneResult::Invalid;
+        return ProcessCloneResult::Invalid(current_authority);
     }
     let mut parent: ProcessHandle = execution_here().current_handle;
     // Not runnable yet: the copied frame, VM and descriptors are installed
     // below, and kernel_syscall_clone_child_return publishes Ready.
     match scheduled_process_alloc_pending(false) {
         ScheduledPooledProcessAllocResult::Full => {
-            return ProcessCloneResult::ResourceExhausted;
+            return ProcessCloneResult::ResourceExhausted(current_authority);
         }
         ScheduledPooledProcessAllocResult::Allocated(pooled) => {
             let mut child: ProcessHandle =
@@ -8951,15 +8975,12 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
             // GitHub issue #693 steps 2/4: the parent is the process running
             // here, and the child is not visible to anyone else until the
             // publish below, so this path owns it.
-            let ProcessRunningHere::Running(parent_running) =
-                process_running_here() else {};
             let child_owner =
                 scheduled_process_owner_new(child.pool_index, child.generation);
-            scheduled_process_copy_command_line(parent_running, child_owner);
-            scheduled_process_copy_signal_mask(parent_running, child_owner);
-            scheduled_process_copy_affinity_mask(parent_running, child_owner);
+            scheduled_process_copy_command_line(current_authority, child_owner);
+            scheduled_process_copy_signal_mask(current_authority, child_owner);
+            scheduled_process_copy_affinity_mask(current_authority, child_owner);
             scheduled_process_owner_drop(child_owner);
-            process_running_end(parent_running);
             // GitHub issue #437: push at the HEAD of the sibling list.
             // O(1), and with one child it leaves first_child naming that
             // child and no sibling -- the shape every existing view was
@@ -8990,6 +9011,7 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
             // (issue #289's fork checkpoint originally gated on
             // `kernel_process_current_pid() != 1`, which is always true here
             // regardless of who forked).
+            process_current_end(current_authority);
             execution_here().current_handle = child;
             // GitHub issue #611: clones run on any CPU now, so the count
             // moves under the lock that orders them.
@@ -9006,7 +9028,7 @@ fn kernel_process_clone_begin(flags: usize, child_stack: usize)
                 scheduled_process_pid_of_handle(parent), parent.generation,
                 5, 0, child.pool_index, child_saved_sp, flags);
             return ProcessCloneResult::ChildConstructing(
-                scheduled_process_pid_of_handle(child));
+                process_constructing_new(child.generation));
         }
     }
 }
@@ -9022,20 +9044,22 @@ fn kernel_process_clone_child_stack_top() -> usize {
 // step in the same clone() syscall (VM copy, fd-table clone) fails.
 // The child never ran: cancellation consumes its Constructing token directly
 // into Exited, without ever publishing an executable Ready/Running context.
-must_use variant ProcessCloneRollbackResult { Invalid; Restored; }
+must_use variant ProcessCloneRollbackResult {
+    Invalid;
+    Restored(exists process: usize. ProcessCurrent[process, ProcessState::Running]);
+}
 
-fn kernel_process_clone_rollback() -> ProcessCloneRollbackResult {
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
+fn kernel_process_clone_rollback(current_authority: ProcessCurrent[process, ProcessState::Constructing]) -> ProcessCloneRollbackResult !{changes_witness_ProcessCurrent} {
     if (execution_here().current_live == false) {
-        { let mut __running_result: ProcessCloneRollbackResult = ProcessCloneRollbackResult::Invalid; process_running_end(running_here); return __running_result; }
+        { let mut __running_result: ProcessCloneRollbackResult = ProcessCloneRollbackResult::Invalid; process_current_end(current_authority); return __running_result; }
     }
-    if (scheduled_process_record_running(running_here)
+    if (scheduled_process_record_current(current_authority)
             .has_parent == false) {
-        { let mut __running_result: ProcessCloneRollbackResult = ProcessCloneRollbackResult::Invalid; process_running_end(running_here); return __running_result; }
+        { let mut __running_result: ProcessCloneRollbackResult = ProcessCloneRollbackResult::Invalid; process_current_end(current_authority); return __running_result; }
     }
     let mut child: ProcessHandle = execution_here().current_handle;
     let mut parent: ProcessHandle =
-        scheduled_process_record_running(running_here).parent;
+        scheduled_process_record_current(current_authority).parent;
     let guard = process_run_lock();
     // Only this still-Running parent can insert or reap its children during
     // the non-preemptible clone syscall. Validate the head before mutating
@@ -9046,12 +9070,12 @@ fn kernel_process_clone_rollback() -> ProcessCloneRollbackResult {
         scheduled_process_same_slot(
             scheduled_process_record_of_locked(guard, parent).first_child, child) == false) {
         process_run_unlock(guard);
-        { let mut __running_result: ProcessCloneRollbackResult = ProcessCloneRollbackResult::Invalid; process_running_end(running_here); return __running_result; }
+        { let mut __running_result: ProcessCloneRollbackResult = ProcessCloneRollbackResult::Invalid; process_current_end(current_authority); return __running_result; }
     }
     match scheduled_process_constructing_take(guard, child) {
         ScheduledProcessConstructingTakeResult::Missing => {
             process_run_unlock(guard);
-            { let mut __running_result: ProcessCloneRollbackResult = ProcessCloneRollbackResult::Invalid; process_running_end(running_here); return __running_result; }
+            { let mut __running_result: ProcessCloneRollbackResult = ProcessCloneRollbackResult::Invalid; process_current_end(current_authority); return __running_result; }
         }
         ScheduledProcessConstructingTakeResult::Constructing(resources) => {
             let (owner, constructing) = resources;
@@ -9069,7 +9093,9 @@ fn kernel_process_clone_rollback() -> ProcessCloneRollbackResult {
             scheduled_process_record_of_locked(guard, child).has_next_sibling = false;
             // We still run on the parent's syscall stack. Restore logical
             // current before releasing any of the failed child's resources.
+            process_current_end(current_authority);
             execution_here().current_handle = parent;
+            let restored = process_running_new(parent.generation);
             let exited = scheduled_process_cancel_clone(owner, constructing);
             scheduled_process_release(owner, exited);
             // The reap's two steps, as every other reaper takes them: the
@@ -9091,18 +9117,19 @@ fn kernel_process_clone_rollback() -> ProcessCloneRollbackResult {
                     parent = execution_here().current_handle;
                 }
             }
-        }
-    }
-    workload_busy_note_selected(
-        scheduled_process_pid_of_handle(parent));
-    let activation: CurrentRootActivationResult =
-        kernel_process_activate_current_root();
-    match activation {
-        CurrentRootActivationResult::Invalid => {
-            { let mut __running_result: ProcessCloneRollbackResult = ProcessCloneRollbackResult::Invalid; process_running_end(running_here); return __running_result; }
-        }
-        CurrentRootActivationResult::Activated => {
-            { let mut __running_result: ProcessCloneRollbackResult = ProcessCloneRollbackResult::Restored; process_running_end(running_here); return __running_result; }
+
+            workload_busy_note_selected(
+                scheduled_process_pid_of_handle(parent));
+            let activation: CurrentRootActivationResult =
+                kernel_process_activate_current_root(restored);
+            match activation {
+                CurrentRootActivationResult::Invalid => {
+                    { let mut __running_result: ProcessCloneRollbackResult = ProcessCloneRollbackResult::Invalid; process_current_end(restored); return __running_result; }
+                }
+                CurrentRootActivationResult::Activated => {
+                    return ProcessCloneRollbackResult::Restored(restored);
+                }
+            }
         }
     }
 }
@@ -9111,28 +9138,30 @@ fn kernel_process_clone_rollback() -> ProcessCloneRollbackResult {
 // (kernel_process_clone_begin() switches to it immediately), so the
 // parent is recovered via that child's own parent link rather than a
 // separate global execution_parent_handle.
-must_use variant CloneInstall { Failed; Installed; }
+must_use variant CloneInstall[process: usize] {
+    Failed(ProcessCurrent[process, ProcessState::Constructing]);
+    Installed(ProcessCurrent[process, ProcessState::Running]);
+}
 
-fn kernel_process_clone_context_install(
+fn kernel_process_clone_context_install(current_authority: ProcessCurrent[process, ProcessState::Constructing],
         parent: borrow FrameRef[parent_process],
-        child: borrow FrameRef[child_process]) -> CloneInstall {
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
+        child: borrow FrameRef[child_process]) -> CloneInstall[process] !{changes_witness_ProcessCurrent} {
     if (execution_here().current_live == false ||
         frame_ref_address(parent) == 0 || frame_ref_address(child) == 0) {
-        { let mut __running_result: CloneInstall = CloneInstall::Failed; process_running_end(running_here); return __running_result; }
+        return CloneInstall::Failed(current_authority);
     }
-    if (scheduled_process_record_running(running_here)
-            .has_parent == false) { { let mut __running_result: CloneInstall = CloneInstall::Failed; process_running_end(running_here); return __running_result; } }
+    if (scheduled_process_record_current(current_authority)
+            .has_parent == false) { return CloneInstall::Failed(current_authority); }
     let mut child_handle: ProcessHandle = execution_here().current_handle;
     let mut parent_handle: ProcessHandle =
-        scheduled_process_record_running(running_here).parent;
+        scheduled_process_record_current(current_authority).parent;
     // The copied child frame becomes Running in the same section that
     // publishes the parent's frame and makes that parent Ready.
     let guard = process_run_lock();
     match scheduled_process_constructing_take(guard, child_handle) {
         ScheduledProcessConstructingTakeResult::Missing => {
             process_run_unlock(guard);
-            { let mut __running_result: CloneInstall = CloneInstall::Failed; process_running_end(running_here); return __running_result; }
+            return CloneInstall::Failed(current_authority);
         }
         ScheduledProcessConstructingTakeResult::Constructing(resources) => {
             let (owner, constructing) = resources;
@@ -9143,33 +9172,32 @@ fn kernel_process_clone_context_install(
             if (kernel_process_yield_handle(guard, parent_handle) == false) {
                 scheduled_process_release(owner, constructing);
                 process_run_unlock(guard);
-                { let mut __running_result: CloneInstall = CloneInstall::Failed; process_running_end(running_here); return __running_result; }
+                return CloneInstall::Failed(current_authority);
             }
+            process_current_end(current_authority);
             let running = scheduled_process_finish_clone(
                 owner, constructing, child);
             scheduled_process_release(owner, running);
             process_run_unlock(guard);
-            { let mut __running_result: CloneInstall = CloneInstall::Installed; process_running_end(running_here); return __running_result; }
+            return CloneInstall::Installed(view ProcessCurrent[process, ProcessState::Running]);
         }
     }
 }
 
-fn kernel_process_is_child() -> bool {
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
-    if (execution_here().current_live == false) { { let mut __running_result: bool = false; process_running_end(running_here); return __running_result; } }
-    { let mut __running_result: bool = scheduled_process_record_running(running_here)
-        .has_parent; process_running_end(running_here); return __running_result; }
+fn kernel_process_is_child(current_authority: borrow ProcessCurrent[current_process, current_phase]) -> bool {
+    if (execution_here().current_live == false) { return false; }
+    return scheduled_process_record_current(current_authority)
+        .has_parent;
 }
 
 // Whether the current process is a direct child of BusyBox init.
-fn kernel_process_parent_is_root() -> bool {
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
-    if (execution_here().current_live == false) { { let mut __running_result: bool = false; process_running_end(running_here); return __running_result; } }
-    if (scheduled_process_record_running(running_here)
-            .has_parent == false) { { let mut __running_result: bool = false; process_running_end(running_here); return __running_result; } }
+fn kernel_process_parent_is_root(current_authority: borrow ProcessCurrent[current_process, current_phase]) -> bool {
+    if (execution_here().current_live == false) { return false; }
+    if (scheduled_process_record_current(current_authority)
+            .has_parent == false) { return false; }
     let mut parent: ProcessHandle =
-        scheduled_process_record_running(running_here).parent;
-    { let mut __running_result: bool = parent.pool_index == 0; process_running_end(running_here); return __running_result; }
+        scheduled_process_record_current(current_authority).parent;
+    return parent.pool_index == 0;
 }
 
 // The current process's parent pid, sampled under ProcessRunGuard when the
@@ -9272,25 +9300,22 @@ fn kernel_process_frame_pid_or_zero(frame: borrow FrameRef[process])
 // blocking process's own ProcessRecord keeps the pending decision scoped to
 // the process making it, still read back synchronously by
 // kernel_syscall_block_return() before any scheduler switch happens.
-fn kernel_process_current_set_pending_block(
+fn kernel_process_current_set_pending_block(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
         reason: ProcessWaitReason, wait4_status_ptr: usize) {
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
     if (execution_here().current_live) {
-        scheduled_process_record_running(running_here)
+        scheduled_process_record_current(current_authority)
             .pending_block_reason = reason;
-        scheduled_process_record_running(running_here)
+        scheduled_process_record_current(current_authority)
             .wait4_status_ptr = wait4_status_ptr;
     }
-    process_running_end(running_here);
 }
 
-fn kernel_process_current_pending_block_reason() -> ProcessWaitReason {
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
+fn kernel_process_current_pending_block_reason(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) -> ProcessWaitReason {
     if (execution_here().current_live) {
-        { let mut __running_result: ProcessWaitReason = scheduled_process_record_running(running_here)
-            .pending_block_reason; process_running_end(running_here); return __running_result; }
+        return scheduled_process_record_current(current_authority)
+            .pending_block_reason;
     }
-    { let mut __running_result: ProcessWaitReason = ProcessWaitReason::None; process_running_end(running_here); return __running_result; }
+    return ProcessWaitReason::None;
 }
 
 // Allocation-free diagnostic view for the terminal exception path.  These
@@ -9344,7 +9369,7 @@ fn kernel_process_crash_wait4_status_ptr() -> usize {
     return scheduled_process_record_peek(current).wait4_status_ptr;
 }
 
-fn kernel_process_crash_root_slot() -> usize {
+fn kernel_process_current_slot() -> usize {
     if (execution_here().current_live == false) { return 0; }
     return execution_here().current_handle.pool_index;
 }
@@ -9361,16 +9386,9 @@ fn kernel_process_crash_image_kind() -> usize {
 // clone, before process_image_activate_root() replaces the old fixed
 // process_image_activate_child() -- read it here rather than reaching
 // into execution_here().current_handle directly.
-fn kernel_process_current_root() -> AddressSpaceRoot !{unsafe} {
+fn kernel_process_current_root(current_authority: borrow ProcessCurrent[current_process, current_phase]) -> AddressSpaceRoot !{unsafe} {
     if (execution_here().current_live) {
-        match process_running_here() {
-            ProcessRunningHere::Running(running) => {
-                let mut root: AddressSpaceRoot =
-                    scheduled_process_address_space_root_running(running);
-                process_running_end(running);
-                return root;
-            }
-        }
+        return scheduled_process_address_space_root_current(current_authority);
     }
     return address_space_boot_root();
 }
@@ -9407,7 +9425,7 @@ private fn kernel_process_exit_reserved(
         parent: ProcessHandle,
         owner: sink ScheduledProcessOwner[process],
         running: sink ScheduledProcessState[process, ProcessState::Running],
-        deliver_wait4: bool, auto_reap: bool) -> ExitSwitch {
+        deliver_wait4: bool, auto_reap: bool) -> ExitSwitch !{changes_witness_ProcessCurrent} {
     match process_image_prepare_activation(
         scheduled_process_address_space_root_owned(owner)) {
         AddressSpaceActivationPrepareResult::Invalid => {
@@ -9509,8 +9527,7 @@ private fn kernel_process_exit_reserved(
     }
 }
 
-fn kernel_process_child_exit(status: usize) -> ExitSwitch {
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
+fn kernel_process_child_exit(current_authority: sink ProcessCurrent[process, ProcessState::Running], status: usize) -> ExitSwitch !{changes_witness_ProcessCurrent} {
     process_test_evidence_record_child_exit(status);
     // GitHub issue #209: a child exit used to close the scheduling gate
     // here (kernel_process_scheduler_disable()), a leftover of the
@@ -9528,20 +9545,18 @@ fn kernel_process_child_exit(status: usize) -> ExitSwitch {
     // off a dying context. Leaving preemption on is also the prerequisite
     // for genuinely concurrent children (a shell backgrounding a job with
     // `&`), where a child exit must not stop the survivors from running.
-    if (execution_here().current_live == false) { { let mut __running_result: ExitSwitch = ExitSwitch::Idle; process_running_end(running_here); return __running_result; } }
-    if (scheduled_process_record_running(running_here)
-            .has_parent == false) { { let mut __running_result: ExitSwitch = ExitSwitch::Idle; process_running_end(running_here); return __running_result; } }
-    let current = process_running_new(
-        execution_here().current_handle.generation);
-    let mut child: ProcessHandle = process_running_handle(current);
+    if (execution_here().current_live == false) { { let mut __running_result: ExitSwitch = ExitSwitch::Idle; process_current_end(current_authority); return __running_result; } }
+    if (scheduled_process_record_current(current_authority)
+            .has_parent == false) { { let mut __running_result: ExitSwitch = ExitSwitch::Idle; process_current_end(current_authority); return __running_result; } }
+    let mut child: ProcessHandle = process_current_handle(current_authority);
     let mut parent: ProcessHandle =
-        scheduled_process_record_running(running_here).parent;
+        scheduled_process_record_current(current_authority).parent;
     kernel_process_trace_record(
         ProcessTraceExit, scheduled_process_pid_of_handle(child),
         child.generation,
         scheduled_process_pid_of_handle(parent), parent.generation, 2, 0,
         child.pool_index,
-        scheduled_process_record_running(running_here).saved_sp, status);
+        scheduled_process_record_current(current_authority).saved_sp, status);
     // GitHub issue #248: per-slot (indexed by the WAITING PARENT's own
     // pool_index), not a bare global -- see these fields' own header
     // comment for why a global here breaks a multi-level concurrent
@@ -9595,8 +9610,8 @@ fn kernel_process_child_exit(status: usize) -> ExitSwitch {
             }
         }
     }
-    parent = scheduled_process_record_running(running_here).parent;
-    scheduled_process_record_running(running_here).exit_status = status;
+    parent = scheduled_process_record_current(current_authority).parent;
+    scheduled_process_record_current(current_authority).exit_status = status;
     // GitHub issue #653: this CPU's own record of the child it is exiting,
     // for kernel_process_child_exec_reap right after. It used to be written
     // to the PARENT's record, where a sibling's exit on another CPU could
@@ -9622,13 +9637,13 @@ fn kernel_process_child_exit(status: usize) -> ExitSwitch {
     kernel_process_signal_child_exit(exit_guard, parent);
     match scheduled_process_running_take(exit_guard, child) {
         ScheduledProcessRunningTakeResult::Missing => {
-            process_running_end(current);
+            process_current_end(current_authority);
             process_run_unlock(exit_guard);
-            { let mut __running_result: ExitSwitch = ExitSwitch::Idle; process_running_end(running_here); return __running_result; }
+            { let mut __running_result: ExitSwitch = ExitSwitch::Idle; return __running_result; }
         }
         ScheduledProcessRunningTakeResult::Running(resources) => {
             let (owner, running) = resources;
-            process_running_end(current);
+            process_current_end(current_authority);
             let exited = scheduled_process_exit(owner, running);
             scheduled_process_release(owner, exited);
             // GitHub issue #244: a parent blocked in wait4 needs both the
@@ -9657,7 +9672,7 @@ fn kernel_process_child_exit(status: usize) -> ExitSwitch {
                         // Blocked before that peer leaves the stack
                         // (kernel_process_stack_idle_blocked), and starting
                         // it here ran it on a stack two CPUs used at once.
-                        if (kernel_process_cpu_allows_slot(exit_guard, 
+                        if (kernel_process_cpu_allows_slot(exit_guard,
                                 cpu_id(), parent.pool_index)) {
                             match scheduled_process_start_check(
                                     exit_guard, parent_owner, ready) {
@@ -9671,7 +9686,7 @@ fn kernel_process_child_exit(status: usize) -> ExitSwitch {
                                     process_run_unlock(exit_guard);
                                     { let mut __running_result: ExitSwitch = kernel_process_exit_reserved(
                                         child, parent, parent_owner,
-                                        parent_running, true, false); process_running_end(running_here); return __running_result; }
+                                        parent_running, true, false); return __running_result; }
                                 }
                                 ScheduledProcessStartCheck::Standing(standing) => {
                                     kernel_process_leave_parent_ready(
@@ -9685,7 +9700,7 @@ fn kernel_process_child_exit(status: usize) -> ExitSwitch {
                     }
                 }
             }
-            if (kernel_process_cpu_allows_slot(exit_guard, 
+            if (kernel_process_cpu_allows_slot(exit_guard,
                     cpu_id(), parent.pool_index)) {
             match scheduled_process_ready_take(exit_guard, parent) {
                 ScheduledProcessReadyTakeResult::Missing => {}
@@ -9696,7 +9711,7 @@ fn kernel_process_child_exit(status: usize) -> ExitSwitch {
                     process_run_unlock(exit_guard);
                     { let mut __running_result: ExitSwitch = kernel_process_exit_reserved(
                         child, parent, parent_owner, parent_running, false,
-                        auto_reap); process_running_end(running_here); return __running_result; }
+                        auto_reap); return __running_result; }
                 }
             }
             }
@@ -9715,7 +9730,7 @@ fn kernel_process_child_exit(status: usize) -> ExitSwitch {
                             process_run_unlock(exit_guard);
                             { let mut __running_result: ExitSwitch = kernel_process_exit_reserved(
                                 child, parent, successor_owner,
-                                successor_running, false, auto_reap); process_running_end(running_here); return __running_result; }
+                                successor_running, false, auto_reap); return __running_result; }
                         }
                     }
                 }
@@ -9747,7 +9762,7 @@ fn kernel_process_child_exit(status: usize) -> ExitSwitch {
     execution_here().scheduler_enabled = false;
     execution_here().reschedule_pending = false;
     process_run_unlock(exit_guard);
-    { let mut __running_result: ExitSwitch = ExitSwitch::Idle; process_running_end(running_here); return __running_result; }
+    { let mut __running_result: ExitSwitch = ExitSwitch::Idle; return __running_result; }
 }
 
 // GitHub issue #248: per-slot now, indexed by whichever slot is CURRENTLY
@@ -10283,28 +10298,26 @@ private fn kernel_process_child_exit_status_for_locked(
 // process's own execve() succeeds -- execution_here().current_handle still
 // names it directly, no switch has happened yet.
 // GitHub issue #693 step 5: the execing process's own record, reached
-// through ProcessRunning.
-fn kernel_process_child_exec_mark() {
+// through ProcessCurrent.
+fn kernel_process_child_exec_mark(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) {
     workload_exec_commit_note();
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
     if (execution_here().current_live) {
-        scheduled_process_record_running(running_here).exec_image_live = true;
+        scheduled_process_record_current(current_authority).exec_image_live = true;
         // Linux: execve resets every caught signal to SIG_DFL, because the
         // handler address named the image that has just been replaced. An
         // ignored signal stays ignored (sigchld_ignored is left alone).
-        scheduled_process_record_running(running_here).sigchld_handler = 0;
-        scheduled_process_record_running(running_here).sigchld_flags = 0;
-        scheduled_process_record_running(running_here).sigchld_restorer = 0;
-        scheduled_process_record_running(running_here).sigchld_action_mask = 0;
+        scheduled_process_record_current(current_authority).sigchld_handler = 0;
+        scheduled_process_record_current(current_authority).sigchld_flags = 0;
+        scheduled_process_record_current(current_authority).sigchld_restorer = 0;
+        scheduled_process_record_current(current_authority).sigchld_action_mask = 0;
         let mut current: ProcessHandle = execution_here().current_handle;
         kernel_process_trace_record(
             ProcessTraceExecCommit,
             scheduled_process_pid_of_handle(current), current.generation,
             0, 0, kernel_process_crash_state(), kernel_process_crash_wait_reason(),
             current.pool_index,
-            scheduled_process_record_running(running_here).saved_sp, 0);
+            scheduled_process_record_current(current_authority).saved_sp, 0);
     }
-    process_running_end(running_here);
 }
 
 // GitHub issue #245 bug fix: this used to be a single no-argument query
@@ -10363,11 +10376,10 @@ fn kernel_process_scheduler_acceptance_evidence() -> bool {
 }
 
 // The pid this process most recently reaped. Only the reaper writes it.
-fn kernel_process_last_reaped_pid() -> usize {
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
-    if (execution_here().current_live == false) { { let mut __running_result: usize = 0; process_running_end(running_here); return __running_result; } }
-    { let mut __running_result: usize = scheduled_process_record_running(running_here)
-        .last_reaped_pid; process_running_end(running_here); return __running_result; }
+fn kernel_process_last_reaped_pid(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) -> usize {
+    if (execution_here().current_live == false) { return 0; }
+    return scheduled_process_record_current(current_authority)
+        .last_reaped_pid;
 }
 
 // The child whose exit this CPU ran last.
@@ -10383,19 +10395,18 @@ fn kernel_process_last_exited_child_pid() -> usize {
 // then execve()s), that outer fork already incremented it once, so
 // checking for exactly 1 undercounts. >= 1 keeps the real assertion
 // (a clone genuinely happened) without assuming how many preceded it.
-fn kernel_process_clone_evidence() -> bool {
-    let ProcessRunningHere::Running(running_here) = process_running_here() else {};
-    if (execution_here().current_live == false) { { let mut __running_result: bool = false; process_running_end(running_here); return __running_result; } }
-    { let mut __running_result: bool = process_test_evidence_clone_calls() >= 1 &&
+fn kernel_process_clone_evidence(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) -> bool {
+    if (execution_here().current_live == false) { return false; }
+    return process_test_evidence_clone_calls() >= 1 &&
            process_test_evidence_exit_42_seen() &&
-           scheduled_process_record_running(running_here)
+           scheduled_process_record_current(current_authority)
                .has_first_child ==
                false &&
-           scheduled_process_record_running(running_here).state ==
+           scheduled_process_record_current(current_authority).state ==
                ProcessSlotState::Running &&
-           scheduled_process_record_running(running_here)
+           scheduled_process_record_current(current_authority)
                .saved_sp !=
-               0; process_running_end(running_here); return __running_result; }
+               0;
 }
 
 // GitHub issues #453/#479, re-derived against the current access paths.
@@ -10560,4 +10571,22 @@ fn scheduled_process_pool_space_stats()
     intrusive_pool_unlock(&scheduled_process_pool, guard);
     return (chunks, capacity, live, chunks * chunk_bytes,
             sizeof(IntrusiveSlot(ProcessRecord)), chunk_bytes);
+}
+
+fn kernel_process_parent_is_root_locked(guard: borrow ProcessRunGuard[lock]) -> bool {
+    let slot: usize = kernel_process_current_slot();
+    let record = scheduled_process_record_locked(guard, slot);
+    if (record.has_parent == false) { return false; }
+    let mut parent: ProcessHandle = record.parent;
+    return parent.pool_index == 0;
+}
+
+fn kernel_process_current_set_pending_block_locked(
+        guard: borrow ProcessRunGuard[lock],
+        reason: ProcessWaitReason, wait4_status_ptr: usize) {
+    if (execution_here().current_live) {
+        let record = scheduled_process_record_of_locked(guard, execution_here().current_handle);
+        record.pending_block_reason = reason;
+        record.wait4_status_ptr = wait4_status_ptr;
+    }
 }

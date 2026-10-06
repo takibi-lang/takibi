@@ -306,7 +306,7 @@ fn kernel_exec_resolve_argv0(mount: Ext2Mount, argv: borrow []u8)
     return ExecResolveResult::NotFound;
 }
 
-fn kernel_process_child_exec_map_result(
+fn kernel_process_child_exec_map_result(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
         pages_result: ProcessImageMapResult, child_root: AddressSpaceRoot)
         -> KernelChildExecPrepareResult {
     match pages_result {
@@ -334,7 +334,7 @@ fn kernel_process_child_exec_map_result(
             }
             kernel_syscall_process_configure_current(heap_start, heap_limit);
             process_image_activate_root(child_root);
-            kernel_process_child_exec_mark();
+            kernel_process_child_exec_mark(current_authority);
             // An exec commits here too, not only on the dynamic image path
             // below. The checkpoint is scoped to the one tracked child pid,
             // so what it means is unchanged -- but the tracked child's own
@@ -396,13 +396,13 @@ fn kernel_init_boot_fixture_reaped(reaper_pid: usize) {
     init_boot_fixture_pending = true;
 }
 
-fn kernel_init_boot_fixture_poll() !{unsafe} {
+fn kernel_init_boot_fixture_poll(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) !{unsafe} {
     if (init_boot_fixture_pending == false) { return; }
     if (kernel_process_current_pid() != 1) { return; }
     init_boot_fixture_pending = false;
     init_boot_fixture_reported = true;
     kernel_init_script_socket_evidence();
-    kernel_init_script_success_evidence();
+    kernel_init_script_success_evidence(current_authority);
     // GitHub issue #207: every page released across this
     // whole boot must have been live at the time. Checked
     // here, now that init.sh's own image is fully torn
@@ -762,8 +762,8 @@ fn kernel_init_boot_fixture_poll() !{unsafe} {
 // since #700, before it decides ChildExec. The map path
 // takes the run lock, so argv cannot be the process record's command line
 // read under a guard held across it.
-fn kernel_process_child_exec_prepare() -> KernelChildExecPrepareResult {
-    if (kernel_process_is_child() == false ||
+fn kernel_process_child_exec_prepare(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) -> KernelChildExecPrepareResult {
+    if (kernel_process_is_child(current_authority) == false ||
         kernel_syscall_exec_pending() == false) {
         return KernelChildExecPrepareResult::NotChildOrPending;
     }
@@ -779,14 +779,14 @@ fn kernel_process_child_exec_prepare() -> KernelChildExecPrepareResult {
             let argv: [u8; 512..] = args[0..<512];
             kernel_syscall_exec_argv_copy(argv);
             let result: KernelChildExecPrepareResult =
-                kernel_process_child_exec_prepare_with(argv);
+                kernel_process_child_exec_prepare_with(current_authority, argv);
             page_free(args_page);
             return result;
         }
     }
 }
 
-private fn kernel_process_child_exec_prepare_with(argv: borrow []u8)
+private fn kernel_process_child_exec_prepare_with(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], argv: borrow []u8)
         -> KernelChildExecPrepareResult {
     kernel_process_trace_exec_prepare();
     if (kernel_syscall_persistent_shell_active()) {
@@ -816,7 +816,7 @@ private fn kernel_process_child_exec_prepare_with(argv: borrow []u8)
     // child running deeper than one level under its own parent (e.g.
     // user_payload's own fork of a UART-block/scheduler-preempt child)
     // needs its own current root here instead.
-    let mut child_space: AddressSpaceRoot = kernel_process_current_root();
+    let mut child_space: AddressSpaceRoot = kernel_process_current_root(current_authority);
     let child_root: usize = address_space_root_slot(child_space);
     // Which VM this exec replaces depends on how the process got the one it
     // has. A forked child is still running on the clone of its parent's, so
@@ -897,7 +897,7 @@ private fn kernel_process_child_exec_prepare_with(argv: borrow []u8)
                             kernel_process_current_pid());
                     }
                     process_image_activate_root(child_space);
-                    kernel_process_child_exec_mark();
+                    kernel_process_child_exec_mark(current_authority);
                     kernel_syscall_exec_clear();
                     return KernelChildExecPrepareResult::Prepared;
                 }
@@ -909,7 +909,7 @@ private fn kernel_process_child_exec_prepare_with(argv: borrow []u8)
             return KernelChildExecPrepareResult::NoImageResolved;
         }
         BootRootImageState::Ready(image) => {
-            return kernel_process_child_exec_map_result(
+            return kernel_process_child_exec_map_result(current_authority,
                 process_image_map_ext2_in_root(
                     image.plan, mount, image.inode, image.file_length, argv,
                     kernel_syscall_exec_argc(), child_space), child_space);
@@ -948,10 +948,10 @@ fn kernel_init_script_socket_evidence() {
     }
 }
 
-fn kernel_init_script_success_evidence() {
+fn kernel_init_script_success_evidence(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) {
     kernel_boot_log("init script exit: 0\n");
     kernel_boot_log("syscall write errors: ebadf efault\n");
-    if (kernel_process_clone_evidence()) {
+    if (kernel_process_clone_evidence(current_authority)) {
         kernel_boot_log("process clone: parent+child exit=42 reaped\n");
     }
     if (kernel_process_scheduler_acceptance_evidence()) {
@@ -963,7 +963,7 @@ fn kernel_init_script_success_evidence() {
     // The HTTPD children subsequently reuse the clone-VM reaper's latest
     // page-count slot. The earlier clone fixture is independently proved by
     // its own lifecycle evidence, so retain its already-completed result.
-    if (kernel_process_clone_evidence()) {
+    if (kernel_process_clone_evidence(current_authority)) {
         kernel_boot_log("vm fork: private pages=132 reclaimed\n");
     }
     if (clone_growth_probe_ok) {

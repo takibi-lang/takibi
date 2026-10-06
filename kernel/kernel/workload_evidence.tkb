@@ -1128,7 +1128,7 @@ private fn workload_busy_record_progress_locked(
     // Started by init, from /etc/inittab. A report from anywhere else is
     // not this workload, and counting it would let an unrelated process
     // satisfy the fairness assertion on the real one's behalf.
-    if (kernel_process_parent_is_root() == false) {
+    if (kernel_process_parent_is_root_locked(guard) == false) {
         workload_busy_pair.refused = workload_busy_pair.refused + 1;
         return WorkloadBusyProgressResult::Value(0);
     }
@@ -1259,7 +1259,7 @@ fn workload_peer_read_progress(bytes: usize, checksum: usize) -> usize {
     let guard = process_run_lock();
     let pid: usize = kernel_process_current_pid();
     if (workload_busy_pair.peer_read_pid == 0) {
-        if (kernel_process_parent_is_root() == false) {
+        if (kernel_process_parent_is_root_locked(guard) == false) {
             workload_busy_pair.refused = workload_busy_pair.refused + 1;
             process_run_unlock(guard);
             return 0;
@@ -1294,7 +1294,7 @@ fn workload_peer_read_progress(bytes: usize, checksum: usize) -> usize {
 // the same on CPU 1 before either starts block I/O.
 fn workload_peer_core_read_ready() -> usize {
     let guard = process_run_lock();
-    if (kernel_process_parent_is_root() == false || cpu_id() != 0) {
+    if (kernel_process_parent_is_root_locked(guard) == false || cpu_id() != 0) {
         workload_busy_pair.refused = workload_busy_pair.refused + 1;
         process_run_unlock(guard);
         return 0;
@@ -1311,7 +1311,7 @@ fn workload_peer_core_read_ready() -> usize {
 // core-0 reader is released.
 fn workload_peer_read_peer_ready() -> usize {
     let guard = process_run_lock();
-    if (kernel_process_parent_is_root() == false ||
+    if (kernel_process_parent_is_root_locked(guard) == false ||
         kernel_process_current_pid() != workload_busy_pair.peer_read_pid ||
         cpu_id() != SECONDARY_CORE_ID) {
         workload_busy_pair.refused = workload_busy_pair.refused + 1;
@@ -1328,7 +1328,7 @@ fn workload_peer_read_peer_ready() -> usize {
 // GitHub issue #587: the peer waiter fixture runs the real scheduler block
 // and timer wake paths without admitting socket calls on a peer. Re-entry of
 // the same test syscall proves the Blocked record was woken and selected.
-fn workload_peer_net_wake_progress(step: usize)
+fn workload_peer_net_wake_progress(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], step: usize)
         -> WorkloadPeerNetWakeResult !{unsafe} {
     let guard = process_run_lock();
     let pid: usize = kernel_process_current_pid();
@@ -1349,7 +1349,7 @@ fn workload_peer_net_wake_progress(step: usize)
         return WorkloadPeerNetWakeResult::Block;
     }
     if (step == 1 && workload_peer_net_wake_block_requested &&
-        kernel_process_current_pending_block_reason() ==
+        kernel_process_current_pending_block_reason(current_authority) ==
             ProcessWaitReason::None) {
         process_run_unlock(guard);
         return WorkloadPeerNetWakeResult::Resumed;
@@ -1369,7 +1369,7 @@ fn workload_peer_console_progress(first: usize, total: usize) -> usize {
     let guard = process_run_lock();
     let pid: usize = kernel_process_current_pid();
     if (workload_busy_pair.peer_console_pid == 0) {
-        if (kernel_process_parent_is_root() == false) {
+        if (kernel_process_parent_is_root_locked(guard) == false) {
             workload_busy_pair.refused = workload_busy_pair.refused + 1;
             process_run_unlock(guard);
             return 0;
@@ -1811,7 +1811,7 @@ fn workload_ordinary_placement_note_syscall(number: usize) {
 private fn workload_ordinary_placement_report() -> usize {
     let guard = process_run_lock();
     let reported: bool =
-        kernel_process_parent_is_root() == false &&
+        kernel_process_parent_is_root_locked(guard) == false &&
         kernel_process_current_affinity_mask(guard) == 0 &&
         workload_busy_pair.ordinary_busybox_peer_reported &&
         kernel_process_current_parent_pid(guard) ==

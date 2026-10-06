@@ -13,7 +13,7 @@ def main() -> int:
     assert not problems(inline_lookup), "an inline accessor must retain its body identity"
     controls = {
         "public view mint": source.replace(
-            "private linear view ProcessRunning[", "linear view ProcessRunning[", 1),
+            "private linear view ProcessCurrent[", "linear view ProcessCurrent[", 1),
         "owner lookup restores raw escape": source.replace(
             "let record = scheduled_process_transfer_owned_loan(live, owner);",
             "let record = scheduled_process_record_at(owner.pool_index);", 1),
@@ -38,7 +38,7 @@ def main() -> int:
         "public owner mint": source.replace(
             "private fn scheduled_process_owner_new(", "fn scheduled_process_owner_new(", 1),
         "public running wrapper mint": source.replace(
-            "private inline fn scheduled_process_running_view_new(", "inline fn scheduled_process_running_view_new(", 1),
+            "private inline fn scheduled_process_current_view_new(", "inline fn scheduled_process_current_view_new(", 1),
         "public running mint": source.replace(
             "private inline fn process_running_new(", "inline fn process_running_new(", 1),
     }

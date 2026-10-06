@@ -83,8 +83,8 @@ def problems(tree: dict[str, str]) -> list[str]:
             "fn workload_peer_read_peer_ready() -> usize" not in evidence):
         result.append("the kernel no longer records both pinned arrivals")
     for route in (
-        "if (x0 == 10) {\n            return SyscallAction::Resume(\n                workload_peer_core_read_ready());",
-        "if (x0 == 11) {\n            return SyscallAction::Resume(\n                workload_peer_read_peer_ready());",
+        "if (x0 == 10) {\n            return syscall_finish_current(frame, SyscallAction::Resume(\n                workload_peer_core_read_ready()), current_authority);",
+        "if (x0 == 11) {\n            return syscall_finish_current(frame, SyscallAction::Resume(\n                workload_peer_read_peer_ready()), current_authority);",
     ):
         if route not in syscall:
             result.append("a reader-arrival tag no longer reaches its "

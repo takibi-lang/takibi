@@ -15,6 +15,36 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-10-06: current-process phase authority at entry
+
+ProcessRecord access retained the allocation proof until a private loan
+transfer to the existing run guard, scheduled owner, or erased current view.
+The current view became ProcessCurrent[generation, phase]: readers borrow one
+entry witness, clone returns Constructing, installation preserves its
+index while returning Running, and rollback restores the parent's Running
+witness. Exit and suspension consume it before logical current changes.
+The checker-only changes_witness contract rejects remaining current authority,
+including when no pointer loan is retained. No pin or runtime witness field
+was added. Physical mint association and remote lifetime protocols remain trust.
+
+Six loop-heavy syscall operations borrow current through forced-inline API
+boundaries because the existing owned-linear loop rule conservatively checks
+break/continue. MaybeFrame ownership passes through the syscall transaction;
+signal return reuses its borrowed FrameRef without a new integer mint seam.
+Source checks inventory mint counts, global literals and context writer
+markers, with nine negative controls. A mapped operation's extraction exposed
+the model-map checker's omission of inline/noinline functions; qualifier/body
+mutation controls now cover it. Balanced body scanning also prevents an
+outdented nested block from truncating the stamped function. Model action
+protocols remain unchanged.
+
+The complete QEMU regression passed, including 68 boot views, protocol replay
+and shell halt/poweroff/restart. The native record-loan and phase fixtures and
+all fixed/unfixed models passed. Linked code shrank by 14696 bytes on QEMU and
+14224 on RPi5; data/BSS and pool endpoint accounting stayed unchanged. RPi5's
+image reservation released eight pages. The measured boundaries and trusted
+limits are recorded in PROCESS_RECORD_AUTHORITY_SPACE_2026-10-06.md.
+
 ## 2026-10-06: authority-derived record loans
 
 The maintainer selected checker-only destructive record contracts after a

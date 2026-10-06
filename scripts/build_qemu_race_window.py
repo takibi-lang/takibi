@@ -92,7 +92,7 @@ WINDOWS = {
     # drop the marker, or the process is later Ready and refused everywhere.
     "603": {
         "spin": ("kernel/process.tkb",
-                 "fn kernel_process_block_wait4(current: borrow FrameRef[process])\n"
+                 "fn kernel_process_block_wait4(current_authority: ProcessCurrent[current_process, ProcessState::Running], current: borrow FrameRef[process])\n"
                  "        -> BlockSwitch {\n",
                  False),
         # wait4's decision lives in pending_block_reason now, and only a
@@ -101,10 +101,9 @@ WINDOWS = {
         # single wait_reason field did, and drops the clear.
         "check": [
             ("kernel/syscall.tkb",
-             "            if (kernel_process_current_pending_block_reason() ==\n"
-             "                    ProcessWaitReason::ChildExit) {\n"
-             "                kernel_process_current_set_pending_block(\n"
-             "                    ProcessWaitReason::None, 0);\n"
+             "            if (reason == ProcessWaitReason::ChildExit) {\n"
+             "                kernel_process_current_set_pending_block_locked(\n"
+             "                    retry_guard, ProcessWaitReason::None, 0);\n"
              "            }\n",
              ""),
             ("kernel/process.tkb",
@@ -112,7 +111,7 @@ WINDOWS = {
              "            .pending_block_reason = reason;\n"
              "        // The reverted kernel says it is Blocked, which it is not.\n"
              "        match process_wait_publish(\n"
-             "                &scheduled_process_record_running(running_here).wait, reason,\n"
+             "                &scheduled_process_record_current(current_authority).wait, reason,\n"
              "                ProcessSlotState::Blocked) {\n"
              "            ProcessWaitPublish::Published => {}\n"
              "            ProcessWaitPublish::Refused => {}\n"
@@ -145,9 +144,9 @@ WINDOWS = {
         # reverted kernel also puts that write back.
         "check": [
             ("kernel/syscall.tkb",
-             "                return SyscallAction::Resume(zombie_pid);\n",
-             "                return SyscallAction::Resume(\n"
-             "                    kernel_process_last_reaped_pid());\n"),
+             "                return syscall_finish_current(frame, SyscallAction::Resume(zombie_pid), current_authority);\n",
+             "                return syscall_finish_current(frame, SyscallAction::Resume(\n"
+             "                    kernel_process_last_reaped_pid(current_authority)), current_authority);\n"),
             ("kernel/process.tkb",
              "    execution_here().last_exited_child_pid =\n"
              "        scheduled_process_pid_of_handle(child);\n",

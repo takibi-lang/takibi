@@ -82,7 +82,7 @@ def busybox_sleep_probe_is_real(makefile: str, stdin: str,
         and 'wait "$placement_guard_pid"' in commands
         and "/etc/placement-report" in commands
         and 'slice_eq(command_line[0..<11], bs"/bin/sleep\\0")' in workload
-        and "kernel_process_parent_is_root()" in workload
+        and "kernel_process_parent_is_root_locked(guard)" in workload
         and "kernel_process_current_affinity_mask(guard) == 0" in sample
         and "kernel_process_online_mask() & (1 << cpu)" in sample
         and "kernel_process_current_parent_pid(guard)" in sample

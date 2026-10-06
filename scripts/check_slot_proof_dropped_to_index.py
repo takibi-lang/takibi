@@ -66,7 +66,7 @@ INDEX_ONLY_ALLOWED = {
 # They return no index or pointer. Keep them separate from cursor snapshots.
 TRANSFER_RELEASES = {
     "scheduled_process_locked_view_drop": "ProcessRecordLockedView",
-    "scheduled_process_running_view_drop": "ProcessRecordRunningView",
+    "scheduled_process_current_view_drop": "ProcessRecordCurrentView",
 }
 
 

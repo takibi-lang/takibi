@@ -75,7 +75,7 @@ DECLARED += """
 private inline fn scheduled_process_locked_view_drop(source: sink ProcessRecordLockedView[l, p]) {
     intrusive_view_drop(source.live);
 }
-private inline fn scheduled_process_running_view_drop(source: sink ProcessRecordRunningView[g, p]) {
+private inline fn scheduled_process_current_view_drop(source: sink ProcessRecordCurrentView[g, p]) {
     intrusive_view_drop(source.live);
 }
 """
@@ -145,7 +145,7 @@ def main() -> int:
         "synthetic_next_live_slot")
     failures += case(
         "a transferred proof release cannot start returning an index",
-        "private inline fn scheduled_process_running_view_drop(source: sink ProcessRecordRunningView[g, p]) -> usize { intrusive_view_drop(source.live); return 1; }\n",
+        "private inline fn scheduled_process_current_view_drop(source: sink ProcessRecordCurrentView[g, p]) -> usize { intrusive_view_drop(source.live); return 1; }\n",
         "must consume its stored proof")
     # The same function written so its answer stays checkable is accepted,
     # which is what makes this a rule rather than a ban on dropping.

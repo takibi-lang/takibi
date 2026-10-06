@@ -38,6 +38,7 @@ not any test exercises the change.
 Exit code only (0 = pass, 1 = fail).
 """
 
+from functools import lru_cache
 import hashlib
 import pathlib
 import re
@@ -76,10 +77,31 @@ def defined_names(tla: str) -> set[str]:
     return set(re.findall(r"^(\w+)(?:\([^)]*\))?\s*==", tla, re.M))
 
 
+@lru_cache(maxsize=8)
+def masked_sources(sources: str) -> str:
+    """Preserve offsets while masking braces in comments and string literals."""
+    return re.sub(r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"',
+                  lambda match: re.sub(r'[^\n]', ' ', match[0]), sources)
+
+
 def function_body(name: str, sources: str) -> str | None:
-    match = re.search(rf"^(?:private )?fn {name}\b.*?^}}", sources,
-                      re.M | re.S)
-    return match.group(0) if match else None
+    code = masked_sources(sources)
+    match = re.search(rf"^(?:private )?(?:inline |noinline )?fn {name}\(",
+                      code, re.M)
+    if match is None:
+        return None
+    depth, position = 1, match.end()
+    while depth:
+        depth += (code[position] == '(') - (code[position] == ')')
+        position += 1
+    brace = code.index('{', position)
+    if code[brace - 1] == '!':
+        brace = code.index('{', code.index('}', brace) + 1)
+    depth, end = 1, brace + 1
+    while depth:
+        depth += (code[end] == '{') - (code[end] == '}')
+        end += 1
+    return sources[match.start():end]
 
 
 def normalised(body: str) -> str:
@@ -227,6 +249,16 @@ def controls_fail(tla_defs: dict[str, set[str]], sources: str) -> list[str]:
         failed.append("body edit keeps its stamp")
     if row_hash(["f"], body) == row_hash(["f"], string):
         failed.append("string edit keeps its stamp")
+    for qualifier in ("inline ", "noinline ", "private inline "):
+        qualified = body.replace("fn f()", qualifier + "fn f()")
+        if function_body("f", qualified) is None:
+            failed.append(qualifier + "function omitted")
+        if row_hash(["f"], qualified) == row_hash(
+                ["f"], qualified.replace("return 1", "return 2")):
+            failed.append(qualifier + "body edit keeps its stamp")
+    nested = 'fn f() {\nif (true) {\n}\nlet text = "}"; // }\nreturn 1;\n}\n'
+    if row_hash(["f"], nested) == row_hash(["f"], nested.replace("return 1", "return 2")):
+        failed.append("outdented nested block truncates the mapped function")
     # Exercise names through table parsing, not row_hash's explicit name list:
     # the original prefix allowlist silently omitted every uart_ function.
     uart_body = body.replace("fn f()", "fn uart_model_map_control()")

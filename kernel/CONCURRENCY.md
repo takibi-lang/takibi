@@ -199,9 +199,26 @@ The current lookup uses a generation-checked probe under the pool lock.
 The private wrapper mint associates that probe with the borrowed lifetime
 authority; that allocation/domain association remains reviewed trust.
 The run lock excludes peer removal, ownership excludes removal without consuming
-that owner, and Running processes cannot be reaped. This is not a proof of the
-scheduler/allocator or a reason to remove field locks. Kernel preemption must
-revisit whether Running authority can survive suspension and migration.
+that owner, and the current Running or still-Constructing process cannot be reaped by a
+peer under the existing scheduler protocol. This is not a proof of the
+scheduler/allocator or a reason to remove field locks.
+
+`ProcessCurrent[generation, phase]` is a private, linear erased view. Readers
+borrow the entry witness instead of minting one in each helper. Clone consumes
+the parent's Running witness and returns the child's Constructing witness;
+rollback consumes that child witness and returns the restored parent's Running
+witness. Installation preserves the child generation while changing its phase
+to Running. Failure returns the original phase witness. Exit and suspension
+consume the witness before changing logical current or making it reapable.
+The checker-only `changes_witness_ProcessCurrent` contract rejects a context
+change with any remaining live current witness, even without a retained record
+pointer. Boot-only calls with no live process retain the existing current-live
+gates and permanent bootstrap record; the view does not prove a process exists.
+The source check inventories entry and transition mints and requires
+that contract on every current-handle/current-live writer. Private mints,
+complete annotation of physical context changes, and remote CPU protocol
+correctness remain trusted. Kernel preemption must preserve or revise this
+boundary before a witness can survive suspension or migration.
 
 The destructive-loan contracts add no instruction or lock section. Owner
 lookup keeps one existing pool acquire/release and adds the expected-generation

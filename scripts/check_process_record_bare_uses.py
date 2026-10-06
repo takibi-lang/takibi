@@ -29,7 +29,7 @@ OWNER_MINTS = Counter({name: 1 for name in (
 CONTRACTS = {
     "scheduled_process_transfer_owned_loan": "loan_transfer",
     "scheduled_process_transfer_locked_loan": "loan_transfer",
-    "scheduled_process_transfer_running_loan": "loan_transfer",
+    "scheduled_process_transfer_current_loan": "loan_transfer",
     "scheduled_process_slot_remove": "record_mutates_ProcessRunGuard",
     "scheduled_process_reap_remove": "record_mutates_ScheduledProcessOwner",
 }
@@ -37,9 +37,9 @@ PRIVATE = (
     "scheduled_process_owner_new", "process_running_new",
     "scheduled_process_transfer_owned_loan",
     "scheduled_process_transfer_locked_loan",
-    "scheduled_process_transfer_running_loan",
+    "scheduled_process_transfer_current_loan",
     "scheduled_process_locked_view_new",
-    "scheduled_process_running_view_new",
+    "scheduled_process_current_view_new",
 )
 FN_RE = re.compile(r"^(private )?(?:inline |noinline )?fn (\w+)\(")
 CALL_RE = re.compile(r"\bscheduled_process_record_(at|of)\s*\(")
@@ -72,9 +72,9 @@ def problems(text: str) -> list[str]:
     if owners != OWNER_MINTS:
         result.append("scheduled ownership mints differ from the seven "
                       "reviewed allocation/state-transfer bodies")
-    if not re.search(r"^private linear view ProcessRunning\[", "\n".join(
+    if not re.search(r"^private linear view ProcessCurrent\[", "\n".join(
             line.split("//", 1)[0] for line in text.splitlines()), re.M):
-        result.append("ProcessRunning must remain a private view mint")
+        result.append("ProcessCurrent must remain a private view mint")
     for name in PRIVATE:
         if name not in private:
             result.append(f"{name} must remain private to its mint module")

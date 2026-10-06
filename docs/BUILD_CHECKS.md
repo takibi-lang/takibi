@@ -106,7 +106,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_liveness_proof_escapes.py` | every place that drops a pool's liveness proof is declared with a reason |
 | `check_wall_clock_bounds.py` | every kernel wait bounded by host wall-clock time (`read_cntfrq() * N`) is declared in `scripts/wall_clock_bounds.tsv` with a class; `pending` rows, whose QEMU verdict a starved host can flip, are removed one at a time |
 | `check_wall_clock_bounds_controls.py` | an undeclared bound, a stale row, a wrong count and an unknown class are each refused |
-| `check_process_running_mints.py` | every caller of `process_running_here`, the mint of a process's evidence that it is running, is declared (#693) |
+| `check_process_running_mints_controls.py` | mutation controls reject missing context markers, additional mints, public constructors, and unmarked writers |
+| `check_process_running_mints.py` | current-process witness entry and transition mint counts, private constructors, and context writer annotations match the reviewed boundary |
 | `check_address_space_root_mints.py` | every maker of an `AddressSpaceRoot` (which carries its backing handle) is declared (#693) |
 | `check_process_record_bare_uses.py` | five declared raw ProcessRecord lookup bodies, seven ownership mint bodies, private constructors and destructive loan annotations |
 | `check_process_record_bare_uses_controls.py` | negative controls for changed lookup/mint scopes, constructor visibility and missing destructive annotations |
