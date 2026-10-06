@@ -34,7 +34,7 @@ ALLOWED = {
     "scheduled_process_address_space_root_current",
 }
 
-FN_RE = re.compile(r"^(?:private )?fn (\w+)\(")
+FN_RE = re.compile(r"^(?:private )?(?:inline |noinline )?fn (\w+)\(")
 MINT_RE = re.compile(r"\b" + MINT + r"\(")
 
 

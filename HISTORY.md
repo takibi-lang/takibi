@@ -15,6 +15,24 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-10-06: complete source-check function attribution
+
+The final audit replayed the inline attribution defect against the liveness
+escape gate. An undeclared inline function immediately after the diagnostic
+peek was counted as another escape inside that allowed peek, and passed.
+Seven remaining source-check matchers now recognize inline/noinline qualifiers;
+a shared control exercises all six qualifier forms in eight matchers and the
+actual gate's acceptance/rejection with the named diagnostic. The source
+inventories do not gain exemptions. This is a build-time check of the reviewed
+trusted escape set, not a proof of arbitrary physical lifetime relationships.
+
+A clean aggregate also exposed the current-witness mutation control exceeding
+the existing ten-second fast-gate bound. It repeatedly analyzed every unchanged
+file for each of its sixteen process-source mutations. Bounded content-keyed
+caches now reuse masking and per-file facts, and absent mint names skip regex
+scans. Changed text remains a separate cache key and all original mutations
+still fail. The gate's budget, membership and guarantees remain unchanged.
+
 ## 2026-10-06: reject late indirect debugger returns
 
 The final authority audit found a remaining misuse of the allocation-failure

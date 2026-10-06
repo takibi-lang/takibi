@@ -54,7 +54,7 @@ CONSTRUCTORS = {"scheduled_process_startable_state": STARTABLE_MINTS,
 LITERALS = {"Startable": "scheduled_process_startable_state",
             "Reapable": "scheduled_process_reapable_state"}
 
-FUNCTION_RE = re.compile(r"^(?:private )?fn (\w+)\(", re.M)
+FUNCTION_RE = re.compile(r"^(?:private )?(?:inline |noinline )?fn (\w+)\(", re.M)
 
 # The callers of each frame mint, by function name, with why each is one.
 FRAME_MINT_CALLERS = {

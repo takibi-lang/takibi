@@ -25,7 +25,7 @@ from pass_line import report_pass
 KERNEL = pathlib.Path("kernel")
 TABLE = pathlib.Path("scripts/wall_clock_bounds.tsv")
 CLASSES = {"pending", "protocol", "backstop"}
-FN_RE = re.compile(r"^(?:private )?fn (\w+)\(")
+FN_RE = re.compile(r"^(?:private )?(?:inline |noinline )?fn (\w+)\(")
 SITE_RE = re.compile(r"read_cntfrq\(\)\s*\*")
 
 

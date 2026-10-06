@@ -103,6 +103,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_lane_artifact_root_controls.py` | Controls for the lane artifact-root check, in both directions |
 | `check_legacy_dma_rx_scope.py` | legacy receive cache calls in maintained code remain only the audited GEM data-buffer calls |
 | `check_legacy_dma_rx_scope_controls.py` | Controls for new, changed, and removed legacy RX calls |
+| `check_function_qualifier_controls.py` | Eight source-check function matchers recognize every supported inline/noinline qualifier; the actual liveness gate rejects an undeclared qualified escape by name |
 | `check_liveness_proof_escapes.py` | every place that drops a pool's liveness proof is declared with a reason |
 | `check_wall_clock_bounds.py` | every kernel wait bounded by host wall-clock time (`read_cntfrq() * N`) is declared in `scripts/wall_clock_bounds.tsv` with a class; `pending` rows, whose QEMU verdict a starved host can flip, are removed one at a time |
 | `check_wall_clock_bounds_controls.py` | an undeclared bound, a stale row, a wrong count and an unknown class are each refused |

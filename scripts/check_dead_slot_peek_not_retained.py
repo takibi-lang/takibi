@@ -39,7 +39,7 @@ from pass_line import report_pass
 
 KERNEL = pathlib.Path("kernel")
 PEEK = "scheduled_process_record_peek"
-DEFINITION_RE = re.compile(r"^(?:private )?fn " + PEEK + r"\b")
+DEFINITION_RE = re.compile(r"^(?:private )?(?:inline |noinline )?fn " + PEEK + r"\b")
 # The call, then a balanced-enough argument list, then the field access. The
 # argument lists here are one identifier or one field path, never nested
 # calls with parentheses, so a non-greedy match to the first ')' is exact.

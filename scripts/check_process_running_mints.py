@@ -7,6 +7,7 @@ It does not prove physical generation association or remote CPU protocols.
 """
 
 from collections import Counter
+from functools import lru_cache
 import pathlib
 import re
 import sys
@@ -40,6 +41,7 @@ ALLOWED = {
 }
 
 
+@lru_cache(maxsize=64)
 def mask(source):
     return re.sub(r'//[^\n]*|"(?:\\.|[^"\\])*"',
                   lambda m: re.sub(r'[^\n]', ' ', m[0]), source)
@@ -62,6 +64,51 @@ def functions(source):
         yield match[1], code[match.start():brace], code[brace:end]
 
 
+@lru_cache(maxsize=64)
+def source_facts(source):
+    """Cache by complete content, so mutation controls reuse unchanged files.
+
+    Facts are only read by problems; aggregate counters are fresh each time.
+    Changed source text always gets a separate analysis.
+    """
+    found = {name: Counter() for name in ALLOWED}
+    totals = Counter()
+    declarations = Counter()
+    failures = []
+    code = mask(source)
+    declarations["view ProcessCurrent"] += len(re.findall(
+        r"^private linear view ProcessCurrent\[", code, re.M))
+    for mint in ALLOWED:
+        pattern = (r'\bview\s+ProcessCurrent\s*\[' if mint.startswith('view ')
+                   else rf'\b{mint}\s*\(')
+        totals[mint] += len(re.findall(pattern, code))
+    for name, header, body in functions(source):
+        declarations[name] += 1
+        for mint in ALLOWED:
+            pattern = (r'\bview\s+ProcessCurrent\s*\[' if mint.startswith('view ')
+                       else rf'\b{mint}\s*\(')
+            # Most functions contain none of these five mint names. Avoid
+            # scanning their whole bodies once for every absent name.
+            needle = "ProcessCurrent" if mint.startswith('view ') else mint
+            if needle in body:
+                found[mint][name] += len(re.findall(pattern, body))
+        writes = re.search(r'\.current_(?:handle|live)\s*=(?!=)', body)
+        leaves_phase = re.search(
+            r'\bsink\s+ScheduledProcessState\[\w+,\s*'
+            r'ProcessState::(?:Running|Constructing)\]', header)
+        changes_state = re.search(r'\.state\s*=(?!=)', body)
+        if (writes or name in {"kernel_process_clone_context_install",
+                               "kernel_process_clone_unselectable_probe",
+                               "scheduled_process_release_every_process"}
+                or (leaves_phase and changes_state)):
+            if "changes_witness_ProcessCurrent" not in header:
+                failures.append(f"{name} changes current context without its witness marker")
+        if name in {"process_running_new", "process_constructing_new"}:
+            if not header.startswith("private inline fn "):
+                failures.append(f"{name} must remain a private inline mint")
+    return found, totals, declarations, tuple(failures)
+
+
 def problems(sources):
     found = {name: Counter() for name in ALLOWED}
     failures = []
@@ -75,33 +122,12 @@ def problems(sources):
                          r"process_running_new|process_constructing_new|ScheduledProcessState)\b|"
                          r"\.current_(?:handle|live)\s*=", source):
             continue
-        code = mask(source)
-        declarations["view ProcessCurrent"] += len(re.findall(
-            r"^private linear view ProcessCurrent\[", code, re.M))
+        local_found, local_totals, local_declarations, local_failures = source_facts(source)
         for mint in ALLOWED:
-            pattern = (r'\bview\s+ProcessCurrent\s*\[' if mint.startswith('view ')
-                       else rf'\b{mint}\s*\(')
-            totals[mint] += len(re.findall(pattern, code))
-        for name, header, body in functions(source):
-            declarations[name] += 1
-            for mint in ALLOWED:
-                pattern = (r'\bview\s+ProcessCurrent\s*\[' if mint.startswith('view ')
-                           else rf'\b{mint}\s*\(')
-                found[mint][name] += len(re.findall(pattern, body))
-            writes = re.search(r'\.current_(?:handle|live)\s*=(?!=)', body)
-            leaves_phase = re.search(
-                r'\bsink\s+ScheduledProcessState\[\w+,\s*'
-                r'ProcessState::(?:Running|Constructing)\]', header)
-            changes_state = re.search(r'\.state\s*=(?!=)', body)
-            if (writes or name in {"kernel_process_clone_context_install",
-                                   "kernel_process_clone_unselectable_probe",
-                                   "scheduled_process_release_every_process"}
-                    or (leaves_phase and changes_state)):
-                if "changes_witness_ProcessCurrent" not in header:
-                    failures.append(f"{path}: {name} changes current context without its witness marker")
-            if name in {"process_running_new", "process_constructing_new"}:
-                if not header.startswith("private inline fn "):
-                    failures.append(f"{name} must remain a private inline mint")
+            found[mint].update(local_found[mint])
+        totals.update(local_totals)
+        declarations.update(local_declarations)
+        failures.extend(f"{path}: {failure}" for failure in local_failures)
     for mint, expected in ALLOWED.items():
         actual = +found[mint]
         if totals[mint] != actual.total() + declarations[mint]:

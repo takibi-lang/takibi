@@ -69,7 +69,7 @@ UNGUARDED_ALLOWED = {
         "ext2 APIs before userspace can reach the filesystem",
 }
 
-FUNCTION_RE = re.compile(r"^(?:private )?fn ([A-Za-z_0-9]+)")
+FUNCTION_RE = re.compile(r"^(?:private )?(?:inline |noinline )?fn ([A-Za-z_0-9]+)")
 
 
 def strip_comment(line: str) -> str:

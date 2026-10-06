@@ -42,7 +42,7 @@ DEFINING_FILE = pathlib.Path("kernel/lib/intrusive_pool.tkb")
 # a number that reads as complete.
 ESCAPE_RE = re.compile(
     r"\bintrusive_pool_(?:payload_unproven_of|ref_unproven)\s*\(")
-FN_RE = re.compile(r"^(?:private )?fn ([A-Za-z_0-9]+)")
+FN_RE = re.compile(r"^(?:private )?(?:inline |noinline )?fn ([A-Za-z_0-9]+)")
 
 # (file, enclosing function) -> why this caller cannot hold the proof.
 # GitHub issue #482: each entry names what keeps the payload alive after

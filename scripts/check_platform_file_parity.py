@@ -54,7 +54,7 @@ ALLOWED = {
         "GitHub issue #472 is actively rewriting both copies from the DTB",
 }
 
-FN_RE = re.compile(r"^(?:private )?fn ([A-Za-z0-9_]+)\s*\(")
+FN_RE = re.compile(r"^(?:private )?(?:inline |noinline )?fn ([A-Za-z0-9_]+)\s*\(")
 
 # GitHub issue #517. The comparison above finds a FUNCTION defined identically
 # in both trees. Duplication written inline -- inside main(), inside a match

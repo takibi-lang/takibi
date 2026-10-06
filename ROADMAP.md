@@ -168,6 +168,8 @@ measurements first.
 5. **Deferred or not a scheduled work item:** #432, #555, #250, #444, #429,
    #149, #567, #539, #536, #624, #132; #13 for `Phi`, with #216 and #109 as
    candidate examples, only after the solver threshold is met. Also deferred:
+   #712 (compiler-derived liveness-escape attribution after the concrete
+   source-check parser failure),
    #58 (static whole-call-path stack bounds; lowered by the maintainer on
    2026-10-04), #698 (metadata mutation exhaustion), #699 (host-side EL0
    postmortem symbolization), #709 (permanent table generation exhaustion),
