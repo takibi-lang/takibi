@@ -45,7 +45,7 @@ DEFINING = "lib/intrusive_pool.tkb"
 DROP = "intrusive_view_drop("
 GENERATION = "intrusive_view_generation("
 
-FUNCTION_RE = re.compile(r"^(?:private )?fn ([A-Za-z_0-9]+)")
+FUNCTION_RE = re.compile(r"^(?:private )?(?:inline |noinline )?fn ([A-Za-z_0-9]+)")
 
 # Functions that drop the proof and keep only a slot address, and why that is
 # the right answer there. Each entry is a claim that can stop being true.
@@ -60,6 +60,13 @@ INDEX_ONLY_ALLOWED = {
         "a predicate whose answer is a snapshot by construction: 'is this "
         "slot occupied' cannot be made to stay true, and every caller that "
         "needs it to is holding a generation of its own",
+}
+
+# These consume a stored pool proof after the compiler checked loan_transfer.
+# They return no index or pointer. Keep them separate from cursor snapshots.
+TRANSFER_RELEASES = {
+    "scheduled_process_locked_view_drop": "ProcessRecordLockedView",
+    "scheduled_process_running_view_drop": "ProcessRecordRunningView",
 }
 
 
@@ -87,6 +94,7 @@ def main() -> int:
     problems = []
     droppers = set()
     index_only = set()
+    transfer_releases = set()
     for path in sorted(KERNEL.rglob("*.tkb")):
         relative = str(path.relative_to(KERNEL))
         if relative == DEFINING:
@@ -110,7 +118,15 @@ def main() -> int:
                 continue
             name, body = holder
             droppers.add(name)
-            if GENERATION in code_of(body):
+            code = code_of(body)
+            if name in TRANSFER_RELEASES:
+                header = code.split("{", 1)[0]
+                expected = "source: sink " + TRANSFER_RELEASES[name] + "["
+                if expected not in header or "->" in header or re.search(r"\breturn\s+[^;]", code):
+                    problems.append(f"{name} must consume its stored proof and return no value")
+                transfer_releases.add(name)
+                continue
+            if GENERATION in code:
                 continue
             index_only.add(name)
             if name in INDEX_ONLY_ALLOWED:
@@ -123,6 +139,8 @@ def main() -> int:
                 f"{name} to INDEX_ONLY_ALLOWED in this script with the reason "
                 f"its answer is meant to be a snapshot")
 
+    for name in sorted(TRANSFER_RELEASES.keys() - transfer_releases):
+        problems.append(f"{name} no longer releases a transferred proof; remove its declaration")
     for name in sorted(INDEX_ONLY_ALLOWED):
         if name not in droppers:
             problems.append(
@@ -142,7 +160,8 @@ def main() -> int:
         return 1
     report_pass("slot-proof-to-index",
                 f"{len(droppers)} function(s) drop a slot view; "
-                f"{len(droppers) - len(index_only)} carry the generation "
+                f"{len(transfer_releases)} consume a transferred proof, "
+                f"{len(droppers) - len(index_only) - len(transfer_releases)} carry the generation "
                 f"forward and {len(INDEX_ONLY_ALLOWED)} are declared as "
                 f"answering a snapshot",
                 droppers=len(droppers))

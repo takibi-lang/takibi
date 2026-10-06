@@ -50,17 +50,6 @@ FN_RE = re.compile(r"^(?:private )?fn ([A-Za-z_0-9]+)")
 # not merely that the function returns a pointer. A new entry has to find
 # its own answer.
 ALLOWED = {
-    ("kernel/kernel/process.tkb", "scheduled_process_record_at"):
-        "a record leaves the pool only through scheduled_process_slot_remove, "
-        "which requires the process-run guard (#482); a reader of another "
-        "process's record holds that lock, and a reader of its own is not "
-        "yet reaped. Since #693 step 7 its only callers are the authority "
-        "makers' own bodies (record_of and the run-guard, owner and running "
-        "accessors built on it), held at five by "
-        "scripts/check_process_record_bare_uses.py. Destructive record annotations "
-        "reject local live loans across removal without a new pin; the mint "
-        "and remote scheduling/reaper protocol still supply the allocation "
-        "lifetime after this private accessor drops the pool view",
     ("kernel/kernel/process.tkb", "scheduled_process_record_peek"):
         "deliberately tolerates a dead slot for crash and trace paths, and "
         "returns the pointer",

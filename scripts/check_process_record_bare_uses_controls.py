@@ -27,18 +27,18 @@ def main() -> int:
         "commented marker": source.replace(
             "record_mutates_ScheduledProcessOwner",
             "// record_mutates_ScheduledProcessOwner\n", 1),
-        "wrong raw caller with unchanged total": source.replace(
-            "fn scheduled_process_record_locked(", "fn unreviewed_record_locked(", 1),
+        "public locked wrapper mint": source.replace(
+            "private inline fn scheduled_process_locked_view_new(", "inline fn scheduled_process_locked_view_new(", 1),
         "additional raw caller": source +
             "\nfn unreviewed() { scheduled_process_record_at(0); }\n",
         "additional ownership mint": source +
             "\nfn unreviewed() { scheduled_process_owner_new(0, 0); }\n",
         "public owner mint": source.replace(
             "private fn scheduled_process_owner_new(", "fn scheduled_process_owner_new(", 1),
-        "public raw lookup": source.replace(
-            "private fn scheduled_process_record_at(", "fn scheduled_process_record_at(", 1),
+        "public running wrapper mint": source.replace(
+            "private inline fn scheduled_process_running_view_new(", "inline fn scheduled_process_running_view_new(", 1),
         "public running mint": source.replace(
-            "private fn process_running_new(", "fn process_running_new(", 1),
+            "private inline fn process_running_new(", "inline fn process_running_new(", 1),
     }
     for name, changed in controls.items():
         assert changed != source, f"control {name} did not change the input"

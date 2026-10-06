@@ -71,6 +71,15 @@ fn scheduled_process_slot_valid(slot: usize) -> bool {
 }
 '''
 
+DECLARED += """
+private inline fn scheduled_process_locked_view_drop(source: sink ProcessRecordLockedView[l, p]) {
+    intrusive_view_drop(source.live);
+}
+private inline fn scheduled_process_running_view_drop(source: sink ProcessRecordRunningView[g, p]) {
+    intrusive_view_drop(source.live);
+}
+"""
+
 
 def build(root, body):
     (root / "scripts").mkdir(parents=True)
@@ -130,6 +139,14 @@ def main() -> int:
         "a new function that drops the proof to a bare index",
         INDEX_ONLY, "keeps no generation")
 
+    failures += case(
+        "an inline drop is attributed to its own body",
+        INDEX_ONLY.replace("private fn synthetic_next_live_slot", "private inline fn synthetic_next_live_slot"),
+        "synthetic_next_live_slot")
+    failures += case(
+        "a transferred proof release cannot start returning an index",
+        "private inline fn scheduled_process_running_view_drop(source: sink ProcessRecordRunningView[g, p]) -> usize { intrusive_view_drop(source.live); return 1; }\n",
+        "must consume its stored proof")
     # The same function written so its answer stays checkable is accepted,
     # which is what makes this a rule rather than a ban on dropping.
     failures += case(

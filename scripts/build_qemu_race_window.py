@@ -112,8 +112,7 @@ WINDOWS = {
              "            .pending_block_reason = reason;\n"
              "        // The reverted kernel says it is Blocked, which it is not.\n"
              "        match process_wait_publish(\n"
-             "                &scheduled_process_record_of(\n"
-             "                    execution_here().current_handle).wait, reason,\n"
+             "                &scheduled_process_record_running(running_here).wait, reason,\n"
              "                ProcessSlotState::Blocked) {\n"
              "            ProcessWaitPublish::Published => {}\n"
              "            ProcessWaitPublish::Refused => {}\n"
@@ -154,8 +153,10 @@ WINDOWS = {
              "        scheduled_process_pid_of_handle(child);\n",
              "    execution_here().last_exited_child_pid =\n"
              "        scheduled_process_pid_of_handle(child);\n"
-             "    scheduled_process_record_of(parent).last_reaped_pid =\n"
-             "        scheduled_process_pid_of_handle(child);\n"),
+             "    let reverted_guard = process_run_guard_forge_unlocked();\n"
+             "    scheduled_process_record_of_locked(reverted_guard, parent).last_reaped_pid =\n"
+             "        scheduled_process_pid_of_handle(child);\n"
+             "    process_run_guard_discard_unlocked(reverted_guard);\n"),
         ],
     },
 }

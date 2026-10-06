@@ -735,57 +735,130 @@ private fn scheduled_process_pool_init() {
     intrusive_pool_init(&scheduled_process_pool);
 }
 
-// Read a record through a HANDLE, which carries a generation, instead of
-// through a bare slot, which does not.
-//
-// GitHub issue #492. `scheduled_process_record_at` takes a slot address and
-// asks the pool whether anything lives there. It cannot ask whether the
-// occupant is the one the caller meant, because a slot address does not say.
-// So a record that was reaped and immediately reallocated answers Live, and
-// the caller gets the NEW occupant's record. Silently. That is why #488 --
-// the kernel reaping the record execution_here() calls current, 26 times a
-// boot -- was invisible for however long it existed.
-//
-// ProcessHandle has carried the generation all along, and
-// scheduled_process_handle_matches has always known how to compare it. The
-// reads just threw it away.
-//
-// COUNTED, NOT ENFORCED, and deliberately so: this tree ships the counter
-// first and proves it fires before changing behaviour. The record returned
-// is exactly what the slot-only path returns, so nothing downstream moves
-// until the number is known. `process invariant:` rather than `process
-// table:` for the same reason the reap counter uses it -- the latter prefix
-// is captured by process_lifecycle.filter, and an expected file is the wrong
-// place for a violation whose count is not yet zero.
-private fn scheduled_process_record_of(handle: ProcessHandle)
-        -> *ProcessRecord !{unsafe} {
+// A run guard keeps a record allocated: reap removes it under the same
+// lock. Retain the pool view through the private loan transfer, then release
+// that view. The returned pointer depends on the whole guard and cannot be
+// used after unlock or across a destructive record operation.
+fn scheduled_process_record_locked(guard: borrow ProcessRunGuard[lock],
+                                   slot: usize) -> *ProcessRecord @ lock
+        !{unsafe} {
+    if (slot == 0) { return &scheduled_process_boot_record; }
+    if (scheduled_process_pool_ready == false) {
+        scheduled_process_record_missing_count =
+            scheduled_process_record_missing_count + 1;
+        if (scheduled_process_missing_first_slot == 0) {
+            scheduled_process_missing_first_slot = slot;
+            scheduled_process_missing_reason = 1;
+        }
+        return &scheduled_process_record_absent;
+    }
+    match intrusive_pool_probe_slot(&scheduled_process_pool, slot) {
+        IntrusiveSlotProbe::NoPayload => {
+            // GitHub issue #569: two different answers wore one counter,
+            // and only one of them is a defect.
+            //
+            // The pool owning this slot with generation 0 means the slot is
+            // FREE. Every slot walk here reaches its slots through
+            // scheduled_process_live_pool_slot_from, which probes under the
+            // pool lock, sees Live, DROPS the view, and returns a bare slot
+            // number; the caller then looks that number up again. Nothing is
+            // held between the two probes, so a free in the gap is a walk
+            // that raced -- and the walk handles it correctly already, since
+            // the absent record reads back Free and `== Ready` skips it.
+            //
+            // Counting that as a missing record made a benign, expected race
+            // fail the lane a view asserts the counter on, about three runs
+            // of `make cicheck` in eight. It also made the counter useless as
+            // a detector, which is the worse half: a number that fires when
+            // nothing is wrong stops being read.
+            //
+            // What stays in the counter is the other answer: an address the
+            // pool does not own at all. That is an invented or corrupted slot
+            // number and has no benign reading. A slot that was freed and
+            // REUSED is not either of these -- the lookup succeeds and the
+            // generation check catches it, on `process invariant: STALE
+            // HANDLE READS` and `RECYCLED HANDLE READS`.
+            if (intrusive_pool_slot_is_valid(&scheduled_process_pool, slot)) {
+                scheduled_process_freed_slot_count =
+                    scheduled_process_freed_slot_count + 1;
+                if (scheduled_process_freed_first_slot == 0) {
+                    scheduled_process_freed_first_slot = slot;
+                    scheduled_process_freed_cpu = cpu_id();
+                    scheduled_process_freed_site =
+                        *kernel_activity_here();
+                }
+                return &scheduled_process_record_absent;
+            }
+            scheduled_process_record_missing_count =
+                scheduled_process_record_missing_count + 1;
+            if (scheduled_process_missing_first_slot == 0) {
+                scheduled_process_missing_first_slot = slot;
+                scheduled_process_missing_reason = 2;
+                scheduled_process_missing_cpu = cpu_id();
+                scheduled_process_missing_site =
+                    *kernel_activity_here();
+                // +1, so 0 means "no current process here" rather than
+                // "current is slot 0". The first version could not tell
+                // those apart and the difference is the idle path.
+                if (execution_here().current_live) {
+                    scheduled_process_missing_current =
+                        execution_here().current_handle.pool_index + 1;
+                }
+            }
+            return &scheduled_process_record_absent;
+        }
+        IntrusiveSlotProbe::Live(slot_view) => {
+            let source = scheduled_process_locked_view_new(slot_view, guard);
+            let record = scheduled_process_transfer_locked_loan(source, guard);
+            scheduled_process_locked_view_drop(source);
+            return record;
+        }
+    }
+}
+
+// The private wrapper carries the run-lock domain without exposing the
+// private pool's address in other modules. Its only runtime member is the
+// existing locked pool view; the extra static index adds no storage.
+private linear struct ProcessRecordLockedView[lock: addr, pool: addr] {
+    private live: IntrusiveSlotView[pool];
+}
+
+private inline fn scheduled_process_locked_view_new(
+        live: IntrusiveSlotView[&scheduled_process_pool],
+        guard: borrow ProcessRunGuard[lock]) -> ProcessRecordLockedView[lock, &scheduled_process_pool] {
+    let mut wrapped: ProcessRecordLockedView[lock, &scheduled_process_pool] = { live };
+    return wrapped;
+}
+
+private inline fn scheduled_process_locked_view_payload(
+        source: borrow ProcessRecordLockedView[lock, &scheduled_process_pool])
+        -> *ProcessRecord @ lock !{unsafe} {
+    return intrusive_pool_payload_of(&scheduled_process_pool, source.live);
+}
+
+private inline fn scheduled_process_transfer_locked_loan(
+        source: borrow ProcessRecordLockedView[lock, &scheduled_process_pool],
+        destination: borrow ProcessRunGuard[lock])
+        -> *ProcessRecord @ lock !{unsafe, loan_transfer} {
+    return scheduled_process_locked_view_payload(source);
+}
+
+private inline fn scheduled_process_locked_view_drop(
+        source: sink ProcessRecordLockedView[lock, &scheduled_process_pool]) {
+    intrusive_view_drop(source.live);
+}
+
+fn scheduled_process_record_of_locked(
+        guard: borrow ProcessRunGuard[lock],
+        handle: ProcessHandle) -> *ProcessRecord @ lock !{unsafe} {
     if (scheduled_process_handle_matches(handle) == false) {
-        scheduled_process_stale_handle_reads =
-            scheduled_process_stale_handle_reads + 1;
+        scheduled_process_stale_handle_reads = scheduled_process_stale_handle_reads + 1;
         if (scheduled_process_stale_first_slot == 0) {
             scheduled_process_stale_first_slot = handle.pool_index;
             scheduled_process_stale_first_generation = handle.generation;
         }
     }
-    return scheduled_process_record_at(handle.pool_index);
-}
-
-// GitHub issue #672 layer 3 (ProcessRecord, plan (2)): a record reached
-// under the process-run lock. The run lock is what keeps a record alive --
-// reap removes it under the same lock -- so the pointer is tied to the
-// guard: once the guard is given back, a use of the pointer does not
-// compile. Same lookup as the slot and handle forms below; only the
-// authority it is derived from is new.
-fn scheduled_process_record_locked(guard: borrow ProcessRunGuard[lock],
-                                   slot: usize)
-        -> *ProcessRecord @ lock !{unsafe} {
-    return scheduled_process_record_at(slot);
-}
-
-fn scheduled_process_record_of_locked(guard: borrow ProcessRunGuard[lock],
-                                      handle: ProcessHandle)
-        -> *ProcessRecord @ lock !{unsafe} {
-    return scheduled_process_record_of(handle);
+    return scheduled_process_record_locked(guard, handle.pool_index);
 }
 
 // GitHub issue #693 step 2: evidence that a process is the one running on
@@ -795,31 +868,80 @@ fn scheduled_process_record_of_locked(guard: borrow ProcessRunGuard[lock],
 // process_running_here, the one place that turns "this CPU's current
 // process" into the evidence (scripts/check_process_running_mints.py keeps
 // the list of its callers).
-linear struct ProcessRunning[process: usize] {
-    private handle: ProcessHandle;
-}
+linear view ProcessRunning[process: usize];
 
 must_use variant ProcessRunningHere {
     Running(exists process: usize. ProcessRunning[process]);
 }
 
-private fn process_running_new(handle: ProcessHandle, slot: usize @ process)
+private inline fn process_running_new(generation: usize @ process)
         -> ProcessRunning[process] {
-    let mut running: ProcessRunning[process] = { handle };
-    return running;
+    return view ProcessRunning[process];
 }
 
 fn process_running_here() -> ProcessRunningHere !{unsafe} {
-    let mut handle: ProcessHandle = execution_here().current_handle;
     return ProcessRunningHere::Running(
-        process_running_new(handle, handle.pool_index));
+        process_running_new(execution_here().current_handle.generation));
 }
 
-fn process_running_end(running: sink ProcessRunning[process]) {}
+private fn process_running_handle(running: borrow ProcessRunning[process])
+        -> ProcessHandle !{handle_of_witness} {
+    return execution_here().current_handle;
+}
+
+inline fn process_running_end(running: sink ProcessRunning[process]) {}
+
+private linear struct ProcessRecordRunningView[process: usize, pool: addr] {
+    private live: IntrusiveSlotView[pool];
+}
+
+private inline fn scheduled_process_running_view_new(
+        live: IntrusiveSlotView[&scheduled_process_pool],
+        running: borrow ProcessRunning[process])
+        -> ProcessRecordRunningView[process, &scheduled_process_pool] {
+    let mut wrapped: ProcessRecordRunningView[process, &scheduled_process_pool] = { live };
+    return wrapped;
+}
+
+private inline fn scheduled_process_running_view_payload(
+        source: borrow ProcessRecordRunningView[process, &scheduled_process_pool])
+        -> *ProcessRecord @ process !{unsafe} {
+    return intrusive_pool_payload_of(&scheduled_process_pool, source.live);
+}
+
+private inline fn scheduled_process_transfer_running_loan(
+        source: borrow ProcessRecordRunningView[process, &scheduled_process_pool],
+        destination: borrow ProcessRunning[process])
+        -> *ProcessRecord @ process !{unsafe, loan_transfer} {
+    return scheduled_process_running_view_payload(source);
+}
+
+private inline fn scheduled_process_running_view_drop(
+        source: sink ProcessRecordRunningView[process, &scheduled_process_pool]) {
+    intrusive_view_drop(source.live);
+}
 
 fn scheduled_process_record_running(running: borrow ProcessRunning[process])
         -> *ProcessRecord @ process !{unsafe} {
-    return scheduled_process_record_of(running.handle);
+    let mut handle: ProcessHandle = process_running_handle(running);
+    if (handle.pool_index == 0) { return &scheduled_process_boot_record; }
+    match intrusive_pool_probe_handle_untrusted(
+            &scheduled_process_pool, handle.pool_index, handle.generation) {
+        IntrusiveSlotProbe::NoPayload => {
+            scheduled_process_record_missing_count = scheduled_process_record_missing_count + 1;
+            if (scheduled_process_missing_first_slot == 0) {
+                scheduled_process_missing_first_slot = handle.pool_index;
+                scheduled_process_missing_reason = 2;
+            }
+            return &scheduled_process_record_absent;
+        }
+        IntrusiveSlotProbe::Live(live) => {
+            let source = scheduled_process_running_view_new(live, running);
+            let record = scheduled_process_transfer_running_loan(source, running);
+            scheduled_process_running_view_drop(source);
+            return record;
+        }
+    }
 }
 
 fn scheduled_process_stale_handle_reads_value() -> usize {
@@ -1075,93 +1197,6 @@ fn scheduled_process_missing_current_value() -> usize {
     return scheduled_process_missing_current;
 }
 
-private fn scheduled_process_record_at(slot: usize) -> *ProcessRecord
-        !{unsafe} {
-    if (slot == 0) { return &scheduled_process_boot_record; }
-    if (scheduled_process_pool_ready == false) {
-        scheduled_process_record_missing_count =
-            scheduled_process_record_missing_count + 1;
-        if (scheduled_process_missing_first_slot == 0) {
-            scheduled_process_missing_first_slot = slot;
-            scheduled_process_missing_reason = 1;
-        }
-        return &scheduled_process_record_absent;
-    }
-    match intrusive_pool_probe_slot(&scheduled_process_pool, slot) {
-        IntrusiveSlotProbe::NoPayload => {
-            // GitHub issue #569: two different answers wore one counter,
-            // and only one of them is a defect.
-            //
-            // The pool owning this slot with generation 0 means the slot is
-            // FREE. Every slot walk here reaches its slots through
-            // scheduled_process_live_pool_slot_from, which probes under the
-            // pool lock, sees Live, DROPS the view, and returns a bare slot
-            // number; the caller then looks that number up again. Nothing is
-            // held between the two probes, so a free in the gap is a walk
-            // that raced -- and the walk handles it correctly already, since
-            // the absent record reads back Free and `== Ready` skips it.
-            //
-            // Counting that as a missing record made a benign, expected race
-            // fail the lane a view asserts the counter on, about three runs
-            // of `make cicheck` in eight. It also made the counter useless as
-            // a detector, which is the worse half: a number that fires when
-            // nothing is wrong stops being read.
-            //
-            // What stays in the counter is the other answer: an address the
-            // pool does not own at all. That is an invented or corrupted slot
-            // number and has no benign reading. A slot that was freed and
-            // REUSED is not either of these -- the lookup succeeds and the
-            // generation check catches it, on `process invariant: STALE
-            // HANDLE READS` and `RECYCLED HANDLE READS`.
-            if (intrusive_pool_slot_is_valid(&scheduled_process_pool, slot)) {
-                scheduled_process_freed_slot_count =
-                    scheduled_process_freed_slot_count + 1;
-                if (scheduled_process_freed_first_slot == 0) {
-                    scheduled_process_freed_first_slot = slot;
-                    scheduled_process_freed_cpu = cpu_id();
-                    scheduled_process_freed_site =
-                        *kernel_activity_here();
-                }
-                return &scheduled_process_record_absent;
-            }
-            scheduled_process_record_missing_count =
-                scheduled_process_record_missing_count + 1;
-            if (scheduled_process_missing_first_slot == 0) {
-                scheduled_process_missing_first_slot = slot;
-                scheduled_process_missing_reason = 2;
-                scheduled_process_missing_cpu = cpu_id();
-                scheduled_process_missing_site =
-                    *kernel_activity_here();
-                // +1, so 0 means "no current process here" rather than
-                // "current is slot 0". The first version could not tell
-                // those apart and the difference is the idle path.
-                if (execution_here().current_live) {
-                    scheduled_process_missing_current =
-                        execution_here().current_handle.pool_index + 1;
-                }
-            }
-            return &scheduled_process_record_absent;
-        }
-        IntrusiveSlotProbe::Live(slot_view) => {
-            // GitHub issue #488, and THIS IS THE SITE. Every read of a
-            // process record comes through here, and returning the payload
-            // drops the view -- the only proof that the slot was occupied
-            // when it was looked up. That is why a handle to a reaped
-            // record kept working: the pointer outlived its proof, landed
-            // on whatever was allocated at the address next, and nothing
-            // noticed.
-            //
-            // The unproven form is what this has always done; its name and
-            // its place in the trusted-base count are new, so the 159 call
-            // sites it feeds are a NUMBER rather than an assumption.
-            // Migrating them to hold the view is filed separately -- that
-            // is the difference between "the default is safe" (this
-            // change) and "nothing launders" (that one).
-            return intrusive_pool_payload_unproven_of(
-                &scheduled_process_pool, slot_view);
-        }
-    }
-}
 
 // Walking every live process. The bootstrap comes first and is not in the
 // pool, which is exactly the thing a hand-written walk would forget -- so
@@ -2218,7 +2253,8 @@ fn scheduled_process_address_space_root_lookup(slot: usize) -> AddressSpaceRoot 
 
 fn scheduled_process_address_space_root_running(
         running: borrow ProcessRunning[process]) -> AddressSpaceRoot !{unsafe} {
-    return address_space_root_mint(running.handle.pool_index,
+    let mut handle: ProcessHandle = process_running_handle(running);
+    return address_space_root_mint(handle.pool_index,
         process_backing_words(scheduled_process_record_running(running)));
 }
 

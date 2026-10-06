@@ -20749,7 +20749,47 @@ private fn transfer_allocation(source: borrow Live[&arena_a, g], destination: bo
 }
 |}
 
+let wrapped_transfer_fixture = {|
+struct WrappedRecord { value: usize; }
+private let mut wrapped_pool: WrappedRecord;
+private let mut wrapped_lock_a: WrappedRecord;
+private let mut wrapped_lock_b: WrappedRecord;
+linear struct LockedProof[p: addr] { private slot: usize; }
+linear view WrappedGuard[l: addr];
+private linear struct LockedWrapper[l: addr, p: addr] { private live: LockedProof[p]; }
+fn proof_payload(proof: borrow LockedProof[p]) -> *WrappedRecord @ p { return &wrapped_pool; }
+private fn wrapper_payload(source: borrow LockedWrapper[l, &wrapped_pool]) -> *WrappedRecord @ l { return proof_payload(source.live); }
+private fn wrapper_transfer(source: borrow LockedWrapper[l, &wrapped_pool], destination: borrow WrappedGuard[l]) -> *WrappedRecord @ l !{loan_transfer} { return wrapper_payload(source); }
+fn wrapper_drop(source: sink LockedWrapper[l, &wrapped_pool]) { proof_drop(source.live); }
+fn proof_drop(proof: sink LockedProof[p]) {}
+fn wrapped_guard_drop(guard: sink WrappedGuard[l]) {}
+|}
+
 let loan_transfer_tests = [
+  Alcotest.test_case "wrapped pool proof transfers through a different domain index" `Quick
+    (fun () -> ignore (gen_codegen (wrapped_transfer_fixture ^ {|
+      fn probe(source: LockedWrapper[l, &wrapped_pool], guard: WrappedGuard[l]) -> usize {
+        let mut value: usize = 0;
+        { let ptr = wrapper_transfer(source, guard); wrapper_drop(source); value = ptr.value; }
+        wrapped_guard_drop(guard); return value;
+      }|})));
+  Alcotest.test_case "wrapped destination release ends the returned loan" `Quick
+    (expect_type_error "cannot be used after" (wrapped_transfer_fixture ^ {|
+      fn probe(source: LockedWrapper[l, &wrapped_pool], guard: WrappedGuard[l]) -> usize {
+        let ptr = wrapper_transfer(source, guard); wrapper_drop(source); wrapped_guard_drop(guard); return ptr.value;
+      }|}));
+  Alcotest.test_case "wrapped source aliases do not acquire the destination lifetime" `Quick
+    (expect_type_error "cannot be used after" (wrapped_transfer_fixture ^ {|
+      fn probe(source: LockedWrapper[l, &wrapped_pool], guard: WrappedGuard[l]) -> usize {
+        let old = wrapper_payload(source); let ptr = wrapper_transfer(source, guard); wrapper_drop(source);
+        let value = old.value; wrapped_guard_drop(guard); return value;
+      }|}));
+  Alcotest.test_case "wrapped proof cannot cross lock domains" `Quick
+    (expect_type_error "static value mismatch" (wrapped_transfer_fixture ^ {|
+      fn probe(source: borrow LockedWrapper[&wrapped_lock_a, &wrapped_pool], guard: borrow WrappedGuard[&wrapped_lock_b]) {
+        let ptr = wrapper_transfer(source, guard);
+      }|}));
+
   Alcotest.test_case "allocation index need not be the source first index" `Quick
     (fun () -> ignore (infer (allocation_transfer_fixture ^ {|
       fn probe(source: Live[&arena_a, g], destination: Destination[g]) -> usize !{unsafe} {

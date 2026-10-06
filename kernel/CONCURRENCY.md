@@ -191,8 +191,13 @@ The owner lookup validates the indexed allocation generation under the
 existing pool lock and uses a private `loan_transfer` before releasing its
 pool view. Its returned loan remains tied to the owner. The pool generation
 is preserved into the creating owner's index rather than copied through an
-unindexed mutable temporary. The other private lookup bodies still drop the
-pool view under their reviewed caller lifetime authority.
+unindexed mutable temporary. Run-lock and current-process accessors retain
+that same locked pool proof in a private indexed wrapper, transfer its loan
+to the existing guard or erased current view, then consume the wrapper.
+There is no bare production lookup; only the diagnostic peek drops its proof.
+The current lookup uses a generation-checked probe under the pool lock.
+The private wrapper mint associates that probe with the borrowed lifetime
+authority; that allocation/domain association remains reviewed trust.
 The run lock excludes peer removal, ownership excludes removal without consuming
 that owner, and Running processes cannot be reaped. This is not a proof of the
 scheduler/allocator or a reason to remove field locks. Kernel preemption must

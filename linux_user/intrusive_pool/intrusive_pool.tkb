@@ -135,6 +135,33 @@ private inline fn allocation_transfer(
     return intrusive_pool_allocation_payload_of(&allocation_transfer_pool, source);
 }
 
+// Match the erased current-authority path: the wrapper retains the real
+// locked pool proof, and the transfer leaves only the current view's loan.
+private linear view TransferCurrent[g: usize];
+private linear struct TransferLive[pool: addr, g: usize] {
+    private live: IntrusiveSlotView[pool];
+}
+private inline fn transfer_current_new(generation: usize @ g) -> TransferCurrent[g] {
+    return view TransferCurrent[g];
+}
+private inline fn transfer_live_new(live: IntrusiveSlotView[&allocation_transfer_pool],
+        current: borrow TransferCurrent[g]) -> TransferLive[&allocation_transfer_pool, g] {
+    let mut wrapped: TransferLive[&allocation_transfer_pool, g] = { live };
+    return wrapped;
+}
+private inline fn transfer_live_payload(source: borrow TransferLive[&allocation_transfer_pool, g])
+        -> *usize @ g !{unsafe} {
+    return intrusive_pool_payload_of(&allocation_transfer_pool, source.live);
+}
+private inline fn transfer_current(source: borrow TransferLive[&allocation_transfer_pool, g],
+        destination: borrow TransferCurrent[g]) -> *usize @ g !{unsafe, loan_transfer} {
+    return transfer_live_payload(source);
+}
+private inline fn transfer_live_drop(source: sink TransferLive[&allocation_transfer_pool, g]) {
+    intrusive_view_drop(source.live);
+}
+private inline fn transfer_current_end(current: sink TransferCurrent[g]) {}
+
 fn check_allocation_transfer() -> AllocationTransferTest !{unsafe} {
     intrusive_pool_init_retaining(&allocation_transfer_pool, 0);
     intrusive_pool_init(&allocation_foreign_pool);
@@ -169,6 +196,19 @@ fn check_allocation_transfer() -> AllocationTransferTest !{unsafe} {
             checked = false; intrusive_allocation_view_drop(live);
         }
     }
+    let current = transfer_current_new(generation);
+    match intrusive_pool_probe_handle_untrusted(&allocation_transfer_pool, slot, generation) {
+        IntrusiveSlotProbe::NoPayload => { checked = false; }
+        IntrusiveSlotProbe::Live(live) => {
+            let source = transfer_live_new(live, current);
+            let ptr = transfer_current(source, current);
+            checked = checked && pool_lock_held_depth_now() == 1;
+            transfer_live_drop(source);
+            *ptr = 654;
+            checked = checked && *ptr == 654 && pool_lock_held_depth_now() == 0;
+        }
+    }
+    transfer_current_end(current);
     let remove_guard = intrusive_pool_lock(&allocation_transfer_pool);
     checked = intrusive_remove_succeeded(intrusive_pool_remove(&allocation_transfer_pool, remove_guard, owner)) && checked;
     intrusive_pool_unlock(&allocation_transfer_pool, remove_guard);
