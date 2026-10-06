@@ -7196,8 +7196,9 @@ let debug_type_metadata () =
       (* Takibi currently declares a direct LLVM aggregate return, without an
          sret parameter. LLVM's AArch64 lowering assigns one result register
          to each scalar leaf (PageRunAllocResult is 40 bytes and returns in
-         x0..x4), so describe that LLVM type tree instead of reimplementing
-         the C ABI's size-based indirect-result rule. *)
+         x0..x4). Only x0..x7 are available; a result that needs more scalar
+         registers is returned through the incoming x8 buffer. Describe that
+         LLVM type tree rather than the C ABI's size-based result rule. *)
       let rec scalar_parts base ty =
         match classify_type ty with
         | TypeKind.Struct ->
@@ -7215,7 +7216,11 @@ let debug_type_metadata () =
         | _ ->
             [(base, Llvm_target.DataLayout.abi_size ty dl)]
       in
-      let parts = scalar_parts 0L llty |> List.mapi (fun index (offset, size) ->
+      let leaves = scalar_parts 0L llty in
+      if List.length leaves > 8 then
+        "{\"kind\":\"indirect\",\"pointer_register\":\"x8\",\"return_address_register\":\"x30\"}"
+      else
+      let parts = leaves |> List.mapi (fun index (offset, size) ->
         Printf.sprintf
           "{\"register\":\"x%d\",\"offset\":%Ld,\"size\":%Ld}"
           index offset size)

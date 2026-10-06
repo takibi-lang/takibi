@@ -235,7 +235,11 @@ for _ in $(seq 1 50); do
         sleep 0.1
         continue
     fi
-    if grep -q "takibi-force-variant-return: $ALLOC_ROLLBACK_VARIANT via registers" "$gdb_log" &&
+    expected_return_abi=registers
+    if [ "$ALLOC_ROLLBACK_POINT" = address-space-backing ]; then
+        expected_return_abi=indirect
+    fi
+    if grep -q "takibi-force-variant-return: $ALLOC_ROLLBACK_VARIANT via $expected_return_abi" "$gdb_log" &&
        grep -q "alloc-rollback: forced point=$ALLOC_ROLLBACK_POINT" "$gdb_log"; then
         armed=true
     fi

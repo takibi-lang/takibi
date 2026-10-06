@@ -15,6 +15,24 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-10-06: AArch64 debugger indirect variant return
+
+The allocation rollback lane exposed an incorrect debugger sidecar: the
+80-byte AddressSpaceBackingReady result was described as ten direct scalar
+registers, but LLVM 19 returns it through the incoming x8 buffer. The sidecar
+now records indirect return when the aggregate exceeds eight integer scalar
+leaves. This preserves the existing direct 40-byte PageRunAllocResult ABI;
+the C ABI's 16-byte aggregate threshold does not describe these LLVM returns.
+Eight- and nine-leaf compiler tests cover the boundary and verify that querying
+metadata leaves generated IR unchanged. The real QEMU injection now reports
+the allocation refusal and returns every pooled record and page.
+
+Indirect injection stops at the first instruction, before a prologue or nested
+call can reuse x8. The runner checks the actual ABI-specific arming marker.
+Earlier tests used smaller payloads and never exhausted the result registers;
+the existing fault lane is the executable regression for the real backend.
+No kernel allocation or lifetime rule changed in this debugger correction.
+
 ## 2026-10-06: current-process phase authority at entry
 
 ProcessRecord access retained the allocation proof until a private loan

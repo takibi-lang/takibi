@@ -17360,6 +17360,10 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
           variant DebugMetaResult { Empty; Byte(u8); Wide(u64); }
           struct DebugMetaWords { first: u64; second: u64; third: u64; }
           variant DebugMetaLarge { Empty; Words(DebugMetaWords); }
+          struct DebugMetaSeven { words: [u64; 7]; }
+          struct DebugMetaEight { words: [u64; 8]; }
+          variant DebugMetaRegisterLimit { Empty; Words(DebugMetaSeven); }
+          variant DebugMetaIndirect { Empty; Words(DebugMetaEight); }
           const DebugMetaEventStart: usize = 7;
           fn debug_meta_use(value: DebugMetaResult) -> usize {
             match value {
@@ -17391,6 +17395,17 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
        Alcotest.(check bool) "large variant scalar return registers are compiler-owned" true
          (contains_substring metadata
            "\"name\":\"DebugMetaLarge\",\"size\":32,\"tag_offset\":0,\"tag_size\":4,\"return_abi\":{\"kind\":\"registers\",\"return_address_register\":\"x30\",\"parts\":[{\"register\":\"x0\",\"offset\":0,\"size\":4},{\"register\":\"x1\",\"offset\":8,\"size\":8},{\"register\":\"x2\",\"offset\":16,\"size\":8},{\"register\":\"x3\",\"offset\":24,\"size\":8}]");
+       Alcotest.(check bool) "eight scalar leaves still return in registers" true
+         (contains_substring metadata
+           "\"name\":\"DebugMetaRegisterLimit\",\"size\":64,\"tag_offset\":0,\"tag_size\":4,\"return_abi\":{\"kind\":\"registers\"");
+       Alcotest.(check bool) "last result register is x7" true
+         (contains_substring metadata
+           "{\"register\":\"x7\",\"offset\":56,\"size\":8}");
+       Alcotest.(check bool) "nine scalar leaves use the incoming result buffer" true
+         (contains_substring metadata
+           "\"name\":\"DebugMetaIndirect\",\"size\":72,\"tag_offset\":0,\"tag_size\":4,\"return_abi\":{\"kind\":\"indirect\",\"pointer_register\":\"x8\",\"return_address_register\":\"x30\"}");
+       Alcotest.(check bool) "x8 is never described as a direct result register" false
+         (contains_substring metadata "\"register\":\"x8\"");
        Alcotest.(check bool) "variant payload uses target offset" true
          (contains_substring metadata
            "\"name\":\"Wide\",\"tag\":2,\"payload\":{\"type\":\"u64\",\"offset\":8,\"size\":8}");

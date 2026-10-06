@@ -103,7 +103,8 @@ else
             break address_space_ensure_root thread $alloc_thread
             continue
             delete
-            break address_space_backing_ensure thread $alloc_thread
+            # Stop before the prologue can reuse the incoming x8 result buffer.
+            eval "break *%p thread %d", &address_space_backing_ensure, $alloc_thread
             continue
             delete
             takibi-force-variant-return AddressSpaceBackingReady Missing
