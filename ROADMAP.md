@@ -71,7 +71,9 @@ before its issue closes. The steps keep their numbers, which issues cite.
      its backing's handle and is made only by declared makers. Removing
      `scheduled_process_record_at` from the escape list needs the makers to
      carry the pool's proof, which is stage 2's question. #674 now reviews
-     global state and context-held values. Space is reviewed at completed
+     global state and context-held values across all kernel declarations;
+     the three FD pools retain their placement and their measurement follow-up
+     (#711) is deferred separately. Space is reviewed at completed
      feature/stage boundaries under `docs/SPACE_REVIEW.md`. #680-#682 retain
      their measured baselines for the optimization decision. The uncontended
      TCP pin/owner and checksum baseline
@@ -165,7 +167,9 @@ measurements first.
    #58 (static whole-call-path stack bounds; lowered by the maintainer on
    2026-10-04), #698 (metadata mutation exhaustion), #699 (host-side EL0
    postmortem symbolization), #709 (permanent table generation exhaustion),
-   and #710 (intrusive pool generation exhaustion).
+   and #710 (intrusive pool generation exhaustion), #711 (FD-service
+   allocation contention and descriptor-access measurement; observation method
+   and representative workload precede candidate implementation).
 
 Items are ordered within each band as well as between bands. The deferred
 items stay listed so a changed premise can bring them back into the queue.

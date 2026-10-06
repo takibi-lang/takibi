@@ -1,6 +1,9 @@
 # Kernel global-state review
 
-This records the first survey and filesystem/image migrations, dated 2026-10-05. It is
+The [current full source/storage review](KERNEL_GLOBAL_REVIEW_2026-10-06.md)
+covers every explicit kernel global with access sites and per-name
+dispositions. This file retains the first survey and filesystem/image
+migrations, dated 2026-10-05. It is
 not a completed synchronization audit or an authorization to move every
 object into one context. The declaration snapshot is
 [KERNEL_GLOBALS_2026-10-05.tsv](KERNEL_GLOBALS_2026-10-05.tsv).
@@ -175,21 +178,21 @@ retain the old CPU 0 fallback. The context does not prove non-migration,
 prevent same-core reentrancy or carry an owner across a preemptible operation.
 The mapper's existing process lifetime and checked pool-pin contracts remain.
 
-## Remaining pool-placement decision
+## Historical pool-placement probe
 
 The FD service is a concrete next grouping candidate: fd_block_pool,
 fd_context_pool and object_pool already use helpers parameterized by the pool
 pointer's inferred identity. Their current APIs do not require new durable
-field-brand syntax. Each linked RPi5 pool occupies 16 bytes. The three locks
-currently occupy two 64-byte cache lines: the FD-context and shared-object
+field-brand syntax. At the 2fdebeb0 probe, each linked RPi5 pool occupied 16
+bytes. The three locks occupied two 64-byte cache lines: the FD-context and shared-object
 locks share one, while the block-pool lock is elsewhere. That is a linked
 placement observation, not an intentional cache-separation contract.
 
-A compiler layout probe for three RegionPool fields reports offsets
+A compiler layout probe at that baseline for three RegionPool fields reports offsets
 0/16/32 and size 48. Wrapping each pool in a struct with align(64) reports
 0/64/128 and size 192. The compact candidate can change which locks share a
 line. The isolated candidate adds 144 bytes and changes the present packing.
-Neither has a representative FD-service workload comparison. The prior
+Neither candidate has a representative FD-service workload comparison. The prior
 pin-sharing measurement is evidence about pin-state traffic, not a measured
 FD-lock improvement.
 
@@ -202,3 +205,11 @@ service evidence; they do not measure false sharing or throughput. A per-CPU
 allocation front and generation/state compression remain separate policy
 decisions. No pool placement or padding is changed by the two context
 migrations above.
+
+The durable generation counter subsequently grows each RegionPool body to
+24 bytes. Three logical bodies now total 72 bytes; three align(64) wrappers
+would reserve 192, a 120-byte difference before whole-image alignment. The
+old probe does not establish current linked lock sharing. The selected
+disposition retains individual pool storage. Allocation contention and FD
+access measurements are separate from the global-state review and do not
+block the other declarations' inventory.
