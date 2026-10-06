@@ -8,7 +8,18 @@ from pass_line import report_pass
 def main() -> int:
     source = PATH.read_text()
     assert not problems(source), "the production source must pass"
+    inline_lookup = source.replace("fn scheduled_process_record_locked(",
+                                   "inline fn scheduled_process_record_locked(", 1)
+    assert not problems(inline_lookup), "an inline accessor must retain its body identity"
     controls = {
+        "owner lookup restores raw escape": source.replace(
+            "let record = scheduled_process_transfer_owned_loan(live, owner);",
+            "let record = scheduled_process_record_at(owner.pool_index);", 1),
+        "owned transfer marker": source.replace(
+            "unsafe, loan_transfer", "unsafe", 1),
+        "public owned transfer": source.replace(
+            "private inline fn scheduled_process_transfer_owned_loan(",
+            "inline fn scheduled_process_transfer_owned_loan(", 1),
         "slot removal marker": source.replace(
             "unsafe, record_mutates_ProcessRunGuard", "unsafe", 1),
         "reap removal marker": source.replace(

@@ -187,15 +187,21 @@ at either boundary, including through helpers or another authority kind. End
 the pointer's lexical scope before destruction. Scalar snapshots can survive.
 This catches removal by the same lock holder as well as use after unlock.
 
-The private lookup bodies remain trusted address-to-authority mints: they drop
-the intrusive pool's view and replace it with the caller's lifetime authority.
+The owner lookup validates the indexed allocation generation under the
+existing pool lock and uses a private `loan_transfer` before releasing its
+pool view. Its returned loan remains tied to the owner. The pool generation
+is preserved into the creating owner's index rather than copied through an
+unindexed mutable temporary. The other private lookup bodies still drop the
+pool view under their reviewed caller lifetime authority.
 The run lock excludes peer removal, ownership excludes removal without consuming
 that owner, and Running processes cannot be reaped. This is not a proof of the
 scheduler/allocator or a reason to remove field locks. Kernel preemption must
 revisit whether Running authority can survive suspension and migration.
 
-The compiler check adds no instruction or lock section. It preserves current
-parallelism but does not reduce existing run-lock contention. Unlocked retained
+The destructive-loan contracts add no instruction or lock section. Owner
+lookup keeps one existing pool acquire/release and adds the expected-generation
+comparison; there is no extra run lock or pin. This does not reduce existing
+run-lock contention. Unlocked retained
 readers without these authorities would need a separate reclamation protocol.
 
 ## Signal words
