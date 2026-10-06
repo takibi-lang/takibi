@@ -108,7 +108,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_wall_clock_bounds_controls.py` | an undeclared bound, a stale row, a wrong count and an unknown class are each refused |
 | `check_process_running_mints.py` | every caller of `process_running_here`, the mint of a process's evidence that it is running, is declared (#693) |
 | `check_address_space_root_mints.py` | every maker of an `AddressSpaceRoot` (which carries its backing handle) is declared (#693) |
-| `check_process_record_bare_uses.py` | the bare `scheduled_process_record_at`/`_of` calls left in `process.tkb` equal a budget that only goes down (#693) |
+| `check_process_record_bare_uses.py` | five declared raw ProcessRecord lookup bodies, seven ownership mint bodies, private constructors and destructive loan annotations |
+| `check_process_record_bare_uses_controls.py` | negative controls for changed lookup/mint scopes, constructor visibility and missing destructive annotations |
 | `check_lock_discipline.py` | global mutexes are not force-reset and raw atomics stay allowlisted |
 | `check_measure_kernel_tcp_throughput_controls.py` | Controls for the wire-throughput measurement, with a scripted curl |
 | `check_kernel_shell_tcp_controls.py` | Controls for checksum-verified bulk HTTP measurements and retained failure artifacts |

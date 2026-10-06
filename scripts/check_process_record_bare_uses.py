@@ -1,30 +1,13 @@
 #!/usr/bin/env python3
-"""The bare process-record lookups left in process.tkb, held to a number.
+"""Keep ProcessRecord's trusted mints and destructive contracts explicit.
 
-GitHub issue #693 moves every read and write of a ProcessRecord onto an
-authority: the run guard (scheduled_process_record_locked/_of_locked), the
-owner (scheduled_process_record_owned), the running evidence
-(scheduled_process_record_running), or the diagnostic peek. What is left is
-scheduled_process_record_at and scheduled_process_record_of called with a
-bare slot or handle, which says nothing about whether the record can be
-reaped meanwhile.
-
-That number (counted as lines by grep) went from 81 to 32 in one session, slice by slice, and was
-measured each time with an ad hoc grep. Nothing stopped it from climbing back
-one convenient lookup at a time. This does: the count must EQUAL the budget
-below. Going over is a new bare lookup -- use an authority instead. Going
-under is progress -- lower the budget in the same commit, so the gain cannot
-be spent later without anyone noticing.
-
-The two accessors' own definitions are not uses; every call is, including
-those inside the authority-taking wrappers. Since #693 step 7 those are the
-only five left: record_of's body and the run-guard, owner and running
-makers built on the two. The number is held there, not driven to zero;
-removing them needs the makers to carry the pool's proof (#637 stage 2).
-
-Exit code only (0 = pass, 1 = fail).
+Raw record lookup is confined to five private/authority accessor bodies. The
+compiler checks loans at marked deletion boundaries; this source check keeps
+those markers and the private ownership mint from silently disappearing. It
+reads tracked source only and does not prove the mint or allocator protocol.
 """
 
+from collections import Counter
 import pathlib
 import re
 import sys
@@ -33,33 +16,84 @@ from pass_line import report_pass
 
 PATH = pathlib.Path("kernel/kernel/process.tkb")
 BUDGET = 5
-CALL_RE = re.compile(r"\bscheduled_process_record_(?:at|of)\s*\(")
-DEF_RE = re.compile(r"^(?:private )?fn scheduled_process_record_(?:at|of)\(")
+RAW_CALLS = Counter({
+    ("scheduled_process_record_of", "at"): 1,
+    ("scheduled_process_record_locked", "at"): 1,
+    ("scheduled_process_record_of_locked", "of"): 1,
+    ("scheduled_process_record_running", "of"): 1,
+    ("scheduled_process_record_owned", "at"): 1,
+})
+OWNER_MINTS = Counter({name: 1 for name in (
+    "scheduled_process_alloc_finish",
+    "scheduled_process_ready_take",
+    "scheduled_process_constructing_take",
+    "scheduled_process_exited_take",
+    "scheduled_process_running_take",
+    "scheduled_process_blocked_take",
+    "kernel_process_clone_begin",
+)})
+DESTRUCTIVE = {
+    "scheduled_process_slot_remove": "record_mutates_ProcessRunGuard",
+    "scheduled_process_reap_remove": "record_mutates_ScheduledProcessOwner",
+}
+PRIVATE = (
+    "scheduled_process_record_at", "scheduled_process_record_of",
+    "scheduled_process_owner_new", "process_running_new",
+)
+FN_RE = re.compile(r"^(private )?fn (\w+)\(")
+CALL_RE = re.compile(r"\bscheduled_process_record_(at|of)\s*\(")
+OWNER_RE = re.compile(r"\bscheduled_process_owner_new\s*\(")
+
+
+def problems(text: str) -> list[str]:
+    raw = Counter()
+    owners = Counter()
+    bodies: dict[str, list[str]] = {}
+    private = set()
+    enclosing = "<file scope>"
+    for line in text.splitlines():
+        code = line.split("//", 1)[0]
+        match = FN_RE.match(code)
+        if match:
+            enclosing = match[2]
+            bodies[enclosing] = []
+            if match[1]:
+                private.add(enclosing)
+        if enclosing in bodies:
+            bodies[enclosing].append(code)
+        calls = code[match.end():] if match else code
+        raw.update((enclosing, m[1]) for m in CALL_RE.finditer(calls))
+        owners[enclosing] += len(OWNER_RE.findall(calls))
+    owners = +owners
+    result = []
+    if sum(raw.values()) != BUDGET or raw != RAW_CALLS:
+        result.append("raw record lookup must occur exactly once in each of "
+                      "the five declared accessor bodies")
+    if owners != OWNER_MINTS:
+        result.append("scheduled ownership mints differ from the seven "
+                      "reviewed allocation/state-transfer bodies")
+    for name in PRIVATE:
+        if name not in private:
+            result.append(f"{name} must remain private to its mint module")
+    for name, required in DESTRUCTIVE.items():
+        body = "\n".join(bodies.get(name, []))
+        header = re.match(r"^(?:private )?fn \w+\([\s\S]*?\)\s*!\{([^}]*)\}", body)
+        effects = [] if header is None else [word.strip() for word in header[1].split(",")]
+        if required not in effects:
+            result.append(f"{name} must declare {required} at its destructive boundary")
+    return result
 
 
 def main() -> int:
-    lines = PATH.read_text().splitlines()
-    uses = 0
-    for line in lines:
-        if DEF_RE.match(line):
-            continue
-        code = line.split("//", 1)[0]
-        uses += len(CALL_RE.findall(code))
-    if uses > BUDGET:
-        print(f"FAIL process-record-bare-uses: {PATH}: {uses} bare "
-              f"scheduled_process_record_at/_of call(s), over the budget of "
-              f"{BUDGET}; reach the record through the run guard, an owner, "
-              f"ProcessRunning or the peek instead (#693)", file=sys.stderr)
-        return 1
-    if uses < BUDGET:
-        print(f"FAIL process-record-bare-uses: {PATH}: {uses} bare "
-              f"call(s), under the budget of {BUDGET}; lower BUDGET in "
-              f"{__file__} to {uses} in this commit", file=sys.stderr)
+    failures = problems(PATH.read_text())
+    if failures:
+        for failure in failures:
+            print("FAIL process-record-bare-uses: " + failure, file=sys.stderr)
         return 1
     report_pass("process-record-bare-uses",
-                f"{uses} bare scheduled_process_record_at/_of call(s) in "
-                f"{PATH}, equal to its budget, across {len(lines)} lines",
-                lines=len(lines), uses=uses)
+                "five declared raw lookup bodies, seven ownership mint bodies, "
+                "private constructors and both destructive loan contracts",
+                uses=BUDGET, owner_mints=sum(OWNER_MINTS.values()))
     return 0
 
 

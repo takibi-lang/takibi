@@ -173,6 +173,31 @@ unlink and the Exited take only; the teardown after it runs outside,
 because a world stop reached from there needs peers able to acknowledge
 it.
 
+## ProcessRecord pointer lifetimes
+
+Ordinary record pointers borrow the process-run guard, the scheduled owner, or
+Running evidence. The owner and Running paths need no additional run lock or
+pin. These authority indices have different meanings (generation, slot, lock
+address); they are not proof of different physical records.
+
+`scheduled_process_slot_remove` declares
+`record_mutates_ProcessRunGuard`; `scheduled_process_reap_remove` declares
+`record_mutates_ScheduledProcessOwner`. The compiler rejects a live record loan
+at either boundary, including through helpers or another authority kind. End
+the pointer's lexical scope before destruction. Scalar snapshots can survive.
+This catches removal by the same lock holder as well as use after unlock.
+
+The private lookup bodies remain trusted address-to-authority mints: they drop
+the intrusive pool's view and replace it with the caller's lifetime authority.
+The run lock excludes peer removal, ownership excludes removal without consuming
+that owner, and Running processes cannot be reaped. This is not a proof of the
+scheduler/allocator or a reason to remove field locks. Kernel preemption must
+revisit whether Running authority can survive suspension and migration.
+
+The compiler check adds no instruction or lock section. It preserves current
+parallelism but does not reduce existing run-lock contention. Unlocked retained
+readers without these authorities would need a separate reclamation protocol.
+
 ## Signal words
 
 `pending_signals` and `signal_mask` are read-modify-written by a sender on

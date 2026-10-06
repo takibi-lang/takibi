@@ -15,6 +15,26 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-10-06: authority-derived record loans
+
+The maintainer selected checker-only destructive record contracts after a
+compiler prototype exercised run-guard, Running and owner boundaries (#693).
+`record_mutates_<Authority>` requires one indexed affine/linear authority
+parameter and rejects calls while a derived loan may still refer to its record.
+Different literal indices separate only within the same authority kind;
+different authority kinds and unknown identities conservatively overlap.
+Argument temporaries are loans too. Existing compiler-generated RegionPin
+owners independently protect their payload; user source cannot forge their
+reserved source provenance. No new pin, lock, field or runtime check is emitted.
+
+ProcessRecord removal declares both contracts and its ownership constructor is
+private. Authority mint correctness and remote scheduling/reaper lifetimes
+remain trusted. Executable tests cover all three paths and stale generations;
+compiler rejection tests cover destructive aliases and temporary arguments.
+A source gate pins the reviewed accessor/mint scopes and contracts. Its negative
+controls caught an initial scanner omission of calls on a function header line;
+scanning the remainder of that line removes the blind spot.
+
 ## 2026-10-05: current-layout production pool space baseline
 
 The maintainer chose to measure before moving pool locks, padding contexts,

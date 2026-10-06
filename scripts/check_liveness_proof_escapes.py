@@ -57,8 +57,10 @@ ALLOWED = {
         "yet reaped. Since #693 step 7 its only callers are the authority "
         "makers' own bodies (record_of and the run-guard, owner and running "
         "accessors built on it), held at five by "
-        "scripts/check_process_record_bare_uses.py; removing it needs those "
-        "makers to carry the pool's proof, which is #637 stage 2",
+        "scripts/check_process_record_bare_uses.py. Destructive record annotations "
+        "reject local live loans across removal without a new pin; the mint "
+        "and remote scheduling/reaper protocol still supply the allocation "
+        "lifetime after this private accessor drops the pool view",
     ("kernel/kernel/process.tkb", "scheduled_process_record_peek"):
         "deliberately tolerates a dead slot for crash and trace paths, and "
         "returns the pointer",

@@ -2402,7 +2402,7 @@ must_use variant ScheduledProcessBlockedTakeResult {
              ScheduledProcessState[process, ProcessState::Blocked]));
 }
 
-fn scheduled_process_owner_new(
+private fn scheduled_process_owner_new(
         slot: usize,
         generation: usize @ process) -> ScheduledProcessOwner[process] {
     let mut owner: ScheduledProcessOwner[process] = { slot, generation };
@@ -2642,9 +2642,11 @@ private fn scheduled_process_release_slot_resources(slot: usize) !{unsafe} {
 // under that lock, through scheduled_process_record_at's escaped pointer;
 // a removal outside it could scrub and free a record between one of those
 // probes and its read. See scheduled_process_reap_teardown.
+// The destructive annotation also excludes this lock holder's live record
+// loans, including loans through another authority. It adds no pin or lock.
 private fn scheduled_process_slot_remove(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock],
-        slot: usize) !{unsafe} {
+        slot: usize) !{unsafe, record_mutates_ProcessRunGuard} {
     if (slot == 0) {
         scheduled_process_boot_live = false;
         return;
@@ -3580,12 +3582,14 @@ fn scheduled_process_reap_teardown(
 // The record itself goes last: the teardown still needed to read it. Reset
 // first, because slot 0's record is a static that survives -- for a pool
 // slot the reset is written into memory about to be handed back, which
-// costs a few stores and keeps one rule instead of two.
+// costs a few stores and keeps one rule instead of two. The record annotation
+// checks live loans before any reset, even though the guard itself is borrowed.
 fn scheduled_process_reap_remove(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock],
         owner: sink ScheduledProcessOwner[process],
         state: sink ScheduledProcessState[process, ProcessState::Reapable])
-        !{unsafe, invalidates_ProcessHandle} {
+        !{unsafe, invalidates_ProcessHandle,
+           record_mutates_ScheduledProcessOwner} {
     scheduled_process_state_drop(state);
     scheduled_process_record_reset(guard, owner.pool_index);
     scheduled_process_slot_remove(guard, owner.pool_index);
