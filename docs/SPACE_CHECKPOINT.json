@@ -2,13 +2,13 @@
   "date": "2026-10-07",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "e74ea74531915932aa3e4c6c0ba3bae170ebeb624ce94bd3a96ed7ffccf794fa",
-  "workload": "Standard production linked QEMU/RPi5 images against published 35c49a52; bounded DDB process-pool copying and CPU-start/stop guards. Saved IRQ flags are local token words. Pool payload, allocation, retained pages and occupancy do not change; existing endpoint evidence is reused only for those unchanged boundaries.",
+  "source_sha256": "40018ec3651168024f7d3b6ade6fe78a85fd4ca5ebea978d1176ae50ffbde3e6",
+  "workload": "Standard production QEMU/RPi5 linked images against published aa30a644; shared bounded boot holds actual VM, FD context and descriptor pool guards and requires nonblocking Busy refusal. Native fixture covers inspection value, alignment, generation, membership, free and shrink. Pool payload, metadata, allocation, retained pages and occupancy are unchanged; existing endpoint evidence is reused only for those boundaries.",
   "evidence": [
     "docs/STOPPED_DIAGNOSTIC_AUTHORITY.md",
     "docs/CPU_PARTICIPANT_AUTHORITY.md",
     "docs/PROCESS_RECORD_AUTHORITY_ENDPOINT_2026-10-06.tsv"
   ],
-  "assessment": "Adopt indexed stopped process-pool views and initiator IRQ exclusion using existing guard contracts. Read-only allocation grows by 1328 bytes QEMU and 1424 bytes RPi5; data and reserved spans remain unchanged (2392064 and 5308416 bytes). QEMU aggregate BSS shrinks 16 bytes. No new runtime pin, lock or per-process field. Local static rejection is not proof of physical IRQ masking/holding. RegionPool VM/FD inspection, fatal-console/normal diagnostic migration and raw authority confinement remain unfinished.",
-  "next_trigger": "Measure at RegionPool inspection or fatal-console migration, a new resource lifetime, or completion of the safe-memory stage."
+  "assessment": "Adopt three one-word scoped inspection types and explicit Busy/Stale diagnostics. Read-only allocation grows 5024 bytes QEMU and 4936 bytes RPi5; data, BSS and reserved image spans remain unchanged (2392064 and 5308416 bytes). No new pin, lock or per-process field. Local lifetime/IRQ rejection and bounded WorldStop evidence do not prove physical holding or native metadata validity. Fatal-console/normal diagnostic migration and raw authority confinement remain unfinished.",
+  "next_trigger": "Measure at fatal-console migration, a changed allocation workload or completion of the safe-memory stage."
 }
