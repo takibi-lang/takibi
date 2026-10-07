@@ -203,3 +203,10 @@ Candidate ELF SHA-256:
 
 - QEMU: 818465f831183236d0031878c87bc4d0973b16b22d55ef068b4881971bf92fe0
 - RPi5: 4d4d108ccd975303d2f6f522f7397d5ecb1e36a751912ebd6d8268cf84f4ea62
+
+Regression evidence uses the real two-core QEMU kernel: the standard fixed
+image emits the consecutive-stop success verdict; an isolated source overlay
+reverting only sequence-base normalization emits `stopped root publication:
+failed`. The fixed UART DDB lane reports two matched roots with no attribution
+mismatches, walks the stopped peer, agrees with GDB and resumes. Publication
+still requires a separate clean exact-HEAD allcheck with actual RPi5 execution.
