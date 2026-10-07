@@ -8,12 +8,12 @@ Two activation paths (exec's, and a fork child's first return) answered
 either one with kernel_syscall_fail_stop. #584's four-core churn run then
 fail-stopped the whole kernel at the ASID counter's first wrap.
 
-The rule: in every `WorldStopResult::Busy` or `WorldStopResult::Partial` arm
+The rule: in every WorldStopResult or MachineStopResult Busy/Partial arm
 under kernel/, no fail-stop call. The arm may retry, yield, report or return
 an error; the fail-stop is reserved for a Complete stop that a terminal path
 keeps (world_stop_keep_forever).
 
-Lexical: an arm is the text from its `=>` to the next `WorldStopResult::`
+Lexical: an arm is the text from its `=>` to the next stop-result constructor
 or the end of the enclosing match. What it cannot see is a refusal turned into
 another value and failed on elsewhere: #632's fork-child path returned
 Invalid from kernel_process_activate_current_root, and its caller
@@ -29,8 +29,8 @@ import sys
 from pass_line import report_pass
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-ARM = re.compile(r"WorldStopResult::(Busy|Partial)\b[^=]*=>")
-NEXT_ARM = re.compile(r"WorldStopResult::\w+")
+ARM = re.compile(r"(?:WorldStopResult|MachineStopResult)::(Busy|Partial)\b[^=]*=>")
+NEXT_ARM = re.compile(r"(?:WorldStopResult|MachineStopResult)::\w+")
 FAIL_STOP = re.compile(r"\b\w*fail_stop\s*\(")
 
 
@@ -55,7 +55,7 @@ def problems_in(text: str, relative: str) -> tuple[int, list[str]]:
         code = "\n".join(part.split("//", 1)[0] for part in body.splitlines())
         if FAIL_STOP.search(code):
             problems.append(
-                f"{relative}:{line}: the WorldStopResult::{kind} arm "
+                f"{relative}:{line}: the world-stop {kind} arm "
                 "fail-stops. A refused stop is ordinary under load -- another "
                 "core may hold it -- so wait it out and retry, or hand the "
                 "work back (#632)")
@@ -77,8 +77,16 @@ def control() -> bool:
         }
     }
 """
-    arms, found = problems_in(planted, "control")
-    return arms == 2 and len(found) == 2
+    for result in ("WorldStopResult", "MachineStopResult"):
+        sample = planted.replace("WorldStopResult", result)
+        arms, found = problems_in(sample, "control")
+        if arms != 2 or len(found) != 2:
+            return False
+        safe = sample.replace("kernel_syscall_fail_stop(sp);", "return;")
+        arms, found = problems_in(safe, "control")
+        if arms != 2 or found:
+            return False
+    return True
 
 
 def main() -> int:
@@ -92,7 +100,8 @@ def main() -> int:
     problems = []
     for path in sorted((REPO / "kernel").rglob("*.tkb")):
         text = path.read_text()
-        if "WorldStopResult::" not in text:
+        if not any(name + "::" in text for name in
+                   ("WorldStopResult", "MachineStopResult")):
             continue
         files += 1
         arms, found = problems_in(text, str(path.relative_to(REPO)))
