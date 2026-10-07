@@ -2239,7 +2239,7 @@ private fn ddb_render_proc(pid: usize) !{unsafe} {
 // the UART source and interrupt controller were acknowledged, but remains an
 // interrupt function: no semantic exception is made for debugger code.
 private fn kernel_ddb_enter_stopped(
-        stopped_world: borrow WorldStopped[id],
+        stopped_world: borrow WorldStopped[&kernel_world_stop],
         frame_sp: usize, entry_kind: usize, entry_source: usize)
         !{interrupt, unsafe} {
     unsafe {
@@ -2288,7 +2288,8 @@ private fn kernel_ddb_enter_stopped(
             kernel_fd_table_crash_object(ddb_snapshot.root_slot, fd);
     }
     let mut process_copy: ProcessDdbCopyResult =
-        kernel_process_ddb_copy(ddb_snapshot.processes as []ProcessDdbRecord);
+        kernel_process_ddb_copy(stopped_world,
+            ddb_snapshot.processes as []ProcessDdbRecord);
     ddb_snapshot.process_count = process_copy.count;
     ddb_snapshot.process_truncated = 0;
     if (process_copy.truncated) { ddb_snapshot.process_truncated = 1; }

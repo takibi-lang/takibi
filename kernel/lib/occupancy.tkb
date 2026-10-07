@@ -271,7 +271,8 @@ private fn world_stop_resume(stop: *WorldStop @ id) !{unsafe} {
 }
 
 fn world_stop_release(stopped: sink WorldStopped[id],
-                      stop: *WorldStop @ id) !{unsafe} {
+                      stop: *WorldStop @ id)
+        !{unsafe, changes_witness_WorldStopped} {
     world_stop_resume(stop);
 }
 

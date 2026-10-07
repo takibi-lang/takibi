@@ -310,7 +310,13 @@ fn world_stop_probe() -> bool !{unsafe} {
                         world_stop_partial_release(partial, &kernel_world_stop);
                     }
                     WorldStopResult::Complete(unexpected) => {
-                        world_stop_release(unexpected, &kernel_world_stop);
+                        // Two complete tokens for the claimed controller
+                        // would break the mint contract. Never resume one
+                        // while the other still authorizes inspection.
+                        world_stop_keep_forever(unexpected);
+                        world_stop_keep_forever(stopped);
+                        kernel_syscall_fail_stop(0);
+                        return false;
                     }
                 }
                 world_stop_release(stopped, &kernel_world_stop);

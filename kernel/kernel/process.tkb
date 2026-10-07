@@ -1433,6 +1433,7 @@ fn kernel_process_protocol_trace_close() -> usize {
 // are probed and at most 32 live records copied. A truncated result is an
 // explicit diagnostic fact, never silently presented as the whole table.
 fn kernel_process_ddb_copy(
+        stopped: borrow WorldStopped[&kernel_world_stop],
         output: borrow [ProcessDdbRecord; DDB_PROCESS_RECORDS..])
         -> ProcessDdbCopyResult !{unsafe} {
     let mut count: usize = 0;
