@@ -1,4 +1,4 @@
 (test
  (name test_takibi)
- (deps %{exe:../bin/main.exe})
+ (deps %{exe:../bin/main.exe} ../kernel/lib/occupancy.tkb)
  (libraries takibi alcotest unix))

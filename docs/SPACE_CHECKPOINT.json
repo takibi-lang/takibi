@@ -2,12 +2,12 @@
   "date": "2026-10-07",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "c7b96e6abb0c70f18ea37f52ceb809826f3e617aaea1a3356fc9adc34ab7ce49",
+  "source_sha256": "5402d0d9d7b3270c4e3abcdb5d7b05f729571f6acf519ab6b676bb42071f4ba5",
   "workload": "Standard production linked QEMU/RPi5 images against published 1ddb61f2 and the existing bounded DDB process-copy workload. No allocation, payload, pool metadata, retention or occupancy changes; previous endpoint evidence is reused only for these unchanged boundaries. Image allocation and page reservation are measured separately.",
   "evidence": [
     "docs/STOPPED_DIAGNOSTIC_AUTHORITY.md",
     "docs/PROCESS_RECORD_AUTHORITY_ENDPOINT_2026-10-06.tsv"
   ],
-  "assessment": "Adopt indexed linear-struct context-change checking and the complete machine-stop admission/resume boundary. llvm-size read-only allocation grows by 64 bytes on each platform; data/BSS and image reservation are unchanged (QEMU 2392064 bytes; RPi5 5308416). No new pin, lock, runtime generation field or reclamation counter. This is local compile-time exclusion, not proof of remote CPU quiescence, diagnostic pool derivation, or physical cache/timing safety. Remaining diagnostic escapes are explicitly retained as unfinished lifetime work, not renamed as removed.",
+  "assessment": "Adopt indexed linear-struct context-change checking and the complete machine-stop admission/resume boundary. The one private physical resume operation invalidates both complete and partial authorities; direct callers inherit this summary. llvm-size read-only allocation grows by 192 bytes on QEMU and 208 on RPi5; data/BSS and image reservation are unchanged (QEMU 2392064 bytes; RPi5 5308416). No new pin, lock, runtime generation field or reclamation counter. This is local compile-time exclusion, not proof of remote CPU quiescence, diagnostic pool derivation, or physical cache/timing safety. Remaining diagnostic escapes are explicitly retained as unfinished lifetime work, not renamed as removed.",
   "next_trigger": "Measure again when diagnostic pool access or fatal-console authority changes, a new lifetime/resource is introduced, or the full safe-memory stage completes. Repeat cross-OS measurements only when its normalized boundary changes."
 }

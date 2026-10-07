@@ -21158,6 +21158,89 @@ let stopped_diagnostic_tests =
       }|};
   ]
 
+(* Use the production resume bodies, not a copied effect annotation. Only the
+   atomic primitive and authority mint are stubbed; no CPU stop is simulated. *)
+let infer_production_stop_boundary code =
+  let path = List.find Sys.file_exists
+      ["../kernel/lib/occupancy.tkb"; "kernel/lib/occupancy.tkb"] in
+  let channel = open_in_bin path in
+  let source = Fun.protect ~finally:(fun () -> close_in channel)
+      (fun () -> really_input_string channel (in_channel_length channel)) in
+  let parse_here source =
+    let lexbuf = Lexing.from_string source in
+    Lexing.set_filename lexbuf "kernel/lib/occupancy.tkb";
+    Parser.program Lexer.read lexbuf in
+  let primitives = parse {|
+    const KERNEL_MAX_CORES: usize = 4;
+    struct no_copy AtomicWord { private value: usize; }
+    fn atomic_word_store(cell: *AtomicWord, value: usize) !{unsafe} {}
+  |} in
+  let types = ["WorldStop"; "WorldStopped"; "WorldStopPartial"] in
+  let functions = ["world_stop_resume"; "world_stopped_end";
+    "world_stop_partial_end"; "world_stop_release"; "world_stop_partial_release"] in
+  let boundary = List.filter (function
+    | Ast.StructDef (name, _, _, _, _, _)
+    | Ast.OwnedStructDef (name, _, _, _, _, _, _, _, _) -> List.mem name types
+    | Ast.FuncDef f -> List.mem f.name functions
+    | _ -> false) (parse_here source) in
+  Alcotest.(check int) "all production boundary declarations extracted" 8
+    (List.length boundary);
+  let harness = parse_here ({|
+    struct Record { value: usize; }
+    private let mut machine: WorldStop;
+    private let mut record: Record;
+    private fn mint(controller: *WorldStop @ s) -> WorldStopped[s] {
+      let mut stopped: WorldStopped[s] = { 1, 0 }; return stopped;
+    }
+    private fn partial(controller: *WorldStop @ s) -> WorldStopPartial[s] {
+      let mut stopped: WorldStopPartial[s] = { 1, 0, 0 }; return stopped;
+    }
+    private fn loan(stopped: borrow WorldStopped[s]) -> *Record @ s { return &record; }
+  |} ^ code) in
+  Type_inf.infer_program (Declared_type_resolver.run
+    (Monomorphize.run (Dma_fixed_record.run
+      (Publish_record.run (primitives @ boundary @ harness)))))
+
+let production_stop_boundary_tests =
+  let good name code = Alcotest.test_case name `Quick
+      (fun () -> ignore (infer_production_stop_boundary code)) in
+  let bad name code = Alcotest.test_case name `Quick (fun () ->
+    match infer_production_stop_boundary code with
+    | _ -> Alcotest.fail "production resume accepted a live stopped authority loan"
+    | exception Types.TypeError (_, message) ->
+        Alcotest.(check bool) "specific witness rejection" true
+          (contains_substring message "contains a live WorldStopped witness")
+    | exception Types.MultiTypeError errors ->
+        Alcotest.(check bool) "specific witness rejection" true
+          (List.exists (fun (_, message) ->
+            contains_substring message "contains a live WorldStopped witness") errors)) in
+  [
+    good "production complete release after scalar copy" {|
+      fn probe() -> usize {
+        let stopped = mint(&machine); let value = loan(stopped).value;
+        world_stop_release(stopped, &machine); return value;
+      }|};
+    good "production partial release without complete authority" {|
+      fn probe() { let incomplete = partial(&machine);
+        world_stop_partial_release(incomplete, &machine); }|};
+    bad "production complete release rejects live loan" {|
+      fn probe() {
+        let stopped = mint(&machine); let ptr = loan(stopped);
+        world_stop_release(stopped, &machine);
+      }|};
+    bad "production partial release rejects complete authority" {|
+      fn probe() {
+        let stopped = mint(&machine); let incomplete = partial(&machine);
+        world_stop_partial_release(incomplete, &machine);
+        world_stop_release(stopped, &machine);
+      }|};
+    bad "production resume rejects a loan after token consumption" {|
+      fn probe() {
+        let stopped = mint(&machine); let ptr = loan(stopped);
+        world_stopped_end(stopped); world_stop_resume(&machine);
+      }|};
+  ]
+
 let named_groups_unisolated = [
   "core",     core_tests;
   "parser",   parser_tests;
@@ -21171,6 +21254,7 @@ let named_groups_unisolated = [
   "record-loan-contracts", record_loan_contract_tests;
   "record-loan-boundaries", record_boundary_tests;
   "stopped-diagnostics", stopped_diagnostic_tests;
+  "production-stop-boundary", production_stop_boundary_tests;
 ]
 
 (* Each Alcotest case represents a fresh compiler invocation. In particular,
