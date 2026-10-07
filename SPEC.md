@@ -3938,14 +3938,15 @@ investigations behind any of these, see `HISTORY.md`.
   directly with a real checked bounds check, for a FieldGet chain of any
   depth (`a.b.c[i]`); only Index-as-a-base remains unsupported.
 
-## Logical Context Changes and Erased Witnesses
+## Logical Context Changes and Witnesses
 
-`changes_witness_<View>` is a checker-only context-change annotation. `<View>`
-must name an indexed linear erased view. A Takibi or extern function may carry
-it; resolved direct callers inherit its context-change summary automatically.
+`changes_witness_<Authority>` is a checker-only context-change annotation.
+`<Authority>` must name an indexed linear view or struct. A Takibi or extern
+function may carry it; resolved direct callers inherit its context-change
+summary automatically.
 The annotation describes replacement of one logical context, not destruction
-of a particular allocation. Different generation or phase indices of that view
-kind therefore do not establish independence.
+of a particular allocation. Different generation or phase indices of that
+authority kind therefore do not establish independence.
 
 At a changing call, every live binding containing that witness kind must have
 been consumed. Owned arguments are transferred before this check; a borrowed
@@ -3970,10 +3971,21 @@ A caller may pass its sole `Current` to `handoff`. It cannot keep another
 while the second is evaluated. Existing erased-view aggregate rules also
 prevent hiding witnesses in runtime fields or tuples.
 
+Authority-derived pointer and slice loans must also leave lexical scope before
+a changing call. Consuming the authority at that call does not end the loan's
+scope, even when the pointer is not read afterwards. This includes aliases,
+address-preserving casts and arguments to a changing helper. For example, a
+loan derived from a borrowed `WorldStopped[stop]` cannot overlap a release
+marked `changes_witness_WorldStopped`. A scalar copied out before release can
+survive it. Unlike `record_mutates_<Authority>`, this does not claim that
+other authority kinds protect possibly reclaimed allocations: an independent
+page-owner loan can survive resuming the world. Reclamation still requires
+its own destructive record boundary.
+
 Changing functions and their direct callers cannot be used as runtime function
 values: a runtime function type does not carry this ownership boundary. Calls
 to independent callbacks remain permitted. Unsafe manufactured function
-pointers, extern implementations, truthful view mints, completeness of context
+pointers, extern implementations, truthful authority mints, completeness of context
 change annotations, and remote context/reclamation protocols remain trusted.
 This rule checks local ownership at declared boundaries; it does not infer
 context replacement from arbitrary writes or prove cross-core exclusion.

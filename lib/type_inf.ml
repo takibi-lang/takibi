@@ -9614,10 +9614,16 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       match Effect_rules.witness_change_annotation word with
       | None -> seeds
       | Some kind ->
-          if Hashtbl.find_opt view_kinds kind <> Some Ast.KindLinear
-             || Option.value (Hashtbl.find_opt view_params kind) ~default:[] = []
+          let indexed_linear_view =
+            Hashtbl.find_opt view_kinds kind = Some Ast.KindLinear
+            && Option.value (Hashtbl.find_opt view_params kind) ~default:[] <> [] in
+          let indexed_linear_struct = List.exists (function
+            | Ast.OwnedStructDef (name, Ast.KindLinear, indices, _, _, _, _, _, _)
+              when name = kind && indices <> [] -> true
+            | _ -> false) prog in
+          if not (indexed_linear_view || indexed_linear_struct)
           then raise (TypeError (loc,
-            "witness change annotation requires an indexed linear view"));
+            "witness change annotation requires an indexed linear view or struct"));
           let existing = Option.value (StringMap.find_opt kind seeds)
             ~default:StringSet.empty in
           StringMap.add kind (StringSet.add key existing) seeds)
@@ -10710,7 +10716,21 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                 !pending_witness_arguments;
               List.iter (fun (binding, sources) -> PathSet.iter (function
                 | PVar (id, source) -> reject binding (binding_type id source)
-                | _ -> ()) sources) !pending_region_arguments
+                | _ -> ()) sources) !pending_region_arguments;
+              (* Consuming a witness at this call does not end a lexical
+                 loan's scope. Check its original authority even when the
+                 argument move has consumed that authority. Unrelated owners
+                 remain valid: changing a stop context is not reclamation. *)
+              let reject_loan binding sources = PathSet.iter (function
+                | PVar (id, source) -> reject binding (binding_type id source)
+                | PField _ -> ()) sources in
+              PathSet.iter (function
+                | PVar (_, binding) as path
+                  when not (ResourceFlow.may_be_consumed path moved) ->
+                    reject_loan binding (TaintEnv.get binding taints)
+                | _ -> ()) !active_declared;
+              List.iter (fun arg ->
+                reject_loan (taint_source_name arg) (expr_taint taints arg)) args
             end) witness_changes;
           let returns_obligation = match StringMap.find_opt target call_returns with
             | Some ty -> is_linear_type ty || is_must_use_type ty

@@ -79,7 +79,7 @@ let record_mutation_annotation name =
       (String.length name - String.length prefix))
   else None
 
-(* A logical-context replacement cannot overlap its erased witness kind. *)
+(* A logical-context replacement cannot overlap its linear witness kind. *)
 let witness_change_annotation name =
   let prefix = "changes_witness_" in
   if String.starts_with ~prefix name && String.length name > String.length prefix

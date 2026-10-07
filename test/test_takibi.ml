@@ -21009,6 +21009,137 @@ let witness_change_tests =
         fn probe() { take(Hold::Held(mint(1)), changed()); }|};
     bad "external replacement obeys the same local boundary"
       {|extern fn foreign() !{changes_witness_Current}; fn probe(current: Current[g]) { foreign(); end(current); }|};
+    bad "erased witness loan remains until scope end" {|
+      private let mut cell: usize;
+      private fn access(current: borrow Current[g]) -> *usize @ g { return &cell; }
+      fn probe() {
+        let current = mint(1); let ptr = access(current);
+        end(current); replace();
+      }|};
+    good "erased witness scalar survives replacement" {|
+      private let mut cell: usize;
+      private fn access(current: borrow Current[g]) -> *usize @ g { return &cell; }
+      fn probe() -> usize {
+        let current = mint(1); let value: usize = *access(current);
+        end(current); replace(); return value;
+      }|};
+  ]
+
+(* Stopped diagnostic loans use the existing authority and destructive rules.
+   These controls do not prove the acknowledgement mint or remote exclusion. *)
+let stopped_diagnostic_fixture = {|
+struct Stop { word: usize; }
+struct Record { value: usize; }
+linear struct Stopped[stop: addr] { private owner: usize; }
+linear struct Partial[stop: addr] { private owner: usize; }
+linear view RunGuard[lock: addr];
+linear view PageOwner[page: usize];
+private let mut machine: Stop;
+private let mut other_machine: Stop;
+private let mut record: Record;
+private fn mint(controller: *Stop @ s) -> Stopped[s] {
+    let mut stopped: Stopped[s] = { 0 }; return stopped;
+}
+private fn partial(controller: *Stop @ s) -> Partial[s] {
+    let mut stopped: Partial[s] = { 0 }; return stopped;
+}
+fn release(stopped: sink Stopped[s], controller: *Stop @ s)
+        !{changes_witness_Stopped} { controller.word = 0; }
+fn partial_release(stopped: sink Partial[s]) {}
+fn diagnostic_copy(stopped: borrow Stopped[&machine]) -> usize { return record.value; }
+private fn diagnostic_loan(stopped: borrow Stopped[s]) -> *Record @ s {
+    return &record;
+}
+fn reclaim(guard: borrow RunGuard[lock]) !{record_mutates_RunGuard} { record.value = 0; }
+fn resume_helper(stopped: sink Stopped[s], controller: *Stop @ s) {
+    release(stopped, controller);
+}
+|}
+
+let stopped_diagnostic_tests =
+  let bad name message code = Alcotest.test_case name `Quick
+    (expect_type_error message (stopped_diagnostic_fixture ^ code)) in
+  [
+    Alcotest.test_case "copy complete stop then resume" `Quick
+      (fun () -> ignore (infer (stopped_diagnostic_fixture ^ {|
+        fn probe() -> usize {
+          let stopped = mint(&machine);
+          let value = diagnostic_copy(stopped);
+          release(stopped, &machine); return value;
+        }|})));
+    Alcotest.test_case "loan scope ends before resume" `Quick
+      (fun () -> ignore (infer (stopped_diagnostic_fixture ^ {|
+        fn probe() -> usize {
+          let stopped = mint(&machine); let mut value: usize = 0;
+          { let ptr = diagnostic_loan(stopped); value = ptr.value; }
+          release(stopped, &machine); return value;
+        }|})));
+    Alcotest.test_case "independent page authority survives resume" `Quick
+      (fun () -> ignore (infer (stopped_diagnostic_fixture ^ {|
+        private fn page_at(owner: borrow PageOwner[p]) -> *Record @ p { return &record; }
+        fn probe(page: borrow PageOwner[p]) -> usize {
+          let stopped = mint(&machine); let ptr = page_at(page);
+          release(stopped, &machine); return ptr.value;
+        }|})));
+    bad "partial is not inspection authority" "struct type mismatch" {|
+      fn probe() -> usize {
+        let stopped = partial(&machine); let value = diagnostic_copy(stopped);
+        partial_release(stopped); return value;
+      }|};
+    bad "another stop domain cannot inspect" "static value mismatch" {|
+      fn probe() -> usize {
+        let stopped = mint(&other_machine); let value = diagnostic_copy(stopped);
+        release(stopped, &other_machine); return value;
+      }|};
+    bad "complete stop cannot release another controller" "static value mismatch" {|
+      fn probe() { let stopped = mint(&machine); release(stopped, &other_machine); }|};
+    bad "inspection requires authority operand" "argument" {|
+      fn probe() -> usize { return diagnostic_copy(); }|};
+    bad "resume rejects a live diagnostic loan" "contains a live Stopped witness" {|
+      fn probe() -> usize {
+        let stopped = mint(&machine); let ptr = diagnostic_loan(stopped);
+        release(stopped, &machine); return ptr.value;
+      }|};
+    bad "resume rejects a live loan even without later use" "contains a live Stopped witness" {|
+      fn probe() {
+        let stopped = mint(&machine); let ptr = diagnostic_loan(stopped);
+        release(stopped, &machine);
+      }|};
+    bad "resume helper rejects a live diagnostic loan" "contains a live Stopped witness" {|
+      fn probe() -> usize {
+        let stopped = mint(&machine); let ptr = diagnostic_loan(stopped);
+        resume_helper(stopped, &machine); return ptr.value;
+      }|};
+    bad "pointer alias retains stopped authority" "contains a live Stopped witness" {|
+      fn probe() -> usize {
+        let stopped = mint(&machine); let ptr = diagnostic_loan(stopped); let alias = ptr;
+        release(stopped, &machine); return alias.value;
+      }|};
+    bad "address cast retains stopped authority" "contains a live Stopped witness" {|
+      fn probe() -> usize {
+        let stopped = mint(&machine); let address: usize = diagnostic_loan(stopped) as usize;
+        release(stopped, &machine); return address;
+      }|};
+    bad "resume callback cannot escape its summary" "cannot be used as runtime function pointers" {|
+      fn probe() { let callback = resume_helper; }|};
+    bad "reclamation rejects a stopped diagnostic loan" "may invalidate live derived value" {|
+      fn probe(guard: borrow RunGuard[lock]) -> usize {
+        let stopped = mint(&machine); let ptr = diagnostic_loan(stopped);
+        reclaim(guard); let value = ptr.value; release(stopped, &machine); return value;
+      }|};
+    bad "borrowed diagnostic loan cannot resume" "contains a live Stopped witness" {|
+      fn read(ptr: borrow *Record, stopped: sink Stopped[s], controller: *Stop @ s) -> usize {
+        release(stopped, controller); return ptr.value;
+      }
+      fn probe() -> usize {
+        let stopped = mint(&machine);
+        return read(diagnostic_loan(stopped), stopped, &machine);
+      }|};
+    bad "unknown callback with diagnostic loan is conservative" "may invalidate live derived value" {|
+      fn probe(callback: fn() -> void) -> usize {
+        let stopped = mint(&machine); let ptr = diagnostic_loan(stopped);
+        callback(); let value = ptr.value; release(stopped, &machine); return value;
+      }|};
   ]
 
 let named_groups_unisolated = [
@@ -21023,6 +21154,7 @@ let named_groups_unisolated = [
   "witness-changes", witness_change_tests;
   "record-loan-contracts", record_loan_contract_tests;
   "record-loan-boundaries", record_boundary_tests;
+  "stopped-diagnostics", stopped_diagnostic_tests;
 ]
 
 (* Each Alcotest case represents a fresh compiler invocation. In particular,
