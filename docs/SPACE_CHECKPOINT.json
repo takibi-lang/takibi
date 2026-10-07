@@ -2,12 +2,13 @@
   "date": "2026-10-07",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "c61cdf8aea8e03323a824448b768b428b0e82cfec2810ed75533e4b5c1d241e6",
-  "workload": "Standard production linked QEMU/RPi5 images against published eaf01fbe, bounded bootstrap CPU_ON attempts and DDB process-copy inspection. The participant word is per controller, with no allocation, payload, retained-page or occupancy change; existing endpoint evidence is reused only for those unchanged boundaries.",
+  "source_sha256": "e74ea74531915932aa3e4c6c0ba3bae170ebeb624ce94bd3a96ed7ffccf794fa",
+  "workload": "Standard production linked QEMU/RPi5 images against published 35c49a52; bounded DDB process-pool copying and CPU-start/stop guards. Saved IRQ flags are local token words. Pool payload, allocation, retained pages and occupancy do not change; existing endpoint evidence is reused only for those unchanged boundaries.",
   "evidence": [
+    "docs/STOPPED_DIAGNOSTIC_AUTHORITY.md",
     "docs/CPU_PARTICIPANT_AUTHORITY.md",
     "docs/PROCESS_RECORD_AUTHORITY_ENDPOINT_2026-10-06.tsv"
   ],
-  "assessment": "Adopt typed CPU_ON reservation and captured full-machine participant authority. Read-only allocation grows by 1104 bytes QEMU and 1072 bytes RPi5; data, BSS and reserved spans remain unchanged (2392064 and 5308416 bytes). No new lock or per-process field. Static scope/lifetime rejection and bounded model evidence do not prove physical holding, firmware truthfulness, retry starvation freedom, or raw-mint confinement. Fatal-console and diagnostic pointer derivation remain separate unfinished work.",
-  "next_trigger": "Measure again when diagnostic pointer derivation or fatal-console authority changes, a new resource/lifetime is introduced, or the safe-memory stage completes."
+  "assessment": "Adopt indexed stopped process-pool views and initiator IRQ exclusion using existing guard contracts. Read-only allocation grows by 1328 bytes QEMU and 1424 bytes RPi5; data and reserved spans remain unchanged (2392064 and 5308416 bytes). QEMU aggregate BSS shrinks 16 bytes. No new runtime pin, lock or per-process field. Local static rejection is not proof of physical IRQ masking/holding. RegionPool VM/FD inspection, fatal-console/normal diagnostic migration and raw authority confinement remain unfinished.",
+  "next_trigger": "Measure at RegionPool inspection or fatal-console migration, a new resource lifetime, or completion of the safe-memory stage."
 }
