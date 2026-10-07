@@ -1069,7 +1069,9 @@ fn kernel_ddb_stopped_root_publish(frame_sp: usize, pid: usize)
     let raw_cpu: usize = cpu_id();
     if (raw_cpu >= KERNEL_MAX_CORES) { return; }
     let core: {0..<KERNEL_MAX_CORES as usize} = raw_cpu;
-    let settled: usize = ddb_stopped_root[core].sequence;
+    // Retirement leaves an odd sequence. Start from its previous even
+    // base so every settled publication is even, including repeated stops.
+    let settled: usize = ddb_stopped_root[core].sequence & ~1;
     // Odd first: a reader arriving now sees "being written" rather than the
     // previous stop's frame, which would still look entirely plausible.
     unsafe {
@@ -1177,6 +1179,35 @@ private fn ddb_stopped_unwind_root(core: usize) -> DdbStoppedRootResult
         run_bottom + KERNEL_STACK_RUN_BYTES
     };
     return DdbStoppedRootResult::Root(root);
+}
+
+// Exercise settled/retired publication on consecutive real stop requests.
+// A retired odd sequence must not make the next completed stop look unheld.
+fn kernel_ddb_stopped_roots_probe() -> bool !{unsafe} {
+    let mut valid: bool = true;
+    for round: usize in 0..<3 {
+        match world_stop_machine_begin(DDB_WORLD_STOP_SPINS) {
+            MachineStopResult::Busy => { valid = false; }
+            MachineStopResult::Partial(partial) => {
+                machine_stop_partial_release(partial, &kernel_world_stop);
+                valid = false;
+            }
+            MachineStopResult::Complete(stopped) => {
+                let mask: usize = machine_stopped_mask(stopped);
+                for core: usize in 0..<KERNEL_MAX_CORES {
+                    if ((mask & (1 << core)) != 0) {
+                        match ddb_stopped_unwind_root(core) {
+                            DdbStoppedRootResult::NotStopped => { valid = false; }
+                            DdbStoppedRootResult::Changed => { valid = false; }
+                            DdbStoppedRootResult::Root(root) => {}
+                        }
+                    }
+                }
+                machine_stop_release(stopped, &kernel_world_stop);
+            }
+        }
+    }
+    return valid;
 }
 
 private fn ddb_current_unwind_root() -> DdbUnwindRoot !{unsafe} {

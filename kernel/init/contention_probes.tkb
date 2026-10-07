@@ -111,6 +111,11 @@ fn contention_probes() !{unsafe} {
     } else {
         kernel_boot_log("world stop: failed\n");
     }
+    if (kernel_ddb_stopped_roots_probe()) {
+        kernel_boot_log("stopped root publication: consecutive stop captures retain usable roots ok\n");
+    } else {
+        kernel_boot_log("stopped root publication: failed\n");
+    }
     if (address_space_stopped_pool_busy_probe() && kernel_fd_table_stopped_pool_busy_probe()) {
         kernel_boot_log("stopped pool inspection: VM, FD context and descriptor metadata refused while their guards were held ok\n");
     } else {

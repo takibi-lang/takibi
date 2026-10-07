@@ -32,8 +32,10 @@ Adding `linux_user/<name>/` needs three Makefile edits, not one: append
 `.tkb` sources it compiles; and set `LINUX_USER_EXTRA_SRCS` for that object.
 The prerequisite and the source list are separate mechanisms, and supplying
 only the prerequisite fails at compile time with an undefined function.
-`.expected` files use CRLF, because output goes through the kernel's own
-formatter; an LF-only fixture fails with a diff that prints as identical.
+`.expected` files must match the program's actual stdout line endings.
+The kernel formatter writes CRLF; native programs that write a literal newline
+directly may write LF. Run `make linuxcheck` to compare the fixture, because
+a standalone execution does not verify its line-ending contract.
 
 ## Tier 3: maintained kernel
 

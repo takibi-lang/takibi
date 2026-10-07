@@ -173,3 +173,33 @@ nonblocking mint and explicit refusals. The diagnostic runs no pool lock or
 pin operation. Physical stop, stable unlocked metadata, and the native mint
 remain trusted; bounded model evidence is not a proof of these conditions.
 Measure again at fatal-console migration or completion of the safe-memory stage.
+
+## Repeated stopped-root publication, 2026-10-07
+
+A peer retires its unwind root by clearing its frame and making its sequence
+odd. The next publication starts from the previous even base, publishes an odd
+in-progress stamp, writes the payload, then publishes the next even stamp.
+Adding nonblocking pool inspection probes exposed the earlier publisher's
+assumption that its input sequence was even: alternate completed stops instead
+looked unheld to DDB. The full machine stop itself was acknowledged, while the
+backtrace and stack-attribution readers correctly refused the odd root.
+
+The shared bounded boot now makes three consecutive real full-machine stops
+and requires every targeted peer's root to be usable before release. The
+WorldStop action mapping names publication and retirement explicitly. Its
+NoUnstoppedRead property still does not model sequence parity: refusals remain
+safe, and usable publication has separate executable regression evidence.
+
+After this correction and regression, fresh standard linked images measure
+700076 text / 5022 data / 1667888 BSS bytes on QEMU, and 709076 text / 2888728
+data / 1705120 BSS bytes on RPi5. Reserved spans remain 2392064 and 5308416
+bytes, measured to usable_ram_start, including the core-zero idle stack.
+Against the published aa30a644 baseline, read-only allocation grows 5528 bytes
+QEMU and 5432 bytes RPi5. No pool payload, metadata, allocation, retained pages
+or endpoint occupancy changes. Adopt the corrected finite publication boundary
+and repeated-stop regression; no cross-OS comparison boundary changed.
+
+Candidate ELF SHA-256:
+
+- QEMU: 818465f831183236d0031878c87bc4d0973b16b22d55ef068b4881971bf92fe0
+- RPi5: 4d4d108ccd975303d2f6f522f7397d5ecb1e36a751912ebd6d8268cf84f4ea62
