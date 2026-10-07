@@ -70,7 +70,7 @@ extern symbol kernel_image_start;
 // Device blocks may also be mapped in TTBR0, but reading them can acknowledge
 // or clear hardware state and is not an inspection-only operation.
 fn page_ddb_kernel_address_readable(
-        stopped: borrow WorldStopped[id], address: usize, count: usize)
+        stopped: borrow MachineStopped[&kernel_world_stop], address: usize, count: usize)
         -> bool !{unsafe} {
     // The token is the exclusion proof. The generic cell cannot import this
     // kernel-specific type, so keep its unsafe escape inside this function;
@@ -114,7 +114,7 @@ fn page_ddb_kernel_address_readable(
 // prevents the debugger interface from treating that mapping choice as the
 // meaning of an `xp` address.
 fn page_ddb_physical_address_readable(
-        stopped: borrow WorldStopped[id], address: usize, count: usize)
+        stopped: borrow MachineStopped[&kernel_world_stop], address: usize, count: usize)
         -> bool !{unsafe} {
     return page_ddb_kernel_address_readable(stopped, address, count);
 }

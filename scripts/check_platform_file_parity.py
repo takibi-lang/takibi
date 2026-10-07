@@ -91,7 +91,7 @@ MIN_SIGNIFICANT_RUN = 8
 # with. Unlike ALLOWED, every entry here is also a piece of work -- these are
 # extractable, and the reason says so.
 ALLOWED_RUNS = {
-    ("intc.tkb", "fn platform_world_stop_notify(cores: usize, owner: usize) "
+    ("intc.tkb", "fn platform_world_stop_notify(mask: usize, owner: usize) "
                  "!{unsafe} {"):
         "a function whose bodies genuinely diverge -- each GIC writes its own "
         "SGI register -- but whose target-list computation is written twice. "

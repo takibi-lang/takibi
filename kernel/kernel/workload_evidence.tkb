@@ -821,7 +821,7 @@ fn workload_profile_note_network_tx(bytes: usize) {
 }
 
 private fn workload_profile_start(
-        stopped: borrow WorldStopped[stop],
+        stopped: borrow MachineStopped[&kernel_world_stop],
         guard: borrow ProcessRunGuard[lock], now: usize, pid: usize) {
     let online: usize = kernel_online_core_count();
     let mut selected_at_start: [usize; KERNEL_MAX_CORES];
@@ -884,7 +884,7 @@ private fn workload_profile_start(
 }
 
 private fn workload_profile_finish(
-        stopped: borrow WorldStopped[stop],
+        stopped: borrow MachineStopped[&kernel_world_stop],
         guard: borrow ProcessRunGuard[lock], now: usize) {
     let online: usize = kernel_online_core_count();
     for cpu: usize in 0..<KERNEL_MAX_CORES {
@@ -1736,20 +1736,19 @@ fn workload_peer_socket_teardown(is_shutdown: bool) {
 
 private fn workload_busy_start_profile(pid: usize, input_steps: usize)
         !{unsafe} {
-    match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
-                           WORKLOAD_PROFILE_WORLD_STOP_SPINS) {
-        WorldStopResult::Busy => {
+    match world_stop_machine_begin(WORKLOAD_PROFILE_WORLD_STOP_SPINS) {
+        MachineStopResult::Busy => {
             let retry_guard = process_run_lock();
             workload_busy_pair.start_requested = false;
             process_run_unlock(retry_guard);
         }
-        WorldStopResult::Partial(partial) => {
+        MachineStopResult::Partial(partial) => {
             world_stop_partial_release(partial, &kernel_world_stop);
             let retry_guard = process_run_lock();
             workload_busy_pair.start_requested = false;
             process_run_unlock(retry_guard);
         }
-        WorldStopResult::Complete(stopped) => {
+        MachineStopResult::Complete(stopped) => {
             let start_guard = process_run_lock();
             if (workload_busy_pair.start_requested &&
                     workload_busy_pair.both_running == false &&
@@ -1778,7 +1777,7 @@ private fn workload_busy_start_profile(pid: usize, input_steps: usize)
                 kernel_boot_log("\n");
             }
             process_run_unlock(start_guard);
-            world_stop_release(stopped, &kernel_world_stop);
+            machine_stop_release(stopped, &kernel_world_stop);
         }
     }
 }
@@ -2091,20 +2090,19 @@ fn workload_busy_record_progress(tag: usize, checksum: usize,
             process_run_unlock(guard);
         }
     }
-    match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
-                           WORKLOAD_PROFILE_WORLD_STOP_SPINS) {
-        WorldStopResult::Busy => {
+    match world_stop_machine_begin(WORKLOAD_PROFILE_WORLD_STOP_SPINS) {
+        MachineStopResult::Busy => {
             let retry_guard = process_run_lock();
             workload_busy_pair.finish_requested = false;
             process_run_unlock(retry_guard);
         }
-        WorldStopResult::Partial(partial) => {
+        MachineStopResult::Partial(partial) => {
             world_stop_partial_release(partial, &kernel_world_stop);
             let retry_guard = process_run_lock();
             workload_busy_pair.finish_requested = false;
             process_run_unlock(retry_guard);
         }
-        WorldStopResult::Complete(stopped) => {
+        MachineStopResult::Complete(stopped) => {
             let finish_guard = process_run_lock();
             // The reservation is still serialized by ProcessRunGuard. With
             // peers stopped, no producer can resume between the final charge
@@ -2119,7 +2117,7 @@ fn workload_busy_record_progress(tag: usize, checksum: usize,
                 workload_busy_pair_report();
             }
             process_run_unlock(finish_guard);
-            world_stop_release(stopped, &kernel_world_stop);
+            machine_stop_release(stopped, &kernel_world_stop);
         }
     }
     // Not 1: the pair keeps reporting, because the restart demonstration is

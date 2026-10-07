@@ -668,7 +668,7 @@ private fn ddb_read_kernel_word(address: usize)
     return DdbWordReadResult::Read(value);
 }
 
-private fn ddb_translate_user(stopped: borrow WorldStopped[id],
+private fn ddb_translate_user(stopped: borrow MachineStopped[&kernel_world_stop],
                               l2: usize, virtual: usize)
         -> DdbUserTranslateResult !{unsafe} {
     if (virtual < USER_TEXT_VA) { return DdbUserTranslateResult::Unmapped; }
@@ -734,7 +734,7 @@ private fn ddb_render_kernel_memory(address: usize, count: usize) !{unsafe} {
     }
 }
 
-private fn ddb_command_kernel_memory(stopped: borrow WorldStopped[id],
+private fn ddb_command_kernel_memory(stopped: borrow MachineStopped[&kernel_world_stop],
                                      address: usize, count: usize) !{unsafe} {
     if (page_ddb_kernel_address_readable(stopped, address, count) == false) {
         ddb_puts("ddb: xk denied (not ordinary kernel RAM) address=");
@@ -746,7 +746,7 @@ private fn ddb_command_kernel_memory(stopped: borrow WorldStopped[id],
     ddb_render_kernel_memory(address, count);
 }
 
-private fn ddb_command_physical_memory(stopped: borrow WorldStopped[id],
+private fn ddb_command_physical_memory(stopped: borrow MachineStopped[&kernel_world_stop],
                                        address: usize, count: usize) !{unsafe} {
     if (page_ddb_physical_address_readable(stopped, address, count) == false) {
         ddb_puts("ddb: xp denied (not ordinary physical RAM) address=");
@@ -777,7 +777,7 @@ private fn ddb_command_physical_memory(stopped: borrow WorldStopped[id],
     }
 }
 
-private fn ddb_render_user_memory(stopped: borrow WorldStopped[id],
+private fn ddb_render_user_memory(stopped: borrow MachineStopped[&kernel_world_stop],
                                   pid: usize, address: usize, count: usize)
         !{unsafe} {
     let mut root: usize = 0;
@@ -2239,7 +2239,7 @@ private fn ddb_render_proc(pid: usize) !{unsafe} {
 // the UART source and interrupt controller were acknowledged, but remains an
 // interrupt function: no semantic exception is made for debugger code.
 private fn kernel_ddb_enter_stopped(
-        stopped_world: borrow WorldStopped[&kernel_world_stop],
+        stopped_world: borrow MachineStopped[&kernel_world_stop],
         frame_sp: usize, entry_kind: usize, entry_source: usize)
         !{interrupt, unsafe} {
     unsafe {
@@ -2341,7 +2341,7 @@ private fn kernel_ddb_enter_stopped(
     if (console_ddb_probe_entry_held()) { ddb_puts("yes\n"); }
     else { ddb_puts("no\n"); }
     ddb_puts("ddb: world-stop complete mask=");
-    ddb_put_hex(world_stopped_mask(stopped_world));
+    ddb_put_hex(machine_stopped_mask(stopped_world));
     ddb_puts("\n");
     ddb_render_oops();
     let mut line: [u8; CRASH_CONSOLE_LINE_BYTES];
@@ -2530,23 +2530,21 @@ fn ddb_render_world_stop_holder() !{interrupt, unsafe} {
 fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
         !{interrupt, unsafe} {
     console_ddb_note_entry();
-    match world_stop_begin(
-            &kernel_world_stop, kernel_online_core_count(),
-            DDB_WORLD_STOP_SPINS) {
-        WorldStopResult::Busy => {
+    match world_stop_machine_begin(DDB_WORLD_STOP_SPINS) {
+        MachineStopResult::Busy => {
             ddb_puts("\nddb: world-stop busy; inspection refused\n");
             ddb_render_world_stop_holder();
         }
-        WorldStopResult::Partial(partial) => {
+        MachineStopResult::Partial(partial) => {
             ddb_puts("\nddb: world-stop partial mask=");
             ddb_put_hex(world_stop_partial_mask(partial));
             ddb_puts("; inspection refused\n");
             world_stop_partial_release(partial, &kernel_world_stop);
         }
-        WorldStopResult::Complete(stopped_world) => {
+        MachineStopResult::Complete(stopped_world) => {
             kernel_ddb_enter_stopped(
                 stopped_world, frame_sp, entry_kind, entry_source);
-            world_stop_release(stopped_world, &kernel_world_stop);
+            machine_stop_release(stopped_world, &kernel_world_stop);
         }
     }
 }

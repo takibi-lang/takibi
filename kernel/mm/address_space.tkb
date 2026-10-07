@@ -1483,21 +1483,20 @@ fn address_space_asid_rollover_probe() -> bool {
             }
             AsidAssignAttempt::RolloverNeeded => {
                 // Core 1 is already online here. Use the production stop
-                // controller with two cores so this exercises a real SGI and
-                // acknowledgement on both QEMU and RPi5.
-                match world_stop_begin(
-                        &kernel_world_stop, 2, ASID_ROLLOVER_STOP_SPINS) {
-                    WorldStopResult::Busy => { ok = false; }
-                    WorldStopResult::Partial(partial) => {
+                // controller with its full participant set so this exercises real
+                // SGIs and acknowledgements on both QEMU and RPi5.
+                match world_stop_machine_begin(ASID_ROLLOVER_STOP_SPINS) {
+                    MachineStopResult::Busy => { ok = false; }
+                    MachineStopResult::Partial(partial) => {
                         world_stop_partial_release(
                             partial, &kernel_world_stop);
                         ok = false;
                     }
-                    WorldStopResult::Complete(stopped) => {
+                    MachineStopResult::Complete(stopped) => {
                         if (asid_rollover_stopped(stopped) == false) {
                             ok = false;
                         }
-                        world_stop_release(stopped, &kernel_world_stop);
+                        machine_stop_release(stopped, &kernel_world_stop);
                     }
                 }
             }

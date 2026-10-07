@@ -21175,7 +21175,8 @@ let infer_production_stop_boundary code =
     struct no_copy AtomicWord { private value: usize; }
     fn atomic_word_store(cell: *AtomicWord, value: usize) !{unsafe} {}
   |} in
-  let types = ["WorldStop"; "WorldStopped"; "WorldStopPartial"] in
+  let types = ["WorldStop"; "WorldStopped"; "WorldStopPartial";
+    "CpuParticipants"; "MachineStopped"; "CpuStart"] in
   let functions = ["world_stop_resume"; "world_stopped_end";
     "world_stop_partial_end"; "world_stop_release"; "world_stop_partial_release"] in
   let boundary = List.filter (function
@@ -21183,7 +21184,7 @@ let infer_production_stop_boundary code =
     | Ast.OwnedStructDef (name, _, _, _, _, _, _, _, _) -> List.mem name types
     | Ast.FuncDef f -> List.mem f.name functions
     | _ -> false) (parse_here source) in
-  Alcotest.(check int) "all production boundary declarations extracted" 8
+  Alcotest.(check int) "all production boundary declarations extracted" 11
     (List.length boundary);
   let harness = parse_here ({|
     struct Record { value: usize; }
@@ -21241,6 +21242,173 @@ let production_stop_boundary_tests =
       }|};
   ]
 
+(* Extract the real gate, reservation, full-stop mint and release bodies.
+   Firmware and atomics are stubs: this tests static contracts, never CPUs. *)
+let infer_production_machine_boundary ?(platform = "qemu") code =
+  let path = List.find Sys.file_exists
+      ["../kernel/lib/occupancy.tkb"; "kernel/lib/occupancy.tkb"] in
+  let channel = open_in_bin path in
+  let source = Fun.protect ~finally:(fun () -> close_in channel)
+      (fun () -> really_input_string channel (in_channel_length channel)) in
+  let parse_here source =
+    let lexbuf = Lexing.from_string source in
+    Lexing.set_filename lexbuf "kernel/lib/occupancy.tkb";
+    Parser.program Lexer.read lexbuf in
+  let primitives = parse {|
+    const KERNEL_MAX_CORES: usize = 4;
+    struct no_copy AtomicWord { private value: usize; }
+    fn atomic_word_store(cell: *AtomicWord, value: usize) !{unsafe} {}
+    fn atomic_word_load(cell: *AtomicWord) -> usize !{unsafe} { return 0; }
+    fn atomic_word_swap(cell: *AtomicWord, value: usize) -> usize !{unsafe} { return 0; }
+    fn cpu_id() -> usize { return 0; }
+    fn platform_world_stop_notify(mask: usize, owner: usize) !{unsafe} {}
+  |} in
+  let types = ["WorldStop"; "WorldStopped"; "WorldStopPartial";
+    "CpuParticipants"; "MachineStopped"; "CpuStart"] in
+  let variants = ["WorldStopResult"; "MachineStopResult"; "CpuStartResult"] in
+  let functions = ["world_stop_claim"; "world_stop_begin_config";
+    "world_stop_begin_claimed"; "world_stop_begin"; "world_stop_machine_begin";
+    "cpu_participants_end"; "machine_stop_release"; "machine_stopped_mask";
+    "cpu_start_reserve"; "cpu_start_core"; "cpu_start_finish";
+    "cpu_start_end"; "cpu_start_gate_release"; "world_stop_resume";
+    "world_stopped_end"; "world_stop_partial_end";
+    "world_stop_release"; "world_stop_partial_release"; "world_stopped_mask"] in
+  let boundary = List.filter (function
+    | Ast.StructDef (name, _, _, _, _, _)
+    | Ast.OwnedStructDef (name, _, _, _, _, _, _, _, _) -> List.mem name types
+    | Ast.FuncDef f -> List.mem f.name functions
+    | Ast.VariantDef (name, _, _, _, _) -> List.mem name variants
+    | _ -> false) (parse_here source) in
+  Alcotest.(check int) "all production machine declarations extracted" 28
+    (List.length boundary);
+  let platform_path = "kernel/platform/" ^ platform ^ "/init.tkb" in
+  let path = List.find Sys.file_exists ["../" ^ platform_path; platform_path] in
+  let channel = open_in_bin path in
+  let platform_source = Fun.protect ~finally:(fun () -> close_in channel)
+      (fun () -> really_input_string channel (in_channel_length channel)) in
+  let issuers = List.filter (function
+    | Ast.FuncDef f -> List.mem f.name
+        [platform ^ "_psci_cpu_on"; "kernel_secondary_boot_cpu_on"]
+    | _ -> false) (parse_here platform_source) in
+  Alcotest.(check int) "both production CPU_ON bodies extracted" 2 (List.length issuers);
+  let harness = parse_here ({|
+    let mut kernel_world_stop: WorldStop;
+    let mut qemu_psci_use_hvc: bool;
+    let mut rpi5_psci_use_hvc: bool;
+    let mut kernel_secondary_entry: usize;
+    struct Record { value: usize; }
+    private let mut record: Record;
+    fn inspect(stopped: borrow MachineStopped[&kernel_world_stop]) -> usize { return 1; }
+    private fn machine_loan(stopped: borrow MachineStopped[s]) -> *Record @ s {
+      return &record;
+    }
+  |} ^ code) in
+  Type_inf.infer_program (Declared_type_resolver.run
+    (Monomorphize.run (Dma_fixed_record.run
+      (Publish_record.run (primitives @ boundary @ issuers @ harness)))))
+
+let production_machine_boundary_tests =
+  let good name code = Alcotest.test_case name `Quick
+      (fun () -> ignore (infer_production_machine_boundary code)) in
+  let bad name message code = Alcotest.test_case name `Quick (fun () ->
+    let matches message' = contains_substring message' message in
+    match infer_production_machine_boundary code with
+    | _ -> Alcotest.fail "production machine boundary accepted invalid authority use"
+    | exception Types.TypeError (_, message') ->
+        if not (matches message') then Alcotest.failf "expected %s, received %s" message message'
+    | exception Types.MultiTypeError errors ->
+        if not (List.exists (fun (_, message') -> matches message') errors) then
+          Alcotest.failf "expected %s, received %s" message
+            (String.concat "; " (List.map snd errors))) in
+  let full body = {|
+    fn probe() { match world_stop_machine_begin(20) {
+      MachineStopResult::Busy => {}
+      MachineStopResult::Partial(partial) => { world_stop_partial_release(partial, &kernel_world_stop); }
+      MachineStopResult::Complete(stopped) => {
+    |} ^ body ^ {|
+        machine_stop_release(stopped, &kernel_world_stop);
+      }
+    } }
+  |} in
+  [
+    good "production full stop admits scalar inspection" (full {|
+      let scalar = inspect(stopped);
+    |});
+    good "production full stop admits scoped loan" (full {|
+      { let ptr = machine_loan(stopped); let scalar = ptr.value; }
+    |});
+    bad "production subset stop cannot inspect machine" "MachineStopped" {|
+      fn probe() { match world_stop_begin(&kernel_world_stop, 1, 20) {
+        WorldStopResult::Busy => {}
+        WorldStopResult::Partial(partial) => { world_stop_partial_release(partial, &kernel_world_stop); }
+        WorldStopResult::Complete(stopped) => {
+          let scalar = inspect(stopped); world_stop_release(stopped, &kernel_world_stop);
+        }
+      } }
+    |};
+    bad "production start rejects retained full stop" "live CpuParticipants witness" (full {|
+      match cpu_start_reserve(1) {
+        CpuStartResult::Busy => {}
+        CpuStartResult::Reserved(start) => { cpu_start_finish(start, 0); }
+      }
+    |});
+    bad "production full release rejects lexical loan" "live CpuParticipants witness" (full {|
+      let ptr = machine_loan(stopped);
+    |});
+    bad "production partial release rejects retained full stop" "live CpuParticipants witness" (full {|
+      match world_stop_begin(&kernel_world_stop, 1, 20) {
+        WorldStopResult::Busy => {}
+        WorldStopResult::Partial(partial) => { world_stop_partial_release(partial, &kernel_world_stop); }
+        WorldStopResult::Complete(subset) => { world_stop_release(subset, &kernel_world_stop); }
+      }
+    |});
+    good "production start requires reservation and finishes" {|
+      fn firmware(start: borrow CpuStart[&kernel_world_stop]) -> usize {
+        let core = cpu_start_core(start); return 0;
+      }
+      fn probe() { match cpu_start_reserve(1) {
+        CpuStartResult::Busy => {}
+        CpuStartResult::Reserved(start) => {
+          let status = firmware(start); cpu_start_finish(start, status);
+        }
+      } }
+    |};
+    good "production CPU_ON consumes the reservation" {|
+      fn probe() { match cpu_start_reserve(1) {
+        CpuStartResult::Busy => {}
+        CpuStartResult::Reserved(start) => {
+          let status = kernel_secondary_boot_cpu_on(start);
+        }
+      } }
+    |};
+    Alcotest.test_case "RPi5 CPU_ON consumes the reservation" `Quick (fun () ->
+      ignore (infer_production_machine_boundary ~platform:"rpi5" {|
+        fn probe() { match cpu_start_reserve(1) {
+          CpuStartResult::Busy => {}
+          CpuStartResult::Reserved(start) => {
+            let status = kernel_secondary_boot_cpu_on(start);
+          }
+        } }
+      |}));
+    bad "production CPU_ON cannot reuse the reservation" "consumed" {|
+      fn probe() { match cpu_start_reserve(1) {
+        CpuStartResult::Busy => {}
+        CpuStartResult::Reserved(start) => {
+          let status = kernel_secondary_boot_cpu_on(start);
+          let again = kernel_secondary_boot_cpu_on(start);
+        }
+      } }
+    |};
+    bad "production raw resume rejects retained start" "live CpuStart witness" {|
+      fn probe() { match cpu_start_reserve(1) {
+        CpuStartResult::Busy => {}
+        CpuStartResult::Reserved(start) => {
+          world_stop_resume(&kernel_world_stop); cpu_start_finish(start, 0);
+        }
+      } }
+    |};
+  ]
+
 let named_groups_unisolated = [
   "core",     core_tests;
   "parser",   parser_tests;
@@ -21255,6 +21423,7 @@ let named_groups_unisolated = [
   "record-loan-boundaries", record_boundary_tests;
   "stopped-diagnostics", stopped_diagnostic_tests;
   "production-stop-boundary", production_stop_boundary_tests;
+  "production-machine-boundary", production_machine_boundary_tests;
 ]
 
 (* Each Alcotest case represents a fresh compiler invocation. In particular,

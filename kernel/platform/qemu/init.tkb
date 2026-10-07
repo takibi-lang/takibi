@@ -15,8 +15,12 @@ use "kernel/init/contention_probes.tkb";
 // Not shared with cpu.tkb's psci_cpu_on: same PSCI_CPU_ON function ID and
 // SMCCC argument convention, only the trapping instruction differs
 // (hvc4 vs smc4, both in lib/llvm_gen.ml/type_inf.ml).
-fn qemu_psci_cpu_on(target_affinity: usize, entry: usize, context: usize)
+private fn qemu_psci_cpu_on(start: borrow CpuStart[&kernel_world_stop])
         -> usize {
+    let core: usize = cpu_start_core(start);
+    let target_affinity: usize = core;
+    let entry: usize = kernel_secondary_entry;
+    let context: usize = 0x190 + core;
     if (qemu_psci_use_hvc) {
         return hvc4(0xc4000003, target_affinity, entry, context);
     }
@@ -42,9 +46,11 @@ fn cpu_id() -> usize {
 // QEMU uses Aff0 target numbering and HVC for PSCI, unlike RPi5's Aff1/SMC
 // path. This one call is what differs; kernel/init/secondary_boot.tkb waits
 // for the core and reports it.
-fn kernel_secondary_boot_cpu_on(core: {0..<KERNEL_MAX_CORES as usize})
+fn kernel_secondary_boot_cpu_on(start: CpuStart[&kernel_world_stop])
         -> usize {
-    return qemu_psci_cpu_on(core, kernel_secondary_entry, 0x190 + core);
+    let status: usize = qemu_psci_cpu_on(start);
+    cpu_start_finish(start, status);
+    return status;
 }
 
 fn kernel_test_platform_network() {

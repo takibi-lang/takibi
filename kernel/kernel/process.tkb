@@ -1433,7 +1433,7 @@ fn kernel_process_protocol_trace_close() -> usize {
 // are probed and at most 32 live records copied. A truncated result is an
 // explicit diagnostic fact, never silently presented as the whole table.
 fn kernel_process_ddb_copy(
-        stopped: borrow WorldStopped[&kernel_world_stop],
+        stopped: borrow MachineStopped[&kernel_world_stop],
         output: borrow [ProcessDdbRecord; DDB_PROCESS_RECORDS..])
         -> ProcessDdbCopyResult !{unsafe} {
     let mut count: usize = 0;
@@ -5531,9 +5531,8 @@ private fn kernel_process_secondary_start_reserved(
             return ProcessSecondaryStart::Idle;
         }
         AddressSpaceActivationPrepareResult::RolloverNeeded => {
-            match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
-                                   SCHEDULER_WORLD_STOP_SPINS) {
-                WorldStopResult::Busy => {
+            match world_stop_machine_begin(SCHEDULER_WORLD_STOP_SPINS) {
+                MachineStopResult::Busy => {
                     kernel_process_start_refused_busy =
                         kernel_process_start_refused_busy + 1;
                     let guard = process_run_lock();
@@ -5542,7 +5541,7 @@ private fn kernel_process_secondary_start_reserved(
                     process_run_unlock(guard);
                     return ProcessSecondaryStart::Idle;
                 }
-                WorldStopResult::Partial(partial) => {
+                MachineStopResult::Partial(partial) => {
                     world_stop_partial_release(partial, &kernel_world_stop);
                     kernel_process_start_refused_partial =
                         kernel_process_start_refused_partial + 1;
@@ -5552,9 +5551,9 @@ private fn kernel_process_secondary_start_reserved(
                     process_run_unlock(guard);
                     return ProcessSecondaryStart::Idle;
                 }
-                WorldStopResult::Complete(stopped) => {
+                MachineStopResult::Complete(stopped) => {
                     if (asid_rollover_stopped(stopped)) {}
-                    world_stop_release(stopped, &kernel_world_stop);
+                    machine_stop_release(stopped, &kernel_world_stop);
                     return kernel_process_secondary_start_reserved(owner, running);
                 }
             }
@@ -5739,20 +5738,19 @@ private fn kernel_process_schedule_reserved(
             return FrameSwitch::Stay;
         }
         AddressSpaceActivationPrepareResult::RolloverNeeded => {
-            match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
-                                   SCHEDULER_WORLD_STOP_SPINS) {
-                WorldStopResult::Busy => {
+            match world_stop_machine_begin(SCHEDULER_WORLD_STOP_SPINS) {
+                MachineStopResult::Busy => {
                     kernel_process_schedule_cancel_reserved(owner, running);
                     return FrameSwitch::Stay;
                 }
-                WorldStopResult::Partial(partial) => {
+                MachineStopResult::Partial(partial) => {
                     world_stop_partial_release(partial, &kernel_world_stop);
                     kernel_process_schedule_cancel_reserved(owner, running);
                     return FrameSwitch::Stay;
                 }
-                WorldStopResult::Complete(stopped) => {
+                MachineStopResult::Complete(stopped) => {
                     if (asid_rollover_stopped(stopped)) {}
-                    world_stop_release(stopped, &kernel_world_stop);
+                    machine_stop_release(stopped, &kernel_world_stop);
                     return kernel_process_schedule_reserved(
                         from, owner, running, current);
                 }
@@ -5851,18 +5849,17 @@ fn kernel_process_activate_current_root(current_authority: borrow ProcessCurrent
                 kernel_process_rollover_backoff();
                 continue;
             }
-            match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
-                                   SCHEDULER_WORLD_STOP_SPINS) {
-                WorldStopResult::Busy => {
+            match world_stop_machine_begin(SCHEDULER_WORLD_STOP_SPINS) {
+                MachineStopResult::Busy => {
                     kernel_process_rollover_backoff();
                 }
-                WorldStopResult::Partial(partial) => {
+                MachineStopResult::Partial(partial) => {
                     world_stop_partial_release(partial, &kernel_world_stop);
                     kernel_process_rollover_backoff();
                 }
-                WorldStopResult::Complete(stopped) => {
+                MachineStopResult::Complete(stopped) => {
                     if (asid_rollover_stopped(stopped)) {}
-                    world_stop_release(stopped, &kernel_world_stop);
+                    machine_stop_release(stopped, &kernel_world_stop);
                 }
             }
         }
@@ -5937,23 +5934,21 @@ fn kernel_process_activate_stable_root(root: AddressSpaceRoot) {
                     kernel_process_rollover_backoff();
                     continue;
                 }
-                match world_stop_begin(&kernel_world_stop,
-                                       kernel_online_core_count(),
-                                       SCHEDULER_WORLD_STOP_SPINS) {
-                    WorldStopResult::Busy => {
+                match world_stop_machine_begin(SCHEDULER_WORLD_STOP_SPINS) {
+                    MachineStopResult::Busy => {
                         kernel_process_stable_retry_busy =
                             kernel_process_stable_retry_busy + 1;
                         kernel_process_rollover_backoff();
                     }
-                    WorldStopResult::Partial(partial) => {
+                    MachineStopResult::Partial(partial) => {
                         world_stop_partial_release(partial, &kernel_world_stop);
                         kernel_process_stable_retry_partial =
                             kernel_process_stable_retry_partial + 1;
                         kernel_process_rollover_backoff();
                     }
-                    WorldStopResult::Complete(stopped) => {
+                    MachineStopResult::Complete(stopped) => {
                         if (asid_rollover_stopped(stopped)) {}
-                        world_stop_release(stopped, &kernel_world_stop);
+                        machine_stop_release(stopped, &kernel_world_stop);
                     }
                 }
             }
@@ -7001,20 +6996,19 @@ private fn kernel_process_block_reserved(
             return BlockSwitch::Retry;
         }
         AddressSpaceActivationPrepareResult::RolloverNeeded => {
-            match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
-                                   SCHEDULER_WORLD_STOP_SPINS) {
-                WorldStopResult::Busy => {
+            match world_stop_machine_begin(SCHEDULER_WORLD_STOP_SPINS) {
+                MachineStopResult::Busy => {
                     kernel_process_schedule_cancel_reserved(owner, running);
                     return BlockSwitch::Retry;
                 }
-                WorldStopResult::Partial(partial) => {
+                MachineStopResult::Partial(partial) => {
                     world_stop_partial_release(partial, &kernel_world_stop);
                     kernel_process_schedule_cancel_reserved(owner, running);
                     return BlockSwitch::Retry;
                 }
-                WorldStopResult::Complete(stopped) => {
+                MachineStopResult::Complete(stopped) => {
                     if (asid_rollover_stopped(stopped)) {}
-                    world_stop_release(stopped, &kernel_world_stop);
+                    machine_stop_release(stopped, &kernel_world_stop);
                     return kernel_process_block_reserved(
                         from, owner, running, current, reason, trace_aux);
                 }
@@ -9454,20 +9448,19 @@ private fn kernel_process_exit_reserved(
             return ExitSwitch::Idle;
         }
         AddressSpaceActivationPrepareResult::RolloverNeeded => {
-            match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
-                                   SCHEDULER_WORLD_STOP_SPINS) {
-                WorldStopResult::Busy => {
+            match world_stop_machine_begin(SCHEDULER_WORLD_STOP_SPINS) {
+                MachineStopResult::Busy => {
                     kernel_process_schedule_cancel_reserved(owner, running);
                     return ExitSwitch::Idle;
                 }
-                WorldStopResult::Partial(partial) => {
+                MachineStopResult::Partial(partial) => {
                     world_stop_partial_release(partial, &kernel_world_stop);
                     kernel_process_schedule_cancel_reserved(owner, running);
                     return ExitSwitch::Idle;
                 }
-                WorldStopResult::Complete(stopped) => {
+                MachineStopResult::Complete(stopped) => {
                     if (asid_rollover_stopped(stopped)) {}
-                    world_stop_release(stopped, &kernel_world_stop);
+                    machine_stop_release(stopped, &kernel_world_stop);
                     return kernel_process_exit_reserved(
                         child, parent, owner, running, deliver_wait4,
                         auto_reap);

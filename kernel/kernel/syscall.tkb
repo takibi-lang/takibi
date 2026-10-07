@@ -5009,16 +5009,15 @@ fn syscall_reboot_request(magic1: usize, magic2: usize, command: usize)
 // complete WorldStopped token is required before any success marker appears.
 // A failed request releases its partial stop and lets userspace retry.
 fn syscall_system_stop(marker: *u8) -> SyscallAction !{unsafe} {
-    match world_stop_begin(&kernel_world_stop, kernel_online_core_count(),
-                           10000000) {
-        WorldStopResult::Busy => { return SyscallAction::Resume(LINUX_EAGAIN); }
-        WorldStopResult::Partial(partial) => {
+    match world_stop_machine_begin(10000000) {
+        MachineStopResult::Busy => { return SyscallAction::Resume(LINUX_EAGAIN); }
+        MachineStopResult::Partial(partial) => {
             world_stop_partial_release(partial, &kernel_world_stop);
             return SyscallAction::Resume(LINUX_EAGAIN);
         }
-        WorldStopResult::Complete(stopped) => {
+        MachineStopResult::Complete(stopped) => {
             disable_irq();
-            world_stop_keep_forever(stopped);
+            machine_stop_keep_forever(stopped);
             kernel_boot_log(marker);
             uart_tx_flush();
             platform_shutdown();

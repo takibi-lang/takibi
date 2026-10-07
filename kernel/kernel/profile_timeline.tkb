@@ -127,7 +127,7 @@ fn profile_timeline_start(pid_a: usize, pid_b: usize) {
 // a complete world stop, so they can name a stopped CPU directly rather than
 // pretending cpu_id() observed an event there.
 fn profile_timeline_interval_start_cpu(
-        stopped: borrow WorldStopped[stop],
+        stopped: borrow MachineStopped[&kernel_world_stop],
         cpu: {0..<KERNEL_MAX_CORES as usize}, pid: usize, timestamp: usize) {
     if (profile_timeline_pid_relevant(pid) == false) { return; }
     let slot: usize = profile_timeline_cores[cpu].stored;
@@ -145,7 +145,7 @@ fn profile_timeline_interval_start_cpu(
 }
 
 fn profile_timeline_interval_finish_cpu(
-        stopped: borrow WorldStopped[stop],
+        stopped: borrow MachineStopped[&kernel_world_stop],
         cpu: {0..<KERNEL_MAX_CORES as usize}, pid: usize, timestamp: usize) {
     if (profile_timeline_pid_relevant(pid) == false) { return; }
     let slot: usize = profile_timeline_cores[cpu].stored;

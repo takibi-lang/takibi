@@ -81,10 +81,10 @@ const RP1_MSIX_CFG_SET_BASE: usize = 0x1F00108808;
 
 // Send the world-stop SGI to every active CPU except the initiator. GICv2's
 // target-list field uses the same CPU-interface bits as ITARGETSR.
-fn platform_world_stop_notify(cores: usize, owner: usize) !{unsafe} {
+fn platform_world_stop_notify(mask: usize, owner: usize) !{unsafe} {
     let mut targets: u32 = 0;
     for cpu: usize in 0..<KERNEL_MAX_CORES {
-        if (cpu < cores && cpu != owner) {
+        if ((mask & (1 << cpu)) != 0 && cpu != owner) {
             targets = targets | ((1 << cpu) as u32);
         }
     }

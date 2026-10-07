@@ -16,9 +16,9 @@
 // the secondary core that reached it.
 //
 // Current limitations:
-// - Online CPUs must form the contiguous prefix [0, count). PSCI bring-up
-//   probes every reserved secondary, but scheduler and world-stop admission
-//   stop at the first absent core rather than representing a sparse set.
+// - Scheduler admission uses the contiguous prefix [0, count). Whole-machine
+//   stops instead use the possible-participant mask, including pending or
+//   uncertain CPU_ON targets and sparse reservations.
 // - The core's exception stacks are its own as of GitHub issue #477. That
 //   was not true when this file was first written, and the first timer
 //   tick here landed on core 0's saved frame -- its INTID came back as
@@ -49,8 +49,8 @@ private let mut kernel_secondary_boot_state: [AtomicWord; KERNEL_MAX_CORES];
 // Core 0's PSCI authority for the contiguous online prefix. A successful
 // CPU_ON joins the prefix before the target publishes its Takibi handshake.
 // This is deliberately conservative: if that CPU faults during entry, a
-// later world stop must return Partial rather than claim the broken CPU did
-// not exist.
+// later scheduler admission is conservative. World-stop membership is
+// independently reserved before CPU_ON, including uncertain status values.
 private let mut kernel_online_cores: io usize;
 
 // This core's timer-interrupt count. Written only by the secondary core,

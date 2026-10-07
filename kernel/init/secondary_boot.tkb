@@ -21,6 +21,7 @@ use "kernel/init/contention_probes.tkb";
 
 must_use variant SecondaryBootResult {
     Started;
+    Busy;
     NotPresent;
     UnexpectedStatus(usize);
     NotStarted(usize);
@@ -59,6 +60,18 @@ fn kernel_secondary_boot_await(core: {0..<KERNEL_MAX_CORES as usize},
 // before the next is asked for. What is shown here -- that a core started
 // and takes its own timer -- is what has to hold before
 // KERNEL_ACTIVE_CORES may admit it to the scheduler.
+private fn kernel_secondary_boot_attempt(core: {0..<KERNEL_MAX_CORES as usize})
+        -> SecondaryBootResult !{unsafe} {
+    match cpu_start_reserve(core) {
+        CpuStartResult::Busy => { return SecondaryBootResult::Busy; }
+        CpuStartResult::Reserved(start) => {
+            let status: usize = kernel_secondary_boot_cpu_on(start);
+            kernel_online_core_note_cpu_on(core, status);
+            return kernel_secondary_boot_await(core, status);
+        }
+    }
+}
+
 fn kernel_secondary_boot_report() !{logs, unsafe} {
     kernel_secondary_boot_state_clear();
     let mut core_one_started: bool = false;
@@ -66,9 +79,8 @@ fn kernel_secondary_boot_report() !{logs, unsafe} {
         let core: {0..<KERNEL_MAX_CORES as usize} = raw;
         kernel_boot_log("smp bringup: core");
         uart_put_udec(raw);
-        let status: usize = kernel_secondary_boot_cpu_on(core);
-        kernel_online_core_note_cpu_on(core, status);
-        match kernel_secondary_boot_await(core, status) {
+        match kernel_secondary_boot_attempt(core) {
+            SecondaryBootResult::Busy => { kernel_boot_log(" busy\n"); }
             SecondaryBootResult::Started => {
                 // GitHub issue #447: "and then it parked" is what this
                 // line used to mean. The core runs an idle loop with its

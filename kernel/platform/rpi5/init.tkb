@@ -36,8 +36,12 @@ fn cpu_id() -> usize {
     return (mrs_mpidr_el1() >> 8) & 3;
 }
 
-fn rpi5_psci_cpu_on(target_affinity: usize, entry: usize, context: usize)
+private fn rpi5_psci_cpu_on(start: borrow CpuStart[&kernel_world_stop])
         -> usize {
+    let core: usize = cpu_start_core(start);
+    let target_affinity: usize = core << 8;
+    let entry: usize = kernel_secondary_entry;
+    let context: usize = 0x190 + core;
     if (rpi5_psci_use_hvc) {
         return hvc4(0xc4000003, target_affinity, entry, context);
     }
@@ -47,10 +51,11 @@ fn rpi5_psci_cpu_on(target_affinity: usize, entry: usize, context: usize)
 // RPi5 numbers its cores in MPIDR_EL1.Aff1, so core N is target N << 8. The
 // context value, 0x190 + N, is what the core checks before it publishes, so
 // a coincidental stale write cannot pass for a start.
-fn kernel_secondary_boot_cpu_on(core: {0..<KERNEL_MAX_CORES as usize})
+fn kernel_secondary_boot_cpu_on(start: CpuStart[&kernel_world_stop])
         -> usize {
-    if (kernel_boot_is_warm() != 0) { return 0; }
-    return rpi5_psci_cpu_on(core << 8, kernel_secondary_entry, 0x190 + core);
+    let status: usize = rpi5_psci_cpu_on(start);
+    cpu_start_finish(start, status);
+    return status;
 }
 
 fn kernel_test_platform_network() {

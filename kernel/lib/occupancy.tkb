@@ -76,6 +76,12 @@
 //   leaving once clears it, so a drain could succeed with that core still
 //   inside. The linear `Occupying` makes the SECOND enter visible (two
 //   live tokens), but nothing rejects it. Every caller today enters once.
+// - WHOLE-MACHINE MEMBERSHIP (2026-10-07). CPU_ON reservations join the
+//   possible-participant mask before firmware may expose the CPU. Start and
+//   stop share the claim gate. Only definitive absence removes a new member;
+//   firmware status truthfulness, holding-pen entry, atomic ordering and raw
+//   mints remain trusted. WorldStopped is only a caller-selected subset;
+//   MachineStopped retains the captured participant authority for full reads.
 // - WORLD STOP IS ONE-DEEP. A nonblocking test-and-set gate refuses competing
 //   initiators with Busy; it never waits for a CPU it may need to stop.
 //   Request generations are never reused, including on integer exhaustion:
@@ -124,15 +130,16 @@ struct WorldStop {
     private generation: usize;
     private requested: AtomicWord;
     private ack: [AtomicWord; KERNEL_MAX_CORES];
+    private participants: AtomicWord;
 }
 
 linear struct WorldStopped[stop: addr] {
-    private cores: usize;
+    private mask: usize;
     private owner: usize;
 }
 
 linear struct WorldStopPartial[stop: addr] {
-    private cores: usize;
+    private mask: usize;
     private owner: usize;
     private stopped_mask: usize;
 }
@@ -143,10 +150,41 @@ must_use variant WorldStopResult[stop: addr] {
     Complete(WorldStopped[stop]);
 }
 
+// The current possible-participant set is captured only while the controller
+// gate is held. Pending and uncertain CPU_ON targets remain in this mask.
+private linear struct CpuParticipants[stop: addr] {
+    private mask: usize;
+}
+
+// Whole-machine inspection cannot accept a caller-selected subset stop.
+linear struct MachineStopped[stop: addr] {
+    private participants: CpuParticipants[stop];
+    private owner: usize;
+}
+
+must_use variant MachineStopResult[stop: addr] {
+    Busy;
+    Partial(WorldStopPartial[stop]);
+    Complete(MachineStopped[stop]);
+}
+
+// Firmware CPU_ON can be issued only while this reservation holds the same
+// gate as a machine stop, after its target has joined the participant mask.
+linear struct CpuStart[stop: addr] {
+    private core: {0..<KERNEL_MAX_CORES as usize};
+    private was_present: bool;
+}
+
+must_use variant CpuStartResult[stop: addr] {
+    Busy;
+    Reserved(CpuStart[stop]);
+}
+
 // One machine-wide controller. Its address is the type index carried by every
 // token, so a proof cannot be spent against another stop domain. Production
-// callers pass KERNEL_ACTIVE_CORES; probes may include an offline slot to
-// exercise the partial result.
+// KERNEL_ACTIVE_CORES is a storage/scheduler bound, not runtime membership.
+// Whole-machine callers use world_stop_machine_begin; subset probes may
+// include an offline slot to exercise the partial result.
 let mut kernel_world_stop: WorldStop;
 
 // Called after the platform interrupt dispatcher has acknowledged the SGI
@@ -186,14 +224,19 @@ private fn world_stop_begin_config(stop: *WorldStop @ id, cores: usize,
                                    stale_ack_probe: bool)
         -> WorldStopResult[id] !{unsafe} {
     let raw_owner: usize = cpu_id();
-    if (cores == 0 || cores > KERNEL_MAX_CORES ||
-            raw_owner >= cores || raw_owner >= KERNEL_MAX_CORES) {
-        return WorldStopResult::Busy;
-    }
-    // Every contender writes the SAME held value. A failed attempt must not
-    // restore an earlier owner: that owner may have released in the meantime.
-    let claimed: usize = world_stop_claim(stop);
-    if (claimed != 0) { return WorldStopResult::Busy; }
+    if (cores == 0 || cores > KERNEL_MAX_CORES || raw_owner >= cores ||
+            raw_owner >= KERNEL_MAX_CORES) { return WorldStopResult::Busy; }
+    if (world_stop_claim(stop) != 0) { return WorldStopResult::Busy; }
+    let mask: usize = (1 << cores) - 1;
+    return world_stop_begin_claimed(stop, mask, spins, notify, stale_ack_probe);
+}
+
+// The caller owns the claim gate, including on every refusal return.
+private fn world_stop_begin_claimed(stop: *WorldStop @ id, mask: usize,
+                                    spins: usize, notify: bool,
+                                    stale_ack_probe: bool)
+        -> WorldStopResult[id] !{unsafe} {
+    let raw_owner: usize = cpu_id();
     let previous: usize = (*stop).generation;
     if (previous == ~(0 as usize)) {
         atomic_word_store(&(*stop).claimed, 0);
@@ -211,12 +254,12 @@ private fn world_stop_begin_config(stop: *WorldStop @ id, cores: usize,
     // request AFTER this request was published. Never used with notification.
     if (stale_ack_probe) {
         for cpu: usize in 0..<KERNEL_MAX_CORES {
-            if (cpu < cores && cpu != raw_owner) {
+            if ((mask & (1 << cpu)) != 0 && cpu != raw_owner) {
                 atomic_word_store(&(*stop).ack[cpu], previous);
             }
         }
     }
-    if (notify) { platform_world_stop_notify(cores, raw_owner); }
+    if (notify) { platform_world_stop_notify(mask, raw_owner); }
 
     let mut remaining: usize = spins;
     let mut stopped_mask: usize = 0;
@@ -226,7 +269,7 @@ private fn world_stop_begin_config(stop: *WorldStop @ id, cores: usize,
         complete = true;
         stopped_mask = 0;
         for cpu: usize in 0..<KERNEL_MAX_CORES {
-            if (cpu < cores && cpu != raw_owner) {
+            if ((mask & (1 << cpu)) != 0 && cpu != raw_owner) {
                 if (atomic_word_load(&(*stop).ack[cpu]) != generation) {
                     complete = false;
                 } else {
@@ -236,11 +279,11 @@ private fn world_stop_begin_config(stop: *WorldStop @ id, cores: usize,
         }
     }
     if (complete) {
-        let mut proof: WorldStopped[id] = { cores, raw_owner };
+        let mut proof: WorldStopped[id] = { mask, raw_owner };
         return WorldStopResult::Complete(proof);
     }
     let mut partial: WorldStopPartial[id] = {
-        cores, raw_owner, stopped_mask
+        mask, raw_owner, stopped_mask
     };
     return WorldStopResult::Partial(partial);
 }
@@ -249,6 +292,102 @@ fn world_stop_begin(stop: *WorldStop @ id, cores: usize, spins: usize)
         -> WorldStopResult[id] !{unsafe} {
     return world_stop_begin_config(stop, cores, spins, true, false);
 }
+
+// Capture under the claim, never from an unlocked online-count read. The
+// bootstrap CPU is present even before the first secondary reservation.
+fn world_stop_machine_begin(spins: usize)
+        -> MachineStopResult[&kernel_world_stop] !{unsafe} {
+    if (world_stop_claim(&kernel_world_stop) != 0) {
+        return MachineStopResult::Busy;
+    }
+    let mask: usize = atomic_word_load(&kernel_world_stop.participants) | 1;
+    let owner: usize = cpu_id();
+    if (owner >= KERNEL_MAX_CORES || (mask & (1 << owner)) == 0) {
+        atomic_word_store(&kernel_world_stop.claimed, 0);
+        return MachineStopResult::Busy;
+    }
+    let mut participants: CpuParticipants[&kernel_world_stop] = { mask };
+    match world_stop_begin_claimed(&kernel_world_stop, mask, spins, true, false) {
+        WorldStopResult::Busy => {
+            cpu_participants_end(participants);
+            return MachineStopResult::Busy;
+        }
+        WorldStopResult::Partial(partial) => {
+            cpu_participants_end(participants);
+            return MachineStopResult::Partial(partial);
+        }
+        WorldStopResult::Complete(stopped) => {
+            let owner: usize = stopped.owner;
+            world_stopped_end(stopped);
+            let mut machine: MachineStopped[&kernel_world_stop] = { participants, owner };
+            return MachineStopResult::Complete(machine);
+        }
+    }
+}
+
+private inline fn cpu_participants_end(participants: sink CpuParticipants[id]) {}
+
+fn machine_stop_release(machine: sink MachineStopped[id], stop: *WorldStop @ id)
+        !{unsafe} {
+    cpu_participants_end(machine.participants);
+    world_stop_resume(stop);
+}
+
+// Terminal shutdown has no subsequent reader and never resumes the peers.
+fn machine_stop_keep_forever(machine: sink MachineStopped[id]) {
+    cpu_participants_end(machine.participants);
+}
+
+fn machine_stopped_mask(machine: borrow MachineStopped[id]) -> usize {
+    let mut mask: usize = 0;
+    for cpu: usize in 0..<KERNEL_MAX_CORES {
+        if ((machine.participants.mask & (1 << cpu)) != 0 && cpu != machine.owner) {
+            mask = mask | (1 << cpu);
+        }
+    }
+    return mask;
+}
+
+// Reserving a CPU changes the logical participant context. These annotations
+// also reject starts in a caller retaining a machine authority or its loans.
+fn cpu_start_reserve(core: {0..<KERNEL_MAX_CORES as usize})
+        -> CpuStartResult[&kernel_world_stop]
+        !{unsafe, changes_witness_CpuParticipants, changes_witness_MachineStopped} {
+    if (core == 0 || cpu_id() != 0) { return CpuStartResult::Busy; }
+    if (world_stop_claim(&kernel_world_stop) != 0) { return CpuStartResult::Busy; }
+    let mask: usize = atomic_word_load(&kernel_world_stop.participants) | 1;
+    let bit: usize = 1 << core;
+    atomic_word_store(&kernel_world_stop.participants, mask | bit);
+    let mut start: CpuStart[&kernel_world_stop] = { core, (mask & bit) != 0 };
+    return CpuStartResult::Reserved(start);
+}
+
+fn cpu_start_core(start: borrow CpuStart[id]) -> {0..<KERNEL_MAX_CORES as usize} {
+    return start.core;
+}
+
+// Only PSCI INVALID_PARAMETERS establishes that this newly reserved target
+// does not exist. Success, timeout, and every uncertain status keep it in the
+// possible set, even before its Takibi handshake. Never remove an old member.
+fn cpu_start_finish(start: sink CpuStart[&kernel_world_stop], status: usize)
+        !{unsafe} {
+    let core: usize = start.core;
+    let was_present: bool = start.was_present;
+    cpu_start_end(start);
+    if (status == 0xFFFFFFFFFFFFFFFE && was_present == false) {
+        let mask: usize = atomic_word_load(&kernel_world_stop.participants);
+        atomic_word_store(&kernel_world_stop.participants, mask & ~(1 << core));
+    }
+    cpu_start_gate_release();
+}
+
+private fn cpu_start_gate_release()
+        !{unsafe, changes_witness_CpuStart, changes_witness_CpuParticipants,
+          changes_witness_MachineStopped} {
+    atomic_word_store(&kernel_world_stop.claimed, 0);
+}
+
+private inline fn cpu_start_end(start: sink CpuStart[id]) {}
 
 must_use variant WorldStopClaimProbeResult {
     Busy;
@@ -286,7 +425,8 @@ fn world_stop_begin_stale_ack_probe(
 }
 
 private fn world_stop_resume(stop: *WorldStop @ id)
-        !{unsafe, changes_witness_WorldStopped, changes_witness_WorldStopPartial} {
+        !{unsafe, changes_witness_WorldStopped, changes_witness_WorldStopPartial,
+          changes_witness_MachineStopped, changes_witness_CpuParticipants, changes_witness_CpuStart} {
     atomic_word_store(&(*stop).requested, 0);
     // owner remains stable until the next successful claimant publishes it.
     // Releasing the gate last prevents a new publication being cleared here.
@@ -347,12 +487,12 @@ fn world_stop_partial_mask(partial: borrow WorldStopPartial[id]) -> usize {
 }
 
 // The complete token does not need to store a second copy of its mask: every
-// non-owner core in [0, cores) acknowledged, which is exactly the set the SGI
+// non-owner core in the requested mask acknowledged, exactly the set the SGI
 // targeted and the set release resumes.
 fn world_stopped_mask(stopped: borrow WorldStopped[id]) -> usize {
     let mut mask: usize = 0;
     for cpu: usize in 0..<KERNEL_MAX_CORES {
-        if (cpu < stopped.cores && cpu != stopped.owner) {
+        if ((stopped.mask & (1 << cpu)) != 0 && cpu != stopped.owner) {
             mask = mask | (1 << cpu);
         }
     }

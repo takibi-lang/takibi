@@ -244,7 +244,7 @@ fn asid_force_rollover_needed() {
 // Re-check under the ASID lock after the machine has stopped. Another caller
 // may have completed rollover while this caller was obtaining its token, so
 // false means the requested work is already done rather than failure.
-fn asid_rollover_stopped(stopped: borrow WorldStopped[stop]) -> bool {
+fn asid_rollover_stopped(stopped: borrow MachineStopped[&kernel_world_stop]) -> bool {
     let guard = locked_cell_take(&asid_cell);
     let state = locked_cell_value(guard, &asid_cell);
     let mut rolled: bool = false;

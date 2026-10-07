@@ -1,7 +1,7 @@
 # Stopped diagnostic authority
 
 The DDB process-copy API requires a borrowed
-`WorldStopped[&kernel_world_stop]`. A partial result, a complete token from
+`MachineStopped[&kernel_world_stop]`. A subset stop, a partial result, a token from
 another controller, or a call without a token cannot enter this API. The DDB
 entry passes the complete token it retains until inspection returns. The copy
 returns value snapshots, not a retained ProcessRecord pointer.
@@ -30,10 +30,12 @@ These are local compile-time API and lifetime checks. They do not prove that
 all remote CPUs acknowledged correctly, or that an arbitrary raw read or a
 remote free obeys the protocol. The controller mint, per-request atomic
 acknowledgements, interrupt entry and physical CPU holding pen remain trusted.
-The generic controller API can still be requested with a caller-supplied core
-count; a complete result must not be confused with a compiler proof that the
-count includes every online CPU. The production DDB entry uses
-`kernel_online_core_count()`.
+The generic controller API still accepts a caller-supplied subset for probes,
+but that WorldStopped token cannot enter the DDB process-copy or RAM-check
+APIs. Whole-machine entry captures the possible-participant mask under the
+same gate as CPU_ON. Pending and uncertain starts are included before firmware
+can expose them. See CPU_PARTICIPANT_AUTHORITY.md for this boundary and its
+named trusted operations.
 
 The lock-free DDB pool probe keeps its IntrusiveSlotView through each copy,
 but its unsafe probe currently relies on the stopped caller rather than a

@@ -70,7 +70,7 @@ Two cores; a parent, its child, and one other runnable process.
 | Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
 | --- | --- | --- | --- | --- |
 | `Wait4Decide` | the wait4 arm of `kernel_syscall_dispatch_action` | the zombie check and the decision to block, under one hold of the run lock (#571) | the pid, the status copy and ECHILD -- irrelevant to `NoLostWakeup`: none of them changes which process is Blocked or Exited | `452fac029ff2` |
-| `Wait4Block` | `kernel_process_block_current`, `kernel_process_block_reserved` | successor choice and the Blocked publication in one critical section; `RECHECK` is the zombie re-check there | ASID preparation and the lock drop around it -- irrelevant to `NoLostWakeup`: the drop comes after Blocked is published and re-checked, and the successor it crosses with is already reserved Running | `a14785ae52df` |
+| `Wait4Block` | `kernel_process_block_current`, `kernel_process_block_reserved` | successor choice and the Blocked publication in one critical section; `RECHECK` is the zombie re-check there | ASID preparation and the lock drop around it -- irrelevant to `NoLostWakeup`: the drop comes after Blocked is published and re-checked, and the successor it crosses with is already reserved Running | `238907d4b551` |
 | `ChildExit` | `kernel_process_child_exit` | the child becomes a zombie and wakes the parent only if the parent is Blocked in ChildExit | zombie draining -- irrelevant to `NoLostWakeup`: it reaps the exiting child's own children, never this parent or this child; SIGCHLD -- irrelevant to `NoLostWakeup`: it makes no process Blocked or Exited, and only such a step can break the property; the direct parent start -- modelled elsewhere: `StackOwnership.ChildExitStart` | `e0d1e49628e4` |
 | `Wait4Resume` | `kernel_syscall_wait4_deliver` | the woken parent reaps | the user-memory status write -- irrelevant to `NoLostWakeup`: it runs after the reap, when the child is no longer Exited | `85c0812b045d` |
 | `Preempt` | `kernel_process_timer_schedule` | the timer takes a process off its core, never inside the parent's wait4 syscall (`KERNEL_PREEMPTIBLE` is 0) | the test-only spread rendezvous -- irrelevant to `NoLostWakeup`: it changes affinity before scheduling and observes an existing leave, without changing a wait or wake | `4504ff8d98f0` |
@@ -130,8 +130,8 @@ modelcheck` requires each to fail:
 | `CloneFinish` | `kernel_process_clone_context_install` | the child is Running and the parent Ready, in a later hold | nothing | `c3436ff2e327` |
 | `SwitchComplete` | `kernel_process_stack_switch_complete` | the physical handoff at exception return: release the stack stood on, own the current process's | the deferred reap it runs after the release -- modelled elsewhere: `Wait4Reap` | `876f585839f4` |
 | `Reserve` | `kernel_process_schedule`, `kernel_process_secondary_start`, `kernel_process_block_current` | a core takes a Ready process whose stack no core owns, and a parent with a continuation only once the child's stack is free too, and marks it Running before it is current | affinity -- irrelevant to `StartsOnFreeStack`: it only forbids some reservations, and the model already allows each one it forbids; the debugger-armed starvation injection of the busy-pair control -- irrelevant to `StartsOnFreeStack`: like affinity it only forbids some reservations; the unlocked ASID preparation before the commit -- irrelevant to `StackSafety`: it moves no stack, and the reserved process is Running, so no other core can take it | `ac805604d519` |
-| `Commit` | `kernel_process_secondary_start_reserved`, `kernel_process_exit_reserved` | the reserved successor becomes current on a core with no running current process | Ready wait4 marker consumption -- irrelevant to `StackSafety`: it changes no physical owner, and the reservation already checked the child stack before clearing the marker | `6bd5d980842e` |
-| `SwitchAway` | `kernel_process_schedule_reserved`, `kernel_process_block_reserved` | the reserved successor replaces a running current process, which is preempted, naps, or blocks in wait4; the core still stands on the outgoing stack, or on its IRQ stack inside an interrupt from EL0 | which child a wait4 waits for, and whether it has exited -- modelled elsewhere: `Wait4Block.Wait4Block` | `117d8c3ce8d4` |
+| `Commit` | `kernel_process_secondary_start_reserved`, `kernel_process_exit_reserved` | the reserved successor becomes current on a core with no running current process | Ready wait4 marker consumption -- irrelevant to `StackSafety`: it changes no physical owner, and the reservation already checked the child stack before clearing the marker | `8673bc3367fb` |
+| `SwitchAway` | `kernel_process_schedule_reserved`, `kernel_process_block_reserved` | the reserved successor replaces a running current process, which is preempted, naps, or blocks in wait4; the core still stands on the outgoing stack, or on its IRQ stack inside an interrupt from EL0 | which child a wait4 waits for, and whether it has exited -- modelled elsewhere: `Wait4Block.Wait4Block` | `6daa128e6074` |
 | `Wait4Block` | the wait4 arm of `kernel_syscall_dispatch_action`, `kernel_process_block_to_idle` | a parent blocks before its child exits, with no successor | the #550 window -- modelled elsewhere: `Wait4Block.Wait4Decide` | `d9ba37325532` |
 | `Nap` | `kernel_process_block_to_idle` | a process blocks for anything but a child's exit, with no successor | what it waits for -- irrelevant to `StackSafety`: every other wait reason blocks and wakes the same way | `951f98d886ed` |
 | `Wake` | `kernel_process_deadline_wake_all` | a napping process becomes Ready wherever its stack is | the other wakers (UART, network, signal) -- irrelevant to `StackSafety`: each makes a Blocked process Ready and moves no stack | `de6f5a9417fb` |
@@ -394,6 +394,39 @@ Properties:
 - `AllSent` (liveness, TLC only): every chunk is written and sent, under
   fairness on each action.
 - `TypeOK`: bookkeeping sanity.
+
+## WorldStop.tla -- CPU startup and a complete machine stop
+
+A shared nonblocking gate serializes CPU_ON reservations and stop requests.
+Before firmware can expose a CPU, its bit joins the possible-participant set.
+Only definitive absence removes a new bit. A complete machine stop captures
+this set under the gate and waits for current-generation acknowledgements
+from every other participant, including pending and uncertain starts.
+
+The fixed model has three CPUs and two non-reused generations. TLC checks its
+whole finite state graph; Apalache checks safety through eight steps. The
+`subset` variant accepts a caller-selected subset as full-machine authority;
+the `ungatedstart` variant starts a CPU during inspection. Both must violate
+`NoUnstoppedRead` (the latter's Apalache bound is ten).
+
+`RequestResolves` checks only that a waiting request eventually completes or
+times out, under weak fairness on those two actions. It does not guarantee
+that retries ever obtain a complete stop. IRQs opening infinitely often and
+weak fairness alone do not guarantee that every CPU acknowledges within one
+bounded wait or that an initiator wins a contested gate. No starvation-freedom
+claim follows from this model. Physical holding, firmware status truthfulness,
+ARM ordering, interrupt decoding and raw mint correctness remain trusted.
+
+| Action | Kernel function it abstracts | What is kept | What is dropped, and why that is safe | Reviewed |
+| --- | --- | --- | --- | --- |
+| `StartReserve` | `cpu_start_reserve` | claim before adding the possible target, sharing the stop gate | exact bit encoding -- irrelevant to `NoUnstoppedRead`: the set is the mask's membership relation | `32cb4c0c8e4c` |
+| `StartFirmware`, `CpuArrive` | `qemu_psci_cpu_on`, `rpi5_psci_cpu_on`, `kernel_secondary_main` | reserved target can execute before or after the firmware call returns | entry assembly and PSCI encoding -- irrelevant to `NoUnstoppedRead`: a CPU may arrive at any step after reservation | `4fc98849f791` |
+| `StartFinish`, `StartAbsent` | `cpu_start_finish`, `cpu_start_gate_release` | uncertain targets stay possible; only definitive absence removes a new reservation before releasing the gate | scheduler's contiguous online prefix -- irrelevant to `NoUnstoppedRead`: the full stop uses the independent possible-participant mask | `609a37fee353` |
+| `Claim`, `Publish` | `world_stop_claim`, `world_stop_begin_claimed`, `world_stop_machine_begin` | one initiator; set capture under the gate; fresh request generation | generation exhaustion -- irrelevant to `NoUnstoppedRead`: two generations are never reused and exhaustion only refuses another request; subset probe API -- irrelevant to `NoUnstoppedRead`: its distinct WorldStopped type cannot enter a whole-machine reader | `ec50389339e4` |
+| `Ack`, `PenExit`, `ToggleIrq` | `world_stop_hold` | ack current request only after entering the pen; exit only when request changes; masked IRQs can delay ack | physical instruction timing -- irrelevant to `NoUnstoppedRead`: arbitrary scheduling allows every delay | `0b3d91555f91` |
+| `Complete`, `Timeout` | `world_stop_begin_claimed` | all captured targets must ack the current generation; timeout yields no complete authority | spin count -- irrelevant to `NoUnstoppedRead`: timeout may happen at any waiting step | `4912d7384d61` |
+| `Release` | `world_stop_resume`, `machine_stop_release` | end the local authority before clearing request and releasing claim | terminal keep-forever -- irrelevant to `NoUnstoppedRead`: it never resumes or releases the gate | `c239880d1dd3` |
+| `Read` | `kernel_process_ddb_copy`, `kernel_ddb_enter_stopped` | inspection requires the borrowed machine authority | which record fields and memory commands are inspected -- irrelevant to `NoUnstoppedRead`: every read is gated by the same machine authority | `5909dca5521b` |
 
 ## Keeping models and the kernel in step
 
