@@ -1,5 +1,5 @@
 (test
  (name test_takibi)
  (deps %{exe:../bin/main.exe} ../kernel/lib/occupancy.tkb ../kernel/platform/qemu/init.tkb
-       ../kernel/platform/rpi5/init.tkb)
+       ../kernel/platform/rpi5/init.tkb ../kernel/kernel/process.tkb)
  (libraries takibi alcotest unix))

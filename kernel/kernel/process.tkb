@@ -1254,6 +1254,7 @@ struct ProcessDdbCopyResult {
 // escape the view exists to close. It only copies fields out, so borrowing
 // is what it meant all along.
 private fn scheduled_process_ddb_copy_one(
+        stopped: borrow MachineStopped[&kernel_world_stop],
         output: borrow [ProcessDdbRecord; DDB_PROCESS_RECORDS..],
         index: usize, slot: usize,
         record: borrow *ProcessRecord) {
@@ -1261,7 +1262,7 @@ private fn scheduled_process_ddb_copy_one(
     output[index].pid = record.pid;
     output[index].ppid = 0;
     if (record.has_parent) {
-        output[index].ppid = scheduled_process_pid_of_handle(record.parent);
+        output[index].ppid = scheduled_process_parent_pid_stopped(stopped, record.parent);
     }
     match record.state {
         ProcessSlotState::Free => { output[index].state = 0; }
@@ -1429,6 +1430,44 @@ fn kernel_process_protocol_trace_close() -> usize {
     return 1;
 }
 
+// Lock-free record access tied to the complete machine stop. The private
+// transfer preserves the checked source proof, then leaves only the stopped
+// authority as the pointer's lifetime. No scoped pool view can cross resume.
+private fn scheduled_process_record_stopped(
+        stopped: borrow MachineStopped[stop], slot: usize)
+        -> *ProcessRecord @ stop !{unsafe} {
+    if (slot == 0) { return &scheduled_process_boot_record; }
+    if (scheduled_process_pool_ready == false) { return &scheduled_process_record_absent; }
+    match machine_pool_probe(&scheduled_process_pool, stopped, slot) {
+        MachineSlotProbe::Missing => { return &scheduled_process_record_absent; }
+        MachineSlotProbe::Live(scoped) => {
+            let record = scheduled_process_stopped_transfer(scoped, stopped);
+            machine_pool_view_drop(scoped);
+            return record;
+        }
+    }
+}
+
+private inline fn scheduled_process_stopped_transfer(
+        source: borrow MachineSlotView[stop, &scheduled_process_pool],
+        destination: borrow MachineStopped[stop])
+        -> *ProcessRecord @ stop !{unsafe, loan_transfer} {
+    return machine_pool_payload(&scheduled_process_pool, source);
+}
+
+private fn scheduled_process_parent_pid_stopped(
+        stopped: borrow MachineStopped[stop],
+        parent: ProcessHandle) -> usize !{unsafe} {
+    return scheduled_process_record_stopped(stopped, parent.pool_index).pid;
+}
+
+fn scheduled_process_address_space_root_stopped(
+        stopped: borrow MachineStopped[stop], slot: usize)
+        -> AddressSpaceRoot !{unsafe} {
+    let record = scheduled_process_record_stopped(stopped, slot);
+    return address_space_root_mint(slot, process_backing_words(record));
+}
+
 // Fixed work for interrupt-safe DDB entry: at most 64 physical pool slots
 // are probed and at most 32 live records copied. A truncated result is an
 // explicit diagnostic fact, never silently presented as the whole table.
@@ -1439,7 +1478,7 @@ fn kernel_process_ddb_copy(
     let mut count: usize = 0;
     if (scheduled_process_boot_live) {
         scheduled_process_ddb_copy_one(
-            output, 0, 0, &scheduled_process_boot_record);
+            stopped, output, 0, 0, scheduled_process_record_stopped(stopped, 0));
         count = count + 1;
     }
     let mut slot: usize = 0;
@@ -1450,18 +1489,18 @@ fn kernel_process_ddb_copy(
     while (slot != 0 && probes < DDB_PROCESS_PROBE_BUDGET &&
             count < DDB_PROCESS_RECORDS) {
         let next: usize = intrusive_pool_next_slot(&scheduled_process_pool, slot);
-        match intrusive_pool_probe_slot_unproven(&scheduled_process_pool, slot) {
-            IntrusiveSlotProbe::NoPayload => {}
-            IntrusiveSlotProbe::Live(slot_view) => {
+        match machine_pool_probe(&scheduled_process_pool, stopped, slot) {
+            MachineSlotProbe::Missing => {}
+            MachineSlotProbe::Live(slot_view) => {
                 // The view is held across the read and released after,
                 // which is the shape GitHub issue #488 wants everywhere:
                 // the payload pointer cannot outlive the proof that the
                 // slot was occupied. This walk was already doing the right
                 // thing by accident -- it just had no way to say so.
-                let record: *ProcessRecord = intrusive_pool_payload_of(
+                let record: *ProcessRecord = machine_pool_payload(
                     &scheduled_process_pool, slot_view);
-                scheduled_process_ddb_copy_one(output, count, slot, record);
-                intrusive_view_release(slot_view);
+                scheduled_process_ddb_copy_one(stopped, output, count, slot, record);
+                machine_pool_view_drop(slot_view);
                 count = count + 1;
             }
         }
@@ -1794,7 +1833,7 @@ fn scheduled_process_peek_saved_sp(slot: usize) -> usize !{unsafe} {
 
 fn scheduled_process_pid_of_handle(handle: ProcessHandle) -> usize
         !{unsafe} {
-    return scheduled_process_record_peek(handle.pool_index).pid;
+    return scheduled_process_pid_of_slot(handle.pool_index);
 }
 
 must_use variant ProcessSlotForPidResult {
@@ -2701,7 +2740,8 @@ private fn scheduled_process_release_slot_resources(slot: usize) !{unsafe} {
 // loans, including loans through another authority. It adds no pin or lock.
 private fn scheduled_process_slot_remove(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock],
-        slot: usize) !{unsafe, record_mutates_ProcessRunGuard} {
+        slot: usize) !{unsafe, record_mutates_ProcessRunGuard,
+                      changes_witness_MachineSlotView} {
     if (slot == 0) {
         scheduled_process_boot_live = false;
         return;
@@ -5542,7 +5582,7 @@ private fn kernel_process_secondary_start_reserved(
                     return ProcessSecondaryStart::Idle;
                 }
                 MachineStopResult::Partial(partial) => {
-                    world_stop_partial_release(partial, &kernel_world_stop);
+                    machine_stop_partial_release(partial, &kernel_world_stop);
                     kernel_process_start_refused_partial =
                         kernel_process_start_refused_partial + 1;
                     let guard = process_run_lock();
@@ -5744,7 +5784,7 @@ private fn kernel_process_schedule_reserved(
                     return FrameSwitch::Stay;
                 }
                 MachineStopResult::Partial(partial) => {
-                    world_stop_partial_release(partial, &kernel_world_stop);
+                    machine_stop_partial_release(partial, &kernel_world_stop);
                     kernel_process_schedule_cancel_reserved(owner, running);
                     return FrameSwitch::Stay;
                 }
@@ -5854,7 +5894,7 @@ fn kernel_process_activate_current_root(current_authority: borrow ProcessCurrent
                     kernel_process_rollover_backoff();
                 }
                 MachineStopResult::Partial(partial) => {
-                    world_stop_partial_release(partial, &kernel_world_stop);
+                    machine_stop_partial_release(partial, &kernel_world_stop);
                     kernel_process_rollover_backoff();
                 }
                 MachineStopResult::Complete(stopped) => {
@@ -5941,7 +5981,7 @@ fn kernel_process_activate_stable_root(root: AddressSpaceRoot) {
                         kernel_process_rollover_backoff();
                     }
                     MachineStopResult::Partial(partial) => {
-                        world_stop_partial_release(partial, &kernel_world_stop);
+                        machine_stop_partial_release(partial, &kernel_world_stop);
                         kernel_process_stable_retry_partial =
                             kernel_process_stable_retry_partial + 1;
                         kernel_process_rollover_backoff();
@@ -7002,7 +7042,7 @@ private fn kernel_process_block_reserved(
                     return BlockSwitch::Retry;
                 }
                 MachineStopResult::Partial(partial) => {
-                    world_stop_partial_release(partial, &kernel_world_stop);
+                    machine_stop_partial_release(partial, &kernel_world_stop);
                     kernel_process_schedule_cancel_reserved(owner, running);
                     return BlockSwitch::Retry;
                 }
@@ -9454,7 +9494,7 @@ private fn kernel_process_exit_reserved(
                     return ExitSwitch::Idle;
                 }
                 MachineStopResult::Partial(partial) => {
-                    world_stop_partial_release(partial, &kernel_world_stop);
+                    machine_stop_partial_release(partial, &kernel_world_stop);
                     kernel_process_schedule_cancel_reserved(owner, running);
                     return ExitSwitch::Idle;
                 }

@@ -5012,7 +5012,7 @@ fn syscall_system_stop(marker: *u8) -> SyscallAction !{unsafe} {
     match world_stop_machine_begin(10000000) {
         MachineStopResult::Busy => { return SyscallAction::Resume(LINUX_EAGAIN); }
         MachineStopResult::Partial(partial) => {
-            world_stop_partial_release(partial, &kernel_world_stop);
+            machine_stop_partial_release(partial, &kernel_world_stop);
             return SyscallAction::Resume(LINUX_EAGAIN);
         }
         MachineStopResult::Complete(stopped) => {

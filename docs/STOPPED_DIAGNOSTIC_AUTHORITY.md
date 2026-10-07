@@ -37,15 +37,28 @@ same gate as CPU_ON. Pending and uncertain starts are included before firmware
 can expose them. See CPU_PARTICIPANT_AUTHORITY.md for this boundary and its
 named trusted operations.
 
-The lock-free DDB pool probe keeps its IntrusiveSlotView through each copy,
-but its unsafe probe currently relies on the stopped caller rather than a
-checked derivation from the stop authority. The fatal console and diagnostic
-peek also retain their existing weaker access paths. No escape is counted as
-removed by this preparation, and no pin, runtime generation witness or new
-lock is introduced. A full diagnostic/reclamation guarantee additionally
-requires those accesses to derive from authority, complete reclamation
-boundaries, a checked failure policy, and confinement of the remaining raw
-mint operations.
+The lock-free DDB process-pool probe now derives a private
+`MachineSlotView[stop, pool]` from the borrowed machine authority. Its payload
+loan retains the stop identity. Resume, CPU-start changes, and actual process
+slot removal reject a live view; resume also rejects an outstanding derived
+pointer after the view itself has been dropped. A private `loan_transfer`
+boundary can move the checked pointer lifetime to the borrowed machine token.
+DDB record copies, parent-PID reads and address-space root selection use this
+path, including the bootstrap record before the pool is initialized.
+
+Full and partial machine stops save and mask the initiator's IRQ state before
+claiming the gate. CPU-start reservations do the same. Their linear result
+payloads carry the existing IRQ-mask and world-stop lock guard contracts;
+release ends the authority before resuming peers and restoring saved IRQs.
+Busy restores immediately. Terminal keep-forever retains the physical mask.
+A derived pool view also carries IRQ-mask exclusion until it is dropped.
+The save/restore implementation and physical IRQ behavior remain trusted.
+
+This is not yet a lock-free guarantee for every diagnostic. VM and FD backing
+inspection still pins RegionPool records, and the fatal console and normal
+diagnostic peek retain weaker paths. Those accesses and raw-authority mint
+confinement remain unfinished. No runtime pin or new lock was added to the
+process-pool copy path.
 
 ## Space review, 2026-10-07
 
@@ -81,3 +94,37 @@ page reservation stay unchanged. This does not establish physical timing or
 cross-core reclamation safety. No cross-OS comparison boundary changed.
 Measure again when diagnostic pool access/fatal-console authority is changed,
 a new lifetime/resource is introduced, or the full safe-memory stage completes.
+
+## Scoped process reads and initiator IRQs, 2026-10-07
+
+Baseline: published 35c49a52 and its recorded linked-image measurements in
+CPU_PARTICIPANT_AUTHORITY.md. Candidate: fresh standard production builds
+with scoped process reads and saved IRQ flags in full/partial machine stops
+and CPU-start tokens. These local flags add one word per retained token,
+not a per-process field or allocation. MachineStopped and CpuStart now carry
+three words; MachineStopPartial carries four. Pool payload, retained pages,
+and workload occupancy are unchanged; their existing endpoint evidence is
+reused only for those unchanged boundaries.
+
+| Boundary (bytes) | QEMU baseline | QEMU candidate | RPi5 baseline | RPi5 candidate |
+| --- | ---: | ---: | ---: | ---: |
+| llvm-size text | 693220 | 694548 | 702220 | 703644 |
+| data | 5022 | 5022 | 2888728 | 2888728 |
+| BSS | 1667904 | 1667888 | 1705120 | 1705120 |
+| reserved image span | 2392064 | 2392064 | 5308416 | 5308416 |
+
+Candidate ELF SHA-256:
+
+- QEMU: e3257c0d5542cd6549595475c3490d15e9c06ffe5dd836ffd912f7e2f43d3e9e
+- RPi5: bcdf63e044d5cef07b8a00220a8b63f0502b0335b1c1a6dfc1a5d09f372f02c6
+
+Measurements use llvm-size-19 and llvm-nm-19; text is aggregate read-only
+allocation and image span includes alignment and stacks. Read-only allocation
+grows by 1328 bytes QEMU and 1424 bytes RPi5. QEMU BSS shrinks by 16 bytes;
+this is an aggregate linked measurement, not a pool-capacity change.
+Data and page reservations stay unchanged. Adopt the scoped boundary and
+initiator IRQ exclusion. The bounded model still assumes indivisible owner
+reads; the IRQ lifetime rejection is separate compiler evidence. Physical
+masking and save/restore remain trusted. No cross-OS comparison changed.
+Measure again at RegionPool inspection or fatal-console migration, a new
+resource lifetime, or completion of the safe-memory stage.

@@ -1743,7 +1743,7 @@ private fn workload_busy_start_profile(pid: usize, input_steps: usize)
             process_run_unlock(retry_guard);
         }
         MachineStopResult::Partial(partial) => {
-            world_stop_partial_release(partial, &kernel_world_stop);
+            machine_stop_partial_release(partial, &kernel_world_stop);
             let retry_guard = process_run_lock();
             workload_busy_pair.start_requested = false;
             process_run_unlock(retry_guard);
@@ -2097,7 +2097,7 @@ fn workload_busy_record_progress(tag: usize, checksum: usize,
             process_run_unlock(retry_guard);
         }
         MachineStopResult::Partial(partial) => {
-            world_stop_partial_release(partial, &kernel_world_stop);
+            machine_stop_partial_release(partial, &kernel_world_stop);
             let retry_guard = process_run_lock();
             workload_busy_pair.finish_requested = false;
             process_run_unlock(retry_guard);

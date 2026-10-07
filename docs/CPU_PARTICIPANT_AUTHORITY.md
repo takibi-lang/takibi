@@ -61,7 +61,10 @@ arbitrary interrupt masking or competing initiators.
 Trusted operations remain finite and named: reservation and full-stop mints
 in occupancy.tkb; platform CPU_ON issuers and truthful PSCI status; acquire/
 release atomic instructions; interrupt dispatch and the holding pen; CPU
-identity and exception entry. Static types do not prove physical quiescence.
+identity and exception entry. Initiator IRQ exclusion is now carried by the existing IRQ-mask guard
+contract on full/partial machine-stop and CPU-start result payloads. Saved
+IRQ restoration is ordered after authority release. Static types do not
+prove physical quiescence or the correctness of IRQ save/restore instructions.
 Raw-pointer confinement and the fatal-console / diagnostic-peek migration
 remain separate parts of the safe-memory work. A crash console which falls
 back after Busy or Partial still has no full-machine authority.
@@ -71,7 +74,8 @@ back after Busy or Partial still has no full-machine authority.
 Baseline: published eaf01fbe. Workload: standard production linked images,
 bounded bootstrap CPU_ON attempts and DDB process-copy inspection. The
 participant word is per controller, not per process; full-stop tokens carry
-one mask and one owner word, with no additional mask copy or allocation.
+one mask and one owner word at this measurement boundary, with no additional
+mask copy or allocation. Subsequent IRQ-scoped tokens also carry saved flags.
 Existing pool endpoint evidence remains applicable to unchanged allocation,
 payload, retained-page and occupancy boundaries. Linked images are measured
 anew with llvm-size-19 and llvm-nm-19. Text is aggregate read-only allocation.

@@ -89,6 +89,7 @@
 //   These guarantees were revised on 2026-09-08 for repeated interval stops.
 use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/execution_model.tkb";
+use "kernel/lib/intrusive_pool.tkb";
 
 // Presence, per core. Private, so no other file can read or write it
 // except through the four entry points below -- which is what makes the
@@ -160,11 +161,28 @@ private linear struct CpuParticipants[stop: addr] {
 linear struct MachineStopped[stop: addr] {
     private participants: CpuParticipants[stop];
     private owner: usize;
+    private irq_flags: usize;
+}
+
+// A pool view stamped with the stop context. Its own lifetime must end
+// before resume or destruction, even if no payload pointer was yet derived.
+private linear struct MachineSlotView[stop: addr, pool: addr] {
+    private live: IntrusiveSlotView[pool];
+}
+
+must_use variant MachineSlotProbe[stop: addr, pool: addr] {
+    Missing;
+    Live(MachineSlotView[stop, pool]);
+}
+
+linear struct MachineStopPartial[stop: addr] {
+    private partial: WorldStopPartial[stop];
+    private irq_flags: usize;
 }
 
 must_use variant MachineStopResult[stop: addr] {
     Busy;
-    Partial(WorldStopPartial[stop]);
+    Partial(MachineStopPartial[stop]);
     Complete(MachineStopped[stop]);
 }
 
@@ -173,6 +191,7 @@ must_use variant MachineStopResult[stop: addr] {
 linear struct CpuStart[stop: addr] {
     private core: {0..<KERNEL_MAX_CORES as usize};
     private was_present: bool;
+    private irq_flags: usize;
 }
 
 must_use variant CpuStartResult[stop: addr] {
@@ -296,30 +315,36 @@ fn world_stop_begin(stop: *WorldStop @ id, cores: usize, spins: usize)
 // Capture under the claim, never from an unlocked online-count read. The
 // bootstrap CPU is present even before the first secondary reservation.
 fn world_stop_machine_begin(spins: usize)
-        -> MachineStopResult[&kernel_world_stop] !{unsafe} {
+        -> MachineStopResult[&kernel_world_stop]
+        !{unsafe, irq_masking_guard, lock_guard_40_world_stop} {
+    let irq_flags: usize = mutex_irq_save();
     if (world_stop_claim(&kernel_world_stop) != 0) {
+        mutex_irq_restore(irq_flags);
         return MachineStopResult::Busy;
     }
     let mask: usize = atomic_word_load(&kernel_world_stop.participants) | 1;
     let owner: usize = cpu_id();
     if (owner >= KERNEL_MAX_CORES || (mask & (1 << owner)) == 0) {
         atomic_word_store(&kernel_world_stop.claimed, 0);
+        mutex_irq_restore(irq_flags);
         return MachineStopResult::Busy;
     }
     let mut participants: CpuParticipants[&kernel_world_stop] = { mask };
     match world_stop_begin_claimed(&kernel_world_stop, mask, spins, true, false) {
         WorldStopResult::Busy => {
             cpu_participants_end(participants);
+            mutex_irq_restore(irq_flags);
             return MachineStopResult::Busy;
         }
         WorldStopResult::Partial(partial) => {
             cpu_participants_end(participants);
-            return MachineStopResult::Partial(partial);
+            let mut pending: MachineStopPartial[&kernel_world_stop] = { partial, irq_flags };
+            return MachineStopResult::Partial(pending);
         }
         WorldStopResult::Complete(stopped) => {
             let owner: usize = stopped.owner;
             world_stopped_end(stopped);
-            let mut machine: MachineStopped[&kernel_world_stop] = { participants, owner };
+            let mut machine: MachineStopped[&kernel_world_stop] = { participants, owner, irq_flags };
             return MachineStopResult::Complete(machine);
         }
     }
@@ -329,8 +354,21 @@ private inline fn cpu_participants_end(participants: sink CpuParticipants[id]) {
 
 fn machine_stop_release(machine: sink MachineStopped[id], stop: *WorldStop @ id)
         !{unsafe} {
+    let irq_flags: usize = machine.irq_flags;
     cpu_participants_end(machine.participants);
     world_stop_resume(stop);
+    mutex_irq_restore(irq_flags);
+}
+
+fn machine_stop_partial_release(pending: sink MachineStopPartial[id], stop: *WorldStop @ id)
+        !{unsafe} {
+    let irq_flags: usize = pending.irq_flags;
+    world_stop_partial_release(pending.partial, stop);
+    mutex_irq_restore(irq_flags);
+}
+
+fn machine_stop_partial_mask(pending: borrow MachineStopPartial[id]) -> usize {
+    return world_stop_partial_mask(pending.partial);
 }
 
 // Terminal shutdown has no subsequent reader and never resumes the peers.
@@ -348,17 +386,45 @@ fn machine_stopped_mask(machine: borrow MachineStopped[id]) -> usize {
     return mask;
 }
 
+// The unlocked proof stays inside this boundary; callers receive a scope
+// whose stop and pool identities the checker retains through every read.
+fn machine_pool_probe(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                      stopped: borrow MachineStopped[stop], slot: usize)
+        -> MachineSlotProbe[stop, pool_id] !{unsafe, irq_masking_guard} {
+    match intrusive_pool_probe_slot_unproven(pool, slot) {
+        IntrusiveSlotProbe::NoPayload => { return MachineSlotProbe::Missing; }
+        IntrusiveSlotProbe::Live(live) => {
+            let mut scoped: MachineSlotView[stop, pool_id] = { live };
+            return MachineSlotProbe::Live(scoped);
+        }
+    }
+}
+
+fn machine_pool_payload(T: type, pool: &mut IntrusivePool(T) @ pool_id,
+                        scoped: borrow MachineSlotView[stop, pool_id])
+        -> *T @ stop !{unsafe} {
+    return intrusive_pool_payload_of(pool, scoped.live);
+}
+
+fn machine_pool_view_drop(source: sink MachineSlotView[stop, pool_id]) {
+    intrusive_view_drop(source.live);
+}
+
 // Reserving a CPU changes the logical participant context. These annotations
 // also reject starts in a caller retaining a machine authority or its loans.
 fn cpu_start_reserve(core: {0..<KERNEL_MAX_CORES as usize})
         -> CpuStartResult[&kernel_world_stop]
-        !{unsafe, changes_witness_CpuParticipants, changes_witness_MachineStopped} {
+        !{unsafe, irq_masking_guard, lock_guard_40_world_stop, changes_witness_CpuParticipants, changes_witness_MachineStopped,
+          changes_witness_MachineSlotView} {
     if (core == 0 || cpu_id() != 0) { return CpuStartResult::Busy; }
-    if (world_stop_claim(&kernel_world_stop) != 0) { return CpuStartResult::Busy; }
+    let irq_flags: usize = mutex_irq_save();
+    if (world_stop_claim(&kernel_world_stop) != 0) {
+        mutex_irq_restore(irq_flags); return CpuStartResult::Busy;
+    }
     let mask: usize = atomic_word_load(&kernel_world_stop.participants) | 1;
     let bit: usize = 1 << core;
     atomic_word_store(&kernel_world_stop.participants, mask | bit);
-    let mut start: CpuStart[&kernel_world_stop] = { core, (mask & bit) != 0 };
+    let mut start: CpuStart[&kernel_world_stop] = { core, (mask & bit) != 0, irq_flags };
     return CpuStartResult::Reserved(start);
 }
 
@@ -373,17 +439,19 @@ fn cpu_start_finish(start: sink CpuStart[&kernel_world_stop], status: usize)
         !{unsafe} {
     let core: usize = start.core;
     let was_present: bool = start.was_present;
+    let irq_flags: usize = start.irq_flags;
     cpu_start_end(start);
     if (status == 0xFFFFFFFFFFFFFFFE && was_present == false) {
         let mask: usize = atomic_word_load(&kernel_world_stop.participants);
         atomic_word_store(&kernel_world_stop.participants, mask & ~(1 << core));
     }
     cpu_start_gate_release();
+    mutex_irq_restore(irq_flags);
 }
 
 private fn cpu_start_gate_release()
         !{unsafe, changes_witness_CpuStart, changes_witness_CpuParticipants,
-          changes_witness_MachineStopped} {
+          changes_witness_MachineStopped, changes_witness_MachineSlotView} {
     atomic_word_store(&kernel_world_stop.claimed, 0);
 }
 
@@ -426,7 +494,9 @@ fn world_stop_begin_stale_ack_probe(
 
 private fn world_stop_resume(stop: *WorldStop @ id)
         !{unsafe, changes_witness_WorldStopped, changes_witness_WorldStopPartial,
-          changes_witness_MachineStopped, changes_witness_CpuParticipants, changes_witness_CpuStart} {
+          changes_witness_MachineStopped, changes_witness_MachineStopPartial,
+          changes_witness_CpuParticipants, changes_witness_CpuStart,
+          changes_witness_MachineSlotView} {
     atomic_word_store(&(*stop).requested, 0);
     // owner remains stable until the next successful claimant publishes it.
     // Releasing the gate last prevents a new publication being cleared here.

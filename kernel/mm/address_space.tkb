@@ -1488,7 +1488,7 @@ fn address_space_asid_rollover_probe() -> bool {
                 match world_stop_machine_begin(ASID_ROLLOVER_STOP_SPINS) {
                     MachineStopResult::Busy => { ok = false; }
                     MachineStopResult::Partial(partial) => {
-                        world_stop_partial_release(
+                        machine_stop_partial_release(
                             partial, &kernel_world_stop);
                         ok = false;
                     }

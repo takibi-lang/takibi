@@ -31,6 +31,7 @@ ALLOWED = {
     "scheduled_process_address_space_root_locked",
     "scheduled_process_address_space_root_owned",
     "scheduled_process_address_space_root_peek",
+    "scheduled_process_address_space_root_stopped",
     "scheduled_process_address_space_root_current",
 }
 

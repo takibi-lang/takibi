@@ -2276,7 +2276,7 @@ private fn kernel_ddb_enter_stopped(
     ddb_snapshot.wait_reason = kernel_process_crash_wait_reason();
     ddb_snapshot.root_slot = kernel_process_current_slot();
     let mut vm: AddressSpaceDiagnosticSnapshot =
-        address_space_diagnostic_snapshot(scheduled_process_address_space_root_peek(ddb_snapshot.root_slot));
+        address_space_diagnostic_snapshot(scheduled_process_address_space_root_stopped(stopped_world, ddb_snapshot.root_slot));
     ddb_snapshot.root_live = 0;
     if (vm.live) { ddb_snapshot.root_live = 1; }
     ddb_snapshot.root_l1 = vm.l1_physical;
@@ -2305,7 +2305,7 @@ private fn kernel_ddb_enter_stopped(
         if (index < ddb_snapshot.process_count) {
             let mut process_vm: AddressSpaceDiagnosticSnapshot =
                 address_space_diagnostic_snapshot(
-                    scheduled_process_address_space_root_peek(ddb_snapshot.processes[index].root_slot));
+                    scheduled_process_address_space_root_stopped(stopped_world, ddb_snapshot.processes[index].root_slot));
             if (process_vm.live) {
                 ddb_snapshot.process_l2[index] = process_vm.l2_physical;
             }
@@ -2537,9 +2537,9 @@ fn kernel_ddb_enter(frame_sp: usize, entry_kind: usize, entry_source: usize)
         }
         MachineStopResult::Partial(partial) => {
             ddb_puts("\nddb: world-stop partial mask=");
-            ddb_put_hex(world_stop_partial_mask(partial));
+            ddb_put_hex(machine_stop_partial_mask(partial));
             ddb_puts("; inspection refused\n");
-            world_stop_partial_release(partial, &kernel_world_stop);
+            machine_stop_partial_release(partial, &kernel_world_stop);
         }
         MachineStopResult::Complete(stopped_world) => {
             kernel_ddb_enter_stopped(

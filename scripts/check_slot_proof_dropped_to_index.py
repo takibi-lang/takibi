@@ -67,6 +67,7 @@ INDEX_ONLY_ALLOWED = {
 TRANSFER_RELEASES = {
     "scheduled_process_locked_view_drop": "ProcessRecordLockedView",
     "scheduled_process_current_view_drop": "ProcessRecordCurrentView",
+    "machine_pool_view_drop": "MachineSlotView",
 }
 
 

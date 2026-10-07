@@ -21173,10 +21173,11 @@ let infer_production_stop_boundary code =
   let primitives = parse {|
     const KERNEL_MAX_CORES: usize = 4;
     struct no_copy AtomicWord { private value: usize; }
+    linear struct IntrusiveSlotView[p: addr] { private slot: usize; }
     fn atomic_word_store(cell: *AtomicWord, value: usize) !{unsafe} {}
   |} in
   let types = ["WorldStop"; "WorldStopped"; "WorldStopPartial";
-    "CpuParticipants"; "MachineStopped"; "CpuStart"] in
+    "CpuParticipants"; "MachineStopped"; "CpuStart"; "MachineSlotView"; "MachineStopPartial"] in
   let functions = ["world_stop_resume"; "world_stopped_end";
     "world_stop_partial_end"; "world_stop_release"; "world_stop_partial_release"] in
   let boundary = List.filter (function
@@ -21184,7 +21185,7 @@ let infer_production_stop_boundary code =
     | Ast.OwnedStructDef (name, _, _, _, _, _, _, _, _) -> List.mem name types
     | Ast.FuncDef f -> List.mem f.name functions
     | _ -> false) (parse_here source) in
-  Alcotest.(check int) "all production boundary declarations extracted" 11
+  Alcotest.(check int) "all production boundary declarations extracted" 13
     (List.length boundary);
   let harness = parse_here ({|
     struct Record { value: usize; }
@@ -21257,29 +21258,47 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
   let primitives = parse {|
     const KERNEL_MAX_CORES: usize = 4;
     struct no_copy AtomicWord { private value: usize; }
+    linear struct IntrusiveSlotView[p: addr] { private slot: usize; }
     fn atomic_word_store(cell: *AtomicWord, value: usize) !{unsafe} {}
     fn atomic_word_load(cell: *AtomicWord) -> usize !{unsafe} { return 0; }
     fn atomic_word_swap(cell: *AtomicWord, value: usize) -> usize !{unsafe} { return 0; }
+    generic struct IntrusivePool(T: type) { value: T; }
+    must_use variant IntrusiveSlotProbe[p: addr] {
+      NoPayload; Live(IntrusiveSlotView[p]);
+    }
+    fn intrusive_pool_probe_slot_unproven(T: type, pool: &mut IntrusivePool(T) @ p,
+                                         slot: usize) -> IntrusiveSlotProbe[p] !{unsafe} {
+      return IntrusiveSlotProbe::NoPayload;
+    }
+    fn intrusive_pool_payload_of(T: type, pool: &mut IntrusivePool(T) @ p,
+                                 slot_view: borrow IntrusiveSlotView[p]) -> *T @ p !{unsafe} {
+      return &pool.value;
+    }
+    fn intrusive_view_drop(slot_view: sink IntrusiveSlotView[p]) {}
+    fn mutex_irq_save() -> usize { return 0; }
+    fn mutex_irq_restore(flags: usize) !{restores_saved_irq} {}
     fn cpu_id() -> usize { return 0; }
     fn platform_world_stop_notify(mask: usize, owner: usize) !{unsafe} {}
   |} in
   let types = ["WorldStop"; "WorldStopped"; "WorldStopPartial";
-    "CpuParticipants"; "MachineStopped"; "CpuStart"] in
-  let variants = ["WorldStopResult"; "MachineStopResult"; "CpuStartResult"] in
+    "CpuParticipants"; "MachineStopped"; "CpuStart"; "MachineSlotView"; "MachineStopPartial"] in
+  let variants = ["WorldStopResult"; "MachineStopResult"; "CpuStartResult"; "MachineSlotProbe"] in
   let functions = ["world_stop_claim"; "world_stop_begin_config";
     "world_stop_begin_claimed"; "world_stop_begin"; "world_stop_machine_begin";
     "cpu_participants_end"; "machine_stop_release"; "machine_stopped_mask";
     "cpu_start_reserve"; "cpu_start_core"; "cpu_start_finish";
     "cpu_start_end"; "cpu_start_gate_release"; "world_stop_resume";
     "world_stopped_end"; "world_stop_partial_end";
-    "world_stop_release"; "world_stop_partial_release"; "world_stopped_mask"] in
+    "world_stop_release"; "world_stop_partial_release"; "world_stopped_mask";
+    "machine_pool_probe"; "machine_pool_payload"; "machine_pool_view_drop";
+    "machine_stop_partial_release"; "machine_stop_partial_mask"; "world_stop_partial_mask"] in
   let boundary = List.filter (function
     | Ast.StructDef (name, _, _, _, _, _)
     | Ast.OwnedStructDef (name, _, _, _, _, _, _, _, _) -> List.mem name types
     | Ast.FuncDef f -> List.mem f.name functions
     | Ast.VariantDef (name, _, _, _, _) -> List.mem name variants
     | _ -> false) (parse_here source) in
-  Alcotest.(check int) "all production machine declarations extracted" 28
+  Alcotest.(check int) "all production machine declarations extracted" 37
     (List.length boundary);
   let platform_path = "kernel/platform/" ^ platform ^ "/init.tkb" in
   let path = List.find Sys.file_exists ["../" ^ platform_path; platform_path] in
@@ -21291,6 +21310,20 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
         [platform ^ "_psci_cpu_on"; "kernel_secondary_boot_cpu_on"]
     | _ -> false) (parse_here platform_source) in
   Alcotest.(check int) "both production CPU_ON bodies extracted" 2 (List.length issuers);
+  (* The destructive body is not simulated. Retain its real signature and
+     annotations to test the admission contract independently of teardown. *)
+  let path = List.find Sys.file_exists
+      ["../kernel/kernel/process.tkb"; "kernel/kernel/process.tkb"] in
+  let channel = open_in_bin path in
+  let process_source = Fun.protect ~finally:(fun () -> close_in channel)
+      (fun () -> really_input_string channel (in_channel_length channel)) in
+  let start = Option.get (substring_position process_source
+      "private fn scheduled_process_slot_remove(") in
+  let tail = String.sub process_source start (String.length process_source - start) in
+  let effects = Option.get (substring_position tail "!{") in
+  let finish = String.index_from tail (effects + 2) '}' in
+  let mutations = parse_here (String.sub tail 0 (finish + 1) ^ " {}") in
+  Alcotest.(check int) "production destruction contract extracted" 1 (List.length mutations);
   let harness = parse_here ({|
     let mut kernel_world_stop: WorldStop;
     let mut qemu_psci_use_hvc: bool;
@@ -21298,14 +21331,25 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
     let mut kernel_secondary_entry: usize;
     struct Record { value: usize; }
     private let mut record: Record;
+    private let mut record_pool: IntrusivePool(Record);
+    linear struct ProcessRunGuard[g: addr] { private flags: usize; }
+    private fn guard_end(guard: sink ProcessRunGuard[g]) {}
+    private fn guard_new(controller: *WorldStop @ g) -> ProcessRunGuard[g] {
+      let mut guard: ProcessRunGuard[g] = { 0 }; return guard;
+    }
     fn inspect(stopped: borrow MachineStopped[&kernel_world_stop]) -> usize { return 1; }
+    private fn scope_transfer(source: borrow MachineSlotView[s, &record_pool],
+                               destination: borrow MachineStopped[s])
+        -> *Record @ s !{unsafe, loan_transfer} {
+      return machine_pool_payload(&record_pool, source);
+    }
     private fn machine_loan(stopped: borrow MachineStopped[s]) -> *Record @ s {
       return &record;
     }
   |} ^ code) in
   Type_inf.infer_program (Declared_type_resolver.run
     (Monomorphize.run (Dma_fixed_record.run
-      (Publish_record.run (primitives @ boundary @ issuers @ harness)))))
+      (Publish_record.run (primitives @ boundary @ issuers @ mutations @ harness)))))
 
 let production_machine_boundary_tests =
   let good name code = Alcotest.test_case name `Quick
@@ -21323,7 +21367,7 @@ let production_machine_boundary_tests =
   let full body = {|
     fn probe() { match world_stop_machine_begin(20) {
       MachineStopResult::Busy => {}
-      MachineStopResult::Partial(partial) => { world_stop_partial_release(partial, &kernel_world_stop); }
+      MachineStopResult::Partial(partial) => { machine_stop_partial_release(partial, &kernel_world_stop); }
       MachineStopResult::Complete(stopped) => {
     |} ^ body ^ {|
         machine_stop_release(stopped, &kernel_world_stop);
@@ -21399,6 +21443,80 @@ let production_machine_boundary_tests =
         }
       } }
     |};
+    bad "production full stop rejects owner IRQ enable" "cannot restore IRQs" (full {|
+      msr_daifclr_irq();
+    |});
+    good "production full stop permits IRQ enable after release" {|
+      fn probe() { match world_stop_machine_begin(20) {
+        MachineStopResult::Busy => {}
+        MachineStopResult::Partial(partial) => { machine_stop_partial_release(partial, &kernel_world_stop); }
+        MachineStopResult::Complete(stopped) => { machine_stop_release(stopped, &kernel_world_stop); }
+      } msr_daifclr_irq(); }
+    |};
+    bad "production partial stop rejects owner IRQ enable" "cannot restore IRQs" {|
+      fn probe() { match world_stop_machine_begin(20) {
+        MachineStopResult::Busy => {}
+        MachineStopResult::Partial(partial) => {
+          msr_daifclr_irq(); machine_stop_partial_release(partial, &kernel_world_stop);
+        }
+        MachineStopResult::Complete(stopped) => { machine_stop_release(stopped, &kernel_world_stop); }
+      } }
+    |};
+    bad "production start reservation rejects owner IRQ enable" "cannot restore IRQs" {|
+      fn probe() { match cpu_start_reserve(1) {
+        CpuStartResult::Busy => {}
+        CpuStartResult::Reserved(start) => {
+          msr_daifclr_irq(); cpu_start_finish(start, 0);
+        }
+      } }
+    |};
+    good "production machine pool read ends scope before resume" (full {|
+      match machine_pool_probe(&record_pool, stopped, 1) {
+        MachineSlotProbe::Missing => {}
+        MachineSlotProbe::Live(scoped) => {
+          let ptr = machine_pool_payload(&record_pool, scoped);
+          let scalar = ptr.value; machine_pool_view_drop(scoped);
+        }
+      }
+    |});
+    bad "production resume rejects retained pool view" "live MachineSlotView witness" (full {|
+      match machine_pool_probe(&record_pool, stopped, 1) {
+        MachineSlotProbe::Missing => {}
+        MachineSlotProbe::Live(scoped) => {
+          machine_stop_release(stopped, &kernel_world_stop);
+          machine_pool_view_drop(scoped);
+        }
+      }
+    |});
+    bad "production resume rejects pool loan after view drop" "live MachineSlotView witness" (full {|
+      match machine_pool_probe(&record_pool, stopped, 1) {
+        MachineSlotProbe::Missing => {}
+        MachineSlotProbe::Live(scoped) => {
+          let ptr = machine_pool_payload(&record_pool, scoped);
+          machine_pool_view_drop(scoped);
+          machine_stop_release(stopped, &kernel_world_stop);
+        }
+      }
+    |});
+    bad "production reclamation rejects retained pool view" "live MachineSlotView witness" (full {|
+      match machine_pool_probe(&record_pool, stopped, 1) {
+        MachineSlotProbe::Missing => {}
+        MachineSlotProbe::Live(scoped) => {
+          let guard = guard_new(&kernel_world_stop);
+          scheduled_process_slot_remove(guard, 1);
+          guard_end(guard); machine_pool_view_drop(scoped);
+        }
+      }
+    |});
+    good "production stop loan transfer keeps only destination" (full {|
+      match machine_pool_probe(&record_pool, stopped, 1) {
+        MachineSlotProbe::Missing => {}
+        MachineSlotProbe::Live(scoped) => {
+          let ptr = scope_transfer(scoped, stopped);
+          machine_pool_view_drop(scoped); let scalar = ptr.value;
+        }
+      }
+    |});
     bad "production raw resume rejects retained start" "live CpuStart witness" {|
       fn probe() { match cpu_start_reserve(1) {
         CpuStartResult::Busy => {}
