@@ -6,18 +6,23 @@ another controller, or a call without a token cannot enter this API. The DDB
 entry passes the complete token it retains until inspection returns. The copy
 returns value snapshots, not a retained ProcessRecord pointer.
 
-`world_stop_release` declares `changes_witness_WorldStopped`. The checker
-propagates this boundary through resolved direct calls and rejects a live
+`world_stop_resume`, the private physical resume operation, declares
+`changes_witness_WorldStopped` and `changes_witness_WorldStopPartial`. Both
+complete and partial release inherit these boundaries automatically. The
+checker propagates them through resolved direct calls and rejects a live
 WorldStopped binding or a pointer/slice loan derived from that authority.
 Moving the token into release does not end the pointer's lexical scope.
 Scalar copies can survive release. An unrelated page-owner loan can also
 survive it: resuming peers is not an assertion that that page was reclaimed.
 Actual record destruction uses the separate `record_mutates_` contract.
 
-An unexpected second complete token for an already claimed controller violates
-the acknowledgement mint contract. The repeated-stop boot fixture fail-stops
-without resuming either token in that impossible-success branch. Its expected
-Busy path still tests sixteen attempted nested stops.
+The repeated-stop boot fixture exercises the production claim gate while
+borrowing its existing complete stop. This probe cannot publish another
+request or mint a second authority. Sixteen failed claims must answer Busy;
+UnexpectedUnclaimed records a broken claim invariant and fails the fixture.
+The shared claim helper is also the first acquisition step of production
+world_stop_begin. Separate fixtures still exercise complete, partial and stale
+acknowledgement results through the full API.
 
 ## Strength and remaining trust
 
@@ -56,7 +61,7 @@ minus kernel_image_start, including alignment and stacks.
 
 | Boundary (bytes) | QEMU baseline | QEMU candidate | RPi5 baseline | RPi5 candidate |
 | --- | ---: | ---: | ---: | ---: |
-| llvm-size text | 691924 | 691988 | 700940 | 701004 |
+| llvm-size text | 691924 | 692116 | 700940 | 701148 |
 | data | 5022 | 5022 | 2888728 | 2888728 |
 | BSS | 1667904 | 1667904 | 1705120 | 1705120 |
 | reserved image span | 2392064 | 2392064 | 5308416 | 5308416 |
@@ -64,13 +69,13 @@ minus kernel_image_start, including alignment and stacks.
 ELF SHA-256:
 
 - QEMU baseline: 9d132da4fa96758726e781d1722501a109ee7e5ddcfe608345fa82bd59db121a
-- QEMU candidate: 936c33b29e3251da166eea1cf21053c19edffd69683d34474cf299135036d4ec
+- QEMU candidate: dfb5b35eaa88b389e6694557b6da1288972a6298e6c7a9037150b19b2f8b1c81
 - RPi5 baseline: 46b5c4e40e2549a299036500e251cc98b3b0cf047d84adb0fdbd60f16df89de2
-- RPi5 candidate: 8f88213be7f930d85770b121915c304c98ab8106ad093df62c53f83d86f3011d
+- RPi5 candidate: 606a116d57ae2d1903fa4ba8f93cfbdccc14b294c3a68e275780a043bd8dd6ae
 
 Assessment: adopt the local stop-domain and resume boundary. Read-only image
-allocation grows by 64 bytes on each platform; mutable storage and page
-reservation stay unchanged. This does not establish physical timing or
+allocation grows by 192 bytes on QEMU and 208 on RPi5; mutable storage and
+page reservation stay unchanged. This does not establish physical timing or
 cross-core reclamation safety. No cross-OS comparison boundary changed.
 Measure again when diagnostic pool access/fatal-console authority is changed,
 a new lifetime/resource is introduced, or the full safe-memory stage completes.

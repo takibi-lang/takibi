@@ -21043,9 +21043,16 @@ private fn mint(controller: *Stop @ s) -> Stopped[s] {
 private fn partial(controller: *Stop @ s) -> Partial[s] {
     let mut stopped: Partial[s] = { 0 }; return stopped;
 }
-fn release(stopped: sink Stopped[s], controller: *Stop @ s)
-        !{changes_witness_Stopped} { controller.word = 0; }
-fn partial_release(stopped: sink Partial[s]) {}
+private fn physical_resume(controller: *Stop @ s)
+        !{changes_witness_Stopped, changes_witness_Partial} { controller.word = 0; }
+private inline fn stopped_end(stopped: sink Stopped[s]) {}
+private inline fn partial_end(stopped: sink Partial[s]) {}
+fn release(stopped: sink Stopped[s], controller: *Stop @ s) {
+    stopped_end(stopped); physical_resume(controller);
+}
+fn partial_release(stopped: sink Partial[s], controller: *Stop @ s) {
+    partial_end(stopped); physical_resume(controller);
+}
 fn diagnostic_copy(stopped: borrow Stopped[&machine]) -> usize { return record.value; }
 private fn diagnostic_loan(stopped: borrow Stopped[s]) -> *Record @ s {
     return &record;
@@ -21084,7 +21091,7 @@ let stopped_diagnostic_tests =
     bad "partial is not inspection authority" "struct type mismatch" {|
       fn probe() -> usize {
         let stopped = partial(&machine); let value = diagnostic_copy(stopped);
-        partial_release(stopped); return value;
+        partial_release(stopped, &machine); return value;
       }|};
     bad "another stop domain cannot inspect" "static value mismatch" {|
       fn probe() -> usize {
@@ -21109,6 +21116,15 @@ let stopped_diagnostic_tests =
       fn probe() -> usize {
         let stopped = mint(&machine); let ptr = diagnostic_loan(stopped);
         resume_helper(stopped, &machine); return ptr.value;
+      }|};
+    bad "partial release cannot revoke a live complete authority" "contains a live Stopped witness" {|
+      fn probe() {
+        let stopped = mint(&machine); let incomplete = partial(&machine);
+        partial_release(incomplete, &machine); release(stopped, &machine);
+      }|};
+    bad "partial release cannot revoke a diagnostic loan" "contains a live Stopped witness" {|
+      fn probe(stopped: borrow Stopped[s], incomplete: sink Partial[s], controller: *Stop @ s) -> usize {
+        let ptr = diagnostic_loan(stopped); partial_release(incomplete, controller); return ptr.value;
       }|};
     bad "pointer alias retains stopped authority" "contains a live Stopped witness" {|
       fn probe() -> usize {

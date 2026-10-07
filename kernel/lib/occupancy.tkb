@@ -177,6 +177,10 @@ private fn world_stop_hold(stop: *WorldStop @ id) !{interrupt, unsafe} {
 // Stop every other core in [0, cores). The platform sends one SGI to the
 // computed target set. A bounded wait returns Partial rather than claiming a
 // proof when any target did not acknowledge.
+private fn world_stop_claim(stop: *WorldStop @ id) -> usize !{unsafe} {
+    return atomic_word_swap(&(*stop).claimed, 1);
+}
+
 private fn world_stop_begin_config(stop: *WorldStop @ id, cores: usize,
                                    spins: usize, notify: bool,
                                    stale_ack_probe: bool)
@@ -188,7 +192,7 @@ private fn world_stop_begin_config(stop: *WorldStop @ id, cores: usize,
     }
     // Every contender writes the SAME held value. A failed attempt must not
     // restore an earlier owner: that owner may have released in the meantime.
-    let claimed: usize = atomic_word_swap(&(*stop).claimed, 1);
+    let claimed: usize = world_stop_claim(stop);
     if (claimed != 0) { return WorldStopResult::Busy; }
     let previous: usize = (*stop).generation;
     if (previous == ~(0 as usize)) {
@@ -246,6 +250,24 @@ fn world_stop_begin(stop: *WorldStop @ id, cores: usize, spins: usize)
     return world_stop_begin_config(stop, cores, spins, true, false);
 }
 
+must_use variant WorldStopClaimProbeResult {
+    Busy;
+    UnexpectedUnclaimed;
+}
+
+// Exercise the production claim gate while retaining a complete stop.
+// Unlike another full begin, this cannot mint a second authority or publish
+// a request that would revoke the borrowed stop. UnexpectedUnclaimed reports
+// a broken claim invariant; it never authorizes another inspection.
+fn world_stop_busy_claim_probe(stopped: borrow WorldStopped[id],
+                               stop: *WorldStop @ id)
+        -> WorldStopClaimProbeResult !{unsafe} {
+    if (world_stop_claim(stop) != 0) {
+        return WorldStopClaimProbeResult::Busy;
+    }
+    return WorldStopClaimProbeResult::UnexpectedUnclaimed;
+}
+
 // Test-only negative control: production callers cannot suppress the SGI.
 // With a real peer online this deterministically yields Partial, proving that
 // absence of an acknowledgement is not silently promoted to a full token.
@@ -263,21 +285,28 @@ fn world_stop_begin_stale_ack_probe(
     return world_stop_begin_config(stop, cores, spins, false, true);
 }
 
-private fn world_stop_resume(stop: *WorldStop @ id) !{unsafe} {
+private fn world_stop_resume(stop: *WorldStop @ id)
+        !{unsafe, changes_witness_WorldStopped, changes_witness_WorldStopPartial} {
     atomic_word_store(&(*stop).requested, 0);
     // owner remains stable until the next successful claimant publishes it.
     // Releasing the gate last prevents a new publication being cleared here.
     atomic_word_store(&(*stop).claimed, 0);
 }
 
+// End the local authority before the physical resume boundary. These private
+// consumers do not resume a CPU or permit an authority to escape its file.
+private inline fn world_stopped_end(stopped: sink WorldStopped[id]) {}
+private inline fn world_stop_partial_end(partial: sink WorldStopPartial[id]) {}
+
 fn world_stop_release(stopped: sink WorldStopped[id],
-                      stop: *WorldStop @ id)
-        !{unsafe, changes_witness_WorldStopped} {
+                      stop: *WorldStop @ id) !{unsafe} {
+    world_stopped_end(stopped);
     world_stop_resume(stop);
 }
 
 fn world_stop_partial_release(partial: sink WorldStopPartial[id],
                               stop: *WorldStop @ id) !{unsafe} {
+    world_stop_partial_end(partial);
     world_stop_resume(stop);
 }
 
@@ -384,4 +413,3 @@ fn occupancy_drain(region: *Occupancy @ id, spins: usize)
 // is the obligation to have been obtained, and being linear is what makes
 // that obligation real.
 fn quiesced_release(proof: sink Quiesced[id]) {}
-
