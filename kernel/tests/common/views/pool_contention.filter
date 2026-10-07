@@ -18,6 +18,7 @@
 ^occupancy drain: 
 ^world stop counts:
 ^world stop:
+^stopped pool inspection:
 ^network init contention counts:
 ^network init contention:
 ^tcp owner contention counts:

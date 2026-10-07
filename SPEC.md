@@ -3121,6 +3121,34 @@ match region_unpin(p) {                          // no pool lock needed
   state. Samples from different pools do not form one atomic snapshot; this
   is neither a peak count nor a count of user payload bytes.
 
+Nonblocking diagnostic inspection is a separate, explicitly unproven mint:
+`region_pool_inspect_unproven__T(&pool, &controller, address, generation)`
+returns `RegionInspectionProbe(T)[pool, scope]`, with `Busy`, `Stale`, and
+`Inspected(inspection)` cases. The controller pointer's element type is a
+compile-time generic; its static address supplies `scope`. `Busy` is checked
+before traversing any chunk metadata. An unheld pool validates membership,
+element alignment, Live state, and generation before issuing the one-word
+linear `RegionInspection(T)[pool, scope]`. It never acquires a lock or changes
+the pin count. The mint asserts that every mutator is quiescent for the whole
+loan, including the calling CPU's interrupt paths; the lock test alone does
+not establish this. It is not a concurrent substitute for `region_pin`.
+
+`region_inspection_at(inspection)` borrows that permission and returns a
+payload pointer tied to its `scope`; `region_inspection_drop` consumes it.
+The pointer cannot be used after consumption. Region take, retire, free,
+and chunk shrink invalidate live inspections and their lexical pointer loans.
+An external quiescence controller must additionally declare its own context
+change boundaries for each inspection type it permits. The maintained
+kernel has three private mints borrowing the production full-machine stop;
+a source gate holds that set and its resume/start annotations complete.
+Physical CPU holding, IRQ masking and the mint's metadata interpretation
+remain trusted. The ordinary `no_copy` rule still forbids copying an entire
+noncopyable payload through this pointer.
+
+Source `region_of`, `region_table_of`, and `region_table_lock` calls lower
+once after generic expansion. User-written calls to the reserved generated
+claim/lock names remain errors, including in programs with generic functions.
+
 Overloads are chosen by the name of an indexed type, its static indices
 being settled by unification afterwards, and an integer literal argument
 does not decide between overloads when the other arguments do.

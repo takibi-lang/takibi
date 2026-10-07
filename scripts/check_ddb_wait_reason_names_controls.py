@@ -94,11 +94,16 @@ def main() -> int:
     # A seventh wait reason, encoded and never named. The kernel keeps working
     # and the view prints a word for every reason but this one.
     failures += case(
+        "legacy direct snapshot encoder remains understood",
+        rename_everywhere(PROCESS, "result.state", "output[index].state"),
+        "", should_fail=False)
+
+    failures += case(
         "a reason encoded and not named",
         edit(PROCESS,
-             "        ProcessWaitReason::UartTx => { output[index].wait_reason = 6; }",
-             "        ProcessWaitReason::UartTx => { output[index].wait_reason = 6; }\n"
-             "        ProcessWaitReason::DiskIo => { output[index].wait_reason = 7; }"),
+             "        ProcessWaitReason::UartTx => { result.wait_reason = 6; }",
+             "        ProcessWaitReason::UartTx => { result.wait_reason = 6; }\n"
+             "        ProcessWaitReason::DiskIo => { result.wait_reason = 7; }"),
         "names no 7")
 
     # The word left behind after the enum case it stood for was renamed.
@@ -119,8 +124,8 @@ def main() -> int:
     # check must say so rather than pass having compared nothing.
     failures += case(
         "the encoding moved out from under it",
-        rename_everywhere(PROCESS, "output[index].wait_reason =",
-                          "output[index].wait_code ="),
+        rename_everywhere(PROCESS, "result.wait_reason =",
+                          "result.wait_code ="),
         "no ProcessWaitReason -> wait_reason encoding found")
 
     # And if the namer itself is gone or reshaped.

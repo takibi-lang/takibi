@@ -54,11 +54,26 @@ Busy restores immediately. Terminal keep-forever retains the physical mask.
 A derived pool view also carries IRQ-mask exclusion until it is dropped.
 The save/restore implementation and physical IRQ behavior remain trusted.
 
-This is not yet a lock-free guarantee for every diagnostic. VM and FD backing
-inspection still pins RegionPool records, and the fatal console and normal
-diagnostic peek retain weaker paths. Those accesses and raw-authority mint
-confinement remain unfinished. No runtime pin or new lock was added to the
-process-pool copy path.
+DDB VM and first-block FD inspection now use a generation-checked
+`RegionInspection` under the borrowed machine authority. The three private
+mints retain IRQ exclusion. A held pool metadata lock returns Busy before
+traversal, because quiescence does not establish consistency of an interrupted
+update. Stale and Busy are explicit diagnostic outcomes, not empty live
+records. Resume and CPU-start context changes invalidate all three permission
+types. Local take, retire, free and chunk shrink also invalidate the matching
+inspection type through compiler-inferred summaries. No runtime pin or lock
+is taken by these DDB backing reads; bootstrap VM backing remains static.
+
+The source gate fixes the three unproven mint callers and checks their
+borrowed stop/IRQ contracts and complete physical invalidation markers.
+A native test validates real metadata behavior. The shared kernel fixture
+holds each real VM/FD guard on the initiating CPU while a full machine stop
+queries its actual diagnostic mint; each must return Busy without waiting.
+Compiler tests cover distinct pools/controllers, resume, local take/retire,
+post-consumption loans, and no_copy payloads. Model evidence does not establish
+physical holding or fault timing. The fatal console and normal diagnostic
+peek still retain weaker paths; their migration and raw-authority confinement
+remain unfinished.
 
 ## Space review, 2026-10-07
 
@@ -128,3 +143,33 @@ reads; the IRQ lifetime rejection is separate compiler evidence. Physical
 masking and save/restore remain trusted. No cross-OS comparison changed.
 Measure again at RegionPool inspection or fatal-console migration, a new
 resource lifetime, or completion of the safe-memory stage.
+
+## Nonblocking RegionPool inspection, 2026-10-07
+
+Baseline is the published aa30a644 measurement above. The candidate is a
+fresh standard production build with scoped RegionInspection carriers for
+AddressSpaceBacking, ProcessFdContext and FdBlock. Each carrier is one local
+word; no payload, pool header, retained capacity or allocation workload changes.
+The shared bounded boot exercises each owner-held pool guard and requires Busy
+rather than inspecting partially updated metadata. The native executable also
+checks value copying, alignment, generation, membership, free and shrink.
+
+| Boundary (bytes) | QEMU baseline | QEMU candidate | RPi5 baseline | RPi5 candidate |
+| --- | ---: | ---: | ---: | ---: |
+| llvm-size text | 694548 | 699572 | 703644 | 708580 |
+| data | 5022 | 5022 | 2888728 | 2888728 |
+| BSS | 1667888 | 1667888 | 1705120 | 1705120 |
+| reserved image span | 2392064 | 2392064 | 5308416 | 5308416 |
+
+Candidate ELF SHA-256:
+
+- QEMU: 21d84996d3af4c6bf65a819df22b5e06c6788f00ac1769bac589d19a8a89c25e
+- RPi5: 96972f7711f5b85b6c8d3ee5ae017b85f070bba8a156efbdaf5bd676fd7f145c
+
+Read-only allocation grows 5024 bytes on QEMU and 4936 bytes on RPi5. Data and
+BSS are unchanged. Reserved span is usable_ram_start minus kernel_image_start, including the
+core-zero idle stack, and is unchanged on both targets. Adopt the
+nonblocking mint and explicit refusals. The diagnostic runs no pool lock or
+pin operation. Physical stop, stable unlocked metadata, and the native mint
+remain trusted; bounded model evidence is not a proof of these conditions.
+Measure again at fatal-console migration or completion of the safe-memory stage.

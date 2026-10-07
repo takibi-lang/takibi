@@ -438,6 +438,15 @@ private fn address_space_backing_read_existing(root: AddressSpaceRoot)
     }
 }
 
+// Shared value copy while either the pin or the stopped inspection is
+// borrowed. No payload pointer or live authority escapes this function.
+private fn address_space_backing_copy(backing: borrow *AddressSpaceBacking)
+        -> AddressSpaceBacking {
+    let mut value: AddressSpaceBacking = { backing.live, backing.l1_physical,
+        backing.l2_physical, backing.asid, backing.asid_generation };
+    return value;
+}
+
 // A successful lookup supplies write evidence without allocating. Activation
 // and release use this path, so a missing backing cannot grow in IRQ context.
 private fn address_space_backing_read_checked(root: AddressSpaceRoot)
@@ -458,11 +467,7 @@ private fn address_space_backing_read_checked(root: AddressSpaceRoot)
         }
         RegionPinned(AddressSpaceBacking)::Pinned(pin) => {
             let backing: *AddressSpaceBacking = region_pin_at(pin);
-            value.live = backing.live;
-            value.l1_physical = backing.l1_physical;
-            value.l2_physical = backing.l2_physical;
-            value.asid = backing.asid;
-            value.asid_generation = backing.asid_generation;
+            value = address_space_backing_copy(backing);
             address_space_backing_unpin(pin);
             return address_space_backing_exists(slot, root, value);
         }
@@ -572,21 +577,67 @@ struct AddressSpaceDiagnosticSnapshot {
     asid: usize;
 }
 
-// IRQ/DDB diagnostics must never turn a missing backing into an allocation.
-// Observe only the lookup-only path used by interrupt context switches and
-// return a value copy that owns no pool reference.
-fn address_space_diagnostic_snapshot(root: AddressSpaceRoot)
-        -> AddressSpaceDiagnosticSnapshot !{unsafe} {
-    let slot: usize = root.slot;
-    let mut backing: AddressSpaceBacking = address_space_backing_read_existing(root);
+must_use variant AddressSpaceDiagnosticResult {
+    Busy;
+    Stale;
+    Ready(AddressSpaceDiagnosticSnapshot);
+}
+
+// Never waits for a lock held by a stopped CPU or creates a missing backing.
+private fn address_space_inspect_stopped(
+        stopped: borrow MachineStopped[&kernel_world_stop],
+        pool: *RegionPool(AddressSpaceBacking) @ backing, root: AddressSpaceRoot)
+        -> RegionInspectionProbe(AddressSpaceBacking)[backing, &kernel_world_stop]
+        !{unsafe, irq_masking_guard} {
+    return region_pool_inspect_unproven__AddressSpaceBacking(pool, &kernel_world_stop,
+        root.backing.address, root.backing.generation);
+}
+
+fn address_space_diagnostic_snapshot(
+        stopped: borrow MachineStopped[&kernel_world_stop], root: AddressSpaceRoot)
+        -> AddressSpaceDiagnosticResult !{unsafe} {
     let mut snapshot: AddressSpaceDiagnosticSnapshot = { false, 0, 0, 0 };
-    if (backing.live) {
-        snapshot.live = true;
-        snapshot.l1_physical = backing.l1_physical;
-        snapshot.l2_physical = backing.l2_physical;
-        snapshot.asid = backing.asid;
+    if (root.slot == 0) {
+        snapshot.live = address_space_backing_root0.live;
+        snapshot.l1_physical = address_space_backing_root0.l1_physical;
+        snapshot.l2_physical = address_space_backing_root0.l2_physical;
+        snapshot.asid = address_space_backing_root0.asid;
+        return AddressSpaceDiagnosticResult::Ready(snapshot);
     }
-    return snapshot;
+    match address_space_inspect_stopped(stopped, &address_space_backing_pool, root) {
+        RegionInspectionProbe(AddressSpaceBacking)::Busy => { return AddressSpaceDiagnosticResult::Busy; }
+        RegionInspectionProbe(AddressSpaceBacking)::Stale => { return AddressSpaceDiagnosticResult::Stale; }
+        RegionInspectionProbe(AddressSpaceBacking)::Inspected(inspected) => {
+            let mut backing: AddressSpaceBacking = address_space_backing_copy(region_inspection_at(inspected));
+            snapshot.live = backing.live;
+            snapshot.l1_physical = backing.l1_physical;
+            snapshot.l2_physical = backing.l2_physical;
+            snapshot.asid = backing.asid;
+            region_inspection_drop(inspected);
+            return AddressSpaceDiagnosticResult::Ready(snapshot);
+        }
+    }
+}
+
+// Hold the real metadata guard on the initiating CPU. A full stop cannot
+// make that in-progress update inspectable; its diagnostic mint must refuse.
+fn address_space_stopped_pool_busy_probe() -> bool !{unsafe} {
+    let guard = address_space_backing_pool_lock(&address_space_backing_pool);
+    let mut refused: bool = false;
+    match world_stop_machine_begin(DDB_WORLD_STOP_SPINS) {
+        MachineStopResult::Busy => {}
+        MachineStopResult::Partial(partial) => { machine_stop_partial_release(partial, &kernel_world_stop); }
+        MachineStopResult::Complete(stopped) => {
+            match address_space_inspect_stopped(stopped, &address_space_backing_pool, address_space_boot_root()) {
+                RegionInspectionProbe(AddressSpaceBacking)::Busy => { refused = true; }
+                RegionInspectionProbe(AddressSpaceBacking)::Stale => {}
+                RegionInspectionProbe(AddressSpaceBacking)::Inspected(inspected) => { region_inspection_drop(inspected); }
+            }
+            machine_stop_release(stopped, &kernel_world_stop);
+        }
+    }
+    address_space_backing_pool_unlock(guard);
+    return refused;
 }
 
 // GitHub issue #402: no ASID is taken here. A root is created without one

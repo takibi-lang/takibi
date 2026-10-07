@@ -395,7 +395,7 @@ fn region_give(g: borrow @PG@[b], s: sink @SL@[b, k]) -> @H@ !{unsafe} {
     return h;
 }
 
-fn region_take(g: borrow @PG@[b], h: @H@) -> @TK@[b] !{unsafe} {
+fn region_take(g: borrow @PG@[b], h: @H@) -> @TK@[b] !{unsafe, changes_witness_@IV@} {
     let mut chunk: usize = *pool_word(g.pool, 1);
     while (chunk != 0 && chunk != h.chunk) { chunk = *pool_word(chunk, 0); }
     if (chunk == 0 || h.slot >= *pool_word(chunk, 1)) { return @TK@::Stale; }
@@ -413,7 +413,7 @@ fn region_take(g: borrow @PG@[b], h: @H@) -> @TK@[b] !{unsafe} {
         pool_slots_base(chunk) + h.slot * sizeof(@T@)));
 }
 
-private fn pool_free(g: borrow @PG@[b], address: usize) !{unsafe} {
+private fn pool_free(g: borrow @PG@[b], address: usize) !{unsafe, changes_witness_@IV@} {
     let chunk: usize = pool_chunk_of(g, address);
     let i: usize = (address - pool_slots_base(chunk)) / sizeof(@T@);
     *pool_word(chunk, 3 + i) = 0;
@@ -532,6 +532,50 @@ fn region_handle_current(g: borrow @PG@[b], address: usize) -> @H@ !{unsafe} {
     return current;
 }
 
+// A generation-checked diagnostic loan. The caller of the unproven mint
+// must hold every mutator stopped and mask its own IRQs. Refuse a held pool
+// lock before traversing metadata: a stopped lock holder may be mid-update.
+// This does not pin, acquire a lock, or promise physical quiescence.
+linear struct @IV@[pool: addr, scope: addr] {
+    private address: usize;
+}
+
+must_use variant @IP@[pool: addr, scope: addr] {
+    Busy;
+    Stale;
+    Inspected(@IV@[pool, scope]);
+}
+
+fn region_pool_inspect_unproven__@T@(C: type, p: *@P@ @ b,
+        controller: *C @ scope, address: usize, generation: usize)
+        -> @IP@[b, scope] !{unsafe} {
+    if (unsafe { atomic_load_acquire(p as usize) } != 0) { return @IP@::Busy; }
+    let mut chunk: usize = p.first;
+    while (chunk != 0) {
+        let base: usize = pool_slots_base(chunk);
+        let count: usize = *pool_word(chunk, 1);
+        if (address >= base && address < base + count * sizeof(@T@)) {
+            if ((address - base) % sizeof(@T@) != 0) { return @IP@::Stale; }
+            let slot: usize = (address - base) / sizeof(@T@);
+            let w: usize = unsafe { atomic_load_acquire(pool_word(chunk, 3 + slot) as usize) };
+            if ((w & 3) != @T@__REGION_LIVE ||
+                    (w >> @T@__POOL_GEN_SHIFT) != generation) {
+                return @IP@::Stale;
+            }
+            let mut inspected: @IV@[b, scope] = { address };
+            return @IP@::Inspected(inspected);
+        }
+        chunk = *pool_word(chunk, 0);
+    }
+    return @IP@::Stale;
+}
+
+fn region_inspection_at(inspected: borrow @IV@[b, scope]) -> *@T@ @ scope !{unsafe} {
+    return unsafe { inspected.address as *@T@ };
+}
+
+fn region_inspection_drop(inspected: sink @IV@[b, scope]) {}
+
 // Whether the pool's lock is held, for a debugger that has stopped every
 // core and must not wait on a lock an interrupted core holds.
 fn region_pool_lock_is_held(p: *@P@ @ b) -> bool !{unsafe} {
@@ -614,7 +658,7 @@ fn region_unpin(p: sink @PN@[b, k]) -> @UP@[b, k] !{unsafe} {
 // Stop new pins and give up this one. Retired: this was the last pin and
 // the Out slot is the caller's. Pending: another pinner's region_unpin
 // will receive it.
-fn region_retire(p: sink @PN@[b, k]) -> @RT@[b, k] !{unsafe} {
+fn region_retire(p: sink @PN@[b, k]) -> @RT@[b, k] !{unsafe, changes_witness_@IV@} {
     let word: usize = p.word;
     let address: usize = p.address;
     region_pin_discharge(p);
@@ -645,7 +689,7 @@ fn region_retire(p: sink @PN@[b, k]) -> @RT@[b, k] !{unsafe} {
 // Give back a chunk whose slots are all Free, as the byte region it came
 // in as. Its identity is new: the pool owned those bytes, and this is where
 // they leave it.
-fn region_pool_shrink(g: borrow @PG@[b]) -> @SH@ !{unsafe} {
+fn region_pool_shrink(g: borrow @PG@[b]) -> @SH@ !{unsafe, changes_witness_@IV@} {
     let mut previous: usize = 0;
     let mut chunk: usize = *pool_word(g.pool, 1);
     while (chunk != 0) {
@@ -877,6 +921,8 @@ let instance elem =
   |> replace_all ~sub:"@RAD@" ~by:("RegionReleaseAdopt__" ^ elem)
   |> replace_all ~sub:"@PA@" ~by:("RegionPoolAlloc__" ^ elem)
   |> replace_all ~sub:"@SL@" ~by:("RegionSlot__" ^ elem)
+  |> replace_all ~sub:"@IV@" ~by:("RegionInspection__" ^ elem)
+  |> replace_all ~sub:"@IP@" ~by:("RegionInspectionProbe__" ^ elem)
   |> replace_all ~sub:"@PG@" ~by:("RegionPoolGuard__" ^ elem)
   |> replace_all ~sub:"@GR@" ~by:("RegionGrow__" ^ elem)
   |> replace_all ~sub:"@SH@" ~by:("RegionShrink__" ^ elem)
@@ -942,7 +988,8 @@ let element_types (prog : Ast.toplevel list) claimed =
          "RegionReleaseSlot__"; "RegionReleaseAdopt__"; "RegionPoolAlloc__";
          "RegionSlot__"; "RegionPool__"; "RegionPoolGuard__"; "RegionGrow__";
          "RegionShrink__"; "RegionAdopt__"; "RegionPin__"; "RegionPinned__";
-         "RegionUnpin__"; "RegionRetire__"; "RegionNext__" ] in
+         "RegionUnpin__"; "RegionRetire__"; "RegionNext__";
+         "RegionInspection__"; "RegionInspectionProbe__" ] in
   List.iter (fun item -> scan (Ast.show_toplevel item)) prog;
   Hashtbl.fold (fun k () acc -> k :: acc) found [] |> List.sort compare
 

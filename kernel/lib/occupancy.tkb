@@ -91,6 +91,9 @@ use "kernel/lib/atomic_word.tkb";
 use "kernel/lib/execution_model.tkb";
 use "kernel/lib/intrusive_pool.tkb";
 
+// Shared bounded wait for diagnostics and their held-pool regression.
+const DDB_WORLD_STOP_SPINS: usize = 10000000;
+
 // Presence, per core. Private, so no other file can read or write it
 // except through the four entry points below -- which is what makes the
 // protocol the type rather than the convention.
@@ -415,7 +418,10 @@ fn machine_pool_view_drop(source: sink MachineSlotView[stop, pool_id]) {
 fn cpu_start_reserve(core: {0..<KERNEL_MAX_CORES as usize})
         -> CpuStartResult[&kernel_world_stop]
         !{unsafe, irq_masking_guard, lock_guard_40_world_stop, changes_witness_CpuParticipants, changes_witness_MachineStopped,
-          changes_witness_MachineSlotView} {
+          changes_witness_MachineSlotView,
+          changes_witness_RegionInspection__AddressSpaceBacking,
+          changes_witness_RegionInspection__ProcessFdContext,
+          changes_witness_RegionInspection__FdBlock} {
     if (core == 0 || cpu_id() != 0) { return CpuStartResult::Busy; }
     let irq_flags: usize = mutex_irq_save();
     if (world_stop_claim(&kernel_world_stop) != 0) {
@@ -451,7 +457,10 @@ fn cpu_start_finish(start: sink CpuStart[&kernel_world_stop], status: usize)
 
 private fn cpu_start_gate_release()
         !{unsafe, changes_witness_CpuStart, changes_witness_CpuParticipants,
-          changes_witness_MachineStopped, changes_witness_MachineSlotView} {
+          changes_witness_MachineStopped, changes_witness_MachineSlotView,
+          changes_witness_RegionInspection__AddressSpaceBacking,
+          changes_witness_RegionInspection__ProcessFdContext,
+          changes_witness_RegionInspection__FdBlock} {
     atomic_word_store(&kernel_world_stop.claimed, 0);
 }
 
@@ -496,7 +505,10 @@ private fn world_stop_resume(stop: *WorldStop @ id)
         !{unsafe, changes_witness_WorldStopped, changes_witness_WorldStopPartial,
           changes_witness_MachineStopped, changes_witness_MachineStopPartial,
           changes_witness_CpuParticipants, changes_witness_CpuStart,
-          changes_witness_MachineSlotView} {
+          changes_witness_MachineSlotView,
+          changes_witness_RegionInspection__AddressSpaceBacking,
+          changes_witness_RegionInspection__ProcessFdContext,
+          changes_witness_RegionInspection__FdBlock} {
     atomic_word_store(&(*stop).requested, 0);
     // owner remains stable until the next successful claimant publishes it.
     // Releasing the gate last prevents a new publication being cleared here.

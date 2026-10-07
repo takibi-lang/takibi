@@ -439,3 +439,14 @@ under the process-run lock. CPU 0 owns the bounded echo operation queue and
 IRQ-protected transmit tags. Atomic pause and input-throttle words connect
 readers on any CPU to the lock-free TX paths; `TERMINAL.md` describes the
 state transitions and supported attributes.
+
+## Stopped diagnostic refusals
+
+DDB copies VM and descriptor backing through a full-machine stop permission,
+without acquiring RegionPool locks or adding pins. A retained metadata lock
+refuses inspection before a chunk walk. `ddb: vm unavailable ... reason=` and
+`ddb: fd unavailable ... reason=` distinguish `pool-busy` from stale backing
+or context. VM payload fields are cleared on refusal. FD snapshot kind codes
+0--5 retain their existing meanings; 7 records pool-busy and 8 stale context
+or block, with object 0. These are wire projections of closed result variants,
+not live descriptors. Normal DDB captures retain their prior layout.

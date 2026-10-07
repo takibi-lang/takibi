@@ -1253,53 +1253,75 @@ struct ProcessDdbCopyResult {
 // let this function keep the pointer past the view, which is exactly the
 // escape the view exists to close. It only copies fields out, so borrowing
 // is what it meant all along.
-private fn scheduled_process_ddb_copy_one(
+private fn scheduled_process_ddb_record(
         stopped: borrow MachineStopped[&kernel_world_stop],
-        output: borrow [ProcessDdbRecord; DDB_PROCESS_RECORDS..],
-        index: usize, slot: usize,
-        record: borrow *ProcessRecord) {
-    if (index >= 32) { return; }
-    output[index].pid = record.pid;
-    output[index].ppid = 0;
+        slot: usize,
+        record: borrow *ProcessRecord) -> ProcessDdbRecord {
+    let mut result: ProcessDdbRecord;
+    result.pid = record.pid;
+    result.ppid = 0;
     if (record.has_parent) {
-        output[index].ppid = scheduled_process_parent_pid_stopped(stopped, record.parent);
+        result.ppid = scheduled_process_parent_pid_stopped(stopped, record.parent);
     }
     match record.state {
-        ProcessSlotState::Free => { output[index].state = 0; }
-        ProcessSlotState::Ready => { output[index].state = 1; }
-        ProcessSlotState::Running => { output[index].state = 2; }
-        ProcessSlotState::Blocked => { output[index].state = 3; }
-        ProcessSlotState::Exited => { output[index].state = 4; }
-        ProcessSlotState::Constructing => { output[index].state = 5; }
+        ProcessSlotState::Free => { result.state = 0; }
+        ProcessSlotState::Ready => { result.state = 1; }
+        ProcessSlotState::Running => { result.state = 2; }
+        ProcessSlotState::Blocked => { result.state = 3; }
+        ProcessSlotState::Exited => { result.state = 4; }
+        ProcessSlotState::Constructing => { result.state = 5; }
     }
     match process_wait_reason(&record.wait) {
-        ProcessWaitReason::None => { output[index].wait_reason = 0; }
-        ProcessWaitReason::UartRx => { output[index].wait_reason = 1; }
-        ProcessWaitReason::ChildExit => { output[index].wait_reason = 2; }
-        ProcessWaitReason::NetRx => { output[index].wait_reason = 3; }
-        ProcessWaitReason::Deadline => { output[index].wait_reason = 4; }
-        ProcessWaitReason::Signal => { output[index].wait_reason = 5; }
-        ProcessWaitReason::UartTx => { output[index].wait_reason = 6; }
+        ProcessWaitReason::None => { result.wait_reason = 0; }
+        ProcessWaitReason::UartRx => { result.wait_reason = 1; }
+        ProcessWaitReason::ChildExit => { result.wait_reason = 2; }
+        ProcessWaitReason::NetRx => { result.wait_reason = 3; }
+        ProcessWaitReason::Deadline => { result.wait_reason = 4; }
+        ProcessWaitReason::Signal => { result.wait_reason = 5; }
+        ProcessWaitReason::UartTx => { result.wait_reason = 6; }
     }
-    output[index].saved_sp = record.saved_sp;
-    output[index].stack_bottom = 0;
-    output[index].stack_top = 0;
+    result.saved_sp = record.saved_sp;
+    result.stack_bottom = 0;
+    result.stack_top = 0;
     if (slot == 0) {
         // PID 1 executes on the linker-owned boot stack even if its record
         // retained a reusable process-stack run from an earlier fixture.
-        output[index].stack_bottom = boot_stack_bottom;
-        output[index].stack_top = boot_stack_top;
+        result.stack_bottom = boot_stack_bottom;
+        result.stack_top = boot_stack_top;
     } else if (kernel_stack_run_usable(record.stack_run)) {
-        output[index].stack_bottom =
+        result.stack_bottom =
             record.stack_run + KERNEL_PROCESS_STACK_SIZE;
-        output[index].stack_top = record.stack_run + KERNEL_STACK_RUN_BYTES;
+        result.stack_top = record.stack_run + KERNEL_STACK_RUN_BYTES;
     }
-    output[index].stack_owner_cpu = record.stack_owner_cpu;
-    output[index].root_slot = slot;
-    output[index].pending_signals = record.pending_signals;
-    output[index].signal_mask = record.signal_mask;
-    output[index].affinity_mask = record.affinity_mask;
-    output[index].core0_for_call = record.core0_for_call;
+    result.stack_owner_cpu = record.stack_owner_cpu;
+    result.root_slot = slot;
+    result.pending_signals = record.pending_signals;
+    result.signal_mask = record.signal_mask;
+    result.affinity_mask = record.affinity_mask;
+    result.core0_for_call = record.core0_for_call;
+    return result;
+}
+
+private fn scheduled_process_ddb_copy_one(
+        stopped: borrow MachineStopped[&kernel_world_stop],
+        output: borrow [ProcessDdbRecord; DDB_PROCESS_RECORDS..],
+        index: usize, slot: usize, record: borrow *ProcessRecord) {
+    if (index < DDB_PROCESS_RECORDS) {
+        output[index] = scheduled_process_ddb_record(stopped, slot, record);
+    }
+}
+
+fn kernel_process_current_stopped_record(
+        stopped: borrow MachineStopped[&kernel_world_stop]) -> ProcessDdbRecord {
+    let slot: usize = kernel_process_current_slot();
+    return scheduled_process_ddb_record(stopped, slot,
+        scheduled_process_record_stopped(stopped, slot));
+}
+
+fn scheduled_process_fd_context_handle_stopped(
+        stopped: borrow MachineStopped[&kernel_world_stop], slot: usize)
+        -> ProcessPoolHandleWords !{unsafe} {
+    return process_fd_context_words(scheduled_process_record_stopped(stopped, slot));
 }
 
 // GitHub issue #606: one diff pass of kernel/kernel/protocol_trace.tkb,

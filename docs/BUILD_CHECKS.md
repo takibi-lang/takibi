@@ -79,6 +79,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_gic_iar_intid.py` | the platform interrupt dispatchers decide on `GICC_IAR & 0x3FF` and hand only the raw word back to GICC_EOIR, so an SGI's sender bits cannot hide it (#632) |
 | `check_stack_proof_states.py` | a process start takes only a `Startable` token and a reap only a `Reapable` one, only the named mint functions build them, and each reads `stack_owner_cpu` (StackOwnership.tla's StartsOnFreeStack) |
 | `check_stack_proof_states_controls.py` | Negative controls for the stack-free proof: a start taking Ready, a reap taking Exited, a token minted elsewhere or written as a literal, and a mint that stopped reading the owner are refused |
+| `check_stopped_pool_inspection.py` | the finite RegionPool diagnostic mint set borrows full-stop authority, retains IRQ exclusion, and has complete resume/start invalidation annotations |
+| `check_stopped_pool_inspection_controls.py` | missing context markers, weakened mint contracts and an unreviewed inspection mint are refused |
 | `check_world_stop_refusals.py` | no `WorldStopResult::Busy` or `Partial` arm fail-stops the kernel; a refused world stop is waited out or handed back (#632) |
 | `check_irq_restore_sites.py` | no `enable_irq()` restores interrupts without consulting the state it overwrites |
 | `check_irq_restore_sites_controls.py` | Controls for the IRQ-restore site check |

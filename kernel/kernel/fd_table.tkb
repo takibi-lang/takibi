@@ -489,11 +489,16 @@ private fn fd_block_free(address: usize, generation: usize) !{unsafe} {
 // when the chain does not reach that far. Both halves are returned from
 // the one walk, so a caller never has to make the same walk twice to ask
 // the second question (the shape issue #371 argued for).
+private fn fd_context_head_copy(ctx: borrow *ProcessFdContext) -> (usize, usize) {
+    return (ctx.block_head, ctx.block_head_generation);
+}
+
 private fn fd_block_lookup(ctx: borrow *ProcessFdContext, fd: usize)
         -> (usize, usize) !{unsafe} {
     let target: usize = fd / FD_BLOCK_SLOTS;
-    let mut address: usize = ctx.block_head;
-    let mut generation: usize = ctx.block_head_generation;
+    let (head, stamp) = fd_context_head_copy(ctx);
+    let mut address: usize = head;
+    let mut generation: usize = stamp;
     let mut index: usize = 0;
     while (fd_block_matches(address, generation)) {
         if (index == target) { return (address, generation); }
@@ -3881,6 +3886,116 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
     { let __ctx_result: bool = shared && heap_independent; fd_context_unpin(ctx_pin); return __ctx_result; }
 }
 
+struct FdDiagnosticEntry {
+    kind: UnifiedFdKind;
+    object: usize;
+}
+
+private fn fd_diagnostic_entry_copy(entries: borrow *FdBlock,
+        index: {0..<FD_BLOCK_SLOTS as usize}) -> FdDiagnosticEntry {
+    let mut entry: FdDiagnosticEntry = { entries.slot[index].kind, entries.slot[index].object };
+    return entry;
+}
+
+must_use variant FdDiagnosticResult {
+    Busy;
+    Stale;
+    Ready(FdDiagnosticEntry);
+}
+
+private fn fd_context_inspect_stopped(
+        stopped: borrow MachineStopped[&kernel_world_stop],
+        pool: *RegionPool(ProcessFdContext) @ contexts, words: ProcessPoolHandleWords)
+        -> RegionInspectionProbe(ProcessFdContext)[contexts, &kernel_world_stop]
+        !{unsafe, irq_masking_guard} {
+    return region_pool_inspect_unproven__ProcessFdContext(pool, &kernel_world_stop, words.address, words.generation);
+}
+
+private fn fd_block_inspect_stopped(
+        stopped: borrow MachineStopped[&kernel_world_stop],
+        pool: *RegionPool(FdBlock) @ blocks, address: usize, generation: usize)
+        -> RegionInspectionProbe(FdBlock)[blocks, &kernel_world_stop]
+        !{unsafe, irq_masking_guard} {
+    return region_pool_inspect_unproven__FdBlock(pool, &kernel_world_stop, address, generation);
+}
+
+// The diagnostic snapshot covers the first descriptor block only. Absence
+// is Empty; held metadata locks and recycled handles are explicit refusals.
+fn kernel_fd_table_stopped_entry(
+        stopped: borrow MachineStopped[&kernel_world_stop], process: usize,
+        fd: {0..<FD_BLOCK_SLOTS as usize}) -> FdDiagnosticResult !{unsafe} {
+    let mut empty: FdDiagnosticEntry = { UnifiedFdKind::Empty, 0 };
+    let mut words: ProcessPoolHandleWords = scheduled_process_fd_context_handle_stopped(stopped, process);
+    if (words.address == 0) { return FdDiagnosticResult::Ready(empty); }
+    let mut address: usize = 0;
+    let mut generation: usize = 0;
+    match fd_context_inspect_stopped(stopped, &fd_context_pool, words) {
+        RegionInspectionProbe(ProcessFdContext)::Busy => { return FdDiagnosticResult::Busy; }
+        RegionInspectionProbe(ProcessFdContext)::Stale => { return FdDiagnosticResult::Stale; }
+        RegionInspectionProbe(ProcessFdContext)::Inspected(inspected) => {
+            let (head, stamp) = fd_context_head_copy(region_inspection_at(inspected));
+            address = head;
+            generation = stamp;
+            region_inspection_drop(inspected);
+        }
+    }
+    if (address == 0) { return FdDiagnosticResult::Ready(empty); }
+    match fd_block_inspect_stopped(stopped, &fd_block_pool, address, generation) {
+        RegionInspectionProbe(FdBlock)::Busy => { return FdDiagnosticResult::Busy; }
+        RegionInspectionProbe(FdBlock)::Stale => { return FdDiagnosticResult::Stale; }
+        RegionInspectionProbe(FdBlock)::Inspected(inspected) => {
+            let mut entry: FdDiagnosticEntry = fd_diagnostic_entry_copy(region_inspection_at(inspected), fd);
+            region_inspection_drop(inspected);
+            return FdDiagnosticResult::Ready(entry);
+        }
+    }
+}
+
+// The real initiating CPU retains its metadata guard across the query.
+private fn fd_context_stopped_pool_busy_probe() -> bool !{unsafe} {
+    let guard = fd_context_pool_lock(&fd_context_pool);
+    let mut refused: bool = false;
+    match world_stop_machine_begin(DDB_WORLD_STOP_SPINS) {
+        MachineStopResult::Busy => {}
+        MachineStopResult::Partial(partial) => { machine_stop_partial_release(partial, &kernel_world_stop); }
+        MachineStopResult::Complete(stopped) => {
+            let mut words: ProcessPoolHandleWords = { 0, 0 };
+            match fd_context_inspect_stopped(stopped, &fd_context_pool, words) {
+                RegionInspectionProbe(ProcessFdContext)::Busy => { refused = true; }
+                RegionInspectionProbe(ProcessFdContext)::Stale => {}
+                RegionInspectionProbe(ProcessFdContext)::Inspected(inspected) => { region_inspection_drop(inspected); }
+            }
+            machine_stop_release(stopped, &kernel_world_stop);
+        }
+    }
+    fd_context_pool_unlock(guard);
+    return refused;
+}
+
+// The real initiating CPU retains its metadata guard across the query.
+private fn fd_block_stopped_pool_busy_probe() -> bool !{unsafe} {
+    let guard = fd_block_pool_lock(&fd_block_pool);
+    let mut refused: bool = false;
+    match world_stop_machine_begin(DDB_WORLD_STOP_SPINS) {
+        MachineStopResult::Busy => {}
+        MachineStopResult::Partial(partial) => { machine_stop_partial_release(partial, &kernel_world_stop); }
+        MachineStopResult::Complete(stopped) => {
+            match fd_block_inspect_stopped(stopped, &fd_block_pool, 0, 0) {
+                RegionInspectionProbe(FdBlock)::Busy => { refused = true; }
+                RegionInspectionProbe(FdBlock)::Stale => {}
+                RegionInspectionProbe(FdBlock)::Inspected(inspected) => { region_inspection_drop(inspected); }
+            }
+            machine_stop_release(stopped, &kernel_world_stop);
+        }
+    }
+    fd_block_pool_unlock(guard);
+    return refused;
+}
+
+fn kernel_fd_table_stopped_pool_busy_probe() -> bool {
+    return fd_context_stopped_pool_busy_probe() && fd_block_stopped_pool_busy_probe();
+}
+
 // Allocation-free diagnostic view for the terminal exception path (issue
 // #294's last acceptance criterion), mirroring kernel/kernel/process.tkb's
 // own kernel_process_crash_*() accessors: reads plain ProcessFdContext data
@@ -3905,7 +4020,8 @@ fn kernel_fd_table_crash_kind(process: usize, fd: usize) -> usize !{unsafe} {
     };
     let entries: *FdBlock = region_pin_at(entries_pin);
     let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
-    match entries.slot[index].kind {
+    let mut entry: FdDiagnosticEntry = fd_diagnostic_entry_copy(entries, index);
+    match entry.kind {
         UnifiedFdKind::Empty => { let __ctx_result: usize = 0; fd_context_unpin(ctx_pin); { let __entries_result: usize = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
         UnifiedFdKind::Terminal => { let __ctx_result: usize = 1; fd_context_unpin(ctx_pin); { let __entries_result: usize = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
         UnifiedFdKind::OpenFile => { let __ctx_result: usize = 2; fd_context_unpin(ctx_pin); { let __entries_result: usize = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
@@ -3932,7 +4048,8 @@ fn kernel_fd_table_crash_object(process: usize, fd: usize) -> usize !{unsafe} {
     };
     let entries: *FdBlock = region_pin_at(entries_pin);
     let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
-    { let __ctx_result: usize = entries.slot[index].object; fd_context_unpin(ctx_pin); { let __entries_result: usize = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
+    let mut entry: FdDiagnosticEntry = fd_diagnostic_entry_copy(entries, index);
+    { let __ctx_result: usize = entry.object; fd_context_unpin(ctx_pin); { let __entries_result: usize = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
 }
 
 // GitHub issue #479. SharedObject.refs and fd_slot_total are guarded by one

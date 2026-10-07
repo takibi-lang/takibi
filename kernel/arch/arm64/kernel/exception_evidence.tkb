@@ -7,7 +7,6 @@ use "kernel/kernel/syscall_unimplemented.tkb";
 
 // DDB stops the runtime online prefix, including idle secondaries: they still
 // execute timer and SGI handlers and must acknowledge inspection quiescence.
-const DDB_WORLD_STOP_SPINS: usize = 10000000;
 
 // How many of a process's descriptors an oops report prints. GitHub issue
 // #393: this is the width of the REPORT, not of the table -- see
@@ -2235,6 +2234,37 @@ private fn ddb_render_proc(pid: usize) !{unsafe} {
     ddb_puts("\n");
 }
 
+// Value-only diagnostic projection. Unavailable backing is reported rather
+// than hidden as an empty table, and no RegionPool pin or lock is taken.
+private fn ddb_vm_snapshot_stopped(
+        stopped: borrow MachineStopped[&kernel_world_stop], root: AddressSpaceRoot,
+        pid: usize) -> AddressSpaceDiagnosticSnapshot !{unsafe} {
+    match address_space_diagnostic_snapshot(stopped, root) {
+        AddressSpaceDiagnosticResult::Ready(value) => { return value; }
+        AddressSpaceDiagnosticResult::Busy => {
+            ddb_puts("ddb: vm unavailable pid="); ddb_put_udec(pid);
+            ddb_puts(" reason=pool-busy\n");
+        }
+        AddressSpaceDiagnosticResult::Stale => {
+            ddb_puts("ddb: vm unavailable pid="); ddb_put_udec(pid);
+            ddb_puts(" reason=stale-backing\n");
+        }
+    }
+    let mut unavailable: AddressSpaceDiagnosticSnapshot = { false, 0, 0, 0 };
+    return unavailable;
+}
+
+private fn diagnostic_fd_kind_code(kind: UnifiedFdKind) -> usize {
+    match kind {
+        UnifiedFdKind::Empty => { return 0; }
+        UnifiedFdKind::Terminal => { return 1; }
+        UnifiedFdKind::OpenFile => { return 2; }
+        UnifiedFdKind::Directory => { return 3; }
+        UnifiedFdKind::Listener => { return 4; }
+        UnifiedFdKind::Connection => { return 5; }
+    }
+}
+
 // The one resumable DDB root. It receives an already-saved IRQ frame after
 // the UART source and interrupt controller were acknowledged, but remains an
 // interrupt function: no semantic exception is made for debugger code.
@@ -2270,22 +2300,37 @@ private fn kernel_ddb_enter_stopped(
     ddb_snapshot.scheduler_enabled = kernel_process_ddb_scheduler_enabled();
     ddb_snapshot.reschedule_pending = kernel_process_ddb_reschedule_pending();
     ddb_snapshot.frame_sp = frame_sp;
-    ddb_snapshot.process_pid = kernel_process_current_pid();
-    ddb_snapshot.parent_pid = kernel_process_crash_parent_pid();
-    ddb_snapshot.process_state = kernel_process_crash_state();
-    ddb_snapshot.wait_reason = kernel_process_crash_wait_reason();
+    let mut current_record = kernel_process_current_stopped_record(stopped_world);
+    ddb_snapshot.process_pid = current_record.pid;
+    ddb_snapshot.parent_pid = current_record.ppid;
+    ddb_snapshot.process_state = current_record.state;
+    ddb_snapshot.wait_reason = current_record.wait_reason;
     ddb_snapshot.root_slot = kernel_process_current_slot();
     let mut vm: AddressSpaceDiagnosticSnapshot =
-        address_space_diagnostic_snapshot(scheduled_process_address_space_root_stopped(stopped_world, ddb_snapshot.root_slot));
+        ddb_vm_snapshot_stopped(stopped_world, scheduled_process_address_space_root_stopped(stopped_world, ddb_snapshot.root_slot), ddb_snapshot.process_pid);
     ddb_snapshot.root_live = 0;
     if (vm.live) { ddb_snapshot.root_live = 1; }
     ddb_snapshot.root_l1 = vm.l1_physical;
     ddb_snapshot.root_asid = vm.asid;
     for fd: usize in 0..<CRASH_FD_SNAPSHOT_SLOTS {
-        ddb_snapshot.fd_kind[fd] =
-            kernel_fd_table_crash_kind(ddb_snapshot.root_slot, fd);
-        ddb_snapshot.fd_object[fd] =
-            kernel_fd_table_crash_object(ddb_snapshot.root_slot, fd);
+        ddb_snapshot.fd_kind[fd] = 0;
+        ddb_snapshot.fd_object[fd] = 0;
+        match kernel_fd_table_stopped_entry(stopped_world, ddb_snapshot.root_slot, fd) {
+            FdDiagnosticResult::Ready(entry) => {
+                ddb_snapshot.fd_kind[fd] = diagnostic_fd_kind_code(entry.kind);
+                ddb_snapshot.fd_object[fd] = entry.object;
+            }
+            FdDiagnosticResult::Busy => {
+                ddb_snapshot.fd_kind[fd] = 7;
+                ddb_puts("ddb: fd unavailable fd="); ddb_put_udec(fd);
+                ddb_puts(" reason=pool-busy\n");
+            }
+            FdDiagnosticResult::Stale => {
+                ddb_snapshot.fd_kind[fd] = 8;
+                ddb_puts("ddb: fd unavailable fd="); ddb_put_udec(fd);
+                ddb_puts(" reason=stale-context\n");
+            }
+        }
     }
     let mut process_copy: ProcessDdbCopyResult =
         kernel_process_ddb_copy(stopped_world,
@@ -2304,8 +2349,9 @@ private fn kernel_ddb_enter_stopped(
         ddb_snapshot.process_l2[index] = 0;
         if (index < ddb_snapshot.process_count) {
             let mut process_vm: AddressSpaceDiagnosticSnapshot =
-                address_space_diagnostic_snapshot(
-                    scheduled_process_address_space_root_stopped(stopped_world, ddb_snapshot.processes[index].root_slot));
+                ddb_vm_snapshot_stopped(stopped_world,
+                    scheduled_process_address_space_root_stopped(stopped_world, ddb_snapshot.processes[index].root_slot),
+                    ddb_snapshot.processes[index].pid);
             if (process_vm.live) {
                 ddb_snapshot.process_l2[index] = process_vm.l2_physical;
             }

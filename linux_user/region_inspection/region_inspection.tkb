@@ -1,0 +1,80 @@
+// Sequential, host-native checks of stopped-pool metadata validation.
+// This fixture has one mutator and no interrupts; it does not simulate CPU
+// holding or certify hardware IRQ behavior. It exercises the real built-in.
+struct Node { value: usize; }
+private let mut pool: RegionPool(Node);
+private let mut bytes: [u8; 1024];
+private let mut controller: u8;
+
+fn expect_live(address: usize, generation: usize) -> bool {
+    match region_pool_inspect_unproven__Node(&pool, &controller, address, generation) {
+        RegionInspectionProbe(Node)::Busy => { return false; }
+        RegionInspectionProbe(Node)::Stale => { return false; }
+        RegionInspectionProbe(Node)::Inspected(inspected) => {
+            let value: usize = region_inspection_at(inspected).value;
+            region_inspection_drop(inspected);
+            return value == 37;
+        }
+    }
+}
+
+fn expect_stale(address: usize, generation: usize) -> bool {
+    match region_pool_inspect_unproven__Node(&pool, &controller, address, generation) {
+        RegionInspectionProbe(Node)::Busy => { return false; }
+        RegionInspectionProbe(Node)::Stale => { return true; }
+        RegionInspectionProbe(Node)::Inspected(inspected) => {
+            region_inspection_drop(inspected); return false;
+        }
+    }
+}
+
+fn expect_busy(address: usize, generation: usize) -> bool {
+    let guard = region_pool_lock(&pool);
+    match region_pool_inspect_unproven__Node(&pool, &controller, address, generation) {
+        RegionInspectionProbe(Node)::Busy => { region_pool_unlock(guard); return true; }
+        RegionInspectionProbe(Node)::Stale => { region_pool_unlock(guard); return false; }
+        RegionInspectionProbe(Node)::Inspected(inspected) => {
+            region_inspection_drop(inspected); region_pool_unlock(guard); return false;
+        }
+    }
+}
+
+fn app_main() {
+    let RegionOf(u8)::Taken(chunk) = region_of(bytes) else {
+        RegionOf(u8)::Gone => { uart_puts("FAIL arena unavailable\n"); return; }
+    };
+    let guard = region_pool_lock(&pool);
+    match region_pool_grow(guard, chunk) {
+        RegionGrow(Node)::TooSmall(back) => { region_release(back); region_pool_unlock(guard); uart_puts("FAIL chunk rejected\n"); return; }
+        RegionGrow(Node)::Grown => {}
+    }
+    let RegionPoolAlloc(Node)::Allocated(slot) = region_alloc(guard) else {
+        RegionPoolAlloc(Node)::Full => { region_pool_unlock(guard); uart_puts("FAIL pool full\n"); return; }
+        RegionPoolAlloc(Node)::Exhausted => { region_pool_unlock(guard); uart_puts("FAIL stamps exhausted\n"); return; }
+    };
+    region_slot_at(slot).value = 37;
+    let mut handle: RegionHandle(Node) = region_give(guard, slot);
+    let address: usize = region_handle_address(handle);
+    let generation: usize = region_handle_generation(handle);
+    region_pool_unlock(guard);
+    if (expect_live(address, generation) == false) { uart_puts("FAIL live value\n"); return; }
+    if (expect_busy(address, generation) == false) { uart_puts("FAIL held-lock refusal\n"); return; }
+    if (expect_stale(address + 1, generation) == false) { uart_puts("FAIL alignment\n"); return; }
+    if (expect_stale(address, generation + 1) == false) { uart_puts("FAIL generation\n"); return; }
+    if (expect_stale(1, generation) == false) { uart_puts("FAIL foreign address\n"); return; }
+    let reclaim = region_pool_lock(&pool);
+    let RegionTake(Node)::Taken(taken) = region_take(reclaim, handle) else {
+        RegionTake(Node)::Stale => { region_pool_unlock(reclaim); uart_puts("FAIL take\n"); return; }
+    };
+    region_free(reclaim, taken);
+    region_pool_unlock(reclaim);
+    if (expect_stale(address, generation) == false) { uart_puts("FAIL freed handle\n"); return; }
+    let shrink = region_pool_lock(&pool);
+    match region_pool_shrink(shrink) {
+        RegionShrink(Node)::Nothing => { region_pool_unlock(shrink); uart_puts("FAIL shrink\n"); return; }
+        RegionShrink(Node)::Chunk(back) => { region_release(back); }
+    }
+    region_pool_unlock(shrink);
+    if (expect_stale(address, generation) == false) { uart_puts("FAIL detached chunk\n"); return; }
+    uart_puts("PASS inspection: value, busy, alignment, generation, membership, free, shrink\n");
+}

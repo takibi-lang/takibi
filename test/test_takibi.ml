@@ -2677,6 +2677,126 @@ let issue370_cell_fixture = {|
   }
 |}
 
+(* Real generated RegionPool inspection functions: no hardware simulation. *)
+let region_inspection_fixture code = {|
+  struct Node { value: usize; }
+  let mut pool: RegionPool(Node);
+  let mut other: RegionPool(Node);
+  let mut controller: u8;
+  let mut other_controller: u8;
+  fn resume() !{changes_witness_RegionInspection__Node} {}
+  fn same_pool(inspected: borrow RegionInspection(Node)[&pool, s]) {}
+  fn same_controller(inspected: borrow RegionInspection(Node)[p, &controller]) {}
+|} ^ code
+
+let region_inspection_tests =
+  let wrap body = region_inspection_fixture ({|
+    fn probe() {
+      match region_pool_inspect_unproven__Node(&pool, &controller, 0, 0) {
+        RegionInspectionProbe(Node)::Busy => {}
+        RegionInspectionProbe(Node)::Stale => {}
+        RegionInspectionProbe(Node)::Inspected(inspected) => {
+  |} ^ body ^ " } } }") in
+  let good name body = Alcotest.test_case name `Quick
+    (fun () -> ignore (infer_regions (wrap body))) in
+  let bad name diagnostic body = Alcotest.test_case name `Quick
+    (expect_region_error diagnostic (wrap body)) in
+  [
+    good "inspection: scalar copy survives resume"
+      "let value = region_inspection_at(inspected).value; region_inspection_drop(inspected); resume();";
+    good "inspection: indices retain pool and controller"
+      "same_pool(inspected); same_controller(inspected); region_inspection_drop(inspected);";
+    bad "inspection: retained view cannot cross resume" "live RegionInspection__Node"
+      "resume(); region_inspection_drop(inspected);";
+    bad "inspection: pointer scope remains after view drop" "live RegionInspection__Node"
+      "let pointer = region_inspection_at(inspected); region_inspection_drop(inspected); resume();";
+    bad "inspection: pointer cannot outlive view" "cannot be used after"
+      "let pointer = region_inspection_at(inspected); region_inspection_drop(inspected); let value = pointer.value;";
+    Alcotest.test_case "inspection: no_copy payload cannot be copied" `Quick
+      (expect_region_error "no_copy" {|
+        struct no_copy Node { value: usize; }
+        let mut pool: RegionPool(Node);
+        let mut controller: u8;
+        fn probe() {
+          match region_pool_inspect_unproven__Node(&pool, &controller, 0, 0) {
+            RegionInspectionProbe(Node)::Busy => {}
+            RegionInspectionProbe(Node)::Stale => {}
+            RegionInspectionProbe(Node)::Inspected(inspected) => {
+              let mut copied: Node = *region_inspection_at(inspected);
+              region_inspection_drop(inspected);
+            }
+          }
+        }
+      |});
+    Alcotest.test_case "inspection: wrong pool is refused" `Quick
+      (expect_region_error "static value mismatch" (region_inspection_fixture {|
+        fn probe() {
+          match region_pool_inspect_unproven__Node(&other, &controller, 0, 0) {
+            RegionInspectionProbe(Node)::Busy => {}
+            RegionInspectionProbe(Node)::Stale => {}
+            RegionInspectionProbe(Node)::Inspected(inspected) => {
+              same_pool(inspected); region_inspection_drop(inspected);
+            }
+          }
+        }
+      |}));
+    Alcotest.test_case "inspection: wrong controller is refused" `Quick
+      (expect_region_error "static value mismatch" (region_inspection_fixture {|
+        fn probe() {
+          match region_pool_inspect_unproven__Node(&pool, &other_controller, 0, 0) {
+            RegionInspectionProbe(Node)::Busy => {}
+            RegionInspectionProbe(Node)::Stale => {}
+            RegionInspectionProbe(Node)::Inspected(inspected) => {
+              same_controller(inspected); region_inspection_drop(inspected);
+            }
+          }
+        }
+      |}));
+    Alcotest.test_case "inspection: take invalidates retained view" `Quick
+      (expect_region_error "live RegionInspection__Node" (region_inspection_fixture {|
+        fn probe(inspected: borrow RegionInspection(Node)[&pool, &controller], handle: RegionHandle(Node)) {
+          let guard = region_pool_lock(&pool);
+          match region_take(guard, handle) {
+            RegionTake(Node)::Stale => {}
+            RegionTake(Node)::Taken(slot) => { region_free(guard, slot); }
+          }
+          region_pool_unlock(guard);
+        }
+      |}));
+    Alcotest.test_case "inspection: retire invalidates retained view" `Quick
+      (expect_region_error "live RegionInspection__Node" (region_inspection_fixture {|
+        fn probe(inspected: borrow RegionInspection(Node)[&pool, &controller], pin: sink RegionPin(Node)[&pool, slot]) {
+          match region_retire(pin) {
+            RegionRetire(Node)::Pending => {}
+            RegionRetire(Node)::Retired(slot) => { region_slot_abandon(slot); }
+          }
+        }
+      |}));
+    Alcotest.test_case "region claim: generic expansion does not lower twice" `Quick
+      (fun () -> ignore (infer_regions {|
+        let mut pages: [u8; 1024];
+        let mut controller: u8;
+        fn identity(T: type, pointer: *T) -> *T { return pointer; }
+        fn probe() {
+          let pointer = identity(&controller);
+          let RegionOf(u8)::Taken(chunk) = region_of(pages) else {
+            RegionOf(u8)::Gone => { return; }
+          };
+          region_release(chunk);
+        }
+      |}));
+    Alcotest.test_case "region claim: generic expansion still rejects direct claim" `Quick
+      (expect_region_error "reserved for the built-in region" {|
+        let mut pages: [u8; 1024];
+        let mut controller: u8;
+        fn identity(T: type, pointer: *T) -> *T { return pointer; }
+        fn probe() {
+          let pointer = identity(&controller);
+          let forged = __region_claim__u8(0, 1, &controller as *bool, &controller);
+        }
+      |});
+  ]
+
 let infer_tests = [
   Alcotest.test_case "effect matrix contains every checker rule exactly once" `Quick
     (fun () ->
@@ -21172,6 +21292,9 @@ let infer_production_stop_boundary code =
     Parser.program Lexer.read lexbuf in
   let primitives = parse {|
     const KERNEL_MAX_CORES: usize = 4;
+    linear struct RegionInspection__AddressSpaceBacking[p: addr, s: addr] { private address: usize; }
+    linear struct RegionInspection__ProcessFdContext[p: addr, s: addr] { private address: usize; }
+    linear struct RegionInspection__FdBlock[p: addr, s: addr] { private address: usize; }
     struct no_copy AtomicWord { private value: usize; }
     linear struct IntrusiveSlotView[p: addr] { private slot: usize; }
     fn atomic_word_store(cell: *AtomicWord, value: usize) !{unsafe} {}
@@ -21257,6 +21380,9 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
     Parser.program Lexer.read lexbuf in
   let primitives = parse {|
     const KERNEL_MAX_CORES: usize = 4;
+    linear struct RegionInspection__AddressSpaceBacking[p: addr, s: addr] { private address: usize; }
+    linear struct RegionInspection__ProcessFdContext[p: addr, s: addr] { private address: usize; }
+    linear struct RegionInspection__FdBlock[p: addr, s: addr] { private address: usize; }
     struct no_copy AtomicWord { private value: usize; }
     linear struct IntrusiveSlotView[p: addr] { private slot: usize; }
     fn atomic_word_store(cell: *AtomicWord, value: usize) !{unsafe} {}
@@ -21275,6 +21401,24 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
       return &pool.value;
     }
     fn intrusive_view_drop(slot_view: sink IntrusiveSlotView[p]) {}
+    fn native_fixture_AddressSpaceBacking(stopped: borrow MachineStopped[s])
+        -> RegionInspection__AddressSpaceBacking[&kernel_world_stop, s] !{irq_masking_guard} {
+      let mut inspected: RegionInspection__AddressSpaceBacking[&kernel_world_stop, s] = { 0 };
+      return inspected;
+    }
+    fn native_fixture_end_AddressSpaceBacking(inspected: sink RegionInspection__AddressSpaceBacking[p, s]) {}
+    fn native_fixture_ProcessFdContext(stopped: borrow MachineStopped[s])
+        -> RegionInspection__ProcessFdContext[&kernel_world_stop, s] !{irq_masking_guard} {
+      let mut inspected: RegionInspection__ProcessFdContext[&kernel_world_stop, s] = { 0 };
+      return inspected;
+    }
+    fn native_fixture_end_ProcessFdContext(inspected: sink RegionInspection__ProcessFdContext[p, s]) {}
+    fn native_fixture_FdBlock(stopped: borrow MachineStopped[s])
+        -> RegionInspection__FdBlock[&kernel_world_stop, s] !{irq_masking_guard} {
+      let mut inspected: RegionInspection__FdBlock[&kernel_world_stop, s] = { 0 };
+      return inspected;
+    }
+    fn native_fixture_end_FdBlock(inspected: sink RegionInspection__FdBlock[p, s]) {}
     fn mutex_irq_save() -> usize { return 0; }
     fn mutex_irq_restore(flags: usize) !{restores_saved_irq} {}
     fn cpu_id() -> usize { return 0; }
@@ -21285,7 +21429,7 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
   let variants = ["WorldStopResult"; "MachineStopResult"; "CpuStartResult"; "MachineSlotProbe"] in
   let functions = ["world_stop_claim"; "world_stop_begin_config";
     "world_stop_begin_claimed"; "world_stop_begin"; "world_stop_machine_begin";
-    "cpu_participants_end"; "machine_stop_release"; "machine_stopped_mask";
+    "cpu_participants_end"; "machine_stop_release"; "machine_stop_keep_forever"; "machine_stopped_mask";
     "cpu_start_reserve"; "cpu_start_core"; "cpu_start_finish";
     "cpu_start_end"; "cpu_start_gate_release"; "world_stop_resume";
     "world_stopped_end"; "world_stop_partial_end";
@@ -21298,7 +21442,7 @@ let infer_production_machine_boundary ?(platform = "qemu") code =
     | Ast.FuncDef f -> List.mem f.name functions
     | Ast.VariantDef (name, _, _, _, _) -> List.mem name variants
     | _ -> false) (parse_here source) in
-  Alcotest.(check int) "all production machine declarations extracted" 37
+  Alcotest.(check int) "all production machine declarations extracted" 38
     (List.length boundary);
   let platform_path = "kernel/platform/" ^ platform ^ "/init.tkb" in
   let path = List.find Sys.file_exists ["../" ^ platform_path; platform_path] in
@@ -21470,6 +21614,30 @@ let production_machine_boundary_tests =
         }
       } }
     |};
+    bad "production resume rejects native AddressSpaceBacking inspection"
+      "live RegionInspection__AddressSpaceBacking" (full {|
+        let inspected = native_fixture_AddressSpaceBacking(stopped);
+        machine_stop_release(stopped, &kernel_world_stop);
+        native_fixture_end_AddressSpaceBacking(inspected);
+      |});
+    bad "production resume rejects native ProcessFdContext inspection"
+      "live RegionInspection__ProcessFdContext" (full {|
+        let inspected = native_fixture_ProcessFdContext(stopped);
+        machine_stop_release(stopped, &kernel_world_stop);
+        native_fixture_end_ProcessFdContext(inspected);
+      |});
+    bad "production resume rejects native FdBlock inspection"
+      "live RegionInspection__FdBlock" (full {|
+        let inspected = native_fixture_FdBlock(stopped);
+        machine_stop_release(stopped, &kernel_world_stop);
+        native_fixture_end_FdBlock(inspected);
+      |});
+    bad "native inspection retains IRQ exclusion after terminal stop consumption"
+      "IRQ" (full {|
+        let inspected = native_fixture_FdBlock(stopped);
+        machine_stop_keep_forever(stopped);
+        msr_daifclr_irq(); native_fixture_end_FdBlock(inspected);
+      |});
     good "production machine pool read ends scope before resume" (full {|
       match machine_pool_probe(&record_pool, stopped, 1) {
         MachineSlotProbe::Missing => {}
@@ -21542,6 +21710,7 @@ let named_groups_unisolated = [
   "stopped-diagnostics", stopped_diagnostic_tests;
   "production-stop-boundary", production_stop_boundary_tests;
   "production-machine-boundary", production_machine_boundary_tests;
+  "region-inspection", region_inspection_tests;
 ]
 
 (* Each Alcotest case represents a fresh compiler invocation. In particular,

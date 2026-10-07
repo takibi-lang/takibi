@@ -42,7 +42,7 @@ def kebab(case: str) -> str:
 
 def encoded(text: str, enum: str, field: str) -> dict[int, str]:
     """The integer each enum case is written into the DDB snapshot as."""
-    pattern = (rf"{enum}::(\w+)\s*=>\s*\{{\s*output\[index\]\.{field}\s*="
+    pattern = (rf"{enum}::(\w+)\s*=>\s*\{{\s*(?:output\[index\]|result)\.{field}\s*="
                rf"\s*(\d+);\s*\}}")
     found = {}
     for case, code in re.findall(pattern, text):

@@ -278,6 +278,10 @@ let region_arrays : (string * (string * int)) list ref = ref []
 let region_claims : string list ref = ref []
 let region_locks : string list ref = ref []
 
+(* Region calls lower only after generic expansion. Lowering them during
+   expansion makes the final pass mistake its own claim call for user input. *)
+let lowering_region_calls = ref false
+
 let region_of_lowering ?(table = false) (e : expr) (array_name : string) : expr_desc =
   match List.assoc_opt array_name !region_arrays with
   | None ->
@@ -340,11 +344,14 @@ let rec walk_expr ~subst ~vsubst ~resolve_inst (e : expr) : expr =
          | Some v -> IntLit (Int64.of_int v)
          | None -> Var name)
     | ViewLit (name, args) -> ViewLit (name, args)
-    | Call ("region_of", [ { desc = Var array_name; _ } ]) ->
+    | Call ("region_of", [ { desc = Var array_name; _ } ])
+      when !lowering_region_calls ->
         region_of_lowering e array_name
-    | Call ("region_table_of", [ { desc = Var array_name; _ } ]) ->
+    | Call ("region_table_of", [ { desc = Var array_name; _ } ])
+      when !lowering_region_calls ->
         region_of_lowering ~table:true e array_name
-    | Call ("region_table_lock", [ { desc = Var array_name; _ } ]) ->
+    | Call ("region_table_lock", [ { desc = Var array_name; _ } ])
+      when !lowering_region_calls ->
         region_lock_lowering e array_name
     | Call (name, _) when is_reserved_region_name name ->
         raise (Types.TypeError (e.loc, Printf.sprintf
@@ -1121,12 +1128,6 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
              | Some v -> IntLit (Int64.of_int v)
              | None -> Var name)
         | ViewLit (name, args) -> ViewLit (name, args)
-        | Call ("region_of", [ { desc = Var array_name; _ } ]) ->
-            region_of_lowering e array_name
-        | Call ("region_table_of", [ { desc = Var array_name; _ } ]) ->
-            region_of_lowering ~table:true e array_name
-        | Call ("region_table_lock", [ { desc = Var array_name; _ } ]) ->
-            region_lock_lowering e array_name
         | Call (name, _) when is_reserved_region_name name ->
             raise (Types.TypeError (e.loc, Printf.sprintf
               "'%s' is reserved for the built-in region" name))
@@ -1595,6 +1596,9 @@ let run ?(explain_inference = false) (prog : toplevel list) : toplevel list =
    whether or not the program has generics (run returns early when it has
    none). Called by Region_builtin.run only under --regions. *)
 let lower_regions (prog : toplevel list) : toplevel list =
-  List.map (walk_toplevel ~subst:no_subst ~vsubst:no_vsubst
-              ~resolve_inst:(fun name args -> TypeGenericInst (name, args)))
-    prog
+  let previous = !lowering_region_calls in
+  lowering_region_calls := true;
+  Fun.protect ~finally:(fun () -> lowering_region_calls := previous) (fun () ->
+    List.map (walk_toplevel ~subst:no_subst ~vsubst:no_vsubst
+                ~resolve_inst:(fun name args -> TypeGenericInst (name, args)))
+      prog)
