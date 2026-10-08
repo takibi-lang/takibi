@@ -36,32 +36,32 @@ struct ProcessImageContext {
 }
 private let mut process_image_contexts: [ProcessImageContext; KERNEL_MAX_CORES];
 
-private fn process_image_context_here() -> *ProcessImageContext {
+private fn process_image_cpu_index() -> {0..<KERNEL_MAX_CORES as usize} {
     let core: usize = cpu_id();
-    if (core >= KERNEL_MAX_CORES) { return &process_image_contexts[0]; }
-    return &process_image_contexts[core];
+    if (core < KERNEL_MAX_CORES) { return core; }
+    return 0;
 }
 
 fn process_image_ext2_source(mount: Ext2Mount, inode: usize,
                              length: usize) {
-    let context: *ProcessImageContext = process_image_context_here();
+    let context: &mut ProcessImageContext = &process_image_contexts[process_image_cpu_index()];
     let mut source: ProcessImageExt2Source = { mount, inode, length };
     context.source = ProcessImageSourceState::Ext2(source);
 }
 
 fn process_image_ext2_source_clear() {
-    process_image_context_here().source = ProcessImageSourceState::Absent;
+    process_image_contexts[process_image_cpu_index()].source = ProcessImageSourceState::Absent;
 }
 
 fn process_image_pair_ext2_source(mount: Ext2Mount, inode: usize,
                                   length: usize) {
-    let context: *ProcessImageContext = process_image_context_here();
+    let context: &mut ProcessImageContext = &process_image_contexts[process_image_cpu_index()];
     let mut source: ProcessImageExt2Source = { mount, inode, length };
     context.pair_source = ProcessImageSourceState::Ext2(source);
 }
 
 fn process_image_pair_ext2_source_clear() {
-    process_image_context_here().pair_source = ProcessImageSourceState::Absent;
+    process_image_contexts[process_image_cpu_index()].pair_source = ProcessImageSourceState::Absent;
 }
 // GitHub issue #448: how many pages the LAST reap gave back, which is a
 // report about an event rather than about a process, so it stays here.
@@ -71,11 +71,6 @@ fn process_image_pair_ext2_source_clear() {
 // clone in flight. See ProcessCloneVm* below for what that ceiling cost.
 private let mut clone_last_reaped_count: [usize; KERNEL_MAX_CORES];
 
-private fn process_image_counter_here(counters: *usize) -> *usize {
-    let core: usize = cpu_id();
-    if (core >= KERNEL_MAX_CORES) { return counters; }
-    return counters + (core as isize);
-}
 // GitHub issues #258 and #264: one persistent record per address-space
 // root, replacing the prior ProcessLayout table plus the separate flattened
 // growth-page array. Its scalar fields are ProcessLayout's former fields,
@@ -166,21 +161,14 @@ private let mut process_image_record_missing_count:
     [usize; KERNEL_MAX_CORES];
 
 private fn process_image_record_missing_note() {
-    let base: *usize = process_image_record_missing_count;
-    let core: usize = cpu_id();
-    if (core >= KERNEL_MAX_CORES) {
-        *base = *base + 1;
-        return;
-    }
-    let count: *usize = base + (core as isize);
-    *count = *count + 1;
+    let core = process_image_cpu_index();
+    process_image_record_missing_count[core] = process_image_record_missing_count[core] + 1;
 }
 
 fn process_image_record_missing_uses() -> usize {
-    let counts: *usize = process_image_record_missing_count;
     let mut total: usize = 0;
     for core: usize in 0..<KERNEL_MAX_CORES {
-        total = total + *(counts + (core as isize));
+        total = total + process_image_record_missing_count[core];
     }
     return total;
 }
@@ -742,18 +730,18 @@ fn process_image_record_release_words(root: usize,
 // Root 0 is a real target. The closed Unset case distinguishes absence
 // without an independently mutable flag or another root array.
 private fn process_image_target_root_here() -> AddressSpaceRoot {
-    match process_image_context_here().target {
+    match process_image_contexts[process_image_cpu_index()].target {
         ProcessImageTargetState::Unset => { return address_space_boot_root(); }
         ProcessImageTargetState::Set(root) => { return root; }
     }
 }
 
 private fn process_image_set_target_root_here(root: AddressSpaceRoot) {
-    process_image_context_here().target = ProcessImageTargetState::Set(root);
+    process_image_contexts[process_image_cpu_index()].target = ProcessImageTargetState::Set(root);
 }
 
 private fn process_image_clear_target_root_here() {
-    process_image_context_here().target = ProcessImageTargetState::Unset;
+    process_image_contexts[process_image_cpu_index()].target = ProcessImageTargetState::Unset;
 }
 
 // GitHub issue #392: a root is a process slot, and a process slot is a
@@ -779,10 +767,10 @@ private let mut process_image_root_unset_count:
 private let mut process_image_root_stale_count:
     [usize; KERNEL_MAX_CORES];
 
-private fn process_image_root_counter_total(counts: *usize) -> usize {
+private fn process_image_root_counter_total(counts: borrow [usize; KERNEL_MAX_CORES..]) -> usize {
     let mut total: usize = 0;
     for core: usize in 0..<KERNEL_MAX_CORES {
-        total = total + *(counts + (core as isize));
+        total = total + counts[core];
     }
     return total;
 }
@@ -791,13 +779,13 @@ private fn process_image_root_counter_total(counts: *usize) -> usize {
 // call sites cannot act on a miss; teardown opens ProcessImageTargetRootResult
 // and does nothing. Reported, not gated: a healthy boot reaches it.
 fn process_image_root_unset_uses() -> usize {
-    return process_image_root_counter_total(process_image_root_unset_count);
+    return process_image_root_counter_total(process_image_root_unset_count as []usize);
 }
 
 // A target that was chosen and whose root has since stopped naming a live
 // process. This one is gated on zero, and it is the one issue #270 hit.
 fn process_image_root_stale_fallback_uses() -> usize {
-    return process_image_root_counter_total(process_image_root_stale_count);
+    return process_image_root_counter_total(process_image_root_stale_count as []usize);
 }
 
 // GitHub issue #492 counted lookups that named an image slot with the
@@ -837,20 +825,18 @@ must_use variant ProcessImageTargetRootResult {
 // asking it is not free and why callers ask once and carry the answer.
 fn process_image_target_root_result()
         -> ProcessImageTargetRootResult !{unsafe} {
-    let root: AddressSpaceRoot = match process_image_context_here().target {
+    let root: AddressSpaceRoot = match process_image_contexts[process_image_cpu_index()].target {
         ProcessImageTargetState::Unset => {
-            let unset_count: *usize =
-                process_image_counter_here(process_image_root_unset_count);
-            *unset_count = *unset_count + 1;
+            let unset_count_core = process_image_cpu_index();
+            process_image_root_unset_count[unset_count_core] = process_image_root_unset_count[unset_count_core] + 1;
             return ProcessImageTargetRootResult::Missing;
         }
         ProcessImageTargetState::Set(selected) => { selected }
     };
     if (scheduled_process_slot_valid(address_space_root_slot(
             root)) == false) {
-        let stale_count: *usize =
-            process_image_counter_here(process_image_root_stale_count);
-        *stale_count = *stale_count + 1;
+        let stale_count_core = process_image_cpu_index();
+        process_image_root_stale_count[stale_count_core] = process_image_root_stale_count[stale_count_core] + 1;
         return ProcessImageTargetRootResult::Missing;
     }
     return ProcessImageTargetRootResult::Ready(
@@ -862,7 +848,7 @@ fn process_image_target_root_result()
 // asserts those counts, so a check asked on every EL0 return must not move
 // them.
 fn process_image_target_root_peek() -> ProcessImageTargetRootResult {
-    match process_image_context_here().target {
+    match process_image_contexts[process_image_cpu_index()].target {
         ProcessImageTargetState::Unset => {
             return ProcessImageTargetRootResult::Missing;
         }
@@ -1233,7 +1219,7 @@ fn process_image_clone_vm_reap(dest_space: AddressSpaceRoot) -> ProcessCloneVmRe
     kernel_process_activate_stable_root(
         scheduled_process_address_space_root_lookup(source));
     process_clone_vm_rollback(dest_space);
-    *process_image_counter_here(clone_last_reaped_count) = count;
+    clone_last_reaped_count[process_image_cpu_index()] = count;
     return ProcessCloneVmReapResult::Reaped;
 }
 
@@ -1383,19 +1369,18 @@ fn process_image_clone_growth_probe() -> bool !{unsafe} {
     // turn into cleanup of the bootstrap address space. Restore the count
     // afterwards so this deliberate negative control does not masquerade
     // as a fault in the healthy-boot evidence.
-    let fallback_count: *usize =
-        process_image_counter_here(process_image_root_unset_count);
-    let fallback_before: usize = *fallback_count;
+    let fallback_count_core = process_image_cpu_index();
+    let fallback_before: usize = process_image_root_unset_count[fallback_count_core];
     process_image_clear_target_root_here();
     process_image_unmap_pages(1);
-    if (*fallback_count != fallback_before + 1 ||
+    if (process_image_root_unset_count[fallback_count_core] != fallback_before + 1 ||
         address_space_pte_read(address_space_boot_root(), process_stack_top_page()) == 0 ||
         process_image_record_read(0).stack_growth_active == false ||
         process_image_record_read(0).active_page_count != 1 ||
         process_image_record_read(0).stack_lowest_l3 != process_stack_top_page()) {
         ok = false;
     }
-    *fallback_count = fallback_before;
+    process_image_root_unset_count[fallback_count_core] = fallback_before;
     process_image_set_target_root_here(address_space_boot_root());
     let mut cow_parent_physical: usize = 0;
     match process_image_clone_vm_begin(child_root_root) {
@@ -1907,11 +1892,11 @@ fn process_dynamic_prepare_stack(page: borrow PageOwner[page],
 
 fn process_image_load_page(page: borrow PageOwner[page],
                            plan: DistroElfLoadPlan,
-                           header: *KernelElf64ProgramHeader,
+                           header: KernelElf64ProgramHeader,
                            load_bias: usize,
                            l3_index: usize)
         -> ProcessImagePageLoadResult !{unsafe} {
-    match process_image_context_here().source {
+    match process_image_contexts[process_image_cpu_index()].source {
         ProcessImageSourceState::Absent => {}
         ProcessImageSourceState::Ext2(source) => {
             return process_image_load_page_ext2(
@@ -1990,11 +1975,11 @@ fn process_image_load_page(page: borrow PageOwner[page],
 // ELF itself never has to fit in a kernel scratch buffer.
 fn process_image_load_page_ext2(page: borrow PageOwner[page],
                                 plan: DistroElfLoadPlan,
-                                header: *KernelElf64ProgramHeader,
+                                header: KernelElf64ProgramHeader,
                                 load_bias: usize,
                                 l3_index: usize)
         -> ProcessImagePageLoadResult !{unsafe} {
-    let context: *ProcessImageContext = process_image_context_here();
+    let context: &mut ProcessImageContext = &process_image_contexts[process_image_cpu_index()];
     let source: ProcessImageExt2Source = match context.source {
         ProcessImageSourceState::Absent => {
             return ProcessImagePageLoadResult::Invalid;
@@ -2249,8 +2234,8 @@ fn process_image_map_segments(plan: DistroElfLoadPlan,
         }
         let header_bytes =
             header_tail[0..<sizeof(KernelElf64ProgramHeader)];
-        let header: *KernelElf64ProgramHeader =
-            header_bytes as *KernelElf64ProgramHeader;
+        let mut header: KernelElf64ProgramHeader =
+            kernel_elf_program_header_copy(header_bytes);
         if (header.segment_type == ELF_PT_LOAD) {
             // PF_R=4 (rodata), PF_R|PF_X=5 (text), PF_R|PF_W=6 (data). A
             // writable+executable combination is never accepted.
@@ -2352,7 +2337,7 @@ fn process_image_pair_probe(primary: DistroElfLoadPlan,
             return ProcessImagePairProbeResult::Invalid;
         }
         ProcessImageSegmentsResult::Mapped(primary_count) => {
-            match process_image_context_here().pair_source {
+            match process_image_contexts[process_image_cpu_index()].pair_source {
                 ProcessImageSourceState::Absent => {}
                 ProcessImageSourceState::Ext2(source) => {
                     process_image_ext2_source(

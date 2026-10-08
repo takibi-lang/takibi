@@ -31,6 +31,21 @@ struct packed KernelElf64ProgramHeader {
     alignment: u64;
 }
 
+// Packed ELF overlays are read only here, after the caller proves the
+// complete header span. Return independent values, never overlay pointers.
+fn kernel_elf_header_copy(bytes: borrow [u8; sizeof(KernelElf64Header)..])
+        -> KernelElf64Header {
+    let header: *KernelElf64Header = bytes as *KernelElf64Header;
+    return *header;
+}
+
+fn kernel_elf_program_header_copy(
+        bytes: borrow [u8; sizeof(KernelElf64ProgramHeader)..])
+        -> KernelElf64ProgramHeader {
+    let header: *KernelElf64ProgramHeader = bytes as *KernelElf64ProgramHeader;
+    return *header;
+}
+
 // sizeof(...) instead of hand-maintained literals (64/56) that used to
 // duplicate the two packed structs' own actual sizes.
 let ELF_HEADER_SIZE: usize = sizeof(KernelElf64Header);
@@ -69,7 +84,7 @@ fn distro_elf_validate_with_length(image: []u8,
         // length can be larger than this metadata window.
         let length: usize = logical_length;
         let header_bytes = image[0..<header_end];
-        let header: *KernelElf64Header = header_bytes as *KernelElf64Header;
+        let mut header: KernelElf64Header = kernel_elf_header_copy(header_bytes);
         if (slice_eq(header_bytes[0..<7], ELF_IDENT_MAGIC as []u8) == false) {
             return DistroElfResult::Invalid;
         }
@@ -100,8 +115,8 @@ fn distro_elf_validate_with_length(image: []u8,
                 return DistroElfResult::Invalid;
             }
             let item_bytes = item_tail[0..<sizeof(KernelElf64ProgramHeader)];
-            let item: *KernelElf64ProgramHeader =
-                item_bytes as *KernelElf64ProgramHeader;
+            let mut item: KernelElf64ProgramHeader =
+                kernel_elf_program_header_copy(item_bytes);
             if (item.segment_type == ELF_PT_LOAD) {
                 let offset: usize = item.offset as usize;
                 let file_size: usize = item.file_size as usize;

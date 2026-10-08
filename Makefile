@@ -505,7 +505,7 @@ LINUX_USER_OBJS          := $(foreach e,$(LINUX_USER_EXAMPLES),$(LINUX_USER_DIR)
 # own .tkb -> .o rule comment) for the tests above that `use` a shared file
 # outside their own directory.
 $(LINUX_USER_DIR)/checked_usize/checked_usize_exe.o: $(LINUX_USER_DIR)/common/checked_usize.tkb
-$(LINUX_USER_DIR)/elf64_validate/elf64_validate_exe.o: $(LINUX_USER_DIR)/common/elf64_validate.tkb $(LINUX_USER_DIR)/common/checked_usize.tkb
+$(LINUX_USER_DIR)/elf64_validate/elf64_validate_exe.o: $(LINUX_USER_DIR)/common/elf64_validate.tkb $(LINUX_USER_DIR)/common/checked_usize.tkb kernel/fs/elf64.tkb
 $(LINUX_USER_DIR)/page_pool/page_pool_exe.o: $(LINUX_USER_DIR)/page_pool/page_pool_core.tkb
 $(LINUX_USER_DIR)/inet_checksum/inet_checksum_exe.o: $(LINUX_USER_DIR)/common/inet_checksum.tkb
 $(LINUX_USER_DIR)/gem_tx_wait/gem_tx_wait_exe.o: kernel/drivers/net/gem_tx_wait.tkb

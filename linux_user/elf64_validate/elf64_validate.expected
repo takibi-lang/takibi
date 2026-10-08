@@ -6,3 +6,4 @@ too many phdrs: PASS
 filesz over memsz: PASS
 wrapped segment extent: PASS
 non-power-two align: PASS
+kernel header copies: PASS

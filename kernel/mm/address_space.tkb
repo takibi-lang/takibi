@@ -111,18 +111,18 @@ private let mut address_space_backing_missing_count:
 // in kernel_process_stack_idle_complete under the run lock.
 private let mut address_space_active_slot: [usize; KERNEL_MAX_CORES];
 
-private fn address_space_active_slot_here() -> usize {
-    let base: *usize = address_space_active_slot;
+private fn address_space_cpu_index() -> {0..<KERNEL_MAX_CORES as usize} {
     let core: usize = cpu_id();
-    if (core >= KERNEL_MAX_CORES) { return *base; }
-    return *(base + (core as isize));
+    if (core < KERNEL_MAX_CORES) { return core; }
+    return 0;
+}
+
+private fn address_space_active_slot_here() -> usize {
+    return address_space_active_slot[address_space_cpu_index()];
 }
 
 private fn address_space_set_active_slot_here(slot: usize) {
-    let base: *usize = address_space_active_slot;
-    let core: usize = cpu_id();
-    if (core >= KERNEL_MAX_CORES) { *base = slot; return; }
-    *(base + (core as isize)) = slot;
+    address_space_active_slot[address_space_cpu_index()] = slot;
 }
 
 // GitHub issue #406: how many address spaces exist right now. Root 0's

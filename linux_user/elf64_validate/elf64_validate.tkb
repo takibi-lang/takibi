@@ -2,6 +2,7 @@
 // The fixture builds with --forbid-trap and performs no ELF loading.
 
 use "linux_user/common/elf64_validate.tkb";
+use "kernel/fs/elf64.tkb";
 
 private let mut image: [u8; 256] align(8);
 
@@ -69,6 +70,23 @@ fn print_result(label: *u8, expected_valid: bool, image_len: usize) {
     }
 }
 
+// Execute the production mint's packed record copies and prove that later
+// source edits cannot change the returned header values.
+fn kernel_header_copy_probe() {
+    valid_image_init();
+    let mut header: KernelElf64Header =
+        kernel_elf_header_copy(image[0..<64]);
+    let mut program: KernelElf64ProgramHeader =
+        kernel_elf_program_header_copy(image[64..<120]);
+    put_u16(16, 0);
+    put_u64(96, 99);
+    let ok: bool = header.ident[0] == 0x7f && header.object_type == 3 &&
+        header.machine == 183 && header.program_offset == 64 &&
+        program.segment_type == 1 && program.file_size == 16;
+    if (ok) { uart_puts("kernel header copies: PASS\n"); }
+    else { uart_puts("kernel header copies: FAIL\n"); }
+}
+
 fn app_main() {
     valid_image_init();
     print_result("valid: ", true, 256);
@@ -100,4 +118,5 @@ fn app_main() {
     valid_image_init();
     put_u64(112, 3);
     print_result("non-power-two align: ", false, 256);
+    kernel_header_copy_probe();
 }

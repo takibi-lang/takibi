@@ -16,16 +16,15 @@ kernel/drivers/block/virtio_blk.tkb	13	16	virtio rings and request buffers, plus
 kernel/drivers/block/virtio_blk_dma.tkb	0	4	the used-ring index read and the reset status register, the two completion observations of the receive mint file (#716; moved from virtio_blk.tkb)
 kernel/drivers/net/rp1_gem.tkb	0	11	RP1 GEM registers (#637 A)
 kernel/drivers/net/virtio_net.tkb	5	21	virtio rings and frames, plus device registers (#637 A, E)
-kernel/fs/elf64.tkb	16	0	ELF headers read from an image in memory (#637 D)
+kernel/fs/elf64.tkb	2	0	Two packed ELF header copy mints take complete bounded byte spans and return independent record values; overlay validity and packed layout remain trusted (#637 D)
 kernel/fs/ext2/ext2.tkb	156	0	ext2 on-disk structures and cache blocks reached through pool pointers (#637 F)
 kernel/init/test_driver.tkb	10	0	boot-time fixtures reaching process records directly (#637 F)
 kernel/kernel/process.tkb	10	0	ProcessRecord loans derive from run guards, indexed current phases, owners or MachineStopped. Ordinary scalar diagnostics copy before releasing their pool view; no liveness escape remains. Per-CPU state uses bounded array places. PID values use guarded copies; physical stack mints and diagnostic output still await file confinement.
 kernel/kernel/syscall.tkb	59	0	syscall frames and scratch buffers (#637 C)
 kernel/lib/diagnostic_ring.tkb	6	0	per-CPU log rings published by atomics (#637 B)
 kernel/lib/intrusive_pool.tkb	93	0	the pool's own chunk carving, the mint of every payload pointer (#637 F)
-kernel/mm/address_space.tkb	10	0	Backing records use indexed references; remaining raw sites are active-root per-CPU state and page-table probe words
+kernel/mm/address_space.tkb	6	0	Backing records use indexed references and active roots use bounded per-CPU array places; remaining raw sites are the deliberate user-VA CoW probe byte mints
 kernel/mm/page.tkb	157	0	physical pages and page metadata (#637 D)
-kernel/mm/process_image.tkb	42	0	Image records use indexed references; remaining raw sites are per-CPU state, ELF/ext2 inputs and physical page destinations
 kernel/mm/user_memory.tkb	11	0	the user-range mint site: user addresses become slices here (#637 D)
 kernel/net/arp.tkb	7	0	frames and the ARP table (#637 F)
 kernel/net/icmp.tkb	13	0	frames (#637 F)
