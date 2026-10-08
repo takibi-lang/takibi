@@ -4397,11 +4397,20 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
             | Target_info.Coherent -> ()
             | Target_info.Unsupported -> raise (TypeError (e.loc,
                 "fixed DMA ownership operations are unavailable on this target")));
+           (* GitHub issue #716: returning device ownership asserts an
+              observed completion or a confirmed reset. Only the record's
+              declaring file -- its mint file -- may make that assertion,
+              so the trusted code is the file, not each call site. *)
            if operation = "dma_finish_owned_rx" then begin
-             if !unsafe_depth = 0 then
-               raise (TypeError (e.loc,
-                 "dma_finish_owned_rx requires unsafe completion or reset evidence"));
-             note_type_checker_unsafe_use ()
+             match Dma_fixed_registry.decl_file_of record with
+             | Some file when file = Ast.source_file_of_loc e.loc -> ()
+             | Some file -> raise (TypeError (e.loc, Printf.sprintf
+                 "dma_finish_owned_rx for '%s' may only be called in its \
+                  declaring file '%s', which observes completion or \
+                  confirms reset; call that file's settle function"
+                 record file))
+             | None -> raise (TypeError (e.loc, Printf.sprintf
+                 "fixed DMA record '%s' has no declaring file" record))
            end;
            TPtr (TStruct destination_token)
        | _ -> raise (TypeError (e.loc, Printf.sprintf

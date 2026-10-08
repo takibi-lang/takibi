@@ -2789,9 +2789,17 @@ the CPU token remains live.
 `dma_begin_rx(cpu, Name)` consumes the CPU token, prepares the entire fixed
 array for device writes, and returns `*NameDevice`. `dma_finish_owned_rx(dev,
 Name)` consumes the device token, finishes the same RX range, and returns
-`*NameCpu`. The latter requires `unsafe { ... }`: the caller must have
-observed completion, including a completed error, or confirmed device
-quiescence/reset. An unobserved timeout alone is not sufficient evidence.
+`*NameCpu`. The latter is accepted only in the file that declares `Name`;
+anywhere else it is a type error, `unsafe { ... }` included. That file is
+the record's mint file (GitHub issue #716): calling the builtin asserts
+that the caller observed completion, including a completed error, or
+confirmed device quiescence/reset, and an unobserved timeout alone is not
+sufficient evidence. Keeping the record, its allocation, the owner-slot
+exchanges and the few functions that make those observations in one small
+file makes that file the whole trusted claim; driver code elsewhere
+receives CPU authority back only through those functions. What the file
+asserts is a device fact the compiler cannot check: the file names the
+observations it trusts in its header.
 `dma_device_span(dev, Name, offset, length)` borrows the device token and
 returns a `DmaDeviceSpan`: the address of byte `offset` of the array and
 `length`. Both `offset` and `length` must be `usize` with a static bound (a

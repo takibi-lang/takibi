@@ -47,6 +47,7 @@
 // directly (DBOFF/RTSOFF are themselves Capability registers), so
 // rp1_usbhost0_doorbell/rp1_usbhost0_ir0 below are NOT offset from
 // rp1_usbhost0_op.
+use "kernel/platform/rpi5/usb_xhci_receive.tkb";
 use "kernel/drivers/usb/config_descriptor.tkb";
 use "kernel/drivers/usb/init_report.tkb";
 use "kernel/lib/mutex.tkb";
@@ -98,8 +99,6 @@ private let mut xhci_device_ctx: [u32; DEVICE_CTX_SIZE / 4] align(64);
 let mut xhci_ep0_ring: [Trb; EP0_RING_TRBS] align(64);
 let mut xhci_bulk_in_ring: [Trb; BULK_RING_TRBS] align(64);
 let mut xhci_bulk_out_ring: [Trb; BULK_RING_TRBS] align(64);
-struct dma_fixed XhciControlReceive { private bytes: [u8; 256]; }
-private let mut xhci_control_receive: XhciControlReceive align(64);
 
 let mut xhci_slot_id: usize = 0;
 let mut xhci_ep0_enq: usize = 0;
@@ -196,119 +195,6 @@ fn xhci_cmd_advance() {
 }
 
 let mut msc_cbw_buf: [u8; 64] align(64);
-struct dma_fixed MscCswReceive { private bytes: [u8; 64]; }
-private let mut msc_csw_receive: MscCswReceive align(64);
-
-private linear struct MscDmaGuard[lock: addr] { private flags: usize; }
-
-private fn msc_dma_lock(lock: *Mutex @ address) -> MscDmaGuard[address]
-        !{acquires_lock_40_msc_dma, lock_guard_40_msc_dma} {
-    let mut guard: MscDmaGuard[address] = { mutex_acquire(lock) };
-    return guard;
-}
-
-private fn msc_dma_unlock(guard: sink MscDmaGuard[address],
-                          lock: *Mutex @ address) {
-    mutex_release(lock, guard.flags);
-}
-
-private fn msc_csw_take() -> MscCswReceiveAuthority {
-    let guard = msc_dma_lock(&dma_owner_MscCswReceive.mutex);
-    let previous: MscCswReceiveAuthority = stable_replace(
-        guard, &dma_owner_MscCswReceive.mutex,
-        dma_owner_MscCswReceive.value, MscCswReceiveAuthority::Empty);
-    msc_dma_unlock(guard, &dma_owner_MscCswReceive.mutex);
-    return previous;
-}
-
-private fn msc_csw_fail_cpu(stale: sink *MscCswReceiveCpu) {
-    kernel_syscall_fail_stop(0);
-}
-
-private fn msc_csw_fail_device(stale: sink *MscCswReceiveDevice) {
-    kernel_syscall_fail_stop(0);
-}
-
-private fn msc_csw_put(value: sink MscCswReceiveAuthority) {
-    let guard = msc_dma_lock(&dma_owner_MscCswReceive.mutex);
-    let previous: MscCswReceiveAuthority = stable_replace(
-        guard, &dma_owner_MscCswReceive.mutex,
-        dma_owner_MscCswReceive.value, value);
-    msc_dma_unlock(guard, &dma_owner_MscCswReceive.mutex);
-    match previous {
-        MscCswReceiveAuthority::Empty => { return; }
-        MscCswReceiveAuthority::Cpu(stale) => { msc_csw_fail_cpu(stale); }
-        MscCswReceiveAuthority::Device(stale) => {
-            msc_csw_fail_device(stale);
-        }
-    }
-}
-
-private fn xhci_control_take() -> XhciControlReceiveAuthority {
-    let guard = msc_dma_lock(&dma_owner_XhciControlReceive.mutex);
-    let previous: XhciControlReceiveAuthority = stable_replace(
-        guard, &dma_owner_XhciControlReceive.mutex,
-        dma_owner_XhciControlReceive.value, XhciControlReceiveAuthority::Empty);
-    msc_dma_unlock(guard, &dma_owner_XhciControlReceive.mutex);
-    return previous;
-}
-
-private fn xhci_control_fail_cpu(stale: sink *XhciControlReceiveCpu) {
-    kernel_syscall_fail_stop(0);
-}
-
-private fn xhci_control_fail_device(stale: sink *XhciControlReceiveDevice) {
-    kernel_syscall_fail_stop(0);
-}
-
-private fn xhci_control_put(value: sink XhciControlReceiveAuthority) {
-    let guard = msc_dma_lock(&dma_owner_XhciControlReceive.mutex);
-    let previous: XhciControlReceiveAuthority = stable_replace(
-        guard, &dma_owner_XhciControlReceive.mutex,
-        dma_owner_XhciControlReceive.value, value);
-    msc_dma_unlock(guard, &dma_owner_XhciControlReceive.mutex);
-    match previous {
-        XhciControlReceiveAuthority::Empty => { return; }
-        XhciControlReceiveAuthority::Cpu(stale) => {
-            xhci_control_fail_cpu(stale);
-        }
-        XhciControlReceiveAuthority::Device(stale) => {
-            xhci_control_fail_device(stale);
-        }
-    }
-}
-
-private fn msc_data_take() -> MscDataReceiveAuthority {
-    let guard = msc_dma_lock(&dma_owner_MscDataReceive.mutex);
-    let previous: MscDataReceiveAuthority = stable_replace(
-        guard, &dma_owner_MscDataReceive.mutex,
-        dma_owner_MscDataReceive.value, MscDataReceiveAuthority::Empty);
-    msc_dma_unlock(guard, &dma_owner_MscDataReceive.mutex);
-    return previous;
-}
-
-private fn msc_data_fail_cpu(stale: sink *MscDataReceiveCpu) {
-    kernel_syscall_fail_stop(0);
-}
-
-private fn msc_data_fail_device(stale: sink *MscDataReceiveDevice) {
-    kernel_syscall_fail_stop(0);
-}
-
-private fn msc_data_put(value: sink MscDataReceiveAuthority) {
-    let guard = msc_dma_lock(&dma_owner_MscDataReceive.mutex);
-    let previous: MscDataReceiveAuthority = stable_replace(
-        guard, &dma_owner_MscDataReceive.mutex,
-        dma_owner_MscDataReceive.value, value);
-    msc_dma_unlock(guard, &dma_owner_MscDataReceive.mutex);
-    match previous {
-        MscDataReceiveAuthority::Empty => { return; }
-        MscDataReceiveAuthority::Cpu(stale) => { msc_data_fail_cpu(stale); }
-        MscDataReceiveAuthority::Device(stale) => {
-            msc_data_fail_device(stale);
-        }
-    }
-}
 // TX uses the ordinary bounce buffer; RX uses a separate protected fixed
 // allocation. Both are isolated and cache-line aligned, so callers may use
 // ordinary byte slices regardless of their own alignment.
@@ -333,8 +219,6 @@ private fn msc_data_put(value: sink MscDataReceiveAuthority) {
 const MSC_MAX_TRANSFER_SECTORS: usize = 128;
 const MSC_SECTOR_SIZE: usize = 512;
 let mut msc_bounce_buf: [u8; MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE] align(64);
-struct dma_fixed MscDataReceive { private bytes: [u8; 65536]; }
-private let mut msc_data_receive: MscDataReceive align(64);
 let mut msc_tag: u32 = 0;
 private let mut msc_write10_command_count: usize = 0;
 
@@ -783,160 +667,54 @@ fn msc_abort_unobserved_transfer() -> MscTimeoutResult {
     return MscTimeoutResult::ControllerUnusable;
 }
 
-// A control DATA IN TD has one final Transfer Event. On a missing event,
-// halt and reset the controller before restoring CPU ownership.
-private fn xhci_receive_configuration(length: {1..<257 as u32}) -> u32 !{unsafe} {
-    static_assert(sizeof(XhciControlReceive) == 256,
-                  "the protected control receive extent covers the descriptor");
-    match xhci_control_take() {
-        XhciControlReceiveAuthority::Cpu(cpu) => {
-            let device = dma_begin_rx(cpu, XhciControlReceive);
-            let span_length: {1..<257 as usize} = length as usize;
-            let mut span = dma_device_span(device, XhciControlReceive,
-                                           0, span_length);
-            let completion: u32 = usb_ctrl_in(0x80, 6, 0x0200, 0, span);
-            if (completion == 0) {
-                match msc_abort_unobserved_transfer() {
-                    MscTimeoutResult::RestartRequired => {
-                        let restored = unsafe {
-                            dma_finish_owned_rx(device, XhciControlReceive)
-                        };
-                        xhci_control_put(XhciControlReceiveAuthority::Cpu(restored));
-                        return 0;
-                    }
-                    MscTimeoutResult::ControllerUnusable => {
-                        xhci_control_put(XhciControlReceiveAuthority::Device(device));
-                        return 0;
-                    }
-                }
-            }
-            let restored = unsafe {
-                dma_finish_owned_rx(device, XhciControlReceive)
-            };
-            xhci_control_put(XhciControlReceiveAuthority::Cpu(restored));
-            return completion;
-        }
-        XhciControlReceiveAuthority::Empty => {
-            kernel_syscall_fail_stop(0);
-            return 0;
-        }
-        XhciControlReceiveAuthority::Device(stale) => {
-            xhci_control_fail_device(stale);
-            return 0;
-        }
-    }
-}
-
 must_use variant MscDataReceiveResult {
     Completed(u32);
     RestartRequired;
     ControllerUnusable;
 }
 
-private fn msc_data_receive_once(length: {1..<65537 as u32})
-        -> MscDataReceiveResult !{unsafe} {
-    static_assert(sizeof(MscDataReceive) ==
-                  MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE,
-                  "the protected receive extent covers one maximal USB transfer");
-    match msc_data_take() {
-        MscDataReceiveAuthority::Cpu(cpu) => {
-            let device = dma_begin_rx(cpu, MscDataReceive);
-            let span_length: {1..<65537 as usize} = length as usize;
-            let mut span = dma_device_span(device, MscDataReceive,
-                                           0, span_length);
-            let completion: u32 = usb_bulk_in(span);
-            if (completion == 0) {
-                match msc_abort_unobserved_transfer() {
-                    MscTimeoutResult::RestartRequired => {
-                        let restored = unsafe {
-                            dma_finish_owned_rx(device, MscDataReceive)
-                        };
-                        msc_data_put(MscDataReceiveAuthority::Cpu(restored));
-                        return MscDataReceiveResult::RestartRequired;
-                    }
-                    MscTimeoutResult::ControllerUnusable => {
-                        msc_data_put(MscDataReceiveAuthority::Device(device));
-                        return MscDataReceiveResult::ControllerUnusable;
-                    }
-                }
-            }
-            let restored = unsafe {
-                dma_finish_owned_rx(device, MscDataReceive)
-            };
-            msc_data_put(MscDataReceiveAuthority::Cpu(restored));
-            return MscDataReceiveResult::Completed(completion);
-        }
-        MscDataReceiveAuthority::Empty => {
-            kernel_syscall_fail_stop(0);
-            return MscDataReceiveResult::ControllerUnusable;
-        }
-        MscDataReceiveAuthority::Device(stale) => {
-            msc_data_fail_device(stale);
-            return MscDataReceiveResult::ControllerUnusable;
-        }
-    }
-}
-
-private fn msc_csw_receive_attempt(cpu: sink *MscCswReceiveCpu,
-                                   remaining_stall_retries: usize)
+private fn msc_csw_receive_attempt(remaining_stall_retries: usize)
         -> MscCommandResult !{unsafe} {
-    static_assert(sizeof(MscCswReceive) >= 13,
-                  "the protected CSW extent covers its transfer");
-    let device = dma_begin_rx(cpu, MscCswReceive);
-    let mut span = dma_device_span(device, MscCswReceive, 0, 13);
-    let completion: u32 = usb_bulk_in(span);
-    if (completion == 0) {
-        match msc_abort_unobserved_transfer() {
-            MscTimeoutResult::RestartRequired => {
-                let restored = unsafe {
-                    dma_finish_owned_rx(device, MscCswReceive)
-                };
-                msc_csw_put(MscCswReceiveAuthority::Cpu(restored));
-                return MscCommandResult::RestartRequired;
-            }
-            MscTimeoutResult::ControllerUnusable => {
-                msc_csw_put(MscCswReceiveAuthority::Device(device));
-                return MscCommandResult::ControllerUnusable;
-            }
+    let mut completion: u32 = 0;
+    match msc_csw_receive_once() {
+        MscDataReceiveResult::Completed(code) => { completion = code; }
+        MscDataReceiveResult::RestartRequired => {
+            return MscCommandResult::RestartRequired;
+        }
+        MscDataReceiveResult::ControllerUnusable => {
+            return MscCommandResult::ControllerUnusable;
         }
     }
     // Any nonzero code came from a final transfer event, even a STALL.
-    let restored = unsafe { dma_finish_owned_rx(device, MscCswReceive) };
     if (completion == 6 && remaining_stall_retries > 0) {
         // Retry this CSW, not a fresh CBW: the device still owes the CSW
         // for the command it accepted. Real hardware needs up to eight
         // bounded STALL recoveries after a WRITE(10).
         xhci_recover_bulk_stall(true, xhci_msc_bulk_in_ep, xhci_bulk_in_dci);
         delay_us(50000);
-        return msc_csw_receive_attempt(restored,
-                                       remaining_stall_retries - 1);
+        return msc_csw_receive_attempt(remaining_stall_retries - 1);
     }
     if (completion != 1 && completion != 13) {
-        msc_csw_put(MscCswReceiveAuthority::Cpu(restored));
         return MscCommandResult::CompletedError(3);
     }
-    let bytes = dma_cpu_slice(restored, MscCswReceive);
-    let mut csw_sig: u32 = 0;
-    let mut csw_tag: u32 = 0;
-    for i: usize in 0..<4 {
-        let sh: u32 = (i * 8) as u32;
-        csw_sig = csw_sig | ((bytes[i] as u32) << sh);
-        csw_tag = csw_tag | ((bytes[4 + i] as u32) << sh);
-    }
-    let signature_ok: bool = csw_sig == 0x53425355;
-    let tag_ok: bool = csw_tag == msc_tag;
-    let status_ok: bool = bytes[12] == 0;
-    msc_csw_put(MscCswReceiveAuthority::Cpu(restored));
-    if (signature_ok == false) { return MscCommandResult::CompletedError(4); }
-    if (tag_ok == false) { return MscCommandResult::CompletedError(5); }
-    if (status_ok == false) { return MscCommandResult::CompletedError(6); }
-    return MscCommandResult::Ok;
-}
-
-private fn msc_read_csw() -> MscCommandResult !{unsafe} {
     match msc_csw_take() {
-        MscCswReceiveAuthority::Cpu(cpu) => {
-            return msc_csw_receive_attempt(cpu, 8);
+        MscCswReceiveAuthority::Cpu(restored) => {
+            let bytes = dma_cpu_slice(restored, MscCswReceive);
+            let mut csw_sig: u32 = 0;
+            let mut csw_tag: u32 = 0;
+            for i: usize in 0..<4 {
+                let sh: u32 = (i * 8) as u32;
+                csw_sig = csw_sig | ((bytes[i] as u32) << sh);
+                csw_tag = csw_tag | ((bytes[4 + i] as u32) << sh);
+            }
+            let signature_ok: bool = csw_sig == 0x53425355;
+            let tag_ok: bool = csw_tag == msc_tag;
+            let status_ok: bool = bytes[12] == 0;
+            msc_csw_put(MscCswReceiveAuthority::Cpu(restored));
+            if (signature_ok == false) { return MscCommandResult::CompletedError(4); }
+            if (tag_ok == false) { return MscCommandResult::CompletedError(5); }
+            if (status_ok == false) { return MscCommandResult::CompletedError(6); }
+            return MscCommandResult::Ok;
         }
         MscCswReceiveAuthority::Empty => {
             kernel_syscall_fail_stop(0);
@@ -947,6 +725,10 @@ private fn msc_read_csw() -> MscCommandResult !{unsafe} {
             return MscCommandResult::ControllerUnusable;
         }
     }
+}
+
+private fn msc_read_csw() -> MscCommandResult !{unsafe} {
+    return msc_csw_receive_attempt(8);
 }
 
 fn msc_run_command(data_len: {0..<65537 as u32}, dir_in: bool,

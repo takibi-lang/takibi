@@ -90,6 +90,9 @@ EXEMPT = {
     "drivers/block/virtio_blk.tkb":
         "device state; every command is issued under memory.tkb's "
         "block_device_lock (GitHub issue #533)",
+    "drivers/block/virtio_blk_receive.tkb":
+        "the receive allocation's owner slot and its mint functions, reached "
+        "only from virtio_blk.tkb under block_device_lock (GitHub issue #716)",
     "drivers/block/memory.tkb":
         "per-core counters and read-ahead run indexed by cpu_id(), and the "
         "device reached only under block_device_lock (GitHub issue #533)",
@@ -111,6 +114,9 @@ EXEMPT = {
         "PCIe2 device state is initialized and used only by CPU0",
     "platform/rpi5/timer_irq.tkb":
         "GIC device state is initialized before interrupts and used by its routed cores",
+    "platform/rpi5/usb_xhci_receive.tkb":
+        "the receive allocations' owner slots and their mint functions, "
+        "reached only from usb_xhci.tkb's commands (GitHub issue #716)",
     "platform/rpi5/usb_xhci.tkb":
         "device state; MSI-X is routed to CPU0, and every mass-storage "
         "command after provisioning is issued under memory.tkb's "

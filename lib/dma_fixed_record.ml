@@ -10,6 +10,8 @@ let run (prog : toplevel list) : toplevel list =
   List.iter (function
     | StructDef (record, _, _, _, _, loc)
       when Dma_fixed_registry.is_fixed record ->
+        Dma_fixed_registry.register_decl_file record
+          (Ast.source_file_of_loc loc);
         let cpu = Dma_fixed_registry.cpu_token record in
         let device = Dma_fixed_registry.device_token record in
         let authority = Dma_fixed_registry.authority_variant record in

@@ -11031,7 +11031,7 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
         fn bad(cpu: sink *Span623Cpu) -> *Span623Cpu !{unsafe} {
           let device = dma_begin_rx(cpu, Span623);
           let mut span = dma_device_span(device, Span623, 0, 8);
-          let back = unsafe { dma_finish_owned_rx(device, Span623) };
+          let back = dma_finish_owned_rx(device, Span623);
           let n: usize = dma_span_length(span);
           return back;
         }");
@@ -11064,15 +11064,35 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
         }");
 
 
-  Alcotest.test_case "fixed DMA finish requires trusted completion" `Quick
-    (expect_type_error
-       "dma_finish_owned_rx requires unsafe completion or reset evidence"
-       "struct no_copy Mutex { private word: usize; }
-        struct dma_fixed DmaFixed596 { private bytes: [u8; 64]; }
-        private let mut dma_fixed596: DmaFixed596 align(64);
-        fn bad(device: sink *DmaFixed596Device) -> *DmaFixed596Cpu {
-          return dma_finish_owned_rx(device, DmaFixed596);
-        }");
+  (* GitHub issue #716: the declaring file is the record's mint file. *)
+  Alcotest.test_case "fixed DMA finish is safe in the declaring file" `Quick
+    (fun () ->
+       ignore (infer_files [
+         "mint.tkb", "struct no_copy Mutex { private word: usize; }
+          struct dma_fixed DmaFixed716 { private bytes: [u8; 64]; }
+          private let mut dma_fixed716: DmaFixed716 align(64);
+          fn settle(device: sink *DmaFixed716Device) -> *DmaFixed716Cpu {
+            return dma_finish_owned_rx(device, DmaFixed716);
+          }";
+       ]));
+
+  Alcotest.test_case "fixed DMA finish is refused outside the declaring file" `Quick
+    (fun () ->
+       match infer_files [
+         "mint.tkb", "struct no_copy Mutex { private word: usize; }
+          struct dma_fixed DmaFixed716 { private bytes: [u8; 64]; }
+          private let mut dma_fixed716: DmaFixed716 align(64);";
+         "driver.tkb", "fn bad(device: sink *DmaFixed716Device) -> *DmaFixed716Cpu {
+            return unsafe { dma_finish_owned_rx(device, DmaFixed716) };
+          }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (loc, msg) ->
+           Alcotest.(check string) "error file" "driver.tkb"
+             loc.Lexing.pos_fname;
+           Alcotest.(check bool) "names the mint file" true
+             (contains_substring msg
+                "may only be called in its declaring file 'mint.tkb'"));
 
   Alcotest.test_case "fixed DMA slot cannot be replicated by zero initialization" `Quick
     (expect_type_error
@@ -11175,7 +11195,7 @@ let codegen_tests = [
           let device = dma_begin_rx(cpu, DmaCodegen596);
           let mut span = dma_device_span(device, DmaCodegen596, 0, 64);
           let address = unsafe { dma_span_address(span) };
-          return unsafe { dma_finish_owned_rx(device, DmaCodegen596) };
+          return dma_finish_owned_rx(device, DmaCodegen596);
         }");
 
   Alcotest.test_case "fixed DMA CPU slice copies a bounded array" `Quick

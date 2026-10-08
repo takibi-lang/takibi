@@ -403,6 +403,7 @@ KERNEL_UNUSED_CHECKED := \
 	kernel/printk/number.tkb
 KERNEL_UNUSED_CHECKED_QEMU := \
 	kernel/drivers/block/virtio_blk.tkb \
+	kernel/drivers/block/virtio_blk_receive.tkb \
 	kernel/drivers/net/virtio_net.tkb \
 	kernel/mm/page.tkb \
 	kernel/platform/qemu/init.tkb \
@@ -434,7 +435,8 @@ KERNEL_UNUSED_CHECKED_RPI5 := \
 	kernel/platform/rpi5/timer_irq.tkb \
 	kernel/platform/rpi5/uart.tkb \
 	kernel/platform/rpi5/usb_provision.tkb \
-	kernel/platform/rpi5/usb_xhci_dtb.tkb
+	kernel/platform/rpi5/usb_xhci_dtb.tkb \
+	kernel/platform/rpi5/usb_xhci_receive.tkb
 KERNEL_UNUSED_CHECK      := --reject-unused-functions \
 	$(foreach entry,$(KERNEL_ASM_ENTRIES) $(KERNEL_DEBUGGER_ENTRIES),--external-entry $(entry)) \
 	$(foreach file,$(KERNEL_UNUSED_CHECKED),--check-unused-file $(file))

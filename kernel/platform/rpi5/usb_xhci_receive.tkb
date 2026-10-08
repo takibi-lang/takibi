@@ -1,0 +1,255 @@
+// GitHub issue #716: the mint file of the xHCI receive allocations.
+// dma_finish_owned_rx is accepted only in the file that declares the
+// record, so this file is the whole trusted claim that device ownership
+// of a receive range may return to the CPU. Each receive function below
+// submits one transfer and returns ownership on exactly two observations:
+//   - a nonzero completion code from usb_ctrl_in or usb_bulk_in, which
+//     usb_await_event returns only for the transfer's final Transfer Event,
+//     a completed error included (xHCI 1.2, 4.11.3.1);
+//   - MscTimeoutResult::RestartRequired from msc_abort_unobserved_transfer,
+//     whose xhci_halt_and_reset confirmed HCHalted, after which no pipelined
+//     transaction remains (xHCI 1.2, 5.4.1.1).
+// Those two functions in usb_xhci.tkb are the observations this file
+// trusts. A failed halt/reset keeps the device token in the owner slot, so
+// the range is never reused in this boot. Every other function here only
+// moves the tokens between the owner slots and their callers. Keep
+// anything else out of this file.
+
+use "kernel/lib/mutex.tkb";
+
+struct dma_fixed XhciControlReceive { private bytes: [u8; 256]; }
+private let mut xhci_control_receive: XhciControlReceive align(64);
+
+struct dma_fixed MscDataReceive { private bytes: [u8; 65536]; }
+private let mut msc_data_receive: MscDataReceive align(64);
+
+struct dma_fixed MscCswReceive { private bytes: [u8; 64]; }
+private let mut msc_csw_receive: MscCswReceive align(64);
+
+private linear struct MscDmaGuard[lock: addr] { private flags: usize; }
+
+private fn msc_dma_lock(lock: *Mutex @ address) -> MscDmaGuard[address]
+        !{acquires_lock_40_msc_dma, lock_guard_40_msc_dma} {
+    let mut guard: MscDmaGuard[address] = { mutex_acquire(lock) };
+    return guard;
+}
+
+private fn msc_dma_unlock(guard: sink MscDmaGuard[address],
+                          lock: *Mutex @ address) {
+    mutex_release(lock, guard.flags);
+}
+
+fn msc_csw_take() -> MscCswReceiveAuthority {
+    let guard = msc_dma_lock(&dma_owner_MscCswReceive.mutex);
+    let previous: MscCswReceiveAuthority = stable_replace(
+        guard, &dma_owner_MscCswReceive.mutex,
+        dma_owner_MscCswReceive.value, MscCswReceiveAuthority::Empty);
+    msc_dma_unlock(guard, &dma_owner_MscCswReceive.mutex);
+    return previous;
+}
+
+private fn msc_csw_fail_cpu(stale: sink *MscCswReceiveCpu) {
+    kernel_syscall_fail_stop(0);
+}
+
+fn msc_csw_fail_device(stale: sink *MscCswReceiveDevice) {
+    kernel_syscall_fail_stop(0);
+}
+
+fn msc_csw_put(value: sink MscCswReceiveAuthority) {
+    let guard = msc_dma_lock(&dma_owner_MscCswReceive.mutex);
+    let previous: MscCswReceiveAuthority = stable_replace(
+        guard, &dma_owner_MscCswReceive.mutex,
+        dma_owner_MscCswReceive.value, value);
+    msc_dma_unlock(guard, &dma_owner_MscCswReceive.mutex);
+    match previous {
+        MscCswReceiveAuthority::Empty => { return; }
+        MscCswReceiveAuthority::Cpu(stale) => { msc_csw_fail_cpu(stale); }
+        MscCswReceiveAuthority::Device(stale) => {
+            msc_csw_fail_device(stale);
+        }
+    }
+}
+
+fn xhci_control_take() -> XhciControlReceiveAuthority {
+    let guard = msc_dma_lock(&dma_owner_XhciControlReceive.mutex);
+    let previous: XhciControlReceiveAuthority = stable_replace(
+        guard, &dma_owner_XhciControlReceive.mutex,
+        dma_owner_XhciControlReceive.value, XhciControlReceiveAuthority::Empty);
+    msc_dma_unlock(guard, &dma_owner_XhciControlReceive.mutex);
+    return previous;
+}
+
+private fn xhci_control_fail_cpu(stale: sink *XhciControlReceiveCpu) {
+    kernel_syscall_fail_stop(0);
+}
+
+fn xhci_control_fail_device(stale: sink *XhciControlReceiveDevice) {
+    kernel_syscall_fail_stop(0);
+}
+
+fn xhci_control_put(value: sink XhciControlReceiveAuthority) {
+    let guard = msc_dma_lock(&dma_owner_XhciControlReceive.mutex);
+    let previous: XhciControlReceiveAuthority = stable_replace(
+        guard, &dma_owner_XhciControlReceive.mutex,
+        dma_owner_XhciControlReceive.value, value);
+    msc_dma_unlock(guard, &dma_owner_XhciControlReceive.mutex);
+    match previous {
+        XhciControlReceiveAuthority::Empty => { return; }
+        XhciControlReceiveAuthority::Cpu(stale) => {
+            xhci_control_fail_cpu(stale);
+        }
+        XhciControlReceiveAuthority::Device(stale) => {
+            xhci_control_fail_device(stale);
+        }
+    }
+}
+
+fn msc_data_take() -> MscDataReceiveAuthority {
+    let guard = msc_dma_lock(&dma_owner_MscDataReceive.mutex);
+    let previous: MscDataReceiveAuthority = stable_replace(
+        guard, &dma_owner_MscDataReceive.mutex,
+        dma_owner_MscDataReceive.value, MscDataReceiveAuthority::Empty);
+    msc_dma_unlock(guard, &dma_owner_MscDataReceive.mutex);
+    return previous;
+}
+
+private fn msc_data_fail_cpu(stale: sink *MscDataReceiveCpu) {
+    kernel_syscall_fail_stop(0);
+}
+
+fn msc_data_fail_device(stale: sink *MscDataReceiveDevice) {
+    kernel_syscall_fail_stop(0);
+}
+
+fn msc_data_put(value: sink MscDataReceiveAuthority) {
+    let guard = msc_dma_lock(&dma_owner_MscDataReceive.mutex);
+    let previous: MscDataReceiveAuthority = stable_replace(
+        guard, &dma_owner_MscDataReceive.mutex,
+        dma_owner_MscDataReceive.value, value);
+    msc_dma_unlock(guard, &dma_owner_MscDataReceive.mutex);
+    match previous {
+        MscDataReceiveAuthority::Empty => { return; }
+        MscDataReceiveAuthority::Cpu(stale) => { msc_data_fail_cpu(stale); }
+        MscDataReceiveAuthority::Device(stale) => {
+            msc_data_fail_device(stale);
+        }
+    }
+}
+
+// A control DATA IN TD has one final Transfer Event. On a missing event,
+// halt and reset the controller before restoring CPU ownership.
+fn xhci_receive_configuration(length: {1..<257 as u32}) -> u32 !{unsafe} {
+    static_assert(sizeof(XhciControlReceive) == 256,
+                  "the protected control receive extent covers the descriptor");
+    match xhci_control_take() {
+        XhciControlReceiveAuthority::Cpu(cpu) => {
+            let device = dma_begin_rx(cpu, XhciControlReceive);
+            let span_length: {1..<257 as usize} = length as usize;
+            let mut span = dma_device_span(device, XhciControlReceive,
+                                           0, span_length);
+            let completion: u32 = usb_ctrl_in(0x80, 6, 0x0200, 0, span);
+            if (completion == 0) {
+                match msc_abort_unobserved_transfer() {
+                    MscTimeoutResult::RestartRequired => {
+                        let restored = dma_finish_owned_rx(device, XhciControlReceive);
+                        xhci_control_put(XhciControlReceiveAuthority::Cpu(restored));
+                        return 0;
+                    }
+                    MscTimeoutResult::ControllerUnusable => {
+                        xhci_control_put(XhciControlReceiveAuthority::Device(device));
+                        return 0;
+                    }
+                }
+            }
+            let restored = dma_finish_owned_rx(device, XhciControlReceive);
+            xhci_control_put(XhciControlReceiveAuthority::Cpu(restored));
+            return completion;
+        }
+        XhciControlReceiveAuthority::Empty => {
+            kernel_syscall_fail_stop(0);
+            return 0;
+        }
+        XhciControlReceiveAuthority::Device(stale) => {
+            xhci_control_fail_device(stale);
+            return 0;
+        }
+    }
+}
+
+fn msc_data_receive_once(length: {1..<65537 as u32})
+        -> MscDataReceiveResult !{unsafe} {
+    static_assert(sizeof(MscDataReceive) ==
+                  MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE,
+                  "the protected receive extent covers one maximal USB transfer");
+    match msc_data_take() {
+        MscDataReceiveAuthority::Cpu(cpu) => {
+            let device = dma_begin_rx(cpu, MscDataReceive);
+            let span_length: {1..<65537 as usize} = length as usize;
+            let mut span = dma_device_span(device, MscDataReceive,
+                                           0, span_length);
+            let completion: u32 = usb_bulk_in(span);
+            if (completion == 0) {
+                match msc_abort_unobserved_transfer() {
+                    MscTimeoutResult::RestartRequired => {
+                        let restored = dma_finish_owned_rx(device, MscDataReceive);
+                        msc_data_put(MscDataReceiveAuthority::Cpu(restored));
+                        return MscDataReceiveResult::RestartRequired;
+                    }
+                    MscTimeoutResult::ControllerUnusable => {
+                        msc_data_put(MscDataReceiveAuthority::Device(device));
+                        return MscDataReceiveResult::ControllerUnusable;
+                    }
+                }
+            }
+            let restored = dma_finish_owned_rx(device, MscDataReceive);
+            msc_data_put(MscDataReceiveAuthority::Cpu(restored));
+            return MscDataReceiveResult::Completed(completion);
+        }
+        MscDataReceiveAuthority::Empty => {
+            kernel_syscall_fail_stop(0);
+            return MscDataReceiveResult::ControllerUnusable;
+        }
+        MscDataReceiveAuthority::Device(stale) => {
+            msc_data_fail_device(stale);
+            return MscDataReceiveResult::ControllerUnusable;
+        }
+    }
+}
+
+// The CSW is always 13 bytes (USB MSC BOT 1.0, 5.2).
+fn msc_csw_receive_once() -> MscDataReceiveResult !{unsafe} {
+    static_assert(sizeof(MscCswReceive) >= 13,
+                  "the protected CSW extent covers its transfer");
+    match msc_csw_take() {
+        MscCswReceiveAuthority::Cpu(cpu) => {
+            let device = dma_begin_rx(cpu, MscCswReceive);
+            let mut span = dma_device_span(device, MscCswReceive, 0, 13);
+            let completion: u32 = usb_bulk_in(span);
+            if (completion == 0) {
+                match msc_abort_unobserved_transfer() {
+                    MscTimeoutResult::RestartRequired => {
+                        let restored = dma_finish_owned_rx(device, MscCswReceive);
+                        msc_csw_put(MscCswReceiveAuthority::Cpu(restored));
+                        return MscDataReceiveResult::RestartRequired;
+                    }
+                    MscTimeoutResult::ControllerUnusable => {
+                        msc_csw_put(MscCswReceiveAuthority::Device(device));
+                        return MscDataReceiveResult::ControllerUnusable;
+                    }
+                }
+            }
+            let restored = dma_finish_owned_rx(device, MscCswReceive);
+            msc_csw_put(MscCswReceiveAuthority::Cpu(restored));
+            return MscDataReceiveResult::Completed(completion);
+        }
+        MscCswReceiveAuthority::Empty => {
+            kernel_syscall_fail_stop(0);
+            return MscDataReceiveResult::ControllerUnusable;
+        }
+        MscCswReceiveAuthority::Device(stale) => {
+            msc_csw_fail_device(stale);
+            return MscDataReceiveResult::ControllerUnusable;
+        }
+    }
+}

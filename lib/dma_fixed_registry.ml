@@ -6,11 +6,15 @@ let pending : (string, unit) Hashtbl.t = Hashtbl.create 8
 let records : (string, (string * Ast.type_expr) list) Hashtbl.t =
   Hashtbl.create 8
 let allocations : (string, string) Hashtbl.t = Hashtbl.create 8
+(* GitHub issue #716: record -> the file that declares it. That file is the
+   record's mint file: only there may device ownership return to the CPU. *)
+let decl_files : (string, string) Hashtbl.t = Hashtbl.create 8
 
 let reset () =
   Hashtbl.reset pending;
   Hashtbl.reset records;
-  Hashtbl.reset allocations
+  Hashtbl.reset allocations;
+  Hashtbl.reset decl_files
 
 let mark name = Hashtbl.replace pending name ()
 
@@ -25,6 +29,8 @@ let fields_of name = Hashtbl.find_opt records name
 let register_allocation record global =
   Hashtbl.replace allocations record global
 let allocation_of record = Hashtbl.find_opt allocations record
+let register_decl_file record file = Hashtbl.replace decl_files record file
+let decl_file_of record = Hashtbl.find_opt decl_files record
 
 let cpu_token record = record ^ "Cpu"
 let device_token record = record ^ "Device"
