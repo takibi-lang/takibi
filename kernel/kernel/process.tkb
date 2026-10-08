@@ -4718,7 +4718,7 @@ fn kernel_process_trace_handle(event: usize, subject: ProcessHandle,
 
 // Copies oldest-to-newest into the caller-owned fixed array. This gives the
 // crash report a stable chronological tail even after the ring wrapped.
-fn kernel_process_crash_trace_copy(output: *usize) -> usize {
+fn kernel_process_crash_trace_copy(output: borrow [usize; KERNEL_CRASH_TRACE_WORDS..]) -> usize {
     // A slot's commit sequence is written LAST and is zero while the record
     // is in flight, so chronology is never derived from a count: every slot
     // is validated against the sequence being looked for, and an in-flight
@@ -4753,14 +4753,15 @@ fn kernel_process_crash_trace_copy(output: *usize) -> usize {
             for slot: usize in 0..<KERNEL_CRASH_TRACE_SLOTS {
                 let source_base: usize =
                     slot * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
+                let destination: usize = copied;
                 if (kernel_crash_trace[
                         source_base + KERNEL_PROCESS_TRACE_SEQUENCE_WORD] ==
                         sequence &&
-                    copied < KERNEL_CRASH_TRACE_EVENTS) {
+                    destination < KERNEL_CRASH_TRACE_EVENTS) {
                     let output_base: usize =
-                        copied * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
+                        destination * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
                     for word: usize in 0..<KERNEL_PROCESS_TRACE_WORDS_PER_EVENT {
-                        *(output + (output_base as isize) + (word as isize)) =
+                        output[output_base + word] =
                             kernel_crash_trace[source_base + word];
                     }
                     copied = copied + 1;
@@ -4772,7 +4773,7 @@ fn kernel_process_crash_trace_copy(output: *usize) -> usize {
         if (item >= copied) {
             let output_base: usize = item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;
             for word: usize in 0..<KERNEL_PROCESS_TRACE_WORDS_PER_EVENT {
-                *(output + (output_base as isize) + (word as isize)) = 0;
+                output[output_base + word] = 0;
             }
         }
     }
@@ -4835,7 +4836,7 @@ fn kernel_process_trace_render(
 // one oldest-to-newest tail rather than following a ring that keeps moving.
 fn kernel_process_trace_report() {
     let mut trace: [usize; KERNEL_CRASH_TRACE_WORDS];
-    let count: usize = kernel_process_crash_trace_copy(trace as *usize);
+    let count: usize = kernel_process_crash_trace_copy(trace as []usize);
     kernel_process_trace_render(
         trace as []usize, count, "process trace:" as *u8);
 }
@@ -8369,7 +8370,7 @@ fn kernel_process_trace_block_wake_probe() -> bool !{unsafe} {
         }
     }
     let mut trace: [usize; KERNEL_CRASH_TRACE_WORDS];
-    let trace_count: usize = kernel_process_crash_trace_copy(trace as *usize);
+    let trace_count: usize = kernel_process_crash_trace_copy(trace as []usize);
     let mut saw_block: bool = false;
     let mut saw_wake: bool = false;
     for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
@@ -8748,7 +8749,7 @@ fn kernel_process_scheduler_probe() -> bool !{changes_witness_ProcessCurrent} {
     // to promise that an older lifecycle event survives arbitrary switches.
     let mut fork_trace: [usize; KERNEL_CRASH_TRACE_WORDS];
     let fork_trace_count: usize =
-        kernel_process_crash_trace_copy(fork_trace as *usize);
+        kernel_process_crash_trace_copy(fork_trace as []usize);
     let mut saw_fork: bool = false;
     for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
         if (item < fork_trace_count &&
@@ -8784,7 +8785,7 @@ fn kernel_process_scheduler_probe() -> bool !{changes_witness_ProcessCurrent} {
         return false;
     }
     let mut trace: [usize; KERNEL_CRASH_TRACE_WORDS];
-    let trace_count: usize = kernel_process_crash_trace_copy(trace as *usize);
+    let trace_count: usize = kernel_process_crash_trace_copy(trace as []usize);
     let mut saw_schedule: bool = false;
     let mut saw_resume: bool = false;
     let mut saw_activate: bool = false;
@@ -8986,7 +8987,7 @@ fn kernel_process_crash_trace_ring_probe() -> bool {
                                     7, event + 300, event + 400);
     }
     let mut copied: [usize; KERNEL_CRASH_TRACE_WORDS];
-    let count: usize = kernel_process_crash_trace_copy(copied as *usize);
+    let count: usize = kernel_process_crash_trace_copy(copied as []usize);
     let mut ok: bool = count == KERNEL_CRASH_TRACE_EVENTS;
     for item: usize in 0..<KERNEL_CRASH_TRACE_EVENTS {
         let base: usize = item * KERNEL_PROCESS_TRACE_WORDS_PER_EVENT;

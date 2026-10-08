@@ -2425,7 +2425,7 @@ private fn kernel_ddb_enter_stopped(
         }
     }
     ddb_snapshot.trace_count = kernel_process_crash_trace_copy(
-        ddb_snapshot.trace as *usize);
+        ddb_snapshot.trace as []usize);
     unsafe {
         atomic_store_release(
             ddb_snapshot_published_sequence_address(),
@@ -3281,7 +3281,7 @@ fn crash_snapshot_capture(slot: usize, frame_sp: usize) !{unsafe} {
         crash_snapshot_here().saved_frame_available = 1;
     }
     crash_snapshot_here().trace_count = kernel_process_crash_trace_copy(
-        crash_snapshot_here().trace as *usize);
+        crash_snapshot_here().trace as []usize);
     crash_snapshot_shared_unavailable();
     match crash_world_stop() {
         CrashStopResult::Unavailable => {
