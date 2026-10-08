@@ -62,7 +62,8 @@ HEALTHY_SPIN = (b"console: tx spin ticks=1000000 bytes=31919 spun=1077 "
 # else has to carry one too or it would be testing this rule instead of its
 # own.
 HEALTHY_BLOCK_IO = (b"block io: reads=31000 writes=55 block_bytes=1024 "
-                    b"cache_hits=93000 runs=400 run_hits=25000\r\n")
+                    b"cache_hits=93000 runs=400 run_hits=25000 "
+                    b"single_reads=500\r\n")
 # GitHub issue #544: a board boot must show a writer that waited, so the
 # default carries a non-zero count that serves both platforms.
 HEALTHY_UART_TX = (b"uart tx: queue=512 low_water=256 writers_waited=5 "
@@ -283,7 +284,7 @@ def main() -> int:
         HEALTHY, "qemu",
         HEALTHY_SPIN
         + b"block io: reads=0 writes=0 block_bytes=1024 cache_hits=0 "
-        b"runs=0 run_hits=0\r\n")
+        b"runs=0 run_hits=0 single_reads=0\r\n")
     if status == 0 or "cannot be right" not in output:
         print("FAIL dmesg-timestamps control: a boot claiming zero block "
               "reads was accepted")
@@ -340,6 +341,16 @@ def main() -> int:
     if status == 0:
         print("FAIL dmesg-timestamps control: a block-layer total without "
               f"the read-ahead runs was accepted\n{output}")
+        return 1
+    # GitHub issue #553: the single-block reads are what per-block write
+    # retirement is judged by, so they are required the same way.
+    status, output = run(
+        HEALTHY, "qemu",
+        HEALTHY_SPIN + b"block io: reads=31000 writes=55 block_bytes=1024 "
+        b"cache_hits=93000 runs=400 run_hits=25000\r\n")
+    if status == 0:
+        print("FAIL dmesg-timestamps control: a block-layer total without "
+              f"the single-block reads was accepted\n{output}")
         return 1
     status, output = run(HEALTHY, "qemu", HEALTHY_TAIL)
     if status != 0 or "93000 cache hits" not in output:

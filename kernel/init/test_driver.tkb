@@ -490,6 +490,10 @@ fn kernel_init_boot_fixture_poll(current_authority: borrow ProcessCurrent[curren
     uart_put_udec(block_run_read_total());
     kernel_boot_log(" run_hits=");
     uart_put_udec(block_run_hit_total());
+    // GitHub issue #553: the reads that were neither read-ahead nor answered
+    // by the cache, which per-block write retirement exists to reduce.
+    kernel_boot_log(" single_reads=");
+    uart_put_udec(block_single_read_total());
     kernel_boot_log("\n");
     kernel_boot_log("virtio-blk wait: completions=");
     uart_put_udec(virtio_blk_completion_count());

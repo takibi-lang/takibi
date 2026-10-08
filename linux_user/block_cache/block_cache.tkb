@@ -42,6 +42,18 @@ fn read_is(core: usize, backend: u8, block: usize, value: u8) -> bool {
     return true;
 }
 
+// A fill as block_read makes it: the epoch is taken before the device read.
+fn fill(core: usize, backend: u8, block: usize) {
+    block_cache_fill(core, backend, block, block_in as []u8,
+                     block_cache_epoch_of(backend, block));
+}
+
+// A write as block_write makes it: the epoch is taken before the device write.
+fn write(core: usize, backend: u8, block: usize, written: bool) {
+    let mut epoch: BlockCacheEpoch = block_cache_epoch_of(backend, block);
+    block_cache_note_write(core, backend, block, block_in as []u8, written, epoch);
+}
+
 fn misses(core: usize, backend: u8, block: usize) -> bool {
     match block_cache_read(core, backend, block, block_out as []u8) {
         BlockCacheReadResult::Miss => { return true; }
@@ -52,7 +64,7 @@ fn misses(core: usize, backend: u8, block: usize) -> bool {
 fn app_main() {
     check("a block never filled misses", misses(0, 0, 7));
     fill_pattern(0x11);
-    block_cache_fill(0, 0, 7, block_in as []u8);
+    fill(0, 0, 7);
     check("a filled block hits with the bytes it was filled with",
           read_is(0, 0, 7, 0x11));
     check("the backend is part of the key", misses(0, 1, 7));
@@ -62,12 +74,12 @@ fn app_main() {
     // block, and each data block once. Twenty data blocks through sixteen
     // slots must not cost the metadata block its place.
     fill_pattern(0x22);
-    block_cache_fill(0, 0, 100, block_in as []u8);
+    fill(0, 0, 100);
     let mut hot_kept: bool = true;
     for data: usize in 0..<20 {
         if (read_is(0, 0, 100, 0x22) == false) { hot_kept = false; }
         fill_pattern((0x30 + data) as u8);
-        block_cache_fill(0, 0, 200 + data, block_in as []u8);
+        fill(0, 0, 200 + data);
     }
     check("the least recently used block goes, not the one read every step",
           hot_kept && read_is(0, 0, 100, 0x22));
@@ -76,25 +88,43 @@ fn app_main() {
     check("the oldest data block was the one given up",
           oldest_missing && newest_present);
 
-    // A write on core 1 retires core 0's copy of the block, and of every
-    // other block; core 1 keeps the bytes it wrote.
+    // A write on core 1 retires core 0's copy of the block it wrote, and
+    // only that block's; core 1 keeps the bytes it wrote (GitHub issue #553).
     fill_pattern(0x55);
-    block_cache_note_write(1, 0, 100, block_in as []u8, true);
-    let old_copy_missing: bool = misses(0, 0, 100);
-    let other_copy_missing: bool = misses(0, 0, 219);
-    check("a write on another core retires this core's copies",
-          old_copy_missing && other_copy_missing);
+    write(1, 0, 100, true);
+    check("a write on another core retires this core's copy of the block",
+          misses(0, 0, 100));
+    check("a write on another core leaves this core's other blocks valid",
+          read_is(0, 0, 219, 0x43));
     check("the core that wrote keeps what it wrote", read_is(1, 0, 100, 0x55));
+
+    // The epoch a fill is held to is the one before its device read. A
+    // peer's write that lands during the read leaves the filled copy stale.
+    fill_pattern(0x58);
+    let mut before_read: BlockCacheEpoch = block_cache_epoch_of(0, 500);
+    write(1, 0, 500, true);
+    block_cache_fill(0, 0, 500, block_in as []u8, before_read);
+    check("a write during a read leaves the read's copy stale",
+          misses(0, 0, 500));
+
+    // Likewise a write's own copy: a peer's write to the block between this
+    // write's device access and its count must not leave this copy current.
+    fill_pattern(0x59);
+    let mut before_write: BlockCacheEpoch = block_cache_epoch_of(0, 600);
+    write(1, 0, 600, true);
+    block_cache_note_write(0, 0, 600, block_in as []u8, true, before_write);
+    check("a peer's write during this write leaves this copy stale",
+          misses(0, 0, 600));
 
     // A write the device refused keeps nothing: what the device holds is
     // not known.
     fill_pattern(0x66);
-    block_cache_note_write(1, 0, 100, block_in as []u8, false);
+    write(1, 0, 100, false);
     check("a failed write retires the block and keeps no copy",
           misses(1, 0, 100));
 
     fill_pattern(0x77);
-    block_cache_fill(0, 0, 300, block_in as []u8);
+    fill(0, 0, 300);
     block_cache_forget_all(1);
     check("a write around the cache retires every copy", misses(0, 0, 300));
 
@@ -102,10 +132,10 @@ fn app_main() {
     // read-ahead run -- is held to the same epoch, so every kind of write
     // must move it, a refused one included.
     let epoch_before: usize = block_cache_epoch_now();
-    block_cache_note_write(0, 0, 400, block_in as []u8, false);
+    write(0, 0, 400, false);
     check("a write moves the epoch a copy outside the cache is held to",
           block_cache_epoch_now() != epoch_before);
 
-    // Hits so far: 0x11 once, 0x22 twenty-one times, 0x43 once, 0x55 once.
-    check("every hit is counted", block_cache_hit_total() == 24);
+    // Hits so far: 0x11 once, 0x22 twenty-one times, 0x43 twice, 0x55 once.
+    check("every hit is counted", block_cache_hit_total() == 25);
 }

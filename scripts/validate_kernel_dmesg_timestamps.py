@@ -30,7 +30,7 @@ VIRTIO_WAIT = re.compile(
     rb"virtio-blk wait: completions=(\d+) total_ticks=(\d+) max_ticks=(\d+)")
 BLOCK_IO = re.compile(
     rb"block io: reads=(\d+) writes=(\d+) block_bytes=(\d+) "
-    rb"cache_hits=(\d+) runs=(\d+) run_hits=(\d+)")
+    rb"cache_hits=(\d+) runs=(\d+) run_hits=(\d+) single_reads=(\d+)")
 
 # GitHub issue #544: how often a userspace write to the UART waited for room
 # in the transmit queue instead of spinning in the kernel, and how many of
@@ -258,13 +258,13 @@ def main() -> None:
     if not block:
         fail("the boot reached its last milestone without printing "
              "`block io: reads=... writes=... block_bytes=... cache_hits=... "
-             "runs=... run_hits=...`. "
+             "runs=... run_hits=... single_reads=...`. "
              "That is the "
              "measurement issues #281 and #208 are ordered against and this "
              "is its only reader, so a missing line means the kernel's shape "
              "changed rather than that the boot read no blocks")
-    reads, writes, block_bytes, hits, runs, run_hits = (
-        int(block.group(i)) for i in (1, 2, 3, 4, 5, 6))
+    reads, writes, block_bytes, hits, runs, run_hits, single_reads = (
+        int(block.group(i)) for i in (1, 2, 3, 4, 5, 6, 7))
     if reads == 0 or block_bytes == 0:
         fail(f"the boot reports {reads} block reads of {block_bytes} bytes, "
              "which cannot be right for a boot that mounts a filesystem and "
@@ -306,7 +306,8 @@ def main() -> None:
              "or the command that exercised it has gone from the ash script")
     block_io = (f", block io={reads} reads/{writes} writes of {block_bytes} B "
                 f"({reads * block_bytes // 1024} KiB read, {hits} cache hits, "
-                f"{runs} read-ahead runs answering {run_hits})")
+                f"{runs} read-ahead runs answering {run_hits}, "
+                f"{single_reads} single-block reads)")
 
     print(
         f"PASS kernel/{args.platform} dmesg: {len(records)} monotonic records, "

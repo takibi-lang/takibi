@@ -4,8 +4,11 @@ ok     the backend is part of the key
 ok     each core has its own slots
 ok     the least recently used block goes, not the one read every step
 ok     the oldest data block was the one given up
-ok     a write on another core retires this core's copies
+ok     a write on another core retires this core's copy of the block
+ok     a write on another core leaves this core's other blocks valid
 ok     the core that wrote keeps what it wrote
+ok     a write during a read leaves the read's copy stale
+ok     a peer's write during this write leaves this copy stale
 ok     a failed write retires the block and keeps no copy
 ok     a write around the cache retires every copy
 ok     a write moves the epoch a copy outside the cache is held to

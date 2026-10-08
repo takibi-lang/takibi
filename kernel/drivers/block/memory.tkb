@@ -82,6 +82,9 @@ fn virtio_block_device_ext2() -> KernelBlockDeviceResult {
 private let mut block_read_calls: [usize; KERNEL_MAX_CORES];
 private let mut block_write_calls: [usize; KERNEL_MAX_CORES];
 private let mut block_device_waits: [usize; KERNEL_MAX_CORES];
+// The reads= blocks that were single-block device reads, not read-ahead
+// (GitHub issue #553: what a per-block cache retirement is judged by).
+private let mut block_single_reads: [usize; KERNEL_MAX_CORES];
 
 private fn block_call_total(counters: borrow [usize; KERNEL_MAX_CORES..])
         -> usize {
@@ -234,8 +237,11 @@ fn block_read(device: KernelBlockDevice, block: usize,
         BlockCacheReadResult::Hit => { return BlockIoResult::Ok; }
         BlockCacheReadResult::Miss => { }
     }
+    // Taken before any copy is produced, so a write that lands meanwhile
+    // leaves the filled copy stale (GitHub issue #553).
+    let mut epoch: BlockCacheEpoch = block_cache_epoch_of(device.backend, block);
     if (block_run_take(core, device, block, destination)) {
-        block_cache_fill(core, device.backend, block, destination);
+        block_cache_fill(core, device.backend, block, destination, epoch);
         return BlockIoResult::Ok;
     }
     // A run that was read and then cannot answer -- another core wrote in
@@ -243,7 +249,8 @@ fn block_read(device: KernelBlockDevice, block: usize,
     if (block_run_wanted(core, device, block)) {
         if (block_run_read(core, device, block)) {
             if (block_run_take(core, device, block, destination)) {
-                block_cache_fill(core, device.backend, block, destination);
+                block_cache_fill(core, device.backend, block, destination,
+                                 epoch);
                 return BlockIoResult::Ok;
             }
         }
@@ -253,7 +260,7 @@ fn block_read(device: KernelBlockDevice, block: usize,
         BlockIoResult::Ok => { }
     }
     block_run_note_single(core, device, block);
-    block_cache_fill(core, device.backend, block, destination);
+    block_cache_fill(core, device.backend, block, destination, epoch);
     return BlockIoResult::Ok;
 }
 
@@ -410,6 +417,10 @@ private fn block_run_transfer_locked(
     }
 }
 
+fn block_single_read_total() -> usize {
+    return block_call_total(block_single_reads as []usize);
+}
+
 fn block_run_read_total() -> usize {
     return block_call_total(block_run_reads as []usize);
 }
@@ -425,13 +436,16 @@ fn block_write(device: KernelBlockDevice, block: usize,
         return BlockIoResult::Invalid;
     }
     let core: usize = cpu_id();
+    let mut epoch: BlockCacheEpoch = block_cache_epoch_of(device.backend, block);
     match block_write_device(device, block, source) {
         BlockIoResult::Invalid => {
-            block_cache_note_write(core, device.backend, block, source, false);
+            block_cache_note_write(core, device.backend, block, source, false,
+                                   epoch);
             return BlockIoResult::Invalid;
         }
         BlockIoResult::Ok => {
-            block_cache_note_write(core, device.backend, block, source, true);
+            block_cache_note_write(core, device.backend, block, source, true,
+                                   epoch);
             return BlockIoResult::Ok;
         }
     }
@@ -466,6 +480,7 @@ private fn block_read_device_locked(
     }
     if (block_fault_hits(guard, false)) { return BlockIoResult::Invalid; }
     block_note_call(block_read_calls as []usize);
+    block_note_call(block_single_reads as []usize);
     workload_profile_note_block_read(KERNEL_BLOCK_SIZE);
     if (device.backend == 1) {
         // Both sectors of the block in one READ(10): a command costs the
