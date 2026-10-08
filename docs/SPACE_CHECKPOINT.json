@@ -1,12 +1,13 @@
 {
   "date": "2026-10-08",
   "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "420428c04be0cec30b9e175e34f548998ceb4693c6ae7da23a61543599ac1241",
-  "workload": "Standard production QEMU/RPi5 linked images and the QEMU main lane boot, before (87517a32) and after (b1897562) per-bucket block cache write retirement. Accounting boundaries: fixed image sections, allocator start pages, and block-device reads per boot. Pools, slots, allocation paths and retained pages are unchanged. 2026-10-08 reuse: 3fb04121 replaces dma_device_addr with a device span (two usize fields, a local value) at four receive submissions; no global, pool, allocation or retained page changes.",
+  "decision": "measured",
+  "source_sha256": "c6f5520c4d1bc980d94f92592be01af569595dab361e0f4469d7ee5df35bf741",
+  "workload": "Standard production QEMU/RPi5 linked images and the QEMU main lane boot, before (dda17a75) and after narrowing PageMeta.map_refcount to u32 (de252ca5). Accounting boundaries: per-page runtime metadata over discovered RAM (managed pages x sizeof(PageMeta)), fixed image sections, and allocator start pages.",
   "evidence": [
+    "docs/PAGE_META_24_2026-10-08.md",
     "docs/BLOCK_CACHE_BUCKETS_2026-10-08.md"
   ],
-  "assessment": "Reuse the 2026-10-08 block cache measurement: the device span is a per-call local of two words and the xHCI entry points are thin wrappers; no static storage, pool, allocation path or retained page is added or removed. Adopt: 2 KiB of per-core per-bucket write counts (QEMU .bss +2048, RPi5 .bss +4096 with alignment, RPi5 allocator 8 pages fewer) buy a 79 percent cut in single-block device reads (6132 -> 1299) and 62 percent in total device reads (226297 -> 85411) on the QEMU main boot. Cache slot count and data size unchanged. RPi5 read latency was not measured in this review.",
-  "next_trigger": "Measure at a change to block cache slot or bucket count, a changed allocation workload, or completion of the safe-memory stage."
+  "assessment": "Adopt: PageMeta 32 -> 24 bytes per managed page, held by static_assert. Runtime metadata falls 2092480 bytes on QEMU (261560 pages) and 2074496 bytes on RPi5 (259312 pages); .bss falls 16384 bytes on both; RPi5 allocator_pages 259304 -> 259312. No pool, slot or retained page changes. Deriving the physical field (24 -> 16) is deferred to #718 until an RPi5 allocator time measurement exists. Allocator operation time was not measured in this review.",
+  "next_trigger": "Measure at a change to sizeof(PageMeta) (the static_assert enforces it), to block cache slot or bucket count, a changed allocation workload, or completion of the safe-memory stage."
 }
