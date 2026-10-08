@@ -212,17 +212,25 @@ guarantee, and a time measurement method before the decisions waiting on it.
    #680-#682 wait on it, because space and time are both kept. #719 (every
    QEMU lane on four vCPUs under a host-wide vCPU budget) also waits for A:
    its runners and boot views overlap #637.
-2. **Signal delivery at interrupt return (#628), after #637 stage 1
-   lands** (both edit `process.tkb` and `syscall.tkb`).
+2. **Signal delivery, after #637 stage 1 lands** (both edit `process.tkb`
+   and `syscall.tkb`; every standard signal now keeps its action): #628
+   (no delivery at an interrupt return), then #726 (a caught signal does
+   not interrupt a sleeping syscall; EINTR versus restart needs a
+   decision).
 3. **Stored authority (#131),** which starts once #637 stage 1 has landed;
    its order is in "Ordered routes" above.
 4. **Remaining work, in this order:** #520 (TCP throughput), #386
-   (retransmit frame copy and global chain head),
+   (retransmit frame copy and global chain head; its own bar -- a profile
+   showing the copy's cost, or a need for per-connection isolation -- is
+   not met),
    #220 (telnet; not urgent, waits on PTY and `pselect6` scoping).
-5. **Compiler safety and language research:** #608 (checked integer to
-   enum conversion; not urgent), #203, #252, #200, #201, #282, #129, #417,
+5. **Compiler safety and language research:** #727 (positive compiler
+   tests also run codegen, which would have caught #722), #608 (checked
+   integer to enum conversion; the signal table is its second instance,
+   syntax deferred until more appear), #203, #252, #200, #201, #282, #129, #417,
    #155, #28, #8.
-6. **Toolchain, portability and hardware-lane support:** #706 (a design
+6. **Toolchain, portability and hardware-lane support:** #728 (qemu-user
+   reference runner for the pinned BusyBox), #706 (a design
    investigation), #123, #124, #122, #95, #51, #50, #85.
 7. **Evaluations and maintainer decisions, not scheduled:** #648 and #688
    (evaluations), #702 (dedicated soak hardware), #9 (SMP process admission;
