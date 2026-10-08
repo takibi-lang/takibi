@@ -10739,6 +10739,43 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
         private let mut first596: DmaFixed596 align(64);
         private let mut second596: DmaFixed596 align(64);");
 
+  (* GitHub issue #626: a fixed receive allocation owns whole cache lines in
+     the linked image because three stages agree -- the type checker
+     requires the declared alignment and the extent to be multiples of the
+     line (the two tests around this one), code generation gives the global
+     that alignment (this test), and the linker keeps every input object's
+     alignment. An allocation starting and ending on line boundaries cannot
+     share a line without overlapping another object, so no separate ELF
+     checker is kept; this is the stage a regression could slip through. *)
+  Alcotest.test_case "fixed DMA allocation keeps its line alignment in LLVM" `Quick
+    (fun () ->
+      ignore (gen_codegen
+        "struct no_copy Mutex { private word: usize; }
+         struct dma_fixed DmaLayout626 { private bytes: [u8; 128]; }
+         private let mut dma_layout626: DmaLayout626 align(64);
+         fn dma_layout626_touch(cpu: sink *DmaLayout626Cpu)
+             -> *DmaLayout626Device {
+           return dma_begin_rx(cpu, DmaLayout626);
+         }");
+      let ir = Llvm.string_of_llmodule !Llvm_gen.the_module in
+      let line = List.find_opt (fun l -> contains_substring l "@dma_layout626 =")
+        (String.split_on_char '\n' ir) in
+      match line with
+      | Some l ->
+          Alcotest.(check bool) ("global keeps align 64: " ^ l) true
+            (contains_substring l "align 64")
+      | None -> Alcotest.fail "global 'dma_layout626' not emitted");
+
+  Alcotest.test_case "fixed DMA allocation rejects alignment below a cache line" `Quick
+    (expect_type_error
+       "must have cache-line-aligned storage and extent"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaFixed626 { private bytes: [u8; 128]; }
+        private let mut dma_fixed626: DmaFixed626 align(16);
+        fn touch626(cpu: sink *DmaFixed626Cpu) -> *DmaFixed626Device {
+          return dma_begin_rx(cpu, DmaFixed626);
+        }");
+
   Alcotest.test_case "fixed DMA allocation requires isolated cache lines" `Quick
     (expect_type_error
        "must have cache-line-aligned storage and extent"

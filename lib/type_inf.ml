@@ -8600,12 +8600,19 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         StringMap.add name (fields, is_packed, align_opt) m
     | _ -> m
   ) StringMap.empty prog in
+  (* The allocation's own declaration, so a layout diagnostic points at the
+     line that would need a different alignment or extent. *)
+  let global_decl_loc name = Option.value ~default:Lexing.dummy_pos
+    (List.find_map (function
+       | Ast.LetDef (n, _, _, _, _, _, loc) when n = name -> Some loc
+       | _ -> None) prog) in
   Hashtbl.iter (fun record fields ->
     match fields, Dma_fixed_registry.allocation_of record with
     | [(_, (Ast.TypeArray (_, _) as array_ty))], Some global ->
+        let decl_loc = global_decl_loc global in
         let size = match const_type_size senv array_ty with
           | Some bytes -> bytes
-          | None -> raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+          | None -> raise (TypeError (decl_loc, Printf.sprintf
               "fixed DMA allocation '%s' has no known byte extent" global)) in
         (match Target_info.dma_cache_contract () with
          | Target_info.Cache_line line ->
@@ -8613,12 +8620,12 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                (StringMap.find_opt global !global_align_bytes_baseline)
                ~default:1 in
              if alignment mod line <> 0 || size mod line <> 0 then
-               raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+               raise (TypeError (decl_loc, Printf.sprintf
                  "fixed DMA allocation '%s' must have cache-line-aligned storage and extent"
                  global))
          | Target_info.Coherent -> ()
          | Target_info.Unsupported ->
-             raise (TypeError (Lexing.dummy_pos, Printf.sprintf
+             raise (TypeError (decl_loc, Printf.sprintf
                "fixed DMA allocation '%s' has no cache-maintenance contract on this target"
                global)))
     | _ -> assert false) Dma_fixed_registry.records;

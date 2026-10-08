@@ -2741,6 +2741,12 @@ target cache-line size. The element type must have a byte extent the type
 checker can compute; arrays of ordinary unpacked structs are not currently
 accepted by this ownership form. The compiler rejects a marked declaration
 on a target without a DMA cache-maintenance contract.
+In the linked image such an allocation therefore owns whole cache lines:
+code generation gives the global its declared alignment and the linker
+keeps every object's alignment, so an allocation that starts and ends on
+line boundaries cannot share a line without overlapping another object.
+This is a static placement property. It does not prove the runtime physical
+mapping, device cache coherence, or the ordering of cache maintenance.
 
 For each record, the compiler creates linear opaque `NameCpu` and
 `NameDevice` token types, a linear `NameAuthority` variant with `Cpu`,
