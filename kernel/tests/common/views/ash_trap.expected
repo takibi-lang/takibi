@@ -1,3 +1,7 @@
 ash trap: usr1 caught
 ash trap: term caught
 ash trap: sender status=0
+ash trap: ignored usr2 survived
+ash trap: default-ignored winch survived
+ash trap: cont refused status=1
+ash trap: real-time refused status=1

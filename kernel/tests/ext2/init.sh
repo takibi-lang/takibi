@@ -215,6 +215,19 @@ trap 'echo "ash trap: term caught"' TERM
 ( kill -USR1 $$ && kill -TERM $$ )
 echo "ash trap: sender status=$?"
 trap - USR1 TERM
+# The edges of the same table: an ignored signal and one whose default is
+# ignore are discarded, and kill refuses SIGCONT (no job control) and a
+# real-time signal (no action table for one) with EINVAL.
+trap '' USR2
+( kill -USR2 $$ )
+echo "ash trap: ignored usr2 survived"
+trap - USR2
+( kill -WINCH $$ )
+echo "ash trap: default-ignored winch survived"
+( kill -CONT $$ ) 2>/dev/null
+echo "ash trap: cont refused status=$?"
+( kill -34 $$ ) 2>/dev/null
+echo "ash trap: real-time refused status=$?"
 
 for phase in fd uart telnet; do
     echo "init: phase $phase"

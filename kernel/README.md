@@ -1581,13 +1581,16 @@ run, not a specification.
   `rt_sigtimedwait`, and lets BusyBox `init` reap and respawn the child without
   spinning. `rt_sigtimedwait` supports a null/infinite timeout, a zero poll,
   and a finite timeout at scheduler-tick resolution; its `siginfo` output is
-  not implemented. `kill(pid, 0)` performs an existence check,
-  `kill(pid, SIGCHLD)` queues the signal the kernel generates, and SIGTERM
-  applies its default process-termination action. Other externally sent
-  signals are not implemented. A SIGCHLD handler is entered at a syscall
-  return through a Linux arm64 signal frame and left through `rt_sigreturn`,
-  and `rt_sigsuspend` waits for one, which is what ash's `wait` builtin needs;
-  handlers for every other signal are accepted and never entered.
+  not implemented. `kill(pid, 0)` performs an existence check, and `kill`
+  sends any standard signal 1-31 except the job-control ones (`SIGCONT`,
+  `SIGSTOP`, `SIGTTIN`, `SIGTTOU`). Every standard signal keeps its own
+  `rt_sigaction` action: an ignored one is discarded, one with no handler
+  and a terminating default ends the process with status 128+signal, and a
+  handler is entered at a syscall return through a Linux arm64 signal frame
+  and left through `rt_sigreturn`. `rt_sigsuspend` waits for any caught
+  signal, which is what ash's `wait` builtin and `trap` need. A caught signal
+  does not wake a process asleep in any other call; it runs at that
+  process's next syscall return.
 - **Memory.** `mmap` is anonymous-only through a heap-break cursor rather
   than a real independent mapping. `mprotect` performs exactly one
   permission transition (`RW+XN` <-> `R+XN` on data, heap, and stack) and

@@ -7542,11 +7542,20 @@ fn kernel_process_current_set_signal_action(
         current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
         signum: usize, action: SignalAction) {
     if (signal_is_standard(signum) == false) { return; }
-    let index: usize = signum - 1;
-    if (index < PROCESS_SIGNAL_ACTIONS &&
+    if (signum >= 1 && signum <= PROCESS_SIGNAL_ACTIONS &&
         execution_state[execution_cpu_index()].current_live) {
+        let index: {0..<PROCESS_SIGNAL_ACTIONS as usize} = signum - 1;
         scheduled_process_record_current(current_authority)
             .signal_actions[index] = action;
+        // POSIX: setting an action that ignores the signal discards a
+        // pending instance of it, blocked or not.
+        let guard = process_run_lock();
+        let record: &mut ProcessRecord = scheduled_process_record_of_locked(
+            guard, execution_state[execution_cpu_index()].current_handle);
+        if (process_signal_ignored(record, index)) {
+            process_signal_pending_clear(guard, record, 1 << index);
+        }
+        process_run_unlock(guard);
     }
 }
 
@@ -7577,6 +7586,15 @@ fn kernel_process_current_caught_signal_take() -> ProcessSignalPendingResult {
     let mut handle: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
     let record: &mut ProcessRecord = scheduled_process_record_of_locked(guard, handle);
     let available: usize = record.pending_signals & ~record.signal_mask;
+    // An unmasked pending signal that is now ignored is discarded, as
+    // Linux discards it at delivery: one that arrived while masked and
+    // ignored must not survive to be acted on once its action changes.
+    for index: usize in 0..<PROCESS_SIGNAL_ACTIONS {
+        let bit: usize = 1 << index;
+        if ((available & bit) != 0 && process_signal_ignored(record, index)) {
+            process_signal_pending_clear(guard, record, bit);
+        }
+    }
     for index: usize in 0..<PROCESS_SIGNAL_ACTIONS {
         let bit: usize = 1 << index;
         if ((available & bit) != 0 && record.signal_actions[index].handler > 1) {
@@ -7605,6 +7623,18 @@ fn kernel_process_current_signal_terminates(signum: usize) -> bool {
     let terminates: bool = process_signal_terminates(record, index);
     process_run_unlock(guard);
     return terminates;
+}
+
+// SIG_IGN, or SIG_DFL with a default of ignore.
+private fn process_signal_ignored(record: borrow &mut ProcessRecord,
+                                  index: {0..<PROCESS_SIGNAL_ACTIONS as usize}) -> bool {
+    let handler: usize = record.signal_actions[index].handler;
+    if (handler == 1) { return true; }
+    if (handler != 0) { return false; }
+    match signal_default_action(index + 1) {
+        SignalDefault::Terminate => { return false; }
+        SignalDefault::Ignore => { return true; }
+    }
 }
 
 // A pending standard signal ends the process when it is not masked (SIGKILL
