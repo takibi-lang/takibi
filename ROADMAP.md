@@ -48,23 +48,32 @@ bus translation.
    (physically contiguous memory) waits for a dynamic DMA allocation; #720
    (session-long xHCI rings and contexts) waits for #131.
 
-## Territories, re-cut 2026-09-25; queues refreshed 2026-10-08
+## Territories, re-cut 2026-10-08
 
 A territory is a role, not a set of directories and not a particular agent
 (`AGENTS.md`); which agent holds which is the maintainer's per-session
-decision. Territory A's route is inherently single-task -- each step needs the
-previous one's four-core RPi5 evidence -- so A takes it alone, and every issue
-off that route belongs to B even where that risks a merge conflict. The
-maintainer rebases and merges often, which is what prevents double
-implementation. If a B issue blocks a step of A's route, A pulls it and says
-so on the issue. Compiler work a step of A needs is done in A as part of that
-step, landed as its own commit.
+decision.
+
+**The split (maintainer, 2026-10-08).** Territory A holds the multicore
+route and every issue that cannot start until that route settles -- its
+dependents, including the compiler work they need (stored authority, the
+process-record typestate group, signal delivery at interrupt return,
+time measurement and the optimizations waiting on it). Territory B holds
+the issues that are independent of it now. The previous split put several
+compiler-heavy items in B that then waited on A's queue; they are in A
+now, so B's queue is work B can actually start. A's route is single-task --
+each step needs the previous one's four-core RPi5 evidence -- so A takes it
+alone. If a B issue turns out to block a step of A's route, A pulls it and
+says so on the issue; if a B issue turns out to need something A has not
+landed, it moves to A's dependents rather than waiting in B.
 
 **Loosely coupled (maintainer, 2026-09-29), since either may stop for days.**
 A changes the kernel core's runtime behavior and needs four-core RPi5
-evidence. B delivers compiler capabilities and build checks, proven in
-compiler tests and `linux_user/`, which A adopts at its own pace. Neither
-waits: A does compiler work on its own critical path itself.
+evidence. B delivers independent fixes, fixtures, diagnostics, compiler
+capabilities and build checks, which A adopts at its own pace. Neither
+waits. The maintainer rebases and merges often, which is what prevents
+double implementation; a conflict in a shared file is expected to be
+incidental.
 
 ### Territory A: the multicore route, in this order
 
@@ -73,8 +82,9 @@ allcheck` stops every other piece of work, and Territory B is busy, so the
 lane that meets such a failure analyses and fixes it, whatever territory
 its cause lies in. The goal is to drive the probability of an allcheck
 failure toward zero step by step. A holds the analysis of #604, #556, #603,
-#649, #654, #655 (#679 would decide it), #665 (its handoff memo), #670,
-#673, #676 and #678 when they next recur.
+#605, #607, #649, #654, #655 (#679 would decide it), #665 (its handoff
+memo), #667, #670, #673, #676, #678, #685 and #690 when they next recur;
+B's first two bands exist to make those analyses shorter or unnecessary.
 
 **QEMU's role (maintainer, 2026-10-03, plan A, done):** QEMU gates
 functional verdicts only; verdicts decided by elapsed time or ticks print
@@ -160,10 +170,9 @@ before its issue closes. The steps keep their numbers, which issues cite.
    `KERNEL_PREEMPTIBLE == 0` asserts. #704 evaluates CPU-local owner
    storage separation and non-migrating access; its design must distinguish
    matching caller indices from trusted storage/authority mint sites.
-   Alongside, not blocking: #641 (a TLA+ model of the world stop), #642 (a
-   boundary fixture for signal frames and mmap reuse), #643 (gdb stall dump
-   and ASID jump for QEMU churn), #651 (probe rendezvous bounded by peer
-   ticks), #652 (lifecycle trace events for signals and wait4).
+   Alongside, not blocking: #641 (a TLA+ model of the world stop), #652
+   (lifecycle trace events for signals and wait4; it edits `process.tkb`'s
+   trace).
 4. **Flip to kernel preemption (#638).** Once step 3's authorities exist,
    measure candidate designs' cost on RPi5 and set `KERNEL_PREEMPTIBLE`
    to 1, with the models passing without their no-preemption guards. Never
@@ -182,71 +191,66 @@ before its issue closes. The steps keep their numbers, which issues cite.
      optional research. Not pursued: the K framework, and a Boogie-style
      IVL (Why3 if one is ever needed).
 
-### Territory B: everything else, ordered by current priority
+**A's dependents: issues that start only as A's route settles.** They are
+A's because they need its authorities, its process-record and scheduler
+shape, or its measurements; none should be started as a local special
+case before then (see "Ordered routes").
 
-**B's window is short (maintainer, 2026-10-03):** B runs for a few days and
-then stops, with no successor. Take only items that finish inside that
-window and that A consumes at once; leave the bands below untouched rather
-than half-done. The shared terminal queue, ordered migration and two-writer
-fixtures, finite lock-held BREAK fixture, and board lock measurements complete
-the extended short-window queue. #13 remains conditional on the solver
-threshold in `TAKIBI_CORE.md`; its recorded examples do not yet justify an
-implementation. The maintainer also selected concrete global Cell brands
-for this window.
+- **After #637 stage 1 lands:** stored authority (#131 with #672 stage 2)
+  and its consumers in the route order -- #622, #707, #720, the
+  process-record typestate group (#653, #590, #308), #686, #687, #704,
+  #343; signal delivery, #628 (no delivery at an interrupt return) then
+  #726 (a caught signal does not interrupt a sleeping syscall; EINTR
+  versus restart needs a decision), with #432 (timed blocking) beside it;
+  #9 (SMP process admission); #203 (no uninitialized kernel bytes copied
+  to userspace; it builds on #725's bounded copy outcomes); #709 and #710
+  (generation exhaustion of region tables and the intrusive pool).
+- **After A is mostly done -- a time measurement method (maintainer,
+  2026-10-08):** #497, then #502. #718, #711, #520 and #680-#682 wait on
+  it, because space and time are both kept; #386 (retransmit frame copy
+  and global chain head) waits for that profile or for a need for
+  per-connection isolation. #719 (every QEMU lane on four vCPUs) waits
+  too: its runners and boot views overlap #637.
+- **Evidence for the route, scheduled by A:** #613 with #645, #606 stage
+  2 with #656, #641, #625 (DMA cache visibility, bounded), #584's soak and
+  #702 (dedicated soak hardware, the maintainer's decision).
+
+### Territory B: independent work, ordered by current priority
+
 On 2026-10-04 the maintainer authorized autonomous B work in priority order
 where acceptance is settled; leave design investigations and unmet
-implementation gates parked.
-The spread fixture now observes the actual EL0 timer ToIdle transition
-before wait4, with negative controls for a disabled leave and a missed CPU 0
-arrival window. #706 evaluates explicit fail-stop provenance; it remains a
-design investigation.
-#680, #681 and #682 (the pin's cost) stay with A: they need RPi5
-measurements first.
+implementation gates parked. Prefer what A consumes at once -- fewer red
+allchecks, faster diagnosis -- and what finishes on its own.
 
-**Order set by the maintainer on 2026-10-08,** after an inventory of every
-open issue: a hole in an existing compile-time guarantee comes before a new
-guarantee, and a time measurement method before the decisions waiting on it.
-
-1. **A time measurement method, after Territory A is mostly done**
-   (maintainer, 2026-10-08): #497, then #502. #718, #711, #520 and A's
-   #680-#682 wait on it, because space and time are both kept. #719 (every
-   QEMU lane on four vCPUs under a host-wide vCPU budget) also waits for A:
-   its runners and boot views overlap #637.
-2. **Signal delivery, after #637 stage 1 lands** (both edit `process.tkb`
-   and `syscall.tkb`; every standard signal now keeps its action): #628
-   (no delivery at an interrupt return), then #726 (a caught signal does
-   not interrupt a sleeping syscall; EINTR versus restart needs a
-   decision).
-3. **Stored authority (#131),** which starts once #637 stage 1 has landed;
-   its order is in "Ordered routes" above.
-4. **Remaining work, in this order:** #520 (TCP throughput), #386
-   (retransmit frame copy and global chain head; its own bar -- a profile
-   showing the copy's cost, or a need for per-connection isolation -- is
-   not met),
-   #220 (telnet; not urgent, waits on PTY and `pselect6` scoping).
-5. **Compiler safety and language research:** #727 (positive compiler
-   tests also run codegen, which would have caught #722), #608 (checked
-   integer to enum conversion; the signal table is its second instance,
-   syntax deferred until more appear), #203, #252, #200, #201, #282, #129, #417,
-   #155, #28, #8.
-6. **Toolchain, portability and hardware-lane support:** #728 (qemu-user
-   reference runner for the pinned BusyBox), #706 (a design
-   investigation), #123, #124, #122, #95, #51, #50, #85.
-7. **Evaluations and maintainer decisions, not scheduled:** #648 and #688
-   (evaluations), #702 (dedicated soak hardware), #9 (SMP process admission;
-   its open items touch `process.tkb`, so after #637 stage 1).
-8. **Deferred or not a scheduled work item:** #432, #555, #250, #444,
-    #429, #149, #567, #539, #536, #624, #132; #13 for `Phi`, with #216 and
-    #109 as candidate examples, only after the solver threshold is met.
-    Also deferred: #712 (compiler-derived liveness-escape attribution after
-    the concrete source-check parser failure), #58 (static whole-call-path
-    stack bounds; lowered by the maintainer on 2026-10-04), #698 (metadata
-    mutation exhaustion), #699 (host-side EL0 postmortem symbolization),
-    #709 (permanent table generation exhaustion), #710 (intrusive pool
-    generation exhaustion), #718 (PageMeta's physical field; waits for the
-    time measurement method in band 1), #711 (FD-service allocation
-    contention and descriptor-access measurement; observation method and
-    representative workload precede candidate implementation).
+1. **Fewer red allchecks:** #651 (contention-probe rendezvous bounded by
+   the peer's ticks, not host time; agree with A on order, since A's next
+   rung types the same probes' atomics), then #688 (evaluate typed clock
+   domains and peer-tick budgets) as its follow-up.
+2. **Diagnostics A uses on the next recurrence:** #679 (console state dump
+   on a stalled shell; a gdb script first, since DDB's file is reshaped
+   often), #643 (churn runner: gdb stall dump and an ASID-jump option),
+   #699 (symbolize DDB's captured EL0 top PC with exact ELF identity).
+3. **Fixtures for paths only refusal and boundary tests reach:** #642
+   (corrupted rt_sigreturn, signal-frame overflow, zero-fill on mmap
+   reuse), #624 (DMA timeout and failed-reset ownership branches in QEMU).
+4. **Tooling:** #727 (positive compiler tests also run codegen, so a
+   construct the checker accepts and codegen cannot lower fails `make test`), #728 (a qemu-user reference runner for the
+   pinned BusyBox).
+5. **Compiler and language research, independent of the ownership
+   checker:** #608 (checked integer to enum conversion; the signal table
+   is its second instance, syntax deferred until more appear), #252, #200,
+   #201, #282, #129, #417, #155, #28, #8.
+6. **Toolchain and portability:** #706 (explicit fail-stop provenance; a
+   design investigation), #123, #124, #122, #95, #51, #50, #85.
+7. **Evaluations and maintainer decisions, not scheduled:** #648.
+8. **Deferred or not a scheduled work item:** #220 (telnet; waits on PTY
+   and `pselect6` scoping), #555, #250, #444, #429, #149, #567, #539, #536,
+   #698 (ext2 metadata exhaustion as ENOSPC), #374 (physically contiguous
+   memory; waits for a dynamic DMA allocation); #13 for `Phi`, with #216
+   and #109 as candidate examples, only after the solver threshold in
+   `TAKIBI_CORE.md` is met; #712 (compiler-derived liveness-escape
+   attribution, after a concrete source-check parser failure); #58 (static
+   whole-call-path stack bounds; lowered by the maintainer on 2026-10-04).
 
 Items are ordered within each band as well as between bands. The deferred
 items stay listed so a changed premise can bring them back into the queue.
