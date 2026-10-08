@@ -5275,7 +5275,7 @@ fn kernel_process_spread_timer_progress(pid: usize, arm: bool)
         }
         ProcessSlotForPidResult::Found(found) => { found }
     };
-    let mut child: ProcessHandle = scheduled_process_handle_of_slot(slot);
+    let mut child: ProcessHandle = scheduled_process_handle_of_slot(guard, slot);
     let mut parent: ProcessHandle = execution_here().current_handle;
     if (arm) {
         let available: bool = match spread_timer_phase {
@@ -5402,7 +5402,7 @@ fn kernel_process_stack_owner_probe(pid: usize) -> usize !{unsafe} {
         }
         ProcessSlotForPidResult::Found(found) => { found }
     };
-    let mut handle: ProcessHandle = scheduled_process_handle_of_slot(slot);
+    let mut handle: ProcessHandle = scheduled_process_handle_of_slot(guard, slot);
     if (slot == 0 ||
         scheduled_process_record_state_locked(guard, slot) != ProcessSlotState::Ready ||
         scheduled_process_record_locked(guard, slot).stack_owner_cpu !=
@@ -5756,7 +5756,7 @@ fn kernel_process_secondary_start() -> ProcessSecondaryStart {
                     workload_busy_starve_skips(
                         scheduled_process_record_locked(guard, slot).pid) == false) {
                     let mut handle: ProcessHandle =
-                        scheduled_process_handle_of_slot(slot);
+                        scheduled_process_handle_of_slot(guard, slot);
                     match scheduled_process_ready_take(guard, handle) {
                         ScheduledProcessReadyTakeResult::Missing => {}
                         ScheduledProcessReadyTakeResult::Ready(resources) => {
@@ -7656,7 +7656,7 @@ fn kernel_process_terminal_settings_wake(
                     scheduled_process_uart_block_delivery(guard, slot) ==
                         UartBlockDelivery::Read) {
                     match scheduled_process_blocked_take(guard,
-                            scheduled_process_handle_of_slot(slot)) {
+                            scheduled_process_handle_of_slot(guard, slot)) {
                         ScheduledProcessBlockedTakeResult::Missing => { }
                         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
                             let (owner, blocked) = resources;
@@ -7748,7 +7748,7 @@ fn kernel_process_terminal_signal(
                         terminal_foreground_session &&
                     scheduled_process_record_locked(guard, slot).pid != 1) {
                     match kernel_process_signal_deliver_to(
-                            guard, scheduled_process_handle_of_slot(slot), signum) {
+                            guard, scheduled_process_handle_of_slot(guard, slot), signum) {
                         ProcessSignalSendResult::Missing => {}
                         ProcessSignalSendResult::Delivered => {}
                     }
@@ -7776,7 +7776,7 @@ fn kernel_process_signal_send(pid: usize, signum: usize)
         return ProcessSignalSendResult::Delivered;
     }
     let result = kernel_process_signal_deliver_to(
-        guard, scheduled_process_handle_of_slot(slot), signum);
+        guard, scheduled_process_handle_of_slot(guard, slot), signum);
     process_run_unlock(guard);
     return result;
 }
@@ -7811,7 +7811,7 @@ fn kernel_process_deadline_wake_all(guard: borrow ProcessRunGuard[lock])
                     scheduled_process_record_locked(guard, slot).deadline_ticks != 0 &&
                     now >= scheduled_process_record_locked(guard, slot).deadline_ticks) {
                     match scheduled_process_blocked_take(guard,
-                            scheduled_process_handle_of_slot(slot)) {
+                            scheduled_process_handle_of_slot(guard, slot)) {
                         ScheduledProcessBlockedTakeResult::Missing => {}
                         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
                             let (owner, blocked) = resources;
@@ -7885,7 +7885,7 @@ fn kernel_process_net_wake_scan(guard: borrow ProcessRunGuard[lock])
                     scheduled_process_record_wait_reason_locked(guard, slot) ==
                         ProcessWaitReason::NetRx) {
                     match scheduled_process_blocked_take(guard,
-                            scheduled_process_handle_of_slot(slot)) {
+                            scheduled_process_handle_of_slot(guard, slot)) {
                         ScheduledProcessBlockedTakeResult::Missing => {}
                         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
                             let (owner, blocked) = resources;
@@ -7936,7 +7936,7 @@ fn kernel_process_uart_tx_wake_all(guard: borrow ProcessRunGuard[lock])
                     scheduled_process_record_wait_reason_locked(guard, slot) ==
                         ProcessWaitReason::UartTx) {
                     match scheduled_process_blocked_take(guard,
-                            scheduled_process_handle_of_slot(slot)) {
+                            scheduled_process_handle_of_slot(guard, slot)) {
                         ScheduledProcessBlockedTakeResult::Missing => {}
                         ScheduledProcessBlockedTakeResult::Blocked(resources) => {
                             let (owner, blocked) = resources;
@@ -8060,7 +8060,7 @@ fn kernel_process_uart_wake(guard: borrow ProcessRunGuard[lock], value: usize)
                             ProcessSlotState::Blocked &&
                         scheduled_process_record_wait_reason_locked(guard, slot) ==
                             ProcessWaitReason::UartRx) {
-                        waiter = scheduled_process_handle_of_slot(slot);
+                        waiter = scheduled_process_handle_of_slot(guard, slot);
                         found = true;
                     }
                     cursor = scheduled_process_next_slot(slot);
@@ -10348,7 +10348,7 @@ fn kernel_process_child_exit_status_for(slot: usize, pid: usize) -> usize {
 
 private fn kernel_process_child_exit_status_for_locked(
         guard: borrow ProcessRunGuard[lock], slot: usize, pid: usize) -> usize {
-    let mut parent: ProcessHandle = scheduled_process_handle_of_slot(slot);
+    let mut parent: ProcessHandle = scheduled_process_handle_of_slot(guard, slot);
     if (scheduled_process_record_of_locked(guard, parent).has_first_child == false) {
         return 0;
     }
@@ -10577,15 +10577,17 @@ fn kernel_process_reap_own_zombies() !{unsafe} {
                         owner_slot =
                             kernel_process_owner_slot_of(sweep_guard, slot);
                     }
+                    // Both handles are read under the same hold as the state
+                    // that chose them, not after it.
+                    let mut victim: ProcessHandle =
+                        scheduled_process_handle_of_slot(sweep_guard, slot);
+                    let mut owner: ProcessHandle =
+                        scheduled_process_handle_of_slot(sweep_guard, owner_slot);
                     process_run_unlock(sweep_guard);
                     if (exited) {
                         found = true;
-                        let mut victim: ProcessHandle =
-                            scheduled_process_handle_of_slot(slot);
                         let collected: usize =
-                            kernel_process_reap_zombie(
-                                scheduled_process_handle_of_slot(owner_slot),
-                                victim);
+                            kernel_process_reap_zombie(owner, victim);
                     }
                     cursor = scheduled_process_next_slot(slot);
                 }
@@ -10616,8 +10618,11 @@ private fn kernel_process_owner_slot_of(guard: borrow ProcessRunGuard[lock],
     return slot;
 }
 
-// The handle a slot currently answers to.
-private fn scheduled_process_handle_of_slot(slot: usize) -> ProcessHandle {
+// The handle a slot currently answers to -- under the run guard, so the
+// slot cannot be reaped and handed to another process between the caller's
+// own check of it and this read (the shape kill() had, 60a09caf).
+private fn scheduled_process_handle_of_slot(guard: borrow ProcessRunGuard[lock],
+                                            slot: usize) -> ProcessHandle {
     if (slot == 0) {
         let mut boot: ProcessHandle = { 0, scheduled_process_boot_generation };
         return boot;
