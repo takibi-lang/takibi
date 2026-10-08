@@ -14,6 +14,25 @@ let contains_substring haystack needle =
 
 let is_compiler_builtin = Language_words.is_compiler_builtin
 
+(* GitHub issue #722: codegen lowers a struct literal only where it
+   initializes storage -- a `let mut` or global initializer, and the fields
+   and elements nested inside one (llvm_gen's init_memory). check_expr is
+   reached from many other destinations (assignments, returns, call
+   arguments), and a literal accepted there type-checked and then stopped
+   codegen with "BUG: StructLit must be handled in gen_stmt". The
+   initializer callers set this; every other position is refused here. *)
+let struct_literal_initializer = ref false
+
+let with_struct_literal_initializer allowed f =
+  let saved = !struct_literal_initializer in
+  struct_literal_initializer := allowed;
+  Fun.protect ~finally:(fun () -> struct_literal_initializer := saved) f
+
+(* A field or element of a literal being initialized: a nested literal is
+   still an initializer, anything else is an ordinary expression. *)
+let struct_literal_element_allowed (e : Ast.expr) =
+  match e.desc with Ast.StructLit _ -> true | _ -> false
+
 let rec count_var_occurrences name (e : Ast.expr) =
   let count_all xs = List.fold_left (fun n x ->
     n + count_var_occurrences name x) 0 xs in
@@ -5545,12 +5564,19 @@ and check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : ty =
         raise (TypeError (e.loc, Printf.sprintf
           "cannot prove this usize value is a multiple of %d" n));
       expected
+  | StructLit _, _ when not !struct_literal_initializer ->
+      raise (TypeError (e.loc,
+        "a struct literal is accepted only as a `let mut` or global \
+         initializer (or a field of one); bind it first, `let mut tmp: Name \
+         = {...};`, and use tmp here"))
   | StructLit exprs, TArray (elem_ty, n) ->
       if List.length exprs <> n then
         raise (TypeError (e.loc, Printf.sprintf
           "array [_; %d] expects %d elements but literal has %d"
           n n (List.length exprs)));
-      List.iter (fun ei -> ignore (check_expr senv eenv tyenv fenv ei elem_ty)) exprs;
+      List.iter (fun ei ->
+        with_struct_literal_initializer (struct_literal_element_allowed ei)
+          (fun () -> ignore (check_expr senv eenv tyenv fenv ei elem_ty))) exprs;
       expected
   | StructLit exprs, TStruct sname ->
       let fields = match StringMap.find_opt sname senv with
@@ -5564,7 +5590,8 @@ and check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : ty =
           "struct '%s' has %d fields but literal has %d values"
           sname (List.length fields) (List.length exprs)));
       List.iter2 (fun (_, ft) ei ->
-        ignore (check_expr senv eenv tyenv fenv ei (of_ast ft))
+        with_struct_literal_initializer (struct_literal_element_allowed ei)
+          (fun () -> ignore (check_expr senv eenv tyenv fenv ei (of_ast ft)))
       ) fields exprs;
       expected
   | StructLit exprs, TIndexedStruct (sname, static_args) ->
@@ -5579,8 +5606,9 @@ and check_expr senv eenv tyenv fenv (e : Ast.expr) (expected : ty) : ty =
           "struct '%s' has %d fields but literal has %d values"
           sname (List.length fields) (List.length exprs)));
       List.iter2 (fun (_, ft) ei ->
-        ignore (check_expr senv eenv tyenv fenv ei
-          (field_type_for_instance sname static_args ft))
+        with_struct_literal_initializer (struct_literal_element_allowed ei)
+          (fun () -> ignore (check_expr senv eenv tyenv fenv ei
+            (field_type_for_instance sname static_args ft)))
       ) fields exprs;
       expected
   | AddrOf inner, TRef _ ->
@@ -5845,7 +5873,8 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
                 Printf.sprintf "struct literal requires `let mut %s: Name = {...}`" name));
             (match repr ty with
              | (TStruct _ | TIndexedStruct _ | TArray _) as expected ->
-                 ignore (check_expr senv eenv tyenv fenv { desc = StructLit exprs; loc } expected)
+                 with_struct_literal_initializer true (fun () ->
+                   ignore (check_expr senv eenv tyenv fenv { desc = StructLit exprs; loc } expected))
              | _ -> raise (TypeError (loc,
                  "literal { ... } requires a struct or array type annotation")));
             None
@@ -9024,7 +9053,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
          | Some { desc = Ast.StructLit exprs; loc } ->
              (match repr ty with
               | (TStruct _ | TArray _) as expected ->
-                  ignore (check_expr senv eenv genv fenv { desc = Ast.StructLit exprs; loc } expected)
+                  with_struct_literal_initializer true (fun () ->
+                    ignore (check_expr senv eenv genv fenv { desc = Ast.StructLit exprs; loc } expected))
               | _ -> raise (TypeError (loc,
                   "literal { ... } requires a struct or array type annotation")));
              genv

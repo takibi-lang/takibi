@@ -539,6 +539,11 @@ affine struct Name[n: usize] { field: T; }   // indexed runtime owner
 linear struct Name[n: usize] { field: T; }   // indexed runtime obligation
 ```
 
+- A positional struct or array literal (`{ e, ... }`) is an initializer
+  only: the initializer of a `let mut` local or of a global, or a field or
+  element nested inside one. Anywhere else -- an assignment, a `return`, a
+  call argument -- it is a type error; bind it first (`let mut tmp: Name =
+  {...};`) and use `tmp`.
 - An ordinary struct may carry static parameters (`struct Name[n: sort]
   { ... }`), the same erased indices an `affine`/`linear` struct or a
   variant can. They let a container name the identity of what it holds --

@@ -15390,7 +15390,7 @@ fn hidden_put(w: sink HiddenWitness[id]) {}
       expect_ok (base ^ {|fn hidden_fresh() -> usize {
   let mut h: HiddenHandle = { 1 };
   { let h: usize = 0; hidden_destroy(); }
-  h = { 2 }; return hidden_inspect(h);
+  let mut fresh: HiddenHandle = { 2 }; h = fresh; return hidden_inspect(h);
 }
 fn hidden_witnessed() -> usize {
   let w = view HiddenWitness[1];
@@ -20498,6 +20498,44 @@ fn caller() { leaf(); let g = take(1); leaf(); put(g); leaf(); }
         fn struct323_sum(p: Struct323Point) -> i32 { return p.x + p.y; }
         fn struct323_use() -> i32 {
           return struct323_sum({1, 2});
+        }");
+
+  (* GitHub issue #722: a struct literal type-checked in an assignment and
+     a return, then stopped codegen with "BUG: StructLit must be handled in
+     gen_stmt". Only initializer positions lower one; every other position
+     is now a type error, and a nested literal inside an initializer still
+     compiles. *)
+  Alcotest.test_case
+    "a struct literal assigned to a local is rejected (issue #722)" `Quick
+    (expect_type_error "a struct literal is accepted only as"
+       "struct S722 { a: usize; b: usize; }
+        fn s722_local() -> usize {
+          let mut p: S722 = { 1, 2 };
+          p = { 3, 4 };
+          return p.a;
+        }");
+  Alcotest.test_case
+    "a struct literal assigned to an array element is rejected (issue #722)" `Quick
+    (expect_type_error "a struct literal is accepted only as"
+       "struct S722b { a: usize; b: usize; }
+        let mut s722_table: [S722b; 4];
+        fn s722_element() -> usize {
+          s722_table[1] = { 3, 4 };
+          return s722_table[1].a;
+        }");
+  Alcotest.test_case
+    "a returned struct literal is rejected (issue #722)" `Quick
+    (expect_type_error "a struct literal is accepted only as"
+       "struct S722c { a: usize; b: usize; }
+        fn s722_make() -> S722c { return { 1, 2 }; }");
+  Alcotest.test_case
+    "a nested struct literal initializer still compiles (issue #722)" `Quick
+    (expect_ok
+       "struct S722i { a: usize; b: usize; }
+        struct S722o { inner: S722i; items: [S722i; 2]; }
+        fn s722_nested() -> usize {
+          let mut o: S722o = { { 1, 2 }, { { 3, 4 }, { 5, 6 } } };
+          return o.items[1].b;
         }");
 
   (* GitHub issue #259: derive_arg_type's &x.field case previously only
