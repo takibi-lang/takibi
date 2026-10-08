@@ -41,6 +41,45 @@ def spin(label: str, peer_only: bool) -> str:
 # the fix removed by construction lists several edits: --revert then puts back
 # the write that made the defect possible as well as removing the check.
 WINDOWS = {
+    # A completed peer can re-enter before the primary disarms the phase.
+    # Holding the primary here exposes the old restart-from-zero loop.
+    "678": {
+        "spin": ("kernel/freelist_contention_evidence.tkb",
+                 "    // With per-round rendezvous this is the secondary completion count at\n"
+                 "    // the instant the primary finishes, not a scheduler-granularity metric.\n",
+                 False),
+        "check": ("kernel/freelist_contention_evidence.tkb",
+                  '    // The idle loop may enter again before the primary disarms this phase.\n'
+                  "    // Keep the round in the phase's published count, not a fresh local loop:\n"
+                  '    // an old rendezvous sequence must never authorize another allocation.\n'
+                  '    while (unsafe {\n'
+                  '               atomic_load_acquire(freelist_probe_secondary_address())\n'
+                  '           } < FREELIST_CONTENTION_ROUNDS && unsafe {\n'
+                  '               atomic_load_acquire(freelist_probe_armed_address())\n'
+                  '           } == 1) {\n'
+                  '        let sequence: usize = unsafe {\n'
+                  '            atomic_load_acquire(freelist_probe_secondary_address())\n'
+                  '        } + 1;\n'
+                  '        if (freelist_probe_cycle(false, sequence)) {\n'
+                  '            unsafe {\n'
+                  '                atomic_fetch_add_relaxed(\n'
+                  '                    freelist_probe_secondary_address(), 1);\n'
+                  '            }\n'
+                  '        }\n'
+                  '    }\n',
+                  '    for round: usize in 0..<FREELIST_CONTENTION_ROUNDS {\n'
+                  '        if (unsafe {\n'
+                  '                atomic_load_acquire(freelist_probe_armed_address())\n'
+                  '            } == 1) {\n'
+                  '            if (freelist_probe_cycle(false, round + 1)) {\n'
+                  '                unsafe {\n'
+                  '                    atomic_fetch_add_relaxed(\n'
+                  '                        freelist_probe_secondary_address(), 1);\n'
+                  '                }\n'
+                  '            }\n'
+                  '        }\n'
+                  '    }\n'),
+    },
     # Deliberately never open CPU 0. The finite child may finish on CPU 1,
     # but its parent must refuse wait4 without a timer leave observation.
     "705-missed-arrival": {

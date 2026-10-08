@@ -15,6 +15,28 @@ commands, directory layout, and day-to-day operating instructions, see
 
 ---
 
+## 2026-10-08: bound freelist probe rounds across idle-loop re-entry
+
+CI run 37771243822 exposed a phase-admission error in the contention fixture:
+primary=4096, secondary=4102, duplicates=4096, empty=0. The secondary could
+finish and return to its idle loop while the primary still kept the phase
+armed. A new invocation restarted its local loop at sequence 1 against
+rendezvous words already at 4096, admitting extra allocations. This was the
+incomplete-phase symptom previously observed under load, not allocator
+corruption or a rendezvous timeout.
+
+The secondary now derives its next sequence and bound from the phase-wide
+completion count, as the PID probe already does. The primary waits for peer
+exit after disarm before resetting the next phase. A QEMU overlay holds the
+primary before disarm; restoring the exact original loop produces secondary
+11877 against primary 4096, while the corrected unlocked and locked phases
+both remain at 4096. The locked phase reports zero duplicate hand-outs.
+The control requires a failed command and those excessive-round counts,
+so a different incomplete run cannot stand in for recurrence prevention.
+The widened window stays out of production kernels. This is runtime
+protocol enforcement with actual two-core regression evidence, not a
+compile-time phase-admission or arbitrary liveness proof.
+
 ## 2026-10-06: complete source-check function attribution
 
 The final audit replayed the inline attribution defect against the liveness

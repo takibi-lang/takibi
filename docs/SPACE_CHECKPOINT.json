@@ -2,9 +2,10 @@
   "date": "2026-10-08",
   "event": "incremental",
   "decision": "reuse",
-  "source_sha256": "c659d630546bb2518e438634b15f17b1df14cc381daa74ca7a5e5ac2ff4054c1",
-  "workload": "Fresh standard production QEMU/RPi5 linked kernels compared with 00cd6dd0 (including the per-signal action table), using space_delta.py, llvm-size-19 and llvm-nm-19. Incremental local compiler/ELF validation and replay-diagnostic corrections do not change storage or allocation behavior. Reuse earlier workload evidence at its recorded strength; older pool endpoints precede the upstream record-size change and are not current occupancy measurements. Final clean allcheck provides separate real RPi5 functional evidence.",
+  "source_sha256": "902e26151be2874f288ff8051493ec07721d4e5e8a82eb5730319e6a4896ebef",
+  "workload": "Incremental correction of the existing two-core freelist boot probe: phase-wide round admission and secondary exit before resetting the locked phase. No new global, allocation, storage layout or allocation lifetime. The generated QEMU regression overlay is separate from production builds. Reuse existing production pool/allocation evidence; a supplementary linked QEMU section comparison uses the failing CI artifact and the corrected local ordinary kernel.",
   "evidence": [
+    "docs/FREELIST_PHASE_REENTRY_2026-10-08.md",
     "docs/RAW_AUTHORITY_AUDIT_SPACE_2026-10-08.md",
     "docs/SIGNAL_ACTIONS_SPACE_2026-10-08.md",
     "docs/PER_CPU_ELF_SPACE_2026-10-08.md",
@@ -20,6 +21,6 @@
     "docs/DMA_MINT_FILES_2026-10-08.md",
     "docs/DMA_TRANSMIT_2026-10-08.md"
   ],
-  "assessment": "Reuse for the #629/#722 session-audit corrections, measured against origin/main 0e8ab289 with scripts/space_delta.py: text +328/+328 bytes (QEMU/RPi5), data +8 (one usize, init_boot_fixture_status, the reaped init.sh exit status), BSS +16/0 from placement; no record, pool or allocation workload changes and reserved spans are unchanged. The compiler change only refuses a construct codegen could not lower. Earlier: Adopt the audit corrections: QEMU text +16 bytes to 719068; RPi5 text unchanged at 728740. Data 5070/2888776 and BSS 1658592/1697600 are unchanged; no data/BSS symbol-size changes. Image reservations remain 2392064/5341184 bytes. No persistent payload/slot or allocation-policy change. Preserve the separately reviewed upstream 1832-byte ProcessRecord and computed process-chunk capacity; do not reuse the older 872-byte endpoint samples as new measurements. No added unsafe/raw mint. File confinement is still opt-in and the shared-slice/fallible-copy gaps remain.",
+  "assessment": "Reuse existing workload evidence for the #678 fixture protocol correction. Supplementary llvm-size-19 cross-build observation against CI run 37771243822 at edd90a04: QEMU text 719396 to 719524 (+128 bytes), data 5078 unchanged, BSS 1658608 unchanged. This is linked QEMU section accounting, not payload occupancy or a fresh RPi5 size comparison. No allocator/pool representation or allocation behavior changes; earlier RPi5 and cross-OS reports retain their separately stated strength.",
   "next_trigger": "Measure at the typed atomic/probe or bounded-copy milestone, process trust-boundary separation, final raw-authority confinement, or a changed allocation/lifetime workload."
 }

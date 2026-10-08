@@ -141,6 +141,24 @@ if ! grep -aEq "$SIGNATURE" "$(signature_file)"; then
     grep -aE '^(oops: (fail-stop|activity)|sched: STARVED|ddb: wait pid)' "$(signature_file)" | sed 's/^/  /' >&2 || true
     exit 1
 fi
+# A 678 failure must be the old phase re-entry, not another incomplete run.
+if [ "$WINDOW" = 678 ]; then
+    python3 - "$(signature_file)" <<'PYCONTROL'
+import pathlib
+import re
+import sys
+log = pathlib.Path(sys.argv[1]).read_text(errors="replace")
+counts = re.search(r"freelist contention counts: primary=(\d+) secondary=(\d+) "
+                   r"duplicates=(\d+) empty=(\d+)", log)
+if counts is None:
+    raise SystemExit("FAIL race-window 678: no phase counts")
+primary, secondary, duplicates, empty = map(int, counts.groups())
+if primary != 4096 or secondary <= 4096 or empty != 0:
+    raise SystemExit("FAIL race-window 678: failure did not show extra peer rounds: "
+                     + counts.group(0))
+print("PASS race-window 678 control: " + counts.group(0))
+PYCONTROL
+fi
 if [ "${KERNEL_QEMU_RACE_WINDOW_ARMED:-run}" = skip ]; then
     echo "PASS $LABEL: with the check reverted, the $WORKLOAD failed showing $SIGNATURE"
 else

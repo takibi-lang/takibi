@@ -424,6 +424,14 @@ targets default to 30 MHz SWD on the validated Debug Probe/board setup; set
 `RPI5_SWD_SPEED=<kHz>` to use a more conservative speed for another probe or
 cable, for example `RPI5_SWD_SPEED=1000`.
 
+`make kernelcheck-race-window-678-qemu` holds the freelist probe's primary
+before disarm, allowing the secondary idle loop to re-enter the completed
+phase. Both unlocked and locked phases must finish exactly 4096 allocations
+per core. The same lane restores the original secondary loop and requires
+an incomplete-phase failure. The phase counter bounds re-entry; disarm and
+secondary exit precede the next phase's state reset. The widened window is
+confined to generated QEMU overlays.
+
 QEMU integration reports boot duration on every run. `allcheck` and `cicheck`
 validate the timestamps, required milestones, network interval and resource
 measurements without enforcing the boot-duration performance bound: host
