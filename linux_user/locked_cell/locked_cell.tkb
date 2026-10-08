@@ -87,8 +87,24 @@ fn locked_record_roundtrip() -> usize {
     return value.value + value.words[0] + value.words[1];
 }
 
+// Field operations copy scalars under the caller's guard without exporting
+// a pointer. Two fields may intentionally share one module-assigned lock.
+private let mut field_lock: Mutex;
+private let mut field_a: GuardedField(usize);
+private let mut field_b: GuardedField(usize);
+fn guarded_field_roundtrip() -> usize {
+    let guard = guarded_field_take(&field_lock);
+    guarded_usize_store(guard, &field_a, 19);
+    guarded_usize_store(guard, &field_b, 23);
+    let value = guarded_usize_load(guard, &field_a)
+              + guarded_usize_load(guard, &field_b);
+    guarded_field_give(guard, &field_lock);
+    return value;
+}
+
 fn app_main() -> i32 !{unsafe} {
     let result: i32 = locked_cell_roundtrip();
     uart_println_hex(locked_record_roundtrip() as i32);
+    uart_println_hex(guarded_field_roundtrip() as i32);
     return result;
 }

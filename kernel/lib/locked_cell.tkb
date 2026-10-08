@@ -190,20 +190,26 @@ private linear struct GuardedFieldGuard[lock: addr] {
 
 // mutex_acquire, not pool_lock_acquire, for the reason at the top of this
 // file.
-fn guarded_field_take(m: *Mutex @ id) -> GuardedFieldGuard[id]
+fn guarded_field_take(m: &mut Mutex @ id) -> GuardedFieldGuard[id]
         !{acquires_lock_40_guarded_field, lock_guard_40_guarded_field} {
     let mut g: GuardedFieldGuard[id] = { mutex_acquire(m) };
     return g;
 }
 
-fn guarded_field_give(g: sink GuardedFieldGuard[id], m: *Mutex @ id) {
+fn guarded_field_give(g: sink GuardedFieldGuard[id], m: &mut Mutex @ id) {
     mutex_release(m, g.flags);
 }
 
-// The only way to the value. Tied to the guard, so it dies with it.
-fn guarded_usize_value(g: borrow GuardedFieldGuard[lock],
-                       f: *GuardedField(usize)) -> *usize @ lock {
-    return &(*f).value;
+// Value operations keep the field loan at the call boundary. The enclosing
+// module still assigns each field to the correct lock.
+fn guarded_usize_load(g: borrow GuardedFieldGuard[lock],
+                      f: borrow &mut GuardedField(usize)) -> usize {
+    return f.value;
+}
+
+fn guarded_usize_store(g: borrow GuardedFieldGuard[lock],
+                       f: borrow &mut GuardedField(usize), value: usize) {
+    f.value = value;
 }
 
 // The MMU-off window's way in, and the only one. See the limitation above
