@@ -9858,10 +9858,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     in
     let loan_transfer_source = Option.map (fun (source, _) -> pvar source)
       (StringMap.find_opt (overload_key fdef.name fdef.params) loan_transfers) in
-    let borrowed_pointer_return_authorities =
+    let borrowed_region_return_authorities =
       match StringMap.find_opt (overload_key fdef.name fdef.params)
           region_return_info with
-      | Some (indices, RegionPointer) ->
+      | Some (indices, _) ->
           List.fold_left (fun paths index ->
             let name, _ = List.nth fdef.params index in
             PathSet.add (pvar name) paths) PathSet.empty indices
@@ -10267,6 +10267,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                      expr_taint taints base
                  | _ -> address_origin base)
             | Ast.Index (base, _) -> base_taint taints base
+            | Ast.Deref pointer -> expr_taint taints pointer
             | _ -> PathSet.empty in
           address_origin place
       | Ast.Var n ->
@@ -10283,8 +10284,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
              stack-array subslice cannot be returned" regressed without
              this special case). base_taint captures exactly this. *)
           base_taint taints base
-      | Ast.Cast (Ast.TypeSlice _, { Ast.desc = Ast.Var n; _ }) ->
-          TaintEnv.get n taints
+      | Ast.Cast (Ast.TypeSlice _, base) ->
+          base_taint taints base
       | Ast.Cast (_, x) | Ast.Bnot x | Ast.Unsafe x -> expr_taint taints x
       | Ast.Deref x | Ast.FieldGet (x, _) when expr_has_region_result e ->
           expr_taint taints x
@@ -10321,14 +10322,23 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                  PathSet.empty args
            | None -> PathSet.empty)
       | _ -> PathSet.empty
-    (* GitHub issue #217: an Index/SliceOf base's own taint -- a bare Var
-       goes straight to TaintEnv (bypassing expr_taint's ordinary Var
-       case's TypeArray exclusion, which exists for plain array reads
-       elsewhere and is NOT what a subslice/element access of that same
-       array means), anything else recurses through expr_taint normally. *)
+    (* Array-to-slice conversion and slicing borrow a place, rather than
+       copying its value. Walk field/index/dereference places back to their
+       authority; ordinary scalar or whole-array reads keep value semantics. *)
     and base_taint taints (base : Ast.expr) =
       match base.desc with
-      | Ast.Var n -> TaintEnv.get n taints
+      | Ast.Var n ->
+          let inherited = TaintEnv.get n taints in
+          (* A by-value record, including a parameter, is callee-owned
+             storage. Borrowing an inline array field must retain that
+             place even though reading the record by value is a copy. *)
+          (match Option.map strip_borrow (StringMap.find_opt n !var_types) with
+           | Some (Ast.TypeNamed name) when StringMap.mem name senv ->
+               PathSet.add (pvar_expr base n) inherited
+           | _ -> inherited)
+      | Ast.FieldGet (parent, _) | Ast.Index (parent, _) | Ast.Deref parent ->
+          base_taint taints parent
+      | Ast.Unsafe inner -> base_taint taints inner
       | _ -> expr_taint taints base
     in
     let accepts_region_borrow = function
@@ -10476,7 +10486,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         | _ -> false in
       let borrowed_return = escape = `Return
         && not (PathSet.is_empty t)
-        && PathSet.subset t borrowed_pointer_return_authorities in
+        && PathSet.subset t borrowed_region_return_authorities in
       if not transferred && not borrowed_return && not (PathSet.is_empty t)
          && not (PathSet.subset t handoff_authorities) then
         let owner = path_to_string (PathSet.choose t) in

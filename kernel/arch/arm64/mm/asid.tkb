@@ -42,7 +42,7 @@
 //   spaces each; between #479 and #452 they were locked but the binding
 //   was a comment.
 // - THE ONE WAY AROUND IT is asid_init/asid_assign_boot, which reach the
-//   state through locked_cell_value_boot and are `!{unsafe}` so that the
+//   state through locked_cell_load_boot and are `!{unsafe}` so that the
 //   exception is visible in their signatures and in the trusted-base
 //   inventory. Both run in the MMU-off window, where a lock is impossible
 //   (AArch64 has no exclusives on Device-typed memory, which is what
@@ -117,7 +117,7 @@ struct AsidState {
 // Zeroed from .bss like every global, which is NOT the starting state
 // here -- next and generation must both be 1. asid_init supplies them,
 // and it runs in the MMU-off window where no lock can be taken at all
-// (see asid_assign_boot below), so it goes through locked_cell_value_boot.
+// (see asid_assign_boot below), so it goes through locked_cell_load_boot.
 private let mut asid_cell: LockedCell(AsidState);
 
 // Called from kernel_mmu_init with the MMU OFF: an mrs and some
@@ -130,21 +130,22 @@ fn asid_init() !{mmu_off, unsafe} {
     asid_bits = mmu_asid_bits();
     // 1 << 16 is 65536 numbers, of which 65535 are assignable.
     asid_last = (1 << asid_bits) - 1;
-    // locked_cell_value_boot, not locked_cell_value: this runs with the
+    // locked_cell_load_boot, not locked_cell_value: this runs with the
     // MMU off, where spin_lock is unavailable by architecture rather than
     // by choice (no exclusives on Device-typed memory) and unnecessary
     // besides -- PSCI has not been asked for a second core yet.
-    let state = locked_cell_value_boot(&asid_cell);
+    let mut state: AsidState = locked_cell_load_boot(&asid_cell);
     state.generation = 1;
     state.next = 1;
+    locked_cell_store_boot(&asid_cell, state);
 }
 
 // DDB's `vm` (GitHub issue #584's long churn run reads it): generation,
 // next number and rollover count, without the lock a stopped CPU may hold.
 // The three words are not a consistent snapshot if a rollover is racing.
 fn asid_reporter_state() -> (usize, usize, usize) !{unsafe} {
-    let state = locked_cell_value_reporter(&asid_cell);
-    return ((*state).generation, (*state).next, (*state).rollover_count);
+    let mut state: AsidState = locked_cell_load_reporter(&asid_cell);
+    return (state.generation, state.next, state.rollover_count);
 }
 
 fn asid_width_bits() -> usize {
@@ -163,7 +164,7 @@ fn asid_highest_value() -> usize {
 // numbers than it asked for (issue #479).
 fn asid_current_generation() -> usize {
     let guard = locked_cell_take(&asid_cell);
-    let state = locked_cell_value(guard, &asid_cell);
+    let mut state: AsidState = locked_cell_load(guard, &asid_cell);
     let generation: usize = state.generation;
     locked_cell_give(&asid_cell, guard);
     return generation;
@@ -171,7 +172,7 @@ fn asid_current_generation() -> usize {
 
 fn asid_rollover_count_value() -> usize {
     let guard = locked_cell_take(&asid_cell);
-    let state = locked_cell_value(guard, &asid_cell);
+    let mut state: AsidState = locked_cell_load(guard, &asid_cell);
     let count: usize = state.rollover_count;
     locked_cell_give(&asid_cell, guard);
     return count;
@@ -183,7 +184,7 @@ fn asid_rollover_count_value() -> usize {
 // value both write value+1, and one number gets handed out twice.
 fn asid_next_value() -> usize {
     let guard = locked_cell_take(&asid_cell);
-    let state = locked_cell_value(guard, &asid_cell);
+    let mut state: AsidState = locked_cell_load(guard, &asid_cell);
     let next: usize = state.next;
     locked_cell_give(&asid_cell, guard);
     return next;
@@ -198,7 +199,7 @@ fn asid_generation_is_current(generation: usize) -> bool {
 
 // The whole cost of the scheme, in one place. Every number is about to be
 // handed out again, so every entry tagged with one has to go.
-private fn asid_rollover(state: borrow *AsidState) {
+private fn asid_rollover(state: borrow &mut AsidState) {
     state.generation = state.generation + 1;
     // Root 0 is shared by every core and never released. Keeping its ASID
     // permanently reserved makes its backing immutable after MMU-off boot;
@@ -220,7 +221,7 @@ must_use variant AsidAssignAttempt {
 
 fn asid_assign_attempt() -> AsidAssignAttempt {
     let guard = locked_cell_take(&asid_cell);
-    let state = locked_cell_value(guard, &asid_cell);
+    let mut state: AsidState = locked_cell_load(guard, &asid_cell);
     if (state.next > asid_last) {
         locked_cell_give(&asid_cell, guard);
         return AsidAssignAttempt::RolloverNeeded;
@@ -228,6 +229,7 @@ fn asid_assign_attempt() -> AsidAssignAttempt {
     let value: usize = state.next;
     state.next = state.next + 1;
     let generation: usize = state.generation;
+    locked_cell_store(guard, &asid_cell, state);
     locked_cell_give(&asid_cell, guard);
     return AsidAssignAttempt::Assigned((value, generation));
 }
@@ -236,8 +238,9 @@ fn asid_assign_attempt() -> AsidAssignAttempt {
 // the counter exhausted, as the 65533rd assignment of a generation does.
 fn asid_force_rollover_needed() {
     let guard = locked_cell_take(&asid_cell);
-    let state = locked_cell_value(guard, &asid_cell);
+    let mut state: AsidState = locked_cell_load(guard, &asid_cell);
     state.next = asid_last + 1;
+    locked_cell_store(guard, &asid_cell, state);
     locked_cell_give(&asid_cell, guard);
 }
 
@@ -246,10 +249,11 @@ fn asid_force_rollover_needed() {
 // false means the requested work is already done rather than failure.
 fn asid_rollover_stopped(stopped: borrow MachineStopped[&kernel_world_stop]) -> bool {
     let guard = locked_cell_take(&asid_cell);
-    let state = locked_cell_value(guard, &asid_cell);
+    let mut state: AsidState = locked_cell_load(guard, &asid_cell);
     let mut rolled: bool = false;
     if (state.next > asid_last) {
-        asid_rollover(state);
+        asid_rollover(&state);
+        locked_cell_store(guard, &asid_cell, state);
         rolled = true;
     }
     locked_cell_give(&asid_cell, guard);
@@ -282,8 +286,9 @@ fn asid_rollover_stopped(stopped: borrow MachineStopped[&kernel_world_stop]) -> 
 // mask is the shape that hangs.
 fn asid_assign() -> (usize, usize) {
     let guard = locked_cell_take(&asid_cell);
-    let state = locked_cell_value(guard, &asid_cell);
-    let result: (usize, usize) = asid_assign_locked(state);
+    let mut state: AsidState = locked_cell_load(guard, &asid_cell);
+    let result: (usize, usize) = asid_assign_locked(&state);
+    locked_cell_store(guard, &asid_cell, state);
     locked_cell_give(&asid_cell, guard);
     return result;
 }
@@ -294,8 +299,10 @@ fn asid_assign() -> (usize, usize) {
 // correct: root 0 takes its ASID before PSCI has been asked for a second
 // core.
 fn asid_assign_boot() -> (usize, usize) !{mmu_off, unsafe} {
-    let state = locked_cell_value_boot(&asid_cell);
-    return asid_assign_locked(state);
+    let mut state: AsidState = locked_cell_load_boot(&asid_cell);
+    let result: (usize, usize) = asid_assign_locked(&state);
+    locked_cell_store_boot(&asid_cell, state);
+    return result;
 }
 
 // asid_last and asid_bits stay outside the cell deliberately: asid_init
@@ -303,7 +310,7 @@ fn asid_assign_boot() -> (usize, usize) !{mmu_off, unsafe} {
 // nothing writes them again. Keeping them out is what lets
 // asid_width_bits() and asid_highest_value() stay lock-free for the
 // callers that only want to print the width.
-private fn asid_assign_locked(state: borrow *AsidState) -> (usize, usize) {
+private fn asid_assign_locked(state: borrow &mut AsidState) -> (usize, usize) {
     if (state.next > asid_last) { asid_rollover(state); }
     let value: usize = state.next;
     state.next = state.next + 1;

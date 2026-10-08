@@ -21286,7 +21286,7 @@ let indexed_cell_copy_fixture = {|
   linear view CopyCellGuard[cell: addr];
   private let mut copy_cell_a: CopyCell(usize);
   private let mut copy_cell_b: CopyCell(usize);
-  fn copy_cell_take(cell: &mut CopyCell(usize) @ id) -> CopyCellGuard[id] {
+  fn copy_cell_take(T: type, cell: &mut CopyCell(T) @ id) -> CopyCellGuard[id] {
     return view CopyCellGuard[id];
   }
   fn copy_cell_give(guard: sink CopyCellGuard[id]) {}
@@ -21300,7 +21300,75 @@ let indexed_cell_copy_fixture = {|
   }
 |}
 
+let array_record_loan_fixture = {|
+  struct ArrayLoanRecord { words: [usize; 2]; }
+  linear view ArrayGuard[g: usize];
+  private let mut array_loan_record: ArrayLoanRecord;
+  fn array_guard_new() -> ArrayGuard[1] { return view ArrayGuard[1]; }
+  fn array_guard_end(guard: sink ArrayGuard[g]) {}
+  fn array_record(guard: borrow ArrayGuard[g]) -> &mut ArrayLoanRecord @ g {
+    return &array_loan_record;
+  }
+|}
+
 let indexed_reference_tests = [
+  Alcotest.test_case "local record array field slice cannot escape" `Quick
+    (expect_type_error "cannot be returned" {|
+      struct Record { words: [usize; 2]; }
+      fn wrong() -> []usize { let mut value: Record = { { 11, 13 } };
+        return value.words as []usize; }
+    |});
+  Alcotest.test_case "value parameter array field slice cannot escape" `Quick
+    (expect_type_error "cannot be returned" {|
+      struct Record { words: [usize; 2]; }
+      fn wrong(value: Record) -> []usize { return value.words as []usize; }
+    |});
+  Alcotest.test_case "nested local record array subslice cannot escape" `Quick
+    (expect_type_error "cannot be returned" {|
+      struct Record { words: [usize; 2]; }
+      struct Outer { inner: Record; }
+      fn wrong() -> []usize { let mut value: Outer = { { { 11, 13 } } };
+        return value.inner.words[0..<2]; }
+    |});
+  Alcotest.test_case "raw widened record array slice retains authority" `Quick
+    (expect_type_error "cannot be used after" (array_record_loan_fixture ^ {|
+      fn wrong() -> usize { let guard = array_guard_new(); let record = array_record(guard);
+        let raw = record as *ArrayLoanRecord; let words = raw.words as []usize;
+        array_guard_end(guard); return words[0]; }
+    |}));
+  Alcotest.test_case "record value copy survives authority release" `Quick
+    (fun () -> ignore (gen_codegen (array_record_loan_fixture ^ {|
+      fn probe() -> usize { let guard = array_guard_new(); let record = array_record(guard);
+        let mut copied: ArrayLoanRecord = *record; array_guard_end(guard);
+        let words = copied.words as []usize; words[0] = 42; return words[0]; }
+    |})));
+  Alcotest.test_case "record array field slice retains indexed authority" `Quick
+    (expect_type_error "cannot be used after" (array_record_loan_fixture ^ {|
+      fn probe() -> usize { let guard = array_guard_new(); let record = array_record(guard);
+        let words = record.words as []usize; array_guard_end(guard); return words[0]; }
+    |}));
+  Alcotest.test_case "record array subslice retains indexed authority" `Quick
+    (expect_type_error "cannot be used after" (array_record_loan_fixture ^ {|
+      fn probe() -> usize { let guard = array_guard_new(); let record = array_record(guard);
+        let words = record.words[0..<2]; array_guard_end(guard); return words[0]; }
+    |}));
+  Alcotest.test_case "dereferenced record array slice retains indexed authority" `Quick
+    (expect_type_error "cannot be used after" (array_record_loan_fixture ^ {|
+      fn probe() -> usize { let guard = array_guard_new(); let record = array_record(guard);
+        let words = (*record).words as []usize; array_guard_end(guard); return words[0]; }
+    |}));
+  Alcotest.test_case "record array field borrowed while live codegens" `Quick
+    (fun () -> ignore (gen_codegen (array_record_loan_fixture ^ {|
+      fn probe() -> usize { let guard = array_guard_new(); let record = array_record(guard);
+        let words = record.words as []usize; words[0] = 42; let value = words[0];
+        array_guard_end(guard); return value; }
+    |})));
+  Alcotest.test_case "indexed reference field address cannot relabel dereferenced borrow" `Quick
+    (expect_type_error "cannot be returned" (array_record_loan_fixture ^ {|
+      struct Outer { inner: ArrayLoanRecord; }
+      fn wrong(guard: borrow ArrayGuard[g], record: borrow &mut Outer)
+          -> &mut ArrayLoanRecord @ g { return &(*record).inner; }
+    |}));
   Alcotest.test_case "indexed cell value copy codegens" `Quick
     (fun () -> ignore (gen_codegen (indexed_cell_copy_fixture ^ {|
       fn probe() -> usize { let guard = copy_cell_take(&copy_cell_a);

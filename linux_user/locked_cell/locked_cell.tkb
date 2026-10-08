@@ -74,6 +74,21 @@ fn locked_cell_roundtrip() -> i32 !{unsafe} {
     return 0;
 }
 
+// A guarded three-word record copy survives unlock without retaining storage.
+struct LockedRecord { value: usize; words: [usize; 2]; }
+private let mut record_cell: LockedCell(LockedRecord);
+
+fn locked_record_roundtrip() -> usize {
+    let guard = locked_cell_take(&record_cell);
+    let mut source: LockedRecord = { 42, { 11, 13 } };
+    locked_cell_store(guard, &record_cell, source);
+    let mut value: LockedRecord = locked_cell_load(guard, &record_cell);
+    locked_cell_give(&record_cell, guard);
+    return value.value + value.words[0] + value.words[1];
+}
+
 fn app_main() -> i32 !{unsafe} {
-    return locked_cell_roundtrip();
+    let result: i32 = locked_cell_roundtrip();
+    uart_println_hex(locked_record_roundtrip() as i32);
+    return result;
 }

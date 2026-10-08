@@ -62,7 +62,7 @@
 // invites relying on a guarantee that quietly stopped holding.
 // - IT PROVES THE DISCIPLINE, NOT THE ASSIGNMENT. That the value in this
 //   cell is the data this lock is supposed to protect is still a module
-//   obligation -- the same caveat kernel/net/tcp.tkb's retx_retry_state
+//   obligation -- the same caveat kernel/net/tcp.tkb's retry-state accessors
 //   carries, and SPEC.md states it under "Guard-derived pointers". What
 //   is machine-checked is that nobody reaches the value without holding
 //   the guard, and that no path forgets to give it back.
@@ -81,7 +81,9 @@
 //   and does not need to be, since that code runs before PSCI has been
 //   asked for a second core. Nothing checks that a caller is really in
 //   that window.
-// - locked_cell_value_reporter IS A DEBUG/TERMINAL-REPORT ESCAPE HATCH. It
+// - locked_cell_value_reporter and locked_cell_load_reporter are
+//   DEBUG/TERMINAL-REPORT ESCAPE HATCHES. A copied result avoids an escaping
+//   alias but is not a coherent snapshot. It
 //   may observe fields from different moments unless its caller holds a
 //   complete world-stop proof, and must never decide a kernel mutation or
 //   continuation. Its callers cannot wait for a lock the inspected core may
@@ -237,4 +239,12 @@ fn locked_cell_load_boot(T: type, cell: borrow &mut LockedCell(T) @ id)
 fn locked_cell_store_boot(T: type, cell: borrow &mut LockedCell(T) @ id,
                          value: T) !{unsafe} {
     (*cell).value = value;
+}
+
+// A reporter copies values without locking. This is not a consistent snapshot
+// if a mutator is running; it carries the same explicit unsafe contract as
+// locked_cell_value_reporter and exports no alias.
+fn locked_cell_load_reporter(T: type, cell: borrow &mut LockedCell(T) @ id)
+        -> T !{unsafe} {
+    return (*cell).value;
 }

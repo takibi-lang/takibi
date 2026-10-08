@@ -2651,7 +2651,11 @@ fn f() {
   legal when `g` identifies the borrowed or sunk lifetime authority required
   by the existing region-return rules. The result and address aliases copied
   from its fields retain that authority: consuming or invalidating the owner
-  before a subsequent read or write is a compile error. Private
+  before a subsequent read or write is a compile error. Converting or slicing
+  an inline array field borrows its containing place, including nested fields
+  and explicit dereferences; it retains that place's authority. Slices of
+  inline arrays in local or by-value parameter records cannot escape the
+  function. Copying a whole record or array remains a value operation. Private
   `loan_transfer` functions may transfer this loan to their destination guard
   under the same rules as indexed pointers. An unindexed reference return,
   struct field, global, or array/slice element remains rejected. This is an
