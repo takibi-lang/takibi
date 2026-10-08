@@ -1,8 +1,8 @@
 {
   "date": "2026-10-08",
   "event": "incremental",
-  "decision": "measured",
-  "source_sha256": "9b32e7f18d4653f488be2babb43931e3e4a0104498b3ba2434707564d2460e44",
+  "decision": "reuse",
+  "source_sha256": "c659d630546bb2518e438634b15f17b1df14cc381daa74ca7a5e5ac2ff4054c1",
   "workload": "Fresh standard production QEMU/RPi5 linked kernels compared with 00cd6dd0 (including the per-signal action table), using space_delta.py, llvm-size-19 and llvm-nm-19. Incremental local compiler/ELF validation and replay-diagnostic corrections do not change storage or allocation behavior. Reuse earlier workload evidence at its recorded strength; older pool endpoints precede the upstream record-size change and are not current occupancy measurements. Final clean allcheck provides separate real RPi5 functional evidence.",
   "evidence": [
     "docs/RAW_AUTHORITY_AUDIT_SPACE_2026-10-08.md",
@@ -20,6 +20,6 @@
     "docs/DMA_MINT_FILES_2026-10-08.md",
     "docs/DMA_TRANSMIT_2026-10-08.md"
   ],
-  "assessment": "Adopt the audit corrections: QEMU text +16 bytes to 719068; RPi5 text unchanged at 728740. Data 5070/2888776 and BSS 1658592/1697600 are unchanged; no data/BSS symbol-size changes. Image reservations remain 2392064/5341184 bytes. No persistent payload/slot or allocation-policy change. Preserve the separately reviewed upstream 1832-byte ProcessRecord and computed process-chunk capacity; do not reuse the older 872-byte endpoint samples as new measurements. No added unsafe/raw mint. File confinement is still opt-in and the shared-slice/fallible-copy gaps remain.",
+  "assessment": "Reuse for the #629/#722 session-audit corrections, measured against origin/main 0e8ab289 with scripts/space_delta.py: text +328/+328 bytes (QEMU/RPi5), data +8 (one usize, init_boot_fixture_status, the reaped init.sh exit status), BSS +16/0 from placement; no record, pool or allocation workload changes and reserved spans are unchanged. The compiler change only refuses a construct codegen could not lower. Earlier: Adopt the audit corrections: QEMU text +16 bytes to 719068; RPi5 text unchanged at 728740. Data 5070/2888776 and BSS 1658592/1697600 are unchanged; no data/BSS symbol-size changes. Image reservations remain 2392064/5341184 bytes. No persistent payload/slot or allocation-policy change. Preserve the separately reviewed upstream 1832-byte ProcessRecord and computed process-chunk capacity; do not reuse the older 872-byte endpoint samples as new measurements. No added unsafe/raw mint. File confinement is still opt-in and the shared-slice/fallible-copy gaps remain.",
   "next_trigger": "Measure at the typed atomic/probe or bounded-copy milestone, process trust-boundary separation, final raw-authority confinement, or a changed allocation/lifetime workload."
 }
