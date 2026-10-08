@@ -11094,6 +11094,63 @@ fn f() -> *usize { return &temp_address_outer().r.a; }");
              (contains_substring msg
                 "may only be called in its declaring file 'mint.tkb'"));
 
+  (* GitHub issue #717: transmit allocations use the same tokens. *)
+  Alcotest.test_case "fixed DMA transmit round trip compiles" `Quick
+    (expect_codegen_ok
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaTx717 { private bytes: [u8; 64]; }
+        private let mut dma_tx717: DmaTx717 align(64);
+        fn send717(cpu: sink *DmaTx717Cpu) -> *DmaTx717Cpu !{unsafe} {
+          let bytes = dma_cpu_slice(cpu, DmaTx717);
+          bytes[0] = 7;
+          let device = dma_begin_tx(cpu, DmaTx717);
+          let mut span = dma_device_span(device, DmaTx717, 0, 31);
+          let address = unsafe { dma_span_address(span) };
+          return dma_finish_owned_tx(device, DmaTx717);
+        }");
+
+  Alcotest.test_case "fixed DMA transmit refuses a CPU write while the device reads" `Quick
+    (expect_type_error
+       "derived from linear value 'cpu' and cannot be used after 'cpu' is consumed"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaTx717 { private bytes: [u8; 64]; }
+        private let mut dma_tx717: DmaTx717 align(64);
+        fn bad(cpu: sink *DmaTx717Cpu) -> *DmaTx717Device {
+          let bytes = dma_cpu_slice(cpu, DmaTx717);
+          let device = dma_begin_tx(cpu, DmaTx717);
+          bytes[0] = 0;
+          return device;
+        }");
+
+  Alcotest.test_case "fixed DMA transmit cannot reuse a buffer without its mint file" `Quick
+    (fun () ->
+       match infer_files [
+         "mint.tkb", "struct no_copy Mutex { private word: usize; }
+          struct dma_fixed DmaTx717 { private bytes: [u8; 64]; }
+          private let mut dma_tx717: DmaTx717 align(64);";
+         "driver.tkb", "fn bad(device: sink *DmaTx717Device) -> *DmaTx717Cpu {
+            return unsafe { dma_finish_owned_tx(device, DmaTx717) };
+          }";
+       ] with
+       | _ -> Alcotest.fail "expected TypeError, but inference succeeded"
+       | exception Types.TypeError (_, msg) ->
+           Alcotest.(check bool) "names the mint file" true
+             (contains_substring msg
+                "dma_finish_owned_tx for 'DmaTx717' may only be called in its declaring file 'mint.tkb'"));
+
+  Alcotest.test_case "fixed DMA record has one direction" `Quick
+    (expect_type_error
+       "fixed DMA record 'DmaTx717' is used for receive here but for transmit"
+       "struct no_copy Mutex { private word: usize; }
+        struct dma_fixed DmaTx717 { private bytes: [u8; 64]; }
+        private let mut dma_tx717: DmaTx717 align(64);
+        fn send(cpu: sink *DmaTx717Cpu) -> *DmaTx717Device {
+          return dma_begin_tx(cpu, DmaTx717);
+        }
+        fn mixed(device: sink *DmaTx717Device) -> *DmaTx717Cpu {
+          return dma_finish_owned_rx(device, DmaTx717);
+        }");
+
   Alcotest.test_case "fixed DMA slot cannot be replicated by zero initialization" `Quick
     (expect_type_error
        "must have only its compiler-created owner slot"

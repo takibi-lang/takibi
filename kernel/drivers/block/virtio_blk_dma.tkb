@@ -1,0 +1,232 @@
+// GitHub issues #716 and #717: the mint file of the virtio-blk DMA
+// allocations -- the receive allocation, the request header and the
+// written data block. dma_finish_owned_rx and dma_finish_owned_tx are
+// accepted only in the file that declares the record, so this file is the
+// whole trusted claim that device ownership may return to the CPU. It
+// returns ownership of every allocation a request submitted after one of
+// two observations, and nowhere else:
+//   - virtio_blk_receive_settle_used: the device advanced the used ring
+//     past the driver's shadow, so it has written the request's data and
+//     status (virtio 1.x, 2.7.8);
+//   - virtio_blk_receive_settle_reset: the status register read back zero
+//     after a reset, so the device no longer touches the queue (virtio
+//     1.x, 2.1).
+// Every other function here only moves the tokens between the owner slots
+// and their callers. Keep anything else out of this file.
+
+use "kernel/lib/mutex.tkb";
+
+// The descriptor still exposes one status byte at offset 1024.
+struct dma_fixed VirtioBlkReceive { private bytes: [u8; 1088]; }
+private let mut virtio_blk_receive: VirtioBlkReceive align(64);
+
+private linear struct VirtioBlkReceiveGuard[lock: addr] {
+    private flags: usize;
+}
+
+private fn virtio_blk_receive_lock(lock: *Mutex @ address)
+        -> VirtioBlkReceiveGuard[address]
+        !{acquires_lock_40_virtio_blk_receive,
+          lock_guard_40_virtio_blk_receive} {
+    let mut guard: VirtioBlkReceiveGuard[address] = { mutex_acquire(lock) };
+    return guard;
+}
+
+private fn virtio_blk_receive_unlock(
+        guard: sink VirtioBlkReceiveGuard[address],
+        lock: *Mutex @ address) {
+    mutex_release(lock, guard.flags);
+}
+
+fn virtio_blk_receive_take() -> VirtioBlkReceiveAuthority {
+    let guard = virtio_blk_receive_lock(&dma_owner_VirtioBlkReceive.mutex);
+    let previous: VirtioBlkReceiveAuthority = stable_replace(
+        guard, &dma_owner_VirtioBlkReceive.mutex,
+        dma_owner_VirtioBlkReceive.value,
+        VirtioBlkReceiveAuthority::Empty);
+    virtio_blk_receive_unlock(guard, &dma_owner_VirtioBlkReceive.mutex);
+    return previous;
+}
+
+private fn virtio_blk_receive_fail_cpu(stale: sink *VirtioBlkReceiveCpu) {
+    kernel_syscall_fail_stop(0);
+}
+
+fn virtio_blk_receive_fail_device(stale: sink *VirtioBlkReceiveDevice) {
+    kernel_syscall_fail_stop(0);
+}
+
+fn virtio_blk_receive_put(value: sink VirtioBlkReceiveAuthority) {
+    let guard = virtio_blk_receive_lock(&dma_owner_VirtioBlkReceive.mutex);
+    let previous: VirtioBlkReceiveAuthority = stable_replace(
+        guard, &dma_owner_VirtioBlkReceive.mutex,
+        dma_owner_VirtioBlkReceive.value, value);
+    virtio_blk_receive_unlock(guard, &dma_owner_VirtioBlkReceive.mutex);
+    match previous {
+        VirtioBlkReceiveAuthority::Empty => { return; }
+        VirtioBlkReceiveAuthority::Cpu(stale) => {
+            virtio_blk_receive_fail_cpu(stale);
+        }
+        VirtioBlkReceiveAuthority::Device(stale) => {
+            virtio_blk_receive_fail_device(stale);
+        }
+    }
+}
+
+
+// The device reads these two. The request header is 16 bytes in a whole
+// cache line; the data block is submitted only by writes.
+struct dma_fixed VirtioBlkRequestTransmit { private bytes: [u8; 64]; }
+private let mut virtio_blk_request_transmit: VirtioBlkRequestTransmit align(64);
+struct dma_fixed VirtioBlkDataTransmit { private bytes: [u8; 1024]; }
+private let mut virtio_blk_data_transmit: VirtioBlkDataTransmit align(64);
+
+fn virtio_blk_request_take() -> VirtioBlkRequestTransmitAuthority {
+    let guard = virtio_blk_receive_lock(&dma_owner_VirtioBlkRequestTransmit.mutex);
+    let previous: VirtioBlkRequestTransmitAuthority = stable_replace(
+        guard, &dma_owner_VirtioBlkRequestTransmit.mutex,
+        dma_owner_VirtioBlkRequestTransmit.value, VirtioBlkRequestTransmitAuthority::Empty);
+    virtio_blk_receive_unlock(guard, &dma_owner_VirtioBlkRequestTransmit.mutex);
+    return previous;
+}
+
+private fn virtio_blk_request_fail_cpu(stale: sink *VirtioBlkRequestTransmitCpu) {
+    kernel_syscall_fail_stop(0);
+}
+
+fn virtio_blk_request_fail_device(stale: sink *VirtioBlkRequestTransmitDevice) {
+    kernel_syscall_fail_stop(0);
+}
+
+fn virtio_blk_request_put(value: sink VirtioBlkRequestTransmitAuthority) {
+    let guard = virtio_blk_receive_lock(&dma_owner_VirtioBlkRequestTransmit.mutex);
+    let previous: VirtioBlkRequestTransmitAuthority = stable_replace(
+        guard, &dma_owner_VirtioBlkRequestTransmit.mutex,
+        dma_owner_VirtioBlkRequestTransmit.value, value);
+    virtio_blk_receive_unlock(guard, &dma_owner_VirtioBlkRequestTransmit.mutex);
+    match previous {
+        VirtioBlkRequestTransmitAuthority::Empty => { return; }
+        VirtioBlkRequestTransmitAuthority::Cpu(stale) => { virtio_blk_request_fail_cpu(stale); }
+        VirtioBlkRequestTransmitAuthority::Device(stale) => { virtio_blk_request_fail_device(stale); }
+    }
+}
+
+
+// Called only after an observed completion or a confirmed reset.
+private fn virtio_blk_request_settle() {
+    match virtio_blk_request_take() {
+        VirtioBlkRequestTransmitAuthority::Cpu(cpu) => {
+            virtio_blk_request_put(VirtioBlkRequestTransmitAuthority::Cpu(cpu));
+        }
+        VirtioBlkRequestTransmitAuthority::Device(device) => {
+            let restored = dma_finish_owned_tx(device, VirtioBlkRequestTransmit);
+            virtio_blk_request_put(VirtioBlkRequestTransmitAuthority::Cpu(restored));
+        }
+        VirtioBlkRequestTransmitAuthority::Empty => { kernel_syscall_fail_stop(0); }
+    }
+}
+
+fn virtio_blk_data_take() -> VirtioBlkDataTransmitAuthority {
+    let guard = virtio_blk_receive_lock(&dma_owner_VirtioBlkDataTransmit.mutex);
+    let previous: VirtioBlkDataTransmitAuthority = stable_replace(
+        guard, &dma_owner_VirtioBlkDataTransmit.mutex,
+        dma_owner_VirtioBlkDataTransmit.value, VirtioBlkDataTransmitAuthority::Empty);
+    virtio_blk_receive_unlock(guard, &dma_owner_VirtioBlkDataTransmit.mutex);
+    return previous;
+}
+
+private fn virtio_blk_data_fail_cpu(stale: sink *VirtioBlkDataTransmitCpu) {
+    kernel_syscall_fail_stop(0);
+}
+
+fn virtio_blk_data_fail_device(stale: sink *VirtioBlkDataTransmitDevice) {
+    kernel_syscall_fail_stop(0);
+}
+
+fn virtio_blk_data_put(value: sink VirtioBlkDataTransmitAuthority) {
+    let guard = virtio_blk_receive_lock(&dma_owner_VirtioBlkDataTransmit.mutex);
+    let previous: VirtioBlkDataTransmitAuthority = stable_replace(
+        guard, &dma_owner_VirtioBlkDataTransmit.mutex,
+        dma_owner_VirtioBlkDataTransmit.value, value);
+    virtio_blk_receive_unlock(guard, &dma_owner_VirtioBlkDataTransmit.mutex);
+    match previous {
+        VirtioBlkDataTransmitAuthority::Empty => { return; }
+        VirtioBlkDataTransmitAuthority::Cpu(stale) => { virtio_blk_data_fail_cpu(stale); }
+        VirtioBlkDataTransmitAuthority::Device(stale) => { virtio_blk_data_fail_device(stale); }
+    }
+}
+
+
+// Called only after an observed completion or a confirmed reset.
+private fn virtio_blk_data_settle() {
+    match virtio_blk_data_take() {
+        VirtioBlkDataTransmitAuthority::Cpu(cpu) => {
+            virtio_blk_data_put(VirtioBlkDataTransmitAuthority::Cpu(cpu));
+        }
+        VirtioBlkDataTransmitAuthority::Device(device) => {
+            let restored = dma_finish_owned_tx(device, VirtioBlkDataTransmit);
+            virtio_blk_data_put(VirtioBlkDataTransmitAuthority::Cpu(restored));
+        }
+        VirtioBlkDataTransmitAuthority::Empty => { kernel_syscall_fail_stop(0); }
+    }
+}
+
+// The device has not yet published a used entry beyond the driver's shadow.
+fn virtio_blk_used_pending() -> bool !{unsafe} {
+    let queue: *u8 = virtio_blk_queue as *u8;
+    return virtio_blk_used_seen == unsafe { ((queue + (VIRTIO_BLK_PAGE_SIZE as isize))
+                                    as *io VirtioBlkUsed) }.idx;
+}
+
+fn virtio_blk_reset() -> bool !{unsafe} {
+    virtio_blk_ready = false;
+    *(virtio_blk_reg(VIRTIO_BLK_STATUS)) = 0;
+    // A zero readback is the virtio reset completion point: the device must
+    // stop interacting with the queue before it reports that status.
+    let reset_start: i64 = read_cntpct();
+    let reset_ticks: i64 = read_cntfrq() * VIRTIO_BLK_COMPLETION_SECONDS;
+    while (read_cntpct() - reset_start < reset_ticks &&
+           *(virtio_blk_reg(VIRTIO_BLK_STATUS)) != 0) {
+    }
+    if (*(virtio_blk_reg(VIRTIO_BLK_STATUS)) != 0) {
+        virtio_blk_disabled = true;
+        return false;
+    }
+    return true;
+}
+
+must_use variant VirtioBlkReceiveUsed {
+    Observed;
+    Pending(*VirtioBlkReceiveDevice);
+}
+
+// Observed puts the CPU token back in the owner slot; Pending hands the
+// device token back unchanged for the reset path.
+fn virtio_blk_receive_settle_used(device: sink *VirtioBlkReceiveDevice)
+        -> VirtioBlkReceiveUsed !{unsafe} {
+    if (virtio_blk_used_pending()) {
+        return VirtioBlkReceiveUsed::Pending(device);
+    }
+    dma_consume();
+    virtio_blk_used_seen = virtio_ring_index_next(virtio_blk_used_seen);
+    let restored = dma_finish_owned_rx(device, VirtioBlkReceive);
+    virtio_blk_receive_put(VirtioBlkReceiveAuthority::Cpu(restored));
+    virtio_blk_request_settle();
+    virtio_blk_data_settle();
+    return VirtioBlkReceiveUsed::Observed;
+}
+
+// A failed reset keeps every device token in its slot, so no range is
+// reused in this boot.
+fn virtio_blk_receive_settle_reset(device: sink *VirtioBlkReceiveDevice)
+        -> bool !{unsafe} {
+    if (virtio_blk_reset() == false) {
+        virtio_blk_receive_put(VirtioBlkReceiveAuthority::Device(device));
+        return false;
+    }
+    let restored = dma_finish_owned_rx(device, VirtioBlkReceive);
+    virtio_blk_receive_put(VirtioBlkReceiveAuthority::Cpu(restored));
+    virtio_blk_request_settle();
+    virtio_blk_data_settle();
+    return true;
+}

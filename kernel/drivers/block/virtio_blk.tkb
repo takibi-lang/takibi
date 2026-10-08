@@ -4,7 +4,7 @@
 
 use "kernel/drivers/virtio_ring.tkb";
 use "kernel/lib/mutex.tkb";
-use "kernel/drivers/block/virtio_blk_receive.tkb";
+use "kernel/drivers/block/virtio_blk_dma.tkb";
 
 const VIRTIO_BLK_GUEST_FEATURES: i32 = 0x20;
 const VIRTIO_BLK_GUEST_PAGE_SIZE: i32 = 0x28;
@@ -59,8 +59,8 @@ let mut virtio_blk_ready: bool;
 // Do not reinitialize the queue or reuse those buffers in that case.
 let mut virtio_blk_disabled: bool;
 let mut virtio_blk_queue: [u8; 2 * VIRTIO_BLK_PAGE_SIZE] align(4096);
-// TX data uses its own scratch block. RX data and the one-byte status occupy
-// separate cache lines in one protected allocation. The block-device TaskMutex
+// The request header, TX data, and RX data with its one-byte status are
+// protected allocations in virtio_blk_dma.tkb (#716, #717). The block-device TaskMutex
 // serializes whole commands; the slot's Mutex protects only token exchange.
 //
 // One request carries a whole 1 KiB block (two sectors), as the USB backend's
@@ -68,8 +68,6 @@ let mut virtio_blk_queue: [u8; 2 * VIRTIO_BLK_PAGE_SIZE] align(4096);
 // synchronous requests, and on a loaded host their waits summed past the
 // lane's 70 s silence watchdog (2026-10-04).
 const VIRTIO_BLK_TRANSFER_BYTES: usize = 1024;
-let mut virtio_blk_data_buf: [u8; 1024] align(64);
-let mut virtio_blk_request_buf: [u8; 16] align(64);
 // Virtio's avail/used idx fields are free-running u16 counters. The nominal
 // domain keeps the driver shadow at that width and makes comparison with a
 // widened counter a type error before the mandatory 65535 -> 0 wrap.
@@ -157,13 +155,66 @@ fn virtio_blk_init() -> bool !{unsafe} {
     return true;
 }
 
-// The only writer of a device-written descriptor's address and length: both
-// come from one span, which dma_device_span proved inside the receive
+// The only writer of a descriptor's address and length: both
+// come from one span, which dma_device_span proved inside its
 // allocation (GitHub issue #623).
-private fn virtio_blk_desc_receive(descs: *VirtioBlkDesc, index: isize,
+private fn virtio_blk_desc_span(descs: *VirtioBlkDesc, index: isize,
                                    span: borrow DmaDeviceSpan) !{unsafe} {
     descs[index].addr = unsafe { dma_span_address(span) };
     descs[index].len = dma_span_length(span) as u32;
+}
+
+// The header's three little-endian fields (virtio 1.x, 5.2.6). The device
+// token stays in the owner slot until the request settles.
+private fn virtio_blk_submit_header(descs: *VirtioBlkDesc, request_type: u32,
+                                    sector: u32) !{unsafe} {
+    match virtio_blk_request_take() {
+        VirtioBlkRequestTransmitAuthority::Cpu(cpu) => {
+            let header = dma_cpu_slice(cpu, VirtioBlkRequestTransmit);
+            for i: usize in 0..<4 {
+                let sh: u32 = (i * 8) as u32;
+                header[i] = ((request_type >> sh) & 0xFF) as u8;
+                header[4 + i] = 0;
+                header[8 + i] = ((sector >> sh) & 0xFF) as u8;
+                header[12 + i] = 0;
+            }
+            let device = dma_begin_tx(cpu, VirtioBlkRequestTransmit);
+            let mut span = dma_device_span(device, VirtioBlkRequestTransmit,
+                                           0, 16);
+            virtio_blk_desc_span(descs, 0, span);
+            descs[0].flags = VIRTIO_BLK_DESC_F_NEXT as u16;
+            descs[0].next = 1;
+            virtio_blk_request_put(
+                VirtioBlkRequestTransmitAuthority::Device(device));
+        }
+        VirtioBlkRequestTransmitAuthority::Empty => {
+            kernel_syscall_fail_stop(0);
+        }
+        VirtioBlkRequestTransmitAuthority::Device(stale) => {
+            virtio_blk_request_fail_device(stale);
+        }
+    }
+}
+
+private fn virtio_blk_submit_write_data(descs: *VirtioBlkDesc,
+                                        source: borrow [u8; 1024..]) !{unsafe} {
+    match virtio_blk_data_take() {
+        VirtioBlkDataTransmitAuthority::Cpu(cpu) => {
+            slice_copy(dma_cpu_slice(cpu, VirtioBlkDataTransmit),
+                       source[0..<1024]);
+            let device = dma_begin_tx(cpu, VirtioBlkDataTransmit);
+            let mut span = dma_device_span(device, VirtioBlkDataTransmit,
+                                           0, VIRTIO_BLK_TRANSFER_BYTES);
+            virtio_blk_desc_span(descs, 1, span);
+            virtio_blk_data_put(VirtioBlkDataTransmitAuthority::Device(device));
+        }
+        VirtioBlkDataTransmitAuthority::Empty => {
+            kernel_syscall_fail_stop(0);
+        }
+        VirtioBlkDataTransmitAuthority::Device(stale) => {
+            virtio_blk_data_fail_device(stale);
+        }
+    }
 }
 
 private fn virtio_blk_submit_owned(request_type: u32, sector: u32,
@@ -174,44 +225,30 @@ private fn virtio_blk_submit_owned(request_type: u32, sector: u32,
     static_assert(sizeof(VirtioBlkReceive) >= 1025,
                   "the protected receive extent covers data and status");
     let sector_buffer = buffer[0..<1024];
-    if (write) {
-        slice_copy(virtio_blk_data_buf as []u8, sector_buffer);
-    }
-    let request: *VirtioBlkRequest = virtio_blk_request_buf as *VirtioBlkRequest;
-    request.request_type = request_type;
-    request.reserved = 0;
-    request.sector = sector as u64;
     let receive_view = dma_cpu_slice(receive_cpu, VirtioBlkReceive);
     receive_view[1024] = 0xff;
     let queue: *u8 = virtio_blk_queue as *u8;
     let descs: *VirtioBlkDesc = queue as *VirtioBlkDesc;
     let mut data_flags: i32 = 0;
     if (write == false) { data_flags = VIRTIO_BLK_DESC_F_WRITE; }
-    descs[0].addr = (virtio_blk_request_buf as *u8) as usize;
-    descs[0].len = sizeof(VirtioBlkRequest) as u32;
-    descs[0].flags = VIRTIO_BLK_DESC_F_NEXT as u16;
-    descs[0].next = 1;
-    dma_prepare_tx(virtio_blk_request_buf as *u8,
-                   sizeof(VirtioBlkRequest));
+
+    virtio_blk_submit_header(descs, request_type, sector);
+
     let receive_device = dma_begin_rx(receive_cpu, VirtioBlkReceive);
     let mut data_span = dma_device_span(receive_device, VirtioBlkReceive,
                                         0, VIRTIO_BLK_TRANSFER_BYTES);
     let mut status_span = dma_device_span(receive_device, VirtioBlkReceive,
                                           VIRTIO_BLK_TRANSFER_BYTES, 1);
     if (write) {
-        descs[1].addr = (virtio_blk_data_buf as *u8) as usize;
-        descs[1].len = VIRTIO_BLK_TRANSFER_BYTES as u32;
+        virtio_blk_submit_write_data(descs, sector_buffer);
     } else {
-        virtio_blk_desc_receive(descs, 1, data_span);
+        virtio_blk_desc_span(descs, 1, data_span);
     }
     descs[1].flags = data_flags as u16 | VIRTIO_BLK_DESC_F_NEXT as u16;
     descs[1].next = 2;
-    virtio_blk_desc_receive(descs, 2, status_span);
+    virtio_blk_desc_span(descs, 2, status_span);
     descs[2].flags = VIRTIO_BLK_DESC_F_WRITE as u16;
     descs[2].next = 0;
-    if (write) {
-        dma_prepare_tx(virtio_blk_data_buf as *u8, VIRTIO_BLK_TRANSFER_BYTES);
-    }
     let avail: *VirtioBlkAvail =
         (queue + VIRTIO_QNUM * (sizeof(VirtioBlkDesc) as isize))
         as *VirtioBlkAvail;

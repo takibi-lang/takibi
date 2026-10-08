@@ -10,11 +10,18 @@ let allocations : (string, string) Hashtbl.t = Hashtbl.create 8
    record's mint file: only there may device ownership return to the CPU. *)
 let decl_files : (string, string) Hashtbl.t = Hashtbl.create 8
 
+(* GitHub issue #717: record -> its transfer direction, fixed by the first
+   begin/finish the type checker sees. A receive finish invalidates the
+   cache range and a transmit finish does not, so mixing them on one
+   record could hand the CPU stale lines. *)
+type direction = Receive | Transmit
+let directions : (string, direction * Ast.loc) Hashtbl.t = Hashtbl.create 8
 let reset () =
   Hashtbl.reset pending;
   Hashtbl.reset records;
   Hashtbl.reset allocations;
-  Hashtbl.reset decl_files
+  Hashtbl.reset decl_files;
+  Hashtbl.reset directions
 
 let mark name = Hashtbl.replace pending name ()
 

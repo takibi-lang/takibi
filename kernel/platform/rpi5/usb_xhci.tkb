@@ -47,7 +47,7 @@
 // directly (DBOFF/RTSOFF are themselves Capability registers), so
 // rp1_usbhost0_doorbell/rp1_usbhost0_ir0 below are NOT offset from
 // rp1_usbhost0_op.
-use "kernel/platform/rpi5/usb_xhci_receive.tkb";
+use "kernel/platform/rpi5/usb_xhci_dma.tkb";
 use "kernel/drivers/usb/config_descriptor.tkb";
 use "kernel/drivers/usb/init_report.tkb";
 use "kernel/lib/mutex.tkb";
@@ -194,7 +194,6 @@ fn xhci_cmd_advance() {
     }
 }
 
-let mut msc_cbw_buf: [u8; 64] align(64);
 // TX uses the ordinary bounce buffer; RX uses a separate protected fixed
 // allocation. Both are isolated and cache-line aligned, so callers may use
 // ordinary byte slices regardless of their own alignment.
@@ -218,7 +217,6 @@ let mut msc_cbw_buf: [u8; 64] align(64);
 // ordinary transport/device error.
 const MSC_MAX_TRANSFER_SECTORS: usize = 128;
 const MSC_SECTOR_SIZE: usize = 512;
-let mut msc_bounce_buf: [u8; MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE] align(64);
 let mut msc_tag: u32 = 0;
 private let mut msc_write10_command_count: usize = 0;
 
@@ -613,28 +611,53 @@ fn msc_recover_transport() -> bool {
 }
 
 // Fills the fixed 15-byte CBW header and zeroes the 16-byte CDB region;
-// callers fill in the CDB's own opcode/fields at msc_cbw_buf[15..]
+// callers fill in the CDB's own opcode/fields with msc_cbw_set(15.., ...)
 // afterward. bCBWLUN is always 0 -- single-drive scope, same as the RPi3
 // side.
 fn msc_cbw_header(data_len: u32, dir_in: bool, cb_len: u32) {
     msc_tag = msc_tag + 1;
     let tag: u32 = msc_tag;
-    for i: usize in 0..<31 {
-        msc_cbw_buf[i] = 0;
+    match msc_cbw_take() {
+        MscCbwTransmitAuthority::Cpu(cpu) => {
+            let cbw = dma_cpu_slice(cpu, MscCbwTransmit);
+            for i: usize in 0..<31 {
+                cbw[i] = 0;
+            }
+            let sig: u32 = 0x43425355;
+            for i: usize in 0..<4 {
+                let sh: u32 = (i * 8) as u32;
+                cbw[i] = ((sig >> sh) & 0xFF) as u8;
+                cbw[4 + i] = ((tag >> sh) & 0xFF) as u8;
+                cbw[8 + i] = ((data_len >> sh) & 0xFF) as u8;
+            }
+            if (dir_in) {
+                cbw[12] = 0x80;
+            } else {
+                cbw[12] = 0x00;
+            }
+            cbw[14] = cb_len as u8;
+            msc_cbw_put(MscCbwTransmitAuthority::Cpu(cpu));
+        }
+        MscCbwTransmitAuthority::Empty => { kernel_syscall_fail_stop(0); }
+        MscCbwTransmitAuthority::Device(stale) => {
+            msc_cbw_fail_device(stale);
+        }
     }
-    let sig: u32 = 0x43425355;
-    for i: usize in 0..<4 {
-        let sh: u32 = (i * 8) as u32;
-        msc_cbw_buf[i] = ((sig >> sh) & 0xFF) as u8;
-        msc_cbw_buf[4 + i] = ((tag >> sh) & 0xFF) as u8;
-        msc_cbw_buf[8 + i] = ((data_len >> sh) & 0xFF) as u8;
+}
+
+// One CDB byte; the CDB occupies bytes 15..<31 of the CBW.
+fn msc_cbw_set(index: {15..<31 as usize}, value: u8) {
+    match msc_cbw_take() {
+        MscCbwTransmitAuthority::Cpu(cpu) => {
+            let cbw = dma_cpu_slice(cpu, MscCbwTransmit);
+            cbw[index] = value;
+            msc_cbw_put(MscCbwTransmitAuthority::Cpu(cpu));
+        }
+        MscCbwTransmitAuthority::Empty => { kernel_syscall_fail_stop(0); }
+        MscCbwTransmitAuthority::Device(stale) => {
+            msc_cbw_fail_device(stale);
+        }
     }
-    if (dir_in) {
-        msc_cbw_buf[12] = 0x80;
-    } else {
-        msc_cbw_buf[12] = 0x00;
-    }
-    msc_cbw_buf[14] = cb_len as u8;
 }
 
 // Run one complete Bulk-Only Transport command: CBW out, optional data
@@ -731,29 +754,22 @@ private fn msc_read_csw() -> MscCommandResult !{unsafe} {
     return msc_csw_receive_attempt(8);
 }
 
-fn msc_run_command(data_len: {0..<65537 as u32}, dir_in: bool,
-                   data: *align(64) u8) -> MscCommandResult {
-    // `data` is used only for outbound payloads. Inbound payloads use the
-    // protected receive allocation inside msc_data_receive_once.
-    let data_base: usize = data as usize;
-    let cbw_base: usize = (msc_cbw_buf as *u8) as usize;
-    let cbw_dma: usize = cbw_base + rp1_dma_pci_offset;
-    let data_dma: usize = data_base + rp1_dma_pci_offset;
-
-    dma_prepare_tx(msc_cbw_buf as *u8, 64);
-    let cbw_cc: u32 = usb_bulk_out(cbw_dma, 31);
-    if (cbw_cc == 0) {
-        match msc_abort_unobserved_transfer() {
-            MscTimeoutResult::RestartRequired => {
-                return MscCommandResult::RestartRequired;
-            }
-            MscTimeoutResult::ControllerUnusable => {
-                return MscCommandResult::ControllerUnusable;
+fn msc_run_command(data_len: {0..<65537 as u32}, dir_in: bool)
+        -> MscCommandResult {
+    // An outbound payload is already in the protected transmit allocation;
+    // an inbound one lands in the protected receive allocation.
+    match msc_cbw_send_once() {
+        MscDataReceiveResult::Completed(code) => {
+            if (code != 1) {
+                return MscCommandResult::CompletedError(1);
             }
         }
-    }
-    if (cbw_cc != 1) {
-        return MscCommandResult::CompletedError(1);
+        MscDataReceiveResult::RestartRequired => {
+            return MscCommandResult::RestartRequired;
+        }
+        MscDataReceiveResult::ControllerUnusable => {
+            return MscCommandResult::ControllerUnusable;
+        }
     }
 
     if (data_len > 0) {
@@ -772,20 +788,18 @@ fn msc_run_command(data_len: {0..<65537 as u32}, dir_in: bool,
                 }
             }
         } else {
-            dma_prepare_tx(data as *u8, data_len as usize);
-            let data_cc: u32 = usb_bulk_out(data_dma, data_len);
-            if (data_cc == 0) {
-                match msc_abort_unobserved_transfer() {
-                    MscTimeoutResult::RestartRequired => {
-                        return MscCommandResult::RestartRequired;
-                    }
-                    MscTimeoutResult::ControllerUnusable => {
-                        return MscCommandResult::ControllerUnusable;
+            match msc_data_send_once(data_len) {
+                MscDataReceiveResult::Completed(code) => {
+                    if (code != 1 && code != 13) {
+                        return MscCommandResult::CompletedError(2);
                     }
                 }
-            }
-            if (data_cc != 1 && data_cc != 13) {
-                return MscCommandResult::CompletedError(2);
+                MscDataReceiveResult::RestartRequired => {
+                    return MscCommandResult::RestartRequired;
+                }
+                MscDataReceiveResult::ControllerUnusable => {
+                    return MscCommandResult::ControllerUnusable;
+                }
             }
         }
     }
@@ -1373,8 +1387,8 @@ fn usb_disk_initialize_stages() -> UsbInitOutcome {
     let mut readiness: UsbRetryRecord = usb_retry_record_start();
     for i: usize in 0..<50 {
         msc_cbw_header(0, false, 6);
-        msc_cbw_buf[15] = 0x00;
-        match msc_run_command(0, false, msc_bounce_buf) {
+        msc_cbw_set(15, 0x00);
+        match msc_run_command(0, false) {
             MscCommandResult::Ok => {
                 readiness = usb_retry_record_attempt(readiness, 0);
             }
@@ -1402,8 +1416,8 @@ fn usb_disk_initialize_stages() -> UsbInitOutcome {
     // READ CAPACITY(10): confirm 512-byte blocks, this project's whole
     // storage stack's own fixed assumption.
     msc_cbw_header(8, true, 10);
-    msc_cbw_buf[15] = 0x25;
-    match msc_run_command(8, true, msc_bounce_buf) {
+    msc_cbw_set(15, 0x25);
+    match msc_run_command(8, true) {
         MscCommandResult::Ok => { }
         MscCommandResult::CompletedError(status) => {
             return UsbInitOutcome::ReadCapacity(status);
@@ -1495,13 +1509,13 @@ fn disk_write10_command_count() -> usize {
 // bounded by MSC_MAX_TRANSFER_SECTORS) | control(0). msc_cbw_header() must already have
 // been called to build the CBW header and zero this CDB region.
 fn msc_scsi_lba_cdb(op: u8, sector: u32, sectors: usize) {
-    msc_cbw_buf[15] = op;
-    msc_cbw_buf[17] = ((sector >> 24) & 0xFF) as u8;
-    msc_cbw_buf[18] = ((sector >> 16) & 0xFF) as u8;
-    msc_cbw_buf[19] = ((sector >> 8) & 0xFF) as u8;
-    msc_cbw_buf[20] = (sector & 0xFF) as u8;
-    msc_cbw_buf[22] = ((sectors >> 8) & 0xFF) as u8;
-    msc_cbw_buf[23] = (sectors & 0xFF) as u8;
+    msc_cbw_set(15, op);
+    msc_cbw_set(17, ((sector >> 24) & 0xFF) as u8);
+    msc_cbw_set(18, ((sector >> 16) & 0xFF) as u8);
+    msc_cbw_set(19, ((sector >> 8) & 0xFF) as u8);
+    msc_cbw_set(20, (sector & 0xFF) as u8);
+    msc_cbw_set(22, ((sectors >> 8) & 0xFF) as u8);
+    msc_cbw_set(23, (sectors & 0xFF) as u8);
 }
 
 // Same retry policy as RPi3's own disk_read/disk_write for completed errors:
@@ -1528,7 +1542,7 @@ fn disk_read_sectors(sector: u32, buf: []u8) -> DiskIoResult {
     msc_cbw_header(transfer_len, true, 10);
     msc_scsi_lba_cdb(0x28, sector, sectors);
     let mut retry: bool = false;
-    match msc_run_command(transfer_len, true, msc_bounce_buf) {
+    match msc_run_command(transfer_len, true) {
         MscCommandResult::Ok => { }
         MscCommandResult::CompletedError(_) => { retry = true; }
         MscCommandResult::RestartRequired => { return DiskIoResult::Err(-1); }
@@ -1538,7 +1552,7 @@ fn disk_read_sectors(sector: u32, buf: []u8) -> DiskIoResult {
         msc_recover_transport();
         msc_cbw_header(transfer_len, true, 10);
         msc_scsi_lba_cdb(0x28, sector, sectors);
-        match msc_run_command(transfer_len, true, msc_bounce_buf) {
+        match msc_run_command(transfer_len, true) {
             MscCommandResult::Ok => { }
             MscCommandResult::CompletedError(_) => {
                 return DiskIoResult::Err(-1);
@@ -1598,15 +1612,25 @@ fn disk_write_sectors(sector: u32, buf: []u8) -> DiskIoResult {
     let length_u32: u32 = length as u32;
     if (length_u32 >= 65537) { return DiskIoResult::Err(-1); }
     let transfer_len: {0..<65537 as u32} = length_u32;
-    for i: usize in 0..<MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE {
-        if (i < buf.len) {
-            msc_bounce_buf[i] = buf[i];
+    match msc_data_out_take() {
+        MscDataTransmitAuthority::Cpu(cpu) => {
+            let bytes = dma_cpu_slice(cpu, MscDataTransmit);
+            for i: usize in 0..<MSC_MAX_TRANSFER_SECTORS * MSC_SECTOR_SIZE {
+                if (i < buf.len) {
+                    bytes[i] = buf[i];
+                }
+            }
+            msc_data_out_put(MscDataTransmitAuthority::Cpu(cpu));
+        }
+        MscDataTransmitAuthority::Empty => { kernel_syscall_fail_stop(0); }
+        MscDataTransmitAuthority::Device(stale) => {
+            msc_data_out_fail_device(stale);
         }
     }
     msc_cbw_header(transfer_len, false, 10);
     msc_scsi_lba_cdb(0x2A, sector, sectors);
     msc_write10_command_count = msc_write10_command_count + 1;
-    match msc_run_command(transfer_len, false, msc_bounce_buf) {
+    match msc_run_command(transfer_len, false) {
         MscCommandResult::Ok => { return DiskIoResult::Ok; }
         MscCommandResult::CompletedError(_) => { }
         MscCommandResult::RestartRequired => { return DiskIoResult::Err(-1); }
@@ -1621,7 +1645,7 @@ fn disk_write_sectors(sector: u32, buf: []u8) -> DiskIoResult {
     msc_cbw_header(transfer_len, false, 10);
     msc_scsi_lba_cdb(0x2A, sector, sectors);
     msc_write10_command_count = msc_write10_command_count + 1;
-    match msc_run_command(transfer_len, false, msc_bounce_buf) {
+    match msc_run_command(transfer_len, false) {
         MscCommandResult::Ok => { return DiskIoResult::Ok; }
         MscCommandResult::CompletedError(_) => {
             return DiskIoResult::Err(-1);
@@ -1656,8 +1680,7 @@ fn usb_bulk_in(span: borrow DmaDeviceSpan) -> u32 !{unsafe} {
     return usb_bulk_xfer(true, bus, dma_span_length(span) as u32);
 }
 
-// Device-read buffers are not yet protected allocations; their address and
-// length are still the caller's.
-fn usb_bulk_out(buf_dma: usize, length: u32) -> u32 !{unsafe} {
-    return usb_bulk_xfer(false, buf_dma, length);
+fn usb_bulk_out(span: borrow DmaDeviceSpan) -> u32 !{unsafe} {
+    let bus: usize = unsafe { dma_span_address(span) } + rp1_dma_pci_offset;
+    return usb_bulk_xfer(false, bus, dma_span_length(span) as u32);
 }

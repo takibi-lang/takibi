@@ -4543,7 +4543,8 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | _ -> raise (Error (Printf.sprintf
            "dma_refresh_live has no fixed array global '%s'" name)))
 
-  | Call (("dma_begin_rx" | "dma_finish_owned_rx") as operation,
+  | Call (("dma_begin_rx" | "dma_finish_owned_rx"
+          | "dma_begin_tx" | "dma_finish_owned_tx") as operation,
           [owner; { desc = Var record; _ }]) ->
       let (_, token) = gen_expr locals owner in
       (match Dma_fixed_registry.allocation_of record,
@@ -4553,15 +4554,24 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
              | Some n -> n
              | None -> raise (Error (Printf.sprintf
                  "fixed DMA allocation '%s' has no known byte extent" global)) in
-           let var = { desc = Var global; loc = e.loc } in
-           let ptr = { desc = Cast (TypePtr TypeU8,
-             { desc = AddrOf var; loc = e.loc }); loc = e.loc } in
-           let len = { desc = IntLit (Int64.of_int size); loc = e.loc } in
-           let cache_operation = if operation = "dma_begin_rx"
-             then "dma_prepare_rx" else "dma_finish_rx" in
-           ignore (gen_expr locals { desc = Call (cache_operation, [ptr; len]);
-             loc = e.loc });
-           let next_type = if operation = "dma_begin_rx"
+           (* GitHub issue #717: a transmit finish has no cache work; the
+              device only read lines dma_begin_tx already cleaned. *)
+           let cache_operation = match operation with
+             | "dma_begin_rx" -> Some "dma_prepare_rx"
+             | "dma_finish_owned_rx" -> Some "dma_finish_rx"
+             | "dma_begin_tx" -> Some "dma_prepare_tx"
+             | _ -> None in
+           (match cache_operation with
+            | Some cache_operation ->
+                let var = { desc = Var global; loc = e.loc } in
+                let ptr = { desc = Cast (TypePtr TypeU8,
+                  { desc = AddrOf var; loc = e.loc }); loc = e.loc } in
+                let len = { desc = IntLit (Int64.of_int size); loc = e.loc } in
+                ignore (gen_expr locals { desc = Call (cache_operation, [ptr; len]);
+                  loc = e.loc })
+            | None -> ());
+           let next_type =
+             if operation = "dma_begin_rx" || operation = "dma_begin_tx"
              then Dma_fixed_registry.device_token record
              else Dma_fixed_registry.cpu_token record in
            (TypePtr (TypeNamed next_type), token)

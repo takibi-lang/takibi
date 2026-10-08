@@ -2745,7 +2745,7 @@ protocol; the refresh neither makes a data buffer CPU-owned nor proves that
 multiple metadata fields form one atomic snapshot. The compiler rejects a
 local alias, partial range, or unsupported cache-maintenance target.
 
-**Protected fixed RX allocations.** `struct dma_fixed Name { private
+**Protected fixed DMA allocations.** `struct dma_fixed Name { private
 data: [T; N]; }` marks a record with exactly one nonempty fixed array
 field. Exactly one `private let mut` global of that record type must be
 declared with `align(...)` and no initializer. On a cache-maintained target,
@@ -2800,6 +2800,17 @@ file makes that file the whole trusted claim; driver code elsewhere
 receives CPU authority back only through those functions. What the file
 asserts is a device fact the compiler cannot check: the file names the
 observations it trusts in its header.
+**Transmit (GitHub issue #717).** The same record form protects an
+allocation the device reads. `dma_begin_tx(cpu, Name)` consumes the CPU
+token, cleans the entire fixed array to memory, and returns `*NameDevice`.
+`dma_finish_owned_tx(dev, Name)` consumes the device token and returns
+`*NameCpu` with no cache work; like the receive finish, it is accepted only
+in the file that declares `Name`, because it asserts that the device has
+finished reading. A record has one direction: the type checker refuses a
+record used with both the receive and the transmit builtins, since only a
+receive finish invalidates the CPU's cached lines. While the device token is
+live the CPU token is consumed, so every pointer, slice or integer derived
+from it is unusable: a CPU write during a transmit is a type error.
 `dma_device_span(dev, Name, offset, length)` borrows the device token and
 returns a `DmaDeviceSpan`: the address of byte `offset` of the array and
 `length`. Both `offset` and `length` must be `usize` with a static bound (a

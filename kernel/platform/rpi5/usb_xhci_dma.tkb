@@ -1,9 +1,12 @@
-// GitHub issue #716: the mint file of the xHCI receive allocations.
-// dma_finish_owned_rx is accepted only in the file that declares the
-// record, so this file is the whole trusted claim that device ownership
-// of a receive range may return to the CPU. Each receive function below
-// submits one transfer and returns ownership on exactly two observations:
-//   - a nonzero completion code from usb_ctrl_in or usb_bulk_in, which
+// GitHub issues #716 and #717: the mint file of the xHCI DMA allocations,
+// three the device writes and two it reads (the CBW and the bulk-out
+// data). dma_finish_owned_rx and dma_finish_owned_tx are accepted only in
+// the file that declares the record, so this file is the whole trusted
+// claim that device ownership of a range may return to the CPU. Each
+// transfer function below submits one transfer and returns ownership on
+// exactly two observations:
+//   - a nonzero completion code from usb_ctrl_in, usb_bulk_in or
+//     usb_bulk_out, which
 //     usb_await_event returns only for the transfer's final Transfer Event,
 //     a completed error included (xHCI 1.2, 4.11.3.1);
 //   - MscTimeoutResult::RestartRequired from msc_abort_unobserved_transfer,
@@ -25,6 +28,13 @@ private let mut msc_data_receive: MscDataReceive align(64);
 
 struct dma_fixed MscCswReceive { private bytes: [u8; 64]; }
 private let mut msc_csw_receive: MscCswReceive align(64);
+
+// The device reads these two: the 31-byte CBW in a whole cache line, and
+// the bulk-out payload of at most one maximal transfer.
+struct dma_fixed MscCbwTransmit { private bytes: [u8; 64]; }
+private let mut msc_cbw_transmit: MscCbwTransmit align(64);
+struct dma_fixed MscDataTransmit { private bytes: [u8; 65536]; }
+private let mut msc_data_transmit: MscDataTransmit align(64);
 
 private linear struct MscDmaGuard[lock: addr] { private flags: usize; }
 
@@ -249,6 +259,138 @@ fn msc_csw_receive_once() -> MscDataReceiveResult !{unsafe} {
         }
         MscCswReceiveAuthority::Device(stale) => {
             msc_csw_fail_device(stale);
+            return MscDataReceiveResult::ControllerUnusable;
+        }
+    }
+}
+
+fn msc_cbw_take() -> MscCbwTransmitAuthority {
+    let guard = msc_dma_lock(&dma_owner_MscCbwTransmit.mutex);
+    let previous: MscCbwTransmitAuthority = stable_replace(
+        guard, &dma_owner_MscCbwTransmit.mutex,
+        dma_owner_MscCbwTransmit.value, MscCbwTransmitAuthority::Empty);
+    msc_dma_unlock(guard, &dma_owner_MscCbwTransmit.mutex);
+    return previous;
+}
+
+private fn msc_cbw_fail_cpu(stale: sink *MscCbwTransmitCpu) {
+    kernel_syscall_fail_stop(0);
+}
+
+fn msc_cbw_fail_device(stale: sink *MscCbwTransmitDevice) {
+    kernel_syscall_fail_stop(0);
+}
+
+fn msc_cbw_put(value: sink MscCbwTransmitAuthority) {
+    let guard = msc_dma_lock(&dma_owner_MscCbwTransmit.mutex);
+    let previous: MscCbwTransmitAuthority = stable_replace(
+        guard, &dma_owner_MscCbwTransmit.mutex,
+        dma_owner_MscCbwTransmit.value, value);
+    msc_dma_unlock(guard, &dma_owner_MscCbwTransmit.mutex);
+    match previous {
+        MscCbwTransmitAuthority::Empty => { return; }
+        MscCbwTransmitAuthority::Cpu(stale) => { msc_cbw_fail_cpu(stale); }
+        MscCbwTransmitAuthority::Device(stale) => { msc_cbw_fail_device(stale); }
+    }
+}
+
+fn msc_data_out_take() -> MscDataTransmitAuthority {
+    let guard = msc_dma_lock(&dma_owner_MscDataTransmit.mutex);
+    let previous: MscDataTransmitAuthority = stable_replace(
+        guard, &dma_owner_MscDataTransmit.mutex,
+        dma_owner_MscDataTransmit.value, MscDataTransmitAuthority::Empty);
+    msc_dma_unlock(guard, &dma_owner_MscDataTransmit.mutex);
+    return previous;
+}
+
+private fn msc_data_out_fail_cpu(stale: sink *MscDataTransmitCpu) {
+    kernel_syscall_fail_stop(0);
+}
+
+fn msc_data_out_fail_device(stale: sink *MscDataTransmitDevice) {
+    kernel_syscall_fail_stop(0);
+}
+
+fn msc_data_out_put(value: sink MscDataTransmitAuthority) {
+    let guard = msc_dma_lock(&dma_owner_MscDataTransmit.mutex);
+    let previous: MscDataTransmitAuthority = stable_replace(
+        guard, &dma_owner_MscDataTransmit.mutex,
+        dma_owner_MscDataTransmit.value, value);
+    msc_dma_unlock(guard, &dma_owner_MscDataTransmit.mutex);
+    match previous {
+        MscDataTransmitAuthority::Empty => { return; }
+        MscDataTransmitAuthority::Cpu(stale) => { msc_data_out_fail_cpu(stale); }
+        MscDataTransmitAuthority::Device(stale) => { msc_data_out_fail_device(stale); }
+    }
+}
+
+// The CBW is always 31 bytes (USB MSC BOT 1.0, 5.1).
+fn msc_cbw_send_once() -> MscDataReceiveResult !{unsafe} {
+    match msc_cbw_take() {
+        MscCbwTransmitAuthority::Cpu(cpu) => {
+            let device = dma_begin_tx(cpu, MscCbwTransmit);
+            let mut span = dma_device_span(device, MscCbwTransmit, 0, 31);
+            let completion: u32 = usb_bulk_out(span);
+            if (completion == 0) {
+                match msc_abort_unobserved_transfer() {
+                    MscTimeoutResult::RestartRequired => {
+                        let restored = dma_finish_owned_tx(device, MscCbwTransmit);
+                        msc_cbw_put(MscCbwTransmitAuthority::Cpu(restored));
+                        return MscDataReceiveResult::RestartRequired;
+                    }
+                    MscTimeoutResult::ControllerUnusable => {
+                        msc_cbw_put(MscCbwTransmitAuthority::Device(device));
+                        return MscDataReceiveResult::ControllerUnusable;
+                    }
+                }
+            }
+            let restored = dma_finish_owned_tx(device, MscCbwTransmit);
+            msc_cbw_put(MscCbwTransmitAuthority::Cpu(restored));
+            return MscDataReceiveResult::Completed(completion);
+        }
+        MscCbwTransmitAuthority::Empty => {
+            kernel_syscall_fail_stop(0);
+            return MscDataReceiveResult::ControllerUnusable;
+        }
+        MscCbwTransmitAuthority::Device(stale) => {
+            msc_cbw_fail_device(stale);
+            return MscDataReceiveResult::ControllerUnusable;
+        }
+    }
+}
+
+// One bulk-out data stage of `length` bytes from the start of the payload.
+fn msc_data_send_once(length: {1..<65537 as u32}) -> MscDataReceiveResult !{unsafe} {
+    match msc_data_out_take() {
+        MscDataTransmitAuthority::Cpu(cpu) => {
+            let device = dma_begin_tx(cpu, MscDataTransmit);
+            let span_length: {1..<65537 as usize} = length as usize;
+            let mut span = dma_device_span(device, MscDataTransmit,
+                                           0, span_length);
+            let completion: u32 = usb_bulk_out(span);
+            if (completion == 0) {
+                match msc_abort_unobserved_transfer() {
+                    MscTimeoutResult::RestartRequired => {
+                        let restored = dma_finish_owned_tx(device, MscDataTransmit);
+                        msc_data_out_put(MscDataTransmitAuthority::Cpu(restored));
+                        return MscDataReceiveResult::RestartRequired;
+                    }
+                    MscTimeoutResult::ControllerUnusable => {
+                        msc_data_out_put(MscDataTransmitAuthority::Device(device));
+                        return MscDataReceiveResult::ControllerUnusable;
+                    }
+                }
+            }
+            let restored = dma_finish_owned_tx(device, MscDataTransmit);
+            msc_data_out_put(MscDataTransmitAuthority::Cpu(restored));
+            return MscDataReceiveResult::Completed(completion);
+        }
+        MscDataTransmitAuthority::Empty => {
+            kernel_syscall_fail_stop(0);
+            return MscDataReceiveResult::ControllerUnusable;
+        }
+        MscDataTransmitAuthority::Device(stale) => {
+            msc_data_out_fail_device(stale);
             return MscDataReceiveResult::ControllerUnusable;
         }
     }

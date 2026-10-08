@@ -13,7 +13,7 @@
 # (rendezvous bounded by peer ticks) and #688's (typed clock domains).
 # Columns: file, function, sites, class, reason (tab separated).
 kernel/drivers/net/gem_tx_wait.tkb	gem_tx_wait	1	protocol	GEM completion active-poll phase (200 us); expiry switches to the existing interrupt wait and never decides a functional verdict
-kernel/drivers/block/virtio_blk_receive.tkb	virtio_blk_reset	1	backstop	reset completion: a device that never reports reset is disabled
+kernel/drivers/block/virtio_blk_dma.tkb	virtio_blk_reset	1	backstop	reset completion: a device that never reports reset is disabled
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_submit_owned	1	backstop	30 s completion: a starved host delayed 1 s completions into a stall (2026-10-04)
 kernel/kernel/asid_contention_evidence.tkb	asid_contention_probe	1	pending	two-core probe finish window (2 s)
 kernel/kernel/console_contention_evidence.tkb	console_ddb_peer_hold	1	pending	DDB peer hold budget (5 s)

@@ -4362,10 +4362,16 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
       raise (TypeError (e.loc, Printf.sprintf
         "%s expects one %s" operation Dma_fixed_registry.span_type))
 
-  | Call (("dma_begin_rx" | "dma_finish_owned_rx") as operation,
+  | Call (("dma_begin_rx" | "dma_finish_owned_rx"
+          | "dma_begin_tx" | "dma_finish_owned_tx") as operation,
           [({ desc = Ast.Var _; _ } as owner); { desc = Ast.Var record; _ }]) ->
+      let begins = operation = "dma_begin_rx" || operation = "dma_begin_tx" in
+      let finishes = not begins in
+      let direction =
+        if operation = "dma_begin_rx" || operation = "dma_finish_owned_rx"
+        then Dma_fixed_registry.Receive else Dma_fixed_registry.Transmit in
       let source_token, destination_token =
-        if operation = "dma_begin_rx" then
+        if begins then
           (Dma_fixed_registry.cpu_token record,
            Dma_fixed_registry.device_token record)
         else
@@ -4380,7 +4386,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
             | _ -> raise (TypeError (owner.loc, Printf.sprintf
                 "%s for '%s' requires its %s authority token"
                 operation record
-                (if operation = "dma_begin_rx" then "CPU" else "device"))));
+                (if begins then "CPU" else "device"))));
            let size = match const_type_size senv array_ty with
              | Some n -> n
              | None -> raise (TypeError (e.loc,
@@ -4401,14 +4407,31 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
               observed completion or a confirmed reset. Only the record's
               declaring file -- its mint file -- may make that assertion,
               so the trusted code is the file, not each call site. *)
-           if operation = "dma_finish_owned_rx" then begin
+           (match Hashtbl.find_opt Dma_fixed_registry.directions record with
+            | None -> Hashtbl.replace Dma_fixed_registry.directions record
+                        (direction, e.loc)
+            | Some (seen, _) when seen = direction -> ()
+            | Some (_, first) ->
+                let name = function
+                  | Dma_fixed_registry.Receive -> "receive"
+                  | Dma_fixed_registry.Transmit -> "transmit" in
+                raise (TypeError (e.loc, Printf.sprintf
+                  "fixed DMA record '%s' is used for %s here but for %s at \
+                   %s:%d; a record has one direction, because only a \
+                   receive finish invalidates the CPU's cached lines"
+                  record (name direction)
+                  (name (if direction = Dma_fixed_registry.Receive
+                         then Dma_fixed_registry.Transmit
+                         else Dma_fixed_registry.Receive))
+                  (Ast.source_file_of_loc first) first.Lexing.pos_lnum)));
+           if finishes then begin
              match Dma_fixed_registry.decl_file_of record with
              | Some file when file = Ast.source_file_of_loc e.loc -> ()
              | Some file -> raise (TypeError (e.loc, Printf.sprintf
-                 "dma_finish_owned_rx for '%s' may only be called in its \
+                 "%s for '%s' may only be called in its \
                   declaring file '%s', which observes completion or \
                   confirms reset; call that file's settle function"
-                 record file))
+                 operation record file))
              | None -> raise (TypeError (e.loc, Printf.sprintf
                  "fixed DMA record '%s' has no declaring file" record))
            end;
@@ -4416,7 +4439,8 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
        | _ -> raise (TypeError (e.loc, Printf.sprintf
            "%s requires a registered fixed DMA record type, got '%s'"
            operation record)))
-  | Call (("dma_begin_rx" | "dma_finish_owned_rx") as operation, _) ->
+  | Call (("dma_begin_rx" | "dma_finish_owned_rx"
+          | "dma_begin_tx" | "dma_finish_owned_tx") as operation, _) ->
       raise (TypeError (e.loc, Printf.sprintf
         "%s expects an authority token and a fixed DMA record type"
         operation))
@@ -10554,7 +10578,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                require_available e.loc moved p;
                if consume then mv_consume p moved else moved
            | _ -> check_expr taints moved false base_expr)
-      | Ast.Call (("dma_begin_rx" | "dma_finish_owned_rx") as operation,
+      | Ast.Call (("dma_begin_rx" | "dma_finish_owned_rx"
+                  | "dma_begin_tx" | "dma_finish_owned_tx") as operation,
                   [owner; _]) ->
           if not consume then
             raise (TypeError (e.loc, Printf.sprintf
