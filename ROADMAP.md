@@ -9,6 +9,42 @@ history, is archived in `HISTORY.md`.
 
 Live intermittents are listed in `docs/KNOWN_INTERMITTENTS.md`, not here.
 
+## Ordered routes: read before starting any issue named here
+
+Set by the maintainer on 2026-10-08. Each issue below is one step of a
+route toward a whole compile-time guarantee. Starting one of them in
+isolation, with a local fix that adds its own special case, is strongly
+discouraged: it would be absorbed or replaced by the route's shared rule.
+If a step seems to need something the route places later, stop and ask.
+
+**Stored authority (#131).** One rule for places that hold ownership: a
+linear authority kept in a struct field, array element or global slot,
+taken and put back without loss or duplication, and borrowed in place.
+Static place identity where the place is known; a runtime option tag only
+where it is not (#637 option (b)).
+
+1. Wait for #637 stage 1 to land; both edit the ownership checker.
+2. #131's design, together with #672 stage 2 (array elements); #637 stage 2
+   adopts the result rather than a parallel mechanism.
+3. First concrete driver: #622 (a DMA token held in the RX frame owner).
+4. Then #707, the process-record typestate group (#653, #590, #308), #686,
+   #687, #704 and #343, each as a consumer of the same rule.
+
+**Fixed DMA lifecycle.** Every stage of one transfer in types, so that the
+only trusted parts left are one device-semantics declaration per driver
+(which marker means completion, what a reset guarantees) and the platform's
+bus translation.
+
+1. #623: a device span binding address, length and bus translation to one
+   allocation's extent, consumed by the descriptor-writing functions.
+2. #716: completion and reset evidence in place of `unsafe` finish.
+3. #717: transmit allocations under the same CPU/Device tokens.
+4. After stored authority's step 3: #622, then #707 (GEM's tokens held
+   across calls).
+5. Evidence layers, not prerequisites: #626 (linked layout), #625 (cache
+   visibility model, bounded), #624 (timeout/reset branch fixture). #374
+   (physically contiguous memory) waits for a dynamic DMA allocation.
+
 ## Territories, re-cut 2026-09-25; queues refreshed 2026-10-08
 
 A territory is a role, not a set of directories and not a particular agent
