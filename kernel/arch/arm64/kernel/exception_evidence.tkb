@@ -2730,6 +2730,9 @@ private fn crash_snapshot_render_every_core() !{unsafe} {
 
 private fn crash_snapshot_render_from(record: *CrashSnapshot,
                                       root_slot: usize) !{unsafe} {
+    // A peer can publish while the crash console is waiting at its prompt.
+    // Its report starts a fresh line under the existing report claim.
+    kernel_boot_log("\n");
     kernel_boot_log("oops: fail-stop seq=");
     uart_put_udec(record.sequence);
     kernel_boot_log(" cpu=");
@@ -3209,6 +3212,7 @@ private fn crash_console_claim() -> bool !{unsafe} {
 
 private fn crash_snapshot_park() {
     crash_report_claim();
+    kernel_boot_log("\n");
     kernel_boot_log("oops: console owned by another core; parking\n");
     crash_report_release();
     while (true) { interrupt_wait(); }
