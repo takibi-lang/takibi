@@ -300,3 +300,22 @@ The report correction adds no storage, allocation, pin or memory authority.
 The unchanged two-core concurrent-fault lane passes with both records in
 fault order and shared-state refusal after Partial. Adopt the combined image;
 the final file-confinement milestone remains the next measurement trigger.
+
+### Rebased fixed-DMA diagnostic review, 2026-10-08
+
+Fresh standard production builds after integration onto b0be64b8 measure
+706436 text, 5030 data and 1653664 BSS bytes on QEMU, and 716636 text,
+2888736 data and 1692832 BSS bytes on RPi5. Reserved spans remain 2392064
+and 5308416 bytes. The upstream compiler change moves fixed-DMA layout
+errors to the allocation declaration; it changes no kernel storage or
+allocation workload. The combined layout is unchanged at every measured
+image accounting boundary. Earlier runtime occupancy evidence retains only
+its stated payload and pool-chunk scope.
+
+Fresh ELF SHA-256:
+
+- QEMU: 557d68b90abf7cc07748a6143fd993c33c7b30b8d91628f80ed72a72bbe71188
+- RPi5: f9dae5c42bceb0274f38401df08f88c0a63f2642adfa2eab44ab3fd20f2c11e3
+
+Adopt the measured combination. Final raw-authority file confinement and
+safe-memory stage completion remain the next measurement trigger.

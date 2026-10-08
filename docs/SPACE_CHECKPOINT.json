@@ -2,8 +2,8 @@
   "date": "2026-10-08",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "5d8d8e636a63493fb86ed18a357a7ddbd29747b9b257016636ebdefc6bb0a091",
-  "workload": "Standard production QEMU/RPi5 linked images after integration onto 706944db; terminal-capture BRK/exec/peer/concurrent-fault and DDB workloads, four-pool Busy probes. The corrected real concurrent-fault lane covers asynchronous report framing. Earlier process/FD endpoint evidence is reused only at its original payload and pool-chunk boundaries, not for total page metadata or free-page counts.",
+  "source_sha256": "10b0f985fcdee1124eb564de0b74e95f191c0170fa158b4c3bca7a879d8d56f2",
+  "workload": "Standard production QEMU/RPi5 linked images after integration onto b0be64b8 and fresh production builds; terminal-capture BRK/exec/peer/concurrent-fault and DDB workloads, four-pool Busy probes. The corrected real concurrent-fault lane covers asynchronous report framing. Earlier process/FD endpoint evidence is reused only at its original payload and pool-chunk boundaries, not for total page metadata or free-page counts.",
   "evidence": [
     "docs/STOPPED_DIAGNOSTIC_AUTHORITY.md",
     "docs/CPU_PARTICIPANT_AUTHORITY.md",
@@ -11,6 +11,6 @@
     "docs/BLOCK_CACHE_BUCKETS_2026-10-08.md",
     "docs/PAGE_META_24_2026-10-08.md"
   ],
-  "assessment": "Adopt stopped-only capture, guarded scalar copies and fresh-line asynchronous reports; the last liveness escape is retired. Combined QEMU/RPi5 text is 706436/716636, data 5030/2888736 and BSS 1653664/1692832 bytes. Reserved spans are 2392064/5308416 bytes. Upstream PageMeta shrinks bootstrap BSS by 16384 bytes on each target and restores eight RPi5 allocator pages; dynamic page metadata is separately measured at 24 bytes per managed page. Terminal capture adds no per-process field, pin or blocking diagnostic lock; report framing adds no storage or authority. Physical holding and named metadata/translation mints remain trusted.",
+  "assessment": "Adopt stopped-only capture, guarded scalar copies and fresh-line asynchronous reports; the last liveness escape is retired. Combined QEMU/RPi5 text is 706436/716636, data 5030/2888736 and BSS 1653664/1692832 bytes. Reserved spans are 2392064/5308416 bytes. Upstream PageMeta shrinks bootstrap BSS by 16384 bytes on each target and restores eight RPi5 allocator pages; dynamic page metadata is separately measured at 24 bytes per managed page. Terminal capture adds no per-process field, pin or blocking diagnostic lock; report framing adds no storage or authority. Physical holding and named metadata/translation mints remain trusted. Fresh integration of the fixed-DMA diagnostic location change preserves all measured text/data/BSS and reservation boundaries; the evidence records the new ELF hashes.",
   "next_trigger": "Measure at raw-authority file confinement and final safe-memory stage completion, or a changed resource/allocation workload."
 }
