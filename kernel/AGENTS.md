@@ -65,6 +65,11 @@ type-level check. Platform-independent code does not belong in a platform
 file; `scripts/check_platform_file_parity.py` enforces this, and an entry in
 its allow list requires a stated reason.
 
+Before building a new, moved or renamed kernel source file, assembly file or
+lane runner, run `python3 scripts/preflight_kernel_file.py PATH` (or
+`OLD=NEW` for a move). It lists, in seconds, every registry the file must
+join or no longer belongs in, and says which ones only a build can settle.
+
 Every mutable-state kernel file must declare its execution model as required
 by the build checks. Preserve lock, pool-release, MMIO-address derivation,
 diagnostic-event, and platform-parity invariants rather than weakening their

@@ -33,6 +33,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_agents_paths.py` | paths named by root guidance resolve and this table names every check |
 | `check_ash_bin_inventory.py` | ash's expected /bin listing matches every image-recipe entry in order |
 | `check_ash_bin_inventory_controls.py` | Controls for additions, omissions, and unrecognized /bin image commands |
+| `check_preflight_kernel_file_controls.py` | `scripts/preflight_kernel_file.py`, the on-demand list of every registry a new, moved or renamed kernel file, assembly file or lane runner must join, names each missing or stale row for planted files and reports an unchanged file clean |
 | `check_found_by_policy_controls.py` | Controls for the `Found-by:` and `Protocol:` trailers an issue-closing commit must carry |
 | `check_archive_kernel_failure_controls.sh` | Regression controls for the failing-lane archive |
 | `check_ci_opam_deps.py` | every library the dune files name is provided by a package in dune-project's depends stanza or by the compiler |
