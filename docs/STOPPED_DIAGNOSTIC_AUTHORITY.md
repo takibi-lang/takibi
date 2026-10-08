@@ -340,3 +340,22 @@ Adopt the measured combination: the modest code growth removes pooled-record
 raw accesses and bounds per-CPU state selection without additional runtime
 storage. The next measurement is the RegionPool record-reference migration
 or final raw-authority confinement milestone.
+
+### Rebased reference and race-control review, 2026-10-08
+
+Fresh allbuild after integrating the indirect-call lock rule and the repaired
+race-control anchor measures the same 709308/719444 text, 5030/2888736 data
+and 1653664/1692832 BSS bytes. Reserved spans remain 2392064/5308416 bytes.
+The standard workload, allocation and retention boundaries are unchanged.
+The compiler rule strengthens checking; the overlay edit affects test kernels
+only. Allbuild passes, including the historical compile targets. The earlier
+QEMU runtime evidence retains its stated scope; publication still requires a
+clean combined allcheck including the real RPi5 lane.
+
+Fresh ELF SHA-256:
+
+- QEMU: 0511e499d8ae0deb453fb3399bc38262a8c3174a1e93a95410777e89cdba9286
+- RPi5: 6ca469a846089d7aec5ca7324112c5c7bd8bfe917df606471795edbb03c133c1
+
+Adopt the measured combination. The next measurement remains the RegionPool
+record-reference migration or final raw-authority confinement milestone.
