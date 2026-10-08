@@ -17,4 +17,5 @@ fn app_main() {
     uart_println(loan_copy_before_removal(loan_fixture_handle(0, 7)) as u64);
     loan_fixture_reset();
     uart_println(loan_distinct_records() as u64);
+    uart_println(loan_reference_field_index() as u64);
 }

@@ -2644,12 +2644,19 @@ fn f() {
   No other source type may cast to `&T`/`&mut T` at all, not even under
   `unsafe` -- fabricating a reference from an arbitrary integer or an
   unrelated pointer type would defeat the entire point of this type.
-- **Legal positions, v1: function parameters and local `let` bindings
-  only.** Not a struct field, global, return type, or array/slice element.
-  No escape/lifetime analysis is implemented for `&T`/`&mut T` (deliberately
-  -- see #132 for the project's general region-polymorphism work, which
-  this does not depend on and is not blocked by), so it simply is not
-  legal anywhere an escape could happen.
+- **Legal positions.** Function parameters and local `let` bindings remain
+  supported. An authority-indexed return `&T @ g` or `&mut T @ g` is also
+  legal when `g` identifies the borrowed or sunk lifetime authority required
+  by the existing region-return rules. The result and address aliases copied
+  from its fields retain that authority: consuming or invalidating the owner
+  before a subsequent read or write is a compile error. Private
+  `loan_transfer` functions may transfer this loan to their destination guard
+  under the same rules as indexed pointers. An unindexed reference return,
+  struct field, global, or array/slice element remains rejected. This is an
+  authority loan check, not a general lifetime analysis for local references.
+  Returning a local address or its aliases, or relabelling an unindexed
+  reference parameter with an unrelated authority, is rejected. Raw-pointer
+  to reference conversion remains an explicit unsafe mint assertion.
 - **No aliasing/exclusivity proof.** `&mut T` guarantees "only this
   parameter may write field/deref targets," by construction of who can
   call it with what -- it does not prove no other alias of the same place

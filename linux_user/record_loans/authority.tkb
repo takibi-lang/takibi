@@ -1,7 +1,7 @@
 // Single-threaded executable controls for the three ProcessRecord authority
 // shapes. Guard mints and Running-state selection are trusted fixture code;
 // this checks storage/erasure behavior, not kernel synchronization or timing.
-struct LoanRecord { generation: usize; value: usize; }
+struct LoanRecord { generation: usize; value: usize; words: [usize; 2]; }
 struct LoanHandle { slot: {0..<2 as usize}; generation: usize; }
 linear view LoanRunGuard[lock: addr];
 linear struct LoanOwner[g: usize] {
@@ -25,11 +25,11 @@ fn loan_lookup(guard: borrow LoanRunGuard[lock], handle: LoanHandle) -> LoanOwne
     if (loan_records[handle.slot].generation != handle.generation) { return LoanOwnerLookup::Stale; }
     return LoanOwnerLookup::Found(loan_mint_owner(handle.slot, handle.generation));
 }
-fn loan_locked(guard: borrow LoanRunGuard[lock], handle: LoanHandle) -> *LoanRecord @ lock {
+fn loan_locked(guard: borrow LoanRunGuard[lock], handle: LoanHandle) -> &mut LoanRecord @ lock {
     return &loan_records[handle.slot];
 }
-fn loan_owned(owner: borrow LoanOwner[g]) -> *LoanRecord @ g { return &loan_records[owner.slot]; }
-fn loan_running_record(running: borrow LoanRunning[s]) -> *LoanRecord @ s {
+fn loan_owned(owner: borrow LoanOwner[g]) -> &mut LoanRecord @ g { return &loan_records[owner.slot]; }
+fn loan_running_record(running: borrow LoanRunning[s]) -> &mut LoanRecord @ s {
     return &loan_records[running.slot];
 }
 fn loan_remove_slot(guard: borrow LoanRunGuard[lock], slot: {0..<2 as usize}) !{record_mutates_LoanRunGuard} {
@@ -99,8 +99,8 @@ private inline fn live_new(generation: usize @ g) -> PoolLive[g] { return view P
 private inline fn running_new(generation: usize @ g) -> Running[g] { return view Running[g]; }
 inline fn live_end(live: sink PoolLive[g]) {}
 inline fn running_end(running: sink Running[g]) {}
-private inline fn payload(live: borrow PoolLive[g]) -> *TransferRecord @ g { return &record; }
-private inline fn transfer(source: borrow PoolLive[g], destination: borrow Running[g]) -> *TransferRecord @ g !{loan_transfer} {
+private inline fn payload(live: borrow PoolLive[g]) -> &mut TransferRecord @ g { return &record; }
+private inline fn transfer(source: borrow PoolLive[g], destination: borrow Running[g]) -> &mut TransferRecord @ g !{loan_transfer} {
     return payload(source);
 }
 fn loan_transferred_after_pool_release() -> usize {
@@ -115,7 +115,7 @@ fn loan_transferred_after_pool_release() -> usize {
 // source inside the accessor. Only the existing Running authority survives.
 private inline fn transferred_running_record(running: borrow Running[g],
                                               generation: usize @ g)
-        -> *TransferRecord @ g {
+        -> &mut TransferRecord @ g {
     let live = live_new(generation);
     let ptr = transfer(live, running);
     live_end(live);
@@ -127,4 +127,20 @@ fn loan_transferred_through_accessor() -> usize {
     { let ptr = transferred_running_record(running, 1);
       ptr.value = ptr.value + 1; value = ptr.value; }
     running_end(running); return value;
+}
+
+// Exercise a reference-return consumer's checked field indexing and raw widening.
+fn loan_reference_field_index() -> usize {
+    let owner = loan_mint_owner(0, 7);
+    let mut value: usize = 0;
+    {
+        let record = loan_owned(owner);
+        record.words[0] = 19; record.words[1] = 23;
+        let words = record.words as [usize; 2..];
+        let raw = record as *LoanRecord;
+        raw.value = words[0] + words[1];
+        value = raw.value;
+    }
+    loan_owner_end(owner);
+    return value;
 }

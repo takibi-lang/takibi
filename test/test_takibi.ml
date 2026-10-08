@@ -21096,6 +21096,108 @@ private inline fn transfer(source: borrow PoolLive[g], destination: borrow Runni
 }
 |}
 
+let indexed_reference_fixture = {|
+struct RefRecord { value: usize; elements: [usize; 1..]; }
+linear view RefOwner[g: usize];
+private let mut ref_record: RefRecord;
+private fn ref_new() -> RefOwner[1] { return view RefOwner[1]; }
+fn ref_end(owner: sink RefOwner[g]) {}
+private fn ref_at(owner: borrow RefOwner[g]) -> &mut RefRecord @ g {
+  return &ref_record;
+}
+private fn ref_read(owner: borrow RefOwner[g]) -> &RefRecord @ g {
+  return ref_at(owner) as &RefRecord;
+}
+|}
+
+let indexed_reference_tests = [
+  Alcotest.test_case "field codegen prefers local pointer over same-named global" `Quick
+    (fun () -> ignore (gen_codegen {|
+      struct GlobalRecord { other: usize; }
+      struct LocalRecord { words: [usize; 2]; }
+      private let mut record: GlobalRecord;
+      fn probe(input: *LocalRecord) -> usize {
+        let record = input; record.words[0] = 42; return record.words[0];
+      }|}));
+  Alcotest.test_case "ordinary reference widens without an integer mint" `Quick
+    (fun () -> ignore (gen_codegen {|
+      struct Record { value: usize; }
+      fn probe(record: &mut Record) -> usize { return (record as *Record).value; }
+    |}));
+
+  Alcotest.test_case "reference widening codegen retains address representation" `Quick
+    (fun () -> ignore (gen_codegen (indexed_reference_fixture ^ {|
+      fn probe() -> usize { let owner = ref_new(); let mut value: usize = 0;
+        { let record = ref_at(owner); let pointer = record as *RefRecord;
+          pointer.value = 42; value = pointer.value; }
+        ref_end(owner); return value; }|})));
+
+  Alcotest.test_case "indexed reference blocks destructive mutation" `Quick
+    (expect_type_error "may invalidate" (indexed_reference_fixture ^ {|
+      fn ref_reset(owner: borrow RefOwner[g]) !{record_mutates_RefOwner} {}
+      fn probe() -> usize { let owner = ref_new(); let record = ref_at(owner);
+        ref_reset(owner); let value = record.value; ref_end(owner); return value; }|}));
+  Alcotest.test_case "reference widening retains consumed owner" `Quick
+    (expect_type_error "cannot be used after" (indexed_reference_fixture ^ {|
+      fn probe() -> usize { let owner = ref_new(); let record = ref_at(owner);
+        let pointer = record as *RefRecord; ref_end(owner); return pointer.value; }|}));
+  Alcotest.test_case "reference return cannot erase authority in callback" `Quick
+    (expect_type_error "runtime function pointer" (indexed_reference_fixture ^ {|
+      fn probe() { let callback = ref_at; }|}));
+
+  Alcotest.test_case "indexed reference cannot return stack address" `Quick
+    (expect_type_error "cannot be returned" (indexed_reference_fixture ^ {|
+      private fn wrong(owner: borrow RefOwner[g]) -> &mut RefRecord @ g {
+        let mut local: RefRecord; return &local;
+      }|}));
+  Alcotest.test_case "indexed reference cannot return stack address alias" `Quick
+    (expect_type_error "cannot be returned" (indexed_reference_fixture ^ {|
+      private fn wrong(owner: borrow RefOwner[g]) -> &mut RefRecord @ g {
+        let mut local: RefRecord; let alias: &mut RefRecord = &local; return alias;
+      }|}));
+  Alcotest.test_case "indexed reference cannot relabel unindexed parameter" `Quick
+    (expect_type_error "cannot be returned" (indexed_reference_fixture ^ {|
+      private fn wrong(owner: borrow RefOwner[g], record: &mut RefRecord)
+          -> &mut RefRecord @ g { return record; }|}));
+
+  Alcotest.test_case "indexed reference return and field update codegen" `Quick
+    (fun () -> ignore (gen_codegen (indexed_reference_fixture ^ {|
+      fn probe() -> usize {
+        let owner = ref_new(); let mut value: usize = 0;
+        { let record = ref_at(owner); record.value = 42; value = record.value; }
+        ref_end(owner); return value;
+      }|})));
+  Alcotest.test_case "indexed reference cannot outlive consumed owner" `Quick
+    (expect_type_error "cannot be used after" (indexed_reference_fixture ^ {|
+      fn probe() -> usize { let owner = ref_new(); let record = ref_at(owner);
+        ref_end(owner); return record.value; }|}));
+  Alcotest.test_case "indexed reference cannot write after consumed owner" `Quick
+    (expect_type_error "cannot be used after" (indexed_reference_fixture ^ {|
+      fn probe() { let owner = ref_new(); let record = ref_at(owner);
+        ref_end(owner); record.value = 42; }|}));
+  Alcotest.test_case "slice field retains indexed reference authority" `Quick
+    (expect_type_error "cannot be used after" (indexed_reference_fixture ^ {|
+      fn probe() -> usize { let owner = ref_new(); let record = ref_at(owner);
+        let elements = record.elements; ref_end(owner); return elements[0]; }|}));
+  Alcotest.test_case "shared indexed reference cannot write" `Quick
+    (expect_type_error "shared reference" (indexed_reference_fixture ^ {|
+      fn probe() { let owner = ref_new(); { let record = ref_read(owner);
+        record.value = 42; } ref_end(owner); }|}));
+  Alcotest.test_case "reference transfer follows destination authority" `Quick
+    (fun () -> ignore (infer ((let source = loan_transfer_fixture in
+       let needle = "*TransferRecord" in
+       let rec replace offset =
+         match substring_position (String.sub source offset (String.length source - offset)) needle with
+         | None -> String.sub source offset (String.length source - offset)
+         | Some index -> String.sub source offset index ^ "&mut TransferRecord" ^
+             replace (offset + index + String.length needle)
+       in replace 0) ^ {|
+      fn probe() -> usize { let live = live_new(1); let running = running_new(1);
+        let mut value: usize = 0; { let record = transfer(live, running);
+          live_end(live); value = record.value; }
+        running_end(running); return value; }|})));
+]
+
 let loan_transfer_struct_fixture = {|
 struct TransferRecord { value: usize; }
 linear struct PoolProof[g: usize] { private generation: usize @ g; }
@@ -21961,6 +22063,7 @@ let named_groups_unisolated = [
   "codegen",  codegen_tests;
   "record-loans", record_loan_tests;
   "loan-transfer", loan_transfer_tests;
+  "indexed-reference", indexed_reference_tests;
   "witness-changes", witness_change_tests;
   "record-loan-contracts", record_loan_contract_tests;
   "record-loan-boundaries", record_boundary_tests;

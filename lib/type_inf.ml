@@ -408,7 +408,8 @@ type region_return_kind = RegionSlice | RegionPointer
 let region_return_annotation = function
   | Ast.TypeSingleton (((Ast.TypeSlice _) as base), arg) ->
       Some (base, arg, RegionSlice)
-  | Ast.TypeSingleton (((Ast.TypePtr _ | Ast.TypeAlignedPtr _) as base), arg) ->
+  | Ast.TypeSingleton
+      (((Ast.TypePtr _ | Ast.TypeAlignedPtr _ | Ast.TypeRef _ | Ast.TypeRefMut _) as base), arg) ->
       Some (base, arg, RegionPointer)
   | _ -> None
 
@@ -3228,6 +3229,13 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
              | _ -> tgt
            end else
            (match repr src_ty with
+            | TRef inner | TRefMut inner ->
+                (match tgt with
+                 | TUsize -> tgt
+                 | TPtr pointee when repr pointee = repr inner -> tgt
+                 | _ -> raise (TypeError (e.loc, Printf.sprintf
+                     "cannot cast reference %s to %s: widen to the same raw pointee type or usize"
+                     (to_string src_ty) (to_string tgt))))
             | TPtr _ | TAlignedPtr _ ->
                 (* TAlignedPtr src (GitHub issue #102) shares TPtr's cast
                    rules exactly: `as usize` or `as *T` always widens/
@@ -8102,7 +8110,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                        function"
                       value_kind n n authority_desc))
                   end;
-                  validate_nonparam_type f.def_loc base)
+                  validate_nonparam_type ~allow_ref:true f.def_loc base)
          | None when (match f.ret_type with
              | Some ret -> ast_contains_stable_owner_value ret
              | None -> false) ->
@@ -9802,6 +9810,9 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             let name, _ = List.nth fdef.params index in
             PathSet.add (pvar name) paths) PathSet.empty indices
       | _ -> PathSet.empty in
+    let returns_indexed_reference = match Option.bind fdef.ret_type region_return_annotation with
+      | Some ((Ast.TypeRef _ | Ast.TypeRefMut _), _, _) -> true
+      | _ -> false in
     let var_types = ref finfo.local_types in
     List.iter2 (fun (name, _) (_, ty) ->
       var_types := StringMap.add name ty !var_types
@@ -10097,7 +10108,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
        slice does propagate, because that result is another address alias. *)
     let rec ast_region_kind = function
       | Ast.TypeSlice _ -> Some RegionSlice
-      | Ast.TypePtr _ | Ast.TypeAlignedPtr _ -> Some RegionPointer
+      | Ast.TypePtr _ | Ast.TypeAlignedPtr _ | Ast.TypeRef _ | Ast.TypeRefMut _ ->
+          Some RegionPointer
       | Ast.TypeSingleton (t, _) | Ast.TypeBorrow t | Ast.TypeBorrowMut t
       | Ast.TypeSink t -> ast_region_kind t
       | _ -> None
@@ -10108,12 +10120,14 @@ let infer_program (prog : Ast.toplevel list) : program_types =
       | Ast.Unsafe x -> expr_ast_type x
       | Ast.Deref x ->
           (match Option.bind (expr_ast_type x) (fun ty -> Some (strip_borrow ty)) with
-           | Some (Ast.TypePtr inner) | Some (Ast.TypeAlignedPtr (_, inner)) ->
+           | Some (Ast.TypePtr inner) | Some (Ast.TypeAlignedPtr (_, inner))
+           | Some (Ast.TypeRef inner) | Some (Ast.TypeRefMut inner) ->
                Some inner
            | _ -> None)
       | Ast.Index (base, _) ->
           (match Option.map strip_borrow (expr_ast_type base) with
            | Some (Ast.TypePtr inner) | Some (Ast.TypeAlignedPtr (_, inner))
+           | Some (Ast.TypeRef inner) | Some (Ast.TypeRefMut inner)
            | Some (Ast.TypeArray (inner, _)) | Some (Ast.TypeSlice (inner, _)) ->
                Some inner
            | _ -> None)
@@ -10122,6 +10136,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
             match strip_borrow ty with
             | Ast.TypeNamed name -> Some name
             | Ast.TypePtr (Ast.TypeNamed name)
+            | Ast.TypeRef (Ast.TypeNamed name)
+            | Ast.TypeRefMut (Ast.TypeNamed name)
             | Ast.TypeAlignedPtr (_, Ast.TypeNamed name) -> Some name
             | _ -> None)
           in
@@ -10135,7 +10151,8 @@ let infer_program (prog : Ast.toplevel list) : program_types =
     in
     let type_contains_region_alias ty =
       let rec visit seen = function
-        | Ast.TypePtr _ | Ast.TypeAlignedPtr _ | Ast.TypeSlice _ -> true
+        | Ast.TypePtr _ | Ast.TypeAlignedPtr _ | Ast.TypeRef _
+        | Ast.TypeRefMut _ | Ast.TypeSlice _ -> true
         | Ast.TypeBorrow t | Ast.TypeBorrowMut t | Ast.TypeSink t
         | Ast.TypeRefined (_, _, t) | Ast.TypeMultiple (_, t) | Ast.TypeSingleton (t, _)
         | Ast.TypeIo t | Ast.TypeArray (t, _) -> visit seen t
@@ -10184,6 +10201,18 @@ let infer_program (prog : Ast.toplevel list) : program_types =
            | _ -> None)
       | _ -> None in
     let rec expr_taint taints (e : Ast.expr) = match e.desc with
+      | Ast.AddrOf place when returns_indexed_reference ->
+          let rec address_origin place = match place.Ast.desc with
+            | Ast.Var name when StringMap.mem name !var_types ->
+                PathSet.singleton (pvar_expr place name)
+            | Ast.FieldGet (base, _) ->
+                (match expr_ast_type base with
+                 | Some (Ast.TypePtr _ | Ast.TypeAlignedPtr _ | Ast.TypeRef _ | Ast.TypeRefMut _) ->
+                     expr_taint taints base
+                 | _ -> address_origin base)
+            | Ast.Index (base, _) -> base_taint taints base
+            | _ -> PathSet.empty in
+          address_origin place
       | Ast.Var n ->
           (match StringMap.find_opt n !var_types with
            | Some (Ast.TypeArray _) -> PathSet.empty
@@ -11500,7 +11529,11 @@ let infer_program (prog : Ast.toplevel list) : program_types =
           fdef.name))
     end;
     let initial_region_taints = List.fold_left (fun taints (name, ty_opt) ->
-      if accepts_region_borrow ty_opt then
+      let reference_parameter = returns_indexed_reference &&
+        (match Option.map strip_borrow ty_opt with
+         | Some (Ast.TypeRef _ | Ast.TypeRefMut _) -> true
+         | _ -> false) in
+      if accepts_region_borrow ty_opt || reference_parameter then
         TaintEnv.set name (PathSet.singleton (pvar name)) taints
       else taints)
       TaintEnv.empty fdef.params

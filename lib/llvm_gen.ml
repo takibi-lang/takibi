@@ -5313,7 +5313,10 @@ and gen_field_access locals (base_expr : Ast.expr) (fname : string)
         (match local_find_opt locals name with
          | Some (Mut (((TypeNamed _ | TypeIndexed _) as ty), ptr)) ->
              (ty, ptr, false)
-         | _ ->
+         | Some _ ->
+             let (ty, value) = gen_expr locals base_expr in
+             (ty, value, false)
+         | None ->
              (match Hashtbl.find_opt global_vars name with
               | Some (((TypeNamed _ | TypeIndexed _) as ty), ptr) ->
                   (ty, ptr, false)
