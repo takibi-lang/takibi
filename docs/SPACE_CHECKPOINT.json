@@ -2,13 +2,14 @@
   "date": "2026-10-08",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "b3bc7ac24a3cf0ea5a718ae88c11f9ef7c0ec65c31870b7d6779a3658864cc4c",
-  "workload": "Standard production QEMU/RPi5 linked images against published 3b02676c; existing BRK, exec, peer and concurrent fatal console workloads, UART/software BREAK DDB, and actual four-pool owner-held Busy probes. Pool payload, metadata, allocation, retained capacity and endpoint occupancy are unchanged; reuse previous endpoint evidence only for those boundaries.",
+  "source_sha256": "63ecdb8b837b2b9a04466c0d53eaa9661efa8540a9f687f88538ff1c2523908e",
+  "workload": "Standard production QEMU/RPi5 linked images against published 3b02676c; existing BRK, exec, peer and concurrent fatal console workloads, UART/software BREAK DDB, and actual four-pool owner-held Busy probes. Pool payload, metadata, allocation, retained capacity and endpoint occupancy are unchanged; reuse previous endpoint evidence only for those boundaries. Fresh combined linked-image measurement after rebasing onto dda17a75, including upstream block-cache and fixed-DMA changes.",
   "evidence": [
     "docs/STOPPED_DIAGNOSTIC_AUTHORITY.md",
     "docs/CPU_PARTICIPANT_AUTHORITY.md",
-    "docs/PROCESS_RECORD_AUTHORITY_ENDPOINT_2026-10-06.tsv"
+    "docs/PROCESS_RECORD_AUTHORITY_ENDPOINT_2026-10-06.tsv",
+    "docs/BLOCK_CACHE_BUCKETS_2026-10-08.md"
   ],
-  "assessment": "Adopt stopped-only fatal/shared capture and guarded scalar copying; retire the last liveness escape. Read-only allocation grows 5392 bytes QEMU and 6464 bytes RPi5. QEMU BSS grows 112 bytes including alignment for per-core captured availability/translations; RPi5 padding absorbs the fields. Reserved spans are 2392064/5341184 bytes; RPi5 grows 32768 bytes and loses eight allocator pages, remaining below the 0x520000 ceiling. No new per-process field, pin or blocking diagnostic lock. Physical holding and metadata/translation mint correctness remain trusted.",
+  "assessment": "Adopt stopped-only fatal/shared capture and guarded scalar copying; retire the last liveness escape. Read-only allocation grows 5392 bytes QEMU and 6464 bytes RPi5. QEMU BSS grows 112 bytes including alignment for per-core captured availability/translations; RPi5 padding absorbs the fields. Reserved spans are 2392064/5341184 bytes; RPi5 grows 32768 bytes and loses eight allocator pages, remaining below the 0x520000 ceiling. No new per-process field, pin or blocking diagnostic lock. Physical holding and metadata/translation mint correctness remain trusted. Combined images measure 706356/716476 text, 5030/2888736 data, and 1670048/1709216 BSS bytes; reserved spans remain unchanged from the terminal-capture candidate.",
   "next_trigger": "Measure at raw-authority file confinement and final safe-memory stage completion, or a changed resource/allocation workload."
 }

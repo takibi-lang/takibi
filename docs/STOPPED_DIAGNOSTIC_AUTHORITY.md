@@ -249,3 +249,24 @@ the existing pool view through the copy. Complete-stop holding, allocator
 metadata interpretation and the named physical translation mints remain
 trusted. No cheaper representation change is supported by these measurements;
 file confinement and its final source union are the next measurement trigger.
+
+### Combined upstream review, 2026-10-08
+
+After rebasing onto dda17a75, the standard linked production images measure
+706356 text / 5030 data / 1670048 BSS bytes on QEMU and
+716476 text / 2888736 data / 1709216 BSS bytes on RPi5. Reserved spans
+remain 2392064 and 5341184 bytes respectively. This combination includes
+upstream per-bucket block-cache retirement and fixed DMA device spans; the
+earlier table isolates the terminal-capture change before that integration.
+The block-cache workload and its measured I/O change are recorded separately
+in BLOCK_CACHE_BUCKETS_2026-10-08.md. The combination adds no further image
+reservation boundary and preserves the expected RPi5 allocator page count.
+
+Combined ELF SHA-256:
+
+- QEMU: 687a94bc0b55a38eb95a43e943248f0af7a2ed3282eff66cd7a04aef0d0baa84
+- RPi5: 45b0a34bf36e014183dbb6f34db8b3b7ddc16349325e9e8c78791fdd2cfd5efc
+
+Adopt the combined layout. Pool payload and retention evidence remains at its
+original boundary; this linked-image measurement does not claim a new runtime
+occupancy or physical concurrency result.
