@@ -10598,6 +10598,30 @@ let infer_program (prog : Ast.toplevel list) : program_types =
                      "lock order violation: '%s' re-acquires single-instance lock '%s' while '%s' holds it"
                      target held.label visible_name)))
                  (live_guards guard_bindings));
+          (* GitHub issue #714: both rules above summarise what a callee
+             acquires through resolved direct calls, so a call through a
+             function pointer -- here, or anywhere the callee can reach --
+             is invisible to them. Treat it conservatively, as the
+             IRQ-restore rule does: no such call while a guard is live. *)
+          (if StringMap.mem (loc_key e.loc) !resolved_indirect_call_effects
+              || StringSet.mem target may_call_indirect then
+             match live_guards guard_bindings with
+             | (visible_name, _, _, held, _) :: _ ->
+                 let what =
+                   if StringMap.mem (loc_key e.loc) !resolved_indirect_call_effects
+                   then "a call through a function pointer"
+                   else Printf.sprintf "'%s', which may reach a call through a \
+                                        function pointer%s" target
+                       (chain_text (call_chain target
+                          (fun callee -> callee = "<indirect call>")
+                          (fun _ -> false))) in
+                 raise (TypeError (e.loc, Printf.sprintf
+                   "lock order violation: %s while '%s' holds lock '%s'; \
+                    the lock-order and single-instance checks cannot see \
+                    what it acquires. Release the guard first, or call the \
+                    target directly"
+                   what visible_name held.Effect_rules.label))
+             | [] -> ());
           (* GitHub issue #528; see irq_restorers. A guard passed to this
              call is being handed over -- released, usually -- rather than
              held across it. *)

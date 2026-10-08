@@ -15544,6 +15544,40 @@ fn hidden_witnessed() -> usize {
             return use558(h);
           }") ());
 
+  (* GitHub issue #714: lock order and single-instance locks summarise only
+     resolved direct calls, so an indirect call -- here or reachable from the
+     callee -- is refused while a guard is live, as the IRQ-restore rule
+     already does. *)
+  Alcotest.test_case "indirect calls are refused while a lock guard is live" `Quick
+    (fun () ->
+      let base = {|linear struct Run714[k: usize] { private flags: usize; }
+fn run714(k: usize) -> Run714[k] !{acquires_lock_40_run, lock_guard_40_run} {
+  let mut guard: Run714[k] = { 0 }; return guard;
+}
+fn run714_release(guard: sink Run714[k]) {}
+fn takes714() { let guard = run714(1); run714_release(guard); }
+fn via714(f: fn() -> void) { f(); }
+|} in
+      expect_type_error "a call through a function pointer while 'guard' holds lock 'run'"
+        (base ^ {|fn bad714(f: fn() -> void) {
+  let guard = run714(1);
+  f();
+  run714_release(guard);
+}|}) ();
+      expect_type_error "'via714', which may reach a call through a function pointer"
+        (base ^ {|fn bad_transitive714(f: fn() -> void) {
+  let guard = run714(1);
+  via714(f);
+  run714_release(guard);
+}|}) ();
+      expect_codegen_ok (base ^ {|fn good714(f: fn() -> void) {
+  let guard = run714(1);
+  run714_release(guard);
+  f();
+  via714(f);
+  takes714();
+}|}) ());
+
   Alcotest.test_case "stored guard holder retains lock and IRQ contracts" `Quick
     (fun () ->
       let base = {|linear struct StoredHigh[k: usize] { private flags: usize; }

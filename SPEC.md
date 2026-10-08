@@ -1699,7 +1699,11 @@ error naming the callee, the lock, and the guard binding, because the only
 instance is already held and the lock is not recursive. The single-instance
 claim is trusted at that one annotation.
 These annotations are checker-only and do not appear in function-pointer
-effect rows.
+effect rows. Because both checks see only resolved direct calls, a call
+through a function pointer while any annotated guard is live is a compile
+error, and so is a call to a function from which such an indirect call is
+reachable through resolved direct calls. Release the guard first, or call
+the target directly.
 
 `--emit-held-guards <path>` writes an optional TSV report after type checking,
 without changing program acceptance. The columns are `file`, `line`, `column`,
