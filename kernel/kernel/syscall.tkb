@@ -286,15 +286,13 @@ struct SyscallScratch {
 
 private let mut syscall_scratch: [SyscallScratch; KERNEL_MAX_CORES];
 
-private fn syscall_scratch_here() -> *SyscallScratch {
-    // Takibi cannot take &array[index] yet (issue #385), so use the same
-    // bounded array-decay pattern as process.tkb's execution_here(). A
-    // hardware affinity outside KERNEL_MAX_CORES falls back to slot zero;
-    // such a core is not active and must never reach syscall dispatch.
-    let base: *SyscallScratch = syscall_scratch;
+// Syscall dispatch retains the non-preemptible, non-migrating per-CPU
+// contract. Check affinity at the array boundary and preserve slot zero
+// for an affinity outside the maintained layout.
+private fn syscall_scratch_cpu_index() -> {0..<KERNEL_MAX_CORES as usize} {
     let core: usize = cpu_id();
-    if (core >= KERNEL_MAX_CORES) { return base; }
-    return base + (core as isize);
+    if (core < KERNEL_MAX_CORES) { return core; }
+    return 0;
 }
 // GitHub issue #257: connection_open, socket_buffer_length/_offset and
 // inetd_response_length used to be four more [T; TCP_CONNECTION_MAX]
@@ -545,19 +543,19 @@ fn kernel_syscall_exec_clear() {
 
 private fn syscall_exec_argv_here() -> [u8; 512..] {
     let scratch: [u8; KERNEL_BLOCK_SIZE..] =
-        syscall_scratch_here().file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+        syscall_scratch[syscall_scratch_cpu_index()].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
     return scratch[0..<512];
 }
 
 private fn syscall_exec_path_here() -> [u8; 256..] {
     let scratch: [u8; KERNEL_BLOCK_SIZE..] =
-        syscall_scratch_here().file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+        syscall_scratch[syscall_scratch_cpu_index()].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
     return scratch[512..<768];
 }
 
 private fn syscall_script_line_here() -> [u8; 256..] {
     let scratch: [u8; KERNEL_BLOCK_SIZE..] =
-        syscall_scratch_here().file_buffer as [u8; KERNEL_BLOCK_SIZE..];
+        syscall_scratch[syscall_scratch_cpu_index()].file_buffer as [u8; KERNEL_BLOCK_SIZE..];
     return scratch[768..<1024];
 }
 
@@ -921,7 +919,7 @@ private fn syscall_exec_elf_interpreter(mount: Ext2Mount, inode: usize)
         -> SyscallExecFormatResult !{unsafe} {
     // ELF probing must not overwrite the collected script argv or path.
     let window: [u8; KERNEL_BLOCK_SIZE..] =
-        syscall_scratch_here().elf_buffer as [u8; KERNEL_BLOCK_SIZE..];
+        syscall_scratch[syscall_scratch_cpu_index()].elf_buffer as [u8; KERNEL_BLOCK_SIZE..];
     let file_length: usize = ext2_regular_file_size(mount, inode);
     let length: usize = match ext2_read_file_chunk(
             mount, inode, 0, window) {
@@ -956,7 +954,7 @@ private fn syscall_exec_elf_interpreter(mount: Ext2Mount, inode: usize)
         return SyscallExecFormatResult::InterpreterUnsupported;
     }
     let name: [u8; SYSCALL_EXEC_INTERPRETER_MAX..] =
-        syscall_scratch_here().interpreter_buffer as
+        syscall_scratch[syscall_scratch_cpu_index()].interpreter_buffer as
             [u8; SYSCALL_EXEC_INTERPRETER_MAX..];
     // The name ends at its first NUL, as Linux reads it, not at the end of
     // the segment.
@@ -1829,7 +1827,7 @@ fn kernel_syscall_socket_evidence() -> bool !{unsafe} {
 // single root component is supported by this first generic lookup slice;
 // directory traversal and symlink resolution remain separate work.
 fn kernel_syscall_path_name(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], address: usize) -> SyscallPathResult {
-    let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
+    let path_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
     let mut length: usize = 0;
     let mut terminated: bool = false;
     for offset: usize in 0..<255 {
@@ -2029,7 +2027,7 @@ fn syscall_terminal_write(current_authority: borrow ProcessCurrent[current_proce
             }
             CheckedUsize::Value(v) => { v }
         };
-        let staging_buffer = syscall_scratch_here().file_buffer as []u8;
+        let staging_buffer = syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8;
         if (chunk > staging_buffer.len) {
             return TerminalWriteResult::Errno(LINUX_EINVAL);
         }
@@ -2206,7 +2204,7 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
                     return SyscallIoResult::Errno(LINUX_EINVAL);
                 }
                 TcpConnectionTakeResult::Ready(owner) => {
-                    let conn: *TcpConnection = tcp_connection_of(owner);
+                    let conn: &mut TcpConnection = tcp_connection_of(owner);
                     if (conn.connection_open == false ||
                         length > 1460 - conn.inetd_response_length) {
                         tcp_connection_put(owner);
@@ -2250,7 +2248,7 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
             if (length == 0 || length > KERNEL_BLOCK_SIZE) {
                 return SyscallIoResult::Errno(LINUX_EINVAL);
             }
-            let destination_base: *u8 = syscall_scratch_here().file_buffer as *u8;
+            let destination_base: *u8 = syscall_scratch[syscall_scratch_cpu_index()].file_buffer as *u8;
             match user_range_check_read(kernel_process_current_root(current_authority), address, length) {
                 UserReadRangeResult::Fault => { return SyscallIoResult::Errno(LINUX_EFAULT); }
                 UserReadRangeResult::Ok(range) => {
@@ -2258,7 +2256,7 @@ fn syscall_write_segment(current_authority: borrow ProcessCurrent[current_proces
                         copy_from_user_raw(range, destination_base, length);
                 }
             }
-            let content_buffer = syscall_scratch_here().file_buffer as []u8;
+            let content_buffer = syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8;
             if (length > content_buffer.len) {
                 return SyscallIoResult::Errno(LINUX_EINVAL);
             }
@@ -2305,7 +2303,7 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                 return SyscallIoResult::Errno(LINUX_EBADF);
               }
               TcpConnectionTakeResult::Ready(owner) => {
-               let conn: *TcpConnection = tcp_connection_of(owner);
+               let conn: &mut TcpConnection = tcp_connection_of(owner);
                if (conn.connection_open == false) {
                    tcp_connection_put(owner);
                    return SyscallIoResult::Errno(LINUX_EBADF);
@@ -2484,7 +2482,7 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
         let opened_inode: usize = kernel_syscall_file_inode(fd);
         if (procfs_inode_is_ours(opened_inode)) {
             let staging_buffer: []u8 =
-                syscall_scratch_here().file_buffer as []u8;
+                syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8;
             let total: usize = procfs_render_file(opened_inode,
                                                   staging_buffer);
             let offset: usize = kernel_syscall_file_offset(fd);
@@ -2499,7 +2497,7 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                     return SyscallIoResult::Errno(LINUX_EFAULT);
                 }
                 UserWriteRangeResult::Ok(range) => {
-                    let source: *u8 = (syscall_scratch_here().file_buffer as *u8) +
+                    let source: *u8 = (syscall_scratch[syscall_scratch_cpu_index()].file_buffer as *u8) +
                         (offset as isize);
                     copy_to_user_raw(range, source, amount);
                 }
@@ -2523,7 +2521,7 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
             if (chunk_limit > KERNEL_BLOCK_SIZE) {
                 chunk_limit = KERNEL_BLOCK_SIZE;
             }
-            let staging_buffer = syscall_scratch_here().file_buffer as []u8;
+            let staging_buffer = syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8;
             if (chunk_limit > staging_buffer.len) {
                 return SyscallIoResult::Errno(LINUX_EINVAL);
             }
@@ -2558,7 +2556,7 @@ fn syscall_read_segment(current_authority: borrow ProcessCurrent[current_process
                         }
                         UserWriteRangeResult::Ok(range) => {
                             let copied_chunk: bool = copy_to_user_raw(
-                                range, syscall_scratch_here().file_buffer as *u8, chunk);
+                                range, syscall_scratch[syscall_scratch_cpu_index()].file_buffer as *u8, chunk);
                         }
                     }
                     if (kernel_syscall_file_set_offset(
@@ -3262,7 +3260,7 @@ private fn syscall_syslog(current_authority: borrow ProcessCurrent[current_proce
     while (copied < amount) {
         let mut chunk: usize = amount - copied;
         if (chunk > KERNEL_BLOCK_SIZE) { chunk = KERNEL_BLOCK_SIZE; }
-        let staging_buffer = syscall_scratch_here().file_buffer as []u8;
+        let staging_buffer = syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8;
         if (chunk > staging_buffer.len) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
@@ -3282,7 +3280,7 @@ private fn syscall_syslog(current_authority: borrow ProcessCurrent[current_proce
             }
             UserWriteRangeResult::Ok(range) => {
                 let sent: bool = copy_to_user_raw(
-                    range, syscall_scratch_here().file_buffer as *u8, chunk);
+                    range, syscall_scratch[syscall_scratch_cpu_index()].file_buffer as *u8, chunk);
                 if (sent == false) {
                     return SyscallAction::Resume(LINUX_EFAULT);
                 }
@@ -3579,8 +3577,8 @@ fn kernel_syscall_child_exec_return(frame_sp: usize) !{unsafe} {
     kernel_process_exec_failure_clear();
     let result: KernelChildExecPrepareResult = kernel_process_child_exec_prepare(current_authority);
     // GitHub issue #597: the prepare was the last ext2 read of this execve.
-    if (syscall_scratch_here().ext2_reader) {
-        syscall_scratch_here().ext2_reader = false;
+    if (syscall_scratch[syscall_scratch_cpu_index()].ext2_reader) {
+        syscall_scratch[syscall_scratch_cpu_index()].ext2_reader = false;
         ext2_read_leave();
     }
     match result {
@@ -3890,7 +3888,7 @@ private fn syscall_mkdirat_under(current_authority: borrow ProcessCurrent[curren
         SyscallPathResult::Invalid => { return LINUX_ENOENT; }
         SyscallPathResult::Name(path) => { path }
     };
-    let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
+    let path_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
     let absolute: bool = path_view[0] == 0x2F;
     let parent: SyscallParent = match kernel_syscall_parent_of(mount,
             x0, absolute, path_name) {
@@ -3930,7 +3928,7 @@ private fn syscall_unlinkat_under(current_authority: borrow ProcessCurrent[curre
         SyscallPathResult::Invalid => { return LINUX_ENOENT; }
         SyscallPathResult::Name(path) => { path }
     };
-    let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
+    let path_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
     let absolute: bool = path_view[0] == 0x2F;
     let parent: SyscallParent = match kernel_syscall_parent_of(mount,
             x0, absolute, path_name) {
@@ -3976,7 +3974,7 @@ private fn syscall_renameat_under(current_authority: borrow ProcessCurrent[curre
         SyscallPathResult::Invalid => { return LINUX_ENOENT; }
         SyscallPathResult::Name(path) => { path }
     };
-    let old_view: []u8 = syscall_scratch_here().path_buffer as []u8;
+    let old_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
     let old_absolute: bool = old_view[0] == 0x2F;
     let old_parent: SyscallParent = match kernel_syscall_parent_of(mount,
             x0, old_absolute, old_path) {
@@ -4007,7 +4005,7 @@ private fn syscall_renameat_under(current_authority: borrow ProcessCurrent[curre
         SyscallPathResult::Invalid => { return LINUX_ENOENT; }
         SyscallPathResult::Name(path) => { path }
     };
-    let new_view: []u8 = syscall_scratch_here().path_buffer as []u8;
+    let new_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
     let new_absolute: bool = new_view[0] == 0x2F;
     let new_parent: SyscallParent = match kernel_syscall_parent_of(mount,
             x2, new_absolute, new_path) {
@@ -4048,10 +4046,10 @@ private fn syscall_bind_claimed(current_authority: borrow ProcessCurrent[current
         UserReadRangeResult::Fault => { return SyscallAction::Resume(LINUX_EFAULT); }
         UserReadRangeResult::Ok(range) => {
             let copied: bool = copy_from_user_raw(
-                range, syscall_scratch_here().sockaddr_buffer as *u8, sockaddr_len);
+                range, syscall_scratch[syscall_scratch_cpu_index()].sockaddr_buffer as *u8, sockaddr_len);
         }
     }
-    let address: []u8 = syscall_scratch_here().sockaddr_buffer as []u8;
+    let address: []u8 = syscall_scratch[syscall_scratch_cpu_index()].sockaddr_buffer as []u8;
     if (address[0] == 2 && address[1] == 0) {
         if (address[4] != 0 || address[5] != 0 ||
             address[6] != 0 || address[7] != 0) {
@@ -4383,7 +4381,7 @@ fn syscall_peer_safe(number: usize, fd: usize, second: usize) -> bool {
     }
     // GitHub issue #9 phase B entry 6: the system-identity reads.
     //
-    // uname answers from fixed string literals into `syscall_scratch_here()`,
+    // uname answers from fixed string literals into the bounded per-CPU scratch array,
     // and that scratch is `[SyscallScratch; KERNEL_MAX_CORES]` indexed by
     // `cpu_id()` -- two cores never share the buffer, so a peer cannot see
     // half of core 0's fill. sysinfo keeps no kernel scratch at all: it
@@ -4946,8 +4944,8 @@ fn kernel_syscall_dispatch(esr: usize, number: usize, x0: usize, x1: usize,
     // that is -- Block and Migrate included. ChildExec is the exception
     // (#597): its exec prepare reads the image after this returns, and
     // kernel_syscall_child_exec_return releases the registration then.
-    if (syscall_scratch_here().ext2_reader && action_code != 8) {
-        syscall_scratch_here().ext2_reader = false;
+    if (syscall_scratch[syscall_scratch_cpu_index()].ext2_reader && action_code != 8) {
+        syscall_scratch[syscall_scratch_cpu_index()].ext2_reader = false;
         ext2_read_leave();
     }
     // A call that completed no longer needs core 0 (GitHub issue #9). A
@@ -5120,7 +5118,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             if (cpu_id() == 0) { return syscall_finish_current(frame, SyscallAction::WaitInterrupt, current_authority); }
             return syscall_finish_current(frame, SyscallAction::Migrate, current_authority);
         }
-        syscall_scratch_here().ext2_reader = true;
+        syscall_scratch[syscall_scratch_cpu_index()].ext2_reader = true;
     }
     kernel_init_boot_fixture_poll(current_authority);
     kernel_syscall_persistent_shell_checkpoint_selected();
@@ -5344,7 +5342,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 return syscall_finish_current(frame, kernel_syscall_procfs_open(node, fd), current_authority);
             }
         }
-        let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
+        let path_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
         let mut lookup_inode: usize = 2;
         if (path_view[0] != 0x2F && x0 != LINUX_AT_FDCWD) {
             if (kernel_syscall_directory_is_open(x0) == false) {
@@ -5465,7 +5463,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             SyscallPathResult::Invalid => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_ENOENT), current_authority); }
             SyscallPathResult::Name(path) => { path }
         };
-        let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
+        let path_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
         let mut lookup_inode: usize = 2;
         if (path_view[0] != 0x2F && dirfd != LINUX_AT_FDCWD) {
             if (kernel_syscall_directory_is_open(dirfd) == false) {
@@ -5522,7 +5520,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 }
             }
         }
-        let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
+        let path_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
         let mut lookup_inode: usize = 2;
         if (path_view[0] != 0x2F && x0 != LINUX_AT_FDCWD) {
             if (kernel_syscall_directory_is_open(x0) == false) {
@@ -6152,7 +6150,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         match user_range_check_read(kernel_process_current_root(current_authority), x0, 2) {
             UserReadRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
             UserReadRangeResult::Ok(range) => {
-                let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
+                let path_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
                 if (copy_from_user(range, path_view[0..<2]) &&
                         (path_view[0] == 0x2F || path_view[0] == 0x2E) &&
                         path_view[1] == 0) {
@@ -6722,7 +6720,7 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                     return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                 }
                 UserWriteRangeResult::Ok(range) => {
-                    let old_bytes = syscall_scratch_here().rlimit_buffer as []u8;
+                    let old_bytes = syscall_scratch[syscall_scratch_cpu_index()].rlimit_buffer as []u8;
                     syscall_rlimit_store(old_bytes[0..<8], soft);
                     syscall_rlimit_store(old_bytes[8..<16], hard);
                     let reported: []u8 = old_bytes[0..<16];
@@ -6738,10 +6736,10 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
             }
             UserReadRangeResult::Ok(range) => {
                 let copied: bool = copy_from_user_raw(
-                    range, syscall_scratch_here().rlimit_buffer as *u8, sizeof(usize) * 2);
+                    range, syscall_scratch[syscall_scratch_cpu_index()].rlimit_buffer as *u8, sizeof(usize) * 2);
             }
         }
-        let new_bytes = syscall_scratch_here().rlimit_buffer as []u8;
+        let new_bytes = syscall_scratch[syscall_scratch_cpu_index()].rlimit_buffer as []u8;
         let new_soft: usize = syscall_rlimit_load(new_bytes[0..<8]);
         let new_hard: usize = syscall_rlimit_load(new_bytes[8..<16]);
         if (new_soft > new_hard) { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority); }
@@ -6763,9 +6761,9 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         match user_range_check_write(kernel_process_current_root(current_authority), x0, sizeof(Utsname)) {
             UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
             UserWriteRangeResult::Ok(range) => {
-                let uname_bytes = syscall_scratch_here().uname_buffer as []u8;
+                let uname_bytes = syscall_scratch[syscall_scratch_cpu_index()].uname_buffer as []u8;
                 for zero_index: usize in 0..<sizeof(Utsname) {
-                    syscall_scratch_here().uname_buffer[zero_index] = 0;
+                    syscall_scratch[syscall_scratch_cpu_index()].uname_buffer[zero_index] = 0;
                 }
                 uname_write_field(uname_bytes[
                                       offsetof(Utsname, sysname)..<
@@ -7316,7 +7314,7 @@ private inline fn syscall_getdents64_current(
                 match ext2_read_directory_chunk(
                     mount, inode_number,
                     directory_offset,
-                    syscall_scratch_here().file_buffer as []u8) {
+                    syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8) {
                     Ext2ReadResult::Invalid => {
                         if (written != 0) {
                             return SyscallAction::Resume(written);
@@ -7339,13 +7337,22 @@ private inline fn syscall_getdents64_current(
                                 }
                                 return SyscallAction::Resume(LINUX_EINVAL);
                             }
-                            let entry: *u8 =
-                                (syscall_scratch_here().file_buffer as *u8) +
-                            (cursor as isize);
+                            let file_bytes = syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8;
+                            let entry_start: usize = cursor;
+                            if (entry_start > file_bytes.len) {
+                                if (written != 0) { return SyscallAction::Resume(written); }
+                                return SyscallAction::Resume(LINUX_EINVAL);
+                            }
+                            let entry_tail = file_bytes[entry_start..<file_bytes.len];
+                            if (entry_tail.len < 8) {
+                                if (written != 0) { return SyscallAction::Resume(written); }
+                                return SyscallAction::Resume(LINUX_EINVAL);
+                            }
+                            let entry = entry_tail[0..<8];
                             let entry_inode: usize =
-                                ext2_u32(entry, 0) as usize;
+                                ext2_u32(entry as *u8, 0) as usize;
                             let record_length: usize =
-                                ext2_u16(entry, 4) as usize;
+                                ext2_u16(entry as *u8, 4) as usize;
                             let name_length: usize = entry[6] as usize;
                             if (record_length < 8 ||
                                 record_length > chunk - cursor ||
@@ -7377,6 +7384,12 @@ private inline fn syscall_getdents64_current(
                                 }
                                 return SyscallAction::Resume(written);
                             }
+                            let name_tail = entry_tail[8..<entry_tail.len];
+                            if (name_length > name_tail.len) {
+                                if (written != 0) { return SyscallAction::Resume(written); }
+                                return SyscallAction::Resume(LINUX_EINVAL);
+                            }
+                            let entry_name = name_tail[0..<name_length];
                             user_write_u64(range, written,
                                 entry_inode as u64);
                             user_write_u64(range, written + 8,
@@ -7385,10 +7398,10 @@ private inline fn syscall_getdents64_current(
                                 output_length);
                             user_write_byte(range, written + 18,
                                 entry[7]);
-                            for name_index: usize in 0..<name_length {
-                                user_write_byte(
-                                    range, written + 19 + name_index,
-                                    entry[(8 + name_index) as isize]);
+                            let mut name_output: usize = written + 19;
+                            for name_byte in entry_name {
+                                user_write_byte(range, name_output, name_byte);
+                                name_output = name_output + 1;
                             }
                             user_write_byte(range,
                                 written + 19 + name_length, 0);
@@ -7436,7 +7449,7 @@ private inline fn syscall_sendfile_current(
         if (chunk_limit > KERNEL_BLOCK_SIZE) {
             chunk_limit = KERNEL_BLOCK_SIZE;
         }
-        let staging_buffer = syscall_scratch_here().file_buffer as []u8;
+        let staging_buffer = syscall_scratch[syscall_scratch_cpu_index()].file_buffer as []u8;
         if (chunk_limit > staging_buffer.len) {
             return SyscallAction::Resume(LINUX_EINVAL);
         }
@@ -7519,7 +7532,7 @@ private inline fn syscall_execve_current(
         SyscallPathResult::Name(path) => { path }
     };
     let mut path_length: usize = exec_lookup_name.len;
-    let path_view: []u8 = syscall_scratch_here().path_buffer as []u8;
+    let path_view: []u8 = syscall_scratch[syscall_scratch_cpu_index()].path_buffer as []u8;
     if (path_view[0] == 0x2F) { path_length = path_length + 1; }
     if (path_length == 0 || argv_address == 0) { return SyscallAction::Resume(LINUX_EINVAL); }
     let exec_path_absolute: bool = path_view[0] == 0x2F;
