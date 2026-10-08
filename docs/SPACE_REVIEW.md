@@ -52,6 +52,12 @@ Generate the fingerprint after the implementation commits are current:
 python3 scripts/space_checkpoint.py --head HEAD --digest
 ```
 
+For a `measured` decision on linked kernels, `python3 scripts/space_delta.py
+[BASE]` builds both production kernels in the working tree and at BASE
+(default `origin/main`, in a temporary worktree) and prints the llvm-size
+table, every data/BSS symbol whose size changed, and `usable_ram_start`,
+which shows whether the image span and the page reservations moved.
+
 The checkpoint has exactly these fields:
 
 - `date`: measurement/review date in YYYY-MM-DD form.

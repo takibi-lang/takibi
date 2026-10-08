@@ -1992,9 +1992,9 @@ _kernelcheck-debug-return-abi-production:
 _kernelcheck-debug-return-abi-debug:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env DEBUG_RETURN_ABI_FLAVOR=debug DEBUG_RETURN_ABI_GDB_PORT=18611 bash scripts/run_kernel_debug_return_abi_qemutest.sh
 _kernelcheck-debug-return-abi-direct-classifier:
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env DEBUG_RETURN_ABI_GDB_PORT=18612 python3 scripts/run_kernel_debug_return_abi_counterfactual.py direct-classifier
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env DEBUG_RETURN_ABI_COUNTERFACTUAL=direct-classifier DEBUG_RETURN_ABI_GDB_PORT=18612 bash scripts/run_kernel_debug_return_abi_qemutest.sh
 _kernelcheck-debug-return-abi-c-size-rule:
-	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env DEBUG_RETURN_ABI_GDB_PORT=18613 python3 scripts/run_kernel_debug_return_abi_counterfactual.py c-size-rule
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env DEBUG_RETURN_ABI_COUNTERFACTUAL=c-size-rule DEBUG_RETURN_ABI_GDB_PORT=18613 bash scripts/run_kernel_debug_return_abi_qemutest.sh
 
 ## kernelsh-qemu: boot the standalone kernel, attach the current terminal to
 ## its TCP-backed UART console, and forward localhost:18080 to guest httpd.

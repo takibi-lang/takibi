@@ -21,6 +21,13 @@ set -euo pipefail
 trap 'takibi_status=$?; echo "[$(basename "$0")] aborted at line $LINENO with exit $takibi_status: $BASH_COMMAND" >&2' ERR
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# A counterfactual run enters through this script too, so the Makefile line
+# that starts it is one scripts/check_qemu_lane_ports.py reads. The wrapper
+# calls back in with the variable cleared.
+if [ -n "${DEBUG_RETURN_ABI_COUNTERFACTUAL:-}" ]; then
+    exec python3 "$REPO_ROOT/scripts/run_kernel_debug_return_abi_counterfactual.py" \
+        "$DEBUG_RETURN_ABI_COUNTERFACTUAL"
+fi
 FLAVOR="${DEBUG_RETURN_ABI_FLAVOR:-production}"
 case "$FLAVOR" in
     production) FLAGS=(--frame-pointers --forbid-trap) ;;

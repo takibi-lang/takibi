@@ -66,7 +66,7 @@ def main():
     wrong = artifacts / "regressed-metadata.json"
     wrong.write_text(json.dumps(regress(json.loads(real.read_text()), mode)),
                      encoding="ascii")
-    env = dict(os.environ,
+    env = dict(os.environ, DEBUG_RETURN_ABI_COUNTERFACTUAL="",
                DEBUG_RETURN_ABI_FLAVOR="production",
                DEBUG_RETURN_ABI_METADATA=str(wrong),
                DEBUG_RETURN_ABI_LABEL=f"counterfactual {mode}",
