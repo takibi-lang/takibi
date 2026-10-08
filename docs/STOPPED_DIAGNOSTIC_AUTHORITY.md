@@ -319,3 +319,24 @@ Fresh ELF SHA-256:
 
 Adopt the measured combination. Final raw-authority file confinement and
 safe-memory stage completion remain the next measurement trigger.
+
+### Indexed record references and bounded execution-state places, 2026-10-08
+
+Fresh standard production QEMU/RPi5 linked images after the reference API
+migration measure 709308/719444 text bytes, 5030/2888736 data bytes and
+1653664/1692832 BSS bytes. Reserved image spans remain 2392064/5308416
+bytes. Text grows by 2872/2808 bytes from the preceding terminal diagnostic
+image; no process field, pool occupancy, allocation or retained-page policy
+changes. Indexed references reuse the existing owner, view and stop authority.
+The maintained QEMU boot, 68 views and halt/poweroff/restart PTY workloads
+pass. Earlier endpoint captures retain only their payload and chunk scope.
+
+ELF SHA-256:
+
+- QEMU: 0511e499d8ae0deb453fb3399bc38262a8c3174a1e93a95410777e89cdba9286
+- RPi5: 4674ca65b9d05eb17be462ac57641b580c4a3460a7fdb46c1b597766dca79c68
+
+Adopt the measured combination: the modest code growth removes pooled-record
+raw accesses and bounds per-CPU state selection without additional runtime
+storage. The next measurement is the RegionPool record-reference migration
+or final raw-authority confinement milestone.
