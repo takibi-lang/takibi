@@ -2,9 +2,11 @@
   "date": "2026-10-08",
   "event": "milestone",
   "decision": "measured",
-  "source_sha256": "f47234a4d066343f29b1a78dcefe2d96e2ce3bac7d4805ce4d422eba27d3e954",
-  "workload": "Fresh standard production QEMU/RPi5 linked images compared to b70b1ffb with space_delta.py. Maintained QEMU boot, 69 views, PTY halt/poweroff/restart and nine pool samples at boot/bounded_end for the preceding record/ASID/compiler stage; final clean allcheck covers the added FD scalar migration. Endpoint samples do not establish peak occupancy or hardware timing.",
+  "source_sha256": "a9e79bdb2832a2d5b90aae59af8f87556936bbc78e87384f31721f42757de286",
+  "workload": "Fresh standard production QEMU/RPi5 linked kernels compared to d4c4d431 with space_delta.py; maintained QEMU 69-view bounded boot and its complete boot/bounded_end nine-pool captures; native production ELF header copy execution. Endpoint captures do not establish peak occupancy, cache coherence or hardware timing. Final clean allcheck supplies real RPi5 evidence.",
   "evidence": [
+    "docs/PER_CPU_ELF_SPACE_2026-10-08.md",
+    "docs/PER_CPU_ELF_POOL_ENDPOINT_2026-10-08.tsv",
     "docs/REGION_RECORD_REFERENCES_2026-10-08.md",
     "docs/REGION_REFERENCE_POOL_ENDPOINT_2026-10-08.tsv",
     "docs/IRQ_COUNTS_SPACE_2026-10-08.md",
@@ -16,6 +18,6 @@
     "docs/DMA_MINT_FILES_2026-10-08.md",
     "docs/DMA_TRANSMIT_2026-10-08.md"
   ],
-  "assessment": "Adopt indexed record references, checked array-field loans and guarded scalar/three-word copies. QEMU/RPi5 text grows 2016/1904 bytes to 716052/725996; data 5070/2888776 and BSS 1655712/1692544 are unchanged. No data/BSS symbol changes size or persistent storage is added. Reserved image spans remain 2392064/5341184 bytes with no further allocator-page cost above the upstream IRQ-count milestone. Pool payload/slot sizes and observed endpoint occupancy retain their existing boundaries. ASID copies are three stack words; FD accesses copy one scalar. No image ceiling or safety rule is weakened. Final raw-authority confinement remains required.",
-  "next_trigger": "Measure at further per-CPU migration, final raw-authority confinement or a changed allocation/lifetime workload."
+  "assessment": "Adopt checked per-CPU places, typed TCP connection consumers and bounded ELF value copies. QEMU/RPi5 text grows 1288/1176 bytes to 717340/727172; data 5070/2888776 and BSS 1655712/1692544 are unchanged, with no data/BSS symbol size changes. Image reservations stay 2392064/5341184 bytes. Fresh pool endpoint accounting is unchanged. ELF copies are bounded 64/56-byte values; no persistent storage or allocation policy changes. Zero consumer raw-dereference counts do not yet establish confinement, and the remaining raw-buffer forwarding/probe atomics are not declared safe.",
+  "next_trigger": "Measure at the typed atomic/probe or bounded-copy milestone, process trust-boundary separation, final raw-authority confinement, or a changed allocation/lifetime workload."
 }
