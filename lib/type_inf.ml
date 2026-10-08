@@ -104,6 +104,21 @@ let raw_deref_sites () =
 
 let active_audit_function : string ref = ref "<global>"
 
+module UnsafeSites = Map.Make (struct
+  type t = string * int * int
+  let compare = compare
+end)
+
+(* Explicit assertion sites are separate from propagated unsafe effects. *)
+let unsafe_site_table : (Lexing.position * string) UnsafeSites.t ref =
+  ref UnsafeSites.empty
+
+let unsafe_authority_sites () = UnsafeSites.bindings !unsafe_site_table |> List.map snd
+
+let record_unsafe_authority loc =
+  let key = (Ast.source_file_of_loc loc, loc.Lexing.pos_lnum, loc.pos_cnum - loc.pos_bol) in
+  unsafe_site_table := UnsafeSites.add key (loc, !active_audit_function) !unsafe_site_table
+
 (* Optional source report from the ownership flow used by lock-order checking.
    Include shadowed owners through declared paths, not only visible names.
    Keep empty sites too: absence of a row must not mean "no guard held".
@@ -3116,6 +3131,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                           `unsafe { ... as %s }` to mark it, or use \
                           `&x`/`&mut x` on the real value instead"
                          (to_string src_ty) (to_string tgt) (to_string tgt)));
+                     note_type_checker_unsafe_use ();
                      tgt
                  | _ ->
                      raise (TypeError (e.loc, Printf.sprintf
@@ -3676,6 +3692,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
            Printf.sprintf "subslice on non-slice/array/pointer type '%s'" (to_string t))))
 
   | Unsafe e1 ->
+      record_unsafe_authority e.loc;
       (* Transparent to typing except for permitting unchecked-assertion
          constructs inside. Restore unsafe_depth at this scope boundary even
          when checking e1 raises: infer_program deliberately continues with
@@ -5921,6 +5938,7 @@ let rec infer_stmt senv eenv tyenv fenv ret_ty raw_locals in_loop (s : Ast.stmt)
       in
       (tyenv, raw_locals')
   | UnsafeBlock stmts ->
+      record_unsafe_authority s.loc;
       (* GitHub issue #315: same as Block, except every statement inside
          is checked with unsafe_depth raised -- the block-granularity
          grant. Both module-scoped grants are restored at this scope
@@ -6773,6 +6791,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset slice_cast_len;     (* GitHub issue #372, same lifetime *)
   Hashtbl.reset overflow_audit_table;
   Hashtbl.reset raw_deref_table;
+  unsafe_site_table := UnsafeSites.empty;
   held_guard_table := HeldGuardSites.empty;
   active_audit_function := "<global>";
   Hashtbl.reset divisor_proven_nonzero_at;

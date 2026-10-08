@@ -17,7 +17,8 @@ describes behavior in prose instead.
 
 File extension: `.tkb`. Compiler invocation: `takibi <file1.tkb>
 [file2.tkb ...] [-o out.o] [--target <triple>] [--cpu <cpu>] [--features
-<features>] [-g] [--forbid-trap] [--forbid-unsafe] [--reject-unused-functions]
+<features>] [-g] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>]
+[--reject-unused-functions]
 [--external-entry <function>] [--check-unused-file <path>] [--explain-inference]
 [--emit-effect-matrix] [--emit-held-guards <path>] [--version]`. Multiple `.tkb` files are
 concatenated (flat global namespace) before compilation -- there is no
@@ -3902,6 +3903,27 @@ future such gate gets correct lint coverage automatically, with no
 codegen-side change needed (GitHub issue #328). A statement or expression
 is only reported as unnecessary when **neither** source found a
 justification for it.
+
+## Raw authority file confinement
+
+`--confine-raw-authority` rejects every type-checked raw pointer dereference
+and local explicit `unsafe` assertion, including dormant generic templates,
+outside a file declared with repeatable
+`--raw-mint-file <path>`. The accessing or asserting file must be declared;
+calling an accessor in a mint file does not grant its caller permission to
+perform raw access. A reference, checked slice, array or value field access
+requires no mint declaration. Local assertions are checked separately from
+propagated unsafe effects, so a safe caller can invoke a named trusted mint.
+Path spellings are normalized lexically, including absolute/relative paths,
+`.` and `..`. Generic instance positions retain the original source boundary.
+Compiler-generated region primitives have their own virtual trusted source.
+
+This policy changes neither pointer representation nor runtime behavior. It
+confines trust, rather than proving the physical claims within a declared mint
+or arbitrary extern/assembly bodies. Reference minting by raw-pointer conversion
+is also confined because it requires an explicit unsafe assertion. A mint-file
+argument without the confinement flag is an error. Application mint declarations
+are an explicit build policy, not inferred from the presence of unsafe code.
 
 ## --forbid-trap
 

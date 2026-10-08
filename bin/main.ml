@@ -46,6 +46,8 @@ let () =
   let debug_info = ref false in
   let forbid_trap = ref false in
   let forbid_unsafe = ref false in
+  let confine_raw_authority = ref false in
+  let raw_mint_files = ref [] in
   let regions = ref false in
   let reject_unused_functions = ref false in
   let external_entries = ref [] in
@@ -65,6 +67,14 @@ let () =
   let i = ref 1 in
   while !i < Array.length Sys.argv do
     (match Sys.argv.(!i) with
+     | "--confine-raw-authority" -> confine_raw_authority := true
+     | "--raw-mint-file" ->
+         incr i;
+         if !i >= Array.length Sys.argv then begin
+           Printf.eprintf "Error: --raw-mint-file requires a path\n";
+           exit 1
+         end;
+         raw_mint_files := Sys.argv.(!i) :: !raw_mint_files
      | "--version" ->
          show_version := true
      | "--emit-exception-frame-offsets" ->
@@ -188,7 +198,7 @@ let () =
 
   if input_files = [] then (
     Printf.eprintf
-      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--forbid-trap] [--forbid-unsafe] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-held-guards <path>] [--version]\n"
+      "Usage: %s <filename>... [-o <output.o>] [--target <triple>] [--cpu <cpu>] [--features <features>] [-g] [--profile-functions] [--frame-pointers] [--forbid-trap] [--forbid-unsafe] [--confine-raw-authority] [--raw-mint-file <path>] [--regions] [--reject-unused-functions] [--external-entry <function>] [--check-unused-file <path>] [--explain-inference] [--emit-effect-matrix] [--emit-exception-frame-offsets <StructName>] [--emit-struct-layout <StructName>] [--emit-debug-metadata <path>] [--emit-depfile <path>] [--emit-overflow-audit <path>] [--emit-raw-deref-audit <path>] [--emit-held-guards <path>] [--version]\n"
       Sys.argv.(0);
     exit 1
   );
@@ -290,6 +300,7 @@ let () =
        synthesise the linear write token that gates its payload stores.
        Before monomorphization so that everything downstream sees only
        ordinary StructDef/OpaqueStructDef declarations. *)
+    let source_prog = prog in
     let prog = Publish_record.run prog in
     let prog = Dma_fixed_record.run prog in
 
@@ -308,6 +319,16 @@ let () =
     (* HM type inference -- catches type errors and produces resolved types *)
     Type_inf.set_held_guard_audit_enabled (!emit_held_guards <> "");
     let prog_types = Typechecker.infer_program prog in
+
+    if !raw_mint_files <> [] && not !confine_raw_authority then begin
+      Printf.eprintf "Error: --raw-mint-file requires --confine-raw-authority\n";
+      exit 1
+    end;
+    if !confine_raw_authority then begin
+      let errors = Raw_authority_policy.check ~source_program:source_prog ~mint_files:!raw_mint_files () in
+      List.iter (fun (loc, message) -> report_error loc message) errors;
+      if errors <> [] then exit 1
+    end;
 
     if !reject_unused_functions then begin
       let errors = Unused_functions.check

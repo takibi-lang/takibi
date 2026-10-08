@@ -21110,6 +21110,88 @@ private fn ref_read(owner: borrow RefOwner[g]) -> &RefRecord @ g {
 }
 |}
 
+let raw_authority_policy_tests = [
+  Alcotest.test_case "dormant generic unsafe assertion retains its source boundary" `Quick
+    (fun () ->
+      let source = "fn dormant(T: type, value: T) !{unsafe} { unsafe { let pointer = (value as usize) as *usize; } } fn main() -> usize { return 42; }" in
+      let source_program = parse source in
+      ignore (Type_inf.infer_program
+        (Declared_type_resolver.run (Monomorphize.run source_program)));
+      Alcotest.(check int) "template emits no typed assertion" 0
+        (List.length (Type_inf.unsafe_authority_sites ()));
+      let errors = Raw_authority_policy.check ~source_program ~mint_files:[] () in
+      Alcotest.(check int) "source assertion rejected" 1 (List.length errors);
+      Alcotest.(check bool) "original function diagnostic" true
+        (contains_substring (snd (List.hd errors)) "'dormant'");
+      let file = Ast.source_file_of_loc (fst (List.hd errors)) in
+      Alcotest.(check int) "declared template accepted" 0
+        (List.length (Raw_authority_policy.check ~source_program ~mint_files:[file] ())));
+
+  Alcotest.test_case "generic access retains its original mint file" `Quick
+    (fun () ->
+      ignore (infer_files [("mint.tkb", "fn load(T: type, pointer: *T) -> T { return *pointer; }");
+        ("consumer.tkb", "fn read(pointer: *usize) -> usize { return load(pointer); }")]);
+      Alcotest.(check int) "original file declared" 0
+        (List.length (Raw_authority_policy.check ~mint_files:["mint.tkb"] ()));
+      Alcotest.(check int) "caller declaration cannot cover callee" 1
+        (List.length (Raw_authority_policy.check ~mint_files:["consumer.tkb"] ())));
+
+  Alcotest.test_case "raw accesses require the accessing file's declaration" `Quick
+    (fun () ->
+      ignore (infer_files [("mint.tkb", "struct Record { value: usize; } fn address(p: *Record) -> *Record { return p; }");
+        ("consumer.tkb", "fn read(p: *Record) -> usize { return address(p).value; }")]);
+      let errors = Raw_authority_policy.check ~mint_files:["mint.tkb"] () in
+      Alcotest.(check int) "consumer rejected" 1 (List.length errors);
+      let loc, message = List.hd errors in
+      Alcotest.(check string) "access location" "consumer.tkb" loc.Lexing.pos_fname;
+      Alcotest.(check bool) "specific raw diagnostic" true
+        (contains_substring message "raw plain field");
+      Alcotest.(check int) "both declared" 0
+        (List.length (Raw_authority_policy.check ~mint_files:["mint.tkb"; "consumer.tkb"] ())));
+  Alcotest.test_case "unsafe reference mint is confined without a raw dereference" `Quick
+    (fun () ->
+      ignore (infer_files [("mint.tkb", {|
+        struct Record { value: usize; }
+        fn mint(pointer: *Record) -> usize !{unsafe} {
+          let reference: &mut Record = unsafe { pointer as &mut Record };
+          return reference.value;
+        }|})]);
+      Alcotest.(check int) "no raw access" 0 (List.length (Type_inf.raw_deref_sites ()));
+      let errors = Raw_authority_policy.check ~mint_files:[] () in
+      Alcotest.(check int) "assertion rejected" 1 (List.length errors);
+      Alcotest.(check bool) "specific assertion diagnostic" true
+        (contains_substring (snd (List.hd errors)) "local unsafe assertion");
+      Alcotest.(check int) "declared mint accepted" 0
+        (List.length (Raw_authority_policy.check ~mint_files:["./mint.tkb"] ())));
+  Alcotest.test_case "unsafe statement block is confined" `Quick
+    (fun () ->
+      ignore (infer_files [("consumer.tkb", "fn mint(address: usize) !{unsafe} { unsafe { let pointer = address as *usize; } }")]);
+      Alcotest.(check int) "block rejected" 1
+        (List.length (Raw_authority_policy.check ~mint_files:[] ())));
+  Alcotest.test_case "references arrays and slices need no application mint" `Quick
+    (fun () ->
+      ignore (infer_files [("consumer.tkb", {|
+        struct Record { value: usize; }
+        fn read(record: &Record, bytes: [u8; 1..]) -> usize {
+          return record.value + (bytes[0] as usize);
+        }|})]);
+      Alcotest.(check int) "safe consumer accepted" 0
+        (List.length (Raw_authority_policy.check ~mint_files:[] ())));
+  Alcotest.test_case "raw authority audit resets between compilations" `Quick
+    (fun () ->
+      ignore (infer "fn mint(address: usize) -> *usize !{unsafe} { return unsafe { address as *usize }; }");
+      ignore (infer "fn safe() -> usize { return 42; }");
+      Alcotest.(check int) "no stale authority" 0
+        (List.length (Raw_authority_policy.check ~mint_files:[] ())));
+  Alcotest.test_case "raw reference mint consumes its necessary unsafe grant" `Quick
+    (expect_unnecessary_unsafe 0 {|
+      struct Record { value: usize; }
+      fn mint(pointer: *Record) -> usize !{unsafe} {
+        let reference: &mut Record = unsafe { pointer as &mut Record };
+        return reference.value;
+      }|});
+]
+
 let indexed_reference_tests = [
   Alcotest.test_case "field codegen prefers local pointer over same-named global" `Quick
     (fun () -> ignore (gen_codegen {|
@@ -22064,6 +22146,7 @@ let named_groups_unisolated = [
   "record-loans", record_loan_tests;
   "loan-transfer", loan_transfer_tests;
   "indexed-reference", indexed_reference_tests;
+  "raw-authority-policy", raw_authority_policy_tests;
   "witness-changes", witness_change_tests;
   "record-loan-contracts", record_loan_contract_tests;
   "record-loan-boundaries", record_boundary_tests;
