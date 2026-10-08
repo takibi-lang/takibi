@@ -6126,7 +6126,8 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 // GitHub issue #270: PID 1 reaping its first child is where
                 // the bounded boot fixture ends now. The hook is a no-op for
                 // every other reaper and after the first one.
-                kernel_init_boot_fixture_reaped(kernel_process_current_pid());
+                kernel_init_boot_fixture_reaped(kernel_process_current_pid(),
+                                                reaped_status);
                 workload_peer_wait_note(false);
                 return syscall_finish_current(frame, SyscallAction::Resume(zombie_pid), current_authority);
             }

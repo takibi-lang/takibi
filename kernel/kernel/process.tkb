@@ -4235,7 +4235,7 @@ fn kernel_process_stack_switch_complete(frame_sp: usize) {
             kernel_process_reap_zombie(reap_parent, reap_child);
         incoming = execution_state[execution_cpu_index()].current_handle;
         kernel_init_boot_fixture_reaped(
-            scheduled_process_pid_of_handle(incoming));
+            scheduled_process_pid_of_handle(incoming), reaped_status);
     }
     // Last, after the deferred reap: that reap is the path that left the
     // target at root 0 in #437.

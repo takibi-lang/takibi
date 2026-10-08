@@ -104,6 +104,8 @@ private let mut image_record_baseline: usize;
 private let mut fd_context_baseline: usize;
 private let mut page_baseline: usize;
 private let mut init_boot_fixture_reported: bool;
+// The reaped child's exit status, printed by kernel_init_script_success_evidence.
+private let mut init_boot_fixture_status: usize;
 private let mut init_boot_fixture_pending: bool;
 private let mut clone_growth_probe_ok: bool;
 
@@ -390,10 +392,11 @@ private fn dead_slot_fallback_uses() -> usize {
         + tcp_absent_fallback_uses();
 }
 
-fn kernel_init_boot_fixture_reaped(reaper_pid: usize) {
+fn kernel_init_boot_fixture_reaped(reaper_pid: usize, status: usize) {
     if (init_boot_fixture_reported) { return; }
     if (reaper_pid != 1) { return; }
     init_boot_fixture_pending = true;
+    init_boot_fixture_status = status;
 }
 
 fn kernel_init_boot_fixture_poll(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) !{unsafe} {
@@ -953,7 +956,12 @@ fn kernel_init_script_socket_evidence() {
 }
 
 fn kernel_init_script_success_evidence(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) {
-    kernel_boot_log("init script exit: 0\n");
+    // The status init.sh actually exited with: 128+signal when a signal
+    // ended it. This line said 0 unconditionally, which hid a script that
+    // a stale signal had ended halfway (found in #629's session audit).
+    kernel_boot_log("init script exit: ");
+    uart_put_udec(init_boot_fixture_status);
+    kernel_boot_log("\n");
     kernel_boot_log("syscall write errors: ebadf efault\n");
     if (kernel_process_clone_evidence(current_authority)) {
         kernel_boot_log("process clone: parent+child exit=42 reaped\n");
