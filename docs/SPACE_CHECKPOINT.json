@@ -1,13 +1,14 @@
 {
   "date": "2026-10-08",
-  "event": "incremental",
-  "decision": "reuse",
-  "source_sha256": "f53583aac69a255a1427d275316335f16a07f9569bd76273cd83a7a482ac0446",
-  "workload": "Standard production QEMU/RPi5 linked images and the QEMU main lane boot, before (dda17a75) and after narrowing PageMeta.map_refcount to u32 (de252ca5). Accounting boundaries: per-page runtime metadata over discovered RAM (managed pages x sizeof(PageMeta)), fixed image sections, and allocator start pages. 2026-10-08 reuse: the #626 commit changes only a type-checker diagnostic location and adds tests; no storage or code layout change.",
+  "event": "milestone",
+  "decision": "measured",
+  "source_sha256": "b3bc7ac24a3cf0ea5a718ae88c11f9ef7c0ec65c31870b7d6779a3658864cc4c",
+  "workload": "Standard production QEMU/RPi5 linked images against published 3b02676c; existing BRK, exec, peer and concurrent fatal console workloads, UART/software BREAK DDB, and actual four-pool owner-held Busy probes. Pool payload, metadata, allocation, retained capacity and endpoint occupancy are unchanged; reuse previous endpoint evidence only for those boundaries.",
   "evidence": [
-    "docs/PAGE_META_24_2026-10-08.md",
-    "docs/BLOCK_CACHE_BUCKETS_2026-10-08.md"
+    "docs/STOPPED_DIAGNOSTIC_AUTHORITY.md",
+    "docs/CPU_PARTICIPANT_AUTHORITY.md",
+    "docs/PROCESS_RECORD_AUTHORITY_ENDPOINT_2026-10-06.tsv"
   ],
-  "assessment": "Reuse the 2026-10-08 PageMeta measurement: a diagnostic location and tests change no static storage, pool, allocation path or retained page. Adopt: PageMeta 32 -> 24 bytes per managed page, held by static_assert. Runtime metadata falls 2092480 bytes on QEMU (261560 pages) and 2074496 bytes on RPi5 (259312 pages); .bss falls 16384 bytes on both; RPi5 allocator_pages 259304 -> 259312. No pool, slot or retained page changes. Deriving the physical field (24 -> 16) is deferred to #718 until an RPi5 allocator time measurement exists. Allocator operation time was not measured in this review.",
-  "next_trigger": "Measure at a change to sizeof(PageMeta) (the static_assert enforces it), to block cache slot or bucket count, a changed allocation workload, or completion of the safe-memory stage."
+  "assessment": "Adopt stopped-only fatal/shared capture and guarded scalar copying; retire the last liveness escape. Read-only allocation grows 5392 bytes QEMU and 6464 bytes RPi5. QEMU BSS grows 112 bytes including alignment for per-core captured availability/translations; RPi5 padding absorbs the fields. Reserved spans are 2392064/5341184 bytes; RPi5 grows 32768 bytes and loses eight allocator pages, remaining below the 0x520000 ceiling. No new per-process field, pin or blocking diagnostic lock. Physical holding and metadata/translation mint correctness remain trusted.",
+  "next_trigger": "Measure at raw-authority file confinement and final safe-memory stage completion, or a changed resource/allocation workload."
 }
