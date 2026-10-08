@@ -2,7 +2,7 @@
   "date": "2026-10-08",
   "event": "incremental",
   "decision": "measured",
-  "source_sha256": "f63ea6bc7c161fb4dbc5ac32eb4d31e33d8ab7f4721e579dd8432bcf21fffdcc",
+  "source_sha256": "4f7cd1426ad5c5bc297e35cb7748eb16b08d3cebc13412932559def548d5e38d",
   "workload": "Fresh standard production QEMU/RPi5 linked kernels, base commit and #716 change, measured with llvm-size-19/llvm-nm-19. Fresh standard production QEMU/RPi5 linked kernels after indexed process references, bounded per-CPU places, the upstream indirect-call lock rule and repaired race-control anchor. Earlier QEMU boot, 68 views and PTY evidence retains its original scope; final combined allcheck is still required.",
   "evidence": [
     "docs/STOPPED_DIAGNOSTIC_AUTHORITY.md",
@@ -10,8 +10,9 @@
     "docs/PROCESS_RECORD_AUTHORITY_ENDPOINT_2026-10-06.tsv",
     "docs/BLOCK_CACHE_BUCKETS_2026-10-08.md",
     "docs/PAGE_META_24_2026-10-08.md",
-    "docs/DMA_MINT_FILES_2026-10-08.md"
+    "docs/DMA_MINT_FILES_2026-10-08.md",
+    "docs/DMA_TRANSMIT_2026-10-08.md"
   ],
-  "assessment": "#716 moves the fixed-DMA receive records and their completion/reset observations into two mint files: text +440/+408 bytes (QEMU/RPi5), data unchanged, no data or BSS symbol changes size; BSS totals move only by alignment padding from the new placement order, and total padding and image span are unchanged. Text is now 709748/719852, BSS 1656624/1692512. Adopt the measured combination. Text 709308/719444, data 5030/2888736, BSS 1653664/1692832 and reserved spans 2392064/5308416 bytes remain unchanged after rebasing. Indexed references reuse existing authority and add no process field, pool allocation or retained-page policy. The compiler lock rule strengthens checking; the corrected overlay affects test images only. Earlier endpoint evidence supports only its stated payload/chunk boundaries. Kernel raw-authority confinement remains required.",
+  "assessment": "#717 protects the virtio-blk and xHCI transmit buffers as fixed DMA records: text +2720/+2672 bytes (QEMU/RPi5), data +32 bytes, four 32-byte owner slots and a 64-byte request-header line; usable_ram_start is unchanged on both targets. Text is now 712468/722524. #716 moves the fixed-DMA receive records and their completion/reset observations into two mint files: text +440/+408 bytes (QEMU/RPi5), data unchanged, no data or BSS symbol changes size; BSS totals move only by alignment padding from the new placement order, and total padding and image span are unchanged. Text is now 709748/719852, BSS 1656624/1692512. Adopt the measured combination. Text 709308/719444, data 5030/2888736, BSS 1653664/1692832 and reserved spans 2392064/5308416 bytes remain unchanged after rebasing. Indexed references reuse existing authority and add no process field, pool allocation or retained-page policy. The compiler lock rule strengthens checking; the corrected overlay affects test images only. Earlier endpoint evidence supports only its stated payload/chunk boundaries. Kernel raw-authority confinement remains required.",
   "next_trigger": "Measure at the RegionPool record-reference migration or final raw-authority confinement milestone."
 }
