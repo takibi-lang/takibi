@@ -1,30 +1,37 @@
 # RegionPool record references: space review, 2026-10-08
 
 Workload: fresh standard production kernels, with the maintained QEMU boot,
-68 views and halt/poweroff/restart PTY cases. The nine pool samples at boot
+69 views and halt/poweroff/restart PTY cases. The nine pool samples at boot
 and bounded_end are retained in REGION_REFERENCE_POOL_ENDPOINT_2026-10-08.tsv.
 These are two endpoint observations, not peak occupancy or a hardware timing
 measurement. The final clean allcheck still supplies real RPi5 evidence.
 
-The base is 09047c61, including the fixed-DMA receive/transmit mint work.
+The base is b70b1ffb, including the fixed-DMA receive/transmit mint work.
 The candidate adds indexed RegionPool record references, guarded TCP retry
-value copies, guarded PID value operations and bounded crash-trace output.
-Measured with scripts/space_delta.py 09047c61, llvm-size-19 and llvm-nm-19:
+value copies, guarded PID and ASID value operations, bounded crash-trace output, array-field
+loan tracking and FD guarded scalar access.
+Measured with scripts/space_delta.py b70b1ffb, llvm-size-19 and llvm-nm-19:
 
 | Boundary | QEMU base | QEMU candidate | RPi5 base | RPi5 candidate |
 | --- | ---: | ---: | ---: | ---: |
-| text bytes | 712468 | 713956 | 722524 | 723900 |
-| data bytes | 5062 | 5062 | 2888768 | 2888768 |
+| text bytes | 714036 | 716052 | 724092 | 725996 |
+| data bytes | 5070 | 5070 | 2888776 | 2888776 |
 | BSS bytes | 1655712 | 1655712 | 1692544 | 1692544 |
-| usable_ram_start | 0x40248000 | 0x40248000 | 0x710000 | 0x718000 |
-| image reservation bytes | 2392064 | 2392064 | 5308416 | 5341184 |
+| usable_ram_start | 0x40248000 | 0x40248000 | 0x718000 | 0x718000 |
+| image reservation bytes | 2392064 | 2392064 | 5341184 | 5341184 |
 
-No data/BSS symbol changes size. The text growth is 1488/1376 bytes; indexed
+No data/BSS symbol changes size. The text growth is 2016/1904 bytes; indexed
 references and scalar copies add no owner slot, process field or pool storage.
-The RPi5 image crosses a 32 KiB stack-alignment boundary, costing eight 4 KiB
-allocator pages. The boot expectation is updated from 259312 to 259304 pages,
-and the existing linked-layout check verifies the exact value. QEMU's image
-reservation is unchanged. No image ceiling or safety check is weakened.
+Both platforms keep the upstream image reservation: 2392064/5341184 bytes.
+The upstream IRQ-count milestone already occupies RPi5's 32 KiB boundary;
+this stage needs no further allocator-page change. The exact linked-layout
+check remains in force. No image ceiling or safety check is weakened.
+
+ASID copies three words under its existing lock; FD copies individual scalar
+fields. Neither exports an alias. This costs small bounded stack values, not
+new persistent storage. The QEMU 69-view and PTY evidence covers the record,
+ASID and compiler stage before the last FD scalar migration; the final clean
+allcheck tests that combined HEAD, including real RPi5.
 
 The retained pool samples keep the existing payload and slot boundaries:
 process 872/880 bytes, FD context 72/72, FD block 400/400, shared object 80/80,
@@ -44,8 +51,8 @@ optimization is made to avoid an alignment threshold.
 
 ELF SHA-256:
 
-- QEMU: 5d230804e165ebad4c8256c7932b1970bfe82bd36ea6b6515721092fdeac152f
-- RPi5: 760c3bd99467374dcf64ea393aaf181bda6f916f6145efe9942da2f0a3e4b50c
+- QEMU: 3cbda79ba42705b7ebf231bcb24c02b024627793732c0c3ebd1ca2f4cfca057a
+- RPi5: 079ef61e6f07881bdd093d655b42c2eba8bb9bb4606a544fe2f59b6fb55ab27b
 
 Next measurement: guarded-record/per-CPU migration, final raw-authority
 confinement, or a changed allocation/lifetime workload.
