@@ -1,10 +1,11 @@
 {
   "date": "2026-10-08",
-  "event": "milestone",
+  "event": "incremental",
   "decision": "measured",
-  "source_sha256": "a9e79bdb2832a2d5b90aae59af8f87556936bbc78e87384f31721f42757de286",
-  "workload": "Fresh standard production QEMU/RPi5 linked kernels compared to d4c4d431 with space_delta.py; maintained QEMU 69-view bounded boot and its complete boot/bounded_end nine-pool captures; native production ELF header copy execution. Endpoint captures do not establish peak occupancy, cache coherence or hardware timing. Final clean allcheck supplies real RPi5 evidence.",
+  "source_sha256": "23752ea99b13aa778acf6fec7fd66c0e1b106f3b6dc82a0d0d1e3816d5471c22",
+  "workload": "Fresh standard production QEMU/RPi5 linked kernels, origin/main cf4f650d and the #629 per-signal action table, measured with scripts/space_delta.py (llvm-size-19/llvm-nm-19). Earlier: Fresh standard production QEMU/RPi5 linked kernels compared to d4c4d431 with space_delta.py; maintained QEMU 69-view bounded boot and its complete boot/bounded_end nine-pool captures; native production ELF header copy execution. Endpoint captures do not establish peak occupancy, cache coherence or hardware timing. Final clean allcheck supplies real RPi5 evidence.",
   "evidence": [
+    "docs/SIGNAL_ACTIONS_SPACE_2026-10-08.md",
     "docs/PER_CPU_ELF_SPACE_2026-10-08.md",
     "docs/PER_CPU_ELF_POOL_ENDPOINT_2026-10-08.tsv",
     "docs/REGION_RECORD_REFERENCES_2026-10-08.md",
@@ -18,6 +19,6 @@
     "docs/DMA_MINT_FILES_2026-10-08.md",
     "docs/DMA_TRANSMIT_2026-10-08.md"
   ],
-  "assessment": "Adopt checked per-CPU places, typed TCP connection consumers and bounded ELF value copies. QEMU/RPi5 text grows 1288/1176 bytes to 717340/727172; data 5070/2888776 and BSS 1655712/1692544 are unchanged, with no data/BSS symbol size changes. Image reservations stay 2392064/5341184 bytes. Fresh pool endpoint accounting is unchanged. ELF copies are bounded 64/56-byte values; no persistent storage or allocation policy changes. Zero consumer raw-dereference counts do not yet establish confinement, and the remaining raw-buffer forwarding/probe atomics are not declared safe.",
+  "assessment": "#629: ProcessRecord grows 872 -> 1832 bytes (31 x 32-byte signal actions replace four SIGCHLD words); text +1712/+1568 (QEMU/RPi5), BSS +2880/+5056 from the three static records, reserved spans unchanged. Computed pool effect: an 8 KiB process chunk holds four records instead of nine. Adopt: Linux keeps the same per-process table; a lazily allocated or fork-shared table is the recorded alternative if a measured workload shows process-pool pressure. Earlier: Adopt checked per-CPU places, typed TCP connection consumers and bounded ELF value copies. QEMU/RPi5 text grows 1288/1176 bytes to 717340/727172; data 5070/2888776 and BSS 1655712/1692544 are unchanged, with no data/BSS symbol size changes. Image reservations stay 2392064/5341184 bytes. Fresh pool endpoint accounting is unchanged. ELF copies are bounded 64/56-byte values; no persistent storage or allocation policy changes. Zero consumer raw-dereference counts do not yet establish confinement, and the remaining raw-buffer forwarding/probe atomics are not declared safe.",
   "next_trigger": "Measure at the typed atomic/probe or bounded-copy milestone, process trust-boundary separation, final raw-authority confinement, or a changed allocation/lifetime workload."
 }
