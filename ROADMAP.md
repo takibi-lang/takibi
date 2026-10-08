@@ -35,13 +35,13 @@ only trusted parts left are one device-semantics declaration per driver
 (which marker means completion, what a reset guarantees) and the platform's
 bus translation.
 
-1. #623: a device span binding address, length and bus translation to one
-   allocation's extent, consumed by the descriptor-writing functions.
+1. Done (#623): a device span binds address and length to one
+   allocation's extent and is consumed by the descriptor-writing functions.
 2. #716: completion and reset evidence in place of `unsafe` finish.
 3. #717: transmit allocations under the same CPU/Device tokens.
 4. After stored authority's step 3: #622, then #707 (GEM's tokens held
    across calls).
-5. Evidence layers, not prerequisites: #626 (linked layout), #625 (cache
+5. Evidence layers, not prerequisites: linked layout is done (#626); #625 (cache
    visibility model, bounded), #624 (timeout/reset branch fixture). #374
    (physically contiguous memory) waits for a dynamic DMA allocation.
 
@@ -187,39 +187,47 @@ design investigation.
 #680, #681 and #682 (the pin's cost) stay with A: they need RPi5
 measurements first.
 
-1. **Safe-memory language support that A's route consumes** (nothing here
-   waits for A): #131 (stored ownership, which feeds #637 stage 2's
-   option (c)). **#131 is the key open capability (maintainer,
-   2026-10-08):** #622, #707, #653, #590, #308, #686, #687, #704 and #343
-   need the same stored authority, and #672 stage 2 and #637 stage 2 must
-   adopt its rule rather than a parallel one. Do not advance those issues
-   with point fixes that add their own storage special case. #131 starts
-   once #637 stage 1 has landed, since both edit the ownership checker;
-   #622 is its first concrete driver. Step 2 is finished, so #637 stage
-   1's device groups, MMIO and DMA, together with #623, can proceed.
-2. **Resource use and measured performance:** #220 (telnet; lowered
-   2026-09-30 by the maintainer, not urgent, and it waits on PTY and
-   `pselect6` scoping), #389, #422, #497, #520, #553,
-   #386, #502. #707 is a separate GEM TX completion/reuse safety follow-up;
-   its authority and failed-device behavior need a design choice before
-   implementation.
-3. **Compiler safety and language research:** #203, #252, #200, #201,
-   #282, #129, #374, #417, #155, #28, #8.
-4. **Toolchain, portability and hardware-lane support:** #706, #123,
-   #124, #122, #95, #51, #50, #85.
-5. **Deferred or not a scheduled work item:** #432, #555, #250, #444, #429,
-   #149, #567, #539, #536, #624, #132; #13 for `Phi`, with #216 and #109 as
-   candidate examples, only after the solver threshold is met. Also deferred:
-   #712 (compiler-derived liveness-escape attribution after the concrete
-   source-check parser failure),
-   #58 (static whole-call-path stack bounds; lowered by the maintainer on
-   2026-10-04), #698 (metadata mutation exhaustion), #699 (host-side EL0
-   postmortem symbolization), #709 (permanent table generation exhaustion),
-   and #710 (intrusive pool generation exhaustion),
-   #718 (PageMeta's physical field; waits for an RPi5 allocator time
-   measurement method, since space and time are both kept), #711 (FD-service
-   allocation contention and descriptor-access measurement; observation method
-   and representative workload precede candidate implementation).
+**Order set by the maintainer on 2026-10-08,** after an inventory of every
+open issue: a hole in an existing compile-time guarantee comes before a new
+guarantee, and a time measurement method before the decisions waiting on it.
+
+1. **Close holes in existing compile-time guarantees:** #714 (an indirect
+   call escapes the lock-order and single-instance checks; first measure the
+   indirect calls made while a guard is held).
+2. **The fixed DMA lifecycle route** ("Ordered routes" above): #716, then
+   #717. #622 and #707 wait for #131.
+3. **A time measurement method:** #497, then #502. #718, #711, #520 and
+   A's #680-#682 wait on it, because space and time are both kept.
+4. **Signal delivery defects, after #637 stage 1 lands** (both edit
+   `process.tkb` and `syscall.tkb`): #629 (handlers other than SIGCHLD are
+   silently dropped; its scope needs a decision), then #628 (no delivery at
+   an interrupt return).
+5. **Stored authority (#131),** which starts once #637 stage 1 has landed;
+   its order is in "Ordered routes" above.
+6. **Remaining work, in this order:** #713 (debug return metadata against
+   the machine ABI), #715 (per-CPU IRQ counts for stall diagnosis), #520
+   (TCP throughput), #386 (retransmit frame copy and global chain head),
+   #220 (telnet; not urgent, waits on PTY and `pselect6` scoping).
+7. **Compiler safety and language research:** #608 (checked integer to
+   enum conversion; not urgent), #203, #252, #200, #201, #282, #129, #417,
+   #155, #28, #8.
+8. **Toolchain, portability and hardware-lane support:** #706 (a design
+   investigation), #123, #124, #122, #95, #51, #50, #85.
+9. **Evaluations and maintainer decisions, not scheduled:** #648 and #688
+   (evaluations), #702 (dedicated soak hardware), #9 (SMP process admission;
+   its open items touch `process.tkb`, so after #637 stage 1).
+10. **Deferred or not a scheduled work item:** #432, #555, #250, #444,
+    #429, #149, #567, #539, #536, #624, #132; #13 for `Phi`, with #216 and
+    #109 as candidate examples, only after the solver threshold is met.
+    Also deferred: #712 (compiler-derived liveness-escape attribution after
+    the concrete source-check parser failure), #58 (static whole-call-path
+    stack bounds; lowered by the maintainer on 2026-10-04), #698 (metadata
+    mutation exhaustion), #699 (host-side EL0 postmortem symbolization),
+    #709 (permanent table generation exhaustion), #710 (intrusive pool
+    generation exhaustion), #718 (PageMeta's physical field; waits for the
+    time measurement method in band 3), #711 (FD-service allocation
+    contention and descriptor-access measurement; observation method and
+    representative workload precede candidate implementation).
 
 Items are ordered within each band as well as between bands. The deferred
 items stay listed so a changed premise can bring them back into the queue.
