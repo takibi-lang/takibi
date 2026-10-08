@@ -38,6 +38,11 @@ INTERRUPT_WINDOW = (ROOT / "kernel" / "tests" / "qemu-debug" /
 NAP_WINDOW = (ROOT / "kernel" / "tests" / "qemu-debug" /
               "protocol_trace_nap.window")
 
+# RPi5's real clone-return window: an EL1 timer leaves a reschedule pending
+# before the child has made its first physical stack handoff.
+CLONE_WINDOW = (ROOT / "kernel" / "tests" / "rpi5" /
+                "protocol_trace_clone_reschedule.window")
+
 CASES = CaseCount()
 
 
@@ -158,9 +163,27 @@ def main() -> int:
     recorded = WINDOW.read_text(encoding="utf-8")
     interrupted = INTERRUPT_WINDOW.read_text(encoding="utf-8")
     napped = NAP_WINDOW.read_text(encoding="utf-8")
+    cloned = CLONE_WINDOW.read_text(encoding="utf-8")
     checks = [
+        expect("the recorded RPi5 clone-return reschedule", run(cloned),
+               True, "CloneReschedule=1"),
+        expect("that window without CloneReschedule",
+               run(cloned, "--without", "CloneReschedule"), False,
+               "sequence 339 (cpu 0): SwitchAway not enabled"),
+        expect("clone reschedule cannot give the child an owned stack",
+               run(cloned.replace("339 0 l p 87 1 - 0 86",
+                                  "339 0 l p 87 1 1 0 86")), False,
+               "CloneReschedule not enabled: the unstarted child already owns a stack"),
+        expect("clone reschedule must use the reserved successor",
+               run(cloned.replace("339 0 l c 0 2 86",
+                                  "339 0 l c 0 1 86")), False,
+               "CloneReschedule not enabled: reserved[c0] = 2, not 1"),
+        expect("clone reschedule cannot relabel the retained parent",
+               run(cloned.replace("339 0 l p 87 1 - 0 86",
+                                  "339 0 l p 87 1 - 0 1")), False,
+               "sequence 339 (cpu 0): SwitchAway not enabled"),
         expect("the recorded window whose child napped with no successor",
-               run(napped), True, "SwitchAway=0, Wait4Block=2, Nap=1"),
+               run(napped), True, "SwitchAway=0, CloneReschedule=0, Wait4Block=2, Nap=1"),
         expect("the recorded window with an interrupt from EL0",
                run(interrupted), True, "InterruptDepart=1"),
         expect("that window without InterruptDepart",
@@ -229,7 +252,9 @@ def main() -> int:
         "Wait4Block.tla's zombie-child block, lost wakeup and wrong-parent "
         "wake, RecordLifetime.tla's unlocked and premature removal, and a "
         "wait published on a Running process are each refused; three recorded QEMU windows pass, one with Nap in SwitchAway's place; they fail without ChildExitStart "
-        "and InterruptDepart, an allocation inside another CPU's hold is "
+        "and InterruptDepart; the recorded RPi5 clone reschedule passes only with "
+        "CloneReschedule, and a child-owned stack, an unreserved successor "
+        "or a relabelled parent are refused; an allocation inside another CPU's hold is "
         "absorbed, a tick leave passes only inside an interrupt, "
         "and #609's shared-stack start, a lost change, a cut report, an "
         "unlocked change, an unsafe snapshot, an unexercised window and a "

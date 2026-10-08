@@ -402,6 +402,33 @@ def switch_away(world, hold, procs, cores):
     return after
 
 
+def clone_reschedule(world, hold, procs, cores):
+    one_core, one_proc = only(cores), only(procs)
+    if hold.gone or not one_core or not one_proc:
+        return None
+    core, (current, stands) = one_core
+    child, (state, owner) = one_proc
+    parent = world.parent.get(child)
+    if child != world.current[core] or state != "Ready" \
+            or world.state.get(child) != "Running" \
+            or current is None or current == child \
+            or stands != world.stands[core] or stands != parent:
+        return None
+    if owner is not None or world.owner.get(child) is not None:
+        return "the unstarted child already owns a stack"
+    if world.state.get(parent) != "Ready" or world.owner.get(parent) != core:
+        return "the parent is not Ready on this core's retained stack"
+    if world.interrupted[core]:
+        return "the clone return is inside an EL0 interrupt"
+    if world.reserved[core] != current:
+        return f"reserved[c{core}] = {world.reserved[core]}, not {current}"
+    after = world.copy()
+    after.state[child] = "Ready"
+    after.current[core] = current
+    after.reserved[core] = None
+    return after
+
+
 def block_to_idle(name, blocked):
     def action(world, hold, procs, cores):
         one_core, one_proc = only(cores), only(procs)
@@ -639,6 +666,7 @@ ACTIONS = {
     "Reserve": reserve,
     "Commit": commit,
     "SwitchAway": switch_away,
+    "CloneReschedule": clone_reschedule,
     "Wait4Block": block_to_idle("Wait4Block", "Blocked"),
     "Nap": block_to_idle("Nap", "Napping"),
     "Wake": wake,

@@ -199,6 +199,24 @@ SwitchAway(c, how) ==
     /\ reserved' = [reserved EXCEPT ![c] = None]
     /\ UNCHANGED <<stands, owner, interrupted, reapPending>>
 
+\* A deferred timer request may select another process from the child's
+\* clone return before the physical stack switch. The child's installed
+\* frame is saved, it becomes Ready, and this core still owns the parent's
+\* Ready stack until SwitchComplete takes the reserved successor's stack.
+CloneReschedule(c) ==
+    /\ current[c] = "child"
+    /\ state["child"] = "Running"
+    /\ owner["child"] = None
+    /\ stands[c] = "parent"
+    /\ owner["parent"] = c
+    /\ state["parent"] = "Ready"
+    /\ ~interrupted[c]
+    /\ reserved[c] # None
+    /\ state' = [state EXCEPT !["child"] = "Ready"]
+    /\ current' = [current EXCEPT ![c] = reserved[c]]
+    /\ reserved' = [reserved EXCEPT ![c] = None]
+    /\ UNCHANGED <<stands, owner, interrupted, reapPending>>
+
 \* The parent calls wait4 before the child has exited and blocks with no
 \* successor. The core has no current process and still stands on the
 \* parent's stack.
@@ -336,6 +354,7 @@ Next ==
     \/ \E c \in Cores :
         \/ CloneBegin(c)
         \/ CloneFinish(c)
+        \/ CloneReschedule(c)
         \/ SwitchComplete(c)
         \/ Commit(c)
         \/ Wait4Block(c)
