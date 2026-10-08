@@ -11,6 +11,29 @@ fn reference_record_copy_probe() -> usize {
     return copied.generation + copied.value + copied.words[0] + copied.words[1];
 }
 
+// Exercise addressable nested/array places through mutable references, then
+// read them through a shared reference. Rejected writes are compiler tests.
+struct ReferencePlaceInner { value: usize; }
+struct ReferencePlaceOuter {
+    inner: ReferencePlaceInner;
+    items: [ReferencePlaceInner; 2];
+}
+fn reference_place_read(source: borrow &ReferencePlaceOuter) -> usize {
+    let inner: &ReferencePlaceInner = &(*source).inner;
+    return inner.value + source.items[0].value;
+}
+fn reference_place_write(target: borrow &mut ReferencePlaceOuter) -> usize {
+    let inner: &mut ReferencePlaceInner = &(*target).inner;
+    inner.value = 19;
+    let item: &mut ReferencePlaceInner = &target.items[0];
+    item.value = 23;
+    return reference_place_read(target);
+}
+fn reference_place_probe() -> usize {
+    let mut value: ReferencePlaceOuter;
+    return reference_place_write(&value);
+}
+
 // Execute positive record-loan cases with the compiler's destructive contracts.
 // Negative lifetime and alias cases belong to the in-process compiler suite.
 fn app_main() {
@@ -32,4 +55,5 @@ fn app_main() {
     uart_println(loan_distinct_records() as u64);
     uart_println(loan_reference_field_index() as u64);
     uart_println(reference_record_copy_probe() as u64);
+    uart_println(reference_place_probe() as u64);
 }

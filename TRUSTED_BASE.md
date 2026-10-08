@@ -82,12 +82,18 @@ and explicitly annotated. It still cannot inspect assembly or an extern body.
 The maintained kernel deliberately does not use this flag: low-level boot,
 MMIO, DMA, and context-switching code still require reviewed unsafe sites.
 
-`--confine-raw-authority` confines type-checked raw dereferences and local
-unsafe assertions to explicitly declared mint files (`--raw-mint-file`).
+`--confine-raw-authority` confines type-checked raw dereferences, implicit
+raw-field reference mints and local unsafe assertions to explicitly declared
+mint files (`--raw-mint-file`).
 Calling a mint does not grant the caller raw access. Authority-indexed reference
 returns carry the existing local loan checks into ordinary field consumers;
 raw-to-reference conversion is an unsafe assertion within the mint boundary.
 The compiler's generated region primitives retain their explicit trusted source.
+Shared-reference direct stores and writable field-address aliases are rejected,
+including nested and explicitly dereferenced places. Array-to-slice aliases
+do not carry that readonly permission, so readonly behavior through a derived
+slice is outside the current guarantee. Authority lifetime tracking alone does
+not establish readonly permission.
 This opt-in policy is file confinement, not proof of allocator metadata, physical
 address validity, or mint lifetime claims. Extern and assembly bodies remain
 separate boundaries. The maintained kernel's enabled flags and finite mint list

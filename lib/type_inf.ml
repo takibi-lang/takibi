@@ -119,6 +119,15 @@ let record_unsafe_authority loc =
   let key = (Ast.source_file_of_loc loc, loc.Lexing.pos_lnum, loc.pos_cnum - loc.pos_bol) in
   unsafe_site_table := UnsafeSites.add key (loc, !active_audit_function) !unsafe_site_table
 
+(* Taking a reference to a raw pointer's field asserts storage validity even
+   when no value is loaded. Keep it separate from dereference counts and from
+   explicit unsafe syntax so confinement cannot miss this implicit mint. *)
+let raw_reference_mint_table : (Lexing.position * string) UnsafeSites.t ref =
+  ref UnsafeSites.empty
+
+let raw_reference_mint_sites () =
+  UnsafeSites.bindings !raw_reference_mint_table |> List.map snd
+
 (* Optional source report from the ownership flow used by lock-order checking.
    Include shadowed owners through declared paths, not only visible names.
    Keep empty sites too: absence of a row must not mean "no guard held".
@@ -648,6 +657,14 @@ let record_raw_deref (loc : Lexing.position) form t =
         Hashtbl.add raw_deref_table key
           { raw_file; raw_loc = loc; raw_function = !active_audit_function;
             raw_form = form; raw_pointer }
+
+let record_raw_reference_mint loc ty =
+  match strip_singleton ty with
+  | TPtr _ | TAlignedPtr _ ->
+      let key = (Ast.source_file_of_loc loc, loc.Lexing.pos_lnum, loc.pos_cnum - loc.pos_bol) in
+      raw_reference_mint_table := UnsafeSites.add key
+        (loc, !active_audit_function) !raw_reference_mint_table
+  | _ -> ()
 
 (* An integer literal starts as a polymorphic unbound type variable, so the
    ordinary unifier needs a separate value check when an expression flows
@@ -5043,6 +5060,7 @@ let rec infer_expr senv eenv tyenv fenv (e : Ast.expr) : ty =
                "cannot store an indexed owner into an array/slice element: it would escape obligation tracking"));
            TVoid
        | FieldGet (base_expr, fname) ->
+           check_no_write_through_shared_ref senv eenv tyenv fenv base_expr;
            let bt = infer_expr senv eenv tyenv fenv base_expr in
            check_no_temporary_field_place ~operation:"assign to"
              senv eenv tyenv fenv base_expr bt;
@@ -5208,6 +5226,15 @@ and check_no_write_through_shared_ref senv eenv tyenv fenv (e : Ast.expr) : unit
               '&mut ...' instead"
              (to_string inner_ty)))
        | _ -> check_no_write_through_shared_ref senv eenv tyenv fenv inner_expr)
+  | Deref pointer ->
+      let pointer_ty = infer_expr senv eenv tyenv fenv pointer in
+      (match strip_singleton pointer_ty with
+       | TRef _ ->
+           raise (TypeError (pointer.loc, Printf.sprintf
+             "cannot write through a shared reference '%s'; declare it '&mut ...' instead"
+             (to_string pointer_ty)))
+       | _ -> ())
+  | Index (base, _) -> check_no_write_through_shared_ref senv eenv tyenv fenv base
   | _ -> ()
 
 (* GitHub issue #314/#319: shared &expr (AddrOf) validation/typing, shared
@@ -5216,13 +5243,16 @@ and check_no_write_through_shared_ref senv eenv tyenv fenv (e : Ast.expr) : unit
    wrapped in: `Ptr (today's unconstrained default -- TAlignedPtr when an
    align(N) proof is available, else plain TPtr, byte-for-byte the same as
    before this type existed), `Ref (shared &T), or `RefMut (exclusive
-   &mut T). The minting rules themselves (bare variable or struct field
-   only, mutable local or any global, rejecting linear/indexed-owner/view/
-   variant/singleton targets) are IDENTICAL regardless of `wrap` -- &T/
-   &mut T does not relax or add to what & already refuses to mint, it only
-   changes what type a successful mint produces. *)
+   &mut T). The addressable-place and non-aliasable-storage checks are shared.
+   A shared place cannot produce a writable alias, and a reference derived
+   from a raw field is separately recorded as a trusted mint for confinement. *)
 and infer_addrof_wrapped senv eenv tyenv fenv (e : Ast.expr) (inner : Ast.expr)
     (wrap : [`Ptr | `Ref | `RefMut]) : ty =
+  (* A raw field address exports a writable alias too. Shared storage must
+     stay read-only even when the expected result is a raw pointer. *)
+  (match wrap with
+   | `Ref -> ()
+   | `Ptr | `RefMut -> check_no_write_through_shared_ref senv eenv tyenv fenv inner);
   (match inner.desc with
    | Var name ->
        check_private_global_access e.loc name;
@@ -5270,6 +5300,9 @@ and infer_addrof_wrapped senv eenv tyenv fenv (e : Ast.expr) (inner : Ast.expr)
              | None -> TPtr t))
    | FieldGet (base_expr, fname) ->
        let bt = infer_expr senv eenv tyenv fenv base_expr in
+       (match wrap with
+        | `Ptr -> ()
+        | `Ref | `RefMut -> record_raw_reference_mint e.loc bt);
        check_no_temporary_field_place ~operation:"take the address of"
          senv eenv tyenv fenv base_expr bt;
        let (sname, static_args) = match struct_instance bt with
@@ -6825,6 +6858,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   Hashtbl.reset overflow_audit_table;
   Hashtbl.reset raw_deref_table;
   unsafe_site_table := UnsafeSites.empty;
+  raw_reference_mint_table := UnsafeSites.empty;
   held_guard_table := HeldGuardSites.empty;
   active_audit_function := "<global>";
   Hashtbl.reset divisor_proven_nonzero_at;

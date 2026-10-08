@@ -2621,6 +2621,13 @@ fn f() {
   place, is a compile error for `&T` -- only `&mut T` may write. This is a
   real, new correctness guarantee `*T` never had (no const/mut pointer
   distinction exists for `*T`).
+  The same restriction applies to nested fields, inline array elements and
+  explicit `(*r).field` places. Their addresses may produce a shared
+  reference, but cannot produce a mutable reference or a writable raw alias
+  through a shared reference.
+  Slice values do not carry shared-reference readonly provenance: an inline
+  array converted to a slice can expose a writable alias. The direct-place
+  restriction above does not establish readonly behavior for those aliases.
 - **No arithmetic, no indexing, no other casts -- bit-opaque, no `unsafe`
   escape.** `r + 1`, `r[i]`, and any cast into `&T`/`&mut T` other than
   the two forms below are compile errors, unconditionally (forgery
@@ -3930,8 +3937,9 @@ justification for it.
 
 ## Raw authority file confinement
 
-`--confine-raw-authority` rejects every type-checked raw pointer dereference
-and local explicit `unsafe` assertion, including dormant generic templates,
+`--confine-raw-authority` rejects every type-checked raw pointer dereference,
+implicit raw-field reference mint, and local explicit `unsafe` assertion,
+including dormant generic templates' explicit assertions,
 outside a file declared with repeatable
 `--raw-mint-file <path>`. The accessing or asserting file must be declared;
 calling an accessor in a mint file does not grant its caller permission to
@@ -3945,7 +3953,10 @@ Compiler-generated region primitives have their own virtual trusted source.
 This policy changes neither pointer representation nor runtime behavior. It
 confines trust, rather than proving the physical claims within a declared mint
 or arbitrary extern/assembly bodies. Reference minting by raw-pointer conversion
-is also confined because it requires an explicit unsafe assertion. A mint-file
+is also confined because it requires an explicit unsafe assertion. Taking
+`&raw.field` with a reference result asserts raw storage validity without
+loading a value; this mint is checked separately from raw dereference counts.
+A mint-file
 argument without the confinement flag is an error. Application mint declarations
 are an explicit build policy, not inferred from the presence of unsafe code.
 

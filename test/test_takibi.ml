@@ -21200,6 +21200,42 @@ private fn ref_read(owner: borrow RefOwner[g]) -> &RefRecord @ g {
 |}
 
 let raw_authority_policy_tests = [
+  Alcotest.test_case "implicit raw field reference mint requires its source file" `Quick
+    (fun () ->
+      let declarations = "struct InnerMint { value: usize; } struct OuterMint { inner: InnerMint; } " in
+      List.iter (fun reference ->
+        ignore (infer_files [("consumer.tkb", declarations ^
+          "fn read(raw: *OuterMint) -> usize { let checked: " ^ reference ^
+          " InnerMint = &raw.inner; return checked.value; }")]);
+        Alcotest.(check int) "address does not load raw storage" 0
+          (List.length (Type_inf.raw_deref_sites ()));
+        let errors = Raw_authority_policy.check ~mint_files:[] () in
+        Alcotest.(check int) "mint rejected" 1 (List.length errors);
+        Alcotest.(check bool) "specific mint diagnostic" true
+          (contains_substring (snd (List.hd errors)) "raw reference mint");
+        Alcotest.(check string) "mint source" "consumer.tkb"
+          (fst (List.hd errors)).Lexing.pos_fname;
+        Alcotest.(check int) "wrong file cannot authorize mint" 1
+          (List.length (Raw_authority_policy.check ~mint_files:["elsewhere.tkb"] ()));
+        Alcotest.(check int) "declared mint accepted" 0
+          (List.length (Raw_authority_policy.check ~mint_files:["./consumer.tkb"] ()))
+      ) ["&"; "&mut"];
+      ignore (infer_files [("consumer.tkb", declarations ^
+        "fn read(record: &OuterMint) -> usize { let checked: &InnerMint = &record.inner; return checked.value; }")]);
+      Alcotest.(check int) "checked field needs no mint" 0
+        (List.length (Raw_authority_policy.check ~mint_files:[] ())));
+  Alcotest.test_case "generic raw field mint retains its original source" `Quick
+    (fun () ->
+      ignore (infer_files [
+        ("mint.tkb", "generic struct MintBox(T: type) { value: T; } struct MintInner { value: usize; } fn read(T: type, raw: *MintBox(T)) -> usize { let checked: &T = &raw.value; return 7; }");
+        ("consumer.tkb", "fn consume_mint(raw: *MintBox(MintInner)) -> usize { return read(raw); }")]);
+      Alcotest.(check int) "original mint file accepted" 0
+        (List.length (Raw_authority_policy.check ~mint_files:["mint.tkb"] ()));
+      Alcotest.(check int) "caller cannot authorize callee mint" 1
+        (List.length (Raw_authority_policy.check ~mint_files:["consumer.tkb"] ()));
+      ignore (infer "fn safe() -> usize { return 42; }");
+      Alcotest.(check int) "mint audit resets" 0
+        (List.length (Raw_authority_policy.check ~mint_files:[] ())));
   Alcotest.test_case "dormant generic unsafe assertion retains its source boundary" `Quick
     (fun () ->
       let source = "fn dormant(T: type, value: T) !{unsafe} { unsafe { let pointer = (value as usize) as *usize; } } fn main() -> usize { return 42; }" in
@@ -21312,6 +21348,60 @@ let array_record_loan_fixture = {|
 |}
 
 let indexed_reference_tests = [
+  Alcotest.test_case "production ELF copy APIs require complete header spans" `Quick
+    (fun () ->
+      let path = List.find Sys.file_exists
+          ["../kernel/fs/elf64.tkb"; "kernel/fs/elf64.tkb"] in
+      let channel = open_in_bin path in
+      let source = Fun.protect ~finally:(fun () -> close_in channel)
+          (fun () -> really_input_string channel (in_channel_length channel)) in
+      List.iter (fun (operation, result, minimum) ->
+        let caller size = Printf.sprintf
+          "fn copy_header(bytes: borrow [u8; %d..]) -> %s { return %s(bytes); }"
+          size result operation in
+        List.iter (fun size ->
+          expect_type_error_files "cannot pass"
+            ["kernel/fs/elf64.tkb", source; "consumer.tkb", caller size] ()
+        ) [0; minimum - 1];
+        ignore (infer_files ["kernel/fs/elf64.tkb", source;
+                             "consumer.tkb", caller minimum])
+      ) ["kernel_elf_header_copy", "KernelElf64Header", 64;
+         "kernel_elf_program_header_copy", "KernelElf64ProgramHeader", 56]);
+  Alcotest.test_case "shared field cannot mint a writable reference or raw alias" `Quick
+    (fun () ->
+      let declarations = "struct SharedInner { value: usize; } struct SharedOuter { inner: SharedInner; items: [SharedInner; 2]; } " in
+      List.iter (fun (place, result) ->
+        expect_type_error "shared reference" (declarations ^
+          "fn bad(shared: &SharedOuter) { let alias: " ^ result ^
+          "SharedInner = &" ^ place ^ "; }") ()
+      ) ["shared.inner", "&mut "; "(*shared).inner", "&mut ";
+         "shared.items[0]", "&mut "; "shared.inner", "*";
+         "(*shared).inner", "*"; "shared.items[0]", "*"]);
+  Alcotest.test_case "nested and explicitly dereferenced shared places cannot be written" `Quick
+    (fun () ->
+      let declarations = "struct SharedInner { value: usize; } struct SharedOuter { inner: SharedInner; words: [usize; 2]; items: [SharedInner; 2]; } " in
+      List.iter (fun place ->
+        expect_type_error "shared reference" (declarations ^
+          "fn bad(shared: &SharedOuter) { " ^ place ^ " = 7; }") ()
+      ) ["shared.inner.value"; "(*shared).inner.value";
+         "(*shared).words[0]"; "shared.items[0].value";
+         "(*shared).items[0].value"]);
+  Alcotest.test_case "mutable field references and shared reads still codegen" `Quick
+    (expect_codegen_ok {|
+      struct PlaceInner { value: usize; }
+      struct PlaceOuter { inner: PlaceInner; items: [PlaceInner; 2]; }
+      fn read(shared: &PlaceOuter) -> usize {
+        let alias: &PlaceInner = &(*shared).inner;
+        return alias.value + shared.items[0].value;
+      }
+      fn write(record: &mut PlaceOuter) -> usize {
+        let field: &mut PlaceInner = &(*record).inner;
+        field.value = 19;
+        let item: &mut PlaceInner = &record.items[0];
+        item.value = 23;
+        return read(record);
+      }
+    |});
   Alcotest.test_case "local record array field slice cannot escape" `Quick
     (expect_type_error "cannot be returned" {|
       struct Record { words: [usize; 2]; }

@@ -1,4 +1,4 @@
-(* Confine raw dereferences and local unsafe assertions to declared mint files.
+(* Confine raw dereferences, reference mints and unsafe assertions to mint files.
    This is a file boundary, not a proof that a mint's physical claim is true. *)
 module Paths = Set.Make (String)
 
@@ -76,6 +76,12 @@ let check ?(source_program = []) ~mint_files () =
       Some (Ast.source_loc loc, Printf.sprintf
         "raw-authority confinement: local unsafe assertion in '%s' is outside a declared mint file"
         name)) in
+  let references = Type_inf.raw_reference_mint_sites () |> List.filter_map (fun (loc, name) ->
+    if declared (Ast.source_file_of_loc loc) then None else
+      Some (Ast.source_loc loc, Printf.sprintf
+        "raw-authority confinement: raw reference mint in '%s' is outside a declared mint file"
+        name)) in
   List.sort_uniq (fun (left, a) (right, b) ->
     compare (Ast.source_file_of_loc left, left.pos_lnum, left.pos_cnum, a)
-      (Ast.source_file_of_loc right, right.pos_lnum, right.pos_cnum, b)) (raw @ unsafe)
+      (Ast.source_file_of_loc right, right.pos_lnum, right.pos_cnum, b))
+      (raw @ unsafe @ references)
