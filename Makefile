@@ -1970,6 +1970,32 @@ _kernelcheck-alloc-rollback-fd-context:
 _kernelcheck-alloc-rollback-address-space-backing:
 	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env KERNEL_QEMU_ALLOC_ROLLBACK_POINT=address-space-backing KERNEL_QEMU_ALLOC_ROLLBACK_SERIAL_PORT=18631 KERNEL_QEMU_ALLOC_ROLLBACK_GDB_PORT=18632 KERNEL_QEMU_ALLOC_ROLLBACK_QMP_PORT=18633 KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_LOCAL_PORT=18634 KERNEL_QEMU_ALLOC_ROLLBACK_NETDEV_REMOTE_PORT=18635 bash scripts/run_kernel_alloc_rollback_qemutest.sh
 
+## Issue #713: the debug sidecar's variant return ABI, executed. A small
+## bare-metal fixture returns variants of four leaves (32 bytes), eight and
+## nine leaves from real non-inlined callees; GDB forces a payload-free case
+## at each callee's first instruction from the sidecar alone, and the caller
+## reports what arrived. Production and -g lowering are separate boots. Two
+## counterfactuals feed a regressed classification (every leaf in a
+## register; the C over-16-bytes rule) and must fail with the mismatch at
+## the probe they break. Each boot takes about a second.
+kernelcheck-debug-return-abi-qemu: build
+	@bash scripts/run_lane.sh $@ $(MAKE) _kernelcheck-debug-return-abi-qemu
+
+DEBUG_RETURN_ABI_RUNS := production debug direct-classifier c-size-rule
+_kernelcheck-debug-return-abi-qemu: \
+	$(addprefix _kernelcheck-debug-return-abi-,$(DEBUG_RETURN_ABI_RUNS))
+
+.PHONY: kernelcheck-debug-return-abi-qemu _kernelcheck-debug-return-abi-qemu \
+	$(addprefix _kernelcheck-debug-return-abi-,$(DEBUG_RETURN_ABI_RUNS))
+_kernelcheck-debug-return-abi-production:
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env DEBUG_RETURN_ABI_FLAVOR=production bash scripts/run_kernel_debug_return_abi_qemutest.sh
+_kernelcheck-debug-return-abi-debug:
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env DEBUG_RETURN_ABI_FLAVOR=debug DEBUG_RETURN_ABI_GDB_PORT=18611 bash scripts/run_kernel_debug_return_abi_qemutest.sh
+_kernelcheck-debug-return-abi-direct-classifier:
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env DEBUG_RETURN_ABI_GDB_PORT=18612 python3 scripts/run_kernel_debug_return_abi_counterfactual.py direct-classifier
+_kernelcheck-debug-return-abi-c-size-rule:
+	@bash scripts/run_line_locked.sh "$(KERNEL_CHECK_OUTPUT_LOCK)" env DEBUG_RETURN_ABI_GDB_PORT=18613 python3 scripts/run_kernel_debug_return_abi_counterfactual.py c-size-rule
+
 ## kernelsh-qemu: boot the standalone kernel, attach the current terminal to
 ## its TCP-backed UART console, and forward localhost:18080 to guest httpd.
 ## Exit miniterm with Ctrl-].
@@ -2031,7 +2057,8 @@ KERNELCHECK_QEMU_LANES := kernelcheck-qemu kernelcheck-qemu-debug \
 	kernelcheck-alloc-rollback-qemu kernelcheck-uart-wake-qemu \
 	kernelcheck-affinity-gdb-qemu kernelcheck-race-window-609-qemu \
 	kernelcheck-race-window-603-qemu kernelcheck-race-window-633-qemu \
-	kernelcheck-race-window-635-qemu kernelcheck-race-window-705-qemu
+	kernelcheck-race-window-635-qemu kernelcheck-race-window-705-qemu \
+	kernelcheck-debug-return-abi-qemu
 
 KERNELCHECK_LANES := $(KERNELCHECK_QEMU_LANES) kernelcheck-rpi5
 

@@ -1,0 +1,117 @@
+// GitHub issue #713: real caller/callee returns at the boundaries the
+// compiler's debug sidecar classifies. Each probe returns a variant through
+// the backend's actual machine convention; GDB forces the payload-free
+// Forced case at the callee's first instruction using only the sidecar's
+// return_abi, and the caller reports which case it observed.
+//
+//   Direct: tag + three u64 = 32 bytes, four scalar leaves. Returned in
+//           x0..x3, although the C rule for aggregates over 16 bytes would
+//           say indirect.
+//   Eight:  tag + seven u64 = eight leaves, the last register case (x0..x7).
+//   Nine:   tag + eight u64 = nine leaves, returned through the x8 buffer.
+//
+// Every probe runs twice: once normally (the control that the fixture ran
+// and the cases are distinguishable) and once with GDB forcing Forced. The
+// key comes from a PL011 register read, so LLVM cannot specialize the
+// callee's result into the caller. Every key has a zero low half: a result
+// GDB failed to place leaves the key in x0, which reads as tag 0 (Normal)
+// with a payload that fails the caller's check, never as Forced.
+
+struct DebugAbiThree { w0: u64; w1: u64; w2: u64; }
+struct DebugAbiSeven { w0: u64; w1: u64; w2: u64; w3: u64; w4: u64; w5: u64; w6: u64; }
+struct DebugAbiEight { w0: u64; w1: u64; w2: u64; w3: u64; w4: u64; w5: u64; w6: u64; w7: u64; }
+variant DebugAbiDirect { Normal(DebugAbiThree); Forced; }
+variant DebugAbiEightLeaves { Normal(DebugAbiSeven); Forced; }
+variant DebugAbiNineLeaves { Normal(DebugAbiEight); Forced; }
+
+const DEBUG_ABI_UART: usize = 0x09000000;
+const DEBUG_ABI_FORCE_KEY: u64 = 0x7E;
+// Probes in one round differ by one in the high half.
+const DEBUG_ABI_KEY_STEP: u64 = 0x100000000;
+
+fn debug_abi_putc(c: u8) !{unsafe} {
+    let data: *io u32 = unsafe { DEBUG_ABI_UART as *io u32 };
+    *data = c as u32;
+}
+
+// String literals are NUL-terminated byte pointers.
+fn debug_abi_puts(text: *u8) !{unsafe} {
+    let mut i: isize = 0;
+    while (text[i] != 0) {
+        debug_abi_putc(text[i]);
+        i = i + 1;
+    }
+}
+
+// Bit 31 of UARTFR is reserved and reads as zero; the compiler cannot know.
+fn debug_abi_seed() -> u64 !{unsafe} {
+    let flags: *io u32 = unsafe { (DEBUG_ABI_UART + 0x18) as *io u32 };
+    return (*flags >> 31) as u64;
+}
+
+noinline fn debug_abi_direct(key: u64) -> DebugAbiDirect {
+    if (key == DEBUG_ABI_FORCE_KEY) { return DebugAbiDirect::Forced; }
+    let mut words: DebugAbiThree = { key, key + 1, key + 2 };
+    return DebugAbiDirect::Normal(words);
+}
+
+noinline fn debug_abi_eight(key: u64) -> DebugAbiEightLeaves {
+    if (key == DEBUG_ABI_FORCE_KEY) { return DebugAbiEightLeaves::Forced; }
+    let mut words: DebugAbiSeven = { key, key, key, key, key, key, key + 6 };
+    return DebugAbiEightLeaves::Normal(words);
+}
+
+noinline fn debug_abi_nine(key: u64) -> DebugAbiNineLeaves {
+    if (key == DEBUG_ABI_FORCE_KEY) { return DebugAbiNineLeaves::Forced; }
+    let mut words: DebugAbiEight = { key, key, key, key, key, key, key, key + 7 };
+    return DebugAbiNineLeaves::Normal(words);
+}
+
+// A normal result must carry the payload the callee built from its key.
+fn debug_abi_report(name: *u8, round: *u8, normal: bool, intact: bool) !{unsafe} {
+    debug_abi_puts("debug-return-abi: ");
+    debug_abi_puts(name);
+    debug_abi_puts(" ");
+    debug_abi_puts(round);
+    if (normal) {
+        if (intact) { debug_abi_puts(" observed=normal\n"); }
+        else { debug_abi_puts(" observed=normal-corrupt\n"); }
+    } else {
+        debug_abi_puts(" observed=forced\n");
+    }
+}
+
+fn debug_abi_round(round: *u8, key: u64) !{unsafe} {
+    match debug_abi_direct(key) {
+        DebugAbiDirect::Normal(w) => {
+            debug_abi_report("direct", round, true,
+                             w.w0 == key && w.w2 == key + 2);
+        }
+        DebugAbiDirect::Forced => { debug_abi_report("direct", round, false, true); }
+    }
+    let eight_key: u64 = key + DEBUG_ABI_KEY_STEP;
+    match debug_abi_eight(eight_key) {
+        DebugAbiEightLeaves::Normal(w) => {
+            debug_abi_report("eight", round, true,
+                             w.w0 == eight_key && w.w6 == eight_key + 6);
+        }
+        DebugAbiEightLeaves::Forced => { debug_abi_report("eight", round, false, true); }
+    }
+    let nine_key: u64 = key + 2 * DEBUG_ABI_KEY_STEP;
+    match debug_abi_nine(nine_key) {
+        DebugAbiNineLeaves::Normal(w) => {
+            debug_abi_report("nine", round, true,
+                             w.w0 == nine_key && w.w7 == nine_key + 7);
+        }
+        DebugAbiNineLeaves::Forced => { debug_abi_report("nine", round, false, true); }
+    }
+}
+
+// The runner's GDB forces only the second round, whose keys are
+// 0x50, 0x51 and 0x52 in the high half.
+fn debug_abi_main() !{unsafe} {
+    let seed: u64 = debug_abi_seed();
+    debug_abi_round("control", (seed + 0x20) * DEBUG_ABI_KEY_STEP);
+    debug_abi_round("forced", (seed + 0x50) * DEBUG_ABI_KEY_STEP);
+    debug_abi_puts("debug-return-abi: done\n");
+}

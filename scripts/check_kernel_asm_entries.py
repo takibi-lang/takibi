@@ -30,9 +30,15 @@ FUNCTION = re.compile(r"^\s*(?:private\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)", re.M)
 ENTRIES = re.compile(r"^KERNEL_ASM_ENTRIES\s*:=((?:.*\\\n)*.*)$", re.M)
 
 
+# A standalone QEMU fixture with its own entry and link (GitHub issue #713);
+# it is never linked into either kernel, so its entry is not a kernel one.
+STANDALONE = (KERNEL / "tests" / "debug_return_abi",)
+
+
 def sources(suffix: str) -> list[Path]:
     return sorted(path for path in KERNEL.rglob(f"*{suffix}")
-                  if BUILD not in path.parents)
+                  if BUILD not in path.parents
+                  and not any(root in path.parents for root in STANDALONE))
 
 
 def takibi_functions(texts: list[str]) -> set[str]:

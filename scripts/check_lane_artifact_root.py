@@ -110,6 +110,10 @@ def check_literals(path, lane):
             continue
         if "." in name:
             continue
+        # dune's output tree: a lane that compiles its own fixture reads the
+        # compiler binary there and never writes it (GitHub issue #713).
+        if name == "default":
+            continue
         if lane is not None and name == f"{lane}-failures":
             if not archives:
                 problems.append(

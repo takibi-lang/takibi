@@ -21,6 +21,21 @@ def _takibi_value(expression):
         raise gdb.GdbError(f"cannot evaluate '{expression}': {error}")
 
 
+def _takibi_at_function_entry(frame):
+    """True when the frame's PC is its function's first instruction.
+
+    A production build has no DWARF, so frame.function() is None; fall
+    back to the ELF symbol table, where "NAME in section" (no "+ OFFSET")
+    means the PC is exactly at NAME (GitHub issue #713)."""
+    function = frame.function()
+    if function is not None:
+        return frame.pc() == int(function.value().address)
+    described = gdb.execute(f"info symbol {frame.pc()}", to_string=True)
+    if " in section " not in described:
+        return False
+    return " + " not in described.split(" in section ", 1)[0]
+
+
 class TakibiDebugMetadata(gdb.Command):
     """Load a JSON sidecar emitted by --emit-debug-metadata."""
 
@@ -166,9 +181,7 @@ class TakibiForceVariantReturn(gdb.Command):
             # The incoming result pointer is caller-saved. Even an unwind
             # cannot recover it after a prologue or nested call reuses it.
             frame = gdb.selected_frame()
-            function = frame.function()
-            if (frame.level() != 0 or function is None
-                    or frame.pc() != int(function.value().address)):
+            if frame.level() != 0 or not _takibi_at_function_entry(frame):
                 raise gdb.GdbError(
                     "indirect forced return requires the innermost frame at its first instruction")
             address = int(gdb.parse_and_eval(f"${abi['pointer_register']}"))
