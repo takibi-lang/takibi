@@ -58,6 +58,14 @@ Add what you observe to the open investigation on GitHub issue #509 rather
 than starting again; it carries the reproduction, the measured rates, and the
 exact line the guest stops on.
 
+To reproduce such a stall on purpose rather than wait for an aggregate,
+`scripts/run_qemu_lanes_under_load.sh` runs lanes side by side under extra
+CPU load, round after round, and prints each round's verdicts with the DDB
+postmortem lines. It is how the 2026-10-04 virtio-blk completion-wait stall
+was reproduced and then shown gone. Its burners stop with it; do not
+improvise one with `pkill -f` (it matches its own shell) or by waiting on
+`jobs -p` (it waits for the burners).
+
 **`records MISSING uses=16 reason=2` on a boot that runs to completion.** A
 different failure, tracked separately, and not caused by load: it appears at
 roughly one boot in six on an idle host too.

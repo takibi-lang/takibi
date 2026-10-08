@@ -1080,7 +1080,13 @@ path. `intr` identifies IRQ versus deliberate BRK entry and reports both the
 live and interrupted DAIF masks; ESR/FAR are shown only for synchronous entry,
 because those registers do not describe an IRQ. `sched` reports the frozen
 scheduler enable/pending bits and process-state counts from the same bounded
-snapshot as `ps`, including its truncation flag. `current`, `vm`, and `fds`
+snapshot as `ps`, including its truncation flag. It adds three lines only
+when they are nonzero: `start-refused` (Ready processes a CPU took and gave
+back unstarted -- activation refused, or an ASID rollover's world stop Busy or
+Partial -- and the in-place retries of a stable activation), `virtio-blk
+completions` (the boot's completion count, slowest and total wait in ticks),
+and `virtio-blk timeouts` (the queue indices, STATUS and INTERRUPT_STATUS at
+the first and latest 1 s timeout). `current`, `vm`, and `fds`
 read only the fixed snapshot captured at DDB
 entry: process identity/state/wait reason, a lookup-only address-space view,
 and the first 16 descriptor slots. The VM lookup cannot allocate a missing
@@ -1337,6 +1343,10 @@ are deliberate, not gaps to silently close:
   and the kernel mounts it through `kernel/drivers/block/virtio_blk.tkb`.
   There is no RP1, PCIe, or xHCI/USB Mass Storage under QEMU, so the real USB
   provisioning and hardware-specific storage checks remain RPi5-only.
+  Each request carries one whole 1 KiB block and is waited for synchronously
+  by polling, bounded at 1 s of counter time; the boot prints
+  `virtio-blk wait: completions= total_ticks= max_ticks=` after `block io:`,
+  the sum being what a loaded host turns into minutes of UART silence.
 - **RAM discovery uses the boot DTB on both platforms.** RPi5 firmware passes
   its resolved FDT to the resident SD stub, which preserves it across SWD
   injection. QEMU's direct-kernel loader generates an FDT from the selected

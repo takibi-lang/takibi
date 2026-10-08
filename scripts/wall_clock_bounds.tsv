@@ -9,7 +9,8 @@
 # behind a RECORDED verdict decided on the RPi5 -- never added without a
 # reason here. `protocol` is a timeout the protocol itself defines against a
 # real peer. `backstop` detects a dead device and is far above any delay a
-# starved host has shown.
+# starved host has shown. Removing the two-core probe rows is #651's
+# (rendezvous bounded by peer ticks) and #688's (typed clock domains).
 # Columns: file, function, sites, class, reason (tab separated).
 kernel/drivers/net/gem_tx_wait.tkb	gem_tx_wait	1	protocol	GEM completion active-poll phase (200 us); expiry switches to the existing interrupt wait and never decides a functional verdict
 kernel/drivers/block/virtio_blk.tkb	virtio_blk_reset	1	backstop	reset completion: a device that never reports reset is disabled
