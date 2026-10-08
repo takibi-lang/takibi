@@ -270,3 +270,33 @@ Combined ELF SHA-256:
 Adopt the combined layout. Pool payload and retention evidence remains at its
 original boundary; this linked-image measurement does not claim a new runtime
 occupancy or physical concurrency result.
+
+### Page metadata and asynchronous report integration, 2026-10-08
+
+After rebasing onto 706944db and fixing asynchronous report line framing,
+fresh standard production images measure:
+
+| Boundary (bytes) | QEMU | RPi5 |
+| --- | ---: | ---: |
+| llvm-size text | 706436 | 716636 |
+| data | 5030 | 2888736 |
+| BSS | 1653664 | 1692832 |
+| reserved image span | 2392064 | 5308416 |
+
+The combined upstream PageMeta change removes 16384 bytes of bootstrap BSS
+on both targets and brings the RPi5 reservation back across one 32 KiB
+boundary. The linked kernels and allocator-page expectations agree. Dynamic
+page metadata now uses 24 bytes per managed page; its separate accounting and
+measurement are in PAGE_META_24_2026-10-08.md. Earlier process/FD endpoint
+evidence remains evidence for its original payload and pool-chunk boundaries,
+not for current total allocator metadata or free-page counts.
+
+ELF SHA-256:
+
+- QEMU: 557d68b90abf7cc07748a6143fd993c33c7b30b8d91628f80ed72a72bbe71188
+- RPi5: e2a19e98d78ba42894a75c4a52a486e0fca5f15d92c139f880b7ff564611dc6e
+
+The report correction adds no storage, allocation, pin or memory authority.
+The unchanged two-core concurrent-fault lane passes with both records in
+fault order and shared-state refusal after Partial. Adopt the combined image;
+the final file-confinement milestone remains the next measurement trigger.
