@@ -121,6 +121,7 @@ suffix is description; dispatch reads only the prefix.
 | `check_net_link_wait_controls.py` | Controls for the shared host-side reachability wait |
 | `check_no_conflict_markers.py` | no tracked file is left mid-merge, where a pattern-scanning check would answer about the half above the marker |
 | `check_no_conflict_markers_controls.py` | Positive and faithful negative controls for the conflict-marker check |
+| `check_race_window_anchors.py` | Every armed/reverted race edit matches the tracked source exactly once before compilation; obsolete, absent and duplicate anchors are refused |
 | `check_race_window_overlay_only.py` | a widened race window's spin exists only in its overlay, never in kernel/, so no ordinary kernel carries it (#615) |
 | `check_race_window_overlay_only_controls.py` | Controls for the race-window overlay check, in both directions |
 | `check_no_cursor_reply.py` | no host driver answers BusyBox's cursor query, whose late reply lands in the next command (#644) |

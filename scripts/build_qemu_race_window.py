@@ -148,9 +148,9 @@ WINDOWS = {
              "                return syscall_finish_current(frame, SyscallAction::Resume(\n"
              "                    kernel_process_last_reaped_pid(current_authority)), current_authority);\n"),
             ("kernel/process.tkb",
-             "    execution_here().last_exited_child_pid =\n"
+             "    execution_state[execution_cpu_index()].last_exited_child_pid =\n"
              "        scheduled_process_pid_of_handle(child);\n",
-             "    execution_here().last_exited_child_pid =\n"
+             "    execution_state[execution_cpu_index()].last_exited_child_pid =\n"
              "        scheduled_process_pid_of_handle(child);\n"
              "    let reverted_guard = process_run_guard_forge_unlocked();\n"
              "    scheduled_process_record_of_locked(reverted_guard, parent).last_reaped_pid =\n"
