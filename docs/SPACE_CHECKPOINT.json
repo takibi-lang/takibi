@@ -1,12 +1,12 @@
 {
   "date": "2026-10-08",
   "event": "incremental",
-  "decision": "measured",
-  "source_sha256": "fd8321ae2c030ee26a94c919994c62f01a063ae08e1de6dff5ef08e70b41b126",
-  "workload": "Standard production QEMU/RPi5 linked images and the QEMU main lane boot, before (87517a32) and after (b1897562) per-bucket block cache write retirement. Accounting boundaries: fixed image sections, allocator start pages, and block-device reads per boot. Pools, slots, allocation paths and retained pages are unchanged.",
+  "decision": "reuse",
+  "source_sha256": "420428c04be0cec30b9e175e34f548998ceb4693c6ae7da23a61543599ac1241",
+  "workload": "Standard production QEMU/RPi5 linked images and the QEMU main lane boot, before (87517a32) and after (b1897562) per-bucket block cache write retirement. Accounting boundaries: fixed image sections, allocator start pages, and block-device reads per boot. Pools, slots, allocation paths and retained pages are unchanged. 2026-10-08 reuse: 3fb04121 replaces dma_device_addr with a device span (two usize fields, a local value) at four receive submissions; no global, pool, allocation or retained page changes.",
   "evidence": [
     "docs/BLOCK_CACHE_BUCKETS_2026-10-08.md"
   ],
-  "assessment": "Adopt: 2 KiB of per-core per-bucket write counts (QEMU .bss +2048, RPi5 .bss +4096 with alignment, RPi5 allocator 8 pages fewer) buy a 79 percent cut in single-block device reads (6132 -> 1299) and 62 percent in total device reads (226297 -> 85411) on the QEMU main boot. Cache slot count and data size unchanged. RPi5 read latency was not measured in this review.",
+  "assessment": "Reuse the 2026-10-08 block cache measurement: the device span is a per-call local of two words and the xHCI entry points are thin wrappers; no static storage, pool, allocation path or retained page is added or removed. Adopt: 2 KiB of per-core per-bucket write counts (QEMU .bss +2048, RPi5 .bss +4096 with alignment, RPi5 allocator 8 pages fewer) buy a 79 percent cut in single-block device reads (6132 -> 1299) and 62 percent in total device reads (226297 -> 85411) on the QEMU main boot. Cache slot count and data size unchanged. RPi5 read latency was not measured in this review.",
   "next_trigger": "Measure at a change to block cache slot or bucket count, a changed allocation workload, or completion of the safe-memory stage."
 }
