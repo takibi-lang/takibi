@@ -7,8 +7,9 @@ comparison. The software backtrace predicates remain shared with RPi5.
 import re
 from ddb_software_brk_checks import backtrace_problems
 
-SIGNALS = (r"(none|(sigint|sigquit|sigterm|sigchld|sigtstp)"
-           r"(,(sigint|sigquit|sigterm|sigchld|sigtstp))*"
+# The standard Linux signals the process view names (GitHub issue #629).
+SIGNALS = (r"(none|sig(hup|int|quit|ill|trap|abrt|bus|fpe|kill|usr1|segv|usr2|pipe|alrm|term|stkflt|chld|cont|stop|tstp|ttin|ttou|urg|xcpu|xfsz|vtalrm|prof|winch|io|pwr|sys)"
+           r"(,sig(hup|int|quit|ill|trap|abrt|bus|fpe|kill|usr1|segv|usr2|pipe|alrm|term|stkflt|chld|cont|stop|tstp|ttin|ttou|urg|xcpu|xfsz|vtalrm|prof|winch|io|pwr|sys))*"
            r"(\+0x[0-9a-f]{16})?|0x[0-9a-f]{16})")
 
 # name, expression, minimum count, maximum count, applicable BREAK source.
@@ -156,7 +157,7 @@ def capture_problems(text, metadata, hold_text=""):
         if not re.search(r"^PASS console BREAK injection: peer guard and phase are held$",
                          hold_text.replace("\r", ""), re.MULTILINE):
             problems.append("console BREAK injection: no observed peer guard")
-        if not has(r"^ddb: ps pid=1 ppid=0 .* masked=(sigint|sigquit|sigterm|sigchld|sigtstp)([,+]|$)"):
+        if not has(r"^ddb: ps pid=1 ppid=0 .* masked=sig(hup|int|quit|ill|trap|abrt|bus|fpe|kill|usr1|segv|usr2|pipe|alrm|term|stkflt|chld|cont|stop|tstp|ttin|ttou|urg|xcpu|xfsz|vtalrm|prof|winch|io|pwr|sys)([,+]|$)"):
             problems.append("PID 1 signal mask: no accepted signal named in live state")
         # Only the first wait graph describes the real terminal reader; the
         # later waittest graph is synthetic and cannot stand in for it.

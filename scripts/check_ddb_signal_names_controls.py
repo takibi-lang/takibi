@@ -5,7 +5,7 @@ The repository passes today, so a control that only ran the check would prove
 nothing. Each rule is exercised against a planted copy of the three files it
 reads.
 
-The case that matters is the first: a signal kill(2) starts accepting and the
+The case that matters is the first: a signal kill(2) accepts and the
 process view does not name. That is the drift the check exists for, and it is
 silent in the running kernel -- the view prints a hex remainder where a word
 should be, and nothing else notices.
@@ -80,67 +80,71 @@ def main() -> int:
     status, report = run(REPO)
     if status != 0:
         failures.append(f"the repository itself does not pass: {report.strip()!r}")
-    elif "5 signal(s) kill(2) accepts" not in report:
+    elif "27 signal(s) kill(2) accepts" not in report:
         failures.append(f"the repository passed about an unexpected "
                         f"vocabulary size: {report.strip()!r}")
 
-    # Another signal, accepted by kill(2) and never named. The kernel keeps
-    # working and every signal but this one prints as a word.
+    # A signal kill(2) accepts with no word. The kernel keeps working and
+    # the view prints it as a hex remainder.
     failures += case(
         "a signal accepted and not named",
-        (edit(SYSCALL, "const LINUX_SIGCHLD: usize = 17;",
-              "const LINUX_SIGCHLD: usize = 17;\n"
-              "const LINUX_SIGUSR1: usize = 10;"),
-         edit(SYSCALL,
-              "x1 != LINUX_SIGTSTP) {",
-              "x1 != LINUX_SIGTSTP && x1 != LINUX_SIGUSR1) {")),
-        "declares no DDB_SIGNAL_SIGUSR1")
+        edit(DEBUGGER, '        10 => { return "sigusr1" as *u8; }\n', ""),
+        "has no arm for it")
 
-    # The word left behind after the constant it stood for was renamed.
+    # A word beside the wrong number reads as a correct view.
     failures += case(
-        "a word that no longer spells its constant",
-        edit(DEBUGGER, 'ddb_puts("sigterm");', 'ddb_puts("sigkill");'),
+        "a word that does not spell its number",
+        edit(DEBUGGER, '15 => { return "sigterm" as *u8; }',
+             '15 => { return "sigkill" as *u8; }'),
         "rather than `sigterm`")
 
-    # A word for a signal that cannot be set: an inventory entry that
-    # outlives its subject, the same failure the wait vocabulary refuses.
+    # A word for a number the renderer never walks.
     failures += case(
-        "a word for a signal kill(2) does not accept",
-        edit(DEBUGGER, "const DDB_SIGNAL_SIGTERM: usize = 15;",
-             "const DDB_SIGNAL_SIGHUP: usize = 1;\n"
-             "const DDB_SIGNAL_SIGTERM: usize = 15;"),
-        "names a signal kill(2) does not accept")
+        "a word outside the walked signals",
+        edit(DEBUGGER, '        _ => { return "sig?" as *u8; }',
+             '        32 => { return "sigrtmin" as *u8; }\n'
+             '        _ => { return "sig?" as *u8; }'),
+        "outside the 31 standard signals")
 
-    # The number drifting apart is the defect that reads as a correct view:
-    # a word beside the wrong bit is worse than no word at all.
+    # The GDB view spells the constants: one beside the wrong number, or one
+    # missing, makes the two debuggers disagree about a bit.
     failures += case(
-        "a number that drifted from the ABI constant",
+        "a GDB constant beside the wrong number",
         edit(DEBUGGER, "const DDB_SIGNAL_SIGCHLD: usize = 17;",
              "const DDB_SIGNAL_SIGCHLD: usize = 18;"),
-        "the view would name the wrong bit")
+        "not that signal's Linux number")
+    failures += case(
+        "a GDB constant missing",
+        edit(DEBUGGER, "const DDB_SIGNAL_SIGUSR1: usize = 10;\n", ""),
+        "no DDB_SIGNAL_SIGUSR1")
 
-    # A named bit left in the remainder prints twice: once as its word and
-    # once inside the hex the view claims is what it could not name.
+    # kill(2) widened past what the view names.
+    failures += case(
+        "kill accepting real-time signals",
+        edit(SYSCALL, "_ => { return signum <= 31; }",
+             "_ => { return signum <= 33; }"),
+        "renderer names only 1..31")
+
+    # A remainder mask one bit short prints that signal twice; one bit over
+    # hides a bit from a view that claims to drop nothing.
     failures += case(
         "a named bit left in the remainder",
-        edit(DEBUGGER, "set & ~(sigint | sigquit | sigterm | sigchld | sigtstp);", "set & ~(sigint | sigquit | sigterm | sigtstp);"),
-        "print that signal twice")
-
-    # And a remainder that subtracts something no constant derives, which
-    # drops that bit from a view whose whole claim is that nothing is lost.
+        edit(DEBUGGER, "const DDB_STANDARD_SIGNAL_BITS: usize = 0x7FFFFFFF;",
+             "const DDB_STANDARD_SIGNAL_BITS: usize = 0x3FFFFFFF;"),
+        "print a signal twice")
     failures += case(
         "an unnamed bit subtracted from the remainder",
-        edit(DEBUGGER, "set & ~(sigint | sigquit | sigterm | sigchld | sigtstp);",
-             "set & ~(sigint | sigquit | sigterm | sigchld | sigtstp | set);"),
-        "a bit hidden from a view")
+        edit(DEBUGGER, "const DDB_STANDARD_SIGNAL_BITS: usize = 0x7FFFFFFF;",
+             "const DDB_STANDARD_SIGNAL_BITS: usize = 0xFFFFFFFF;"),
+        "drop a bit hidden")
 
-    # The check reads syscall.tkb's own guard. If that moves, the check must
-    # say so rather than pass having compared nothing.
+    # The check reads syscall.tkb's own match. If that moves, the check
+    # must say so rather than pass having compared nothing.
     failures += case(
         "the accepted set moved out from under it",
-        edit(SYSCALL, "if (number == AARCH64_NR_KILL) {",
-             "if (number == AARCH64_NR_KILL || false) {"),
-        "no kill(2) arm found")
+        edit(SYSCALL, "fn kill_signal_accepted(signum: usize) -> bool {",
+             "fn kill_signal_allowed(signum: usize) -> bool {"),
+        "no kill_signal_accepted")
 
     # And if the renderer itself is gone or reshaped.
     failures += case(
@@ -150,14 +154,14 @@ def main() -> int:
         "is missing or reshaped")
 
     failures += case(
-        "a stale first signal alternative in the runner",
-        edit(RUNNER, 'SIGNALS = (r"(none|(sigint|sigquit|sigterm|sigchld|sigtstp)',
-             'SIGNALS = (r"(none|(sigquit|sigterm|sigchld|sigtstp)'),
+        "a stale signal alternative in the runner",
+        edit(RUNNER, 'SIGNALS = (r"(none|sig(hup|int|',
+             'SIGNALS = (r"(none|sig(int|'),
         "runner signal vocabulary rejects")
     failures += case(
         "a stale real-state mask gate",
-        edit(RUNNER, "masked=(sigint|sigquit|sigterm|sigchld|sigtstp)([,+]|$)",
-             "masked=(sigterm|sigchld)([,+]|$)"),
+        edit(RUNNER, "masked=sig(hup|int|quit|ill|trap|abrt|bus|fpe|kill|usr1|segv|usr2|pipe|alrm|term|stkflt|chld|cont|stop|tstp|ttin|ttou|urg|xcpu|xfsz|vtalrm|prof|winch|io|pwr|sys)([,+]|$)",
+             "masked=sig(term|chld)([,+]|$)"),
         "runner signal vocabulary does not exercise")
 
     for failure in failures:
@@ -169,10 +173,10 @@ def main() -> int:
     report_pass(
         "ddb-signal-names controls",
         "the repository passes, and a signal accepted without a word, a "
-        "word that no longer spells its constant, a word for a signal that "
-        "cannot be set, a drifted number, a named bit printed twice, an "
-        "unnamed bit dropped, a moved accepted set and a reshaped renderer "
-        "are each refused",
+        "word beside the wrong number, a GDB constant wrong or missing, a word outside the walked signals, "
+        "kill widened past the view, a named bit printed twice, an unnamed "
+        "bit dropped, a moved accepted set and a reshaped renderer are each "
+        "refused",
         cases=CASES.ran)
     return 0
 

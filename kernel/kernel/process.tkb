@@ -201,6 +201,18 @@ private fn process_handle_new(slot: usize, generation: usize)
     return handle;
 }
 
+// GitHub issue #629: the standard Linux signals 1..31 each have an action.
+// Real-time signals (32..64) have none; rt_sigaction refuses them.
+const PROCESS_SIGNAL_ACTIONS: usize = 31;
+const PROCESS_SIGKILL_BIT: usize = 256; // 1 << (SIGKILL - 1)
+
+struct SignalAction {
+    handler: usize;
+    flags: usize;
+    restorer: usize;
+    mask: usize;
+}
+
 // GitHub issue #264 first stage: keep the scheduler/lifecycle bookkeeping
 // for one process slot together. This is deliberately a plain data struct:
 // the linear ScheduledProcessOwner/state protocol, stable store, SlotMap,
@@ -258,14 +270,12 @@ struct ProcessRecord {
     // Linux gives SIGCHLD=SIG_IGN special process-lifecycle semantics:
     // children are discarded after exit instead of becoming waitable zombies.
     sigchld_ignored: bool;
-    // GitHub issue #627: the one asynchronous handler this kernel delivers,
-    // SIGCHLD's, as rt_sigaction installed it. handler 0 is SIG_DFL and 1
-    // SIG_IGN (sigchld_ignored above carries that one's lifecycle meaning);
-    // anything larger is an EL0 entry point, reached at a syscall return.
-    sigchld_handler: usize;
-    sigchld_flags: usize;
-    sigchld_restorer: usize;
-    sigchld_action_mask: usize;
+    // GitHub issues #627 and #629: each standard signal's action as
+    // rt_sigaction installed it, indexed by signum - 1. handler 0 is
+    // SIG_DFL and 1 SIG_IGN (sigchld_ignored above carries SIGCHLD's
+    // lifecycle meaning); anything larger is an EL0 entry point, reached at
+    // a syscall return.
+    signal_actions: [SignalAction; PROCESS_SIGNAL_ACTIONS];
     // rt_sigsuspend's mask swap, as Linux's saved_sigmask: the mask the
     // caller had, put back into the signal frame (and so restored by
     // rt_sigreturn) or restored directly when nothing is delivered.
@@ -2181,14 +2191,11 @@ private fn scheduled_process_copy_signal_mask(parent: borrow ProcessCurrent[p, P
     scheduled_process_record_owned(child).sigchld_ignored =
         scheduled_process_record_current(parent).sigchld_ignored;
     // Linux: a forked child inherits its parent's handlers.
-    scheduled_process_record_owned(child).sigchld_handler =
-        scheduled_process_record_current(parent).sigchld_handler;
-    scheduled_process_record_owned(child).sigchld_flags =
-        scheduled_process_record_current(parent).sigchld_flags;
-    scheduled_process_record_owned(child).sigchld_restorer =
-        scheduled_process_record_current(parent).sigchld_restorer;
-    scheduled_process_record_owned(child).sigchld_action_mask =
-        scheduled_process_record_current(parent).sigchld_action_mask;
+    for index: usize in 0..<PROCESS_SIGNAL_ACTIONS {
+        let mut inherited: SignalAction =
+            scheduled_process_record_current(parent).signal_actions[index];
+        scheduled_process_record_owned(child).signal_actions[index] = inherited;
+    }
 }
 
 // Linux: a child inherits its parent's affinity mask across fork, and
@@ -2717,10 +2724,10 @@ private fn scheduled_process_record_reset(guard: borrow ProcessRunGuard[lock],
     record.pending_signals = 0;
     record.sigwait_set = 0;
     record.sigchld_ignored = false;
-    record.sigchld_handler = 0;
-    record.sigchld_flags = 0;
-    record.sigchld_restorer = 0;
-    record.sigchld_action_mask = 0;
+    let mut cleared: SignalAction = { 0, 0, 0, 0 };
+    for index: usize in 0..<PROCESS_SIGNAL_ACTIONS {
+        record.signal_actions[index] = cleared;
+    }
     record.sigsuspend_saved_mask = 0;
     record.sigsuspend_mask_saved = false;
     record.sigwait_suspend = false;
@@ -7386,16 +7393,14 @@ fn kernel_process_current_termination_signal_take()
     let guard = process_run_lock();
     let mut handle: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
     let record: &mut ProcessRecord = scheduled_process_record_of_locked(guard, handle);
-    let available: usize = record.pending_signals & ~record.signal_mask;
-    for signum: usize in 1..<16 {
-        if (signum == 2 || signum == 3 || signum == 15) {
-            let bit: usize = 1 << (signum - 1);
-            if ((available & bit) != 0) {
-                process_signal_pending_clear(guard, record, bit);
-                process_run_unlock(guard);
-                return ProcessSignalPendingResult::Pending(
-                    taken_signal_new(handle.pool_index, handle.generation, signum));
-            }
+    for index: usize in 0..<PROCESS_SIGNAL_ACTIONS {
+        let bit: usize = 1 << index;
+        if ((record.pending_signals & bit) != 0 &&
+            process_signal_terminates(record, index)) {
+            process_signal_pending_clear(guard, record, bit);
+            process_run_unlock(guard);
+            return ProcessSignalPendingResult::Pending(
+                taken_signal_new(handle.pool_index, handle.generation, index + 1));
         }
     }
     process_run_unlock(guard);
@@ -7492,39 +7497,78 @@ fn kernel_process_current_suspend_mask_restore() {
     process_run_unlock(guard);
 }
 
-struct SigchldAction {
-    handler: usize;
-    flags: usize;
-    restorer: usize;
-    mask: usize;
+// What a standard signal does with no handler installed (SIG_DFL). The one
+// place this kernel decides it, for sending, waking and terminating alike;
+// it used to be two hand-written lists of 2, 3 and 15 that nothing kept in
+// step (GitHub issue #629).
+enum SignalDefault {
+    Terminate;
+    Ignore;
 }
 
-fn kernel_process_current_sigchld_action(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) -> SigchldAction {
-    let mut action: SigchldAction = { 0, 0, 0, 0 };
-    if (execution_state[execution_cpu_index()].current_live) {
-        let record: &mut ProcessRecord =
-            scheduled_process_record_current(current_authority);
-        action.handler = record.sigchld_handler;
-        action.flags = record.sigchld_flags;
-        action.restorer = record.sigchld_restorer;
-        action.mask = record.sigchld_action_mask;
+fn signal_default_action(signum: usize) -> SignalDefault {
+    match signum {
+        // SIGCHLD, SIGURG and SIGWINCH are ignored. SIGCONT continues and
+        // the four stop signals stop, neither of which this kernel has
+        // without job control: kill refuses all of them but SIGTSTP, whose
+        // default is ignored here because every process group is orphaned
+        // (one session, one group), as Linux ignores it for one.
+        17 | 23 | 28 | 18 | 19 | 20 | 21 | 22 => { return SignalDefault::Ignore; }
+        _ => { return SignalDefault::Terminate; }
+    }
+}
+
+// True when `signum` names a standard signal; a signal action index is then
+// signum - 1.
+fn signal_is_standard(signum: usize) -> bool {
+    return signum >= 1 && signum <= PROCESS_SIGNAL_ACTIONS;
+}
+
+fn kernel_process_current_signal_action(
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+        signum: usize) -> SignalAction {
+    let mut action: SignalAction = { 0, 0, 0, 0 };
+    if (signal_is_standard(signum) == false) { return action; }
+    let index: usize = signum - 1;
+    if (index < PROCESS_SIGNAL_ACTIONS &&
+        execution_state[execution_cpu_index()].current_live) {
+        action = scheduled_process_record_current(current_authority)
+            .signal_actions[index];
     }
     return action;
 }
 
-fn kernel_process_current_set_sigchld_action(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], action: SigchldAction) {
-    if (execution_state[execution_cpu_index()].current_live) {
-        let record: &mut ProcessRecord =
-            scheduled_process_record_current(current_authority);
-        record.sigchld_handler = action.handler;
-        record.sigchld_flags = action.flags;
-        record.sigchld_restorer = action.restorer;
-        record.sigchld_action_mask = action.mask;
+fn kernel_process_current_set_signal_action(
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+        signum: usize, action: SignalAction) {
+    if (signal_is_standard(signum) == false) { return; }
+    let index: usize = signum - 1;
+    if (index < PROCESS_SIGNAL_ACTIONS &&
+        execution_state[execution_cpu_index()].current_live) {
+        scheduled_process_record_current(current_authority)
+            .signal_actions[index] = action;
     }
 }
 
-// Take a pending SIGCHLD the current process has a handler for and does
-// not mask, for a syscall return to run the handler.
+// The signals the current process has a handler for and does not mask, as
+// a Linux signal set; rt_sigsuspend waits for any of them.
+fn kernel_process_current_caught_set(
+        current_authority: borrow ProcessCurrent[current_process, ProcessState::Running],
+        mask: usize) -> usize {
+    let mut caught: usize = 0;
+    if (execution_state[execution_cpu_index()].current_live == false) { return 0; }
+    for index: usize in 0..<PROCESS_SIGNAL_ACTIONS {
+        let bit: usize = 1 << index;
+        if (scheduled_process_record_current(current_authority)
+                .signal_actions[index].handler > 1 && (mask & bit) == 0) {
+            caught = caught | bit;
+        }
+    }
+    return caught;
+}
+
+// Take the lowest pending signal the current process has a handler for and
+// does not mask, for a syscall return to run the handler.
 fn kernel_process_current_caught_signal_take() -> ProcessSignalPendingResult {
     if (execution_state[execution_cpu_index()].current_live == false) {
         return ProcessSignalPendingResult::Missing;
@@ -7532,17 +7576,50 @@ fn kernel_process_current_caught_signal_take() -> ProcessSignalPendingResult {
     let guard = process_run_lock();
     let mut handle: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
     let record: &mut ProcessRecord = scheduled_process_record_of_locked(guard, handle);
-    let sigchld_bit: usize = 1 << 16;
-    if (record.sigchld_handler <= 1 ||
-        (record.pending_signals & sigchld_bit) == 0 ||
-        (record.signal_mask & sigchld_bit) != 0) {
-        process_run_unlock(guard);
-        return ProcessSignalPendingResult::Missing;
+    let available: usize = record.pending_signals & ~record.signal_mask;
+    for index: usize in 0..<PROCESS_SIGNAL_ACTIONS {
+        let bit: usize = 1 << index;
+        if ((available & bit) != 0 && record.signal_actions[index].handler > 1) {
+            process_signal_pending_clear(guard, record, bit);
+            process_run_unlock(guard);
+            return ProcessSignalPendingResult::Pending(
+                taken_signal_new(handle.pool_index, handle.generation, index + 1));
+        }
     }
-    process_signal_pending_clear(guard, record, sigchld_bit);
     process_run_unlock(guard);
-    return ProcessSignalPendingResult::Pending(
-        taken_signal_new(handle.pool_index, handle.generation, 17));
+    return ProcessSignalPendingResult::Missing;
+}
+
+// True when `signum`, sent now, would end the current process by its
+// default action: kill's own-pid shortcut.
+fn kernel_process_current_signal_terminates(signum: usize) -> bool {
+    if (signal_is_standard(signum) == false) { return false; }
+    let index: usize = signum - 1;
+    if (index >= PROCESS_SIGNAL_ACTIONS ||
+        execution_state[execution_cpu_index()].current_live == false) {
+        return false;
+    }
+    let guard = process_run_lock();
+    let record: &mut ProcessRecord = scheduled_process_record_of_locked(
+        guard, execution_state[execution_cpu_index()].current_handle);
+    let terminates: bool = process_signal_terminates(record, index);
+    process_run_unlock(guard);
+    return terminates;
+}
+
+// A pending standard signal ends the process when it is not masked (SIGKILL
+// cannot be), has no handler, and its default terminates.
+private fn process_signal_terminates(record: borrow &mut ProcessRecord,
+                                     index: {0..<PROCESS_SIGNAL_ACTIONS as usize}) -> bool {
+    let bit: usize = 1 << index;
+    if (bit != PROCESS_SIGKILL_BIT && (record.signal_mask & bit) != 0) {
+        return false;
+    }
+    if (record.signal_actions[index].handler != 0) { return false; }
+    match signal_default_action(index + 1) {
+        SignalDefault::Terminate => { return true; }
+        SignalDefault::Ignore => { return false; }
+    }
 }
 
 fn kernel_process_block_signal(current: borrow FrameRef[process])
@@ -7567,23 +7644,27 @@ private fn kernel_process_signal_deliver_to(
     }
     let bit: usize = 1 << (signum - 1);
     let record: &mut ProcessRecord = scheduled_process_record_of_locked(guard, target);
-    // An unblocked SIGCHLD with no handler has its Linux default (ignored);
-    // a blocked one remains pending for rt_sigtimedwait, which is the
-    // BusyBox init path. One with a handler (GitHub issue #627) stays
-    // pending, masked or not, until a syscall return can run the handler.
-    let caught: bool = signum == 17 && record.sigchld_handler > 1;
-    // Every session has one group, so every group is orphaned: no parent
-    // can be in the same session but a different group. Unblocked SIGTSTP
-    // therefore has the ignored orphan-group default. A blocked SIGTSTP
-    // still participates in sigwait, as the generated signal really exists.
-    if ((record.signal_mask & bit) == 0 && signum != 2 && signum != 3 &&
-        signum != 15 && caught == false) {
+    // GitHub issue #629: what the target does with this signal, from its
+    // action table and signal_default_action. A blocked signal stays
+    // pending whatever its action, for rt_sigtimedwait (BusyBox init) or a
+    // later unmask. An unblocked one is discarded if it would be ignored;
+    // one with a handler stays pending until a syscall return can run it.
+    let mut handled: bool = false;
+    let mut terminates: bool = false;
+    if (signum >= 1 && signum <= PROCESS_SIGNAL_ACTIONS) {
+        let index: {0..<PROCESS_SIGNAL_ACTIONS as usize} = signum - 1;
+        handled = record.signal_actions[index].handler > 1;
+        terminates = process_signal_terminates(record, index);
+    }
+    let masked: bool = (record.signal_mask & bit) != 0 && bit != PROCESS_SIGKILL_BIT;
+    if (masked == false && handled == false && terminates == false) {
         return ProcessSignalSendResult::Delivered;
     }
     process_signal_pending_raise(guard, record, bit);
-    // A terminal-generated fatal signal must interrupt a blocked child too,
-    // not wait for that child's deadline or an unrelated input byte.
-    if ((signum == 2 || signum == 3) && (record.signal_mask & bit) == 0 &&
+    // A fatal signal must interrupt a blocked target too, not wait for its
+    // deadline or an unrelated input byte: the rerun of its syscall takes
+    // the signal at entry and exits.
+    if (terminates &&
         scheduled_process_state_of_locked(guard, target) == ProcessSlotState::Blocked) {
         match scheduled_process_blocked_take(guard, target) {
             ScheduledProcessBlockedTakeResult::Missing => {}
@@ -10369,10 +10450,17 @@ fn kernel_process_child_exec_mark(current_authority: borrow ProcessCurrent[curre
         // Linux: execve resets every caught signal to SIG_DFL, because the
         // handler address named the image that has just been replaced. An
         // ignored signal stays ignored (sigchld_ignored is left alone).
-        scheduled_process_record_current(current_authority).sigchld_handler = 0;
-        scheduled_process_record_current(current_authority).sigchld_flags = 0;
-        scheduled_process_record_current(current_authority).sigchld_restorer = 0;
-        scheduled_process_record_current(current_authority).sigchld_action_mask = 0;
+        // As Linux's flush_signal_handlers: flags, restorer and mask are
+        // cleared for every signal, SIG_IGN kept as the only handler.
+        for index: usize in 0..<PROCESS_SIGNAL_ACTIONS {
+            let mut reset: SignalAction = { 0, 0, 0, 0 };
+            if (scheduled_process_record_current(current_authority)
+                    .signal_actions[index].handler == 1) {
+                reset.handler = 1;
+            }
+            scheduled_process_record_current(current_authority)
+                .signal_actions[index] = reset;
+        }
         let mut current: ProcessHandle = execution_state[execution_cpu_index()].current_handle;
         kernel_process_trace_record(
             ProcessTraceExecCommit,

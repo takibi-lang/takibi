@@ -205,6 +205,17 @@ done
 echo "ash heap: $r rounds of a ${#x}-byte string, arena reused"
 unset x
 
+# GitHub issue #629: a handler for a signal other than SIGCHLD runs, and a
+# caught SIGTERM does not take its default (termination). The traps are in
+# place before the sender exists; the sender is a subshell, so the signals
+# come from another process, and this shell is blocked in wait4 for it
+# while they arrive. Both run at that wait4's return, lowest number first.
+trap 'echo "ash trap: usr1 caught"' USR1
+trap 'echo "ash trap: term caught"' TERM
+( kill -USR1 $$ && kill -TERM $$ )
+echo "ash trap: sender status=$?"
+trap - USR1 TERM
+
 for phase in fd uart telnet; do
     echo "init: phase $phase"
 done

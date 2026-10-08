@@ -1732,11 +1732,83 @@ private fn ddb_render_fds() !{unsafe} {
 // pair to the guard in that file's kill(2) arm. A signal the kernel starts
 // accepting and does not name here prints as a bare hex remainder, which is
 // the opacity this rendering exists to remove.
+
+// GitHub issue #629: kill accepts every standard signal 1..31 but the job
+// control ones, so the view names all 31 by their Linux names, in number
+// order. The DDB_SIGNAL_ constants are what scripts/kernel_state.gdb reads
+// from the debug metadata to spell the same words; the match below spells
+// them for DDB. scripts/check_ddb_signal_names.py holds the two, and both to
+// the Linux numbers, in step.
+const DDB_SIGNAL_SIGHUP: usize = 1;
 const DDB_SIGNAL_SIGINT: usize = 2;
 const DDB_SIGNAL_SIGQUIT: usize = 3;
-const DDB_SIGNAL_SIGTSTP: usize = 20;
+const DDB_SIGNAL_SIGILL: usize = 4;
+const DDB_SIGNAL_SIGTRAP: usize = 5;
+const DDB_SIGNAL_SIGABRT: usize = 6;
+const DDB_SIGNAL_SIGBUS: usize = 7;
+const DDB_SIGNAL_SIGFPE: usize = 8;
+const DDB_SIGNAL_SIGKILL: usize = 9;
+const DDB_SIGNAL_SIGUSR1: usize = 10;
+const DDB_SIGNAL_SIGSEGV: usize = 11;
+const DDB_SIGNAL_SIGUSR2: usize = 12;
+const DDB_SIGNAL_SIGPIPE: usize = 13;
+const DDB_SIGNAL_SIGALRM: usize = 14;
 const DDB_SIGNAL_SIGTERM: usize = 15;
+const DDB_SIGNAL_SIGSTKFLT: usize = 16;
 const DDB_SIGNAL_SIGCHLD: usize = 17;
+const DDB_SIGNAL_SIGCONT: usize = 18;
+const DDB_SIGNAL_SIGSTOP: usize = 19;
+const DDB_SIGNAL_SIGTSTP: usize = 20;
+const DDB_SIGNAL_SIGTTIN: usize = 21;
+const DDB_SIGNAL_SIGTTOU: usize = 22;
+const DDB_SIGNAL_SIGURG: usize = 23;
+const DDB_SIGNAL_SIGXCPU: usize = 24;
+const DDB_SIGNAL_SIGXFSZ: usize = 25;
+const DDB_SIGNAL_SIGVTALRM: usize = 26;
+const DDB_SIGNAL_SIGPROF: usize = 27;
+const DDB_SIGNAL_SIGWINCH: usize = 28;
+const DDB_SIGNAL_SIGIO: usize = 29;
+const DDB_SIGNAL_SIGPWR: usize = 30;
+const DDB_SIGNAL_SIGSYS: usize = 31;
+const DDB_STANDARD_SIGNALS: usize = 31;
+const DDB_STANDARD_SIGNAL_BITS: usize = 0x7FFFFFFF;
+
+private fn ddb_signal_name(signum: usize) -> *u8 {
+    match signum {
+        1 => { return "sighup" as *u8; }
+        2 => { return "sigint" as *u8; }
+        3 => { return "sigquit" as *u8; }
+        4 => { return "sigill" as *u8; }
+        5 => { return "sigtrap" as *u8; }
+        6 => { return "sigabrt" as *u8; }
+        7 => { return "sigbus" as *u8; }
+        8 => { return "sigfpe" as *u8; }
+        9 => { return "sigkill" as *u8; }
+        10 => { return "sigusr1" as *u8; }
+        11 => { return "sigsegv" as *u8; }
+        12 => { return "sigusr2" as *u8; }
+        13 => { return "sigpipe" as *u8; }
+        14 => { return "sigalrm" as *u8; }
+        15 => { return "sigterm" as *u8; }
+        16 => { return "sigstkflt" as *u8; }
+        17 => { return "sigchld" as *u8; }
+        18 => { return "sigcont" as *u8; }
+        19 => { return "sigstop" as *u8; }
+        20 => { return "sigtstp" as *u8; }
+        21 => { return "sigttin" as *u8; }
+        22 => { return "sigttou" as *u8; }
+        23 => { return "sigurg" as *u8; }
+        24 => { return "sigxcpu" as *u8; }
+        25 => { return "sigxfsz" as *u8; }
+        26 => { return "sigvtalrm" as *u8; }
+        27 => { return "sigprof" as *u8; }
+        28 => { return "sigwinch" as *u8; }
+        29 => { return "sigio" as *u8; }
+        30 => { return "sigpwr" as *u8; }
+        31 => { return "sigsys" as *u8; }
+        _ => { return "sig?" as *u8; }
+    }
+}
 
 // One signal set: named where the kernel can act on the signal, and printed
 // as a hex remainder where it cannot. Nothing is dropped, because the named
@@ -1751,38 +1823,15 @@ private fn ddb_put_signal_set(set: usize) !{unsafe} {
         ddb_puts("none");
         return;
     }
-    let sigint: usize = 1 << (DDB_SIGNAL_SIGINT - 1);
-    let sigquit: usize = 1 << (DDB_SIGNAL_SIGQUIT - 1);
-    let sigterm: usize = 1 << (DDB_SIGNAL_SIGTERM - 1);
-    let sigchld: usize = 1 << (DDB_SIGNAL_SIGCHLD - 1);
-    let sigtstp: usize = 1 << (DDB_SIGNAL_SIGTSTP - 1);
     let mut printed: usize = 0;
-    if ((set & sigint) != 0) {
-        if (printed != 0) { ddb_puts(","); }
-        ddb_puts("sigint");
-        printed = printed + 1;
+    for index: usize in 0..<DDB_STANDARD_SIGNALS {
+        if ((set & (1 << index)) != 0) {
+            if (printed != 0) { ddb_puts(","); }
+            ddb_puts(ddb_signal_name(index + 1));
+            printed = printed + 1;
+        }
     }
-    if ((set & sigquit) != 0) {
-        if (printed != 0) { ddb_puts(","); }
-        ddb_puts("sigquit");
-        printed = printed + 1;
-    }
-    if ((set & sigterm) != 0) {
-        if (printed != 0) { ddb_puts(","); }
-        ddb_puts("sigterm");
-        printed = printed + 1;
-    }
-    if ((set & sigchld) != 0) {
-        if (printed != 0) { ddb_puts(","); }
-        ddb_puts("sigchld");
-        printed = printed + 1;
-    }
-    if ((set & sigtstp) != 0) {
-        if (printed != 0) { ddb_puts(","); }
-        ddb_puts("sigtstp");
-        printed = printed + 1;
-    }
-    let remainder: usize = set & ~(sigint | sigquit | sigterm | sigchld | sigtstp);
+    let remainder: usize = set & ~DDB_STANDARD_SIGNAL_BITS;
     if (remainder != 0) {
         if (printed != 0) { ddb_puts("+"); }
         ddb_put_hex(remainder);

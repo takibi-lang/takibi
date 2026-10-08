@@ -102,11 +102,18 @@ const LINUX_ENOTTY: usize = 0xFFFFFFFFFFFFFFE7;
 const LINUX_EAGAIN: usize = 0xFFFFFFFFFFFFFFF5;
 const LINUX_EACCES: usize = 0xFFFFFFFFFFFFFFF3;
 const LINUX_ECHILD: usize = 0xFFFFFFFFFFFFFFF6;
-const LINUX_SIGINT: usize = 2;
-const LINUX_SIGQUIT: usize = 3;
-const LINUX_SIGTSTP: usize = 20;
-const LINUX_SIGTERM: usize = 15;
 const LINUX_SIGCHLD: usize = 17;
+const LINUX_SIGKILL: usize = 9;
+const LINUX_SIGSTOP: usize = 19;
+
+// kill's accepted signal numbers (GitHub issue #629): the null signal and
+// the standard ones whose action this kernel can carry out.
+fn kill_signal_accepted(signum: usize) -> bool {
+    match signum {
+        18 | 19 | 21 | 22 => { return false; }
+        _ => { return signum <= 31; }
+    }
+}
 // GitHub issue #295: distinct errno for fixed-pool exhaustion, previously
 // collapsed into LINUX_EBADF (which real Linux reserves for an actually bad
 // descriptor argument) at every fd-allocating syscall handler below.
@@ -4711,11 +4718,15 @@ fn syscall_signal_frame_write(current_authority: borrow ProcessCurrent[current_p
         UserWriteRangeResult::Ok(range) => {
             if (user_zero_fill(range) == false) { return (false, 0); }
             let mut ok: bool = true;
-            // siginfo: si_signo, si_errno, si_code (CLD_EXITED). The child
-            // is not named: the one handler this kernel runs only records
-            // that some child changed state, and wait4 names it.
+            // siginfo: si_signo, si_errno, si_code. SIGCHLD says CLD_EXITED
+            // without naming the child (wait4 names it); any other signal
+            // came from kill, SI_USER, without the sender's pid and uid
+            // (GitHub issue #629).
             ok = ok && user_write_u32(range, 0, signum as u32);
-            ok = ok && user_write_u32(range, 8, 1);
+            match signum {
+                17 => { ok = ok && user_write_u32(range, 8, 1); }
+                _ => {}
+            }
             ok = ok && user_write_u64(range, SIGFRAME_UC_SIGMASK,
                                       restore_mask as u64);
             for index: usize in 0..<31 {
@@ -4747,7 +4758,7 @@ fn syscall_signal_frame_write(current_authority: borrow ProcessCurrent[current_p
     }
 }
 
-// Every Resume passes through here. With a caught SIGCHLD pending and
+// Every Resume passes through here. With a caught signal pending and
 // unmasked, the syscall's result goes into a signal frame and the process
 // returns into its handler instead.
 fn syscall_signal_deliver(current_authority: ProcessCurrent[current_process, ProcessState::Running], frame: MaybeFrame, action: SyscallAction)
@@ -4789,7 +4800,8 @@ private fn syscall_signal_deliver_into(current_authority: ProcessCurrent[current
         }
         ProcessSignalPendingResult::Pending(taken) => {
             let signum: usize = taken_signal_number(taken);
-            let mut handler: SigchldAction = kernel_process_current_sigchld_action(current_authority);
+            let mut handler: SignalAction =
+                kernel_process_current_signal_action(current_authority, signum);
             let restore_mask: usize = kernel_process_current_frame_mask_take();
             let (written, base) = syscall_signal_frame_write(current_authority,
                 here, value, signum, restore_mask);
@@ -4806,8 +4818,8 @@ private fn syscall_signal_deliver_into(current_authority: ProcessCurrent[current
             }
             kernel_process_current_set_signal_mask(handler_mask);
             if ((handler.flags & LINUX_SA_RESETHAND) != 0) {
-                let mut reset: SigchldAction = { 0, 0, 0, 0 };
-                kernel_process_current_set_sigchld_action(current_authority, reset);
+                let mut reset: SignalAction = { 0, 0, 0, 0 };
+                kernel_process_current_set_signal_action(current_authority, signum, reset);
             }
             frame_general_set(here, 1, base);
             frame_general_set(here, 2, base + 128);
@@ -4914,12 +4926,7 @@ fn syscall_signal_suspend(current_authority: borrow ProcessCurrent[current_proce
         ProcessSignalPendingResult::Missing => {}
     }
     kernel_process_current_suspend_mask_restore();
-    let sigchld_bit: usize = 1 << (LINUX_SIGCHLD - 1);
-    let mut wait_set: usize = 0;
-    if (kernel_process_current_sigchld_action(current_authority).handler > 1 &&
-        (mask & sigchld_bit) == 0) {
-        wait_set = sigchld_bit;
-    }
+    let wait_set: usize = kernel_process_current_caught_set(current_authority, mask);
     kernel_process_current_prepare_signal_suspend(current_authority, wait_set);
     return SyscallAction::Block;
 }
@@ -6223,15 +6230,16 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         return syscall_finish_current(frame, SyscallAction::Resume(0), current_authority);
     }
     if (number == AARCH64_NR_RT_SIGACTION) {
-        // rt_sigaction(signum, act, oldact, sigsetsize). SIGCHLD's handler is
-        // the only one this kernel enters (syscall_signal_deliver), and
+        // rt_sigaction(signum, act, oldact, sigsetsize). Every standard
+        // signal keeps its action (GitHub issue #629); SIGKILL and SIGSTOP
+        // cannot have one, and real-time signals have no table here.
         // SIGCHLD=SIG_IGN is not merely a handler choice on Linux: children
-        // must not remain as zombies. Other signals' actions are accepted
-        // and not kept.
+        // must not remain as zombies, which sigchld_ignored carries.
         let signum: usize = x0;
         let act: usize = x1;
         let oldact: usize = x2;
-        if (signum == 0 || signum == 9 || signum == 19) {
+        if (signal_is_standard(signum) == false ||
+            signum == LINUX_SIGKILL || signum == LINUX_SIGSTOP) {
             return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
         }
         if (oldact != 0) {
@@ -6239,21 +6247,20 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                 UserWriteRangeResult::Fault => { return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority); }
                 UserWriteRangeResult::Ok(range) => {
                     let zeroed: bool = user_zero_fill(range);
+                    let mut old: SignalAction =
+                        kernel_process_current_signal_action(current_authority, signum);
                     if (signum == LINUX_SIGCHLD &&
                         kernel_process_current_sigchld_ignored(current_authority)) {
-                        let wrote_handler: bool = user_write_u64(range, 0, 1);
-                    } else if (signum == LINUX_SIGCHLD) {
-                        let mut old: SigchldAction =
-                            kernel_process_current_sigchld_action(current_authority);
-                        let wrote_handler: bool =
-                            user_write_u64(range, 0, old.handler as u64);
-                        let wrote_flags: bool =
-                            user_write_u64(range, 8, old.flags as u64);
-                        let wrote_restorer: bool =
-                            user_write_u64(range, 16, old.restorer as u64);
-                        let wrote_mask: bool =
-                            user_write_u64(range, 24, old.mask as u64);
+                        old.handler = 1;
                     }
+                    let wrote_handler: bool =
+                        user_write_u64(range, 0, old.handler as u64);
+                    let wrote_flags: bool =
+                        user_write_u64(range, 8, old.flags as u64);
+                    let wrote_restorer: bool =
+                        user_write_u64(range, 16, old.restorer as u64);
+                    let wrote_mask: bool =
+                        user_write_u64(range, 24, old.mask as u64);
                 }
             }
         }
@@ -6271,25 +6278,22 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
                         restorer_ok == false || mask_ok == false) {
                         return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EFAULT), current_authority);
                     }
+                    // GitHub issue #627: a handler returns through the
+                    // caller's restorer; there is no vDSO to fall back on.
+                    if (handler > 1 &&
+                        (((flags as usize) & LINUX_SA_RESTORER) == 0 ||
+                         restorer == 0)) {
+                        return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
+                    }
                     if (signum == LINUX_SIGCHLD) {
-                        // GitHub issue #627: a handler returns through the
-                        // caller's restorer; there is no vDSO to fall back on.
-                        if (handler > 1 &&
-                            (((flags as usize) & LINUX_SA_RESTORER) == 0 ||
-                             restorer == 0)) {
-                            return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
-                        }
                         kernel_process_current_set_sigchld_ignored(current_authority,
                             handler == 1);
-                        let mut action: SigchldAction = { 0, 0, 0, 0 };
-                        if (handler > 1) {
-                            action.handler = handler as usize;
-                            action.flags = flags as usize;
-                            action.restorer = restorer as usize;
-                            action.mask = mask as usize;
-                        }
-                        kernel_process_current_set_sigchld_action(current_authority, action);
                     }
+                    let mut action: SignalAction = {
+                        handler as usize, flags as usize,
+                        restorer as usize, mask as usize };
+                    kernel_process_current_set_signal_action(current_authority,
+                        signum, action);
                 }
             }
         }
@@ -6359,15 +6363,15 @@ fn kernel_syscall_dispatch_action(esr: usize, number: usize, x0: usize, x1: usiz
         }
     }
     if (number == AARCH64_NR_KILL) {
-        if (x0 == 0 || x1 > 64) {
+        // GitHub issue #629: 0 and the standard signals, except SIGCONT
+        // and the stop signals other than SIGTSTP, which need job control
+        // this kernel does not have. Refused rather than mishandled.
+        if (x0 == 0 || kill_signal_accepted(x1) == false) {
             return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
         }
-        if (x1 != 0 && x1 != LINUX_SIGINT && x1 != LINUX_SIGQUIT &&
-            x1 != LINUX_SIGTERM && x1 != LINUX_SIGCHLD && x1 != LINUX_SIGTSTP) {
-            return syscall_finish_current(frame, SyscallAction::Resume(LINUX_EINVAL), current_authority);
-        }
-        if (x0 == kernel_process_current_pid() && x1 == LINUX_SIGTERM) {
-            return kernel_syscall_exit_current_process(current_authority, 128 + LINUX_SIGTERM);
+        if (x0 == kernel_process_current_pid() &&
+            kernel_process_current_signal_terminates(x1)) {
+            return kernel_syscall_exit_current_process(current_authority, 128 + x1);
         }
         match kernel_process_signal_send(x0, x1) {
             ProcessSignalSendResult::Missing => {

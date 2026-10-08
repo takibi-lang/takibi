@@ -1,0 +1,3 @@
+ash trap: usr1 caught
+ash trap: term caught
+ash trap: sender status=0
