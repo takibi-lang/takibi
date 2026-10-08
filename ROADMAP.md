@@ -215,7 +215,9 @@ measurements first.
    #58 (static whole-call-path stack bounds; lowered by the maintainer on
    2026-10-04), #698 (metadata mutation exhaustion), #699 (host-side EL0
    postmortem symbolization), #709 (permanent table generation exhaustion),
-   and #710 (intrusive pool generation exhaustion), #711 (FD-service
+   and #710 (intrusive pool generation exhaustion),
+   #718 (PageMeta's physical field; waits for an RPi5 allocator time
+   measurement method, since space and time are both kept), #711 (FD-service
    allocation contention and descriptor-access measurement; observation method
    and representative workload precede candidate implementation).
 

@@ -213,10 +213,16 @@ struct PageMeta {
     // What a run's pages are FOR is still answerable, from `owner`: every
     // page of a kernel stack run carries PageOwnerTag::KernelStack.
     owner: PageOwnerTag;
-    map_refcount: usize;
+    // u32, not usize (GitHub issue #389): with occupied and owner it fills
+    // the first word, so a page costs 24 bytes of runtime metadata rather
+    // than 32. Retains stop at PAGE_MAP_REF_CEILING, so it cannot wrap.
+    map_refcount: u32;
     next_free: usize;
     physical: usize;
 }
+
+// The largest map_refcount a retain may produce.
+const PAGE_MAP_REF_CEILING: usize = 0xFFFFFFFF;
 
 struct PageExtent {
     start: usize;
@@ -778,6 +784,12 @@ fn page_allocator_apply_memory(memory: FdtMemoryMap)
         return PageAllocatorMemoryResult::Invalid;
     }
 
+    // Per-page metadata is allocated for every page of discovered RAM, so
+    // its size is the allocator's space cost: 24 of 4096 bytes. Growing it
+    // is a decision to make with a measurement, not a side effect of adding
+    // a field (GitHub issue #389).
+    static_assert(sizeof(PageMeta) <= 24,
+                  "PageMeta grew past 24 bytes per managed page");
     let metadata_bytes: usize = total_pages * sizeof(PageMeta);
     if (region_count > 0xFFFFFFFFFFFFFFFF / sizeof(PageExtent)) {
         return PageAllocatorMemoryResult::Invalid;
@@ -1422,14 +1434,14 @@ private fn page_mapping_retain_physical_locked(pool: borrow *BootPagePool,
         }
         PageIndexResult::Found(index) => {
             let meta: *PageMeta = page_meta_at_index(pool, index);
-            let current: usize = (*meta).map_refcount;
+            let current: usize = (*meta).map_refcount as usize;
             if ((*meta).occupied == false || current == 0) {
                 return PageMappingRetainResult::NotMapped;
             }
-            if (current >= limit) {
+            if (current >= limit || current >= PAGE_MAP_REF_CEILING) {
                 return PageMappingRetainResult::RefCeilingReached;
             }
-            (*meta).map_refcount = current + 1;
+            (*meta).map_refcount = (current + 1) as u32;
             return PageMappingRetainResult::Retained;
         }
     }
@@ -1538,7 +1550,9 @@ private fn page_mapping_refcount_set_probe(index: usize, value: usize)
     let pool = locked_cell_value(guard, &boot_page_pool_cell);
     if (index < page_capacity(pool)) {
         let meta: *PageMeta = page_meta_at_index(pool, index);
-        (*meta).map_refcount = value;
+        if (value <= PAGE_MAP_REF_CEILING) {
+            (*meta).map_refcount = value as u32;
+        }
     }
     locked_cell_give(&boot_page_pool_cell, guard);
 }
@@ -1560,7 +1574,7 @@ private fn page_mapping_refcount_physical_locked(
         PageIndexResult::NotManaged => { return 0; }
         PageIndexResult::Found(index) => {
             let meta: *PageMeta = page_meta_at_index(pool, index);
-            if ((*meta).occupied) { return (*meta).map_refcount; }
+            if ((*meta).occupied) { return (*meta).map_refcount as usize; }
         }
     }
     return 0;
@@ -1579,13 +1593,13 @@ fn page_mapping_release_physical(physical: usize) !{unsafe} {
         PageIndexResult::NotManaged => {}
         PageIndexResult::Found(index) => {
             let meta: *PageMeta = page_meta_at_index(pool, index);
-            let current: usize = (*meta).map_refcount;
+            let current: usize = (*meta).map_refcount as usize;
             if ((*meta).occupied == false || current == 0) {
                 (*pool).double_remove_count =
                     (*pool).double_remove_count + 1;
             } else {
                 let next: usize = current - 1;
-                (*meta).map_refcount = next;
+                (*meta).map_refcount = next as u32;
                 if (next == 0) {
                     page_transferred_release_locked(pool, index);
                 }
