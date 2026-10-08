@@ -33,8 +33,12 @@ primary before disarm; restoring the exact original loop produces secondary
 both remain at 4096. The locked phase reports zero duplicate hand-outs.
 The control requires a failed command and those excessive-round counts,
 so a different incomplete run cannot stand in for recurrence prevention.
-The widened window stays out of production kernels. This is runtime
-protocol enforcement with actual two-core regression evidence, not a
+The widened window stays out of production kernels. A fast source gate
+also discovers re-entered secondary entries and rejects the original local
+0..<ROUNDS shape, including a renamed loop or qualified entry. Its controls
+permit comments, strings and buffer loops and refuse unlocatable entries.
+That lexical gate does not inspect helper-hidden or alternative admission
+paths. This is runtime protocol enforcement with actual two-core regression evidence, not a
 compile-time phase-admission or arbitrary liveness proof.
 
 ## 2026-10-06: complete source-check function attribution

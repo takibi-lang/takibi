@@ -430,7 +430,10 @@ phase. Both unlocked and locked phases must finish exactly 4096 allocations
 per core. The same lane restores the original secondary loop and requires
 an incomplete-phase failure. The phase counter bounds re-entry; disarm and
 secondary exit precede the next phase's state reset. The widened window is
-confined to generated QEMU overlays.
+confined to generated QEMU overlays. The fast source gate discovers re-entered
+secondary probe entries and rejects invocation-local `0..<ROUNDS` batches.
+It checks that source shape; helper-hidden or alternative admission protocols
+still require the runtime regression.
 
 QEMU integration reports boot duration on every run. `allcheck` and `cicheck`
 validate the timestamps, required milestones, network interval and resource

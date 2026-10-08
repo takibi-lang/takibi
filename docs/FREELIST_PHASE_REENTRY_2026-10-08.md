@@ -36,6 +36,26 @@ or a passing reverted command. The aggregate includes this lane in both
 allcheck and cicheck. This is evidence for the exercised two-core protocol,
 not a proof of arbitrary scheduling, physical cache coherence or liveness.
 
+## Static source gate
+
+`check_probe_round_restart.py` discovers 16 current `_secondary_run` entries
+called by the secondary dispatcher and refuses an invocation-local
+`for ...: usize in 0..<...ROUNDS` batch in their bodies. Each discovered entry
+must have exactly one maintained body. It accepts the current shared-count
+loops and rejects the actual previous freelist body before a kernel runs.
+Controls separately check the rejection status and named diagnostic, iterator
+renaming, qualifiers, comments/strings and new/missing/duplicate entries.
+Ordinary local buffer loops remain permitted.
+
+This is a lexical build-time rule, not a new Takibi type/effect rule. It does
+not inspect helper-hidden repetition, local while loops, numeric round bounds
+or arbitrary alternative admission paths. The mandatory two-core regression
+continues to verify the actual production protocol. An indexed shared phase
+participant could express Running versus Done at the API boundary, but a
+signature-only linear token cannot prevent a trusted global mint from issuing
+two participants for one phase. Stored authority and the atomic admission
+boundary require their separate design; no parallel owner mechanism is added.
+
 ## Incremental space review
 
 This corrects a bounded boot fixture and adds a generated test overlay; it

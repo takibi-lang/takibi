@@ -123,6 +123,8 @@ suffix is description; dispatch reads only the prefix.
 | `check_net_link_wait_controls.py` | Controls for the shared host-side reachability wait |
 | `check_no_conflict_markers.py` | no tracked file is left mid-merge, where a pattern-scanning check would answer about the half above the marker |
 | `check_no_conflict_markers_controls.py` | Positive and faithful negative controls for the conflict-marker check |
+| `check_probe_round_restart.py` | Discover re-entered secondary probe entries and reject invocation-local `0..<ROUNDS` batches; not a proof of helper-hidden or arbitrary phase protocols |
+| `check_probe_round_restart_controls.py` | The actual previous freelist loop, iterator renaming and qualifiers reject; comments/strings and local buffer loops pass; new, absent and duplicate entry bodies are covered |
 | `check_race_window_anchors.py` | Every armed/reverted race edit matches the tracked source exactly once before compilation; obsolete, absent and duplicate anchors are refused |
 | `check_race_window_overlay_only.py` | a widened race window's spin exists only in its overlay, never in kernel/, so no ordinary kernel carries it (#615) |
 | `check_race_window_overlay_only_controls.py` | Controls for the race-window overlay check, in both directions |
