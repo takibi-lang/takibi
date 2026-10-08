@@ -464,7 +464,7 @@ variant RetxLink {
 struct RetxEntry {
     private mutex: Mutex;
     private next: RetxLink;
-    // GitHub issue #452: reachable only through retx_retry_state(), which
+    // GitHub issue #452: reachable only through guarded retry copy operations, which
     // needs the guard. These are the two fields the scan writes while
     // other contexts can read the entry.
     private retry: RetxRetryState;
@@ -1681,25 +1681,19 @@ fn retx_unlock(guard: sink RetxGuard[address],
     mutex_release(m, guard.flags);
 }
 
-// GitHub issue #452: the only way to reach an entry's retry state.
-//
-// The returned pointer is tied to the guard's authority, so using it after
-// retx_unlock is a compile error ("pointer is derived from linear value
-// 'guard' and cannot be used after 'guard' is consumed") -- which is the
-// half a `private` marker alone does not give. What it does NOT prove is
-// that this function returns data the lock actually protects; that stays
-// a module obligation, and SPEC.md says so under "Guard-derived pointers".
-//
-// The container is a borrowed RetxEntry reference rather than one carrying `@ address`
-// -- the tie comes from the guard, and a field address through an
-// identity-annotated pointer is rejected today anyway.
-// Borrowing since GitHub issue #488: the entry reference now comes
-// from a live IntrusiveSlotView or owner, and a retaining parameter would
-// let this keep it past that proof. It only takes a field address, so
-// borrowing is what it meant.
-fn retx_retry_state(guard: borrow RetxGuard[address], e: borrow &mut RetxEntry)
-        -> *RetxRetryState @ address {
-    return &e.retry;
+// The retry state is copied or replaced only while both the lock guard and
+// the entry reference are borrowed. Returning a value lets it survive unlock
+// without exporting a pointer whose lifetime would also need the slot owner.
+// The module still establishes that the supplied guard protects this entry;
+// the compiler checks both borrowed inputs and prevents a retained entry alias.
+private fn retx_retry_read(guard: borrow RetxGuard[address],
+                         entry: borrow &mut RetxEntry) -> RetxRetryState {
+    return entry.retry;
+}
+
+private fn retx_retry_write(guard: borrow RetxGuard[address],
+                          entry: borrow &mut RetxEntry, value: RetxRetryState) {
+    entry.retry = value;
 }
 
 // Detach the whole queue. Every walk below is "take the chain, decide
@@ -1981,9 +1975,8 @@ fn pending_tcp_record(connection_owner: borrow TcpConnectionOwner[connection_poo
             // exception for "I know it is private right now" is how that
             // property stops holding later.
             let init_guard = retx_lock(&entry.mutex);
-            let init_retry = retx_retry_state(init_guard, entry);
-            init_retry.sent_at = read_cntpct();
-            init_retry.retries = 0;
+            let mut init_retry: RetxRetryState = { read_cntpct(), 0 };
+            retx_retry_write(init_guard, entry, init_retry);
             retx_unlock(init_guard, &entry.mutex);
             slice_copy(entry.frame as []u8, frame[0..<1514]);
 
@@ -2305,11 +2298,12 @@ fn pending_tcp_service_once(conn: borrow &mut TcpConnection,
                 let mut length: usize = 0;
                 if (entry.connection == conn.self_address) {
                     let scan_guard = retx_lock(&entry.mutex);
-                    let retry = retx_retry_state(scan_guard, entry);
+                    let mut retry: RetxRetryState = retx_retry_read(scan_guard, entry);
                     if (now - retry.sent_at >= retry_ticks) {
                         if (retry.retries < TCP_RETRY_LIMIT) {
                             retry.sent_at = now;
                             retry.retries = retry.retries + 1;
+                            retx_retry_write(scan_guard, entry, retry);
                             retransmit = true;
                             length = entry.frame_length;
                         } else {
@@ -3539,7 +3533,7 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection_pool, con
 // replacement is narrower, which is worth saying rather than quietly
 // rewording: RetxEntry used to have eleven public fields behind a guard
 // covering one, and TcpConnection twenty. Issue #452 made RetxEntry's
-// mutable state private behind retx_retry_state(), which needs the guard;
+// mutable state private behind guarded retry copy operations;
 // its remaining public fields are written once before the entry is linked
 // and read-only after, and the chain link's own acquire/release orders
 // that against a reader. Issue #462 made TcpConnectionOwner itself the
