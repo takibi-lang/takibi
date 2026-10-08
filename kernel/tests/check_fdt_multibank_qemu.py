@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import selectors
 import socket
 import struct
@@ -11,6 +12,15 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+from await_timing import AwaitTiming  # noqa: E402
+
+# Each boot's wait for its memory line: a fixed budget from QEMU launch, or
+# from release after the DTB is patched. GitHub issue #666 records how much
+# of it was used, without changing it or the verdict.
+OBSERVE_TIMEOUT_SECONDS = 10.0
+LABEL = "kernel/qemu fdt-multibank"
 
 
 MULTIBANK_EXPECTED = (
@@ -99,17 +109,22 @@ def make_discontiguous(blob: bytes) -> bytes:
     return bytes(patched)
 
 
-def observe_process(process: subprocess.Popen[bytes], expected: bytes
-                    ) -> tuple[bool, bytearray]:
+def observe_process(process: subprocess.Popen[bytes], expected: bytes,
+                    timing_path: str | None = None, name: str = "memory line",
+                    clock=time.monotonic) -> tuple[bool, bytearray]:
     assert process.stdout is not None
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ)
-    deadline = time.monotonic() + 10.0
+    started = clock()
+    deadline = started + OBSERVE_TIMEOUT_SECONDS
+    timing = AwaitTiming(timing_path, started, OBSERVE_TIMEOUT_SECONDS, (), (),
+                         label=LABEL, origin="QEMU start of this boot",
+                         milestones=(name,))
     transcript = bytearray()
     found = False
     try:
-        while time.monotonic() < deadline:
-            events = selector.select(deadline - time.monotonic())
+        while clock() < deadline:
+            events = selector.select(max(0.0, deadline - clock()))
             if not events:
                 break
             chunk = process.stdout.read1(4096)
@@ -117,9 +132,11 @@ def observe_process(process: subprocess.Popen[bytes], expected: bytes
                 break
             transcript.extend(chunk)
             if expected in transcript:
+                timing.record(name, True, clock())
                 found = True
                 break
     finally:
+        timing.finish(clock())
         selector.close()
         process.terminate()
         try:
@@ -130,13 +147,15 @@ def observe_process(process: subprocess.Popen[bytes], expected: bytes
     return found, transcript
 
 
-def observe(command: list[str], expected: bytes) -> tuple[bool, bytearray]:
+def observe(command: list[str], expected: bytes, timing_path: str,
+            name: str) -> tuple[bool, bytearray]:
     process = subprocess.Popen(
         command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    return observe_process(process, expected)
+    return observe_process(process, expected, timing_path, name)
 
 
-def observe_patched_dtb(command: list[str], dtb: Path, expected: bytes
+def observe_patched_dtb(command: list[str], dtb: Path, expected: bytes,
+                        timing_path: str, name: str
                         ) -> tuple[bool, bytearray]:
     # QEMU's raw-ELF boot places its generated DTB at physical address zero;
     # `-dtb` does not replace that blob for this boot path. Pause at reset and
@@ -165,7 +184,7 @@ def observe_patched_dtb(command: list[str], dtb: Path, expected: bytes
         process.terminate()
         process.wait(timeout=2.0)
         return False, bytearray(debugger.stdout)
-    return observe_process(process, expected)
+    return observe_process(process, expected, timing_path, name)
 
 
 def main() -> int:
@@ -174,6 +193,12 @@ def main() -> int:
     if not kernel.is_file():
         print(f"error: missing QEMU kernel: {kernel}", file=sys.stderr)
         return 1
+    artifacts = Path(os.environ.get("TAKIBI_LANE_ARTIFACT_ROOT",
+                                    str(repo / "_build"))) / "kernel-fdt-multibank-qemu"
+    artifacts.mkdir(parents=True, exist_ok=True)
+
+    def timing(boot: str) -> str:
+        return str(artifacts / f"await-{boot}.jsonl")
 
     command = [
         "qemu-system-aarch64",
@@ -190,7 +215,8 @@ def main() -> int:
         "-serial", "stdio",
         "-kernel", str(kernel),
     ]
-    found, transcript = observe(command, MULTIBANK_EXPECTED)
+    found, transcript = observe(command, MULTIBANK_EXPECTED,
+                               timing("multibank"), "multi-bank memory line")
     if not found:
         sys.stderr.buffer.write(transcript)
         print("FAIL kernel/qemu FDT multi-bank: expected memory line absent",
@@ -241,7 +267,8 @@ def main() -> int:
             "-kernel", str(kernel),
         ]
         found, transcript = observe_patched_dtb(
-            discontiguous_command, dtb, DISCONTIGUOUS_PROBE_EXPECTED)
+            discontiguous_command, dtb, DISCONTIGUOUS_PROBE_EXPECTED,
+            timing("physical-hole"), "physical-hole allocator probe")
         if not found or DISCONTIGUOUS_MEMORY_EXPECTED not in transcript:
             sys.stderr.buffer.write(transcript)
             print("FAIL kernel/qemu FDT physical-hole allocator probe",
@@ -260,7 +287,8 @@ def main() -> int:
         "-serial", "stdio",
         "-kernel", str(kernel),
     ]
-    found, transcript = observe(low_memory_command, LOW_MEMORY_EXPECTED)
+    found, transcript = observe(low_memory_command, LOW_MEMORY_EXPECTED,
+                               timing("low-memory"), "low-memory sizing line")
     if not found:
         sys.stderr.buffer.write(transcript)
         print("FAIL kernel/qemu FDT allocator sizing: expected memory line absent",
@@ -304,7 +332,8 @@ def main() -> int:
             "-kernel", str(kernel),
         ]
         found, transcript = observe_patched_dtb(
-            invalid_command, dtb, MISSING_EXPECTED)
+            invalid_command, dtb, MISSING_EXPECTED,
+            timing("missing-memory"), "missing-memory halt")
         if not found:
             sys.stderr.buffer.write(transcript)
             print("FAIL kernel/qemu FDT negative control: kernel did not reject the modified tree",

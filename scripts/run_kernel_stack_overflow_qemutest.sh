@@ -93,12 +93,24 @@ if [ "$armed" != true ]; then
     exit 1
 fi
 
+# GitHub issue #666: record how much of this wait's 100 x 0.1 s budget the
+# overflow line used. The budget and the verdict below are unchanged.
+overflow_wait_started=$(date +%s.%N)
+overflow_arrived=
 for _ in $(seq 1 100); do
     if grep -q 'kernel stack: OVERFLOW at exception entry' "$UART_LOG"; then
+        overflow_arrived=--arrived
         break
     fi
     sleep 0.1
 done
+python3 "$REPO_ROOT/scripts/await_timing.py" \
+    --path "$ARTIFACT_DIR/await-overflow.jsonl" \
+    --label "kernel/qemu stack-overflow" \
+    --origin "GDB release of the injected entry" \
+    --name "overflow line" --timeout 10 \
+    --started "$overflow_wait_started" --ended "$(date +%s.%N)" \
+    $overflow_arrived || true
 
 if ! grep -Eq '^kernel stack: OVERFLOW at exception entry \(issue #377\) sp=[0-9]+ below the boot stack$' \
         "$UART_LOG"; then

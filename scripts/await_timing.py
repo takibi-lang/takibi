@@ -81,3 +81,33 @@ class AwaitTiming:
     def finish(self, now):
         for name in list(self.pending):
             self.record(name, False, now)
+
+
+def main(argv=None):
+    """Record one fixed-budget wait a shell lane runner made (GitHub issue #666).
+
+    The runner reads its own clock (`date +%s.%N`) when the budget starts and
+    when the wait ends, and says whether the line arrived. The budget and the
+    verdict stay the runner's; this only writes the observation.
+    """
+    import argparse
+    parser = argparse.ArgumentParser(description=main.__doc__)
+    parser.add_argument("--path", required=True)
+    parser.add_argument("--label", required=True)
+    parser.add_argument("--origin", required=True)
+    parser.add_argument("--name", required=True)
+    parser.add_argument("--timeout", type=float, required=True)
+    parser.add_argument("--started", type=float, required=True)
+    parser.add_argument("--ended", type=float, required=True)
+    parser.add_argument("--arrived", action="store_true")
+    args = parser.parse_args(argv)
+    timing = AwaitTiming(args.path, args.started, args.timeout, (), (),
+                         label=args.label, origin=args.origin,
+                         milestones=(args.name,))
+    timing.record(args.name, args.arrived, args.ended)
+    timing.finish(args.ended)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
