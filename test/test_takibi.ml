@@ -21193,6 +21193,19 @@ let raw_authority_policy_tests = [
 ]
 
 let indexed_reference_tests = [
+  Alcotest.test_case "indexed reference passes to a nonretaining reference parameter" `Quick
+    (fun () -> ignore (gen_codegen (indexed_reference_fixture ^ {|
+      fn read(record: borrow &RefRecord) -> usize { return record.value; }
+      fn write(record: borrow &mut RefRecord) { record.value = 42; }
+      fn probe() -> usize { let owner = ref_new(); let mut result: usize = 0;
+        { let record = ref_at(owner); write(record); result = read(record); }
+        ref_end(owner); return result; }|})));
+  Alcotest.test_case "borrowed reference cannot forward to a retaining parameter" `Quick
+    (expect_type_error "retaining" {|
+      struct Record { value: usize; }
+      fn keep(record: &mut Record) {}
+      fn leak(record: borrow &mut Record) { keep(record); }|});
+
   Alcotest.test_case "field codegen prefers local pointer over same-named global" `Quick
     (fun () -> ignore (gen_codegen {|
       struct GlobalRecord { other: usize; }

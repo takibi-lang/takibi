@@ -625,3 +625,10 @@ fn occupancy_drain(region: *Occupancy @ id, spins: usize)
 // is the obligation to have been obtained, and being linear is what makes
 // that obligation real.
 fn quiesced_release(proof: sink Quiesced[id]) {}
+
+// Preserve whole-machine authority while exposing a validated record.
+fn machine_pool_record(T: type, pool: borrow &mut IntrusivePool(T) @ pool_id,
+                       scoped: borrow MachineSlotView[stop, pool_id])
+        -> &mut T @ stop !{unsafe} {
+    return intrusive_pool_record_of(pool, scoped.live);
+}

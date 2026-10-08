@@ -309,8 +309,8 @@ private fn pool_walk_once() !{unsafe} {
             match intrusive_pool_probe_slot_unproven(&pool_walk_pool, cursor) {
                 IntrusiveSlotProbe::NoPayload => {}
                 IntrusiveSlotProbe::Live(slot_view) => {
-                    let payload: *PoolWalkItem =
-                        intrusive_pool_payload_of(&pool_walk_pool, slot_view);
+                    let payload: &mut PoolWalkItem =
+                        intrusive_pool_record_of(&pool_walk_pool, slot_view);
                     // The floor is written once at setup and never touched
                     // again, so this is a control rather than a race: a
                     // deviation means the walk read something that is not
@@ -394,8 +394,8 @@ private fn pool_view_hold_once() !{unsafe} {
             unsafe { atomic_store_release(pool_view_done_address(), 1); }
         }
         IntrusiveSlotProbe::Live(slot_view) => {
-            let payload: *PoolWalkItem =
-                intrusive_pool_payload_of(&pool_walk_pool, slot_view);
+            let payload: &mut PoolWalkItem =
+                intrusive_pool_record_of(&pool_walk_pool, slot_view);
             let first_ok: bool = payload.stamp == POOL_WALK_SENTINEL;
             unsafe { atomic_store_release(pool_view_held_address(), 1); }
             let ticks_start: usize = pool_walk_peer_ticks();
@@ -490,7 +490,7 @@ private fn pool_walk_floor_take() -> bool !{allocates, unsafe} {
             match taken {
                 IntrusivePoolInsertResult::OutOfMemory => { return false; }
                 IntrusivePoolInsertResult::Allocated(owner) => {
-                    intrusive_pool_ref(&pool_walk_pool, owner).stamp =
+                    intrusive_pool_owned_record(&pool_walk_pool, owner).stamp =
                         POOL_WALK_SENTINEL;
                     pool_walk_floor_address[i] = intrusive_owner_slot(owner);
                     pool_walk_floor_generation[i] =
@@ -581,7 +581,7 @@ private fn pool_walk_round(round: usize) -> PoolWalkRound !{allocates, unsafe} {
             return PoolWalkRound::Failed("allocator-empty" as *u8);
         }
         IntrusivePoolInsertResult::Allocated(owner) => {
-            intrusive_pool_ref(&pool_walk_pool, owner).stamp =
+            intrusive_pool_owned_record(&pool_walk_pool, owner).stamp =
                 POOL_WALK_SENTINEL;
             // The walker has to have the address BEFORE the chunk goes,
             // or the round proves nothing. This wait is what replaces the

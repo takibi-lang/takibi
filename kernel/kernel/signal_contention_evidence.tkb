@@ -60,7 +60,7 @@ fn signal_contention_is_armed() -> bool !{unsafe} {
 }
 
 fn signal_contention_secondary_run() !{unsafe} {
-    let record: *ProcessRecord = &signal_probe_record;
+    let record: &mut ProcessRecord = &signal_probe_record;
     let mut served: usize = 0;
     while (unsafe { atomic_load_acquire(signal_probe_addr(
                &signal_probe_armed)) } == 1) {
@@ -102,7 +102,7 @@ private fn signal_probe_wait_done(round: usize, window: i64) -> bool
 // 2 when core 1 never raised at all.
 private fn signal_probe_round(round: usize, locked: bool) -> usize
         !{unsafe} {
-    let record: *ProcessRecord = &signal_probe_record;
+    let record: &mut ProcessRecord = &signal_probe_record;
     record.pending_signals = 0;
     // Unlocked, core 1 can finish, so wait until it has (bounded at a
     // second). Locked, it cannot until the store below, so the window only

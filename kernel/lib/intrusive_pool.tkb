@@ -55,14 +55,10 @@ use "kernel/lib/locked_cell.tkb";
 //   Cursor traversal itself remains lockless: issue #482 proves that probing a
 //   cursor into a released chunk is refused before dereference. The explicitly
 //   unsafe probe_slot_unproven is reserved for that stale-cursor test and a
-//   reporter that has stopped every peer. payload_unproven_of releases a
-//   normal view before returning its bare pointer; those eleven caller-owned
-//   lifetime exceptions remain named and checked by
-//   scripts/check_liveness_proof_escapes.py rather than weakening every view,
-//   and since GitHub issue #482 each entry there names what keeps its payload
-//   alive: a reaper's exclusivity, a reference count, a connection owner, or
-//   -- for process records, which other CPUs' scheduler walks read -- the
-//   process-run guard scheduled_process_slot_remove now requires.
+//   reporter that has stopped every peer. Payload access retains its view
+//   or transfers the loan to an existing indexed authority. No API consumes
+//   the liveness proof to return an unproven payload; the source gate rejects
+//   reintroducing the retired escapes.
 // - LIVE SAYS THE SLOT IS THE CALLER'S, NOT THAT ITS PAYLOAD IS WRITTEN.
 //   The two entry points promise different things about the bytes, and a
 //   walker that reads a payload field needs to know which (issue #514).
@@ -2570,4 +2566,25 @@ fn intrusive_pool_boot_probe() -> bool !{unsafe} {
            stale_refused && stale_counted && invariants_ok && pages_returned &&
            slot_probe_answered_live && handle_probe_refused &&
            handle_probe_current && recycled_counted;
+}
+
+// Record access keeps the existing owner or view alive. Only this pool mint
+// asserts that validated payload storage contains the caller's record type.
+fn intrusive_pool_record_of(T: type, pool: borrow &mut IntrusivePool(T) @ pool_id,
+                           live: borrow IntrusiveSlotView[pool_id])
+        -> &mut T @ pool_id !{unsafe} {
+    return unsafe { ((live.slot.raw + offsetof(IntrusiveSlot(T), storage)) as *T) as &mut T };
+}
+
+fn intrusive_pool_allocation_record_of(
+        T: type, pool: borrow &mut IntrusivePool(T) @ pool_id,
+        live: borrow IntrusiveAllocationView[pool_id, allocation])
+        -> &mut T @ allocation !{unsafe} {
+    return unsafe { ((live.slot.raw + offsetof(IntrusiveSlot(T), storage)) as *T) as &mut T };
+}
+
+fn intrusive_pool_owned_record(T: type, pool: borrow &mut IntrusivePool(T) @ pool_id,
+                              owner: borrow IntrusiveOwner[pool_id, allocation])
+        -> &mut T @ allocation !{unsafe} {
+    return unsafe { ((owner.slot.raw + offsetof(IntrusiveSlot(T), storage)) as *T) as &mut T };
 }

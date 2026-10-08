@@ -7835,6 +7835,10 @@ let infer_program (prog : Ast.toplevel list) : program_types =
   let validate_param_type loc ty =
     validate_static_type loc ty;
     match ty with
+    | Ast.TypeBorrow (Ast.TypeSingleton ((Ast.TypeRef inner | Ast.TypeRefMut inner), _))
+    | Ast.TypeBorrow (Ast.TypeRef inner | Ast.TypeRefMut inner) ->
+        validate_ref_referent loc inner;
+        validate_complete_type loc true inner
     | Ast.TypeBorrow ((Ast.TypePtr _ | Ast.TypeAlignedPtr _
                       | Ast.TypeSlice _) as inner) ->
         validate_complete_type loc false inner
@@ -7851,7 +7855,7 @@ let infer_program (prog : Ast.toplevel list) : program_types =
         validate_complete_type loc false inner
     | Ast.TypeBorrow _ ->
         raise (TypeError (loc,
-          "borrow is only valid on a raw/aligned pointer, slice, affine/linear opaque pointer, indexed owner, erased view, kinded variant, or device span parameter"))
+          "borrow is only valid on a reference, raw/aligned pointer, slice, affine/linear opaque pointer, indexed owner, erased view, kinded variant, or device span parameter"))
     | Ast.TypeBorrowMut (Ast.TypeIndexed (name, _) as inner)
       when is_kinded name -> validate_complete_type loc false inner
     | Ast.TypeBorrowMut _ ->

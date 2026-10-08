@@ -720,7 +720,7 @@ private fn scheduled_process_pool_init() {
 // that view. The returned pointer depends on the whole guard and cannot be
 // used after unlock or across a destructive record operation.
 fn scheduled_process_record_locked(guard: borrow ProcessRunGuard[lock],
-                                   slot: usize) -> *ProcessRecord @ lock
+                                   slot: usize) -> &mut ProcessRecord @ lock
         !{unsafe} {
     if (slot == 0) { return &scheduled_process_boot_record; }
     if (scheduled_process_pool_ready == false) {
@@ -812,14 +812,14 @@ private inline fn scheduled_process_locked_view_new(
 
 private inline fn scheduled_process_locked_view_payload(
         source: borrow ProcessRecordLockedView[lock, &scheduled_process_pool])
-        -> *ProcessRecord @ lock !{unsafe} {
-    return intrusive_pool_payload_of(&scheduled_process_pool, source.live);
+        -> &mut ProcessRecord @ lock !{unsafe} {
+    return intrusive_pool_record_of(&scheduled_process_pool, source.live);
 }
 
 private inline fn scheduled_process_transfer_locked_loan(
         source: borrow ProcessRecordLockedView[lock, &scheduled_process_pool],
         destination: borrow ProcessRunGuard[lock])
-        -> *ProcessRecord @ lock !{unsafe, loan_transfer} {
+        -> &mut ProcessRecord @ lock !{unsafe, loan_transfer} {
     return scheduled_process_locked_view_payload(source);
 }
 
@@ -830,7 +830,7 @@ private inline fn scheduled_process_locked_view_drop(
 
 fn scheduled_process_record_of_locked(
         guard: borrow ProcessRunGuard[lock],
-        handle: ProcessHandle) -> *ProcessRecord @ lock !{unsafe} {
+        handle: ProcessHandle) -> &mut ProcessRecord @ lock !{unsafe} {
     if (scheduled_process_handle_matches(handle) == false) {
         scheduled_process_stale_handle_reads = scheduled_process_stale_handle_reads + 1;
         if (scheduled_process_stale_first_slot == 0) {
@@ -898,14 +898,14 @@ private inline fn scheduled_process_current_view_new(
 
 private inline fn scheduled_process_current_view_payload(
         source: borrow ProcessRecordCurrentView[process, &scheduled_process_pool])
-        -> *ProcessRecord @ process !{unsafe} {
-    return intrusive_pool_payload_of(&scheduled_process_pool, source.live);
+        -> &mut ProcessRecord @ process !{unsafe} {
+    return intrusive_pool_record_of(&scheduled_process_pool, source.live);
 }
 
 private inline fn scheduled_process_transfer_current_loan(
         source: borrow ProcessRecordCurrentView[process, &scheduled_process_pool],
         destination: borrow ProcessCurrent[process, phase])
-        -> *ProcessRecord @ process !{unsafe, loan_transfer} {
+        -> &mut ProcessRecord @ process !{unsafe, loan_transfer} {
     return scheduled_process_current_view_payload(source);
 }
 
@@ -915,7 +915,7 @@ private inline fn scheduled_process_current_view_drop(
 }
 
 fn scheduled_process_record_current(running: borrow ProcessCurrent[process, phase])
-        -> *ProcessRecord @ process !{unsafe} {
+        -> &mut ProcessRecord @ process !{unsafe} {
     let mut handle: ProcessHandle = process_current_handle(running);
     if (handle.pool_index == 0) { return &scheduled_process_boot_record; }
     match intrusive_pool_probe_handle_untrusted(
@@ -1248,7 +1248,7 @@ struct ProcessDdbCopyResult {
     truncated: bool;
 }
 
-// `borrow *ProcessRecord`, and GitHub issue #488 is why. The caller reads
+// `borrow &mut ProcessRecord` retains no record authority beyond the call. The caller reads
 // the record through a live IntrusiveSlotView; a retaining parameter would
 // let this function keep the pointer past the view, which is exactly the
 // escape the view exists to close. It only copies fields out, so borrowing
@@ -1256,7 +1256,7 @@ struct ProcessDdbCopyResult {
 private fn scheduled_process_ddb_record(
         stopped: borrow MachineStopped[&kernel_world_stop],
         slot: usize,
-        record: borrow *ProcessRecord) -> ProcessDdbRecord {
+        record: borrow &mut ProcessRecord) -> ProcessDdbRecord {
     let mut result: ProcessDdbRecord;
     result.pid = record.pid;
     result.ppid = 0;
@@ -1305,7 +1305,7 @@ private fn scheduled_process_ddb_record(
 private fn scheduled_process_ddb_copy_one(
         stopped: borrow MachineStopped[&kernel_world_stop],
         output: borrow [ProcessDdbRecord; DDB_PROCESS_RECORDS..],
-        index: usize, slot: usize, record: borrow *ProcessRecord) {
+        index: usize, slot: usize, record: borrow &mut ProcessRecord) {
     if (index < DDB_PROCESS_RECORDS) {
         output[index] = scheduled_process_ddb_record(stopped, slot, record);
     }
@@ -1376,7 +1376,7 @@ private fn kernel_process_protocol_owner(owner: usize) -> usize {
 
 // A record with no parent (the boot process, or an orphan the teardown
 // sweep detached) names nothing.
-private fn kernel_process_protocol_parent(record: borrow *ProcessRecord)
+private fn kernel_process_protocol_parent(record: borrow &mut ProcessRecord)
         -> usize !{unsafe} {
     if (record.has_parent) {
         return scheduled_process_pid_of_handle(record.parent);
@@ -1406,7 +1406,7 @@ private fn kernel_process_protocol_observe(unlocked: bool) !{unsafe} {
         match intrusive_pool_probe_slot_unproven(&scheduled_process_pool, slot) {
             IntrusiveSlotProbe::NoPayload => {}
             IntrusiveSlotProbe::Live(slot_view) => {
-                let record: *ProcessRecord = intrusive_pool_payload_of(
+                let record: &mut ProcessRecord = intrusive_pool_record_of(
                     &scheduled_process_pool, slot_view);
                 // A slot being allocated is not a process yet.
                 if (record.state != ProcessSlotState::Free) {
@@ -1472,7 +1472,7 @@ fn kernel_process_protocol_trace_close() -> usize {
 // authority as the pointer's lifetime. No scoped pool view can cross resume.
 private fn scheduled_process_record_stopped(
         stopped: borrow MachineStopped[stop], slot: usize)
-        -> *ProcessRecord @ stop !{unsafe} {
+        -> &mut ProcessRecord @ stop !{unsafe} {
     if (slot == 0) { return &scheduled_process_boot_record; }
     if (scheduled_process_pool_ready == false) { return &scheduled_process_record_absent; }
     match machine_pool_probe(&scheduled_process_pool, stopped, slot) {
@@ -1489,8 +1489,8 @@ private fn scheduled_process_record_stopped(
 private inline fn scheduled_process_stopped_transfer(
         source: borrow MachineSlotView[stop, &scheduled_process_pool],
         destination: borrow MachineStopped[stop])
-        -> *ProcessRecord @ stop !{unsafe, loan_transfer} {
-    return machine_pool_payload(&scheduled_process_pool, source);
+        -> &mut ProcessRecord @ stop !{unsafe, loan_transfer} {
+    return machine_pool_record(&scheduled_process_pool, source);
 }
 
 private fn scheduled_process_parent_pid_stopped(
@@ -1539,7 +1539,7 @@ fn kernel_process_ddb_copy(
                 // the payload pointer cannot outlive the proof that the
                 // slot was occupied. This walk was already doing the right
                 // thing by accident -- it just had no way to say so.
-                let record: *ProcessRecord = machine_pool_payload(
+                let record: &mut ProcessRecord = machine_pool_record(
                     &scheduled_process_pool, slot_view);
                 scheduled_process_ddb_copy_one(stopped, output, count, slot, record);
                 machine_pool_view_drop(slot_view);
@@ -1803,7 +1803,7 @@ fn scheduled_process_reset_syscall_state_everywhere() !{unsafe} {
 // holds an authority for (the run guard, the creating owner, or the reset
 // of a record being removed), not looked up again by slot.
 private fn scheduled_process_record_reset_syscall_state(
-        record: borrow *ProcessRecord) {
+        record: borrow &mut ProcessRecord) {
     record.uart_block_delivery = UartBlockDelivery::Scalar;
     let mut fresh: CloneFileState = { false };
     record.clone_file_state = fresh;
@@ -1832,7 +1832,7 @@ struct ProcessRecordScalarSnapshot {
     stack_run: usize;
 }
 
-private inline fn scheduled_process_scalar_copy(record: borrow *ProcessRecord)
+private inline fn scheduled_process_scalar_copy(record: borrow &mut ProcessRecord)
         -> ProcessRecordScalarSnapshot {
     let mut snapshot: ProcessRecordScalarSnapshot = {
         record.pid, record.state, process_wait_reason(&record.wait),
@@ -1853,7 +1853,7 @@ private fn scheduled_process_scalar_snapshot(slot: usize)
         }
         IntrusiveSlotProbe::Live(slot_view) => {
             let mut snapshot: ProcessRecordScalarSnapshot = scheduled_process_scalar_copy(
-                intrusive_pool_payload_of(&scheduled_process_pool, slot_view));
+                intrusive_pool_record_of(&scheduled_process_pool, slot_view));
             intrusive_view_drop(slot_view);
             return snapshot;
         }
@@ -1998,7 +1998,7 @@ private fn scheduled_process_diagnostic_copy(
 // Fill caller-owned storage: returning another 600-byte snapshot overflowed
 // a debug build's 16 KiB kernel stack. The caller retains its own authority.
 private fn scheduled_process_diagnostic_record_fill(
-        record: borrow *ProcessRecord, parent_pid: usize, resident_pages: usize,
+        record: borrow &mut ProcessRecord, parent_pid: usize, resident_pages: usize,
         snapshot: borrow *ProcessDiagnosticSnapshot) {
     snapshot.pid = record.pid;
     snapshot.session_id = record.session_id;
@@ -2181,8 +2181,8 @@ fn scheduled_process_command_line(guard: borrow ProcessRunGuard[lock],
 // generation compare, so record_at is the right read for it.
 private fn scheduled_process_copy_command_line(parent: borrow ProcessCurrent[p, ProcessState::Running],
         child: borrow ScheduledProcessOwner[c]) !{unsafe} {
-    let source: *ProcessRecord = scheduled_process_record_current(parent);
-    let destination: *ProcessRecord = scheduled_process_record_owned(child);
+    let source: &mut ProcessRecord = scheduled_process_record_current(parent);
+    let destination: &mut ProcessRecord = scheduled_process_record_owned(child);
     destination.command_line_length = source.command_line_length &
                                       PROCESS_COMMAND_LENGTH_MASK;
     for index: usize in 0..<512 {
@@ -2229,14 +2229,14 @@ private fn scheduled_process_copy_affinity_mask(parent: borrow ProcessCurrent[p,
 
 // The one place each pair is read; every authority below passes the
 // record it reached.
-private fn process_fd_context_words(record: borrow *ProcessRecord)
+private fn process_fd_context_words(record: borrow &mut ProcessRecord)
         -> ProcessPoolHandleWords !{unsafe} {
     let mut words: ProcessPoolHandleWords =
         { record.fd_context, record.fd_context_generation };
     return words;
 }
 
-private fn process_image_record_words(record: borrow *ProcessRecord)
+private fn process_image_record_words(record: borrow &mut ProcessRecord)
         -> ProcessPoolHandleWords !{unsafe} {
     let mut words: ProcessPoolHandleWords =
         { record.image_record, record.image_record_generation };
@@ -2259,7 +2259,7 @@ fn scheduled_process_fd_context_handle(slot: usize) -> ProcessPoolHandleWords
 fn scheduled_process_set_fd_context(slot: usize, address: usize,
                                     generation: usize) !{unsafe} {
     let guard = process_run_lock();
-    let record: *ProcessRecord = scheduled_process_record_locked(guard, slot);
+    let record: &mut ProcessRecord = scheduled_process_record_locked(guard, slot);
     record.fd_context = address;
     record.fd_context_generation = generation;
     process_run_unlock(guard);
@@ -2293,7 +2293,7 @@ fn scheduled_process_image_record_handle(slot: usize) -> ProcessPoolHandleWords
 fn scheduled_process_set_image_record(slot: usize, address: usize,
                                       generation: usize) !{unsafe} {
     let guard = process_run_lock();
-    let record: *ProcessRecord = scheduled_process_record_locked(guard, slot);
+    let record: &mut ProcessRecord = scheduled_process_record_locked(guard, slot);
     record.image_record = address;
     record.image_record_generation = generation;
     process_run_unlock(guard);
@@ -2320,7 +2320,7 @@ fn scheduled_process_slot_valid(slot: usize) -> bool !{unsafe} {
 
 // The backing handle's two words, read from a record reached under an
 // authority by one of the makers below.
-private fn process_backing_words(record: borrow *ProcessRecord)
+private fn process_backing_words(record: borrow &mut ProcessRecord)
         -> ProcessPoolHandleWords !{unsafe} {
     let mut words: ProcessPoolHandleWords = {
         record.address_space_backing, record.address_space_backing_generation };
@@ -2367,7 +2367,7 @@ fn scheduled_process_address_space_root_current(
 fn scheduled_process_set_address_space_backing(
         slot: usize, address: usize, generation: usize) !{unsafe} {
     let guard = process_run_lock();
-    let record: *ProcessRecord = scheduled_process_record_locked(guard, slot);
+    let record: &mut ProcessRecord = scheduled_process_record_locked(guard, slot);
     record.address_space_backing = address;
     record.address_space_backing_generation = generation;
     process_run_unlock(guard);
@@ -2608,12 +2608,12 @@ fn scheduled_process_exited_state(
 private inline fn scheduled_process_transfer_owned_loan(
         source: borrow IntrusiveAllocationView[&scheduled_process_pool, process],
         destination: borrow ScheduledProcessOwner[process])
-        -> *ProcessRecord @ process !{unsafe, loan_transfer} {
-    return intrusive_pool_allocation_payload_of(&scheduled_process_pool, source);
+        -> &mut ProcessRecord @ process !{unsafe, loan_transfer} {
+    return intrusive_pool_allocation_record_of(&scheduled_process_pool, source);
 }
 
 fn scheduled_process_record_owned(owner: borrow ScheduledProcessOwner[process])
-        -> *ProcessRecord @ process !{unsafe} {
+        -> &mut ProcessRecord @ process !{unsafe} {
     // The bootstrap and absent diagnostic records have permanent storage.
     if (owner.pool_index == 0) { return &scheduled_process_boot_record; }
     match intrusive_pool_probe_allocation_untrusted(
@@ -2718,7 +2718,7 @@ fn scheduled_process_table_init() !{unsafe} {
 // reader of this record holds.
 private fn scheduled_process_record_reset(guard: borrow ProcessRunGuard[lock],
                                           slot: usize) !{unsafe} {
-    let record: *ProcessRecord = scheduled_process_record_locked(guard, slot);
+    let record: &mut ProcessRecord = scheduled_process_record_locked(guard, slot);
     record.pid = 0;
     record.session_id = 0;
     record.start_time_ticks = 0;
@@ -3628,7 +3628,7 @@ fn scheduled_process_block(
 // A wait has ended: the published wait is cleared, and so is the decision
 // that led to it, which a rerun of the syscall reads as "first entry" only
 // when nothing is left of the last one.
-private fn scheduled_process_wait_settle(record: borrow *ProcessRecord) {
+private fn scheduled_process_wait_settle(record: borrow &mut ProcessRecord) {
     process_wait_clear(&record.wait);
     record.pending_block_reason = ProcessWaitReason::None;
 }
@@ -6986,7 +6986,7 @@ private fn kernel_process_block_would_miss(
         // A signal is raised under this lock (#570); one raised inside the
         // window is pending here.
         ProcessWaitReason::Signal => {
-            let waiting: *ProcessRecord = scheduled_process_record_of_locked(guard, from);
+            let waiting: &mut ProcessRecord = scheduled_process_record_of_locked(guard, from);
             let terminating: usize = (1 << 1) | (1 << 2) | (1 << 14);
             let wanted: usize = waiting.sigwait_set |
                                 (terminating & ~waiting.signal_mask);
@@ -7277,7 +7277,7 @@ fn kernel_process_current_clear_deadline(current_authority: borrow ProcessCurren
 // handle so kernel/kernel/signal_contention_evidence.tkb can drive these
 // exact functions on a record of its own that no scheduler walk reaches.
 fn process_signal_pending_raise(guard: borrow ProcessRunGuard[lock],
-                                record: borrow *ProcessRecord, bits: usize) {
+                                record: borrow &mut ProcessRecord, bits: usize) {
     process_signal_pending_store(
         guard, record, process_signal_pending_raised(guard, record, bits));
 }
@@ -7287,18 +7287,18 @@ fn process_signal_pending_raise(guard: borrow ProcessRunGuard[lock],
 // raises. That split is what makes the unlocked lost update happen every
 // round rather than when two three-instruction windows happen to meet.
 fn process_signal_pending_raised(guard: borrow ProcessRunGuard[lock],
-                                 record: borrow *ProcessRecord, bits: usize)
+                                 record: borrow &mut ProcessRecord, bits: usize)
         -> usize {
     return record.pending_signals | bits;
 }
 
 fn process_signal_pending_store(guard: borrow ProcessRunGuard[lock],
-                                record: borrow *ProcessRecord, value: usize) {
+                                record: borrow &mut ProcessRecord, value: usize) {
     record.pending_signals = value;
 }
 
 fn process_signal_pending_clear(guard: borrow ProcessRunGuard[lock],
-                                record: borrow *ProcessRecord, bits: usize) {
+                                record: borrow &mut ProcessRecord, bits: usize) {
     record.pending_signals = record.pending_signals & ~bits;
 }
 
@@ -7388,7 +7388,7 @@ fn taken_signal_restore(taken: sink TakenSignal[signal]) {
     if (signum == 0 || signum > 64) { return; }
     let guard = process_run_lock();
     if (scheduled_process_handle_matches(handle)) {
-        let record: *ProcessRecord = scheduled_process_record_of_locked(guard, handle);
+        let record: &mut ProcessRecord = scheduled_process_record_of_locked(guard, handle);
         process_signal_pending_raise(guard, record, 1 << (signum - 1));
     }
     process_run_unlock(guard);
@@ -7401,7 +7401,7 @@ fn kernel_process_current_signal_take(wait_set: usize)
     }
     let guard = process_run_lock();
     let mut handle: ProcessHandle = execution_here().current_handle;
-    let record: *ProcessRecord = scheduled_process_record_of_locked(guard, handle);
+    let record: &mut ProcessRecord = scheduled_process_record_of_locked(guard, handle);
     let available: usize = record.pending_signals & wait_set;
     for bit: usize in 0..<64 {
         let bit_mask: usize = 1 << bit;
@@ -7426,7 +7426,7 @@ fn kernel_process_current_termination_signal_take()
     }
     let guard = process_run_lock();
     let mut handle: ProcessHandle = execution_here().current_handle;
-    let record: *ProcessRecord = scheduled_process_record_of_locked(guard, handle);
+    let record: &mut ProcessRecord = scheduled_process_record_of_locked(guard, handle);
     let available: usize = record.pending_signals & ~record.signal_mask;
     for signum: usize in 1..<16 {
         if (signum == 2 || signum == 3 || signum == 15) {
@@ -7489,7 +7489,7 @@ fn kernel_process_current_clear_signal_suspend() {
 fn kernel_process_current_suspend_mask_install(mask: usize) {
     let guard = process_run_lock();
     if (execution_here().current_live) {
-        let record: *ProcessRecord =
+        let record: &mut ProcessRecord =
             scheduled_process_record_of_locked(guard, execution_here().current_handle);
         let unmaskable: usize = (1 << 8) | (1 << 18);
         record.sigsuspend_saved_mask = record.signal_mask;
@@ -7506,7 +7506,7 @@ fn kernel_process_current_frame_mask_take() -> usize {
     let guard = process_run_lock();
     let mut mask: usize = 0;
     if (execution_here().current_live) {
-        let record: *ProcessRecord =
+        let record: &mut ProcessRecord =
             scheduled_process_record_of_locked(guard, execution_here().current_handle);
         mask = record.signal_mask;
         if (record.sigsuspend_mask_saved) {
@@ -7523,7 +7523,7 @@ fn kernel_process_current_frame_mask_take() -> usize {
 fn kernel_process_current_suspend_mask_restore() {
     let guard = process_run_lock();
     if (execution_here().current_live) {
-        let record: *ProcessRecord =
+        let record: &mut ProcessRecord =
             scheduled_process_record_of_locked(guard, execution_here().current_handle);
         if (record.sigsuspend_mask_saved) {
             record.signal_mask = record.sigsuspend_saved_mask;
@@ -7543,7 +7543,7 @@ struct SigchldAction {
 fn kernel_process_current_sigchld_action(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running]) -> SigchldAction {
     let mut action: SigchldAction = { 0, 0, 0, 0 };
     if (execution_here().current_live) {
-        let record: *ProcessRecord =
+        let record: &mut ProcessRecord =
             scheduled_process_record_current(current_authority);
         action.handler = record.sigchld_handler;
         action.flags = record.sigchld_flags;
@@ -7555,7 +7555,7 @@ fn kernel_process_current_sigchld_action(current_authority: borrow ProcessCurren
 
 fn kernel_process_current_set_sigchld_action(current_authority: borrow ProcessCurrent[current_process, ProcessState::Running], action: SigchldAction) {
     if (execution_here().current_live) {
-        let record: *ProcessRecord =
+        let record: &mut ProcessRecord =
             scheduled_process_record_current(current_authority);
         record.sigchld_handler = action.handler;
         record.sigchld_flags = action.flags;
@@ -7572,7 +7572,7 @@ fn kernel_process_current_caught_signal_take() -> ProcessSignalPendingResult {
     }
     let guard = process_run_lock();
     let mut handle: ProcessHandle = execution_here().current_handle;
-    let record: *ProcessRecord = scheduled_process_record_of_locked(guard, handle);
+    let record: &mut ProcessRecord = scheduled_process_record_of_locked(guard, handle);
     let sigchld_bit: usize = 1 << 16;
     if (record.sigchld_handler <= 1 ||
         (record.pending_signals & sigchld_bit) == 0 ||
@@ -7607,7 +7607,7 @@ private fn kernel_process_signal_deliver_to(
         return ProcessSignalSendResult::Missing;
     }
     let bit: usize = 1 << (signum - 1);
-    let record: *ProcessRecord = scheduled_process_record_of_locked(guard, target);
+    let record: &mut ProcessRecord = scheduled_process_record_of_locked(guard, target);
     // An unblocked SIGCHLD with no handler has its Linux default (ignored);
     // a blocked one remains pending for rt_sigtimedwait, which is the
     // BusyBox init path. One with a handler (GitHub issue #627) stays
@@ -9334,7 +9334,7 @@ fn kernel_process_current_parent_pid(
         guard: borrow ProcessRunGuard[scheduled_process_run_lock]) -> usize {
     if (execution_here().current_live == false) { return 0; }
     let mut current: ProcessHandle = execution_here().current_handle;
-    let record: *ProcessRecord = scheduled_process_record_of_locked(guard, current);
+    let record: &mut ProcessRecord = scheduled_process_record_of_locked(guard, current);
     if (record.has_parent == false) { return 0; }
     let mut parent: ProcessHandle = record.parent;
     if (scheduled_process_handle_matches(parent) == false) { return 0; }
@@ -9380,7 +9380,7 @@ fn kernel_process_session_create() -> ProcessSessionResult {
         return ProcessSessionResult::Missing;
     }
     let mut current: ProcessHandle = execution_here().current_handle;
-    let record: *ProcessRecord = scheduled_process_record_of_locked(guard, current);
+    let record: &mut ProcessRecord = scheduled_process_record_of_locked(guard, current);
     if (record.session_id == record.pid) {
         process_run_unlock(guard);
         return ProcessSessionResult::Leader;

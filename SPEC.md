@@ -2340,7 +2340,8 @@ back to DMA.
   result remains tied because it is another address alias.
 - **Callee retention boundary**: an authority-derived pointer or slice may be
   passed to a named Takibi function only when the corresponding parameter is
-  declared `borrow *T`, `borrow align(N) *T`, or `borrow [T; N..]`. A plain
+  declared `borrow &T`, `borrow &mut T`, `borrow *T`,
+  `borrow align(N) *T`, or `borrow [T; N..]`. A plain
   pointer or slice parameter is potentially retaining and rejects such an
   argument. This `borrow` means non-owning and non-retaining for the duration
   of the call; it does not make the pointee immutable.
