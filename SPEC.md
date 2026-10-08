@@ -4090,3 +4090,13 @@ change annotations, and remote context/reclamation protocols remain trusted.
 This rule checks local ownership at declared boundaries; it does not infer
 context replacement from arbitrary writes or prove cross-core exclusion.
 It inserts no runtime operand, pin, branch, lock, or counter.
+
+## Record-only RegionPool access
+
+For a plain named struct element, `region_slot_record`, `region_pin_record`
+and `region_inspection_record` return an authority-indexed `&mut` reference.
+The reference becomes unusable when its slot, pin or inspection authority is
+consumed, or when the inspection context is invalidated. These record-only
+operations share the trusted storage interpretation of the pointer accessors;
+they add no allocation or runtime ownership representation. Primitive element
+instances retain the existing pointer operations and have no record accessor.

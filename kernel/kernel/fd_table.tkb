@@ -489,11 +489,11 @@ private fn fd_block_free(address: usize, generation: usize) !{unsafe} {
 // when the chain does not reach that far. Both halves are returned from
 // the one walk, so a caller never has to make the same walk twice to ask
 // the second question (the shape issue #371 argued for).
-private fn fd_context_head_copy(ctx: borrow *ProcessFdContext) -> (usize, usize) {
+private fn fd_context_head_copy(ctx: borrow &mut ProcessFdContext) -> (usize, usize) {
     return (ctx.block_head, ctx.block_head_generation);
 }
 
-private fn fd_block_lookup(ctx: borrow *ProcessFdContext, fd: usize)
+private fn fd_block_lookup(ctx: borrow &mut ProcessFdContext, fd: usize)
         -> (usize, usize) !{unsafe} {
     let target: usize = fd / FD_BLOCK_SLOTS;
     let (head, stamp) = fd_context_head_copy(ctx);
@@ -505,7 +505,7 @@ private fn fd_block_lookup(ctx: borrow *ProcessFdContext, fd: usize)
         match fd_block_pin(&fd_block_pool, address, generation) {
             RegionPinned(FdBlock)::Stale => { return (0, 0); }
             RegionPinned(FdBlock)::Pinned(block_pin) => {
-                let block: *FdBlock = region_pin_at(block_pin);
+                let block: &mut FdBlock = region_pin_record(block_pin);
                 address = block.next;
                 generation = block.next_generation;
                 index = index + 1;
@@ -523,7 +523,7 @@ private fn fd_block_lookup(ctx: borrow *ProcessFdContext, fd: usize)
 // A pool grows by taking another chunk; it never moves an existing one, and
 // the block below is pinned across the allocation, so its pointer stays
 // valid.
-private fn fd_block_ensure(ctx: borrow *ProcessFdContext, fd: usize)
+private fn fd_block_ensure(ctx: borrow &mut ProcessFdContext, fd: usize)
         -> (usize, usize) !{unsafe} {
     let target: usize = fd / FD_BLOCK_SLOTS;
     if (fd_block_matches(ctx.block_head, ctx.block_head_generation) == false) {
@@ -543,7 +543,7 @@ private fn fd_block_ensure(ctx: borrow *ProcessFdContext, fd: usize)
         match fd_block_pin(&fd_block_pool, address, generation) {
             RegionPinned(FdBlock)::Stale => { break; }
             RegionPinned(FdBlock)::Pinned(block_pin) => {
-                let block: *FdBlock = region_pin_at(block_pin);
+                let block: &mut FdBlock = region_pin_record(block_pin);
                 if (fd_block_matches(block.next, block.next_generation) == false) {
                     match fd_block_alloc() {
                         FdBlockAllocResult::OutOfMemory => { let __block_result: (usize, usize) = (0, 0); fd_block_unpin(block_pin); return __block_result; }
@@ -566,7 +566,7 @@ private fn fd_block_ensure(ctx: borrow *ProcessFdContext, fd: usize)
 
 // Gives the whole chain back. The descriptors themselves are expected to
 // have been closed already (unified_fd_destroy); this is the storage.
-private fn fd_blocks_release(ctx: borrow *ProcessFdContext) !{unsafe} {
+private fn fd_blocks_release(ctx: borrow &mut ProcessFdContext) !{unsafe} {
     let mut address: usize = ctx.block_head;
     let mut generation: usize = ctx.block_head_generation;
     ctx.block_head = 0;
@@ -575,7 +575,7 @@ private fn fd_blocks_release(ctx: borrow *ProcessFdContext) !{unsafe} {
         match fd_block_pin(&fd_block_pool, address, generation) {
             RegionPinned(FdBlock)::Stale => { break; }
             RegionPinned(FdBlock)::Pinned(block_pin) => {
-                let block: *FdBlock = region_pin_at(block_pin);
+                let block: &mut FdBlock = region_pin_record(block_pin);
                 let next: usize = block.next;
                 let next_generation: usize = block.next_generation;
                 fd_block_free(address, generation);
@@ -656,7 +656,7 @@ private fn fd_context_publish(pool: *RegionPool(ProcessFdContext) @ contexts,
                               fresh: sink RegionSlot(ProcessFdContext)[contexts, k])
         -> ProcessFdContextReady[identity] !{unsafe} {
     region_slot_zero(fresh);
-    let ctx: *ProcessFdContext = region_slot_at(fresh);
+    let ctx: &mut ProcessFdContext = region_slot_record(fresh);
     // GitHub issue #393: a process starts with Linux's own RLIMIT_NOFILE
     // rather than with the zeroing's 0/0. No block is allocated here: a
     // process that never opens a descriptor never pays for one.
@@ -710,7 +710,7 @@ fn unified_fd_context_release_words(process: usize,
     };
     // The descriptor blocks go first: they are a separate pool, and the
     // context is the only thing that names them.
-    fd_blocks_release(region_pin_at(pin));
+    fd_blocks_release(region_pin_record(pin));
     // The record's handle is cleared, so nothing pins the context again by
     // this slot; then it is retired, and the last pin frees it.
     scheduled_process_set_fd_context(process, 0, 0);
@@ -935,7 +935,7 @@ private fn unified_object_kind(handle: UnifiedObjectHandle) -> UnifiedFdKind !{u
     match object_pin_handle(&object_pool, handle) {
         RegionPinned(SharedObject)::Stale => { return UnifiedFdKind::Empty; }
         RegionPinned(SharedObject)::Pinned(pin) => {
-            let kind: UnifiedFdKind = region_pin_at(pin).kind;
+            let kind: UnifiedFdKind = region_pin_record(pin).kind;
             object_unpin(pin);
             return kind;
         }
@@ -1008,7 +1008,7 @@ private fn unified_object_retain_locked(
             object_pin_handle(&object_pool, handle) else {
         RegionPinned(SharedObject)::Stale => { return UnifiedObjectRetainResult::Invalid; }
     };
-    let object: *SharedObject = region_pin_at(object_pin);
+    let object: &mut SharedObject = region_pin_record(object_pin);
     let refs = guarded_usize_value(guard, &object.refs);
     if (*refs >= limit) { { let __object_result: UnifiedObjectRetainResult = UnifiedObjectRetainResult::Overflow; object_unpin(object_pin); return __object_result; } }
     *refs = *refs + 1;
@@ -1082,7 +1082,7 @@ private fn unified_object_refs_of(handle: UnifiedObjectHandle) -> usize
             object_pin_handle(&object_pool, handle) else {
         RegionPinned(SharedObject)::Stale => { guarded_field_give(guard, &object_refcount_lock); return 0; }
     };
-    let held_object: *SharedObject = region_pin_at(held_object_pin);
+    let held_object: &mut SharedObject = region_pin_record(held_object_pin);
     let refs = guarded_usize_value(guard, &held_object.refs);
     let held: usize = *refs;
     guarded_field_give(guard, &object_refcount_lock);
@@ -1123,7 +1123,7 @@ private fn unified_object_release_locked(
             object_pin_handle(&object_pool, handle) else {
         RegionPinned(SharedObject)::Stale => { return UnifiedObjectReleaseResult::Invalid; }
     };
-    let object: *SharedObject = region_pin_at(object_pin);
+    let object: &mut SharedObject = region_pin_record(object_pin);
     // `held < 1` rather than `held == 1`/`!= 0`, and through a `let`
     // rather than off the field: this file's range narrowing is what
     // proves `held - 1` non-negative below, and it narrows the `<` form
@@ -1266,7 +1266,7 @@ fn unified_fd_next_open(process: usize, from: usize)
             fd_context_pin(&fd_context_pool, process) else {
         RegionPinned(ProcessFdContext)::Stale => { return UnifiedFdScanResult::Done; }
     };
-    let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+    let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
     let mut address: usize = ctx.block_head;
     let mut generation: usize = ctx.block_head_generation;
     let mut base: usize = 0;
@@ -1274,7 +1274,7 @@ fn unified_fd_next_open(process: usize, from: usize)
         match fd_block_pin(&fd_block_pool, address, generation) {
             RegionPinned(FdBlock)::Stale => { fd_context_unpin(ctx_pin); return UnifiedFdScanResult::Done; }
             RegionPinned(FdBlock)::Pinned(block_pin) => {
-                let block: *FdBlock = region_pin_at(block_pin);
+                let block: &mut FdBlock = region_pin_record(block_pin);
                 for index: usize in 0..<FD_BLOCK_SLOTS {
                     if (base + index >= from &&
                         block.slot[index].kind != UnifiedFdKind::Empty) {
@@ -1330,7 +1330,7 @@ fn unified_fd_table_init() !{unsafe} {
                 match pinned {
                     RegionPinned(ProcessFdContext)::Stale => {}
                     RegionPinned(ProcessFdContext)::Pinned(pin) => {
-                        let live: *ProcessFdContext = region_pin_at(pin);
+                        let live: &mut ProcessFdContext = region_pin_record(pin);
                         // GitHub issue #393: giving the descriptor blocks
                         // back is what "empty every entry" means once the
                         // entries are allocated rather than always there.
@@ -1369,7 +1369,7 @@ fn unified_process_heap_range_configure(
                 fd_context_pin(&fd_context_pool, process) else {
             RegionPinned(ProcessFdContext)::Stale => { return UnifiedFdResult::Invalid; }
         };
-        let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+        let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
         ctx.heap_start = start;
         ctx.heap_limit = limit;
         ctx.heap_break = start;
@@ -1389,7 +1389,7 @@ fn unified_process_heap_configure(process: usize @ identity,
                 fd_context_pin(&fd_context_pool, process) else {
             RegionPinned(ProcessFdContext)::Stale => { return UnifiedFdResult::Invalid; }
         };
-        let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+        let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
         ctx.heap_break = value;
         { let __ctx_result: UnifiedFdResult = UnifiedFdResult::Ok; fd_context_unpin(ctx_pin); return __ctx_result; }
     }
@@ -1406,7 +1406,7 @@ fn mmap_arena_assumption() {
                   "the mmap bitmap must cover the whole heap arena");
 }
 
-private fn mmap_page_used(ctx: borrow *ProcessFdContext, page: usize) -> bool {
+private fn mmap_page_used(ctx: borrow &mut ProcessFdContext, page: usize) -> bool {
     if (page < 64) { return ((ctx.mmap_used_low >> page) & 1) == 1; }
     if (page < 128) {
         return ((ctx.mmap_used_high >> (page - 64)) & 1) == 1;
@@ -1414,7 +1414,7 @@ private fn mmap_page_used(ctx: borrow *ProcessFdContext, page: usize) -> bool {
     return true;
 }
 
-private fn mmap_page_set(ctx: borrow *ProcessFdContext, page: usize, used: bool) {
+private fn mmap_page_set(ctx: borrow &mut ProcessFdContext, page: usize, used: bool) {
     if (page < 64) {
         if (used) { ctx.mmap_used_low = ctx.mmap_used_low | (1 << page); }
         else { ctx.mmap_used_low = ctx.mmap_used_low & ~(1 << page); }
@@ -1426,7 +1426,7 @@ private fn mmap_page_set(ctx: borrow *ProcessFdContext, page: usize, used: bool)
 }
 
 // Pages of the arena, capped at what the bitmap covers.
-private fn mmap_arena_page_count(ctx: borrow *ProcessFdContext) -> usize {
+private fn mmap_arena_page_count(ctx: borrow &mut ProcessFdContext) -> usize {
     if (ctx.heap_limit <= ctx.heap_start) { return 0; }
     let pages: usize = (ctx.heap_limit - ctx.heap_start) / PAGE_SIZE;
     if (pages > MMAP_ARENA_PAGES) { return MMAP_ARENA_PAGES; }
@@ -1434,7 +1434,7 @@ private fn mmap_arena_page_count(ctx: borrow *ProcessFdContext) -> usize {
 }
 
 // The first arena page at or above `address`, rounding up.
-private fn mmap_page_ceiling(ctx: borrow *ProcessFdContext, address: usize) -> usize {
+private fn mmap_page_ceiling(ctx: borrow &mut ProcessFdContext, address: usize) -> usize {
     if (address <= ctx.heap_start) { return 0; }
     return (address - ctx.heap_start + PAGE_SIZE - 1) / PAGE_SIZE;
 }
@@ -1456,7 +1456,7 @@ fn unified_process_mmap_take(process: usize @ identity,
             fd_context_pin(&fd_context_pool, process) else {
         RegionPinned(ProcessFdContext)::Stale => { return UnifiedMmapResult::Full; }
     };
-    let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+    let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
     let floor: usize = mmap_page_ceiling(ctx, ctx.heap_break);
     let mut end: usize = mmap_arena_page_count(ctx);
     while (end >= pages && end - pages >= floor) {
@@ -1490,7 +1490,7 @@ fn unified_process_mmap_release_page(process: usize @ identity,
             fd_context_pin(&fd_context_pool, process) else {
         RegionPinned(ProcessFdContext)::Stale => { return; }
     };
-    let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+    let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
     if (address < ctx.heap_start) { { fd_context_unpin(ctx_pin); return; } }
     let page: usize = (address - ctx.heap_start) / PAGE_SIZE;
     if (page < mmap_arena_page_count(ctx)) {
@@ -1508,7 +1508,7 @@ fn unified_process_brk_blocked(process: usize, value: usize) -> bool {
             fd_context_pin(&fd_context_pool, process) else {
         RegionPinned(ProcessFdContext)::Stale => { return true; }
     };
-    let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+    let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
     let top: usize = mmap_page_ceiling(ctx, value);
     let mut page: usize = 0;
     while (page < top && page < MMAP_ARENA_PAGES) {
@@ -1525,7 +1525,7 @@ fn unified_process_heap_break(process: usize) -> UnifiedOffsetResult {
                 fd_context_pin(&fd_context_pool, process) else {
             RegionPinned(ProcessFdContext)::Stale => { return UnifiedOffsetResult::Missing; }
         };
-        let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+        let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
         { let __ctx_result: UnifiedOffsetResult = UnifiedOffsetResult::Found(ctx.heap_break); fd_context_unpin(ctx_pin); return __ctx_result; }
     }
     return UnifiedOffsetResult::Missing;
@@ -1538,7 +1538,7 @@ fn unified_process_heap_start(process: usize) -> UnifiedOffsetResult {
                 fd_context_pin(&fd_context_pool, process) else {
             RegionPinned(ProcessFdContext)::Stale => { return UnifiedOffsetResult::Missing; }
         };
-        let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+        let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
         { let __ctx_result: UnifiedOffsetResult = UnifiedOffsetResult::Found(ctx.heap_start); fd_context_unpin(ctx_pin); return __ctx_result; }
     }
     return UnifiedOffsetResult::Missing;
@@ -1551,7 +1551,7 @@ fn unified_process_heap_limit(process: usize) -> UnifiedOffsetResult {
                 fd_context_pin(&fd_context_pool, process) else {
             RegionPinned(ProcessFdContext)::Stale => { return UnifiedOffsetResult::Missing; }
         };
-        let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+        let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
         { let __ctx_result: UnifiedOffsetResult = UnifiedOffsetResult::Found(ctx.heap_limit); fd_context_unpin(ctx_pin); return __ctx_result; }
     }
     return UnifiedOffsetResult::Missing;
@@ -1570,7 +1570,7 @@ fn unified_file_open(process: usize, fd: usize, inode: usize,
                     object_pin_handle(&object_pool, handle) else {
                 RegionPinned(SharedObject)::Stale => { return UnifiedOpenResult::Full; }
             };
-            let object: *SharedObject = region_pin_at(object_pin);
+            let object: &mut SharedObject = region_pin_record(object_pin);
             object.inode = inode;
             object.readable = readable;
             object.writable = writable;
@@ -1613,7 +1613,7 @@ fn unified_directory_open(process: usize, fd: usize, inode: usize)
                     object_pin_handle(&object_pool, handle) else {
                 RegionPinned(SharedObject)::Stale => { return UnifiedOpenResult::Full; }
             };
-            let object: *SharedObject = region_pin_at(object_pin);
+            let object: &mut SharedObject = region_pin_record(object_pin);
             object.inode = inode;
             object.readable = true;
             object.writable = false;
@@ -1745,14 +1745,14 @@ fn unified_terminal_is_open(process: usize, fd: usize) -> bool !{unsafe} {
             fd_context_pin(&fd_context_pool, process) else {
         RegionPinned(ProcessFdContext)::Stale => { return false; }
     };
-    let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+    let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
     let (block, block_generation) = fd_block_lookup(ctx, fd);
     if (block == 0) { { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; } }
     let RegionPinned(FdBlock)::Pinned(entries_pin) =
             fd_block_pin(&fd_block_pool, block, block_generation) else {
         RegionPinned(FdBlock)::Stale => { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; }
     };
-    let entries: *FdBlock = region_pin_at(entries_pin);
+    let entries: &mut FdBlock = region_pin_record(entries_pin);
     let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
     // GitHub issue #391: the descriptor's (address, generation) pair is
     // checked by the pool before the record behind it is read, where the
@@ -1817,7 +1817,7 @@ private fn unified_object_publish(pool: *RegionPool(SharedObject) @ objects,
                                   fresh: sink RegionSlot(SharedObject)[objects, k])
         -> UnifiedObjectResult !{unsafe} {
     region_slot_zero(fresh);
-    let object: *SharedObject = region_slot_at(fresh);
+    let object: &mut SharedObject = region_slot_record(fresh);
     object.kind = kind;
     // Zeroing already left this 0. Written again through the guard so that
     // EVERY write to refs has one discipline. The pool lock is released
@@ -1872,7 +1872,7 @@ fn unified_fd_alloc(process: usize, first: usize) -> UnifiedFdAllocResult !{unsa
             fd_context_pin(&fd_context_pool, process) else {
         RegionPinned(ProcessFdContext)::Stale => { return UnifiedFdAllocResult::Full; }
     };
-    let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+    let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
     let limit: usize = ctx.fd_limit_soft;
     let mut address: usize = ctx.block_head;
     let mut generation: usize = ctx.block_head_generation;
@@ -1881,7 +1881,7 @@ fn unified_fd_alloc(process: usize, first: usize) -> UnifiedFdAllocResult !{unsa
         match fd_block_pin(&fd_block_pool, address, generation) {
             RegionPinned(FdBlock)::Stale => { fd_context_unpin(ctx_pin); return UnifiedFdAllocResult::Full; }
             RegionPinned(FdBlock)::Pinned(block_pin) => {
-                let block: *FdBlock = region_pin_at(block_pin);
+                let block: &mut FdBlock = region_pin_record(block_pin);
                 for index: usize in 0..<FD_BLOCK_SLOTS {
                     let fd: usize = base + index;
                     if (fd >= limit) { { let __ctx_result: UnifiedFdAllocResult = UnifiedFdAllocResult::Full; fd_context_unpin(ctx_pin); { let __block_result: UnifiedFdAllocResult = __ctx_result; fd_block_unpin(block_pin); return __block_result; } } }
@@ -1917,7 +1917,7 @@ fn unified_process_fd_limit(process: usize) -> UnifiedFdLimitResult !{unsafe} {
             fd_context_pin(&fd_context_pool, process) else {
         RegionPinned(ProcessFdContext)::Stale => { return UnifiedFdLimitResult::Missing; }
     };
-    let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+    let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
     { let __ctx_result: UnifiedFdLimitResult = UnifiedFdLimitResult::Found((ctx.fd_limit_soft, ctx.fd_limit_hard)); fd_context_unpin(ctx_pin); return __ctx_result; }
 }
 
@@ -1954,7 +1954,7 @@ fn unified_process_fd_limit_configure(process: usize, soft: usize, hard: usize)
             fd_context_pin(&fd_context_pool, process) else {
         RegionPinned(ProcessFdContext)::Stale => { return UnifiedFdResult::Invalid; }
     };
-    let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+    let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
     ctx.fd_limit_soft = soft;
     ctx.fd_limit_hard = hard;
     { let __ctx_result: UnifiedFdResult = UnifiedFdResult::Ok; fd_context_unpin(ctx_pin); return __ctx_result; }
@@ -1968,7 +1968,7 @@ fn unified_socket_lookup(process: usize, fd: usize,
             fd_context_pin(&fd_context_pool, process) else {
         RegionPinned(ProcessFdContext)::Stale => { return UnifiedSocketResult::Missing; }
     };
-    let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+    let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
     // GitHub issue #393: "is this fd in range" is "does this process's
     // chain reach that far". A descriptor the process never opened has no
     // block, which is the same answer the range test gave and needs no
@@ -1979,7 +1979,7 @@ fn unified_socket_lookup(process: usize, fd: usize,
             fd_block_pin(&fd_block_pool, block, block_generation) else {
         RegionPinned(FdBlock)::Stale => { let __ctx_result: UnifiedSocketResult = UnifiedSocketResult::Missing; fd_context_unpin(ctx_pin); return __ctx_result; }
     };
-    let entries: *FdBlock = region_pin_at(entries_pin);
+    let entries: &mut FdBlock = region_pin_record(entries_pin);
     let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
     let mut handle: UnifiedObjectHandle = {
         entries.slot[index].object, entries.slot[index].generation
@@ -2001,7 +2001,7 @@ fn unified_listener_create(process: usize, fd: usize) -> UnifiedOpenResult {
                     object_pin_handle(&object_pool, handle) else {
                 RegionPinned(SharedObject)::Stale => { return UnifiedOpenResult::Full; }
             };
-            let object: *SharedObject = region_pin_at(object_pin);
+            let object: &mut SharedObject = region_pin_record(object_pin);
             object.listener_state = UnifiedListenerState::Created;
             object.port = 0;
             object.pending_accept_slot = 0;
@@ -2044,7 +2044,7 @@ fn unified_connection_create(process: usize, fd: usize,
                     object_pin_handle(&object_pool, handle) else {
                 RegionPinned(SharedObject)::Stale => { return UnifiedOpenResult::Full; }
             };
-            let object: *SharedObject = region_pin_at(object_pin);
+            let object: &mut SharedObject = region_pin_record(object_pin);
             object.transport_slot = transport_slot;
             object.transport_generation = transport_generation;
             match unified_fd_install(process, fd, handle.slot,
@@ -2082,14 +2082,14 @@ fn unified_fd_duplicate(process: usize, old_fd: usize, new_fd: usize)
             fd_context_pin(&fd_context_pool, process) else {
         RegionPinned(ProcessFdContext)::Stale => { return UnifiedFdInstallResult::Invalid; }
     };
-    let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+    let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
     let (block, block_generation) = fd_block_lookup(ctx, old_fd);
     if (block == 0) { { let __ctx_result: UnifiedFdInstallResult = UnifiedFdInstallResult::Invalid; fd_context_unpin(ctx_pin); return __ctx_result; } }
     let RegionPinned(FdBlock)::Pinned(entries_pin) =
             fd_block_pin(&fd_block_pool, block, block_generation) else {
         RegionPinned(FdBlock)::Stale => { let __ctx_result: UnifiedFdInstallResult = UnifiedFdInstallResult::Invalid; fd_context_unpin(ctx_pin); return __ctx_result; }
     };
-    let entries: *FdBlock = region_pin_at(entries_pin);
+    let entries: &mut FdBlock = region_pin_record(entries_pin);
     let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(old_fd);
     if (entries.slot[index].kind == UnifiedFdKind::Empty) {
         { let __ctx_result: UnifiedFdInstallResult = UnifiedFdInstallResult::Invalid; fd_context_unpin(ctx_pin); { let __entries_result: UnifiedFdInstallResult = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
@@ -2107,14 +2107,14 @@ fn unified_fd_set_close_on_exec(process: usize, fd: usize, value: bool)
             fd_context_pin(&fd_context_pool, process) else {
         RegionPinned(ProcessFdContext)::Stale => { return UnifiedFdResult::Invalid; }
     };
-    let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+    let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
     let (block, block_generation) = fd_block_lookup(ctx, fd);
     if (block == 0) { { let __ctx_result: UnifiedFdResult = UnifiedFdResult::Invalid; fd_context_unpin(ctx_pin); return __ctx_result; } }
     let RegionPinned(FdBlock)::Pinned(entries_pin) =
             fd_block_pin(&fd_block_pool, block, block_generation) else {
         RegionPinned(FdBlock)::Stale => { let __ctx_result: UnifiedFdResult = UnifiedFdResult::Invalid; fd_context_unpin(ctx_pin); return __ctx_result; }
     };
-    let entries: *FdBlock = region_pin_at(entries_pin);
+    let entries: &mut FdBlock = region_pin_record(entries_pin);
     let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
     if (entries.slot[index].kind != UnifiedFdKind::Empty) {
         entries.slot[index].close_on_exec = value;
@@ -2130,14 +2130,14 @@ fn unified_fd_close_on_exec(process: usize, fd: usize) -> bool !{unsafe} {
             fd_context_pin(&fd_context_pool, process) else {
         RegionPinned(ProcessFdContext)::Stale => { return false; }
     };
-    let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+    let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
     let (block, block_generation) = fd_block_lookup(ctx, fd);
     if (block == 0) { { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; } }
     let RegionPinned(FdBlock)::Pinned(entries_pin) =
             fd_block_pin(&fd_block_pool, block, block_generation) else {
         RegionPinned(FdBlock)::Stale => { let __ctx_result: bool = false; fd_context_unpin(ctx_pin); return __ctx_result; }
     };
-    let entries: *FdBlock = region_pin_at(entries_pin);
+    let entries: &mut FdBlock = region_pin_record(entries_pin);
     let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
     { let __ctx_result: bool = entries.slot[index].close_on_exec; fd_context_unpin(ctx_pin); { let __entries_result: bool = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } }
 }
@@ -2179,7 +2179,7 @@ fn unified_object_references(handle: UnifiedObjectHandle) -> usize !{unsafe} {
             object_pin_handle(&object_pool, handle) else {
         RegionPinned(SharedObject)::Stale => { guarded_field_give(guard, &object_refcount_lock); return 0; }
     };
-    let held_object: *SharedObject = region_pin_at(held_object_pin);
+    let held_object: &mut SharedObject = region_pin_record(held_object_pin);
     let refs = guarded_usize_value(guard, &held_object.refs);
     let held: usize = *refs;
     guarded_field_give(guard, &object_refcount_lock);
@@ -2219,7 +2219,7 @@ fn unified_listener_claim(handle: UnifiedObjectHandle) -> ListenerClaimResult
             object_pin_handle(&object_pool, handle) else {
         RegionPinned(SharedObject)::Stale => { guarded_field_give(guard, &object_refcount_lock); return ListenerClaimResult::Missing; }
     };
-    let held_object: *SharedObject = region_pin_at(held_object_pin);
+    let held_object: &mut SharedObject = region_pin_record(held_object_pin);
     let busy = guarded_usize_value(guard,
                                    &held_object.listener_busy);
     if (*busy != 0) {
@@ -2241,7 +2241,7 @@ fn unified_listener_release(claim: sink ListenerClaim[object]) !{unsafe} {
             object_pin_handle(&object_pool, handle) else {
         RegionPinned(SharedObject)::Stale => { guarded_field_give(guard, &object_refcount_lock); return; }
     };
-    let held_object: *SharedObject = region_pin_at(held_object_pin);
+    let held_object: &mut SharedObject = region_pin_record(held_object_pin);
     let busy = guarded_usize_value(guard,
                                    &held_object.listener_busy);
     *busy = 0;
@@ -2255,7 +2255,7 @@ fn unified_listener_state(handle: UnifiedObjectHandle) -> UnifiedListenerState {
                 object_pin_handle(&object_pool, handle) else {
             RegionPinned(SharedObject)::Stale => { return UnifiedListenerState::Closed; }
         };
-        let object: *SharedObject = region_pin_at(object_pin);
+        let object: &mut SharedObject = region_pin_record(object_pin);
         if (object.kind == UnifiedFdKind::Listener) {
             { let __object_result: UnifiedListenerState = object.listener_state; object_unpin(object_pin); return __object_result; }
         }
@@ -2272,7 +2272,7 @@ fn unified_listener_set_state(handle: UnifiedObjectHandle,
                 object_pin_handle(&object_pool, handle) else {
             RegionPinned(SharedObject)::Stale => { return UnifiedFdResult::Invalid; }
         };
-        let object: *SharedObject = region_pin_at(object_pin);
+        let object: &mut SharedObject = region_pin_record(object_pin);
         if (object.kind == UnifiedFdKind::Listener) {
             object.listener_state = state;
             { let __object_result: UnifiedFdResult = UnifiedFdResult::Ok; object_unpin(object_pin); return __object_result; }
@@ -2288,7 +2288,7 @@ fn unified_listener_port(handle: UnifiedObjectHandle) -> u16 {
                 object_pin_handle(&object_pool, handle) else {
             RegionPinned(SharedObject)::Stale => { return 0; }
         };
-        let object: *SharedObject = region_pin_at(object_pin);
+        let object: &mut SharedObject = region_pin_record(object_pin);
         if (object.kind == UnifiedFdKind::Listener) { { let __object_result: u16 = object.port; object_unpin(object_pin); return __object_result; } }
         object_unpin(object_pin);
     }
@@ -2302,7 +2302,7 @@ fn unified_listener_set_port(handle: UnifiedObjectHandle, port: u16)
                 object_pin_handle(&object_pool, handle) else {
             RegionPinned(SharedObject)::Stale => { return UnifiedFdResult::Invalid; }
         };
-        let object: *SharedObject = region_pin_at(object_pin);
+        let object: &mut SharedObject = region_pin_record(object_pin);
         if (object.kind == UnifiedFdKind::Listener) {
             object.port = port;
             { let __object_result: UnifiedFdResult = UnifiedFdResult::Ok; object_unpin(object_pin); return __object_result; }
@@ -2321,7 +2321,7 @@ fn unified_listener_pending_slot(handle: UnifiedObjectHandle) -> usize {
                 object_pin_handle(&object_pool, handle) else {
             RegionPinned(SharedObject)::Stale => { return 0; }
         };
-        let object: *SharedObject = region_pin_at(object_pin);
+        let object: &mut SharedObject = region_pin_record(object_pin);
         if (object.kind == UnifiedFdKind::Listener) {
             { let __object_result: usize = object.pending_accept_slot; object_unpin(object_pin); return __object_result; }
         }
@@ -2336,7 +2336,7 @@ fn unified_listener_pending_generation(handle: UnifiedObjectHandle) -> usize {
                 object_pin_handle(&object_pool, handle) else {
             RegionPinned(SharedObject)::Stale => { return 0; }
         };
-        let object: *SharedObject = region_pin_at(object_pin);
+        let object: &mut SharedObject = region_pin_record(object_pin);
         if (object.kind == UnifiedFdKind::Listener) {
             { let __object_result: usize = object.pending_accept_generation; object_unpin(object_pin); return __object_result; }
         }
@@ -2352,7 +2352,7 @@ fn unified_listener_set_pending(handle: UnifiedObjectHandle, slot: usize,
                 object_pin_handle(&object_pool, handle) else {
             RegionPinned(SharedObject)::Stale => { return UnifiedFdResult::Invalid; }
         };
-        let object: *SharedObject = region_pin_at(object_pin);
+        let object: &mut SharedObject = region_pin_record(object_pin);
         if (object.kind == UnifiedFdKind::Listener) {
             object.pending_accept_slot = slot;
             object.pending_accept_generation = generation;
@@ -2369,7 +2369,7 @@ fn unified_connection_slot(handle: UnifiedObjectHandle) -> usize {
                 object_pin_handle(&object_pool, handle) else {
             RegionPinned(SharedObject)::Stale => { return 0; }
         };
-        let object: *SharedObject = region_pin_at(object_pin);
+        let object: &mut SharedObject = region_pin_record(object_pin);
         if (object.kind == UnifiedFdKind::Connection) {
             { let __object_result: usize = object.transport_slot; object_unpin(object_pin); return __object_result; }
         }
@@ -2389,7 +2389,7 @@ fn unified_connection_generation(handle: UnifiedObjectHandle) -> usize {
                 object_pin_handle(&object_pool, handle) else {
             RegionPinned(SharedObject)::Stale => { return 0; }
         };
-        let object: *SharedObject = region_pin_at(object_pin);
+        let object: &mut SharedObject = region_pin_record(object_pin);
         if (object.kind == UnifiedFdKind::Connection) {
             { let __object_result: usize = object.transport_generation; object_unpin(object_pin); return __object_result; }
         }
@@ -2405,14 +2405,14 @@ fn unified_file_lookup(process: usize, fd: usize) -> UnifiedFileResult {
             fd_context_pin(&fd_context_pool, process) else {
         RegionPinned(ProcessFdContext)::Stale => { return UnifiedFileResult::Missing; }
     };
-    let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+    let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
     let (block, block_generation) = fd_block_lookup(ctx, fd);
     if (block == 0) { { let __ctx_result: UnifiedFileResult = UnifiedFileResult::Missing; fd_context_unpin(ctx_pin); return __ctx_result; } }
     let RegionPinned(FdBlock)::Pinned(entries_pin) =
             fd_block_pin(&fd_block_pool, block, block_generation) else {
         RegionPinned(FdBlock)::Stale => { let __ctx_result: UnifiedFileResult = UnifiedFileResult::Missing; fd_context_unpin(ctx_pin); return __ctx_result; }
     };
-    let entries: *FdBlock = region_pin_at(entries_pin);
+    let entries: &mut FdBlock = region_pin_record(entries_pin);
     let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
     let mut handle: UnifiedObjectHandle = {
         entries.slot[index].object, entries.slot[index].generation
@@ -2432,7 +2432,7 @@ fn unified_file_inode(handle: UnifiedObjectHandle) -> usize {
                 object_pin_handle(&object_pool, handle) else {
             RegionPinned(SharedObject)::Stale => { return 0; }
         };
-        let object: *SharedObject = region_pin_at(object_pin);
+        let object: &mut SharedObject = region_pin_record(object_pin);
         if (object.kind == UnifiedFdKind::OpenFile) { { let __object_result: usize = object.inode; object_unpin(object_pin); return __object_result; } }
         object_unpin(object_pin);
     }
@@ -2449,14 +2449,14 @@ fn unified_directory_lookup(process: usize, fd: usize)
             fd_context_pin(&fd_context_pool, process) else {
         RegionPinned(ProcessFdContext)::Stale => { return UnifiedDirectoryResult::Missing; }
     };
-    let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+    let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
     let (block, block_generation) = fd_block_lookup(ctx, fd);
     if (block == 0) { { let __ctx_result: UnifiedDirectoryResult = UnifiedDirectoryResult::Missing; fd_context_unpin(ctx_pin); return __ctx_result; } }
     let RegionPinned(FdBlock)::Pinned(entries_pin) =
             fd_block_pin(&fd_block_pool, block, block_generation) else {
         RegionPinned(FdBlock)::Stale => { let __ctx_result: UnifiedDirectoryResult = UnifiedDirectoryResult::Missing; fd_context_unpin(ctx_pin); return __ctx_result; }
     };
-    let entries: *FdBlock = region_pin_at(entries_pin);
+    let entries: &mut FdBlock = region_pin_record(entries_pin);
     let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
     let mut handle: UnifiedObjectHandle = {
         entries.slot[index].object, entries.slot[index].generation
@@ -2476,7 +2476,7 @@ fn unified_directory_inode(handle: UnifiedObjectHandle) -> usize {
                 object_pin_handle(&object_pool, handle) else {
             RegionPinned(SharedObject)::Stale => { return 0; }
         };
-        let object: *SharedObject = region_pin_at(object_pin);
+        let object: &mut SharedObject = region_pin_record(object_pin);
         if (object.kind == UnifiedFdKind::Directory) { { let __object_result: usize = object.inode; object_unpin(object_pin); return __object_result; } }
         object_unpin(object_pin);
     }
@@ -2489,7 +2489,7 @@ fn unified_file_is_readable(handle: UnifiedObjectHandle) -> bool {
             object_pin_handle(&object_pool, handle) else {
         RegionPinned(SharedObject)::Stale => { return false; }
     };
-    let object: *SharedObject = region_pin_at(object_pin);
+    let object: &mut SharedObject = region_pin_record(object_pin);
     { let __object_result: bool = object.kind == UnifiedFdKind::OpenFile && object.readable; object_unpin(object_pin); return __object_result; }
 }
 
@@ -2499,7 +2499,7 @@ fn unified_file_is_writable(handle: UnifiedObjectHandle) -> bool {
             object_pin_handle(&object_pool, handle) else {
         RegionPinned(SharedObject)::Stale => { return false; }
     };
-    let object: *SharedObject = region_pin_at(object_pin);
+    let object: &mut SharedObject = region_pin_record(object_pin);
     { let __object_result: bool = object.kind == UnifiedFdKind::OpenFile && object.writable; object_unpin(object_pin); return __object_result; }
 }
 
@@ -2569,7 +2569,7 @@ fn unified_fd_install(process: usize, fd: usize, object_value: usize,
             fd_context_pin(&fd_context_pool, process) else {
         RegionPinned(ProcessFdContext)::Stale => { return UnifiedFdInstallResult::Invalid; }
     };
-    let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+    let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
     // GitHub issue #393: a descriptor number above this process's own soft
     // RLIMIT_NOFILE is refused as a bad argument, which is what Linux's
     // dup2/dup3 do with one (EBADF). The openat path never reaches this,
@@ -2588,7 +2588,7 @@ fn unified_fd_install(process: usize, fd: usize, object_value: usize,
             object_pin_handle(&object_pool, handle) else {
         RegionPinned(SharedObject)::Stale => { let __ctx_result: UnifiedFdInstallResult = UnifiedFdInstallResult::Invalid; fd_context_unpin(ctx_pin); return __ctx_result; }
     };
-    let object: *SharedObject = region_pin_at(object_pin);
+    let object: &mut SharedObject = region_pin_record(object_pin);
     // The block is made here rather than at allocation time, so this is
     // where the page allocator can be empty -- reported as its own variant
     // rather than folded into the bad-argument one, the discipline issue
@@ -2599,7 +2599,7 @@ fn unified_fd_install(process: usize, fd: usize, object_value: usize,
             fd_block_pin(&fd_block_pool, block, block_generation) else {
         RegionPinned(FdBlock)::Stale => { let __ctx_result: UnifiedFdInstallResult = UnifiedFdInstallResult::NoMemory; fd_context_unpin(ctx_pin); let __object_result: UnifiedFdInstallResult = __ctx_result; object_unpin(object_pin); return __object_result; }
     };
-    let entries: *FdBlock = region_pin_at(entries_pin);
+    let entries: &mut FdBlock = region_pin_record(entries_pin);
     let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
     if (entries.slot[index].kind != UnifiedFdKind::Empty ||
         object.kind == UnifiedFdKind::Empty) {
@@ -2629,14 +2629,14 @@ fn unified_fd_close(process: usize, fd: usize) -> UnifiedFdResult !{unsafe} {
             fd_context_pin(&fd_context_pool, process) else {
         RegionPinned(ProcessFdContext)::Stale => { return UnifiedFdResult::Invalid; }
     };
-    let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+    let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
     let (block, block_generation) = fd_block_lookup(ctx, fd);
     if (block == 0) { { let __ctx_result: UnifiedFdResult = UnifiedFdResult::Invalid; fd_context_unpin(ctx_pin); return __ctx_result; } }
     let RegionPinned(FdBlock)::Pinned(entries_pin) =
             fd_block_pin(&fd_block_pool, block, block_generation) else {
         RegionPinned(FdBlock)::Stale => { let __ctx_result: UnifiedFdResult = UnifiedFdResult::Invalid; fd_context_unpin(ctx_pin); return __ctx_result; }
     };
-    let entries: *FdBlock = region_pin_at(entries_pin);
+    let entries: &mut FdBlock = region_pin_record(entries_pin);
     let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
     let mut handle: UnifiedObjectHandle = {
         entries.slot[index].object, entries.slot[index].generation
@@ -2765,7 +2765,7 @@ private fn unified_fd_clone_run(parent: usize, child: usize,
             fd_context_pin(&fd_context_pool, parent) else {
         RegionPinned(ProcessFdContext)::Stale => { return UnifiedFdCloneRunResult::Invalid; }
     };
-    let parent_ctx: *ProcessFdContext = region_pin_at(parent_ctx_pin);
+    let parent_ctx: &mut ProcessFdContext = region_pin_record(parent_ctx_pin);
     let child_ctx_address: usize = fd_context_address(child);
     if (child_ctx_address == 0) {
         { let __parent_ctx_result: UnifiedFdCloneRunResult = UnifiedFdCloneRunResult::Invalid; fd_context_unpin(parent_ctx_pin); return __parent_ctx_result; }
@@ -2774,7 +2774,7 @@ private fn unified_fd_clone_run(parent: usize, child: usize,
             fd_context_pin(&fd_context_pool, child) else {
         RegionPinned(ProcessFdContext)::Stale => { let __parent_ctx_result: UnifiedFdCloneRunResult = UnifiedFdCloneRunResult::Invalid; fd_context_unpin(parent_ctx_pin); return __parent_ctx_result; }
     };
-    let child_ctx: *ProcessFdContext = region_pin_at(child_ctx_pin);
+    let child_ctx: &mut ProcessFdContext = region_pin_record(child_ctx_pin);
     // The child must be starting empty. That used to be checked fd by fd
     // against a constant; asking for its lowest open descriptor is the
     // same question over a table that no longer has a fixed width.
@@ -2803,7 +2803,7 @@ private fn unified_fd_clone_run(parent: usize, child: usize,
                         fd_block_pin(&fd_block_pool, block, block_generation) else {
                     RegionPinned(FdBlock)::Stale => { fd_context_unpin(child_ctx_pin); fd_context_unpin(parent_ctx_pin); return UnifiedFdCloneRunResult::Invalid; }
                 };
-                let entries: *FdBlock = region_pin_at(entries_pin);
+                let entries: &mut FdBlock = region_pin_record(entries_pin);
                 let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
                 let mut parent_handle: UnifiedObjectHandle = {
                     entries.slot[index].object, entries.slot[index].generation
@@ -2858,7 +2858,7 @@ private fn unified_fd_clone_run(parent: usize, child: usize,
                         fd_block_pin(&fd_block_pool, block, block_generation) else {
                     RegionPinned(FdBlock)::Stale => { unified_fd_clone_rollback(transaction); fd_context_unpin(child_ctx_pin); fd_context_unpin(parent_ctx_pin); return UnifiedFdCloneRunResult::Invalid; }
                 };
-                let entries: *FdBlock = region_pin_at(entries_pin);
+                let entries: &mut FdBlock = region_pin_record(entries_pin);
                 let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
                 let inherited: bool = entries.slot[index].close_on_exec;
                 let inject_failure: bool = match fault {
@@ -2942,14 +2942,14 @@ fn unified_fd_set_offset(process: usize, fd: usize, offset: usize)
             fd_context_pin(&fd_context_pool, process) else {
         RegionPinned(ProcessFdContext)::Stale => { return UnifiedFdResult::Invalid; }
     };
-    let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+    let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
     let (block, block_generation) = fd_block_lookup(ctx, fd);
     if (block == 0) { { let __ctx_result: UnifiedFdResult = UnifiedFdResult::Invalid; fd_context_unpin(ctx_pin); return __ctx_result; } }
     let RegionPinned(FdBlock)::Pinned(entries_pin) =
             fd_block_pin(&fd_block_pool, block, block_generation) else {
         RegionPinned(FdBlock)::Stale => { let __ctx_result: UnifiedFdResult = UnifiedFdResult::Invalid; fd_context_unpin(ctx_pin); return __ctx_result; }
     };
-    let entries: *FdBlock = region_pin_at(entries_pin);
+    let entries: &mut FdBlock = region_pin_record(entries_pin);
     let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
     let mut handle: UnifiedObjectHandle = {
         entries.slot[index].object, entries.slot[index].generation
@@ -2961,7 +2961,7 @@ fn unified_fd_set_offset(process: usize, fd: usize, offset: usize)
                 object_pin_handle(&object_pool, handle) else {
             RegionPinned(SharedObject)::Stale => { let __ctx_result: UnifiedFdResult = UnifiedFdResult::Invalid; fd_block_unpin(entries_pin); fd_context_unpin(ctx_pin); return __ctx_result; }
         };
-        let object: *SharedObject = region_pin_at(object_pin);
+        let object: &mut SharedObject = region_pin_record(object_pin);
         if (object.kind == UnifiedFdKind::OpenFile ||
             object.kind == UnifiedFdKind::Directory) {
             object.offset = offset;
@@ -2979,14 +2979,14 @@ fn unified_fd_offset(process: usize, fd: usize) -> UnifiedOffsetResult {
             fd_context_pin(&fd_context_pool, process) else {
         RegionPinned(ProcessFdContext)::Stale => { return UnifiedOffsetResult::Missing; }
     };
-    let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+    let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
     let (block, block_generation) = fd_block_lookup(ctx, fd);
     if (block == 0) { { let __ctx_result: UnifiedOffsetResult = UnifiedOffsetResult::Missing; fd_context_unpin(ctx_pin); return __ctx_result; } }
     let RegionPinned(FdBlock)::Pinned(entries_pin) =
             fd_block_pin(&fd_block_pool, block, block_generation) else {
         RegionPinned(FdBlock)::Stale => { let __ctx_result: UnifiedOffsetResult = UnifiedOffsetResult::Missing; fd_context_unpin(ctx_pin); return __ctx_result; }
     };
-    let entries: *FdBlock = region_pin_at(entries_pin);
+    let entries: &mut FdBlock = region_pin_record(entries_pin);
     let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
     let mut handle: UnifiedObjectHandle = {
         entries.slot[index].object, entries.slot[index].generation
@@ -2998,7 +2998,7 @@ fn unified_fd_offset(process: usize, fd: usize) -> UnifiedOffsetResult {
                 object_pin_handle(&object_pool, handle) else {
             RegionPinned(SharedObject)::Stale => { let __ctx_result: UnifiedOffsetResult = UnifiedOffsetResult::Missing; fd_block_unpin(entries_pin); fd_context_unpin(ctx_pin); return __ctx_result; }
         };
-        let object: *SharedObject = region_pin_at(object_pin);
+        let object: &mut SharedObject = region_pin_record(object_pin);
         if (object.kind == UnifiedFdKind::OpenFile ||
             object.kind == UnifiedFdKind::Directory) {
             { let __ctx_result: UnifiedOffsetResult = UnifiedOffsetResult::Found(object.offset); fd_context_unpin(ctx_pin); { let __entries_result: UnifiedOffsetResult = __ctx_result; fd_block_unpin(entries_pin); { let __object_result: UnifiedOffsetResult = __entries_result; object_unpin(object_pin); return __object_result; } } }
@@ -3682,14 +3682,14 @@ private fn unified_fd_probe_object_references(process: usize, fd: usize)
             fd_context_pin(&fd_context_pool, process) else {
         RegionPinned(ProcessFdContext)::Stale => { return 0; }
     };
-    let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+    let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
     let (block, block_generation) = fd_block_lookup(ctx, fd);
     if (block == 0) { { let __ctx_result: usize = 0; fd_context_unpin(ctx_pin); return __ctx_result; } }
     let RegionPinned(FdBlock)::Pinned(entries_pin) =
             fd_block_pin(&fd_block_pool, block, block_generation) else {
         RegionPinned(FdBlock)::Stale => { let __ctx_result: usize = 0; fd_context_unpin(ctx_pin); return __ctx_result; }
     };
-    let entries: *FdBlock = region_pin_at(entries_pin);
+    let entries: &mut FdBlock = region_pin_record(entries_pin);
     let index: {0..<FD_BLOCK_SLOTS as usize} = fd_slot_index(fd);
     if (entries.slot[index].kind == UnifiedFdKind::Empty) { { let __ctx_result: usize = 0; fd_context_unpin(ctx_pin); { let __entries_result: usize = __ctx_result; fd_block_unpin(entries_pin); return __entries_result; } } }
     let mut handle: UnifiedObjectHandle = {
@@ -3733,7 +3733,7 @@ fn unified_fd_table_probe() -> bool !{unsafe} {
             fd_context_pin(&fd_context_pool, 0) else {
         RegionPinned(ProcessFdContext)::Stale => { return false; }
     };
-    let ctx: *ProcessFdContext = region_pin_at(ctx_pin);
+    let ctx: &mut ProcessFdContext = region_pin_record(ctx_pin);
     ctx.heap_break = 0x50000000;
     match unified_terminal_stdio_open(0) {
         UnifiedOpenResult::Invalid => { scheduled_process_probe_slot_release(child);
@@ -3891,7 +3891,7 @@ struct FdDiagnosticEntry {
     object: usize;
 }
 
-private fn fd_diagnostic_entry_copy(entries: borrow *FdBlock,
+private fn fd_diagnostic_entry_copy(entries: borrow &mut FdBlock,
         index: {0..<FD_BLOCK_SLOTS as usize}) -> FdDiagnosticEntry {
     let mut entry: FdDiagnosticEntry = { entries.slot[index].kind, entries.slot[index].object };
     return entry;
@@ -3933,7 +3933,7 @@ fn kernel_fd_table_stopped_entry(
         RegionInspectionProbe(ProcessFdContext)::Busy => { return FdDiagnosticResult::Busy; }
         RegionInspectionProbe(ProcessFdContext)::Stale => { return FdDiagnosticResult::Stale; }
         RegionInspectionProbe(ProcessFdContext)::Inspected(inspected) => {
-            let (head, stamp) = fd_context_head_copy(region_inspection_at(inspected));
+            let (head, stamp) = fd_context_head_copy(region_inspection_record(inspected));
             address = head;
             generation = stamp;
             region_inspection_drop(inspected);
@@ -3944,7 +3944,7 @@ fn kernel_fd_table_stopped_entry(
         RegionInspectionProbe(FdBlock)::Busy => { return FdDiagnosticResult::Busy; }
         RegionInspectionProbe(FdBlock)::Stale => { return FdDiagnosticResult::Stale; }
         RegionInspectionProbe(FdBlock)::Inspected(inspected) => {
-            let mut entry: FdDiagnosticEntry = fd_diagnostic_entry_copy(region_inspection_at(inspected), fd);
+            let mut entry: FdDiagnosticEntry = fd_diagnostic_entry_copy(region_inspection_record(inspected), fd);
             region_inspection_drop(inspected);
             return FdDiagnosticResult::Ready(entry);
         }

@@ -3071,7 +3071,7 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
            let inst = build_load (ltype_of_ast inner_ty) v1 "deref" builder in
            set_volatile true inst;
            (inner_ty, to_arith_width inner_ty inst)
-       | TypePtr inner_ty ->
+       | TypePtr inner_ty | TypeRef inner_ty | TypeRefMut inner_ty ->
            let inst = build_load (ltype_of_ast inner_ty) v1 "deref" builder in
            (inner_ty, to_arith_width inner_ty inst)
        | _ -> raise (Error "dereference of non-pointer type"))
@@ -5202,13 +5202,13 @@ let rec gen_expr ?expected_ty locals (e : Ast.expr) : Ast.type_expr * llvalue =
        | Deref ptr_expr ->
            let (ptr_ty, ptr_v) = gen_expr locals ptr_expr in
            let pointee_ty = match ptr_ty with
-             | TypePtr (TypeIo inner) | TypePtr inner -> Some inner
+             | TypePtr (TypeIo inner) | TypePtr inner | TypeRefMut inner -> Some inner
              | _ -> None
            in
            let (_, val_v) = gen_expr ?expected_ty:pointee_ty locals rhs in
            let (is_volatile, coerced) = match ptr_ty with
              | TypePtr (TypeIo inner) -> (true,  coerce val_v inner)
-             | TypePtr inner          -> (false, coerce val_v inner)
+             | TypePtr inner | TypeRefMut inner -> (false, coerce val_v inner)
              | _                      -> (false, val_v)
            in
            let inst = build_store coerced ptr_v builder in

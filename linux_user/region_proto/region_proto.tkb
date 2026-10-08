@@ -65,13 +65,13 @@ fn test_table() {
     match region_alloc(pool) {
         RegionAlloc(Node)::Full => { uart_puts("pool: full\n"); }
         RegionAlloc(Node)::Allocated(slot) => {
-            region_slot_at(slot).key = 42;
+            region_slot_record(slot).key = 42;
             let mut handle: RegionHandle(Node) = region_give(pool, slot);
             match region_take(pool, handle) {
                 RegionTake(Node)::Stale => { uart_puts("pool: stale\n"); }
                 RegionTake(Node)::Taken(again) => {
                     uart_puts("pool: key ");
-                    uart_print(region_slot_at(again).key);
+                    uart_print(region_slot_record(again).key);
                     uart_puts("\n");
                     region_free(pool, again);
                 }
@@ -104,7 +104,7 @@ fn test_locked_table() {
         }
         RegionAlloc(Node)::Allocated(slot) => {
             region_table_unlock(pool);              // the lock is released here
-            region_slot_at(slot).key = 5;           // the slot is still ours
+            region_slot_record(slot).key = 5;           // the slot is still ours
             let again = region_table_lock(shared_arena);
             let mut handle: RegionHandle(Node) = region_give(again, slot);
             region_table_unlock(again);
@@ -149,7 +149,7 @@ fn test_pool() {
             RegionPoolAlloc(Node)::Full => { full = true; }
             RegionPoolAlloc(Node)::Allocated(slot) => {
                 allocated = allocated + 1;
-                region_slot_at(slot).key = allocated;
+                region_slot_record(slot).key = allocated;
                 let mut h: RegionHandle(Node) = region_give(pool, slot);
             }
         }
@@ -203,7 +203,7 @@ fn test_pins() {
         RegionPoolAlloc(Node)::Exhausted => { region_pool_unlock(pool); uart_puts("pool: exhausted unexpectedly\n"); return; }
         RegionPoolAlloc(Node)::Full => { region_pool_unlock(pool); return; }
     };
-    region_slot_at(slot).key = 9;
+    region_slot_record(slot).key = 9;
     print_pool_space(pool);
     let mut h: RegionHandle(Node) = region_give(pool, slot);
     let RegionPinned(Node)::Pinned(first) = region_pin(pool, h) else {
@@ -262,7 +262,7 @@ fn test_pins() {
     uart_print(walked);
     uart_puts("\n");
     uart_puts("pins: two holders see key ");
-    uart_print(region_pin_at(first).key + region_pin_at(second).key - 9);
+    uart_print(region_pin_record(first).key + region_pin_record(second).key - 9);
     uart_puts("\n");
     match region_take(pool, h) {                       // in use: refused
         RegionTake(Node)::Stale => { uart_puts("pins: take refused while pinned\n"); }

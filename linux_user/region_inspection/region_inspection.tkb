@@ -1,7 +1,7 @@
 // Sequential, host-native checks of stopped-pool metadata validation.
 // This fixture has one mutator and no interrupts; it does not simulate CPU
 // holding or certify hardware IRQ behavior. It exercises the real built-in.
-struct Node { value: usize; }
+struct Node { value: usize; words: [usize; 2]; }
 private let mut pool: RegionPool(Node);
 private let mut bytes: [u8; 1024];
 private let mut controller: u8;
@@ -11,9 +11,11 @@ fn expect_live(address: usize, generation: usize) -> bool {
         RegionInspectionProbe(Node)::Busy => { return false; }
         RegionInspectionProbe(Node)::Stale => { return false; }
         RegionInspectionProbe(Node)::Inspected(inspected) => {
-            let value: usize = region_inspection_at(inspected).value;
+            let record = region_inspection_record(inspected);
+            let value: usize = record.value;
+            let sum: usize = record.words[0] + record.words[1];
             region_inspection_drop(inspected);
-            return value == 37;
+            return value == 37 && sum == 24;
         }
     }
 }
@@ -52,7 +54,10 @@ fn app_main() {
         RegionPoolAlloc(Node)::Full => { region_pool_unlock(guard); uart_puts("FAIL pool full\n"); return; }
         RegionPoolAlloc(Node)::Exhausted => { region_pool_unlock(guard); uart_puts("FAIL stamps exhausted\n"); return; }
     };
-    region_slot_at(slot).value = 37;
+    let record = region_slot_record(slot);
+    record.value = 37;
+    record.words[0] = 11;
+    record.words[1] = 13;
     let mut handle: RegionHandle(Node) = region_give(guard, slot);
     let address: usize = region_handle_address(handle);
     let generation: usize = region_handle_generation(handle);

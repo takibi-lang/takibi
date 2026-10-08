@@ -131,8 +131,8 @@ enum PendingTcpKind: u8 { None; Data; Fin; }
 // refined pool_index, and the tcp_connection_store parking lot below are
 // all untouched, and TCP_CONNECTION_MAX still sizes the array of these.
 // What it buys is the step after it -- a pool hands back a
-// *TcpConnection, and once every per-connection field is reached through
-// that pointer there is nothing left keyed by a connection INDEX for a
+// an authority-indexed TcpConnection reference; once every field is reached
+// through that reference there is nothing left keyed by a connection INDEX for a
 // ceiling to be the size of.
 //
 // The byte arrays deliberately stay outside: tcp_stream_tx_frame (1514),
@@ -172,7 +172,7 @@ struct TcpConnection {
     // -- that one is the last segment's payload size as the TCP layer
     // saw it, these two are how much of the buffer userspace has drained.
     // GitHub issue #257 step 5: this connection's own pool address, so
-    // that a *TcpConnection is enough to name it -- a retransmit entry
+    // that a TcpConnection reference can name it -- a retransmit entry
     // records which connection it belongs to, and with no index left there
     // is nothing else to record.
     self_address: usize;
@@ -357,7 +357,7 @@ fn kernel_tcp_ddb_connection_pending() -> NetPendingState !{unsafe} {
                 match region_pin(guard, handle) {
                     RegionPinned(TcpConnection)::Stale => {}
                     RegionPinned(TcpConnection)::Pinned(pin) => {
-                        let conn: *TcpConnection = region_pin_at(pin);
+                        let conn: &mut TcpConnection = region_pin_record(pin);
                         if (task_mutex_is_held(&conn.lock)) {
                             busy = true;
                         } else if (conn.connection_open &&
@@ -754,7 +754,7 @@ fn tcp_frame_take() -> (FrameLink, bool) !{unsafe} {
 // whatever it managed to take. Called from tcp_connection_alloc, whose Full
 // result is exactly the right thing to report when it fails -- a connection
 // with no frame to transmit from is not one this stack can serve.
-fn tcp_connection_frames_acquire(conn: borrow *TcpConnection) -> bool !{unsafe} {
+fn tcp_connection_frames_acquire(conn: borrow &mut TcpConnection) -> bool !{unsafe} {
     mutex_init(&conn.frames_mutex);
     let (tx, tx_taken) = tcp_frame_take();
     if (tx_taken == false) {
@@ -809,7 +809,7 @@ fn tcp_frame_release_displaced(link: FrameLink) !{unsafe} {
     }
 }
 
-fn tcp_connection_frames_release(conn: borrow *TcpConnection) !{unsafe} {
+fn tcp_connection_frames_release(conn: borrow &mut TcpConnection) !{unsafe} {
     let tx_guard = tcp_frame_lock(&conn.frames_mutex);
     let held_tx: FrameLink = stable_replace(
         tx_guard, &conn.frames_mutex, conn.tx, FrameLink::None);
@@ -844,7 +844,7 @@ enum TcpFrameRole: u8 { Tx; Rx; Inetd; }
 // SAME role on this path, which finds None and is told so.
 fn tcp_connection_frame_hold(owner: borrow TcpConnectionOwner[connection_pool, connection],
                              role: TcpFrameRole) -> FrameLink !{unsafe} {
-    let conn: *TcpConnection = tcp_connection_of(owner);
+    let conn: &mut TcpConnection = tcp_connection_of(owner);
     let guard = tcp_frame_lock(&conn.frames_mutex);
     let held: FrameLink = match role {
         TcpFrameRole::Tx => {
@@ -864,7 +864,7 @@ fn tcp_connection_frame_hold(owner: borrow TcpConnectionOwner[connection_pool, c
 fn tcp_connection_frame_unhold(owner: borrow TcpConnectionOwner[connection_pool, connection],
                                role: TcpFrameRole,
                                link: sink FrameLink) !{unsafe} {
-    let conn: *TcpConnection = tcp_connection_of(owner);
+    let conn: &mut TcpConnection = tcp_connection_of(owner);
     let guard = tcp_frame_lock(&conn.frames_mutex);
     let displaced: FrameLink = match role {
         TcpFrameRole::Tx => {
@@ -885,7 +885,7 @@ fn tcp_connection_frame_unhold(owner: borrow TcpConnectionOwner[connection_pool,
 // a use of the slice, or of anything cut from it, does not compile.
 fn tcp_frame_bytes(slot: borrow RegionSlot(NetFrame)[p, k])
         -> [u8; 1514..] @ p !{unsafe} {
-    return region_slot_at(slot).bytes as [u8; 1514..];
+    return region_slot_record(slot).bytes as [u8; 1514..];
 }
 
 // Copies `source` to the start of one of the connection's frames: the
@@ -927,8 +927,8 @@ private fn tcp_connection_owner_release(owner: sink TcpConnectionOwner[p, k])
 // The connection an owner holds, derived from its pin: no lookup, nothing
 // to find missing, and it dies with the borrow of the owner.
 fn tcp_connection_of(owner: borrow TcpConnectionOwner[p, connection])
-        -> *TcpConnection @ connection !{unsafe} {
-    return region_pin_at(owner.pin);
+        -> &mut TcpConnection @ connection !{unsafe} {
+    return region_pin_record(owner.pin);
 }
 
 // Give up a pin. The last pin of a freed connection gives its slot back
@@ -1070,7 +1070,7 @@ fn tcp_connection_has_pending_read(address: usize) -> bool !{unsafe} {
     match pinned {
         RegionPinned(TcpConnection)::Stale => { return false; }
         RegionPinned(TcpConnection)::Pinned(pin) => {
-            let conn: *TcpConnection = region_pin_at(pin);
+            let conn: &mut TcpConnection = region_pin_record(pin);
             let pending: bool = conn.connection_open &&
                    conn.socket_buffer_offset < conn.socket_buffer_length;
             tcp_connection_unpin(pin);
@@ -1097,7 +1097,7 @@ fn tcp_any_connection_open() -> bool !{unsafe} {
                 match region_pin(guard, handle) {
                     RegionPinned(TcpConnection)::Stale => {}
                     RegionPinned(TcpConnection)::Pinned(pin) => {
-                        if (region_pin_at(pin).connection_open) {
+                        if (region_pin_record(pin).connection_open) {
                             open = true;
                             walking = false;
                         }
@@ -1193,7 +1193,7 @@ private fn tcp_connection_open_slot(pool: *RegionPool(TcpConnection) @ conns,
     // stable owner storage whose empty state is a zero tag (#369), and a
     // zero TaskMutex is a free one.
     region_slot_zero(slot);
-    let conn: *TcpConnection = region_slot_at(slot);
+    let conn: &mut TcpConnection = region_slot_record(slot);
     conn.self_address = region_slot_address(slot);
     conn.state = ConnState::Listen;
     conn.local_port = TCP_ECHO_PORT;
@@ -1214,7 +1214,7 @@ private fn tcp_connection_open_slot(pool: *RegionPool(TcpConnection) @ conns,
         }
     };
     // GitHub issue #462: an owner means a held lock. The zeroed word is free.
-    task_mutex_acquire(&region_pin_at(pin).lock);
+    task_mutex_acquire(&region_pin_record(pin).lock);
     return TcpConnectionAllocResult::Allocated(tcp_connection_owner_new(pin));
 }
 
@@ -1233,7 +1233,7 @@ fn tcp_connection_identity(owner: borrow TcpConnectionOwner[p, connection])
 fn tcp_connection_put(owner: sink TcpConnectionOwner[p, connection])
         !{unsafe} {
     let pin = tcp_connection_owner_release(owner);
-    task_mutex_release(&region_pin_at(pin).lock);
+    task_mutex_release(&region_pin_record(pin).lock);
     tcp_connection_unpin(pin);
 }
 
@@ -1250,9 +1250,9 @@ fn tcp_connection_take(slot_value: usize, generation: usize)
             return TcpConnectionTakeResult::Missing;
         }
     };
-    task_mutex_acquire(&region_pin_at(pin).lock);
-    if (region_pin_at(pin).retired) {
-        task_mutex_release(&region_pin_at(pin).lock);
+    task_mutex_acquire(&region_pin_record(pin).lock);
+    if (region_pin_record(pin).retired) {
+        task_mutex_release(&region_pin_record(pin).lock);
         tcp_connection_unpin(pin);
         return TcpConnectionTakeResult::Missing;
     }
@@ -1271,12 +1271,12 @@ fn tcp_connection_try_take(slot_value: usize, generation: usize)
             return TcpConnectionTryTakeResult::Missing;
         }
     };
-    if (task_mutex_trylock(&region_pin_at(pin).lock) == false) {
+    if (task_mutex_trylock(&region_pin_record(pin).lock) == false) {
         tcp_connection_unpin(pin);
         return TcpConnectionTryTakeResult::Busy;
     }
-    if (region_pin_at(pin).retired) {
-        task_mutex_release(&region_pin_at(pin).lock);
+    if (region_pin_record(pin).retired) {
+        task_mutex_release(&region_pin_record(pin).lock);
         tcp_connection_unpin(pin);
         return TcpConnectionTryTakeResult::Missing;
     }
@@ -1484,14 +1484,14 @@ fn pin_sharing_cleanup() -> PinSharingCleanupResult !{unsafe} {
 // retired: no new pin is granted from here on, and whoever gives up the
 // last pin (this owner, or a waiter) returns the slot to the pool.
 fn tcp_connection_free(owner: sink TcpConnectionOwner[p, connection]) !{unsafe} {
-    let conn: *TcpConnection = tcp_connection_of(owner);
+    let conn: &mut TcpConnection = tcp_connection_of(owner);
     pending_tcp_reset_all(conn);
     conn.state = ConnState::Listen;
     conn.connection_open = false;
     tcp_connection_frames_release(conn);
     conn.retired = true;
     let pin = tcp_connection_owner_release(owner);
-    task_mutex_release(&region_pin_at(pin).lock);
+    task_mutex_release(&region_pin_record(pin).lock);
     match region_retire(pin) {
         RegionRetire(TcpConnection)::Pending => {}
         RegionRetire(TcpConnection)::Retired(slot) => { tcp_connection_slot_free(slot); }
@@ -1632,7 +1632,7 @@ fn kernel_tcp_clear_injection_markers() !{unsafe} {
                 match region_pin(guard, handle) {
                     RegionPinned(TcpConnection)::Stale => {}
                     RegionPinned(TcpConnection)::Pinned(pin) => {
-                        let conn: *TcpConnection = region_pin_at(pin);
+                        let conn: &mut TcpConnection = region_pin_record(pin);
                         conn.injected_data_entry = 0;
                         conn.injected_fin_entry = 0;
                         match region_unpin(pin) {
@@ -1690,14 +1690,14 @@ fn retx_unlock(guard: sink RetxGuard[address],
 // that this function returns data the lock actually protects; that stays
 // a module obligation, and SPEC.md says so under "Guard-derived pointers".
 //
-// The container is a plain *RetxEntry rather than one carrying `@ address`
+// The container is a borrowed RetxEntry reference rather than one carrying `@ address`
 // -- the tie comes from the guard, and a field address through an
 // identity-annotated pointer is rejected today anyway.
-// `borrow *RetxEntry` since GitHub issue #488: the entry pointer now comes
+// Borrowing since GitHub issue #488: the entry reference now comes
 // from a live IntrusiveSlotView or owner, and a retaining parameter would
 // let this keep it past that proof. It only takes a field address, so
 // borrowing is what it meant.
-fn retx_retry_state(guard: borrow RetxGuard[address], e: borrow *RetxEntry)
+fn retx_retry_state(guard: borrow RetxGuard[address], e: borrow &mut RetxEntry)
         -> *RetxRetryState @ address {
     return &e.retry;
 }
@@ -1732,7 +1732,7 @@ fn retx_chain_put(link: RetxLink) -> bool {
     }
 }
 
-fn retx_entry_take_next(entry: borrow *RetxEntry) -> RetxLink {
+fn retx_entry_take_next(entry: borrow &mut RetxEntry) -> RetxLink {
     let guard = retx_lock(&entry.mutex);
     let next: RetxLink = stable_replace(
         guard, &entry.mutex, entry.next, RetxLink::End);
@@ -1740,7 +1740,7 @@ fn retx_entry_take_next(entry: borrow *RetxEntry) -> RetxLink {
     return next;
 }
 
-fn retx_entry_put_next(entry: borrow *RetxEntry, link: RetxLink) -> bool {
+fn retx_entry_put_next(entry: borrow &mut RetxEntry, link: RetxLink) -> bool {
     let guard = retx_lock(&entry.mutex);
     let displaced: RetxLink = stable_replace(
         guard, &entry.mutex, entry.next, link);
@@ -1757,7 +1757,7 @@ fn retx_entry_put_next(entry: borrow *RetxEntry, link: RetxLink) -> bool {
 // own link is taken first: freeing an entry that still held one would
 // lose the rest of a chain.
 fn retx_entry_release(parked: sink RegionSlot(RetxEntry)[p, k]) !{unsafe} {
-    let entry: *RetxEntry = region_slot_at(parked);
+    let entry: &mut RetxEntry = region_slot_record(parked);
     match retx_entry_take_next(entry) {
         RetxLink::End => {}
         RetxLink::More(stray) => {
@@ -1872,7 +1872,7 @@ fn retx_chain_reverse(link_in: RetxLink) -> RetxLink !{unsafe} {
         match link {
             RetxLink::End => { walking = false; link = RetxLink::End; }
             RetxLink::More(parked) => {
-                let entry: *RetxEntry = region_slot_at(parked);
+                let entry: &mut RetxEntry = region_slot_record(parked);
                 let following: RetxLink = retx_entry_take_next(entry);
                 if (retx_entry_put_next(entry, reversed) == false) {
                     kernel_boot_log("tcp retx: chain link was not empty\n");
@@ -1893,7 +1893,7 @@ fn retx_chain_reverse(link_in: RetxLink) -> RetxLink !{unsafe} {
 // the queue alone. Called once per connection from kernel_tcp_accept_begin
 // (alongside its own state = Listen reset), so a new connection never
 // inherits a previous one's outstanding segments.
-fn pending_tcp_reset_all(conn: borrow *TcpConnection) !{unsafe} {
+fn pending_tcp_reset_all(conn: borrow &mut TcpConnection) !{unsafe} {
     let connection_address: usize = conn.self_address;
     let mut link: RetxLink = retx_chain_take();
     let mut kept: RetxLink = RetxLink::End;
@@ -1902,7 +1902,7 @@ fn pending_tcp_reset_all(conn: borrow *TcpConnection) !{unsafe} {
         match link {
             RetxLink::End => { walking = false; link = RetxLink::End; }
             RetxLink::More(parked) => {
-                let entry: *RetxEntry = region_slot_at(parked);
+                let entry: &mut RetxEntry = region_slot_record(parked);
                 let following: RetxLink = retx_entry_take_next(entry);
                 let mine: bool = entry.connection == connection_address;
                 if (mine) {
@@ -1947,7 +1947,7 @@ fn pending_tcp_record(connection_owner: borrow TcpConnectionOwner[connection_poo
                       kind: PendingTcpKind, frame: borrow [u8; 1514..],
                       frame_length: usize)
         -> usize !{unsafe} {
-    let conn: *TcpConnection = tcp_connection_of(connection_owner);
+    let conn: &mut TcpConnection = tcp_connection_of(connection_owner);
     match tcp_retx_take() {
         RetxLink::End => {
             // capacity=0: there is no capacity to report any more, which
@@ -1960,7 +1960,7 @@ fn pending_tcp_record(connection_owner: borrow TcpConnectionOwner[connection_poo
         }
         RetxLink::More(owner) => {
             let entry_address: usize = region_slot_address(owner);
-            let entry: *RetxEntry = region_slot_at(owner);
+            let entry: &mut RetxEntry = region_slot_record(owner);
             // GitHub issue #460: this was `entry.mutex = 0` and it
             // compiled after the field became a Mutex -- assigning an
             // integer to a struct emits a FOUR-BYTE store, so it zeroed
@@ -2053,8 +2053,8 @@ private let mut pending_tcp_probe_frame: [u8; 1514];
 fn pending_tcp_chain_probe_body(owner_a: borrow TcpConnectionOwner[first_pool, first],
                                  owner_b: borrow TcpConnectionOwner[second_pool, second])
         -> bool !{unsafe} {
-    let conn: *TcpConnection = tcp_connection_of(owner_a);
-    let other: *TcpConnection = tcp_connection_of(owner_b);
+    let conn: &mut TcpConnection = tcp_connection_of(owner_a);
+    let other: &mut TcpConnection = tcp_connection_of(owner_b);
     let live_before: usize = tcp_retx_live_count();
 
     // One past the old ceiling of 4, plus one belonging to a DIFFERENT
@@ -2094,7 +2094,7 @@ fn pending_tcp_chain_probe_body(owner_a: borrow TcpConnectionOwner[first_pool, f
         match link {
             RetxLink::End => { walking = false; link = RetxLink::End; }
             RetxLink::More(parked) => {
-                let entry: *RetxEntry = region_slot_at(parked);
+                let entry: &mut RetxEntry = region_slot_record(parked);
                 let following: RetxLink = retx_entry_take_next(entry);
                 if (entry.connection == conn.self_address) {
                     if (entry.frame_length != 1000 + walked) {
@@ -2138,7 +2138,7 @@ fn pending_tcp_chain_probe_body(owner_a: borrow TcpConnectionOwner[first_pool, f
 // under --forbid-trap -- is now a struct the caller already has a pointer
 // to, and there is no index to bound.
 fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32,
-                           entry: borrow *RetxEntry) -> bool {
+                           entry: borrow &mut RetxEntry) -> bool {
     if (entry.kind == PendingTcpKind::None || len < 54 || len > 1514) {
         return false;
     }
@@ -2195,7 +2195,7 @@ fn pending_tcp_ack_matches(frame: borrow [u8; 1514..], len: i32,
 // four slots -- a deliberate choice, since servicing every connection's
 // deadlines from whichever one happens to be running would be a timing
 // change on a path with a history of them.
-fn pending_tcp_service_once(conn: borrow *TcpConnection,
+fn pending_tcp_service_once(conn: borrow &mut TcpConnection,
                             ready_in: sink NetRxCanAcquire,
                              retry_ticks: i64)
         -> NetRxCanAcquire !{may_block, unsafe} {
@@ -2212,7 +2212,7 @@ fn pending_tcp_service_once(conn: borrow *TcpConnection,
                 match link {
                     RetxLink::End => { walking = false; link = RetxLink::End; }
                     RetxLink::More(parked) => {
-                        let entry: *RetxEntry = region_slot_at(parked);
+                        let entry: &mut RetxEntry = region_slot_record(parked);
                         let following: RetxLink =
                             retx_entry_take_next(entry);
                         let mut acked: bool = false;
@@ -2287,7 +2287,7 @@ fn pending_tcp_service_once(conn: borrow *TcpConnection,
         match link {
             RetxLink::End => { walking = false; link = RetxLink::End; }
             RetxLink::More(parked) => {
-                let entry: *RetxEntry = region_slot_at(parked);
+                let entry: &mut RetxEntry = region_slot_record(parked);
                 let following: RetxLink = retx_entry_take_next(entry);
                 let mut expired: bool = false;
                 // GitHub issue #452: decide and mutate under the guard,
@@ -2362,7 +2362,7 @@ fn pending_tcp_service_once(conn: borrow *TcpConnection,
 // this file rather than a harmless miscount -- and usize underflow wraps
 // to an enormous number that would make kernel_tcp_close_stream spin to
 // its deadline every time.
-fn retx_count_after_release(conn: borrow *TcpConnection) -> usize {
+fn retx_count_after_release(conn: borrow &mut TcpConnection) -> usize {
     let current: usize = conn.retx_count;
     if (current == 0) {
         kernel_boot_log("tcp retx: released an entry with an empty count\n");
@@ -2381,7 +2381,7 @@ fn retx_count_after_release(conn: borrow *TcpConnection) -> usize {
 // A counter rather than a walk: the chain is stable owner storage, so
 // even a read-only walk has to take and put every link, and this is
 // polled in a loop.
-fn pending_tcp_any_active(conn: borrow *TcpConnection) -> bool {
+fn pending_tcp_any_active(conn: borrow &mut TcpConnection) -> bool {
     return conn.retx_count != 0;
 }
 
@@ -2407,7 +2407,7 @@ fn fix_tcp_checksum(ip: borrow [u8; 20..], tcp_seg: borrow [u8; 20..]) {
 // Rewrites a SYN request into a SYN-ACK reply in place. Only called from
 // TCP_LISTEN after the caller has already validated the request (IP/TCP
 // checksums, dst port, SYN flag set).
-fn build_syn_ack(conn: borrow *TcpConnection,
+fn build_syn_ack(conn: borrow &mut TcpConnection,
                  eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
@@ -2448,7 +2448,7 @@ fn build_syn_ack(conn: borrow *TcpConnection,
 // given the caller's own tcp_len bound, but see the explicit check below
 // for why this needs to be enforced, not assumed, to construct tcp_seg
 // with a proven minimum).
-fn build_data_reply(conn: borrow *TcpConnection,
+fn build_data_reply(conn: borrow &mut TcpConnection,
         eth: borrow [u8; 1514..], ihl: {20..<21 as u16},
         tcp_seg: borrow [u8; 20..], response_len: u16,
         received_len: u16) -> bool {
@@ -2500,7 +2500,7 @@ fn build_data_reply(conn: borrow *TcpConnection,
 // rcv_nxt by the caller) and sends our own FIN in the same segment.
 // Only called from TCP_ESTABLISHED after the caller has already validated
 // the request and confirmed seq == rcv_nxt (before incrementing it).
-fn build_fin_ack(conn: borrow *TcpConnection,
+fn build_fin_ack(conn: borrow &mut TcpConnection,
                  eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
@@ -2533,7 +2533,7 @@ fn build_fin_ack(conn: borrow *TcpConnection,
 // Rewrites a received data frame into an ACK with no payload.  This releases
 // the sole GEM RX capability between non-final stream segments while keeping
 // the already-copied bytes in the caller's reconstruction buffer.
-fn build_receive_ack(conn: borrow *TcpConnection,
+fn build_receive_ack(conn: borrow &mut TcpConnection,
                      eth: borrow [u8; 54..], ihl: {20..<21 as u16}) {
     slice_copy(eth[0..<6], eth[6..<12]);
     slice_copy(eth[6..<12], our_mac as []u8);
@@ -2658,7 +2658,7 @@ fn kernel_tcp_echo_check(ready_in: sink NetRxCanAcquire)
         }
         TcpConnectionAllocResult::Allocated(owner) => { owner }
     };
-    let conn: *TcpConnection = tcp_connection_of(echo_owner);
+    let conn: &mut TcpConnection = tcp_connection_of(echo_owner);
     let remote_ip_bytes =
         conn.remote_ip as []u8;
     net_read_mac(our_mac as []u8);
@@ -2823,7 +2823,7 @@ must_use variant KernelTcpAcceptStep {
 // two together are what the old blocking accept loop used to be.
 fn kernel_tcp_accept_begin(owner: borrow TcpConnectionOwner[connection_pool, connection],
                            port: u16) !{unsafe} {
-    let conn: *TcpConnection = tcp_connection_of(owner);
+    let conn: &mut TcpConnection = tcp_connection_of(owner);
     conn.state = ConnState::Listen;
     conn.local_port = port;
     // GitHub issue #180: a fresh connection never inherits a stale queue
@@ -2862,7 +2862,7 @@ fn kernel_tcp_accept_step(owner: borrow TcpConnectionOwner[connection_pool, conn
                           ready_in: sink NetRxCanAcquire)
         -> KernelTcpAcceptStep !{unsafe} {
     let mut ready = ready_in;
-    let conn: *TcpConnection = tcp_connection_of(owner);
+    let conn: &mut TcpConnection = tcp_connection_of(owner);
     // Another receive waiter can acquire the final ACK first and complete
     // this half-open connection through tcp_route_received_segment(). The
     // parked accept must finish when it resumes, even though no frame is left.
@@ -3146,7 +3146,7 @@ fn tcp_route_received_segment(current_address: usize,
                             // sender's TCP retry will present it again.
                         }
                         TcpConnectionTryTakeResult::Ready(target_owner) => {
-                            let target: *TcpConnection =
+                            let target: &mut TcpConnection =
                                 tcp_connection_of(target_owner);
                             let remote_ip: []u8 = target.remote_ip as []u8;
                             let tuple_matches: bool =
@@ -3243,7 +3243,7 @@ fn kernel_tcp_receive_once(owner: borrow TcpConnectionOwner[connection_pool, con
                            destination: borrow [u8; 1460..])
         -> KernelTcpReceiveResult !{unsafe} {
     let mut ready = ready_in;
-    let conn: *TcpConnection = tcp_connection_of(owner);
+    let conn: &mut TcpConnection = tcp_connection_of(owner);
     if (conn.receive_waiting == false) {
         conn.receive_started_at = read_cntpct();
         conn.receive_waiting = true;
@@ -3359,7 +3359,7 @@ fn kernel_tcp_send_received(owner: borrow TcpConnectionOwner[connection_pool, co
                             received_length: usize,
                             payload_length: usize)
         -> KernelTcpSendResult !{may_block} {
-    let conn: *TcpConnection = tcp_connection_of(owner);
+    let conn: &mut TcpConnection = tcp_connection_of(owner);
     let remote_ip_bytes =
         conn.remote_ip as []u8;
     let remote_mac_bytes =
@@ -3465,7 +3465,7 @@ fn kernel_tcp_close_stream(owner: borrow TcpConnectionOwner[connection_pool, con
                            ready_in: sink NetRxCanAcquire)
         -> KernelTcpCloseResult !{may_block} {
     let mut ready = ready_in;
-    let conn: *TcpConnection = tcp_connection_of(owner);
+    let conn: &mut TcpConnection = tcp_connection_of(owner);
     let remote_ip_bytes =
         conn.remote_ip as []u8;
     let remote_mac_bytes =

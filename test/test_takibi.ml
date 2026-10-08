@@ -2702,6 +2702,12 @@ let region_inspection_tests =
   let bad name diagnostic body = Alcotest.test_case name `Quick
     (expect_region_error diagnostic (wrap body)) in
   [
+    good "inspection: record reference reads while inspected"
+      "let record = region_inspection_record(inspected); record.value = 42; let copied = record.value; region_inspection_drop(inspected);";
+    bad "inspection: record reference cannot outlive authority" "cannot be used after"
+      "let record = region_inspection_record(inspected); region_inspection_drop(inspected); let copied = record.value;";
+    bad "inspection: record reference cannot cross resume" "live RegionInspection__Node"
+      "let record = region_inspection_record(inspected); resume(); region_inspection_drop(inspected);";
     good "inspection: scalar copy survives resume"
       "let value = region_inspection_at(inspected).value; region_inspection_drop(inspected); resume();";
     good "inspection: indices retain pool and controller"
@@ -3679,6 +3685,12 @@ let infer_tests = [
        }");
 
   (* #672 layer 3: pins, the shared-object side of a pool. *)
+  Alcotest.test_case "region pool: record reference cannot outlive its pin" `Quick
+    (expect_region_error "cannot be used after" (pin_use
+      "let node = region_pin_record(p); match region_unpin(p) { RegionUnpin(Node)::Unpinned => {} RegionUnpin(Node)::Last(s) => { region_slot_abandon(s); } } node.key = 1;"));
+  Alcotest.test_case "region pool: record reference accepts borrowed field access" `Quick
+    (fun () -> ignore (infer_regions (pin_use
+      "let node = region_pin_record(p); node.key = 42; let copied = node.key; match region_unpin(p) { RegionUnpin(Node)::Unpinned => {} RegionUnpin(Node)::Last(s) => { region_slot_abandon(s); } }")));
   Alcotest.test_case "region pool: a pinned element after its unpin" `Quick
     (expect_region_error "cannot be used after" (pin_use
       "let node = region_pin_at(p);
@@ -21270,6 +21282,18 @@ let raw_authority_policy_tests = [
 ]
 
 let indexed_reference_tests = [
+  Alcotest.test_case "whole record reference copy codegens" `Quick
+    (fun () -> ignore (gen_codegen {|
+      struct Record { value: usize; words: [usize; 2]; }
+      fn copy(source: borrow &Record) -> Record { return *source; }
+      fn write(target: borrow &mut Record, source: borrow &Record) { *target = *source; }
+      fn copy_mut(source: borrow &mut Record) -> Record { return *source; }
+    |}));
+  Alcotest.test_case "whole shared reference assignment is rejected" `Quick
+    (expect_type_error "shared reference" {|
+      struct Record { value: usize; }
+      fn write(target: borrow &Record, source: borrow &Record) { *target = *source; }
+    |});
   Alcotest.test_case "indexed reference passes to a nonretaining reference parameter" `Quick
     (fun () -> ignore (gen_codegen (indexed_reference_fixture ^ {|
       fn read(record: borrow &RefRecord) -> usize { return record.value; }

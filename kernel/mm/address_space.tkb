@@ -440,7 +440,7 @@ private fn address_space_backing_read_existing(root: AddressSpaceRoot)
 
 // Shared value copy while either the pin or the stopped inspection is
 // borrowed. No payload pointer or live authority escapes this function.
-private fn address_space_backing_copy(backing: borrow *AddressSpaceBacking)
+private fn address_space_backing_copy(backing: borrow &mut AddressSpaceBacking)
         -> AddressSpaceBacking {
     let mut value: AddressSpaceBacking = { backing.live, backing.l1_physical,
         backing.l2_physical, backing.asid, backing.asid_generation };
@@ -466,7 +466,7 @@ private fn address_space_backing_read_checked(root: AddressSpaceRoot)
             return AddressSpaceBackingReady::Missing;
         }
         RegionPinned(AddressSpaceBacking)::Pinned(pin) => {
-            let backing: *AddressSpaceBacking = region_pin_at(pin);
+            let backing: &mut AddressSpaceBacking = region_pin_record(pin);
             value = address_space_backing_copy(backing);
             address_space_backing_unpin(pin);
             return address_space_backing_exists(slot, root, value);
@@ -496,7 +496,7 @@ private fn address_space_backing_write(
             address_space_backing_missing_note();
         }
         RegionPinned(AddressSpaceBacking)::Pinned(pin) => {
-            let backing: *AddressSpaceBacking = region_pin_at(pin);
+            let backing: &mut AddressSpaceBacking = region_pin_record(pin);
             backing.live = value.live;
             backing.l1_physical = value.l1_physical;
             backing.l2_physical = value.l2_physical;
@@ -608,7 +608,7 @@ fn address_space_diagnostic_snapshot(
         RegionInspectionProbe(AddressSpaceBacking)::Busy => { return AddressSpaceDiagnosticResult::Busy; }
         RegionInspectionProbe(AddressSpaceBacking)::Stale => { return AddressSpaceDiagnosticResult::Stale; }
         RegionInspectionProbe(AddressSpaceBacking)::Inspected(inspected) => {
-            let mut backing: AddressSpaceBacking = address_space_backing_copy(region_inspection_at(inspected));
+            let mut backing: AddressSpaceBacking = address_space_backing_copy(region_inspection_record(inspected));
             snapshot.live = backing.live;
             snapshot.l1_physical = backing.l1_physical;
             snapshot.l2_physical = backing.l2_physical;
@@ -807,7 +807,7 @@ fn address_space_ensure_root(slot: usize) -> AddressSpaceEnsureResult {
 // number available to another root and these shared fields never need a
 // cross-core write. Every other backing remains protected by its pool guard.
 private fn address_space_refresh_asid(
-        evidence: borrow AddressSpaceBackingExists[slot], backing: *AddressSpaceBacking) {
+        evidence: borrow AddressSpaceBackingExists[slot], backing: &mut AddressSpaceBacking) {
     let slot: usize = evidence.slot;
     if (slot == 0) { return; }
     if (asid_generation_is_current(backing.asid_generation)) { return; }

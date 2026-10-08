@@ -911,8 +911,22 @@ let replace_all ~sub ~by s =
   done;
   Buffer.contents buf
 
-let instance elem =
-  template
+(* Record-only accessors retain the same slot, pin or stopped inspection
+   authority. Primitive instances keep their existing pointer operations. *)
+let record_access_source = {|
+fn region_slot_record(s: borrow @SL@[b, k]) -> &mut @T@ @ b !{unsafe} {
+    return unsafe { (s.address as *@T@) as &mut @T@ };
+}
+fn region_pin_record(p: borrow @PN@[b, k]) -> &mut @T@ @ b !{unsafe} {
+    return unsafe { (p.address as *@T@) as &mut @T@ };
+}
+fn region_inspection_record(p: borrow @IV@[b, scope]) -> &mut @T@ @ scope !{unsafe} {
+    return unsafe { (p.address as *@T@) as &mut @T@ };
+}
+|}
+
+let instance ?(record = false) elem =
+  (if record then template ^ record_access_source else template)
   |> replace_all ~sub:"@R@" ~by:("region__" ^ elem)
   |> replace_all ~sub:"@S@" ~by:("RegionSplit__" ^ elem)
   |> replace_all ~sub:"@O@" ~by:("RegionOf__" ^ elem)
@@ -1095,7 +1109,12 @@ let plan prog : string list =
   let elems = if not uses_bytes || List.mem "u8" elems then elems
               else "u8" :: elems in
   let defs = if not uses_bytes then []
-    else List.map instance elems @ [ common_source ] in
+    else
+      let records = List.filter_map (function
+        | Ast.StructDef (name, _, _, _, _, _) -> Some name
+        | _ -> None) prog in
+      List.map (fun elem -> instance ~record:(List.mem elem records) elem) elems
+      @ [ common_source ] in
   let flags = String.concat "" (List.map (fun (name, (_, n)) ->
     Printf.sprintf "let mut %s: bool = false;\nlet mut %s: [usize; %d];\n"
       (flag_name name) (meta_name name) (2 * n)) claimed) in

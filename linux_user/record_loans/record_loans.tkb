@@ -1,3 +1,16 @@
+// Whole-record reference load/store is executed independently of pool mints.
+fn reference_record_copy(source: borrow &LoanRecord) -> LoanRecord { return *source; }
+fn reference_record_assign(target: borrow &mut LoanRecord, source: borrow &LoanRecord) {
+    *target = *source;
+}
+fn reference_record_copy_probe() -> usize {
+    let mut source: LoanRecord = { 7, 11, { 13, 17 } };
+    let mut target: LoanRecord;
+    reference_record_assign(&target, &source);
+    let mut copied: LoanRecord = reference_record_copy(&target);
+    return copied.generation + copied.value + copied.words[0] + copied.words[1];
+}
+
 // Execute positive record-loan cases with the compiler's destructive contracts.
 // Negative lifetime and alias cases belong to the in-process compiler suite.
 fn app_main() {
@@ -18,4 +31,5 @@ fn app_main() {
     loan_fixture_reset();
     uart_println(loan_distinct_records() as u64);
     uart_println(loan_reference_field_index() as u64);
+    uart_println(reference_record_copy_probe() as u64);
 }
